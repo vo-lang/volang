@@ -18,7 +18,6 @@ use crate::JitError;
 
 #[derive(Clone, Copy)]
 pub struct HelperFuncIds {
-    pub call_vm: cranelift_module::FuncId,
     pub gc_alloc: cranelift_module::FuncId,
     pub write_barrier: cranelift_module::FuncId,
     pub panic: cranelift_module::FuncId,
@@ -86,7 +85,6 @@ pub struct HelperFuncIds {
 pub fn register_symbols(builder: &mut JITBuilder) {
     builder.symbol("vo_gc_alloc", vo_runtime::jit_api::vo_gc_alloc as *const u8);
     builder.symbol("vo_gc_write_barrier", vo_runtime::jit_api::vo_gc_write_barrier as *const u8);
-    builder.symbol("vo_call_vm", vo_runtime::jit_api::vo_call_vm as *const u8);
     builder.symbol("vo_str_new", vo_runtime::jit_api::vo_str_new as *const u8);
     builder.symbol("vo_str_len", vo_runtime::jit_api::vo_str_len as *const u8);
     builder.symbol("vo_str_index", vo_runtime::jit_api::vo_str_index as *const u8);
@@ -151,18 +149,6 @@ pub fn register_symbols(builder: &mut JITBuilder) {
 
 pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type) -> Result<HelperFuncIds, JitError> {
     use cranelift_module::Linkage::Import;
-    
-    let call_vm = module.declare_function("vo_call_vm", Import, &{
-        let mut sig = Signature::new(module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(ptr));
-        sig.params.push(AbiParam::new(types::I32));
-        sig.params.push(AbiParam::new(ptr));
-        sig.params.push(AbiParam::new(types::I32));
-        sig.params.push(AbiParam::new(ptr));
-        sig.params.push(AbiParam::new(types::I32));
-        sig.returns.push(AbiParam::new(types::I32));
-        sig
-    })?;
     
     let gc_alloc = module.declare_function("vo_gc_alloc", Import, &{
         let mut sig = Signature::new(module.target_config().default_call_conv);
@@ -539,11 +525,13 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
     
     let set_call_request = module.declare_function("vo_set_call_request", Import, &{
         let mut sig = Signature::new(module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(ptr));
-        sig.params.push(AbiParam::new(types::I32));
-        sig.params.push(AbiParam::new(types::I32));
-        sig.params.push(AbiParam::new(types::I32));
-        sig.params.push(AbiParam::new(types::I32));
+        sig.params.push(AbiParam::new(ptr));   // ctx
+        sig.params.push(AbiParam::new(types::I32)); // func_id
+        sig.params.push(AbiParam::new(types::I32)); // arg_start
+        sig.params.push(AbiParam::new(types::I32)); // resume_pc
+        sig.params.push(AbiParam::new(types::I32)); // ret_slots
+        sig.params.push(AbiParam::new(types::I32)); // ret_reg
+        sig.params.push(AbiParam::new(types::I32)); // call_kind
         sig
     })?;
     
@@ -695,7 +683,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
     })?;
     
     Ok(HelperFuncIds {
-        call_vm, gc_alloc, write_barrier,
+        gc_alloc, write_barrier,
         panic, call_extern,
         str_new, str_len, str_index, str_concat, str_slice, str_eq, str_cmp, str_decode_rune,
         ptr_clone, closure_new, 
@@ -725,7 +713,6 @@ pub fn get_helper_refs(
     ids: &HelperFuncIds,
 ) -> HelperFuncs {
     HelperFuncs {
-        call_vm: Some(module.declare_func_in_func(ids.call_vm, func)),
         gc_alloc: Some(module.declare_func_in_func(ids.gc_alloc, func)),
         write_barrier: Some(module.declare_func_in_func(ids.write_barrier, func)),
         panic: Some(module.declare_func_in_func(ids.panic, func)),

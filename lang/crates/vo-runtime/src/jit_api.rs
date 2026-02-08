@@ -31,18 +31,6 @@ use vo_common_core::bytecode::Module;
 // JitContext
 // =============================================================================
 
-/// Function pointer type for VM call trampoline.
-/// This allows vo_call_vm to call back into the VM without circular dependency.
-pub type VmCallFn = extern "C" fn(
-    vm: *mut c_void,
-    fiber: *mut c_void,
-    func_id: u32,
-    args: *const u64,
-    arg_count: u32,
-    ret: *mut u64,
-    ret_count: u32,
-) -> JitResult;
-
 /// Function pointer type for pushing a JIT frame.
 /// Also updates caller's frame.pc to caller_resume_pc for nested Call handling.
 /// Returns: args_ptr for the new frame (fiber.stack_ptr + new_bp)
@@ -157,18 +145,12 @@ pub struct JitContext {
     pub panic_msg: *mut InterfaceSlot,
     
     /// Opaque pointer to VM instance.
-    /// Used by vo_call_vm to execute VM functions.
     /// Cast to `*mut Vm` in trampoline code.
     pub vm: *mut c_void,
     
     /// Opaque pointer to current Fiber.
-    /// Used by vo_call_vm for stack management.
     /// Cast to `*mut Fiber` in trampoline code.
     pub fiber: *mut c_void,
-    
-    /// Callback to execute a function in VM.
-    /// Set by VM when creating JitContext.
-    pub call_vm_fn: Option<VmCallFn>,
     
     /// Pointer to ItabCache for interface method dispatch and dynamic itab creation.
     pub itab_cache: *mut ItabCache,
@@ -220,6 +202,11 @@ pub struct JitContext {
     
     /// Call request: number of return slots caller expects
     pub call_ret_slots: u16,
+    
+    /// Call request: ret_reg offset in caller's frame where return values should go.
+    /// For REGULAR calls, this may differ from call_arg_start (inst.a vs inst.c).
+    /// For PREPARED calls, this equals call_arg_start.
+    pub call_ret_reg: u16,
     
     /// Call request: call kind (0=regular, 253=yield, 254=block)
     pub call_kind: u8,
@@ -383,6 +370,7 @@ impl JitContext {
     pub const OFFSET_CALL_ARG_START: i32 = std::mem::offset_of!(JitContext, call_arg_start) as i32;
     pub const OFFSET_CALL_RESUME_PC: i32 = std::mem::offset_of!(JitContext, call_resume_pc) as i32;
     pub const OFFSET_CALL_RET_SLOTS: i32 = std::mem::offset_of!(JitContext, call_ret_slots) as i32;
+    pub const OFFSET_CALL_RET_REG: i32 = std::mem::offset_of!(JitContext, call_ret_reg) as i32;
     pub const OFFSET_CALL_KIND: i32 = std::mem::offset_of!(JitContext, call_kind) as i32;
     #[cfg(feature = "std")]
     pub const OFFSET_WAIT_IO_TOKEN: i32 = std::mem::offset_of!(JitContext, wait_io_token) as i32;
@@ -396,6 +384,7 @@ impl JitContext {
 
     // call_kind constants
     pub const CALL_KIND_REGULAR: u8 = 0;
+    pub const CALL_KIND_PREPARED: u8 = 1; // prepare callback already did push_frame + arg layout
     pub const CALL_KIND_YIELD: u8 = 253;
     pub const CALL_KIND_BLOCK: u8 = 254;
 
@@ -535,62 +524,20 @@ pub extern "C" fn vo_gc_safepoint(_ctx: *mut JitContext) {
     // Intentionally no-op. See doc comment for design rationale.
 }
 
-/// Call a VM-interpreted function from JIT code.
-///
-/// This is the fallback path when callee is not JIT-compiled.
-/// JIT-to-JIT calls go directly through function pointers when available.
-///
-/// # Arguments
-/// - `ctx`: JIT context
-/// - `func_id`: Function ID to call
-/// - `args`: Pointer to argument slots
-/// - `arg_count`: Number of argument slots
-/// - `ret`: Pointer to return value slots
-/// - `ret_count`: Number of return value slots
-///
-/// # Returns
-/// - `JitResult::Ok` if function completed normally
-/// - `JitResult::Panic` if function panicked
-///
-/// # Safety
-/// - `ctx` must be a valid pointer to JitContext
-/// - `args` must point to at least `arg_count` u64 values
-/// - `ret` must point to space for at least `ret_count` u64 values
-#[no_mangle]
-pub extern "C" fn vo_call_vm(
-    ctx: *mut JitContext,
-    func_id: u32,
-    args: *const u64,
-    arg_count: u32,
-    ret: *mut u64,
-    ret_count: u32,
-) -> JitResult {
-    // Safety: ctx must be valid
-    let ctx = unsafe { &*ctx };
-    
-    // Get the VM call callback
-    let call_fn = match ctx.call_vm_fn {
-        Some(f) => f,
-        None => return JitResult::Panic, // No callback registered
-    };
-    
-    // Call back into VM
-    call_fn(ctx.vm, ctx.fiber, func_id, args, arg_count, ret, ret_count)
-}
-
 /// Set Call request state in JitContext.
 /// Called by JIT when it needs to hand off to VM for a non-jittable callee.
 /// 
 /// # Safety
 /// - `ctx` must be a valid pointer to JitContext
 #[no_mangle]
-pub extern "C" fn vo_set_call_request(ctx: *mut JitContext, func_id: u32, arg_start: u32, resume_pc: u32, ret_slots: u32) {
+pub extern "C" fn vo_set_call_request(ctx: *mut JitContext, func_id: u32, arg_start: u32, resume_pc: u32, ret_slots: u32, ret_reg: u32, call_kind: u32) {
     unsafe {
         (*ctx).call_func_id = func_id;
         (*ctx).call_arg_start = arg_start as u16;
         (*ctx).call_resume_pc = resume_pc;
         (*ctx).call_ret_slots = ret_slots as u16;
-        (*ctx).call_kind = JitContext::CALL_KIND_REGULAR;
+        (*ctx).call_ret_reg = ret_reg as u16;
+        (*ctx).call_kind = call_kind as u8;
     }
 }
 
@@ -1441,7 +1388,6 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_gc_alloc", vo_gc_alloc as *const u8),
         ("vo_gc_write_barrier", vo_gc_write_barrier as *const u8),
         ("vo_gc_safepoint", vo_gc_safepoint as *const u8),
-        ("vo_call_vm", vo_call_vm as *const u8),
         ("vo_panic", vo_panic as *const u8),
         ("vo_call_extern", vo_call_extern as *const u8),
         ("vo_str_new", vo_str_new as *const u8),

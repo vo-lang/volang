@@ -20,7 +20,6 @@ pub enum TranslateResult {
 /// Runtime helper function references
 #[derive(Default, Clone, Copy)]
 pub struct HelperFuncs {
-    pub call_vm: Option<FuncRef>,
     pub gc_alloc: Option<FuncRef>,
     pub write_barrier: Option<FuncRef>,
     pub panic: Option<FuncRef>,

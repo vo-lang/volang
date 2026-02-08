@@ -151,8 +151,12 @@ impl<'a> FunctionCompiler<'a> {
     /// so we recompute the destination from ctx.stack_ptr + saved_jit_bp.
     fn emit_variable_spill(&mut self) {
         let dst_ptr = self.fiber_stack_args_ptr();
-        let num_slots = self.vars.len();
-        for i in 0..num_slots {
+        // Only spill SSA-only slots (< memory_only_start).
+        // Memory-only slots (>= memory_only_start) are the source of truth in
+        // fiber.stack. SlotSet writes to memory without updating SSA, so spilling
+        // those slots would overwrite correct memory values with stale SSA zeros.
+        let spill_count = (self.memory_only_start as usize).min(self.vars.len());
+        for i in 0..spill_count {
             let offset = (i * 8) as i32;
             let val = self.builder.use_var(self.vars[i]);
             self.builder.ins().store(MemFlags::trusted(), val, dst_ptr, offset);
@@ -434,6 +438,7 @@ impl<'a> FunctionCompiler<'a> {
             crate::call_helpers::emit_jit_call_with_fallback(self, crate::call_helpers::JitCallWithFallbackConfig {
                 func_id: target_func_id,
                 arg_start,
+                ret_reg: arg_start,
                 arg_slots,
                 call_ret_slots,
                 func_ret_slots: target_func.ret_slots as usize,
@@ -448,6 +453,7 @@ impl<'a> FunctionCompiler<'a> {
             crate::call_helpers::emit_call_via_vm(self, crate::call_helpers::CallViaVmConfig {
                 func_id: target_func_id,
                 arg_start,
+                ret_reg: arg_start,
                 resume_pc: self.current_pc + 1,
                 ret_slots: call_ret_slots,
             });

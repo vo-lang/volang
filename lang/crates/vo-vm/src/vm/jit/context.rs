@@ -57,6 +57,10 @@ impl JitContextWrapper {
         self.ctx.call_ret_slots
     }
 
+    pub fn call_ret_reg(&self) -> u16 {
+        self.ctx.call_ret_reg
+    }
+
     #[cfg(feature = "std")]
     pub fn wait_io_token(&self) -> u64 {
         self.ctx.wait_io_token
@@ -93,7 +97,6 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         panic_msg: &mut *panic_msg as *mut InterfaceSlot,
         vm: vm as *mut Vm as *mut core::ffi::c_void,
         fiber: fiber as *mut Fiber as *mut core::ffi::c_void,
-        call_vm_fn: Some(crate::vm::vm_call_trampoline),
         itab_cache: &mut vm.state.itab_cache as *mut _,
         extern_registry: &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
         #[cfg(feature = "std")]
@@ -113,6 +116,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         call_arg_start: 0,
         call_resume_pc: 0,
         call_ret_slots: 0,
+        call_ret_reg: 0,
         call_kind: 0,
         #[cfg(feature = "std")]
         wait_io_token: 0,

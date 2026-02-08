@@ -27,8 +27,6 @@ mod jit;
 mod trampoline;
 
 pub use helpers::{stack_get, stack_set};
-#[cfg(feature = "jit")]
-pub use trampoline::vm_call_trampoline;
 pub use trampoline::closure_call_trampoline;
 pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE, SchedulingOutcome, RuntimeTrapKind};
 #[cfg(feature = "std")]
@@ -381,9 +379,11 @@ impl Vm {
             };
 
             let result = self.run_fiber(fiber_id);
-            
             match result {
-                ExecResult::TimesliceExpired | ExecResult::Osr(_, _, _) => {
+                ExecResult::TimesliceExpired => {
+                    self.scheduler.yield_current();
+                }
+                ExecResult::Osr(_, _, _) => {
                     self.scheduler.yield_current();
                 }
                 ExecResult::Block(reason) => {
@@ -1750,7 +1750,8 @@ impl Vm {
                         
                         match self.scheduler.schedule_next() {
                             Some(next_id) => {
-                                match self.run_fiber(FiberId::Regular(next_id)) {
+                                let mini_result = self.run_fiber(FiberId::Regular(next_id));
+                                match mini_result {
                                     ExecResult::Done | ExecResult::Panic => {
                                         let _ = self.scheduler.kill_current();
                                     }
@@ -1768,7 +1769,9 @@ impl Vm {
                                             }
                                         }
                                     }
-                                    ExecResult::TimesliceExpired => self.scheduler.yield_current(),
+                                    ExecResult::TimesliceExpired | ExecResult::Osr(_, _, _) => {
+                                        self.scheduler.yield_current();
+                                    }
                                     _ => {}
                                 }
                                 if is_callback_runnable(&self.scheduler) {

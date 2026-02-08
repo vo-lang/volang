@@ -10,53 +10,6 @@ use vo_runtime::objects::closure;
 use super::helpers::build_closure_args;
 use super::Vm;
 
-/// Trampoline for JIT code to call VM-interpreted functions.
-///
-/// This is used when a JIT-compiled function calls another function
-/// that isn't JIT-compiled (VM fallback path in JIT-to-JIT calls).
-///
-/// # Safety
-/// All pointers must be valid. Called from JIT-generated code.
-#[cfg(feature = "jit")]
-pub extern "C" fn vm_call_trampoline(
-    vm: *mut core::ffi::c_void,
-    fiber: *mut core::ffi::c_void,
-    func_id: u32,
-    args: *const u64,
-    arg_count: u32,
-    ret: *mut u64,
-    ret_count: u32,
-) -> vo_runtime::jit_api::JitResult {
-    use crate::fiber::Fiber;
-    
-    let vm = unsafe { &mut *(vm as *mut Vm) };
-    let args_slice = unsafe { std::slice::from_raw_parts(args, arg_count as usize) };
-
-    // Trigger func JIT compilation for the target function if not already compiled.
-    // This ensures that future JIT-to-JIT calls can use the compiled version.
-    if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-        if !jit_mgr.is_compiled(func_id) && !jit_mgr.is_unsupported(func_id) {
-            let module = vm.module.as_ref().unwrap();
-            let func_def = &module.functions[func_id as usize];
-            let _ = jit_mgr.compile_function(func_id, func_def, module);
-        }
-    }
-
-    // Execute using callback fiber
-    let (success, panic_state) = vm.execute_func_sync(func_id, args_slice, ret, ret_count);
-
-    if success {
-        vo_runtime::jit_api::JitResult::Ok
-    } else {
-        // Transfer panic state from callback fiber to main fiber
-        // so handle_jit_result can read it
-        if let Some(state) = panic_state {
-            let main_fiber = unsafe { &mut *(fiber as *mut Fiber) };
-            main_fiber.panic_state = Some(state);
-        }
-        vo_runtime::jit_api::JitResult::Panic
-    }
-}
 
 /// Trampoline for calling closures from extern functions.
 /// This allows extern functions like dyn_call_closure to execute closures.

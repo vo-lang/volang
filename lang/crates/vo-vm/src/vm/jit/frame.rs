@@ -21,7 +21,6 @@ use crate::fiber::Fiber;
 ///
 /// # Safety
 /// All pointers must be valid. Called from JIT-generated code.
-#[allow(unused_variables)]
 pub extern "C" fn jit_push_frame(
     ctx: *mut JitContext,
     func_id: u32,
@@ -33,8 +32,17 @@ pub extern "C" fn jit_push_frame(
     let ctx_ref = unsafe { &mut *ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     
-    // New frame base is current sp
-    let new_bp = fiber.sp;
+    // Set caller's frame.pc so VM can resume the caller at the correct
+    // position if the callee returns Call (e.g., PREPARED trampoline).
+    if let Some(caller_frame) = fiber.frames.last_mut() {
+        caller_frame.pc = caller_resume_pc as usize;
+    }
+    
+    // New frame base is current sp.
+    // Use ctx.fiber_sp (not fiber.sp) as the canonical stack pointer.
+    // In JIT non-OK propagation blocks, ctx.fiber_sp is correctly restored
+    // to the caller's sp, but fiber.sp may still reflect a deeper call's sp.
+    let new_bp = ctx_ref.fiber_sp as usize;
     let new_sp = new_bp + local_slots as usize;
     
     // Ensure capacity (may reallocate fiber.stack)
