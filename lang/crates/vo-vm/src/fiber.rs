@@ -226,6 +226,87 @@ impl PanicState {
     }
 }
 
+/// State for extern closure callback suspend/replay.
+///
+/// When an extern function requests a closure call (ExternResult::CallClosure),
+/// the VM pushes the closure frame, executes it, caches the return values here,
+/// then replays the extern with cached results.
+#[derive(Debug, Clone)]
+pub struct ClosureReplayState {
+    /// Accumulated closure call results for extern replay.
+    /// Each entry is the return values from one closure call.
+    /// On extern replay, results are consumed in order via `index`.
+    /// Cleared when extern finally returns Ok/Panic (not CallClosure).
+    pub results: Vec<Vec<u64>>,
+    /// Consumption index during extern replay.
+    /// Tracks how many cached results have been consumed in the current replay.
+    /// Reset to 0 at the start of each CallExtern execution.
+    pub index: usize,
+    /// Frame depth at which a closure-for-extern-replay was pushed.
+    /// When a Return pops down to this depth, the return values are
+    /// appended to `results` and the extern is replayed.
+    /// 0 = no pending closure replay.
+    pub depth: usize,
+    /// Set when a closure-for-replay panicked. The extern function should
+    /// check this and return an error instead of using the cached result.
+    pub panicked: bool,
+    /// Stack of saved `depth` values for nested replay cycles.
+    pub depth_stack: Vec<usize>,
+}
+
+impl ClosureReplayState {
+    pub fn new() -> Self {
+        Self {
+            results: Vec::new(),
+            index: 0,
+            depth: 0,
+            panicked: false,
+            depth_stack: Vec::new(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.results.clear();
+        self.index = 0;
+        self.depth = 0;
+        self.panicked = false;
+        self.depth_stack.clear();
+    }
+
+    /// Prepare for a new CallExtern execution: take results, reset index.
+    /// Returns (results, panicked) for passing to the extern call.
+    pub fn take_for_extern(&mut self) -> (Vec<Vec<u64>>, bool) {
+        let results = core::mem::take(&mut self.results);
+        let panicked = self.panicked;
+        self.panicked = false;
+        self.index = 0;
+        (results, panicked)
+    }
+
+    /// Push a closure frame: save current depth, set new depth.
+    pub fn push_depth(&mut self, frame_count: usize) {
+        self.depth_stack.push(self.depth);
+        self.depth = frame_count;
+    }
+
+    /// Pop closure frame depth after return or panic.
+    pub fn pop_depth(&mut self) {
+        self.depth = self.depth_stack.pop().unwrap_or(0);
+    }
+
+    /// Check if current frame is at the closure replay boundary.
+    #[inline]
+    pub fn at_replay_boundary(&self, frame_count: usize) -> bool {
+        self.depth > 0 && frame_count == self.depth
+    }
+
+    /// Check if panic should be intercepted at closure replay boundary.
+    #[inline]
+    pub fn should_intercept_panic(&self, frame_count: usize) -> bool {
+        self.depth > 0 && frame_count <= self.depth
+    }
+}
+
 /// Initial stack capacity in slots (64KB = 8192 slots).
 const INITIAL_STACK_CAPACITY: usize = 8192;
 
@@ -275,25 +356,8 @@ pub struct Fiber {
     /// On resume, they are popped and converted to VM frames.
     #[cfg(feature = "jit")]
     pub resume_stack: Vec<ResumePoint>,
-    /// Accumulated closure call results for extern replay.
-    /// Each entry is the return values from one closure call.
-    /// On extern replay, results are consumed in order via closure_replay_index.
-    /// Cleared when extern finally returns Ok/Panic (not CallClosure).
-    pub closure_replay_results: Vec<Vec<u64>>,
-    /// Consumption index during extern replay.
-    /// Tracks how many cached results have been consumed in the current replay.
-    /// Reset to 0 at the start of each CallExtern execution.
-    pub closure_replay_index: usize,
-    /// Frame depth at which a closure-for-extern-replay was pushed.
-    /// When a Return pops down to this depth, the return values are
-    /// appended to closure_replay_results and the extern is replayed.
-    /// 0 = no pending closure replay.
-    pub closure_replay_depth: usize,
-    /// Set when a closure-for-replay panicked. The extern function should
-    /// check this and return an error instead of using the cached result.
-    pub closure_replay_panicked: bool,
-    /// Stack of saved closure_replay_depth values for nested replay cycles.
-    pub closure_replay_depth_stack: Vec<usize>,
+    /// Closure callback suspend/replay state for extern functions.
+    pub closure_replay: ClosureReplayState,
 }
 
 impl Fiber {
@@ -315,11 +379,7 @@ impl Fiber {
             resume_io_token: None,
             #[cfg(feature = "jit")]
             resume_stack: Vec::new(),  // Lazy: only allocates on first push (Call/WaitIo)
-            closure_replay_results: Vec::new(),
-            closure_replay_index: 0,
-            closure_replay_depth: 0,
-            closure_replay_panicked: false,
-            closure_replay_depth_stack: Vec::new(),
+            closure_replay: ClosureReplayState::new(),
         }
     }
     
@@ -341,11 +401,7 @@ impl Fiber {
         }
         #[cfg(feature = "jit")]
         self.resume_stack.clear();
-        self.closure_replay_results.clear();
-        self.closure_replay_index = 0;
-        self.closure_replay_depth = 0;
-        self.closure_replay_panicked = false;
-        self.closure_replay_depth_stack.clear();
+        self.closure_replay.reset();
     }
     
     /// Check if current panic is recoverable and return the interface{} value if so.

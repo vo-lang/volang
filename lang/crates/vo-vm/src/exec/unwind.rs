@@ -207,7 +207,7 @@ fn handle_initial_return(
     let current_frame_depth = fiber.frames.len();
     
     // Check: is this return from a closure-for-extern-replay?
-    if fiber.closure_replay_depth == current_frame_depth && current_frame_depth > 0 {
+    if fiber.closure_replay.at_replay_boundary(current_frame_depth) && current_frame_depth > 0 {
         let ret_start = inst.a as usize;
         let ret_count = inst.b as usize;
         let current_bp = fiber.frames.last().unwrap().bp;
@@ -218,8 +218,8 @@ fn handle_initial_return(
             .map(|i| stack_get(stack, current_bp + ret_start + i))
             .collect();
         
-        fiber.closure_replay_results.push(vals);
-        fiber.closure_replay_depth = fiber.closure_replay_depth_stack.pop().unwrap_or(0);
+        fiber.closure_replay.results.push(vals);
+        fiber.closure_replay.pop_depth();
         
         // Check for defers in the closure — they must run first
         let has_defers = fiber.defer_stack.last()
@@ -494,10 +494,10 @@ fn start_panic_unwind(
         // The closure frame is at depth == closure_replay_depth. When panic unwinds
         // to or past it, we pop the closure frame and let the caller's CallExtern replay
         // with the panicked flag set.
-        if fiber.closure_replay_depth > 0 && fiber.frames.len() <= fiber.closure_replay_depth {
-            let target_depth = fiber.closure_replay_depth - 1; // caller's frame depth
-            fiber.closure_replay_depth = fiber.closure_replay_depth_stack.pop().unwrap_or(0);
-            fiber.closure_replay_panicked = true;
+        if fiber.closure_replay.should_intercept_panic(fiber.frames.len()) {
+            let target_depth = fiber.closure_replay.depth - 1; // caller's frame depth
+            fiber.closure_replay.pop_depth();
+            fiber.closure_replay.panicked = true;
             // Consume the panic — it will be reported as an error by the extern function
             fiber.panic_state = None;
             fiber.panic_trap_kind = None;

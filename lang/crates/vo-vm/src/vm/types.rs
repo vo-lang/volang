@@ -31,9 +31,13 @@ pub type IslandRegistry = Arc<Mutex<HashMap<u32, Sender<IslandCommand>>>>;
 pub const TIME_SLICE: u32 = 1000;
 
 /// VM execution result - drives scheduler state transitions.
+///
+/// Variants visible to the scheduling loop: TimesliceExpired, Block, Panic, Done.
+/// Internal variants (FrameChanged, CallClosure): consumed inside run_fiber,
+/// never reach the scheduling loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecResult {
-    /// Call/return changed frames, refetch locals.
+    /// Call/return changed frames, refetch locals. Internal to run_fiber.
     FrameChanged,
     /// Time slice expired, yield to scheduler.
     TimesliceExpired,
@@ -43,10 +47,7 @@ pub enum ExecResult {
     Panic,
     /// Fiber finished.
     Done,
-    /// OSR request: (func_id, backedge_pc, loop_header_pc).
-    /// Reserved for future OSR integration.
-    Osr(u32, usize, usize),
-    /// Extern function requests closure execution.
+    /// Extern function requests closure execution. Internal to run_fiber.
     /// VM pushes the closure frame, sets replay depth, and re-executes the extern on return.
     CallClosure {
         closure_ref: vo_runtime::gc::GcRef,

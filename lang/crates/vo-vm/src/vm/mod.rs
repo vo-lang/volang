@@ -381,9 +381,6 @@ impl Vm {
                 ExecResult::TimesliceExpired => {
                     self.scheduler.yield_current();
                 }
-                ExecResult::Osr(_, _, _) => {
-                    self.scheduler.yield_current();
-                }
                 ExecResult::Block(reason) => {
                     match reason {
                         crate::fiber::BlockReason::Queue => {
@@ -416,7 +413,8 @@ impl Vm {
                     }
                 }
                 ExecResult::FrameChanged | ExecResult::CallClosure { .. } => {
-                    // Internal to run_fiber, should not reach here
+                    // Internal to run_fiber — should never escape to scheduling loop.
+                    debug_assert!(false, "internal ExecResult leaked to scheduling loop: {:?}", result);
                     self.scheduler.yield_current();
                 }
             }
@@ -1038,10 +1036,7 @@ impl Vm {
                     let fiber_ptr = fiber as *mut crate::fiber::Fiber as *mut core::ffi::c_void;
                     #[cfg(feature = "std")]
                     let resume_io_token = fiber.resume_io_token.take();
-                    let closure_replay_results = core::mem::take(&mut fiber.closure_replay_results);
-                    let closure_replay_panicked = fiber.closure_replay_panicked;
-                    fiber.closure_replay_panicked = false;
-                    fiber.closure_replay_index = 0;
+                    let (closure_replay_results, closure_replay_panicked) = fiber.closure_replay.take_for_extern();
                     let result = exec::exec_call_extern(
                         &mut fiber.stack, bp, &inst, &module.externs, &self.state.extern_registry,
                         &mut self.state.gc, &module.struct_metas, &module.interface_metas,
@@ -1103,8 +1098,7 @@ impl Vm {
                             
                             // Mark replay depth so return path knows to cache results.
                             // Push previous depth so nested CallExterns don't clobber it.
-                            fiber.closure_replay_depth_stack.push(fiber.closure_replay_depth);
-                            fiber.closure_replay_depth = fiber.frames.len();
+                            fiber.closure_replay.push_depth(fiber.frames.len());
                             
                             stack = fiber.stack_ptr();
                             refetch!();

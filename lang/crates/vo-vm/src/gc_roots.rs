@@ -99,7 +99,7 @@ fn scan_fibers(gc: &mut Gc, fibers: &[Box<Fiber>], functions: &[FunctionDef]) {
         // Conservative: treat all values as potential GcRefs since we don't have
         // slot_types for these cached return values. Short-lived (cleared when
         // extern finally returns Ok/Panic), so impact is negligible.
-        for vals in &fiber.closure_replay_results {
+        for vals in &fiber.closure_replay.results {
             scan_gcrefs(gc, vals);
         }
     }

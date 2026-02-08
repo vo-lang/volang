@@ -535,10 +535,8 @@ pub extern "C" fn jit_call_extern(
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     let resume_io_token = fiber.resume_io_token.take();
     
-    // Take closure_replay_results from fiber (populated by VM suspend/replay on re-entry)
-    let closure_replay_results = core::mem::take(&mut fiber.closure_replay_results);
-    let closure_replay_panicked = fiber.closure_replay_panicked;
-    fiber.closure_replay_panicked = false;
+    // Take closure replay state from fiber (populated by VM suspend/replay on re-entry)
+    let (closure_replay_results, closure_replay_panicked) = fiber.closure_replay.take_for_extern();
     
     let result = registry.call(
         extern_id,
