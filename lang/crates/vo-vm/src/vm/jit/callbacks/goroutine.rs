@@ -1,9 +1,47 @@
 //! JIT callbacks for goroutine spawning.
 
 use vo_runtime::jit_api::JitContext;
+use vo_runtime::gc::GcRef;
+use vo_runtime::objects::closure;
 
 use crate::fiber::Fiber;
 use crate::vm::Vm;
+
+/// Create a new fiber from a closure and spawn it on the scheduler.
+///
+/// Handles: func_id resolution, Fiber creation, push_frame, call_layout arg copy, and spawn.
+unsafe fn spawn_closure_fiber(
+    vm: &mut Vm,
+    module: &vo_runtime::bytecode::Module,
+    closure_ref: u64,
+    args_ptr: *const u64,
+    arg_slots: u32,
+) {
+    let closure_gcref = closure_ref as GcRef;
+    let func_id = closure::func_id(closure_gcref);
+    let func = &module.functions[func_id as usize];
+
+    let next_id = vm.scheduler.fibers.len() as u32;
+    let mut new_fiber = Fiber::new(next_id);
+    new_fiber.push_frame(func_id, func.local_slots, 0, 0);
+
+    let layout = closure::call_layout(
+        closure_ref,
+        closure_gcref,
+        func.recv_slots as usize,
+        func.is_closure,
+    );
+
+    let new_stack = new_fiber.stack_ptr();
+    if let Some(slot0_val) = layout.slot0 {
+        *new_stack = slot0_val;
+    }
+    for i in 0..arg_slots as usize {
+        *new_stack.add(layout.arg_offset + i) = *args_ptr.add(i);
+    }
+
+    vm.scheduler.spawn(new_fiber);
+}
 
 /// JIT callback to spawn a new goroutine.
 /// This is fire-and-forget - creates a new fiber and adds it to the scheduler.
@@ -15,57 +53,24 @@ pub extern "C" fn jit_go_start(
     args_ptr: *const u64,
     arg_slots: u32,
 ) {
-    use vo_runtime::gc::GcRef;
-    use vo_runtime::objects::closure;
-    
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
     let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
     
-    let is_closure_call = is_closure_call != 0;
-    
-    // Get func_id: from closure if is_closure_call, otherwise from parameter
-    let actual_func_id = if is_closure_call {
-        closure::func_id(closure_ref as GcRef)
-    } else {
-        func_id
-    };
-    
-    let func = &module.functions[actual_func_id as usize];
-    
-    // Create new fiber
-    let next_id = vm.scheduler.fibers.len() as u32;
-    let mut new_fiber = Fiber::new(next_id);
-    new_fiber.push_frame(actual_func_id, func.local_slots, 0, 0);
-    
-    // Copy args to new fiber's stack
-    let new_stack = new_fiber.stack_ptr();
-    if is_closure_call {
-        // Use call_layout for consistent argument placement
-        let closure_gcref = closure_ref as GcRef;
-        let layout = closure::call_layout(
-            closure_ref,
-            closure_gcref,
-            func.recv_slots as usize,
-            func.is_closure,
-        );
-        
-        if let Some(slot0_val) = layout.slot0 {
-            unsafe { *new_stack = slot0_val };
-        }
-        
-        for i in 0..arg_slots as usize {
-            unsafe { *new_stack.add(layout.arg_offset + i) = *args_ptr.add(i) };
-        }
+    if is_closure_call != 0 {
+        unsafe { spawn_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) };
     } else {
         // Regular function: args start at reg[0]
+        let func = &module.functions[func_id as usize];
+        let next_id = vm.scheduler.fibers.len() as u32;
+        let mut new_fiber = Fiber::new(next_id);
+        new_fiber.push_frame(func_id, func.local_slots, 0, 0);
+        let new_stack = new_fiber.stack_ptr();
         for i in 0..arg_slots as usize {
             unsafe { *new_stack.add(i) = *args_ptr.add(i) };
         }
+        vm.scheduler.spawn(new_fiber);
     }
-    
-    // Add to scheduler
-    vm.scheduler.spawn(new_fiber);
 }
 
 /// JIT callback to spawn a goroutine on a specific island.
@@ -78,9 +83,6 @@ pub extern "C" fn jit_go_island(
     args_ptr: *const u64,
     arg_slots: u32,
 ) {
-    use vo_runtime::gc::GcRef;
-    use vo_runtime::objects::closure;
-    
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
     let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
@@ -90,30 +92,7 @@ pub extern "C" fn jit_go_island(
     let island_id = vo_runtime::island::id(island_handle);
     
     if island_id == 0 {
-        // Local spawn - use call_layout for consistent argument placement
-        let func_id = closure::func_id(closure);
-        let func = &module.functions[func_id as usize];
-        
-        let next_id = vm.scheduler.fibers.len() as u32;
-        let mut new_fiber = Fiber::new(next_id);
-        new_fiber.push_frame(func_id, func.local_slots, 0, 0);
-        
-        let layout = closure::call_layout(
-            closure_ref,
-            closure,
-            func.recv_slots as usize,
-            func.is_closure,
-        );
-        
-        let new_stack = new_fiber.stack_ptr();
-        if let Some(slot0_val) = layout.slot0 {
-            unsafe { *new_stack = slot0_val };
-        }
-        for i in 0..arg_slots as usize {
-            unsafe { *new_stack.add(layout.arg_offset + i) = *args_ptr.add(i) };
-        }
-        
-        vm.scheduler.spawn(new_fiber);
+        unsafe { spawn_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) };
     } else {
         // Remote spawn - pack closure and send to island
         let func_id = closure::func_id(closure);
@@ -169,38 +148,11 @@ pub extern "C" fn jit_go_island(
     args_ptr: *const u64,
     arg_slots: u32,
 ) {
-    use vo_runtime::gc::GcRef;
-    use vo_runtime::objects::closure;
-    
     // In no_std mode, always spawn locally - match VM behavior
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
     let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
     
-    let closure_gcref = closure_ref as GcRef;
-    let func_id = closure::func_id(closure_gcref);
-    let func = &module.functions[func_id as usize];
-    
-    let next_id = vm.scheduler.fibers.len() as u32;
-    let mut new_fiber = Fiber::new(next_id);
-    new_fiber.push_frame(func_id, func.local_slots, 0, 0);
-    
-    // Use call_layout for consistent argument placement
-    let layout = closure::call_layout(
-        closure_ref,
-        closure_gcref,
-        func.recv_slots as usize,
-        func.is_closure,
-    );
-    
-    let new_stack = new_fiber.stack_ptr();
-    if let Some(slot0_val) = layout.slot0 {
-        unsafe { *new_stack = slot0_val };
-    }
-    for i in 0..arg_slots as usize {
-        unsafe { *new_stack.add(layout.arg_offset + i) = *args_ptr.add(i) };
-    }
-    
-    vm.scheduler.spawn(new_fiber);
+    unsafe { spawn_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) };
     let _ = island; // suppress unused warning
 }

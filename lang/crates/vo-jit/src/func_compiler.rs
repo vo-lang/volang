@@ -548,48 +548,12 @@ impl<'a> FunctionCompiler<'a> {
         self.builder.switch_to_block(non_ok_block);
         self.builder.seal_block(non_ok_block);
         
-        // Restore ctx.jit_bp and ctx.fiber_sp before push_frame.
-        // The inline update set fiber_sp = old_fiber_sp + callee_local_slots;
-        // push_frame uses fiber_sp as new_bp, so without restore it allocates at wrong position.
-        self.builder.ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
-        self.builder.ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
-        
-        // Spill caller's variables to fiber.stack
-        self.emit_variable_spill();
-        
-        // Materialize callee's frame in fiber.stack
-        let push_frame_fn_ptr = self.builder.ins().load(
-            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_FRAME_FN
-        );
-        let push_frame_sig = crate::call_helpers::import_push_frame_sig(self);
-        let push_call = self.builder.ins().call_indirect(
-            push_frame_sig, push_frame_fn_ptr,
-            &[ctx, func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val]
-        );
-        let callee_fiber_args_ptr = self.builder.inst_results(push_call)[0];
-        
-        // Copy args from native stack to fiber.stack
-        for i in 0..arg_slots {
-            let val = self.builder.ins().stack_load(types::I64, args_slot, (i * 8) as i32);
-            self.builder.ins().store(MemFlags::trusted(), val, callee_fiber_args_ptr, (i * 8) as i32);
-        }
-        
-        // Push resume point
-        let push_resume_point_fn_ptr = self.builder.ins().load(
-            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_RESUME_POINT_FN
-        );
-        let push_resume_point_sig = crate::call_helpers::import_push_resume_point_sig(self);
-        
-        let callee_bp = self.builder.ins().load(
-            types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
-        );
-        
-        self.builder.ins().call_indirect(
-            push_resume_point_sig, push_resume_point_fn_ptr,
-            &[ctx, func_id_val, caller_resume_pc_val, callee_bp, caller_bp, ret_reg_val, ret_slots_val]
-        );
-        
-        self.builder.ins().return_(&[result]);
+        crate::call_helpers::emit_non_ok_slow_path(self, crate::call_helpers::NonOkSlowPathParams {
+            jit_result: result,
+            ctx, caller_bp, old_fiber_sp,
+            func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val,
+            copy_args: Some((args_slot, arg_slots)),
+        });
         
         // OK path (FAST PATH) - restore ctx.jit_bp and ctx.fiber_sp
         self.builder.switch_to_block(ok_block);

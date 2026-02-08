@@ -655,43 +655,12 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         emitter.builder().switch_to_block(jit_non_ok_block);
         emitter.builder().seal_block(jit_non_ok_block);
         
-        // Restore ctx.jit_bp and ctx.fiber_sp before push_frame.
-        // The inline update set fiber_sp = old_fiber_sp + callee_local_slots;
-        // push_frame uses fiber_sp as new_bp, so without restore it allocates at wrong position.
-        emitter.builder().ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
-        emitter.builder().ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
-        
-        // Spill SSA-only vars to fiber.stack so VM can see caller state.
-        // emit_variable_spill only spills slots < memory_only_start, preserving
-        // memory-only slots that were updated by SlotSet.
-        emitter.spill_all_vars();
-        
-        let push_frame_fn_ptr = emitter.builder().ins().load(
-            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_FRAME_FN
-        );
-        let push_frame_sig = import_push_frame_sig(emitter);
-        emitter.builder().ins().call_indirect(
-            push_frame_sig, push_frame_fn_ptr,
-            &[ctx, func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val]
-        );
-        // NOTE: No arg copy here! The callee already spilled its current state
-        // (including modified args) to fiber.stack[callee_bp + slot] before returning
-        // Call. push_frame allocates at the same location without zeroing, so the
-        // spilled state is preserved. Copying original args from native stack would
-        // overwrite the callee's modified state.
-        
-        let push_resume_point_fn_ptr = emitter.builder().ins().load(
-            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_RESUME_POINT_FN
-        );
-        let push_resume_point_sig = import_push_resume_point_sig(emitter);
-        let callee_bp = emitter.builder().ins().load(
-            types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
-        );
-        emitter.builder().ins().call_indirect(
-            push_resume_point_sig, push_resume_point_fn_ptr,
-            &[ctx, func_id_val, caller_resume_pc_val, callee_bp, caller_bp, ret_reg_val, ret_slots_val]
-        );
-        emitter.builder().ins().return_(&[jit_result_indirect]);
+        emit_non_ok_slow_path(emitter, NonOkSlowPathParams {
+            jit_result: jit_result_indirect,
+            ctx, caller_bp, old_fiber_sp,
+            func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val,
+            copy_args: None,
+        });
         
         // JIT OK path - restore ctx and jump to merge
         emitter.builder().switch_to_block(jit_ok_block);
@@ -747,40 +716,12 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(jit_non_ok_block);
     emitter.builder().seal_block(jit_non_ok_block);
     
-    // Restore ctx.jit_bp and ctx.fiber_sp before push_frame.
-    // The inline update set fiber_sp = old_fiber_sp + callee_local_slots;
-    // push_frame uses fiber_sp as new_bp, so without restore it allocates at wrong position.
-    emitter.builder().ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
-    emitter.builder().ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
-    
-    // Spill SSA-only vars to fiber.stack so VM can see caller state.
-    // emit_variable_spill only spills slots < memory_only_start, preserving
-    // memory-only slots that were updated by SlotSet.
-    emitter.spill_all_vars();
-    
-    let push_frame_fn_ptr = emitter.builder().ins().load(
-        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_FRAME_FN
-    );
-    let push_frame_sig = import_push_frame_sig(emitter);
-    emitter.builder().ins().call_indirect(
-        push_frame_sig, push_frame_fn_ptr,
-        &[ctx, func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val]
-    );
-    // NOTE: No arg copy here! Same as indirect non-OK block - callee already
-    // spilled its state to fiber.stack before returning Call.
-    
-    let push_resume_point_fn_ptr = emitter.builder().ins().load(
-        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_RESUME_POINT_FN
-    );
-    let push_resume_point_sig = import_push_resume_point_sig(emitter);
-    let callee_bp_direct = emitter.builder().ins().load(
-        types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
-    );
-    emitter.builder().ins().call_indirect(
-        push_resume_point_sig, push_resume_point_fn_ptr,
-        &[ctx, func_id_val, caller_resume_pc_val, callee_bp_direct, caller_bp, ret_reg_val, ret_slots_val]
-    );
-    emitter.builder().ins().return_(&[jit_result]);
+    emit_non_ok_slow_path(emitter, NonOkSlowPathParams {
+        jit_result,
+        ctx, caller_bp, old_fiber_sp,
+        func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val,
+        copy_args: None,
+    });
     
     // OK path - restore ctx and copy return values
     emitter.builder().switch_to_block(jit_ok_block);
@@ -792,6 +733,88 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
         emitter.write_var((config.arg_start + i) as u16, val);
     }
+}
+
+/// Parameters for the non-OK slow path (shared by direct/indirect/self-recursive calls).
+///
+/// When a JIT callee returns non-OK (Call/WaitIo/Panic), the caller must:
+/// 1. Restore ctx.jit_bp and ctx.fiber_sp to caller's values
+/// 2. Spill SSA variables to fiber.stack
+/// 3. push_frame to materialize callee frame
+/// 4. Optionally copy args from native stack to fiber.stack
+/// 5. push_resume_point for frame chain
+/// 6. Return the JIT result
+pub struct NonOkSlowPathParams {
+    pub jit_result: Value,
+    pub ctx: Value,
+    pub caller_bp: Value,
+    pub old_fiber_sp: Value,
+    pub func_id_val: Value,
+    pub local_slots_val: Value,
+    pub ret_reg_val: Value,
+    pub ret_slots_val: Value,
+    pub caller_resume_pc_val: Value,
+    /// Optional: (args_slot, arg_count) to copy args from native stack to fiber.stack after push_frame.
+    /// Used by self-recursive calls where args are on native stack, not yet in fiber.stack.
+    /// Regular/indirect calls don't need this because callee already spilled to fiber.stack.
+    pub copy_args: Option<(cranelift_codegen::ir::StackSlot, usize)>,
+}
+
+/// Emit the non-OK slow path: restore ctx, spill, push_frame, push_resume_point, return.
+///
+/// Caller is responsible for creating/switching to the non-OK block before calling this.
+pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    p: NonOkSlowPathParams,
+) {
+    let ctx = p.ctx;
+
+    // 1. Restore ctx.jit_bp and ctx.fiber_sp before push_frame.
+    // The inline update set fiber_sp = old_fiber_sp + callee_local_slots;
+    // push_frame uses fiber_sp as new_bp, so without restore it allocates at wrong position.
+    emitter.builder().ins().store(MemFlags::trusted(), p.caller_bp, ctx, JitContext::OFFSET_JIT_BP);
+    emitter.builder().ins().store(MemFlags::trusted(), p.old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
+
+    // 2. Spill SSA-only vars to fiber.stack so VM can see caller state.
+    emitter.spill_all_vars();
+
+    // 3. Push frame to materialize callee frame in fiber.stack.
+    let push_frame_fn_ptr = emitter.builder().ins().load(
+        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_FRAME_FN
+    );
+    let push_frame_sig = import_push_frame_sig(emitter);
+    let push_call = emitter.builder().ins().call_indirect(
+        push_frame_sig, push_frame_fn_ptr,
+        &[ctx, p.func_id_val, p.local_slots_val, p.ret_reg_val, p.ret_slots_val, p.caller_resume_pc_val]
+    );
+
+    // 4. Optional: copy args from native stack to fiber.stack.
+    // Self-recursive calls pass args via native stack slot, so we must copy them.
+    // Regular/indirect calls: callee already spilled its state to fiber.stack before
+    // returning Call, so copying would overwrite the callee's modified state.
+    if let Some((args_slot, arg_count)) = p.copy_args {
+        let callee_fiber_args_ptr = emitter.builder().inst_results(push_call)[0];
+        for i in 0..arg_count {
+            let val = emitter.builder().ins().stack_load(types::I64, args_slot, (i * 8) as i32);
+            emitter.builder().ins().store(MemFlags::trusted(), val, callee_fiber_args_ptr, (i * 8) as i32);
+        }
+    }
+
+    // 5. Push resume point for frame chain.
+    let push_resume_point_fn_ptr = emitter.builder().ins().load(
+        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_RESUME_POINT_FN
+    );
+    let push_resume_point_sig = import_push_resume_point_sig(emitter);
+    let callee_bp = emitter.builder().ins().load(
+        types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
+    );
+    emitter.builder().ins().call_indirect(
+        push_resume_point_sig, push_resume_point_fn_ptr,
+        &[ctx, p.func_id_val, p.caller_resume_pc_val, callee_bp, p.caller_bp, p.ret_reg_val, p.ret_slots_val]
+    );
+
+    // 6. Return the JIT result.
+    emitter.builder().ins().return_(&[p.jit_result]);
 }
 
 /// Check call result and handle non-Ok cases.

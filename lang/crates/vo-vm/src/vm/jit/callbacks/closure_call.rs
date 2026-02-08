@@ -3,9 +3,21 @@
 //! These callbacks prepare a closure/iface call for potential JIT-to-JIT direct dispatch.
 //! They handle: func_id resolution, jit_func_table lookup, push_frame, and arg layout.
 
+use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::jit_api::{JitContext, PreparedCall};
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::closure;
+
+/// Look up a function in the direct_call_table for JIT-to-JIT fast path.
+/// Returns non-null only when callee is safe for direct calls (no defer, no CallClosure/CallIface).
+#[inline]
+fn lookup_direct_call_ptr(ctx: &JitContext, func_id: u32, func_def: &FunctionDef) -> *const u8 {
+    if !func_def.has_defer && func_id < ctx.direct_call_count {
+        unsafe { *ctx.direct_call_table.add(func_id as usize) }
+    } else {
+        core::ptr::null()
+    }
+}
 
 /// Prepare a closure call for JIT dispatch.
 ///
@@ -31,18 +43,8 @@ pub extern "C" fn jit_prepare_closure_call(
     let func_def = &module.functions[func_id as usize];
     let local_slots = func_def.local_slots as usize;
     
-    // 2. Determine if callee can use JIT fast path:
-    //    - Must not have defer (complex control flow)
-    //    - Must be in direct_call_table (no CallClosure/CallIface → won't return JitResult::Call)
-    let jit_func_ptr = if !func_def.has_defer {
-        if func_id < ctx.direct_call_count {
-            unsafe { *ctx.direct_call_table.add(func_id as usize) }
-        } else {
-            core::ptr::null()
-        }
-    } else {
-        core::ptr::null()
-    };
+    // 2. Determine if callee can use JIT fast path
+    let jit_func_ptr = lookup_direct_call_ptr(ctx, func_id, func_def);
     
     // 3. push_frame: always allocate callee frame on fiber.stack.
     //    Both fast path (JIT direct call) and slow path (call_vm trampoline) need valid callee_args_ptr.
@@ -116,15 +118,7 @@ pub extern "C" fn jit_prepare_iface_call(
     let recv_slots = func_def.recv_slots as usize;
     
     // 2. Determine if callee can use JIT fast path
-    let jit_func_ptr = if !func_def.has_defer {
-        if func_id < ctx_ref.direct_call_count {
-            unsafe { *ctx_ref.direct_call_table.add(func_id as usize) }
-        } else {
-            core::ptr::null()
-        }
-    } else {
-        core::ptr::null()
-    };
+    let jit_func_ptr = lookup_direct_call_ptr(ctx_ref, func_id, func_def);
     
     // 3. push_frame: always allocate callee frame on fiber.stack
     let push_frame_fn = ctx_ref.push_frame_fn.expect("push_frame_fn not set");
