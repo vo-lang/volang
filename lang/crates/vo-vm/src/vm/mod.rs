@@ -372,7 +372,7 @@ impl Vm {
             }
             
             let fiber_id = match self.scheduler.schedule_next() {
-                Some(id) => crate::scheduler::FiberId::Regular(id),
+                Some(id) => id,
                 None => break,
             };
 
