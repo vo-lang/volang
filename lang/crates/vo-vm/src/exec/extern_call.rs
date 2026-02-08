@@ -16,7 +16,6 @@ use crate::vm::ExecResult;
 pub use vo_runtime::ffi::ExternRegistry;
 use vo_runtime::ffi::ExternResult;
 use vo_runtime::SentinelErrorCache;
-use vo_common_core::bytecode::WellKnownTypes;
 use vo_runtime::gc::Gc;
 use vo_common_core::bytecode::Module;
 #[cfg(feature = "std")]
@@ -31,17 +30,11 @@ pub fn exec_call_extern(
     externs: &[ExternDef],
     registry: &ExternRegistry,
     gc: &mut Gc,
-    struct_metas: &[vo_common_core::bytecode::StructMeta],
-    interface_metas: &[vo_common_core::bytecode::InterfaceMeta],
-    named_type_metas: &[vo_common_core::bytecode::NamedTypeMeta],
-    runtime_types: &[vo_runtime::RuntimeType],
-    itab_cache: &mut vo_runtime::itab::ItabCache,
-    func_defs: &[vo_common_core::bytecode::FunctionDef],
     module: &Module,
+    itab_cache: &mut vo_runtime::itab::ItabCache,
     vm: *mut core::ffi::c_void,
     fiber: *mut core::ffi::c_void,
     fiber_panic_msg: &mut Option<String>,
-    well_known: &WellKnownTypes,
     program_args: &[String],
     sentinel_errors: &mut SentinelErrorCache,
     #[cfg(feature = "std")]
@@ -73,16 +66,10 @@ pub fn exec_call_extern(
         arg_count,
         dst,
         gc,
-        struct_metas,
-        interface_metas,
-        named_type_metas,
-        runtime_types,
-        itab_cache,
-        func_defs,
         module,
+        itab_cache,
         vm,
         fiber,
-        well_known,
         program_args,
         sentinel_errors,
         #[cfg(feature = "std")]

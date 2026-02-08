@@ -1070,11 +1070,9 @@ impl Vm {
                     let (closure_replay_results, closure_replay_panicked) = fiber.closure_replay.take_for_extern();
                     let result = exec::exec_call_extern(
                         &mut fiber.stack, bp, &inst, &module.externs, &self.state.extern_registry,
-                        &mut self.state.gc, &module.struct_metas, &module.interface_metas,
-                        &module.named_type_metas, &module.runtime_types, &mut self.state.itab_cache,
-                        &module.functions, module, vm_ptr, fiber_ptr,
-                        &mut extern_panic_msg, &module.well_known, &self.state.program_args,
-                        &mut self.state.sentinel_errors,
+                        &mut self.state.gc, module, &mut self.state.itab_cache,
+                        vm_ptr, fiber_ptr, &mut extern_panic_msg,
+                        &self.state.program_args, &mut self.state.sentinel_errors,
                         #[cfg(feature = "std")] &mut self.state.io,
                         #[cfg(feature = "std")] resume_io_token,
                         closure_replay_results,

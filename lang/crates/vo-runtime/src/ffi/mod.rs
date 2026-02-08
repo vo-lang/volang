@@ -327,24 +327,14 @@ pub struct ExternCallContext<'a> {
     call: ExternCall<'a>,
     /// GC for allocations.
     gc: &'a mut Gc,
-    /// Struct metadata for reflection.
-    struct_metas: &'a [StructMeta],
-    /// Named type metadata for reflection.
-    named_type_metas: &'a [NamedTypeMeta],
-    interface_metas: &'a [InterfaceMeta],
-    /// Runtime types for rttid resolution.
-    runtime_types: &'a [RuntimeType],
-    itab_cache: &'a mut ItabCache,
-    /// Function definitions for closure calls.
-    func_defs: &'a [vo_common_core::bytecode::FunctionDef],
-    /// Module reference for deep comparison operations.
+    /// Module reference (provides struct_metas, interface_metas, named_type_metas,
+    /// runtime_types, functions, well_known, and deep comparison support).
     module: &'a Module,
+    itab_cache: &'a mut ItabCache,
     /// Opaque pointer to VM instance (for closure calls).
     vm: *mut core::ffi::c_void,
     /// Opaque pointer to current Fiber (for closure calls).
     fiber: *mut core::ffi::c_void,
-    /// Pre-computed IDs for well-known types.
-    well_known: &'a WellKnownTypes,
     /// Program arguments.
     program_args: &'a [String],
     /// Sentinel error cache.
@@ -375,16 +365,10 @@ impl<'a> ExternCallContext<'a> {
         arg_count: u16,
         ret_start: u16,
         gc: &'a mut Gc,
-        struct_metas: &'a [StructMeta],
-        named_type_metas: &'a [NamedTypeMeta],
-        interface_metas: &'a [InterfaceMeta],
-        runtime_types: &'a [RuntimeType],
-        itab_cache: &'a mut ItabCache,
-        func_defs: &'a [vo_common_core::bytecode::FunctionDef],
         module: &'a Module,
+        itab_cache: &'a mut ItabCache,
         vm: *mut core::ffi::c_void,
         fiber: *mut core::ffi::c_void,
-        well_known: &'a WellKnownTypes,
         program_args: &'a [String],
         sentinel_errors: &'a mut SentinelErrorCache,
         #[cfg(feature = "std")] io: &'a mut IoRuntime,
@@ -395,16 +379,10 @@ impl<'a> ExternCallContext<'a> {
         Self {
             call: ExternCall::new(stack, bp, arg_start, arg_count, ret_start),
             gc,
-            struct_metas,
-            named_type_metas,
-            interface_metas,
-            runtime_types,
-            itab_cache,
-            func_defs,
             module,
+            itab_cache,
             vm,
             fiber,
-            well_known,
             program_args,
             sentinel_errors,
             #[cfg(feature = "std")]
@@ -426,38 +404,38 @@ impl<'a> ExternCallContext<'a> {
     /// Get struct metadata by index.
     #[inline]
     pub fn struct_meta(&self, idx: usize) -> Option<&StructMeta> {
-        self.struct_metas.get(idx)
+        self.module.struct_metas.get(idx)
     }
 
     /// Get named type metadata by index.
     #[inline]
     pub fn named_type_meta(&self, idx: usize) -> Option<&NamedTypeMeta> {
-        self.named_type_metas.get(idx)
+        self.module.named_type_metas.get(idx)
     }
 
     #[inline]
-    pub fn named_type_metas(&self) -> &'a [NamedTypeMeta] {
-        self.named_type_metas
+    pub fn named_type_metas(&self) -> &[NamedTypeMeta] {
+        &self.module.named_type_metas
     }
 
     #[inline]
     pub fn interface_meta(&self, idx: usize) -> Option<&InterfaceMeta> {
-        self.interface_metas.get(idx)
+        self.module.interface_metas.get(idx)
     }
 
     #[inline]
-    pub fn interface_metas(&self) -> &'a [InterfaceMeta] {
-        self.interface_metas
+    pub fn interface_metas(&self) -> &[InterfaceMeta] {
+        &self.module.interface_metas
     }
 
     #[inline]
-    pub fn runtime_types(&self) -> &'a [RuntimeType] {
-        self.runtime_types
+    pub fn runtime_types(&self) -> &[RuntimeType] {
+        &self.module.runtime_types
     }
 
     #[inline]
     pub fn well_known(&self) -> &WellKnownTypes {
-        self.well_known
+        &self.module.well_known
     }
 
     /// Get sentinel errors cache (immutable).
@@ -494,8 +472,8 @@ impl<'a> ExternCallContext<'a> {
             named_type_id,
             iface_meta_id,
             src_is_pointer,
-            self.named_type_metas,
-            self.interface_metas,
+            &self.module.named_type_metas,
+            &self.module.interface_metas,
         )
     }
 
@@ -509,15 +487,15 @@ impl<'a> ExternCallContext<'a> {
             named_type_id,
             iface_meta_id,
             src_is_pointer,
-            self.named_type_metas,
-            self.interface_metas,
+            &self.module.named_type_metas,
+            &self.module.interface_metas,
         )
     }
 
     /// Get struct_meta_id from rttid using RuntimeType's embedded meta_id.
     /// O(1) lookup via RuntimeType.struct_meta_id().
     pub fn get_struct_meta_id_from_rttid(&self, rttid: u32) -> Option<u32> {
-        self.runtime_types.get(rttid as usize)
+        self.module.runtime_types.get(rttid as usize)
             .and_then(|rt| rt.struct_meta_id())
     }
 
@@ -525,12 +503,11 @@ impl<'a> ExternCallContext<'a> {
     /// Handles both direct Interface types and Named interface types.
     pub fn get_interface_meta_id_from_rttid(&self, rttid: u32) -> Option<u32> {
         use vo_common_core::runtime_type::RuntimeType;
-        let rt = self.runtime_types.get(rttid as usize)?;
+        let rt = self.module.runtime_types.get(rttid as usize)?;
         match rt {
             RuntimeType::Interface { meta_id, .. } => Some(*meta_id),
             RuntimeType::Named { id, .. } => {
-                // For named interface types, get meta_id from underlying_meta
-                let named_meta = self.named_type_metas.get(*id as usize)?;
+                let named_meta = self.module.named_type_metas.get(*id as usize)?;
                 if named_meta.underlying_meta.value_kind() == ValueKind::Interface {
                     Some(named_meta.underlying_meta.meta_id())
                 } else {
@@ -546,11 +523,11 @@ impl<'a> ExternCallContext<'a> {
     /// Returns Some(named_type_id) if rttid refers to a Named type.
     pub fn get_named_type_id_from_rttid(&self, rttid: u32, follow_pointer: bool) -> Option<u32> {
         use vo_common_core::runtime_type::RuntimeType;
-        let rt = self.runtime_types.get(rttid as usize)?;
+        let rt = self.module.runtime_types.get(rttid as usize)?;
         match rt {
             RuntimeType::Named { id, .. } => Some(*id),
             RuntimeType::Pointer(elem) if follow_pointer => {
-                match self.runtime_types.get(elem.rttid() as usize)? {
+                match self.module.runtime_types.get(elem.rttid() as usize)? {
                     RuntimeType::Named { id, .. } => Some(*id),
                     _ => None,
                 }
@@ -564,7 +541,7 @@ impl<'a> ExternCallContext<'a> {
     /// For Pointer types, dereferences to find the base named type.
     pub fn lookup_method(&self, rttid: u32, method_name: &str) -> Option<(u32, bool, u32)> {
         let named_id = self.get_named_type_id_from_rttid(rttid, true)?;
-        let named_meta = self.named_type_metas.get(named_id as usize)?;
+        let named_meta = self.module.named_type_metas.get(named_id as usize)?;
         let method_info = named_meta.methods.get(method_name)?;
         Some((method_info.func_id, method_info.is_pointer_receiver, method_info.signature_rttid))
     }
@@ -838,7 +815,7 @@ impl<'a> ExternCallContext<'a> {
     pub fn get_func_results(&self, func_rttid: u32) -> Vec<ValueRttid> {
         use crate::RuntimeType;
 
-        if let Some(RuntimeType::Func { results, .. }) = self.runtime_types.get(func_rttid as usize) {
+        if let Some(RuntimeType::Func { results, .. }) = self.module.runtime_types.get(func_rttid as usize) {
             return results.clone();
         }
         Vec::new()
@@ -849,7 +826,7 @@ impl<'a> ExternCallContext<'a> {
     pub fn get_func_signature(&self, func_rttid: u32) -> Option<(&Vec<ValueRttid>, &Vec<ValueRttid>, bool)> {
         use crate::RuntimeType;
 
-        match self.runtime_types.get(func_rttid as usize)? {
+        match self.module.runtime_types.get(func_rttid as usize)? {
             RuntimeType::Func { params, results, variadic } => Some((params, results, *variadic)),
             _ => None,
         }
@@ -860,7 +837,7 @@ impl<'a> ExternCallContext<'a> {
     pub fn get_slice_elem(&self, slice_rttid: u32) -> Option<ValueRttid> {
         use crate::RuntimeType;
 
-        match self.runtime_types.get(slice_rttid as usize)? {
+        match self.module.runtime_types.get(slice_rttid as usize)? {
             RuntimeType::Slice(elem) => Some(*elem),
             _ => None,
         }
@@ -880,7 +857,7 @@ impl<'a> ExternCallContext<'a> {
         }
 
         let get_func_sig = |rttid: u32| -> Option<(&Vec<crate::ValueRttid>, &Vec<crate::ValueRttid>, bool)> {
-            match self.runtime_types.get(rttid as usize)? {
+            match self.module.runtime_types.get(rttid as usize)? {
                 RuntimeType::Func { params, results, variadic } => Some((params, results, *variadic)),
                 _ => None,
             }
@@ -914,7 +891,7 @@ impl<'a> ExternCallContext<'a> {
 
             if let Some(variadic_param) = closure_params.last() {
                 let variadic_rttid = variadic_param.rttid();
-                if let Some(RuntimeType::Slice(elem_rttid)) = self.runtime_types.get(variadic_rttid as usize) {
+                if let Some(RuntimeType::Slice(elem_rttid)) = self.module.runtime_types.get(variadic_rttid as usize) {
                     for (i, expected) in expected_params.iter().skip(non_variadic_count).enumerate() {
                         if !self.value_rttids_compatible(*expected, *elem_rttid) {
                             return Err(format!("variadic parameter {} type mismatch", i + 1));
@@ -969,14 +946,14 @@ impl<'a> ExternCallContext<'a> {
         }
 
         let target_rttid = target.rttid();
-        if let Some(RuntimeType::Interface { methods, .. }) = self.runtime_types.get(target_rttid as usize) {
+        if let Some(RuntimeType::Interface { methods, .. }) = self.module.runtime_types.get(target_rttid as usize) {
             if methods.is_empty() {
                 return true;
             }
         }
 
         let source_rttid = source.rttid();
-        if let Some(RuntimeType::Interface { methods, .. }) = self.runtime_types.get(source_rttid as usize) {
+        if let Some(RuntimeType::Interface { methods, .. }) = self.module.runtime_types.get(source_rttid as usize) {
             if methods.is_empty() {
                 return true;
             }
@@ -989,8 +966,7 @@ impl<'a> ExternCallContext<'a> {
     pub fn get_elem_value_rttid_from_base(&self, base_rttid: u32) -> crate::ValueRttid {
         use crate::RuntimeType;
 
-        let rt = self
-            .runtime_types
+        let rt = self.module.runtime_types
             .get(base_rttid as usize)
             .expect("dyn_get_index: base_rttid not found in runtime_types");
 
@@ -1004,7 +980,7 @@ impl<'a> ExternCallContext<'a> {
                 crate::ValueRttid::new(crate::ValueKind::Uint8 as u32, crate::ValueKind::Uint8)
             }
             RuntimeType::Named { id, .. } => {
-                let meta = &self.named_type_metas[*id as usize];
+                let meta = &self.module.named_type_metas[*id as usize];
                 let underlying_rttid = meta.underlying_meta.meta_id();
                 self.get_elem_value_rttid_from_base(underlying_rttid)
             }
@@ -1016,15 +992,14 @@ impl<'a> ExternCallContext<'a> {
     pub fn get_array_len_from_rttid(&self, rttid: u32) -> usize {
         use crate::RuntimeType;
 
-        let rt = self
-            .runtime_types
+        let rt = self.module.runtime_types
             .get(rttid as usize)
             .expect("get_array_len_from_rttid: rttid not found in runtime_types");
 
         match rt {
             RuntimeType::Array { len, .. } => *len as usize,
             RuntimeType::Named { id, .. } => {
-                let meta = &self.named_type_metas[*id as usize];
+                let meta = &self.module.named_type_metas[*id as usize];
                 let underlying_rttid = meta.underlying_meta.meta_id();
                 self.get_array_len_from_rttid(underlying_rttid)
             }
@@ -1036,14 +1011,13 @@ impl<'a> ExternCallContext<'a> {
     pub fn get_type_slot_count(&self, rttid: u32) -> u16 {
         use crate::RuntimeType;
 
-        let rt = self
-            .runtime_types
+        let rt = self.module.runtime_types
             .get(rttid as usize)
             .expect("get_type_slot_count: rttid not found in runtime_types");
 
         match rt {
             RuntimeType::Named { id: named_id, .. } => {
-                if let Some(named_meta) = self.named_type_metas.get(*named_id as usize) {
+                if let Some(named_meta) = self.module.named_type_metas.get(*named_id as usize) {
                     let underlying_vk = named_meta.underlying_meta.value_kind();
                     let underlying_meta_id = named_meta.underlying_meta.meta_id();
                     match underlying_vk {
@@ -1120,7 +1094,7 @@ impl<'a> ExternCallContext<'a> {
     /// Get function definition by func_id.
     #[inline]
     pub fn get_func_def(&self, func_id: u32) -> Option<&vo_common_core::bytecode::FunctionDef> {
-        self.func_defs.get(func_id as usize)
+        self.module.functions.get(func_id as usize)
     }
 
     /// Check if a previous closure-for-replay panicked.
@@ -1272,16 +1246,10 @@ impl ExternRegistry {
         arg_count: u16,
         ret_start: u16,
         gc: &mut Gc,
-        struct_metas: &[StructMeta],
-        interface_metas: &[InterfaceMeta],
-        named_type_metas: &[NamedTypeMeta],
-        runtime_types: &[RuntimeType],
-        itab_cache: &mut ItabCache,
-        func_defs: &[vo_common_core::bytecode::FunctionDef],
         module: &Module,
+        itab_cache: &mut ItabCache,
         vm: *mut core::ffi::c_void,
         fiber: *mut core::ffi::c_void,
-        well_known: &WellKnownTypes,
         program_args: &[String],
         sentinel_errors: &mut SentinelErrorCache,
         #[cfg(feature = "std")] io: &mut IoRuntime,
@@ -1302,16 +1270,10 @@ impl ExternRegistry {
                     arg_count,
                     ret_start,
                     gc,
-                    struct_metas,
-                    named_type_metas,
-                    interface_metas,
-                    runtime_types,
-                    itab_cache,
-                    func_defs,
                     module,
+                    itab_cache,
                     vm,
                     fiber,
-                    well_known,
                     program_args,
                     sentinel_errors,
                     #[cfg(feature = "std")]
