@@ -2,10 +2,11 @@
 
 use vo_runtime::jit_api::{JitContext, JitResult};
 
+#[cfg(not(feature = "std"))]
 use crate::fiber::Fiber;
-use crate::vm::{helpers, Vm};
+use crate::vm::helpers;
 
-use super::helpers::set_jit_panic;
+use super::helpers::{extract_context, set_jit_panic};
 
 /// JIT callback to close a port.
 /// Returns JitResult::Ok on success, JitResult::Panic on nil port.
@@ -14,9 +15,7 @@ pub extern "C" fn jit_port_close(ctx: *mut JitContext, port: u64) -> JitResult {
     use vo_runtime::gc::GcRef;
     use vo_runtime::objects::port;
     
-    let ctx = unsafe { &mut *ctx };
-    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
-    let fiber = unsafe { &mut *(ctx.fiber as *mut Fiber) };
+    let (vm, fiber) = unsafe { extract_context(ctx) };
     let p = port as GcRef;
     
     if p.is_null() {
@@ -63,10 +62,9 @@ pub extern "C" fn jit_port_send(
     use vo_runtime::objects::port;
     use crate::exec::{PortResult, port_send_core};
     
-    let ctx = unsafe { &mut *ctx };
-    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
-    let fiber = unsafe { &mut *(ctx.fiber as *mut Fiber) };
-    let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
+    // Read module pointer before extract_context to avoid aliasing &mut
+    let module = unsafe { &*((*ctx).module as *const vo_runtime::bytecode::Module) };
+    let (vm, fiber) = unsafe { extract_context(ctx) };
     let p = port as GcRef;
     
     if p.is_null() {
@@ -119,10 +117,9 @@ pub extern "C" fn jit_port_recv(
     use vo_runtime::gc::GcRef;
     use crate::exec::{port_recv_core, PortRecvCoreResult};
     
-    let ctx = unsafe { &mut *ctx };
-    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
-    let fiber = unsafe { &mut *(ctx.fiber as *mut Fiber) };
-    let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
+    // Read module pointer before extract_context to avoid aliasing &mut
+    let module = unsafe { &*((*ctx).module as *const vo_runtime::bytecode::Module) };
+    let (vm, fiber) = unsafe { extract_context(ctx) };
     let p = port as GcRef;
     let has_ok = has_ok != 0;
     
