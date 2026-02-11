@@ -7,12 +7,12 @@
 #[cfg(feature = "std")]
 use regex::Regex;
 
-use vo_ffi_macro::vostd_extern_ctx;
+use vo_ffi_macro::vostd_fn;
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 
 // ==================== Matching ====================
 
-#[vostd_extern_ctx("regexp", "matchString")]
+#[vostd_fn("regexp", "matchString", std)]
 fn match_string(call: &mut ExternCallContext) -> ExternResult {
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let s = call.arg_str(slots::ARG_S);
@@ -25,7 +25,7 @@ fn match_string(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("regexp", "matchBytes")]
+#[vostd_fn("regexp", "matchBytes", std)]
 fn match_bytes(call: &mut ExternCallContext) -> ExternResult {
     use vo_runtime::objects::slice;
     let pattern = call.arg_str(slots::ARG_PATTERN);
@@ -49,7 +49,7 @@ fn match_bytes(call: &mut ExternCallContext) -> ExternResult {
 
 // ==================== Find ====================
 
-#[vostd_extern_ctx("regexp", "findString")]
+#[vostd_fn("regexp", "findString", std)]
 fn find_string(call: &mut ExternCallContext) -> ExternResult {
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let s = call.arg_str(slots::ARG_S);
@@ -63,7 +63,7 @@ fn find_string(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("regexp", "findStringIndex")]
+#[vostd_fn("regexp", "findStringIndex", std)]
 fn find_string_index(call: &mut ExternCallContext) -> ExternResult {
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let s = call.arg_str(slots::ARG_S);
@@ -76,7 +76,7 @@ fn find_string_index(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("regexp", "findAllString")]
+#[vostd_fn("regexp", "findAllString", std)]
 fn find_all_string(call: &mut ExternCallContext) -> ExternResult {
     use vo_runtime::objects::{array, slice, string as str_obj};
     use vo_common_core::types::ValueMeta;
@@ -111,7 +111,7 @@ fn find_all_string(call: &mut ExternCallContext) -> ExternResult {
 
 // ==================== Replace ====================
 
-#[vostd_extern_ctx("regexp", "replaceAllString")]
+#[vostd_fn("regexp", "replaceAllString", std)]
 fn replace_all_string(call: &mut ExternCallContext) -> ExternResult {
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let src = call.arg_str(slots::ARG_SRC);
@@ -126,7 +126,7 @@ fn replace_all_string(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("regexp", "replaceAllLiteralString")]
+#[vostd_fn("regexp", "replaceAllLiteralString", std)]
 fn replace_all_literal_string(call: &mut ExternCallContext) -> ExternResult {
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let src = call.arg_str(slots::ARG_SRC);
@@ -143,7 +143,7 @@ fn replace_all_literal_string(call: &mut ExternCallContext) -> ExternResult {
 
 // ==================== Split ====================
 
-#[vostd_extern_ctx("regexp", "splitString")]
+#[vostd_fn("regexp", "splitString", std)]
 fn split_string(call: &mut ExternCallContext) -> ExternResult {
     use vo_runtime::objects::{array, slice, string as str_obj};
     use vo_common_core::types::ValueMeta;
@@ -178,7 +178,7 @@ fn split_string(call: &mut ExternCallContext) -> ExternResult {
 
 // ==================== Submatch ====================
 
-#[vostd_extern_ctx("regexp", "findStringSubmatch")]
+#[vostd_fn("regexp", "findStringSubmatch", std)]
 fn find_string_submatch(call: &mut ExternCallContext) -> ExternResult {
     use vo_runtime::objects::{array, slice, string as str_obj};
     use vo_common_core::types::ValueMeta;
@@ -212,7 +212,7 @@ fn find_string_submatch(call: &mut ExternCallContext) -> ExternResult {
 
 // ==================== Quote ====================
 
-#[vostd_extern_ctx("regexp", "quoteMeta")]
+#[vostd_fn("regexp", "quoteMeta", std)]
 fn quote_meta(call: &mut ExternCallContext) -> ExternResult {
     let s = call.arg_str(slots::ARG_S);
     let result = regex::escape(s);

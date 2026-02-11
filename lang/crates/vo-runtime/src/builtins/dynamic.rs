@@ -95,6 +95,13 @@ impl From<(DynErr, &'static str)> for DynOrSuspend {
 
 type DynSuspendResult<T> = Result<T, DynOrSuspend>;
 
+/// Read `count` slots from a GcRef, returning zeros if the ref is null.
+fn read_ref_slots(src_ref: GcRef, count: usize) -> Vec<u64> {
+    (0..count).map(|i| {
+        if src_ref.is_null() { 0 } else { unsafe { Gc::read_slot(src_ref, i) } }
+    }).collect()
+}
+
 // ============================================================================
 // Layer 1: Protocol Infrastructure
 // ============================================================================
@@ -145,7 +152,7 @@ fn call_protocol<const N: usize>(
     args: &[u64],
     err: DynErr,
 ) -> DynSuspendResult<[u64; N]> {
-    if call.is_closure_replay_panicked() {
+    if call.is_replay_panicked() {
         return Err(DynOrSuspend::Dyn(DynErr::BadCall, "closure panicked"));
     }
     let ret_vec = match call.resume_closure_result() {
@@ -556,9 +563,8 @@ fn set_struct_field(
         return Err((DynErr::TypeMismatch, "field type mismatch"));
     } else if field_vk == ValueKind::Struct || field_vk == ValueKind::Array {
         // Struct/Array: val_slot1 is a GcRef to boxed data
-        let src_ref = val_slot1 as GcRef;
-        for i in 0..field_slots {
-            let val = if src_ref.is_null() { 0 } else { unsafe { Gc::read_slot(src_ref, i) } };
+        let vals = read_ref_slots(val_slot1 as GcRef, field_slots);
+        for (i, &val) in vals.iter().enumerate() {
             unsafe { Gc::write_slot(current_ref, field.offset + i, val); }
         }
     } else {
@@ -645,10 +651,7 @@ fn set_map_string_key(
     } else if val_slots == 1 {
         vec![val_slot1]
     } else {
-        let src_ref = val_slot1 as GcRef;
-        (0..val_slots).map(|i| {
-            if src_ref.is_null() { 0 } else { unsafe { Gc::read_slot(src_ref, i) } }
-        }).collect()
+        read_ref_slots(val_slot1 as GcRef, val_slots)
     };
     
     // For map[any]T, wrap key as interface
@@ -693,10 +696,7 @@ fn get_map_index(
     } else if map_key_slots == 1 {
         vec![key_slot1]
     } else {
-        let src_ref = key_slot1 as GcRef;
-        (0..map_key_slots).map(|i| {
-            if src_ref.is_null() { 0 } else { unsafe { Gc::read_slot(src_ref, i) } }
-        }).collect()
+        read_ref_slots(key_slot1 as GcRef, map_key_slots)
     };
     
     let val_meta = map::val_meta(base_ref);
@@ -755,10 +755,7 @@ fn set_map_index(
     } else if map_key_slots == 1 {
         vec![key_slot1]
     } else {
-        let src_ref = key_slot1 as GcRef;
-        (0..map_key_slots).map(|i| {
-            if src_ref.is_null() { 0 } else { unsafe { Gc::read_slot(src_ref, i) } }
-        }).collect()
+        read_ref_slots(key_slot1 as GcRef, map_key_slots)
     };
     
     let val_meta = map::val_meta(base_ref);
@@ -776,10 +773,7 @@ fn set_map_index(
     let val_data: Vec<u64> = if val_vk == ValueKind::Interface {
         vec![val_slot0, val_slot1]
     } else if val_vk == ValueKind::Struct || val_vk == ValueKind::Array {
-        let src_ref = val_slot1 as GcRef;
-        (0..val_slots).map(|i| {
-            if src_ref.is_null() { 0 } else { unsafe { Gc::read_slot(src_ref, i) } }
-        }).collect()
+        read_ref_slots(val_slot1 as GcRef, val_slots)
     } else {
         vec![val_slot1]
     };
@@ -911,9 +905,8 @@ fn set_slice_index(
         slice::set(base_ref, idx * elem_slots, val_slot0, 8);
         slice::set(base_ref, idx * elem_slots + 1, val_slot1, 8);
     } else if elem_vk == ValueKind::Struct || elem_vk == ValueKind::Array {
-        let src_ref = val_slot1 as GcRef;
-        for i in 0..elem_slots {
-            let slot = if src_ref.is_null() { 0 } else { unsafe { Gc::read_slot(src_ref, i) } };
+        let vals = read_ref_slots(val_slot1 as GcRef, elem_slots);
+        for (i, &slot) in vals.iter().enumerate() {
             slice::set(base_ref, idx * elem_slots + i, slot, 8);
         }
     } else {
@@ -1073,7 +1066,7 @@ fn do_call(
     is_any_start: u16,
     error_offset: u16,
 ) -> ExternResult {
-    if call.is_closure_replay_panicked() {
+    if call.is_replay_panicked() {
         return call_return_error(call, error_offset, DynErr::BadCall, "closure panicked");
     }
     if closure_ref.is_null() {
@@ -1257,11 +1250,7 @@ fn unpack_args(
         } else if param_slots == 1 {
             args.push(arg_slot1);
         } else {
-            let src_ref = arg_slot1 as GcRef;
-            for j in 0..param_slots {
-                let val = if !src_ref.is_null() { unsafe { Gc::read_slot(src_ref, j) } } else { 0 };
-                args.push(val);
-            }
+            args.extend(read_ref_slots(arg_slot1 as GcRef, param_slots));
         }
     }
     
@@ -1315,11 +1304,8 @@ fn set_slice_elem_from_any(
     } else if elem_slots == 1 {
         slice::set(slice_ref, idx, arg_slot1, 8);
     } else {
-        let src_ref = arg_slot1 as GcRef;
-        if !src_ref.is_null() {
-            let vals: Vec<u64> = (0..elem_slots).map(|j| unsafe { Gc::read_slot(src_ref, j) }).collect();
-            slice::set_n(slice_ref, idx, &vals, elem_slots * 8);
-        }
+        let vals = read_ref_slots(arg_slot1 as GcRef, elem_slots);
+        slice::set_n(slice_ref, idx, &vals, elem_slots * 8);
     }
 }
 
@@ -1547,7 +1533,7 @@ fn do_call_via_protocol(
         Err((e, m)) => return call_return_error(call, error_offset, e, m),
     };
     
-    if call.is_closure_replay_panicked() {
+    if call.is_replay_panicked() {
         return call_return_error(call, error_offset, DynErr::BadCall, "closure panicked");
     }
     
@@ -1892,9 +1878,9 @@ fn dyn_type_assert_error(call: &mut ExternCallContext) -> ExternResult {
 // ============================================================================
 
 pub fn register_externs(registry: &mut crate::ffi::ExternRegistry, externs: &[crate::bytecode::ExternDef]) {
-    use crate::ffi::ExternFnWithContext;
+    use crate::ffi::ExternFn;
     
-    const TABLE: &[(&str, ExternFnWithContext)] = &[
+    const TABLE: &[(&str, ExternFn)] = &[
         ("dyn_getDynErrors", get_dyn_errors),
         ("dyn_field", dyn_field),
         ("dyn_index", dyn_index),
@@ -1913,7 +1899,7 @@ pub fn register_externs(registry: &mut crate::ffi::ExternRegistry, externs: &[cr
     for (id, def) in externs.iter().enumerate() {
         for (name, func) in TABLE {
             if def.name == *name {
-                registry.register_with_context(id as u32, *func);
+                registry.register(id as u32, *func);
                 break;
             }
         }

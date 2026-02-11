@@ -284,16 +284,16 @@ fn regexp_quote_meta(call: &mut ExternCallContext) -> ExternResult {
 pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     for (id, def) in externs.iter().enumerate() {
         match def.name.as_str() {
-            "regexp_matchString" => registry.register_with_context(id as u32, regexp_match_string),
-            "regexp_matchBytes" => registry.register_with_context(id as u32, regexp_match_bytes),
-            "regexp_findString" => registry.register_with_context(id as u32, regexp_find_string),
-            "regexp_findStringIndex" => registry.register_with_context(id as u32, regexp_find_string_index),
-            "regexp_findAllString" => registry.register_with_context(id as u32, regexp_find_all_string),
-            "regexp_replaceAllString" => registry.register_with_context(id as u32, regexp_replace_all_string),
-            "regexp_replaceAllLiteralString" => registry.register_with_context(id as u32, regexp_replace_all_literal_string),
-            "regexp_splitString" => registry.register_with_context(id as u32, regexp_split_string),
-            "regexp_findStringSubmatch" => registry.register_with_context(id as u32, regexp_find_string_submatch),
-            "regexp_quoteMeta" => registry.register_with_context(id as u32, regexp_quote_meta),
+            "regexp_matchString" => registry.register(id as u32, regexp_match_string),
+            "regexp_matchBytes" => registry.register(id as u32, regexp_match_bytes),
+            "regexp_findString" => registry.register(id as u32, regexp_find_string),
+            "regexp_findStringIndex" => registry.register(id as u32, regexp_find_string_index),
+            "regexp_findAllString" => registry.register(id as u32, regexp_find_all_string),
+            "regexp_replaceAllString" => registry.register(id as u32, regexp_replace_all_string),
+            "regexp_replaceAllLiteralString" => registry.register(id as u32, regexp_replace_all_literal_string),
+            "regexp_splitString" => registry.register(id as u32, regexp_split_string),
+            "regexp_findStringSubmatch" => registry.register(id as u32, regexp_find_string_submatch),
+            "regexp_quoteMeta" => registry.register(id as u32, regexp_quote_meta),
             _ => {}
         }
     }

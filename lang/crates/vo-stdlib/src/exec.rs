@@ -7,7 +7,7 @@ use std::collections::HashMap;
 #[cfg(feature = "std")]
 use std::sync::Mutex;
 
-use vo_ffi_macro::vostd_extern_ctx;
+use vo_ffi_macro::vostd_fn;
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 #[cfg(feature = "std")]
 use vo_runtime::gc::{Gc, GcRef};
@@ -38,7 +38,7 @@ fn take_child(pid: i32) -> Option<std::process::Child> {
 }
 
 #[cfg(feature = "std")]
-#[vostd_extern_ctx("os/exec", "startProcess")]
+#[vostd_fn("os/exec", "startProcess", std)]
 fn exec_start_process(call: &mut ExternCallContext) -> ExternResult {
     let path = call.arg_str(slots::ARG_PATH);
     let args_ref = call.arg_ref(slots::ARG_ARGS);
@@ -98,7 +98,7 @@ fn read_string_slice(slice_ref: GcRef) -> Vec<String> {
 }
 
 #[cfg(feature = "std")]
-#[vostd_extern_ctx("os/exec", "waitProcess")]
+#[vostd_fn("os/exec", "waitProcess", std)]
 fn exec_wait_process(call: &mut ExternCallContext) -> ExternResult {
     let pid = call.arg_i64(slots::ARG_PID) as i32;
 
@@ -139,7 +139,7 @@ fn exec_wait_process(call: &mut ExternCallContext) -> ExternResult {
 }
 
 #[cfg(feature = "std")]
-#[vostd_extern_ctx("os/exec", "runCaptureOutput")]
+#[vostd_fn("os/exec", "runCaptureOutput", std)]
 fn exec_run_capture_output(call: &mut ExternCallContext) -> ExternResult {
     let path = call.arg_str(slots::ARG_PATH);
     let args_ref = call.arg_ref(slots::ARG_ARGS);

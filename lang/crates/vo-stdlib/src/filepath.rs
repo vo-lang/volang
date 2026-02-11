@@ -5,13 +5,13 @@ use std::path::PathBuf;
 #[cfg(feature = "std")]
 use std::fs;
 
-use vo_ffi_macro::vostd_extern_ctx;
+use vo_ffi_macro::vostd_fn;
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 #[cfg(feature = "std")]
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 
 #[cfg(feature = "std")]
-#[vostd_extern_ctx("path/filepath", "evalSymlinks")]
+#[vostd_fn("path/filepath", "evalSymlinks", std)]
 fn filepath_eval_symlinks(call: &mut ExternCallContext) -> ExternResult {
     let path = call.arg_str(slots::ARG_PATH);
     

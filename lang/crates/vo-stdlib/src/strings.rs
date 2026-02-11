@@ -12,21 +12,21 @@ use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use vo_ffi_macro::vostd_extern;
+use vo_ffi_macro::vostd_fn;
 
 // ==================== Search ====================
 
-#[vostd_extern("strings", "Index")]
+#[vostd_fn("strings", "Index")]
 fn index(s: &str, substr: &str) -> i64 {
     s.find(substr).map(|i| i as i64).unwrap_or(-1)
 }
 
-#[vostd_extern("strings", "LastIndex")]
+#[vostd_fn("strings", "LastIndex")]
 fn last_index(s: &str, substr: &str) -> i64 {
     s.rfind(substr).map(|i| i as i64).unwrap_or(-1)
 }
 
-#[vostd_extern("strings", "Count")]
+#[vostd_fn("strings", "Count")]
 fn count(s: &str, substr: &str) -> i64 {
     if substr.is_empty() {
         return (s.chars().count() + 1) as i64;
@@ -36,17 +36,17 @@ fn count(s: &str, substr: &str) -> i64 {
 
 // ==================== Case conversion ====================
 
-#[vostd_extern("strings", "ToLower")]
+#[vostd_fn("strings", "ToLower")]
 fn to_lower(s: &str) -> String {
     s.to_lowercase()
 }
 
-#[vostd_extern("strings", "ToUpper")]
+#[vostd_fn("strings", "ToUpper")]
 fn to_upper(s: &str) -> String {
     s.to_uppercase()
 }
 
-#[vostd_extern("strings", "ToTitle")]
+#[vostd_fn("strings", "ToTitle")]
 fn to_title(s: &str) -> String {
     // Go's ToTitle converts all letters to title case (not just first letter of each word)
     s.chars().flat_map(|c| c.to_uppercase()).collect()
@@ -54,7 +54,7 @@ fn to_title(s: &str) -> String {
 
 // ==================== Splitting ====================
 
-#[vostd_extern("strings", "Split")]
+#[vostd_fn("strings", "Split")]
 fn split(s: &str, sep: &str) -> Vec<String> {
     if sep.is_empty() {
         s.chars().map(|c| c.to_string()).collect()
@@ -63,7 +63,7 @@ fn split(s: &str, sep: &str) -> Vec<String> {
     }
 }
 
-#[vostd_extern("strings", "SplitN")]
+#[vostd_fn("strings", "SplitN")]
 fn split_n(s: &str, sep: &str, n: i64) -> Vec<String> {
     if n == 0 {
         return Vec::new();
@@ -78,7 +78,7 @@ fn split_n(s: &str, sep: &str, n: i64) -> Vec<String> {
     }
 }
 
-#[vostd_extern("strings", "SplitAfter")]
+#[vostd_fn("strings", "SplitAfter")]
 fn split_after(s: &str, sep: &str) -> Vec<String> {
     if sep.is_empty() {
         s.chars().map(|c| c.to_string()).collect()
@@ -97,7 +97,7 @@ fn split_after(s: &str, sep: &str) -> Vec<String> {
     }
 }
 
-#[vostd_extern("strings", "SplitAfterN")]
+#[vostd_fn("strings", "SplitAfterN")]
 fn split_after_n(s: &str, sep: &str, n: i64) -> Vec<String> {
     if n == 0 {
         return Vec::new();
@@ -130,14 +130,14 @@ fn split_after_n(s: &str, sep: &str, n: i64) -> Vec<String> {
     result
 }
 
-#[vostd_extern("strings", "Fields")]
+#[vostd_fn("strings", "Fields")]
 fn fields(s: &str) -> Vec<String> {
     s.split_whitespace().map(|s| s.to_string()).collect()
 }
 
 // ==================== Replace ====================
 
-#[vostd_extern("strings", "Replace")]
+#[vostd_fn("strings", "Replace")]
 fn replace(s: &str, old: &str, new: &str, n: i64) -> String {
     if n < 0 {
         s.replace(old, new)
@@ -150,7 +150,7 @@ fn replace(s: &str, old: &str, new: &str, n: i64) -> String {
 
 // ==================== Comparison ====================
 
-#[vostd_extern("strings", "EqualFold")]
+#[vostd_fn("strings", "EqualFold")]
 fn equal_fold(s: &str, t: &str) -> bool {
     // Unicode case-insensitive comparison
     s.to_lowercase() == t.to_lowercase()

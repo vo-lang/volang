@@ -13,9 +13,9 @@ use vo_runtime::builtins::error_helper::write_error_to;
 use super::serde::{marshal_struct_value, marshal_any_value, unmarshal_struct, get_pointed_type_rttid, FormatWriter as _};
 use super::serde_toml::{TomlWriter, TomlReader};
 
-use vo_ffi_macro::vostd_extern_ctx_nostd;
+use vo_ffi_macro::vostd_fn;
 
-#[vostd_extern_ctx_nostd("encoding/toml", "marshalAny")]
+#[vostd_fn("encoding/toml", "marshalAny")]
 fn marshal_any(call: &mut ExternCallContext) -> ExternResult {
     let v_slot0 = call.arg_u64(0);
     let v_slot1 = call.arg_u64(1);
@@ -52,7 +52,7 @@ fn marshal_any(call: &mut ExternCallContext) -> ExternResult {
     }
 }
 
-#[vostd_extern_ctx_nostd("encoding/toml", "Unmarshal")]
+#[vostd_fn("encoding/toml", "Unmarshal")]
 fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
     let toml_str = {
         let data = call.arg_bytes(0);

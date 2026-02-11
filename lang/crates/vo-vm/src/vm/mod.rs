@@ -1077,7 +1077,7 @@ impl Vm {
                     refetch!();
                 }
                 Opcode::CallExtern => {
-                    use vo_runtime::ffi::ExternResult;
+                    use vo_runtime::ffi::{ExternResult, ExternInvoke, ExternWorld, ExternFiberInputs};
                     // CallExtern: a=dst, b=extern_id, c=args_start, flags=arg_count
                     let extern_id = inst.b as u32;
                     let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
@@ -1085,16 +1085,33 @@ impl Vm {
                     #[cfg(feature = "std")]
                     let resume_io_token = fiber.resume_io_token.take();
                     let (closure_replay_results, closure_replay_panicked) = fiber.closure_replay.take_for_extern();
-                    let extern_result = self.state.extern_registry.call(
+                    let invoke = ExternInvoke {
                         extern_id,
-                        &mut fiber.stack, bp, inst.c, inst.flags as u16, inst.a,
-                        &mut self.state.gc, module, &mut self.state.itab_cache,
-                        vm_ptr, fiber_ptr,
-                        &self.state.program_args, &mut self.state.sentinel_errors,
-                        #[cfg(feature = "std")] &mut self.state.io,
-                        #[cfg(feature = "std")] resume_io_token,
-                        closure_replay_results,
-                        closure_replay_panicked,
+                        bp: bp as u32,
+                        arg_start: inst.c,
+                        arg_slots: inst.flags as u16,
+                        ret_start: inst.a,
+                        ret_slots: 0, // not used by current dispatch
+                    };
+                    let world = ExternWorld {
+                        gc: &mut self.state.gc,
+                        module,
+                        itab_cache: &mut self.state.itab_cache,
+                        vm_opaque: vm_ptr,
+                        program_args: &self.state.program_args,
+                        sentinel_errors: &mut self.state.sentinel_errors,
+                        #[cfg(feature = "std")]
+                        io: &mut self.state.io,
+                    };
+                    let fiber_inputs = ExternFiberInputs {
+                        fiber_opaque: fiber_ptr,
+                        #[cfg(feature = "std")]
+                        resume_io_token,
+                        replay_results: closure_replay_results,
+                        replay_panicked: closure_replay_panicked,
+                    };
+                    let extern_result = self.state.extern_registry.call(
+                        &mut fiber.stack, invoke, world, fiber_inputs,
                     );
                     match extern_result {
                         ExternResult::Ok => { refetch!(); }

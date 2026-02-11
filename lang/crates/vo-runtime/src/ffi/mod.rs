@@ -3,12 +3,19 @@
 //! This module provides the interface for implementing Vo functions in Rust.
 //! Both VM interpreter and JIT compiler use these types.
 //!
+//! # Architecture
+//!
+//! - **`ExternFn`**: Unified function type `fn(&mut ExternCallContext) -> ExternResult`.
+//! - **`ExternCallContext`**: Single context providing stack access, GC, module metadata, I/O.
+//! - **`ExternRegistry`**: Maps extern IDs to `ExternFn` pointers.
+//! - **Call convention**: `ExternRegistry::call(stack, ExternInvoke, ExternWorld, ExternFiberInputs)`.
+//!
 //! # Example
 //!
 //! ```ignore
-//! use vo_runtime::ffi::{ExternCall, ExternResult};
+//! use vo_runtime::ffi::{ExternCallContext, ExternResult};
 //!
-//! fn my_add(call: &mut ExternCall) -> ExternResult {
+//! fn my_add(call: &mut ExternCallContext) -> ExternResult {
 //!     let a = call.arg_i64(0);
 //!     let b = call.arg_i64(1);
 //!     call.ret_i64(0, a + b);
@@ -22,6 +29,10 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 #[cfg(not(feature = "std"))]
 use alloc::format;
+
+// Structured call types (ExternInvoke, ExternWorld, ExternFiberInputs)
+pub mod call;
+pub use call::{ExternInvoke, ExternWorld, ExternFiberInputs};
 
 // Container accessors
 pub mod containers;
@@ -113,96 +124,119 @@ pub enum ExternResult {
     },
 }
 
-/// Extern function signature.
-pub type ExternFn = fn(&mut ExternCall) -> ExternResult;
+/// Unified extern function signature.
+/// All extern functions take the full ExternCallContext.
+pub type ExternFn = fn(&mut ExternCallContext) -> ExternResult;
 
-/// Extern function with full context (GC + type metadata).
-pub type ExternFnWithContext = fn(&mut ExternCallContext) -> ExternResult;
+// ==================== Extension ABI (dylib boundary) ====================
 
-/// Unified stdlib extern entry for static registration.
-/// This avoids manually distinguishing between ExternFn and ExternFnWithContext.
+/// Extension ABI result codes returned across dylib boundary.
+pub mod ext_abi {
+    pub const RESULT_OK: u32 = 0;
+    pub const RESULT_YIELD: u32 = 1;
+    pub const RESULT_BLOCK: u32 = 2;
+    pub const RESULT_WAIT_IO: u32 = 3;
+    pub const RESULT_PANIC: u32 = 4;
+    pub const RESULT_CALL_CLOSURE: u32 = 5;
+}
+
+/// Extension function pointer type (C calling convention).
+/// `ctx` is a pointer to `ExternCallContext` (opaque at the ABI boundary).
+/// Returns an `ext_abi::RESULT_*` code. Complex result data (panic message,
+/// I/O token, closure args) is stored on ExternCallContext via `set_ext_*`
+/// methods before returning.
+pub type ExternFnPtr = extern "C" fn(ctx: *mut ExternCallContext) -> u32;
+
+/// Extension table entry (C calling convention).
+/// All fields use C-compatible types for stable ABI across dylib boundary.
+#[cfg(feature = "std")]
+#[repr(C)]
+pub struct ExternEntry {
+    /// Function name (UTF-8, NOT null-terminated).
+    pub name_ptr: *const u8,
+    /// Function name length in bytes.
+    pub name_len: u32,
+    /// The function (C calling convention).
+    pub func: ExternFnPtr,
+}
+
+#[cfg(feature = "std")]
+impl ExternEntry {
+    /// Get function name as a string slice.
+    pub fn name(&self) -> &str {
+        unsafe {
+            core::str::from_utf8_unchecked(
+                core::slice::from_raw_parts(self.name_ptr, self.name_len as usize)
+            )
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+unsafe impl Send for ExternEntry {}
+#[cfg(feature = "std")]
+unsafe impl Sync for ExternEntry {}
+
+/// Extension table exported by dylibs via `vo_ext_get_entries()`.
+#[cfg(feature = "std")]
+#[repr(C)]
+pub struct ExtensionTable {
+    /// ABI version — must match runtime's expected version.
+    pub version: u32,
+    /// Number of entries.
+    pub entry_count: u32,
+    /// Pointer to entries array.
+    pub entries: *const ExternEntry,
+}
+
+#[cfg(feature = "std")]
+unsafe impl Send for ExtensionTable {}
+#[cfg(feature = "std")]
+unsafe impl Sync for ExtensionTable {}
+
+/// Stdlib extern entry for static registration.
 #[derive(Clone, Copy)]
-pub enum StdlibEntry {
-    /// Function without GC context.
-    NoCtx(&'static str, ExternFn),
-    /// Function with GC context.
-    WithCtx(&'static str, ExternFnWithContext),
+pub struct StdlibEntry {
+    pub name: &'static str,
+    pub func: ExternFn,
 }
 
 impl StdlibEntry {
     /// Get the function name.
     pub fn name(&self) -> &'static str {
-        match self {
-            StdlibEntry::NoCtx(name, _) => name,
-            StdlibEntry::WithCtx(name, _) => name,
-        }
+        self.name
     }
     
     /// Register this entry into the registry.
     pub fn register(&self, registry: &mut ExternRegistry, id: u32) {
-        match self {
-            StdlibEntry::NoCtx(_, func) => registry.register(id, *func),
-            StdlibEntry::WithCtx(_, func) => registry.register_with_context(id, *func),
-        }
+        registry.register(id, self.func);
     }
 }
 
 // ==================== Auto-registration via linkme (std only) ====================
 
-/// Entry for auto-registered extern functions.
-#[cfg(feature = "std")]
-pub struct ExternEntry {
-    /// Function name in format "pkg_FuncName" (e.g., "fmt_Println").
-    pub name: &'static str,
-    /// The extern function.
-    pub func: ExternFn,
-}
-
-/// Entry for auto-registered extern functions with full context.
-#[cfg(feature = "std")]
-pub struct ExternEntryWithContext {
-    /// Function name in format "pkg_FuncName" (e.g., "fmt_Sprint").
-    pub name: &'static str,
-    /// The extern function with full context.
-    pub func: ExternFnWithContext,
-}
-
-/// Distributed slice for auto-registered extern functions.
+/// Distributed slice for auto-registered extension functions.
+/// Extension macros (`#[vo_fn]`) register `ExternEntry` entries here.
+/// Collected by `export_extensions!()` for dylib export.
 #[cfg(feature = "std")]
 #[distributed_slice]
 pub static EXTERN_TABLE: [ExternEntry] = [..];
 
-/// Distributed slice for auto-registered extern functions with full context.
+/// Lookup an extension function by name.
 #[cfg(feature = "std")]
-#[distributed_slice]
-pub static EXTERN_TABLE_WITH_CONTEXT: [ExternEntryWithContext] = [..];
-
-/// Lookup an extern function by name.
-#[cfg(feature = "std")]
-pub fn lookup_extern(name: &str) -> Option<ExternFn> {
+pub fn lookup_extern(name: &str) -> Option<ExternFnPtr> {
     for entry in EXTERN_TABLE {
-        if entry.name == name {
+        if entry.name() == name {
             return Some(entry.func);
         }
     }
     None
 }
 
-/// Lookup an extern function with full context by name.
-#[cfg(feature = "std")]
-pub fn lookup_extern_with_context(name: &str) -> Option<ExternFnWithContext> {
-    for entry in EXTERN_TABLE_WITH_CONTEXT {
-        if entry.name == name {
-            return Some(entry.func);
-        }
-    }
-    None
-}
-
-/// External function call context - provides type-safe stack access.
+/// Unified external function call context.
 ///
-/// This is the main interface for extern functions that don't need GC allocation.
-pub struct ExternCall<'a> {
+/// Provides stack access, GC allocation, and type metadata for all extern functions.
+pub struct ExternCallContext<'a> {
     /// Stack slots.
     stack: &'a mut [u64],
     /// Base pointer (frame start).
@@ -213,13 +247,80 @@ pub struct ExternCall<'a> {
     arg_count: u16,
     /// Return value start slot (relative to bp).
     ret_start: u16,
+    /// Return value slot count (u64 slots).
+    ret_slots: u16,
+    /// GC for allocations.
+    gc: &'a mut Gc,
+    /// Module reference (provides struct_metas, interface_metas, named_type_metas,
+    /// runtime_types, functions, well_known, and deep comparison support).
+    module: &'a Module,
+    itab_cache: &'a mut ItabCache,
+    /// Opaque pointer to VM instance (for closure calls).
+    vm: *mut core::ffi::c_void,
+    /// Opaque pointer to current Fiber (for closure calls).
+    fiber: *mut core::ffi::c_void,
+    /// Program arguments.
+    program_args: &'a [String],
+    /// Sentinel error cache.
+    sentinel_errors: &'a mut SentinelErrorCache,
+    /// Runtime I/O (std only).
+    #[cfg(feature = "std")]
+    io: &'a mut IoRuntime,
+    /// I/O token that woke this fiber (std only). When present, extern should
+    /// consume the completion for this token instead of submitting a new op.
+    #[cfg(feature = "std")]
+    resume_io_token: Option<IoToken>,
+    /// Cached closure results from previous CallClosure suspends.
+    /// Consumed in order via replay_index.
+    replay_results: Vec<Vec<u64>>,
+    /// Current consumption index into replay_results.
+    replay_index: usize,
+    /// Whether a closure-for-replay panicked.
+    replay_panicked: bool,
+    /// Extension result payload: panic message (set by trampoline, read by runtime).
+    ext_panic_msg: Option<String>,
+    /// Extension result payload: I/O token (set by trampoline, read by runtime).
+    #[cfg(feature = "std")]
+    ext_wait_io_token: Option<IoToken>,
+    /// Extension result payload: closure call request (set by trampoline, read by runtime).
+    ext_call_closure: Option<(GcRef, Vec<u64>)>,
 }
 
-impl<'a> ExternCall<'a> {
-    /// Create a new extern call context.
+impl<'a> ExternCallContext<'a> {
+    /// Create from structured call types.
     #[inline]
-    pub fn new(stack: &'a mut [u64], bp: usize, arg_start: u16, arg_count: u16, ret_start: u16) -> Self {
-        Self { stack, bp, arg_start, arg_count, ret_start }
+    pub fn new(
+        stack: &'a mut [u64],
+        invoke: ExternInvoke,
+        world: ExternWorld<'a>,
+        fiber_inputs: ExternFiberInputs,
+    ) -> Self {
+        Self {
+            stack,
+            bp: invoke.bp as usize,
+            arg_start: invoke.arg_start,
+            arg_count: invoke.arg_slots,
+            ret_start: invoke.ret_start,
+            ret_slots: invoke.ret_slots,
+            gc: world.gc,
+            module: world.module,
+            itab_cache: world.itab_cache,
+            vm: world.vm_opaque,
+            fiber: fiber_inputs.fiber_opaque,
+            program_args: world.program_args,
+            sentinel_errors: world.sentinel_errors,
+            #[cfg(feature = "std")]
+            io: world.io,
+            #[cfg(feature = "std")]
+            resume_io_token: fiber_inputs.resume_io_token,
+            replay_results: fiber_inputs.replay_results,
+            replay_index: 0,
+            replay_panicked: fiber_inputs.replay_panicked,
+            ext_panic_msg: None,
+            #[cfg(feature = "std")]
+            ext_wait_io_token: None,
+            ext_call_closure: None,
+        }
     }
 
     // ==================== Raw Slot Access ====================
@@ -234,6 +335,18 @@ impl<'a> ExternCall<'a> {
     #[inline]
     pub fn arg_count(&self) -> u16 {
         self.arg_count
+    }
+
+    /// Get argument start slot.
+    #[inline]
+    pub fn arg_start(&self) -> u16 {
+        self.arg_start
+    }
+
+    /// Get return start slot.
+    #[inline]
+    pub fn ret_start(&self) -> u16 {
+        self.ret_start
     }
 
     /// Read a raw slot value.
@@ -317,84 +430,9 @@ impl<'a> ExternCall<'a> {
     pub fn ret_nil(&mut self, n: u16) {
         self.set_slot(self.ret_start + n, 0);
     }
-}
 
-/// External function call context with full runtime access.
-///
-/// Provides GC allocation and type metadata access for extern functions.
-pub struct ExternCallContext<'a> {
-    /// Base call context.
-    call: ExternCall<'a>,
-    /// GC for allocations.
-    gc: &'a mut Gc,
-    /// Module reference (provides struct_metas, interface_metas, named_type_metas,
-    /// runtime_types, functions, well_known, and deep comparison support).
-    module: &'a Module,
-    itab_cache: &'a mut ItabCache,
-    /// Opaque pointer to VM instance (for closure calls).
-    vm: *mut core::ffi::c_void,
-    /// Opaque pointer to current Fiber (for closure calls).
-    fiber: *mut core::ffi::c_void,
-    /// Program arguments.
-    program_args: &'a [String],
-    /// Sentinel error cache.
-    sentinel_errors: &'a mut SentinelErrorCache,
-    /// Runtime I/O (std only).
-    #[cfg(feature = "std")]
-    io: &'a mut IoRuntime,
-    /// I/O token that woke this fiber (std only). When present, extern should
-    /// consume the completion for this token instead of submitting a new op.
-    #[cfg(feature = "std")]
-    resume_io_token: Option<IoToken>,
-    /// Cached closure results from previous CallClosure suspends.
-    /// Consumed in order via closure_replay_index.
-    closure_replay_results: Vec<Vec<u64>>,
-    /// Current consumption index into closure_replay_results.
-    closure_replay_index: usize,
-    /// Whether a closure-for-replay panicked.
-    closure_replay_panicked: bool,
-}
+    // ==================== Runtime Access ====================
 
-impl<'a> ExternCallContext<'a> {
-    /// Create a new extern call context.
-    #[inline]
-    pub fn new(
-        stack: &'a mut [u64],
-        bp: usize,
-        arg_start: u16,
-        arg_count: u16,
-        ret_start: u16,
-        gc: &'a mut Gc,
-        module: &'a Module,
-        itab_cache: &'a mut ItabCache,
-        vm: *mut core::ffi::c_void,
-        fiber: *mut core::ffi::c_void,
-        program_args: &'a [String],
-        sentinel_errors: &'a mut SentinelErrorCache,
-        #[cfg(feature = "std")] io: &'a mut IoRuntime,
-        #[cfg(feature = "std")] resume_io_token: Option<IoToken>,
-        closure_replay_results: Vec<Vec<u64>>,
-        closure_replay_panicked: bool,
-    ) -> Self {
-        Self {
-            call: ExternCall::new(stack, bp, arg_start, arg_count, ret_start),
-            gc,
-            module,
-            itab_cache,
-            vm,
-            fiber,
-            program_args,
-            sentinel_errors,
-            #[cfg(feature = "std")]
-            io,
-            #[cfg(feature = "std")]
-            resume_io_token,
-            closure_replay_results,
-            closure_replay_index: 0,
-            closure_replay_panicked,
-        }
-    }
-    
     /// Get program arguments.
     #[inline]
     pub fn program_args(&self) -> &[String] {
@@ -456,7 +494,17 @@ impl<'a> ExternCallContext<'a> {
         self.io
     }
 
-    /// Token that resumed this extern call due to I/O completion.
+    /// Take the I/O completion token that woke this fiber.
+    /// One-shot: must be consumed exactly once on the resume path.
+    /// `verify_post_call()` will panic if it was not consumed.
+    #[cfg(feature = "std")]
+    #[inline]
+    pub fn take_resume_io_token(&mut self) -> Option<IoToken> {
+        self.resume_io_token.take()
+    }
+
+    /// Peek at the resume I/O token without consuming it.
+    /// Prefer `take_resume_io_token()` in normal use.
     #[cfg(feature = "std")]
     #[inline]
     pub fn resume_io_token(&self) -> Option<IoToken> {
@@ -546,18 +594,6 @@ impl<'a> ExternCallContext<'a> {
         Some((method_info.func_id, method_info.is_pointer_receiver, method_info.signature_rttid))
     }
 
-    /// Get the base call context.
-    #[inline]
-    pub fn call(&self) -> &ExternCall<'a> {
-        &self.call
-    }
-
-    /// Get mutable access to the base call context.
-    #[inline]
-    pub fn call_mut(&mut self) -> &mut ExternCall<'a> {
-        &mut self.call
-    }
-
     /// Get mutable GC reference.
     #[inline]
     pub fn gc(&mut self) -> &mut Gc {
@@ -570,34 +606,12 @@ impl<'a> ExternCallContext<'a> {
         self.module
     }
 
-    // ==================== Slot info (delegated) ====================
-
-    #[inline]
-    pub fn available_slots(&self) -> usize { self.call.available_slots() }
-    #[inline]
-    pub fn arg_count(&self) -> u16 { self.call.arg_count() }
-    #[inline]
-    pub fn arg_start(&self) -> u16 { self.call.arg_start }
-    #[inline]
-    pub fn ret_start(&self) -> u16 { self.call.ret_start }
-
-    // ==================== Argument Reading (delegated) ====================
-
-    #[inline]
-    pub fn arg_i64(&self, n: u16) -> i64 { self.call.arg_i64(n) }
-    #[inline]
-    pub fn arg_u64(&self, n: u16) -> u64 { self.call.arg_u64(n) }
-    #[inline]
-    pub fn arg_f64(&self, n: u16) -> f64 { self.call.arg_f64(n) }
-    #[inline]
-    pub fn arg_bool(&self, n: u16) -> bool { self.call.arg_bool(n) }
-    #[inline]
-    pub fn arg_ref(&self, n: u16) -> GcRef { self.call.arg_ref(n) }
+    // ==================== String/Bytes Argument Reading ====================
 
     /// Read argument as string (zero-copy borrow).
     #[inline]
     pub fn arg_str(&self, n: u16) -> &str {
-        let ptr = self.call.arg_ref(n);
+        let ptr = self.arg_ref(n);
         if ptr.is_null() {
             ""
         } else {
@@ -608,7 +622,7 @@ impl<'a> ExternCallContext<'a> {
     /// Read argument as byte slice (zero-copy borrow).
     #[inline]
     pub fn arg_bytes(&self, n: u16) -> &[u8] {
-        let ptr = self.call.arg_ref(n);
+        let ptr = self.arg_ref(n);
         if ptr.is_null() {
             &[]
         } else {
@@ -622,8 +636,8 @@ impl<'a> ExternCallContext<'a> {
     #[inline]
     pub fn arg_any(&self, n: u16) -> InterfaceSlot {
         InterfaceSlot {
-            slot0: self.call.arg_u64(n),
-            slot1: self.call.arg_u64(n + 1),
+            slot0: self.arg_u64(n),
+            slot1: self.arg_u64(n + 1),
         }
     }
 
@@ -638,60 +652,47 @@ impl<'a> ExternCallContext<'a> {
     /// Read any argument directly as i64.
     #[inline]
     pub fn arg_any_as_i64(&self, n: u16) -> i64 {
-        self.call.arg_u64(n + 1) as i64
+        self.arg_u64(n + 1) as i64
     }
 
     /// Read any argument directly as u64.
     #[inline]
     pub fn arg_any_as_u64(&self, n: u16) -> u64 {
-        self.call.arg_u64(n + 1)
+        self.arg_u64(n + 1)
     }
 
     /// Read any argument directly as f64.
     #[inline]
     pub fn arg_any_as_f64(&self, n: u16) -> f64 {
-        f64::from_bits(self.call.arg_u64(n + 1))
+        f64::from_bits(self.arg_u64(n + 1))
     }
 
     /// Read any argument directly as bool.
     #[inline]
     pub fn arg_any_as_bool(&self, n: u16) -> bool {
-        self.call.arg_u64(n + 1) != 0
+        self.arg_u64(n + 1) != 0
     }
 
     /// Read any argument directly as GcRef.
     #[inline]
     pub fn arg_any_as_ref(&self, n: u16) -> GcRef {
-        self.call.arg_u64(n + 1) as GcRef
+        self.arg_u64(n + 1) as GcRef
     }
 
-    // ==================== Return Value Writing (delegated) ====================
-
-    #[inline]
-    pub fn ret_i64(&mut self, n: u16, val: i64) { self.call.ret_i64(n, val); }
-    #[inline]
-    pub fn ret_u64(&mut self, n: u16, val: u64) { self.call.ret_u64(n, val); }
-    #[inline]
-    pub fn ret_f64(&mut self, n: u16, val: f64) { self.call.ret_f64(n, val); }
-    #[inline]
-    pub fn ret_bool(&mut self, n: u16, val: bool) { self.call.ret_bool(n, val); }
-    #[inline]
-    pub fn ret_ref(&mut self, n: u16, val: GcRef) { self.call.ret_ref(n, val); }
-    #[inline]
-    pub fn ret_nil(&mut self, n: u16) { self.call.ret_nil(n); }
+    // ==================== Complex Return Value Writing ====================
 
     /// Allocate and return a new string.
     #[inline]
     pub fn ret_str(&mut self, n: u16, s: &str) {
         let ptr = string::from_rust_str(self.gc, s);
-        self.call.ret_ref(n, ptr);
+        self.ret_ref(n, ptr);
     }
 
     /// Write return value as InterfaceSlot (2 slots: any/interface type).
     #[inline]
     pub fn ret_any(&mut self, n: u16, val: InterfaceSlot) {
-        self.call.ret_u64(n, val.slot0);
-        self.call.ret_u64(n + 1, val.slot1);
+        self.ret_u64(n, val.slot0);
+        self.ret_u64(n + 1, val.slot1);
     }
 
     /// Write return value as InterfaceSlot (2 slots: error interface type).
@@ -1051,7 +1052,7 @@ impl<'a> ExternCallContext<'a> {
     #[inline]
     pub fn ret_bytes(&mut self, n: u16, data: &[u8]) {
         let ptr = self.alloc_bytes(data);
-        self.call.ret_ref(n, ptr);
+        self.ret_ref(n, ptr);
     }
 
     /// Allocate a new byte slice.
@@ -1069,7 +1070,7 @@ impl<'a> ExternCallContext<'a> {
     #[inline]
     pub fn ret_string_slice(&mut self, n: u16, strings: &[String]) {
         let ptr = self.alloc_string_slice(strings);
-        self.call.ret_ref(n, ptr);
+        self.ret_ref(n, ptr);
     }
 
     /// Allocate a new string slice ([]string).
@@ -1100,18 +1101,25 @@ impl<'a> ExternCallContext<'a> {
     /// Check if a previous closure-for-replay panicked.
     /// If true, the extern function should return an error.
     #[inline]
-    pub fn is_closure_replay_panicked(&self) -> bool {
-        self.closure_replay_panicked
+    pub fn is_replay_panicked(&self) -> bool {
+        self.replay_panicked
+    }
+
+    /// Get the return slot count.
+    #[inline]
+    pub fn ret_slots(&self) -> u16 {
+        self.ret_slots
     }
 
     /// Get cached closure result from a previous CallClosure suspend.
     /// Returns None if no more cached results (caller should return CallClosure to suspend).
     /// Returns Some(ret_values) if a cached result is available.
     /// Each call advances the internal index — results are consumed in order.
+    /// Uses `mem::take` to move the result out (zero-alloc).
     pub fn resume_closure_result(&mut self) -> Option<Vec<u64>> {
-        if self.closure_replay_index < self.closure_replay_results.len() {
-            let result = self.closure_replay_results[self.closure_replay_index].clone();
-            self.closure_replay_index += 1;
+        if self.replay_index < self.replay_results.len() {
+            let result = core::mem::take(&mut self.replay_results[self.replay_index]);
+            self.replay_index += 1;
             Some(result)
         } else {
             None
@@ -1130,6 +1138,98 @@ impl<'a> ExternCallContext<'a> {
         self.fiber
     }
 
+    // ==================== Extension Result Payload ====================
+
+    /// Set panic message for extension result (called by trampoline).
+    #[inline]
+    pub fn set_ext_panic(&mut self, msg: String) {
+        self.ext_panic_msg = Some(msg);
+    }
+
+    /// Set I/O wait token for extension result (called by trampoline).
+    #[cfg(feature = "std")]
+    #[inline]
+    pub fn set_ext_wait_io(&mut self, token: IoToken) {
+        self.ext_wait_io_token = Some(token);
+    }
+
+    /// Set closure call request for extension result (called by trampoline).
+    #[inline]
+    pub fn set_ext_call_closure(&mut self, closure_ref: GcRef, args: Vec<u64>) {
+        self.ext_call_closure = Some((closure_ref, args));
+    }
+
+    /// Decode extension result code into ExternResult, consuming stored payloads.
+    /// Called by ExternRegistry after dispatching to an extension function.
+    pub fn decode_ext_result(&mut self, code: u32) -> ExternResult {
+        match code {
+            ext_abi::RESULT_OK => ExternResult::Ok,
+            ext_abi::RESULT_YIELD => ExternResult::Yield,
+            ext_abi::RESULT_BLOCK => ExternResult::Block,
+            #[cfg(feature = "std")]
+            ext_abi::RESULT_WAIT_IO => {
+                let token = self.ext_wait_io_token.take()
+                    .expect("ext_abi::RESULT_WAIT_IO without set_ext_wait_io");
+                ExternResult::WaitIo { token }
+            }
+            ext_abi::RESULT_PANIC => {
+                let msg = self.ext_panic_msg.take()
+                    .unwrap_or_else(|| String::from("unknown panic from extension"));
+                ExternResult::Panic(msg)
+            }
+            ext_abi::RESULT_CALL_CLOSURE => {
+                let (closure_ref, args) = self.ext_call_closure.take()
+                    .expect("ext_abi::RESULT_CALL_CLOSURE without set_ext_call_closure");
+                ExternResult::CallClosure { closure_ref, args }
+            }
+            _ => ExternResult::Panic(format!("invalid extension result code: {}", code)),
+        }
+    }
+
+    // ==================== Post-call Verification ====================
+
+    /// Verify the post-call protocol contract.
+    ///
+    /// Called by `ExternRegistry::call` after every extern execution.
+    /// Panics if the extern violated the replay or I/O resume protocol:
+    /// - `replay_index != replay_results.len()` (replay not fully consumed)
+    /// - `resume_io_token` was provided but not consumed
+    pub fn verify_post_call(&self) {
+        // Check replay protocol: all cached results must be consumed
+        let replay_len = self.replay_results.len();
+        assert!(
+            self.replay_index == replay_len,
+            "FFI post-call violation: replay_index ({}) != replay_results.len() ({}). \
+             Extern function did not consume all cached closure results.",
+            self.replay_index, replay_len,
+        );
+
+        // Check resume_io_token protocol: must be consumed if provided
+        #[cfg(feature = "std")]
+        assert!(
+            self.resume_io_token.is_none(),
+            "FFI post-call violation: resume_io_token was not consumed. \
+             Extern function must call take_resume_io_token() on the resume path.",
+        );
+    }
+
+    // ==================== Error Return Helpers ====================
+
+    /// Allocate a Vo error object from a message string and write it to return slots.
+    ///
+    /// Writes 2 slots at `ret_start + n`: (slot0=packed_error_meta, slot1=error_gcref).
+    /// This is the canonical way to return an error from Result-mode wrappers.
+    pub fn ret_error_msg(&mut self, n: u16, msg: &str) {
+        use crate::objects::{interface, string};
+        // Allocate the error message string
+        let str_ref = string::from_rust_str(self.gc, msg);
+        // Create a simple string-based error (rttid=0, ValueKind::String for now)
+        // The sentinel_errors system provides pre-allocated errors for common cases.
+        // For arbitrary messages, we create a basic error interface value.
+        let slot0 = interface::pack_slot0(0, 0, ValueKind::String);
+        self.ret_u64(n, slot0);
+        self.ret_u64(n + 1, str_ref as u64);
+    }
 
     // ==================== Protocol/Interface Support ====================
 
@@ -1155,15 +1255,19 @@ impl<'a> ExternCallContext<'a> {
 
 // ==================== Extern Registry ====================
 
+/// A registered extern function — either internal (Rust ABI) or extension.
+pub enum RegisteredFn {
+    /// Internal function (stdlib, builtins) — Rust calling convention.
+    Internal(ExternFn),
+    /// Extension function (loaded from dylib) — C calling convention.
+    #[cfg(feature = "std")]
+    Extension(ExternFnPtr),
+}
+
 /// Registry for extern functions.
 #[derive(Default)]
 pub struct ExternRegistry {
-    funcs: Vec<Option<ExternFnEntry>>,
-}
-
-enum ExternFnEntry {
-    Simple(ExternFn),
-    WithContext(ExternFnWithContext),
+    funcs: Vec<Option<RegisteredFn>>,
 }
 
 impl ExternRegistry {
@@ -1173,9 +1277,6 @@ impl ExternRegistry {
     }
 
     /// Register all functions from an extension loader.
-    ///
-    /// This resolves extern function names from the module's extern defs
-    /// and registers them by ID.
     #[cfg(feature = "std")]
     pub fn register_from_extension_loader(
         &mut self,
@@ -1183,109 +1284,85 @@ impl ExternRegistry {
         extern_defs: &[crate::bytecode::ExternDef],
     ) {
         for (id, def) in extern_defs.iter().enumerate() {
-            // Already registered (e.g., from stdlib or linkme)?
             if self.has(id as u32) {
                 continue;
             }
-            
-            // Try to find in extension loader
             if let Some(func) = loader.lookup(&def.name) {
-                self.register(id as u32, func);
-            } else if let Some(func) = loader.lookup_with_context(&def.name) {
-                self.register_with_context(id as u32, func);
+                self.register_extension(id as u32, func);
             }
         }
     }
 
     /// Register all functions from linkme distributed slices.
-    ///
-    /// This resolves extern function names from the module's extern defs
-    /// and registers them by ID from EXTERN_TABLE and EXTERN_TABLE_WITH_CONTEXT.
     #[cfg(feature = "std")]
     pub fn register_from_linkme(&mut self, extern_defs: &[crate::bytecode::ExternDef]) {
         for (id, def) in extern_defs.iter().enumerate() {
-            // Already registered (e.g., from stdlib)?
             if self.has(id as u32) {
                 continue;
             }
-            
-            // Try to find in linkme tables
             if let Some(func) = lookup_extern(&def.name) {
-                self.register(id as u32, func);
-            } else if let Some(func) = lookup_extern_with_context(&def.name) {
-                self.register_with_context(id as u32, func);
+                self.register_extension(id as u32, func);
             }
         }
     }
 
-    /// Register a simple extern function (no GC access).
+    /// Register an internal extern function (Rust ABI).
     pub fn register(&mut self, id: u32, func: ExternFn) {
         let idx = id as usize;
         if idx >= self.funcs.len() {
             self.funcs.resize_with(idx + 1, || None);
         }
-        self.funcs[idx] = Some(ExternFnEntry::Simple(func));
+        self.funcs[idx] = Some(RegisteredFn::Internal(func));
     }
 
-    /// Register an extern function with full context.
-    pub fn register_with_context(&mut self, id: u32, func: ExternFnWithContext) {
+    /// Register an extension extern function.
+    #[cfg(feature = "std")]
+    pub fn register_extension(&mut self, id: u32, func: ExternFnPtr) {
         let idx = id as usize;
         if idx >= self.funcs.len() {
             self.funcs.resize_with(idx + 1, || None);
         }
-        self.funcs[idx] = Some(ExternFnEntry::WithContext(func));
+        self.funcs[idx] = Some(RegisteredFn::Extension(func));
     }
 
     /// Call an extern function.
+    ///
+    /// Dispatches to either Internal (Rust ABI) or Extension variant.
+    /// After the extern returns, verifies the post-call protocol contract
+    /// (replay fully consumed, resume_io_token consumed). See `verify_post_call()`.
     pub fn call(
         &self,
-        id: u32,
         stack: &mut [u64],
-        bp: usize,
-        arg_start: u16,
-        arg_count: u16,
-        ret_start: u16,
-        gc: &mut Gc,
-        module: &Module,
-        itab_cache: &mut ItabCache,
-        vm: *mut core::ffi::c_void,
-        fiber: *mut core::ffi::c_void,
-        program_args: &[String],
-        sentinel_errors: &mut SentinelErrorCache,
-        #[cfg(feature = "std")] io: &mut IoRuntime,
-        #[cfg(feature = "std")] resume_io_token: Option<IoToken>,
-        closure_replay_results: Vec<Vec<u64>>,
-        closure_replay_panicked: bool,
+        invoke: ExternInvoke,
+        world: ExternWorld,
+        fiber_inputs: ExternFiberInputs,
     ) -> ExternResult {
-        match self.funcs.get(id as usize) {
-            Some(Some(ExternFnEntry::Simple(f))) => {
-                let mut call = ExternCall::new(stack, bp, arg_start, arg_count, ret_start);
-                f(&mut call)
-            }
-            Some(Some(ExternFnEntry::WithContext(f))) => {
-                let mut call = ExternCallContext::new(
-                    stack,
-                    bp,
-                    arg_start,
-                    arg_count,
-                    ret_start,
-                    gc,
-                    module,
-                    itab_cache,
-                    vm,
-                    fiber,
-                    program_args,
-                    sentinel_errors,
+        match self.funcs.get(invoke.extern_id as usize) {
+            Some(Some(registered)) => {
+                let mut ctx = ExternCallContext::new(stack, invoke, world, fiber_inputs);
+                let result = match registered {
+                    RegisteredFn::Internal(f) => f(&mut ctx),
                     #[cfg(feature = "std")]
-                    io,
+                    RegisteredFn::Extension(f) => {
+                        let code = f(&mut ctx as *mut ExternCallContext);
+                        ctx.decode_ext_result(code)
+                    }
+                };
+                // Only verify on terminal results. CallClosure/WaitIo are
+                // intermediate: the extern will be re-executed after the
+                // runtime fulfills the request, so replay_index may be partial
+                // and resume_io_token is not applicable.
+                match &result {
+                    ExternResult::CallClosure { .. } => {}
                     #[cfg(feature = "std")]
-                    resume_io_token,
-                    closure_replay_results,
-                    closure_replay_panicked,
-                );
-                f(&mut call)
+                    ExternResult::WaitIo { .. } => {}
+                    _ => {
+                        ctx.verify_post_call();
+                    }
+                }
+                result
             }
-            _ => ExternResult::NotRegistered(id),
+            _ => ExternResult::NotRegistered(invoke.extern_id),
         }
     }
 

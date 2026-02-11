@@ -25,7 +25,7 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     for (id, def) in externs.iter().enumerate() {
         let id = id as u32;
         match def.name.as_str() {
-            "io_getIoErrors" => registry.register_with_context(id, get_io_errors),
+            "io_getIoErrors" => registry.register(id, get_io_errors),
             _ => {}
         }
     }

@@ -5,7 +5,7 @@
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use vo_ffi_macro::vostd_extern;
+use vo_ffi_macro::vostd_fn;
 
 /// xoroshiro128++ state
 struct Rng {
@@ -123,7 +123,7 @@ fn bounded_int(n: u64) -> u64 {
     })
 }
 
-#[vostd_extern("math/rand", "Intn")]
+#[vostd_fn("math/rand", "Intn")]
 fn intn(n: i64) -> i64 {
     if n <= 0 {
         panic!("rand.Intn: invalid argument {}", n);
@@ -131,7 +131,7 @@ fn intn(n: i64) -> i64 {
     bounded_int(n as u64) as i64
 }
 
-#[vostd_extern("math/rand", "Int63n")]
+#[vostd_fn("math/rand", "Int63n")]
 fn int63n(n: i64) -> i64 {
     if n <= 0 {
         panic!("rand.Int63n: invalid argument {}", n);
@@ -139,22 +139,22 @@ fn int63n(n: i64) -> i64 {
     bounded_int(n as u64) as i64
 }
 
-#[vostd_extern("math/rand", "Int")]
+#[vostd_fn("math/rand", "Int")]
 fn rand_int() -> i64 {
     with_rng(|rng| (rng.next_u64() >> 1) as i64)
 }
 
-#[vostd_extern("math/rand", "Uint64")]
+#[vostd_fn("math/rand", "Uint64")]
 fn uint64() -> u64 {
     with_rng(|rng| rng.next_u64())
 }
 
-#[vostd_extern("math/rand", "Uint32")]
+#[vostd_fn("math/rand", "Uint32")]
 fn uint32() -> u64 {
     with_rng(|rng| rng.next_u64() as u32 as u64)
 }
 
-#[vostd_extern("math/rand", "Float64")]
+#[vostd_fn("math/rand", "Float64")]
 fn float64() -> f64 {
     // Use upper 53 bits for double precision
     with_rng(|rng| {
@@ -163,7 +163,7 @@ fn float64() -> f64 {
     })
 }
 
-#[vostd_extern("math/rand", "Float32")]
+#[vostd_fn("math/rand", "Float32")]
 fn float32() -> f64 {
     // Use upper 24 bits, return as f64 for ABI compatibility
     with_rng(|rng| {
@@ -174,13 +174,13 @@ fn float32() -> f64 {
 
 #[cfg(feature = "std")]
 mod read_impl {
-    use vo_ffi_macro::vostd_extern_ctx;
+    use vo_ffi_macro::vostd_fn;
     use vo_runtime::ffi::{ExternCallContext, ExternResult};
     use vo_runtime::builtins::error_helper::write_nil_error;
     use vo_runtime::objects::slice;
     use super::with_rng;
 
-    #[vostd_extern_ctx("math/rand", "Read")]
+    #[vostd_fn("math/rand", "Read", std)]
     pub fn read(call: &mut ExternCallContext) -> ExternResult {
         let buf_ref = call.arg_ref(slots::ARG_P);
         let len = slice::len(buf_ref);

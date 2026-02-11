@@ -11,14 +11,14 @@ use crate::{PENDING_HANDLER, start_timeout as js_start_timeout, clear_timeout as
 // App Externs
 // =============================================================================
 
-#[vo_extern_ctx("vogui", "registerEventHandler")]
+#[vo_fn("vogui", "registerEventHandler")]
 pub fn register_event_handler(ctx: &mut ExternCallContext) -> ExternResult {
     let handler = ctx.arg_ref(slots::ARG_HANDLER);
     PENDING_HANDLER.with(|s| *s.borrow_mut() = Some(handler));
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vogui", "emitRender")]
+#[vo_fn("vogui", "emitRender")]
 pub fn emit_render(ctx: &mut ExternCallContext) -> ExternResult {
     let json_ref = ctx.arg_ref(slots::ARG_JSON);
     let json = if json_ref.is_null() { "" } else { string::as_str(json_ref) };
@@ -33,7 +33,7 @@ pub fn emit_render(ctx: &mut ExternCallContext) -> ExternResult {
 // Timer Externs
 // =============================================================================
 
-#[vo_extern_ctx("vogui", "startTimeout")]
+#[vo_fn("vogui", "startTimeout")]
 pub fn start_timeout(ctx: &mut ExternCallContext) -> ExternResult {
     let id = ctx.arg_i64(slots::ARG_ID) as i32;
     let ms = ctx.arg_i64(slots::ARG_MS) as i32;
@@ -41,14 +41,14 @@ pub fn start_timeout(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vogui", "clearTimeout")]
+#[vo_fn("vogui", "clearTimeout")]
 pub fn clear_timeout(ctx: &mut ExternCallContext) -> ExternResult {
     let id = ctx.arg_i64(slots::ARG_ID) as i32;
     js_clear_timeout(id);
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vogui", "startInterval")]
+#[vo_fn("vogui", "startInterval")]
 pub fn start_interval(ctx: &mut ExternCallContext) -> ExternResult {
     let id = ctx.arg_i64(slots::ARG_ID) as i32;
     let ms = ctx.arg_i64(slots::ARG_MS) as i32;
@@ -56,7 +56,7 @@ pub fn start_interval(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vogui", "clearInterval")]
+#[vo_fn("vogui", "clearInterval")]
 pub fn clear_interval(ctx: &mut ExternCallContext) -> ExternResult {
     let id = ctx.arg_i64(slots::ARG_ID) as i32;
     js_clear_interval(id);
@@ -67,7 +67,7 @@ pub fn clear_interval(ctx: &mut ExternCallContext) -> ExternResult {
 // Router Externs
 // =============================================================================
 
-#[vo_extern_ctx("vogui", "navigate")]
+#[vo_fn("vogui", "navigate")]
 pub fn navigate(ctx: &mut ExternCallContext) -> ExternResult {
     let path_ref = ctx.arg_ref(slots::ARG_PATH);
     let path = if path_ref.is_null() { "" } else { string::as_str(path_ref) };
@@ -75,7 +75,7 @@ pub fn navigate(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vogui", "getCurrentPath")]
+#[vo_fn("vogui", "getCurrentPath")]
 pub fn get_current_path(ctx: &mut ExternCallContext) -> ExternResult {
     let path = js_get_current_path();
     let gc_ref = string::from_rust_str(ctx.gc(), &path);
@@ -127,7 +127,7 @@ pub fn vo_ext_register(registry: &mut ExternRegistry, externs: &[ExternDef]) {
         }
         for entry in EXTERN_TABLE_WITH_CONTEXT.iter() {
             if let Some(id) = find_id(externs, entry.name) {
-                registry.register_with_context(id, entry.func);
+                registry.register(id, entry.func);
             }
         }
     }

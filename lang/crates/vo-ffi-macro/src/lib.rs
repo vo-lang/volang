@@ -33,84 +33,34 @@ use std::path::{Path, PathBuf};
 mod vo_parser;
 
 
-/// Attribute macro for implementing Vo extern functions (user projects).
-///
-/// This macro is for user projects. It does NOT allow implementing stdlib extern functions.
-/// Use `#[vostd_extern]` for stdlib development.
-///
-/// # Arguments
-///
-/// The attribute takes two string arguments:
-/// - Package path (e.g., "game/engine")
-/// - Function name (e.g., "RenderSprite")
-///
-/// # Example
-///
-/// ```ignore
-/// #[vo_extern("game/engine", "RenderSprite")]
-/// fn render_sprite(x: i64, y: i64, sprite: &str) {
-///     my_engine::render(x as i32, y as i32, sprite);
-/// }
-/// ```
+/// **Deprecated**: Use `#[vo_fn("pkg", "Name")]` instead.
 #[proc_macro_attribute]
-pub fn vo_extern(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr with Punctuated::<Expr, Token![,]>::parse_terminated);
+pub fn vo_extern(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
-    
-    match vo_extern_impl(args, func, false) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
+    syn::Error::new_spanned(
+        &func.sig,
+        "#[vo_extern] is deprecated. Use #[vo_fn(\"pkg\", \"Name\")] instead.",
+    ).to_compile_error().into()
 }
 
-/// Attribute macro for implementing stdlib extern functions.
-///
-/// This macro is for stdlib development only. It allows implementing stdlib extern functions.
-///
-/// # Example
-///
-/// ```ignore
-/// #[vostd_extern("fmt", "Println")]
-/// fn println(s: &str) -> i64 {
-///     println!("{}", s);
-///     s.len() as i64 + 1
-/// }
-/// ```
+/// **Deprecated**: Use `#[vostd_fn("pkg", "Name")]` instead.
 #[proc_macro_attribute]
-pub fn vostd_extern(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr with Punctuated::<Expr, Token![,]>::parse_terminated);
+pub fn vostd_extern(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
-    
-    match vo_extern_impl(args, func, true) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
+    syn::Error::new_spanned(
+        &func.sig,
+        "#[vostd_extern] is deprecated. Use #[vostd_fn(\"pkg\", \"Name\")] instead.",
+    ).to_compile_error().into()
 }
 
-/// Attribute macro for stdlib extern functions that require std.
-///
-/// In std mode: works like `vostd_extern`.
-/// In no_std mode: generates a panic stub that says "requires std".
-///
-/// Use this for os, regexp, and other std-only modules.
-///
-/// # Example
-///
-/// ```ignore
-/// #[vostd_extern_only("os", "ReadFile")]
-/// fn read_file(path: &str) -> (Vec<u8>, ErrorSlot) {
-///     // ... std-only implementation
-/// }
-/// ```
+/// **Deprecated**: Use `#[vostd_fn("pkg", "Name", std)]` instead.
 #[proc_macro_attribute]
-pub fn vostd_extern_only(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr with Punctuated::<Expr, Token![,]>::parse_terminated);
+pub fn vostd_extern_only(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
-    
-    match vostd_extern_only_impl(args, func) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
+    syn::Error::new_spanned(
+        &func.sig,
+        "#[vostd_extern_only] is deprecated. Use #[vostd_fn(\"pkg\", \"Name\", std)] instead.",
+    ).to_compile_error().into()
 }
 
 /// Attribute macro for builtin functions called directly by runtime.
@@ -138,82 +88,762 @@ pub fn vo_builtin(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Attribute macro for context-based extern functions.
+/// **Deprecated**: Use `#[vo_fn("pkg", "Name")]` instead.
+#[proc_macro_attribute]
+pub fn vo_extern_ctx(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let func = parse_macro_input!(item as ItemFn);
+    syn::Error::new_spanned(
+        &func.sig,
+        "#[vo_extern_ctx] is deprecated. Use #[vo_fn(\"pkg\", \"Name\")] instead. \
+         Mode is auto-detected from signature.",
+    ).to_compile_error().into()
+}
+
+/// **Deprecated**: Use `#[vostd_fn("pkg", "Name", std)]` instead.
+#[proc_macro_attribute]
+pub fn vostd_extern_ctx(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let func = parse_macro_input!(item as ItemFn);
+    syn::Error::new_spanned(
+        &func.sig,
+        "#[vostd_extern_ctx] is deprecated. Use #[vostd_fn(\"pkg\", \"Name\", std)] instead. \
+         Mode is auto-detected from signature.",
+    ).to_compile_error().into()
+}
+
+/// **Deprecated**: Use `#[vostd_fn("pkg", "Name")]` instead.
+#[proc_macro_attribute]
+pub fn vostd_extern_ctx_nostd(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let func = parse_macro_input!(item as ItemFn);
+    syn::Error::new_spanned(
+        &func.sig,
+        "#[vostd_extern_ctx_nostd] is deprecated. Use #[vostd_fn(\"pkg\", \"Name\")] instead. \
+         Mode is auto-detected from signature.",
+    ).to_compile_error().into()
+}
+
+// ==================== Unified Macros ====================
+
+/// Unified macro for extension extern functions.
 ///
-/// Use this for functions that need direct access to `ExternCallContext`,
-/// typically for functions that return errors or handle complex types.
+/// Supports three modes detected from the function signature:
+/// - **Manual**: `fn(ctx: &mut ExternCallContext) -> ExternResult`
+/// - **Result**: `fn(args...) -> Result<T, String>`
+/// - **Simple**: `fn(args...) -> T`
 ///
-/// The function must have signature:
-/// `fn(call: &mut ExternCallContext) -> ExternResult`
+/// # Arguments
+/// - `("pkg", "FuncName")` — standard form
 ///
-/// # Example
-///
+/// # Examples
 /// ```ignore
-/// #[vo_extern_ctx("os", "fileRead")]
-/// fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
-///     let fd = call.arg_i64(0);
-///     // ... implementation
-///     ExternResult::Ok
-/// }
+/// // Manual mode
+/// #[vo_fn("game/engine", "Update")]
+/// fn update(ctx: &mut ExternCallContext) -> ExternResult { ... }
+///
+/// // Result mode
+/// #[vo_fn("game/engine", "ParseConfig")]
+/// fn parse_config(s: &str) -> Result<i64, String> { ... }
+///
+/// // Simple mode
+/// #[vo_fn("game/engine", "GetVersion")]
+/// fn get_version() -> i64 { 42 }
 /// ```
 #[proc_macro_attribute]
-pub fn vo_extern_ctx(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn vo_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr with Punctuated::<Expr, Token![,]>::parse_terminated);
     let func = parse_macro_input!(item as ItemFn);
-    
-    match vo_extern_ctx_impl(args, func) {
+
+    match unified_fn_impl(args, func, MacroFlavor::Extension) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-/// Context-based extern function that requires std.
+/// Unified macro for stdlib extern functions.
 ///
-/// In std mode: works like `vo_extern_ctx`.
-/// In no_std mode: generates a panic stub.
+/// Supports three modes detected from the function signature:
+/// - **Manual**: `fn(ctx: &mut ExternCallContext) -> ExternResult`
+/// - **Result**: `fn(args...) -> Result<T, String>`
+/// - **Simple**: `fn(args...) -> T`
 ///
-/// # Example
+/// # Arguments
+/// - `("pkg", "FuncName")` — standard form
+/// - `("pkg", "FuncName", std)` — std-only (generates panic stub in no_std)
 ///
+/// # Examples
 /// ```ignore
-/// #[vostd_extern_ctx("os", "fileRead")]
-/// fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
-///     // ... std-only implementation
-/// }
+/// // Manual mode, std-only
+/// #[vostd_fn("os", "blocking_fileRead", std)]
+/// fn os_file_read(call: &mut ExternCallContext) -> ExternResult { ... }
+///
+/// // Result mode
+/// #[vostd_fn("strconv", "ParseFloat")]
+/// fn parse_float(s: &str) -> Result<f64, String> { ... }
+///
+/// // Simple mode
+/// #[vostd_fn("math", "Floor")]
+/// fn floor(x: f64) -> f64 { x.floor() }
 /// ```
 #[proc_macro_attribute]
-pub fn vostd_extern_ctx(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn vostd_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr with Punctuated::<Expr, Token![,]>::parse_terminated);
     let func = parse_macro_input!(item as ItemFn);
-    
-    match vostd_extern_ctx_impl(args, func) {
+
+    match unified_fn_impl(args, func, MacroFlavor::Stdlib) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-/// Context-based extern function that works in both std and no_std.
+/// Flavor of the unified macro (determines registration strategy and std handling).
+enum MacroFlavor {
+    /// Extension developers: `#[vo_fn(...)]`
+    Extension,
+    /// Stdlib developers: `#[vostd_fn(...)]`
+    Stdlib,
+}
+
+/// Detected function mode based on signature analysis.
+enum FnMode {
+    /// `fn(ctx: &mut ExternCallContext) -> ExternResult`
+    Manual,
+    /// `fn(args...) -> Result<T, String>` where T maps to Vo return values before error
+    Result,
+    /// `fn(args...) -> T` (everything else)
+    Simple,
+}
+
+/// Parse unified macro args: ("pkg", "FuncName") or ("pkg", "FuncName", std).
+/// Returns (pkg_path, func_name, is_std_only).
+fn parse_unified_args(args: &Punctuated<Expr, Token![,]>) -> syn::Result<(String, String, bool)> {
+    let args_vec: Vec<_> = args.iter().collect();
+
+    if args_vec.len() < 2 || args_vec.len() > 3 {
+        return Err(syn::Error::new_spanned(
+            args,
+            "expected 2 or 3 arguments: (\"pkg\", \"FuncName\") or (\"pkg\", \"FuncName\", std)",
+        ));
+    }
+
+    let pkg_path = match &args_vec[0] {
+        Expr::Lit(expr_lit) => match &expr_lit.lit {
+            Lit::Str(s) => s.value(),
+            _ => return Err(syn::Error::new_spanned(args_vec[0], "expected string literal")),
+        },
+        _ => return Err(syn::Error::new_spanned(args_vec[0], "expected string literal")),
+    };
+
+    let func_name = match &args_vec[1] {
+        Expr::Lit(expr_lit) => match &expr_lit.lit {
+            Lit::Str(s) => s.value(),
+            _ => return Err(syn::Error::new_spanned(args_vec[1], "expected string literal")),
+        },
+        _ => return Err(syn::Error::new_spanned(args_vec[1], "expected string literal")),
+    };
+
+    let is_std_only = if args_vec.len() == 3 {
+        // Third arg must be the identifier `std`
+        match &args_vec[2] {
+            Expr::Path(p) => {
+                if p.path.is_ident("std") {
+                    true
+                } else {
+                    return Err(syn::Error::new_spanned(
+                        args_vec[2],
+                        "third argument must be `std`",
+                    ));
+                }
+            }
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    args_vec[2],
+                    "third argument must be `std`",
+                ));
+            }
+        }
+    } else {
+        false
+    };
+
+    Ok((pkg_path, func_name, is_std_only))
+}
+
+/// Check if the first parameter is `&mut ExternCallContext`.
+fn is_first_param_extern_call_context(func: &ItemFn) -> bool {
+    if let Some(FnArg::Typed(pat_type)) = func.sig.inputs.first() {
+        if let Type::Reference(r) = &*pat_type.ty {
+            if r.mutability.is_some() {
+                if let Type::Path(p) = &*r.elem {
+                    if let Some(seg) = p.path.segments.last() {
+                        return seg.ident == "ExternCallContext";
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if return type is `ExternResult`.
+fn is_return_extern_result(func: &ItemFn) -> bool {
+    if let ReturnType::Type(_, ty) = &func.sig.output {
+        if let Type::Path(p) = &**ty {
+            if let Some(seg) = p.path.segments.last() {
+                return seg.ident == "ExternResult";
+            }
+        }
+    }
+    false
+}
+
+/// Check if return type is `Result<T, String>`. Returns the inner `T` type if so.
+fn extract_result_type(func: &ItemFn) -> Option<Type> {
+    if let ReturnType::Type(_, ty) = &func.sig.output {
+        if let Type::Path(p) = &**ty {
+            if let Some(seg) = p.path.segments.last() {
+                if seg.ident == "Result" {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        let args_vec: Vec<_> = args.args.iter().collect();
+                        if args_vec.len() == 2 {
+                            // Check second arg is String
+                            if let syn::GenericArgument::Type(Type::Path(err_p)) = args_vec[1] {
+                                if let Some(err_seg) = err_p.path.segments.last() {
+                                    if err_seg.ident == "String" {
+                                        // Extract T
+                                        if let syn::GenericArgument::Type(t) = args_vec[0] {
+                                            return Some(t.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Detect function mode from signature.
+fn detect_fn_mode(func: &ItemFn) -> syn::Result<FnMode> {
+    let has_ctx_param = is_first_param_extern_call_context(func);
+    let has_extern_result_ret = is_return_extern_result(func);
+    let result_inner = extract_result_type(func);
+
+    // Rule 1: Manual mode
+    if has_ctx_param && has_extern_result_ret {
+        return Ok(FnMode::Manual);
+    }
+
+    // Conflict: has ctx param but wrong return type
+    if has_ctx_param && !has_extern_result_ret {
+        return Err(syn::Error::new_spanned(
+            &func.sig,
+            "Manual-mode function must return `ExternResult`.",
+        ));
+    }
+
+    // Conflict: has ExternResult return but no ctx param
+    if has_extern_result_ret && !has_ctx_param {
+        return Err(syn::Error::new_spanned(
+            &func.sig,
+            "return type `ExternResult` is only valid in Manual mode. \
+             Add `ctx: &mut ExternCallContext` as first parameter.",
+        ));
+    }
+
+    // Rule 2: Result mode
+    if let Some(_inner_ty) = result_inner {
+        return Ok(FnMode::Result);
+    }
+
+    // Check for Result<T, E> where E is not String
+    if let ReturnType::Type(_, ty) = &func.sig.output {
+        if let Type::Path(p) = &**ty {
+            if let Some(seg) = p.path.segments.last() {
+                if seg.ident == "Result" {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        let args_vec: Vec<_> = args.args.iter().collect();
+                        if args_vec.len() == 2 {
+                            if let syn::GenericArgument::Type(Type::Path(err_p)) = args_vec[1] {
+                                let err_name = err_p.path.segments.last()
+                                    .map(|s| s.ident.to_string())
+                                    .unwrap_or_default();
+                                return Err(syn::Error::new_spanned(
+                                    &func.sig.output,
+                                    format!(
+                                        "Result-mode error type must be `String`. Found `{}`. \
+                                         Use Manual mode for custom error handling.",
+                                        err_name
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Rule 3: Simple mode
+    Ok(FnMode::Simple)
+}
+
+/// Generate Result-mode wrapper: Ok/Err dual-path codegen.
+fn generate_result_wrapper(
+    func: &ItemFn,
+    pkg_path: &str,
+    func_name: &str,
+    inner_ty: &Type,
+) -> syn::Result<TokenStream2> {
+    let fn_name = &func.sig.ident;
+
+    let symbol_name = format!(
+        "__vo_{}_{}",
+        pkg_path.replace('/', "_").replace('.', "_"),
+        func_name
+    );
+    let wrapper_name = format_ident!("{}", symbol_name);
+
+    let (arg_reads, arg_names) = parse_fn_args(func)?;
+    let call_expr = quote! { #fn_name(#(#arg_names),*) };
+
+    let (ok_writes, err_zero_writes, err_slot) = generate_result_ret_writes(inner_ty)?;
+
+    Ok(quote! {
+        #[doc(hidden)]
+        pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
+            #(#arg_reads)*
+            let __result = #call_expr;
+            match __result {
+                Ok(__val) => {
+                    #ok_writes
+                    call.ret_nil_error(#err_slot);
+                }
+                Err(__err) => {
+                    #err_zero_writes
+                    call.ret_error_msg(#err_slot, &__err);
+                }
+            }
+            vo_runtime::ffi::ExternResult::Ok
+        }
+    })
+}
+
+/// Generate the Ok-path writes, Err-path zero-value writes, and the error slot index.
+fn generate_result_ret_writes(inner_ty: &Type) -> syn::Result<(TokenStream2, TokenStream2, u16)> {
+    match inner_ty {
+        // Result<(), String> → error-only
+        Type::Tuple(tuple) if tuple.elems.is_empty() => {
+            Ok((quote! {}, quote! {}, 0))
+        }
+        // Result<single_type, String>
+        Type::Path(type_path) => {
+            let (ok_write, zero_write, slots) = generate_single_result_writes(type_path, 0)?;
+            Ok((ok_write, zero_write, slots))
+        }
+        // Result<(T1, T2, ...), String>
+        Type::Tuple(tuple) => {
+            let mut ok_writes = Vec::new();
+            let mut zero_writes = Vec::new();
+            let mut current_slot: u16 = 0;
+
+            for (i, elem) in tuple.elems.iter().enumerate() {
+                let field = syn::Index::from(i);
+                if let Type::Path(type_path) = elem {
+                    let (ok_w, zero_w, slots) = generate_tuple_result_writes(type_path, current_slot, &field)?;
+                    ok_writes.push(ok_w);
+                    zero_writes.push(zero_w);
+                    current_slot += slots;
+                } else {
+                    return Err(syn::Error::new_spanned(elem, "unsupported tuple element type in Result mode"));
+                }
+            }
+
+            Ok((
+                quote! { #(#ok_writes)* },
+                quote! { #(#zero_writes)* },
+                current_slot,
+            ))
+        }
+        _ => Err(syn::Error::new_spanned(inner_ty, "unsupported Result inner type")),
+    }
+}
+
+/// Generate Ok-path write and Err-path zero-write for a single (non-tuple) Result value.
+fn generate_single_result_writes(
+    type_path: &syn::TypePath,
+    slot: u16,
+) -> syn::Result<(TokenStream2, TokenStream2, u16)> {
+    let ident = type_path.path.segments.last()
+        .map(|s| s.ident.to_string())
+        .unwrap_or_default();
+
+    match ident.as_str() {
+        "i64" | "i32" | "i16" | "i8" | "isize" => Ok((
+            quote! { call.ret_i64(#slot, __val as i64); },
+            quote! { call.ret_i64(#slot, 0); },
+            1,
+        )),
+        "u64" | "u32" | "u16" | "u8" | "usize" => Ok((
+            quote! { call.ret_u64(#slot, __val as u64); },
+            quote! { call.ret_u64(#slot, 0); },
+            1,
+        )),
+        "f64" => Ok((
+            quote! { call.ret_f64(#slot, __val); },
+            quote! { call.ret_f64(#slot, 0.0); },
+            1,
+        )),
+        "f32" => Ok((
+            quote! { call.ret_f64(#slot, __val as f64); },
+            quote! { call.ret_f64(#slot, 0.0); },
+            1,
+        )),
+        "bool" => Ok((
+            quote! { call.ret_bool(#slot, __val); },
+            quote! { call.ret_bool(#slot, false); },
+            1,
+        )),
+        "String" => Ok((
+            quote! { call.ret_str(#slot, &__val); },
+            quote! { call.ret_str(#slot, ""); },
+            1,
+        )),
+        "GcRef" => Ok((
+            quote! { call.ret_ref(#slot, __val); },
+            quote! { call.ret_u64(#slot, 0); },
+            1,
+        )),
+        "AnySlot" | "InterfaceSlot" => Ok((
+            quote! { call.ret_any(#slot, __val); },
+            quote! { call.ret_u64(#slot, 0); call.ret_u64(#slot + 1, 0); },
+            2,
+        )),
+        "ErrorSlot" => Ok((
+            quote! { call.ret_error(#slot, __val); },
+            quote! { call.ret_u64(#slot, 0); call.ret_u64(#slot + 1, 0); },
+            2,
+        )),
+        _ => Err(syn::Error::new_spanned(
+            type_path,
+            format!("unsupported type in Result mode: {}", ident),
+        )),
+    }
+}
+
+/// Generate Ok-path write and Err-path zero-write for a tuple element in Result mode.
+fn generate_tuple_result_writes(
+    type_path: &syn::TypePath,
+    slot: u16,
+    field: &syn::Index,
+) -> syn::Result<(TokenStream2, TokenStream2, u16)> {
+    let ident = type_path.path.segments.last()
+        .map(|s| s.ident.to_string())
+        .unwrap_or_default();
+
+    match ident.as_str() {
+        "i64" | "i32" | "i16" | "i8" | "isize" => Ok((
+            quote! { call.ret_i64(#slot, __val.#field as i64); },
+            quote! { call.ret_i64(#slot, 0); },
+            1,
+        )),
+        "u64" | "u32" | "u16" | "u8" | "usize" => Ok((
+            quote! { call.ret_u64(#slot, __val.#field as u64); },
+            quote! { call.ret_u64(#slot, 0); },
+            1,
+        )),
+        "f64" => Ok((
+            quote! { call.ret_f64(#slot, __val.#field); },
+            quote! { call.ret_f64(#slot, 0.0); },
+            1,
+        )),
+        "f32" => Ok((
+            quote! { call.ret_f64(#slot, __val.#field as f64); },
+            quote! { call.ret_f64(#slot, 0.0); },
+            1,
+        )),
+        "bool" => Ok((
+            quote! { call.ret_bool(#slot, __val.#field); },
+            quote! { call.ret_bool(#slot, false); },
+            1,
+        )),
+        "String" => Ok((
+            quote! { call.ret_str(#slot, &__val.#field); },
+            quote! { call.ret_str(#slot, ""); },
+            1,
+        )),
+        "GcRef" => Ok((
+            quote! { call.ret_ref(#slot, __val.#field); },
+            quote! { call.ret_u64(#slot, 0); },
+            1,
+        )),
+        "AnySlot" | "InterfaceSlot" => Ok((
+            quote! { call.ret_any(#slot, __val.#field); },
+            quote! { call.ret_u64(#slot, 0); call.ret_u64(#slot + 1, 0); },
+            2,
+        )),
+        "ErrorSlot" => Ok((
+            quote! { call.ret_error(#slot, __val.#field); },
+            quote! { call.ret_u64(#slot, 0); call.ret_u64(#slot + 1, 0); },
+            2,
+        )),
+        _ => Err(syn::Error::new_spanned(
+            type_path,
+            format!("unsupported tuple element type in Result mode: {}", ident),
+        )),
+    }
+}
+
+/// Core implementation for vo_fn / vostd_fn.
+fn unified_fn_impl(
+    args: Punctuated<Expr, Token![,]>,
+    func: ItemFn,
+    flavor: MacroFlavor,
+) -> syn::Result<TokenStream2> {
+    let (pkg_path, func_name, is_std_only) = parse_unified_args(&args)?;
+
+    // std-only flag is only valid for Stdlib flavor
+    if is_std_only {
+        if let MacroFlavor::Extension = flavor {
+            return Err(syn::Error::new_spanned(
+                &func.sig,
+                "`std` flag is only valid for #[vostd_fn], not #[vo_fn].",
+            ));
+        }
+    }
+
+    // Detect mode from signature
+    let mode = detect_fn_mode(&func)?;
+
+    match mode {
+        FnMode::Manual => unified_manual_impl(&func, &pkg_path, &func_name, is_std_only, &flavor),
+        FnMode::Result => unified_result_impl(&func, &pkg_path, &func_name, is_std_only, &flavor),
+        FnMode::Simple => unified_simple_impl(&func, &pkg_path, &func_name, is_std_only, &flavor),
+    }
+}
+
+/// Manual mode: function gets ExternCallContext directly. Inject slots mod + register.
+fn unified_manual_impl(
+    func: &ItemFn,
+    pkg_path: &str,
+    func_name: &str,
+    is_std_only: bool,
+    flavor: &MacroFlavor,
+) -> syn::Result<TokenStream2> {
+    let fn_name = &func.sig.ident;
+    let fn_vis = &func.vis;
+    let fn_sig = &func.sig;
+    let fn_attrs = &func.attrs;
+    let fn_body = &func.block;
+    let slot_mod = generate_inline_slot_mod(pkg_path, func_name);
+
+    let fn_tokens = quote! {
+        #(#fn_attrs)*
+        #fn_vis #fn_sig {
+            #slot_mod
+            #fn_body
+        }
+    };
+
+    Ok(emit_fn_registration(
+        fn_tokens, fn_name, pkg_path, func_name, is_std_only, flavor,
+    ))
+}
+
+/// Result mode: fn(args...) -> Result<T, String>.
+fn unified_result_impl(
+    func: &ItemFn,
+    pkg_path: &str,
+    func_name: &str,
+    is_std_only: bool,
+    flavor: &MacroFlavor,
+) -> syn::Result<TokenStream2> {
+    let inner_ty = extract_result_type(func)
+        .ok_or_else(|| syn::Error::new_spanned(&func.sig, "failed to extract Result inner type"))?;
+    let wrapper = generate_result_wrapper(func, pkg_path, func_name, &inner_ty)?;
+    let wrapper_name = format_ident!(
+        "__vo_{}_{}",
+        pkg_path.replace('/', "_").replace('.', "_"),
+        func_name
+    );
+
+    let fn_tokens = quote! {
+        #func
+        #wrapper
+    };
+
+    Ok(emit_fn_registration(
+        fn_tokens, &wrapper_name, pkg_path, func_name, is_std_only, flavor,
+    ))
+}
+
+/// Simple mode: fn(args...) -> T.
+fn unified_simple_impl(
+    func: &ItemFn,
+    pkg_path: &str,
+    func_name: &str,
+    is_std_only: bool,
+    flavor: &MacroFlavor,
+) -> syn::Result<TokenStream2> {
+    let (vo_sig, _is_std) = find_vo_signature(pkg_path, func_name, func)?;
+    validate_signature(func, &vo_sig)?;
+    let wrapper = generate_wrapper(func, pkg_path, func_name)?;
+    let wrapper_name = format_ident!(
+        "__vo_{}_{}",
+        pkg_path.replace('/', "_").replace('.', "_"),
+        func_name
+    );
+
+    let fn_tokens = quote! {
+        #func
+        #wrapper
+    };
+
+    Ok(emit_fn_registration(
+        fn_tokens, &wrapper_name, pkg_path, func_name, is_std_only, flavor,
+    ))
+}
+
+/// Shared registration logic for all three modes.
 ///
-/// Unlike `vostd_extern_ctx` which panics in no_std, this macro
-/// generates working code for both modes. Use for functions like fmt
-/// that can work in no_std via output.rs.
+/// Given the function tokens and the entry function name (the fn with
+/// `ExternCallContext -> ExternResult` signature), generates the full output
+/// including std-only handling, extension trampoline + linkme, or stdlib entry.
+fn emit_fn_registration(
+    fn_tokens: TokenStream2,
+    entry_fn: &syn::Ident,
+    pkg_path: &str,
+    func_name: &str,
+    is_std_only: bool,
+    flavor: &MacroFlavor,
+) -> TokenStream2 {
+    let lookup_name = format!(
+        "{}_{}",
+        pkg_path.replace('/', "_").replace('.', "_"),
+        func_name
+    );
+    let stdlib_entry_name = format_ident!("__STDLIB_{}", lookup_name);
+
+    if is_std_only {
+        let panic_msg = format!("{}::{} requires std", pkg_path, func_name);
+        quote! {
+            #[cfg(feature = "std")]
+            #fn_tokens
+
+            #[cfg(feature = "std")]
+            #[doc(hidden)]
+            pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry =
+                vo_runtime::ffi::StdlibEntry { name: #lookup_name, func: #entry_fn };
+
+            #[cfg(not(feature = "std"))]
+            #[doc(hidden)]
+            pub fn #entry_fn(_call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
+                vo_runtime::ffi::ExternResult::Panic(alloc::string::String::from(#panic_msg))
+            }
+
+            #[cfg(not(feature = "std"))]
+            #[doc(hidden)]
+            pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry =
+                vo_runtime::ffi::StdlibEntry { name: #lookup_name, func: #entry_fn };
+        }
+    } else {
+        match flavor {
+            MacroFlavor::Stdlib => {
+                quote! {
+                    #fn_tokens
+
+                    #[doc(hidden)]
+                    pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry =
+                        vo_runtime::ffi::StdlibEntry { name: #lookup_name, func: #entry_fn };
+                }
+            }
+            MacroFlavor::Extension => {
+                let entry_name = format_ident!("__VO_EXT_ENTRY_{}", lookup_name.to_uppercase().replace('/', "_"));
+                let trampoline_name = format_ident!("__vo_ext_trampoline_{}", lookup_name);
+                let trampoline = generate_ext_trampoline(&trampoline_name, entry_fn);
+                quote! {
+                    #fn_tokens
+
+                    #[cfg(not(target_arch = "wasm32"))]
+                    #trampoline
+
+                    #[cfg(not(target_arch = "wasm32"))]
+                    #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE)]
+                    #[doc(hidden)]
+                    static #entry_name: vo_runtime::ffi::ExternEntry = vo_runtime::ffi::ExternEntry {
+                        name_ptr: #lookup_name.as_ptr(),
+                        name_len: #lookup_name.len() as u32,
+                        func: #trampoline_name,
+                    };
+
+                    #[cfg(target_arch = "wasm32")]
+                    #[doc(hidden)]
+                    pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry =
+                        vo_runtime::ffi::StdlibEntry { name: #lookup_name, func: #entry_fn };
+                }
+            }
+        }
+    }
+}
+
+/// Generate an `extern "C"` trampoline that wraps an inner Rust function
+/// (`fn(&mut ExternCallContext) -> ExternResult`) for extension ABI export.
 ///
-/// # Example
-///
-/// ```ignore
-/// #[vostd_extern_ctx_nostd("fmt", "nativeWrite")]
-/// fn native_write(call: &mut ExternCallContext) -> ExternResult {
-///     crate::output::write(call.arg_str(slots::ARG_S));
-///     ExternResult::Ok
-/// }
-/// ```
-#[proc_macro_attribute]
-pub fn vostd_extern_ctx_nostd(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr with Punctuated::<Expr, Token![,]>::parse_terminated);
-    let func = parse_macro_input!(item as ItemFn);
-    
-    match vostd_extern_ctx_nostd_impl(args, func) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
+/// The trampoline:
+/// 1. Casts the raw pointer to `&mut ExternCallContext`
+/// 2. Calls the inner function inside `catch_unwind`
+/// 3. Maps `ExternResult` variants to `ext_abi::RESULT_*` u32 codes
+/// 4. Stores complex payloads (panic msg, io token, closure) on the context
+fn generate_ext_trampoline(
+    trampoline_name: &syn::Ident,
+    inner_fn_name: &syn::Ident,
+) -> TokenStream2 {
+    // Extensions always have std (dynamic loading requires it).
+    // WaitIo is handled unconditionally — #[cfg] inside quote! doesn't work
+    // in proc macros (it generates a literal attribute, not conditional compilation).
+    quote! {
+        #[doc(hidden)]
+        pub extern "C" fn #trampoline_name(
+            ctx: *mut vo_runtime::ffi::ExternCallContext,
+        ) -> u32 {
+            let ctx_ref = unsafe { &mut *ctx };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                #inner_fn_name(ctx_ref)
+            }));
+            match result {
+                Ok(vo_runtime::ffi::ExternResult::Ok) => vo_runtime::ffi::ext_abi::RESULT_OK,
+                Ok(vo_runtime::ffi::ExternResult::Yield) => vo_runtime::ffi::ext_abi::RESULT_YIELD,
+                Ok(vo_runtime::ffi::ExternResult::Block) => vo_runtime::ffi::ext_abi::RESULT_BLOCK,
+                Ok(vo_runtime::ffi::ExternResult::Panic(msg)) => {
+                    ctx_ref.set_ext_panic(msg);
+                    vo_runtime::ffi::ext_abi::RESULT_PANIC
+                }
+                Ok(vo_runtime::ffi::ExternResult::NotRegistered(_)) => {
+                    ctx_ref.set_ext_panic(std::string::String::from("NotRegistered in extension trampoline"));
+                    vo_runtime::ffi::ext_abi::RESULT_PANIC
+                }
+                Ok(vo_runtime::ffi::ExternResult::CallClosure { closure_ref, args }) => {
+                    ctx_ref.set_ext_call_closure(closure_ref, args);
+                    vo_runtime::ffi::ext_abi::RESULT_CALL_CLOSURE
+                }
+                Ok(vo_runtime::ffi::ExternResult::WaitIo { token }) => {
+                    ctx_ref.set_ext_wait_io(token);
+                    vo_runtime::ffi::ext_abi::RESULT_WAIT_IO
+                }
+                Err(panic_payload) => {
+                    let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        std::string::String::from("unknown panic in extension")
+                    };
+                    ctx_ref.set_ext_panic(msg);
+                    vo_runtime::ffi::ext_abi::RESULT_PANIC
+                }
+            }
+        }
     }
 }
 
@@ -237,147 +867,6 @@ fn to_screaming_snake_case(s: &str) -> String {
     result
 }
 
-fn vo_extern_ctx_impl(
-    args: Punctuated<Expr, Token![,]>,
-    func: ItemFn,
-) -> syn::Result<TokenStream2> {
-    let (pkg_path, func_name) = parse_extern_args(&args)?;
-    
-    let fn_name = &func.sig.ident;
-    let fn_vis = &func.vis;
-    let fn_sig = &func.sig;
-    let fn_attrs = &func.attrs;
-    let fn_body = &func.block;
-    
-    // Generate lookup name: "pkg_FuncName" format
-    let lookup_name = format!(
-        "{}_{}",
-        pkg_path.replace('/', "_").replace('.', "_"),
-        func_name
-    );
-    
-    // Generate entry name for the static
-    let entry_name = format_ident!("__VO_CTX_ENTRY_{}", lookup_name.to_uppercase().replace('/', "_"));
-    let stdlib_entry_name = format_ident!("__STDLIB_{}", lookup_name);
-    
-    // Generate slot constants as inline mod (to be injected into function body)
-    let slot_mod = generate_inline_slot_mod(&pkg_path, &func_name);
-    
-    // Generate code for both native (linkme) and wasm (static entry) platforms
-    Ok(quote! {
-        #(#fn_attrs)*
-        #fn_vis #fn_sig {
-            #slot_mod
-            #fn_body
-        }
-        
-        // Native: use linkme distributed_slice for auto-registration
-        #[cfg(not(target_arch = "wasm32"))]
-        #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
-        #[doc(hidden)]
-        static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
-            name: #lookup_name,
-            func: #fn_name,
-        };
-        
-        // WASM: generate StdlibEntry constant for manual registration
-        #[cfg(target_arch = "wasm32")]
-        #[doc(hidden)]
-        pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry = 
-            vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #fn_name);
-    })
-}
-
-/// Implementation for #[vostd_extern_ctx_nostd] - context functions that work in both std and no_std.
-fn vostd_extern_ctx_nostd_impl(
-    args: Punctuated<Expr, Token![,]>,
-    func: ItemFn,
-) -> syn::Result<TokenStream2> {
-    let (pkg_path, func_name) = parse_extern_args(&args)?;
-    
-    let fn_name = &func.sig.ident;
-    let fn_vis = &func.vis;
-    let fn_sig = &func.sig;
-    let fn_attrs = &func.attrs;
-    let fn_body = &func.block;
-    
-    // Generate names
-    let lookup_name = format!(
-        "{}_{}",
-        pkg_path.replace('/', "_").replace('.', "_"),
-        func_name
-    );
-    let stdlib_entry_name = format_ident!("__STDLIB_{}", lookup_name);
-    
-    // Generate slot constants
-    let slot_mod = generate_inline_slot_mod(&pkg_path, &func_name);
-    
-    // Generate code that works in both std and no_std
-    Ok(quote! {
-        #(#fn_attrs)*
-        #fn_vis #fn_sig {
-            #slot_mod
-            #fn_body
-        }
-        
-        #[doc(hidden)]
-        pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry = 
-            vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #fn_name);
-    })
-}
-
-/// Implementation for #[vostd_extern_ctx] - std-only context functions with no_std panic stub.
-fn vostd_extern_ctx_impl(
-    args: Punctuated<Expr, Token![,]>,
-    func: ItemFn,
-) -> syn::Result<TokenStream2> {
-    let (pkg_path, func_name) = parse_extern_args(&args)?;
-    
-    let fn_name = &func.sig.ident;
-    let fn_vis = &func.vis;
-    let fn_sig = &func.sig;
-    let fn_attrs = &func.attrs;
-    let fn_body = &func.block;
-    
-    // Generate names
-    let lookup_name = format!(
-        "{}_{}",
-        pkg_path.replace('/', "_").replace('.', "_"),
-        func_name
-    );
-    let stdlib_entry_name = format_ident!("__STDLIB_{}", lookup_name);
-    
-    // Generate slot constants
-    let slot_mod = generate_inline_slot_mod(&pkg_path, &func_name);
-    
-    // Generate panic message for no_std
-    let panic_msg = format!("{}::{} requires std", pkg_path, func_name);
-    
-    Ok(quote! {
-        #[cfg(feature = "std")]
-        #(#fn_attrs)*
-        #fn_vis #fn_sig {
-            #slot_mod
-            #fn_body
-        }
-        
-        #[cfg(feature = "std")]
-        #[doc(hidden)]
-        pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry = 
-            vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #fn_name);
-        
-        #[cfg(not(feature = "std"))]
-        #[doc(hidden)]
-        pub fn #fn_name(_call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
-            vo_runtime::ffi::ExternResult::Panic(alloc::string::String::from(#panic_msg))
-        }
-        
-        #[cfg(not(feature = "std"))]
-        #[doc(hidden)]
-        pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry = 
-            vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #fn_name);
-    })
-}
 
 /// Generate inline slot module to be injected into function body.
 /// This creates `mod slots { ... }` that can be used directly as `slots::ARG_X`.
@@ -542,41 +1031,6 @@ fn derive_pkg_name(import_path: &str) -> String {
         .find(|part| !part.is_empty())
         .unwrap_or(import_path)
         .to_string()
-}
-
-fn vo_extern_impl(
-    args: Punctuated<Expr, Token![,]>,
-    func: ItemFn,
-    allow_std: bool,
-) -> syn::Result<TokenStream2> {
-    // Parse attributes: ("pkg/path", "FuncName")
-    let (pkg_path, func_name) = parse_extern_args(&args)?;
-    
-    // Resolve package and check if it's stdlib
-    let (vo_sig, is_std) = find_vo_signature(&pkg_path, &func_name, &func)?;
-    
-    // If it's a stdlib package, only allow with vostd_extern
-    if is_std && !allow_std {
-        return Err(syn::Error::new_spanned(
-            &func.sig,
-            format!(
-                "cannot implement stdlib extern '{}::{}' with #[vo_extern] - \
-                 standard library natives are built-in. \
-                 Use #[vostd_extern] for stdlib development.",
-                pkg_path, func_name
-            ),
-        ));
-    }
-    
-    // Validate signature
-    validate_signature(&func, &vo_sig)?;
-    
-    let wrapper = generate_wrapper(&func, &pkg_path, &func_name)?;
-    
-    Ok(quote! {
-        #func
-        #wrapper
-    })
 }
 
 /// Find Vo function signature by resolving package path (strict mode).
@@ -921,172 +1375,39 @@ fn generate_wrapper(
     func_name: &str,
 ) -> syn::Result<TokenStream2> {
     let fn_name = &func.sig.ident;
-    
-    // Generate symbol name: __vo_<pkg_path>_<func_name>
-    // e.g., "game/engine" + "RenderSprite" -> __vo_game_engine_RenderSprite
     let symbol_name = format!(
         "__vo_{}_{}",
         pkg_path.replace('/', "_").replace('.', "_"),
         func_name
     );
     let wrapper_name = format_ident!("{}", symbol_name);
-    
-    // Generate registration entry name
-    let entry_name = format_ident!("__VO_ENTRY_{}", symbol_name.to_uppercase());
-    
-    // Generate lookup name: "pkg_FuncName" format
-    let lookup_name = format!(
-        "{}_{}",
-        pkg_path.replace('/', "_").replace('.', "_"),
-        func_name
-    );
-    
-    // Analyze parameters
-    let params: Vec<_> = func.sig.inputs.iter().collect();
-    let mut arg_reads = Vec::new();
-    let mut arg_names = Vec::new();
-    let mut needs_gc = false;
-    let mut slot_idx: u16 = 0;
-    
-    for param in &params {
-        match param {
-            FnArg::Typed(pat_type) => {
-                let param_name = match &*pat_type.pat {
-                    Pat::Ident(ident) => &ident.ident,
-                    _ => return Err(syn::Error::new_spanned(pat_type, "expected identifier")),
-                };
-                
-                let ty = &*pat_type.ty;
-                let (read_expr, is_gc, slots) = generate_arg_read(ty, slot_idx)?;
-                
-                arg_reads.push(quote! {
-                    let #param_name = #read_expr;
-                });
-                arg_names.push(quote! { #param_name });
-                
-                if is_gc {
-                    needs_gc = true;
-                }
-                slot_idx += slots;
-            }
-            FnArg::Receiver(_) => {
-                return Err(syn::Error::new_spanned(param, "self parameter not allowed in extern functions"));
-            }
-        }
-    }
-    
-    // Analyze return type
-    let (ret_writes, ret_needs_gc) = generate_ret_write(&func.sig.output)?;
-    if ret_needs_gc {
-        needs_gc = true;
-    }
-    
-    // Generate wrapper
+
+    let (arg_reads, arg_names) = parse_fn_args(func)?;
+    let ret_writes = generate_ret_write(&func.sig.output)?;
     let call_expr = quote! { #fn_name(#(#arg_names),*) };
     
-    // vostd_extern is for stdlib, which is always statically linked - no linkme needed
     Ok(generate_extern_entry(
         &wrapper_name,
-        &entry_name,
-        &lookup_name,
         &arg_reads,
         &call_expr,
         &ret_writes,
-        needs_gc,
-        false, // use_linkme = false for stdlib
     ))
 }
 
-/// Implementation for #[vostd_extern_only] - std-only functions with no_std panic stub.
-fn vostd_extern_only_impl(
-    args: Punctuated<Expr, Token![,]>,
-    func: ItemFn,
-) -> syn::Result<TokenStream2> {
-    let (pkg_path, func_name) = parse_extern_args(&args)?;
-    
-    // Generate names
-    let lookup_name = format!(
-        "{}_{}",
-        pkg_path.replace('/', "_").replace('.', "_"),
-        func_name
-    );
-    let wrapper_name = format_ident!("__vo_{}_{}", 
-        pkg_path.replace('/', "_").replace('.', "_"),
-        func_name
-    );
-    let stdlib_entry_name = format_ident!("__STDLIB_{}", lookup_name);
-    
-    // Get the full std implementation via generate_wrapper
-    let std_impl = generate_wrapper(&func, &pkg_path, &func_name)?;
-    
-    // Generate no_std panic stub
-    let panic_msg = format!("{}::{} requires std", pkg_path, func_name);
-    
-    Ok(quote! {
-        #[cfg(feature = "std")]
-        #func
-        
-        #[cfg(feature = "std")]
-        #std_impl
-        
-        #[cfg(not(feature = "std"))]
-        #[doc(hidden)]
-        pub fn #wrapper_name(_call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
-            vo_runtime::ffi::ExternResult::Panic(alloc::string::String::from(#panic_msg))
-        }
-        
-        #[cfg(not(feature = "std"))]
-        #[doc(hidden)]
-        pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry = 
-            vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #wrapper_name);
-    })
-}
-
-/// Generate extern entry registration code (shared by generate_wrapper and vo_builtin_impl).
-/// 
-/// - `use_linkme`: if true, generates linkme distributed_slice registration (for vo_extern).
-///   if false, only generates the wrapper function (for vostd_extern - stdlib is always static).
+/// Generate a wrapper function that reads args from slots, calls the inner fn, and writes returns.
 fn generate_extern_entry(
     wrapper_name: &syn::Ident,
-    _entry_name: &syn::Ident,
-    lookup_name: &str,
     arg_reads: &[TokenStream2],
     call_expr: &TokenStream2,
     ret_writes: &TokenStream2,
-    needs_gc: bool,
-    _use_linkme: bool,
 ) -> TokenStream2 {
-    // vostd_extern is only used inside vo-runtime crate
-    // Generate StdlibEntry const (e.g., "math_Floor" -> __STDLIB_math_Floor)
-    let stdlib_entry_name = format_ident!("__STDLIB_{}", lookup_name);
-    
-    if needs_gc {
-        quote! {
-            #[doc(hidden)]
-            pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
-                #(#arg_reads)*
-                let __result = #call_expr;
-                #ret_writes
-                vo_runtime::ffi::ExternResult::Ok
-            }
-            
-            #[doc(hidden)]
-            pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry = 
-                vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #wrapper_name);
-        }
-    } else {
-        quote! {
-            #[doc(hidden)]
-            pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCall) -> vo_runtime::ffi::ExternResult {
-                #(#arg_reads)*
-                let __result = #call_expr;
-                #ret_writes
-                vo_runtime::ffi::ExternResult::Ok
-            }
-            
-            #[doc(hidden)]
-            pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry = 
-                vo_runtime::ffi::StdlibEntry::NoCtx(#lookup_name, #wrapper_name);
+    quote! {
+        #[doc(hidden)]
+        pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
+            #(#arg_reads)*
+            let __result = #call_expr;
+            #ret_writes
+            vo_runtime::ffi::ExternResult::Ok
         }
     }
 }
@@ -1095,63 +1416,26 @@ fn generate_extern_entry(
 fn vo_builtin_impl(name: String, func: ItemFn) -> syn::Result<TokenStream2> {
     let fn_name = &func.sig.ident;
     let wrapper_name = format_ident!("__vo_builtin_{}", name);
-    let entry_name = format_ident!("__VO_BUILTIN_ENTRY_{}", name.to_uppercase());
-    
-    // Analyze parameters
-    let params: Vec<_> = func.sig.inputs.iter().collect();
-    let mut arg_reads = Vec::new();
-    let mut arg_names = Vec::new();
-    let mut needs_gc = false;
-    let mut slot_idx: u16 = 0;
-    
-    for param in &params {
-        match param {
-            FnArg::Typed(pat_type) => {
-                let param_name = match &*pat_type.pat {
-                    Pat::Ident(ident) => &ident.ident,
-                    _ => return Err(syn::Error::new_spanned(pat_type, "expected identifier")),
-                };
-                
-                let ty = &*pat_type.ty;
-                let (read_expr, is_gc, slots) = generate_arg_read(ty, slot_idx)?;
-                
-                arg_reads.push(quote! {
-                    let #param_name = #read_expr;
-                });
-                arg_names.push(quote! { #param_name });
-                
-                if is_gc {
-                    needs_gc = true;
-                }
-                slot_idx += slots;
-            }
-            FnArg::Receiver(_) => {
-                return Err(syn::Error::new_spanned(param, "self parameter not allowed"));
-            }
-        }
-    }
-    
-    let (ret_writes, ret_needs_gc) = generate_ret_write(&func.sig.output)?;
-    if ret_needs_gc {
-        needs_gc = true;
-    }
+
+    let (arg_reads, arg_names) = parse_fn_args(&func)?;
+    let ret_writes = generate_ret_write(&func.sig.output)?;
     let call_expr = quote! { #fn_name(#(#arg_names),*) };
     
-    // vo_builtin is for internal runtime functions - no linkme needed
-    let entry = generate_extern_entry(
+    let wrapper_fn = generate_extern_entry(
         &wrapper_name,
-        &entry_name,
-        &name,
         &arg_reads,
         &call_expr,
         &ret_writes,
-        needs_gc,
-        false, // use_linkme = false for builtins
     );
+    let stdlib_entry_name = format_ident!("__STDLIB_{}", name);
     
     Ok(quote! {
         #func
-        #entry
+        #wrapper_fn
+
+        #[doc(hidden)]
+        pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry =
+            vo_runtime::ffi::StdlibEntry { name: #name, func: #wrapper_name };
     })
 }
 
@@ -1166,7 +1450,39 @@ fn get_generic_inner_type(type_path: &syn::TypePath) -> Option<String> {
     None
 }
 
-fn generate_arg_read(ty: &Type, slot: u16) -> syn::Result<(TokenStream2, bool, u16)> {
+/// Parse function parameters into slot-reading expressions and argument names.
+fn parse_fn_args(func: &ItemFn) -> syn::Result<(Vec<TokenStream2>, Vec<TokenStream2>)> {
+    let mut arg_reads = Vec::new();
+    let mut arg_names = Vec::new();
+    let mut slot_idx: u16 = 0;
+
+    for param in &func.sig.inputs {
+        match param {
+            FnArg::Typed(pat_type) => {
+                let param_name = match &*pat_type.pat {
+                    Pat::Ident(ident) => &ident.ident,
+                    _ => return Err(syn::Error::new_spanned(pat_type, "expected identifier")),
+                };
+
+                let ty = &*pat_type.ty;
+                let (read_expr, slots) = generate_arg_read(ty, slot_idx)?;
+
+                arg_reads.push(quote! {
+                    let #param_name = #read_expr;
+                });
+                arg_names.push(quote! { #param_name });
+                slot_idx += slots;
+            }
+            FnArg::Receiver(_) => {
+                return Err(syn::Error::new_spanned(param, "self parameter not allowed"));
+            }
+        }
+    }
+
+    Ok((arg_reads, arg_names))
+}
+
+fn generate_arg_read(ty: &Type, slot: u16) -> syn::Result<(TokenStream2, u16)> {
     match ty {
         Type::Path(type_path) => {
             let ident = type_path.path.segments.last()
@@ -1175,29 +1491,29 @@ fn generate_arg_read(ty: &Type, slot: u16) -> syn::Result<(TokenStream2, bool, u
             
             match ident.as_str() {
                 "i64" | "i32" | "i16" | "i8" | "isize" => {
-                    Ok((quote! { call.arg_i64(#slot) as #ty }, false, 1))
+                    Ok((quote! { call.arg_i64(#slot) as #ty }, 1))
                 }
                 "u64" | "u32" | "u16" | "u8" | "usize" => {
-                    Ok((quote! { call.arg_u64(#slot) as #ty }, false, 1))
+                    Ok((quote! { call.arg_u64(#slot) as #ty }, 1))
                 }
                 "f64" => {
-                    Ok((quote! { call.arg_f64(#slot) }, false, 1))
+                    Ok((quote! { call.arg_f64(#slot) }, 1))
                 }
                 "f32" => {
-                    Ok((quote! { call.arg_f64(#slot) as f32 }, false, 1))
+                    Ok((quote! { call.arg_f64(#slot) as f32 }, 1))
                 }
                 "bool" => {
-                    Ok((quote! { call.arg_bool(#slot) }, false, 1))
+                    Ok((quote! { call.arg_bool(#slot) }, 1))
                 }
                 "GcRef" => {
-                    Ok((quote! { call.arg_ref(#slot) }, false, 1))
+                    Ok((quote! { call.arg_ref(#slot) }, 1))
                 }
                 // 2-slot types: any, interface, error
                 "AnySlot" | "InterfaceSlot" => {
-                    Ok((quote! { call.arg_any(#slot) }, true, 2))
+                    Ok((quote! { call.arg_any(#slot) }, 2))
                 }
                 "ErrorSlot" => {
-                    Ok((quote! { call.arg_error(#slot) }, true, 2))
+                    Ok((quote! { call.arg_error(#slot) }, 2))
                 }
                 _ => Err(syn::Error::new_spanned(ty, format!("unsupported parameter type: {}", ident))),
             }
@@ -1209,7 +1525,7 @@ fn generate_arg_read(ty: &Type, slot: u16) -> syn::Result<(TokenStream2, bool, u
                     .unwrap_or_default();
                 
                 if ident == "str" {
-                    return Ok((quote! { call.arg_str(#slot) }, true, 1));
+                    return Ok((quote! { call.arg_str(#slot) }, 1));
                 }
             }
             // Check for &[u8] slice type
@@ -1219,7 +1535,7 @@ fn generate_arg_read(ty: &Type, slot: u16) -> syn::Result<(TokenStream2, bool, u
                         .map(|s| s.ident.to_string())
                         .unwrap_or_default();
                     if ident == "u8" {
-                        return Ok((quote! { call.arg_bytes(#slot) }, true, 1));
+                        return Ok((quote! { call.arg_bytes(#slot) }, 1));
                     }
                 }
             }
@@ -1229,9 +1545,9 @@ fn generate_arg_read(ty: &Type, slot: u16) -> syn::Result<(TokenStream2, bool, u
     }
 }
 
-fn generate_ret_write(ret: &ReturnType) -> syn::Result<(TokenStream2, bool)> {
+fn generate_ret_write(ret: &ReturnType) -> syn::Result<TokenStream2> {
     match ret {
-        ReturnType::Default => Ok((quote! {}, false)),
+        ReturnType::Default => Ok(quote! {}),
         ReturnType::Type(_, ty) => {
             match &**ty {
                 Type::Path(type_path) => {
@@ -1241,37 +1557,40 @@ fn generate_ret_write(ret: &ReturnType) -> syn::Result<(TokenStream2, bool)> {
                     
                     match ident.as_str() {
                         "i64" | "i32" | "i16" | "i8" | "isize" => {
-                            Ok((quote! { call.ret_i64(0, __result as i64); }, false))
+                            Ok(quote! { call.ret_i64(0, __result as i64); })
                         }
                         "u64" | "u32" | "u16" | "u8" | "usize" => {
-                            Ok((quote! { call.ret_u64(0, __result as u64); }, false))
+                            Ok(quote! { call.ret_u64(0, __result as u64); })
                         }
                         "f64" => {
-                            Ok((quote! { call.ret_f64(0, __result); }, false))
+                            Ok(quote! { call.ret_f64(0, __result); })
                         }
                         "f32" => {
-                            Ok((quote! { call.ret_f64(0, __result as f64); }, false))
+                            Ok(quote! { call.ret_f64(0, __result as f64); })
                         }
                         "bool" => {
-                            Ok((quote! { call.ret_bool(0, __result); }, false))
+                            Ok(quote! { call.ret_bool(0, __result); })
                         }
                         "String" => {
-                            Ok((quote! { call.ret_str(0, &__result); }, true))
+                            Ok(quote! { call.ret_str(0, &__result); })
                         }
                         "Vec" => {
                             match get_generic_inner_type(type_path).as_deref() {
-                                Some("u8") => Ok((quote! { call.ret_bytes(0, &__result); }, true)),
-                                Some("String") => Ok((quote! { call.ret_string_slice(0, &__result); }, true)),
+                                Some("u8") => Ok(quote! { call.ret_bytes(0, &__result); }),
+                                Some("String") => Ok(quote! { call.ret_string_slice(0, &__result); }),
                                 Some(inner) => Err(syn::Error::new_spanned(ty, format!("unsupported Vec element type: {}", inner))),
                                 None => Err(syn::Error::new_spanned(ty, "Vec requires generic type argument")),
                             }
                         }
+                        "GcRef" => {
+                            Ok(quote! { call.ret_ref(0, __result); })
+                        }
                         // 2-slot types: any, interface, error
                         "AnySlot" | "InterfaceSlot" => {
-                            Ok((quote! { call.ret_any(0, __result); }, true))
+                            Ok(quote! { call.ret_any(0, __result); })
                         }
                         "ErrorSlot" => {
-                            Ok((quote! { call.ret_error(0, __result); }, true))
+                            Ok(quote! { call.ret_error(0, __result); })
                         }
                         _ => Err(syn::Error::new_spanned(ty, format!("unsupported return type: {}", ident))),
                     }
@@ -1331,7 +1650,7 @@ fn generate_ret_write(ret: &ReturnType) -> syn::Result<(TokenStream2, bool)> {
                             return Err(syn::Error::new_spanned(elem, "unsupported tuple element type"));
                         }
                     }
-                    Ok((quote! { #(#writes)* }, true))
+                    Ok(quote! { #(#writes)* })
                 }
                 _ => Err(syn::Error::new_spanned(ty, "unsupported return type")),
             }
@@ -1927,7 +2246,8 @@ fn vo_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
     let getter_fn = format_ident!("get_{}_errors", pkg_lower);
     let helper_fn = format_ident!("{}_sentinel_error", pkg_lower);
     let getter_vo_name = format!("get{}Errors", to_pascal_case(pkg_name));
-    let entry_name = format_ident!("__VO_CTX_ENTRY_{}_{}", pkg_lower, getter_vo_name);
+    let entry_name = format_ident!("__VO_EXT_ENTRY_{}_{}", pkg_lower, getter_vo_name);
+    let trampoline_fn = format_ident!("__vo_ext_trampoline_{}_{}", pkg_lower, getter_vo_name);
     let lookup_name = format!("{}_{}", pkg_lower, getter_vo_name);
     
     let error_count = parsed.errors.len();
@@ -1959,6 +2279,8 @@ fn vo_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
     // Generate __STDLIB_ constant name for stdlib_register! macro (no_std compatible)
     let stdlib_const_name = format_ident!("__STDLIB_{}_{}", pkg_lower, getter_vo_name);
     
+    let trampoline = generate_ext_trampoline(&trampoline_fn, &getter_fn);
+
     let pkg_str = pkg_lower.as_str();
     let generated = if is_internal {
         quote! {
@@ -2016,7 +2338,7 @@ fn vo_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
             // For stdlib_register! macro (works in both std and no_std)
             #[doc(hidden)]
             pub const #stdlib_const_name: vo_runtime::ffi::StdlibEntry = 
-                vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #getter_fn);
+                vo_runtime::ffi::StdlibEntry { name: #lookup_name, func: #getter_fn };
         }
     } else {
         quote! {
@@ -2068,13 +2390,23 @@ fn vo_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
                 }
                 vo_runtime::ffi::ExternResult::Ok
             }
-            
-            #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
+
+            #[cfg(not(target_arch = "wasm32"))]
+            #trampoline
+
+            #[cfg(not(target_arch = "wasm32"))]
+            #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE)]
             #[doc(hidden)]
-            static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
-                name: #lookup_name,
-                func: #getter_fn,
+            static #entry_name: vo_runtime::ffi::ExternEntry = vo_runtime::ffi::ExternEntry {
+                name_ptr: #lookup_name.as_ptr(),
+                name_len: #lookup_name.len() as u32,
+                func: #trampoline_fn,
             };
+
+            #[cfg(target_arch = "wasm32")]
+            #[doc(hidden)]
+            pub const #stdlib_const_name: vo_runtime::ffi::StdlibEntry =
+                vo_runtime::ffi::StdlibEntry { name: #lookup_name, func: #getter_fn };
         }
     };
     
@@ -2259,7 +2591,7 @@ fn vostd_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
         #[doc(hidden)]
         #[allow(non_upper_case_globals)]
         pub const #stdlib_const_name: vo_runtime::ffi::StdlibEntry = 
-            vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #getter_fn);
+            vo_runtime::ffi::StdlibEntry { name: #lookup_name, func: #getter_fn };
     })
 }
 
@@ -2344,7 +2676,8 @@ fn vo_consts_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
     // Generate identifiers
     let getter_fn = format_ident!("get_{}_consts", pkg_lower);
     let getter_vo_name = format!("get{}Consts", to_pascal_case(pkg_name));
-    let entry_name = format_ident!("__VO_CTX_ENTRY_{}_{}", pkg_lower, getter_vo_name);
+    let entry_name = format_ident!("__VO_EXT_ENTRY_{}_{}", pkg_lower, getter_vo_name);
+    let trampoline_fn = format_ident!("__vo_ext_trampoline_{}_{}", pkg_lower, getter_vo_name);
     let lookup_name = format!("{}_{}", pkg_lower, getter_vo_name);
     let stdlib_const_name = format_ident!("__STDLIB_{}_{}", pkg_lower, getter_vo_name);
     
@@ -2363,6 +2696,7 @@ fn vo_consts_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
     }
     
     let generated = if is_internal {
+        // Stdlib: use StdlibEntry only (no linkme)
         quote! {
             #(#const_defs)*
             
@@ -2371,21 +2705,13 @@ fn vo_consts_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
                 vo_runtime::ffi::ExternResult::Ok
             }
             
-            // For stdlib_register! macro (works in both std and no_std)
             #[doc(hidden)]
             pub const #stdlib_const_name: vo_runtime::ffi::StdlibEntry = 
-                vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #getter_fn);
-            
-            // For distributed_slice (std only)
-            #[cfg(feature = "std")]
-            #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
-            #[doc(hidden)]
-            static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
-                name: #lookup_name,
-                func: #getter_fn,
-            };
+                vo_runtime::ffi::StdlibEntry { name: #lookup_name, func: #getter_fn };
         }
     } else {
+        // Extension: use trampoline + linkme (native), StdlibEntry (WASM)
+        let trampoline = generate_ext_trampoline(&trampoline_fn, &getter_fn);
         quote! {
             #(#const_defs)*
             
@@ -2393,13 +2719,23 @@ fn vo_consts_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
                 #(#ret_stmts)*
                 vo_runtime::ffi::ExternResult::Ok
             }
-            
-            #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
+
+            #[cfg(not(target_arch = "wasm32"))]
+            #trampoline
+
+            #[cfg(not(target_arch = "wasm32"))]
+            #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE)]
             #[doc(hidden)]
-            static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
-                name: #lookup_name,
-                func: #getter_fn,
+            static #entry_name: vo_runtime::ffi::ExternEntry = vo_runtime::ffi::ExternEntry {
+                name_ptr: #lookup_name.as_ptr(),
+                name_len: #lookup_name.len() as u32,
+                func: #trampoline_fn,
             };
+
+            #[cfg(target_arch = "wasm32")]
+            #[doc(hidden)]
+            pub const #stdlib_const_name: vo_runtime::ffi::StdlibEntry =
+                vo_runtime::ffi::StdlibEntry { name: #lookup_name, func: #getter_fn };
         }
     };
     

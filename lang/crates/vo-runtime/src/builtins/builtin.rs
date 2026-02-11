@@ -315,12 +315,10 @@ fn panic_with_error(call: &mut ExternCallContext) -> ExternResult {
 
 
 /// Register builtin extern functions (for no_std mode).
-/// Builtin functions are defined directly with ExternFnWithContext signature.
 pub fn register_externs(registry: &mut crate::ffi::ExternRegistry, externs: &[crate::bytecode::ExternDef]) {
-    use crate::ffi::ExternFnWithContext;
+    use crate::ffi::ExternFn;
     
-    // Builtin functions already have ExternFnWithContext signature - use directly
-    const TABLE: &[(&str, ExternFnWithContext)] = &[
+    const TABLE: &[(&str, ExternFn)] = &[
         ("vo_print", builtin_print),
         ("vo_println", builtin_println),
         ("vo_assert", builtin_assert),
@@ -338,7 +336,7 @@ pub fn register_externs(registry: &mut crate::ffi::ExternRegistry, externs: &[cr
     for (id, def) in externs.iter().enumerate() {
         for (name, func) in TABLE {
             if def.name == *name {
-                registry.register_with_context(id as u32, *func);
+                registry.register(id as u32, *func);
                 break;
             }
         }

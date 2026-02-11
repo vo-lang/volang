@@ -3,7 +3,7 @@
 use std::net::{UdpSocket, SocketAddr, ToSocketAddrs};
 use std::os::fd::AsRawFd;
 
-use vo_ffi_macro::vostd_extern_ctx;
+use vo_ffi_macro::vostd_fn;
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 use vo_runtime::io::{IoHandle, CompletionData};
 use vo_runtime::objects::slice;
@@ -19,7 +19,7 @@ fn register_udp_conn(conn: UdpSocket) -> i32 {
     h
 }
 
-#[vostd_extern_ctx("net", "listenPacket")]
+#[vostd_fn("net", "listenPacket", std)]
 pub fn net_listen_packet(call: &mut ExternCallContext) -> ExternResult {
     let network = call.arg_str(slots::ARG_NETWORK).to_string();
     let address = call.arg_str(slots::ARG_ADDRESS).to_string();
@@ -46,8 +46,9 @@ pub fn net_listen_packet(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "blocking_udpConnReadFrom")]
+#[vostd_fn("net", "blocking_udpConnReadFrom", std)]
 pub fn net_udp_conn_read_from(call: &mut ExternCallContext) -> ExternResult {
+    let resume_token = call.take_resume_io_token();
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let buf_ref = call.arg_ref(slots::ARG_P);
     let buf_len = slice::len(buf_ref);
@@ -66,7 +67,7 @@ pub fn net_udp_conn_read_from(call: &mut ExternCallContext) -> ExternResult {
         }
     };
 
-    let token = match call.resume_io_token() {
+    let token = match resume_token {
         Some(token) => token,
         None => {
             let token = call.io_mut().submit_recv_from(fd as IoHandle, buf_ptr, buf_len);
@@ -105,8 +106,9 @@ fn handle_recv_from_completion(
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "blocking_udpConnWriteTo")]
+#[vostd_fn("net", "blocking_udpConnWriteTo", std)]
 pub fn net_udp_conn_write_to(call: &mut ExternCallContext) -> ExternResult {
+    let resume_token = call.take_resume_io_token();
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let buf_ref = call.arg_ref(slots::ARG_P);
     let addr_str = call.arg_str(slots::ARG_ADDR);
@@ -142,7 +144,7 @@ pub fn net_udp_conn_write_to(call: &mut ExternCallContext) -> ExternResult {
         }
     };
 
-    let token = match call.resume_io_token() {
+    let token = match resume_token {
         Some(token) => token,
         None => {
             let token = call.io_mut().submit_send_to(fd as IoHandle, buf_ptr, buf_len, dest_addr);
@@ -177,7 +179,7 @@ fn handle_send_to_completion(
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "udpConnClose")]
+#[vostd_fn("net", "udpConnClose", std)]
 pub fn net_udp_conn_close(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     
@@ -189,7 +191,7 @@ pub fn net_udp_conn_close(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "udpConnLocalAddr")]
+#[vostd_fn("net", "udpConnLocalAddr", std)]
 pub fn net_udp_conn_local_addr(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     
@@ -215,7 +217,7 @@ fn set_udp_deadline(conn: &UdpSocket, deadline_ns: i64, read: bool, write: bool)
     Ok(())
 }
 
-#[vostd_extern_ctx("net", "udpConnSetDeadline")]
+#[vostd_fn("net", "udpConnSetDeadline", std)]
 pub fn net_udp_conn_set_deadline(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let deadline_ns = call.arg_i64(slots::ARG_DEADLINE_NS);
@@ -232,7 +234,7 @@ pub fn net_udp_conn_set_deadline(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "udpConnSetReadDeadline")]
+#[vostd_fn("net", "udpConnSetReadDeadline", std)]
 pub fn net_udp_conn_set_read_deadline(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let deadline_ns = call.arg_i64(slots::ARG_DEADLINE_NS);
@@ -249,7 +251,7 @@ pub fn net_udp_conn_set_read_deadline(call: &mut ExternCallContext) -> ExternRes
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "udpConnSetWriteDeadline")]
+#[vostd_fn("net", "udpConnSetWriteDeadline", std)]
 pub fn net_udp_conn_set_write_deadline(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let deadline_ns = call.arg_i64(slots::ARG_DEADLINE_NS);

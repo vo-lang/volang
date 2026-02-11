@@ -3,81 +3,81 @@
 //! All Unicode character classification and case conversion requires
 //! Unicode tables, so they must be native.
 
-use vo_ffi_macro::vostd_extern;
+use vo_ffi_macro::vostd_fn;
 
 // ==================== Character classification ====================
 
-#[vostd_extern("unicode", "IsLetter")]
+#[vostd_fn("unicode", "IsLetter")]
 fn is_letter(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_alphabetic())
         .unwrap_or(false)
 }
 
-#[vostd_extern("unicode", "IsDigit")]
+#[vostd_fn("unicode", "IsDigit")]
 fn is_digit(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_ascii_digit()) // Go's IsDigit is decimal digits only
         .unwrap_or(false)
 }
 
-#[vostd_extern("unicode", "IsSpace")]
+#[vostd_fn("unicode", "IsSpace")]
 fn is_space(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_whitespace())
         .unwrap_or(false)
 }
 
-#[vostd_extern("unicode", "IsUpper")]
+#[vostd_fn("unicode", "IsUpper")]
 fn is_upper(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_uppercase())
         .unwrap_or(false)
 }
 
-#[vostd_extern("unicode", "IsLower")]
+#[vostd_fn("unicode", "IsLower")]
 fn is_lower(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_lowercase())
         .unwrap_or(false)
 }
 
-#[vostd_extern("unicode", "IsControl")]
+#[vostd_fn("unicode", "IsControl")]
 fn is_control(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_control())
         .unwrap_or(false)
 }
 
-#[vostd_extern("unicode", "IsPrint")]
+#[vostd_fn("unicode", "IsPrint")]
 fn is_print(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| !c.is_control() && c != '\u{FFFD}')
         .unwrap_or(false)
 }
 
-#[vostd_extern("unicode", "IsPunct")]
+#[vostd_fn("unicode", "IsPunct")]
 fn is_punct(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_ascii_punctuation() || unicode_is_punct(c))
         .unwrap_or(false)
 }
 
-#[vostd_extern("unicode", "IsGraphic")]
+#[vostd_fn("unicode", "IsGraphic")]
 fn is_graphic(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| !c.is_control() && !c.is_whitespace() || c == ' ')
         .unwrap_or(false)
 }
 
-#[vostd_extern("unicode", "IsNumber")]
+#[vostd_fn("unicode", "IsNumber")]
 fn is_number(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_numeric())
         .unwrap_or(false)
 }
 
-#[vostd_extern("unicode", "IsMark")]
+#[vostd_fn("unicode", "IsMark")]
 fn is_mark(r: i32) -> bool {
     // Unicode Mark category (Mn, Mc, Me)
     char::from_u32(r as u32)
@@ -85,7 +85,7 @@ fn is_mark(r: i32) -> bool {
         .unwrap_or(false)
 }
 
-#[vostd_extern("unicode", "IsSymbol")]
+#[vostd_fn("unicode", "IsSymbol")]
 fn is_symbol(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(unicode_is_symbol)
@@ -94,7 +94,7 @@ fn is_symbol(r: i32) -> bool {
 
 // ==================== Case conversion ====================
 
-#[vostd_extern("unicode", "ToLower")]
+#[vostd_fn("unicode", "ToLower")]
 fn to_lower(r: i32) -> i32 {
     char::from_u32(r as u32)
         .and_then(|c| c.to_lowercase().next())
@@ -102,7 +102,7 @@ fn to_lower(r: i32) -> i32 {
         .unwrap_or(r)
 }
 
-#[vostd_extern("unicode", "ToUpper")]
+#[vostd_fn("unicode", "ToUpper")]
 fn to_upper(r: i32) -> i32 {
     char::from_u32(r as u32)
         .and_then(|c| c.to_uppercase().next())
@@ -110,7 +110,7 @@ fn to_upper(r: i32) -> i32 {
         .unwrap_or(r)
 }
 
-#[vostd_extern("unicode", "ToTitle")]
+#[vostd_fn("unicode", "ToTitle")]
 fn to_title(r: i32) -> i32 {
     // In most cases, title case is the same as uppercase
     char::from_u32(r as u32)
@@ -119,7 +119,7 @@ fn to_title(r: i32) -> i32 {
         .unwrap_or(r)
 }
 
-#[vostd_extern("unicode", "SimpleFold")]
+#[vostd_fn("unicode", "SimpleFold")]
 fn simple_fold(r: i32) -> i32 {
     // SimpleFold returns the next character in the Unicode case fold orbit
     // For most characters, this cycles: lower -> upper -> lower

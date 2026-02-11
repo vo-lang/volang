@@ -17,7 +17,7 @@ use alloc::string::{String, ToString};
 use alloc::format;
 
 use vo_common_core::types::ValueKind;
-use vo_ffi_macro::vostd_extern_ctx_nostd;
+use vo_ffi_macro::vostd_fn;
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::{interface, slice, string as str_obj};
@@ -402,7 +402,7 @@ fn format_with_spec(spec: FormatSpec, slot0: u64, slot1: u64, call: Option<&Exte
 // =============================================================================
 
 /// nativeWrite - write string to output (uses output.rs for std/no_std)
-#[vostd_extern_ctx_nostd("fmt", "nativeWrite")]
+#[vostd_fn("fmt", "nativeWrite")]
 fn native_write(call: &mut ExternCallContext) -> ExternResult {
     let s = call.arg_str(slots::ARG_S);
     vo_runtime::output::write(s);
@@ -410,7 +410,7 @@ fn native_write(call: &mut ExternCallContext) -> ExternResult {
 }
 
 /// nativeSprint - format []interface{} with default format
-#[vostd_extern_ctx_nostd("fmt", "nativeSprint")]
+#[vostd_fn("fmt", "nativeSprint")]
 fn native_sprint(call: &mut ExternCallContext) -> ExternResult {
     let args_ref = call.arg_ref(slots::ARG_A);
     let formatted = format_args_slice_with_ctx(args_ref, Some(call));
@@ -421,7 +421,7 @@ fn native_sprint(call: &mut ExternCallContext) -> ExternResult {
 }
 
 /// nativeSprintln - format []interface{} with newline
-#[vostd_extern_ctx_nostd("fmt", "nativeSprintln")]
+#[vostd_fn("fmt", "nativeSprintln")]
 fn native_sprintln(call: &mut ExternCallContext) -> ExternResult {
     let args_ref = call.arg_ref(slots::ARG_A);
     let mut formatted = format_args_slice_with_ctx(args_ref, Some(call));
@@ -433,7 +433,7 @@ fn native_sprintln(call: &mut ExternCallContext) -> ExternResult {
 }
 
 /// nativeSprintf - format with format string
-#[vostd_extern_ctx_nostd("fmt", "nativeSprintf")]
+#[vostd_fn("fmt", "nativeSprintf")]
 fn native_sprintf(call: &mut ExternCallContext) -> ExternResult {
     let format_str = call.arg_str(slots::ARG_FORMAT);
     let args_ref = call.arg_ref(slots::ARG_A);

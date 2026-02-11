@@ -533,7 +533,7 @@ pub extern "C" fn jit_call_extern(
     _ret: *mut u64,
     ret_slots: u32,
 ) -> JitResult {
-    use vo_runtime::ffi::{ExternRegistry, ExternResult};
+    use vo_runtime::ffi::{ExternRegistry, ExternResult, ExternInvoke, ExternWorld, ExternFiberInputs};
     let ctx_ref = unsafe { &mut *ctx };
     let registry = unsafe { &*(extern_registry as *const ExternRegistry) };
     let gc = unsafe { &mut *gc };
@@ -559,25 +559,30 @@ pub extern "C" fn jit_call_extern(
     // Take closure replay state from fiber (populated by VM suspend/replay on re-entry)
     let (closure_replay_results, closure_replay_panicked) = fiber.closure_replay.take_for_extern();
     
-    let result = registry.call(
+    let invoke = ExternInvoke {
         extern_id,
-        buffer,
-        0, // bp = 0 (start of buffer)
-        0, // arg_start = 0
-        arg_count as u16,
-        0, // ret_start = 0 (returns overwrite args in same buffer)
+        bp: 0,        // start of buffer
+        arg_start: 0,
+        arg_slots: arg_count as u16,
+        ret_start: 0, // returns overwrite args in same buffer
+        ret_slots: ret_slots as u16,
+    };
+    let world = ExternWorld {
         gc,
         module,
         itab_cache,
-        ctx_ref.vm,
-        ctx_ref.fiber,
+        vm_opaque: ctx_ref.vm,
         program_args,
         sentinel_errors,
         io,
+    };
+    let fiber_inputs = ExternFiberInputs {
+        fiber_opaque: ctx_ref.fiber,
         resume_io_token,
-        closure_replay_results,
-        closure_replay_panicked,
-    );
+        replay_results: closure_replay_results,
+        replay_panicked: closure_replay_panicked,
+    };
+    let result = registry.call(buffer, invoke, world, fiber_inputs);
     
     match result {
         ExternResult::Ok => JitResult::Ok,

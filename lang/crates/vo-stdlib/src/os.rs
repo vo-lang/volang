@@ -18,7 +18,7 @@ use std::sync::Mutex;
 
 #[cfg(feature = "std")]
 use vo_common_core::types::ValueKind;
-use vo_ffi_macro::{vostd_extern_ctx, vostd_errors, vo_consts};
+use vo_ffi_macro::{vostd_fn, vostd_errors, vo_consts};
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 #[cfg(feature = "std")]
 use vo_runtime::gc::{Gc, GcRef};
@@ -157,8 +157,43 @@ fn metadata_to_file_info(call: &mut ExternCallContext, name: &str, meta: &fs::Me
     file_info
 }
 
-#[vostd_extern_ctx("os", "blocking_fileRead")]
+#[cfg(feature = "std")]
+fn handle_read_completion(call: &mut ExternCallContext, c: vo_runtime::io::Completion, ret_n: u16, ret_err: u16) {
+    match c.result {
+        Ok(CompletionData::Size(0)) => {
+            call.ret_i64(ret_n, 0);
+            write_error_to(call, ret_err, "EOF");
+        }
+        Ok(CompletionData::Size(n)) => {
+            call.ret_i64(ret_n, n as i64);
+            write_nil_error(call, ret_err);
+        }
+        Ok(_) => panic!("unexpected completion data for read"),
+        Err(e) => {
+            call.ret_i64(ret_n, 0);
+            write_io_error(call, ret_err, e);
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+fn handle_write_completion(call: &mut ExternCallContext, c: vo_runtime::io::Completion, ret_n: u16, ret_err: u16) {
+    match c.result {
+        Ok(CompletionData::Size(n)) => {
+            call.ret_i64(ret_n, n as i64);
+            write_nil_error(call, ret_err);
+        }
+        Ok(_) => panic!("unexpected completion data for write"),
+        Err(e) => {
+            call.ret_i64(ret_n, 0);
+            write_io_error(call, ret_err, e);
+        }
+    }
+}
+
+#[vostd_fn("os", "blocking_fileRead", std)]
 fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
+    let resume_token = call.take_resume_io_token();
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
     let buf_len = slice::len(buf_ref);
@@ -186,29 +221,13 @@ fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
         file.as_raw_fd()
     };
 
-    let token = match call.resume_io_token() {
+    let token = match resume_token {
         Some(token) => token,
         None => {
-            let token = call
-                .io_mut()
-                .submit_read(raw_fd as IoHandle, buf_ptr, buf_len);
+            let token = call.io_mut().submit_read(raw_fd as IoHandle, buf_ptr, buf_len);
             match call.io_mut().try_take_completion(token) {
                 Some(c) => {
-                    match c.result {
-                        Ok(CompletionData::Size(0)) => {
-                            call.ret_i64(slots::RET_0, 0);
-                            write_error_to(call, slots::RET_1, "EOF");
-                        }
-                        Ok(CompletionData::Size(n)) => {
-                            call.ret_i64(slots::RET_0, n as i64);
-                            write_nil_error(call, slots::RET_1);
-                        }
-                        Ok(_) => panic!("unexpected completion data for read"),
-                        Err(e) => {
-                            call.ret_i64(slots::RET_0, 0);
-                            write_io_error(call, slots::RET_1, e);
-                        }
-                    }
+                    handle_read_completion(call, c, slots::RET_0, slots::RET_1);
                     return ExternResult::Ok;
                 }
                 None => return ExternResult::WaitIo { token },
@@ -217,26 +236,13 @@ fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
     };
 
     let c = call.io_mut().take_completion(token);
-    match c.result {
-        Ok(CompletionData::Size(0)) => {
-            call.ret_i64(slots::RET_0, 0);
-            write_error_to(call, slots::RET_1, "EOF");
-        }
-        Ok(CompletionData::Size(n)) => {
-            call.ret_i64(slots::RET_0, n as i64);
-            write_nil_error(call, slots::RET_1);
-        }
-        Ok(_) => panic!("unexpected completion data for read"),
-        Err(e) => {
-            call.ret_i64(slots::RET_0, 0);
-            write_io_error(call, slots::RET_1, e);
-        }
-    }
+    handle_read_completion(call, c, slots::RET_0, slots::RET_1);
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "blocking_fileWrite")]
+#[vostd_fn("os", "blocking_fileWrite", std)]
 fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
+    let resume_token = call.take_resume_io_token();
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
     let buf_len = slice::len(buf_ref);
@@ -270,25 +276,13 @@ fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
         file.as_raw_fd()
     };
 
-    let token = match call.resume_io_token() {
+    let token = match resume_token {
         Some(token) => token,
         None => {
-            let token = call
-                .io_mut()
-                .submit_write(raw_fd as IoHandle, buf_ptr, buf_len);
+            let token = call.io_mut().submit_write(raw_fd as IoHandle, buf_ptr, buf_len);
             match call.io_mut().try_take_completion(token) {
                 Some(c) => {
-                    match c.result {
-                        Ok(CompletionData::Size(n)) => {
-                            call.ret_i64(slots::RET_0, n as i64);
-                            write_nil_error(call, slots::RET_1);
-                        }
-                        Ok(_) => panic!("unexpected completion data for write"),
-                        Err(e) => {
-                            call.ret_i64(slots::RET_0, 0);
-                            write_io_error(call, slots::RET_1, e);
-                        }
-                    }
+                    handle_write_completion(call, c, slots::RET_0, slots::RET_1);
                     return ExternResult::Ok;
                 }
                 None => return ExternResult::WaitIo { token },
@@ -297,28 +291,18 @@ fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
     };
 
     let c = call.io_mut().take_completion(token);
-    match c.result {
-        Ok(CompletionData::Size(n)) => {
-            call.ret_i64(slots::RET_0, n as i64);
-            write_nil_error(call, slots::RET_1);
-        }
-        Ok(_) => panic!("unexpected completion data for write"),
-        Err(e) => {
-            call.ret_i64(slots::RET_0, 0);
-            write_io_error(call, slots::RET_1, e);
-        }
-    }
+    handle_write_completion(call, c, slots::RET_0, slots::RET_1);
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "blocking_fileReadAt")]
+#[vostd_fn("os", "blocking_fileReadAt", std)]
 fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
+    let resume_token = call.take_resume_io_token();
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
     let offset = call.arg_i64(slots::ARG_OFF);
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
-    let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_len) };
     
     let raw_fd = {
         let handles = FILE_HANDLES.lock().unwrap();
@@ -333,29 +317,13 @@ fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
         file.as_raw_fd()
     };
 
-    let token = match call.resume_io_token() {
+    let token = match resume_token {
         Some(token) => token,
         None => {
-            let token = call
-                .io_mut()
-                .submit_read_at(raw_fd as IoHandle, buf_ptr, buf_len, offset);
+            let token = call.io_mut().submit_read_at(raw_fd as IoHandle, buf_ptr, buf_len, offset);
             match call.io_mut().try_take_completion(token) {
                 Some(c) => {
-                    match c.result {
-                        Ok(CompletionData::Size(0)) => {
-                            call.ret_i64(slots::RET_0, 0);
-                            write_error_to(call, slots::RET_1, "EOF");
-                        }
-                        Ok(CompletionData::Size(n)) => {
-                            call.ret_i64(slots::RET_0, n as i64);
-                            write_nil_error(call, slots::RET_1);
-                        }
-                        Ok(_) => panic!("unexpected completion data for read"),
-                        Err(e) => {
-                            call.ret_i64(slots::RET_0, 0);
-                            write_io_error(call, slots::RET_1, e);
-                        }
-                    }
+                    handle_read_completion(call, c, slots::RET_0, slots::RET_1);
                     return ExternResult::Ok;
                 }
                 None => return ExternResult::WaitIo { token },
@@ -364,32 +332,18 @@ fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
     };
 
     let c = call.io_mut().take_completion(token);
-    match c.result {
-        Ok(CompletionData::Size(0)) => {
-            call.ret_i64(slots::RET_0, 0);
-            write_error_to(call, slots::RET_1, "EOF");
-        }
-        Ok(CompletionData::Size(n)) => {
-            call.ret_i64(slots::RET_0, n as i64);
-            write_nil_error(call, slots::RET_1);
-        }
-        Ok(_) => panic!("unexpected completion data for read"),
-        Err(e) => {
-            call.ret_i64(slots::RET_0, 0);
-            write_io_error(call, slots::RET_1, e);
-        }
-    }
+    handle_read_completion(call, c, slots::RET_0, slots::RET_1);
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "blocking_fileWriteAt")]
+#[vostd_fn("os", "blocking_fileWriteAt", std)]
 fn os_file_write_at(call: &mut ExternCallContext) -> ExternResult {
+    let resume_token = call.take_resume_io_token();
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
     let offset = call.arg_i64(slots::ARG_OFF);
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
-    let buf = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
     
     let raw_fd = {
         let handles = FILE_HANDLES.lock().unwrap();
@@ -404,25 +358,13 @@ fn os_file_write_at(call: &mut ExternCallContext) -> ExternResult {
         file.as_raw_fd()
     };
 
-    let token = match call.resume_io_token() {
+    let token = match resume_token {
         Some(token) => token,
         None => {
-            let token = call
-                .io_mut()
-                .submit_write_at(raw_fd as IoHandle, buf_ptr, buf_len, offset);
+            let token = call.io_mut().submit_write_at(raw_fd as IoHandle, buf_ptr, buf_len, offset);
             match call.io_mut().try_take_completion(token) {
                 Some(c) => {
-                    match c.result {
-                        Ok(CompletionData::Size(n)) => {
-                            call.ret_i64(slots::RET_0, n as i64);
-                            write_nil_error(call, slots::RET_1);
-                        }
-                        Ok(_) => panic!("unexpected completion data for write"),
-                        Err(e) => {
-                            call.ret_i64(slots::RET_0, 0);
-                            write_io_error(call, slots::RET_1, e);
-                        }
-                    }
+                    handle_write_completion(call, c, slots::RET_0, slots::RET_1);
                     return ExternResult::Ok;
                 }
                 None => return ExternResult::WaitIo { token },
@@ -431,21 +373,11 @@ fn os_file_write_at(call: &mut ExternCallContext) -> ExternResult {
     };
 
     let c = call.io_mut().take_completion(token);
-    match c.result {
-        Ok(CompletionData::Size(n)) => {
-            call.ret_i64(slots::RET_0, n as i64);
-            write_nil_error(call, slots::RET_1);
-        }
-        Ok(_) => panic!("unexpected completion data for write"),
-        Err(e) => {
-            call.ret_i64(slots::RET_0, 0);
-            write_io_error(call, slots::RET_1, e);
-        }
-    }
+    handle_write_completion(call, c, slots::RET_0, slots::RET_1);
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "fileSeek")]
+#[vostd_fn("os", "fileSeek", std)]
 fn os_file_seek(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let offset = call.arg_i64(slots::ARG_OFFSET);
@@ -468,7 +400,7 @@ fn os_file_seek(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "fileClose")]
+#[vostd_fn("os", "fileClose", std)]
 fn os_file_close(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     if fd <= 2 { write_nil_error(call, slots::RET_0); return ExternResult::Ok; }
@@ -477,7 +409,7 @@ fn os_file_close(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "fileSync")]
+#[vostd_fn("os", "fileSync", std)]
 fn os_file_sync(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     with_file!(fd, call, slots::RET_0, |file| {
@@ -486,7 +418,7 @@ fn os_file_sync(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "fileStat")]
+#[vostd_fn("os", "fileStat", std)]
 fn os_file_stat(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     with_file!(fd, call, 5, nil 5, |file| {
@@ -502,7 +434,7 @@ fn os_file_stat(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "fileTruncate")]
+#[vostd_fn("os", "fileTruncate", std)]
 fn os_file_truncate(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let size = call.arg_i64(slots::ARG_SIZE) as u64;
@@ -526,7 +458,7 @@ vo_consts! {
     }
 }
 
-#[vostd_extern_ctx("os", "openFile")]
+#[vostd_fn("os", "openFile", std)]
 fn os_open_file(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(slots::ARG_NAME);
     let flag = call.arg_i64(slots::ARG_FLAG) as i32;
@@ -555,7 +487,7 @@ fn os_open_file(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeMkdir")]
+#[vostd_fn("os", "nativeMkdir", std)]
 fn os_mkdir(call: &mut ExternCallContext) -> ExternResult {
     let path = call.arg_str(slots::ARG_PATH);
     let perm = call.arg_u64(slots::ARG_PERM) as u32;
@@ -566,7 +498,7 @@ fn os_mkdir(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeMkdirAll")]
+#[vostd_fn("os", "nativeMkdirAll", std)]
 fn os_mkdir_all(call: &mut ExternCallContext) -> ExternResult {
     let path = call.arg_str(slots::ARG_PATH);
     let perm = call.arg_u64(slots::ARG_PERM) as u32;
@@ -577,7 +509,7 @@ fn os_mkdir_all(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeRemove")]
+#[vostd_fn("os", "nativeRemove", std)]
 fn os_remove(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(slots::ARG_NAME);
     match fs::remove_file(name) {
@@ -590,7 +522,7 @@ fn os_remove(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeRemoveAll")]
+#[vostd_fn("os", "nativeRemoveAll", std)]
 fn os_remove_all(call: &mut ExternCallContext) -> ExternResult {
     let path = call.arg_str(slots::ARG_PATH);
     match fs::remove_dir_all(path) {
@@ -600,7 +532,7 @@ fn os_remove_all(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeRename")]
+#[vostd_fn("os", "nativeRename", std)]
 fn os_rename(call: &mut ExternCallContext) -> ExternResult {
     let oldpath = call.arg_str(slots::ARG_OLDPATH);
     let newpath = call.arg_str(slots::ARG_NEWPATH);
@@ -608,7 +540,7 @@ fn os_rename(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeStat")]
+#[vostd_fn("os", "nativeStat", std)]
 fn os_stat(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(slots::ARG_NAME);
     match fs::metadata(name) {
@@ -623,7 +555,7 @@ fn os_stat(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeLstat")]
+#[vostd_fn("os", "nativeLstat", std)]
 fn os_lstat(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(slots::ARG_NAME);
     match fs::symlink_metadata(name) {
@@ -638,7 +570,7 @@ fn os_lstat(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeReadDir")]
+#[vostd_fn("os", "nativeReadDir", std)]
 fn os_read_dir(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(slots::ARG_NAME);
     match fs::read_dir(name) {
@@ -669,7 +601,7 @@ fn os_read_dir(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeChmod")]
+#[vostd_fn("os", "nativeChmod", std)]
 fn os_chmod(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(slots::ARG_NAME);
     let mode = call.arg_u64(slots::ARG_MODE) as u32;
@@ -678,7 +610,7 @@ fn os_chmod(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeChown")]
+#[vostd_fn("os", "nativeChown", std)]
 fn os_chown(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(slots::ARG_NAME);
     let uid = call.arg_i64(slots::ARG_UID) as u32;
@@ -688,7 +620,7 @@ fn os_chown(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeSymlink")]
+#[vostd_fn("os", "nativeSymlink", std)]
 fn os_symlink(call: &mut ExternCallContext) -> ExternResult {
     let oldname = call.arg_str(slots::ARG_OLDNAME);
     let newname = call.arg_str(slots::ARG_NEWNAME);
@@ -697,7 +629,7 @@ fn os_symlink(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeReadlink")]
+#[vostd_fn("os", "nativeReadlink", std)]
 fn os_readlink(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(slots::ARG_NAME);
     match fs::read_link(name) {
@@ -707,7 +639,7 @@ fn os_readlink(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeLink")]
+#[vostd_fn("os", "nativeLink", std)]
 fn os_link(call: &mut ExternCallContext) -> ExternResult {
     let oldname = call.arg_str(slots::ARG_OLDNAME);
     let newname = call.arg_str(slots::ARG_NEWNAME);
@@ -715,7 +647,7 @@ fn os_link(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeTruncate")]
+#[vostd_fn("os", "nativeTruncate", std)]
 fn os_truncate(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(slots::ARG_NAME);
     let size = call.arg_i64(slots::ARG_SIZE) as u64;
@@ -726,7 +658,7 @@ fn os_truncate(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeReadFile")]
+#[vostd_fn("os", "nativeReadFile", std)]
 fn os_read_file_native(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(slots::ARG_NAME);
     match fs::read(name) {
@@ -736,7 +668,7 @@ fn os_read_file_native(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeWriteFile")]
+#[vostd_fn("os", "nativeWriteFile", std)]
 fn os_write_file_native(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(slots::ARG_NAME);
     let data = call.arg_bytes(slots::ARG_DATA);
@@ -748,35 +680,35 @@ fn os_write_file_native(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeGetenv")]
+#[vostd_fn("os", "nativeGetenv", std)]
 fn os_getenv(call: &mut ExternCallContext) -> ExternResult {
     let key = call.arg_str(slots::ARG_KEY);
     call.ret_str(slots::RET_0, &std::env::var(key).unwrap_or_default());
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeSetenv")]
+#[vostd_fn("os", "nativeSetenv", std)]
 fn os_setenv(call: &mut ExternCallContext) -> ExternResult {
     std::env::set_var(call.arg_str(slots::ARG_KEY), call.arg_str(slots::ARG_VALUE));
     write_nil_error(call, slots::RET_0);
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeUnsetenv")]
+#[vostd_fn("os", "nativeUnsetenv", std)]
 fn os_unsetenv(call: &mut ExternCallContext) -> ExternResult {
     std::env::remove_var(call.arg_str(slots::ARG_KEY));
     write_nil_error(call, slots::RET_0);
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeEnviron")]
+#[vostd_fn("os", "nativeEnviron", std)]
 fn os_environ(call: &mut ExternCallContext) -> ExternResult {
     let vars: Vec<String> = std::env::vars().map(|(k, v)| format!("{}={}", k, v)).collect();
     call.ret_string_slice(slots::RET_0, &vars);
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeLookupEnv")]
+#[vostd_fn("os", "nativeLookupEnv", std)]
 fn os_lookup_env(call: &mut ExternCallContext) -> ExternResult {
     let key = call.arg_str(slots::ARG_KEY);
     match std::env::var(key) {
@@ -786,13 +718,13 @@ fn os_lookup_env(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeClearenv")]
+#[vostd_fn("os", "nativeClearenv", std)]
 fn os_clearenv(_call: &mut ExternCallContext) -> ExternResult {
     for (key, _) in std::env::vars() { std::env::remove_var(key); }
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeExpandEnv")]
+#[vostd_fn("os", "nativeExpandEnv", std)]
 fn os_expand_env(call: &mut ExternCallContext) -> ExternResult {
     let s = call.arg_str(slots::ARG_S);
     let mut result = s.to_string();
@@ -804,7 +736,7 @@ fn os_expand_env(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeGetwd")]
+#[vostd_fn("os", "nativeGetwd", std)]
 fn os_getwd(call: &mut ExternCallContext) -> ExternResult {
     match std::env::current_dir() {
         Ok(path) => { call.ret_str(slots::RET_0, &path.to_string_lossy()); write_nil_error(call, slots::RET_1); }
@@ -813,13 +745,13 @@ fn os_getwd(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeChdir")]
+#[vostd_fn("os", "nativeChdir", std)]
 fn os_chdir(call: &mut ExternCallContext) -> ExternResult {
     match std::env::set_current_dir(call.arg_str(slots::ARG_DIR)) { Ok(_) => write_nil_error(call, slots::RET_0), Err(e) => write_io_error(call, slots::RET_0, e) }
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeUserHomeDir")]
+#[vostd_fn("os", "nativeUserHomeDir", std)]
 fn os_user_home_dir(call: &mut ExternCallContext) -> ExternResult {
     match dirs::home_dir() {
         Some(path) => { call.ret_str(slots::RET_0, &path.to_string_lossy()); write_nil_error(call, slots::RET_1); }
@@ -828,7 +760,7 @@ fn os_user_home_dir(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeUserCacheDir")]
+#[vostd_fn("os", "nativeUserCacheDir", std)]
 fn os_user_cache_dir(call: &mut ExternCallContext) -> ExternResult {
     match dirs::cache_dir() {
         Some(path) => { call.ret_str(slots::RET_0, &path.to_string_lossy()); write_nil_error(call, slots::RET_1); }
@@ -837,7 +769,7 @@ fn os_user_cache_dir(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeUserConfigDir")]
+#[vostd_fn("os", "nativeUserConfigDir", std)]
 fn os_user_config_dir(call: &mut ExternCallContext) -> ExternResult {
     match dirs::config_dir() {
         Some(path) => { call.ret_str(slots::RET_0, &path.to_string_lossy()); write_nil_error(call, slots::RET_1); }
@@ -846,34 +778,34 @@ fn os_user_config_dir(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeTempDir")]
+#[vostd_fn("os", "nativeTempDir", std)]
 fn os_temp_dir(call: &mut ExternCallContext) -> ExternResult {
     call.ret_str(slots::RET_0, &std::env::temp_dir().to_string_lossy());
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeGetpid")]
+#[vostd_fn("os", "nativeGetpid", std)]
 fn os_getpid(call: &mut ExternCallContext) -> ExternResult { call.ret_i64(slots::RET_0, std::process::id() as i64); ExternResult::Ok }
-#[vostd_extern_ctx("os", "nativeGetppid")]
+#[vostd_fn("os", "nativeGetppid", std)]
 fn os_getppid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(slots::RET_0, unsafe { libc::getppid() } as i64); } #[cfg(not(unix))] { call.ret_i64(slots::RET_0, 0); } ExternResult::Ok }
-#[vostd_extern_ctx("os", "nativeGetuid")]
+#[vostd_fn("os", "nativeGetuid", std)]
 fn os_getuid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(slots::RET_0, unsafe { libc::getuid() } as i64); } #[cfg(not(unix))] { call.ret_i64(slots::RET_0, 0); } ExternResult::Ok }
-#[vostd_extern_ctx("os", "nativeGeteuid")]
+#[vostd_fn("os", "nativeGeteuid", std)]
 fn os_geteuid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(slots::RET_0, unsafe { libc::geteuid() } as i64); } #[cfg(not(unix))] { call.ret_i64(slots::RET_0, 0); } ExternResult::Ok }
-#[vostd_extern_ctx("os", "nativeGetgid")]
+#[vostd_fn("os", "nativeGetgid", std)]
 fn os_getgid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(slots::RET_0, unsafe { libc::getgid() } as i64); } #[cfg(not(unix))] { call.ret_i64(slots::RET_0, 0); } ExternResult::Ok }
-#[vostd_extern_ctx("os", "nativeGetegid")]
+#[vostd_fn("os", "nativeGetegid", std)]
 fn os_getegid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(slots::RET_0, unsafe { libc::getegid() } as i64); } #[cfg(not(unix))] { call.ret_i64(slots::RET_0, 0); } ExternResult::Ok }
-#[vostd_extern_ctx("os", "nativeExit")]
+#[vostd_fn("os", "nativeExit", std)]
 fn os_exit(call: &mut ExternCallContext) -> ExternResult { std::process::exit(call.arg_i64(slots::ARG_CODE) as i32); }
-#[vostd_extern_ctx("os", "nativeGetArgs")]
+#[vostd_fn("os", "nativeGetArgs", std)]
 fn os_get_args(call: &mut ExternCallContext) -> ExternResult {
     let args: Vec<String> = call.program_args().to_vec();
     call.ret_string_slice(slots::RET_0, &args);
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeIsTerminal")]
+#[vostd_fn("os", "nativeIsTerminal", std)]
 fn os_is_terminal(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
 
@@ -903,7 +835,7 @@ fn os_is_terminal(call: &mut ExternCallContext) -> ExternResult {
     }
 }
 
-#[vostd_extern_ctx("os", "nativeHostname")]
+#[vostd_fn("os", "nativeHostname", std)]
 fn os_hostname(call: &mut ExternCallContext) -> ExternResult {
     match hostname::get() {
         Ok(name) => { call.ret_str(slots::RET_0, &name.to_string_lossy()); write_nil_error(call, slots::RET_1); }
@@ -912,7 +844,7 @@ fn os_hostname(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeExecutable")]
+#[vostd_fn("os", "nativeExecutable", std)]
 fn os_executable(call: &mut ExternCallContext) -> ExternResult {
     match std::env::current_exe() {
         Ok(path) => { call.ret_str(slots::RET_0, &path.to_string_lossy()); write_nil_error(call, slots::RET_1); }
@@ -921,7 +853,7 @@ fn os_executable(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeCreateTemp")]
+#[vostd_fn("os", "nativeCreateTemp", std)]
 fn os_create_temp(call: &mut ExternCallContext) -> ExternResult {
     let dir = call.arg_str(slots::ARG_DIR);
     let pattern = call.arg_str(slots::ARG_PATTERN);
@@ -940,7 +872,7 @@ fn os_create_temp(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "nativeMkdirTemp")]
+#[vostd_fn("os", "nativeMkdirTemp", std)]
 fn os_mkdir_temp(call: &mut ExternCallContext) -> ExternResult {
     let dir = call.arg_str(slots::ARG_DIR);
     let pattern = call.arg_str(slots::ARG_PATTERN);
@@ -962,7 +894,7 @@ fn os_mkdir_temp(call: &mut ExternCallContext) -> ExternResult {
 // ==================== Pipe ====================
 
 #[cfg(feature = "std")]
-#[vostd_extern_ctx("os", "nativePipe")]
+#[vostd_fn("os", "nativePipe", std)]
 fn os_native_pipe(call: &mut ExternCallContext) -> ExternResult {
     use std::os::unix::io::{FromRawFd, IntoRawFd};
     
@@ -994,7 +926,7 @@ fn os_native_pipe(call: &mut ExternCallContext) -> ExternResult {
 // ==================== Chtimes ====================
 
 #[cfg(feature = "std")]
-#[vostd_extern_ctx("os", "nativeChtimes")]
+#[vostd_fn("os", "nativeChtimes", std)]
 fn os_native_chtimes(call: &mut ExternCallContext) -> ExternResult {
     use std::time::{Duration, UNIX_EPOCH};
     use std::fs::FileTimes;
@@ -1028,7 +960,7 @@ fn os_native_chtimes(call: &mut ExternCallContext) -> ExternResult {
 // ==================== FindProcess / Kill ====================
 
 #[cfg(feature = "std")]
-#[vostd_extern_ctx("os", "nativeFindProcess")]
+#[vostd_fn("os", "nativeFindProcess", std)]
 fn os_native_find_process(call: &mut ExternCallContext) -> ExternResult {
     let pid = call.arg_i64(slots::ARG_PID) as i32;
     
@@ -1041,7 +973,7 @@ fn os_native_find_process(call: &mut ExternCallContext) -> ExternResult {
 }
 
 #[cfg(feature = "std")]
-#[vostd_extern_ctx("os", "nativeKillProcess")]
+#[vostd_fn("os", "nativeKillProcess", std)]
 fn os_native_kill_process(call: &mut ExternCallContext) -> ExternResult {
     let pid = call.arg_i64(slots::ARG_PID) as i32;
     let sig = call.arg_i64(slots::ARG_SIG) as i32;

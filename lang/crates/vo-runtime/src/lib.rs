@@ -54,14 +54,14 @@ pub use objects::interface::InterfaceSlot;
 
 // Re-exports from ffi (core types always available)
 pub use ffi::{
-    ExternCall, ExternCallContext, ExternFn, ExternFnWithContext, ExternRegistry, ExternResult,
+    ExternCallContext, ExternFn, ExternRegistry, ExternResult,
     SentinelErrorCache,
 };
-// Re-exports from ffi (std only - linkme registration)
+// Re-exports from ffi (std only - linkme registration and extension ABI types)
 #[cfg(feature = "std")]
 pub use ffi::{
-    ExternEntry, ExternEntryWithContext, EXTERN_TABLE, EXTERN_TABLE_WITH_CONTEXT,
-    lookup_extern, lookup_extern_with_context,
+    ExternEntry, ExtensionTable, ExternFnPtr,
+    EXTERN_TABLE, lookup_extern,
 };
 #[cfg(feature = "std")]
 pub use linkme::distributed_slice;

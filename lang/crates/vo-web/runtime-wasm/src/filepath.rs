@@ -76,7 +76,7 @@ fn normalize_path(path: &str) -> String {
 pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     for (id, def) in externs.iter().enumerate() {
         match def.name.as_str() {
-            "path_filepath_evalSymlinks" => registry.register_with_context(id as u32, eval_symlinks),
+            "path_filepath_evalSymlinks" => registry.register(id as u32, eval_symlinks),
             _ => {}
         }
     }

@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "std")]
-use vo_runtime::ffi::{ExternCall, ExternCallContext, ExternResult};
+use vo_runtime::ffi::{ExternCallContext, ExternResult};
 
 #[cfg(feature = "std")]
 static START_INSTANT: OnceLock<Instant> = OnceLock::new();
@@ -28,13 +28,13 @@ fn now_unix_nano() -> i64 {
 }
 
 #[cfg(feature = "std")]
-fn timesys_now_unix_nano(call: &mut ExternCall) -> ExternResult {
+fn timesys_now_unix_nano(call: &mut ExternCallContext) -> ExternResult {
     call.ret_i64(0, now_unix_nano());
     ExternResult::Ok
 }
 
 #[cfg(feature = "std")]
-fn timesys_now_mono_nano(call: &mut ExternCall) -> ExternResult {
+fn timesys_now_mono_nano(call: &mut ExternCallContext) -> ExternResult {
     call.ret_i64(0, now_mono_nano());
     ExternResult::Ok
 }
@@ -47,7 +47,7 @@ fn timesys_sleep_nano(ctx: &mut ExternCallContext) -> ExternResult {
     }
     
     // Check if we're resuming from a timer completion
-    if let Some(_token) = ctx.resume_io_token() {
+    if let Some(_token) = ctx.take_resume_io_token() {
         // Timer completed, return normally
         return ExternResult::Ok;
     }
@@ -63,7 +63,7 @@ pub fn register_externs(registry: &mut vo_runtime::ffi::ExternRegistry, externs:
         match def.name.as_str() {
             "time_nowUnixNano" => registry.register(id as u32, timesys_now_unix_nano),
             "time_nowMonoNano" => registry.register(id as u32, timesys_now_mono_nano),
-            "time_blocking_sleepNano" => registry.register_with_context(id as u32, timesys_sleep_nano),
+            "time_blocking_sleepNano" => registry.register(id as u32, timesys_sleep_nano),
             _ => {}
         }
     }

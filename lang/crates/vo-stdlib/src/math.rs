@@ -4,173 +4,173 @@
 //! Simple functions (Abs, Max, Min, Dim, IsNaN, IsInf, Signbit, Copysign, Pow10)
 //! are implemented in Vo for better JIT inlining.
 
-use vo_ffi_macro::vostd_extern;
+use vo_ffi_macro::vostd_fn;
 
 // ==================== Rounding (hardware instructions) ====================
 
-#[vostd_extern("math", "Floor")]
+#[vostd_fn("math", "Floor")]
 fn floor(x: f64) -> f64 {
     x.floor()
 }
 
-#[vostd_extern("math", "Ceil")]
+#[vostd_fn("math", "Ceil")]
 fn ceil(x: f64) -> f64 {
     x.ceil()
 }
 
-#[vostd_extern("math", "Round")]
+#[vostd_fn("math", "Round")]
 fn round(x: f64) -> f64 {
     x.round()
 }
 
-#[vostd_extern("math", "Trunc")]
+#[vostd_fn("math", "Trunc")]
 fn trunc(x: f64) -> f64 {
     x.trunc()
 }
 
 // ==================== Power and root (libm) ====================
 
-#[vostd_extern("math", "Sqrt")]
+#[vostd_fn("math", "Sqrt")]
 fn sqrt(x: f64) -> f64 {
     x.sqrt()
 }
 
-#[vostd_extern("math", "Cbrt")]
+#[vostd_fn("math", "Cbrt")]
 fn cbrt(x: f64) -> f64 {
     x.cbrt()
 }
 
-#[vostd_extern("math", "Pow")]
+#[vostd_fn("math", "Pow")]
 fn pow(x: f64, y: f64) -> f64 {
     x.powf(y)
 }
 
-#[vostd_extern("math", "Hypot")]
+#[vostd_fn("math", "Hypot")]
 fn hypot(x: f64, y: f64) -> f64 {
     x.hypot(y)
 }
 
 // ==================== Exponential and logarithm (libm) ====================
 
-#[vostd_extern("math", "Exp")]
+#[vostd_fn("math", "Exp")]
 fn exp(x: f64) -> f64 {
     x.exp()
 }
 
-#[vostd_extern("math", "Exp2")]
+#[vostd_fn("math", "Exp2")]
 fn exp2(x: f64) -> f64 {
     x.exp2()
 }
 
-#[vostd_extern("math", "Expm1")]
+#[vostd_fn("math", "Expm1")]
 fn expm1(x: f64) -> f64 {
     x.exp_m1()
 }
 
-#[vostd_extern("math", "Log")]
+#[vostd_fn("math", "Log")]
 fn log(x: f64) -> f64 {
     x.ln()
 }
 
-#[vostd_extern("math", "Log2")]
+#[vostd_fn("math", "Log2")]
 fn log2(x: f64) -> f64 {
     x.log2()
 }
 
-#[vostd_extern("math", "Log10")]
+#[vostd_fn("math", "Log10")]
 fn log10(x: f64) -> f64 {
     x.log10()
 }
 
-#[vostd_extern("math", "Log1p")]
+#[vostd_fn("math", "Log1p")]
 fn log1p(x: f64) -> f64 {
     x.ln_1p()
 }
 
 // ==================== Trigonometric (libm) ====================
 
-#[vostd_extern("math", "Sin")]
+#[vostd_fn("math", "Sin")]
 fn sin(x: f64) -> f64 {
     x.sin()
 }
 
-#[vostd_extern("math", "Cos")]
+#[vostd_fn("math", "Cos")]
 fn cos(x: f64) -> f64 {
     x.cos()
 }
 
-#[vostd_extern("math", "Tan")]
+#[vostd_fn("math", "Tan")]
 fn tan(x: f64) -> f64 {
     x.tan()
 }
 
-#[vostd_extern("math", "Asin")]
+#[vostd_fn("math", "Asin")]
 fn asin(x: f64) -> f64 {
     x.asin()
 }
 
-#[vostd_extern("math", "Acos")]
+#[vostd_fn("math", "Acos")]
 fn acos(x: f64) -> f64 {
     x.acos()
 }
 
-#[vostd_extern("math", "Atan")]
+#[vostd_fn("math", "Atan")]
 fn atan(x: f64) -> f64 {
     x.atan()
 }
 
-#[vostd_extern("math", "Atan2")]
+#[vostd_fn("math", "Atan2")]
 fn atan2(y: f64, x: f64) -> f64 {
     y.atan2(x)
 }
 
 // ==================== Hyperbolic (libm) ====================
 
-#[vostd_extern("math", "Sinh")]
+#[vostd_fn("math", "Sinh")]
 fn sinh(x: f64) -> f64 {
     x.sinh()
 }
 
-#[vostd_extern("math", "Cosh")]
+#[vostd_fn("math", "Cosh")]
 fn cosh(x: f64) -> f64 {
     x.cosh()
 }
 
-#[vostd_extern("math", "Tanh")]
+#[vostd_fn("math", "Tanh")]
 fn tanh(x: f64) -> f64 {
     x.tanh()
 }
 
-#[vostd_extern("math", "Asinh")]
+#[vostd_fn("math", "Asinh")]
 fn asinh(x: f64) -> f64 {
     x.asinh()
 }
 
-#[vostd_extern("math", "Acosh")]
+#[vostd_fn("math", "Acosh")]
 fn acosh(x: f64) -> f64 {
     x.acosh()
 }
 
-#[vostd_extern("math", "Atanh")]
+#[vostd_fn("math", "Atanh")]
 fn atanh(x: f64) -> f64 {
     x.atanh()
 }
 
 // ==================== IEEE 754 operations ====================
 
-#[vostd_extern("math", "Mod")]
+#[vostd_fn("math", "Mod")]
 fn mod_fn(x: f64, y: f64) -> f64 {
     x % y
 }
 
-#[vostd_extern("math", "Modf")]
+#[vostd_fn("math", "Modf")]
 fn modf(x: f64) -> (f64, f64) {
     let int_part = x.trunc();
     let frac_part = x - int_part;
     (int_part, frac_part)
 }
 
-#[vostd_extern("math", "Frexp")]
+#[vostd_fn("math", "Frexp")]
 fn frexp(x: f64) -> (f64, i64) {
     if x == 0.0 || x.is_nan() || x.is_infinite() {
         return (x, 0);
@@ -194,28 +194,28 @@ fn frexp(x: f64) -> (f64, i64) {
     (frac, e)
 }
 
-#[vostd_extern("math", "Ldexp")]
+#[vostd_fn("math", "Ldexp")]
 fn ldexp(frac: f64, exp: i64) -> f64 {
     frac * (2.0_f64).powi(exp as i32)
 }
 
-#[vostd_extern("math", "FMA")]
+#[vostd_fn("math", "FMA")]
 fn fma(x: f64, y: f64, z: f64) -> f64 {
     x.mul_add(y, z)
 }
 
-#[vostd_extern("math", "Inf")]
+#[vostd_fn("math", "Inf")]
 fn inf(sign: i64) -> f64 {
     if sign >= 0 { f64::INFINITY } else { f64::NEG_INFINITY }
 }
 
-#[vostd_extern("math", "NaN")]
+#[vostd_fn("math", "NaN")]
 fn nan() -> f64 {
     f64::NAN
 }
 
 // Register all math extern functions using the stdlib_register! macro.
-// The macro automatically handles ExternFn vs ExternFnWithContext based on __STDLIB_* consts.
+// The macro registers all listed functions via __STDLIB_* consts.
 vo_runtime::stdlib_register!(math:
     Floor, Ceil, Round, Trunc,
     Sqrt, Cbrt, Pow, Hypot,

@@ -1,5 +1,5 @@
 use vo_runtime::bytecode::ExternDef;
-use vo_runtime::ffi::{ExternCall, ExternRegistry, ExternResult};
+use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
 
 fn now_unix_nano() -> i64 {
     let ms = js_sys::Date::now();
@@ -13,17 +13,17 @@ fn now_mono_nano() -> i64 {
     (ms * 1_000_000.0) as i64
 }
 
-fn timesys_NowUnixNano(call: &mut ExternCall) -> ExternResult {
+fn timesys_NowUnixNano(call: &mut ExternCallContext) -> ExternResult {
     call.ret_i64(0, now_unix_nano());
     ExternResult::Ok
 }
 
-fn timesys_NowMonoNano(call: &mut ExternCall) -> ExternResult {
+fn timesys_NowMonoNano(call: &mut ExternCallContext) -> ExternResult {
     call.ret_i64(0, now_mono_nano());
     ExternResult::Ok
 }
 
-fn timesys_SleepNano(_call: &mut ExternCall) -> ExternResult {
+fn timesys_SleepNano(_call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Panic("time.Sleep is not supported on wasm".into())
 }
 

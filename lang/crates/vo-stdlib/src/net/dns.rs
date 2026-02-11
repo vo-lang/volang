@@ -2,7 +2,7 @@
 
 use std::net::ToSocketAddrs;
 
-use vo_ffi_macro::vostd_extern_ctx;
+use vo_ffi_macro::vostd_fn;
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::slice;
@@ -11,7 +11,7 @@ use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 
 use super::write_io_error;
 
-#[vostd_extern_ctx("net", "lookupHost")]
+#[vostd_fn("net", "lookupHost", std)]
 pub fn net_lookup_host(call: &mut ExternCallContext) -> ExternResult {
     let host = call.arg_str(slots::ARG_HOST);
     
@@ -35,7 +35,7 @@ pub fn net_lookup_host(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "lookupIP")]
+#[vostd_fn("net", "lookupIP", std)]
 pub fn net_lookup_ip(call: &mut ExternCallContext) -> ExternResult {
     let host = call.arg_str(slots::ARG_HOST);
     
@@ -62,7 +62,7 @@ pub fn net_lookup_ip(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "lookupAddr")]
+#[vostd_fn("net", "lookupAddr", std)]
 pub fn net_lookup_addr(call: &mut ExternCallContext) -> ExternResult {
     let addr = call.arg_str(slots::ARG_ADDR);
     
@@ -81,7 +81,7 @@ pub fn net_lookup_addr(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "resolveTCPAddr")]
+#[vostd_fn("net", "resolveTCPAddr", std)]
 pub fn net_resolve_tcp_addr(call: &mut ExternCallContext) -> ExternResult {
     let network = call.arg_str(slots::ARG_NETWORK).to_string();
     let address = call.arg_str(slots::ARG_ADDRESS).to_string();
@@ -111,7 +111,7 @@ pub fn net_resolve_tcp_addr(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "resolveUDPAddr")]
+#[vostd_fn("net", "resolveUDPAddr", std)]
 pub fn net_resolve_udp_addr(call: &mut ExternCallContext) -> ExternResult {
     let network = call.arg_str(slots::ARG_NETWORK).to_string();
     let address = call.arg_str(slots::ARG_ADDRESS).to_string();

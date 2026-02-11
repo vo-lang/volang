@@ -3,7 +3,7 @@
 use std::os::unix::net::{UnixStream, UnixListener};
 use std::os::fd::{AsRawFd, FromRawFd};
 
-use vo_ffi_macro::vostd_extern_ctx;
+use vo_ffi_macro::vostd_fn;
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 use vo_runtime::io::{IoHandle, CompletionData, Completion};
 use vo_runtime::objects::slice;
@@ -52,7 +52,7 @@ fn handle_rw_completion(
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "unixDial")]
+#[vostd_fn("net", "unixDial", std)]
 pub fn net_unix_dial(call: &mut ExternCallContext) -> ExternResult {
     let address = call.arg_str(slots::ARG_ADDRESS).to_string();
     
@@ -70,7 +70,7 @@ pub fn net_unix_dial(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "unixListen")]
+#[vostd_fn("net", "unixListen", std)]
 pub fn net_unix_listen(call: &mut ExternCallContext) -> ExternResult {
     let address = call.arg_str(slots::ARG_ADDRESS).to_string();
     
@@ -88,8 +88,9 @@ pub fn net_unix_listen(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "blocking_unixConnRead")]
+#[vostd_fn("net", "blocking_unixConnRead", std)]
 pub fn net_unix_conn_read(call: &mut ExternCallContext) -> ExternResult {
+    let resume_token = call.take_resume_io_token();
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
     let buf_len = slice::len(buf_ref);
@@ -107,7 +108,7 @@ pub fn net_unix_conn_read(call: &mut ExternCallContext) -> ExternResult {
         }
     };
 
-    let token = match call.resume_io_token() {
+    let token = match resume_token {
         Some(token) => token,
         None => {
             let token = call.io_mut().submit_read(fd as IoHandle, buf_ptr, buf_len);
@@ -122,8 +123,9 @@ pub fn net_unix_conn_read(call: &mut ExternCallContext) -> ExternResult {
     handle_rw_completion(call, c, slots::RET_0, slots::RET_1, true)
 }
 
-#[vostd_extern_ctx("net", "blocking_unixConnWrite")]
+#[vostd_fn("net", "blocking_unixConnWrite", std)]
 pub fn net_unix_conn_write(call: &mut ExternCallContext) -> ExternResult {
+    let resume_token = call.take_resume_io_token();
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
     let buf_len = slice::len(buf_ref);
@@ -141,7 +143,7 @@ pub fn net_unix_conn_write(call: &mut ExternCallContext) -> ExternResult {
         }
     };
 
-    let token = match call.resume_io_token() {
+    let token = match resume_token {
         Some(token) => token,
         None => {
             let token = call.io_mut().submit_write(fd as IoHandle, buf_ptr, buf_len);
@@ -156,7 +158,7 @@ pub fn net_unix_conn_write(call: &mut ExternCallContext) -> ExternResult {
     handle_rw_completion(call, c, slots::RET_0, slots::RET_1, false)
 }
 
-#[vostd_extern_ctx("net", "unixConnClose")]
+#[vostd_fn("net", "unixConnClose", std)]
 pub fn net_unix_conn_close(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     
@@ -168,8 +170,9 @@ pub fn net_unix_conn_close(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "blocking_unixListenerAccept")]
+#[vostd_fn("net", "blocking_unixListenerAccept", std)]
 pub fn net_unix_listener_accept(call: &mut ExternCallContext) -> ExternResult {
+    let resume_token = call.take_resume_io_token();
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     
     let fd = {
@@ -184,7 +187,7 @@ pub fn net_unix_listener_accept(call: &mut ExternCallContext) -> ExternResult {
         }
     };
 
-    let token = match call.resume_io_token() {
+    let token = match resume_token {
         Some(token) => token,
         None => {
             let token = call.io_mut().submit_accept(fd as IoHandle);
@@ -221,7 +224,7 @@ fn handle_accept_completion(
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "unixListenerClose")]
+#[vostd_fn("net", "unixListenerClose", std)]
 pub fn net_unix_listener_close(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     

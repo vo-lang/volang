@@ -1,30 +1,21 @@
 //! Extension loader for dynamic loading of native extensions.
 //!
 //! Extensions are discovered from `vo.ext.toml` manifests and loaded
-//! at runtime via dlopen.
+//! at runtime via dlopen. Uses `ExtensionTable` at the dylib
+//! boundary for stable cross-compilation compatibility.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use libloading::{Library, Symbol};
 
-use crate::ffi::{ExternEntry, ExternEntryWithContext, ExternFn, ExternFnWithContext};
+use crate::ffi::{ExternEntry, ExternFnPtr, ExtensionTable};
 
 // Re-export from vo-module
 pub use vo_module::{ExtensionManifest, discover_extensions};
 
-/// ABI version - must match vo-ext's ABI_VERSION.
-pub const ABI_VERSION: u32 = 1;
-
-/// Extension table from loaded library.
-#[repr(C)]
-pub struct ExtensionTable {
-    pub version: u32,
-    pub entry_count: usize,
-    pub entries: *const ExternEntry,
-    pub entry_with_context_count: usize,
-    pub entries_with_context: *const ExternEntryWithContext,
-}
+/// ABI version — must match vo-ext's ABI_VERSION.
+pub const ABI_VERSION: u32 = 2;
 
 /// Error type for extension loading.
 #[derive(Debug)]
@@ -63,24 +54,27 @@ impl From<std::io::Error> for ExtError {
     }
 }
 
+/// A loaded extension entry.
+struct LoadedEntry {
+    func: ExternFnPtr,
+}
+
 /// A loaded extension.
 struct LoadedExtension {
     /// Keep library alive.
     _lib: Library,
     /// Name of the extension.
     name: String,
-    /// Basic extern functions.
-    entries: &'static [ExternEntry],
-    /// Context extern functions.
-    entries_with_context: &'static [ExternEntryWithContext],
+    /// All extern functions.
+    entries: Vec<LoadedEntry>,
 }
 
 /// Extension loader and registry.
 pub struct ExtensionLoader {
     /// Loaded extensions.
     loaded: Vec<LoadedExtension>,
-    /// Cache: function name -> index in loaded + entry index.
-    cache: HashMap<String, (usize, usize, bool)>, // (ext_idx, entry_idx, with_context)
+    /// Cache: function name -> (ext_idx, entry_idx).
+    cache: HashMap<String, (usize, usize)>,
 }
 
 impl ExtensionLoader {
@@ -125,52 +119,33 @@ impl ExtensionLoader {
             });
         }
 
-        let entries: &'static [ExternEntry] = unsafe {
-            std::slice::from_raw_parts(table.entries, table.entry_count)
-        };
-
-        let entries_with_context: &'static [ExternEntryWithContext] = unsafe {
-            std::slice::from_raw_parts(table.entries_with_context, table.entry_with_context_count)
+        let c_entries: &[ExternEntry] = unsafe {
+            std::slice::from_raw_parts(table.entries, table.entry_count as usize)
         };
 
         let ext_idx = self.loaded.len();
+        let mut entries = Vec::with_capacity(c_entries.len());
 
-        // Build cache for basic entries
-        for (i, entry) in entries.iter().enumerate() {
-            self.cache.insert(entry.name.to_string(), (ext_idx, i, false));
-        }
-
-        // Build cache for context entries
-        for (i, entry) in entries_with_context.iter().enumerate() {
-            self.cache.insert(entry.name.to_string(), (ext_idx, i, true));
+        for (i, c_entry) in c_entries.iter().enumerate() {
+            self.cache.insert(c_entry.name().to_string(), (ext_idx, i));
+            entries.push(LoadedEntry {
+                func: c_entry.func,
+            });
         }
 
         self.loaded.push(LoadedExtension {
             _lib: lib,
             name: name.to_string(),
             entries,
-            entries_with_context,
         });
 
         Ok(())
     }
 
-    /// Lookup a basic extern function by name.
-    pub fn lookup(&self, name: &str) -> Option<ExternFn> {
-        let (ext_idx, entry_idx, with_context) = self.cache.get(name)?;
-        if *with_context {
-            return None;
-        }
+    /// Lookup an extension function by name.
+    pub fn lookup(&self, name: &str) -> Option<ExternFnPtr> {
+        let (ext_idx, entry_idx) = self.cache.get(name)?;
         Some(self.loaded[*ext_idx].entries[*entry_idx].func)
-    }
-
-    /// Lookup a context extern function by name.
-    pub fn lookup_with_context(&self, name: &str) -> Option<ExternFnWithContext> {
-        let (ext_idx, entry_idx, with_context) = self.cache.get(name)?;
-        if !*with_context {
-            return None;
-        }
-        Some(self.loaded[*ext_idx].entries_with_context[*entry_idx].func)
     }
 
     /// Get list of loaded extension names.
@@ -184,4 +159,3 @@ impl Default for ExtensionLoader {
         Self::new()
     }
 }
-
