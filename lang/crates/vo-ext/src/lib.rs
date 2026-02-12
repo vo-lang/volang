@@ -13,7 +13,7 @@
 //! ```ignore
 //! use vo_ext::prelude::*;
 //!
-//! #[vo_extern("mylib/math", "FastAdd")]
+//! #[vo_fn("mylib/math", "FastAdd")]
 //! fn fast_add(a: i64, b: i64) -> i64 {
 //!     a + b
 //! }
@@ -38,7 +38,6 @@
 //! ```
 
 pub use vo_ffi_macro::vo_fn;
-pub use vo_ffi_macro::vo_struct;
 pub use vo_runtime::ffi::{
     ExternCallContext, ExternFn,
     ExternResult, StdlibEntry, ExternRegistry,
@@ -109,7 +108,6 @@ macro_rules! export_extensions {
 pub mod prelude {
     pub use crate::export_extensions;
     pub use crate::vo_fn;
-    pub use crate::vo_struct;
     pub use crate::ExternResult;
     pub use crate::ExternCallContext;
     pub use crate::InterfaceSlot;

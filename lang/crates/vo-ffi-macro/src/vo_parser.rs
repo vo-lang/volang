@@ -14,84 +14,11 @@ pub struct VoFuncSig {
     pub results: Vec<VoType>,
 }
 
-impl VoFuncSig {
-    /// Create a placeholder signature from a Rust function.
-    /// Used when Vo signature parsing fails (e.g., variadic functions).
-    pub fn from_rust_fn(func: &syn::ItemFn) -> Self {
-        let params = func.sig.inputs.iter().filter_map(|arg| {
-            if let syn::FnArg::Typed(pat_type) = arg {
-                let name = if let syn::Pat::Ident(ident) = &*pat_type.pat {
-                    ident.ident.to_string()
-                } else {
-                    String::new()
-                };
-                let ty = rust_type_to_vo(&pat_type.ty);
-                Some(VoParam { name, ty })
-            } else {
-                None
-            }
-        }).collect();
-
-        let results = match &func.sig.output {
-            syn::ReturnType::Default => Vec::new(),
-            syn::ReturnType::Type(_, ty) => {
-                if let syn::Type::Tuple(tuple) = &**ty {
-                    tuple.elems.iter().map(rust_type_to_vo).collect()
-                } else {
-                    vec![rust_type_to_vo(ty)]
-                }
-            }
-        };
-
-        Self {
-            name: func.sig.ident.to_string(),
-            params,
-            results,
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct VoImport {
     pub alias: Option<String>,
     pub path: String,
-}
-
-fn rust_type_to_vo(ty: &syn::Type) -> VoType {
-    match ty {
-        syn::Type::Path(p) => {
-            let ident = p.path.segments.last()
-                .map(|s| s.ident.to_string())
-                .unwrap_or_default();
-            match ident.as_str() {
-                "i64" | "isize" => VoType::Int64,
-                "i32" => VoType::Int32,
-                "i16" => VoType::Int16,
-                "i8" => VoType::Int8,
-                "u64" | "usize" => VoType::Uint64,
-                "u32" => VoType::Uint32,
-                "u16" => VoType::Uint16,
-                "u8" => VoType::Uint8,
-                "f64" => VoType::Float64,
-                "f32" => VoType::Float32,
-                "bool" => VoType::Bool,
-                "String" => VoType::String,
-                _ => VoType::Any,
-            }
-        }
-        syn::Type::Reference(r) => {
-            if let syn::Type::Path(p) = &*r.elem {
-                let ident = p.path.segments.last()
-                    .map(|s| s.ident.to_string())
-                    .unwrap_or_default();
-                if ident == "str" {
-                    return VoType::String;
-                }
-            }
-            VoType::Any
-        }
-        _ => VoType::Any,
-    }
 }
 
 /// A Vo function parameter.
@@ -230,19 +157,13 @@ impl VoType {
             
             // Named type: resolve alias
             VoType::Named(name) => {
-                // Check for well-known types
-                match name.as_str() {
-                    "error" => 2, // error is an interface
-                    _ => {
-                        // Try to resolve type alias
-                        if let Some(underlying) = type_aliases.get(name) {
-                            underlying.slot_count(type_aliases)
-                        } else {
-                            // Unknown named type, assume it's a reference type (1 slot)
-                            // This handles struct types passed by reference
-                            1
-                        }
-                    }
+                // Try to resolve type alias
+                if let Some(underlying) = type_aliases.get(name) {
+                    underlying.slot_count(type_aliases)
+                } else {
+                    // Unknown named type, assume it's a reference type (1 slot)
+                    // This handles struct types passed by reference
+                    1
                 }
             }
             
@@ -256,143 +177,67 @@ impl VoType {
         }
     }
 
-    /// Get the expected Rust type for this Vo type.
-    pub fn expected_rust_type(&self) -> &'static str {
+    /// Map this Vo type to a codegen SlotType, if one exists.
+    ///
+    /// Returns None for types that don't map cleanly (Variadic, Struct, Any with
+    /// special semantics). The caller should handle those cases explicitly.
+    pub fn to_slot_type(&self) -> Option<crate::codegen::SlotType> {
+        use crate::codegen::SlotType;
         match self {
-            VoType::Int | VoType::Int64 => "i64",
-            VoType::Int8 => "i8",
-            VoType::Int16 => "i16",
-            VoType::Int32 => "i32",
-            VoType::Uint | VoType::Uint64 => "u64",
-            VoType::Uint8 => "u8",
-            VoType::Uint16 => "u16",
-            VoType::Uint32 => "u32",
-            VoType::Float32 => "f32",
-            VoType::Float64 => "f64",
-            VoType::Bool => "bool",
-            VoType::String => "&str",
-            VoType::Any => "any",
-            VoType::Pointer(_) => "GcRef",
-            VoType::Slice(inner) => match inner.as_ref() {
-                VoType::Uint8 => "&[u8]",
-                _ => "GcRef",
-            },
-            VoType::Array(_, _) => "GcRef",
-            VoType::Map(_, _) => "GcRef",
-            VoType::Chan(_, _) => "GcRef",
-            VoType::Port(_) => "GcRef",
-            VoType::Island => "GcRef",
-            VoType::Func(_, _) => "GcRef",
-            VoType::Named(_) => "GcRef",
-            VoType::Variadic(_) => "variadic",
-            VoType::Struct(_) => "struct",
+            VoType::Int | VoType::Int8 | VoType::Int16 | VoType::Int32 | VoType::Int64 => Some(SlotType::I64),
+            VoType::Uint | VoType::Uint8 | VoType::Uint16 | VoType::Uint32 | VoType::Uint64 => Some(SlotType::U64),
+            VoType::Float32 => Some(SlotType::F32),
+            VoType::Float64 => Some(SlotType::F64),
+            VoType::Bool => Some(SlotType::Bool),
+            VoType::String => Some(SlotType::Str),
+            VoType::Slice(inner) if matches!(inner.as_ref(), VoType::Uint8) => Some(SlotType::Bytes),
+            VoType::Any => Some(SlotType::Any),
+            VoType::Pointer(_) | VoType::Slice(_) | VoType::Array(_, _) |
+            VoType::Map(_, _) | VoType::Chan(_, _) | VoType::Port(_) |
+            VoType::Island | VoType::Func(_, _) | VoType::Named(_) => Some(SlotType::GcRef),
+            VoType::Variadic(_) | VoType::Struct(_) => None,
         }
     }
 
-}
-
-/// Parsed struct field information.
-#[derive(Debug, Clone)]
-pub struct VoStructField {
-    pub name: String,
-    pub ty: VoType,
-}
-
-/// Parsed struct definition.
-#[derive(Debug, Clone)]
-pub struct VoStructDef {
-    #[allow(dead_code)]
-    pub name: String,
-    pub fields: Vec<VoStructField>,
-}
-
-impl VoStructDef {
-    /// Calculate field offsets based on type slot counts.
-    pub fn field_offsets(&self, type_aliases: &std::collections::HashMap<String, VoType>) -> Vec<u16> {
-        let mut offsets = Vec::new();
-        let mut current_offset: u16 = 0;
-        for field in &self.fields {
-            offsets.push(current_offset);
-            current_offset += field.ty.slot_count(type_aliases);
+    /// Get the expected Rust type for this Vo type (canonical, for error messages).
+    pub fn expected_rust_type(&self) -> &'static str {
+        if let Some(st) = self.to_slot_type() {
+            st.compatible_rust_types()[0]
+        } else {
+            match self {
+                VoType::Variadic(_) => "variadic",
+                VoType::Struct(_) => "struct",
+                _ => "?",
+            }
         }
-        offsets
-    }
-    
-    /// Get total slot count for this struct.
-    pub fn total_slots(&self, type_aliases: &std::collections::HashMap<String, VoType>) -> u16 {
-        self.fields.iter().map(|f| f.ty.slot_count(type_aliases)).sum()
     }
 }
 
-/// Find and parse a struct definition from a package directory using vo-syntax parser.
-pub fn find_struct_def(pkg_dir: &Path, struct_name: &str) -> Result<VoStructDef, String> {
-    let entries = std::fs::read_dir(pkg_dir)
-        .map_err(|e| format!("cannot read directory {:?}: {}", pkg_dir, e))?;
-    
+/// Iterate over all `.vo` files in a directory, parsing each one and calling the
+/// visitor with the AST and interner. Skips files that fail to read.
+fn for_each_parsed_vo_file(
+    pkg_dir: &Path,
+    mut visitor: impl FnMut(&ast::File, &SymbolInterner),
+) {
+    let Ok(entries) = std::fs::read_dir(pkg_dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().map(|e| e == "vo").unwrap_or(false) {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 let (file, _diagnostics, interner) = vo_syntax::parse(&content, 0);
-                
-                for decl in &file.decls {
-                    if let ast::Decl::Type(type_decl) = decl {
-                        let name = interner.resolve(type_decl.name.symbol).unwrap_or("");
-                        if name == struct_name {
-                            if let TypeExprKind::Struct(struct_type) = &type_decl.ty.kind {
-                                let fields = struct_type.fields.iter()
-                                    .flat_map(|field| {
-                                        let ty = type_expr_to_vo_type(&field.ty, &interner);
-                                        if field.names.is_empty() {
-                                            // Embedded field
-                                            vec![VoStructField {
-                                                name: String::new(),
-                                                ty,
-                                            }]
-                                        } else {
-                                            field.names.iter().map(|n| VoStructField {
-                                                name: interner.resolve(n.symbol).unwrap_or("").to_string(),
-                                                ty: ty.clone(),
-                                            }).collect()
-                                        }
-                                    })
-                                    .collect();
-                                
-                                return Ok(VoStructDef {
-                                    name: struct_name.to_string(),
-                                    fields,
-                                });
-                            }
-                        }
-                    }
-                }
+                visitor(&file, &interner);
             }
         }
     }
-    
-    Err(format!("struct '{}' not found in {:?}", struct_name, pkg_dir))
 }
 
 /// Parse all type aliases from a package directory.
 /// Returns a map from type name to underlying type.
 pub fn parse_type_aliases(pkg_dir: &Path) -> std::collections::HashMap<String, VoType> {
     let mut aliases = std::collections::HashMap::new();
-    
-    let entries = match std::fs::read_dir(pkg_dir) {
-        Ok(e) => e,
-        Err(_) => return aliases,
-    };
-    
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().map(|e| e == "vo").unwrap_or(false) {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let (file, _diagnostics, interner) = vo_syntax::parse(&content, 0);
-                parse_type_aliases_from_ast(&file, &mut aliases, &interner);
-            }
-        }
-    }
-    
+    for_each_parsed_vo_file(pkg_dir, |file, interner| {
+        parse_type_aliases_from_ast(file, &mut aliases, interner);
+    });
     aliases
 }
 
@@ -505,28 +350,20 @@ fn type_expr_to_vo_type(type_expr: &ast::TypeExpr, interner: &SymbolInterner) ->
 
 /// Find and parse extern functions from a package directory using vo-syntax parser.
 pub fn find_extern_func(pkg_dir: &Path, func_name: &str) -> Result<VoFuncSig, String> {
-    let entries = std::fs::read_dir(pkg_dir)
-        .map_err(|e| format!("cannot read directory {:?}: {}", pkg_dir, e))?;
-    
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().map(|e| e == "vo").unwrap_or(false) {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let (file, _diagnostics, interner) = vo_syntax::parse(&content, 0);
-                
-                for decl in &file.decls {
-                    if let ast::Decl::Func(func_decl) = decl {
-                        let name = interner.resolve(func_decl.name.symbol).unwrap_or("");
-                        if name == func_name && func_decl.is_extern() {
-                            return Ok(func_decl_to_vo_sig(func_decl, &interner));
-                        }
-                    }
+    let mut result = None;
+    for_each_parsed_vo_file(pkg_dir, |file, interner| {
+        if result.is_some() { return; }
+        for decl in &file.decls {
+            if let ast::Decl::Func(func_decl) = decl {
+                let name = interner.resolve(func_decl.name.symbol).unwrap_or("");
+                if name == func_name && func_decl.is_extern() {
+                    result = Some(func_decl_to_vo_sig(func_decl, interner));
+                    return;
                 }
             }
         }
-    }
-    
-    Err(format!("extern function '{}' not found in {:?}", func_name, pkg_dir))
+    });
+    result.ok_or_else(|| format!("extern function '{}' not found in {:?}", func_name, pkg_dir))
 }
 
 /// Convert vo-syntax FuncDecl to VoFuncSig.
@@ -568,44 +405,26 @@ fn func_decl_to_vo_sig(func_decl: &ast::FuncDecl, interner: &SymbolInterner) -> 
 /// Parse imports from a package directory using vo-syntax parser.
 pub fn parse_imports(pkg_dir: &Path) -> Vec<VoImport> {
     let mut imports = Vec::new();
-    let entries = match std::fs::read_dir(pkg_dir) {
-        Ok(e) => e,
-        Err(_) => return imports,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().map(|e| e == "vo").unwrap_or(false) {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let (file, _diagnostics, interner) = vo_syntax::parse(&content, 0);
-                for import in &file.imports {
-                    // StringLit has .value field with the parsed string value
-                    let path_str = import.path.value.clone();
-                    let alias = import.alias.as_ref().map(|a| interner.resolve(a.symbol).unwrap_or("").to_string());
-                    imports.push(VoImport { alias, path: path_str });
-                }
-            }
+    for_each_parsed_vo_file(pkg_dir, |file, interner| {
+        for import in &file.imports {
+            let path_str = import.path.value.clone();
+            let alias = import.alias.as_ref().map(|a| interner.resolve(a.symbol).unwrap_or("").to_string());
+            imports.push(VoImport { alias, path: path_str });
         }
-    }
-
+    });
     imports
 }
 
 /// Find package name from a package directory using vo-syntax parser.
 pub fn find_package_name(pkg_dir: &Path) -> Option<String> {
-    let entries = std::fs::read_dir(pkg_dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().map(|e| e == "vo").unwrap_or(false) {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let (file, _diagnostics, interner) = vo_syntax::parse(&content, 0);
-                if let Some(pkg) = &file.package {
-                    if let Some(name) = interner.resolve(pkg.symbol) {
-                        return Some(name.to_string());
-                    }
-                }
+    let mut result = None;
+    for_each_parsed_vo_file(pkg_dir, |file, interner| {
+        if result.is_some() { return; }
+        if let Some(pkg) = &file.package {
+            if let Some(name) = interner.resolve(pkg.symbol) {
+                result = Some(name.to_string());
             }
         }
-    }
-    None
+    });
+    result
 }
