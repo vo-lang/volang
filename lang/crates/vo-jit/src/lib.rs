@@ -16,11 +16,11 @@ pub use translator::{HelperFuncs, IrEmitter, TranslateResult};
 
 use std::collections::HashMap;
 
-use cranelift_codegen::ir::{types, AbiParam, Signature};
+use cranelift_codegen::ir::{types, AbiParam, FuncRef, Signature};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::FunctionBuilderContext;
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::Module;
+use cranelift_module::{FuncId, Module};
 
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::Opcode;
@@ -126,6 +126,8 @@ pub struct JitCompiler {
     module: JITModule,
     ctx: cranelift_codegen::Context,
     cache: JitCache,
+    func_decl_ids: HashMap<u32, FuncId>,
+    callee_func_refs_buf: Vec<Option<FuncRef>>,
     helper_funcs: HelperFuncIds,
     debug_ir: bool,
 }
@@ -155,11 +157,49 @@ impl JitCompiler {
         let ptr_type = module.target_config().pointer_type();
         let helper_funcs = helpers::declare_helpers(&mut module, ptr_type)?;
 
-        Ok(Self { module, ctx, cache: JitCache::new(), helper_funcs, debug_ir })
+        Ok(Self {
+            module,
+            ctx,
+            cache: JitCache::new(),
+            func_decl_ids: HashMap::new(),
+            callee_func_refs_buf: Vec::new(),
+            helper_funcs,
+            debug_ir,
+        })
     }
 
     fn get_helper_refs(&mut self) -> HelperFuncs {
         helpers::get_helper_refs(&mut self.module, &mut self.ctx.func, &self.helper_funcs)
+    }
+
+    fn rebuild_callee_func_refs(
+        &mut self,
+        refs: &mut Vec<Option<FuncRef>>,
+        func_count: usize,
+        available_direct_callees: &[u32],
+        self_entry: Option<(u32, FuncRef)>,
+    ) {
+        refs.clear();
+        refs.resize(func_count, None);
+
+        if let Some((self_func_id, self_ref)) = self_entry {
+            if (self_func_id as usize) < refs.len() {
+                refs[self_func_id as usize] = Some(self_ref);
+            }
+        }
+
+        for &callee_id in available_direct_callees {
+            if (callee_id as usize) >= refs.len() {
+                continue;
+            }
+            if refs[callee_id as usize].is_some() {
+                continue;
+            }
+            if let Some(&decl_id) = self.func_decl_ids.get(&callee_id) {
+                let callee_ref = self.module.declare_func_in_func(decl_id, &mut self.ctx.func);
+                refs[callee_id as usize] = Some(callee_ref);
+            }
+        }
     }
 
     fn finalize_function(&mut self, func_id_cl: cranelift_module::FuncId, #[cfg_attr(not(debug_assertions), allow(unused))] name: &str) -> Result<*const u8, JitError> {
@@ -186,7 +226,13 @@ impl JitCompiler {
         Ok(self.module.get_finalized_function(func_id_cl))
     }
 
-    pub fn compile(&mut self, func_id: u32, func: &FunctionDef, vo_module: &VoModule) -> Result<(), JitError> {
+    pub fn compile(
+        &mut self,
+        func_id: u32,
+        func: &FunctionDef,
+        vo_module: &VoModule,
+        available_direct_callees: &[u32],
+    ) -> Result<(), JitError> {
         if self.cache.contains(func_id) {
             return Ok(());
         }
@@ -203,6 +249,7 @@ impl JitCompiler {
 
         let func_name = format!("vo_jit_{}", func_id);
         let func_id_cl = self.module.declare_function(&func_name, cranelift_module::Linkage::Local, &sig)?;
+        self.func_decl_ids.insert(func_id, func_id_cl);
 
         self.ctx.func.signature = sig;
         self.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(0, func_id);
@@ -211,8 +258,28 @@ impl JitCompiler {
         let helpers = self.get_helper_refs();
         // Get FuncRef for self-recursive calls optimization
         let self_func_ref = self.module.declare_func_in_func(func_id_cl, &mut self.ctx.func);
-        let compiler = FunctionCompiler::new(&mut self.ctx.func, &mut func_ctx, func_id, func, vo_module, helpers, Some(self_func_ref));
-        compiler.compile()?;
+        let mut callee_func_refs = std::mem::take(&mut self.callee_func_refs_buf);
+        self.rebuild_callee_func_refs(
+            &mut callee_func_refs,
+            vo_module.functions.len(),
+            available_direct_callees,
+            Some((func_id, self_func_ref)),
+        );
+        let compile_result = {
+            let compiler = FunctionCompiler::new(
+                &mut self.ctx.func,
+                &mut func_ctx,
+                func_id,
+                func,
+                vo_module,
+                helpers,
+                Some(self_func_ref),
+                &callee_func_refs,
+            );
+            compiler.compile()
+        };
+        self.callee_func_refs_buf = callee_func_refs;
+        compile_result?;
         
         if self.debug_ir {
             eprintln!("=== JIT IR for func_{} {} ===", func_id, func.name);
@@ -228,7 +295,14 @@ impl JitCompiler {
         Ok(())
     }
 
-    pub fn compile_loop(&mut self, func_id: u32, func: &FunctionDef, vo_module: &VoModule, loop_info: &LoopInfo) -> Result<(), JitError> {
+    pub fn compile_loop(
+        &mut self,
+        func_id: u32,
+        func: &FunctionDef,
+        vo_module: &VoModule,
+        loop_info: &LoopInfo,
+        available_direct_callees: &[u32],
+    ) -> Result<(), JitError> {
         let begin_pc = loop_info.begin_pc;
         if self.cache.contains_loop(func_id, begin_pc) {
             return Ok(());
@@ -250,8 +324,28 @@ impl JitCompiler {
 
         let mut func_ctx = FunctionBuilderContext::new();
         let helpers = self.get_helper_refs();
-        let compiler = LoopCompiler::new(&mut self.ctx.func, &mut func_ctx, func_id, func, vo_module, loop_info, helpers);
-        compiler.compile()?;
+        let mut callee_func_refs = std::mem::take(&mut self.callee_func_refs_buf);
+        self.rebuild_callee_func_refs(
+            &mut callee_func_refs,
+            vo_module.functions.len(),
+            available_direct_callees,
+            None,
+        );
+        let compile_result = {
+            let compiler = LoopCompiler::new(
+                &mut self.ctx.func,
+                &mut func_ctx,
+                func_id,
+                func,
+                vo_module,
+                loop_info,
+                helpers,
+                &callee_func_refs,
+            );
+            compiler.compile()
+        };
+        self.callee_func_refs_buf = callee_func_refs;
+        compile_result?;
         
         let code_ptr = self.finalize_function(func_id_cl, &format!("loop_{}_{}", func_id, begin_pc))?;
         let compiled = CompiledLoop { code_ptr, loop_info: loop_info.clone() };

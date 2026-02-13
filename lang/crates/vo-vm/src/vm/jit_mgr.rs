@@ -118,6 +118,9 @@ pub struct JitManager {
     
     /// Configuration.
     config: JitConfig,
+
+    /// Reusable scratch buffer for direct callee snapshots.
+    available_direct_callees_buf: Vec<u32>,
 }
 
 // SAFETY: func_table contains raw pointers to JIT code which is thread-safe to read.
@@ -133,6 +136,7 @@ impl JitManager {
             direct_call_table: Vec::new(),
             compiler: JitCompiler::new()?,
             config: JitConfig::default(),
+            available_direct_callees_buf: Vec::new(),
         })
     }
     
@@ -145,6 +149,7 @@ impl JitManager {
             direct_call_table: Vec::new(),
             compiler,
             config,
+            available_direct_callees_buf: Vec::new(),
         })
     }
     
@@ -186,6 +191,17 @@ impl JitManager {
     #[inline]
     pub fn config(&self) -> &JitConfig {
         &self.config
+    }
+
+    fn rebuild_available_direct_callees(&self, out: &mut Vec<u32>) {
+        out.clear();
+        out.reserve(self.func_table.len().saturating_sub(out.capacity()));
+
+        for (id, ptr) in self.func_table.iter().enumerate() {
+            if !ptr.is_null() {
+                out.push(id as u32);
+            }
+        }
     }
     
     // =========================================================================
@@ -278,19 +294,31 @@ impl JitManager {
         func_def: &FunctionDef, 
         module: &VoModule
     ) -> Result<(), JitError> {
-        let info = match self.funcs.get_mut(func_id as usize) {
-            Some(i) => i,
+        let idx = func_id as usize;
+        let current_state = match self.funcs.get(idx) {
+            Some(i) => i.state,
             None => return Err(JitError::FunctionNotFound(func_id)),
         };
-        
+
         // Already compiled
-        if info.state == CompileState::FullyCompiled {
+        if current_state == CompileState::FullyCompiled {
             return Ok(());
         }
         
+        // Build a snapshot of currently compiled functions so codegen can emit
+        // direct FuncRef calls for non-self static callees when possible.
+        let mut available_direct_callees = std::mem::take(&mut self.available_direct_callees_buf);
+        self.rebuild_available_direct_callees(&mut available_direct_callees);
+
         // Compile
-        if let Err(e) = self.compiler.compile(func_id, func_def, module) {
-            info.state = CompileState::Unsupported;
+        let compile_result = self
+            .compiler
+            .compile(func_id, func_def, module, &available_direct_callees);
+        self.available_direct_callees_buf = available_direct_callees;
+        if let Err(e) = compile_result {
+            if let Some(info) = self.funcs.get_mut(idx) {
+                info.state = CompileState::Unsupported;
+            }
             return Err(e);
         }
         
@@ -299,15 +327,17 @@ impl JitManager {
             .ok_or_else(|| JitError::Internal("compiled but no pointer".into()))?;
         
         // Update state
-        info.full_entry = Some(ptr);
-        info.state = CompileState::FullyCompiled;
-        self.func_table[func_id as usize] = ptr as *const u8;
+        if let Some(info) = self.funcs.get_mut(idx) {
+            info.full_entry = Some(ptr);
+            info.state = CompileState::FullyCompiled;
+        }
+        self.func_table[idx] = ptr as *const u8;
         
         // Only populate direct_call_table if function is safe for JIT-to-JIT direct calls
         // from prepare callbacks. Functions with CallClosure/CallIface can return JitResult::Call
         // which the fast path non-OK handler cannot handle.
         if vo_jit::can_direct_jit_call(func_def) {
-            self.direct_call_table[func_id as usize] = ptr as *const u8;
+            self.direct_call_table[idx] = ptr as *const u8;
         }
         
         Ok(())
@@ -366,7 +396,13 @@ impl JitManager {
         module: &VoModule,
         loop_info: &LoopInfo,
     ) -> Result<(), JitError> {
-        self.compiler.compile_loop(func_id, func_def, module, loop_info)
+        let mut available_direct_callees = std::mem::take(&mut self.available_direct_callees_buf);
+        self.rebuild_available_direct_callees(&mut available_direct_callees);
+        let compile_result = self.compiler
+            .compile_loop(func_id, func_def, module, loop_info, &available_direct_callees)
+        ;
+        self.available_direct_callees_buf = available_direct_callees;
+        compile_result
     }
     
     /// Get loop function pointer.

@@ -28,6 +28,9 @@ pub struct FunctionCompiler<'a> {
     reg_consts: HashMap<u16, i64>,
     /// FuncRef for self-recursive calls (direct call optimization)
     self_func_ref: Option<FuncRef>,
+    /// FuncRef table for other already-compiled callees.
+    /// Index by func_id. None means keep indirect fallback path.
+    callee_func_refs: &'a [Option<FuncRef>],
     /// Saved jit_bp from function entry, used to recompute fiber.stack address after reallocation
     saved_jit_bp: Option<Variable>,
     /// The args_ptr parameter passed to this function (points to fiber.stack[jit_bp]).
@@ -54,6 +57,7 @@ impl<'a> FunctionCompiler<'a> {
         vo_module: &'a VoModule,
         helpers: HelperFuncs,
         self_func_ref: Option<FuncRef>,
+        callee_func_refs: &'a [Option<FuncRef>],
     ) -> Self {
         let mut builder = FunctionBuilder::new(func, func_ctx);
         let entry_block = builder.create_block();
@@ -71,6 +75,7 @@ impl<'a> FunctionCompiler<'a> {
             helpers,
             reg_consts: HashMap::new(),
             self_func_ref,
+            callee_func_refs,
             saved_jit_bp: None,
             args_ptr_val: None,
             checked_non_nil: HashSet::new(),
@@ -489,6 +494,12 @@ impl<'a> FunctionCompiler<'a> {
         // has_defer callees need VM execution (defer requires real CallFrame in fiber.frames).
         // Everything else can use JIT-to-JIT direct call with VM fallback.
         if !target_func.has_defer {
+            let callee_func_ref = self
+                .callee_func_refs
+                .get(target_func_id as usize)
+                .copied()
+                .flatten();
+
             // JIT-to-JIT direct call with runtime check for compiled callee
             // If callee returns Call/WaitIo, we propagate it to VM
             crate::call_helpers::emit_jit_call_with_fallback(self, crate::call_helpers::JitCallWithFallbackConfig {
@@ -499,7 +510,7 @@ impl<'a> FunctionCompiler<'a> {
                 call_ret_slots,
                 func_ret_slots: target_func.ret_slots as usize,
                 callee_local_slots: target_func.local_slots as usize,
-                callee_func_ref: None, // TODO: pass FuncRef for direct call when available
+                callee_func_ref,
             });
             false // Block not terminated - we have a merge block for continuation
         } else {

@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cranelift_codegen::ir::{types, Block, Function, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{types, Block, FuncRef, Function, InstBuilder, MemFlags, Value};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 
@@ -41,6 +41,8 @@ pub struct LoopCompiler<'a> {
     ctx_ptr: Value,
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
+    /// FuncRef table for already-compiled callees. Indexed by func_id.
+    callee_func_refs: &'a [Option<FuncRef>],
     checked_non_nil: HashSet<u16>,
     /// Slots >= this value must use memory reads (may be aliased by SlotSet/SlotSetN).
     memory_only_start: u16,
@@ -55,6 +57,7 @@ impl<'a> LoopCompiler<'a> {
         vo_module: &'a VoModule,
         loop_info: &'a LoopInfo,
         helpers: HelperFuncs,
+        callee_func_refs: &'a [Option<FuncRef>],
     ) -> Self {
         let mut builder = FunctionBuilder::new(func, func_ctx);
         let entry_block = builder.create_block();
@@ -76,6 +79,7 @@ impl<'a> LoopCompiler<'a> {
             ctx_ptr: Value::from_u32(0),
             helpers,
             reg_consts: HashMap::new(),
+            callee_func_refs,
             checked_non_nil: HashSet::new(),
             memory_only_start: u16::MAX,
         }
@@ -390,6 +394,12 @@ impl<'a> LoopCompiler<'a> {
         // has_defer callees need VM execution (defer requires real CallFrame in fiber.frames).
         // Everything else can use JIT-to-JIT direct call with VM fallback.
         if !target_func.has_defer {
+            let callee_func_ref = self
+                .callee_func_refs
+                .get(func_id as usize)
+                .copied()
+                .flatten();
+
             // JIT-to-JIT direct call with fallback to VM
             crate::call_helpers::emit_jit_call_with_fallback(self, crate::call_helpers::JitCallWithFallbackConfig {
                 func_id,
@@ -399,7 +409,7 @@ impl<'a> LoopCompiler<'a> {
                 call_ret_slots,
                 func_ret_slots: target_func.ret_slots as usize,
                 callee_local_slots: target_func.local_slots as usize,
-                callee_func_ref: None,
+                callee_func_ref,
             });
             false // Block not terminated - we have a merge block
         } else {
