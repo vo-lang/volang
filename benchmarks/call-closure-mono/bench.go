@@ -1,0 +1,21 @@
+package main
+
+import "fmt"
+
+func makeAdder(base int) func(int) int {
+	return func(x int) int {
+		return x + base
+	}
+}
+
+func main() {
+	iterations := 20000000
+	f := makeAdder(7)
+	acc := 0
+
+	for i := 0; i < iterations; i++ {
+		acc += f(i & 1023)
+	}
+
+	fmt.Println(acc)
+}

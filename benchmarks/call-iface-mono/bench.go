@@ -1,0 +1,27 @@
+package main
+
+import "fmt"
+
+type Adder interface {
+	Add(int) int
+}
+
+type Inc struct {
+	base int
+}
+
+func (a *Inc) Add(x int) int {
+	return x + a.base
+}
+
+func main() {
+	iterations := 20000000
+	var adder Adder = &Inc{base: 7}
+	acc := 0
+
+	for i := 0; i < iterations; i++ {
+		acc += adder.Add(i & 1023)
+	}
+
+	fmt.Println(acc)
+}

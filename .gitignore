@@ -75,3 +75,9 @@ cmd/vo-test/.vo-cache/
 lang/crates/vo-web/node_modules/
 lang/crates/vo-web/pkg/
 lang/crates/vo-web/dist/
+
+
+benchmarks/call-closure-mono/go_bench
+benchmarks/call-closure-poly4/go_bench
+benchmarks/call-iface-mono/go_bench
+benchmarks/call-iface-poly4/go_bench

@@ -4,7 +4,7 @@ Vo Development Tool - Unified test/bench/loc script
 
 Usage:
     ./d.py test [vm|jit|gc|nostd|wasm] [-v] [file.vo]
-    ./d.py bench [all|vo|<name>|score] [--all-langs]
+    ./d.py bench [all|vo|calls|<name>|score] [--all-langs] [--jit-hot]
     ./d.py loc [--with-tests]
     ./d.py play [--build-only]  Build WASM and start playground
 """
@@ -977,11 +977,26 @@ class TestRunner:
 # =============================================================================
 
 class BenchmarkRunner:
-    def __init__(self, vo_only: bool = False, all_langs: bool = False, arch: str = '64'):
+    BENCH_GROUPS = {
+        'calls': 'call-',
+    }
+
+    def __init__(
+        self,
+        vo_only: bool = False,
+        all_langs: bool = False,
+        arch: str = '64',
+        jit_hot: bool = False,
+        jit_call_threshold: int | None = None,
+        jit_loop_threshold: int | None = None,
+    ):
         self.vo_only = vo_only
         self.all_langs = all_langs
         self.arch = arch
         self.vo_bench_bin = get_vo_bench_bin(arch=arch)
+        self.jit_hot = jit_hot
+        self.jit_call_threshold = jit_call_threshold
+        self.jit_loop_threshold = jit_loop_threshold
 
     def run(self, target: str):
         if target == 'score':
@@ -991,15 +1006,34 @@ class BenchmarkRunner:
         self._check_deps()
         self._build_vo()
 
+        benchmark_scope = None
         if target == 'all' or target == 'vo':
-            self._run_all_benchmarks()
-            self.calculate_scores()
+            benchmark_scope = self._run_all_benchmarks()
+            self.calculate_scores(only_benchmarks=benchmark_scope)
+        elif target in self.BENCH_GROUPS:
+            benchmark_scope = self._run_group_benchmarks(target)
+            self.calculate_scores(only_benchmarks=benchmark_scope)
         elif self._benchmark_exists(target):
             self._run_benchmark(target)
+            benchmark_scope = [target]
+            self.calculate_scores(only_benchmarks=benchmark_scope)
         else:
             print(f"Unknown benchmark: {target}")
             self._list_benchmarks()
             sys.exit(1)
+
+    def _jit_env_prefix(self) -> str:
+        env_parts = []
+        if self.jit_hot and self.jit_call_threshold is None:
+            env_parts.append('VO_JIT_CALL_THRESHOLD=1')
+        if self.jit_call_threshold is not None:
+            env_parts.append(f'VO_JIT_CALL_THRESHOLD={self.jit_call_threshold}')
+        if self.jit_hot and self.jit_loop_threshold is None:
+            # Keep loop OSR out when measuring call-heavy benchmarks.
+            env_parts.append('VO_JIT_LOOP_THRESHOLD=999999')
+        if self.jit_loop_threshold is not None:
+            env_parts.append(f'VO_JIT_LOOP_THRESHOLD={self.jit_loop_threshold}')
+        return " ".join(env_parts)
 
     def _check_deps(self):
         missing = []
@@ -1042,14 +1076,33 @@ class BenchmarkRunner:
         for d in sorted(BENCHMARK_DIR.iterdir()):
             if d.is_dir() and d.name != 'results':
                 print(f"  - {d.name}")
+        print("Benchmark groups:")
+        for name, prefix in self.BENCH_GROUPS.items():
+            print(f"  - {name} (prefix: {prefix}*)")
 
     def _benchmark_exists(self, name: str) -> bool:
         return (BENCHMARK_DIR / name).is_dir()
 
     def _run_all_benchmarks(self):
+        ran = []
         for d in sorted(BENCHMARK_DIR.iterdir()):
             if d.is_dir() and d.name != 'results':
                 self._run_benchmark(d.name)
+                ran.append(d.name)
+        return ran
+
+    def _run_group_benchmarks(self, group: str):
+        prefix = self.BENCH_GROUPS[group]
+        benchmarks = [
+            d.name for d in sorted(BENCHMARK_DIR.iterdir())
+            if d.is_dir() and d.name != 'results' and d.name.startswith(prefix)
+        ]
+        if not benchmarks:
+            print(f"No benchmarks found for group: {group}")
+            return []
+        for name in benchmarks:
+            self._run_benchmark(name)
+        return benchmarks
 
     def _run_benchmark(self, name: str):
         bench_dir = BENCHMARK_DIR / name
@@ -1068,6 +1121,8 @@ class BenchmarkRunner:
 
         cmds = []
         names = []
+        jit_env = self._jit_env_prefix()
+        jit_label = 'Vo-JIT-Hot' if jit_env else 'Vo-JIT'
 
         if vo_file:
             # Use vo run for benchmark execution
@@ -1075,8 +1130,11 @@ class BenchmarkRunner:
             names.append('Vo-VM')
             # JIT not supported on 32-bit
             if self.arch != '32':
-                cmds.append(f"'{vo_bench_bin}' run '{vo_file}' --mode=jit")
-                names.append('Vo-JIT')
+                jit_cmd = f"'{vo_bench_bin}' run '{vo_file}' --mode=jit"
+                if jit_env:
+                    jit_cmd = f"{jit_env} {jit_cmd}"
+                cmds.append(jit_cmd)
+                names.append(jit_label)
 
         if not self.vo_only:
             if go_file:
@@ -1138,10 +1196,13 @@ class BenchmarkRunner:
 
         subprocess.run(hf_cmd)
 
-    def calculate_scores(self):
+    def calculate_scores(self, only_benchmarks: Optional[list[str]] = None):
         print(f"\n=== Calculating Scores ===\n")
 
         json_files = list(RESULTS_DIR.glob('*.json'))
+        if only_benchmarks is not None:
+            selected = set(only_benchmarks)
+            json_files = [f for f in json_files if f.stem in selected]
         if not json_files:
             print("No results found. Run benchmarks first.")
             return
@@ -1170,7 +1231,7 @@ class BenchmarkRunner:
             for result in data['results']:
                 name = result.get('command', '')
                 mean = result.get('mean')
-                if name in ('Vo-VM', 'Vo-JIT', 'Go', 'Lua', 'LuaJIT', 'Node', 'Python', 'Ruby', 'Java', 'C'):
+                if name in ('Vo-VM', 'Vo-JIT', 'Vo-JIT-Hot', 'Go', 'Lua', 'LuaJIT', 'Node', 'Python', 'Ruby', 'Java', 'C'):
                     if mean and mean > 0:
                         mean_times[name] = mean
 
@@ -1201,35 +1262,43 @@ class BenchmarkRunner:
 
         if self.vo_only:
             sorted_langs = sorted(averages.items(), key=lambda x: x[1])
+            lang_name_width = max(8, max(len(lang) for lang, _ in sorted_langs))
             print(f"\n{'=' * 60}")
             print("Language Performance (Vo-VM = 100, lower is faster):")
             print('=' * 60)
             for i, (lang, score) in enumerate(sorted_langs, 1):
                 marker = " ← baseline" if lang == 'Vo-VM' else ""
-                print(f"{i:2d}. {lang:<8}: {score:>7.1f}{marker}")
+                print(f"{i:2d}. {lang:<{lang_name_width}}: {score:>7.1f}{marker}")
         else:
             sorted_langs = sorted(averages.items(), key=lambda x: x[1])
+            lang_name_width = max(8, max(len(lang) for lang, _ in sorted_langs))
             print(f"\n{'=' * 60}")
             print("Language Performance Ranking (lower relative time is better):")
             print('=' * 60)
             for i, (lang, score) in enumerate(sorted_langs, 1):
-                print(f"{i:2d}. {lang:<8}: {score:.2f}x")
+                print(f"{i:2d}. {lang:<{lang_name_width}}: {score:.2f}x")
 
         self._print_detailed_table(json_files, sorted_langs)
 
     def _print_detailed_table(self, json_files: list, sorted_langs: list):
-        print(f"\n{'=' * 80}")
-        print("Detailed relative times by benchmark:")
-        print('=' * 80)
-
         benchmarks = sorted(f.stem for f in json_files)
         lang_order = [lang for lang, _ in sorted_langs]
 
-        header = f"{'Benchmark':<15}"
+        benchmark_width = max(15, max((len(b) for b in benchmarks), default=15))
+        lang_widths = {
+            lang: max(8, len(lang))
+            for lang in lang_order
+        }
+
+        print(f"\n{'=' * (benchmark_width + sum(w + 1 for w in lang_widths.values()) + 2)}")
+        print("Detailed relative times by benchmark:")
+        print('=' * (benchmark_width + sum(w + 1 for w in lang_widths.values()) + 2))
+
+        header = f"{'Benchmark':<{benchmark_width}}"
         for lang in lang_order:
-            header += f" {lang:>8}"
+            header += f" {lang:>{lang_widths[lang]}}"
         print(header)
-        print('-' * 80)
+        print('-' * len(header))
 
         for benchmark in benchmarks:
             with open(RESULTS_DIR / f"{benchmark}.json") as f:
@@ -1253,17 +1322,17 @@ class BenchmarkRunner:
             else:
                 baseline = min(mean_times.values())
 
-            row = f"{benchmark:<15}"
+            row = f"{benchmark:<{benchmark_width}}"
             for lang in lang_order:
                 if lang in mean_times:
                     if self.vo_only:
                         val = (mean_times[lang] / baseline) * 100
-                        row += f" {val:>8.1f}"
+                        row += f" {val:>{lang_widths[lang]}.1f}"
                     else:
                         val = mean_times[lang] / baseline
-                        row += f" {val:>8.2f}"
+                        row += f" {val:>{lang_widths[lang]}.2f}"
                 else:
-                    row += f" {'-':>8}"
+                    row += f" {'-':>{lang_widths[lang]}}"
             print(row)
 
         print()
@@ -1404,11 +1473,17 @@ def main():
     # bench
     bench_parser = subparsers.add_parser('bench', help='Run benchmarks')
     bench_parser.add_argument('target', nargs='?', default='all',
-                              help='all, vo, score, or benchmark name')
+                              help='all, vo, calls, score, or benchmark name')
     bench_parser.add_argument('--all-langs', action='store_true',
                               help='Include Python and Ruby')
     bench_parser.add_argument('--arch', choices=['32', '64'], default='64',
                               help='Target architecture (default: 64)')
+    bench_parser.add_argument('--jit-hot', action='store_true',
+                              help='Run JIT benchmark with hot thresholds (call=1, loop=999999 by default)')
+    bench_parser.add_argument('--jit-call-threshold', type=int,
+                              help='Override VO_JIT_CALL_THRESHOLD for JIT benchmark runs')
+    bench_parser.add_argument('--jit-loop-threshold', type=int,
+                              help='Override VO_JIT_LOOP_THRESHOLD for JIT benchmark runs')
 
     # loc
     loc_parser = subparsers.add_parser('loc', help='Code statistics')
@@ -1452,7 +1527,14 @@ def main():
 
     elif args.command == 'bench':
         vo_only = args.target == 'vo'
-        runner = BenchmarkRunner(vo_only=vo_only, all_langs=args.all_langs, arch=args.arch)
+        runner = BenchmarkRunner(
+            vo_only=vo_only,
+            all_langs=args.all_langs,
+            arch=args.arch,
+            jit_hot=args.jit_hot,
+            jit_call_threshold=args.jit_call_threshold,
+            jit_loop_threshold=args.jit_loop_threshold,
+        )
         runner.run(args.target)
 
     elif args.command == 'loc':
