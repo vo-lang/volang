@@ -241,7 +241,7 @@ fn handle_jit_result(
             let panic_msg = fiber.take_recoverable_panic()
                 .unwrap_or_else(|| create_default_panic_msg(&mut vm.state.gc));
             
-            materialize_jit_frames(fiber, 0);
+            materialize_jit_frames(fiber, module, 0);
             
             // Set panic state and start unwinding
             fiber.set_recoverable_panic(panic_msg);
@@ -270,6 +270,12 @@ fn handle_jit_result(
                     callee_ret_slots as u16, call_ret_reg,
                     callee_bp, caller_resume_pc,
                 );
+                // Trigger JIT compilation for callee so future dynamic calls
+                // can use the JIT-to-JIT fast path.
+                if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
+                    let callee_func_def = &module.functions[callee_func_id as usize];
+                    let _ = jit_mgr.resolve_call(callee_func_id, callee_func_def, module);
+                }
                 return ExecResult::FrameChanged;
             }
             
@@ -294,7 +300,7 @@ fn handle_jit_result(
         }
         JitResult::WaitIo => {
             let resume_pc = ctx.call_resume_pc();
-            materialize_jit_frames(fiber, resume_pc);
+            materialize_jit_frames(fiber, module, resume_pc);
             
             #[cfg(feature = "std")]
             {
@@ -309,7 +315,7 @@ fn handle_jit_result(
         }
         JitResult::WaitQueue => {
             let resume_pc = ctx.call_resume_pc();
-            materialize_jit_frames(fiber, resume_pc);
+            materialize_jit_frames(fiber, module, resume_pc);
             ExecResult::Block(crate::fiber::BlockReason::Queue)
         }
         JitResult::Replay => {
@@ -317,7 +323,7 @@ fn handle_jit_result(
             // resume_pc points at the CallExtern instruction itself, so VM will
             // re-execute it and go through the suspend/replay path.
             let resume_pc = ctx.call_resume_pc();
-            materialize_jit_frames(fiber, resume_pc);
+            materialize_jit_frames(fiber, module, resume_pc);
             ExecResult::FrameChanged
         }
     }
@@ -347,8 +353,8 @@ fn setup_prepared_call(
     
     // Materialize any intermediate JIT frames from non-OK propagation
     if !fiber.resume_stack.is_empty() {
-        materialize_jit_frames(fiber, caller_resume_pc);
-        fiber.resume_stack.clear();
+        materialize_jit_frames(fiber, module, caller_resume_pc);
+        // resume_stack already cleared by materialize_jit_frames
     } else {
         if let Some(frame) = fiber.frames.last_mut() {
             frame.pc = caller_resume_pc as usize;
@@ -389,7 +395,7 @@ fn setup_regular_call(
     call_arg_start: usize,
     resume_pc: u32,
 ) -> (usize, usize) {
-    materialize_jit_frames(fiber, resume_pc);
+    materialize_jit_frames(fiber, module, resume_pc);
     
     // After materialize_jit_frames, the last frame is the immediate caller.
     let caller_frame = fiber.frames.last().unwrap();
@@ -435,29 +441,31 @@ fn setup_regular_call(
 ///
 /// # Resume Stack Structure
 ///
-/// With lazy push, resume_stack is built in REVERSE order (callee first, then caller):
-/// - JIT A calls B, B calls C, C returns non-OK
-/// - C's frame info is pushed first (by B's non-OK handler)
-/// - B's frame info is pushed next (by A's non-OK handler)
-/// - resume_stack = [C_info, B_info] (reverse order!)
+/// resume_stack is built in REVERSE order (innermost callee first, outermost last):
+/// - JIT A calls B, B calls C, C returns non-OK (e.g. WaitIo)
+/// - B's non-OK handler pushes (C_func_id, B_resume_pc, C_bp, B_bp)
+/// - A's non-OK handler pushes (B_func_id, A_resume_pc, B_bp, A_bp)
+/// - resume_stack = [C_entry, B_entry]
 ///
 /// We iterate in reverse to get [B, C] order for fiber.frames.
 ///
 /// # ResumePoint Semantics
 ///
-/// Each ResumePoint contains:
-/// - func_id, bp: identifies the callee frame
-/// - resume_pc: the CALLER's resume pc (where caller should continue after callee returns)
+/// Each entry represents a CALLEE frame with the CALLER's resume info:
+/// - `func_id`: CALLEE's func_id (the function whose frame is at `bp`)
+/// - `bp`: callee's base pointer (where callee's frame lives in fiber.stack)
+/// - `resume_pc`: CALLER's resume pc (becomes the previous frame's pc)
+/// - `caller_bp`: caller's base pointer
+/// - `ret_reg`/`ret_slots`: caller's return destination
+///
+/// The entry frame (fiber.frames.last()) is the JIT dispatch entry function.
+/// Step 1 updates its pc to the outermost entry's resume_pc.
+/// Step 2 creates CallFrame(callee_func_id, callee_bp) for each entry.
 ///
 /// # OSR Deduplication
 ///
-/// When a function enters JIT via OSR (On-Stack Replacement), its frame already
-/// exists in fiber.frames (pushed by VM at function entry). If the same function
-/// later appears in resume_stack (from JIT-to-JIT call chain), we must NOT create
-/// a duplicate frame. Instead, we only update the existing frame's pc.
-///
-/// Detection: func_id AND bp must both match (same function at same stack position).
-fn materialize_jit_frames(fiber: &mut Fiber, resume_pc: u32) {
+/// If a frame with same func_id AND bp already exists, just update pc.
+fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
     let len = fiber.resume_stack.len();
     
     if len == 0 {
@@ -488,6 +496,11 @@ fn materialize_jit_frames(fiber: &mut Fiber, resume_pc: u32) {
             fiber.resume_stack[i - 1].resume_pc as usize
         };
         
+        // rp.func_id is the CALLEE's func_id, rp.bp is the callee's bp.
+        // This creates a frame for the callee at the correct location.
+        // rp.caller_bp is the caller's bp (used for ret_reg destination).
+        // rp.resume_pc is the CALLER's resume pc (used for the previous frame's pc).
+        
         // Check for OSR duplicate: same func_id AND same bp means same frame
         let existing = fiber.frames.iter_mut().find(|f| 
             f.func_id == rp.func_id && f.bp == rp.bp as usize
@@ -508,6 +521,13 @@ fn materialize_jit_frames(fiber: &mut Fiber, resume_pc: u32) {
             fiber.frames.push(frame);
         }
     }
+    
+    // Step 3: Fix fiber.sp — must cover the innermost frame.
+    // The non-OK propagation chain's push_frame calls overwrote fiber.sp with
+    // progressively lower values. Restore it to the innermost callee's sp.
+    let innermost = &fiber.resume_stack[0];
+    let innermost_local_slots = module.functions[innermost.func_id as usize].local_slots as usize;
+    fiber.sp = innermost.bp + innermost_local_slots;
     
     // Clear resume_stack since VM now owns the frames
     fiber.resume_stack.clear();
@@ -640,6 +660,7 @@ pub fn dispatch_loop_osr(
     fiber_id: crate::scheduler::FiberId,
     loop_func: vo_jit::LoopFunc,
     bp: usize,
+    local_slots: usize,
 ) -> OsrResult {
     // Use raw pointers to avoid borrow conflicts
     let module_ptr = vm.module.as_ref().unwrap() as *const Module;
@@ -649,12 +670,16 @@ pub fn dispatch_loop_osr(
         let module = &*module_ptr;
         let fiber = &mut *fiber_ptr;
         
-        // Build JitContext
+        // Sync fiber.sp to the correct value for this frame.
+        // After a WaitIo cycle, fiber.sp may be stale (left at a higher value
+        // by push_frame in the non-OK path). The correct sp is bp + local_slots.
+        fiber.sp = bp + local_slots;
+        
         let mut ctx = build_jit_context(vm, fiber, module);
         ctx.ctx.stack_ptr = fiber.stack_ptr();
         ctx.ctx.stack_cap = fiber.stack.len() as u32;
         ctx.ctx.jit_bp = bp as u32;
-        
+
         // locals_ptr points to fiber.stack[bp..]
         let locals_ptr = fiber.stack_ptr().add(bp);
         
@@ -716,6 +741,13 @@ pub fn dispatch_loop_osr(
                     callee_ret_slots, call_ret_reg,
                     callee_bp, caller_resume_pc,
                 );
+                // Hint: trigger JIT compilation for callee so future loop OSR
+                // iterations can use JIT-to-JIT fast path. Error ignored because
+                // this is best-effort — the VM fallback path works regardless.
+                if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
+                    let callee_func_def = &module.functions[callee_func_id as usize];
+                    let _ = jit_mgr.resolve_call(callee_func_id, callee_func_def, module);
+                }
                 OsrResult::FrameChanged
             } else {
                 let resume_pc = ctx.call_resume_pc();
@@ -782,7 +814,9 @@ pub(crate) fn try_loop_osr(
     bp: usize,
 ) -> Option<OsrResult> {
     let loop_func = get_or_compile_loop(vm, func_id, loop_pc)?;
-    Some(dispatch_loop_osr(vm, fiber_id, loop_func, bp))
+    let module = vm.module.as_ref().unwrap();
+    let local_slots = module.functions[func_id as usize].local_slots as usize;
+    Some(dispatch_loop_osr(vm, fiber_id, loop_func, bp, local_slots))
 }
 
 /// Get compiled loop or compile if hot. Returns None if not ready.

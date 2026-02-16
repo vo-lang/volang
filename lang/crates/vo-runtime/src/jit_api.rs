@@ -60,7 +60,80 @@ pub type JitPushResumePointFn = extern "C" fn(
     ret_slots: u32,
 );
 
+/// Monomorphic inline cache entry for dynamic calls (closure/iface).
+///
+/// Each JIT callsite hashes to an IC entry. On hit, the JIT fast path
+/// skips the prepare callback entirely and does a direct JIT-to-JIT call
+/// with native stack args.
+///
+/// Layout: 32 bytes, 8-aligned.
+#[derive(Debug)]
+#[repr(C)]
+pub struct DynCallIC {
+    /// Cache key: func_id (closure) or packed itab_id|method_idx (iface).
+    /// 0 = empty/invalid entry.
+    pub key: u32,
+    /// Callee's local_slots count.
+    pub local_slots: u32,
+    /// Cached JIT function pointer (0 = callee not compiled or not in direct_call_table).
+    pub jit_func_ptr: u64,
+    /// Offset where user args start in callee frame (0, 1, or recv_slots).
+    pub arg_offset: u32,
+    /// What to place in slot0:
+    ///   0 = nothing (named function wrapper)
+    ///   1 = closure_ref (anonymous closure or closure with captures)
+    ///   2 = captures[0] (method closure - load from closure GcRef + HEADER_SLOTS*8)
+    ///   3 = iface receiver (iface_slot1)
+    pub slot0_kind: u32,
+    /// Resolved func_id (same as key for closure; for iface, resolved via itab).
+    pub func_id: u32,
+    /// Whether callee is a leaf function (no Call/CallClosure/CallIface).
+    /// Leaf callees never read ctx.jit_bp/fiber_sp, so IC hit can skip ctx stores.
+    pub is_leaf: u32,
+}
+
+impl Default for DynCallIC {
+    fn default() -> Self {
+        // All zeros = empty/invalid entry (key=0)
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+impl DynCallIC {
+    pub const SIZE: usize = core::mem::size_of::<DynCallIC>();
+    pub const OFFSET_KEY: i32 = 0;
+    pub const OFFSET_LOCAL_SLOTS: i32 = 4;
+    pub const OFFSET_JIT_FUNC_PTR: i32 = 8;
+    pub const OFFSET_ARG_OFFSET: i32 = 16;
+    pub const OFFSET_SLOT0_KIND: i32 = 20;
+    pub const OFFSET_FUNC_ID: i32 = 24;
+    pub const OFFSET_IS_LEAF: i32 = 28;
+
+    pub const SLOT0_NONE: u32 = 0;
+    pub const SLOT0_CLOSURE_REF: u32 = 1;
+    pub const SLOT0_CAPTURE0: u32 = 2;
+    pub const SLOT0_IFACE_RECEIVER: u32 = 3;
+
+    /// IC table size (must be power of 2).
+    pub const TABLE_SIZE: usize = 512;
+    pub const TABLE_MASK: u32 = (Self::TABLE_SIZE - 1) as u32;
+}
+
+const _: () = assert!(DynCallIC::SIZE == 32);
+const _: () = assert!(DynCallIC::TABLE_SIZE.is_power_of_two());
+
+/// Allocate a zeroed IC table with TABLE_SIZE entries.
+pub fn alloc_ic_table() -> Vec<DynCallIC> {
+    let mut table = Vec::with_capacity(DynCallIC::TABLE_SIZE);
+    unsafe {
+        core::ptr::write_bytes(table.as_mut_ptr(), 0, DynCallIC::TABLE_SIZE);
+        table.set_len(DynCallIC::TABLE_SIZE);
+    }
+    table
+}
+
 /// Result of preparing a closure or interface call.
+/// Note: SIZE must match core::mem::size_of::<PreparedCall>() (checked below).
 /// Contains information needed for JIT-to-JIT direct call or trampoline fallback.
 #[repr(C)]
 pub struct PreparedCall {
@@ -75,9 +148,25 @@ pub struct PreparedCall {
     pub callee_local_slots: u32,
     /// Resolved func_id (for trampoline fallback).
     pub func_id: u32,
+    /// Offset where user args start in callee frame.
+    pub arg_offset: u32,
+    /// slot0_kind (see DynCallIC::SLOT0_*).
+    pub slot0_kind: u32,
+    /// Whether callee is a leaf function (no Call/CallClosure/CallIface).
+    pub is_leaf: u32,
 }
 
 impl PreparedCall {
+    pub const OFFSET_JIT_FUNC_PTR: i32 = 0;
+    pub const OFFSET_CALLEE_ARGS_PTR: i32 = 8;
+    pub const OFFSET_RET_PTR: i32 = 16;
+    pub const OFFSET_CALLEE_LOCAL_SLOTS: i32 = 24;
+    pub const OFFSET_FUNC_ID: i32 = 28;
+    pub const OFFSET_ARG_OFFSET: i32 = 32;
+    pub const OFFSET_SLOT0_KIND: i32 = 36;
+    pub const OFFSET_IS_LEAF: i32 = 40;
+    pub const SIZE: usize = 48;
+
     /// Create a fallback result (callee should use trampoline).
     pub fn fallback(func_id: u32, callee_local_slots: u32) -> Self {
         PreparedCall {
@@ -86,9 +175,14 @@ impl PreparedCall {
             ret_ptr: core::ptr::null_mut(),
             callee_local_slots,
             func_id,
+            arg_offset: 0,
+            slot0_kind: DynCallIC::SLOT0_NONE,
+            is_leaf: 0,
         }
     }
 }
+
+const _: () = assert!(PreparedCall::SIZE == core::mem::size_of::<PreparedCall>());
 
 /// Function pointer type for preparing a closure call.
 /// Writes result to `out` pointer instead of returning struct (avoids ABI mismatch
@@ -357,6 +451,14 @@ pub struct JitContext {
     
     /// Callback to prepare an interface method call for JIT-to-JIT dispatch.
     pub prepare_iface_call_fn: Option<PrepareIfaceCallFn>,
+    
+    // =========================================================================
+    // Monomorphic Inline Cache for dynamic calls
+    // =========================================================================
+    
+    /// Pointer to DynCallIC table (DynCallIC::TABLE_SIZE entries).
+    /// JIT callsites hash into this table for fast-path dispatch.
+    pub ic_table: *mut DynCallIC,
 }
 
 /// JitContext field offsets for JIT compiler.
@@ -419,6 +521,9 @@ impl JitContext {
     // JIT-to-JIT Direct Call for Closure/Iface
     pub const OFFSET_PREPARE_CLOSURE_CALL_FN: i32 = std::mem::offset_of!(JitContext, prepare_closure_call_fn) as i32;
     pub const OFFSET_PREPARE_IFACE_CALL_FN: i32 = std::mem::offset_of!(JitContext, prepare_iface_call_fn) as i32;
+    
+    // Inline Cache
+    pub const OFFSET_IC_TABLE: i32 = std::mem::offset_of!(JitContext, ic_table) as i32;
 }
 
 // =============================================================================

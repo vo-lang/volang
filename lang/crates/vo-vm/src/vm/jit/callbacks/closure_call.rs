@@ -4,12 +4,12 @@
 //! They handle: func_id resolution, jit_func_table lookup, push_frame, and arg layout.
 
 use vo_runtime::bytecode::FunctionDef;
-use vo_runtime::jit_api::{JitContext, PreparedCall};
+use vo_runtime::jit_api::{JitContext, PreparedCall, DynCallIC};
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::closure;
 
 /// Look up a function in the direct_call_table for JIT-to-JIT fast path.
-/// Returns non-null only when callee is safe for direct calls (no defer, no CallClosure/CallIface).
+/// Returns non-null only when callee is a leaf (no defer, no call instructions).
 #[inline]
 fn lookup_direct_call_ptr(ctx: &JitContext, func_id: u32, func_def: &FunctionDef) -> *const u8 {
     if !func_def.has_defer && func_id < ctx.direct_call_count {
@@ -77,6 +77,16 @@ pub extern "C" fn jit_prepare_closure_call(
         }
     }
     
+    // Determine slot0_kind for IC population
+    let cap_count = closure::capture_count(closure_gcref);
+    let slot0_kind = if func_def.recv_slots > 0 && cap_count > 0 {
+        DynCallIC::SLOT0_CAPTURE0
+    } else if cap_count > 0 || func_def.is_closure {
+        DynCallIC::SLOT0_CLOSURE_REF
+    } else {
+        DynCallIC::SLOT0_NONE
+    };
+    
     unsafe {
         *out = PreparedCall {
             jit_func_ptr,
@@ -84,6 +94,9 @@ pub extern "C" fn jit_prepare_closure_call(
             ret_ptr,
             callee_local_slots: local_slots as u32,
             func_id,
+            arg_offset: arg_offset as u32,
+            slot0_kind,
+            is_leaf: (!func_def.has_calls && !func_def.has_call_extern) as u32,
         };
     }
 }
@@ -147,6 +160,9 @@ pub extern "C" fn jit_prepare_iface_call(
             ret_ptr,
             callee_local_slots: local_slots as u32,
             func_id,
+            arg_offset: recv_slots as u32,
+            slot0_kind: DynCallIC::SLOT0_IFACE_RECEIVER,
+            is_leaf: (!func_def.has_calls && !func_def.has_call_extern) as u32,
         };
     }
 }

@@ -88,6 +88,9 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
             jit_mgr.direct_call_table_len() as u32,
         )
     };
+    
+    // IC table is per-fiber to avoid data races between goroutines
+    let ic_table = fiber.ensure_ic_table();
 
     let mut owned = Box::new(JitOwnedState {
         panic_flag: false,
@@ -159,6 +162,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         ret_start: 0,
         prepare_closure_call_fn: Some(callbacks::jit_prepare_closure_call),
         prepare_iface_call_fn: Some(callbacks::jit_prepare_iface_call),
+        ic_table,
     };
 
     JitContextWrapper {

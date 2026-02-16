@@ -419,6 +419,7 @@ mod tests {
     use super::*;
     
     fn make_func(code: Vec<Instruction>) -> FunctionDef {
+        let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
         FunctionDef {
             name: "test".to_string(),
             param_count: 0,
@@ -433,6 +434,9 @@ mod tests {
             is_closure: false,
             capture_types: vec![],
             error_ret_slot: -1,
+            has_defer: false,
+            has_calls,
+            has_call_extern,
             code,
             slot_types: vec![],
         }

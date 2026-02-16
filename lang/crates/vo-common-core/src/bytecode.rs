@@ -53,6 +53,14 @@ pub struct FunctionDef {
     /// True if function contains DeferPush or ErrDeferPush instructions.
     /// Used by JIT to route calls through VM (ensuring real CallFrame exists for defer).
     pub has_defer: bool,
+    /// True if function contains Call, CallClosure, or CallIface instructions.
+    /// Used by JIT to determine call routing (direct JIT vs VM fallback) and
+    /// IC leaf optimization: a function is leaf IFF !has_calls && !has_call_extern.
+    pub has_calls: bool,
+    /// True if function contains CallExtern instructions.
+    /// CallExtern can return WaitIo/Replay which triggers a spill using saved_jit_bp,
+    /// so IC leaf optimization must NOT skip ctx.jit_bp/fiber_sp update for such functions.
+    pub has_call_extern: bool,
     pub code: Vec<Instruction>,
     pub slot_types: Vec<SlotType>,
     /// Capture types for cross-island transfer (closures only).
@@ -63,6 +71,25 @@ pub struct FunctionDef {
     /// Each entry: (ValueMeta raw, slot_count) for one parameter.
     /// Empty if function has no parameters or types not needed.
     pub param_types: Vec<(u32, u16)>,
+}
+
+impl FunctionDef {
+    /// Scan bytecode to compute (has_calls, has_call_extern).
+    /// Used during construction and deserialization to avoid duplicating this logic.
+    pub fn compute_call_flags(code: &[Instruction]) -> (bool, bool) {
+        use crate::instruction::Opcode;
+        let mut has_calls = false;
+        let mut has_call_extern = false;
+        for inst in code {
+            match inst.opcode() {
+                Opcode::Call | Opcode::CallClosure | Opcode::CallIface => has_calls = true,
+                Opcode::CallExtern => has_call_extern = true,
+                _ => {}
+            }
+            if has_calls && has_call_extern { break; }
+        }
+        (has_calls, has_call_extern)
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -1138,6 +1138,7 @@ impl FuncBuilder {
         let has_defer = self.code.iter().any(|inst| {
             matches!(inst.opcode(), Opcode::DeferPush | Opcode::ErrDeferPush)
         });
+        let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&self.code);
         
         FunctionDef {
             name: self.name,
@@ -1152,6 +1153,8 @@ impl FuncBuilder {
             is_closure: self.is_closure,
             error_ret_slot: self.error_ret_slot,
             has_defer,
+            has_calls,
+            has_call_extern,
             code: self.code,
             slot_types: self.slot_types,
             capture_types: self.capture_types,

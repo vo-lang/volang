@@ -687,6 +687,8 @@ impl CodegenContext {
             is_closure: false,
             error_ret_slot: -1,
             has_defer: false,
+            has_calls: false,
+            has_call_extern: false,
             code: Vec::new(),
             slot_types: Vec::new(),
             capture_types: Vec::new(),
@@ -939,6 +941,7 @@ impl CodegenContext {
         cache_key: MethodValueWrapperKey,
     ) -> u32 {
         use vo_vm::bytecode::FunctionDef;
+        let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
         let wrapper_func = FunctionDef {
             name,
             param_count: param_slots,
@@ -952,6 +955,8 @@ impl CodegenContext {
             is_closure: true,
             error_ret_slot: -1,
             has_defer: false,  // wrappers never have defer
+            has_calls,
+            has_call_extern,
             code,
             slot_types: Vec::new(),
             capture_types: Vec::new(),

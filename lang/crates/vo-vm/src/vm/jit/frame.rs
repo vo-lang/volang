@@ -97,6 +97,16 @@ pub extern "C" fn jit_pop_frame(ctx: *mut JitContext, caller_bp: u32) {
 /// Called by JIT code when callee returns non-OK, before propagating the result.
 /// This builds the call chain in reverse order (callee-to-caller).
 ///
+/// Push a resume point to the fiber's resume_stack.
+///
+/// - `func_id`: CALLEE's func_id (the function whose frame is at `bp`)
+/// - `resume_pc`: CALLER's resume pc (where the caller should continue after callee returns)
+/// - `bp`: callee's base pointer (where callee's frame lives in fiber.stack)
+/// - `caller_bp`: caller's base pointer
+/// - `ret_reg`/`ret_slots`: caller's return destination (where callee's return values go)
+///
+/// materialize_jit_frames creates CallFrame(func_id, bp) from each entry.
+///
 /// # Safety
 /// All pointers must be valid. Called from JIT-generated code.
 pub extern "C" fn jit_push_resume_point(
@@ -111,7 +121,7 @@ pub extern "C" fn jit_push_resume_point(
     let ctx_ref = unsafe { &mut *ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     
-    // Push to resume_stack (builds chain in reverse: callee first, then caller)
+    // Push to resume_stack (builds chain in reverse: innermost callee first, outermost caller last)
     #[cfg(feature = "jit")]
     fiber.resume_stack.push(crate::fiber::ResumePoint {
         func_id,

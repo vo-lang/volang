@@ -614,7 +614,7 @@ impl<'a> FunctionCompiler<'a> {
         crate::call_helpers::emit_non_ok_slow_path(self, crate::call_helpers::NonOkSlowPathParams {
             jit_result: result,
             ctx, caller_bp, old_fiber_sp,
-            func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val,
+            callee_func_id_val: func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val,
             copy_args: Some((args_slot, arg_slots)),
         });
         

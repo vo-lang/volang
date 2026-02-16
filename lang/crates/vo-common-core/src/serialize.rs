@@ -726,6 +726,8 @@ impl Module {
                 let c = r.read_u16()?;
                 code.push(Instruction { op, flags, a, b, c });
             }
+            // Compute has_calls/has_call_extern from bytecode (not serialized — derived fields)
+            let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
             // Cross-island transfer types
             let capture_types = r.read_vec(|r| {
                 let meta = r.read_u32()?;
@@ -750,6 +752,8 @@ impl Module {
                 is_closure,
                 error_ret_slot,
                 has_defer,
+                has_calls,
+                has_call_extern,
                 slot_types,
                 code,
                 capture_types,
@@ -861,6 +865,8 @@ mod tests {
             is_closure: false,
             error_ret_slot: -1,
             has_defer: false,
+            has_calls: false,
+            has_call_extern: false,
             slot_types: vec![SlotType::Value, SlotType::Value],
             code: vec![
                 Instruction::new(Opcode::LoadInt, 0, 0x0001, 0x0000),

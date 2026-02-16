@@ -367,19 +367,16 @@ impl Default for JitCompiler {
 /// Check if a function can be safely called via JIT-to-JIT direct call from
 /// prepare_closure_call / prepare_iface_call fast path.
 ///
-/// Returns false if the function contains CallClosure or CallIface instructions,
-/// because those can return JitResult::Call (when the nested prepare callback
-/// returns null / slow path). The fast path non-OK handler only propagates the
-/// result — it doesn't handle Call semantics (no push_frame for the nested callee).
+/// Returns false if the function contains any call instructions (Call/CallClosure/CallIface),
+/// because those can return JitResult::Call. The emit_prepared_call non-OK path only
+/// propagates the result with push_resume_point — it doesn't properly handle the
+/// ctx.jit_bp/fiber_sp state that nested calls leave behind.
+///
+/// Only leaf functions (no calls) are safe for JIT-to-JIT direct dispatch from
+/// prepare callbacks. They always return Ok or Panic, never Call.
 ///
 /// This is used to populate the direct_call_table, which prepare callbacks consult
 /// to decide if a JIT-to-JIT direct call is safe.
 pub fn can_direct_jit_call(func: &vo_runtime::bytecode::FunctionDef) -> bool {
-    for inst in &func.code {
-        match inst.opcode() {
-            Opcode::CallClosure | Opcode::CallIface => return false,
-            _ => {}
-        }
-    }
-    true
+    !func.has_calls
 }

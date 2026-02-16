@@ -356,6 +356,10 @@ pub struct Fiber {
     /// On resume, they are popped and converted to VM frames.
     #[cfg(feature = "jit")]
     pub resume_stack: Vec<ResumePoint>,
+    /// Per-fiber monomorphic inline cache table for dynamic calls (closure/iface).
+    /// Lazily allocated on first JIT use. Per-fiber to avoid data races between goroutines.
+    #[cfg(feature = "jit")]
+    pub ic_table: Vec<vo_runtime::jit_api::DynCallIC>,
     /// Closure callback suspend/replay state for extern functions.
     pub closure_replay: ClosureReplayState,
 }
@@ -379,6 +383,8 @@ impl Fiber {
             resume_io_token: None,
             #[cfg(feature = "jit")]
             resume_stack: Vec::new(),  // Lazy: only allocates on first push (Call/WaitIo)
+            #[cfg(feature = "jit")]
+            ic_table: Vec::new(),  // Lazy: allocated on first JIT dispatch
             closure_replay: ClosureReplayState::new(),
         }
     }
@@ -401,7 +407,24 @@ impl Fiber {
         }
         #[cfg(feature = "jit")]
         self.resume_stack.clear();
+        #[cfg(feature = "jit")]
+        if !self.ic_table.is_empty() {
+            // Zero all IC entries (key=0 means invalid). memset is faster than per-entry clear.
+            unsafe {
+                core::ptr::write_bytes(self.ic_table.as_mut_ptr(), 0, self.ic_table.len());
+            }
+        }
         self.closure_replay.reset();
+    }
+    
+    /// Ensure IC table is allocated (lazy allocation on first JIT dispatch).
+    /// Returns mutable pointer to the IC table.
+    #[cfg(feature = "jit")]
+    pub fn ensure_ic_table(&mut self) -> *mut vo_runtime::jit_api::DynCallIC {
+        if self.ic_table.is_empty() {
+            self.ic_table = vo_runtime::jit_api::alloc_ic_table();
+        }
+        self.ic_table.as_mut_ptr()
     }
     
     /// Check if current panic is recoverable and return the interface{} value if so.

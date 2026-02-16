@@ -7,7 +7,8 @@ use cranelift_codegen::ir::{types, FuncRef, InstBuilder, MemFlags, SigRef, Stack
 use cranelift_codegen::ir::condcodes::IntCC;
 
 use vo_runtime::instruction::Instruction;
-use vo_runtime::jit_api::JitContext;
+use vo_runtime::jit_api::{JitContext, DynCallIC, PreparedCall};
+use vo_runtime::objects::closure as closure_obj;
 
 use crate::intrinsics;
 use crate::translator::IrEmitter;
@@ -17,6 +18,11 @@ pub const JIT_RESULT_OK: i32 = 0;
 pub const JIT_RESULT_PANIC: i32 = 1;
 pub const JIT_RESULT_CALL: i32 = 2;
 pub const JIT_RESULT_WAIT_IO: i32 = 3;
+
+/// Maximum callee local_slots for IC native stack fast path.
+/// Callees with more locals fall through to prepare callback.
+/// 64 slots = 512 bytes on native stack per dynamic call site.
+const MAX_IC_NATIVE_SLOTS: usize = 64;
 
 /// Create signature for push_frame_fn callback: (ctx, func_id, local_slots, ret_reg, ret_slots, caller_resume_pc) -> args_ptr
 pub fn import_push_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
@@ -72,7 +78,7 @@ pub fn import_jit_func_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
 
 /// Create signature for prepare_closure_call callback.
 /// (ctx, closure_ref, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr, out) -> void
-/// Uses output pointer to avoid ABI mismatch (PreparedCall is 32 bytes, too large for register return).
+/// Uses output pointer to avoid ABI mismatch (PreparedCall is 48 bytes, too large for register return).
 fn import_prepare_closure_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     emitter.builder().func.import_signature({
         let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
@@ -109,9 +115,196 @@ fn import_prepare_iface_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     })
 }
 
-/// Emit a closure call instruction.
+/// Parameters for the shared IC hit fast path (after slot0 setup).
+struct IcHitParams {
+    ctx: Value,
+    ic_jit_ptr: Value,
+    ic_args_ptr: Value,
+    ic_arg_offset: Value,
+    ic_local_slots: Value,
+    ic_func_id: Value,
+    ic_is_leaf: Value,
+    ret_ptr: Value,
+    caller_bp: Value,
+    old_fiber_sp: Value,
+    merge_block: cranelift_codegen::ir::Block,
+    arg_start: usize,
+    ret_slots: usize,
+    resume_pc: usize,
+}
+
+/// Emit the shared IC hit fast path: copy user args, leaf-optimized ctx update,
+/// JIT call, OK/non-OK handling. Called after slot0 setup is complete.
+///
+/// On OK: conditionally restores ctx (skips for leaf), jumps to merge_block.
+/// On non-OK: emit_non_ok_slow_path (restores ctx unconditionally, returns).
+fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    p: IcHitParams,
+    user_arg_vals: &[Value],
+) {
+    // Copy user args at arg_offset (runtime value)
+    let arg_offset_bytes = emitter.builder().ins().ishl_imm(p.ic_arg_offset, 3);
+    let arg_offset_i64 = emitter.builder().ins().uextend(types::I64, arg_offset_bytes);
+    let user_dst_base = emitter.builder().ins().iadd(p.ic_args_ptr, arg_offset_i64);
+    for (i, val) in user_arg_vals.iter().enumerate() {
+        emitter.builder().ins().store(MemFlags::trusted(), *val, user_dst_base, (i * 8) as i32);
+    }
+    
+    // Leaf callee optimization: skip ctx stores if callee never reads jit_bp/fiber_sp
+    let is_leaf_flag = emitter.builder().ins().icmp_imm(IntCC::NotEqual, p.ic_is_leaf, 0);
+    let new_bp = p.old_fiber_sp;
+    let new_sp = emitter.builder().ins().iadd(new_bp, p.ic_local_slots);
+    
+    // Pre-call: conditionally update ctx (skip for leaf callees)
+    let pre_store_block = emitter.builder().create_block();
+    let call_block = emitter.builder().create_block();
+    emitter.builder().ins().brif(is_leaf_flag, call_block, &[], pre_store_block, &[]);
+    
+    emitter.builder().switch_to_block(pre_store_block);
+    emitter.builder().seal_block(pre_store_block);
+    emitter.builder().ins().store(MemFlags::trusted(), new_bp, p.ctx, JitContext::OFFSET_JIT_BP);
+    emitter.builder().ins().store(MemFlags::trusted(), new_sp, p.ctx, JitContext::OFFSET_FIBER_SP);
+    emitter.builder().ins().jump(call_block, &[]);
+    
+    // Direct JIT call
+    emitter.builder().switch_to_block(call_block);
+    emitter.builder().seal_block(call_block);
+    let jit_func_sig = import_jit_func_sig(emitter);
+    let jit_call = emitter.builder().ins().call_indirect(
+        jit_func_sig, p.ic_jit_ptr, &[p.ctx, p.ic_args_ptr, p.ret_ptr]
+    );
+    let jit_result = emitter.builder().inst_results(jit_call)[0];
+    
+    // Check result
+    let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
+    let is_ok = emitter.builder().ins().icmp(IntCC::Equal, jit_result, ok_val);
+    let ic_ok_block = emitter.builder().create_block();
+    let ic_non_ok_block = emitter.builder().create_block();
+    emitter.builder().ins().brif(is_ok, ic_ok_block, &[], ic_non_ok_block, &[]);
+    
+    // IC hit OK: conditionally restore ctx (skip for leaf)
+    emitter.builder().switch_to_block(ic_ok_block);
+    emitter.builder().seal_block(ic_ok_block);
+    let restore_block = emitter.builder().create_block();
+    emitter.builder().ins().brif(is_leaf_flag, p.merge_block, &[], restore_block, &[]);
+    
+    emitter.builder().switch_to_block(restore_block);
+    emitter.builder().seal_block(restore_block);
+    emitter.builder().ins().store(MemFlags::trusted(), p.caller_bp, p.ctx, JitContext::OFFSET_JIT_BP);
+    emitter.builder().ins().store(MemFlags::trusted(), p.old_fiber_sp, p.ctx, JitContext::OFFSET_FIBER_SP);
+    emitter.builder().ins().jump(p.merge_block, &[]);
+    
+    // IC hit non-OK: slow path
+    emitter.builder().switch_to_block(ic_non_ok_block);
+    emitter.builder().seal_block(ic_non_ok_block);
+    
+    let ic_ret_reg_val = emitter.builder().ins().iconst(types::I32, p.arg_start as i64);
+    let ic_ret_slots_val = emitter.builder().ins().iconst(types::I32, p.ret_slots as i64);
+    let ic_resume_pc_val = emitter.builder().ins().iconst(types::I32, p.resume_pc as i64);
+    
+    emit_non_ok_slow_path(emitter, NonOkSlowPathParams {
+        jit_result,
+        ctx: p.ctx, caller_bp: p.caller_bp, old_fiber_sp: p.old_fiber_sp,
+        callee_func_id_val: p.ic_func_id,
+        local_slots_val: p.ic_local_slots,
+        ret_reg_val: ic_ret_reg_val,
+        ret_slots_val: ic_ret_slots_val,
+        caller_resume_pc_val: ic_resume_pc_val,
+        copy_args: None,
+    });
+}
+
+/// Parameters for the shared IC miss path (update IC entry + dispatch).
+struct IcMissParams {
+    ctx: Value,
+    ic_entry: Value,
+    ret_ptr: Value,
+    out_slot: cranelift_codegen::ir::StackSlot,
+    ret_slot: cranelift_codegen::ir::StackSlot,
+    /// Caller's bp, saved BEFORE the prepare callback (which changes ctx.jit_bp via push_frame).
+    caller_bp: Value,
+    /// Caller's fiber_sp, saved BEFORE the prepare callback.
+    old_fiber_sp: Value,
+    arg_start: usize,
+    ret_slots: usize,
+    resume_pc_val: Value,
+    ret_reg_val: Value,
+    ret_slots_val: Value,
+    arg_count_val: Value,
+    merge_block: cranelift_codegen::ir::Block,
+    /// IC key value to store (func_id for closure, packed itab_id|method_idx for iface).
+    ic_key_val: Value,
+}
+
+/// Emit the shared IC miss path: conditionally update IC entry, then dispatch
+/// via emit_prepared_call. Called after prepare callback returns.
+fn emit_ic_miss_update_and_dispatch<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    p: IcMissParams,
+) {
+    // Load PreparedCall fields needed for IC update
+    let out_func_id = emitter.builder().ins().stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_FUNC_ID);
+    let out_jit_ptr = emitter.builder().ins().stack_load(types::I64, p.out_slot, PreparedCall::OFFSET_JIT_FUNC_PTR);
+    let out_local_slots = emitter.builder().ins().stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_CALLEE_LOCAL_SLOTS);
+    let out_arg_offset = emitter.builder().ins().stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_ARG_OFFSET);
+    let out_slot0_kind = emitter.builder().ins().stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_SLOT0_KIND);
+    
+    // Only update IC when jit_func_ptr is non-null AND local_slots fits in native buffer.
+    let null_jit = emitter.builder().ins().iconst(types::I64, 0);
+    let has_jit = emitter.builder().ins().icmp(IntCC::NotEqual, out_jit_ptr, null_jit);
+    let max_slots = emitter.builder().ins().iconst(types::I32, MAX_IC_NATIVE_SLOTS as i64);
+    let fits = emitter.builder().ins().icmp(IntCC::UnsignedLessThanOrEqual, out_local_slots, max_slots);
+    let can_cache = emitter.builder().ins().band(has_jit, fits);
+    let ic_update_block = emitter.builder().create_block();
+    let ic_skip_block = emitter.builder().create_block();
+    emitter.builder().ins().brif(can_cache, ic_update_block, &[], ic_skip_block, &[]);
+    
+    // Update IC entry
+    emitter.builder().switch_to_block(ic_update_block);
+    emitter.builder().seal_block(ic_update_block);
+    emitter.builder().ins().store(MemFlags::trusted(), p.ic_key_val, p.ic_entry, DynCallIC::OFFSET_KEY);
+    emitter.builder().ins().store(MemFlags::trusted(), out_local_slots, p.ic_entry, DynCallIC::OFFSET_LOCAL_SLOTS);
+    emitter.builder().ins().store(MemFlags::trusted(), out_jit_ptr, p.ic_entry, DynCallIC::OFFSET_JIT_FUNC_PTR);
+    emitter.builder().ins().store(MemFlags::trusted(), out_arg_offset, p.ic_entry, DynCallIC::OFFSET_ARG_OFFSET);
+    emitter.builder().ins().store(MemFlags::trusted(), out_slot0_kind, p.ic_entry, DynCallIC::OFFSET_SLOT0_KIND);
+    emitter.builder().ins().store(MemFlags::trusted(), out_func_id, p.ic_entry, DynCallIC::OFFSET_FUNC_ID);
+    let out_is_leaf = emitter.builder().ins().stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_IS_LEAF);
+    emitter.builder().ins().store(MemFlags::trusted(), out_is_leaf, p.ic_entry, DynCallIC::OFFSET_IS_LEAF);
+    emitter.builder().ins().jump(ic_skip_block, &[]);
+    
+    emitter.builder().switch_to_block(ic_skip_block);
+    emitter.builder().seal_block(ic_skip_block);
+    
+    // Load PreparedCall fields and dispatch
+    let jit_func_ptr = emitter.builder().ins().stack_load(types::I64, p.out_slot, PreparedCall::OFFSET_JIT_FUNC_PTR);
+    let callee_args_ptr = emitter.builder().ins().stack_load(types::I64, p.out_slot, PreparedCall::OFFSET_CALLEE_ARGS_PTR);
+    let callee_local_slots = emitter.builder().ins().stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_CALLEE_LOCAL_SLOTS);
+    let func_id = emitter.builder().ins().stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_FUNC_ID);
+    
+    emit_prepared_call(emitter, PreparedCallParams {
+        jit_func_ptr, callee_args_ptr, func_id, ret_ptr: p.ret_ptr,
+        callee_local_slots, caller_bp: p.caller_bp, old_fiber_sp: p.old_fiber_sp,
+        arg_start: p.arg_start, ret_slots: p.ret_slots, ret_slot: p.ret_slot,
+        resume_pc_val: p.resume_pc_val, ret_reg_val: p.ret_reg_val,
+        ret_slots_val: p.ret_slots_val, arg_count_val: p.arg_count_val,
+        merge_block: Some(p.merge_block),
+    });
+}
+
+/// Emit a closure call instruction with monomorphic inline cache.
 /// 
 /// CallClosure: inst.a = closure_slot, inst.b = arg_start, inst.c = (arg_slots << 8) | ret_slots
+///
+/// IC fast path (hit + jit_func_ptr != 0):
+///   - Extract func_id from closure header, compare with IC key
+///   - Native stack args, inline ctx.jit_bp/fiber_sp update, direct JIT call
+///   - No prepare callback, no push_frame/pop_frame callbacks
+///
+/// IC slow path (miss or jit_func_ptr == 0):
+///   - Call prepare_closure_call callback (does push_frame + arg layout on fiber.stack)
+///   - Update IC entry from PreparedCall result
+///   - Dispatch via emit_prepared_call (direct JIT or trampoline)
 pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     inst: &Instruction,
@@ -123,6 +316,9 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     
     let ctx = emitter.ctx_param();
     let panic_ret_val = emitter.panic_return_value();
+    let caller_func_id = emitter.func_id();
+    let callsite_pc = emitter.current_pc();
+    let resume_pc = callsite_pc + 1;
     
     // Read closure_ref
     let closure_ref = emitter.read_var(closure_slot as u16);
@@ -143,19 +339,21 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(continue_block);
     emitter.builder().seal_block(continue_block);
     
-    // Read user args and copy to native stack
-    let args_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
+    // Read user args into SSA values (before any branching)
+    let mut user_arg_vals = Vec::with_capacity(arg_slots);
+    for i in 0..arg_slots {
+        user_arg_vals.push(emitter.read_var((arg_start + i) as u16));
+    }
+    
+    // Allocate stack slots and get their addresses BEFORE branching
+    // so SSA values dominate both IC hit and miss paths.
+    let ic_args_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
-        (arg_slots.max(1) * 8) as u32,
+        (MAX_IC_NATIVE_SLOTS * 8) as u32,
         8,
     ));
-    for i in 0..arg_slots {
-        let val = emitter.read_var((arg_start + i) as u16);
-        emitter.builder().ins().stack_store(val, args_slot, (i * 8) as i32);
-    }
-    let user_args_ptr = emitter.builder().ins().stack_addr(types::I64, args_slot, 0);
+    let ic_args_ptr = emitter.builder().ins().stack_addr(types::I64, ic_args_slot, 0);
     
-    // Create ret_slot
     let ret_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
         (ret_slots.max(1) * 8) as u32,
@@ -163,14 +361,130 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     ));
     let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
     
-    // Allocate stack slot for PreparedCall output (32 bytes, 8-aligned)
-    // Layout: [jit_func_ptr:I64@0, callee_args_ptr:I64@8, ret_ptr:I64@16, callee_local_slots:I32@24, func_id:I32@28]
+    // Save caller_bp and fiber_sp BEFORE branching — both IC hit and miss paths need these,
+    // and the prepare callback (miss path) changes ctx.jit_bp via push_frame.
+    let caller_bp = emitter.prologue_caller_bp().unwrap_or_else(|| {
+        emitter.builder().ins().load(types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP)
+    });
+    let old_fiber_sp = emitter.prologue_fiber_sp().unwrap_or_else(|| {
+        emitter.builder().ins().load(types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_FIBER_SP)
+    });
+    
+    // =====================================================================
+    // IC lookup: extract func_id from closure, check IC entry
+    // =====================================================================
+    
+    // Load func_id from closure header: ClosureHeader.func_id is u32 at offset 0
+    let closure_func_id = emitter.builder().ins().load(
+        types::I32, MemFlags::trusted(), closure_ref, 0
+    );
+    
+    // Compute IC entry address: ic_table + ((caller_func_id * 97 + callsite_pc) & MASK) * IC_SIZE
+    let ic_table = emitter.builder().ins().load(
+        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_IC_TABLE
+    );
+    let ic_index = ((caller_func_id.wrapping_mul(97)).wrapping_add(callsite_pc as u32)) & DynCallIC::TABLE_MASK;
+    let ic_byte_offset = (ic_index as usize) * DynCallIC::SIZE;
+    let ic_entry = emitter.builder().ins().iadd_imm(ic_table, ic_byte_offset as i64);
+    
+    // Load IC key and compare
+    let ic_key = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_KEY);
+    let key_match = emitter.builder().ins().icmp(IntCC::Equal, closure_func_id, ic_key);
+    
+    // Load IC jit_func_ptr and check non-null
+    let ic_jit_ptr = emitter.builder().ins().load(types::I64, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_JIT_FUNC_PTR);
+    let ptr_ok = emitter.builder().ins().icmp(IntCC::NotEqual, ic_jit_ptr, zero);
+    
+    // Both conditions must be true for IC hit
+    let ic_hit = emitter.builder().ins().band(key_match, ptr_ok);
+    
+    let ic_hit_block = emitter.builder().create_block();
+    let ic_miss_block = emitter.builder().create_block();
+    let merge_block = emitter.builder().create_block();
+    
+    emitter.builder().ins().brif(ic_hit, ic_hit_block, &[], ic_miss_block, &[]);
+    
+    // =====================================================================
+    // IC HIT: native stack fast path (like emit_jit_call_with_fallback)
+    // =====================================================================
+    emitter.builder().switch_to_block(ic_hit_block);
+    emitter.builder().seal_block(ic_hit_block);
+    
+    // Load cached layout from IC entry
+    let ic_local_slots = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_LOCAL_SLOTS);
+    let ic_arg_offset = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_ARG_OFFSET);
+    let ic_slot0_kind = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_SLOT0_KIND);
+    let ic_func_id = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_FUNC_ID);
+    let ic_is_leaf = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_IS_LEAF);
+    
+    // Write slot0 based on slot0_kind
+    // SLOT0_NONE(0): skip, SLOT0_CLOSURE_REF(1): closure_ref, SLOT0_CAPTURE0(2): captures[0]
+    {
+        let slot0_none_block = emitter.builder().create_block();
+        let slot0_ref_block = emitter.builder().create_block();
+        let slot0_cap_block = emitter.builder().create_block();
+        let slot0_done_block = emitter.builder().create_block();
+        
+        let kind_one = emitter.builder().ins().iconst(types::I32, DynCallIC::SLOT0_CLOSURE_REF as i64);
+        let is_ref = emitter.builder().ins().icmp(IntCC::Equal, ic_slot0_kind, kind_one);
+        emitter.builder().ins().brif(is_ref, slot0_ref_block, &[], slot0_none_block, &[]);
+        
+        // Check capture0 case
+        emitter.builder().switch_to_block(slot0_none_block);
+        emitter.builder().seal_block(slot0_none_block);
+        let kind_two = emitter.builder().ins().iconst(types::I32, DynCallIC::SLOT0_CAPTURE0 as i64);
+        let is_cap = emitter.builder().ins().icmp(IntCC::Equal, ic_slot0_kind, kind_two);
+        emitter.builder().ins().brif(is_cap, slot0_cap_block, &[], slot0_done_block, &[]);
+        
+        // SLOT0_CLOSURE_REF: slot0 = closure_ref
+        emitter.builder().switch_to_block(slot0_ref_block);
+        emitter.builder().seal_block(slot0_ref_block);
+        emitter.builder().ins().stack_store(closure_ref, ic_args_slot, 0);
+        emitter.builder().ins().jump(slot0_done_block, &[]);
+        
+        // SLOT0_CAPTURE0: slot0 = captures[0] = load [closure_ref + HEADER_SLOTS * 8]
+        emitter.builder().switch_to_block(slot0_cap_block);
+        emitter.builder().seal_block(slot0_cap_block);
+        let cap0_offset = (closure_obj::HEADER_SLOTS * 8) as i32;
+        let cap0 = emitter.builder().ins().load(types::I64, MemFlags::trusted(), closure_ref, cap0_offset);
+        emitter.builder().ins().stack_store(cap0, ic_args_slot, 0);
+        emitter.builder().ins().jump(slot0_done_block, &[]);
+        
+        emitter.builder().switch_to_block(slot0_done_block);
+        emitter.builder().seal_block(slot0_done_block);
+    }
+    
+    emit_ic_hit_call_and_result(emitter, IcHitParams {
+        ctx, ic_jit_ptr, ic_args_ptr, ic_arg_offset,
+        ic_local_slots, ic_func_id, ic_is_leaf, ret_ptr,
+        caller_bp, old_fiber_sp, merge_block,
+        arg_start, ret_slots, resume_pc,
+    }, &user_arg_vals);
+    
+    // =====================================================================
+    // IC MISS: fall through to prepare callback, update IC, dispatch
+    // =====================================================================
+    emitter.builder().switch_to_block(ic_miss_block);
+    emitter.builder().seal_block(ic_miss_block);
+    
+    // Copy user args to native stack for prepare callback
+    let user_args_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        (arg_slots.max(1) * 8) as u32,
+        8,
+    ));
+    for (i, val) in user_arg_vals.iter().enumerate() {
+        emitter.builder().ins().stack_store(*val, user_args_slot, (i * 8) as i32);
+    }
+    let user_args_ptr = emitter.builder().ins().stack_addr(types::I64, user_args_slot, 0);
+    
+    // Allocate PreparedCall output
     let out_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot, 32, 8,
+        StackSlotKind::ExplicitSlot, PreparedCall::SIZE as u32, 8,
     ));
     let out_ptr = emitter.builder().ins().stack_addr(types::I64, out_slot, 0);
     
-    // Call prepare_closure_call callback (writes to out_ptr)
+    // Call prepare_closure_call callback
     let prepare_fn_ptr = emitter.builder().ins().load(
         types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PREPARE_CLOSURE_CALL_FN
     );
@@ -178,7 +492,6 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     
     let ret_reg_val = emitter.builder().ins().iconst(types::I32, arg_start as i64);
     let ret_slots_val = emitter.builder().ins().iconst(types::I32, ret_slots as i64);
-    let resume_pc = emitter.current_pc() + 1;
     let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
     let arg_count_val = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
     
@@ -187,24 +500,33 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         &[ctx, closure_ref, ret_reg_val, ret_slots_val, resume_pc_val, user_args_ptr, arg_count_val, ret_ptr, out_ptr]
     );
     
-    // Load fields from PreparedCall output
-    let jit_func_ptr = emitter.builder().ins().stack_load(types::I64, out_slot, 0);
-    let callee_args_ptr = emitter.builder().ins().stack_load(types::I64, out_slot, 8);
-    let callee_local_slots = emitter.builder().ins().stack_load(types::I32, out_slot, 24);
-    let func_id = emitter.builder().ins().stack_load(types::I32, out_slot, 28);
+    // IC key for closure = func_id
+    let ic_key_val = emitter.builder().ins().stack_load(types::I32, out_slot, PreparedCall::OFFSET_FUNC_ID);
     
-    emit_prepared_call(emitter, PreparedCallParams {
-        jit_func_ptr, callee_args_ptr, func_id, ret_ptr,
-        callee_local_slots,
-        arg_start, ret_slots, ret_slot,
-        resume_pc_val, ret_reg_val, ret_slots_val, arg_count_val,
+    emit_ic_miss_update_and_dispatch(emitter, IcMissParams {
+        ctx, ic_entry, ret_ptr, out_slot, ret_slot, caller_bp, old_fiber_sp,
+        arg_start, ret_slots, resume_pc_val, ret_reg_val,
+        ret_slots_val, arg_count_val, merge_block, ic_key_val,
     });
+    
+    // =====================================================================
+    // Merge: copy return values to SSA vars (shared by IC hit OK + prepared OK)
+    // =====================================================================
+    // merge_block is already switched to and sealed by emit_prepared_call
+    for i in 0..ret_slots {
+        let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
+        emitter.write_var((arg_start + i) as u16, val);
+    }
 }
 
-/// Emit an interface method call instruction.
+/// Emit an interface method call instruction with monomorphic inline cache.
 /// 
 /// CallIface: inst.a = iface_slot (2 slots), inst.b = arg_start, inst.c = (arg_slots << 8) | ret_slots
 ///            inst.flags = method_idx
+///
+/// IC key for iface: packed (itab_id << 16) | method_idx — unique per (concrete type, method).
+/// IC fast path: extract itab_id from slot0, check IC, native stack with receiver + user args.
+/// IC slow path: call prepare_iface_call, update IC, dispatch via emit_prepared_call.
 pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     inst: &Instruction,
@@ -216,24 +538,29 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     let method_idx = inst.flags as u32;
     
     let ctx = emitter.ctx_param();
+    let caller_func_id = emitter.func_id();
+    let callsite_pc = emitter.current_pc();
+    let resume_pc = callsite_pc + 1;
     
     // Read interface slots
     let slot0 = emitter.read_var(iface_slot as u16);
     let slot1 = emitter.read_var((iface_slot + 1) as u16);
     
-    // Read user args and copy to native stack
-    let args_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
+    // Read user args into SSA values (before any branching)
+    let mut user_arg_vals = Vec::with_capacity(arg_slots);
+    for i in 0..arg_slots {
+        user_arg_vals.push(emitter.read_var((arg_start + i) as u16));
+    }
+    
+    // Allocate stack slots and get their addresses BEFORE branching
+    // so SSA values dominate both IC hit and miss paths.
+    let ic_args_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
-        (arg_slots.max(1) * 8) as u32,
+        (MAX_IC_NATIVE_SLOTS * 8) as u32,
         8,
     ));
-    for i in 0..arg_slots {
-        let val = emitter.read_var((arg_start + i) as u16);
-        emitter.builder().ins().stack_store(val, args_slot, (i * 8) as i32);
-    }
-    let user_args_ptr = emitter.builder().ins().stack_addr(types::I64, args_slot, 0);
+    let ic_args_ptr = emitter.builder().ins().stack_addr(types::I64, ic_args_slot, 0);
     
-    // Create ret_slot
     let ret_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
         (ret_slots.max(1) * 8) as u32,
@@ -241,13 +568,99 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     ));
     let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
     
-    // Allocate stack slot for PreparedCall output (32 bytes, 8-aligned)
+    // Save caller_bp and fiber_sp BEFORE branching — both IC hit and miss paths need these,
+    // and the prepare callback (miss path) changes ctx.jit_bp via push_frame.
+    let caller_bp = emitter.prologue_caller_bp().unwrap_or_else(|| {
+        emitter.builder().ins().load(types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP)
+    });
+    let old_fiber_sp = emitter.prologue_fiber_sp().unwrap_or_else(|| {
+        emitter.builder().ins().load(types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_FIBER_SP)
+    });
+    
+    // =====================================================================
+    // IC lookup: extract itab_id from slot0, check IC entry
+    // =====================================================================
+    
+    // Extract itab_id = slot0 >> 32 (high 32 bits of slot0)
+    let itab_id = emitter.builder().ins().ushr_imm(slot0, 32);
+    let itab_id_i32 = emitter.builder().ins().ireduce(types::I32, itab_id);
+    
+    // IC key = (itab_id << 16) | method_idx
+    let key_shifted = emitter.builder().ins().ishl_imm(itab_id_i32, 16);
+    let method_idx_val_i32 = emitter.builder().ins().iconst(types::I32, method_idx as i64);
+    let ic_key_val = emitter.builder().ins().bor(key_shifted, method_idx_val_i32);
+    
+    // Compute IC entry address
+    let ic_table = emitter.builder().ins().load(
+        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_IC_TABLE
+    );
+    let ic_index = ((caller_func_id.wrapping_mul(97)).wrapping_add(callsite_pc as u32)) & DynCallIC::TABLE_MASK;
+    let ic_byte_offset = (ic_index as usize) * DynCallIC::SIZE;
+    let ic_entry = emitter.builder().ins().iadd_imm(ic_table, ic_byte_offset as i64);
+    
+    // Load IC key and compare
+    let ic_stored_key = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_KEY);
+    let key_match = emitter.builder().ins().icmp(IntCC::Equal, ic_key_val, ic_stored_key);
+    
+    // Load IC jit_func_ptr and check non-null
+    let zero = emitter.builder().ins().iconst(types::I64, 0);
+    let ic_jit_ptr = emitter.builder().ins().load(types::I64, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_JIT_FUNC_PTR);
+    let ptr_ok = emitter.builder().ins().icmp(IntCC::NotEqual, ic_jit_ptr, zero);
+    
+    // Both conditions must be true for IC hit
+    let ic_hit = emitter.builder().ins().band(key_match, ptr_ok);
+    
+    let ic_hit_block = emitter.builder().create_block();
+    let ic_miss_block = emitter.builder().create_block();
+    let merge_block = emitter.builder().create_block();
+    
+    emitter.builder().ins().brif(ic_hit, ic_hit_block, &[], ic_miss_block, &[]);
+    
+    // =====================================================================
+    // IC HIT: native stack fast path
+    // =====================================================================
+    emitter.builder().switch_to_block(ic_hit_block);
+    emitter.builder().seal_block(ic_hit_block);
+    
+    let ic_local_slots = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_LOCAL_SLOTS);
+    let ic_arg_offset = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_ARG_OFFSET);
+    let ic_func_id = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_FUNC_ID);
+    let ic_is_leaf = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_IS_LEAF);
+    
+    // Write receiver (slot1) to slot 0 of callee args
+    emitter.builder().ins().stack_store(slot1, ic_args_slot, 0);
+    
+    emit_ic_hit_call_and_result(emitter, IcHitParams {
+        ctx, ic_jit_ptr, ic_args_ptr, ic_arg_offset,
+        ic_local_slots, ic_func_id, ic_is_leaf, ret_ptr,
+        caller_bp, old_fiber_sp, merge_block,
+        arg_start, ret_slots, resume_pc,
+    }, &user_arg_vals);
+    
+    // =====================================================================
+    // IC MISS: prepare callback, update IC, dispatch
+    // =====================================================================
+    emitter.builder().switch_to_block(ic_miss_block);
+    emitter.builder().seal_block(ic_miss_block);
+    
+    // Copy user args for prepare callback
+    let user_args_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        (arg_slots.max(1) * 8) as u32,
+        8,
+    ));
+    for (i, val) in user_arg_vals.iter().enumerate() {
+        emitter.builder().ins().stack_store(*val, user_args_slot, (i * 8) as i32);
+    }
+    let user_args_ptr = emitter.builder().ins().stack_addr(types::I64, user_args_slot, 0);
+    
+    // Allocate PreparedCall output
     let out_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot, 32, 8,
+        StackSlotKind::ExplicitSlot, PreparedCall::SIZE as u32, 8,
     ));
     let out_ptr = emitter.builder().ins().stack_addr(types::I64, out_slot, 0);
     
-    // Call prepare_iface_call callback (writes to out_ptr)
+    // Call prepare_iface_call callback
     let prepare_fn_ptr = emitter.builder().ins().load(
         types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PREPARE_IFACE_CALL_FN
     );
@@ -256,7 +669,6 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     let method_idx_val = emitter.builder().ins().iconst(types::I32, method_idx as i64);
     let ret_reg_val = emitter.builder().ins().iconst(types::I32, arg_start as i64);
     let ret_slots_val = emitter.builder().ins().iconst(types::I32, ret_slots as i64);
-    let resume_pc = emitter.current_pc() + 1;
     let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
     let arg_count_val = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
     
@@ -265,18 +677,19 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
         &[ctx, slot0, slot1, method_idx_val, ret_reg_val, ret_slots_val, resume_pc_val, user_args_ptr, arg_count_val, ret_ptr, out_ptr]
     );
     
-    // Load fields from PreparedCall output
-    let jit_func_ptr = emitter.builder().ins().stack_load(types::I64, out_slot, 0);
-    let callee_args_ptr = emitter.builder().ins().stack_load(types::I64, out_slot, 8);
-    let callee_local_slots = emitter.builder().ins().stack_load(types::I32, out_slot, 24);
-    let func_id = emitter.builder().ins().stack_load(types::I32, out_slot, 28);
-    
-    emit_prepared_call(emitter, PreparedCallParams {
-        jit_func_ptr, callee_args_ptr, func_id, ret_ptr,
-        callee_local_slots,
-        arg_start, ret_slots, ret_slot,
-        resume_pc_val, ret_reg_val, ret_slots_val, arg_count_val,
+    emit_ic_miss_update_and_dispatch(emitter, IcMissParams {
+        ctx, ic_entry, ret_ptr, out_slot, ret_slot, caller_bp, old_fiber_sp,
+        arg_start, ret_slots, resume_pc_val, ret_reg_val,
+        ret_slots_val, arg_count_val, merge_block, ic_key_val,
     });
+    
+    // =====================================================================
+    // Merge: copy return values
+    // =====================================================================
+    for i in 0..ret_slots {
+        let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
+        emitter.write_var((arg_start + i) as u16, val);
+    }
 }
 
 /// Parameters for the common prepared-call dispatch.
@@ -286,6 +699,10 @@ struct PreparedCallParams {
     func_id: Value,
     ret_ptr: Value,
     callee_local_slots: Value,
+    /// Caller's bp, saved BEFORE the prepare callback (which changes ctx.jit_bp via push_frame).
+    caller_bp: Value,
+    /// Caller's fiber_sp, saved BEFORE the prepare callback.
+    old_fiber_sp: Value,
     arg_start: usize,
     ret_slots: usize,
     ret_slot: cranelift_codegen::ir::StackSlot,
@@ -293,24 +710,26 @@ struct PreparedCallParams {
     ret_reg_val: Value,
     ret_slots_val: Value,
     arg_count_val: Value,
+    /// If Some, jump to this block on OK instead of creating a new merge block.
+    /// The block will be switched to and sealed by this function.
+    merge_block: Option<cranelift_codegen::ir::Block>,
 }
 
 /// Emit the common dispatch logic after a prepare callback returns PreparedCall.
 ///
 /// Handles: null check → trampoline(return Call with CALL_KIND_PREPARED) or JIT direct call
 ///          → non-OK (push_resume_point + propagate) or OK (pop_frame) → merge.
+///
+/// If merge_block is Some, OK path jumps there (caller owns the merge block and ret copy).
+/// If merge_block is None, creates its own merge block and copies return values.
 fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     p: PreparedCallParams,
 ) {
     let ctx = emitter.ctx_param();
-    let panic_ret_val = emitter.panic_return_value();
-    let caller_func_id_val = emitter.func_id();
     
-    // Save caller_bp for pop_frame
-    let caller_bp = emitter.builder().ins().load(
-        types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
-    );
+    // caller_bp was saved BEFORE the prepare callback (which updates ctx.jit_bp via push_frame).
+    let caller_bp = p.caller_bp;
     
     // Load pop_frame resources before branching (needed in both trampoline and JIT-OK paths)
     let pop_frame_fn_ptr = emitter.builder().ins().load(
@@ -324,7 +743,7 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     
     let trampoline_block = emitter.builder().create_block();
     let jit_call_block = emitter.builder().create_block();
-    let merge_block = emitter.builder().create_block();
+    let merge_block = p.merge_block.unwrap_or_else(|| emitter.builder().create_block());
     
     emitter.builder().ins().brif(is_null, trampoline_block, &[], jit_call_block, &[]);
     
@@ -376,22 +795,44 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     let jit_ok_block = emitter.builder().create_block();
     emitter.builder().ins().brif(is_ok, jit_ok_block, &[], jit_non_ok_block, &[]);
     
-    // Non-OK: spill, push resume point, propagate
+    // Non-OK: restore ctx, spill caller vars, push resume point, propagate.
+    //
+    // The prepare callback already did push_frame, so the callee frame exists
+    // on fiber.stack and fiber.sp/ctx are at callee's state.
+    // We must NOT call push_frame again (emit_non_ok_slow_path would double-push).
+    // Instead we manually:
+    //   1. Save callee_bp from ctx.jit_bp (still points to callee)
+    //   2. Restore ctx to caller state so spill writes to correct location
+    //   3. Spill caller's SSA vars
+    //   4. Push resume point (func_id = CALLEE, bp = callee_bp)
+    //   5. Return non-OK result
     emitter.builder().switch_to_block(jit_non_ok_block);
     emitter.builder().seal_block(jit_non_ok_block);
+    
+    // 1. Save callee_bp from ctx.jit_bp (still points to callee's frame)
+    let callee_bp = emitter.builder().ins().load(
+        types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
+    );
+    
+    // 2. Restore ctx.jit_bp and ctx.fiber_sp to caller's values.
+    // ctx.fiber_sp restore is needed so that materialize_jit_frames (via resume_stack)
+    // can reconstruct the correct frame chain. The fiber.sp sync at OSR entry
+    // (dispatch_loop_osr) handles the stale fiber.sp issue.
+    emitter.builder().ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
+    emitter.builder().ins().store(MemFlags::trusted(), p.old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
+    
+    // 3. Spill caller's SSA vars to fiber.stack[caller_bp..]
     emitter.spill_all_vars();
     
+    // 4. Push resume point with CALLEE's func_id.
+    // materialize_jit_frames creates CallFrame(rp.func_id, rp.bp) — both must be callee's.
     let push_resume_point_fn_ptr = emitter.builder().ins().load(
         types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_RESUME_POINT_FN
     );
     let push_resume_point_sig = import_push_resume_point_sig(emitter);
-    let callee_bp = emitter.builder().ins().load(
-        types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
-    );
-    let caller_func_id = emitter.builder().ins().iconst(types::I32, caller_func_id_val as i64);
     emitter.builder().ins().call_indirect(
         push_resume_point_sig, push_resume_point_fn_ptr,
-        &[ctx, caller_func_id, p.resume_pc_val, callee_bp, caller_bp, p.ret_reg_val, p.ret_slots_val]
+        &[ctx, p.func_id, p.resume_pc_val, callee_bp, caller_bp, p.ret_reg_val, p.ret_slots_val]
     );
     emitter.builder().ins().return_(&[jit_result]);
     
@@ -401,13 +842,17 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     emitter.builder().ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx, caller_bp]);
     emitter.builder().ins().jump(merge_block, &[]);
     
-    // === Merge: copy return values to SSA vars ===
+    // === Merge block ===
     emitter.builder().switch_to_block(merge_block);
     emitter.builder().seal_block(merge_block);
     
-    for i in 0..p.ret_slots {
-        let val = emitter.builder().ins().stack_load(types::I64, p.ret_slot, (i * 8) as i32);
-        emitter.write_var((p.arg_start + i) as u16, val);
+    // If caller owns merge_block, they handle ret value copy.
+    // Otherwise we do it here.
+    if p.merge_block.is_none() {
+        for i in 0..p.ret_slots {
+            let val = emitter.builder().ins().stack_load(types::I64, p.ret_slot, (i * 8) as i32);
+            emitter.write_var((p.arg_start + i) as u16, val);
+        }
     }
 }
 
@@ -554,7 +999,6 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     config: JitCallWithFallbackConfig,
 ) {
     let ctx = emitter.ctx_param();
-    let panic_ret_val = emitter.panic_return_value();
     
     // Reuse prologue-saved caller_bp and fiber_sp if available (avoids redundant ctx loads)
     let caller_bp = emitter.prologue_caller_bp().unwrap_or_else(|| {
@@ -656,7 +1100,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         emit_non_ok_slow_path(emitter, NonOkSlowPathParams {
             jit_result: jit_result_indirect,
             ctx, caller_bp, old_fiber_sp,
-            func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val,
+            callee_func_id_val: func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val,
             copy_args: None,
         });
         
@@ -717,7 +1161,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emit_non_ok_slow_path(emitter, NonOkSlowPathParams {
         jit_result,
         ctx, caller_bp, old_fiber_sp,
-        func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val,
+        callee_func_id_val: func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val,
         copy_args: None,
     });
     
@@ -747,7 +1191,9 @@ pub struct NonOkSlowPathParams {
     pub ctx: Value,
     pub caller_bp: Value,
     pub old_fiber_sp: Value,
-    pub func_id_val: Value,
+    /// CALLEE's func_id — used in push_resume_point to create CallFrame(callee_func_id, callee_bp).
+    /// materialize_jit_frames uses (func_id, bp) from the resume_point to build the VM frame chain.
+    pub callee_func_id_val: Value,
     pub local_slots_val: Value,
     pub ret_reg_val: Value,
     pub ret_slots_val: Value,
@@ -783,7 +1229,7 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(
     let push_frame_sig = import_push_frame_sig(emitter);
     let push_call = emitter.builder().ins().call_indirect(
         push_frame_sig, push_frame_fn_ptr,
-        &[ctx, p.func_id_val, p.local_slots_val, p.ret_reg_val, p.ret_slots_val, p.caller_resume_pc_val]
+        &[ctx, p.callee_func_id_val, p.local_slots_val, p.ret_reg_val, p.ret_slots_val, p.caller_resume_pc_val]
     );
 
     // 4. Optional: copy args from native stack to fiber.stack.
@@ -808,7 +1254,7 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(
     );
     emitter.builder().ins().call_indirect(
         push_resume_point_sig, push_resume_point_fn_ptr,
-        &[ctx, p.func_id_val, p.caller_resume_pc_val, callee_bp, p.caller_bp, p.ret_reg_val, p.ret_slots_val]
+        &[ctx, p.callee_func_id_val, p.caller_resume_pc_val, callee_bp, p.caller_bp, p.ret_reg_val, p.ret_slots_val]
     );
 
     // 6. Return the JIT result.
