@@ -621,8 +621,14 @@ pub extern "C" fn jit_call_extern(
             }
             JitResult::Panic
         }
-        ExternResult::Yield => JitResult::Call,
-        ExternResult::Block => JitResult::Call,
+        ExternResult::Yield => {
+            ctx_ref.call_kind = JitContext::CALL_KIND_YIELD;
+            JitResult::Call
+        }
+        ExternResult::Block => {
+            ctx_ref.call_kind = JitContext::CALL_KIND_BLOCK;
+            JitResult::Call
+        }
         #[cfg(feature = "std")]
         ExternResult::WaitIo { token } => {
             ctx_ref.wait_io_token = token;
@@ -691,20 +697,17 @@ pub fn dispatch_loop_osr(
     let fiber = unsafe { &mut *fiber_ptr };
     let module = unsafe { &*module_ptr };
     
-    // Clear resume_stack for non-Call results. For Call results, resume_stack
-    // is handled per call_kind below.
-    #[cfg(feature = "jit")]
-    let needs_resume_clear = !matches!(result, JitResult::Call);
-    #[cfg(feature = "jit")]
-    if needs_resume_clear {
-        fiber.resume_stack.clear();
-    }
-    
     match result {
         JitResult::Ok => {
+            // resume_stack should be empty on Ok (no nested non-OK propagation).
+            #[cfg(feature = "jit")]
+            fiber.resume_stack.clear();
             OsrResult::ExitPc(ctx.ctx.loop_exit_pc as usize)
         }
         JitResult::Panic => {
+            // Materialize any intermediate JIT frames so panic unwinding
+            // can correctly traverse the frame chain.
+            materialize_jit_frames(fiber, module, 0);
             let panic_msg = if ctx.is_user_panic() {
                 ctx.panic_msg()
             } else {
@@ -724,10 +727,7 @@ pub fn dispatch_loop_osr(
             match call_kind {
                 JitContext::CALL_KIND_YIELD | JitContext::CALL_KIND_BLOCK => {
                     let resume_pc = ctx.call_resume_pc();
-                    fiber.resume_stack.clear();
-                    if let Some(frame) = fiber.current_frame_mut() {
-                        frame.pc = resume_pc as usize;
-                    }
+                    materialize_jit_frames(fiber, module, resume_pc);
                     return OsrResult::FrameChanged;
                 }
                 _ => {}
@@ -764,10 +764,10 @@ pub fn dispatch_loop_osr(
             let token = ctx.wait_io_token();
             let resume_pc = ctx.call_resume_pc();
             
-            // Update frame for resume
-            if let Some(frame) = fiber.current_frame_mut() {
-                frame.pc = resume_pc as usize;
-            }
+            // Materialize any intermediate JIT frames from nested calls.
+            // Without this, resume_stack entries are lost and the fiber
+            // resumes at the wrong PC (callee's PC in the loop function's frame).
+            materialize_jit_frames(fiber, module, resume_pc);
             
             // Store token for scheduler
             fiber.resume_io_token = Some(token);
@@ -780,22 +780,12 @@ pub fn dispatch_loop_osr(
         }
         JitResult::WaitQueue => {
             let resume_pc = ctx.call_resume_pc();
-            
-            // Update frame for resume (re-execute the blocking instruction)
-            if let Some(frame) = fiber.current_frame_mut() {
-                frame.pc = resume_pc as usize;
-            }
-            
+            materialize_jit_frames(fiber, module, resume_pc);
             OsrResult::WaitQueue
         }
         JitResult::Replay => {
             let resume_pc = ctx.call_resume_pc();
-            
-            // Exit loop OSR: set frame.pc to CallExtern instruction, VM will replay it
-            if let Some(frame) = fiber.current_frame_mut() {
-                frame.pc = resume_pc as usize;
-            }
-            
+            materialize_jit_frames(fiber, module, resume_pc);
             OsrResult::FrameChanged
         }
     }
