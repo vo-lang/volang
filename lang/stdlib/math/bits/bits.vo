@@ -107,12 +107,18 @@ func Reverse(x uint) uint {
 
 // Reverse8 returns the value of x with its bits in reversed order.
 func Reverse8(x uint8) uint8 {
-    return rev8[x]
+    x = (x&0x55)<<1 | (x&0xAA)>>1
+    x = (x&0x33)<<2 | (x&0xCC)>>2
+    x = (x&0x0F)<<4 | (x&0xF0)>>4
+    return x
 }
 
 // Reverse16 returns the value of x with its bits in reversed order.
 func Reverse16(x uint16) uint16 {
-    return uint16(rev8[x>>8]) | uint16(rev8[x&0xFF])<<8
+    x = (x&0x5555)<<1 | (x&0xAAAA)>>1
+    x = (x&0x3333)<<2 | (x&0xCCCC)>>2
+    x = (x&0x0F0F)<<4 | (x&0xF0F0)>>4
+    return x>>8 | x<<8
 }
 
 // Reverse32 returns the value of x with its bits in reversed order.

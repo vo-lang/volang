@@ -2,9 +2,14 @@ package http
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +57,26 @@ const (
 // Header represents the key-value pairs in an HTTP header.
 type Header map[string][]string
 
+// CanonicalHeaderKey returns the canonical format of the header key s.
+// The canonicalization converts the first letter and any letter following a hyphen to upper case;
+// the rest are converted to lowercase.
+func CanonicalHeaderKey(s string) string {
+	if s == "" {
+		return ""
+	}
+	b := []byte(s)
+	upper := true
+	for i, c := range b {
+		if upper && c >= 'a' && c <= 'z' {
+			b[i] = c - 32
+		} else if !upper && c >= 'A' && c <= 'Z' {
+			b[i] = c + 32
+		}
+		upper = c == '-'
+	}
+	return string(b)
+}
+
 // Add adds the key-value pair to the header.
 func (h Header) Add(key, value string) {
 	h[key] = append(h[key], value)
@@ -91,12 +116,41 @@ func (h Header) Clone() Header {
 	return h2
 }
 
+// Write writes a header in wire format to w.
+func (h Header) Write(w io.Writer) error {
+	for k, vv := range h {
+		for _, v := range vv {
+			line := k + ": " + v + "\r\n"
+			if _, err := io.WriteString(w, line); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// WriteSubset writes a header in wire format to w, excluding keys in exclude.
+func (h Header) WriteSubset(w io.Writer, exclude map[string]bool) error {
+	for k, vv := range h {
+		if exclude != nil && exclude[k] {
+			continue
+		}
+		for _, v := range vv {
+			line := k + ": " + v + "\r\n"
+			if _, err := io.WriteString(w, line); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // ==================== Request ====================
 
 // Request represents an HTTP request received by a server or to be sent by a client.
 type Request struct {
 	Method        string
-	URL           string
+	URL           *url.URL
 	Proto         string
 	Header        Header
 	Body          io.Reader
@@ -104,21 +158,126 @@ type Request struct {
 	Host          string
 	RemoteAddr    string
 	RequestURI    string
+	Form          url.Values
+	ctx           context.Context
+}
+
+// NewRequestWithContext returns a Request suitable for use with Client.Do or Transport.RoundTrip
+// to make an HTTP client request. The provided ctx must be non-nil. If the context is cancelled,
+// requests made with this Request will be cancelled.
+func NewRequestWithContext(ctx context.Context, method, rawurl string, body io.Reader) (*Request, error) {
+	req, err := NewRequest(method, rawurl, body)
+	if err != nil {
+		return nil, err
+	}
+	req.ctx = ctx
+	return req, nil
 }
 
 // NewRequest creates a new Request with the given method, URL, and optional body.
-func NewRequest(method, url string, body io.Reader) (*Request, error) {
+func NewRequest(method, rawurl string, body io.Reader) (*Request, error) {
 	if method == "" {
 		method = MethodGet
 	}
+	u, err := url.Parse(rawurl)
+	if err != nil {
+		return nil, err
+	}
 	req := &Request{
 		Method: method,
-		URL:    url,
+		URL:    u,
 		Proto:  "HTTP/1.1",
 		Header: make(Header),
 		Body:   body,
+		Host:   u.Host,
 	}
 	return req, nil
+}
+
+// Context returns the request's context. To change the context, use WithContext.
+func (r *Request) Context() context.Context {
+	if r.ctx != nil {
+		return r.ctx
+	}
+	return context.Background()
+}
+
+// WithContext returns a shallow copy of r with its context changed to ctx.
+func (r *Request) WithContext(ctx context.Context) *Request {
+	r2 := *r
+	r2.ctx = ctx
+	return &r2
+}
+
+// Clone returns a deep copy of r with its context changed to ctx.
+func (r *Request) Clone(ctx context.Context) *Request {
+	r2 := r.WithContext(ctx)
+	if r.Header != nil {
+		r2.Header = make(Header)
+		for k, v := range r.Header {
+			r2.Header[k] = v
+		}
+	}
+	return r2
+}
+
+// FormValue returns the first value for the named component of the query.
+// POST and PUT body parameters take precedence over URL query string values.
+// FormValue calls ParseForm if necessary.
+func (r *Request) FormValue(key string) string {
+	if r.Form == nil {
+		r.ParseForm()
+	}
+	if vs, ok := r.Form[key]; ok && len(vs) > 0 {
+		return vs[0]
+	}
+	return ""
+}
+
+// ParseForm populates r.Form from URL query parameters and, for POST/PUT,
+// the request body if Content-Type is application/x-www-form-urlencoded.
+func (r *Request) ParseForm() error {
+	if r.Form != nil {
+		return nil
+	}
+	r.Form = make(url.Values)
+	// Parse query string
+	if r.URL != nil && r.URL.RawQuery != "" {
+		q := r.URL.Query()
+		for k, vs := range q {
+			for _, v := range vs {
+				r.Form.Add(k, v)
+			}
+		}
+	}
+	// Parse body for POST/PUT with form content type
+	if (r.Method == MethodPost || r.Method == MethodPut) && r.Body != nil {
+		ct := r.Header.Get("Content-Type")
+		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				return err
+			}
+			formValues, err := url.ParseQuery(string(body))
+			if err != nil {
+				return err
+			}
+			// Form body values take precedence by being added first lookup
+			merged := make(url.Values)
+			for k, vs := range formValues {
+				for _, v := range vs {
+					merged.Add(k, v)
+				}
+			}
+			for k, vs := range r.Form {
+				for _, v := range vs {
+					merged.Add(k, v)
+				}
+			}
+			r.Form = merged
+		}
+	}
+	return nil
 }
 
 // ==================== Response ====================
@@ -132,6 +291,27 @@ type Response struct {
 	Body          io.ReadCloser
 	ContentLength int64
 	Request       *Request
+}
+
+// Cookies parses and returns the cookies set in the Set-Cookie headers.
+func (r *Response) Cookies() []*Cookie {
+	var cookies []*Cookie
+	for _, line := range r.Header["Set-Cookie"] {
+		parts := strings.Split(line, ";")
+		if len(parts) == 0 {
+			continue
+		}
+		kv := strings.TrimSpace(parts[0])
+		i := strings.Index(kv, "=")
+		if i <= 0 {
+			continue
+		}
+		cookies = append(cookies, &Cookie{
+			Name:  kv[:i],
+			Value: kv[i+1:],
+		})
+	}
+	return cookies
 }
 
 // ==================== Client ====================
@@ -157,6 +337,12 @@ func Head(url string) (*Response, error) {
 // Post issues a POST to the specified URL.
 func Post(url, contentType string, body io.Reader) (*Response, error) {
 	return DefaultClient.Post(url, contentType, body)
+}
+
+// PostForm issues a POST to the specified URL with data's keys and values
+// URL-encoded as the request body.
+func PostForm(url string, data url.Values) (*Response, error) {
+	return DefaultClient.PostForm(url, data)
 }
 
 // Get issues a GET to the specified URL.
@@ -187,6 +373,12 @@ func (c *Client) Post(url, contentType string, body io.Reader) (*Response, error
 	return c.Do(req)
 }
 
+// PostForm issues a POST to the specified URL with data's keys and values
+// URL-encoded as the request body.
+func (c *Client) PostForm(rawurl string, data url.Values) (*Response, error) {
+	return c.Post(rawurl, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()))
+}
+
 // Do sends an HTTP request and returns an HTTP response.
 func (c *Client) Do(req *Request) (*Response, error) {
 	bodyBytes, err := readRequestBody(req)
@@ -195,13 +387,14 @@ func (c *Client) Do(req *Request) (*Response, error) {
 	}
 
 	// HTTPS and timeout-enabled requests use the native bridge
-	scheme := urlScheme(req.URL)
+	rawURL := req.URL.String()
+	scheme := req.URL.Scheme
 	if scheme == "https" || c.Timeout > 0 {
-		return c.doNativeRequest(req, bodyBytes)
+		return c.doNativeRequest(req, bodyBytes, rawURL)
 	}
 
 	// Plain HTTP: parse URL and use Vo TCP client
-	_, dialAddr, hostHeader, path, err := parseURL(req.URL)
+	_, dialAddr, hostHeader, reqPath, err := parseURL(rawURL)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +405,7 @@ func (c *Client) Do(req *Request) (*Response, error) {
 	}
 
 	// Build and send HTTP request
-	if err := writeRequest(conn, req, hostHeader, path, bodyBytes); err != nil {
+	if err := writeRequest(conn, req, hostHeader, reqPath, bodyBytes); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -240,14 +433,14 @@ func readRequestBody(req *Request) ([]byte, error) {
 	return body, nil
 }
 
-func (c *Client) doNativeRequest(req *Request, bodyBytes []byte) (*Response, error) {
+func (c *Client) doNativeRequest(req *Request, bodyBytes []byte, rawURL string) (*Response, error) {
 	headers := requestHeaderLines(req, "")
 	timeoutNs := int64(0)
 	if c.Timeout > 0 {
 		timeoutNs = c.Timeout.Nanoseconds()
 	}
 
-	statusCode, status, proto, responseHeaderLines, responseBody, err := nativeHttpsRequest(req.Method, req.URL, headers, bodyBytes, timeoutNs)
+	statusCode, status, proto, responseHeaderLines, responseBody, err := nativeHttpsRequest(req.Method, rawURL, headers, bodyBytes, timeoutNs)
 	if err != nil {
 		return nil, err
 	}
@@ -523,7 +716,25 @@ func (b *connBody) Close() error {
 	return b.conn.Close()
 }
 
-// ==================== ResponseWriter ====================
+// ==================== ResponseWriter and related interfaces ====================
+
+// Flusher is implemented by ResponseWriters that allow an HTTP handler to flush
+// buffered data to the client.
+type Flusher interface {
+	Flush()
+}
+
+// Hijacker is implemented by ResponseWriters that allow an HTTP handler to
+// take over the connection.
+type Hijacker interface {
+	Hijack() (net.Conn, error)
+}
+
+// CloseNotifier is implemented by ResponseWriters which detect when the
+// underlying connection has gone away. Deprecated: use Request.Context().
+type CloseNotifier interface {
+	CloseNotify() <-chan bool
+}
 
 // ResponseWriter interface is used by an HTTP handler to construct an HTTP response.
 type ResponseWriter interface {
@@ -573,7 +784,7 @@ func (mux *ServeMux) HandleFunc(pattern string, handler func(ResponseWriter, *Re
 
 // ServeHTTP dispatches the request to the handler whose pattern most closely matches.
 func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
-	h := mux.match(r.URL)
+	h := mux.match(r.RequestURI)
 	if h == nil {
 		NotFound(w, r)
 		return
@@ -581,8 +792,8 @@ func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
 	h.ServeHTTP(w, r)
 }
 
-func (mux *ServeMux) match(url string) Handler {
-	path := urlPath(url)
+func (mux *ServeMux) match(uri string) Handler {
+	path := urlPath(uri)
 	bestMatch := -1
 	bestLen := 0
 	for i, pattern := range mux.patterns {
@@ -622,6 +833,22 @@ type Server struct {
 }
 
 var ErrServerClosed = errors.New("http: Server closed")
+
+// Common HTTP errors.
+var (
+	ErrBodyReadAfterClose  = errors.New("http: invalid Read on closed Body")
+	ErrHandlerTimeout      = errors.New("http: Handler timeout")
+	ErrLineTooLong         = errors.New("http: header line too long")
+	ErrMissingFile         = errors.New("http: no such file")
+	ErrNotSupported        = errors.New("http: feature not supported by handler")
+	ErrUnexpectedTrailer   = errors.New("http: trailer header without chunked transfer encoding")
+	ErrMissingBoundary     = errors.New("http: no multipart boundary param in Content-Type")
+	ErrNotMultipart        = errors.New("http: request Content-Type isn't multipart/form-data")
+	ErrContentLength       = errors.New("http: wrote more than the declared Content-Length")
+	ErrBodyNotAllowed      = errors.New("http: request method or response status code does not allow body")
+	ErrHijacked            = errors.New("http: connection has been hijacked")
+	ErrAbortHandler        = errors.New("net/http: abort Handler")
+)
 
 // ListenAndServe listens on the TCP network address addr and then calls Serve.
 func (srv *Server) ListenAndServe() error {
@@ -696,6 +923,19 @@ func ListenAndServe(addr string, handler Handler) error {
 // ==================== Helper Functions ====================
 
 // NotFound replies to the request with an HTTP 404 not found error.
+// NotFoundHandler returns a simple request handler that replies to each request with a 404 page.
+func NotFoundHandler() Handler {
+	return HandlerFunc(NotFound)
+}
+
+// RedirectHandler returns a request handler that redirects each request it receives
+// to the given url using the given status code.
+func RedirectHandler(url string, code int) Handler {
+	return HandlerFunc(func(w ResponseWriter, r *Request) {
+		Redirect(w, r, url, code)
+	})
+}
+
 func NotFound(w ResponseWriter, r *Request) {
 	w.WriteHeader(StatusNotFound)
 	w.Write([]byte("404 page not found\n"))
@@ -706,6 +946,148 @@ func Error(w ResponseWriter, error string, code int) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(code)
 	w.Write([]byte(error))
+}
+
+// Redirect replies to the request with a redirect to the given URL and status code.
+func Redirect(w ResponseWriter, r *Request, redirectURL string, code int) {
+	w.Header().Set("Location", redirectURL)
+	if r.Method == MethodGet || r.Method == MethodHead {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	}
+	w.WriteHeader(code)
+	if r.Method != MethodHead {
+		body := "<a href=\"" + redirectURL + "\">" + StatusText(code) + "</a>.\n"
+		w.Write([]byte(body))
+	}
+}
+
+// ==================== Cookie ====================
+
+// Cookie represents an HTTP cookie.
+type Cookie struct {
+	Name     string
+	Value    string
+	Path     string
+	Domain   string
+	MaxAge   int
+	Secure   bool
+	HttpOnly bool
+}
+
+// String returns the serialization of the cookie for use in a Set-Cookie header.
+func (c *Cookie) String() string {
+	var b []byte
+	b = append(b, c.Name...)
+	b = append(b, '=')
+	b = append(b, c.Value...)
+	if c.Path != "" {
+		b = append(b, "; Path="...)
+		b = append(b, c.Path...)
+	}
+	if c.Domain != "" {
+		b = append(b, "; Domain="...)
+		b = append(b, c.Domain...)
+	}
+	if c.MaxAge > 0 {
+		b = append(b, "; Max-Age="...)
+		b = append(b, strconv.Itoa(c.MaxAge)...)
+	} else if c.MaxAge < 0 {
+		b = append(b, "; Max-Age=0"...)
+	}
+	if c.Secure {
+		b = append(b, "; Secure"...)
+	}
+	if c.HttpOnly {
+		b = append(b, "; HttpOnly"...)
+	}
+	return string(b)
+}
+
+// SetCookie adds a Set-Cookie header to the provided ResponseWriter's headers.
+func SetCookie(w ResponseWriter, cookie *Cookie) {
+	w.Header().Add("Set-Cookie", cookie.String())
+}
+
+// Cookies parses and returns the HTTP cookies sent with the request.
+func (r *Request) Cookies() []*Cookie {
+	var cookies []*Cookie
+	for _, line := range r.Header.Values("Cookie") {
+		parts := strings.Split(line, ";")
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			i := strings.Index(part, "=")
+			if i <= 0 {
+				continue
+			}
+			cookies = append(cookies, &Cookie{
+				Name:  part[:i],
+				Value: part[i+1:],
+			})
+		}
+	}
+	return cookies
+}
+
+// Cookie returns the named cookie provided in the request.
+func (r *Request) Cookie(name string) (*Cookie, error) {
+	for _, c := range r.Cookies() {
+		if c.Name == name {
+			return c, nil
+		}
+	}
+	return nil, ErrNoCookie
+}
+
+var ErrNoCookie = errors.New("http: named cookie not present")
+
+// UserAgent returns the client's User-Agent, if sent in the request.
+func (r *Request) UserAgent() string {
+	return r.Header.Get("User-Agent")
+}
+
+// Referer returns the referring URL, if sent in the request.
+func (r *Request) Referer() string {
+	return r.Header.Get("Referer")
+}
+
+// BasicAuth returns the username and password provided in the request's
+// Authorization header, if the request uses HTTP Basic Authentication.
+func (r *Request) BasicAuth() (username, password string, ok bool) {
+	auth := r.Header.Get("Authorization")
+	if auth == "" {
+		return "", "", false
+	}
+	if !strings.HasPrefix(auth, "Basic ") {
+		return "", "", false
+	}
+	decoded, err := base64.DecodeString(auth[6:])
+	if err != nil {
+		return "", "", false
+	}
+	cs := string(decoded)
+	i := strings.Index(cs, ":")
+	if i < 0 {
+		return cs, "", true
+	}
+	return cs[:i], cs[i+1:], true
+}
+
+// ProtoAtLeast reports whether the HTTP protocol used in the request is
+// at least major.minor.
+func (r *Request) ProtoAtLeast(major, minor int) bool {
+	if !strings.HasPrefix(r.Proto, "HTTP/") {
+		return false
+	}
+	parts := strings.Split(r.Proto[5:], ".")
+	if len(parts) != 2 {
+		return false
+	}
+	pMajor, err1 := strconv.Atoi(parts[0])
+	pMinor, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return pMajor > major || (pMajor == major && pMinor >= minor)
 }
 
 // StatusText returns a text for the HTTP status code.
@@ -871,9 +1253,10 @@ func parseRequest(conn net.Conn) (*Request, error) {
 	method, rest := parseWord(reqLine)
 	uri, proto := parseWord(rest)
 	
+	parsedURL, _ := url.Parse(uri)
 	req := &Request{
 		Method:     method,
-		URL:        uri,
+		URL:        parsedURL,
 		RequestURI: uri,
 		Proto:      proto,
 		Header:     make(Header),
@@ -911,6 +1294,37 @@ func parseRequest(conn net.Conn) (*Request, error) {
 		pos = hdrEnd + 2
 	}
 	
+	// Read body based on Content-Length
+	bodyStartPos := pos + 2
+	if bodyStartPos < len(data) {
+		clStr := req.Header.Get("Content-Length")
+		if clStr != "" {
+			cl, clErr := strconv.Atoi(clStr)
+			if clErr == nil && cl > 0 {
+				bodyData := data[bodyStartPos:]
+				// If we already have all the body
+				if len(bodyData) >= cl {
+					req.Body = bytes.NewReader([]byte(bodyData[:cl]))
+					req.ContentLength = int64(cl)
+				} else {
+					// Need to read more body data
+					fullBody := make([]byte, 0, cl)
+					fullBody = append(fullBody, bodyData...)
+					readBuf := make([]byte, 4096)
+					for len(fullBody) < cl {
+						rn, rerr := conn.Read(readBuf)
+						if rerr != nil {
+							break
+						}
+						fullBody = append(fullBody, readBuf[:rn]...)
+					}
+					req.Body = bytes.NewReader(fullBody[:cl])
+					req.ContentLength = int64(cl)
+				}
+			}
+		}
+	}
+
 	return req, nil
 }
 
@@ -931,3 +1345,252 @@ func parseWord(s string) (word, rest string) {
 }
 
 func nativeHttpsRequest(method, url string, headers []string, body []byte, timeoutNs int64) (int, string, string, []string, []byte, error)
+
+// DetectContentType implements the algorithm described at
+// https://mimesniff.spec.whatwg.org/ to determine the Content-Type
+// of the given data. It considers at most the first 512 bytes of data.
+func DetectContentType(data []byte) string {
+	if len(data) > 512 {
+		data = data[:512]
+	}
+	if len(data) >= 4 {
+		if data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+			return "image/jpeg"
+		}
+		if data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 {
+			return "image/png"
+		}
+		if data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 {
+			return "image/gif"
+		}
+		if data[0] == 0x25 && data[1] == 0x50 && data[2] == 0x44 && data[3] == 0x46 {
+			return "application/pdf"
+		}
+		if data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04 {
+			return "application/zip"
+		}
+		if data[0] == 0x52 && data[1] == 0x49 && data[2] == 0x46 && data[3] == 0x46 {
+			return "audio/wave"
+		}
+	}
+	if len(data) >= 8 {
+		if data[0] == 0x42 && data[1] == 0x4D {
+			return "image/bmp"
+		}
+		if data[4] == 0x66 && data[5] == 0x74 && data[6] == 0x79 && data[7] == 0x70 {
+			return "video/mp4"
+		}
+	}
+	// Check for text-based types
+	s := string(data)
+	for _, b := range data {
+		if b > 0x7E && b < 0x80 {
+			continue
+		}
+		if b < 0x09 || (b >= 0x0E && b < 0x20 && b != 0x1B) {
+			return "application/octet-stream"
+		}
+	}
+	if strings.HasPrefix(s, "<?xml") || strings.HasPrefix(s, "<xml") {
+		return "text/xml; charset=utf-8"
+	}
+	if strings.HasPrefix(s, "<!DOCTYPE html") || strings.HasPrefix(s, "<html") || strings.HasPrefix(s, "<head") || strings.HasPrefix(s, "<body") {
+		return "text/html; charset=utf-8"
+	}
+	if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") {
+		return "application/json"
+	}
+	return "text/plain; charset=utf-8"
+}
+
+// ==================== File Serving ====================
+
+// fileHandler serves files from the file system rooted at root.
+type fileHandler struct {
+	root string
+}
+
+// FileServer returns a handler that serves HTTP requests with the contents
+// of the file system rooted at root.
+func FileServer(root string) Handler {
+	return &fileHandler{root: root}
+}
+
+func (fh *fileHandler) ServeHTTP(w ResponseWriter, r *Request) {
+	upath := r.URL.Path
+	if !strings.HasPrefix(upath, "/") {
+		upath = "/" + upath
+	}
+	fullPath := filepath.Join([]string{fh.root, filepath.FromSlash(upath)})
+	fi, err := os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			NotFound(w, r)
+		} else {
+			Error(w, "Internal Server Error", StatusInternalServerError)
+		}
+		return
+	}
+	if fi.IsDir() {
+		indexPath := filepath.Join([]string{fullPath, "index.html"})
+		if _, err2 := os.Stat(indexPath); err2 == nil {
+			fullPath = indexPath
+			fi, _ = os.Stat(fullPath)
+		} else {
+			serveDirectory(w, r, fullPath)
+			return
+		}
+	}
+	serveFile(w, r, fullPath, fi)
+}
+
+func serveFile(w ResponseWriter, r *Request, path string, fi os.FileInfo) {
+	f, err := os.Open(path)
+	if err != nil {
+		Error(w, "Internal Server Error", StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	content, err := io.ReadAll(f)
+	if err != nil {
+		Error(w, "Internal Server Error", StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", mimeTypeForPath(path))
+	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+	w.WriteHeader(StatusOK)
+	w.Write(content)
+}
+
+func serveDirectory(w ResponseWriter, r *Request, path string) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		Error(w, "Internal Server Error", StatusInternalServerError)
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("<html><body><ul>")
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
+			name = name + "/"
+		}
+		sb.WriteString("<li><a href=\"")
+		sb.WriteString(name)
+		sb.WriteString("\">")
+		sb.WriteString(name)
+		sb.WriteString("</a></li>")
+	}
+	sb.WriteString("</ul></body></html>")
+	body := []byte(sb.String())
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(StatusOK)
+	w.Write(body)
+}
+
+func mimeTypeForPath(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".html", ".htm":
+		return "text/html; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".js":
+		return "application/javascript"
+	case ".json":
+		return "application/json"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".svg":
+		return "image/svg+xml"
+	case ".ico":
+		return "image/x-icon"
+	case ".txt":
+		return "text/plain; charset=utf-8"
+	case ".pdf":
+		return "application/pdf"
+	case ".wasm":
+		return "application/wasm"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// maxBytesReader wraps an io.ReadCloser and enforces a byte limit.
+type maxBytesReader struct {
+	r   io.ReadCloser
+	n   int64
+	err error
+}
+
+func (m *maxBytesReader) Read(p []byte) (n int, err error) {
+	if m.err != nil {
+		return 0, m.err
+	}
+	if int64(len(p)) > m.n+1 {
+		p = p[:m.n+1]
+	}
+	n, err = m.r.Read(p)
+	m.n -= int64(n)
+	if m.n < 0 {
+		m.err = errors.New("http: request body too large")
+		return n + int(m.n), m.err
+	}
+	return n, err
+}
+
+func (m *maxBytesReader) Close() error { return m.r.Close() }
+
+// MaxBytesReader is similar to io.LimitReader but is intended for limiting
+// the size of incoming request bodies. It returns an error if the limit is exceeded.
+func MaxBytesReader(w ResponseWriter, r io.ReadCloser, n int64) io.ReadCloser {
+	return &maxBytesReader{r: r, n: n}
+}
+
+// maxBytesHandlerImpl wraps a handler with a max bytes limit on the request body.
+type maxBytesHandlerImpl struct {
+	h   Handler
+	n   int64
+}
+
+func (m *maxBytesHandlerImpl) ServeHTTP(w ResponseWriter, r *Request) {
+	r2 := *r
+	var rc io.ReadCloser
+	if closer, ok := r.Body.(io.ReadCloser); ok {
+		rc = closer
+	} else {
+		rc = io.NopCloser(r.Body)
+	}
+	r2.Body = MaxBytesReader(w, rc, m.n)
+	m.h.ServeHTTP(w, &r2)
+}
+
+// MaxBytesHandler returns a Handler that runs h with its ResponseWriter and Request.Body
+// limited to at most n bytes. This protects servers from abuse by clients sending large bodies.
+func MaxBytesHandler(h Handler, n int64) Handler {
+	return &maxBytesHandlerImpl{h: h, n: n}
+}
+
+// StripPrefix returns a handler that serves HTTP requests by removing the
+// given prefix from the request's URL Path and invoking the handler h.
+func StripPrefix(prefix string, h Handler) Handler {
+	if prefix == "" {
+		return h
+	}
+	return HandlerFunc(func(w ResponseWriter, r *Request) {
+		origPath := r.URL.Path
+		p := strings.TrimPrefix(origPath, prefix)
+		if len(p) < len(origPath) {
+			r2 := *r
+			r2.URL = &url.URL{Path: p, RawQuery: r.URL.RawQuery}
+			h.ServeHTTP(w, &r2)
+		} else {
+			NotFound(w, r)
+		}
+	})
+}

@@ -7,7 +7,7 @@ use crate::objects::{ObjKey, ScopeKey, TCObjects};
 use crate::typ;
 use super::type_info::TypeInfo;
 use vo_syntax::ast::{
-    AssignOp, Block, Decl, Expr, ExprKind, File, FuncDecl, Stmt, StmtKind, UnaryOp,
+    AssignOp, Block, Decl, Expr, ExprKind, File, FuncDecl, Ident, Stmt, StmtKind, UnaryOp,
 };
 use crate::selection::SelectionKind;
 use std::collections::{HashMap, HashSet};
@@ -108,6 +108,33 @@ impl<'a> EscapeAnalyzer<'a> {
         if let ExprKind::Ident(ident) = &expr.kind {
             if let Some(Some(obj)) = self.type_info.defs.get(&ident.id) {
                 self.mark_loop_var(*obj);
+            }
+        }
+    }
+
+    /// Visit an identifier use and record closure captures/escapes when needed.
+    fn visit_ident_use(&mut self, ident: &Ident) {
+        let Some(func_scope) = self.func_scope else {
+            return;
+        };
+        let Some(&obj) = self.type_info.uses.get(&ident.id) else {
+            return;
+        };
+        if !self.is_captured(obj, func_scope) {
+            return;
+        }
+
+        self.escaped.insert(obj);
+        // Record capture for closures that actually need to capture this var.
+        for entry in &self.closure_stack {
+            if let Some(scope) = entry.scope {
+                if self.is_captured(obj, scope) {
+                    if let Some(captures) = self.closure_captures.get_mut(&entry.id) {
+                        if !captures.contains(&obj) {
+                            captures.push(obj);
+                        }
+                    }
+                }
             }
         }
     }
@@ -323,6 +350,20 @@ impl<'a> EscapeAnalyzer<'a> {
             }
             StmtKind::Select(ss) => {
                 for case in &ss.cases {
+                    if let Some(comm) = &case.comm {
+                        match comm {
+                            vo_syntax::ast::CommClause::Send(send) => {
+                                self.visit_expr(&send.chan);
+                                self.visit_expr(&send.value);
+                            }
+                            vo_syntax::ast::CommClause::Recv(recv) => {
+                                self.visit_expr(&recv.expr);
+                                for ident in &recv.lhs {
+                                    self.visit_ident_use(ident);
+                                }
+                            }
+                        }
+                    }
                     for s in &case.body {
                         self.visit_stmt(s);
                     }
@@ -404,27 +445,7 @@ impl<'a> EscapeAnalyzer<'a> {
 
             // 4. Variable reference → check if captured by closure
             ExprKind::Ident(ident) => {
-                if let Some(func_scope) = self.func_scope {
-                    if let Some(&obj) = self.type_info.uses.get(&ident.id) {
-                        if self.is_captured(obj, func_scope) {
-                            self.escaped.insert(obj);
-                            // Record capture for closures that actually need to capture this var
-                            // A closure needs to capture a var if the var is declared outside that closure's scope
-                            for entry in &self.closure_stack {
-                                if let Some(scope) = entry.scope {
-                                    // Only add if var is captured by THIS closure (not its own param/local)
-                                    if self.is_captured(obj, scope) {
-                                        if let Some(captures) = self.closure_captures.get_mut(&entry.id) {
-                                            if !captures.contains(&obj) {
-                                                captures.push(obj);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                self.visit_ident_use(ident);
             }
 
             // Recurse into other expressions
@@ -977,6 +998,79 @@ mod tests {
             }
         "#);
         assert!(escaped.contains(&"x".to_string()), "x should escape: {:?}", escaped);
+    }
+
+    #[test]
+    fn test_select_recv_capture() {
+        let escaped = get_escaped_vars(r#"
+            package main
+            func main() {
+                done := make(chan struct{})
+                f := func() {
+                    select {
+                    case <-done:
+                    default:
+                    }
+                }
+                _ = f
+            }
+        "#);
+        assert!(
+            escaped.contains(&"done".to_string()),
+            "done should escape when captured in select receive clause: {:?}",
+            escaped
+        );
+    }
+
+    #[test]
+    fn test_select_recv_assign_capture() {
+        let escaped = get_escaped_vars(r#"
+            package main
+            func main() {
+                ch := make(chan int)
+                x := 0
+                f := func() {
+                    select {
+                    case x = <-ch:
+                    default:
+                    }
+                }
+                _ = f
+            }
+        "#);
+        assert!(
+            escaped.contains(&"x".to_string()),
+            "x should escape when assigned in select receive clause inside closure: {:?}",
+            escaped
+        );
+    }
+
+    #[test]
+    fn test_select_send_capture() {
+        let escaped = get_escaped_vars(r#"
+            package main
+            func main() {
+                ch := make(chan int)
+                x := 1
+                f := func() {
+                    select {
+                    case ch <- x:
+                    default:
+                    }
+                }
+                _ = f
+            }
+        "#);
+        assert!(
+            escaped.contains(&"ch".to_string()),
+            "ch should escape when used in select send clause inside closure: {:?}",
+            escaped
+        );
+        assert!(
+            escaped.contains(&"x".to_string()),
+            "x should escape when used in select send value inside closure: {:?}",
+            escaped
+        );
     }
 
     // =========================================================================

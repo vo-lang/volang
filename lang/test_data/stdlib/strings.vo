@@ -67,6 +67,28 @@ func main() {
     assert(strings.EqualFold("HELLO", "hello"), "EqualFold failed")
     assert(!strings.EqualFold("hello", "world"), "EqualFold should be false")
     
+    // Replacer
+    r := strings.NewReplacer("foo", "bar", "hello", "world")
+    assert(r.Replace("foo and hello") == "bar and world", "Replacer.Replace failed")
+    assert(r.Replace("nothing") == "nothing", "Replacer no match")
+    assert(r.Replace("") == "", "Replacer empty")
+    r2 := strings.NewReplacer("a", "1", "ab", "2")
+    assert(r2.Replace("ab") == "1b", "Replacer first match wins")
+    
+    // IndexFunc / LastIndexFunc
+    isDigit := func(r rune) bool { return r >= '0' && r <= '9' }
+    assert(strings.IndexFunc("abc123", isDigit) == 3, "IndexFunc digit")
+    assert(strings.IndexFunc("abc", isDigit) == -1, "IndexFunc no match")
+    assert(strings.LastIndexFunc("abc123abc456", isDigit) == 11, "LastIndexFunc digit")
+
+    // Title
+    assert(strings.Title("hello world") == "Hello World", "Title failed")
+    assert(strings.Title("") == "", "Title empty")
+
+    // ToValidUTF8
+    valid := strings.ToValidUTF8("hello", "?")
+    assert(valid == "hello", "ToValidUTF8 already valid")
+
     fmt.Println("All strings tests passed!")
 }
 

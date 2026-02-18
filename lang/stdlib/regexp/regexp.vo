@@ -1,6 +1,9 @@
 package regexp
 
-import "errors"
+import (
+	"errors"
+	"strings"
+)
 
 // ErrInvalidPattern indicates an invalid regular expression pattern.
 var ErrInvalidPattern = errors.New("invalid regexp pattern")
@@ -114,4 +117,187 @@ func (re *Regexp) Split(s string, n int) []string {
 // FindStringSubmatch returns the leftmost match and captures in s.
 func (re *Regexp) FindStringSubmatch(s string) []string {
     return findStringSubmatch(re.pattern, s)
+}
+
+// String returns the source text used to compile the regular expression.
+func (re *Regexp) String() string {
+    return re.pattern
+}
+
+// NumSubexp returns the number of parenthesized subexpressions in this Regexp.
+func (re *Regexp) NumSubexp() int {
+    count := 0
+    inEscape := false
+    for i := 0; i < len(re.pattern); i++ {
+        c := re.pattern[i]
+        if inEscape {
+            inEscape = false
+            continue
+        }
+        if c == '\\' {
+            inEscape = true
+        } else if c == '(' {
+            if i+1 < len(re.pattern) && re.pattern[i+1] != '?' {
+                count++
+            } else if i+2 < len(re.pattern) && re.pattern[i+1] == '?' && re.pattern[i+2] == 'P' {
+                count++
+            }
+        }
+    }
+    return count
+}
+
+// SubexpNames returns the names of the parenthesized subexpressions in this Regexp.
+// The name for the first sub-expression is names[1], so that if m is a match
+// slice, the name for m[i] is SubexpNames()[i].
+func (re *Regexp) SubexpNames() []string {
+    n := re.NumSubexp()
+    names := make([]string, n+1)
+    return names
+}
+
+// ReplaceAllStringFunc returns a copy of src in which all matches of the
+// Regexp have been replaced by the return value of function repl applied
+// to the matched string.
+func (re *Regexp) ReplaceAllStringFunc(src string, repl func(string) string) string {
+    var b strings.Builder
+    rest := src
+    for len(rest) > 0 {
+        start, end := findStringIndex(re.pattern, rest)
+        if start == -1 {
+            b.WriteString(rest)
+            break
+        }
+        b.WriteString(rest[:start])
+        b.WriteString(repl(rest[start:end]))
+        rest = rest[end:]
+        if end == start {
+            if len(rest) > 0 {
+                b.WriteByte(rest[0])
+                rest = rest[1:]
+            }
+        }
+    }
+    return b.String()
+}
+
+// FindAll is the 'All' version of Find; it returns a slice of all successive
+// matches of the expression, as defined by the 'All' description in the
+// package comment.
+func (re *Regexp) FindAll(b []byte, n int) [][]byte {
+    strs := findAllString(re.pattern, string(b), n)
+    result := make([][]byte, len(strs))
+    for i, s := range strs {
+        result[i] = []byte(s)
+    }
+    return result
+}
+
+// Find returns a slice holding the text of the leftmost match in b of the regular
+// expression. A return value of nil indicates no match.
+func (re *Regexp) Find(b []byte) []byte {
+    s := findString(re.pattern, string(b))
+    if s == "" {
+        return nil
+    }
+    return []byte(s)
+}
+
+// FindIndex returns a two-element slice of integers defining the location of
+// the leftmost match in b of the regular expression.
+func (re *Regexp) FindIndex(b []byte) []int {
+    s := string(b)
+    start, end := findStringIndex(re.pattern, s)
+    if start == -1 {
+        return nil
+    }
+    return []int{start, end}
+}
+
+// FindSubmatch returns a slice of slices holding the text of the leftmost
+// match of the regular expression in b and the matches, if any, of its
+// subexpressions.
+func (re *Regexp) FindSubmatch(b []byte) [][]byte {
+    strs := findStringSubmatch(re.pattern, string(b))
+    if strs == nil {
+        return nil
+    }
+    result := make([][]byte, len(strs))
+    for i, s := range strs {
+        result[i] = []byte(s)
+    }
+    return result
+}
+
+// ReplaceAll returns a copy of src, replacing matches of the Regexp
+// with the replacement text repl.
+func (re *Regexp) ReplaceAll(src, repl []byte) []byte {
+    return []byte(re.ReplaceAllString(string(src), string(repl)))
+}
+
+// ReplaceAllLiteral returns a copy of src, replacing matches of the Regexp
+// with the replacement bytes repl. The replacement is substituted directly.
+func (re *Regexp) ReplaceAllLiteralBytes(src, repl []byte) []byte {
+    return []byte(re.ReplaceAllLiteralString(string(src), string(repl)))
+}
+
+// FindAllStringIndex is the 'All' version of FindStringIndex; it returns a
+// slice of all successive matches of the expression.
+func (re *Regexp) FindAllStringIndex(s string, n int) [][]int {
+    all := findAllString(re.pattern, s, n)
+    result := make([][]int, 0, len(all))
+    pos := 0
+    src := s
+    for _, match := range all {
+        idx := -1
+        for i := pos; i <= len(src)-len(match); i++ {
+            if src[i:i+len(match)] == match {
+                idx = i
+                break
+            }
+        }
+        if idx >= 0 {
+            result = append(result, []int{idx, idx + len(match)})
+            pos = idx + len(match)
+            if len(match) == 0 {
+                pos++
+            }
+        }
+    }
+    return result
+}
+
+// FindAllStringSubmatch is the 'All' version of FindStringSubmatch; it returns
+// a slice of all successive matches of the expression.
+func (re *Regexp) FindAllStringSubmatch(s string, n int) [][]string {
+    result := make([][]string, 0)
+    src := s
+    count := 0
+    for len(src) > 0 && (n < 0 || count < n) {
+        m := findStringSubmatch(re.pattern, src)
+        if m == nil || len(m) == 0 {
+            break
+        }
+        result = append(result, m)
+        if len(m[0]) == 0 {
+            if len(src) == 0 {
+                break
+            }
+            src = src[1:]
+        } else {
+            idx := -1
+            for i := 0; i <= len(src)-len(m[0]); i++ {
+                if src[i:i+len(m[0])] == m[0] {
+                    idx = i
+                    break
+                }
+            }
+            if idx < 0 {
+                break
+            }
+            src = src[idx+len(m[0]):]
+        }
+        count++
+    }
+    return result
 }

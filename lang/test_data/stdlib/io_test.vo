@@ -1,0 +1,111 @@
+package main
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"strings"
+)
+
+func main() {
+	testReadAll()
+	testCopy()
+	testLimitReader()
+	testSectionReader()
+	testReadFull()
+	testDiscard()
+	testWriteString()
+}
+
+func testReadAll() {
+	r := strings.NewReader("hello world")
+	data, err := io.ReadAll(r)
+	assert(err == nil)
+	assert(string(data) == "hello world")
+
+	r2 := strings.NewReader("")
+	data, err = io.ReadAll(r2)
+	assert(err == nil)
+	assert(len(data) == 0)
+}
+
+func testCopy() {
+	src := strings.NewReader("hello world")
+	var dst bytes.Buffer
+	n, err := io.Copy(&dst, src)
+	assert(err == nil)
+	assert(n == 11)
+	assert(dst.String() == "hello world")
+
+	// CopyN
+	src2 := strings.NewReader("hello world")
+	var dst2 bytes.Buffer
+	n, err = io.CopyN(&dst2, src2, 5)
+	assert(err == nil)
+	assert(n == 5)
+	assert(dst2.String() == "hello")
+}
+
+func testLimitReader() {
+	r := strings.NewReader("hello world")
+	lr := io.LimitReader(r, 5)
+	data, err := io.ReadAll(lr)
+	assert(err == nil)
+	assert(string(data) == "hello")
+
+	// Limit of 0
+	r2 := strings.NewReader("hello")
+	lr2 := io.LimitReader(r2, 0)
+	data, err = io.ReadAll(lr2)
+	assert(err == nil)
+	assert(len(data) == 0)
+}
+
+func testSectionReader() {
+	r := strings.NewReader("hello world")
+	sr := io.NewSectionReader(r, 6, 5) // "world"
+	data, err := io.ReadAll(sr)
+	assert(err == nil)
+	assert(string(data) == "world")
+
+	assert(sr.Size() == 5)
+
+	// Seek and re-read
+	_, err = sr.Seek(0, io.SeekStart)
+	assert(err == nil)
+	buf := make([]byte, 3)
+	n, err := sr.Read(buf)
+	assert(n == 3)
+	assert(string(buf) == "wor")
+}
+
+func testReadFull() {
+	r := strings.NewReader("hello world")
+	buf := make([]byte, 11)
+	n, err := io.ReadFull(r, buf)
+	assert(err == nil)
+	assert(n == 11)
+	assert(string(buf) == "hello world")
+
+	// Short read -> ErrUnexpectedEOF
+	r2 := strings.NewReader("hi")
+	buf2 := make([]byte, 10)
+	n, err = io.ReadFull(r2, buf2)
+	assert(n == 2)
+	assert(errors.Is(err, io.ErrUnexpectedEOF))
+}
+
+func testDiscard() {
+	src := strings.NewReader("hello world")
+	n, err := io.Copy(io.Discard, src)
+	assert(err == nil)
+	assert(n == 11)
+}
+
+func testWriteString() {
+	var buf bytes.Buffer
+	n, err := io.WriteString(&buf, "hello")
+	assert(err == nil)
+	assert(n == 5)
+	assert(buf.String() == "hello")
+}

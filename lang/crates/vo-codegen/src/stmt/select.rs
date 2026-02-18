@@ -6,7 +6,7 @@ use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
-use crate::func::FuncBuilder;
+use crate::func::{FuncBuilder, StorageKind};
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
 /// Info for recv case variable binding
@@ -120,6 +120,77 @@ pub(crate) fn compile_select(
     Ok(())
 }
 
+fn store_recv_ident(
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+    ident: &vo_syntax::ast::Ident,
+    src_slot: u16,
+    src_type: TypeKey,
+) -> Result<(), CodegenError> {
+    let lhs_type = info
+        .ident_type(ident)
+        .ok_or_else(|| CodegenError::Internal(format!("recv lhs has no type: {:?}", ident.symbol)))?;
+
+    if let Some(local) = func.lookup_local(ident.symbol) {
+        return crate::assign::emit_store_to_storage(
+            local.storage,
+            src_slot,
+            src_type,
+            lhs_type,
+            ctx,
+            func,
+            info,
+        );
+    }
+
+    let obj_key = info.get_use(ident);
+    if let Some(global_idx) = ctx.get_global_index(obj_key) {
+        let slots = if info.is_array(lhs_type) {
+            1
+        } else {
+            info.type_slot_count(lhs_type)
+        };
+        let storage = StorageKind::Global {
+            index: global_idx as u16,
+            slots,
+        };
+        return crate::assign::emit_store_to_storage(
+            storage,
+            src_slot,
+            src_type,
+            lhs_type,
+            ctx,
+            func,
+            info,
+        );
+    }
+
+    if let Some(capture) = func.lookup_capture(ident.symbol) {
+        let capture_index = capture.index;
+        let slot_types = info.type_slot_types(lhs_type);
+        let converted = func.alloc_slots(&slot_types);
+        crate::assign::emit_assign(
+            converted,
+            crate::assign::AssignSource::Slot {
+                slot: src_slot,
+                type_key: src_type,
+            },
+            lhs_type,
+            ctx,
+            func,
+            info,
+        )?;
+
+        let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+        func.emit_op(Opcode::ClosureGet, gcref_slot, capture_index, 0);
+        func.emit_ptr_set_with_slot_types(gcref_slot, 0, converted, &slot_types);
+        return Ok(());
+    }
+
+    Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)))
+}
+
 /// Bind variables for a recv case (either define new or assign to existing)
 fn bind_recv_variables(
     ctx: &mut CodegenContext,
@@ -138,12 +209,8 @@ fn bind_recv_variables(
     let first = &recv.lhs[0];
     if recv.define {
         func.define_local_at(first.symbol, recv_info.dst_reg, recv_info.elem_slots);
-    } else if let Some(local) = func.lookup_local(first.symbol) {
-        // Existing variable: need to check for interface conversion
-        let storage = local.storage.clone();
-        let obj_key = info.get_use(first);
-        let lhs_type = info.obj_type(obj_key, "recv var must have type");
-        crate::assign::emit_store_to_storage(storage, recv_info.dst_reg, elem_type, lhs_type, ctx, func, info)?;
+    } else {
+        store_recv_ident(ctx, func, info, first, recv_info.dst_reg, elem_type)?;
     }
     
     // Second variable: ok bool (if present)
@@ -152,9 +219,8 @@ fn bind_recv_variables(
         let ok_reg = recv_info.dst_reg + recv_info.elem_slots;
         if recv.define {
             func.define_local_at(second.symbol, ok_reg, 1);
-        } else if let Some(local) = func.lookup_local(second.symbol) {
-            // ok is always bool, no interface conversion needed
-            func.emit_storage_store(local.storage, ok_reg, &[SlotType::Value]);
+        } else {
+            store_recv_ident(ctx, func, info, second, ok_reg, info.bool_type())?;
         }
     }
     Ok(())

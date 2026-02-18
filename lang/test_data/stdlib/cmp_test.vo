@@ -1,0 +1,70 @@
+package main
+
+import (
+	"cmp"
+	"fmt"
+)
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("ASSERT FAILED: " + msg)
+	}
+}
+
+func main() {
+	fmt.Println("Starting cmp tests...")
+
+	// CompareInt
+	assert(cmp.CompareInt(1, 2) < 0, "1 < 2")
+	assert(cmp.CompareInt(2, 1) > 0, "2 > 1")
+	assert(cmp.CompareInt(1, 1) == 0, "1 == 1")
+
+	// CompareInt64
+	assert(cmp.CompareInt64(-100, 100) < 0, "-100 < 100")
+	assert(cmp.CompareInt64(100, -100) > 0, "100 > -100")
+
+	// CompareFloat64
+	assert(cmp.CompareFloat64(1.5, 2.5) < 0, "1.5 < 2.5")
+	assert(cmp.CompareFloat64(2.5, 1.5) > 0, "2.5 > 1.5")
+	assert(cmp.CompareFloat64(1.5, 1.5) == 0, "1.5 == 1.5")
+
+	// CompareString
+	assert(cmp.CompareString("abc", "abd") < 0, "abc < abd")
+	assert(cmp.CompareString("abd", "abc") > 0, "abd > abc")
+	assert(cmp.CompareString("abc", "abc") == 0, "abc == abc")
+
+	// CompareUint64
+	assert(cmp.CompareUint64(0, 1) < 0, "0 < 1 uint64")
+	assert(cmp.CompareUint64(1, 0) > 0, "1 > 0 uint64")
+
+	// OrInt
+	assert(cmp.OrInt(0, 0, 3) == 3, "OrInt first non-zero")
+	assert(cmp.OrInt(1, 2, 3) == 1, "OrInt returns first")
+	assert(cmp.OrInt(0, 0, 0) == 0, "OrInt all zero")
+
+	// OrString
+	assert(cmp.OrString("", "", "hello") == "hello", "OrString first non-empty")
+	assert(cmp.OrString("a", "b") == "a", "OrString returns first")
+	assert(cmp.OrString("", "") == "", "OrString all empty")
+
+	// Or (any)
+	r := cmp.Or(nil, nil, "value")
+	assert(r != nil, "Or returns non-nil")
+
+	// Min/Max
+	assert(cmp.MinInt(3, 5) == 3, "MinInt")
+	assert(cmp.MaxInt(3, 5) == 5, "MaxInt")
+	assert(cmp.MinFloat64(1.5, 2.5) == 1.5, "MinFloat64")
+	assert(cmp.MaxFloat64(1.5, 2.5) == 2.5, "MaxFloat64")
+	assert(cmp.MinString("abc", "abd") == "abc", "MinString")
+	assert(cmp.MaxString("abc", "abd") == "abd", "MaxString")
+
+	// IsZero
+	assert(cmp.IsZeroInt(0), "IsZeroInt 0")
+	assert(!cmp.IsZeroInt(1), "IsZeroInt 1 is not zero")
+	assert(cmp.IsZeroString(""), "IsZeroString empty")
+	assert(!cmp.IsZeroString("x"), "IsZeroString x is not zero")
+	assert(cmp.IsZeroFloat64(0), "IsZeroFloat64 0")
+
+	fmt.Println("All cmp tests passed!")
+}

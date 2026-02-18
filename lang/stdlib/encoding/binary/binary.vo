@@ -1,0 +1,379 @@
+// Package binary implements simple translation between numbers and byte sequences
+// and encoding and decoding of varints.
+package binary
+
+import (
+	"errors"
+	"io"
+)
+
+// ByteOrder specifies how to convert byte sequences into 16-, 32-, or 64-bit unsigned integers.
+type ByteOrder interface {
+	Uint16([]byte) uint16
+	Uint32([]byte) uint32
+	Uint64([]byte) uint64
+	PutUint16([]byte, uint16)
+	PutUint32([]byte, uint32)
+	PutUint64([]byte, uint64)
+	String() string
+}
+
+// bigEndianOrder implements ByteOrder for big-endian byte order.
+type bigEndianOrder struct{}
+
+func (b bigEndianOrder) Uint16(bs []byte) uint16 {
+	return uint16(bs[1]) | uint16(bs[0])<<8
+}
+
+func (b bigEndianOrder) Uint32(bs []byte) uint32 {
+	return uint32(bs[3]) | uint32(bs[2])<<8 | uint32(bs[1])<<16 | uint32(bs[0])<<24
+}
+
+func (b bigEndianOrder) Uint64(bs []byte) uint64 {
+	return uint64(bs[7]) | uint64(bs[6])<<8 | uint64(bs[5])<<16 | uint64(bs[4])<<24 |
+		uint64(bs[3])<<32 | uint64(bs[2])<<40 | uint64(bs[1])<<48 | uint64(bs[0])<<56
+}
+
+func (b bigEndianOrder) PutUint16(bs []byte, v uint16) {
+	bs[0] = byte(v >> 8)
+	bs[1] = byte(v)
+}
+
+func (b bigEndianOrder) PutUint32(bs []byte, v uint32) {
+	bs[0] = byte(v >> 24)
+	bs[1] = byte(v >> 16)
+	bs[2] = byte(v >> 8)
+	bs[3] = byte(v)
+}
+
+func (b bigEndianOrder) PutUint64(bs []byte, v uint64) {
+	bs[0] = byte(v >> 56)
+	bs[1] = byte(v >> 48)
+	bs[2] = byte(v >> 40)
+	bs[3] = byte(v >> 32)
+	bs[4] = byte(v >> 24)
+	bs[5] = byte(v >> 16)
+	bs[6] = byte(v >> 8)
+	bs[7] = byte(v)
+}
+
+func (b bigEndianOrder) String() string { return "BigEndian" }
+
+// AppendUint16 appends the big-endian encoding of v to b.
+func (b bigEndianOrder) AppendUint16(bs []byte, v uint16) []byte {
+	return append(bs, byte(v>>8), byte(v))
+}
+
+// AppendUint32 appends the big-endian encoding of v to b.
+func (b bigEndianOrder) AppendUint32(bs []byte, v uint32) []byte {
+	return append(bs, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+}
+
+// AppendUint64 appends the big-endian encoding of v to b.
+func (b bigEndianOrder) AppendUint64(bs []byte, v uint64) []byte {
+	return append(bs,
+		byte(v>>56), byte(v>>48), byte(v>>40), byte(v>>32),
+		byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+}
+
+// littleEndianOrder implements ByteOrder for little-endian byte order.
+type littleEndianOrder struct{}
+
+func (l littleEndianOrder) Uint16(bs []byte) uint16 {
+	return uint16(bs[0]) | uint16(bs[1])<<8
+}
+
+func (l littleEndianOrder) Uint32(bs []byte) uint32 {
+	return uint32(bs[0]) | uint32(bs[1])<<8 | uint32(bs[2])<<16 | uint32(bs[3])<<24
+}
+
+func (l littleEndianOrder) Uint64(bs []byte) uint64 {
+	return uint64(bs[0]) | uint64(bs[1])<<8 | uint64(bs[2])<<16 | uint64(bs[3])<<24 |
+		uint64(bs[4])<<32 | uint64(bs[5])<<40 | uint64(bs[6])<<48 | uint64(bs[7])<<56
+}
+
+func (l littleEndianOrder) PutUint16(bs []byte, v uint16) {
+	bs[0] = byte(v)
+	bs[1] = byte(v >> 8)
+}
+
+func (l littleEndianOrder) PutUint32(bs []byte, v uint32) {
+	bs[0] = byte(v)
+	bs[1] = byte(v >> 8)
+	bs[2] = byte(v >> 16)
+	bs[3] = byte(v >> 24)
+}
+
+func (l littleEndianOrder) PutUint64(bs []byte, v uint64) {
+	bs[0] = byte(v)
+	bs[1] = byte(v >> 8)
+	bs[2] = byte(v >> 16)
+	bs[3] = byte(v >> 24)
+	bs[4] = byte(v >> 32)
+	bs[5] = byte(v >> 40)
+	bs[6] = byte(v >> 48)
+	bs[7] = byte(v >> 56)
+}
+
+func (l littleEndianOrder) String() string { return "LittleEndian" }
+
+// AppendUint16 appends the little-endian encoding of v to b.
+func (l littleEndianOrder) AppendUint16(bs []byte, v uint16) []byte {
+	return append(bs, byte(v), byte(v>>8))
+}
+
+// AppendUint32 appends the little-endian encoding of v to b.
+func (l littleEndianOrder) AppendUint32(bs []byte, v uint32) []byte {
+	return append(bs, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+}
+
+// AppendUint64 appends the little-endian encoding of v to b.
+func (l littleEndianOrder) AppendUint64(bs []byte, v uint64) []byte {
+	return append(bs,
+		byte(v), byte(v>>8), byte(v>>16), byte(v>>24),
+		byte(v>>32), byte(v>>40), byte(v>>48), byte(v>>56))
+}
+
+// BigEndian is the big-endian implementation of ByteOrder.
+var BigEndian ByteOrder = bigEndianOrder{}
+
+// LittleEndian is the little-endian implementation of ByteOrder.
+var LittleEndian ByteOrder = littleEndianOrder{}
+
+// NativeEndian is the native byte order for the current platform.
+// Vo targets 64-bit little-endian platforms.
+var NativeEndian ByteOrder = littleEndianOrder{}
+
+// Size returns how many bytes Write would generate to encode the value v.
+func Size(v any) int {
+	switch x := v.(type) {
+	case bool, int8, uint8:
+		return 1
+	case int16, uint16:
+		return 2
+	case int32, uint32, float32:
+		return 4
+	case int64, uint64, float64:
+		return 8
+	}
+	return -1
+}
+
+// ReadUint8 reads a single byte from r.
+func ReadUint8(r io.Reader) (uint8, error) {
+	buf := make([]byte, 1)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return 0, err
+	}
+	return buf[0], nil
+}
+
+// ReadInt8 reads a signed byte from r.
+func ReadInt8(r io.Reader) (int8, error) {
+	b, err := ReadUint8(r)
+	return int8(b), err
+}
+
+// ReadUint16 reads a 2-byte unsigned integer from r using the specified byte order.
+func ReadUint16(r io.Reader, order ByteOrder) (uint16, error) {
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return 0, err
+	}
+	return order.Uint16(buf), nil
+}
+
+// ReadInt16 reads a 2-byte signed integer from r.
+func ReadInt16(r io.Reader, order ByteOrder) (int16, error) {
+	v, err := ReadUint16(r, order)
+	return int16(v), err
+}
+
+// ReadUint32 reads a 4-byte unsigned integer from r.
+func ReadUint32(r io.Reader, order ByteOrder) (uint32, error) {
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return 0, err
+	}
+	return order.Uint32(buf), nil
+}
+
+// ReadInt32 reads a 4-byte signed integer from r.
+func ReadInt32(r io.Reader, order ByteOrder) (int32, error) {
+	v, err := ReadUint32(r, order)
+	return int32(v), err
+}
+
+// ReadUint64 reads an 8-byte unsigned integer from r.
+func ReadUint64(r io.Reader, order ByteOrder) (uint64, error) {
+	buf := make([]byte, 8)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return 0, err
+	}
+	return order.Uint64(buf), nil
+}
+
+// ReadInt64 reads an 8-byte signed integer from r.
+func ReadInt64(r io.Reader, order ByteOrder) (int64, error) {
+	v, err := ReadUint64(r, order)
+	return int64(v), err
+}
+
+// WriteUint8 writes a single byte to w.
+func WriteUint8(w io.Writer, v uint8) error {
+	_, err := w.Write([]byte{v})
+	return err
+}
+
+// WriteInt8 writes a signed byte to w.
+func WriteInt8(w io.Writer, v int8) error {
+	return WriteUint8(w, uint8(v))
+}
+
+// WriteUint16 writes a 2-byte unsigned integer to w.
+func WriteUint16(w io.Writer, order ByteOrder, v uint16) error {
+	buf := make([]byte, 2)
+	order.PutUint16(buf, v)
+	_, err := w.Write(buf)
+	return err
+}
+
+// WriteInt16 writes a 2-byte signed integer to w.
+func WriteInt16(w io.Writer, order ByteOrder, v int16) error {
+	return WriteUint16(w, order, uint16(v))
+}
+
+// WriteUint32 writes a 4-byte unsigned integer to w.
+func WriteUint32(w io.Writer, order ByteOrder, v uint32) error {
+	buf := make([]byte, 4)
+	order.PutUint32(buf, v)
+	_, err := w.Write(buf)
+	return err
+}
+
+// WriteInt32 writes a 4-byte signed integer to w.
+func WriteInt32(w io.Writer, order ByteOrder, v int32) error {
+	return WriteUint32(w, order, uint32(v))
+}
+
+// WriteUint64 writes an 8-byte unsigned integer to w.
+func WriteUint64(w io.Writer, order ByteOrder, v uint64) error {
+	buf := make([]byte, 8)
+	order.PutUint64(buf, v)
+	_, err := w.Write(buf)
+	return err
+}
+
+// WriteInt64 writes an 8-byte signed integer to w.
+func WriteInt64(w io.Writer, order ByteOrder, v int64) error {
+	return WriteUint64(w, order, uint64(v))
+}
+
+// WriteBytes writes a byte slice to w.
+func WriteBytes(w io.Writer, data []byte) error {
+	_, err := w.Write(data)
+	return err
+}
+
+// ==================== Varint encoding ====================
+
+// PutUvarint encodes a uint64 into buf and returns the number of bytes written.
+// If the buffer is too small, PutUvarint will panic.
+func PutUvarint(buf []byte, x uint64) int {
+	i := 0
+	for x >= 0x80 {
+		buf[i] = byte(x) | 0x80
+		x >>= 7
+		i++
+	}
+	buf[i] = byte(x)
+	return i + 1
+}
+
+// Uvarint decodes a uint64 from buf and returns that value and the number of bytes read.
+func Uvarint(buf []byte) (uint64, int) {
+	var x uint64
+	var s uint
+	for i, b := range buf {
+		if i == 10 {
+			return 0, -(i + 1)
+		}
+		if b < 0x80 {
+			if i == 9 && b > 1 {
+				return 0, -(i + 1)
+			}
+			return x | uint64(b)<<s, i + 1
+		}
+		x |= uint64(b&0x7f) << s
+		s += 7
+	}
+	return 0, 0
+}
+
+// PutVarint encodes an int64 into buf and returns the number of bytes written.
+func PutVarint(buf []byte, x int64) int {
+	ux := uint64(x) << 1
+	if x < 0 {
+		ux = ^ux
+	}
+	return PutUvarint(buf, ux)
+}
+
+// Varint decodes an int64 from buf and returns that value and the number of bytes read.
+func Varint(buf []byte) (int64, int) {
+	ux, n := Uvarint(buf)
+	x := int64(ux >> 1)
+	if ux&1 != 0 {
+		x = ^x
+	}
+	return x, n
+}
+
+// ReadUvarint reads an encoded unsigned integer from r and returns it as a uint64.
+func ReadUvarint(r io.ByteReader) (uint64, error) {
+	var x uint64
+	var s uint
+	for i := 0; i < 10; i++ {
+		b, err := r.ReadByte()
+		if err != nil {
+			return x, err
+		}
+		if b < 0x80 {
+			if i == 9 && b > 1 {
+				return 0, errors.New("binary.ReadUvarint: overflow")
+			}
+			return x | uint64(b)<<s, nil
+		}
+		x |= uint64(b&0x7f) << s
+		s += 7
+	}
+	return 0, errors.New("binary.ReadUvarint: overflow")
+}
+
+// ReadVarint reads an encoded signed integer from r and returns it as an int64.
+func ReadVarint(r io.ByteReader) (int64, error) {
+	ux, err := ReadUvarint(r)
+	x := int64(ux >> 1)
+	if ux&1 != 0 {
+		x = ^x
+	}
+	return x, err
+}
+
+// AppendUvarint appends the varint-encoded form of x to buf.
+func AppendUvarint(buf []byte, x uint64) []byte {
+	for x >= 0x80 {
+		buf = append(buf, byte(x)|0x80)
+		x >>= 7
+	}
+	return append(buf, byte(x))
+}
+
+// AppendVarint appends the varint-encoded form of x to buf.
+func AppendVarint(buf []byte, x int64) []byte {
+	ux := uint64(x) << 1
+	if x < 0 {
+		ux = ^ux
+	}
+	return AppendUvarint(buf, ux)
+}

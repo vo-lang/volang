@@ -243,3 +243,50 @@ func KeysStringAny(m map[string]any) []string {
     }
     return keys
 }
+
+// ==================== DeleteFunc typed variants ====================
+
+// DeleteFuncStringString deletes any key/value pairs from m for which del returns true.
+func DeleteFuncStringString(m map[string]string, del func(string, string) bool) {
+    for k, v := range m {
+        if del(k, v) {
+            delete(m, k)
+        }
+    }
+}
+
+// DeleteFuncStringInt deletes any key/value pairs from m for which del returns true.
+func DeleteFuncStringInt(m map[string]int, del func(string, int) bool) {
+    for k, v := range m {
+        if del(k, v) {
+            delete(m, k)
+        }
+    }
+}
+
+// DeleteFuncIntString deletes any key/value pairs from m for which del returns true.
+func DeleteFuncIntString(m map[int]string, del func(int, string) bool) {
+    for k, v := range m {
+        if del(k, v) {
+            delete(m, k)
+        }
+    }
+}
+
+// DeleteFuncIntInt deletes any key/value pairs from m for which del returns true.
+func DeleteFuncIntInt(m map[int]int, del func(int, int) bool) {
+    for k, v := range m {
+        if del(k, v) {
+            delete(m, k)
+        }
+    }
+}
+
+// DeleteFuncStringAny deletes any key/value pairs from m for which del returns true.
+func DeleteFuncStringAny(m map[string]any, del func(string, any) bool) {
+    for k, v := range m {
+        if del(k, v) {
+            delete(m, k)
+        }
+    }
+}

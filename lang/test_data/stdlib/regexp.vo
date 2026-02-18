@@ -22,5 +22,42 @@ func main() {
     assert(re.MatchString("abc123def"), "should match digits")
     assert(!re.MatchString("abcdef"), "should not match without digits")
     
+    // String() method
+    reStr, _ := regexp.Compile("[0-9]+")
+    assert(reStr.String() == "[0-9]+", "String() should return pattern")
+    
+    // NumSubexp
+    reSub, _ := regexp.Compile("([0-9]+)")
+    assert(reSub.NumSubexp() == 1, "NumSubexp should be 1")
+    reNoSub, _ := regexp.Compile("[0-9]+")
+    assert(reNoSub.NumSubexp() == 0, "NumSubexp should be 0")
+    
+    // ReplaceAllStringFunc
+    reFunc, _ := regexp.Compile("[0-9]+")
+    result := reFunc.ReplaceAllStringFunc("abc123def456", func(s string) string {
+        return "[" + s + "]"
+    })
+    assert(result == "abc[123]def[456]", "ReplaceAllStringFunc failed: " + result)
+    
+    // Find (byte variant)
+    reByte, _ := regexp.Compile("[0-9]+")
+    found := reByte.Find([]byte("hello 42 world"))
+    assert(string(found) == "42", "Find bytes failed")
+    
+    // FindIndex (byte variant)
+    idxResult := reByte.FindIndex([]byte("hello 42 world"))
+    assert(len(idxResult) == 2, "FindIndex should return 2-element slice")
+    assert(idxResult[0] == 6 && idxResult[1] == 8, "FindIndex wrong indices")
+    
+    // FindSubmatch
+    reCapture, _ := regexp.Compile("([a-z]+)([0-9]+)")
+    sm := reCapture.FindSubmatch([]byte("abc123"))
+    assert(len(sm) >= 1, "FindSubmatch should return matches")
+    
+    // FindAllStringIndex
+    reAllIdx, _ := regexp.Compile("[0-9]+")
+    indices := reAllIdx.FindAllStringIndex("a1b22c333", -1)
+    assert(len(indices) == 3, "FindAllStringIndex should find 3 matches")
+    
     fmt.Println("All regexp tests passed!")
 }

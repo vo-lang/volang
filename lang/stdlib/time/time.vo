@@ -1,5 +1,10 @@
 package time
 
+import (
+	"errors"
+	"strconv"
+)
+
 // Native externs
 func nowUnixNano() int64
 func nowMonoNano() int64
@@ -141,3 +146,1247 @@ func (d Duration) Milliseconds() int64 { return int64(d / Millisecond) }
 func (d Duration) Seconds() int64 { return int64(d / Second) }
 func (d Duration) Minutes() int64 { return int64(d / Minute) }
 func (d Duration) Hours() int64 { return int64(d / Hour) }
+
+// String returns a string representing the duration in the form "72h3m0.5s".
+// Leading zero units are omitted. As a special case, durations less than one
+// second format use a smaller unit (milli-, micro-, or nanoseconds) to ensure
+// that the leading digit is non-zero. The zero duration formats as 0s.
+func (d Duration) String() string {
+	if d == 0 {
+		return "0s"
+	}
+
+	var buf [32]byte
+	w := len(buf)
+
+	neg := d < 0
+	if neg {
+		d = -d
+	}
+
+	u := int64(d)
+
+	if u < int64(Second) {
+		// Special case: use smaller units
+		var prec int
+		w--
+		buf[w] = 's'
+		if u == 0 {
+			return "0s"
+		} else if u < int64(Microsecond) {
+			// nanoseconds
+			prec = 0
+			w--
+			buf[w] = 'n'
+		} else if u < int64(Millisecond) {
+			// microseconds
+			prec = 3
+			w--
+			// µ is two bytes in UTF-8
+			buf[w] = 0xB5
+			w--
+			buf[w] = 0xC2
+		} else {
+			// milliseconds
+			prec = 6
+			w--
+			buf[w] = 'm'
+		}
+		w, u = fmtFrac(buf[:], w, u, prec)
+		w = fmtInt(buf[:], w, u)
+	} else {
+		w--
+		buf[w] = 's'
+		w, u = fmtFrac(buf[:], w, u, 9)
+
+		// u is now integer seconds
+		w = fmtInt(buf[:], w, u%60)
+		u /= 60
+
+		// u is now integer minutes
+		if u > 0 {
+			w--
+			buf[w] = 'm'
+			w = fmtInt(buf[:], w, u%60)
+			u /= 60
+
+			// u is now integer hours
+			if u > 0 {
+				w--
+				buf[w] = 'h'
+				w = fmtInt(buf[:], w, u)
+			}
+		}
+	}
+
+	if neg {
+		w--
+		buf[w] = '-'
+	}
+
+	return string(buf[w:])
+}
+
+// fmtFrac formats the fraction of v/10**prec (e.g., ".12345") into the
+// tail of buf, omitting trailing zeros. It omits the decimal
+// point too when the fraction is 0. It returns the index where the
+// output bytes begin and the value v/10**prec.
+func fmtFrac(buf []byte, w int, v int64, prec int) (int, int64) {
+	print := false
+	for i := 0; i < prec; i++ {
+		digit := v % 10
+		print = print || digit != 0
+		if print {
+			w--
+			buf[w] = byte(digit) + '0'
+		}
+		v /= 10
+	}
+	if print {
+		w--
+		buf[w] = '.'
+	}
+	return w, v
+}
+
+// fmtInt formats v into the tail of buf.
+// It returns the index where the output begins.
+func fmtInt(buf []byte, w int, v int64) int {
+	if v == 0 {
+		w--
+		buf[w] = '0'
+	} else {
+		for v > 0 {
+			w--
+			buf[w] = byte(v%10) + '0'
+			v /= 10
+		}
+	}
+	return w
+}
+
+// ParseDuration parses a duration string.
+// A duration string is a possibly signed sequence of decimal numbers,
+// each with optional fraction and a unit suffix, such as "300ms", "-1.5h" or "2h45m".
+// Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
+func ParseDuration(s string) (Duration, error) {
+	orig := s
+	neg := false
+	if s != "" {
+		if s[0] == '-' || s[0] == '+' {
+			neg = s[0] == '-'
+			s = s[1:]
+		}
+	}
+	if s == "" || s == "." {
+		return 0, errors.New("time: invalid duration " + quote(orig))
+	}
+
+	var d int64
+	for s != "" {
+		// Parse integer part
+		var v int64
+		var frac int64
+		var fracScale int64
+		fracScale = 1
+		hasInt := false
+
+		for s != "" && s[0] >= '0' && s[0] <= '9' {
+			hasInt = true
+			v = v*10 + int64(s[0]-'0')
+			s = s[1:]
+		}
+
+		// Parse fractional part
+		hasFrac := false
+		if s != "" && s[0] == '.' {
+			s = s[1:]
+			for s != "" && s[0] >= '0' && s[0] <= '9' {
+				hasFrac = true
+				if fracScale < 1000000000000 {
+					frac = frac*10 + int64(s[0]-'0')
+					fracScale *= 10
+				}
+				s = s[1:]
+			}
+		}
+
+		if !hasInt && !hasFrac {
+			return 0, errors.New("time: invalid duration " + quote(orig))
+		}
+
+		// Parse unit
+		if s == "" {
+			return 0, errors.New("time: missing unit in duration " + quote(orig))
+		}
+
+		var unit int64
+		if len(s) >= 2 && s[0:2] == "ns" {
+			unit = 1
+			s = s[2:]
+		} else if len(s) >= 2 && s[0:2] == "us" {
+			unit = int64(Microsecond)
+			s = s[2:]
+		} else if len(s) >= 3 && s[0] == 0xC2 && s[1] == 0xB5 && s[2] == 's' {
+			// µs (UTF-8: 0xC2 0xB5)
+			unit = int64(Microsecond)
+			s = s[3:]
+		} else if len(s) >= 2 && s[0:2] == "ms" {
+			unit = int64(Millisecond)
+			s = s[2:]
+		} else if s[0] == 's' {
+			unit = int64(Second)
+			s = s[1:]
+		} else if s[0] == 'm' {
+			unit = int64(Minute)
+			s = s[1:]
+		} else if s[0] == 'h' {
+			unit = int64(Hour)
+			s = s[1:]
+		} else {
+			return 0, errors.New("time: unknown unit " + quote(s[0:1]) + " in duration " + quote(orig))
+		}
+
+		d += v * unit
+		d += frac * unit / fracScale
+	}
+
+	if neg {
+		d = -d
+	}
+	return Duration(d), nil
+}
+
+func quote(s string) string {
+	return "\"" + s + "\""
+}
+
+// ============================================
+// Month and Weekday types
+// ============================================
+
+// A Month specifies a month of the year (January = 1, ...).
+type Month int
+
+const (
+	January Month = 1 + iota
+	February
+	March
+	April
+	May
+	June
+	July
+	August
+	September
+	October
+	November
+	December
+)
+
+// String returns the English name of the month ("January", "February", ...).
+func (m Month) String() string {
+	if m >= January && m <= December {
+		return longMonthNames[m-1]
+	}
+	return "%!Month(" + strconv.Itoa(int(m)) + ")"
+}
+
+// A Weekday specifies a day of the week (Sunday = 0, ...).
+type Weekday int
+
+const (
+	Sunday Weekday = iota
+	Monday
+	Tuesday
+	Wednesday
+	Thursday
+	Friday
+	Saturday
+)
+
+// String returns the English name of the day ("Sunday", "Monday", ...).
+func (d Weekday) String() string {
+	if d >= Sunday && d <= Saturday {
+		return longDayNames[d]
+	}
+	return "%!Weekday(" + strconv.Itoa(int(d)) + ")"
+}
+
+var longMonthNames = []string{
+	"January", "February", "March", "April", "May", "June",
+	"July", "August", "September", "October", "November", "December",
+}
+
+var shortMonthNames = []string{
+	"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+	"Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+}
+
+var longDayNames = []string{
+	"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+}
+
+var shortDayNames = []string{
+	"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat",
+}
+
+// ============================================
+// Internal calendar algorithms
+// ============================================
+
+const (
+	secondsPerMinute = 60
+	secondsPerHour   = 60 * secondsPerMinute
+	secondsPerDay    = 24 * secondsPerHour
+)
+
+// civilFromDays converts days since Unix epoch (1970-01-01) to (year, month, day).
+// Uses the Howard Hinnant algorithm.
+func civilFromDays(z int) (int, int, int) {
+	z += 719468
+	var era int
+	if z >= 0 {
+		era = z / 146097
+	} else {
+		era = (z - 146096) / 146097
+	}
+	doe := z - era*146097
+	yoe := (doe - doe/1460 + doe/36524 - doe/146096) / 365
+	y := yoe + era*400
+	doy := doe - (365*yoe + yoe/4 - yoe/100)
+	mp := (5*doy + 2) / 153
+	d := doy - (153*mp+2)/5 + 1
+	var m int
+	if mp < 10 {
+		m = mp + 3
+	} else {
+		m = mp - 9
+	}
+	if m <= 2 {
+		y++
+	}
+	return y, m, d
+}
+
+// daysFromCivil converts (year, month, day) to days since Unix epoch (1970-01-01).
+func daysFromCivil(y, m, d int) int {
+	if m <= 2 {
+		y--
+	}
+	var era int
+	if y >= 0 {
+		era = y / 400
+	} else {
+		era = (y - 399) / 400
+	}
+	yoe := y - era*400
+	var doy int
+	if m > 2 {
+		doy = (153*(m-3)+2)/5 + d - 1
+	} else {
+		doy = (153*(m+9)+2)/5 + d - 1
+	}
+	doe := yoe*365 + yoe/4 - yoe/100 + doy
+	return era*146097 + doe - 719468
+}
+
+// isLeap reports whether y is a leap year.
+func isLeap(y int) bool {
+	return y%4 == 0 && (y%100 != 0 || y%400 == 0)
+}
+
+// daysIn returns the number of days in the given month of the given year.
+func daysIn(m Month, year int) int {
+	if m == February {
+		if isLeap(year) {
+			return 29
+		}
+		return 28
+	}
+	if m == April || m == June || m == September || m == November {
+		return 30
+	}
+	return 31
+}
+
+// norm normalizes hi, lo by moving excess lo into hi.
+func norm(hi, lo, base int) (int, int) {
+	if lo < 0 {
+		n := (-lo-1)/base + 1
+		hi -= n
+		lo += n * base
+	}
+	if lo >= base {
+		n := lo / base
+		hi += n
+		lo -= n * base
+	}
+	return hi, lo
+}
+
+// ============================================
+// Time accessor methods
+// ============================================
+
+// absClock returns the hour, minute, and second for the given Unix second.
+func absClock(unixSec int64) (int, int, int) {
+	sec := int(unixSec % int64(secondsPerDay))
+	if sec < 0 {
+		sec += secondsPerDay
+	}
+	hour := sec / secondsPerHour
+	sec -= hour * secondsPerHour
+	min := sec / secondsPerMinute
+	sec -= min * secondsPerMinute
+	return hour, min, sec
+}
+
+// date computes the year, month, day, and optionally year-day from t.
+func (t Time) date(full bool) (int, Month, int, int) {
+	unixSec := divFloor(t.unixNano, nanosPerSecond)
+	unixDay := int(divFloor(unixSec, int64(secondsPerDay)))
+	y, m, d := civilFromDays(unixDay)
+	yday := 0
+	if full {
+		jan1 := daysFromCivil(y, 1, 1)
+		yday = unixDay - jan1 + 1
+	}
+	return y, Month(m), d, yday
+}
+
+// Date returns the year, month, and day in which t occurs (UTC).
+func (t Time) Date() (int, Month, int) {
+	year, month, day, _ := t.date(false)
+	return year, month, day
+}
+
+// Clock returns the hour, minute, and second within the day specified by t (UTC).
+func (t Time) Clock() (int, int, int) {
+	unixSec := divFloor(t.unixNano, nanosPerSecond)
+	return absClock(unixSec)
+}
+
+// Year returns the year in which t occurs.
+func (t Time) Year() int {
+	year, _, _, _ := t.date(false)
+	return year
+}
+
+// Month returns the month of the year specified by t.
+func (t Time) Month() Month {
+	_, month, _, _ := t.date(false)
+	return month
+}
+
+// Day returns the day of the month specified by t.
+func (t Time) Day() int {
+	_, _, day, _ := t.date(false)
+	return day
+}
+
+// Hour returns the hour within the day specified by t, in the range [0, 23].
+func (t Time) Hour() int {
+	unixSec := divFloor(t.unixNano, nanosPerSecond)
+	return int(unixSec%int64(secondsPerDay)+int64(secondsPerDay)) % secondsPerDay / secondsPerHour
+}
+
+// Minute returns the minute offset within the hour specified by t, in the range [0, 59].
+func (t Time) Minute() int {
+	unixSec := divFloor(t.unixNano, nanosPerSecond)
+	sec := int(unixSec%int64(secondsPerDay)+int64(secondsPerDay)) % secondsPerDay
+	return sec % secondsPerHour / secondsPerMinute
+}
+
+// Second returns the second offset within the minute specified by t, in the range [0, 59].
+func (t Time) Second() int {
+	unixSec := divFloor(t.unixNano, nanosPerSecond)
+	sec := int(unixSec%int64(secondsPerDay)+int64(secondsPerDay)) % secondsPerDay
+	return sec % secondsPerMinute
+}
+
+// Nanosecond returns the nanosecond offset within the second specified by t,
+// in the range [0, 999999999].
+func (t Time) Nanosecond() int {
+	nsec := t.unixNano % nanosPerSecond
+	if nsec < 0 {
+		nsec += nanosPerSecond
+	}
+	return int(nsec)
+}
+
+// YearDay returns the day of the year specified by t, in the range [1,365] for
+// non-leap years, and [1,366] in leap years.
+func (t Time) YearDay() int {
+	_, _, _, yday := t.date(true)
+	return yday
+}
+
+// Weekday returns the day of the week specified by t.
+func (t Time) Weekday() Weekday {
+	unixSec := divFloor(t.unixNano, nanosPerSecond)
+	unixDay := int(divFloor(unixSec, int64(secondsPerDay)))
+	// January 1, 1970 was a Thursday (4).
+	wd := ((unixDay%7 + 4) + 7) % 7
+	return Weekday(wd)
+}
+
+// ============================================
+// Date constructor
+// ============================================
+
+// Date returns the Time corresponding to
+//
+//	yyyy-mm-dd hh:mm:ss + nsec nanoseconds
+//
+// in UTC. Month and day values outside their usual ranges are normalized.
+// For example, October 32 converts to November 1.
+func Date(year int, month Month, day, hour, min, sec, nsec int) Time {
+	// Normalize month
+	m := int(month) - 1
+	year, m = norm(year, m, 12)
+	month = Month(m + 1)
+
+	// Normalize nsec, sec, min, hour, day
+	sec, nsec = norm(sec, nsec, 1000000000)
+	min, sec = norm(min, sec, 60)
+	hour, min = norm(hour, min, 60)
+	day, hour = norm(day, hour, 24)
+
+	// Compute days from civil date
+	days := daysFromCivil(year, int(month), day)
+
+	totalSec := int64(days)*int64(secondsPerDay) + int64(hour)*int64(secondsPerHour) + int64(min)*int64(secondsPerMinute) + int64(sec)
+	totalNano := totalSec*nanosPerSecond + int64(nsec)
+
+	return Time{unixNano: totalNano}
+}
+
+// Truncate returns the result of rounding t down to a multiple of d (since the zero time).
+// If d <= 0, Truncate returns t stripped of any monotonic clock reading but otherwise unchanged.
+func (t Time) Truncate(d Duration) Time {
+	if d <= 0 {
+		return Time{unixNano: t.unixNano}
+	}
+	_, r := div(t, d)
+	return t.Add(-r)
+}
+
+// Round returns the result of rounding t to the nearest multiple of d (since the zero time).
+// If d <= 0, Round returns t stripped of any monotonic clock reading but otherwise unchanged.
+func (t Time) Round(d Duration) Time {
+	if d <= 0 {
+		return Time{unixNano: t.unixNano}
+	}
+	_, r := div(t, d)
+	if r+r < d {
+		return t.Add(-r)
+	}
+	return t.Add(d - r)
+}
+
+// div divides t by d and returns the quotient parity and remainder.
+func div(t Time, d Duration) (int, Duration) {
+	if d <= 0 {
+		return 0, 0
+	}
+	neg := false
+	nsec := t.unixNano
+	if nsec < 0 {
+		neg = true
+		nsec = -nsec
+	}
+	q := nsec / int64(d)
+	r := Duration(nsec % int64(d))
+	if neg && r > 0 {
+		q++
+		r = d - r
+	}
+	return int(q & 1), r
+}
+
+// ============================================
+// Layout constants
+// ============================================
+
+const (
+	ANSIC       = "Mon Jan _2 15:04:05 2006"
+	UnixDate    = "Mon Jan _2 15:04:05 MST 2006"
+	RubyDate    = "Mon Jan 02 15:04:05 -0700 2006"
+	RFC822      = "02 Jan 06 15:04 MST"
+	RFC822Z     = "02 Jan 06 15:04 -0700"
+	RFC850      = "Monday, 02-Jan-06 15:04:05 MST"
+	RFC1123     = "Mon, 02 Jan 2006 15:04:05 MST"
+	RFC1123Z    = "Mon, 02 Jan 2006 15:04:05 -0700"
+	RFC3339     = "2006-01-02T15:04:05Z07:00"
+	RFC3339Nano = "2006-01-02T15:04:05.999999999Z07:00"
+	Kitchen     = "3:04PM"
+	Stamp       = "Jan _2 15:04:05"
+	StampMilli  = "Jan _2 15:04:05.000"
+	StampMicro  = "Jan _2 15:04:05.000000"
+	StampNano   = "Jan _2 15:04:05.000000000"
+	DateTime    = "2006-01-02 15:04:05"
+	DateOnly    = "2006-01-02"
+	TimeOnly    = "15:04:05"
+)
+
+// ============================================
+// Format directive codes
+// ============================================
+
+const (
+	stdNone           = 0
+	stdLongMonth      = 1
+	stdMonth          = 2
+	stdNumMonth       = 3
+	stdZeroMonth      = 4
+	stdLongWeekDay    = 5
+	stdWeekDay        = 6
+	stdDay            = 7
+	stdUnderDay       = 8
+	stdZeroDay        = 9
+	stdHour           = 10
+	stdHour12         = 11
+	stdZeroHour12     = 12
+	stdMinute         = 13
+	stdZeroMinute     = 14
+	stdSecond         = 15
+	stdZeroSecond     = 16
+	stdLongYear       = 17
+	stdYear           = 18
+	stdPM             = 19
+	stdpm             = 20
+	stdTZ             = 21
+	stdISO8601TZ      = 22
+	stdISO8601ColonTZ = 23
+	stdNumTZ          = 24
+	stdNumShortTZ     = 25
+	stdNumColonTZ     = 26
+	stdFracSecond0    = 27 // ".0", ".00", ... (zero pad)
+	stdFracSecond9    = 28 // ".9", ".99", ... (trim trailing zeros)
+	stdArgShift       = 16
+)
+
+// nextStdChunk finds the first standard layout directive in the layout string.
+// It returns the text before the directive, the directive code, and the text after.
+func nextStdChunk(layout string) (string, int, string) {
+	for i := 0; i < len(layout); i++ {
+		c := layout[i]
+		if c == 'J' {
+			// January, June, July
+			if len(layout) >= i+7 && layout[i:i+7] == "January" {
+				return layout[0:i], stdLongMonth, layout[i+7:]
+			}
+			if len(layout) >= i+3 && layout[i:i+3] == "Jan" {
+				return layout[0:i], stdMonth, layout[i+3:]
+			}
+		} else if c == 'M' {
+			// Monday, Mon, MST
+			if len(layout) >= i+6 && layout[i:i+6] == "Monday" {
+				return layout[0:i], stdLongWeekDay, layout[i+6:]
+			}
+			if len(layout) >= i+3 && layout[i:i+3] == "Mon" {
+				return layout[0:i], stdWeekDay, layout[i+3:]
+			}
+			if len(layout) >= i+3 && layout[i:i+3] == "MST" {
+				return layout[0:i], stdTZ, layout[i+3:]
+			}
+		} else if c == '0' {
+			// 01, 02, 03, 04, 05, 06
+			if len(layout) >= i+2 {
+				ch2 := layout[i+1]
+				if ch2 == '1' {
+					return layout[0:i], stdZeroMonth, layout[i+2:]
+				} else if ch2 == '2' {
+					return layout[0:i], stdZeroDay, layout[i+2:]
+				} else if ch2 == '3' {
+					return layout[0:i], stdZeroHour12, layout[i+2:]
+				} else if ch2 == '4' {
+					return layout[0:i], stdZeroMinute, layout[i+2:]
+				} else if ch2 == '5' {
+					return layout[0:i], stdZeroSecond, layout[i+2:]
+				} else if ch2 == '6' {
+					return layout[0:i], stdYear, layout[i+2:]
+				}
+			}
+		} else if c == '1' {
+			// 15 or 1
+			if len(layout) >= i+2 && layout[i+1] == '5' {
+				return layout[0:i], stdHour, layout[i+2:]
+			}
+			return layout[0:i], stdNumMonth, layout[i+1:]
+		} else if c == '2' {
+			// 2006 or 2
+			if len(layout) >= i+4 && layout[i:i+4] == "2006" {
+				return layout[0:i], stdLongYear, layout[i+4:]
+			}
+			return layout[0:i], stdDay, layout[i+1:]
+		} else if c == '_' {
+			// _2 (space-padded day)
+			if len(layout) >= i+2 && layout[i+1] == '2' {
+				return layout[0:i], stdUnderDay, layout[i+2:]
+			}
+		} else if c == '3' {
+			return layout[0:i], stdHour12, layout[i+1:]
+		} else if c == '4' {
+			return layout[0:i], stdMinute, layout[i+1:]
+		} else if c == '5' {
+			return layout[0:i], stdSecond, layout[i+1:]
+		} else if c == 'P' {
+			if len(layout) >= i+2 && layout[i+1] == 'M' {
+				return layout[0:i], stdPM, layout[i+2:]
+			}
+		} else if c == 'p' {
+			if len(layout) >= i+2 && layout[i+1] == 'm' {
+				return layout[0:i], stdpm, layout[i+2:]
+			}
+		} else if c == '-' {
+			// -0700, -07:00, -07
+			if len(layout) >= i+5 && layout[i:i+5] == "-0700" {
+				return layout[0:i], stdNumTZ, layout[i+5:]
+			}
+			if len(layout) >= i+6 && layout[i:i+6] == "-07:00" {
+				return layout[0:i], stdNumColonTZ, layout[i+6:]
+			}
+			if len(layout) >= i+3 && layout[i:i+3] == "-07" {
+				return layout[0:i], stdNumShortTZ, layout[i+3:]
+			}
+		} else if c == 'Z' {
+			// Z0700, Z07:00
+			if len(layout) >= i+5 && layout[i:i+5] == "Z0700" {
+				return layout[0:i], stdISO8601TZ, layout[i+5:]
+			}
+			if len(layout) >= i+6 && layout[i:i+6] == "Z07:00" {
+				return layout[0:i], stdISO8601ColonTZ, layout[i+6:]
+			}
+		} else if c == '.' || c == ',' {
+			// .000 or .999 fractional seconds
+			if i+1 < len(layout) && (layout[i+1] == '0' || layout[i+1] == '9') {
+				ch := layout[i+1]
+				n := 1
+				for i+1+n < len(layout) && layout[i+1+n] == ch {
+					n++
+				}
+				if ch == '0' {
+					return layout[0:i], stdFracSecond0 | (n << stdArgShift), layout[i+1+n:]
+				}
+				return layout[0:i], stdFracSecond9 | (n << stdArgShift), layout[i+1+n:]
+			}
+		}
+	}
+	return layout, stdNone, ""
+}
+
+// ============================================
+// Format
+// ============================================
+
+// appendInt appends the decimal form of x to b, using width minimum digits.
+// If x is negative, a minus sign is prepended.
+func appendInt(b []byte, x int, width int) []byte {
+	if x < 0 {
+		b = append(b, '-')
+		x = -x
+	}
+	var buf [20]byte
+	i := len(buf)
+	for x >= 10 {
+		i--
+		buf[i] = byte(x%10) + '0'
+		x /= 10
+	}
+	i--
+	buf[i] = byte(x) + '0'
+
+	w := len(buf) - i
+	for w < width {
+		b = append(b, '0')
+		w++
+	}
+	return append(b, buf[i:]...)
+}
+
+// appendNano appends fractional second to b.
+// ndig is number of digits, trim controls whether trailing zeros are removed.
+func appendNano(b []byte, nsec int, ndig int, trim bool) []byte {
+	var buf [9]byte
+	n := nsec
+	for i := 8; i >= 0; i-- {
+		buf[i] = byte(n%10) + '0'
+		n /= 10
+	}
+	if ndig > 9 {
+		ndig = 9
+	}
+	if trim {
+		for ndig > 0 && buf[ndig-1] == '0' {
+			ndig--
+		}
+		if ndig == 0 {
+			return b
+		}
+	}
+	b = append(b, '.')
+	return append(b, buf[:ndig]...)
+}
+
+// AppendFormat is like Format but appends the textual representation to b
+// and returns the extended buffer.
+func (t Time) AppendFormat(b []byte, layout string) []byte {
+	year, month, day, yday := t.date(true)
+	hour, min, sec := absClock(divFloor(t.unixNano, nanosPerSecond))
+	nsec := t.Nanosecond()
+
+	for layout != "" {
+		prefix, std, suffix := nextStdChunk(layout)
+		if prefix != "" {
+			b = append(b, prefix...)
+		}
+		if std == stdNone {
+			break
+		}
+
+		layout = suffix
+
+		stdBase := std & (1<<stdArgShift - 1)
+		stdArg := std >> stdArgShift
+
+		if stdBase == stdLongYear {
+			b = appendInt(b, year, 4)
+		} else if stdBase == stdYear {
+			b = appendInt(b, year%100, 2)
+		} else if stdBase == stdLongMonth {
+			b = append(b, longMonthNames[month-1]...)
+		} else if stdBase == stdMonth {
+			b = append(b, shortMonthNames[month-1]...)
+		} else if stdBase == stdNumMonth {
+			b = appendInt(b, int(month), 0)
+		} else if stdBase == stdZeroMonth {
+			b = appendInt(b, int(month), 2)
+		} else if stdBase == stdLongWeekDay {
+			b = append(b, longDayNames[t.Weekday()]...)
+		} else if stdBase == stdWeekDay {
+			b = append(b, shortDayNames[t.Weekday()]...)
+		} else if stdBase == stdDay {
+			b = appendInt(b, day, 0)
+		} else if stdBase == stdUnderDay {
+			if day < 10 {
+				b = append(b, ' ')
+			}
+			b = appendInt(b, day, 0)
+		} else if stdBase == stdZeroDay {
+			b = appendInt(b, day, 2)
+		} else if stdBase == stdHour {
+			b = appendInt(b, hour, 2)
+		} else if stdBase == stdHour12 {
+			h := hour % 12
+			if h == 0 {
+				h = 12
+			}
+			b = appendInt(b, h, 0)
+		} else if stdBase == stdZeroHour12 {
+			h := hour % 12
+			if h == 0 {
+				h = 12
+			}
+			b = appendInt(b, h, 2)
+		} else if stdBase == stdMinute {
+			b = appendInt(b, min, 0)
+		} else if stdBase == stdZeroMinute {
+			b = appendInt(b, min, 2)
+		} else if stdBase == stdSecond {
+			b = appendInt(b, sec, 0)
+		} else if stdBase == stdZeroSecond {
+			b = appendInt(b, sec, 2)
+		} else if stdBase == stdPM {
+			if hour >= 12 {
+				b = append(b, "PM"...)
+			} else {
+				b = append(b, "AM"...)
+			}
+		} else if stdBase == stdpm {
+			if hour >= 12 {
+				b = append(b, "pm"...)
+			} else {
+				b = append(b, "am"...)
+			}
+		} else if stdBase == stdTZ {
+			// No timezone support yet - output UTC
+			b = append(b, "UTC"...)
+		} else if stdBase == stdISO8601TZ || stdBase == stdISO8601ColonTZ {
+			// ISO 8601: Z for UTC
+			b = append(b, 'Z')
+		} else if stdBase == stdNumTZ {
+			b = append(b, "+0000"...)
+		} else if stdBase == stdNumColonTZ {
+			b = append(b, "+00:00"...)
+		} else if stdBase == stdNumShortTZ {
+			b = append(b, "+00"...)
+		} else if stdBase == stdFracSecond0 {
+			b = appendNano(b, nsec, stdArg, false)
+		} else if stdBase == stdFracSecond9 {
+			b = appendNano(b, nsec, stdArg, true)
+		}
+	}
+	return b
+}
+
+// Format returns a textual representation of the time value formatted according
+// to the layout defined by the argument. See the constants for predefined layouts.
+// The reference time used in layouts is the specific time stamp:
+//
+//	01/02 03:04:05PM '06 -0700
+//
+// (January 2, 15:04:05, 2006, in time zone seven hours west of Greenwich).
+func (t Time) Format(layout string) string {
+	b := make([]byte, 0, 64)
+	b = t.AppendFormat(b, layout)
+	return string(b)
+}
+
+// String returns the time formatted using the format string
+//
+//	"2006-01-02 15:04:05.999999999 -0700 MST"
+func (t Time) String() string {
+	return t.Format("2006-01-02 15:04:05.999999999 -0700 MST")
+}
+
+// MarshalJSON implements the json.Marshaler interface.
+// Time is formatted as a quoted RFC3339 string.
+func (t Time) MarshalJSON() ([]byte, error) {
+	b := make([]byte, 0, len(RFC3339)+2)
+	b = append(b, '"')
+	b = t.AppendFormat(b, RFC3339Nano)
+	b = append(b, '"')
+	return b, nil
+}
+
+// UnmarshalJSON implements the json.Unmarshaler interface.
+// Expects a quoted RFC3339 string.
+func (t *Time) UnmarshalJSON(data []byte) error {
+	s := string(data)
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		return errors.New("time: invalid JSON time value")
+	}
+	s = s[1 : len(s)-1]
+	parsed, err := Parse(RFC3339, s)
+	if err != nil {
+		parsed, err = Parse(RFC3339Nano, s)
+		if err != nil {
+			return err
+		}
+	}
+	*t = parsed
+	return nil
+}
+
+// MarshalText implements the encoding.TextMarshaler interface.
+// Time is formatted as RFC3339Nano.
+func (t Time) MarshalText() ([]byte, error) {
+	return []byte(t.Format(RFC3339Nano)), nil
+}
+
+// UnmarshalText implements the encoding.TextUnmarshaler interface.
+func (t *Time) UnmarshalText(data []byte) error {
+	parsed, err := Parse(RFC3339, string(data))
+	if err != nil {
+		parsed, err = Parse(RFC3339Nano, string(data))
+		if err != nil {
+			return err
+		}
+	}
+	*t = parsed
+	return nil
+}
+
+// ============================================
+// Parse
+// ============================================
+
+// startsWithLowerCase reports whether the string has a lower-case letter at the beginning.
+func startsWithLowerCase(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	c := s[0]
+	return c >= 'a' && c <= 'z'
+}
+
+// parseNanoseconds parses a fractional second string like ".123456789" and returns
+// the nanoseconds value and the length of the consumed string.
+func parseNanoseconds(value string, nbytes int) (int, error) {
+	if value[0] != '.' && value[0] != ',' {
+		return 0, errors.New("time: bad fractional second prefix")
+	}
+	ns := 0
+	for i := 1; i < nbytes; i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return 0, errors.New("time: bad fractional second digit")
+		}
+		ns = ns*10 + int(value[i]-'0')
+	}
+	// Scale to 9 digits
+	for i := nbytes - 1; i < 9; i++ {
+		ns *= 10
+	}
+	return ns, nil
+}
+
+// lookupMonth returns the month number (1-12) and the length consumed.
+func lookupMonth(value string) (int, int, error) {
+	for i := 0; i < 12; i++ {
+		if len(value) >= len(longMonthNames[i]) && value[:len(longMonthNames[i])] == longMonthNames[i] {
+			return i + 1, len(longMonthNames[i]), nil
+		}
+	}
+	for i := 0; i < 12; i++ {
+		if len(value) >= len(shortMonthNames[i]) && value[:len(shortMonthNames[i])] == shortMonthNames[i] {
+			return i + 1, len(shortMonthNames[i]), nil
+		}
+	}
+	return 0, 0, errors.New("time: bad month")
+}
+
+// lookupWeekday returns the weekday number (0-6) and the length consumed.
+func lookupWeekday(value string) (int, int, error) {
+	for i := 0; i < 7; i++ {
+		if len(value) >= len(longDayNames[i]) && value[:len(longDayNames[i])] == longDayNames[i] {
+			return i, len(longDayNames[i]), nil
+		}
+	}
+	for i := 0; i < 7; i++ {
+		if len(value) >= len(shortDayNames[i]) && value[:len(shortDayNames[i])] == shortDayNames[i] {
+			return i, len(shortDayNames[i]), nil
+		}
+	}
+	return 0, 0, errors.New("time: bad weekday")
+}
+
+// parseInt parses an integer from the string, returning the value, remaining string, and error.
+func parseInt(s string, minDigits, maxDigits int) (int, string, error) {
+	i := 0
+	for i < len(s) && i < maxDigits && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i < minDigits {
+		return 0, s, errors.New("time: bad number")
+	}
+	v, err := strconv.Atoi(s[:i])
+	if err != nil {
+		return 0, s, errors.New("time: bad number")
+	}
+	return v, s[i:], nil
+}
+
+// skip tries to consume exactly the string literal from value, or whitespace matches.
+func skip(value, prefix string) (string, error) {
+	for len(prefix) > 0 {
+		if len(value) == 0 {
+			return value, errors.New("time: value too short")
+		}
+		if prefix[0] == ' ' {
+			// Skip spaces in both
+			if value[0] != ' ' {
+				return value, errors.New("time: expected space")
+			}
+			prefix = prefix[1:]
+			value = value[1:]
+		} else {
+			if value[0] != prefix[0] {
+				return value, errors.New("time: expected '" + prefix[:1] + "'")
+			}
+			prefix = prefix[1:]
+			value = value[1:]
+		}
+	}
+	return value, nil
+}
+
+// Parse parses a formatted string and returns the time value it represents.
+// See the documentation for the constants to understand the layout format.
+// The layout defines the format by showing how the reference time,
+// Mon Jan 2 15:04:05 -0700 MST 2006, would be represented.
+// Elements omitted from the layout are assumed to be zero or, when
+// impossible, one (for day-of-month).
+func Parse(layout, value string) (Time, error) {
+	year := 0
+	month := 1
+	day := 1
+	hour := 0
+	min := 0
+	sec := 0
+	nsec := 0
+
+	for layout != "" {
+		prefix, std, suffix := nextStdChunk(layout)
+		var err error
+
+		// Consume the prefix literal from value
+		value, err = skip(value, prefix)
+		if err != nil {
+			return Time{}, errors.New("time: cannot parse " + quote(value) + " as " + quote(prefix))
+		}
+
+		if std == stdNone {
+			break
+		}
+
+		layout = suffix
+		stdBase := std & (1<<stdArgShift - 1)
+		stdArg := std >> stdArgShift
+
+		if stdBase == stdLongYear {
+			year, value, err = parseInt(value, 4, 4)
+			if err != nil {
+				return Time{}, errors.New("time: bad year")
+			}
+		} else if stdBase == stdYear {
+			year, value, err = parseInt(value, 2, 2)
+			if err != nil {
+				return Time{}, errors.New("time: bad year")
+			}
+			if year >= 69 {
+				year += 1900
+			} else {
+				year += 2000
+			}
+		} else if stdBase == stdLongMonth {
+			m, n, e := lookupMonth(value)
+			if e != nil {
+				return Time{}, e
+			}
+			month = m
+			value = value[n:]
+		} else if stdBase == stdMonth {
+			m, n, e := lookupMonth(value)
+			if e != nil {
+				return Time{}, e
+			}
+			month = m
+			value = value[n:]
+		} else if stdBase == stdNumMonth {
+			month, value, err = parseInt(value, 1, 2)
+			if err != nil {
+				return Time{}, errors.New("time: bad month")
+			}
+		} else if stdBase == stdZeroMonth {
+			month, value, err = parseInt(value, 1, 2)
+			if err != nil {
+				return Time{}, errors.New("time: bad month")
+			}
+		} else if stdBase == stdLongWeekDay {
+			_, n, e := lookupWeekday(value)
+			if e != nil {
+				return Time{}, e
+			}
+			value = value[n:]
+		} else if stdBase == stdWeekDay {
+			_, n, e := lookupWeekday(value)
+			if e != nil {
+				return Time{}, e
+			}
+			value = value[n:]
+		} else if stdBase == stdDay || stdBase == stdUnderDay || stdBase == stdZeroDay {
+			if stdBase == stdUnderDay && len(value) > 0 && value[0] == ' ' {
+				value = value[1:]
+			}
+			day, value, err = parseInt(value, 1, 2)
+			if err != nil {
+				return Time{}, errors.New("time: bad day")
+			}
+		} else if stdBase == stdHour {
+			hour, value, err = parseInt(value, 1, 2)
+			if err != nil {
+				return Time{}, errors.New("time: bad hour")
+			}
+		} else if stdBase == stdHour12 || stdBase == stdZeroHour12 {
+			hour, value, err = parseInt(value, 1, 2)
+			if err != nil {
+				return Time{}, errors.New("time: bad hour")
+			}
+		} else if stdBase == stdMinute || stdBase == stdZeroMinute {
+			min, value, err = parseInt(value, 1, 2)
+			if err != nil {
+				return Time{}, errors.New("time: bad minute")
+			}
+		} else if stdBase == stdSecond || stdBase == stdZeroSecond {
+			sec, value, err = parseInt(value, 1, 2)
+			if err != nil {
+				return Time{}, errors.New("time: bad second")
+			}
+		} else if stdBase == stdPM || stdBase == stdpm {
+			if len(value) >= 2 {
+				p := value[:2]
+				if p == "PM" || p == "pm" {
+					if hour < 12 {
+						hour += 12
+					}
+					value = value[2:]
+				} else if p == "AM" || p == "am" {
+					if hour == 12 {
+						hour = 0
+					}
+					value = value[2:]
+				} else {
+					return Time{}, errors.New("time: bad AM/PM")
+				}
+			} else {
+				return Time{}, errors.New("time: bad AM/PM")
+			}
+		} else if stdBase == stdTZ {
+			// Consume timezone name (letters only)
+			n := 0
+			for n < len(value) && ((value[n] >= 'A' && value[n] <= 'Z') || (value[n] >= 'a' && value[n] <= 'z')) {
+				n++
+			}
+			if n == 0 {
+				return Time{}, errors.New("time: bad timezone")
+			}
+			value = value[n:]
+		} else if stdBase == stdISO8601TZ || stdBase == stdISO8601ColonTZ {
+			// Z or +hh:mm / +hhmm
+			if len(value) > 0 && value[0] == 'Z' {
+				value = value[1:]
+			} else {
+				// Skip timezone offset like +05:30 or -0700
+				value = skipTZOffset(value)
+			}
+		} else if stdBase == stdNumTZ || stdBase == stdNumColonTZ || stdBase == stdNumShortTZ {
+			value = skipTZOffset(value)
+		} else if stdBase == stdFracSecond0 || stdBase == stdFracSecond9 {
+			// Parse fractional seconds
+			ndig := stdArg
+			if len(value) > 0 && (value[0] == '.' || value[0] == ',') {
+				// Count the actual digits
+				i := 1
+				for i < len(value) && value[i] >= '0' && value[i] <= '9' {
+					i++
+				}
+				ns, e := parseNanoseconds(value, i)
+				if e != nil {
+					return Time{}, e
+				}
+				nsec = ns
+				value = value[i:]
+			}
+			_ = ndig
+		}
+	}
+
+	return Date(year, Month(month), day, hour, min, sec, nsec), nil
+}
+
+// skipTZOffset skips a timezone offset like "+0700", "-07:00", "+07" from the value.
+func skipTZOffset(value string) string {
+	if len(value) == 0 {
+		return value
+	}
+	if value[0] != '+' && value[0] != '-' {
+		return value
+	}
+	i := 1
+	// Skip digits and colons
+	for i < len(value) && ((value[i] >= '0' && value[i] <= '9') || value[i] == ':') {
+		i++
+	}
+	return value[i:]
+}

@@ -3,6 +3,7 @@ package strings
 import (
     "errors"
     "io"
+    "unicode"
     "unicode/utf8"
 )
 
@@ -338,8 +339,78 @@ func CutPrefix(s, prefix string) (after string, found bool) {
     return s[len(prefix):], true
 }
 
-// CutSuffix returns s without the provided ending suffix string and reports whether it found the suffix.
-// If s doesn't end with suffix, CutSuffix returns s, false.
+// ContainsFunc reports whether any Unicode code point r in s satisfies f(r).
+func ContainsFunc(s string, f func(rune) bool) bool {
+    return IndexFunc(s, f) >= 0
+}
+
+// IndexFunc returns the index into s of the first Unicode code point satisfying f(c),
+// or -1 if none do.
+func IndexFunc(s string, f func(rune) bool) int {
+    for i := 0; i < len(s); {
+        r, size := utf8.DecodeRuneInString(s[i:])
+        if f(r) {
+            return i
+        }
+        i += size
+    }
+    return -1
+}
+
+// LastIndexFunc returns the index into s of the last Unicode code point
+// satisfying f(c), or -1 if none do.
+func LastIndexFunc(s string, f func(rune) bool) int {
+    last := -1
+    for i := 0; i < len(s); {
+        r, size := utf8.DecodeRuneInString(s[i:])
+        if f(r) {
+            last = i
+        }
+        i += size
+    }
+    return last
+}
+
+// Title returns a copy of the string s with all Unicode letters that begin
+// words mapped to their Unicode title case.
+// Deprecated: use golang.org/x/text/cases instead.
+func Title(s string) string {
+    prevSpace := true
+    var b Builder
+    for i := 0; i < len(s); {
+        r, size := utf8.DecodeRuneInString(s[i:])
+        if prevSpace {
+            b.WriteRune(unicode.ToTitle(r))
+        } else {
+            b.WriteRune(r)
+        }
+        prevSpace = isSpaceRune(r)
+        i += size
+    }
+    return b.String()
+}
+
+func isSpaceRune(r rune) bool {
+    return unicode.IsSpace(r)
+}
+
+// ToValidUTF8 returns a copy of the string s with each run of invalid UTF-8 byte sequences
+// replaced by the replacement string, which may be empty.
+func ToValidUTF8(s, replacement string) string {
+    var b Builder
+    for i := 0; i < len(s); {
+        r, size := utf8.DecodeRuneInString(s[i:])
+        if r == utf8.RuneError && size == 1 {
+            b.WriteString(replacement)
+            i++
+        } else {
+            b.WriteRune(r)
+            i += size
+        }
+    }
+    return b.String()
+}
+
 func CutSuffix(s, suffix string) (before string, found bool) {
     if !HasSuffix(s, suffix) {
         return s, false
@@ -551,4 +622,60 @@ func (b *Builder) WriteRune(r rune) (int, error) {
 func (b *Builder) WriteString(s string) (int, error) {
     b.buf = append(b.buf, s...)
     return len(s), nil
+}
+
+// ==================== Replacer ====================
+
+// Replacer replaces a list of strings with replacements.
+// It is safe for concurrent use by multiple goroutines.
+type Replacer struct {
+    oldnew []string
+}
+
+// NewReplacer returns a new Replacer from a list of old, new string
+// pairs. Replacements are performed in the order they appear in the
+// target string, without overlapping matches. The old string
+// comparisons are done in argument order.
+func NewReplacer(oldnew ...string) *Replacer {
+    if len(oldnew)%2 == 1 {
+        panic("strings.NewReplacer: odd argument count")
+    }
+    return &Replacer{oldnew: oldnew}
+}
+
+// Replace returns a copy of s with all replacements performed.
+func (r *Replacer) Replace(s string) string {
+    if len(r.oldnew) == 0 {
+        return s
+    }
+    // Apply replacements left-to-right, greedy from position 0.
+    var b Builder
+    i := 0
+    for i < len(s) {
+        found := false
+        for j := 0; j < len(r.oldnew); j += 2 {
+            old := r.oldnew[j]
+            repl := r.oldnew[j+1]
+            if len(old) == 0 {
+                continue
+            }
+            if i+len(old) <= len(s) && s[i:i+len(old)] == old {
+                b.WriteString(repl)
+                i += len(old)
+                found = true
+                break
+            }
+        }
+        if !found {
+            b.WriteByte(s[i])
+            i++
+        }
+    }
+    return b.String()
+}
+
+// WriteString writes to w the output of r.Replace(s).
+func (r *Replacer) WriteString(w interface{ WriteString(string) (int, error) }, s string) (n int, err error) {
+    result := r.Replace(s)
+    return w.WriteString(result)
 }

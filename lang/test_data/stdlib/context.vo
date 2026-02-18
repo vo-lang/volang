@@ -1,0 +1,171 @@
+package main
+
+import (
+	"context"
+	"time"
+)
+
+func main() {
+	testBackground()
+	testTODO()
+	testWithCancel()
+	testWithCancelParentCancel()
+	testWithTimeout()
+	testWithTimeoutExpires()
+	testWithValue()
+	testWithValueChain()
+	testWithDeadline()
+	testCancelIdempotent()
+}
+
+func testBackground() {
+	ctx := context.Background()
+	assert(ctx != nil)
+	assert(ctx.Err() == nil)
+	assert(ctx.Done() == nil)
+	_, ok := ctx.Deadline()
+	assert(!ok)
+	assert(ctx.Value("key") == nil)
+}
+
+func testTODO() {
+	ctx := context.TODO()
+	assert(ctx != nil)
+	assert(ctx.Err() == nil)
+	assert(ctx.Done() == nil)
+}
+
+func testWithCancel() {
+	ctx, cancel := context.WithCancel(context.Background())
+	assert(ctx.Err() == nil)
+
+	// Done channel should be open
+	select {
+	case <-ctx.Done():
+		panic("should not be done yet")
+	default:
+		// expected
+	}
+
+	// Cancel it
+	cancel()
+
+	// Done channel should be closed
+	select {
+	case <-ctx.Done():
+		// expected
+	default:
+		panic("should be done after cancel")
+	}
+
+	assert(ctx.Err() != nil)
+	assert(ctx.Err().Error() == "context canceled")
+}
+
+func testWithCancelParentCancel() {
+	parent, parentCancel := context.WithCancel(context.Background())
+	child, _ := context.WithCancel(parent)
+
+	assert(child.Err() == nil)
+
+	// Cancel parent should cancel child
+	parentCancel()
+	time.Sleep(50 * time.Millisecond) // allow propagation goroutine
+
+	select {
+	case <-child.Done():
+		// expected - child canceled because parent was
+	default:
+		panic("child should be done after parent cancel")
+	}
+
+	assert(child.Err() != nil)
+}
+
+func testWithTimeout() {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	assert(ctx.Err() == nil)
+
+	dl, ok := ctx.Deadline()
+	assert(ok)
+	assert(!dl.IsZero())
+
+	// Should not be expired yet
+	select {
+	case <-ctx.Done():
+		panic("should not be done yet")
+	default:
+		// expected
+	}
+}
+
+func testWithTimeoutExpires() {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	// Wait for timeout to expire
+	time.Sleep(150 * time.Millisecond)
+
+	select {
+	case <-ctx.Done():
+		// expected - timeout expired
+	default:
+		panic("should be done after timeout")
+	}
+
+	assert(ctx.Err() != nil)
+	assert(ctx.Err().Error() == "context deadline exceeded")
+}
+
+func testWithValue() {
+	ctx := context.WithValue(context.Background(), "key", "value")
+
+	val := ctx.Value("key")
+	assert(val != nil)
+
+	s, ok2 := val.(string)
+	assert(ok2)
+	assert(s == "value")
+
+	// Non-existent key
+	assert(ctx.Value("other") == nil)
+}
+
+func testWithValueChain() {
+	ctx1 := context.WithValue(context.Background(), "a", "1")
+	ctx2 := context.WithValue(ctx1, "b", "2")
+	ctx3 := context.WithValue(ctx2, "c", "3")
+
+	// All values should be accessible through the chain
+	assert(ctx3.Value("a") != nil)
+	assert(ctx3.Value("b") != nil)
+	assert(ctx3.Value("c") != nil)
+	assert(ctx3.Value("d") == nil)
+
+	// Earlier contexts don't have later values
+	assert(ctx1.Value("b") == nil)
+	assert(ctx1.Value("c") == nil)
+}
+
+func testWithDeadline() {
+	dl := time.Now().Add(500 * time.Millisecond)
+	ctx, cancel := context.WithDeadline(context.Background(), dl)
+	defer cancel()
+
+	gotDl, ok := ctx.Deadline()
+	assert(ok)
+	assert(!gotDl.IsZero())
+}
+
+func testCancelIdempotent() {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Calling cancel multiple times should not panic
+	cancel()
+	cancel()
+	cancel()
+
+	assert(ctx.Err() != nil)
+}

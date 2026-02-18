@@ -3,6 +3,7 @@ package bytes
 import (
     "errors"
     "io"
+    "unicode"
     "unicode/utf8"
 )
 
@@ -370,6 +371,82 @@ func TrimSuffix(b, suffix []byte) []byte {
 // ReplaceAll returns a copy of b with all occurrences of old replaced by new.
 func ReplaceAll(b, old, new []byte) []byte {
     return Replace(b, old, new, -1)
+}
+
+// ContainsFunc reports whether any Unicode code point r in b satisfies f(r).
+func ContainsFunc(b []byte, f func(rune) bool) bool {
+    return IndexFunc(b, f) >= 0
+}
+
+// IndexFunc interprets s as a sequence of UTF-8-encoded code points.
+// It returns the byte index in s of the first Unicode code point satisfying f(c),
+// or -1 if none do.
+func IndexFunc(s []byte, f func(rune) bool) int {
+    i := 0
+    for i < len(s) {
+        r, size := utf8.DecodeRune(s[i:])
+        if f(r) {
+            return i
+        }
+        i += size
+    }
+    return -1
+}
+
+// LastIndexFunc interprets s as a sequence of UTF-8-encoded code points.
+// It returns the byte index in s of the last Unicode code point satisfying f(c),
+// or -1 if none do.
+func LastIndexFunc(s []byte, f func(rune) bool) int {
+    last := -1
+    i := 0
+    for i < len(s) {
+        r, size := utf8.DecodeRune(s[i:])
+        if f(r) {
+            last = i
+        }
+        i += size
+    }
+    return last
+}
+
+// Title treats s as UTF-8-encoded bytes and returns a copy with all Unicode
+// letters that begin words mapped to their title case.
+// Deprecated: use golang.org/x/text/cases.
+func Title(s []byte) []byte {
+    prevSpace := true
+    result := make([]byte, 0, len(s))
+    i := 0
+    for i < len(s) {
+        r, size := utf8.DecodeRune(s[i:])
+        if prevSpace {
+            result = utf8.AppendRune(result, unicode.ToTitle(r))
+        } else {
+            for j := 0; j < size; j++ {
+                result = append(result, s[i+j])
+            }
+        }
+        prevSpace = unicode.IsSpace(r)
+        i += size
+    }
+    return result
+}
+
+// ToValidUTF8 treats s as UTF-8-encoded bytes and returns a copy with each run
+// of invalid UTF-8 byte sequences replaced by the bytes in replacement,
+// which may be empty.
+func ToValidUTF8(s, replacement []byte) []byte {
+    result := make([]byte, 0, len(s))
+    for i := 0; i < len(s); {
+        r, size := utf8.DecodeRune(s[i:])
+        if r == utf8.RuneError && size == 1 {
+            result = append(result, replacement...)
+            i++
+        } else {
+            result = append(result, s[i:i+size]...)
+            i += size
+        }
+    }
+    return result
 }
 
 // Map returns a copy of the byte slice b with all its characters modified

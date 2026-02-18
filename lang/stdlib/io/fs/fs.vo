@@ -1,0 +1,279 @@
+package fs
+
+import (
+	"errors"
+	"io"
+	"time"
+)
+
+// FS provides access to a hierarchical file system.
+type FS interface {
+	// Open opens the named file.
+	Open(name string) (File, error)
+}
+
+// File provides access to a single file. The File interface is the minimum
+// implementation required by the FS.
+type File interface {
+	Stat() (FileInfo, error)
+	Read([]byte) (int, error)
+	Close() error
+}
+
+// DirEntry is an entry read from a directory.
+type DirEntry interface {
+	// Name returns the name of the file (or subdirectory) described by the entry.
+	Name() string
+	// IsDir reports whether the entry describes a directory.
+	IsDir() bool
+	// Type returns the type bits for the entry.
+	Type() FileMode
+	// Info returns the FileInfo for the file or subdirectory described by the entry.
+	Info() (FileInfo, error)
+}
+
+// FileInfo describes a file and is returned by Stat.
+type FileInfo interface {
+	Name() string
+	Size() int64
+	Mode() FileMode
+	ModTime() time.Time
+	IsDir() bool
+	Sys() any
+}
+
+// FileMode represents a file's mode and permission bits.
+type FileMode uint32
+
+const (
+	ModeDir        FileMode = 1 << (32 - 1 - 0)
+	ModeAppend     FileMode = 1 << (32 - 1 - 1)
+	ModeExclusive  FileMode = 1 << (32 - 1 - 2)
+	ModeTemporary  FileMode = 1 << (32 - 1 - 3)
+	ModeSymlink    FileMode = 1 << (32 - 1 - 4)
+	ModeDevice     FileMode = 1 << (32 - 1 - 5)
+	ModeNamedPipe  FileMode = 1 << (32 - 1 - 6)
+	ModeSocket     FileMode = 1 << (32 - 1 - 7)
+	ModeSetuid     FileMode = 1 << (32 - 1 - 8)
+	ModeSetgid     FileMode = 1 << (32 - 1 - 9)
+	ModeCharDevice FileMode = 1 << (32 - 1 - 10)
+	ModeSticky     FileMode = 1 << (32 - 1 - 11)
+	ModeIrregular  FileMode = 1 << (32 - 1 - 12)
+	ModeType       FileMode = ModeDir | ModeSymlink | ModeNamedPipe | ModeSocket | ModeDevice | ModeCharDevice | ModeIrregular
+	ModePerm       FileMode = 0777
+)
+
+// IsDir reports whether m describes a directory.
+func (m FileMode) IsDir() bool { return m&ModeDir != 0 }
+
+// IsRegular reports whether m describes a regular file.
+func (m FileMode) IsRegular() bool { return m&ModeType == 0 }
+
+// Perm returns the Unix permission bits in m (m & ModePerm).
+func (m FileMode) Perm() FileMode { return m & ModePerm }
+
+// ReadDirFile is a directory file whose entries can be read with the ReadDir method.
+type ReadDirFile interface {
+	File
+	ReadDir(n int) ([]DirEntry, error)
+}
+
+// ==================== Sentinel errors ====================
+
+var (
+	ErrInvalid    = errors.New("invalid argument")
+	ErrPermission = errors.New("permission denied")
+	ErrExist      = errors.New("file already exists")
+	ErrNotExist   = errors.New("file does not exist")
+	ErrClosed     = errors.New("file already closed")
+)
+
+// ==================== In-memory FS (MapFS) ====================
+
+// MapFile is a single in-memory file for use in a MapFS.
+type MapFile struct {
+	Data    []byte
+	Mode    FileMode
+	ModTime time.Time
+}
+
+// MapFS is a simple in-memory file system for use in tests.
+// The key is the file path (without leading slash).
+type MapFS struct {
+	files map[string]*MapFile
+}
+
+// NewMapFS creates a new empty MapFS.
+func NewMapFS() *MapFS {
+	return &MapFS{files: make(map[string]*MapFile)}
+}
+
+// Add adds a file to the MapFS.
+func (m *MapFS) Add(name string, data []byte) {
+	m.files[name] = &MapFile{Data: data, Mode: 0444, ModTime: time.Now()}
+}
+
+// Open opens the named file.
+func (m *MapFS) Open(name string) (File, error) {
+	if name == "." {
+		return &mapDirFile{name: ".", fs: m}, nil
+	}
+	f, ok := m.files[name]
+	if !ok {
+		return nil, ErrNotExist
+	}
+	return &mapFile{name: name, data: f.Data, mode: f.Mode, modTime: f.ModTime}, nil
+}
+
+// mapFile is an in-memory file implementing fs.File.
+type mapFile struct {
+	name    string
+	data    []byte
+	pos     int
+	mode    FileMode
+	modTime time.Time
+}
+
+func (f *mapFile) Read(b []byte) (int, error) {
+	if f.pos >= len(f.data) {
+		return 0, io.EOF
+	}
+	n := copy(b, f.data[f.pos:])
+	f.pos += n
+	if f.pos >= len(f.data) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (f *mapFile) Close() error { return nil }
+
+func (f *mapFile) Stat() (FileInfo, error) {
+	return &mapFileInfo{
+		name:    f.name,
+		size:    int64(len(f.data)),
+		mode:    f.mode,
+		modTime: f.modTime,
+		isDir:   false,
+	}, nil
+}
+
+// mapDirFile is a directory entry for the root of a MapFS.
+type mapDirFile struct {
+	name string
+	fs   *MapFS
+}
+
+func (d *mapDirFile) Read(b []byte) (int, error) {
+	return 0, errors.New("is a directory")
+}
+
+func (d *mapDirFile) Close() error { return nil }
+
+func (d *mapDirFile) Stat() (FileInfo, error) {
+	return &mapFileInfo{
+		name:  d.name,
+		isDir: true,
+		mode:  ModeDir | 0555,
+	}, nil
+}
+
+// mapFileInfo implements fs.FileInfo for in-memory files.
+type mapFileInfo struct {
+	name    string
+	size    int64
+	mode    FileMode
+	modTime time.Time
+	isDir   bool
+}
+
+func (fi *mapFileInfo) Name() string       { return fi.name }
+func (fi *mapFileInfo) Size() int64        { return fi.size }
+func (fi *mapFileInfo) Mode() FileMode     { return fi.mode }
+func (fi *mapFileInfo) ModTime() time.Time { return fi.modTime }
+func (fi *mapFileInfo) IsDir() bool        { return fi.isDir }
+func (fi *mapFileInfo) Sys() any           { return nil }
+
+// ==================== Utility functions ====================
+
+// ReadFile reads the named file from the file system fs and returns its contents.
+func ReadFile(fsys FS, name string) ([]byte, error) {
+	file, err := fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	var buf []byte
+	tmp := make([]byte, 512)
+	for {
+		n, readErr := file.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return buf, readErr
+		}
+	}
+	return buf, nil
+}
+
+// Stat returns a FileInfo describing the named file from the file system.
+func Stat(fsys FS, name string) (FileInfo, error) {
+	file, err := fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return file.Stat()
+}
+
+// ReadDir reads and returns the entire named directory.
+func ReadDir(fsys FS, name string) ([]DirEntry, error) {
+	file, err := fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if rdf, ok := file.(ReadDirFile); ok {
+		return rdf.ReadDir(-1)
+	}
+	return nil, errors.New("fs: file does not implement ReadDir")
+}
+
+// ValidPath reports whether the given path name is valid for use in a call to
+// Open.
+func ValidPath(name string) bool {
+	if name == "." {
+		return true
+	}
+	if len(name) == 0 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if name[i] == 0 {
+			return false
+		}
+	}
+	// Must not start or end with slash, or contain ..
+	if name[0] == '/' || name[len(name)-1] == '/' {
+		return false
+	}
+	// Check for ".." components
+	n := len(name)
+	i := 0
+	for i < n {
+		j := i
+		for j < n && name[j] != '/' {
+			j++
+		}
+		elem := name[i:j]
+		if elem == ".." {
+			return false
+		}
+		i = j + 1
+	}
+	return true
+}

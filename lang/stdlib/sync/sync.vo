@@ -1,0 +1,463 @@
+package sync
+
+// mutexInit initializes a 1-buffered channel used as a mutex token.
+// Token present = unlocked, absent = locked.
+func mutexInit(ch chan struct{}) chan struct{} {
+	if ch == nil {
+		ch = make(chan struct{}, 1)
+		ch <- struct{}{}
+	}
+	return ch
+}
+
+// Mutex is a mutual exclusion lock. The zero value for a Mutex is an unlocked mutex.
+// A Mutex must not be copied after first use.
+type Mutex struct {
+	ch chan struct{}
+}
+
+func (m *Mutex) init() {
+	if m.ch == nil {
+		m.ch = make(chan struct{}, 1)
+		m.ch <- struct{}{}
+	}
+}
+
+// Lock locks m. Blocks until the lock is available.
+func (m *Mutex) Lock() {
+	m.init()
+	<-m.ch
+}
+
+// Unlock unlocks m. Panics if m is not locked.
+func (m *Mutex) Unlock() {
+	m.init()
+	select {
+	case m.ch <- struct{}{}:
+	default:
+		panic("sync: unlock of unlocked mutex")
+	}
+}
+
+// TryLock tries to lock m and reports whether it succeeded.
+func (m *Mutex) TryLock() bool {
+	m.init()
+	select {
+	case <-m.ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// RWMutex is a reader/writer mutual exclusion lock. The zero value is an unlocked mutex.
+//
+// Implementation: uses two channels as semaphores:
+//   - writeCh (1-buffered): token present = write slot available; held by active writer
+//   - stateCh (1-buffered): token present = state unlocked; protects readers/drainCh
+//
+// This avoids nested Mutex struct method calls (Vo limitation: cannot call methods
+// on struct fields at non-zero offset via pointer receiver).
+type RWMutex struct {
+	writeCh chan struct{} // 1-buffered write semaphore
+	stateCh chan struct{} // 1-buffered state semaphore
+	readers int
+	writerWaiting bool
+	drainCh chan struct{} // closed when last reader exits while writer waiting
+}
+
+func (rw *RWMutex) initRW() {
+	if rw.writeCh == nil {
+		rw.writeCh = make(chan struct{}, 1)
+		rw.writeCh <- struct{}{}
+		rw.stateCh = make(chan struct{}, 1)
+		rw.stateCh <- struct{}{}
+	}
+}
+
+func (rw *RWMutex) lockState()   { <-rw.stateCh }
+func (rw *RWMutex) unlockState() { rw.stateCh <- struct{}{} }
+
+// RLock locks rw for reading.
+func (rw *RWMutex) RLock() {
+	rw.initRW()
+	for {
+		rw.lockState()
+		if !rw.writerWaiting {
+			rw.readers++
+			rw.unlockState()
+			return
+		}
+		// Writer is waiting — block on writeCh then retry.
+		rw.unlockState()
+		<-rw.writeCh
+		rw.writeCh <- struct{}{}
+	}
+}
+
+// RUnlock undoes a single RLock call.
+func (rw *RWMutex) RUnlock() {
+	rw.initRW()
+	rw.lockState()
+	if rw.readers <= 0 {
+		rw.unlockState()
+		panic("sync: RUnlock of unlocked RWMutex")
+	}
+	rw.readers--
+	if rw.readers == 0 && rw.writerWaiting {
+		close(rw.drainCh)
+		rw.drainCh = nil
+	}
+	rw.unlockState()
+}
+
+// TryRLock tries to lock rw for reading and reports whether it succeeded.
+func (rw *RWMutex) TryRLock() bool {
+	rw.initRW()
+	rw.lockState()
+	if rw.writerWaiting {
+		rw.unlockState()
+		return false
+	}
+	// Check if a writer is actively holding the write lock.
+	select {
+	case <-rw.writeCh:
+		rw.writeCh <- struct{}{}
+	default:
+		rw.unlockState()
+		return false
+	}
+	rw.readers++
+	rw.unlockState()
+	return true
+}
+
+// Lock locks rw for writing. Blocks until all readers and any concurrent writer finish.
+func (rw *RWMutex) Lock() {
+	rw.initRW()
+	// Grab write slot — blocks other writers; also blocks RLock retries.
+	<-rw.writeCh
+
+	// Announce writer waiting and count existing readers.
+	rw.lockState()
+	rw.writerWaiting = true
+	n := rw.readers
+	if n > 0 {
+		rw.drainCh = make(chan struct{})
+	}
+	rw.unlockState()
+
+	// Wait for existing readers to drain.
+	if n > 0 {
+		<-rw.drainCh
+	}
+}
+
+// Unlock unlocks rw for writing.
+func (rw *RWMutex) Unlock() {
+	rw.initRW()
+	rw.lockState()
+	rw.writerWaiting = false
+	rw.unlockState()
+	rw.writeCh <- struct{}{}
+}
+
+// TryLock tries to lock rw for writing and reports whether it succeeded.
+func (rw *RWMutex) TryLock() bool {
+	rw.initRW()
+	select {
+	case <-rw.writeCh:
+	default:
+		return false
+	}
+	rw.lockState()
+	if rw.readers > 0 {
+		rw.unlockState()
+		rw.writeCh <- struct{}{}
+		return false
+	}
+	rw.writerWaiting = true
+	rw.unlockState()
+	return true
+}
+
+// WaitGroup waits for a collection of goroutines to finish. The zero value is usable.
+type WaitGroup struct {
+	stateCh chan struct{} // 1-buffered state semaphore
+	count   int
+	done    chan struct{}
+}
+
+func (wg *WaitGroup) initWG() {
+	if wg.stateCh == nil {
+		wg.stateCh = make(chan struct{}, 1)
+		wg.stateCh <- struct{}{}
+		wg.done = make(chan struct{})
+		close(wg.done) // count=0 means already done
+	}
+}
+
+func (wg *WaitGroup) lockState()   { <-wg.stateCh }
+func (wg *WaitGroup) unlockState() { wg.stateCh <- struct{}{} }
+
+// Add adds delta to the WaitGroup counter. If the counter becomes zero,
+// all goroutines blocked on Wait are released. Panics if counter goes negative.
+func (wg *WaitGroup) Add(delta int) {
+	wg.initWG()
+	wg.lockState()
+	prev := wg.count
+	wg.count += delta
+	if wg.count < 0 {
+		wg.unlockState()
+		panic("sync: negative WaitGroup counter")
+	}
+	if prev == 0 && delta > 0 {
+		wg.done = make(chan struct{})
+	} else if wg.count == 0 && prev > 0 {
+		close(wg.done)
+	}
+	wg.unlockState()
+}
+
+// Done decrements the WaitGroup counter by one.
+func (wg *WaitGroup) Done() {
+	wg.Add(-1)
+}
+
+// Wait blocks until the WaitGroup counter is zero.
+func (wg *WaitGroup) Wait() {
+	wg.initWG()
+	wg.lockState()
+	ch := wg.done
+	wg.unlockState()
+	<-ch
+}
+
+// Once is an object that will perform exactly one action.
+type Once struct {
+	ch   chan struct{} // 1-buffered mutex
+	done bool
+}
+
+func (o *Once) initOnce() {
+	if o.ch == nil {
+		o.ch = make(chan struct{}, 1)
+		o.ch <- struct{}{}
+	}
+}
+
+// Do calls f if and only if this is the first call to Do for this Once instance.
+func (o *Once) Do(f func()) {
+	o.initOnce()
+	<-o.ch
+	if !o.done {
+		o.done = true
+		o.ch <- struct{}{}
+		f()
+		return
+	}
+	o.ch <- struct{}{}
+}
+
+// Map is a concurrent-safe map[any]any. The zero value is ready to use.
+type Map struct {
+	ch chan struct{} // 1-buffered mutex
+	m  map[any]any
+}
+
+func (m *Map) initMap() {
+	if m.ch == nil {
+		m.ch = make(chan struct{}, 1)
+		m.ch <- struct{}{}
+		m.m = make(map[any]any)
+	}
+}
+
+func (m *Map) lockMap()   { <-m.ch }
+func (m *Map) unlockMap() { m.ch <- struct{}{} }
+
+// Store sets the value for a key.
+func (m *Map) Store(key any, value any) {
+	m.initMap()
+	m.lockMap()
+	m.m[key] = value
+	m.unlockMap()
+}
+
+// Load returns the value for a key, or nil if not present.
+func (m *Map) Load(key any) (value any, ok bool) {
+	m.initMap()
+	m.lockMap()
+	value, ok = m.m[key]
+	m.unlockMap()
+	return value, ok
+}
+
+// Delete deletes the value for a key.
+func (m *Map) Delete(key any) {
+	m.initMap()
+	m.lockMap()
+	delete(m.m, key)
+	m.unlockMap()
+}
+
+// LoadOrStore returns the existing value for key if present, otherwise stores
+// and returns value. The loaded result is true if value was loaded, false if stored.
+func (m *Map) LoadOrStore(key any, value any) (actual any, loaded bool) {
+	m.initMap()
+	m.lockMap()
+	if v, ok := m.m[key]; ok {
+		m.unlockMap()
+		return v, true
+	}
+	m.m[key] = value
+	m.unlockMap()
+	return value, false
+}
+
+// LoadAndDelete deletes the value for a key, returning the previous value if any.
+func (m *Map) LoadAndDelete(key any) (value any, loaded bool) {
+	m.initMap()
+	m.lockMap()
+	v, ok := m.m[key]
+	if ok {
+		delete(m.m, key)
+	}
+	m.unlockMap()
+	return v, ok
+}
+
+// Range calls f sequentially for each key and value in the map.
+// If f returns false, range stops.
+func (m *Map) Range(f func(key any, value any) bool) {
+	m.initMap()
+	m.lockMap()
+	keys := make([]any, 0, len(m.m))
+	vals := make([]any, 0, len(m.m))
+	for k, v := range m.m {
+		keys = append(keys, k)
+		vals = append(vals, v)
+	}
+	m.unlockMap()
+	for i, k := range keys {
+		if !f(k, vals[i]) {
+			break
+		}
+	}
+}
+
+// Locker represents an object that can be locked and unlocked.
+type Locker interface {
+	Lock()
+	Unlock()
+}
+
+// Cond implements a condition variable for goroutine coordination.
+// It must not be copied after first use.
+type Cond struct {
+	L        Locker
+	waiters  chan chan struct{}
+	initCh   chan struct{}
+}
+
+func (c *Cond) initCond() {
+	if c.initCh == nil {
+		c.initCh = make(chan struct{}, 1)
+		c.initCh <- struct{}{}
+		c.waiters = make(chan chan struct{}, 64)
+	}
+}
+
+func (c *Cond) lockCond()   { <-c.initCh }
+func (c *Cond) unlockCond() { c.initCh <- struct{}{} }
+
+// NewCond returns a new Cond with Locker l.
+func NewCond(l Locker) *Cond {
+	return &Cond{L: l}
+}
+
+// Wait atomically unlocks c.L and suspends execution of the calling goroutine.
+// After later resuming execution, Wait locks c.L before returning.
+func (c *Cond) Wait() {
+	c.initCond()
+	ch := make(chan struct{}, 1)
+	c.lockCond()
+	c.waiters <- ch
+	c.unlockCond()
+	c.L.Unlock()
+	<-ch
+	c.L.Lock()
+}
+
+// Signal wakes one goroutine waiting on c.
+func (c *Cond) Signal() {
+	c.initCond()
+	c.lockCond()
+	if len(c.waiters) > 0 {
+		ch := <-c.waiters
+		c.unlockCond()
+		ch <- struct{}{}
+		return
+	}
+	c.unlockCond()
+}
+
+// Broadcast wakes all goroutines waiting on c.
+func (c *Cond) Broadcast() {
+	c.initCond()
+	c.lockCond()
+	var pending []chan struct{}
+	for len(c.waiters) > 0 {
+		pending = append(pending, <-c.waiters)
+	}
+	c.unlockCond()
+	for _, ch := range pending {
+		ch <- struct{}{}
+	}
+}
+
+type Pool struct {
+	ch   chan struct{} // 1-buffered mutex
+	pool []any
+	New  func() any
+}
+
+func (p *Pool) initPool() {
+	if p.ch == nil {
+		p.ch = make(chan struct{}, 1)
+		p.ch <- struct{}{}
+	}
+}
+
+func (p *Pool) lockPool()   { <-p.ch }
+func (p *Pool) unlockPool() { p.ch <- struct{}{} }
+
+// Get selects an item from the Pool, removes it, and returns it.
+// If Get would return nil and p.New is non-nil, Get returns p.New().
+func (p *Pool) Get() any {
+	p.initPool()
+	p.lockPool()
+	n := len(p.pool)
+	if n > 0 {
+		v := p.pool[n-1]
+		p.pool = p.pool[:n-1]
+		p.unlockPool()
+		return v
+	}
+	p.unlockPool()
+	if p.New != nil {
+		return p.New()
+	}
+	return nil
+}
+
+// Put adds x to the pool.
+func (p *Pool) Put(x any) {
+	if x == nil {
+		return
+	}
+	p.initPool()
+	p.lockPool()
+	p.pool = append(p.pool, x)
+	p.unlockPool()
+}

@@ -37,5 +37,30 @@ func main() {
     sort.Ints(single)
     assert(sort.IntsAreSorted(single), "single element should be sorted")
     
+    // Test sort.Interface
+    testSortInterface()
+
     fmt.Println("All sort tests passed!")
+}
+
+type IntSlice struct {
+    data []int
+}
+
+func (s IntSlice) Len() int           { return len(s.data) }
+func (s IntSlice) Less(i, j int) bool { return s.data[i] < s.data[j] }
+func (s IntSlice) Swap(i, j int)      { s.data[i], s.data[j] = s.data[j], s.data[i] }
+
+func testSortInterface() {
+    s := IntSlice{data: []int{5, 2, 8, 1, 9, 3}}
+    assert(!sort.IsSorted(s), "unsorted should not be sorted")
+    sort.Sort(s)
+    assert(sort.IsSorted(s), "after Sort, should be sorted")
+    assert(s.data[0] == 1, "first should be 1")
+    assert(s.data[5] == 9, "last should be 9")
+
+    s2 := IntSlice{data: []int{5, 2, 8, 1, 9, 3}}
+    sort.Stable(s2)
+    assert(sort.IsSorted(s2), "after Stable, should be sorted")
+    assert(s2.data[0] == 1, "first should be 1")
 }

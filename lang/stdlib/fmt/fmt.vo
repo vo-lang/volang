@@ -5,6 +5,46 @@ import (
 	"io"
 )
 
+// Stringer is implemented by any value that has a String method, which defines
+// the "native" format for that value.
+type Stringer interface {
+	String() string
+}
+
+// GoStringer is implemented by any value that has a GoString method, which
+// defines the Go syntax for that value.
+type GoStringer interface {
+	GoString() string
+}
+
+// State represents the printer state passed to custom formatters.
+// It provides access to the io.Writer interface plus information about the flags and options for the operand's format specifier.
+type State interface {
+	Write(b []byte) (n int, err error)
+	Width() (wid int, ok bool)
+	Precision() (prec int, ok bool)
+	Flag(c int) bool
+}
+
+// Formatter is implemented by values with a custom formatter.
+type Formatter interface {
+	Format(f State, verb rune)
+}
+
+// Scanner is implemented by any value that has a Scan method, which scans the input for the representation of a value and stores the result in the receiver.
+type Scanner interface {
+	Scan(state ScanState, verb rune) error
+}
+
+// ScanState represents the scanner state passed to custom scanners.
+type ScanState interface {
+	ReadRune() (r rune, size int, err error)
+	UnreadRune() error
+	SkipSpace()
+	Token(skipSpace bool, f func(rune) bool) (token []byte, err error)
+	Width() (wid int, ok bool)
+}
+
 // Native functions (implemented in Rust)
 func nativeWrite(s string)
 func nativeSprint(a []interface{}) string

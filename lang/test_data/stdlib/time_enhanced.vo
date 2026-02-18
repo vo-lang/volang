@@ -1,0 +1,452 @@
+package main
+
+import "time"
+
+func main() {
+	testMonthWeekday()
+	testDateAccessors()
+	testClockAccessors()
+	testDateConstructor()
+	testDateNormalization()
+	testWeekday()
+	testYearDay()
+	testFormat()
+	testFormatLayouts()
+	testParse()
+	testParseFormats()
+	testString()
+	testTruncateRound()
+	testDurationString()
+	testParseDuration()
+	testAppendFormat()
+	testNegativeTimestamps()
+	testEdgeCases()
+}
+
+func testMonthWeekday() {
+	assert(time.January.String() == "January")
+	assert(time.February.String() == "February")
+	assert(time.March.String() == "March")
+	assert(time.December.String() == "December")
+	assert(int(time.January) == 1)
+	assert(int(time.December) == 12)
+
+	assert(time.Sunday.String() == "Sunday")
+	assert(time.Monday.String() == "Monday")
+	assert(time.Saturday.String() == "Saturday")
+	assert(int(time.Sunday) == 0)
+	assert(int(time.Saturday) == 6)
+}
+
+func testDateAccessors() {
+	// 2024-03-15 10:30:45.123456789 UTC
+	t := time.Date(2024, time.March, 15, 10, 30, 45, 123456789)
+
+	year, month, day := t.Date()
+	assert(year == 2024)
+	assert(month == time.March)
+	assert(day == 15)
+
+	assert(t.Year() == 2024)
+	assert(t.Month() == time.March)
+	assert(t.Day() == 15)
+	assert(t.Nanosecond() == 123456789)
+
+	// Unix epoch
+	t0 := time.Unix(0, 0)
+	y0, m0, d0 := t0.Date()
+	assert(y0 == 1970)
+	assert(m0 == time.January)
+	assert(d0 == 1)
+
+	// 2000-01-01
+	t2k := time.Date(2000, time.January, 1, 0, 0, 0, 0)
+	assert(t2k.Year() == 2000)
+	assert(t2k.Month() == time.January)
+	assert(t2k.Day() == 1)
+}
+
+func testClockAccessors() {
+	t := time.Date(2024, time.March, 15, 10, 30, 45, 0)
+	hour, min, sec := t.Clock()
+	assert(hour == 10)
+	assert(min == 30)
+	assert(sec == 45)
+
+	assert(t.Hour() == 10)
+	assert(t.Minute() == 30)
+	assert(t.Second() == 45)
+
+	// Midnight
+	t0 := time.Date(2024, time.January, 1, 0, 0, 0, 0)
+	assert(t0.Hour() == 0)
+	assert(t0.Minute() == 0)
+	assert(t0.Second() == 0)
+
+	// End of day
+	t23 := time.Date(2024, time.January, 1, 23, 59, 59, 0)
+	assert(t23.Hour() == 23)
+	assert(t23.Minute() == 59)
+	assert(t23.Second() == 59)
+}
+
+func testDateConstructor() {
+	// Basic construction
+	t := time.Date(2024, time.March, 15, 10, 30, 45, 123456789)
+	assert(t.Year() == 2024)
+	assert(t.Month() == time.March)
+	assert(t.Day() == 15)
+	assert(t.Hour() == 10)
+	assert(t.Minute() == 30)
+	assert(t.Second() == 45)
+	assert(t.Nanosecond() == 123456789)
+
+	// Round-trip through Unix
+	t2 := time.Date(2024, time.January, 1, 0, 0, 0, 0)
+	unix := t2.Unix()
+	t3 := time.Unix(unix, 0)
+	assert(t3.Year() == 2024)
+	assert(t3.Month() == time.January)
+	assert(t3.Day() == 1)
+}
+
+func testDateNormalization() {
+	// Month overflow: month 13 = January next year
+	t := time.Date(2024, time.Month(13), 1, 0, 0, 0, 0)
+	assert(t.Year() == 2025)
+	assert(t.Month() == time.January)
+
+	// Day overflow: Feb 30 in leap year = Mar 1
+	t2 := time.Date(2024, time.February, 30, 0, 0, 0, 0)
+	assert(t2.Month() == time.March)
+	assert(t2.Day() == 1)
+
+	// Hour overflow
+	t3 := time.Date(2024, time.January, 1, 25, 0, 0, 0)
+	assert(t3.Day() == 2)
+	assert(t3.Hour() == 1)
+}
+
+func testWeekday() {
+	// 1970-01-01 was Thursday
+	t0 := time.Unix(0, 0)
+	assert(t0.Weekday() == time.Thursday)
+
+	// 2024-03-15 is Friday
+	t := time.Date(2024, time.March, 15, 0, 0, 0, 0)
+	assert(t.Weekday() == time.Friday)
+
+	// Sunday check
+	t2 := time.Date(2024, time.March, 17, 0, 0, 0, 0)
+	assert(t2.Weekday() == time.Sunday)
+}
+
+func testYearDay() {
+	// Jan 1 = day 1
+	t := time.Date(2024, time.January, 1, 0, 0, 0, 0)
+	assert(t.YearDay() == 1)
+
+	// Feb 29 in leap year = day 60
+	t2 := time.Date(2024, time.February, 29, 0, 0, 0, 0)
+	assert(t2.YearDay() == 60)
+
+	// Dec 31 in leap year = day 366
+	t3 := time.Date(2024, time.December, 31, 0, 0, 0, 0)
+	assert(t3.YearDay() == 366)
+
+	// Dec 31 in non-leap year = day 365
+	t4 := time.Date(2023, time.December, 31, 0, 0, 0, 0)
+	assert(t4.YearDay() == 365)
+}
+
+func testFormat() {
+	t := time.Date(2024, time.March, 15, 14, 30, 45, 0)
+
+	// DateOnly
+	assert(t.Format(time.DateOnly) == "2024-03-15")
+
+	// TimeOnly
+	assert(t.Format(time.TimeOnly) == "14:30:45")
+
+	// DateTime
+	assert(t.Format(time.DateTime) == "2024-03-15 14:30:45")
+
+	// RFC3339
+	assert(t.Format(time.RFC3339) == "2024-03-15T14:30:45Z")
+
+	// Kitchen
+	assert(t.Format(time.Kitchen) == "2:30PM")
+
+	// Single-digit day
+	t2 := time.Date(2024, time.January, 5, 9, 5, 3, 0)
+	assert(t2.Format(time.DateOnly) == "2024-01-05")
+}
+
+func testFormatLayouts() {
+	t := time.Date(2024, time.March, 5, 9, 5, 3, 123000000)
+
+	// Long month name
+	assert(t.Format("January 2, 2006") == "March 5, 2024")
+
+	// Short month name
+	assert(t.Format("Jan 2, 2006") == "Mar 5, 2024")
+
+	// Zero-padded day
+	assert(t.Format("2006-01-02") == "2024-03-05")
+
+	// Fractional seconds (zero-padded)
+	assert(t.Format("15:04:05.000") == "09:05:03.123")
+
+	// Fractional seconds (trimmed)
+	assert(t.Format("15:04:05.999") == "09:05:03.123")
+
+	// No fractional when zero (trimmed)
+	t2 := time.Date(2024, time.March, 5, 9, 5, 3, 0)
+	assert(t2.Format("15:04:05.999") == "09:05:03")
+
+	// 12-hour format
+	tAM := time.Date(2024, time.January, 1, 9, 30, 0, 0)
+	assert(tAM.Format("3:04PM") == "9:30AM")
+
+	tPM := time.Date(2024, time.January, 1, 14, 30, 0, 0)
+	assert(tPM.Format("3:04PM") == "2:30PM")
+
+	// Weekday
+	assert(t.Format("Monday") == "Tuesday")
+	assert(t.Format("Mon") == "Tue")
+
+	// Two-digit year
+	assert(t.Format("06") == "24")
+}
+
+func testParse() {
+	// DateOnly
+	t, err := time.Parse(time.DateOnly, "2024-03-15")
+	assert(err == nil)
+	assert(t.Year() == 2024)
+	assert(t.Month() == time.March)
+	assert(t.Day() == 15)
+
+	// DateTime
+	t2, err2 := time.Parse(time.DateTime, "2024-03-15 14:30:45")
+	assert(err2 == nil)
+	assert(t2.Year() == 2024)
+	assert(t2.Hour() == 14)
+	assert(t2.Minute() == 30)
+	assert(t2.Second() == 45)
+
+	// RFC3339
+	t3, err3 := time.Parse(time.RFC3339, "2024-03-15T14:30:45Z")
+	assert(err3 == nil)
+	assert(t3.Year() == 2024)
+	assert(t3.Month() == time.March)
+	assert(t3.Day() == 15)
+	assert(t3.Hour() == 14)
+	assert(t3.Minute() == 30)
+	assert(t3.Second() == 45)
+
+	// RFC3339 with offset (parsed, offset ignored for now)
+	t4, err4 := time.Parse(time.RFC3339, "2024-03-15T14:30:45+05:30")
+	assert(err4 == nil)
+	assert(t4.Year() == 2024)
+}
+
+func testParseFormats() {
+	// Month name
+	t, err := time.Parse("January 2, 2006", "March 15, 2024")
+	assert(err == nil)
+	assert(t.Year() == 2024)
+	assert(t.Month() == time.March)
+	assert(t.Day() == 15)
+
+	// Short month name
+	t2, err2 := time.Parse("Jan 2, 2006", "Mar 15, 2024")
+	assert(err2 == nil)
+	assert(t2.Month() == time.March)
+
+	// RFC3339Nano
+	t3, err3 := time.Parse(time.RFC3339Nano, "2024-03-15T14:30:45.123456789Z")
+	assert(err3 == nil)
+	assert(t3.Nanosecond() == 123456789)
+
+	// Two-digit year
+	t4, err4 := time.Parse("06-01-02", "24-03-15")
+	assert(err4 == nil)
+	assert(t4.Year() == 2024)
+
+	// Parse error
+	_, err5 := time.Parse(time.DateOnly, "not-a-date")
+	assert(err5 != nil)
+}
+
+func testString() {
+	t := time.Date(2024, time.March, 15, 14, 30, 45, 0)
+	s := t.String()
+	// Should contain date and time
+	assert(len(s) > 0)
+	// Verify it contains the expected components by parsing back
+	// Format is "2006-01-02 15:04:05.999999999 -0700 MST"
+	// For zero nsec, no fractional part
+	assert(s == "2024-03-15 14:30:45 +0000 UTC")
+
+	// With nanoseconds
+	t2 := time.Date(2024, time.March, 15, 14, 30, 45, 123456789)
+	s2 := t2.String()
+	assert(s2 == "2024-03-15 14:30:45.123456789 +0000 UTC")
+}
+
+func testTruncateRound() {
+	// Truncate to seconds
+	t := time.Date(2024, time.March, 15, 14, 30, 45, 500000000)
+	trunc := t.Truncate(time.Second)
+	assert(trunc.Nanosecond() == 0)
+	assert(trunc.Second() == 45)
+
+	// Truncate to minutes
+	trunc2 := t.Truncate(time.Minute)
+	assert(trunc2.Second() == 0)
+	assert(trunc2.Minute() == 30)
+
+	// Round to seconds (500ms rounds up)
+	round := t.Round(time.Second)
+	assert(round.Second() == 46)
+	assert(round.Nanosecond() == 0)
+
+	// Round to seconds (400ms rounds down)
+	t2 := time.Date(2024, time.March, 15, 14, 30, 45, 400000000)
+	round2 := t2.Round(time.Second)
+	assert(round2.Second() == 45)
+
+	// Truncate to hours
+	trunc3 := t.Truncate(time.Hour)
+	assert(trunc3.Minute() == 0)
+	assert(trunc3.Second() == 0)
+	assert(trunc3.Hour() == 14)
+}
+
+func testDurationString() {
+	assert((0 * time.Second).String() == "0s")
+	assert((1 * time.Nanosecond).String() == "1ns")
+	assert((1100 * time.Nanosecond).String() == "1.1µs")
+	assert((2200 * time.Microsecond).String() == "2.2ms")
+	assert((time.Second).String() == "1s")
+	assert((time.Minute).String() == "1m0s")
+	assert((time.Hour).String() == "1h0m0s")
+	assert((time.Hour + 30*time.Minute + 10*time.Second).String() == "1h30m10s")
+	assert((-time.Second).String() == "-1s")
+
+	// Complex duration
+	d := 2*time.Hour + 3*time.Minute + 4*time.Second + 500*time.Millisecond
+	assert(d.String() == "2h3m4.5s")
+}
+
+func testParseDuration() {
+	d, err := time.ParseDuration("1h30m")
+	assert(err == nil)
+	assert(d == time.Hour+30*time.Minute)
+
+	d2, err2 := time.ParseDuration("300ms")
+	assert(err2 == nil)
+	assert(d2 == 300*time.Millisecond)
+
+	d3, err3 := time.ParseDuration("-1.5h")
+	assert(err3 == nil)
+	assert(d3 == -(time.Hour + 30*time.Minute))
+
+	d4, err4 := time.ParseDuration("2h45m30s")
+	assert(err4 == nil)
+	assert(d4 == 2*time.Hour+45*time.Minute+30*time.Second)
+
+	d5, err5 := time.ParseDuration("100ns")
+	assert(err5 == nil)
+	assert(d5 == 100*time.Nanosecond)
+
+	d6, err6 := time.ParseDuration("1.5s")
+	assert(err6 == nil)
+	assert(d6 == time.Second+500*time.Millisecond)
+
+	// Error cases
+	_, errA := time.ParseDuration("")
+	assert(errA != nil)
+
+	_, errB := time.ParseDuration("1")
+	assert(errB != nil)
+
+	_, errC := time.ParseDuration("1x")
+	assert(errC != nil)
+}
+
+func testAppendFormat() {
+	t := time.Date(2024, time.March, 15, 14, 30, 45, 0)
+	var buf []byte
+	buf = append(buf, "time: "...)
+	buf = t.AppendFormat(buf, time.DateOnly)
+	assert(string(buf) == "time: 2024-03-15")
+}
+
+func testNegativeTimestamps() {
+	// Before Unix epoch: 1969-12-31 23:59:59
+	t := time.Unix(-1, 0)
+	assert(t.Year() == 1969)
+	assert(t.Month() == time.December)
+	assert(t.Day() == 31)
+	assert(t.Hour() == 23)
+	assert(t.Minute() == 59)
+	assert(t.Second() == 59)
+
+	// 1960-06-15 12:00:00
+	t2 := time.Date(1960, time.June, 15, 12, 0, 0, 0)
+	assert(t2.Year() == 1960)
+	assert(t2.Month() == time.June)
+	assert(t2.Day() == 15)
+	assert(t2.Hour() == 12)
+
+	// Weekday for Dec 31, 1969 (Wednesday)
+	assert(t.Weekday() == time.Wednesday)
+}
+
+func testEdgeCases() {
+	// Leap year Feb 29
+	t := time.Date(2024, time.February, 29, 0, 0, 0, 0)
+	assert(t.Month() == time.February)
+	assert(t.Day() == 29)
+
+	// Non-leap year Feb 29 normalizes to March 1
+	t2 := time.Date(2023, time.February, 29, 0, 0, 0, 0)
+	assert(t2.Month() == time.March)
+	assert(t2.Day() == 1)
+
+	// Year 2000 (leap year)
+	t3 := time.Date(2000, time.February, 29, 0, 0, 0, 0)
+	assert(t3.Month() == time.February)
+	assert(t3.Day() == 29)
+
+	// Year 1900 (NOT a leap year)
+	t4 := time.Date(1900, time.February, 29, 0, 0, 0, 0)
+	assert(t4.Month() == time.March)
+	assert(t4.Day() == 1)
+
+	// Zero time
+	var zero time.Time
+	assert(zero.IsZero())
+	assert(zero.Year() == 1970)
+	assert(zero.Month() == time.January)
+	assert(zero.Day() == 1)
+
+	// Format round-trip
+	t5 := time.Date(2024, time.March, 15, 14, 30, 45, 123456789)
+	formatted := t5.Format(time.RFC3339Nano)
+	parsed, err := time.Parse(time.RFC3339Nano, formatted)
+	assert(err == nil)
+	assert(parsed.Year() == t5.Year())
+	assert(parsed.Month() == t5.Month())
+	assert(parsed.Day() == t5.Day())
+	assert(parsed.Hour() == t5.Hour())
+	assert(parsed.Minute() == t5.Minute())
+	assert(parsed.Second() == t5.Second())
+	assert(parsed.Nanosecond() == t5.Nanosecond())
+
+	// Max nanoseconds
+	tNano := time.Date(2024, time.January, 1, 0, 0, 0, 999999999)
+	assert(tNano.Nanosecond() == 999999999)
+}

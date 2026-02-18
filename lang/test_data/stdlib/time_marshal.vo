@@ -1,0 +1,52 @@
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("ASSERT FAILED: " + msg)
+	}
+}
+
+func main() {
+	fmt.Println("Starting time marshal tests...")
+
+	// MarshalJSON
+	t := time.Unix(0, 0)
+	data, err := t.MarshalJSON()
+	assert(err == nil, "MarshalJSON no error")
+	assert(len(data) > 2, "MarshalJSON non-empty")
+	assert(data[0] == '"', "MarshalJSON starts with quote")
+	assert(data[len(data)-1] == '"', "MarshalJSON ends with quote")
+
+	// UnmarshalJSON round-trip
+	t2 := time.Time{}
+	err2 := t2.UnmarshalJSON(data)
+	assert(err2 == nil, "UnmarshalJSON no error")
+	assert(t2.Unix() == t.Unix(), "Unix timestamp preserved")
+
+	// MarshalText
+	textBytes, err3 := t.MarshalText()
+	assert(err3 == nil, "MarshalText no error")
+	assert(len(textBytes) > 0, "MarshalText non-empty")
+
+	// UnmarshalText round-trip
+	t3 := time.Time{}
+	err4 := t3.UnmarshalText(textBytes)
+	assert(err4 == nil, "UnmarshalText no error")
+	assert(t3.Unix() == t.Unix(), "Unix timestamp preserved via text")
+
+	// Test with a known time
+	t4 := time.Unix(1000000, 0)
+	d4, err5 := t4.MarshalJSON()
+	assert(err5 == nil, "MarshalJSON known time no error")
+	t5 := time.Time{}
+	err6 := t5.UnmarshalJSON(d4)
+	assert(err6 == nil, "UnmarshalJSON known time no error")
+	assert(t5.Unix() == 1000000, "known time preserved")
+
+	fmt.Println("All time marshal tests passed!")
+}

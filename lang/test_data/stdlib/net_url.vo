@@ -1,0 +1,285 @@
+package main
+
+import (
+	"net/url"
+)
+
+func main() {
+	testParseBasic()
+	testParseWithPort()
+	testParseWithPath()
+	testParseWithQuery()
+	testParseWithFragment()
+	testParseWithUserinfo()
+	testParseRelative()
+	testURLString()
+	testURLHostnamePort()
+	testURLRequestURI()
+	testValues()
+	testValuesEncode()
+	testParseQuery()
+	testQueryEscapeUnescape()
+	testPathEscapeUnescape()
+	testResolveReference()
+	testURLQuery()
+	testEdgeCases()
+}
+
+func testParseBasic() {
+	u, err := url.Parse("http://example.com")
+	assert(err == nil)
+	assert(u.Scheme == "http")
+	assert(u.Host == "example.com")
+	assert(u.Path == "")
+
+	u2, err2 := url.Parse("https://example.com/path")
+	assert(err2 == nil)
+	assert(u2.Scheme == "https")
+	assert(u2.Host == "example.com")
+	assert(u2.Path == "/path")
+}
+
+func testParseWithPort() {
+	u, err := url.Parse("http://example.com:8080/path")
+	assert(err == nil)
+	assert(u.Host == "example.com:8080")
+	assert(u.Path == "/path")
+}
+
+func testParseWithPath() {
+	u, err := url.Parse("http://example.com/a/b/c")
+	assert(err == nil)
+	assert(u.Path == "/a/b/c")
+
+	// Path with encoded characters
+	u2, err2 := url.Parse("http://example.com/path%20with%20spaces")
+	assert(err2 == nil)
+	assert(u2.Path == "/path with spaces")
+}
+
+func testParseWithQuery() {
+	u, err := url.Parse("http://example.com/path?key=value&foo=bar")
+	assert(err == nil)
+	assert(u.Path == "/path")
+	assert(u.RawQuery == "key=value&foo=bar")
+}
+
+func testParseWithFragment() {
+	u, err := url.Parse("http://example.com/path#section")
+	assert(err == nil)
+	assert(u.Path == "/path")
+	assert(u.Fragment == "section")
+
+	// Fragment with query
+	u2, err2 := url.Parse("http://example.com/path?q=1#frag")
+	assert(err2 == nil)
+	assert(u2.RawQuery == "q=1")
+	assert(u2.Fragment == "frag")
+}
+
+func testParseWithUserinfo() {
+	u, err := url.Parse("http://user:pass@example.com/path")
+	assert(err == nil)
+	assert(u.User != nil)
+	assert(u.User.Username() == "user")
+	pw, ok := u.User.Password()
+	assert(ok)
+	assert(pw == "pass")
+	assert(u.Host == "example.com")
+
+	// Username only
+	u2, err2 := url.Parse("http://user@example.com/path")
+	assert(err2 == nil)
+	assert(u2.User.Username() == "user")
+	_, ok2 := u2.User.Password()
+	assert(!ok2)
+}
+
+func testParseRelative() {
+	u, err := url.Parse("/path/to/resource")
+	assert(err == nil)
+	assert(u.Scheme == "")
+	assert(u.Host == "")
+	assert(u.Path == "/path/to/resource")
+
+	u2, err2 := url.Parse("/path?q=1")
+	assert(err2 == nil)
+	assert(u2.Path == "/path")
+	assert(u2.RawQuery == "q=1")
+}
+
+func testURLString() {
+	// Round-trip: parse and stringify
+	original := "http://example.com/path?key=value"
+	u, err := url.Parse(original)
+	assert(err == nil)
+	assert(u.String() == original)
+
+	// With fragment
+	u2, _ := url.Parse("http://example.com/path#frag")
+	assert(u2.String() == "http://example.com/path#frag")
+
+	// With userinfo
+	u3, _ := url.Parse("http://user:pass@example.com/path")
+	assert(u3.String() == "http://user:pass@example.com/path")
+
+	// HTTPS with port
+	u4, _ := url.Parse("https://example.com:443/path")
+	assert(u4.String() == "https://example.com:443/path")
+}
+
+func testURLHostnamePort() {
+	u, _ := url.Parse("http://example.com:8080/path")
+	assert(u.Hostname() == "example.com")
+	assert(u.Port() == "8080")
+
+	u2, _ := url.Parse("http://example.com/path")
+	assert(u2.Hostname() == "example.com")
+	assert(u2.Port() == "")
+}
+
+func testURLRequestURI() {
+	u, _ := url.Parse("http://example.com/path?q=1")
+	assert(u.RequestURI() == "/path?q=1")
+
+	u2, _ := url.Parse("http://example.com")
+	assert(u2.RequestURI() == "/")
+
+	u3, _ := url.Parse("http://example.com/")
+	assert(u3.RequestURI() == "/")
+}
+
+func testValues() {
+	v := make(url.Values)
+	v.Set("key", "value")
+	assert(v.Get("key") == "value")
+	assert(v.Has("key"))
+	assert(!v.Has("missing"))
+	assert(v.Get("missing") == "")
+
+	v.Add("key", "value2")
+	vals := v["key"]
+	assert(len(vals) == 2)
+	assert(vals[0] == "value")
+	assert(vals[1] == "value2")
+
+	v.Del("key")
+	assert(!v.Has("key"))
+}
+
+func testValuesEncode() {
+	v := make(url.Values)
+	v.Set("foo", "bar")
+	v.Set("baz", "qux")
+	encoded := v.Encode()
+	// Keys should be sorted
+	assert(encoded == "baz=qux&foo=bar")
+
+	// Special characters
+	v2 := make(url.Values)
+	v2.Set("key", "hello world")
+	assert(v2.Encode() == "key=hello+world")
+}
+
+func testParseQuery() {
+	v, err := url.ParseQuery("key=value&foo=bar&key=other")
+	assert(err == nil)
+	assert(v.Get("key") == "value")
+	assert(v.Get("foo") == "bar")
+	vals := v["key"]
+	assert(len(vals) == 2)
+	assert(vals[1] == "other")
+
+	// Encoded query
+	v2, err2 := url.ParseQuery("key=hello+world&encoded=%2Fpath")
+	assert(err2 == nil)
+	assert(v2.Get("key") == "hello world")
+	assert(v2.Get("encoded") == "/path")
+}
+
+func testQueryEscapeUnescape() {
+	assert(url.QueryEscape("hello world") == "hello+world")
+	assert(url.QueryEscape("foo/bar") == "foo%2Fbar")
+	assert(url.QueryEscape("a=b&c=d") == "a%3Db%26c%3Dd")
+	assert(url.QueryEscape("simple") == "simple")
+
+	s, err := url.QueryUnescape("hello+world")
+	assert(err == nil)
+	assert(s == "hello world")
+
+	s2, err2 := url.QueryUnescape("foo%2Fbar")
+	assert(err2 == nil)
+	assert(s2 == "foo/bar")
+}
+
+func testPathEscapeUnescape() {
+	assert(url.PathEscape("hello world") == "hello%20world")
+	assert(url.PathEscape("simple") == "simple")
+	assert(url.PathEscape("a/b") == "a%2Fb")
+
+	s, err := url.PathUnescape("hello%20world")
+	assert(err == nil)
+	assert(s == "hello world")
+
+	s2, err2 := url.PathUnescape("/path/to/file")
+	assert(err2 == nil)
+	assert(s2 == "/path/to/file")
+}
+
+func testResolveReference() {
+	base, _ := url.Parse("http://example.com/a/b/c")
+
+	// Absolute reference
+	ref1, _ := url.Parse("http://other.com/x")
+	resolved1 := base.ResolveReference(ref1)
+	assert(resolved1.String() == "http://other.com/x")
+
+	// Relative path
+	ref2, _ := url.Parse("d")
+	resolved2 := base.ResolveReference(ref2)
+	assert(resolved2.Host == "example.com")
+	assert(resolved2.Path == "/a/b/d")
+
+	// Absolute path
+	ref3, _ := url.Parse("/x/y")
+	resolved3 := base.ResolveReference(ref3)
+	assert(resolved3.Host == "example.com")
+	assert(resolved3.Path == "/x/y")
+
+	// Query only
+	ref4, _ := url.Parse("?q=1")
+	resolved4 := base.ResolveReference(ref4)
+	assert(resolved4.Path == "/a/b/c")
+	assert(resolved4.RawQuery == "q=1")
+}
+
+func testURLQuery() {
+	u, _ := url.Parse("http://example.com/path?foo=bar&baz=qux")
+	q := u.Query()
+	assert(q.Get("foo") == "bar")
+	assert(q.Get("baz") == "qux")
+}
+
+func testEdgeCases() {
+	// Empty URL
+	u, err := url.Parse("")
+	assert(err == nil)
+	assert(u.Path == "")
+
+	// Just path
+	u2, _ := url.Parse("/")
+	assert(u2.Path == "/")
+
+	// Star
+	u3, _ := url.Parse("*")
+	assert(u3.Path == "*")
+
+	// Percent-encoded
+	u4, _ := url.Parse("http://example.com/a%20b")
+	assert(u4.Path == "/a b")
+
+	// Query with no value
+	v, _ := url.ParseQuery("key=&other")
+	assert(v.Get("key") == "")
+	assert(v.Has("other"))
+}

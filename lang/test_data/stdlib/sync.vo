@@ -1,0 +1,209 @@
+package main
+
+import (
+	"sync"
+	"time"
+)
+
+func main() {
+	testMutex()
+	testMutexTryLock()
+	testRWMutex()
+	testRWMutexConcurrent()
+	testWaitGroup()
+	testOnce()
+	testMap()
+	testPool()
+}
+
+func testMutex() {
+	var mu sync.Mutex
+	mu.Lock()
+	mu.Unlock()
+
+	// TryLock when unlocked
+	assert(mu.TryLock())
+	// TryLock when locked should fail
+	assert(!mu.TryLock())
+	mu.Unlock()
+}
+
+func testMutexTryLock() {
+	var mu sync.Mutex
+
+	mu.Lock()
+	gotLock := false
+	done := make(chan struct{})
+	go func() {
+		gotLock = mu.TryLock()
+		close(done)
+	}()
+	<-done
+	assert(!gotLock)
+	mu.Unlock()
+
+	assert(mu.TryLock())
+	mu.Unlock()
+}
+
+func testRWMutex() {
+	var rw sync.RWMutex
+
+	// Multiple readers can hold simultaneously
+	rw.RLock()
+	rw.RLock()
+	rw.RUnlock()
+	rw.RUnlock()
+
+	// TryRLock
+	assert(rw.TryRLock())
+	rw.RUnlock()
+
+	// TryLock
+	assert(rw.TryLock())
+	// TryRLock should fail when writer holds
+	assert(!rw.TryRLock())
+	// TryLock should fail when writer holds
+	assert(!rw.TryLock())
+	rw.Unlock()
+}
+
+func testRWMutexConcurrent() {
+	var rw sync.RWMutex
+	results := make([]int, 0)
+	done := make(chan struct{})
+
+	// Writer goroutine
+	go func() {
+		rw.Lock()
+		results = append(results, 99)
+		rw.Unlock()
+		close(done)
+	}()
+
+	// Give writer time to try to acquire
+	time.Sleep(10 * time.Millisecond)
+	<-done
+	assert(len(results) == 1)
+	assert(results[0] == 99)
+}
+
+func testWaitGroup() {
+	var wg sync.WaitGroup
+
+	// Wait on zero counter should return immediately
+	wg.Wait()
+
+	counter := 0
+	n := 5
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			counter++
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+	assert(counter == n)
+}
+
+func testOnce() {
+	var once sync.Once
+	count := 0
+	f := func() { count++ }
+
+	once.Do(f)
+	once.Do(f)
+	once.Do(f)
+	assert(count == 1)
+
+	// Different Once instances are independent
+	var once2 sync.Once
+	once2.Do(f)
+	assert(count == 2)
+}
+
+func testMap() {
+	var m sync.Map
+
+	// Store and Load
+	m.Store("key1", 42)
+	v, ok := m.Load("key1")
+	assert(ok)
+	n, ok2 := v.(int)
+	assert(ok2)
+	assert(n == 42)
+
+	// Missing key
+	_, ok = m.Load("missing")
+	assert(!ok)
+
+	// Delete
+	m.Delete("key1")
+	_, ok = m.Load("key1")
+	assert(!ok)
+
+	// LoadOrStore
+	actual, loaded := m.LoadOrStore("k", "first")
+	assert(!loaded)
+	s, _ := actual.(string)
+	assert(s == "first")
+
+	actual, loaded = m.LoadOrStore("k", "second")
+	assert(loaded)
+	s, _ = actual.(string)
+	assert(s == "first")
+
+	// LoadAndDelete
+	val, loaded := m.LoadAndDelete("k")
+	assert(loaded)
+	s, _ = val.(string)
+	assert(s == "first")
+	_, ok = m.Load("k")
+	assert(!ok)
+
+	// Range
+	m.Store("a", 1)
+	m.Store("b", 2)
+	m.Store("c", 3)
+	count := 0
+	m.Range(func(key any, value any) bool {
+		count++
+		return true
+	})
+	assert(count == 3)
+
+	// Range early stop
+	stopped := 0
+	m.Range(func(key any, value any) bool {
+		stopped++
+		return false // stop after first
+	})
+	assert(stopped == 1)
+}
+
+func testPool() {
+	p := &sync.Pool{
+		New: func() any { return "new-item" },
+	}
+
+	// Get from empty pool calls New
+	v := p.Get()
+	s, _ := v.(string)
+	assert(s == "new-item")
+
+	// Put then Get
+	p.Put("cached")
+	v = p.Get()
+	s, _ = v.(string)
+	assert(s == "cached")
+
+	// Pool without New returns nil when empty
+	var p2 sync.Pool
+	assert(p2.Get() == nil)
+	p2.Put("item")
+	v = p2.Get()
+	s, _ = v.(string)
+	assert(s == "item")
+	assert(p2.Get() == nil)
+}

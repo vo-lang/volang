@@ -1,0 +1,48 @@
+package main
+
+import (
+	"context"
+	"fmt"
+)
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("ASSERT FAILED: " + msg)
+	}
+}
+
+func main() {
+	fmt.Println("Starting context extended tests...")
+
+	// Test WithCancelCause
+	ctx, cancel := context.WithCancelCause(context.Background())
+	assert(ctx.Err() == nil, "context not yet cancelled")
+	cancel(nil)
+	assert(ctx.Err() != nil, "context cancelled")
+
+	// Test Cause
+	ctx2, cancel2 := context.WithCancelCause(context.Background())
+	cancel2(nil)
+	_ = cancel2
+	_ = context.Cause(ctx2)
+
+	// Test WithoutCancel
+	parent, cancelParent := context.WithCancel(context.Background())
+	child := context.WithoutCancel(parent)
+	assert(child.Err() == nil, "child not cancelled before parent")
+	cancelParent()
+	assert(parent.Err() != nil, "parent cancelled")
+	assert(child.Err() == nil, "child not affected by parent cancel (WithoutCancel)")
+
+	// Test WithoutCancel passes values
+	key := "mykey"
+	valCtx := context.WithValue(context.Background(), key, "hello")
+	noCancel := context.WithoutCancel(valCtx)
+	v := noCancel.Value(key)
+	assert(v != nil, "WithoutCancel propagates values")
+	s, ok := v.(string)
+	assert(ok, "value type assert ok")
+	assert(s == "hello", "value matches")
+
+	fmt.Println("All context extended tests passed!")
+}

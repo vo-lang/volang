@@ -574,6 +574,23 @@ func DialTimeout(network, address string, timeout time.Duration) (Conn, error) {
 	}
 }
 
+// Dialer contains options for connecting to an address.
+type Dialer struct {
+    Timeout   time.Duration
+    LocalAddr Addr
+}
+
+// Dial connects to the address on the named network using d's configuration.
+func (d *Dialer) Dial(network, address string) (Conn, error) {
+    return DialTimeout(network, address, d.Timeout)
+}
+
+// DialContext is like Dial but takes a context. Context is currently ignored
+// since Vo context support is island-local; the call falls through to Dial.
+func (d *Dialer) DialContext(network, address string) (Conn, error) {
+    return d.Dial(network, address)
+}
+
 // Listen announces on the local network address.
 // Known networks are "tcp", "tcp4" (IPv4-only), "tcp6" (IPv6-only), "unix".
 func Listen(network, address string) (Listener, error) {

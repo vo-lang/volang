@@ -1,0 +1,79 @@
+package main
+
+import (
+	"encoding/csv"
+	"fmt"
+	"strings"
+)
+
+func main() {
+	fmt.Println("Starting csv tests...")
+
+	// Test basic read
+	r := csv.NewReader(strings.NewReader("a,b,c\n1,2,3\n"))
+	records, err := r.ReadAll()
+	assert(err == nil, "ReadAll should not error")
+	assert(len(records) == 2, "should have 2 records")
+	assert(records[0][0] == "a", "first field should be a")
+	assert(records[0][1] == "b", "second field should be b")
+	assert(records[0][2] == "c", "third field should be c")
+	assert(records[1][0] == "1", "second record first field")
+	assert(records[1][2] == "3", "second record third field")
+
+	// Test quoted fields
+	r2 := csv.NewReader(strings.NewReader("\"hello, world\",foo\n"))
+	rec2, err2 := r2.Read()
+	assert(err2 == nil, "quoted read should not error")
+	assert(len(rec2) == 2, "should have 2 fields")
+	assert(rec2[0] == "hello, world", "quoted field should be unquoted")
+	assert(rec2[1] == "foo", "unquoted field")
+
+	// Test escaped quotes inside quoted field
+	r3 := csv.NewReader(strings.NewReader("\"say \"\"hi\"\"\",bar\n"))
+	rec3, err3 := r3.Read()
+	assert(err3 == nil, "escaped quote read should not error")
+	assert(rec3[0] == "say \"hi\"", "escaped quotes inside field")
+
+	// Test empty fields
+	r4 := csv.NewReader(strings.NewReader(",b,\n"))
+	rec4, err4 := r4.Read()
+	assert(err4 == nil, "empty fields read should not error")
+	assert(len(rec4) == 3, "should have 3 fields")
+	assert(rec4[0] == "", "first field empty")
+	assert(rec4[1] == "b", "second field b")
+	assert(rec4[2] == "", "third field empty")
+
+	// Test Writer
+	var buf strings.Builder
+	w := csv.NewWriter(&buf)
+	w.Write([]string{"name", "age", "city"})
+	w.Write([]string{"Alice", "30", "New York"})
+	w.Write([]string{"Bob", "25", "London, UK"})
+	w.Flush()
+	result := buf.String()
+	assert(strings.Contains(result, "name,age,city"), "header row")
+	assert(strings.Contains(result, "Alice,30,New York"), "alice row")
+	assert(strings.Contains(result, "\"London, UK\""), "quoted london")
+
+	// Test WriteAll
+	var buf2 strings.Builder
+	w2 := csv.NewWriter(&buf2)
+	err5 := w2.WriteAll([][]string{
+		{"a", "b"},
+		{"1", "2"},
+	})
+	assert(err5 == nil, "WriteAll should not error")
+	result2 := buf2.String()
+	assert(strings.Contains(result2, "a,b"), "WriteAll header")
+	assert(strings.Contains(result2, "1,2"), "WriteAll row")
+
+	// Test FieldsPerRecord validation
+	r5 := csv.NewReader(strings.NewReader("a,b,c\n1,2\n"))
+	r5.FieldsPerRecord = 3
+	_, err6 := r5.Read()
+	assert(err6 == nil, "first record ok")
+	_, err7 := r5.Read()
+	assert(err7 != nil, "second record should fail field count check")
+
+	fmt.Println("All csv tests passed!")
+}

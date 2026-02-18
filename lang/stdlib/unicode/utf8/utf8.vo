@@ -196,14 +196,14 @@ func DecodeRune(p []byte) (rune, int) {
     if p0 < RuneSelf {
         return rune(p0), 1
     }
-    x := first[p0]
+    x := first[int(p0)]
     if x >= as {
         // Invalid or ASCII (already handled above, so must be invalid)
         return RuneError, 1
     }
     sz := int(x & 7)
-    accept := acceptRanges[x>>4]
-    if n < sz {
+    accept := acceptRanges[int(x>>4)]
+    if n < sz || n < 2 {
         return RuneError, 1
     }
     b1 := p[1]
@@ -238,13 +238,13 @@ func DecodeRuneInString(s string) (rune, int) {
     if s0 < RuneSelf {
         return rune(s0), 1
     }
-    x := first[s0]
+    x := first[int(s0)]
     if x >= as {
         return RuneError, 1
     }
     sz := int(x & 7)
-    accept := acceptRanges[x>>4]
-    if n < sz {
+    accept := acceptRanges[int(x>>4)]
+    if n < sz || n < 2 {
         return RuneError, 1
     }
     s1 := s[1]
@@ -389,12 +389,12 @@ func FullRune(p []byte) bool {
     if n == 0 {
         return false
     }
-    x := first[p[0]]
+    x := first[int(p[0])]
     if n >= int(x&7) {
         return true // ASCII, invalid or valid.
     }
     // Must be short or invalid.
-    accept := acceptRanges[x>>4]
+    accept := acceptRanges[int(x>>4)]
     if n > 1 && (p[1] < accept.lo || accept.hi < p[1]) {
         return true
     } else if n > 2 && (p[2] < locb || hicb < p[2]) {
@@ -409,12 +409,12 @@ func FullRuneInString(s string) bool {
     if n == 0 {
         return false
     }
-    x := first[s[0]]
+    x := first[int(s[0])]
     if n >= int(x&7) {
         return true // ASCII, invalid, or valid.
     }
     // Must be short or invalid.
-    accept := acceptRanges[x>>4]
+    accept := acceptRanges[int(x>>4)]
     if n > 1 && (s[1] < accept.lo || accept.hi < s[1]) {
         return true
     } else if n > 2 && (s[2] < locb || hicb < s[2]) {

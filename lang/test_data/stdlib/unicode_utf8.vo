@@ -1,0 +1,107 @@
+package main
+
+import "unicode/utf8"
+
+func main() {
+	testRuneLen()
+	testRuneCount()
+	testValid()
+	testDecodeRune()
+	testEncodeRune()
+	testAppendRune()
+	testFullRune()
+}
+
+func testRuneLen() {
+	assert(utf8.RuneLen('A') == 1)
+	assert(utf8.RuneLen(0x7F) == 1)
+	assert(utf8.RuneLen(0x80) == 2)
+	assert(utf8.RuneLen(0x7FF) == 2)
+	assert(utf8.RuneLen(0x800) == 3)
+	assert(utf8.RuneLen(0xFFFF) == 3)
+	assert(utf8.RuneLen(0x10000) == 4)
+	assert(utf8.RuneLen(0x10FFFF) == 4)
+	// Invalid rune
+	assert(utf8.RuneLen(utf8.MaxRune+1) == -1)
+}
+
+func testRuneCount() {
+	assert(utf8.RuneCountInString("") == 0)
+	assert(utf8.RuneCountInString("hello") == 5)
+	assert(utf8.RuneCountInString("héllo") == 5)
+
+	b := []byte("hello")
+	assert(utf8.RuneCount(b) == 5)
+}
+
+func testValid() {
+	assert(utf8.ValidString("hello"))
+	assert(utf8.ValidString(""))
+	assert(utf8.ValidString("héllo"))
+
+	assert(utf8.Valid([]byte("hello")))
+	assert(utf8.Valid([]byte("")))
+
+	// Individual rune validity
+	assert(utf8.ValidRune('A'))
+	assert(utf8.ValidRune(0x10FFFF))
+	assert(!utf8.ValidRune(utf8.MaxRune + 1))
+}
+
+func testDecodeRune() {
+	b := []byte("A")
+	r, size := utf8.DecodeRune(b)
+	assert(r == 'A')
+	assert(size == 1)
+
+	// 2-byte sequence: é = U+00E9
+	b2 := []byte{0xC3, 0xA9}
+	r, size = utf8.DecodeRune(b2)
+	assert(r == 0xE9)
+	assert(size == 2)
+
+	// DecodeRuneInString
+	r, size = utf8.DecodeRuneInString("hello")
+	assert(r == 'h')
+	assert(size == 1)
+
+	// DecodeLastRune
+	r, size = utf8.DecodeLastRuneInString("hello")
+	assert(r == 'o')
+	assert(size == 1)
+}
+
+func testEncodeRune() {
+	buf := make([]byte, 4)
+	n := utf8.EncodeRune(buf, 'A')
+	assert(n == 1)
+	assert(buf[0] == 'A')
+
+	n = utf8.EncodeRune(buf, 0xE9) // é
+	assert(n == 2)
+	assert(buf[0] == 0xC3)
+	assert(buf[1] == 0xA9)
+}
+
+func testAppendRune() {
+	buf := utf8.AppendRune(nil, 'H')
+	assert(len(buf) == 1)
+	assert(buf[0] == 'H')
+
+	buf = utf8.AppendRune(buf, 0xE9) // é
+	assert(len(buf) == 3)
+
+	// Round-trip
+	r, _ := utf8.DecodeRune(buf[1:])
+	assert(r == 0xE9)
+}
+
+func testFullRune() {
+	assert(utf8.FullRune([]byte("A")))
+	assert(utf8.FullRune([]byte{0xC3, 0xA9}))
+	// {0xC3} alone = invalid sequence → treated as RuneError (sz=1) → FullRune = true
+	assert(utf8.FullRune([]byte{0xC3}))
+
+	assert(utf8.FullRuneInString("hello"))
+	assert(!utf8.FullRuneInString(""))
+}

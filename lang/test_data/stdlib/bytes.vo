@@ -57,6 +57,21 @@ func main() {
     assert(len(rep) == 6, "Repeat length")
     assert(rep[4] == 1, "Repeat content")
     
+    // IndexFunc / LastIndexFunc
+    isDigit := func(r rune) bool { return r >= '0' && r <= '9' }
+    assert(bytes.IndexFunc([]byte("abc123"), isDigit) == 3, "IndexFunc digit")
+    assert(bytes.IndexFunc([]byte("abc"), isDigit) == -1, "IndexFunc no match")
+    assert(bytes.LastIndexFunc([]byte("abc123abc456"), isDigit) == 11, "LastIndexFunc digit")
+
+    // Title
+    titleResult := bytes.Title([]byte("hello world"))
+    assert(string(titleResult) == "Hello World", "Title failed")
+    assert(len(bytes.Title([]byte{})) == 0, "Title empty")
+
+    // ToValidUTF8
+    validResult := bytes.ToValidUTF8([]byte("hello"), []byte("?"))
+    assert(string(validResult) == "hello", "ToValidUTF8 valid input")
+
     fmt.Println("All bytes tests passed!")
 }
 

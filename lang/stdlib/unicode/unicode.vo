@@ -17,3 +17,10 @@ func ToLower(r rune) rune
 func ToUpper(r rune) rune
 func ToTitle(r rune) rune
 func SimpleFold(r rune) rune
+
+// IsTitle reports whether the rune is a title case letter.
+// Title case letters are a small set (e.g. ǅ ǈ ǋ) where the titlecase form
+// differs from both uppercase and lowercase.
+func IsTitle(r rune) bool {
+    return IsLetter(r) && ToTitle(r) == r && ToUpper(r) != r
+}

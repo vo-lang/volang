@@ -627,3 +627,108 @@ func (o *OffsetWriter) Seek(offset int64, whence int) (int64, error) {
 	o.off = abs
 	return abs - o.base, nil
 }
+
+// ==================== Pipe ====================
+
+// pipeState holds the shared state between PipeReader and PipeWriter.
+type pipeState struct {
+	dataCh chan []byte
+	doneCh chan struct{}
+	rerr   error
+	werr   error
+	rclose bool
+	wclose bool
+}
+
+// PipeReader is the read half of a pipe created by Pipe.
+type PipeReader struct {
+	state *pipeState
+}
+
+// Read implements the io.Reader interface.
+func (r *PipeReader) Read(data []byte) (n int, err error) {
+	if r.state.rclose {
+		return 0, ErrClosedPipe
+	}
+	select {
+	case buf := <-r.state.dataCh:
+		if buf == nil {
+			return 0, r.state.werr
+		}
+		n = copy(data, buf)
+		return n, nil
+	case <-r.state.doneCh:
+		if r.state.werr != nil {
+			return 0, r.state.werr
+		}
+		return 0, EOF
+	}
+}
+
+// Close closes the reader; subsequent writes will return ErrClosedPipe.
+func (r *PipeReader) Close() error {
+	return r.CloseWithError(nil)
+}
+
+// CloseWithError closes the reader with the given error.
+func (r *PipeReader) CloseWithError(e error) error {
+	if e == nil {
+		e = ErrClosedPipe
+	}
+	r.state.rerr = e
+	r.state.rclose = true
+	select {
+	case r.state.doneCh <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// PipeWriter is the write half of a pipe created by Pipe.
+type PipeWriter struct {
+	state *pipeState
+}
+
+// Write implements the io.Writer interface.
+func (w *PipeWriter) Write(data []byte) (n int, err error) {
+	if w.state.wclose {
+		return 0, ErrClosedPipe
+	}
+	if w.state.rclose {
+		return 0, w.state.rerr
+	}
+	buf := make([]byte, len(data))
+	copy(buf, data)
+	select {
+	case w.state.dataCh <- buf:
+		return len(data), nil
+	case <-w.state.doneCh:
+		return 0, w.state.rerr
+	}
+}
+
+// Close closes the writer; subsequent reads will return EOF.
+func (w *PipeWriter) Close() error {
+	return w.CloseWithError(nil)
+}
+
+// CloseWithError closes the writer, causing subsequent reads to return the error.
+func (w *PipeWriter) CloseWithError(e error) error {
+	if e == nil {
+		e = EOF
+	}
+	w.state.werr = e
+	w.state.wclose = true
+	close(w.state.dataCh)
+	return nil
+}
+
+// Pipe creates a synchronous in-memory pipe.
+// It can be used to connect code expecting an io.Reader with code expecting an io.Writer.
+func Pipe() (*PipeReader, *PipeWriter) {
+	state := &pipeState{
+		dataCh: make(chan []byte, 1),
+		doneCh: make(chan struct{}, 1),
+	}
+	return &PipeReader{state: state}, &PipeWriter{state: state}
+}

@@ -1,0 +1,151 @@
+// Package cmp provides types and functions related to comparing ordered values.
+// This is Go 1.21's cmp package, adapted for Vo (no generics — use any).
+package cmp
+
+// Ordered is a constraint that permits any ordered type (int, float64, string).
+// In Vo without generics, use the typed Compare functions or CompareAny.
+
+// CompareInt returns an integer comparing two int values.
+// The result will be 0 if a == b, -1 if a < b, and +1 if a > b.
+func CompareInt(a, b int) int {
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+
+// CompareInt64 compares two int64 values.
+func CompareInt64(a, b int64) int {
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+
+// CompareFloat64 compares two float64 values.
+// NaN is considered less than any non-NaN value.
+func CompareFloat64(a, b float64) int {
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+
+// CompareString compares two string values lexicographically.
+func CompareString(a, b string) int {
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+
+// CompareUint64 compares two uint64 values.
+func CompareUint64(a, b uint64) int {
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+
+// OrInt returns the first non-zero int value, or zero if all are zero.
+func OrInt(vals ...int) int {
+	for _, v := range vals {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+// OrString returns the first non-empty string, or "" if all are empty.
+func OrString(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// Or returns the first non-zero value of any type, or zero value if all are zero.
+// A value is "non-zero" if it is not nil (for interfaces/pointers) or not the zero value.
+func Or(vals ...any) any {
+	for _, v := range vals {
+		if v != nil {
+			return v
+		}
+	}
+	return nil
+}
+
+// IsZeroInt reports whether v is the zero value for int.
+func IsZeroInt(v int) bool { return v == 0 }
+
+// IsZeroString reports whether v is the zero value for string.
+func IsZeroString(v string) bool { return v == "" }
+
+// IsZeroFloat64 reports whether v is the zero value for float64.
+func IsZeroFloat64(v float64) bool { return v == 0 }
+
+// MinInt returns the smaller of a and b.
+func MinInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// MaxInt returns the larger of a and b.
+func MaxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// MinFloat64 returns the smaller of a and b.
+func MinFloat64(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// MaxFloat64 returns the larger of a and b.
+func MaxFloat64(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// MinString returns the lexicographically smaller of a and b.
+func MinString(a, b string) string {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// MaxString returns the lexicographically larger of a and b.
+func MaxString(a, b string) string {
+	if a > b {
+		return a
+	}
+	return b
+}

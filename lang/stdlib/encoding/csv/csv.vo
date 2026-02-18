@@ -1,0 +1,318 @@
+package csv
+
+import (
+	"bufio"
+	"bytes"
+	"errors"
+	"io"
+	"strings"
+)
+
+// ParseError is returned for parsing errors.
+type ParseError struct {
+	StartLine int
+	Line      int
+	Column    int
+	Err       error
+}
+
+func (e *ParseError) Error() string {
+	if e.Err == ErrFieldCount {
+		return "record on line " + itoa(e.Line) + ": " + e.Err.Error()
+	}
+	return "parse error on line " + itoa(e.Line) + ", column " + itoa(e.Column) + ": " + e.Err.Error()
+}
+
+var (
+	ErrBareQuote  = errors.New("bare \" in non-quoted-field")
+	ErrQuote      = errors.New("extraneous or missing \" in quoted-field")
+	ErrFieldCount = errors.New("wrong number of fields")
+)
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	var buf [20]byte
+	pos := 20
+	for n > 0 {
+		pos--
+		buf[pos] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
+}
+
+// Reader reads records from a CSV-encoded file.
+type Reader struct {
+	Comma            rune
+	Comment          rune
+	FieldsPerRecord  int
+	LazyQuotes       bool
+	TrimLeadingSpace bool
+	ReuseRecord      bool
+
+	r          *bufio.Reader
+	line       int
+	numFields  int
+	fieldBuf   []string
+	fullBuf    []string
+}
+
+// NewReader returns a new Reader reading from r.
+func NewReader(r io.Reader) *Reader {
+	return &Reader{
+		Comma: ',',
+		r:     bufio.NewReader(r),
+	}
+}
+
+// Read reads one record (a slice of fields) from r.
+func (r *Reader) Read() (record []string, err error) {
+	for {
+		record, err = r.readRecord()
+		if record != nil {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return record, nil
+}
+
+// ReadAll reads all the remaining records from r.
+func (r *Reader) ReadAll() (records [][]string, err error) {
+	for {
+		record, err := r.Read()
+		if err == io.EOF {
+			return records, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+}
+
+func (r *Reader) readRecord() ([]string, error) {
+	line, err := r.readLine()
+	if err != nil {
+		return nil, err
+	}
+
+	r.line++
+
+	if r.Comment != 0 && nextRune(line) == r.Comment {
+		return nil, nil
+	}
+
+	if line == "" || line == "\n" || line == "\r\n" {
+		return nil, nil
+	}
+
+	comma := string(r.Comma)
+	if r.Comma == 0 {
+		comma = ","
+	}
+
+	s := strings.TrimRight(line, "\r\n")
+	var fields []string
+	for {
+		var field string
+		hadComma := false
+		if len(s) > 0 && s[0] == '"' {
+			// Quoted field: parseQuotedField returns rest after closing quote
+			field, s, err = parseQuotedField(s[1:], r.LazyQuotes)
+			if err != nil {
+				return nil, &ParseError{Line: r.line, Err: err}
+			}
+			// Consume the comma that follows (if any)
+			if strings.HasPrefix(s, comma) {
+				s = s[len(comma):]
+				hadComma = true
+			}
+		} else {
+			// Unquoted field: advance s past the comma inline
+			idx := strings.Index(s, comma)
+			if idx < 0 {
+				field = s
+				s = ""
+			} else {
+				field = s[:idx]
+				s = s[idx+len(comma):]
+				hadComma = true
+			}
+			if r.TrimLeadingSpace {
+				field = strings.TrimLeft(field, " \t")
+			}
+		}
+		fields = append(fields, field)
+		if !hadComma {
+			break
+		}
+	}
+
+	if r.FieldsPerRecord > 0 {
+		if len(fields) != r.FieldsPerRecord {
+			return nil, &ParseError{Line: r.line, Err: ErrFieldCount}
+		}
+	} else if r.FieldsPerRecord == 0 {
+		if r.numFields == 0 {
+			r.numFields = len(fields)
+		} else if len(fields) != r.numFields {
+			return nil, &ParseError{Line: r.line, Err: ErrFieldCount}
+		}
+	}
+
+	return fields, nil
+}
+
+func (r *Reader) readLine() (string, error) {
+	var buf bytes.Buffer
+	for {
+		b, err := r.r.ReadByte()
+		if err == io.EOF {
+			if buf.Len() == 0 {
+				return "", io.EOF
+			}
+			return buf.String(), nil
+		}
+		if err != nil {
+			return "", err
+		}
+		buf.WriteByte(b)
+		if b == '\n' {
+			return buf.String(), nil
+		}
+	}
+}
+
+func nextRune(s string) rune {
+	if len(s) == 0 {
+		return 0
+	}
+	return rune(s[0])
+}
+
+func parseQuotedField(s string, lazy bool) (field, rest string, err error) {
+	var buf strings.Builder
+	for {
+		idx := strings.IndexByte(s, '"')
+		if idx < 0 {
+			if lazy {
+				buf.WriteString(s)
+				return buf.String(), "", nil
+			}
+			return "", "", ErrQuote
+		}
+		buf.WriteString(s[:idx])
+		s = s[idx+1:]
+		if len(s) == 0 || s[0] != '"' {
+			return buf.String(), s, nil
+		}
+		buf.WriteByte('"')
+		s = s[1:]
+	}
+}
+
+// Writer writes records using CSV encoding.
+type Writer struct {
+	Comma   rune
+	UseCRLF bool
+	w       *bufio.Writer
+}
+
+// NewWriter returns a new Writer writing to w.
+func NewWriter(w io.Writer) *Writer {
+	return &Writer{
+		Comma: ',',
+		w:     bufio.NewWriter(w),
+	}
+}
+
+// Write writes a single CSV record to w.
+func (w *Writer) Write(record []string) error {
+	comma := string(w.Comma)
+	if w.Comma == 0 {
+		comma = ","
+	}
+	for n, field := range record {
+		if n > 0 {
+			if _, err := w.w.WriteString(comma); err != nil {
+				return err
+			}
+		}
+		if w.fieldNeedsQuotes(field) {
+			if err := w.writeQuoted(field); err != nil {
+				return err
+			}
+		} else {
+			if _, err := w.w.WriteString(field); err != nil {
+				return err
+			}
+		}
+	}
+	if w.UseCRLF {
+		_, err := w.w.WriteString("\r\n")
+		return err
+	}
+	return w.w.WriteByte('\n')
+}
+
+// WriteAll writes multiple CSV records to w.
+func (w *Writer) WriteAll(records [][]string) error {
+	for _, record := range records {
+		if err := w.Write(record); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
+}
+
+// Flush writes any buffered data to the underlying io.Writer.
+func (w *Writer) Flush() error {
+	return w.w.Flush()
+}
+
+// Error reports any error that has occurred during a previous Write or Flush.
+func (w *Writer) Error() error {
+	return nil
+}
+
+func (w *Writer) fieldNeedsQuotes(field string) bool {
+	comma := string(w.Comma)
+	if w.Comma == 0 {
+		comma = ","
+	}
+	return strings.Contains(field, comma) ||
+		strings.ContainsAny(field, "\"\r\n")
+}
+
+func (w *Writer) writeQuoted(field string) error {
+	if err := w.w.WriteByte('"'); err != nil {
+		return err
+	}
+	for _, r := range field {
+		if r == '"' {
+			if _, err := w.w.WriteString("\"\""); err != nil {
+				return err
+			}
+		} else {
+			_, err := w.w.WriteRune(r)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return w.w.WriteByte('"')
+}

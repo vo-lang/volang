@@ -1,0 +1,256 @@
+package main
+
+import (
+	"bytes"
+	"flag"
+	"io/fs"
+	"log"
+	"maps"
+	"slices"
+	"sort"
+)
+
+func main() {
+	testLog()
+	testFlag()
+	testSortSlice()
+	testSlicesAdditions()
+	testMapsDeleteFunc()
+	testIoFS()
+}
+
+func testLog() {
+	// Log to a buffer via custom logger
+	var buf bytes.Buffer
+	logger := log.New(&buf, "TEST: ", 0)
+	logger.Print("hello")
+	s := buf.String()
+	assert(len(s) > 0)
+	// Should contain our prefix and message
+	assert(s[0] == 'T') // starts with "TEST: "
+
+	buf.Reset()
+	logger.Printf("count=%d", 42)
+	s = buf.String()
+	assert(len(s) > 0)
+
+	// SetFlags/SetPrefix
+	logger.SetFlags(log.Ldate | log.Ltime)
+	logger.SetPrefix("PREFIX:")
+	assert(logger.Prefix() == "PREFIX:")
+	assert(logger.Flags() == log.Ldate|log.Ltime)
+}
+
+func testFlag() {
+	fs2 := flag.NewFlagSet("test", flag.ContinueOnError)
+
+	verbose := fs2.Bool("verbose", false, "enable verbose")
+	count := fs2.Int("count", 10, "number of items")
+	name := fs2.String("name", "default", "name to use")
+	ratio := fs2.Float64("ratio", 0.5, "ratio value")
+
+	err := fs2.Parse([]string{"-verbose", "-count=42", "--name", "hello", "-ratio=3.14"})
+	assert(err == nil)
+
+	assert(verbose.Value)
+	assert(count.Value == 42)
+	assert(name.Value == "hello")
+	assert(ratio.Value > 3.13 && ratio.Value < 3.15)
+	assert(fs2.NFlag() == 4)
+	assert(fs2.NArg() == 0)
+
+	// Non-flag args
+	fs2.Parse([]string{"-count=5", "arg1", "arg2"})
+	assert(count.Value == 5)
+	assert(fs2.NArg() == 2)
+	assert(fs2.Arg(0) == "arg1")
+	assert(fs2.Arg(1) == "arg2")
+
+	// Lookup
+	f := fs2.Lookup("name")
+	assert(f != nil)
+	assert(f.Name == "name")
+	assert(fs2.Lookup("nonexistent") == nil)
+}
+
+func testSortSlice() {
+	// sort.Slice with []any
+	data := []any{5, 3, 1, 4, 2}
+	sort.Slice(data, func(i int, j int) bool {
+		a, _ := data[i].(int)
+		b, _ := data[j].(int)
+		return a < b
+	})
+	assert(sort.SliceIsSorted(data, func(i int, j int) bool {
+		a, _ := data[i].(int)
+		b, _ := data[j].(int)
+		return a < b
+	}))
+	first, _ := data[0].(int)
+	last, _ := data[4].(int)
+	assert(first == 1)
+	assert(last == 5)
+
+	// sort.SliceStable
+	strs := []any{"banana", "apple", "cherry", "avocado"}
+	sort.SliceStable(strs, func(i int, j int) bool {
+		a, _ := strs[i].(string)
+		b, _ := strs[j].(string)
+		return a < b
+	})
+	s0, _ := strs[0].(string)
+	s1, _ := strs[1].(string)
+	assert(s0 == "apple")
+	assert(s1 == "avocado")
+}
+
+func testSlicesAdditions() {
+	// IndexFunc
+	data := []any{1, 2, 3, 4, 5}
+	idx := slices.IndexFunc(data, func(v any) bool {
+		n, _ := v.(int)
+		return n > 3
+	})
+	assert(idx == 3)
+	assert(slices.IndexFunc(data, func(v any) bool { return false }) == -1)
+
+	// ContainsFunc
+	assert(slices.ContainsFunc(data, func(v any) bool {
+		n, _ := v.(int)
+		return n == 3
+	}))
+	assert(!slices.ContainsFunc(data, func(v any) bool {
+		n, _ := v.(int)
+		return n == 99
+	}))
+
+	// Insert
+	s := []any{1, 2, 4, 5}
+	s = slices.Insert(s, 2, 3)
+	assert(len(s) == 5)
+	mid, _ := s[2].(int)
+	assert(mid == 3)
+
+	// Delete
+	s = slices.Delete(s, 1, 3) // remove elements at index 1,2
+	assert(len(s) == 3)
+	v0, _ := s[0].(int)
+	v1, _ := s[1].(int)
+	assert(v0 == 1)
+	assert(v1 == 4)
+
+	// DeleteFunc
+	nums := []any{1, 2, 3, 4, 5, 6}
+	nums = slices.DeleteFunc(nums, func(v any) bool {
+		n, _ := v.(int)
+		return n%2 == 0
+	})
+	assert(len(nums) == 3)
+
+	// Replace
+	r := []any{"a", "b", "c", "d"}
+	r = slices.Replace(r, 1, 3, "X", "Y")
+	assert(len(r) == 4)
+	rX, _ := r[1].(string)
+	assert(rX == "X")
+
+	// Concat
+	c := slices.Concat([]any{1, 2}, []any{3, 4}, []any{5})
+	assert(len(c) == 5)
+
+	// Grow/Clip
+	g := make([]any, 2, 2)
+	g = slices.Grow(g, 5)
+	assert(cap(g) >= 7)
+	g = slices.Clip(g)
+	assert(cap(g) == len(g))
+
+	// Typed InsertInt / DeleteInt
+	ints := []int{1, 2, 4, 5}
+	ints = slices.InsertInt(ints, 2, 3)
+	assert(len(ints) == 5 && ints[2] == 3)
+	ints = slices.DeleteInt(ints, 1, 3)
+	assert(len(ints) == 3 && ints[1] == 4)
+
+	// DeleteFuncInt
+	evens := slices.DeleteFuncInt([]int{1, 2, 3, 4, 5, 6}, func(v int) bool { return v%2 == 0 })
+	assert(len(evens) == 3)
+
+	// ReplaceString
+	ss := slices.ReplaceString([]string{"a", "b", "c"}, 1, 2, "X", "Y")
+	assert(len(ss) == 4 && ss[1] == "X" && ss[2] == "Y")
+}
+
+func testMapsDeleteFunc() {
+	m := map[string]int{"a": 1, "b": 2, "c": 3, "d": 4}
+	maps.DeleteFuncStringInt(m, func(k string, v int) bool {
+		return v%2 == 0
+	})
+	assert(len(m) == 2)
+	_, hasB := m["b"]
+	_, hasD := m["d"]
+	assert(!hasB && !hasD)
+	_, hasA := m["a"]
+	assert(hasA)
+
+	m2 := map[string]string{"x": "hello", "y": "world", "z": "foo"}
+	maps.DeleteFuncStringString(m2, func(k string, v string) bool {
+		return len(v) > 4
+	})
+	assert(len(m2) == 1)
+	_, hasZ := m2["z"]
+	assert(hasZ)
+}
+
+func testIoFS() {
+	// MapFS
+	memFS := fs.NewMapFS()
+	memFS.Add("hello.txt", []byte("hello world"))
+	memFS.Add("data.json", []byte(`{"key":"value"}`))
+
+	// Open and read a file
+	f, err := memFS.Open("hello.txt")
+	assert(err == nil)
+	buf := make([]byte, 20)
+	n, _ := f.Read(buf)
+	assert(n == 11)
+	assert(string(buf[:n]) == "hello world")
+	f.Close()
+
+	// Stat
+	f, err = memFS.Open("hello.txt")
+	assert(err == nil)
+	info, err := f.Stat()
+	assert(err == nil)
+	assert(info.Name() == "hello.txt")
+	assert(info.Size() == 11)
+	assert(!info.IsDir())
+	f.Close()
+
+	// Not found
+	_, err = memFS.Open("missing.txt")
+	assert(err != nil)
+
+	// ReadFile utility
+	data, err := fs.ReadFile(memFS, "data.json")
+	assert(err == nil)
+	assert(len(data) > 0)
+
+	// ValidPath
+	assert(fs.ValidPath("."))
+	assert(fs.ValidPath("hello.txt"))
+	assert(fs.ValidPath("dir/file.txt"))
+	assert(!fs.ValidPath(".."))
+	assert(!fs.ValidPath("/absolute"))
+	assert(!fs.ValidPath(""))
+	assert(!fs.ValidPath("dir/../file"))
+
+	// FileMode
+	m := fs.FileMode(0755)
+	assert(m.Perm() == 0755)
+	assert(!m.IsDir())
+	assert(m.IsRegular())
+
+	dirMode := fs.ModeDir | 0755
+	assert(dirMode.IsDir())
+}

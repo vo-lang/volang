@@ -1,5 +1,117 @@
 package sort
 
+// Interface defines the interface for types that can be sorted.
+// Sort requires that the collection's elements be ordered by the Less method.
+type Interface interface {
+    Len() int
+    Less(i, j int) bool
+    Swap(i, j int)
+}
+
+// Sort sorts data in ascending order as determined by the Less method.
+// The sort is not guaranteed to be stable.
+func Sort(data Interface) {
+    n := data.Len()
+    quickSortInterface(data, 0, n)
+}
+
+// Stable sorts data in ascending order as determined by the Less method,
+// while keeping the original order of equal elements.
+func Stable(data Interface) {
+    n := data.Len()
+    mergeSortInterface(data, 0, n)
+}
+
+// IsSorted reports whether data is sorted.
+func IsSorted(data Interface) bool {
+    n := data.Len()
+    for i := n - 1; i > 0; i-- {
+        if data.Less(i, i-1) {
+            return false
+        }
+    }
+    return true
+}
+
+// Reverse returns the reverse order for data.
+type reversedData struct {
+    data Interface
+}
+
+func (r reversedData) Len() int           { return r.data.Len() }
+func (r reversedData) Less(i, j int) bool { return r.data.Less(j, i) }
+func (r reversedData) Swap(i, j int)      { r.data.Swap(i, j) }
+
+// ReverseInterface returns the reverse order for data.
+func ReverseInterface(data Interface) Interface {
+    return reversedData{data: data}
+}
+
+func quickSortInterface(data Interface, lo, hi int) {
+    if hi-lo <= 1 {
+        return
+    }
+    if hi-lo <= 12 {
+        insertionSortInterface(data, lo, hi)
+        return
+    }
+    p := partitionInterface(data, lo, hi)
+    quickSortInterface(data, lo, p)
+    quickSortInterface(data, p+1, hi)
+}
+
+func partitionInterface(data Interface, lo, hi int) int {
+    pivot := lo + (hi-lo)/2
+    data.Swap(pivot, hi-1)
+    j := lo
+    for i := lo; i < hi-1; i++ {
+        if data.Less(i, hi-1) {
+            data.Swap(i, j)
+            j++
+        }
+    }
+    data.Swap(j, hi-1)
+    return j
+}
+
+func insertionSortInterface(data Interface, lo, hi int) {
+    for i := lo + 1; i < hi; i++ {
+        for j := i; j > lo && data.Less(j, j-1); j-- {
+            data.Swap(j, j-1)
+        }
+    }
+}
+
+func mergeSortInterface(data Interface, lo, hi int) {
+    if hi-lo <= 1 {
+        return
+    }
+    if hi-lo <= 12 {
+        insertionSortInterface(data, lo, hi)
+        return
+    }
+    mid := lo + (hi-lo)/2
+    mergeSortInterface(data, lo, mid)
+    mergeSortInterface(data, mid, hi)
+    mergeInterface(data, lo, mid, hi)
+}
+
+func mergeInterface(data Interface, lo, mid, hi int) {
+    // Build index array and merge via swaps
+    i := lo
+    j := mid
+    for i < j && j < hi {
+        if data.Less(j, i) {
+            // Rotate data[i..j] left by one
+            for k := j; k > i; k-- {
+                data.Swap(k, k-1)
+            }
+            j++
+        }
+        i++
+    }
+}
+
 // Vo-implemented functions - all sorting uses quicksort with insertion sort for small arrays
 
 // Ints sorts a slice of ints in increasing order.
@@ -241,4 +353,127 @@ func insertionSortStrings(x []string, lo, hi int) {
             x[j], x[j-1] = x[j-1], x[j]
         }
     }
+}
+
+// ==================== Closure-based sort ([]any) ====================
+
+// Slice sorts the slice x given the provided less function. The sort is not
+// guaranteed to be stable. For a stable sort, use SliceStable.
+// x must be a []any; elements are compared using the provided less function.
+func Slice(x []any, less func(i int, j int) bool) {
+	quickSortAny(x, 0, len(x), less)
+}
+
+// SliceStable sorts the slice x using the provided less function, keeping
+// equal elements in their original order.
+func SliceStable(x []any, less func(i int, j int) bool) {
+	mergeSortAny(x, less)
+}
+
+// SliceIsSorted reports whether the slice x is sorted in ascending order as
+// defined by the provided less function.
+func SliceIsSorted(x []any, less func(i int, j int) bool) bool {
+	n := len(x)
+	for i := n - 1; i > 0; i-- {
+		if less(i, i-1) {
+			return false
+		}
+	}
+	return true
+}
+
+func quickSortAny(x []any, lo, hi int, less func(int, int) bool) {
+	if hi-lo <= 12 {
+		insertionSortAny(x, lo, hi, less)
+		return
+	}
+	p := partitionAny(x, lo, hi, less)
+	quickSortAny(x, lo, p, less)
+	quickSortAny(x, p+1, hi, less)
+}
+
+func partitionAny(x []any, lo, hi int, less func(int, int) bool) int {
+	mid := lo + (hi-lo)/2
+	// Median-of-three pivot selection
+	if less(mid, lo) {
+		x[lo], x[mid] = x[mid], x[lo]
+	}
+	if less(hi-1, lo) {
+		x[lo], x[hi-1] = x[hi-1], x[lo]
+	}
+	if less(mid, hi-1) {
+		x[mid], x[hi-1] = x[hi-1], x[mid]
+	}
+	pivot := hi - 1
+	i := lo - 1
+	for j := lo; j < pivot; j++ {
+		if less(j, pivot) {
+			i++
+			x[i], x[j] = x[j], x[i]
+		}
+	}
+	x[i+1], x[pivot] = x[pivot], x[i+1]
+	return i + 1
+}
+
+func insertionSortAny(x []any, lo, hi int, less func(int, int) bool) {
+	for i := lo + 1; i < hi; i++ {
+		for j := i; j > lo && less(j, j-1); j-- {
+			x[j], x[j-1] = x[j-1], x[j]
+		}
+	}
+}
+
+// mergeSortAny stably sorts x by building a sorted index permutation.
+// This avoids mutating x during comparison (which would break less functions
+// that capture x to compare by value).
+func mergeSortAny(x []any, less func(int, int) bool) {
+	n := len(x)
+	if n <= 1 {
+		return
+	}
+	// Sort an index array stably.
+	idx := make([]int, n)
+	for i := 0; i < n; i++ {
+		idx[i] = i
+	}
+	idxAux := make([]int, n)
+	idxMergeSortRange(idx, idxAux, 0, n, less)
+	// Apply permutation to x.
+	out := make([]any, n)
+	for i := 0; i < n; i++ {
+		out[i] = x[idx[i]]
+	}
+	for i := 0; i < n; i++ {
+		x[i] = out[i]
+	}
+}
+
+func idxMergeSortRange(idx, aux []int, lo, hi int, less func(int, int) bool) {
+	if hi-lo <= 1 {
+		return
+	}
+	mid := lo + (hi-lo)/2
+	idxMergeSortRange(idx, aux, lo, mid, less)
+	idxMergeSortRange(idx, aux, mid, hi, less)
+	for i := lo; i < hi; i++ {
+		aux[i] = idx[i]
+	}
+	i := lo
+	j := mid
+	for k := lo; k < hi; k++ {
+		if i >= mid {
+			idx[k] = aux[j]
+			j++
+		} else if j >= hi {
+			idx[k] = aux[i]
+			i++
+		} else if less(aux[j], aux[i]) {
+			idx[k] = aux[j]
+			j++
+		} else {
+			idx[k] = aux[i]
+			i++
+		}
+	}
 }

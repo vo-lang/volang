@@ -335,7 +335,15 @@ pub fn compile_expr_to(
                         if let Some(func_idx) = ctx.get_func_by_objkey(obj_key) {
                             func.emit_closure_new(dst, func_idx, 0);
                         } else {
-                            return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+                            let ident_name = info.project.interner.resolve(ident.symbol).unwrap_or("?");
+                            let obj = &info.project.tc_objs.lobjs[obj_key];
+                            return Err(CodegenError::VariableNotFound(format!(
+                                "name='{}' symbol={:?} obj_key={:?} entity={:?}",
+                                ident_name,
+                                ident.symbol,
+                                obj_key,
+                                obj.entity_type(),
+                            )));
                         }
                     }
                 }

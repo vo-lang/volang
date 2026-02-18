@@ -423,3 +423,250 @@ func ReverseByte(s []byte) {
         s[i], s[n-1-i] = s[n-1-i], s[i]
     }
 }
+
+// ==================== Functional variants ([]any) ====================
+
+// IndexFunc returns the first index i satisfying f(s[i]), or -1.
+func IndexFunc(s []any, f func(any) bool) int {
+    for i, v := range s {
+        if f(v) {
+            return i
+        }
+    }
+    return -1
+}
+
+// ContainsFunc reports whether at least one element e satisfies f(e).
+func ContainsFunc(s []any, f func(any) bool) bool {
+    return IndexFunc(s, f) >= 0
+}
+
+// Insert inserts the values v... into s at index i, returning the modified slice.
+func Insert(s []any, i int, v ...any) []any {
+    tot := len(s) + len(v)
+    res := make([]any, tot)
+    copy(res, s[:i])
+    copy(res[i:], v)
+    copy(res[i+len(v):], s[i:])
+    return res
+}
+
+// Delete removes the elements s[i:j] from s, returning the modified slice.
+func Delete(s []any, i int, j int) []any {
+    return append(s[:i], s[j:]...)
+}
+
+// DeleteFunc removes any elements from s for which del returns true,
+// returning the modified slice.
+func DeleteFunc(s []any, del func(any) bool) []any {
+    result := s[:0]
+    for _, v := range s {
+        if !del(v) {
+            result = append(result, v)
+        }
+    }
+    return result
+}
+
+// Replace replaces the elements s[i:j] by the given v, returning the modified slice.
+func Replace(s []any, i int, j int, v ...any) []any {
+    tot := len(s[:i]) + len(v) + len(s[j:])
+    res := make([]any, tot)
+    copy(res, s[:i])
+    copy(res[i:], v)
+    copy(res[i+len(v):], s[j:])
+    return res
+}
+
+// Concat returns a new slice concatenating the passed in slices.
+func Concat(slices ...[]any) []any {
+    size := 0
+    for _, s := range slices {
+        size += len(s)
+    }
+    result := make([]any, 0, size)
+    for _, s := range slices {
+        result = append(result, s...)
+    }
+    return result
+}
+
+// Grow increases the slice's capacity by at least n elements if necessary,
+// returning the (possibly new) slice.
+func Grow(s []any, n int) []any {
+    if n -= cap(s) - len(s); n > 0 {
+        s = append(s[:cap(s)], make([]any, n)...)[:len(s)]
+    }
+    return s
+}
+
+// Clip removes unused capacity from the slice, returning s[:len(s):len(s)].
+func Clip(s []any) []any {
+    return s[:len(s):len(s)]
+}
+
+// ==================== Typed Insert/Delete/Replace for int ====================
+
+func InsertInt(s []int, i int, v ...int) []int {
+    tot := len(s) + len(v)
+    res := make([]int, tot)
+    copy(res, s[:i])
+    copy(res[i:], v)
+    copy(res[i+len(v):], s[i:])
+    return res
+}
+
+func DeleteInt(s []int, i int, j int) []int {
+    return append(s[:i], s[j:]...)
+}
+
+func DeleteFuncInt(s []int, del func(int) bool) []int {
+    result := s[:0]
+    for _, v := range s {
+        if !del(v) {
+            result = append(result, v)
+        }
+    }
+    return result
+}
+
+func ReplaceInt(s []int, i int, j int, v ...int) []int {
+    tot := len(s[:i]) + len(v) + len(s[j:])
+    res := make([]int, tot)
+    copy(res, s[:i])
+    copy(res[i:], v)
+    copy(res[i+len(v):], s[j:])
+    return res
+}
+
+func GrowInt(s []int, n int) []int {
+    if n -= cap(s) - len(s); n > 0 {
+        s = append(s[:cap(s)], make([]int, n)...)[:len(s)]
+    }
+    return s
+}
+
+func ClipInt(s []int) []int { return s[:len(s):len(s)] }
+
+// ==================== Typed Insert/Delete/Replace for string ====================
+
+func InsertString(s []string, i int, v ...string) []string {
+    tot := len(s) + len(v)
+    res := make([]string, tot)
+    copy(res, s[:i])
+    copy(res[i:], v)
+    copy(res[i+len(v):], s[i:])
+    return res
+}
+
+func DeleteString(s []string, i int, j int) []string {
+    return append(s[:i], s[j:]...)
+}
+
+func DeleteFuncString(s []string, del func(string) bool) []string {
+    result := s[:0]
+    for _, v := range s {
+        if !del(v) {
+            result = append(result, v)
+        }
+    }
+    return result
+}
+
+func ReplaceString(s []string, i int, j int, v ...string) []string {
+    tot := len(s[:i]) + len(v) + len(s[j:])
+    res := make([]string, tot)
+    copy(res, s[:i])
+    copy(res[i:], v)
+    copy(res[i+len(v):], s[j:])
+    return res
+}
+
+func GrowString(s []string, n int) []string {
+    if n -= cap(s) - len(s); n > 0 {
+        s = append(s[:cap(s)], make([]string, n)...)[:len(s)]
+    }
+    return s
+}
+
+func ClipString(s []string) []string { return s[:len(s):len(s)] }
+
+// ============ Comparison-based functions (Go 1.21+ slices package) ============
+
+// SortFunc sorts the slice s in ascending order as determined by the cmp function.
+// cmp(a, b) returns negative if a < b, zero if a == b, positive if a > b.
+func SortFunc(s []any, cmp func(any, any) int) {
+    n := len(s)
+    for i := 1; i < n; i++ {
+        key := s[i]
+        j := i - 1
+        for j >= 0 && cmp(s[j], key) > 0 {
+            s[j+1] = s[j]
+            j--
+        }
+        s[j+1] = key
+    }
+}
+
+// SortStableFunc sorts the slice s keeping equal elements in original order.
+func SortStableFunc(s []any, cmp func(any, any) int) {
+    n := len(s)
+    for i := 1; i < n; i++ {
+        key := s[i]
+        j := i - 1
+        for j >= 0 && cmp(s[j], key) > 0 {
+            s[j+1] = s[j]
+            j--
+        }
+        s[j+1] = key
+    }
+}
+
+// IsSortedFunc reports whether x is sorted in ascending order per cmp.
+func IsSortedFunc(x []any, cmp func(any, any) int) bool {
+    for i := len(x) - 1; i > 0; i-- {
+        if cmp(x[i], x[i-1]) < 0 {
+            return false
+        }
+    }
+    return true
+}
+
+// BinarySearchFunc returns the index where target would be inserted and whether found.
+func BinarySearchFunc(x []any, target any, cmp func(any, any) int) (int, bool) {
+    lo, hi := 0, len(x)
+    for lo < hi {
+        mid := (lo + hi) / 2
+        c := cmp(x[mid], target)
+        if c < 0 {
+            lo = mid + 1
+        } else if c > 0 {
+            hi = mid
+        } else {
+            return mid, true
+        }
+    }
+    return lo, false
+}
+
+// MaxFunc returns the maximal value in x using cmp. Panics if x is empty.
+func MaxFunc(x []any, cmp func(any, any) int) any {
+    m := x[0]
+    for i := 1; i < len(x); i++ {
+        if cmp(x[i], m) > 0 {
+            m = x[i]
+        }
+    }
+    return m
+}
+
+// MinFunc returns the minimal value in x using cmp. Panics if x is empty.
+func MinFunc(x []any, cmp func(any, any) int) any {
+    m := x[0]
+    for i := 1; i < len(x); i++ {
+        if cmp(x[i], m) < 0 {
+            m = x[i]
+        }
+    }
+    return m
+}

@@ -1,0 +1,175 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"strings"
+)
+
+func main() {
+	testReader()
+	testReaderReadLine()
+	testReaderReadString()
+	testWriter()
+	testScannerLines()
+	testScannerWords()
+	testScannerBytes()
+	testScannerCustomSplit()
+}
+
+func testReader() {
+	r := bufio.NewReader(strings.NewReader("hello world"))
+
+	// Peek without consuming
+	b, err := r.Peek(5)
+	assert(err == nil)
+	assert(string(b) == "hello")
+
+	// Read
+	buf := make([]byte, 5)
+	n, err := r.Read(buf)
+	assert(err == nil)
+	assert(n == 5)
+	assert(string(buf) == "hello")
+
+	// ReadByte
+	c, err := r.ReadByte()
+	assert(err == nil)
+	assert(c == ' ')
+
+	// UnreadByte
+	err = r.UnreadByte()
+	assert(err == nil)
+	c, err = r.ReadByte()
+	assert(err == nil)
+	assert(c == ' ')
+
+	// Read rest
+	n, err = r.Read(buf)
+	assert(n == 5)
+	assert(string(buf[:n]) == "world")
+}
+
+func testReaderReadLine() {
+	input := "line1\nline2\r\nline3"
+	r := bufio.NewReader(strings.NewReader(input))
+
+	line, isPrefix, err := r.ReadLine()
+	assert(err == nil)
+	assert(!isPrefix)
+	assert(string(line) == "line1")
+
+	line, isPrefix, err = r.ReadLine()
+	assert(err == nil)
+	assert(!isPrefix)
+	assert(string(line) == "line2")
+
+	line, _, err = r.ReadLine()
+	assert(err == nil)
+	assert(string(line) == "line3")
+}
+
+func testReaderReadString() {
+	r := bufio.NewReader(strings.NewReader("hello\nworld\n"))
+
+	s, err := r.ReadString('\n')
+	assert(err == nil)
+	assert(s == "hello\n")
+
+	s, err = r.ReadString('\n')
+	assert(err == nil)
+	assert(s == "world\n")
+}
+
+func testWriter() {
+	var buf bytes.Buffer
+	w := bufio.NewWriter(&buf)
+
+	n, err := w.WriteString("hello")
+	assert(err == nil)
+	assert(n == 5)
+
+	err = w.WriteByte(' ')
+	assert(err == nil)
+
+	n, err = w.WriteString("world")
+	assert(err == nil)
+	assert(n == 5)
+
+	// Not flushed yet
+	assert(buf.Len() == 0)
+
+	err = w.Flush()
+	assert(err == nil)
+	assert(buf.String() == "hello world")
+}
+
+func testScannerLines() {
+	input := "line1\nline2\nline3\n"
+	scanner := bufio.NewScanner(strings.NewReader(input))
+
+	lines := make([]string, 0)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	assert(scanner.Err() == nil)
+	assert(len(lines) == 3)
+	assert(lines[0] == "line1")
+	assert(lines[1] == "line2")
+	assert(lines[2] == "line3")
+}
+
+func testScannerWords() {
+	input := "  hello   world   foo  "
+	scanner := bufio.NewScanner(strings.NewReader(input))
+	scanner.Split(bufio.ScanWords)
+
+	words := make([]string, 0)
+	for scanner.Scan() {
+		words = append(words, scanner.Text())
+	}
+	assert(scanner.Err() == nil)
+	assert(len(words) == 3)
+	assert(words[0] == "hello")
+	assert(words[1] == "world")
+	assert(words[2] == "foo")
+}
+
+func testScannerBytes() {
+	input := "abc"
+	scanner := bufio.NewScanner(strings.NewReader(input))
+	scanner.Split(bufio.ScanBytes)
+
+	result := make([]byte, 0)
+	for scanner.Scan() {
+		result = append(result, scanner.Bytes()...)
+	}
+	assert(scanner.Err() == nil)
+	assert(string(result) == "abc")
+}
+
+func testScannerCustomSplit() {
+	// Split on comma
+	input := "a,b,c,d"
+	scanner := bufio.NewScanner(strings.NewReader(input))
+	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		for i, b := range data {
+			if b == ',' {
+				return i + 1, data[:i], nil
+			}
+		}
+		if atEOF && len(data) > 0 {
+			return len(data), data, nil
+		}
+		return 0, nil, nil
+	})
+
+	tokens := make([]string, 0)
+	for scanner.Scan() {
+		tokens = append(tokens, scanner.Text())
+	}
+	assert(scanner.Err() == nil)
+	assert(len(tokens) == 4)
+	assert(tokens[0] == "a")
+	assert(tokens[3] == "d")
+}

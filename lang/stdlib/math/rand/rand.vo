@@ -1,5 +1,7 @@
 package rand
 
+import "math"
+
 // Package rand implements pseudo-random number generators.
 // The default source is automatically seeded at program startup.
 // This is similar to Go 1.20+ behavior.
@@ -11,6 +13,34 @@ func Intn(n int) int
 // Int63n returns a non-negative pseudo-random int in [0, n).
 // It panics if n <= 0.
 func Int63n(n int) int
+
+// Int63 returns a non-negative pseudo-random 63-bit integer as int64.
+func Int63() int64 {
+	return int64(Uint64() >> 1)
+}
+
+// Int31 returns a non-negative pseudo-random 31-bit integer as int32.
+func Int31() int32 {
+	return int32(Uint32() >> 1)
+}
+
+// Int31n returns a non-negative pseudo-random int32 in [0, n).
+// It panics if n <= 0.
+func Int31n(n int32) int32 {
+	if n <= 0 {
+		panic("rand: invalid argument to Int31n")
+	}
+	return int32(Intn(int(n)))
+}
+
+// Int64n returns a non-negative pseudo-random int64 in [0, n).
+// It panics if n <= 0.
+func Int64n(n int64) int64 {
+	if n <= 0 {
+		panic("rand: invalid argument to Int64n")
+	}
+	return int64(Int63n(int(n)))
+}
 
 // Int returns a non-negative pseudo-random int.
 func Int() int
@@ -60,4 +90,163 @@ func Shuffle(n int, swap func(int, int)) {
 // Deprecated: As of Go 1.20, this function is a no-op.
 func Seed(seed int) {
 	// No-op - automatic seeding
+}
+
+// NormFloat64 returns a normally distributed float64 in the range
+// [-math.MaxFloat64, +math.MaxFloat64] with standard normal distribution
+// (mean = 0, stddev = 1).
+// Uses the Box-Muller transform.
+func NormFloat64() float64 {
+	// Box-Muller transform: requires two uniform random numbers
+	u1 := Float64()
+	if u1 == 0 {
+		u1 = 1e-10 // avoid log(0)
+	}
+	u2 := Float64()
+	return math.Sqrt(-2.0*math.Log(u1)) * math.Cos(2.0*math.Pi*u2)
+}
+
+// ExpFloat64 returns an exponentially distributed float64 in the range
+// (0, +math.MaxFloat64] with an exponential distribution whose rate parameter
+// (lambda) is 1 and whose mean is 1/lambda (1).
+// Uses the inverse transform: -ln(U) where U is uniform(0,1).
+func ExpFloat64() float64 {
+	u := Float64()
+	if u == 0 {
+		u = 1e-10
+	}
+	return -math.Log(u)
+}
+
+// Source represents a source of uniformly-distributed pseudo-random int64 values
+// in the range [0, 1<<63).
+type Source interface {
+	Int63() int64
+	Seed(seed int64)
+}
+
+// Rand is a source of random numbers.
+type Rand struct {
+	src Source
+}
+
+// New returns a new Rand that uses random values from src to generate other
+// random values.
+func New(src Source) *Rand {
+	return &Rand{src: src}
+}
+
+// NewSource returns a new pseudo-random Source seeded with the given value.
+// Unlike the default global source, this source is not safe for concurrent use.
+func NewSource(seed int64) Source {
+	return &lockedSource{seed: seed}
+}
+
+// lockedSource is a simple LCG PRNG implementing Source.
+type lockedSource struct {
+	seed int64
+}
+
+// LCG multiplier and increment (Knuth/PCG constants, hex to avoid decimal literal size issues).
+const (
+	lcgA = 0x5851F42D4C957F2D
+	lcgC = 0x14057B7EF767814F
+)
+
+func (s *lockedSource) Int63() int64 {
+	s.seed = s.seed*lcgA + lcgC
+	return s.seed & 0x7fffffffffffffff
+}
+
+func (s *lockedSource) Seed(seed int64) {
+	s.seed = seed
+}
+
+// Intn returns a non-negative pseudo-random int in [0, n) from r.
+func (r *Rand) Intn(n int) int {
+	if n <= 0 {
+		panic("rand: invalid argument to Intn")
+	}
+	return int(r.src.Int63() % int64(n))
+}
+
+// Int63n returns a non-negative pseudo-random int in [0, n) from r.
+func (r *Rand) Int63n(n int) int {
+	if n <= 0 {
+		panic("rand: invalid argument to Int63n")
+	}
+	return int(r.src.Int63() % int64(n))
+}
+
+// Int63 returns a non-negative pseudo-random 63-bit integer from r.
+func (r *Rand) Int63() int64 {
+	return r.src.Int63()
+}
+
+// Int returns a non-negative pseudo-random int from r.
+func (r *Rand) Int() int {
+	return int(r.src.Int63())
+}
+
+// Uint64 returns a pseudo-random 64-bit unsigned integer from r.
+func (r *Rand) Uint64() uint64 {
+	return uint64(r.src.Int63())
+}
+
+// Float64 returns a pseudo-random float64 in [0.0, 1.0) from r.
+func (r *Rand) Float64() float64 {
+	v := float64(r.src.Int63())
+	return v / 9223372036854775808.0 // 2^63 as float64
+}
+
+// Float32 returns a pseudo-random float32 in [0.0, 1.0) from r.
+func (r *Rand) Float32() float64 {
+	return r.Float64()
+}
+
+// Seed uses the provided seed value to initialize r's source.
+func (r *Rand) Seed(seed int64) {
+	r.src.Seed(seed)
+}
+
+// Perm returns a slice of n ints in [0, n) in pseudo-random order from r.
+func (r *Rand) Perm(n int) []int {
+	p := make([]int, n)
+	for i := 0; i < n; i++ {
+		p[i] = i
+	}
+	r.Shuffle(len(p), func(i int, j int) {
+		p[i], p[j] = p[j], p[i]
+	})
+	return p
+}
+
+// Shuffle pseudo-randomizes the order of elements using r.
+func (r *Rand) Shuffle(n int, swap func(int, int)) {
+	if n < 2 {
+		return
+	}
+	for i := n - 1; i > 0; i-- {
+		j := r.Intn(i + 1)
+		swap(i, j)
+	}
+}
+
+// NormFloat64 returns a normally distributed float64 from r.
+func (r *Rand) NormFloat64() float64 {
+	u1 := r.Float64()
+	if u1 == 0 {
+		u1 = 1e-10
+	}
+	u2 := r.Float64()
+	return math.Sqrt(-2.0*math.Log(u1)) * math.Cos(2.0*math.Pi*u2)
+}
+
+// ExpFloat64 returns an exponentially distributed float64 from r.
+func (r *Rand) ExpFloat64() float64 {
+	u := r.Float64()
+	if u == 0 {
+		u = 1e-10
+	}
+	return -math.Log(u)
 }

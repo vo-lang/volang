@@ -285,6 +285,11 @@ impl<'a> TypeInfoWrapper<'a> {
     pub fn int_type(&self) -> TypeKey {
         self.tc_objs().universe().lookup_type(vo_analysis::BasicType::Int).expect("int type must exist")
     }
+
+    /// Get the bool type from Universe.
+    pub fn bool_type(&self) -> TypeKey {
+        self.tc_objs().universe().lookup_type(vo_analysis::BasicType::Bool).expect("bool type must exist")
+    }
     
     /// Get the rune type from Universe.
     pub fn rune_type(&self) -> TypeKey {

@@ -23,6 +23,10 @@ dyn = { path = "dyn" }
 "encoding/base64" = { path = "encoding/base64" }
 "encoding/json" = { path = "encoding/json" }
 "encoding/toml" = { path = "encoding/toml" }
+"encoding/csv" = { path = "encoding/csv" }
+"encoding/binary" = { path = "encoding/binary" }
+cmp = { path = "cmp" }
+path = { path = "path" }
 
 # Standard packages (requires OS support)
 [packages.std]
@@ -30,14 +34,19 @@ io = { path = "io" }
 os = { path = "os" }
 time = { path = "time" }
 net = { path = "net" }
+"net/url" = { path = "net/url" }
 "math/rand" = { path = "math/rand" }
 "path/filepath" = { path = "path/filepath" }
 "os/exec" = { path = "os/exec" }
-# bufio = { path = "bufio" }
+context = { path = "context" }
+sync = { path = "sync" }
+bufio = { path = "bufio" }
+log = { path = "log" }
+flag = { path = "flag" }
+"io/fs" = { path = "io/fs" }
 
 # Runtime packages (deep VM integration)
 [packages.runtime]
 # reflect = { path = "reflect" }
 # runtime = { path = "runtime" }
 # sync = { path = "sync" }
-# context = { path = "context" }

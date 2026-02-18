@@ -11,7 +11,23 @@ use crate::error::CodegenError;
 use crate::func::FuncBuilder;
 use crate::type_info::TypeInfoWrapper;
 
-use super::{compile_expr, compile_expr_to, get_gcref_slot};
+use super::{compile_expr, compile_expr_to, get_gcref_slot, traverse_indirect_field};
+
+fn emit_ptr_with_slot_offset(
+    src_ptr: u16,
+    offset_slots: u16,
+    dst: u16,
+    func: &mut FuncBuilder,
+) {
+    if offset_slots == 0 {
+        func.emit_copy(dst, src_ptr, 1);
+        return;
+    }
+
+    let offset_reg = func.alloc_slots(&[SlotType::Value]);
+    func.emit_op(Opcode::LoadInt, offset_reg, offset_slots, 0);
+    func.emit_ptr_add(dst, src_ptr, offset_reg);
+}
 
 /// Get the GcRef and offset for an addressable expression.
 /// 
@@ -39,9 +55,20 @@ pub fn get_addressable_gcref(
             if info.is_pointer(recv_type) {
                 return None;
             }
+
+            // Indirect/method selectors cannot be represented as a static (gcref, offset).
+            if let Some(selection) = info.get_selection(expr.id) {
+                if selection.indirect() {
+                    return None;
+                }
+                if *selection.kind() != vo_analysis::selection::SelectionKind::FieldVal {
+                    return None;
+                }
+            }
+
             let (gcref_slot, base_offset) = get_addressable_gcref(&sel.expr, func, info)?;
             let field_name = info.project.interner.resolve(sel.sel.symbol)?;
-            let (field_offset, _) = info.struct_field_offset(recv_type, field_name);
+            let (field_offset, _) = info.selector_field_offset(expr.id, recv_type, field_name);
             Some((gcref_slot, base_offset + field_offset))
         }
         ExprKind::Paren(inner) => get_addressable_gcref(inner, func, info),
@@ -78,22 +105,43 @@ pub fn compile_expr_to_ptr(
         }
     }
     
-    // Case 3: Selector on pointer base (c2.pt where c2: *Container, pt: Point)
+    // Case 3: Selector - recursively get base pointer, then apply field offset.
+    // Supports both pointer-base selectors and heap-boxed value selectors.
     if let ExprKind::Selector(sel) = &expr.kind {
-        let base_type = info.expr_type(sel.expr.id);
-        if info.is_pointer(base_type) {
+        if !super::is_pkg_qualified_name(sel, info) {
+            if let Some(selection) = info.get_selection(expr.id) {
+                if *selection.kind() != vo_analysis::selection::SelectionKind::FieldVal {
+                    return Err(CodegenError::UnsupportedExpr(
+                        "cannot get pointer to method selector".to_string(),
+                    ));
+                }
+
+                if selection.indirect() {
+                    let resolved = traverse_indirect_field(sel, selection.indices(), ctx, func, info)?;
+                    if resolved.is_ptr {
+                        emit_ptr_with_slot_offset(resolved.base_reg, resolved.offset, dst, func);
+                        return Ok(());
+                    }
+                    return Err(CodegenError::UnsupportedExpr(
+                        "cannot get pointer to non-pointer indirect selector".to_string(),
+                    ));
+                }
+            }
+
+            let recv_type = info.expr_type(sel.expr.id);
+            let base_type = if info.is_pointer(recv_type) {
+                info.pointer_base(recv_type)
+            } else {
+                recv_type
+            };
             let field_name = info.project.interner.resolve(sel.sel.symbol)
                 .ok_or_else(|| CodegenError::Internal("cannot resolve field name".to_string()))?;
-            let ptr_base = info.pointer_base(base_type);
-            let (field_offset, _) = info.struct_field_offset(ptr_base, field_name);
-            if field_offset == 0 {
-                let ptr_reg = compile_expr(&sel.expr, ctx, func, info)?;
-                func.emit_copy(dst, ptr_reg, 1);
-                return Ok(());
-            }
-            return Err(CodegenError::Internal(
-                format!("cannot take address of field at non-zero offset {} in pointer-based access", field_offset)
-            ));
+            let (field_offset, _) = info.selector_field_offset(expr.id, base_type, field_name);
+
+            let base_ptr = func.alloc_slots(&[SlotType::GcRef]);
+            compile_expr_to_ptr(&sel.expr, base_ptr, ctx, func, info)?;
+            emit_ptr_with_slot_offset(base_ptr, field_offset, dst, func);
+            return Ok(());
         }
     }
     
@@ -107,15 +155,10 @@ pub fn compile_expr_to_ptr(
         }
     }
     
-    // Case 5: Addressable on heap (variable, field at offset 0)
+    // Case 5: Addressable on heap (variable or field with static offset)
     if let Some((gcref_slot, offset)) = get_addressable_gcref(expr, func, info) {
-        if offset == 0 {
-            func.emit_copy(dst, gcref_slot, 1);
-            return Ok(());
-        }
-        return Err(CodegenError::Internal(
-            format!("cannot take address of field at non-zero offset {}", offset)
-        ));
+        emit_ptr_with_slot_offset(gcref_slot, offset, dst, func);
+        return Ok(());
     }
     
     Err(CodegenError::UnsupportedExpr(

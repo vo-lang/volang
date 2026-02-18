@@ -1,0 +1,39 @@
+package main
+
+import "errors"
+
+// Reproduce context package codegen issue
+
+var Canceled = errors.New("context canceled")
+
+type cancelCtx struct {
+	done     chan struct{}
+	err      error
+	canceled bool
+}
+
+func doCancel(c *cancelCtx, err error) {
+	if c.canceled {
+		return
+	}
+	c.canceled = true
+	c.err = err
+	close(c.done)
+}
+
+func WithCancel() (*cancelCtx, func()) {
+	done := make(chan struct{})
+	ctx := &cancelCtx{done: done}
+	cancel := func() {
+		doCancel(ctx, Canceled)
+	}
+	return ctx, cancel
+}
+
+func main() {
+	ctx, cancel := WithCancel()
+	assert(ctx.err == nil)
+	cancel()
+	assert(ctx.err != nil)
+	println("ok")
+}

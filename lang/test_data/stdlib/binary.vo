@@ -1,0 +1,92 @@
+package main
+
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+)
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("ASSERT FAILED: " + msg)
+	}
+}
+
+func main() {
+	fmt.Println("Starting encoding/binary tests...")
+
+	// Test BigEndian Uint16/Uint32/Uint64
+	buf := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	assert(binary.BigEndian.Uint16(buf) == 0x0102, "BigEndian.Uint16")
+	assert(binary.BigEndian.Uint32(buf) == 0x01020304, "BigEndian.Uint32")
+	assert(binary.BigEndian.Uint64(buf) == 0x0102030405060708, "BigEndian.Uint64")
+
+	// Test LittleEndian
+	assert(binary.LittleEndian.Uint16(buf) == 0x0201, "LittleEndian.Uint16")
+	assert(binary.LittleEndian.Uint32(buf) == 0x04030201, "LittleEndian.Uint32")
+	assert(binary.LittleEndian.Uint64(buf) == 0x0807060504030201, "LittleEndian.Uint64")
+
+	// Test PutUint16 BigEndian
+	b2 := make([]byte, 2)
+	binary.BigEndian.PutUint16(b2, 0x0102)
+	assert(b2[0] == 0x01, "PutUint16 high byte")
+	assert(b2[1] == 0x02, "PutUint16 low byte")
+
+	// Test PutUint32 LittleEndian
+	b4 := make([]byte, 4)
+	binary.LittleEndian.PutUint32(b4, 0x01020304)
+	assert(b4[0] == 0x04, "PutUint32 LE byte 0")
+	assert(b4[1] == 0x03, "PutUint32 LE byte 1")
+	assert(b4[2] == 0x02, "PutUint32 LE byte 2")
+	assert(b4[3] == 0x01, "PutUint32 LE byte 3")
+
+	// Test Read functions
+	r := bytes.NewReader([]byte{0xAB, 0xCD})
+	v16, err := binary.ReadUint16(r, binary.BigEndian)
+	assert(err == nil, "ReadUint16 no error")
+	assert(v16 == 0xABCD, "ReadUint16 value")
+
+	r2 := bytes.NewReader([]byte{0x00, 0x00, 0x00, 0x2A})
+	v32, err2 := binary.ReadUint32(r2, binary.BigEndian)
+	assert(err2 == nil, "ReadUint32 no error")
+	assert(v32 == 42, "ReadUint32 value")
+
+	// Test Write functions
+	var wbuf bytes.Buffer
+	err3 := binary.WriteUint16(&wbuf, binary.BigEndian, 0x1234)
+	assert(err3 == nil, "WriteUint16 no error")
+	wb := wbuf.Bytes()
+	assert(wb[0] == 0x12, "WriteUint16 byte 0")
+	assert(wb[1] == 0x34, "WriteUint16 byte 1")
+
+	// Test Uvarint encoding
+	vbuf := make([]byte, 10)
+	n := binary.PutUvarint(vbuf, 300)
+	assert(n == 2, "PutUvarint 300 needs 2 bytes")
+	v, nb := binary.Uvarint(vbuf[:n])
+	assert(nb == 2, "Uvarint read 2 bytes")
+	assert(v == 300, "Uvarint decoded 300")
+
+	// Test Varint (zigzag)
+	n2 := binary.PutVarint(vbuf, -1)
+	assert(n2 == 1, "PutVarint -1 needs 1 byte")
+	sv, snb := binary.Varint(vbuf[:n2])
+	assert(snb == 1, "Varint read 1 byte")
+	assert(sv == -1, "Varint decoded -1")
+
+	// Test AppendUvarint
+	app := binary.AppendUvarint([]byte{}, 128)
+	assert(len(app) == 2, "AppendUvarint 128 = 2 bytes")
+
+	// Test Size
+	assert(binary.Size(uint8(0)) == 1, "Size uint8")
+	assert(binary.Size(uint16(0)) == 2, "Size uint16")
+	assert(binary.Size(uint32(0)) == 4, "Size uint32")
+	assert(binary.Size(uint64(0)) == 8, "Size uint64")
+
+	// Test BigEndian.String
+	assert(binary.BigEndian.String() == "BigEndian", "BigEndian string")
+	assert(binary.LittleEndian.String() == "LittleEndian", "LittleEndian string")
+
+	fmt.Println("All encoding/binary tests passed!")
+}

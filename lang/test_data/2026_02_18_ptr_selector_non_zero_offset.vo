@@ -1,0 +1,129 @@
+package main
+
+type Point struct {
+	x int
+	y int
+}
+
+func (p *Point) Move(dx int, dy int) {
+	p.x = p.x + dx
+	p.y = p.y + dy
+}
+
+type Container struct {
+	pad int
+	pt  Point
+}
+
+type Wrapper struct {
+	tag int
+	c   Container
+}
+
+type Inner struct {
+	head int
+	pt   Point
+}
+
+type OuterEmbed struct {
+	marker int
+	*Inner
+}
+
+func main() {
+	testDirectPointerSelector()
+	testNestedSelectorChain()
+	testIndirectEmbeddedPointerSelector()
+	testHeapBoxedSelectorAddress()
+	testHeapBoxedNestedSelectorAddress()
+}
+
+func testDirectPointerSelector() {
+	c := &Container{
+		pad: 1,
+		pt:  Point{x: 10, y: 20},
+	}
+
+	p := &c.pt
+	p.Move(3, 4)
+	assert(c.pt.x == 13)
+	assert(c.pt.y == 24)
+
+	c.pt.Move(1, 2)
+	assert(c.pt.x == 14)
+	assert(c.pt.y == 26)
+}
+
+
+func testNestedSelectorChain() {
+	w := &Wrapper{
+		tag: 7,
+		c: Container{
+			pad: 0,
+			pt:  Point{x: 2, y: 5},
+		},
+	}
+
+	nested := &w.c.pt
+	nested.Move(10, 20)
+	assert(w.c.pt.x == 12)
+	assert(w.c.pt.y == 25)
+
+	w.c.pt.Move(1, 1)
+	assert(w.c.pt.x == 13)
+	assert(w.c.pt.y == 26)
+}
+
+func testIndirectEmbeddedPointerSelector() {
+	o := &OuterEmbed{
+		marker: 9,
+		Inner: &Inner{
+			head: 3,
+			pt:   Point{x: 30, y: 40},
+		},
+	}
+
+	p := &o.pt
+	p.Move(7, 8)
+	assert(o.Inner.pt.x == 37)
+	assert(o.Inner.pt.y == 48)
+
+	o.pt.Move(1, 1)
+	assert(o.Inner.pt.x == 38)
+	assert(o.Inner.pt.y == 49)
+}
+
+func testHeapBoxedSelectorAddress() {
+	c := Container{
+		pad: 5,
+		pt:  Point{x: 100, y: 200},
+	}
+
+	getPoint := func() *Point {
+		return &c.pt
+	}
+
+	p := getPoint()
+	p.Move(5, 6)
+	assert(c.pt.x == 105)
+	assert(c.pt.y == 206)
+}
+
+func testHeapBoxedNestedSelectorAddress() {
+	w := Wrapper{
+		tag: 1,
+		c: Container{
+			pad: 2,
+			pt:  Point{x: 11, y: 22},
+		},
+	}
+
+	getPoint := func() *Point {
+		return &w.c.pt
+	}
+
+	p := getPoint()
+	p.Move(3, 4)
+	assert(w.c.pt.x == 14)
+	assert(w.c.pt.y == 26)
+}

@@ -1,0 +1,148 @@
+package main
+
+import (
+	"math"
+	"math/rand"
+	"os"
+	"strconv"
+)
+
+func main() {
+	testStrconvAppendFloat()
+	testStrconvCanBackquote()
+	testRandNormFloat64()
+	testRandExpFloat64()
+	testRandNewSource()
+	testRandRandType()
+	testOsUserDirs()
+}
+
+func testStrconvAppendFloat() {
+	dst := []byte("prefix:")
+	dst = strconv.AppendFloat(dst, 3.14, 'f', 2, 64)
+	s := string(dst)
+	assert(s == "prefix:3.14", s)
+
+	// Append to nil
+	var buf []byte
+	buf = strconv.AppendFloat(buf, 1.5, 'f', 1, 64)
+	assert(string(buf) == "1.5")
+}
+
+func testStrconvCanBackquote() {
+	assert(strconv.CanBackquote("hello world"))
+	assert(strconv.CanBackquote("with\ttab"))
+	assert(!strconv.CanBackquote("with`backtick"))
+	assert(!strconv.CanBackquote("with\nnewline"))
+	assert(!strconv.CanBackquote("with\x00null"))
+	assert(strconv.CanBackquote(""))
+}
+
+func testRandNormFloat64() {
+	// NormFloat64 should return finite values
+	for i := 0; i < 100; i++ {
+		v := rand.NormFloat64()
+		assert(!math.IsInf(v, 0))
+		assert(!math.IsNaN(v))
+	}
+}
+
+func testRandExpFloat64() {
+	// ExpFloat64 should return positive values
+	for i := 0; i < 100; i++ {
+		v := rand.ExpFloat64()
+		assert(v > 0)
+		assert(!math.IsInf(v, 0))
+		assert(!math.IsNaN(v))
+	}
+}
+
+func testRandNewSource() {
+	// Two sources with same seed should produce same sequence
+	src1 := rand.NewSource(42)
+	src2 := rand.NewSource(42)
+	for i := 0; i < 10; i++ {
+		assert(src1.Int63() == src2.Int63())
+	}
+
+	// Different seeds should (very likely) produce different sequences
+	src3 := rand.NewSource(1)
+	src4 := rand.NewSource(2)
+	different := false
+	for i := 0; i < 10; i++ {
+		if src3.Int63() != src4.Int63() {
+			different = true
+			break
+		}
+	}
+	assert(different)
+}
+
+func testRandRandType() {
+	r := rand.New(rand.NewSource(12345))
+
+	// Intn
+	for i := 0; i < 20; i++ {
+		v := r.Intn(10)
+		assert(v >= 0 && v < 10)
+	}
+
+	// Float64 in [0, 1)
+	for i := 0; i < 20; i++ {
+		v := r.Float64()
+		assert(v >= 0.0 && v < 1.0)
+	}
+
+	// Perm
+	p := r.Perm(5)
+	assert(len(p) == 5)
+	seen := make([]bool, 5)
+	for _, v := range p {
+		assert(v >= 0 && v < 5)
+		seen[v] = true
+	}
+	for _, s := range seen {
+		assert(s)
+	}
+
+	// Shuffle
+	arr := []int{1, 2, 3, 4, 5}
+	r.Shuffle(len(arr), func(i int, j int) {
+		arr[i], arr[j] = arr[j], arr[i]
+	})
+	// After shuffle, all elements still present
+	sum := 0
+	for _, v := range arr {
+		sum += v
+	}
+	assert(sum == 15)
+
+	// Seed reproducibility
+	r2 := rand.New(rand.NewSource(12345))
+	r3 := rand.New(rand.NewSource(12345))
+	assert(r2.Int63() == r3.Int63())
+
+	// NormFloat64 and ExpFloat64 via Rand
+	n := r.NormFloat64()
+	assert(!math.IsNaN(n) && !math.IsInf(n, 0))
+	e := r.ExpFloat64()
+	assert(e > 0 && !math.IsInf(e, 0))
+}
+
+func testOsUserDirs() {
+	// UserHomeDir: should return a path when HOME is set
+	home, err := os.UserHomeDir()
+	if err == nil {
+		assert(len(home) > 0)
+	}
+
+	// UserCacheDir and UserConfigDir
+	cache, err := os.UserCacheDir()
+	if err == nil {
+		assert(len(cache) > 0)
+	}
+	cfg, err := os.UserConfigDir()
+	if err == nil {
+		assert(len(cfg) > 0)
+	}
+}

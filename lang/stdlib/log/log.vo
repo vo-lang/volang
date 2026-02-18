@@ -1,0 +1,265 @@
+package log
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"time"
+)
+
+// Flag constants for controlling output format of each log entry.
+const (
+	Ldate         = 1 << 0 // the date in the local time zone: 2009/01/23
+	Ltime         = 1 << 1 // the time in the local time zone: 01:23:23
+	Lmicroseconds = 1 << 2 // microsecond resolution: 01:23:23.123123. assumes Ltime.
+	Llongfile     = 1 << 3 // full file name and line number: /a/b/c/d.go:23
+	Lshortfile    = 1 << 4 // final file name element and line number: d.go:23. overrides Llongfile
+	LUTC          = 1 << 5 // if Ldate or Ltime is set, use UTC rather than the local time zone
+	Lmsgprefix    = 1 << 6 // move the "prefix" from the beginning of the line to before the message
+	LstdFlags     = Ldate | Ltime // initial values for the standard logger
+)
+
+// Logger represents an active logging object that generates lines of output to
+// an io.Writer.
+type Logger struct {
+	prefix string
+	flag   int
+	out    io.Writer
+}
+
+// New creates a new Logger. The out argument sets the destination to which log
+// data will be written. The prefix appears at the beginning of each generated
+// log line, or after the log header if the Lmsgprefix flag is provided.
+// The flag argument defines the logging properties.
+func New(out io.Writer, prefix string, flag int) *Logger {
+	return &Logger{out: out, prefix: prefix, flag: flag}
+}
+
+// SetOutput sets the output destination for the logger.
+func (l *Logger) SetOutput(w io.Writer) {
+	l.out = w
+}
+
+// SetFlags sets the output flags for the logger.
+func (l *Logger) SetFlags(flag int) {
+	l.flag = flag
+}
+
+// SetPrefix sets the output prefix for the logger.
+func (l *Logger) SetPrefix(prefix string) {
+	l.prefix = prefix
+}
+
+// Flags returns the output flags for the logger.
+func (l *Logger) Flags() int { return l.flag }
+
+// Prefix returns the output prefix for the logger.
+func (l *Logger) Prefix() string { return l.prefix }
+
+// Writer returns the output destination for the logger.
+func (l *Logger) Writer() io.Writer { return l.out }
+
+func (l *Logger) formatHeader(buf []byte, t time.Time) []byte {
+	if l.flag&Lmsgprefix == 0 {
+		buf = append(buf, l.prefix...)
+	}
+	if l.flag&(Ldate|Ltime|Lmicroseconds) != 0 {
+		if l.flag&Ldate != 0 {
+			year, month, day := t.Date()
+			buf = itoa(buf, year, 4)
+			buf = append(buf, '/')
+			buf = itoa(buf, int(month), 2)
+			buf = append(buf, '/')
+			buf = itoa(buf, day, 2)
+			buf = append(buf, ' ')
+		}
+		if l.flag&(Ltime|Lmicroseconds) != 0 {
+			hour, min, sec := t.Clock()
+			buf = itoa(buf, hour, 2)
+			buf = append(buf, ':')
+			buf = itoa(buf, min, 2)
+			buf = append(buf, ':')
+			buf = itoa(buf, sec, 2)
+			if l.flag&Lmicroseconds != 0 {
+				buf = append(buf, '.')
+				buf = itoa(buf, t.Nanosecond()/1e3, 6)
+			}
+			buf = append(buf, ' ')
+		}
+	}
+	if l.flag&Lmsgprefix != 0 {
+		buf = append(buf, l.prefix...)
+	}
+	return buf
+}
+
+// Output writes the output for a logging event. The string s contains the text
+// to print after the prefix specified by the flags of the Logger.
+func (l *Logger) Output(calldepth int, s string) error {
+	now := time.Now()
+	var buf []byte
+	buf = l.formatHeader(buf, now)
+	buf = append(buf, s...)
+	if len(s) == 0 || s[len(s)-1] != '\n' {
+		buf = append(buf, '\n')
+	}
+	_, err := l.out.Write(buf)
+	return err
+}
+
+// Print calls l.Output to print to the logger. Arguments are handled in the
+// manner of fmt.Print.
+func (l *Logger) Print(v ...interface{}) {
+	l.Output(2, fmt.Sprint(v...))
+}
+
+// Println calls l.Output to print to the logger. Arguments are handled in the
+// manner of fmt.Println.
+func (l *Logger) Println(v ...interface{}) {
+	l.Output(2, fmt.Sprintln(v...))
+}
+
+// Printf calls l.Output to print to the logger. Arguments are handled in the
+// manner of fmt.Printf.
+func (l *Logger) Printf(format string, v ...interface{}) {
+	l.Output(2, fmt.Sprintf(format, v...))
+}
+
+// Fatal is equivalent to l.Print() followed by a call to os.Exit(1).
+func (l *Logger) Fatal(v ...interface{}) {
+	l.Output(2, fmt.Sprint(v...))
+	os.Exit(1)
+}
+
+// Fatalf is equivalent to l.Printf() followed by a call to os.Exit(1).
+func (l *Logger) Fatalf(format string, v ...interface{}) {
+	l.Output(2, fmt.Sprintf(format, v...))
+	os.Exit(1)
+}
+
+// Fatalln is equivalent to l.Println() followed by a call to os.Exit(1).
+func (l *Logger) Fatalln(v ...interface{}) {
+	l.Output(2, fmt.Sprintln(v...))
+	os.Exit(1)
+}
+
+// Panic is equivalent to l.Print() followed by a call to panic().
+func (l *Logger) Panic(v ...interface{}) {
+	s := fmt.Sprint(v...)
+	l.Output(2, s)
+	panic(s)
+}
+
+// Panicf is equivalent to l.Printf() followed by a call to panic().
+func (l *Logger) Panicf(format string, v ...interface{}) {
+	s := fmt.Sprintf(format, v...)
+	l.Output(2, s)
+	panic(s)
+}
+
+// Panicln is equivalent to l.Println() followed by a call to panic().
+func (l *Logger) Panicln(v ...interface{}) {
+	s := fmt.Sprintln(v...)
+	l.Output(2, s)
+	panic(s)
+}
+
+// ==================== Default logger ====================
+
+var std = New(os.Stderr, "", LstdFlags)
+
+// Default returns the standard logger used by the package-level output functions.
+func Default() *Logger { return std }
+
+// SetOutput sets the output destination for the standard logger.
+func SetOutput(w io.Writer) { std.SetOutput(w) }
+
+// SetFlags sets the output flags for the standard logger.
+func SetFlags(flag int) { std.SetFlags(flag) }
+
+// SetPrefix sets the output prefix for the standard logger.
+func SetPrefix(prefix string) { std.SetPrefix(prefix) }
+
+// Flags returns the output flags for the standard logger.
+func Flags() int { return std.Flags() }
+
+// Prefix returns the output prefix for the standard logger.
+func Prefix() string { return std.Prefix() }
+
+// Writer returns the output destination for the standard logger.
+func Writer() io.Writer { return std.Writer() }
+
+// Print calls Output to print to the standard logger.
+func Print(v ...interface{}) { std.Output(2, fmt.Sprint(v...)) }
+
+// Println calls Output to print to the standard logger.
+func Println(v ...interface{}) { std.Output(2, fmt.Sprintln(v...)) }
+
+// Printf calls Output to print to the standard logger.
+func Printf(format string, v ...interface{}) { std.Output(2, fmt.Sprintf(format, v...)) }
+
+// Fatal is equivalent to Print() followed by a call to os.Exit(1).
+func Fatal(v ...interface{}) {
+	std.Output(2, fmt.Sprint(v...))
+	os.Exit(1)
+}
+
+// Fatalf is equivalent to Printf() followed by a call to os.Exit(1).
+func Fatalf(format string, v ...interface{}) {
+	std.Output(2, fmt.Sprintf(format, v...))
+	os.Exit(1)
+}
+
+// Fatalln is equivalent to Println() followed by a call to os.Exit(1).
+func Fatalln(v ...interface{}) {
+	std.Output(2, fmt.Sprintln(v...))
+	os.Exit(1)
+}
+
+// Panic is equivalent to Print() followed by a call to panic().
+func Panic(v ...interface{}) {
+	s := fmt.Sprint(v...)
+	std.Output(2, s)
+	panic(s)
+}
+
+// Panicf is equivalent to Printf() followed by a call to panic().
+func Panicf(format string, v ...interface{}) {
+	s := fmt.Sprintf(format, v...)
+	std.Output(2, s)
+	panic(s)
+}
+
+// Panicln is equivalent to Println() followed by a call to panic().
+func Panicln(v ...interface{}) {
+	s := fmt.Sprintln(v...)
+	std.Output(2, s)
+	panic(s)
+}
+
+// ==================== Helpers ====================
+
+// itoa formats an int into buf with a minimum width (zero-padded) and returns the extended buf.
+func itoa(buf []byte, i int, wid int) []byte {
+	var b [20]byte
+	pos := len(b)
+	neg := false
+	if i < 0 {
+		neg = true
+		i = -i
+	}
+	for i >= 10 || wid > 1 {
+		wid--
+		q := i / 10
+		b[pos-1] = byte('0' + i - q*10)
+		pos--
+		i = q
+	}
+	b[pos-1] = byte('0' + i)
+	pos--
+	if neg {
+		b[pos-1] = '-'
+		pos--
+	}
+	return append(buf, b[pos:]...)
+}

@@ -1,0 +1,58 @@
+package main
+
+import (
+	"fmt"
+	"path"
+)
+
+func main() {
+	fmt.Println("Starting path tests...")
+
+	// Clean
+	assert(path.Clean("/a/b/../c") == "/a/c", "Clean ..")
+	assert(path.Clean("/a//b") == "/a/b", "Clean double slash")
+	assert(path.Clean("") == ".", "Clean empty")
+	assert(path.Clean(".") == ".", "Clean dot")
+	assert(path.Clean("a/b/c") == "a/b/c", "Clean no change")
+
+	// Base
+	assert(path.Base("/a/b/c") == "c", "Base")
+	assert(path.Base("/a/b/c/") == "c", "Base trailing slash")
+	assert(path.Base("/") == "/", "Base root")
+	assert(path.Base("") == ".", "Base empty")
+	assert(path.Base("file.txt") == "file.txt", "Base file")
+
+	// Dir
+	assert(path.Dir("/a/b/c") == "/a/b", "Dir")
+	assert(path.Dir("/a/b/c/") == "/a/b/c", "Dir trailing slash")
+	assert(path.Dir("/") == "/", "Dir root")
+	assert(path.Dir("file.txt") == ".", "Dir no dir")
+
+	// Ext
+	assert(path.Ext("file.txt") == ".txt", "Ext")
+	assert(path.Ext("file.tar.gz") == ".gz", "Ext double")
+	assert(path.Ext("file") == "", "Ext no ext")
+	assert(path.Ext(".hidden") == ".hidden", "Ext hidden")
+
+	// IsAbs
+	assert(path.IsAbs("/a/b"), "IsAbs absolute")
+	assert(!path.IsAbs("a/b"), "IsAbs relative")
+	assert(!path.IsAbs(""), "IsAbs empty")
+
+	// Join
+	assert(path.Join("/a", "b", "c") == "/a/b/c", "Join")
+	assert(path.Join("/a", "", "c") == "/a/c", "Join empty elem")
+	assert(path.Join("a", "b") == "a/b", "Join relative")
+	assert(path.Join() == "", "Join empty")
+
+	// Split
+	dir, file := path.Split("/a/b/c")
+	assert(dir == "/a/b/", "Split dir")
+	assert(file == "c", "Split file")
+
+	dir2, file2 := path.Split("file.txt")
+	assert(dir2 == "", "Split no dir")
+	assert(file2 == "file.txt", "Split file only")
+
+	fmt.Println("All path tests passed!")
+}
