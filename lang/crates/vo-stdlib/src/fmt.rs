@@ -416,7 +416,7 @@ fn native_sprint(call: &mut ExternCallContext) -> ExternResult {
     let formatted = format_args_slice_with_ctx(args_ref, Some(call));
     let gc = call.gc();
     let s = str_obj::from_rust_str(gc, &formatted);
-    call.ret_ref(0, s);
+    call.ret_ref(slots::RET_0, s);
     ExternResult::Ok
 }
 
@@ -428,7 +428,7 @@ fn native_sprintln(call: &mut ExternCallContext) -> ExternResult {
     formatted.push('\n');
     let gc = call.gc();
     let s = str_obj::from_rust_str(gc, &formatted);
-    call.ret_ref(0, s);
+    call.ret_ref(slots::RET_0, s);
     ExternResult::Ok
 }
 
@@ -440,7 +440,7 @@ fn native_sprintf(call: &mut ExternCallContext) -> ExternResult {
     let formatted = sprintf_impl(format_str, args_ref, Some(call));
     let gc = call.gc();
     let s = str_obj::from_rust_str(gc, &formatted);
-    call.ret_ref(0, s);
+    call.ret_ref(slots::RET_0, s);
     ExternResult::Ok
 }
 

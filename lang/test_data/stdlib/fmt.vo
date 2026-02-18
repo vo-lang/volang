@@ -1,12 +1,16 @@
 package main
 
-import "fmt"
+import (
+	"bytes"
+	"fmt"
+)
 
 func main() {
 	testSprint()
 	testSprintln()
 	testSprintf()
 	testPrintFunctions()
+	testWriterFunctions()
 	testFormatVerbs()
 	testEdgeCases()
 	fmt.Println("All fmt tests passed!")
@@ -117,6 +121,29 @@ func testPrintFunctions() {
 	
 	n3 := fmt.Sprintf("%d", 123)
 	assert(len(n3) == 3)
+}
+
+func testWriterFunctions() {
+	buf := &bytes.Buffer{}
+
+	n, err := fmt.Fprint(buf, "x", 1, true)
+	assert(err == nil)
+	assert(n == len("x 1 true"))
+	assert(buf.String() == "x 1 true")
+
+	n, err = fmt.Fprintln(buf, "tail")
+	assert(err == nil)
+	assert(n == len("tail\n"))
+	assert(buf.String() == "x 1 truetail\n")
+
+	n, err = fmt.Fprintf(buf, "-%s:%d-", "id", 7)
+	assert(err == nil)
+	assert(n == len("-id:7-"))
+	assert(buf.String() == "x 1 truetail\n-id:7-")
+
+	e := fmt.Errorf("boom:%d", 42)
+	assert(e != nil)
+	assert(e.Error() == "boom:42")
 }
 
 func testFormatVerbs() {

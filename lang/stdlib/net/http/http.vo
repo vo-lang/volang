@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net"
@@ -188,106 +189,156 @@ func (c *Client) Post(url, contentType string, body io.Reader) (*Response, error
 
 // Do sends an HTTP request and returns an HTTP response.
 func (c *Client) Do(req *Request) (*Response, error) {
-	// Parse URL to get host and path
-	host, path, err := parseURL(req.URL)
+	bodyBytes, err := readRequestBody(req)
 	if err != nil {
 		return nil, err
 	}
-	
-	// Dial TCP connection
-	conn, err := net.Dial("tcp", host)
+
+	// HTTPS and timeout-enabled requests use the native bridge
+	scheme := urlScheme(req.URL)
+	if scheme == "https" || c.Timeout > 0 {
+		return c.doNativeRequest(req, bodyBytes)
+	}
+
+	// Plain HTTP: parse URL and use Vo TCP client
+	_, dialAddr, hostHeader, path, err := parseURL(req.URL)
 	if err != nil {
 		return nil, err
 	}
-	
-	// TODO: timeout support requires conn.SetDeadline which needs Time.Add
-	_ = c.Timeout
-	
+
+	conn, err := net.Dial("tcp", dialAddr)
+	if err != nil {
+		return nil, err
+	}
+
 	// Build and send HTTP request
-	if err := writeRequest(conn, req, host, path); err != nil {
+	if err := writeRequest(conn, req, hostHeader, path, bodyBytes); err != nil {
 		conn.Close()
 		return nil, err
 	}
-	
+
 	// Read and parse HTTP response
 	resp, err := readResponse(conn, req)
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
-	
+
+	return resp, nil
+}
+
+func readRequestBody(req *Request) ([]byte, error) {
+	if req.Body == nil {
+		req.ContentLength = 0
+		return []byte{}, nil
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	req.ContentLength = int64(len(body))
+	return body, nil
+}
+
+func (c *Client) doNativeRequest(req *Request, bodyBytes []byte) (*Response, error) {
+	headers := requestHeaderLines(req, "")
+	timeoutNs := int64(0)
+	if c.Timeout > 0 {
+		timeoutNs = c.Timeout.Nanoseconds()
+	}
+
+	statusCode, status, proto, responseHeaderLines, responseBody, err := nativeHttpsRequest(req.Method, req.URL, headers, bodyBytes, timeoutNs)
+	if err != nil {
+		return nil, err
+	}
+
+	respHeader := parseHeaderLines(responseHeaderLines)
+	resp := &Response{
+		Status:        status,
+		StatusCode:    statusCode,
+		Proto:         proto,
+		Header:        respHeader,
+		Body:          io.NopCloser(bytes.NewReader(responseBody)),
+		ContentLength: contentLengthFromHeaders(respHeader, int64(len(responseBody))),
+		Request:       req,
+	}
 	return resp, nil
 }
 
 // parseURL extracts host:port and path from URL.
-// Supports http://host:port/path and http://host/path formats.
-func parseURL(url string) (host, path string, err error) {
-	// Remove scheme
-	if strings.HasPrefix(url, "http://") {
-		url = url[7:]
-	} else if strings.HasPrefix(url, "https://") {
-		return "", "", errors.New("https not supported")
+// Supports http://host:port/path, https://host/path and host/path formats.
+func parseURL(url string) (scheme, dialAddr, hostHeader, path string, err error) {
+	rest := url
+	scheme = "http"
+	if strings.HasPrefix(rest, "http://") {
+		rest = rest[7:]
+	} else if strings.HasPrefix(rest, "https://") {
+		scheme = "https"
+		rest = rest[8:]
 	}
-	
-	// Split host and path
-	idx := strings.Index(url, "/")
+
+	idx := strings.Index(rest, "/")
+	qIdx := strings.Index(rest, "?")
+	if idx == -1 || (qIdx != -1 && qIdx < idx) {
+		idx = qIdx
+	}
 	if idx == -1 {
-		host = url
+		hostHeader = rest
 		path = "/"
 	} else {
-		host = url[:idx]
-		path = url[idx:]
+		hostHeader = rest[:idx]
+		path = rest[idx:]
+		if len(path) > 0 && path[0] == '?' {
+			path = "/" + path
+		}
 	}
-	
-	// Add default port if missing
-	if strings.Index(host, ":") == -1 {
-		host = host + ":80"
+
+	if hostHeader == "" {
+		return "", "", "", "", errors.New("invalid URL: missing host")
 	}
-	
 	if path == "" {
 		path = "/"
 	}
-	
-	return host, path, nil
+
+	if hasAuthorityPort(hostHeader) {
+		dialAddr = hostHeader
+	} else if scheme == "https" {
+		dialAddr = hostHeader + ":443"
+	} else {
+		dialAddr = hostHeader + ":80"
+	}
+
+	return scheme, dialAddr, hostHeader, path, nil
+}
+
+func urlScheme(url string) string {
+	if strings.HasPrefix(url, "https://") {
+		return "https"
+	}
+	return "http"
+}
+
+func hasAuthorityPort(authority string) bool {
+	if strings.HasPrefix(authority, "[") {
+		return strings.Contains(authority, "]:")
+	}
+	return strings.Contains(authority, ":")
 }
 
 // writeRequest writes HTTP request to connection.
-func writeRequest(conn net.Conn, req *Request, host, path string) error {
+func writeRequest(conn net.Conn, req *Request, hostHeader, path string, bodyBytes []byte) error {
 	// Request line: METHOD /path HTTP/1.1\r\n
 	line := req.Method + " " + path + " HTTP/1.1\r\n"
 	if _, err := conn.Write([]byte(line)); err != nil {
 		return err
 	}
-	
-	// Host header (required for HTTP/1.1)
-	hostHeader := "Host: " + strings.Split(host, ":")[0] + "\r\n"
-	if _, err := conn.Write([]byte(hostHeader)); err != nil {
-		return err
-	}
-	
-	// User headers
-	for key, values := range req.Header {
-		for _, val := range values {
-			header := key + ": " + val + "\r\n"
-			if _, err := conn.Write([]byte(header)); err != nil {
-				return err
-			}
-		}
-	}
-	
-	// Body handling
-	var bodyBytes []byte
-	if req.Body != nil {
-		bodyBytes, _ = io.ReadAll(req.Body)
-	}
-	
-	if len(bodyBytes) > 0 {
-		cl := "Content-Length: " + strconv.Itoa(len(bodyBytes)) + "\r\n"
-		if _, err := conn.Write([]byte(cl)); err != nil {
+
+	for _, header := range requestHeaderLines(req, hostHeader) {
+		if _, err := conn.Write([]byte(header + "\r\n")); err != nil {
 			return err
 		}
 	}
-	
+
 	// End of headers
 	if _, err := conn.Write([]byte("\r\n")); err != nil {
 		return err
@@ -303,6 +354,48 @@ func writeRequest(conn net.Conn, req *Request, host, path string) error {
 	return nil
 }
 
+func requestHeaderLines(req *Request, hostHeader string) []string {
+	lines := make([]string, 0, len(req.Header)+2)
+	if hostHeader != "" && req.Header.Get("Host") == "" {
+		lines = append(lines, "Host: "+hostHeader)
+	}
+
+	for key, values := range req.Header {
+		for _, val := range values {
+			lines = append(lines, key+": "+val)
+		}
+	}
+
+	if req.ContentLength > 0 && req.Header.Get("Content-Length") == "" {
+		lines = append(lines, "Content-Length: "+strconv.Itoa(int(req.ContentLength)))
+	}
+
+	return lines
+}
+
+func parseHeaderLines(lines []string) Header {
+	h := make(Header)
+	for _, line := range lines {
+		idx := strings.Index(line, ":")
+		if idx <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:idx])
+		val := strings.TrimSpace(line[idx+1:])
+		h[key] = append(h[key], val)
+	}
+	return h
+}
+
+func contentLengthFromHeaders(headers Header, fallback int64) int64 {
+	if cl := headers.Get("Content-Length"); cl != "" {
+		if n, err := strconv.Atoi(cl); err == nil {
+			return int64(n)
+		}
+	}
+	return fallback
+}
+
 // readResponse reads and parses HTTP response from connection.
 func readResponse(conn net.Conn, req *Request) (*Response, error) {
 	// Read response into buffer
@@ -312,7 +405,7 @@ func readResponse(conn net.Conn, req *Request) (*Response, error) {
 	// Read headers (until \r\n\r\n)
 	for {
 		n, err := conn.Read(buf)
-		if err != nil && err.Error() != "EOF" {
+		if err != nil && !errors.Is(err, io.EOF) {
 			if len(data) == 0 {
 				return nil, err
 			}
@@ -585,7 +678,6 @@ func (srv *Server) handleConn(conn net.Conn, handler Handler) {
 	
 	handler.ServeHTTP(w, req)
 	w.finishRequest()
-	return
 }
 
 // Close immediately closes all active connections and the listener.
@@ -837,3 +929,5 @@ func parseWord(s string) (word, rest string) {
 	}
 	return word, rest
 }
+
+func nativeHttpsRequest(method, url string, headers []string, body []byte, timeoutNs int64) (int, string, string, []string, []byte, error)

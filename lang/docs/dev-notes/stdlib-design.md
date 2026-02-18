@@ -1,11 +1,15 @@
 # Vo Standard Library Design
 
+> **Scope note (2026-02):** This file records implementation tradeoffs (Vo vs native) and heuristic choices.
+> The authoritative product contract (package scope, compatibility level, platform support)
+> is maintained in `lang/docs/dev/stdlib-compatibility-matrix.md`.
+
 ## Design Principles
 
 1. **Prefer Vo implementation**: Unless performance-critical or requires syscalls
 2. **Consider FFI overhead**: ~50-100 cycles per Native call, no inlining
 3. **JIT Vo performance**: ~5x Rust, but can be inlined
-4. **Minimal API**: Only common functions, avoid Go's historical baggage
+4. **Go-Compatible High-Frequency API**: Prioritize common Go usage with compatible semantics
 
 ## Decision Rules
 
@@ -334,9 +338,9 @@ DecodedLen(n int) int
 
 ---
 
-### 15. `encoding/json` (DEFERRED)
+### 15. `encoding/json`
 
-Not implemented for now.
+Implemented (Vo + native helpers). See compatibility matrix for contract level.
 
 ---
 
@@ -395,33 +399,33 @@ Errorf(format string, a ...any) error
 
 ---
 
-### 18. `io` (DEFERRED)
+### 18. `io`
 
-Requires OS support.
-
----
-
-### 19. `os` (DEFERRED)
-
-Requires OS support.
+Implemented. See compatibility matrix for contract level and boundary notes.
 
 ---
 
-### 20. `time` (DEFERRED)
+### 19. `os`
 
-Requires OS support.
-
----
-
-### 21. `sync` (DEFERRED)
-
-Requires atomic operations.
+Implemented. See compatibility matrix for contract level and platform notes.
 
 ---
 
-### 22. `context` (DEFERRED)
+### 20. `time`
 
-Requires channels.
+Implemented. See compatibility matrix for contract level.
+
+---
+
+### 21. `sync`
+
+Planned as **island-local coordination API**, not direct Go shared-memory semantics.
+
+---
+
+### 22. `context`
+
+Planned. Target contract and priority are tracked in compatibility matrix.
 
 ---
 
@@ -444,7 +448,7 @@ Requires channels.
 | encoding/hex | 0 | 6 | Partial |
 | encoding/base64 | 0 | 16 | Partial |
 | regexp | 25 | 2 | Partial |
-| fmt | 10 | 0 | Partial |
+| fmt | 6 | 4 | Partial |
 | dyn | 2 | 10 | ✓ Complete |
 | **Total** | ~120 | ~170 | |
 

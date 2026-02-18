@@ -219,9 +219,12 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
             StorageKind::HeapArray { .. } | StorageKind::HeapBoxed { .. } => {
                 // Heap allocations are already zero-initialized by PtrNew/ArrayNew
             }
-            StorageKind::StackArray { .. } => {
-                // Stack arrays rely on JIT/VM prologue zero-initialization
-                // No codegen needed - locals_slot is zeroed before function execution
+            StorageKind::StackArray { base_slot, elem_slots, len } => {
+                // VM's exec_call does NOT zero locals, so we must emit explicit zero-init.
+                let total_slots = elem_slots * len;
+                for i in 0..total_slots {
+                    self.func.emit_op(Opcode::LoadInt, base_slot + i, 0, 0);
+                }
             }
             StorageKind::StackValue { slot, slots } => {
                 for i in 0..slots {

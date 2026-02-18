@@ -3,10 +3,65 @@ package main
 import "time"
 
 func main() {
-	assert(time.Now().UnixNano() > 0)
+	testNowSinceSleep()
+	testUnixConstructors()
+	testTimeArithmeticAndCompare()
+	testDurationConversions()
+}
+
+func testNowSinceSleep() {
+	now := time.Now()
+	assert(now.UnixNano() > 0)
 
 	start := time.Now()
-	time.Sleep(time.Duration(10) * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 	d := time.Since(start)
 	assert(d > 0)
+
+	future := start.Add(20 * time.Millisecond)
+	until := time.Until(future)
+	assert(until > 0)
+}
+
+func testUnixConstructors() {
+	t0 := time.Unix(0, 0)
+	assert(t0.UnixNano() == 0)
+	assert(t0.Unix() == 0)
+	assert(t0.UnixMilli() == 0)
+	assert(t0.UnixMicro() == 0)
+	assert(t0.IsZero())
+
+	t1 := time.Unix(1, 500)
+	assert(t1.Unix() == 1)
+	assert(t1.UnixNano() == 1000000500)
+
+	t2 := time.UnixMilli(2500)
+	assert(t2.UnixMilli() == 2500)
+	assert(t2.UnixNano() == 2500*1000000)
+
+	t3 := time.UnixMicro(3200)
+	assert(t3.UnixMicro() == 3200)
+	assert(t3.UnixNano() == 3200*1000)
+}
+
+func testTimeArithmeticAndCompare() {
+	base := time.Unix(100, 0)
+	delta := 250 * time.Millisecond
+	later := base.Add(delta)
+
+	assert(later.After(base))
+	assert(base.Before(later))
+	assert(!base.Equal(later))
+	assert(base.Equal(time.Unix(100, 0)))
+	assert(later.Sub(base) == delta)
+}
+
+func testDurationConversions() {
+	d := 2*time.Hour + 3*time.Minute + 4*time.Second + 5*time.Millisecond + 6*time.Microsecond + 7*time.Nanosecond
+	assert(d.Hours() == 2)
+	assert(d.Minutes() == 123)
+	assert(d.Seconds() == 7384)
+	assert(d.Milliseconds() == 7384005)
+	assert(d.Microseconds() == 7384005006)
+	assert(d.Nanoseconds() == 7384005006007)
 }

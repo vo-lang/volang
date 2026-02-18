@@ -18,12 +18,12 @@ fn filepath_eval_symlinks(call: &mut ExternCallContext) -> ExternResult {
     match eval_symlinks_impl(&path) {
         Ok(resolved) => {
             let result = call.alloc_str(&resolved);
-            call.ret_ref(0, result);
-            write_nil_error(call, 1);
+            call.ret_ref(slots::RET_0, result);
+            write_nil_error(call, slots::RET_1);
         }
         Err(e) => {
-            call.ret_ref(0, std::ptr::null_mut()); // empty string
-            write_error_to(call, 1, &e);
+            call.ret_ref(slots::RET_0, std::ptr::null_mut()); // empty string
+            write_error_to(call, slots::RET_1, &e);
         }
     }
     

@@ -19,6 +19,17 @@ fn register_unix_conn(conn: UnixStream) -> i32 {
     h
 }
 
+fn set_deadline(conn: &UnixStream, deadline_ns: i64, read: bool, write: bool) -> std::io::Result<()> {
+    let timeout = super::deadline_to_timeout(deadline_ns);
+    if read {
+        conn.set_read_timeout(timeout)?;
+    }
+    if write {
+        conn.set_write_timeout(timeout)?;
+    }
+    Ok(())
+}
+
 fn register_unix_listener(listener: UnixListener) -> i32 {
     // Set non-blocking for async accept
     listener.set_nonblocking(true).ok();
@@ -156,6 +167,40 @@ pub fn net_unix_conn_write(call: &mut ExternCallContext) -> ExternResult {
 
     let c = call.io_mut().take_completion(token);
     handle_rw_completion(call, c, slots::RET_0, slots::RET_1, false)
+}
+
+fn do_set_deadline(call: &mut ExternCallContext, handle: i32, deadline_ns: i64, ret_slot: u16, read: bool, write: bool) -> ExternResult {
+    let handles = UNIX_CONN_HANDLES.lock().unwrap();
+    if let Some(conn) = handles.get(&handle) {
+        match set_deadline(conn, deadline_ns, read, write) {
+            Ok(()) => write_nil_error(call, ret_slot),
+            Err(e) => write_io_error(call, ret_slot, e),
+        }
+    } else {
+        write_error_to(call, ret_slot, "use of closed network connection");
+    }
+    ExternResult::Ok
+}
+
+#[vostd_fn("net", "unixConnSetDeadline", std)]
+pub fn net_unix_conn_set_deadline(call: &mut ExternCallContext) -> ExternResult {
+    let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
+    let deadline_ns = call.arg_i64(slots::ARG_DEADLINE_NS);
+    do_set_deadline(call, handle, deadline_ns, slots::RET_0, true, true)
+}
+
+#[vostd_fn("net", "unixConnSetReadDeadline", std)]
+pub fn net_unix_conn_set_read_deadline(call: &mut ExternCallContext) -> ExternResult {
+    let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
+    let deadline_ns = call.arg_i64(slots::ARG_DEADLINE_NS);
+    do_set_deadline(call, handle, deadline_ns, slots::RET_0, true, false)
+}
+
+#[vostd_fn("net", "unixConnSetWriteDeadline", std)]
+pub fn net_unix_conn_set_write_deadline(call: &mut ExternCallContext) -> ExternResult {
+    let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
+    let deadline_ns = call.arg_i64(slots::ARG_DEADLINE_NS);
+    do_set_deadline(call, handle, deadline_ns, slots::RET_0, false, true)
 }
 
 #[vostd_fn("net", "unixConnClose", std)]

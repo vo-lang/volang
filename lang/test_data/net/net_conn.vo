@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"os"
 	"time"
 )
 
@@ -9,76 +10,79 @@ func main() {
 	testTCPListenClose()
 	testUDPListenClose()
 	testDialErrors()
+	testUnixDeadlines()
 	// TODO: testTCPEcho requires goroutines to work properly
 	println("net connection tests passed")
 }
 
 func testTCPListenClose() {
-	// Basic listen and close test
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		panic("Listen failed: " + err.Error())
-	}
+	assert(err == nil, "Listen failed")
 
 	addr := listener.Addr()
-	if addr == nil {
-		panic("Listener.Addr() is nil")
-	}
-	if addr.Network() != "tcp" {
-		panic("Listener.Addr().Network() should be tcp")
-	}
+	assert(addr != nil, "Listener.Addr() is nil")
+	assert(addr.Network() == "tcp", "Listener.Addr().Network() should be tcp")
 
 	err = listener.Close()
-	if err != nil {
-		panic("Close failed: " + err.Error())
-	}
+	assert(err == nil, "Close failed")
 }
 
 func testUDPListenClose() {
-	// UDP listen and close
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		panic("ListenPacket failed: " + err.Error())
-	}
+	assert(err == nil, "ListenPacket failed")
 
 	addr := conn.LocalAddr()
-	if addr == nil {
-		panic("UDP LocalAddr is nil")
-	}
-	if addr.Network() != "udp" {
-		panic("UDP LocalAddr.Network() should be udp")
-	}
+	assert(addr != nil, "UDP LocalAddr is nil")
+	assert(addr.Network() == "udp", "UDP LocalAddr.Network() should be udp")
 
 	err = conn.Close()
-	if err != nil {
-		panic("UDP Close failed: " + err.Error())
-	}
+	assert(err == nil, "UDP Close failed")
 }
 
 func testDialErrors() {
-	// Test dial to non-existent address (should fail quickly)
 	_, err := net.DialTimeout("tcp", "127.0.0.1:1", 100*time.Millisecond)
-	if err == nil {
-		panic("Dial to closed port should fail")
-	}
+	assert(err != nil, "Dial to closed port should fail")
 
-	// Test unknown network
 	_, err = net.Dial("invalid", "localhost:80")
-	if err == nil {
-		panic("Dial with invalid network should fail")
-	}
+	assert(err != nil, "Dial with invalid network should fail")
 
-	// Test Listen unknown network
 	_, err = net.Listen("invalid", "localhost:80")
-	if err == nil {
-		panic("Listen with invalid network should fail")
-	}
+	assert(err != nil, "Listen with invalid network should fail")
 
-	// Test ListenPacket unknown network
 	_, err = net.ListenPacket("invalid", "localhost:80")
-	if err == nil {
-		panic("ListenPacket with invalid network should fail")
-	}
+	assert(err != nil, "ListenPacket with invalid network should fail")
+}
+
+func testUnixDeadlines() {
+	path := "/tmp/volang_net_conn_deadline.sock"
+	_ = os.Remove(path)
+
+	listener, err := net.Listen("unix", path)
+	assert(err == nil, "unix Listen failed")
+	defer listener.Close()
+	defer os.Remove(path)
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		assert(acceptErr == nil, "unix Accept failed")
+		accepted <- conn
+	}()
+
+	conn, err := net.Dial("unix", path)
+	assert(err == nil, "unix Dial failed")
+	peer := <-accepted
+
+	deadline := time.Now().Add(100 * time.Millisecond)
+	err = conn.SetDeadline(deadline)
+	assert(err == nil, "unix SetDeadline failed")
+	err = conn.SetReadDeadline(deadline)
+	assert(err == nil, "unix SetReadDeadline failed")
+	err = conn.SetWriteDeadline(deadline)
+	assert(err == nil, "unix SetWriteDeadline failed")
+
+	conn.Close()
+	peer.Close()
 }
 
 func testTCPEcho() {

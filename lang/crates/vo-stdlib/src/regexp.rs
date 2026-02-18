@@ -20,8 +20,8 @@ fn match_string(call: &mut ExternCallContext) -> ExternResult {
         Ok(re) => (re.is_match(s), true),
         Err(_) => (false, false),
     };
-    call.ret_bool(0, matched);
-    call.ret_bool(1, valid);
+    call.ret_bool(slots::RET_0, matched);
+    call.ret_bool(slots::RET_1, valid);
     ExternResult::Ok
 }
 
@@ -42,8 +42,8 @@ fn match_bytes(call: &mut ExternCallContext) -> ExternResult {
         }
         Err(_) => (false, false),
     };
-    call.ret_bool(0, matched);
-    call.ret_bool(1, valid);
+    call.ret_bool(slots::RET_0, matched);
+    call.ret_bool(slots::RET_1, valid);
     ExternResult::Ok
 }
 
@@ -59,7 +59,7 @@ fn find_string(call: &mut ExternCallContext) -> ExternResult {
     };
     let gc = call.gc();
     let str_ref = vo_runtime::objects::string::from_rust_str(gc, &result);
-    call.ret_ref(0, str_ref);
+    call.ret_ref(slots::RET_0, str_ref);
     ExternResult::Ok
 }
 
@@ -71,8 +71,8 @@ fn find_string_index(call: &mut ExternCallContext) -> ExternResult {
         Ok(re) => re.find(s).map(|m| (m.start() as i64, m.end() as i64)).unwrap_or((-1, -1)),
         Err(_) => (-1, -1),
     };
-    call.ret_i64(0, start);
-    call.ret_i64(1, end);
+    call.ret_i64(slots::RET_0, start);
+    call.ret_i64(slots::RET_1, end);
     ExternResult::Ok
 }
 
@@ -105,7 +105,7 @@ fn find_all_string(call: &mut ExternCallContext) -> ExternResult {
         array::set(arr, i, str_ref as u64, 8);
     }
     let slice_ref = slice::from_array(gc, arr);
-    call.ret_ref(0, slice_ref);
+    call.ret_ref(slots::RET_0, slice_ref);
     ExternResult::Ok
 }
 
@@ -122,7 +122,7 @@ fn replace_all_string(call: &mut ExternCallContext) -> ExternResult {
     };
     let gc = call.gc();
     let str_ref = vo_runtime::objects::string::from_rust_str(gc, &result);
-    call.ret_ref(0, str_ref);
+    call.ret_ref(slots::RET_0, str_ref);
     ExternResult::Ok
 }
 
@@ -137,7 +137,7 @@ fn replace_all_literal_string(call: &mut ExternCallContext) -> ExternResult {
     };
     let gc = call.gc();
     let str_ref = vo_runtime::objects::string::from_rust_str(gc, &result);
-    call.ret_ref(0, str_ref);
+    call.ret_ref(slots::RET_0, str_ref);
     ExternResult::Ok
 }
 
@@ -172,7 +172,7 @@ fn split_string(call: &mut ExternCallContext) -> ExternResult {
         array::set(arr, i, str_ref as u64, 8);
     }
     let slice_ref = slice::from_array(gc, arr);
-    call.ret_ref(0, slice_ref);
+    call.ret_ref(slots::RET_0, slice_ref);
     ExternResult::Ok
 }
 
@@ -206,7 +206,7 @@ fn find_string_submatch(call: &mut ExternCallContext) -> ExternResult {
         array::set(arr, i, str_ref as u64, 8);
     }
     let slice_ref = slice::from_array(gc, arr);
-    call.ret_ref(0, slice_ref);
+    call.ret_ref(slots::RET_0, slice_ref);
     ExternResult::Ok
 }
 
@@ -218,7 +218,7 @@ fn quote_meta(call: &mut ExternCallContext) -> ExternResult {
     let result = regex::escape(s);
     let gc = call.gc();
     let str_ref = vo_runtime::objects::string::from_rust_str(gc, &result);
-    call.ret_ref(0, str_ref);
+    call.ret_ref(slots::RET_0, str_ref);
     ExternResult::Ok
 }
 

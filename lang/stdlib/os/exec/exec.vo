@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -46,10 +47,7 @@ type Cmd struct {
 	ProcessState *ProcessState
 
 	// Internal fields
-	finished    bool
-	childFiles  []int // file descriptors to pass to child
-	closeAfterStart []int
-	closeAfterWait  []int
+	finished bool
 }
 
 // Process stores information about a process created by Start.
@@ -102,9 +100,19 @@ func (p *ProcessState) String() string {
 		if p.exitCode == 0 {
 			return "exit status 0"
 		}
-		return "exit status " + itoa(p.exitCode)
+		return "exit status " + strconv.Itoa(p.exitCode)
 	}
 	return "running"
+}
+
+func interfaceFD(v any, name string) (int, error) {
+	if v == nil {
+		return -1, nil
+	}
+	if f, ok := v.(*os.File); ok {
+		return f.Fd(), nil
+	}
+	return -1, errors.New("exec: " + name + " must be *os.File")
 }
 
 // ExitError is returned by Cmd.Wait when the command exits with a non-zero status.
@@ -114,7 +122,7 @@ type ExitError struct {
 }
 
 func (e *ExitError) Error() string {
-	return "exit status " + itoa(e.ProcessState.exitCode)
+	return "exit status " + strconv.Itoa(e.ProcessState.exitCode)
 }
 
 // Command returns the Cmd struct to execute the named program with
@@ -176,11 +184,18 @@ func (c *Cmd) Start() error {
 		return errors.New("exec: already started")
 	}
 
-	// Prepare stdin/stdout/stderr
-	var stdinFd, stdoutFd, stderrFd int = -1, -1, -1
-
-	// For now, we don't support piping - just inherit or use /dev/null
-	// A full implementation would create pipes here
+	stdinFd, err := interfaceFD(c.Stdin, "Stdin")
+	if err != nil {
+		return err
+	}
+	stdoutFd, err := interfaceFD(c.Stdout, "Stdout")
+	if err != nil {
+		return err
+	}
+	stderrFd, err := interfaceFD(c.Stderr, "Stderr")
+	if err != nil {
+		return err
+	}
 
 	pid, err := startProcess(c.Path, c.Args, c.Dir, c.Env, stdinFd, stdoutFd, stderrFd)
 	if err != nil {
@@ -225,8 +240,20 @@ func (c *Cmd) Output() ([]byte, error) {
 	if c.Stdout != nil {
 		return nil, errors.New("exec: Stdout already set")
 	}
+	if c.Process != nil {
+		return nil, errors.New("exec: already started")
+	}
 
-	stdout, err := runCaptureOutput(c.Path, c.Args, c.Dir, c.Env, false)
+	stdout, pid, exitCode, err := runCaptureOutput(c.Path, c.Args, c.Dir, c.Env, false)
+	c.finished = true
+	if pid > 0 {
+		c.Process = &Process{Pid: pid}
+		c.ProcessState = &ProcessState{
+			pid:      pid,
+			exitCode: exitCode,
+			exited:   true,
+		}
+	}
 	if err != nil {
 		return stdout, err
 	}
@@ -242,8 +269,20 @@ func (c *Cmd) CombinedOutput() ([]byte, error) {
 	if c.Stderr != nil {
 		return nil, errors.New("exec: Stderr already set")
 	}
+	if c.Process != nil {
+		return nil, errors.New("exec: already started")
+	}
 
-	output, err := runCaptureOutput(c.Path, c.Args, c.Dir, c.Env, true)
+	output, pid, exitCode, err := runCaptureOutput(c.Path, c.Args, c.Dir, c.Env, true)
+	c.finished = true
+	if pid > 0 {
+		c.Process = &Process{Pid: pid}
+		c.ProcessState = &ProcessState{
+			pid:      pid,
+			exitCode: exitCode,
+			exited:   true,
+		}
+	}
 	if err != nil {
 		return output, err
 	}
@@ -295,31 +334,7 @@ func LookPath(file string) (string, error) {
 	return "", ErrNotFound
 }
 
-// itoa converts an integer to a string.
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	neg := false
-	if i < 0 {
-		neg = true
-		i = -i
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for i > 0 {
-		pos--
-		buf[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
-}
-
 // Native functions for process management
 func startProcess(path string, args []string, dir string, env []string, stdin, stdout, stderr int) (int, error)
 func waitProcess(pid int) (*ProcessState, error)
-func runCaptureOutput(path string, args []string, dir string, env []string, combined bool) ([]byte, error)
+func runCaptureOutput(path string, args []string, dir string, env []string, combined bool) ([]byte, int, int, error)

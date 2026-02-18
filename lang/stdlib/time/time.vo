@@ -5,6 +5,8 @@ func nowUnixNano() int64
 func nowMonoNano() int64
 func blocking_sleepNano(d int64)
 
+const nanosPerSecond = int64(1000000000)
+
 type Duration int64
 
 const (
@@ -21,17 +23,114 @@ type Time struct {
 	monoNano int64
 }
 
+// Now returns the current local time with both wall clock and monotonic components.
 func Now() Time {
 	return Time{unixNano: nowUnixNano(), monoNano: nowMonoNano()}
 }
 
-func (t Time) UnixNano() int64 { return t.unixNano }
-func (t Time) MonoNano() int64 { return t.monoNano }
-
-func Since(t Time) Duration {
-	return Duration(nowMonoNano() - t.monoNano)
+// Unix returns the local Time corresponding to the given Unix time,
+// sec seconds and nsec nanoseconds since January 1, 1970 UTC.
+func Unix(sec, nsec int64) Time {
+	sec += nsec / nanosPerSecond
+	nsec = nsec % nanosPerSecond
+	if nsec < 0 {
+		nsec += nanosPerSecond
+		sec--
+	}
+	return Time{unixNano: sec*nanosPerSecond + nsec}
 }
 
+// UnixMilli returns the local Time corresponding to the given Unix time in milliseconds.
+func UnixMilli(msec int64) Time {
+	return Time{unixNano: msec * int64(Millisecond)}
+}
+
+// UnixMicro returns the local Time corresponding to the given Unix time in microseconds.
+func UnixMicro(usec int64) Time {
+	return Time{unixNano: usec * int64(Microsecond)}
+}
+
+// UnixNano returns t as a Unix time, the number of nanoseconds elapsed since January 1, 1970 UTC.
+func (t Time) UnixNano() int64 { return t.unixNano }
+
+// Unix returns t as a Unix time, the number of seconds elapsed since January 1, 1970 UTC.
+func (t Time) Unix() int64 { return divFloor(t.unixNano, int64(Second)) }
+
+// UnixMilli returns t as a Unix time in milliseconds.
+func (t Time) UnixMilli() int64 { return divFloor(t.unixNano, int64(Millisecond)) }
+
+// UnixMicro returns t as a Unix time in microseconds.
+func (t Time) UnixMicro() int64 { return divFloor(t.unixNano, int64(Microsecond)) }
+
+// divFloor performs floor division (rounds toward negative infinity).
+func divFloor(a, b int64) int64 {
+	q := a / b
+	if (a^b) < 0 && q*b != a {
+		q--
+	}
+	return q
+}
+
+// MonoNano returns the monotonic component in nanoseconds.
+func (t Time) MonoNano() int64 { return t.monoNano }
+
+// Add returns the time t+d.
+func (t Time) Add(d Duration) Time {
+	mono := int64(0)
+	if t.monoNano != 0 {
+		mono = t.monoNano + int64(d)
+	}
+	return Time{unixNano: t.unixNano + int64(d), monoNano: mono}
+}
+
+// Sub returns the duration t-u.
+func (t Time) Sub(u Time) Duration {
+	if t.monoNano != 0 && u.monoNano != 0 {
+		return Duration(t.monoNano - u.monoNano)
+	}
+	return Duration(t.unixNano - u.unixNano)
+}
+
+// Before reports whether the time instant t is before u.
+func (t Time) Before(u Time) bool {
+	if t.monoNano != 0 && u.monoNano != 0 {
+		return t.monoNano < u.monoNano
+	}
+	return t.unixNano < u.unixNano
+}
+
+// After reports whether the time instant t is after u.
+func (t Time) After(u Time) bool {
+	if t.monoNano != 0 && u.monoNano != 0 {
+		return t.monoNano > u.monoNano
+	}
+	return t.unixNano > u.unixNano
+}
+
+// Equal reports whether t and u represent the same time instant.
+func (t Time) Equal(u Time) bool {
+	if t.monoNano != 0 && u.monoNano != 0 {
+		return t.monoNano == u.monoNano
+	}
+	return t.unixNano == u.unixNano
+}
+
+// IsZero reports whether t represents the zero time instant.
+func (t Time) IsZero() bool {
+	return t.unixNano == 0 && t.monoNano == 0
+}
+
+// Since returns the time elapsed since t.
+func Since(t Time) Duration {
+	return Now().Sub(t)
+}
+
+// Until returns the duration until t.
+func Until(t Time) Duration {
+	return t.Sub(Now())
+}
+
+// Sleep pauses the current goroutine for at least the duration d.
 func Sleep(d Duration) {
 	blocking_sleepNano(int64(d))
 }
@@ -40,3 +139,5 @@ func (d Duration) Nanoseconds() int64 { return int64(d) }
 func (d Duration) Microseconds() int64 { return int64(d / Microsecond) }
 func (d Duration) Milliseconds() int64 { return int64(d / Millisecond) }
 func (d Duration) Seconds() int64 { return int64(d / Second) }
+func (d Duration) Minutes() int64 { return int64(d / Minute) }
+func (d Duration) Hours() int64 { return int64(d / Hour) }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -11,11 +12,15 @@ func main() {
 	testCommandOutput()
 	testCommandRun()
 	testCombinedOutput()
+	testCombinedOutputOrder()
 	testCommandDir()
 	testCommandEnv()
 	testCommandString()
+	testInvalidEnvEntry()
 	testProcessState()
 	testStartWait()
+	testStdoutPipeRedirect()
+	testStdinPipeRedirect()
 	
 	fmt.Println("All exec tests passed!")
 }
@@ -104,6 +109,13 @@ func testCombinedOutput() {
 	assert(strings.Contains(string(output), "err"), "CombinedOutput contains err")
 }
 
+func testCombinedOutputOrder() {
+	cmd := exec.Command("sh", []string{"-c", "printf out1; printf err1 >&2; printf out2; printf err2 >&2"})
+	output, err := cmd.CombinedOutput()
+	assert(err == nil, "CombinedOutput order")
+	assert(string(output) == "out1err1out2err2", "CombinedOutput preserves write order")
+}
+
 func testCommandDir() {
 	// Set working directory
 	cmd := exec.Command("pwd", nil)
@@ -142,6 +154,20 @@ func testCommandString() {
 	assert(strings.Contains(s, "ls"), "String contains ls")
 	assert(strings.Contains(s, "-la"), "String contains -la")
 	assert(strings.Contains(s, "/tmp"), "String contains /tmp")
+}
+
+func testInvalidEnvEntry() {
+	// Go: env entries without '=' are silently ignored, not rejected
+	cmd := exec.Command("true", nil)
+	cmd.Env = []string{"MALFORMED_ENV_ENTRY"}
+	err := cmd.Start()
+	assert(err == nil, "Start should NOT fail for env entry without '=' (Go compat)")
+	cmd.Wait()
+
+	cmd = exec.Command("true", nil)
+	cmd.Env = []string{"ANOTHER_BAD_ENTRY", "VALID=yes"}
+	_, err = cmd.Output()
+	assert(err == nil, "Output should NOT fail for env entry without '=' (Go compat)")
 }
 
 func testProcessState() {
@@ -191,6 +217,64 @@ func testStartWait() {
 	cmd.Start()
 	err = cmd.Start()
 	assert(err != nil, "Double Start should error")
+}
+
+func testStdoutPipeRedirect() {
+	r, w, err := os.Pipe()
+	assert(err == nil, "os.Pipe for stdout redirect")
+
+	cmd := exec.Command("echo", []string{"pipe-out"})
+	cmd.Stdout = w
+	err = cmd.Start()
+	if err != nil {
+		panic("Start stdout redirect failed: " + err.Error())
+	}
+
+	// Parent should close writer after child starts.
+	w.Close()
+
+	err = cmd.Wait()
+	assert(err == nil, "Wait stdout redirect")
+
+	buf := make([]byte, 128)
+	n, err := r.Read(buf)
+	assert(err == nil, "Read stdout redirect")
+	r.Close()
+
+	assert(strings.TrimSpace(string(buf[:n])) == "pipe-out", "stdout redirect content")
+}
+
+func testStdinPipeRedirect() {
+	stdinR, stdinW, err := os.Pipe()
+	assert(err == nil, "os.Pipe for stdin redirect")
+	stdoutR, stdoutW, err := os.Pipe()
+	assert(err == nil, "os.Pipe for stdout capture")
+
+	cmd := exec.Command("cat", nil)
+	cmd.Stdin = stdinR
+	cmd.Stdout = stdoutW
+
+	err = cmd.Start()
+	if err != nil {
+		panic("Start stdin redirect failed: " + err.Error())
+	}
+
+	// Parent closes child-side descriptors and writes data into stdin pipe.
+	stdinR.Close()
+	stdoutW.Close()
+
+	_, err = stdinW.Write([]byte("from-stdin\n"))
+	assert(err == nil, "Write stdin redirect")
+	stdinW.Close()
+
+	buf := make([]byte, 128)
+	n, err := stdoutR.Read(buf)
+	assert(err == nil, "Read stdin redirect")
+	stdoutR.Close()
+
+	err = cmd.Wait()
+	assert(err == nil, "Wait stdin redirect")
+	assert(strings.TrimSpace(string(buf[:n])) == "from-stdin", "stdin redirect content")
 }
 
 func assert(cond bool, msg string) {

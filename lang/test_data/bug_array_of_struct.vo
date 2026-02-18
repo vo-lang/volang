@@ -1,5 +1,5 @@
-// BUG: Array of struct causes segfault
-// Minimal reproduction
+// Fixed: Array of struct zero-initialization
+// Regression test for stack array zero-init in codegen
 
 package main
 

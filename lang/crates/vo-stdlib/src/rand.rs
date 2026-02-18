@@ -185,7 +185,12 @@ mod read_impl {
         let buf_ref = call.arg_ref(slots::ARG_P);
         let len = slice::len(buf_ref);
         let buf_ptr = slice::data_ptr(buf_ref);
-        let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, len) };
+        if buf_ptr.is_null() && len > 0 {
+            call.ret_i64(slots::RET_0, 0);
+            write_nil_error(call, slots::RET_1);
+            return ExternResult::Ok;
+        }
+        let buf = if len == 0 { &mut [] as &mut [u8] } else { unsafe { std::slice::from_raw_parts_mut(buf_ptr, len) } };
         
         with_rng(|rng| {
             let mut i = 0;

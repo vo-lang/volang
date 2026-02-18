@@ -6,7 +6,7 @@
 #[cfg(feature = "std")]
 use std::fs::{self, File, OpenOptions};
 #[cfg(feature = "std")]
-use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(feature = "std")]
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 #[cfg(feature = "std")]
@@ -48,6 +48,16 @@ fn register_file(file: File) -> i32 {
     #[cfg(unix)]
     {
         let raw_fd = file.as_raw_fd();
+
+        let fd_flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) };
+        if fd_flags == -1 {
+            panic!("fcntl(F_GETFD) failed: {}", std::io::Error::last_os_error());
+        }
+        let ret = unsafe { libc::fcntl(raw_fd, libc::F_SETFD, fd_flags | libc::FD_CLOEXEC) };
+        if ret == -1 {
+            panic!("fcntl(F_SETFD) failed: {}", std::io::Error::last_os_error());
+        }
+
         let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
         if flags == -1 {
             panic!("fcntl(F_GETFL) failed: {}", std::io::Error::last_os_error());
@@ -69,6 +79,15 @@ fn register_file(file: File) -> i32 {
 #[cfg(feature = "std")]
 fn remove_file(fd: i32) -> Option<File> {
     FILE_HANDLES.lock().unwrap().remove(&fd)
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn raw_fd_from_handle(fd: i32) -> Option<i32> {
+    if fd == 0 || fd == 1 || fd == 2 {
+        return Some(fd);
+    }
+    let handles = FILE_HANDLES.lock().unwrap();
+    handles.get(&fd).map(|f| f.as_raw_fd())
 }
 
 #[cfg(feature = "std")]
@@ -198,7 +217,12 @@ fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
     let buf_ref = call.arg_ref(slots::ARG_B);
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
-    let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_len) };
+    if buf_ptr.is_null() && buf_len > 0 {
+        call.ret_i64(slots::RET_0, 0);
+        write_error_to(call, slots::RET_1, "invalid buffer pointer");
+        return ExternResult::Ok;
+    }
+    let buf = if buf_len == 0 { &mut [] as &mut [u8] } else { unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_len) } };
     
     if fd == 0 {
         match std::io::stdin().read(buf) {
@@ -727,10 +751,44 @@ fn os_clearenv(_call: &mut ExternCallContext) -> ExternResult {
 #[vostd_fn("os", "nativeExpandEnv", std)]
 fn os_expand_env(call: &mut ExternCallContext) -> ExternResult {
     let s = call.arg_str(slots::ARG_S);
-    let mut result = s.to_string();
-    for (key, value) in std::env::vars() {
-        result = result.replace(&format!("{{{{{}}}}}", key), &value);
-        result = result.replace(&format!("${}", key), &value);
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'$' && i + 1 < len {
+            if bytes[i + 1] == b'{' {
+                // ${VAR} form
+                if let Some(end) = s[i + 2..].find('}') {
+                    let name = &s[i + 2..i + 2 + end];
+                    result.push_str(&std::env::var(name).unwrap_or_default());
+                    i += 2 + end + 1;
+                } else {
+                    // Go: unterminated ${ → expand empty name (""), consume just the "${",
+                    // rest of string is literal. getenv("") = ""
+                    i += 2;
+                }
+            } else if bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_' {
+                // $VAR form: consume alphanumeric + underscore
+                let start = i + 1;
+                let mut end = start;
+                while end < len && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+                    end += 1;
+                }
+                let name = &s[start..end];
+                result.push_str(&std::env::var(name).unwrap_or_default());
+                i = end;
+            } else {
+                // Go: $x where x is not alpha/underscore/{: treat x as a single-char var name
+                // e.g., $$ → getenv("$"), $1 → getenv("1"), $- → getenv("-")
+                let name = &s[i + 1..i + 2];
+                result.push_str(&std::env::var(name).unwrap_or_default());
+                i += 2;
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
     }
     call.ret_str(slots::RET_0, &result);
     ExternResult::Ok
@@ -910,14 +968,14 @@ fn os_native_pipe(call: &mut ExternCallContext) -> ExternResult {
             let rfd = register_file(r_file);
             let wfd = register_file(w_file);
             
-            call.ret_i64(0, rfd as i64);
-            call.ret_i64(1, wfd as i64);
-            write_nil_error(call, 2);
+            call.ret_i64(slots::RET_0, rfd as i64);
+            call.ret_i64(slots::RET_1, wfd as i64);
+            write_nil_error(call, slots::RET_2);
         }
         Err(e) => {
-            call.ret_i64(0, -1);
-            call.ret_i64(1, -1);
-            write_error_to(call, 2, &e.to_string());
+            call.ret_i64(slots::RET_0, -1);
+            call.ret_i64(slots::RET_1, -1);
+            write_error_to(call, slots::RET_2, &e.to_string());
         }
     }
     ExternResult::Ok
@@ -941,7 +999,7 @@ fn os_native_chtimes(call: &mut ExternCallContext) -> ExternResult {
     let file = match File::options().write(true).open(&name) {
         Ok(f) => f,
         Err(e) => {
-            write_io_error(call, 0, e);
+            write_io_error(call, slots::RET_0, e);
             return ExternResult::Ok;
         }
     };
@@ -951,8 +1009,8 @@ fn os_native_chtimes(call: &mut ExternCallContext) -> ExternResult {
         .set_modified(mtime_systime);
     
     match file.set_times(times) {
-        Ok(_) => write_nil_error(call, 0),
-        Err(e) => write_io_error(call, 0, e),
+        Ok(_) => write_nil_error(call, slots::RET_0),
+        Err(e) => write_io_error(call, slots::RET_0, e),
     }
     ExternResult::Ok
 }
@@ -966,8 +1024,8 @@ fn os_native_find_process(call: &mut ExternCallContext) -> ExternResult {
     
     // Check if process exists by sending signal 0
     match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
-        Ok(_) => write_nil_error(call, 0),
-        Err(e) => write_error_to(call, 0, &e.to_string()),
+        Ok(_) => write_nil_error(call, slots::RET_0),
+        Err(e) => write_error_to(call, slots::RET_0, &e.to_string()),
     }
     ExternResult::Ok
 }
@@ -981,14 +1039,14 @@ fn os_native_kill_process(call: &mut ExternCallContext) -> ExternResult {
     let signal = match nix::sys::signal::Signal::try_from(sig) {
         Ok(s) => Some(s),
         Err(_) => {
-            write_error_to(call, 0, "invalid signal");
+            write_error_to(call, slots::RET_0, "invalid signal");
             return ExternResult::Ok;
         }
     };
     
     match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal) {
-        Ok(_) => write_nil_error(call, 0),
-        Err(e) => write_error_to(call, 0, &e.to_string()),
+        Ok(_) => write_nil_error(call, slots::RET_0),
+        Err(e) => write_error_to(call, slots::RET_0, &e.to_string()),
     }
     ExternResult::Ok
 }

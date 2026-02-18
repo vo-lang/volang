@@ -145,6 +145,12 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[vo_runtime::by
             #[cfg(unix)]
             "net_blocking_unixConnWrite" => registry.register(id, unix::net_unix_conn_write),
             #[cfg(unix)]
+            "net_unixConnSetDeadline" => registry.register(id, unix::net_unix_conn_set_deadline),
+            #[cfg(unix)]
+            "net_unixConnSetReadDeadline" => registry.register(id, unix::net_unix_conn_set_read_deadline),
+            #[cfg(unix)]
+            "net_unixConnSetWriteDeadline" => registry.register(id, unix::net_unix_conn_set_write_deadline),
+            #[cfg(unix)]
             "net_unixConnClose" => registry.register(id, unix::net_unix_conn_close),
             #[cfg(unix)]
             "net_blocking_unixListenerAccept" => registry.register(id, unix::net_unix_listener_accept),

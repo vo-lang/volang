@@ -510,9 +510,9 @@ func (c *UnixConn) Write(b []byte) (int, error) { return blocking_unixConnWrite(
 func (c *UnixConn) Close() error                { return unixConnClose(c.handle) }
 func (c *UnixConn) LocalAddr() Addr             { return &UnixAddr{Name: "", Net: "unix"} }
 func (c *UnixConn) RemoteAddr() Addr            { return &UnixAddr{Name: "", Net: "unix"} }
-func (c *UnixConn) SetDeadline(t time.Time) error      { return nil }
-func (c *UnixConn) SetReadDeadline(t time.Time) error  { return nil }
-func (c *UnixConn) SetWriteDeadline(t time.Time) error { return nil }
+func (c *UnixConn) SetDeadline(t time.Time) error      { return unixConnSetDeadline(c.handle, t.UnixNano()) }
+func (c *UnixConn) SetReadDeadline(t time.Time) error  { return unixConnSetReadDeadline(c.handle, t.UnixNano()) }
+func (c *UnixConn) SetWriteDeadline(t time.Time) error { return unixConnSetWriteDeadline(c.handle, t.UnixNano()) }
 
 // UnixListener is a Unix domain socket listener.
 type UnixListener struct {
@@ -999,6 +999,9 @@ func unixDial(address string) (int, error)
 func unixListen(address string) (int, error)
 func blocking_unixConnRead(handle int, b []byte) (int, error)
 func blocking_unixConnWrite(handle int, b []byte) (int, error)
+func unixConnSetDeadline(handle int, deadlineNs int64) error
+func unixConnSetReadDeadline(handle int, deadlineNs int64) error
+func unixConnSetWriteDeadline(handle int, deadlineNs int64) error
 func unixConnClose(handle int) error
 func blocking_unixListenerAccept(handle int) (int, error)
 func unixListenerClose(handle int) error
