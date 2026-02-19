@@ -95,9 +95,9 @@ pub enum SchedulingOutcome {
     /// All fibers blocked, no progress possible.
     /// Caller decides whether this is a deadlock or expected (e.g., trampoline context).
     Blocked,
-    /// All runnable fibers are done; some fibers are waiting for external callbacks.
-    /// The async run loop should await those callbacks then call wake_callback + resume.
-    SuspendedForCallbacks,
+    /// All runnable fibers are done; some fibers are waiting for host-side events.
+    /// The async run loop should await those events then call wake_host_event + resume.
+    SuspendedForHostEvents,
     /// A fiber panicked.
     Panicked,
 }

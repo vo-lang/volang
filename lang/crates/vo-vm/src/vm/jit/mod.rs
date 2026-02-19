@@ -599,7 +599,7 @@ pub extern "C" fn jit_call_extern(
     let fiber_inputs = ExternFiberInputs {
         fiber_opaque: ctx_ref.fiber,
         resume_io_token,
-        resume_callback_token: fiber.resume_callback_token.take(),
+        resume_host_event_token: fiber.resume_host_event_token.take(),
         replay_results: closure_replay_results,
         replay_panicked: closure_replay_panicked,
     };
@@ -635,8 +635,8 @@ pub extern "C" fn jit_call_extern(
             ctx_ref.wait_io_token = token;
             JitResult::WaitIo
         }
-        ExternResult::CallbackWait { .. } | ExternResult::CallbackWaitAndResume { .. } => {
-            // Exit JIT — VM will handle blocking for callback
+        ExternResult::HostEventWait { .. } | ExternResult::HostEventWaitAndReplay { .. } => {
+            // Exit JIT — VM will handle host event suspension
             JitResult::Replay
         }
         ExternResult::NotRegistered(_) => {

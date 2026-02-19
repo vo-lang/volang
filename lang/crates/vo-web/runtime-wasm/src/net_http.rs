@@ -1,7 +1,7 @@
 //! WASM net/http implementation via browser fetch API.
 //!
-//! Uses the W0 CallbackWaitAndResume mechanism:
-//! - First extern call: starts fetch, registers Promise, returns CallbackWaitAndResume
+//! Uses the HostEventWaitAndReplay mechanism:
+//! - First extern call: starts fetch, registers Promise, returns HostEventWaitAndReplay
 //! - After Promise resolves, result stored in FETCH_RESULTS
 //! - Re-invoked extern: reads result, writes return slots, returns Ok
 
@@ -203,7 +203,7 @@ fn read_string_slice(slice_ref: GcRef) -> Vec<String> {
 }
 
 fn wasm_http_native_request(call: &mut ExternCallContext) -> ExternResult {
-    if let Some(token) = call.take_resume_callback_token() {
+    if let Some(token) = call.take_resume_host_event_token() {
         let result = match take_fetch_result(token) {
             Some(r) => r,
             None => return ExternResult::Panic(format!("fetch result missing for token {}", token)),
@@ -238,7 +238,7 @@ fn wasm_http_native_request(call: &mut ExternCallContext) -> ExternResult {
         match build_fetch_promise(&method, &url, &headers, &body) {
             Ok(promise) => {
                 register_fetch_promise(token, promise);
-                ExternResult::CallbackWaitAndResume { token }
+                ExternResult::HostEventWaitAndReplay { token }
             }
             Err(e) => ExternResult::Panic(e),
         }

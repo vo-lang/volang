@@ -43,8 +43,8 @@ enum WaitResult {
     Done,
     /// All fibers blocked (potential deadlock).
     Blocked,
-    /// Some fibers waiting for external callbacks; async loop must handle them.
-    SuspendedForCallbacks,
+    /// Some fibers waiting for host-side events; async loop must handle them.
+    SuspendedForHostEvents,
     /// Island VM should return to its command loop.
     Break,
 }
@@ -301,7 +301,7 @@ impl Vm {
         }
     }
 
-    /// Like `run()` but returns `SuspendedForCallbacks` to caller instead of treating it as complete.
+    /// Like `run()` but returns `SuspendedForHostEvents` to caller instead of treating it as complete.
     /// Used by the WASM async entry point to handle timer/fetch suspension.
     pub fn run_resumable(&mut self) -> Result<SchedulingOutcome, VmError> {
         let module = self.module.as_ref().ok_or(VmError::NoEntryFunction)?;
@@ -323,7 +323,7 @@ impl Vm {
         Ok(outcome)
     }
 
-    /// Like `run_scheduled()` but returns `SuspendedForCallbacks` instead of treating it as complete.
+    /// Like `run_scheduled()` but returns `SuspendedForHostEvents` instead of treating it as complete.
     pub fn run_scheduled_resumable(&mut self) -> Result<SchedulingOutcome, VmError> {
         let outcome = self.run_scheduling_loop(None)?;
         if outcome == SchedulingOutcome::Blocked {
@@ -362,7 +362,7 @@ impl Vm {
                     WaitResult::Retry => continue,
                     WaitResult::Done => return Ok(SchedulingOutcome::Completed),
                     WaitResult::Blocked => return Ok(SchedulingOutcome::Blocked),
-                    WaitResult::SuspendedForCallbacks => return Ok(SchedulingOutcome::SuspendedForCallbacks),
+                    WaitResult::SuspendedForHostEvents => return Ok(SchedulingOutcome::SuspendedForHostEvents),
                     WaitResult::Break => break,
                 }
             }
@@ -448,18 +448,18 @@ impl Vm {
             return WaitResult::Retry;
         }
         
-        // If the only blocked fibers are callback waiters, signal the async loop.
-        if self.scheduler.has_callback_waiters() {
-            return WaitResult::SuspendedForCallbacks;
+        // If the only blocked fibers are host event waiters, signal the async loop.
+        if self.scheduler.has_host_event_waiters() {
+            return WaitResult::SuspendedForHostEvents;
         }
 
         WaitResult::Done
     }
 
-    /// Wake a fiber blocked on an external callback and schedule it to run.
-    /// Called by the WASM async run loop after a callback fires.
-    pub fn wake_callback(&mut self, token: u64) {
-        self.scheduler.wake_callback(token);
+    /// Wake a fiber blocked on a host-side event and schedule it to run.
+    /// Called by the WASM async run loop after a host event fires.
+    pub fn wake_host_event(&mut self, token: u64) {
+        self.scheduler.wake_host_event(token);
     }
 
     /// Handle a fiber execution result. Returns:
@@ -480,9 +480,9 @@ impl Vm {
                     crate::fiber::BlockReason::Queue => {
                         self.scheduler.block_for_queue();
                     }
-                    crate::fiber::BlockReason::Callback(_) |
-                    crate::fiber::BlockReason::CallbackResume(_) => {
-                        unreachable!("Callback blocked directly in run_resumable, not via ExecResult");
+                    crate::fiber::BlockReason::HostEvent(_) |
+                    crate::fiber::BlockReason::HostEventReplay(_) => {
+                        unreachable!("HostEvent blocked directly in scheduling loop, not via ExecResult");
                     }
                     #[cfg(feature = "std")]
                     crate::fiber::BlockReason::Io(token) => {
@@ -1133,7 +1133,7 @@ impl Vm {
                     let fiber_ptr = fiber as *mut crate::fiber::Fiber as *mut core::ffi::c_void;
                     #[cfg(feature = "std")]
                     let resume_io_token = fiber.resume_io_token.take();
-                    let resume_callback_token = fiber.resume_callback_token.take();
+                    let resume_host_event_token = fiber.resume_host_event_token.take();
                     let (closure_replay_results, closure_replay_panicked) = fiber.closure_replay.take_for_extern();
                     let invoke = ExternInvoke {
                         extern_id,
@@ -1157,7 +1157,7 @@ impl Vm {
                         fiber_opaque: fiber_ptr,
                         #[cfg(feature = "std")]
                         resume_io_token,
-                        resume_callback_token,
+                        resume_host_event_token,
                         replay_results: closure_replay_results,
                         replay_panicked: closure_replay_panicked,
                     };
@@ -1178,15 +1178,15 @@ impl Vm {
                         }
                         ExternResult::Yield => { return ExecResult::TimesliceExpired; }
                         ExternResult::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
-                        ExternResult::CallbackWait { token, delay_ms } => {
-                            self.scheduler.block_for_callback(token, delay_ms);
+                        ExternResult::HostEventWait { token, delay_ms } => {
+                            self.scheduler.block_for_host_event(token, delay_ms);
                             return ExecResult::TimesliceExpired;
                         }
-                        ExternResult::CallbackWaitAndResume { token } => {
+                        ExternResult::HostEventWaitAndReplay { token } => {
                             // Undo PC so extern replays on wake (like CallClosure)
                             let frame = fiber.current_frame_mut().unwrap();
                             frame.pc -= 1;
-                            self.scheduler.block_for_callback_resume(token);
+                            self.scheduler.block_for_host_event_replay(token);
                             return ExecResult::TimesliceExpired;
                         }
                         #[cfg(feature = "std")]

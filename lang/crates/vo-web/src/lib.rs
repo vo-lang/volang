@@ -249,52 +249,52 @@ async fn run_vm_async(bytecode: &[u8]) -> (String, String, String) {
         Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
     };
 
-    while outcome == SchedulingOutcome::SuspendedForCallbacks {
-        let callbacks = vm.scheduler.take_pending_callbacks();
-        if callbacks.is_empty() {
-            break;
+    'host_event_loop: while outcome == SchedulingOutcome::SuspendedForHostEvents {
+        // Drain all in-flight fetch Promises before processing timers.
+        // New fetches may spawn further fetches on resume, so loop until empty.
+        loop {
+            let fetches = vo_web_runtime_wasm::net_http::take_pending_fetch_promises();
+            if fetches.is_empty() { break; }
+            for (token, promise) in fetches {
+                outcome = match await_fetch(&mut vm, token, promise).await {
+                    Ok(o) => o,
+                    Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
+                };
+                if outcome != SchedulingOutcome::SuspendedForHostEvents { break 'host_event_loop; }
+            }
         }
 
-        // Process resume-style callbacks (fetch Promises) first.
-        let fetch_promises = vo_web_runtime_wasm::net_http::take_pending_fetch_promises();
-        for (token, promise) in fetch_promises {
-            outcome = match await_fetch(&mut vm, token, promise).await {
-                Ok(o) => o,
-                Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
-            };
-            if outcome != SchedulingOutcome::SuspendedForCallbacks { break; }
-        }
-        if outcome != SchedulingOutcome::SuspendedForCallbacks { break; }
-
-        // Process timer callbacks in chronological order.
-        let mut timer_callbacks: Vec<_> = callbacks.into_iter()
-            .filter(|c| !c.resume)
+        // Snapshot pending timer events after fetches are drained.
+        // Use real wall-clock time (batch_start_ms) as t=0 so that VM execution
+        // time between timer wakes is accounted for in each remaining computation.
+        let mut timer_events: Vec<_> = vm.scheduler.take_pending_host_events()
+            .into_iter()
+            .filter(|e| !e.replay)
             .collect();
-        timer_callbacks.sort_unstable_by_key(|c| c.delay_ms);
-        let mut elapsed_ms: u32 = 0;
-        for cb in timer_callbacks {
-            let remaining = cb.delay_ms.saturating_sub(elapsed_ms);
+        if timer_events.is_empty() { break; }
+        timer_events.sort_unstable_by_key(|e| e.delay_ms);
+        let batch_start_ms = js_now_ms();
+        for ev in timer_events {
+            let elapsed = js_now_ms() - batch_start_ms;
+            let remaining = ((ev.delay_ms as f64) - elapsed).ceil().max(0.0) as u32;
             if remaining > 0 {
                 wasm_callback_sleep_ms(remaining).await;
-                elapsed_ms = elapsed_ms.saturating_add(remaining);
             }
-            vm.wake_callback(cb.token);
+            vm.wake_host_event(ev.token);
             outcome = match vm.run_scheduled_resumable() {
                 Ok(o) => o,
                 Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
             };
-            if outcome != SchedulingOutcome::SuspendedForCallbacks { break; }
+            if outcome != SchedulingOutcome::SuspendedForHostEvents { break 'host_event_loop; }
 
-            // Drain any fetch Promises spawned during this timer wake.
-            let new_fetches = vo_web_runtime_wasm::net_http::take_pending_fetch_promises();
-            for (ft, fp) in new_fetches {
+            // Drain fetches spawned by this timer wake before firing the next timer.
+            for (ft, fp) in vo_web_runtime_wasm::net_http::take_pending_fetch_promises() {
                 outcome = match await_fetch(&mut vm, ft, fp).await {
                     Ok(o) => o,
                     Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
                 };
-                if outcome != SchedulingOutcome::SuspendedForCallbacks { break; }
+                if outcome != SchedulingOutcome::SuspendedForHostEvents { break 'host_event_loop; }
             }
-            if outcome != SchedulingOutcome::SuspendedForCallbacks { break; }
         }
     }
 
@@ -320,7 +320,7 @@ async fn await_fetch(
         },
     };
     vo_web_runtime_wasm::net_http::store_fetch_result(token, fetch_result);
-    vm.wake_callback(token);
+    vm.wake_host_event(token);
     vm.run_scheduled_resumable()
 }
 

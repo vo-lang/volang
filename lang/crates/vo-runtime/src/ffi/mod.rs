@@ -111,14 +111,14 @@ pub enum ExternResult {
     /// Wait for I/O completion.
     #[cfg(feature = "std")]
     WaitIo { token: IoToken },
-    /// Block current fiber until an external callback wakes it.
+    /// Block current fiber until a host-side event wakes it.
     /// `token` is an opaque ID; the runtime maps token → fiber.
     /// `delay_ms` is a hint to the platform (e.g. setTimeout ms); 0 = no hint.
-    CallbackWait { token: u64, delay_ms: u32 },
-    /// Like `CallbackWait` but also re-invokes the extern after the fiber wakes
-    /// (PC is undone). On re-invocation, `take_resume_callback_token()` returns `token`.
+    HostEventWait { token: u64, delay_ms: u32 },
+    /// Like `HostEventWait` but also re-invokes the extern after the fiber wakes
+    /// (PC is undone). On re-invocation, `take_resume_host_event_token()` returns `token`.
     /// Use for async ops that produce return values (e.g. fetch).
-    CallbackWaitAndResume { token: u64 },
+    HostEventWaitAndReplay { token: u64 },
     /// Panic with error message.
     Panic(String),
     /// Extern function not registered.
@@ -278,9 +278,9 @@ pub struct ExternCallContext<'a> {
     /// consume the completion for this token instead of submitting a new op.
     #[cfg(feature = "std")]
     resume_io_token: Option<IoToken>,
-    /// Callback token that woke this fiber. Present on the PC re-execution path
-    /// after `CallbackWaitAndResume`. Extern must consume via `take_resume_callback_token()`.
-    resume_callback_token: Option<u64>,
+    /// Host event token that woke this fiber. Present on the PC re-execution path
+    /// after `HostEventWaitAndReplay`. Extern must consume via `take_resume_host_event_token()`.
+    resume_host_event_token: Option<u64>,
     /// Cached closure results from previous CallClosure suspends.
     /// Consumed in order via replay_index.
     replay_results: Vec<Vec<u64>>,
@@ -324,7 +324,7 @@ impl<'a> ExternCallContext<'a> {
             io: world.io,
             #[cfg(feature = "std")]
             resume_io_token: fiber_inputs.resume_io_token,
-            resume_callback_token: fiber_inputs.resume_callback_token,
+            resume_host_event_token: fiber_inputs.resume_host_event_token,
             replay_results: fiber_inputs.replay_results,
             replay_index: 0,
             replay_panicked: fiber_inputs.replay_panicked,
@@ -515,11 +515,11 @@ impl<'a> ExternCallContext<'a> {
         self.resume_io_token.take()
     }
 
-    /// Take the callback token that woke this fiber on the `CallbackWaitAndResume` path.
+    /// Take the host event token that woke this fiber on the `HostEventWaitAndReplay` path.
     /// Returns `Some(token)` on re-invocation, `None` on first invocation.
     #[inline]
-    pub fn take_resume_callback_token(&mut self) -> Option<u64> {
-        self.resume_callback_token.take()
+    pub fn take_resume_host_event_token(&mut self) -> Option<u64> {
+        self.resume_host_event_token.take()
     }
 
     /// Peek at the resume I/O token without consuming it.

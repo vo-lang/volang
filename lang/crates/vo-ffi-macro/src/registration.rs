@@ -156,9 +156,9 @@ fn generate_ext_trampoline(
                     ctx_ref.set_ext_wait_io(token);
                     vo_runtime::ffi::ext_abi::RESULT_WAIT_IO
                 }
-                Ok(vo_runtime::ffi::ExternResult::CallbackWait { .. }) |
-                Ok(vo_runtime::ffi::ExternResult::CallbackWaitAndResume { .. }) => {
-                    ctx_ref.set_ext_panic(std::string::String::from("CallbackWait not supported in extension trampoline"));
+                Ok(vo_runtime::ffi::ExternResult::HostEventWait { .. }) |
+                Ok(vo_runtime::ffi::ExternResult::HostEventWaitAndReplay { .. }) => {
+                    ctx_ref.set_ext_panic(std::string::String::from("HostEventWait not supported in extension trampoline"));
                     vo_runtime::ffi::ext_abi::RESULT_PANIC
                 }
                 Err(panic_payload) => {

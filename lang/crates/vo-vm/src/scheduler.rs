@@ -35,21 +35,21 @@ impl FiberId {
     }
 }
 
-/// Internal state for a fiber waiting on an external callback.
+/// Internal state for a fiber waiting on a host-side event.
 #[derive(Debug)]
-struct CallbackWaiter {
+struct HostEventWaiter {
     token: u64,
     delay_ms: u32,
-    resume: bool,
+    replay: bool,
     fiber_id: FiberId,
 }
 
-/// Public view of a pending callback for the async run loop.
+/// Public view of a pending host event for the async run loop.
 #[derive(Debug, Clone)]
-pub struct PendingCallback {
+pub struct PendingHostEvent {
     pub token: u64,
     pub delay_ms: u32,
-    pub resume: bool,
+    pub replay: bool,
 }
 
 #[derive(Debug)]
@@ -68,8 +68,8 @@ pub struct Scheduler {
     #[cfg(feature = "std")]
     io_waiters: HashMap<IoToken, FiberId>,
 
-    /// Fibers waiting for external callbacks (timers, fetch Promises).
-    callback_waiters: Vec<CallbackWaiter>,
+    /// Fibers waiting for host-side events (timers, fetch Promises).
+    host_event_waiters: Vec<HostEventWaiter>,
 }
 
 impl Scheduler {
@@ -82,7 +82,7 @@ impl Scheduler {
             blocked_count: 0,
             #[cfg(feature = "std")]
             io_waiters: HashMap::new(),
-            callback_waiters: Vec::new(),
+            host_event_waiters: Vec::new(),
         }
     }
 
@@ -215,55 +215,55 @@ impl Scheduler {
         self.blocked_count > 0
     }
 
-    /// Block current fiber waiting for a callback timer (e.g. setTimeout).
-    /// Running -> Blocked(Callback(token)).
-    pub fn block_for_callback(&mut self, token: u64, delay_ms: u32) {
+    /// Block current fiber waiting for a host-side event (e.g. setTimeout).
+    /// Running -> Blocked(HostEvent(token)).
+    pub fn block_for_host_event(&mut self, token: u64, delay_ms: u32) {
         if let Some(id) = self.current.take() {
             let fiber = &mut self.fibers[id.0 as usize];
-            fiber.state = FiberState::Blocked(BlockReason::Callback(token));
+            fiber.state = FiberState::Blocked(BlockReason::HostEvent(token));
             self.blocked_count += 1;
-            self.callback_waiters.push(CallbackWaiter { token, delay_ms, resume: false, fiber_id: id });
+            self.host_event_waiters.push(HostEventWaiter { token, delay_ms, replay: false, fiber_id: id });
         }
     }
 
-    /// Block current fiber waiting for an async result (e.g. fetch Promise).
+    /// Block current fiber waiting for a host-side async op result (e.g. fetch Promise).
     /// The extern's PC was already undone; on wake the extern re-executes.
-    /// Running -> Blocked(CallbackResume(token)).
-    pub fn block_for_callback_resume(&mut self, token: u64) {
+    /// Running -> Blocked(HostEventReplay(token)).
+    pub fn block_for_host_event_replay(&mut self, token: u64) {
         if let Some(id) = self.current.take() {
             let fiber = &mut self.fibers[id.0 as usize];
-            fiber.state = FiberState::Blocked(BlockReason::CallbackResume(token));
+            fiber.state = FiberState::Blocked(BlockReason::HostEventReplay(token));
             self.blocked_count += 1;
-            self.callback_waiters.push(CallbackWaiter { token, delay_ms: 0, resume: true, fiber_id: id });
+            self.host_event_waiters.push(HostEventWaiter { token, delay_ms: 0, replay: true, fiber_id: id });
         }
     }
 
-    /// Wake the fiber waiting for the given callback token.
-    /// For resume-style callbacks, sets `resume_callback_token` on the fiber
+    /// Wake the fiber waiting for the given host event token.
+    /// For replay-style events, sets `resume_host_event_token` on the fiber
     /// so the extern knows it is being re-invoked.
-    pub fn wake_callback(&mut self, token: u64) {
-        if let Some(pos) = self.callback_waiters.iter().position(|w| w.token == token) {
-            let waiter = self.callback_waiters.remove(pos);
-            if waiter.resume {
-                self.fibers[waiter.fiber_id.0 as usize].resume_callback_token = Some(token);
+    pub fn wake_host_event(&mut self, token: u64) {
+        if let Some(pos) = self.host_event_waiters.iter().position(|w| w.token == token) {
+            let waiter = self.host_event_waiters.remove(pos);
+            if waiter.replay {
+                self.fibers[waiter.fiber_id.0 as usize].resume_host_event_token = Some(token);
             }
             self.wake_fiber(waiter.fiber_id);
         }
     }
 
-    /// Return all pending callback waiters for the async run loop.
-    /// Entries remain in the list until individually consumed by `wake_callback`.
-    pub fn take_pending_callbacks(&mut self) -> Vec<PendingCallback> {
-        self.callback_waiters.iter().map(|w| PendingCallback {
+    /// Return all pending host event waiters for the async run loop.
+    /// Entries remain in the list until individually consumed by `wake_host_event`.
+    pub fn take_pending_host_events(&mut self) -> Vec<PendingHostEvent> {
+        self.host_event_waiters.iter().map(|w| PendingHostEvent {
             token: w.token,
             delay_ms: w.delay_ms,
-            resume: w.resume,
+            replay: w.replay,
         }).collect()
     }
 
-    /// Check if there are fibers waiting for external callbacks.
-    pub fn has_callback_waiters(&self) -> bool {
-        !self.callback_waiters.is_empty()
+    /// Check if there are fibers waiting for host-side events.
+    pub fn has_host_event_waiters(&self) -> bool {
+        !self.host_event_waiters.is_empty()
     }
     
     /// Current fiber blocks on I/O.

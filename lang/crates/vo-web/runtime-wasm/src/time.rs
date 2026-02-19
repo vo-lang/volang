@@ -98,7 +98,7 @@ fn timesys_SleepNano(call: &mut ExternCallContext) -> ExternResult {
     let ns = call.arg_i64(0);
     let ms = ((ns as f64) / 1_000_000.0).ceil().max(0.0) as u32;
     let token = next_callback_token();
-    ExternResult::CallbackWait { token, delay_ms: ms }
+    ExternResult::HostEventWait { token, delay_ms: ms }
 }
 
 // --- Timezone implementations via JS Intl API (W1) ---
