@@ -99,9 +99,8 @@ fn write_io_error(call: &mut ExternCallContext, ret_slot: u16, err: std::io::Err
     };
     
     if let Some(k) = kind {
-        let (slot0, slot1) = net_sentinel_error(call, k);
-        call.ret_u64(ret_slot, slot0);
-        call.ret_u64(ret_slot + 1, slot1);
+        let pair = net_sentinel_error(call, k);
+        call.ret_interface_pair(ret_slot, pair);
     } else {
         write_error_to(call, ret_slot, &err.to_string());
     }

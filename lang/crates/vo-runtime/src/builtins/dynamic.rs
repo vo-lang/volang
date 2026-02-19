@@ -1000,9 +1000,8 @@ fn call_return_error(
         call.ret_u64(i, 0);
     }
     let (cause0, cause1) = dyn_sentinel_error(call, err.into());
-    let (slot0, slot1) = create_error_with_cause(call, msg, cause0, cause1);
-    call.ret_u64(error_offset, slot0);
-    call.ret_u64(error_offset + 1, slot1);
+    let pair = create_error_with_cause(call, msg, cause0, cause1);
+    call.ret_interface_pair(error_offset, pair);
     ExternResult::Ok
 }
 
@@ -1349,8 +1348,7 @@ fn pack_returns(
         
         if is_any {
             let boxed = call.box_to_interface(actual_rttid, actual_vk, raw_slots);
-            call.ret_u64(dst_off, boxed.slot0);
-            call.ret_u64(dst_off + 1, boxed.slot1);
+            call.ret_any(dst_off, boxed);
         } else if (expected_vk == ValueKind::Struct || expected_vk == ValueKind::Array) && actual_width > 2 {
             let new_ref = call.alloc_and_copy_slots(raw_slots);
             call.ret_u64(dst_off, 0);
@@ -1560,8 +1558,7 @@ fn do_call_via_protocol(
         for i in 0..error_offset {
             call.ret_u64(i, 0);
         }
-        call.ret_u64(error_offset, ret[2]);
-        call.ret_u64(error_offset + 1, ret[3]);
+        call.ret_interface_pair(error_offset, (ret[2], ret[3]));
         return ExternResult::Ok;
     }
     

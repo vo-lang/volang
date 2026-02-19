@@ -619,10 +619,8 @@ fn errors_impl(parsed: VoErrorsInput) -> syn::Result<TokenStream2> {
                 .get(#pkg_str)
                 .expect(concat!("sentinel error init failed for '", #pkg_str, "' - well_known not available"))
                 .to_vec();
-            for (i, (slot0, slot1)) in errors_vec.iter().copied().enumerate() {
-                let idx = i * 2;
-                call.ret_u64(idx as u16, slot0);
-                call.ret_u64((idx + 1) as u16, slot1);
+            for (i, pair) in errors_vec.iter().copied().enumerate() {
+                call.ret_interface_pair((i * 2) as u16, pair);
             }
             vo_runtime::ffi::ExternResult::Ok
         }

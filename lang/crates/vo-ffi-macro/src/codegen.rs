@@ -175,7 +175,7 @@ impl SlotType {
             Self::Bool => quote! { call.ret_bool(#slot, false); },
             Self::OwnedString => quote! { call.ret_str(#slot, ""); },
             Self::GcRef => quote! { call.ret_u64(#slot, 0); },
-            Self::Any | Self::Error => quote! { call.ret_u64(#slot, 0); call.ret_u64(#slot + 1, 0); },
+            Self::Any | Self::Error => quote! { call.ret_nil_error(#slot); },
             Self::VecU8 | Self::VecString => quote! { call.ret_u64(#slot, 0); },
             Self::Str | Self::Bytes => unreachable!("arg-only types"),
         }
