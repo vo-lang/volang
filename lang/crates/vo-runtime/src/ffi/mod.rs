@@ -701,6 +701,14 @@ impl<'a> ExternCallContext<'a> {
         self.ret_any(n, val);
     }
 
+    /// Write a pre-packed interface pair (slot0, slot1) at return slot n.
+    /// Used for sentinel errors returned as raw (u64, u64) from cache lookups.
+    #[inline]
+    pub fn ret_interface_pair(&mut self, n: u16, pair: (u64, u64)) {
+        self.ret_u64(n, pair.0);
+        self.ret_u64(n + 1, pair.1);
+    }
+
     /// Write a nil error (no error).
     #[inline]
     pub fn ret_nil_error(&mut self, n: u16) {

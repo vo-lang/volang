@@ -50,6 +50,9 @@ func nativeWrite(s string)
 func nativeSprint(a []interface{}) string
 func nativeSprintln(a []interface{}) string
 func nativeSprintf(format string, a []interface{}) string
+func nativeSscan(str string) []any
+func nativeSscanf(str string, format string) ([]any, error)
+func nativeReadLine() (string, error)
 
 // Print formats using the default formats and writes to standard output.
 // Returns the number of bytes written.
@@ -115,4 +118,94 @@ func Fprintf(w io.Writer, format string, a ...interface{}) (int, error) {
 // Errorf formats according to a format specifier and returns the string as an error.
 func Errorf(format string, a ...interface{}) error {
 	return errors.New(nativeSprintf(format, a))
+}
+
+// ==================== Scan Family ====================
+//
+// Vo adaptation: Go's Scan functions take pointer args (&x) to write into.
+// Since Vo has no pointer-to-primitive types, scan functions return []any
+// with typed values: %d→int, %f→float64, %s→string, %t→bool, %c→int(rune).
+
+// Sscan splits str by whitespace and returns tokens as string values in []any.
+func Sscan(str string) []any {
+	return nativeSscan(str)
+}
+
+// Sscanln splits the first line of str by whitespace and returns tokens as string values.
+func Sscanln(str string) []any {
+	idx := -1
+	for i := 0; i < len(str); i++ {
+		if str[i] == '\n' {
+			idx = i
+			break
+		}
+	}
+	if idx >= 0 {
+		str = str[:idx]
+	}
+	return nativeSscan(str)
+}
+
+// Sscanf scans str according to the format string, returning typed values as []any.
+// Format verbs: %d→int, %f→float64, %s→string, %t→bool, %c→int(rune),
+// %x→int(hex), %o→int(octal), %b→int(binary), %v→string.
+func Sscanf(str string, format string) ([]any, error) {
+	return nativeSscanf(str, format)
+}
+
+// Fscan reads space-separated tokens from r and returns them as string values.
+func Fscan(r io.Reader) ([]any, error) {
+	buf := make([]byte, 4096)
+	n, err := r.Read(buf)
+	if n == 0 && err != nil {
+		return nil, err
+	}
+	return nativeSscan(string(buf[:n])), nil
+}
+
+// Fscanf reads from r and scans according to format, returning typed values.
+func Fscanf(r io.Reader, format string) ([]any, error) {
+	buf := make([]byte, 4096)
+	n, err := r.Read(buf)
+	if n == 0 && err != nil {
+		return nil, err
+	}
+	return nativeSscanf(string(buf[:n]), format)
+}
+
+// Fscanln reads from r until newline and returns space-separated tokens.
+func Fscanln(r io.Reader) ([]any, error) {
+	buf := make([]byte, 4096)
+	n, err := r.Read(buf)
+	if n == 0 && err != nil {
+		return nil, err
+	}
+	return Sscanln(string(buf[:n])), nil
+}
+
+// Scan reads space-separated tokens from standard input.
+func Scan() ([]any, error) {
+	line, err := nativeReadLine()
+	if err != nil {
+		return nil, err
+	}
+	return nativeSscan(line), nil
+}
+
+// Scanf reads from standard input according to the format string.
+func Scanf(format string) ([]any, error) {
+	line, err := nativeReadLine()
+	if err != nil {
+		return nil, err
+	}
+	return nativeSscanf(line, format)
+}
+
+// Scanln reads space-separated tokens from standard input until newline.
+func Scanln() ([]any, error) {
+	line, err := nativeReadLine()
+	if err != nil {
+		return nil, err
+	}
+	return Sscanln(line), nil
 }

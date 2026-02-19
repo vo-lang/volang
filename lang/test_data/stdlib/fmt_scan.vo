@@ -1,0 +1,118 @@
+package main
+
+import "fmt"
+
+func testSscan() {
+	vals := fmt.Sscan("hello world 42")
+	assert(len(vals) == 3, "Sscan should return 3 tokens")
+	assert(vals[0].(string) == "hello", "Sscan token 0")
+	assert(vals[1].(string) == "world", "Sscan token 1")
+	assert(vals[2].(string) == "42", "Sscan token 2")
+
+	// Empty string
+	vals = fmt.Sscan("")
+	assert(len(vals) == 0, "Sscan empty should return 0 tokens")
+
+	// Multiple spaces
+	vals = fmt.Sscan("  a   b  ")
+	assert(len(vals) == 2, "Sscan with extra spaces should return 2 tokens")
+	assert(vals[0].(string) == "a", "Sscan extra spaces token 0")
+	assert(vals[1].(string) == "b", "Sscan extra spaces token 1")
+}
+
+func testSscanln() {
+	vals := fmt.Sscanln("hello world\nignored")
+	assert(len(vals) == 2, "Sscanln should return 2 tokens (before newline)")
+	assert(vals[0].(string) == "hello", "Sscanln token 0")
+	assert(vals[1].(string) == "world", "Sscanln token 1")
+
+	// No newline
+	vals = fmt.Sscanln("abc def")
+	assert(len(vals) == 2, "Sscanln without newline should return 2 tokens")
+}
+
+func testSscanfIntegers() {
+	vals, err := fmt.Sscanf("42 -7 100", "%d %d %d")
+	assert(err == nil, "Sscanf integers should not error")
+	assert(len(vals) == 3, "Sscanf should return 3 values")
+	assert(vals[0].(int) == 42, "Sscanf int 0")
+	assert(vals[1].(int) == -7, "Sscanf int 1")
+	assert(vals[2].(int) == 100, "Sscanf int 2")
+}
+
+func testSscanfMixed() {
+	vals, err := fmt.Sscanf("hello 42 3.14 true", "%s %d %f %t")
+	assert(err == nil, "Sscanf mixed should not error")
+	assert(len(vals) == 4, "Sscanf mixed should return 4 values")
+	assert(vals[0].(string) == "hello", "Sscanf string")
+	assert(vals[1].(int) == 42, "Sscanf int")
+
+	f := vals[2].(float64)
+	assert(f > 3.13 && f < 3.15, "Sscanf float64")
+	assert(vals[3].(bool) == true, "Sscanf bool")
+}
+
+func testSscanfHex() {
+	vals, err := fmt.Sscanf("0xff 0xA0", "%x %x")
+	assert(err == nil, "Sscanf hex should not error")
+	assert(len(vals) == 2, "Sscanf hex should return 2 values")
+	assert(vals[0].(int) == 255, "Sscanf hex 0xff")
+	assert(vals[1].(int) == 160, "Sscanf hex 0xA0")
+}
+
+func testSscanfOctal() {
+	vals, err := fmt.Sscanf("077 010", "%o %o")
+	assert(err == nil, "Sscanf octal should not error")
+	assert(len(vals) == 2, "Sscanf octal should return 2 values")
+	assert(vals[0].(int) == 63, "Sscanf octal 077")
+	assert(vals[1].(int) == 8, "Sscanf octal 010")
+}
+
+func testSscanfBinary() {
+	vals, err := fmt.Sscanf("0b1010 0B11", "%b %b")
+	assert(err == nil, "Sscanf binary should not error")
+	assert(len(vals) == 2, "Sscanf binary should return 2 values")
+	assert(vals[0].(int) == 10, "Sscanf binary 0b1010")
+	assert(vals[1].(int) == 3, "Sscanf binary 0B11")
+}
+
+func testSscanfChar() {
+	vals, err := fmt.Sscanf("A", "%c")
+	assert(err == nil, "Sscanf char should not error")
+	assert(len(vals) == 1, "Sscanf char should return 1 value")
+	assert(vals[0].(int) == 65, "Sscanf char 'A'")
+}
+
+func testSscanfLiterals() {
+	vals, err := fmt.Sscanf("x=42,y=7", "x=%d,y=%d")
+	assert(err == nil, "Sscanf with literals should not error")
+	assert(len(vals) == 2, "Sscanf with literals should return 2 values")
+	assert(vals[0].(int) == 42, "Sscanf literal x")
+	assert(vals[1].(int) == 7, "Sscanf literal y")
+}
+
+func testSscanfError() {
+	_, err := fmt.Sscanf("abc", "%d")
+	assert(err != nil, "Sscanf should error on non-integer input for %d")
+}
+
+func testSscanfPercentLiteral() {
+	vals, err := fmt.Sscanf("100%done", "%d%%done")
+	assert(err == nil, "Sscanf %% should not error")
+	assert(vals[0].(int) == 100, "Sscanf %% value")
+}
+
+func main() {
+	testSscan()
+	testSscanln()
+	testSscanfIntegers()
+	testSscanfMixed()
+	testSscanfHex()
+	testSscanfOctal()
+	testSscanfBinary()
+	testSscanfChar()
+	testSscanfLiterals()
+	testSscanfError()
+	testSscanfPercentLiteral()
+	fmt.Println("PASS: fmt_scan")
+}

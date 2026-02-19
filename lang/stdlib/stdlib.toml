@@ -35,6 +35,7 @@ os = { path = "os" }
 time = { path = "time" }
 net = { path = "net" }
 "net/url" = { path = "net/url" }
+"net/http" = { path = "net/http" }
 "math/rand" = { path = "math/rand" }
 "path/filepath" = { path = "path/filepath" }
 "os/exec" = { path = "os/exec" }

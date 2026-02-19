@@ -11,7 +11,8 @@ use alloc::vec::Vec;
 
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::{channel, queue_state};
-use vo_runtime::objects::queue_state::{ChannelMessage, ChannelState, ChannelWaiter, SelectWaiter};
+use vo_runtime::objects::channel::{RecvResult, SendResult};
+use vo_runtime::objects::queue_state::{ChannelMessage, ChannelWaiter, SelectWaiter};
 use vo_runtime::slot::Slot;
 
 use crate::fiber::{Fiber, SelectCase, SelectCaseKind, SelectState};
@@ -30,6 +31,8 @@ pub enum SelectResult {
     Block,
     /// Send on closed channel - triggers panic.
     SendOnClosed,
+    /// A waiter was woken by an immediate send or recv case.
+    Wake(ChannelWaiter),
 }
 
 /// Initialize a new select statement.
@@ -154,7 +157,10 @@ fn find_ready_case(stack: *const Slot, bp: usize, state: &SelectState) -> ReadyC
 
         let is_ready = match case.kind {
             SelectCaseKind::Send => {
-                !chan_state.waiting_receivers.is_empty() || chan_state.buffer.len() < cap
+                // Closed channel is always "ready" — execute_send_case will return SendOnClosed.
+                chan_state.closed
+                    || !chan_state.waiting_receivers.is_empty()
+                    || chan_state.buffer.len() < cap
             }
             SelectCaseKind::Recv => {
                 !chan_state.buffer.is_empty() || !chan_state.waiting_senders.is_empty() || chan_state.closed
@@ -210,18 +216,56 @@ fn complete_woken_case(
 
     // For recv cases, read data from channel buffer
     let case = &state.cases[idx];
-    if case.kind == SelectCaseKind::Recv {
+    let wake = if case.kind == SelectCaseKind::Recv {
         let ch = stack_get(stack, bp + case.chan_reg as usize) as GcRef;
         if !ch.is_null() {
+            let val_reg = case.val_reg;
+            let elem_slots = case.elem_slots as usize;
+            let has_ok = case.has_ok;
             let chan_state = channel::get_state(ch);
-            recv_to_stack(stack, bp, case.val_reg, case.elem_slots as usize, case.has_ok, chan_state);
+            let (result, value) = chan_state.try_recv();
+            let dst_start = bp + val_reg as usize;
+            match value {
+                Some(val) => {
+                    for (i, &v) in val.iter().enumerate().take(elem_slots) {
+                        stack_set(stack, dst_start + i, v);
+                    }
+                    if has_ok {
+                        stack_set(stack, dst_start + elem_slots, 1);
+                    }
+                }
+                None => {
+                    for i in 0..elem_slots {
+                        stack_set(stack, dst_start + i, 0);
+                    }
+                    if has_ok {
+                        stack_set(stack, dst_start + elem_slots, 0);
+                    }
+                }
+            }
+            match result {
+                RecvResult::Success(Some(sender)) => Some(sender),
+                RecvResult::Success(None) | RecvResult::Closed => None,
+                RecvResult::WouldBlock | RecvResult::Blocked => {
+                    unreachable!("complete_woken_case recv: channel was woken but try_recv would block")
+                }
+            }
+        } else {
+            None
         }
-    }
-    // For send cases: the receiver already consumed our value from the waiter queue
+    } else {
+        // For send cases: the receiver already consumed our value from the waiter queue
+        None
+    };
 
     stack_set(stack, bp + result_reg as usize, idx as u64);
     *select_state = None;
-    SelectResult::Continue
+
+    if let Some(sender) = wake {
+        SelectResult::Wake(sender)
+    } else {
+        SelectResult::Continue
+    }
 }
 
 fn execute_send_case(
@@ -234,21 +278,33 @@ fn execute_send_case(
     val_reg: u16,
     select_state: &mut Option<SelectState>,
 ) -> SelectResult {
+    let cap = queue_state::capacity(ch);
     let chan_state = channel::get_state(ch);
 
-    if chan_state.closed {
-        *select_state = None;
-        return SelectResult::SendOnClosed;
-    }
-
-    // Read value and push to buffer
     let val_start = bp + val_reg as usize;
     let value: ChannelMessage = (0..elem_slots).map(|i| stack_get(stack, val_start + i)).collect();
-    chan_state.buffer.push_back(value);
 
-    stack_set(stack, bp + result_reg as usize, idx as u64);
-    *select_state = None;
-    SelectResult::Continue
+    // Use try_send so that waiting receivers are properly woken.
+    // Direct buffer push would leave waiting receivers blocked forever.
+    match chan_state.try_send(value, cap) {
+        SendResult::DirectSend(receiver) => {
+            stack_set(stack, bp + result_reg as usize, idx as u64);
+            *select_state = None;
+            SelectResult::Wake(receiver)
+        }
+        SendResult::Buffered => {
+            stack_set(stack, bp + result_reg as usize, idx as u64);
+            *select_state = None;
+            SelectResult::Continue
+        }
+        SendResult::Closed => {
+            *select_state = None;
+            SelectResult::SendOnClosed
+        }
+        SendResult::WouldBlock(_) | SendResult::Blocked => {
+            unreachable!("execute_send_case: case was marked ready but try_send would block")
+        }
+    }
 }
 
 fn execute_recv_case(
@@ -263,58 +319,41 @@ fn execute_recv_case(
     select_state: &mut Option<SelectState>,
 ) -> SelectResult {
     let chan_state = channel::get_state(ch);
-
-    // Try to receive: buffer first, then waiting senders, then closed
-    if !recv_to_stack(stack, bp, val_reg, elem_slots, has_ok, chan_state) {
-        // Shouldn't happen - we checked in find_ready_case
-        return SelectResult::Block;
-    }
-
-    stack_set(stack, bp + result_reg as usize, idx as u64);
-    *select_state = None;
-    SelectResult::Continue
-}
-
-/// Receive value from channel and write to stack. Returns false if no data available.
-fn recv_to_stack(
-    stack: *mut Slot,
-    bp: usize,
-    val_reg: u16,
-    elem_slots: usize,
-    has_ok: bool,
-    chan_state: &mut ChannelState,
-) -> bool {
     let dst_start = bp + val_reg as usize;
 
-    let (value, ok) = if let Some(val) = chan_state.buffer.pop_front() {
-        (Some(val), true)
-    } else if let Some((_, val)) = chan_state.waiting_senders.pop_front() {
-        (Some(val), true)
-    } else if chan_state.closed {
-        (None, false)
-    } else {
-        return false;
-    };
+    // Use try_recv so that waiting senders are properly woken when the buffer
+    // has space freed, or when consuming directly from waiting_senders.
+    let (result, value) = chan_state.try_recv();
 
-    // Write value to stack
     match value {
         Some(val) => {
             for (i, &v) in val.iter().enumerate().take(elem_slots) {
                 stack_set(stack, dst_start + i, v);
+            }
+            if has_ok {
+                stack_set(stack, dst_start + elem_slots, 1);
             }
         }
         None => {
             for i in 0..elem_slots {
                 stack_set(stack, dst_start + i, 0);
             }
+            if has_ok {
+                stack_set(stack, dst_start + elem_slots, 0);
+            }
         }
     }
 
-    if has_ok {
-        stack_set(stack, dst_start + elem_slots, ok as u64);
-    }
+    stack_set(stack, bp + result_reg as usize, idx as u64);
+    *select_state = None;
 
-    true
+    match result {
+        RecvResult::Success(Some(sender)) => SelectResult::Wake(sender),
+        RecvResult::Success(None) | RecvResult::Closed => SelectResult::Continue,
+        RecvResult::WouldBlock | RecvResult::Blocked => {
+            unreachable!("execute_recv_case: case was marked ready but try_recv would block")
+        }
+    }
 }
 
 // =============================================================================

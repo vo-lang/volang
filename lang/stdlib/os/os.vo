@@ -3,6 +3,8 @@ package os
 import (
 	"errors"
 	"io"
+	"io/fs"
+	"time"
 )
 
 // Common errors returned by os functions.
@@ -684,6 +686,71 @@ const PathSeparator = '/'
 // PathListSeparator is the OS-specific path list separator.
 const PathListSeparator = ':'
 
+// ==================== DirFS ====================
+
+// DirFS returns a file system (an fs.FS) for the tree of files rooted at the directory dir.
+func DirFS(dir string) fs.FS {
+	return &dirFS{dir: dir}
+}
+
+// dirFS implements fs.FS rooted at a directory.
+type dirFS struct {
+	dir string
+}
+
+func (d *dirFS) Open(name string) (fs.File, error) {
+	if !fs.ValidPath(name) {
+		return nil, errors.New("os: invalid path")
+	}
+	var fullpath string
+	if name == "." {
+		fullpath = d.dir
+	} else {
+		fullpath = d.dir + "/" + name
+	}
+	f, err := Open(fullpath)
+	if err != nil {
+		return nil, err
+	}
+	return &dirFile{file: f, name: name}, nil
+}
+
+// dirFile wraps os.File to implement fs.File (with fs.FileInfo returning time.Time).
+type dirFile struct {
+	file *File
+	name string
+}
+
+func (f *dirFile) Read(b []byte) (int, error) {
+	return f.file.Read(b)
+}
+
+func (f *dirFile) Close() error {
+	return f.file.Close()
+}
+
+func (f *dirFile) Stat() (fs.FileInfo, error) {
+	info, err := f.file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return &dirFileInfo{info: info, name: f.name}, nil
+}
+
+// dirFileInfo wraps os.FileInfo to implement fs.FileInfo.
+// Converts int64 unix timestamp to time.Time.
+type dirFileInfo struct {
+	info FileInfo
+	name string
+}
+
+func (fi *dirFileInfo) Name() string        { return fi.name }
+func (fi *dirFileInfo) Size() int64         { return fi.info.Size() }
+func (fi *dirFileInfo) Mode() fs.FileMode   { return fs.FileMode(fi.info.Mode()) }
+func (fi *dirFileInfo) ModTime() time.Time  { return time.Unix(fi.info.ModTime(), 0) }
+func (fi *dirFileInfo) IsDir() bool         { return fi.info.IsDir() }
+func (fi *dirFileInfo) Sys() any            { return nil }
+
 // ==================== Interface Compliance ====================
 
 // Ensure File implements io interfaces
@@ -694,3 +761,6 @@ var _ io.Seeker = (*File)(nil)
 var _ io.ReaderAt = (*File)(nil)
 var _ io.WriterAt = (*File)(nil)
 var _ io.StringWriter = (*File)(nil)
+var _ fs.FS = (*dirFS)(nil)
+var _ fs.File = (*dirFile)(nil)
+var _ fs.FileInfo = (*dirFileInfo)(nil)

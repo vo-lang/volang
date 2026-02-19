@@ -67,7 +67,7 @@ The Vo standard library aims to provide a **production-ready, Go-compatible core
 | `math` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | Core surface covered; missing `Remainder`, `Gamma`, `Lgamma`, `Erf`, `Erfc`, `J0/J1/Jn/Y0/Y1/Yn` (low frequency) |
 | `math/bits` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | Bug fixed: `Reverse8`/`Reverse16` now use arithmetic instead of buggy lookup table; full surface covered |
 | `math/rand` | P0 | Vo-Adapted | Vo-Adapted | ✅ Adequate | `Int63`, `Int31`, `Int31n`, `Int64n`, `ExpFloat64`, `NormFloat64`, `New`/`NewSource`, `Rand` struct all present |
-| `time` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Format`, `Parse`, `Date`, `Year/Month/Day/Hour/Minute/Second`, `Truncate`, `Round`, layout constants (`RFC3339`, `DateTime`, etc.), `Weekday`, `Month`, `MarshalJSON`/`UnmarshalJSON`, `MarshalText`/`UnmarshalText` all present; `Timer`/`Ticker` deferred |
+| `time` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Format`, `Parse`, `Date`, `Year/Month/Day/Hour/Minute/Second`, `Truncate`, `Round`, layout constants (`RFC3339`, `DateTime`, etc.), `Weekday`, `Month`, `MarshalJSON`/`UnmarshalJSON`, `MarshalText`/`UnmarshalText`, `Timer`/`Ticker`/`After`/`Tick`/`AfterFunc` all present |
 | `io` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | Core interfaces, `ReadAll`, `Copy`, `CopyN`, `ReadFull`, `LimitReader`, `SectionReader`, `Discard`, `WriteString`, `Pipe`/`PipeReader`/`PipeWriter` all present |
 | `os` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `UserHomeDir`, `UserCacheDir`, `UserConfigDir`, `TempDir`, `CreateTemp`, `Symlink`, `Readlink`, `Link` all present |
 | `path/filepath` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Clean`, `Join`, `Split`, `Base`, `Dir`, `Ext`, `Abs`, `Rel`, `Walk`, `WalkDir`, `Glob`, `Match`, `EvalSymlinks` all present |
@@ -105,16 +105,16 @@ The Vo standard library aims to provide a **production-ready, Go-compatible core
 
 **Remaining (Lower Priority / Deferred)**:
 - `Location` / timezone support (`LoadLocation`, `FixedZone`) — requires tz database
-- `Timer`, `Ticker` — requires goroutine/channel integration
-- `After`, `Tick` channel-based APIs
 - `Time.In(loc *Location)`, `Time.UTC()`, `Time.Local()`
+
+**Implemented in this session**: `Timer`, `Ticker`, `After`, `Tick`, `AfterFunc` — pure Vo using goroutines + channels with gen counter for correctness.
 
 #### 2.2.2 `net/http` — Mostly Complete
 
 **Status**: Basic HTTP/1.1 client (`Get`, `Post`, `Head`, `Client.Do`), full server (`ListenAndServe`, `Server`, `ServeMux`, `HandleFunc`), `Header`, `Request`, `Response`, `ResponseWriter`, `Cookie`/`SetCookie`, `Redirect`, `Error`, `NotFound`, `FormValue`, `ParseForm`, `net/url` package with `URL` struct, HTTPS client support, `FileServer`, `StripPrefix`, `HandlerFunc` adapter.
 
 **Remaining (Deferred)**:
-- `http.TimeoutHandler`, `http.MaxBytesReader`
+- `http.TimeoutHandler`
 - `Transfer-Encoding: chunked` support
 - Connection keep-alive (currently forces `Connection: close`)
 - TLS configuration on server side
@@ -146,7 +146,7 @@ The Vo standard library aims to provide a **production-ready, Go-compatible core
 
 ### 2.3 Remaining Cross-Cutting Gaps
 
-1. **`fmt.Scan` family**: `Scan`, `Scanln`, `Scanf`, `Sscan`, `Sscanf`, `Fscan`, `Fscanf` are not implemented. These require native (Rust) implementation similar to the print family.
+1. **`fmt.Scan` family**: ✅ Done. `Sscan`, `Sscanln`, `Sscanf`, `Fscan`, `Fscanf`, `Fscanln`, `Scan`, `Scanf`, `Scanln` all implemented. Vo adaptation: returns `[]any` with typed values (since Vo has no pointer-to-primitive types). Native Rust parsing for `nativeSscan`, `nativeSscanf`, `nativeReadLine`.
 
 2. **`sync.Pool`**: Object pooling implemented; `Get`/`Put` without GC-managed freeing (island-local manual pool).
 
@@ -158,9 +158,11 @@ The Vo standard library aims to provide a **production-ready, Go-compatible core
 
 6. **`time.Timer`/`time.Ticker`/`time.After`/`time.Tick`**: Channel-based time APIs deferred pending goroutine integration design.
 
-7. **Test Coverage** (current state as of 2026-02):
-   - Total: 1958 tests passing (984 VM + 974 JIT), 0 failures
-   - New test files added this phase: `math/bits`, `unicode/utf8`, `io`, `sort` (Interface), `strings` (IndexFunc/Title), `bytes` (IndexFunc/Title), `regexp` (byte variants), `encoding/csv`, `path`
+7. **`os.DirFS`**: ✅ Done. `DirFS(dir string) fs.FS` implemented in pure Vo with `dirFS`, `dirFile`, `dirFileInfo` wrapper types. Bridges `os.FileInfo.ModTime() int64` to `fs.FileInfo.ModTime() time.Time` via `time.Unix()`.
+
+8. **Test Coverage** (current state as of 2026-02-19):
+   - Total: 1972 tests passing (991 VM + 981 JIT), 0 failures
+   - New test files added this phase: `math/bits`, `unicode/utf8`, `io`, `sort` (Interface), `strings` (IndexFunc/Title), `bytes` (IndexFunc/Title), `regexp` (byte variants), `encoding/csv`, `path`, `binary`, `cmp_test`, `context_extended`, `time_marshal`, `fmt_scan`, `os_dirfs`
 
 ---
 
@@ -398,7 +400,7 @@ The Vo standard library aims to provide a **production-ready, Go-compatible core
 
 All tests verified in both VM and JIT modes via `./d.py test both --release`.
 
-**Final result: 1954 tests passing (982 VM + 972 JIT), 0 failures.**
+**Final result: 1972 tests passing (991 VM + 981 JIT), 0 failures.**
 
 #### 3.3 Bug Fixes Applied
 
@@ -415,7 +417,7 @@ All tests verified in both VM and JIT modes via `./d.py test both --release`.
 | 4.2 | `time.Timer`, `time.Ticker` | Goroutine + channel integration |
 | 4.3 | `time.After`, `time.Tick` | Channel-based APIs |
 | 4.4 | TLS server support | Native bridge |
-| 4.5 | `encoding/csv`, `encoding/xml` | If demand warrants |
+| 4.5 | `encoding/xml` | If demand warrants |
 | 4.6 | `crypto/sha256`, `crypto/md5`, `crypto/hmac` | Native impl |
 
 ---

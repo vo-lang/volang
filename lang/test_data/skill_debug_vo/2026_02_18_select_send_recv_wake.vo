@@ -1,0 +1,130 @@
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+// Regression test for bug: select statement with immediate send/recv case
+// did not wake blocked waiters. Specifically:
+//
+// Bug 1: `select { case ch <- v: default: }` inside a goroutine chose the
+// correct case but failed to write v to ch (waiting receiver stayed blocked).
+// Root cause: execute_send_case pushed to buffer directly instead of using
+// try_send, so waiting receivers were never woken.
+//
+// Bug 2: `select { case v := <-ch: ... }` consuming from waiting_senders
+// discarded the sender waiter (with `_`) without waking the blocked sender.
+// Root cause: recv_to_stack discarded (W, M) pair; execute_recv_case now uses
+// try_recv which properly returns and wakes the sender.
+
+// Test 1: non-blocking select send wakes a goroutine blocked on recv
+func testSelectSendWakesBlockedRecv() {
+	ch1 := make(chan int, 1)
+	ch2 := make(chan int, 1)
+	ch1 <- 10
+
+	go func() {
+		select {
+		case v := <-ch1:
+			// non-blocking send inside goroutine - must wake main blocked on <-ch2
+			select {
+			case ch2 <- v:
+			default:
+				panic("should not take default - ch2 has space and waiting receiver")
+			}
+		}
+	}()
+
+	got := <-ch2
+	assert(got == 10, "expected 10")
+	fmt.Println("testSelectSendWakesBlockedRecv OK")
+}
+
+// Test 2: non-blocking select send to buffered channel with waiting receiver
+func testSelectSendDirectHandoff() {
+	C := make(chan int, 1)
+	done := make(chan struct{})
+
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		// main is blocked on <-C; this non-blocking send must deliver to main
+		select {
+		case C <- 42:
+		default:
+			panic("should not take default")
+		}
+		done <- struct{}{}
+	}()
+
+	v := <-C
+	if v != 42 {
+		panic("expected 42")
+	}
+	<-done
+	fmt.Println("testSelectSendDirectHandoff OK")
+}
+
+// Test 3: ticker pattern - goroutine loop with nested goroutine and stop
+// (This was the original hang: non-blocking send in ticker loop)
+func testTickerPattern() {
+	C := make(chan int, 1)
+	stop := make(chan struct{}, 1)
+
+	go func() {
+		for {
+			inner := make(chan int, 1)
+			go func() {
+				time.Sleep(5 * time.Millisecond)
+				inner <- 1
+			}()
+			select {
+			case v := <-inner:
+				select {
+				case C <- v:
+				default:
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	v := <-C
+	assert(v == 1, "expected 1")
+	stop <- struct{}{}
+	fmt.Println("testTickerPattern OK")
+}
+
+// Test 4: select recv case wakes a blocked sender
+func testSelectRecvWakesBlockedSender() {
+	ch := make(chan int) // unbuffered: sender blocks until receiver ready
+	result := make(chan int, 1)
+
+	go func() {
+		// This sender will block until someone receives from ch
+		ch <- 99
+	}()
+
+	time.Sleep(2 * time.Millisecond) // let sender block
+
+	go func() {
+		select {
+		case v := <-ch:
+			// receiving here should wake the blocked sender
+			result <- v
+		}
+	}()
+
+	got := <-result
+	assert(got == 99, "expected 99")
+	fmt.Println("testSelectRecvWakesBlockedSender OK")
+}
+
+func main() {
+	testSelectSendWakesBlockedRecv()
+	testSelectSendDirectHandoff()
+	testTickerPattern()
+	testSelectRecvWakesBlockedSender()
+	fmt.Println("PASS")
+}

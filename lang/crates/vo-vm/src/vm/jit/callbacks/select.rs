@@ -136,5 +136,9 @@ pub extern "C" fn jit_select_exec(
         SelectResult::SendOnClosed => {
             set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED)
         }
+        SelectResult::Wake(waiter) => {
+            vm.scheduler.wake_channel_waiter(&waiter);
+            JitResult::Ok
+        }
     }
 }

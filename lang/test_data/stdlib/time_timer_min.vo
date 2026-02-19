@@ -1,0 +1,24 @@
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	// Minimal test: does Sleep + goroutine + channel work?
+	ch := make(chan int, 1)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		ch <- 42
+	}()
+	v := <-ch
+	assert(v == 42, "basic goroutine+sleep+channel")
+
+	// Does NewTimer fire?
+	t := time.NewTimer(10 * time.Millisecond)
+	v2 := <-t.C
+	assert(v2.UnixNano() > 0, "Timer should fire")
+
+	fmt.Println("PASS: time_timer_min")
+}

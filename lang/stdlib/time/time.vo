@@ -10,7 +10,68 @@ func nowUnixNano() int64
 func nowMonoNano() int64
 func blocking_sleepNano(d int64)
 
+// Timezone native externs
+func localOffsetAt(unixSec int64) int64
+func localAbbrevAt(unixSec int64) string
+func ianaOffsetAt(name string, unixSec int64) int64
+func ianaAbbrevAt(name string, unixSec int64) string
+func loadLocation(name string) (string, error)
+
 const nanosPerSecond = int64(1000000000)
+
+// ==================== Location (Timezone) ====================
+
+// Location maps time instants to the zone in use at that time.
+// Locations with fixed==true use a constant UTC offset; others use the IANA
+// Time Zone database (name=="Local" means the system local zone).
+type Location struct {
+	name   string
+	fixed  bool
+	offset int
+}
+
+// UTC represents Universal Coordinated Time (UTC).
+var UTC = &Location{name: "UTC", fixed: true, offset: 0}
+
+// Local represents the system's local time zone.
+var Local = &Location{name: "Local", fixed: false, offset: 0}
+
+// locOffsetAt returns the UTC offset in seconds for loc at the given Unix second.
+// Returns 0 for nil (UTC).
+func locOffsetAt(loc *Location, unixSec int64) int {
+	if loc == nil {
+		return 0
+	}
+	if loc.fixed {
+		return loc.offset
+	}
+	if loc.name == "Local" {
+		return int(localOffsetAt(unixSec))
+	}
+	return int(ianaOffsetAt(loc.name, unixSec))
+}
+
+// FixedZone returns a Location that always uses the given zone name and
+// offset (seconds east of UTC) from UTC.
+func FixedZone(name string, offset int) *Location {
+	return &Location{name: name, fixed: true, offset: offset}
+}
+
+// LoadLocation returns the Location with the given name from the IANA database.
+// The special names "UTC" and "Local" return the corresponding singletons.
+func LoadLocation(name string) (*Location, error) {
+	if name == "UTC" {
+		return UTC, nil
+	}
+	if name == "Local" {
+		return Local, nil
+	}
+	canonical, err := loadLocation(name)
+	if err != nil {
+		return nil, err
+	}
+	return &Location{name: canonical, fixed: false, offset: 0}, nil
+}
 
 type Duration int64
 
@@ -26,6 +87,7 @@ const (
 type Time struct {
 	unixNano int64
 	monoNano int64
+	loc      *Location
 }
 
 // Now returns the current local time with both wall clock and monotonic components.
@@ -85,7 +147,7 @@ func (t Time) Add(d Duration) Time {
 	if t.monoNano != 0 {
 		mono = t.monoNano + int64(d)
 	}
-	return Time{unixNano: t.unixNano + int64(d), monoNano: mono}
+	return Time{unixNano: t.unixNano + int64(d), monoNano: mono, loc: t.loc}
 }
 
 // Sub returns the duration t-u.
@@ -125,6 +187,55 @@ func (t Time) IsZero() bool {
 	return t.unixNano == 0 && t.monoNano == 0
 }
 
+// locSec returns unix seconds adjusted by the time's location UTC offset.
+// Used internally for calendar decomposition.
+func (t Time) locSec() int64 {
+	unixSec := divFloor(t.unixNano, nanosPerSecond)
+	return unixSec + int64(locOffsetAt(t.loc, unixSec))
+}
+
+// Location returns the time zone information associated with t.
+// Returns UTC if t has no location set.
+func (t Time) Location() *Location {
+	if t.loc == nil {
+		return UTC
+	}
+	return t.loc
+}
+
+// Zone computes the time zone in effect at time t, returning the abbreviated
+// name of the zone (such as "PST") and its offset in seconds east of UTC.
+func (t Time) Zone() (name string, offset int) {
+	unixSec := divFloor(t.unixNano, nanosPerSecond)
+	offset = locOffsetAt(t.loc, unixSec)
+	if t.loc == nil {
+		return "UTC", 0
+	}
+	if t.loc.fixed {
+		return t.loc.name, t.loc.offset
+	}
+	if t.loc.name == "Local" {
+		return localAbbrevAt(unixSec), offset
+	}
+	return ianaAbbrevAt(t.loc.name, unixSec), offset
+}
+
+// In returns a copy of t representing the same time instant, but with
+// the copy's location set to loc for display purposes.
+func (t Time) In(loc *Location) Time {
+	return Time{unixNano: t.unixNano, monoNano: t.monoNano, loc: loc}
+}
+
+// UTC returns t with the location set to UTC.
+func (t Time) UTC() Time {
+	return Time{unixNano: t.unixNano, monoNano: t.monoNano, loc: nil}
+}
+
+// Local returns t with the location set to the system local time zone.
+func (t Time) Local() Time {
+	return Time{unixNano: t.unixNano, monoNano: t.monoNano, loc: Local}
+}
+
 // Since returns the time elapsed since t.
 func Since(t Time) Duration {
 	return Now().Sub(t)
@@ -138,6 +249,204 @@ func Until(t Time) Duration {
 // Sleep pauses the current goroutine for at least the duration d.
 func Sleep(d Duration) {
 	blocking_sleepNano(int64(d))
+}
+
+// ==================== Timer ====================
+//
+// Timer/Ticker use a generation counter + per-goroutine stop channel capture.
+// Each spawned goroutine captures myStop (channel at creation) and myGen
+// (gen at creation). Stop() invalidates the current goroutine by incrementing
+// gen then signaling via the stop channel. When a goroutine fires naturally, it
+// checks t.gen == myGen before sending to t.C, preventing stale goroutines
+// from firing after Reset(). The active bool tracks whether Stop() should
+// return true (timer/ticker is still waiting to fire).
+
+// Timer represents a single event.
+// After the duration d, the timer fires by sending the current time to C.
+type Timer struct {
+	C      chan Time
+	stop   chan struct{}
+	active bool
+	gen    int
+}
+
+// timerSpawn launches the timer goroutine capturing myStop and myGen by value.
+func timerSpawn(t *Timer, d Duration, myStop chan struct{}, myGen int) {
+	go func() {
+		inner := make(chan Time, 1)
+		go func() {
+			Sleep(d)
+			inner <- Now()
+		}()
+		select {
+		case v := <-inner:
+			if t.gen == myGen {
+				t.active = false
+				t.C <- v
+			}
+		case <-myStop:
+		}
+	}()
+}
+
+// NewTimer creates a new Timer that will fire after duration d.
+func NewTimer(d Duration) *Timer {
+	t := &Timer{
+		C:      make(chan Time, 1),
+		stop:   make(chan struct{}, 1),
+		active: true,
+		gen:    0,
+	}
+	timerSpawn(t, d, t.stop, 0)
+	return t
+}
+
+// Stop prevents the Timer from firing.
+// Returns true if the call stops the timer before it fires.
+func (t *Timer) Stop() bool {
+	if !t.active {
+		return false
+	}
+	t.active = false
+	t.gen++
+	select {
+	case t.stop <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// Reset changes the timer to expire after duration d.
+// It should be called only on stopped or expired timers.
+// Returns true if the timer had been active.
+func (t *Timer) Reset(d Duration) bool {
+	wasActive := t.Stop()
+	t.active = true
+	t.stop = make(chan struct{}, 1)
+	timerSpawn(t, d, t.stop, t.gen)
+	return wasActive
+}
+
+// afterFuncSpawn launches the AfterFunc goroutine capturing its own stop and gen.
+func afterFuncSpawn(t *Timer, d Duration, f func(), myStop chan struct{}, myGen int) {
+	go func() {
+		inner := make(chan struct{}, 1)
+		go func() {
+			Sleep(d)
+			inner <- struct{}{}
+		}()
+		select {
+		case <-inner:
+			if t.gen == myGen {
+				t.active = false
+				go f()
+			}
+		case <-myStop:
+		}
+	}()
+}
+
+// AfterFunc waits for the duration to elapse and then calls f in a new goroutine.
+// It returns a Timer that can be used to cancel the call using its Stop method.
+func AfterFunc(d Duration, f func()) *Timer {
+	t := &Timer{
+		C:      make(chan Time, 1),
+		stop:   make(chan struct{}, 1),
+		active: true,
+		gen:    0,
+	}
+	afterFuncSpawn(t, d, f, t.stop, 0)
+	return t
+}
+
+// After waits for the duration to elapse and then sends the current time
+// on the returned channel.
+func After(d Duration) chan Time {
+	return NewTimer(d).C
+}
+
+// ==================== Ticker ====================
+
+// Ticker holds a channel that delivers "ticks" of a clock at intervals.
+type Ticker struct {
+	C      chan Time
+	stop   chan struct{}
+	d      Duration
+	active bool
+	gen    int
+}
+
+// tickerSpawn launches the ticker goroutine capturing myStop and myGen by value.
+// Each iteration checks t.gen == myGen so Stop() invalidates the loop.
+func tickerSpawn(t *Ticker, myStop chan struct{}, myGen int) {
+	go func() {
+		for t.gen == myGen {
+			inner := make(chan Time, 1)
+			go func() {
+				Sleep(t.d)
+				inner <- Now()
+			}()
+			select {
+			case v := <-inner:
+				if t.gen == myGen {
+					t.C <- v
+				}
+			case <-myStop:
+				return
+			}
+		}
+	}()
+}
+
+// NewTicker returns a new Ticker containing a channel that will send
+// the time on the channel after each tick. The period of the ticks is
+// specified by the duration argument.
+func NewTicker(d Duration) *Ticker {
+	if d <= 0 {
+		panic("time: non-positive interval for NewTicker")
+	}
+	t := &Ticker{
+		C:      make(chan Time, 1),
+		stop:   make(chan struct{}, 1),
+		d:      d,
+		active: true,
+		gen:    0,
+	}
+	tickerSpawn(t, t.stop, 0)
+	return t
+}
+
+// Stop turns off a ticker. After Stop, no more ticks will be sent.
+func (t *Ticker) Stop() {
+	if !t.active {
+		return
+	}
+	t.active = false
+	t.gen++
+	select {
+	case t.stop <- struct{}{}:
+	default:
+	}
+}
+
+// Reset stops a ticker and resets its period to the specified duration.
+func (t *Ticker) Reset(d Duration) {
+	t.Stop()
+	t.d = d
+	t.active = true
+	t.stop = make(chan struct{}, 1)
+	tickerSpawn(t, t.stop, t.gen)
+}
+
+// Tick is a convenience wrapper for NewTicker providing access to the ticking
+// channel only. While Tick is useful for clients that have no need to shut down
+// the Ticker, be aware that without a way to shut it down the underlying Ticker
+// cannot be recovered by the garbage collector; it "leaks".
+func Tick(d Duration) chan Time {
+	if d <= 0 {
+		return nil
+	}
+	return NewTicker(d).C
 }
 
 func (d Duration) Nanoseconds() int64 { return int64(d) }
@@ -542,9 +851,10 @@ func absClock(unixSec int64) (int, int, int) {
 }
 
 // date computes the year, month, day, and optionally year-day from t.
+// All values are in t's location (or UTC if loc is nil).
 func (t Time) date(full bool) (int, Month, int, int) {
-	unixSec := divFloor(t.unixNano, nanosPerSecond)
-	unixDay := int(divFloor(unixSec, int64(secondsPerDay)))
+	locS := t.locSec()
+	unixDay := int(divFloor(locS, int64(secondsPerDay)))
 	y, m, d := civilFromDays(unixDay)
 	yday := 0
 	if full {
@@ -560,10 +870,9 @@ func (t Time) Date() (int, Month, int) {
 	return year, month, day
 }
 
-// Clock returns the hour, minute, and second within the day specified by t (UTC).
+// Clock returns the hour, minute, and second within the day specified by t.
 func (t Time) Clock() (int, int, int) {
-	unixSec := divFloor(t.unixNano, nanosPerSecond)
-	return absClock(unixSec)
+	return absClock(t.locSec())
 }
 
 // Year returns the year in which t occurs.
@@ -586,21 +895,21 @@ func (t Time) Day() int {
 
 // Hour returns the hour within the day specified by t, in the range [0, 23].
 func (t Time) Hour() int {
-	unixSec := divFloor(t.unixNano, nanosPerSecond)
-	return int(unixSec%int64(secondsPerDay)+int64(secondsPerDay)) % secondsPerDay / secondsPerHour
+	locS := t.locSec()
+	return int(locS%int64(secondsPerDay)+int64(secondsPerDay)) % secondsPerDay / secondsPerHour
 }
 
 // Minute returns the minute offset within the hour specified by t, in the range [0, 59].
 func (t Time) Minute() int {
-	unixSec := divFloor(t.unixNano, nanosPerSecond)
-	sec := int(unixSec%int64(secondsPerDay)+int64(secondsPerDay)) % secondsPerDay
+	locS := t.locSec()
+	sec := int(locS%int64(secondsPerDay)+int64(secondsPerDay)) % secondsPerDay
 	return sec % secondsPerHour / secondsPerMinute
 }
 
 // Second returns the second offset within the minute specified by t, in the range [0, 59].
 func (t Time) Second() int {
-	unixSec := divFloor(t.unixNano, nanosPerSecond)
-	sec := int(unixSec%int64(secondsPerDay)+int64(secondsPerDay)) % secondsPerDay
+	locS := t.locSec()
+	sec := int(locS%int64(secondsPerDay)+int64(secondsPerDay)) % secondsPerDay
 	return sec % secondsPerMinute
 }
 
@@ -623,8 +932,8 @@ func (t Time) YearDay() int {
 
 // Weekday returns the day of the week specified by t.
 func (t Time) Weekday() Weekday {
-	unixSec := divFloor(t.unixNano, nanosPerSecond)
-	unixDay := int(divFloor(unixSec, int64(secondsPerDay)))
+	locS := t.locSec()
+	unixDay := int(divFloor(locS, int64(secondsPerDay)))
 	// January 1, 1970 was a Thursday (4).
 	wd := ((unixDay%7 + 4) + 7) % 7
 	return Weekday(wd)
@@ -665,7 +974,7 @@ func Date(year int, month Month, day, hour, min, sec, nsec int) Time {
 // If d <= 0, Truncate returns t stripped of any monotonic clock reading but otherwise unchanged.
 func (t Time) Truncate(d Duration) Time {
 	if d <= 0 {
-		return Time{unixNano: t.unixNano}
+		return Time{unixNano: t.unixNano, loc: t.loc}
 	}
 	_, r := div(t, d)
 	return t.Add(-r)
@@ -675,7 +984,7 @@ func (t Time) Truncate(d Duration) Time {
 // If d <= 0, Round returns t stripped of any monotonic clock reading but otherwise unchanged.
 func (t Time) Round(d Duration) Time {
 	if d <= 0 {
-		return Time{unixNano: t.unixNano}
+		return Time{unixNano: t.unixNano, loc: t.loc}
 	}
 	_, r := div(t, d)
 	if r+r < d {
@@ -929,12 +1238,34 @@ func appendNano(b []byte, nsec int, ndig int, trim bool) []byte {
 	return append(b, buf[:ndig]...)
 }
 
+// appendZone appends a timezone offset like +05:30, -0700, etc.
+func appendZone(b []byte, offsetSec int, colon bool, useZ bool) []byte {
+	if useZ && offsetSec == 0 {
+		return append(b, 'Z')
+	}
+	sign := '+'
+	if offsetSec < 0 {
+		sign = '-'
+		offsetSec = -offsetSec
+	}
+	b = append(b, byte(sign))
+	h := offsetSec / 3600
+	m := (offsetSec % 3600) / 60
+	b = appendInt(b, h, 2)
+	if colon {
+		b = append(b, ':')
+	}
+	b = appendInt(b, m, 2)
+	return b
+}
+
 // AppendFormat is like Format but appends the textual representation to b
 // and returns the extended buffer.
 func (t Time) AppendFormat(b []byte, layout string) []byte {
 	year, month, day, yday := t.date(true)
-	hour, min, sec := absClock(divFloor(t.unixNano, nanosPerSecond))
+	hour, min, sec := absClock(t.locSec())
 	nsec := t.Nanosecond()
+	zoneName, zoneOffset := t.Zone()
 
 	for layout != "" {
 		prefix, std, suffix := nextStdChunk(layout)
@@ -1010,17 +1341,25 @@ func (t Time) AppendFormat(b []byte, layout string) []byte {
 				b = append(b, "am"...)
 			}
 		} else if stdBase == stdTZ {
-			// No timezone support yet - output UTC
-			b = append(b, "UTC"...)
-		} else if stdBase == stdISO8601TZ || stdBase == stdISO8601ColonTZ {
-			// ISO 8601: Z for UTC
-			b = append(b, 'Z')
+			b = append(b, zoneName...)
+		} else if stdBase == stdISO8601TZ {
+			b = appendZone(b, zoneOffset, false, true)
+		} else if stdBase == stdISO8601ColonTZ {
+			b = appendZone(b, zoneOffset, true, true)
 		} else if stdBase == stdNumTZ {
-			b = append(b, "+0000"...)
+			b = appendZone(b, zoneOffset, false, false)
 		} else if stdBase == stdNumColonTZ {
-			b = append(b, "+00:00"...)
+			b = appendZone(b, zoneOffset, true, false)
 		} else if stdBase == stdNumShortTZ {
-			b = append(b, "+00"...)
+			// -07 format: hours only
+			sign := '+'
+			off := zoneOffset
+			if off < 0 {
+				sign = '-'
+				off = -off
+			}
+			b = append(b, byte(sign))
+			b = appendInt(b, off/3600, 2)
 		} else if stdBase == stdFracSecond0 {
 			b = appendNano(b, nsec, stdArg, false)
 		} else if stdBase == stdFracSecond9 {
@@ -1215,6 +1554,9 @@ func Parse(layout, value string) (Time, error) {
 	min := 0
 	sec := 0
 	nsec := 0
+	zoneOffsetSec := 0       // parsed UTC offset in seconds (east of UTC)
+	hasZone := false
+	zoneParsedName := "UTC"
 
 	for layout != "" {
 		prefix, std, suffix := nextStdChunk(layout)
@@ -1333,7 +1675,7 @@ func Parse(layout, value string) (Time, error) {
 				return Time{}, errors.New("time: bad AM/PM")
 			}
 		} else if stdBase == stdTZ {
-			// Consume timezone name (letters only)
+			// Consume timezone name (letters only) - for display only, no offset
 			n := 0
 			for n < len(value) && ((value[n] >= 'A' && value[n] <= 'Z') || (value[n] >= 'a' && value[n] <= 'z')) {
 				n++
@@ -1341,17 +1683,25 @@ func Parse(layout, value string) (Time, error) {
 			if n == 0 {
 				return Time{}, errors.New("time: bad timezone")
 			}
+			zoneParsedName = value[:n]
 			value = value[n:]
 		} else if stdBase == stdISO8601TZ || stdBase == stdISO8601ColonTZ {
 			// Z or +hh:mm / +hhmm
 			if len(value) > 0 && value[0] == 'Z' {
 				value = value[1:]
+				zoneOffsetSec = 0
+				hasZone = true
 			} else {
-				// Skip timezone offset like +05:30 or -0700
-				value = skipTZOffset(value)
+				var off int
+				value, off = parseTZOffset(value)
+				zoneOffsetSec = off
+				hasZone = true
 			}
 		} else if stdBase == stdNumTZ || stdBase == stdNumColonTZ || stdBase == stdNumShortTZ {
-			value = skipTZOffset(value)
+			var off int
+			value, off = parseTZOffset(value)
+			zoneOffsetSec = off
+			hasZone = true
 		} else if stdBase == stdFracSecond0 || stdBase == stdFracSecond9 {
 			// Parse fractional seconds
 			ndig := stdArg
@@ -1372,21 +1722,63 @@ func Parse(layout, value string) (Time, error) {
 		}
 	}
 
-	return Date(year, Month(month), day, hour, min, sec, nsec), nil
+	// Build UTC epoch: the parsed fields represent local time in the parsed timezone.
+	// Subtract the zone offset to get UTC.
+	utc := Date(year, Month(month), day, hour, min, sec, nsec)
+	if hasZone {
+		utc = Time{unixNano: utc.unixNano - int64(zoneOffsetSec)*nanosPerSecond}
+		return utc.In(FixedZone(zoneParsedName, zoneOffsetSec)), nil
+	}
+	_ = zoneParsedName
+	return utc, nil
 }
 
-// skipTZOffset skips a timezone offset like "+0700", "-07:00", "+07" from the value.
-func skipTZOffset(value string) string {
+// parseTZOffset parses a timezone offset like "+0700", "-07:00", "+07" from value.
+// Accepted formats: ±hh, ±hhmm, ±hh:mm (strictly 2-digit hour, optional 2-digit minute).
+// Returns (remaining, offsetSeconds). On invalid format returns (original, 0).
+func parseTZOffset(value string) (string, int) {
 	if len(value) == 0 {
-		return value
+		return value, 0
 	}
 	if value[0] != '+' && value[0] != '-' {
-		return value
+		return value, 0
 	}
-	i := 1
-	// Skip digits and colons
-	for i < len(value) && ((value[i] >= '0' && value[i] <= '9') || value[i] == ':') {
-		i++
+	neg := value[0] == '-'
+	rest := value[1:]
+
+	// Must start with exactly 2 hour digits.
+	if len(rest) < 2 || rest[0] < '0' || rest[0] > '9' || rest[1] < '0' || rest[1] > '9' {
+		return value, 0
 	}
-	return value[i:]
+	h := int(rest[0]-'0')*10 + int(rest[1]-'0')
+	rest = rest[2:]
+
+	m := 0
+	consumed := 2 // sign + 2 hour digits consumed from value
+	if len(rest) > 0 && rest[0] == ':' {
+		// ±hh:mm format — need exactly 2 more digits
+		if len(rest) < 3 || rest[1] < '0' || rest[1] > '9' || rest[2] < '0' || rest[2] > '9' {
+			// Malformed — treat as hour-only, leave colon in remaining.
+			// consumed stays at 2 (sign already counted above, value[1:3] are the 2 hour digits)
+		} else {
+			m = int(rest[1]-'0')*10 + int(rest[2]-'0')
+			consumed += 3 // colon + 2 minute digits
+			rest = rest[3:]
+		}
+	} else if len(rest) >= 2 && rest[0] >= '0' && rest[0] <= '9' && rest[1] >= '0' && rest[1] <= '9' {
+		// ±hhmm format — consume 2 minute digits
+		m = int(rest[0]-'0')*10 + int(rest[1]-'0')
+		consumed += 2
+		rest = rest[2:]
+	}
+	// Validate ranges
+	if h > 23 || m > 59 {
+		return value, 0
+	}
+	_ = consumed
+	off := h*3600 + m*60
+	if neg {
+		off = -off
+	}
+	return rest, off
 }

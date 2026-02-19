@@ -1,0 +1,42 @@
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+)
+
+func main() {
+	// Create a temp dir with a test file
+	tmpDir, err := os.MkdirTemp("", "dirfs_test")
+	assert(err == nil, "MkdirTemp failed: "+fmt.Sprint(err))
+
+	// Write a test file
+	testFile := tmpDir + "/hello.txt"
+	err = os.WriteFile(testFile, []byte("hello world"), 0644)
+	assert(err == nil, "WriteFile failed")
+
+	// Create DirFS
+	fsys := os.DirFS(tmpDir)
+
+	// Read file through fs.FS
+	data, err := fs.ReadFile(fsys, "hello.txt")
+	assert(err == nil, "fs.ReadFile failed: "+fmt.Sprint(err))
+	assert(string(data) == "hello world", "file content mismatch: got "+string(data))
+
+	// Stat through fs.FS
+	info, err := fs.Stat(fsys, "hello.txt")
+	assert(err == nil, "fs.Stat failed: "+fmt.Sprint(err))
+	assert(info.Name() == "hello.txt", "Name mismatch")
+	assert(info.Size() == 11, "Size mismatch")
+	assert(!info.IsDir(), "should not be dir")
+
+	// Invalid path should fail
+	_, err = fsys.Open("../etc/passwd")
+	assert(err != nil, "invalid path should fail")
+
+	// Clean up
+	os.RemoveAll(tmpDir)
+
+	fmt.Println("PASS: os_dirfs")
+}

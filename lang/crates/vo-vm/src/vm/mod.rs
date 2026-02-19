@@ -1553,6 +1553,10 @@ impl Vm {
                         exec::SelectResult::SendOnClosed => {
                             handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel));
                         }
+                        exec::SelectResult::Wake(waiter) => {
+                            self.scheduler.wake_channel_waiter(&waiter);
+                            return ExecResult::TimesliceExpired;
+                        }
                     }
                 }
 

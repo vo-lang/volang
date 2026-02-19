@@ -24,10 +24,10 @@ func testSprint() {
 	assert(fmt.Sprint(true) == "true")
 	assert(fmt.Sprint(false) == "false")
 	
-	// Multiple arguments (space separated)
-	assert(fmt.Sprint("a", "b") == "a b")
+	// Multiple arguments: space only between non-string adjacent operands (Go semantics)
+	assert(fmt.Sprint("a", "b") == "ab")
 	assert(fmt.Sprint(1, 2, 3) == "1 2 3")
-	assert(fmt.Sprint("x", 42, true) == "x 42 true")
+	assert(fmt.Sprint("x", 42, true) == "x42 true")
 	
 	// Float values
 	assert(fmt.Sprint(3.14) == "3.14")
@@ -128,18 +128,18 @@ func testWriterFunctions() {
 
 	n, err := fmt.Fprint(buf, "x", 1, true)
 	assert(err == nil)
-	assert(n == len("x 1 true"))
-	assert(buf.String() == "x 1 true")
+	assert(n == len("x1 true"))
+	assert(buf.String() == "x1 true")
 
 	n, err = fmt.Fprintln(buf, "tail")
 	assert(err == nil)
 	assert(n == len("tail\n"))
-	assert(buf.String() == "x 1 truetail\n")
+	assert(buf.String() == "x1 truetail\n")
 
 	n, err = fmt.Fprintf(buf, "-%s:%d-", "id", 7)
 	assert(err == nil)
 	assert(n == len("-id:7-"))
-	assert(buf.String() == "x 1 truetail\n-id:7-")
+	assert(buf.String() == "x1 truetail\n-id:7-")
 
 	e := fmt.Errorf("boom:%d", 42)
 	assert(e != nil)

@@ -146,9 +146,8 @@ fn write_io_error(call: &mut ExternCallContext, ret_slot: u16, err: std::io::Err
     };
     
     if let Some(k) = kind {
-        let (slot0, slot1) = os_sentinel_error(call, k);
-        call.ret_u64(ret_slot, slot0);
-        call.ret_u64(ret_slot + 1, slot1);
+        let pair = os_sentinel_error(call, k);
+        call.ret_interface_pair(ret_slot, pair);
     } else {
         write_error_to(call, ret_slot, &err.to_string());
     }
@@ -181,7 +180,8 @@ fn handle_read_completion(call: &mut ExternCallContext, c: vo_runtime::io::Compl
     match c.result {
         Ok(CompletionData::Size(0)) => {
             call.ret_i64(ret_n, 0);
-            write_error_to(call, ret_err, "EOF");
+            let eof_pair = crate::io::io_sentinel_error(call, crate::io::IoErrorKind::EOF);
+            call.ret_interface_pair(ret_err, eof_pair);
         }
         Ok(CompletionData::Size(n)) => {
             call.ret_i64(ret_n, n as i64);
@@ -226,6 +226,11 @@ fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
     
     if fd == 0 {
         match std::io::stdin().read(buf) {
+            Ok(0) => {
+                call.ret_i64(slots::RET_0, 0);
+                let eof_pair = crate::io::io_sentinel_error(call, crate::io::IoErrorKind::EOF);
+                call.ret_interface_pair(slots::RET_1, eof_pair);
+            }
             Ok(n) => { call.ret_i64(slots::RET_0, n as i64); write_nil_error(call, slots::RET_1); }
             Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
         }

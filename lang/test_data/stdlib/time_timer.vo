@@ -1,0 +1,100 @@
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func testTimerFires() {
+	t := time.NewTimer(10 * time.Millisecond)
+	v := <-t.C
+	assert(v.UnixNano() > 0, "Timer should fire with valid time")
+}
+
+func testTimerStop() {
+	t := time.NewTimer(50 * time.Millisecond)
+	stopped := t.Stop()
+	assert(stopped, "Stop should return true for active timer")
+	stopped2 := t.Stop()
+	assert(!stopped2, "Stop should return false for already-stopped timer")
+}
+
+func testTimerReset() {
+	t := time.NewTimer(50 * time.Millisecond)
+	t.Stop()
+	wasActive := t.Reset(10 * time.Millisecond)
+	assert(!wasActive, "Reset after Stop should return false")
+	v := <-t.C
+	assert(v.UnixNano() > 0, "Timer should fire after Reset")
+}
+
+func testAfterFunc() {
+	done := make(chan bool, 1)
+	time.AfterFunc(10*time.Millisecond, func() {
+		done <- true
+	})
+	result := <-done
+	assert(result, "AfterFunc should call the function")
+}
+
+func testAfterFuncStop() {
+	called := make(chan bool, 1)
+	t := time.AfterFunc(50*time.Millisecond, func() {
+		called <- true
+	})
+	stopped := t.Stop()
+	assert(stopped, "AfterFunc Stop should return true")
+	// Don't wait — the goroutine won't fire
+}
+
+func testAfter() {
+	ch := time.After(10 * time.Millisecond)
+	v := <-ch
+	assert(v.UnixNano() > 0, "After should deliver time value")
+}
+
+func testTickerFires() {
+	tk := time.NewTicker(10 * time.Millisecond)
+	v := <-tk.C
+	assert(v.UnixNano() > 0, "Ticker should fire with valid time")
+	v2 := <-tk.C
+	assert(v2.UnixNano() >= v.UnixNano(), "Ticker second tick should be >= first")
+	tk.Stop()
+}
+
+func testTickerStop() {
+	tk := time.NewTicker(10 * time.Millisecond)
+	<-tk.C
+	tk.Stop()
+}
+
+func testTick() {
+	// time.Tick leaks the ticker goroutine (by design, like Go).
+	// In Vo, the scheduler waits for all goroutines, so use NewTicker+Stop in tests.
+	tk := time.NewTicker(10 * time.Millisecond)
+	v := <-tk.C
+	assert(v.UnixNano() > 0, "Tick channel should deliver time value")
+	tk.Stop()
+}
+
+func main() {
+	fmt.Println("testTimerFires...")
+	testTimerFires()
+	fmt.Println("testTimerStop...")
+	testTimerStop()
+	fmt.Println("testTimerReset...")
+	testTimerReset()
+	fmt.Println("testAfterFunc...")
+	testAfterFunc()
+	fmt.Println("testAfterFuncStop...")
+	testAfterFuncStop()
+	fmt.Println("testAfter...")
+	testAfter()
+	fmt.Println("testTickerFires...")
+	testTickerFires()
+	fmt.Println("testTickerStop...")
+	testTickerStop()
+	fmt.Println("testTick...")
+	testTick()
+	fmt.Println("PASS: time_timer")
+}

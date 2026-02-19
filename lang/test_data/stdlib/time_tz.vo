@@ -1,0 +1,163 @@
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func assertEq(label string, got, want any) {
+	if got != want {
+		panic(fmt.Sprintf("%s: got %v, want %v", label, got, want))
+	}
+}
+
+func testFixedZone() {
+	fmt.Println("testFixedZone...")
+	// +05:30 = IST (India Standard Time) = 5.5 hours east
+	ist := time.FixedZone("IST", 5*3600+30*60)
+	t := time.Unix(0, 0).In(ist)
+	name, off := t.Zone()
+	assertEq("FixedZone name", name, "IST")
+	assertEq("FixedZone offset", off, 5*3600+30*60)
+	// Epoch in IST is 1970-01-01 05:30:00
+	assertEq("IST Hour", t.Hour(), 5)
+	assertEq("IST Minute", t.Minute(), 30)
+	assertEq("IST Second", t.Second(), 0)
+}
+
+func testUTCLocation() {
+	fmt.Println("testUTCLocation...")
+	t := time.Unix(0, 0)
+	assertEq("UTC Hour", t.Hour(), 0)
+	assertEq("UTC Minute", t.Minute(), 0)
+	t2 := t.UTC()
+	name, off := t2.Zone()
+	assertEq("UTC name", name, "UTC")
+	assertEq("UTC offset", off, 0)
+}
+
+func testIn() {
+	fmt.Println("testIn...")
+	// 2025-01-15 12:00:00 UTC
+	base := time.Date(2025, time.January, 15, 12, 0, 0, 0)
+	// +09:00 = JST
+	jst := time.FixedZone("JST", 9*3600)
+	t := base.In(jst)
+	assertEq("JST Hour", t.Hour(), 21)
+	assertEq("JST Minute", t.Minute(), 0)
+	assertEq("JST Year", t.Year(), 2025)
+	assertEq("JST Month", int(t.Month()), 1)
+	assertEq("JST Day", t.Day(), 15)
+	// Back to UTC
+	tUtc := t.UTC()
+	assertEq("Back UTC Hour", tUtc.Hour(), 12)
+}
+
+func testNegativeOffset() {
+	fmt.Println("testNegativeOffset...")
+	// -05:00 = EST
+	est := time.FixedZone("EST", -5*3600)
+	// 2025-03-10 00:00:00 UTC
+	base := time.Date(2025, time.March, 10, 0, 0, 0, 0)
+	t := base.In(est)
+	// Should be 2025-03-09 19:00:00 EST
+	assertEq("EST Hour", t.Hour(), 19)
+	assertEq("EST Day", t.Day(), 9)
+	assertEq("EST Month", int(t.Month()), 3)
+}
+
+func testLocation() {
+	fmt.Println("testLocation...")
+	t := time.Unix(0, 0)
+	name, _ := t.Zone()
+	assertEq("default Location name", name, "UTC")
+	ist := time.FixedZone("IST", 19800)
+	t2 := t.In(ist)
+	name2, _ := t2.Zone()
+	assertEq("IST Location name", name2, "IST")
+}
+
+func testLoadLocation() {
+	fmt.Println("testLoadLocation...")
+	// Valid IANA zone
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		panic("LoadLocation failed: " + err.Error())
+	}
+	if loc == nil {
+		panic("LoadLocation returned nil")
+	}
+
+	// Invalid zone
+	_, err2 := time.LoadLocation("Not/A/Zone")
+	if err2 == nil {
+		panic("LoadLocation should fail for unknown zone")
+	}
+
+	// UTC is a singleton - Zone() on a time using it should return "UTC"
+	utcLoc, _ := time.LoadLocation("UTC")
+	tUTC := time.Unix(0, 0).In(utcLoc)
+	utcName, _ := tUTC.Zone()
+	assertEq("LoadLocation UTC name", utcName, "UTC")
+}
+
+func testIANAOffset() {
+	fmt.Println("testIANAOffset...")
+	loc, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		panic("LoadLocation Asia/Tokyo failed: " + err.Error())
+	}
+	// Tokyo is always UTC+9, no DST
+	// 2025-06-15 12:00:00 UTC
+	base := time.Date(2025, time.June, 15, 12, 0, 0, 0)
+	t := base.In(loc)
+	assertEq("Tokyo Hour", t.Hour(), 21)
+	_, off := t.Zone()
+	assertEq("Tokyo offset", off, 9*3600)
+}
+
+func testFormatWithTZ() {
+	fmt.Println("testFormatWithTZ...")
+	ist := time.FixedZone("IST", 5*3600+30*60)
+	t := time.Unix(0, 0).In(ist)
+	// 1970-01-01T05:30:00+05:30
+	s := t.Format(time.RFC3339)
+	assertEq("RFC3339 with IST", s, "1970-01-01T05:30:00+05:30")
+}
+
+func testParseWithTZ() {
+	fmt.Println("testParseWithTZ...")
+	t, err := time.Parse(time.RFC3339, "1970-01-01T05:30:00+05:30")
+	if err != nil {
+		panic("Parse failed: " + err.Error())
+	}
+	// Underlying epoch should be 0 (UTC midnight)
+	assertEq("ParsedTZ UnixNano", t.UnixNano(), int64(0))
+	// Zone should be +05:30
+	_, off := t.Zone()
+	assertEq("ParsedTZ offset", off, 5*3600+30*60)
+}
+
+func testAdd_preservesLoc() {
+	fmt.Println("testAdd_preservesLoc...")
+	ist := time.FixedZone("IST", 19800)
+	t := time.Unix(0, 0).In(ist)
+	t2 := t.Add(time.Hour)
+	_, off := t2.Zone()
+	assertEq("Add preserves offset", off, 19800)
+	assertEq("Add IST Hour", t2.Hour(), 6)
+}
+
+func main() {
+	testFixedZone()
+	testUTCLocation()
+	testIn()
+	testNegativeOffset()
+	testLocation()
+	testLoadLocation()
+	testIANAOffset()
+	testFormatWithTZ()
+	testParseWithTZ()
+	testAdd_preservesLoc()
+	fmt.Println("PASS: time_tz")
+}

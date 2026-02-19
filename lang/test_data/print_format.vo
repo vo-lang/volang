@@ -47,7 +47,7 @@ func main() {
     assert(fmt.Sprint("hello") == "hello", "Sprint string")
     assert(fmt.Sprint(true) == "true", "Sprint bool")
     assert(fmt.Sprint(1, 2, 3) == "1 2 3", "Sprint multiple ints")
-    assert(fmt.Sprint("a", "b") == "a b", "Sprint multiple strings")
+    assert(fmt.Sprint("a", "b") == "ab", "Sprint multiple strings")
     
     // === nil error ===
     var nilErr error
