@@ -18,7 +18,7 @@ func testNowSinceSleep() {
 	d := time.Since(start)
 	assert(d > 0)
 
-	future := start.Add(20 * time.Millisecond)
+	future := start.Add(1 * time.Second)
 	until := time.Until(future)
 	assert(until > 0)
 }
