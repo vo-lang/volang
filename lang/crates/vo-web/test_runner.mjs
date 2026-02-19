@@ -92,7 +92,7 @@ async function runTest(filePath) {
   }
   
   try {
-    const result = voWeb.compileAndRun(source, relPath);
+    const result = await voWeb.compileAndRun(source, relPath);
     
     if (result.status === "ok") {
       console.log(`  ${GREEN}✓${NC} ${relPath} [wasm]`);

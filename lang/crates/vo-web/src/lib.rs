@@ -8,7 +8,9 @@
 //! - `compiler` (default): Full compiler chain
 //! - No features: Bytecode execution only
 
+use core::cell::Cell;
 use wasm_bindgen::prelude::*;
+use vo_vm::vm::SchedulingOutcome;
 
 #[cfg(feature = "compiler")]
 use std::path::{Path, PathBuf};
@@ -198,20 +200,192 @@ pub fn run(bytecode: &[u8]) -> RunResult {
     }
 }
 
-/// Compile and run in one step.
+/// Compile and run in one step. Returns a Promise<{status,stdout,stderr}> to support async ops.
 #[cfg(feature = "compiler")]
 #[wasm_bindgen(js_name = "compileAndRun")]
-pub fn compile_and_run(source: &str, filename: Option<String>) -> RunResult {
-    let result = compile(source, filename);
+pub fn compile_and_run(source: &str, filename: Option<String>) -> js_sys::Promise {
+    let source = source.to_string();
+    let result = compile(&source, filename);
     if !result.success {
-        return RunResult {
-            status: "compile_error".to_string(),
-            stdout: String::new(),
-            stderr: result.error_message.unwrap_or_default(),
-        };
+        let obj = make_run_result_obj("compile_error", "", &result.error_message.unwrap_or_default());
+        return js_sys::Promise::resolve(&obj);
     }
-    
-    run(&result.bytecode.unwrap())
+    let bytecode = result.bytecode.unwrap();
+    wasm_bindgen_futures::future_to_promise(async move {
+        let (status, stdout, stderr) = run_vm_async(&bytecode).await;
+        Ok(make_run_result_obj(&status, &stdout, &stderr))
+    })
+}
+
+fn make_run_result_obj(status: &str, stdout: &str, stderr: &str) -> JsValue {
+    let obj = js_sys::Object::new();
+    js_sys::Reflect::set(&obj, &JsValue::from_str("status"), &JsValue::from_str(status)).unwrap();
+    js_sys::Reflect::set(&obj, &JsValue::from_str("stdout"), &JsValue::from_str(stdout)).unwrap();
+    js_sys::Reflect::set(&obj, &JsValue::from_str("stderr"), &JsValue::from_str(stderr)).unwrap();
+    obj.into()
+}
+
+/// Async VM execution loop: runs until complete, awaiting JS callbacks for Sleep/fetch.
+/// Returns (status, stdout, stderr).
+async fn run_vm_async(bytecode: &[u8]) -> (String, String, String) {
+    vo_runtime::output::clear_output();
+    let module = match vo_vm::bytecode::Module::deserialize(bytecode) {
+        Ok(m) => m,
+        Err(e) => return ("error".into(), String::new(), format!("Failed to load bytecode: {:?}", e)),
+    };
+
+    let mut vm = vo_vm::vm::Vm::new();
+    let reg = &mut vm.state.extern_registry;
+    let exts = &module.externs;
+    vo_stdlib::register_externs(reg, exts);
+    vo_web_runtime_wasm::os::register_externs(reg, exts);
+    vo_web_runtime_wasm::time::register_externs(reg, exts);
+    vo_web_runtime_wasm::filepath::register_externs(reg, exts);
+    vo_web_runtime_wasm::net_http::register_externs(reg, exts);
+    vm.load(module);
+
+    let mut outcome = match vm.run_resumable() {
+        Ok(o) => o,
+        Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
+    };
+
+    while outcome == SchedulingOutcome::SuspendedForCallbacks {
+        let callbacks = vm.scheduler.take_pending_callbacks();
+        if callbacks.is_empty() {
+            break;
+        }
+
+        // Process resume-style callbacks (fetch Promises) first.
+        let fetch_promises = vo_web_runtime_wasm::net_http::take_pending_fetch_promises();
+        for (token, promise) in fetch_promises {
+            outcome = match await_fetch(&mut vm, token, promise).await {
+                Ok(o) => o,
+                Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
+            };
+            if outcome != SchedulingOutcome::SuspendedForCallbacks { break; }
+        }
+        if outcome != SchedulingOutcome::SuspendedForCallbacks { break; }
+
+        // Process timer callbacks in chronological order.
+        let mut timer_callbacks: Vec<_> = callbacks.into_iter()
+            .filter(|c| !c.resume)
+            .collect();
+        timer_callbacks.sort_unstable_by_key(|c| c.delay_ms);
+        let mut elapsed_ms: u32 = 0;
+        for cb in timer_callbacks {
+            let remaining = cb.delay_ms.saturating_sub(elapsed_ms);
+            if remaining > 0 {
+                wasm_callback_sleep_ms(remaining).await;
+                elapsed_ms = elapsed_ms.saturating_add(remaining);
+            }
+            vm.wake_callback(cb.token);
+            outcome = match vm.run_scheduled_resumable() {
+                Ok(o) => o,
+                Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
+            };
+            if outcome != SchedulingOutcome::SuspendedForCallbacks { break; }
+
+            // Drain any fetch Promises spawned during this timer wake.
+            let new_fetches = vo_web_runtime_wasm::net_http::take_pending_fetch_promises();
+            for (ft, fp) in new_fetches {
+                outcome = match await_fetch(&mut vm, ft, fp).await {
+                    Ok(o) => o,
+                    Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
+                };
+                if outcome != SchedulingOutcome::SuspendedForCallbacks { break; }
+            }
+            if outcome != SchedulingOutcome::SuspendedForCallbacks { break; }
+        }
+    }
+
+    ("ok".into(), vo_runtime::output::take_output(), String::new())
+}
+
+/// Await a single fetch Promise: resolve it, store the result, wake the fiber, and resume VM.
+async fn await_fetch(
+    vm: &mut vo_vm::vm::Vm,
+    token: u64,
+    promise: js_sys::Promise,
+) -> Result<SchedulingOutcome, vo_vm::vm::VmError> {
+    let result = wasm_bindgen_futures::JsFuture::from(promise).await;
+    let fetch_result = match result {
+        Ok(val) => vo_web_runtime_wasm::net_http::parse_fetch_js_value(token, &val),
+        Err(e) => vo_web_runtime_wasm::net_http::FetchResult {
+            status_code: 0,
+            status: String::new(),
+            proto: String::new(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            error: Some(format!("fetch error: {:?}", e)),
+        },
+    };
+    vo_web_runtime_wasm::net_http::store_fetch_result(token, fetch_result);
+    vm.wake_callback(token);
+    vm.run_scheduled_resumable()
+}
+
+/// Best-effort monotonic clock in milliseconds for WASM host environments.
+///
+/// Prefers globalThis.performance.now() when available (browser + Node),
+/// falling back to Date.now().
+fn js_now_ms() -> f64 {
+    let global = js_sys::global();
+    if let Ok(perf) = js_sys::Reflect::get(&global, &JsValue::from_str("performance")) {
+        if !perf.is_undefined() && !perf.is_null() {
+            if let Ok(now_fn) = js_sys::Reflect::get(&perf, &JsValue::from_str("now")) {
+                if now_fn.is_function() {
+                    let func = js_sys::Function::from(now_fn);
+                    if let Ok(v) = func.call0(&perf) {
+                        if let Some(ms) = v.as_f64() {
+                            return ms.max(0.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    js_sys::Date::now().max(0.0)
+}
+
+/// Await one JS setTimeout via a Promise. Returns false if setTimeout is unavailable.
+async fn wasm_sleep_once_ms(ms: u32) -> bool {
+    let used_set_timeout = Cell::new(false);
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let global = js_sys::global();
+        let set_timeout = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+            .unwrap_or(JsValue::UNDEFINED);
+        if set_timeout.is_function() {
+            used_set_timeout.set(true);
+            let func = js_sys::Function::from(set_timeout);
+            let _ = func.call2(&JsValue::NULL, &resolve, &JsValue::from(ms));
+        } else {
+            // Fallback: resolve immediately (no setTimeout available)
+            let _ = resolve.call0(&JsValue::NULL);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    used_set_timeout.get()
+}
+
+/// Await at least `ms` milliseconds using JS timers.
+///
+/// A single setTimeout can fire slightly early in some hosts; we therefore
+/// loop until a deadline is reached to preserve Sleep lower-bound semantics.
+async fn wasm_callback_sleep_ms(ms: u32) {
+    if ms == 0 {
+        return;
+    }
+    let deadline_ms = js_now_ms() + ms as f64;
+    loop {
+        let remaining_ms = deadline_ms - js_now_ms();
+        if remaining_ms <= 0.0 {
+            break;
+        }
+        let remaining = remaining_ms.ceil().max(1.0) as u32;
+        if !wasm_sleep_once_ms(remaining).await {
+            break;
+        }
+    }
 }
 
 // =============================================================================
@@ -248,8 +422,8 @@ pub fn create_vm_from_module(module: Module, register_externs: ExternRegistrar) 
     // wasm platform
     vo_web_runtime_wasm::os::register_externs(reg, exts);
     vo_web_runtime_wasm::time::register_externs(reg, exts);
-    vo_web_runtime_wasm::regexp::register_externs(reg, exts);
     vo_web_runtime_wasm::filepath::register_externs(reg, exts);
+    vo_web_runtime_wasm::net_http::register_externs(reg, exts);
     
     // caller
     register_externs(reg, exts);

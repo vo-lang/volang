@@ -965,4 +965,28 @@ fn native_read_line(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-vo_runtime::stdlib_register!(fmt: nativeWrite, nativeSprint, nativeSprintln, nativeSprintf, nativeSscan, nativeSscanf, nativeReadLine);
+pub fn register_externs(
+    registry: &mut vo_runtime::ffi::ExternRegistry,
+    externs: &[vo_runtime::bytecode::ExternDef],
+) {
+    const BASE_TABLE: &[vo_runtime::ffi::StdlibEntry] = &[
+        __STDLIB_fmt_nativeWrite,
+        __STDLIB_fmt_nativeSprint,
+        __STDLIB_fmt_nativeSprintln,
+        __STDLIB_fmt_nativeSprintf,
+        __STDLIB_fmt_nativeSscan,
+        __STDLIB_fmt_nativeSscanf,
+    ];
+    for (id, def) in externs.iter().enumerate() {
+        for entry in BASE_TABLE {
+            if def.name == entry.name() {
+                entry.register(registry, id as u32);
+                break;
+            }
+        }
+        #[cfg(feature = "std")]
+        if def.name == __STDLIB_fmt_nativeReadLine.name() {
+            __STDLIB_fmt_nativeReadLine.register(registry, id as u32);
+        }
+    }
+}

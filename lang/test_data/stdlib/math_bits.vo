@@ -16,10 +16,10 @@ func main() {
 }
 
 func testLeadingZeros() {
-	assert(bits.LeadingZeros(0) == 64)
-	assert(bits.LeadingZeros(1) == 63)
-	assert(bits.LeadingZeros(0x8000000000000000) == 0)
-	assert(bits.LeadingZeros(0xFF) == 56)
+	assert(bits.LeadingZeros(0) == bits.UintSize)
+	assert(bits.LeadingZeros(1) == bits.UintSize-1)
+	assert(bits.LeadingZeros64(0x8000000000000000) == 0)
+	assert(bits.LeadingZeros(0xFF) == bits.UintSize-8)
 
 	assert(bits.LeadingZeros8(0) == 8)
 	assert(bits.LeadingZeros8(1) == 7)
@@ -36,7 +36,7 @@ func testLeadingZeros() {
 }
 
 func testTrailingZeros() {
-	assert(bits.TrailingZeros(0) == 64)
+	assert(bits.TrailingZeros(0) == bits.UintSize)
 	assert(bits.TrailingZeros(1) == 0)
 	assert(bits.TrailingZeros(2) == 1)
 	assert(bits.TrailingZeros(0x10) == 4)
@@ -57,7 +57,7 @@ func testOnesCount() {
 	assert(bits.OnesCount(0) == 0)
 	assert(bits.OnesCount(1) == 1)
 	assert(bits.OnesCount(0xFF) == 8)
-	assert(bits.OnesCount(0xFFFFFFFFFFFFFFFF) == 64)
+	assert(bits.OnesCount64(0xFFFFFFFFFFFFFFFF) == 64)
 
 	assert(bits.OnesCount8(0) == 0)
 	assert(bits.OnesCount8(0xFF) == 8)

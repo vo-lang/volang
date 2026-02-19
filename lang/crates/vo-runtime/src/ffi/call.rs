@@ -81,6 +81,10 @@ pub struct ExternFiberInputs {
     #[cfg(feature = "std")]
     pub resume_io_token: Option<IoToken>,
 
+    /// Callback token that woke this fiber. Present only on the PC re-execution
+    /// path (second execution of the same `CallExtern`) after `CallbackWaitAndResume`.
+    pub resume_callback_token: Option<u64>,
+
     /// Cached closure results from previous `CallClosure` round-trips.
     /// Consumed in order via `ExternCallContext.replay_index`.
     pub replay_results: Vec<Vec<u64>>,

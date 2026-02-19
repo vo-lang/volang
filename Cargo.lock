@@ -1848,6 +1848,7 @@ dependencies = [
  "vo-vm",
  "vo-web-runtime-wasm",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
 ]

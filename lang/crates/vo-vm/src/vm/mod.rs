@@ -43,6 +43,8 @@ enum WaitResult {
     Done,
     /// All fibers blocked (potential deadlock).
     Blocked,
+    /// Some fibers waiting for external callbacks; async loop must handle them.
+    SuspendedForCallbacks,
     /// Island VM should return to its command loop.
     Break,
 }
@@ -298,6 +300,37 @@ impl Vm {
             _ => Ok(()),
         }
     }
+
+    /// Like `run()` but returns `SuspendedForCallbacks` to caller instead of treating it as complete.
+    /// Used by the WASM async entry point to handle timer/fetch suspension.
+    pub fn run_resumable(&mut self) -> Result<SchedulingOutcome, VmError> {
+        let module = self.module.as_ref().ok_or(VmError::NoEntryFunction)?;
+        let entry_func = module.entry_func;
+
+        if entry_func as usize >= module.functions.len() {
+            return Err(VmError::InvalidFunctionId(entry_func));
+        }
+
+        let func = &module.functions[entry_func as usize];
+        let mut fiber = Fiber::new(0);
+        fiber.push_frame(entry_func, func.local_slots, 0, 0);
+        self.scheduler.spawn(fiber);
+
+        let outcome = self.run_scheduling_loop(None)?;
+        if outcome == SchedulingOutcome::Blocked {
+            return Err(self.report_deadlock().unwrap_err());
+        }
+        Ok(outcome)
+    }
+
+    /// Like `run_scheduled()` but returns `SuspendedForCallbacks` instead of treating it as complete.
+    pub fn run_scheduled_resumable(&mut self) -> Result<SchedulingOutcome, VmError> {
+        let outcome = self.run_scheduling_loop(None)?;
+        if outcome == SchedulingOutcome::Blocked {
+            return Err(self.report_deadlock().unwrap_err());
+        }
+        Ok(outcome)
+    }
     
     /// Run existing runnable fibers without spawning entry fiber.
     /// Used for event handling after initial run.
@@ -329,6 +362,7 @@ impl Vm {
                     WaitResult::Retry => continue,
                     WaitResult::Done => return Ok(SchedulingOutcome::Completed),
                     WaitResult::Blocked => return Ok(SchedulingOutcome::Blocked),
+                    WaitResult::SuspendedForCallbacks => return Ok(SchedulingOutcome::SuspendedForCallbacks),
                     WaitResult::Break => break,
                 }
             }
@@ -414,9 +448,20 @@ impl Vm {
             return WaitResult::Retry;
         }
         
+        // If the only blocked fibers are callback waiters, signal the async loop.
+        if self.scheduler.has_callback_waiters() {
+            return WaitResult::SuspendedForCallbacks;
+        }
+
         WaitResult::Done
     }
-    
+
+    /// Wake a fiber blocked on an external callback and schedule it to run.
+    /// Called by the WASM async run loop after a callback fires.
+    pub fn wake_callback(&mut self, token: u64) {
+        self.scheduler.wake_callback(token);
+    }
+
     /// Handle a fiber execution result. Returns:
     /// - `None`: continue scheduling loop
     /// - `Some(Ok(outcome))`: return this outcome
@@ -434,6 +479,10 @@ impl Vm {
                 match reason {
                     crate::fiber::BlockReason::Queue => {
                         self.scheduler.block_for_queue();
+                    }
+                    crate::fiber::BlockReason::Callback(_) |
+                    crate::fiber::BlockReason::CallbackResume(_) => {
+                        unreachable!("Callback blocked directly in run_resumable, not via ExecResult");
                     }
                     #[cfg(feature = "std")]
                     crate::fiber::BlockReason::Io(token) => {
@@ -1084,6 +1133,7 @@ impl Vm {
                     let fiber_ptr = fiber as *mut crate::fiber::Fiber as *mut core::ffi::c_void;
                     #[cfg(feature = "std")]
                     let resume_io_token = fiber.resume_io_token.take();
+                    let resume_callback_token = fiber.resume_callback_token.take();
                     let (closure_replay_results, closure_replay_panicked) = fiber.closure_replay.take_for_extern();
                     let invoke = ExternInvoke {
                         extern_id,
@@ -1107,6 +1157,7 @@ impl Vm {
                         fiber_opaque: fiber_ptr,
                         #[cfg(feature = "std")]
                         resume_io_token,
+                        resume_callback_token,
                         replay_results: closure_replay_results,
                         replay_panicked: closure_replay_panicked,
                     };
@@ -1127,6 +1178,17 @@ impl Vm {
                         }
                         ExternResult::Yield => { return ExecResult::TimesliceExpired; }
                         ExternResult::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
+                        ExternResult::CallbackWait { token, delay_ms } => {
+                            self.scheduler.block_for_callback(token, delay_ms);
+                            return ExecResult::TimesliceExpired;
+                        }
+                        ExternResult::CallbackWaitAndResume { token } => {
+                            // Undo PC so extern replays on wake (like CallClosure)
+                            let frame = fiber.current_frame_mut().unwrap();
+                            frame.pc -= 1;
+                            self.scheduler.block_for_callback_resume(token);
+                            return ExecResult::TimesliceExpired;
+                        }
                         #[cfg(feature = "std")]
                         ExternResult::WaitIo { token } => {
                             return ExecResult::Block(crate::fiber::BlockReason::Io(token));

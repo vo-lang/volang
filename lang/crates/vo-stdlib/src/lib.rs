@@ -19,7 +19,6 @@ pub mod strings;
 pub mod strconv;
 pub mod unicode;
 pub mod fmt;
-#[cfg(feature = "std")]
 pub mod regexp;
 pub mod json;
 pub mod toml_pkg;
@@ -62,10 +61,12 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     toml_pkg::register_externs(registry, externs);
     io::register_externs(registry, externs);
 
+    // cross-platform (no std required)
+    regexp::register_externs(registry, externs);
+
     // std-only
     #[cfg(feature = "std")]
     {
-        regexp::register_externs(registry, externs);
         time::register_externs(registry, externs);
         os::register_externs(registry, externs);
         net::register_externs(registry, externs);

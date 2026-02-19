@@ -196,6 +196,12 @@ pub enum BlockReason {
     /// Waiting for I/O completion.
     #[cfg(feature = "std")]
     Io(vo_runtime::io::IoToken),
+    /// Waiting for an external callback timer (e.g. setTimeout).
+    /// Fiber resumes at next instruction after wake.
+    Callback(u64),
+    /// Waiting for an async operation that produces a result (e.g. fetch Promise).
+    /// Fiber re-executes the extern on wake (PC was undone before blocking).
+    CallbackResume(u64),
 }
 
 
@@ -351,6 +357,9 @@ pub struct Fiber {
     pub panic_generation: u64,
     #[cfg(feature = "std")]
     pub resume_io_token: Option<IoToken>,
+    /// Callback token set when fiber wakes via `CallbackWaitAndResume`.
+    /// Read by extern on re-invocation via `take_resume_callback_token()`.
+    pub resume_callback_token: Option<u64>,
     /// JIT resume stack for suspended call chains.
     /// When JIT returns Call/WaitIo, resume points are pushed here.
     /// On resume, they are popped and converted to VM frames.
@@ -381,6 +390,7 @@ impl Fiber {
             panic_generation: 0,
             #[cfg(feature = "std")]
             resume_io_token: None,
+            resume_callback_token: None,
             #[cfg(feature = "jit")]
             resume_stack: Vec::new(),  // Lazy: only allocates on first push (Call/WaitIo)
             #[cfg(feature = "jit")]
@@ -405,6 +415,7 @@ impl Fiber {
         {
             self.resume_io_token = None;
         }
+        self.resume_callback_token = None;
         #[cfg(feature = "jit")]
         self.resume_stack.clear();
         #[cfg(feature = "jit")]

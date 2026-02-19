@@ -5,11 +5,18 @@
 
 use vo_ffi_macro::vostd_fn;
 
+// ==================== Platform uint size ====================
+
+#[vostd_fn("math/bits", "nativeUintSize")]
+fn native_uint_size() -> i64 {
+    (core::mem::size_of::<usize>() * 8) as i64
+}
+
 // ==================== Leading zeros (CLZ instruction) ====================
 
 #[vostd_fn("math/bits", "LeadingZeros")]
 fn leading_zeros(x: u64) -> i64 {
-    x.leading_zeros() as i64
+    (x as usize).leading_zeros() as i64
 }
 
 #[vostd_fn("math/bits", "LeadingZeros8")]
@@ -36,7 +43,8 @@ fn leading_zeros64(x: u64) -> i64 {
 
 #[vostd_fn("math/bits", "TrailingZeros")]
 fn trailing_zeros(x: u64) -> i64 {
-    if x == 0 { 64 } else { x.trailing_zeros() as i64 }
+    let v = x as usize;
+    if v == 0 { (core::mem::size_of::<usize>() * 8) as i64 } else { v.trailing_zeros() as i64 }
 }
 
 #[vostd_fn("math/bits", "TrailingZeros8")]
@@ -63,7 +71,7 @@ fn trailing_zeros64(x: u64) -> i64 {
 
 #[vostd_fn("math/bits", "OnesCount")]
 fn ones_count(x: u64) -> i64 {
-    x.count_ones() as i64
+    (x as usize).count_ones() as i64
 }
 
 #[vostd_fn("math/bits", "OnesCount8")]
@@ -187,6 +195,7 @@ fn div64(hi: u64, lo: u64, y: u64) -> (u64, u64) {
 }
 
 vo_runtime::stdlib_register!(math_bits:
+    nativeUintSize,
     LeadingZeros, LeadingZeros8, LeadingZeros16, LeadingZeros32, LeadingZeros64,
     TrailingZeros, TrailingZeros8, TrailingZeros16, TrailingZeros32, TrailingZeros64,
     OnesCount, OnesCount8, OnesCount16, OnesCount32, OnesCount64,

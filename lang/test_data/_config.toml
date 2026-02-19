@@ -1319,8 +1319,8 @@ reason = "os module requires native"
 
 [[tests]]
 file = "stdlib/regexp.vo"
-skip = ["nostd", "wasm"]
-reason = "regexp module requires std"
+skip = ["nostd"]
+reason = "regexp module requires alloc (not available in nostd build)"
 
 [[tests]]
 file = "stdlib/time.vo"
@@ -1434,9 +1434,84 @@ reason = "channel requires goroutine"
 
 [[tests]]
 file = "lang/test/http_server_test.vo"
-reason = "concurrent IO read on fd causes crash under JIT"
+skip = ["wasm"]
+reason = "net requires native externs; concurrent IO read on fd causes crash under JIT"
 
 [[tests]]
 file = "bugs/2026_01_31_jit_http_server_client.vo"
-reason = "concurrent IO read on fd causes crash under JIT"
+skip = ["wasm"]
+reason = "net requires native externs; concurrent IO read on fd causes crash under JIT"
+
+[[tests]]
+file = "stdlib/context.vo"
+skip = []
+reason = "time.Sleep works via JS async substrate (W0+W2)"
+
+[[tests]]
+file = "stdlib/sync.vo"
+skip = []
+reason = "time.Sleep works via JS async substrate (W0+W2)"
+
+[[tests]]
+file = "stdlib/time_timer.vo"
+skip = []
+reason = "time.Sleep works via JS async substrate (W0+W2)"
+
+[[tests]]
+file = "stdlib/time_timer_min.vo"
+skip = []
+reason = "time.Sleep works via JS async substrate (W0+W2)"
+
+[[tests]]
+file = "skill_debug_vo/2026_02_18_select_send_recv_wake.vo"
+skip = []
+reason = "time.Sleep works via JS async substrate (W0+W2)"
+
+
+
+[[tests]]
+file = "stdlib/time_tz.vo"
+skip = []
+reason = "timezone APIs implemented via JS Intl API (W1)"
+
+[[tests]]
+file = "stdlib/os_dirfs.vo"
+skip = ["wasm"]
+reason = "native filesystem; vfs is browser-only and not available in Node.js test runner"
+
+[[tests]]
+file = "2026_01_31_blocking_file_ops.vo"
+skip = ["wasm"]
+reason = "blocking file ops use vfs (window namespace); not available in Node.js test runner"
+
+[[tests]]
+file = "2026_02_02_mixed_jit_vm_waitio.vo"
+skip = []
+reason = "time.Sleep works via JS async substrate (W0+W2)"
+
+[[tests]]
+file = "2026_02_02_nested_jit_waitio.vo"
+skip = []
+reason = "time.Sleep works via JS async substrate (W0+W2)"
+
+[[tests]]
+file = "lang/test/time_extern_test.vo"
+skip = []
+reason = "time.Sleep works via JS async substrate (W0+W2)"
+
+[[tests]]
+file = "lang/test/http_client_test.vo"
+skip = []
+reason = "http via fetch API (W3)"
+
+[[tests]]
+file = "lang/test/net_dial_test.vo"
+skip = ["wasm"]
+reason = "net_dial requires native externs"
+
+[[tests]]
+file = "lang/test/tcp_read_test.vo"
+skip = ["wasm"]
+reason = "net_dial requires native externs"
+
 

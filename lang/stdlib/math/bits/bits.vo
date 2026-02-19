@@ -1,7 +1,8 @@
 package bits
 
-// UintSize is the size of a uint in bits.
-const UintSize = 64
+// UintSize is the size of a uint in bits (platform-dependent: 32 on wasm32, 64 on 64-bit).
+func nativeUintSize() int
+var UintSize = nativeUintSize()
 
 // Extern functions (implemented in Rust) - hardware instructions
 func LeadingZeros(x uint) int

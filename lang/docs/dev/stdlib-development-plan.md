@@ -67,7 +67,7 @@ The Vo standard library aims to provide a **production-ready, Go-compatible core
 | `math` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | Core surface covered; missing `Remainder`, `Gamma`, `Lgamma`, `Erf`, `Erfc`, `J0/J1/Jn/Y0/Y1/Yn` (low frequency) |
 | `math/bits` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | Bug fixed: `Reverse8`/`Reverse16` now use arithmetic instead of buggy lookup table; full surface covered |
 | `math/rand` | P0 | Vo-Adapted | Vo-Adapted | ✅ Adequate | `Int63`, `Int31`, `Int31n`, `Int64n`, `ExpFloat64`, `NormFloat64`, `New`/`NewSource`, `Rand` struct all present |
-| `time` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Format`, `Parse`, `Date`, `Year/Month/Day/Hour/Minute/Second`, `Truncate`, `Round`, layout constants (`RFC3339`, `DateTime`, etc.), `Weekday`, `Month`, `MarshalJSON`/`UnmarshalJSON`, `MarshalText`/`UnmarshalText`, `Timer`/`Ticker`/`After`/`Tick`/`AfterFunc` all present |
+| `time` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Format`, `Parse`, `Date`, `Year/Month/Day/Hour/Minute/Second`, `Truncate`, `Round`, layout constants (`RFC3339`, `DateTime`, etc.), `Weekday`, `Month`, `MarshalJSON`/`UnmarshalJSON`, `MarshalText`/`UnmarshalText`, `Timer`/`Ticker`/`After`/`Tick`/`AfterFunc`, `Location`/`FixedZone`/`LoadLocation`/`In`/`UTC`/`Local` all present |
 | `io` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | Core interfaces, `ReadAll`, `Copy`, `CopyN`, `ReadFull`, `LimitReader`, `SectionReader`, `Discard`, `WriteString`, `Pipe`/`PipeReader`/`PipeWriter` all present |
 | `os` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `UserHomeDir`, `UserCacheDir`, `UserConfigDir`, `TempDir`, `CreateTemp`, `Symlink`, `Readlink`, `Link` all present |
 | `path/filepath` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Clean`, `Join`, `Split`, `Base`, `Dir`, `Ext`, `Abs`, `Rel`, `Walk`, `WalkDir`, `Glob`, `Match`, `EvalSymlinks` all present |
@@ -75,7 +75,7 @@ The Vo standard library aims to provide a **production-ready, Go-compatible core
 | `encoding/toml` | P1 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Marshal`, `Unmarshal`, `Decode`/`DecodeString`, `Valid` — Vo-specific addition |
 | `net` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Dial`, `DialTimeout`, `Dialer`, `Listen`, `LookupHost`, `LookupIP`, `LookupAddr`, TCP/UDP/Unix types all present; `LookupCNAME/MX/TXT/SRV` deferred |
 | `net/http` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Redirect`, `Error`, `NotFound`, `FormValue`, `ParseForm`, `Cookie`, `ServeMux`, `Server`, `FileServer`, `StripPrefix`, `HandlerFunc`, `MaxBytesReader`, `MaxBytesHandler`, `DetectContentType`, `NotFoundHandler`, `RedirectHandler`, `PostForm`, `NewRequestWithContext`, `Flusher`/`Hijacker`/`CloseNotifier` interfaces, `Request.Context`/`WithContext`/`Clone` all present; chunked transfer, keep-alive, TLS server deferred |
-| `fmt` | P0 | Subset-Compatible | Subset-Compatible | ⚠️ Partial | Print family + `Stringer`, `GoStringer`, `Formatter`, `State`, `Scanner`, `ScanState` interfaces present; Missing: `Sscan`, `Sscanf`, `Fscan`, `Fscanf`, `Scan`, `Scanln`, `Scanf` (scan family needs native impl) |
+| `fmt` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | Print family + Scan family all present; `Stringer`, `GoStringer`, `Formatter`, `State`, `Scanner`, `ScanState` interfaces; Scan functions return `[]any` (Vo-adapted, no pointer args) |
 | `os/exec` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Command`, `Cmd.Run/Start/Wait/Output/CombinedOutput`, `LookPath` present |
 | `regexp` | P1 | Subset-Compatible | Subset-Compatible | ✅ Adequate | String variants + byte variants (`Find`, `FindIndex`, `FindAll`, `FindSubmatch`, `ReplaceAll`, `ReplaceAllStringFunc`), `String`, `NumSubexp`, `SubexpNames` all present |
 | `sort` | P1 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Interface`, `Sort`, `Stable`, `IsSorted`, `ReverseInterface`, `Slice`, `SliceStable`, `SliceIsSorted`, typed variants, `Search*` all present |
@@ -101,13 +101,9 @@ The Vo standard library aims to provide a **production-ready, Go-compatible core
 
 #### 2.2.1 `time` — Complete
 
-**Status**: All high-priority items implemented. `Format`, `Parse`, `Date`, field accessors (`Year`, `Month`, `Day`, `Hour`, `Minute`, `Second`, `Nanosecond`, `Weekday`, `YearDay`), layout constants (`RFC3339`, `RFC1123`, `DateTime`, `DateOnly`, `TimeOnly`, etc.), `Truncate`, `Round`, `AppendFormat`, `ParseDuration`, `String()`.
+**Status**: Fully complete. `Format`, `Parse`, `Date`, field accessors (`Year`, `Month`, `Day`, `Hour`, `Minute`, `Second`, `Nanosecond`, `Weekday`, `YearDay`), layout constants (`RFC3339`, `RFC1123`, `DateTime`, `DateOnly`, `TimeOnly`, etc.), `Truncate`, `Round`, `AppendFormat`, `ParseDuration`, `String()`, `Timer`, `Ticker`, `After`, `Tick`, `AfterFunc` (pure Vo goroutines + channels), `Location`, `FixedZone`, `LoadLocation`, `In`, `UTC`, `Local` (timezone via native Rust backend).
 
-**Remaining (Lower Priority / Deferred)**:
-- `Location` / timezone support (`LoadLocation`, `FixedZone`) — requires tz database
-- `Time.In(loc *Location)`, `Time.UTC()`, `Time.Local()`
-
-**Implemented in this session**: `Timer`, `Ticker`, `After`, `Tick`, `AfterFunc` — pure Vo using goroutines + channels with gen counter for correctness.
+**Remaining**: None.
 
 #### 2.2.2 `net/http` — Mostly Complete
 
@@ -156,13 +152,92 @@ The Vo standard library aims to provide a **production-ready, Go-compatible core
 
 5. **`unicode.In`**: Category range table lookups deferred (requires embedded Unicode tables).
 
-6. **`time.Timer`/`time.Ticker`/`time.After`/`time.Tick`**: Channel-based time APIs deferred pending goroutine integration design.
+6. **`time.Timer`/`time.Ticker`/`time.After`/`time.Tick`/`time.AfterFunc`**: ✅ Done. Pure Vo implementation using goroutines + channels with generation counter for Stop/Reset correctness.
 
 7. **`os.DirFS`**: ✅ Done. `DirFS(dir string) fs.FS` implemented in pure Vo with `dirFS`, `dirFile`, `dirFileInfo` wrapper types. Bridges `os.FileInfo.ModTime() int64` to `fs.FileInfo.ModTime() time.Time` via `time.Unix()`.
 
 8. **Test Coverage** (current state as of 2026-02-19):
    - Total: 1972 tests passing (991 VM + 981 JIT), 0 failures
    - New test files added this phase: `math/bits`, `unicode/utf8`, `io`, `sort` (Interface), `strings` (IndexFunc/Title), `bytes` (IndexFunc/Title), `regexp` (byte variants), `encoding/csv`, `path`, `binary`, `cmp_test`, `context_extended`, `time_marshal`, `fmt_scan`, `os_dirfs`
+
+### 2.4 WASM / no_std Support — Actual State
+
+WASM support is implemented in `lang/crates/vo-web/runtime-wasm/` (`vo-web-runtime-wasm` crate). The native backend (`vo-stdlib`) gates all OS-dependent modules behind `#[cfg(feature = "std")]` and provides a no-op `register_externs` for the `time` module, deferring to the wasm crate.
+
+**Legend**: ✅ Full  ⚠️ Partial/Degraded  ❌ Not Available
+
+| Package | WASM Status | Notes |
+|---------|-------------|-------|
+| `errors`, `strings`, `bytes`, `strconv`, `math`, `math/bits`, `sort`, `slices`, `maps`, `unicode`, `unicode/utf8`, `encoding/hex`, `encoding/base64`, `dyn`, `cmp`, `path` | ✅ Full | Always registered; no `cfg(feature="std")` gate |
+| `fmt`, `encoding/json`, `encoding/toml`, `io` | ✅ Full | Always registered; pure Rust/Vo, no OS deps |
+| `math/rand` | ⚠️ Partial | xoroshiro128++ works, but `auto_seed()` uses a **counter only** (no time/pid/thread) — output is predictable across runs; `Read` not available in wasm |
+| `regexp` | ⚠️ Partial | Backed by **JS `RegExp`** (not Rust `regex` crate); most patterns work, but Go-specific syntax (e.g., `(?P<name>...)` named groups, POSIX classes) may differ |
+| `time` | ⚠️ Partial | `Now()` works (JS `Date`), mono clock works (`Performance.now`); **`Sleep` panics** ("not supported on wasm"); **timezone externs not registered** — `LoadLocation`, `In`, `Zone`, `localOffsetAt`, etc. will panic with unregistered extern error |
+| `os` | ⚠️ Partial | Full file I/O via **in-memory VirtualFS** (JS-side state); `Getenv` returns `""`, `os.Args` = `["wasm"]`, `Exit` no-op, `Pipe` unimplemented, `symlink`/`link` return error |
+| `path/filepath` | ⚠️ Partial | Only `EvalSymlinks` has a wasm impl (VFS-backed); all other functions are pure Vo and work fine |
+| `bufio`, `log`, `flag`, `io/fs` | ✅ Full | Pure Vo; no wasm-specific issues |
+| `net`, `net/url`, `net/http` | ❌ Not Available | No wasm extern implementation; calling any native net function will fail with unregistered extern |
+| `os/exec` | ❌ Not Available | No wasm implementation; process spawning not possible in browser |
+| `sync`, `context` | ❓ Scheduler-dependent | Island-local goroutines/channels; behavior depends on whether the WASM scheduler supports concurrent fibers |
+
+**Key gaps to address if full WASM support is needed:**
+- Timezone: register `localOffsetAt`, `ianaOffsetAt` etc. via JS `Intl.DateTimeFormat` in `vo-web-runtime-wasm/src/time.rs`
+- `rand` seeding: use `crypto.getRandomValues` for true entropy
+- `time.Sleep`: use a blocking-compatible yield mechanism (JS `setTimeout` callback)
+
+### 2.5 WASM / no_std — Ultimate Target State
+
+The target is **three distinct capability tiers** that compose cleanly, with no silent degradation at any tier boundary.
+
+#### Tier 1: `no_std + alloc` (embedded / bare-metal / custom allocator)
+
+Everything in this tier runs without an OS, without `thread_local!`, and without `std::`. Platform provides nothing except an allocator.
+
+| Package | Status | Notes |
+|---------|--------|-------|
+| `errors`, `strings`, `bytes`, `strconv`, `math`, `math/bits`, `unicode`, `unicode/utf8`, `sort`, `slices`, `maps`, `encoding/*`, `fmt`, `io`, `bufio`, `log`, `flag`, `dyn`, `cmp`, `path`, `io/fs` | ✅ Works now (minor auditing needed) | Must replace `thread_local!` in `rand.rs` |
+| `regexp` | ✅ After W4 | Rust `regex` crate is `no_std`-compatible with `alloc` |
+| `math/rand` | ✅ After W5 | Replace `thread_local!` + `AtomicU64`; platform injects entropy via a registered callback |
+| `time` | ❌ Excluded | Requires OS clock; no meaningful implementation without OS |
+| `os`, `net`, `net/http`, `os/exec` | ❌ Excluded | OS/network required by definition |
+| `sync`, `context` | ❓ Future | Requires scheduler; channel semantics depend on coroutine support |
+
+#### Tier 2: WASM / browser
+
+Builds on Tier 1. Browser JS APIs replace OS-level services.
+
+| Package | Target State | Implementation Path |
+|---------|-------------|---------------------|
+| `time.Now()` | ✅ Done | `js_sys::Date::now()` |
+| `time` timezone | ✅ After W1.1 | `Intl.DateTimeFormat().resolvedOptions().timeZone` + `Intl.DateTimeFormat` offset calculation |
+| `time.Sleep` | ✅ After W2.1 | Cooperative fiber suspend: scheduler registers a JS `setTimeout` callback that resumes the fiber |
+| `time.Timer`/`Ticker` | ✅ After W2.2 | Same as Sleep; goroutine-based implementation works once Sleep works |
+| `math/rand` | ✅ After W1.2 | `crypto.getRandomValues` for seeding + refill; true entropy |
+| `regexp` | ✅ After W4 | Switch to Rust `regex` crate (compiles to wasm32); drop JS `RegExp` shim; identical behavior to native |
+| `os` (VirtualFS) | ✅ Done | In-memory VirtualFS; covers playground use case |
+| `os` (real FS) | 🔮 Optional | Browser File System Access API (`showOpenFilePicker`) — gated behind feature flag |
+| `net/http` (client) | ✅ After W3 | `fetch` API bridge: `Client.Do` → JS `fetch()`; supports GET/POST/headers/body/response streaming |
+| `net/http` (server) | ❌ Not possible | Browsers cannot bind server sockets; out of scope |
+| `net` (raw TCP/UDP) | ❌ Not possible | Browser has no raw socket API; out of scope |
+| `os/exec` | ❌ Not possible | No process spawning in browser; out of scope |
+| `sync`, `context` | ✅ After W2.2 | Verify WASM scheduler handles single-threaded coroutine multiplexing |
+
+#### Tier 3: Native (current full state)
+
+All packages including server-side `net/http`, `os/exec`, filesystem, real timezone database.
+
+#### Package classification summary
+
+```
+Tier 1 (no_std+alloc): errors strings bytes strconv math math/bits unicode unicode/utf8
+                        sort slices maps encoding/* fmt io bufio log flag dyn cmp path
+                        io/fs regexp* math/rand*        (* after W4/W5)
+
+Tier 2 (wasm):          Tier 1 + time os(VFS) math/rand(crypto) regexp(Rust) sync context
+                        net/http(client fetch)           (* after W1-W4)
+
+Tier 3 (native):        Everything
+```
 
 ---
 
@@ -413,12 +488,127 @@ All tests verified in both VM and JIT modes via `./d.py test both --release`.
 
 | Task | Description | Depends On |
 |------|-------------|------------|
-| 4.1 | Timezone/`Location` support in `time` | External timezone database |
-| 4.2 | `time.Timer`, `time.Ticker` | Goroutine + channel integration |
-| 4.3 | `time.After`, `time.Tick` | Channel-based APIs |
+| 4.1 | ~~Timezone/`Location` support in `time`~~ | ✅ Done — `FixedZone`, `LoadLocation`, `In`, `UTC`, `Local`; native Rust backend |
+| 4.2 | ~~`time.Timer`, `time.Ticker`~~ | ✅ Done — pure Vo goroutine implementation |
+| 4.3 | ~~`time.After`, `time.Tick`, `time.AfterFunc`~~ | ✅ Done — pure Vo goroutine implementation |
 | 4.4 | TLS server support | Native bridge |
 | 4.5 | `encoding/xml` | If demand warrants |
 | 4.6 | `crypto/sha256`, `crypto/md5`, `crypto/hmac` | Native impl |
+
+---
+
+### Phase W: WASM / no_std Full Support
+
+**Goal**: Reach full WASM + `no_std` support without architectural drift. Unlike earlier phases, Phase W is **not fully reorderable**: async substrate work must land before Sleep/fetch.
+
+**Architecture decisions (locked for this plan):**
+1. **Do not enable `std` just for WASM**. Build a platform-agnostic suspend/resume path that works in `no_std + alloc`.
+2. **For HTTP, move directly to the final ABI** (`nativeHttpDo`) across both native and WASM implementations; do not keep a compatibility layer.
+3. **For regexp, move directly to the final unified backend** in `vo-stdlib`; remove WASM-specific regexp module and registrations in the same phase.
+
+#### Phase W0: Async Suspension Substrate for WASM/no_std (~4-6 days)
+
+This is the prerequisite for W2 (`time.Sleep`) and W3 (`fetch`).
+
+| Task | File | Description |
+|------|------|-------------|
+| W0.1 | `vo-runtime/src/ffi/mod.rs` + VM extern dispatch | Introduce a platform-agnostic extern wait/suspend result available in both `std` and `no_std` builds (instead of relying on `std`-only I/O wait variants). |
+| W0.2 | `vo-vm/src/scheduler.rs` + VM run loop | Add generic "blocked-by-runtime-event" scheduling path. Keep existing std I/O polling behavior, but route WASM wakeups through the same fiber state machine. |
+| W0.3 | `vo-web/src/lib.rs` + `vo-web/runtime-wasm` (new wake module) | Implement re-entrant dispatch entry for browser callbacks (`setTimeout`, `Promise.then`). Callback must wake specific fiber and continue scheduling safely. |
+| W0.4 | Tests (`vo-web` wasm tests) | Add suspend/resume conformance test using a minimal test extern: verify fiber blocks, callback wakes, and execution resumes at correct PC. |
+
+**Exit criteria:** no `std` feature dependency is introduced in WASM path; suspend/resume works for both timer and Promise-style callbacks.
+
+#### Phase W1: Fix Critical WASM Runtime Gaps (~3-5 days)
+
+These are user-visible failures in playground flows (timezone APIs and entropy quality).
+
+| Task | File | Description |
+|------|------|-------------|
+| W1.1 | `vo-web/runtime-wasm/src/time.rs` | Implement `localOffsetAt` / `localAbbrevAt` via JS Intl APIs for a given Unix timestamp. |
+| W1.2 | `vo-web/runtime-wasm/src/time.rs` | Implement `ianaOffsetAt` / `ianaAbbrevAt` / `loadLocation` using `Intl.DateTimeFormat`; validate timezone names and return consistent errors. |
+| W1.3 | `vo-stdlib/src/rand.rs` | WASM entropy path: use `crypto.getRandomValues` for `auto_seed()` and byte-fill operations used by `Read`. |
+| W1.4 | `vo-web/runtime-wasm/src/time.rs` + extern registration tests | Add regression check that exported symbol names exactly match Vo extern declarations (e.g., `time_blocking_sleepNano` vs `time_sleepNano`). |
+
+**Exit criteria:** timezone APIs no longer panic on WASM; entropy source is cryptographically strong in browser; symbol mapping test prevents silent mismatch regressions.
+
+#### Phase W2: `time.Sleep` / Timer / Ticker on WASM (~3-5 days)
+
+`time.Sleep` currently panics; `Timer`/`Ticker`/`After` rely on it.
+
+| Task | File | Description |
+|------|------|-------------|
+| W2.1 | `vo-web/runtime-wasm/src/time.rs` | Replace panic implementation with suspend-via-W0 path. Convert nanoseconds to milliseconds carefully (floor/ceil policy documented and tested). |
+| W2.2 | `vo-web/runtime-wasm/src/time.rs` + registration | Register the **correct extern name** used by Vo stdlib (`time_blocking_sleepNano`). |
+| W2.3 | `lang/test_data` + wasm integration tests | Add tests for `time.Sleep`, `time.After`, `NewTimer`, `NewTicker`, reset/stop behavior, and no-busy-loop guarantees. |
+| W2.4 | Scheduler re-entry tests | Verify callback-driven re-entry remains correct with nested goroutines and multiple concurrent sleepers. |
+
+**Exit criteria:** no panic path for `Sleep` on WASM; timer family behaves consistently with native semantics for supported cases.
+
+#### Phase W3: `net/http` Client via Browser `fetch` (~5-8 days)
+
+Enables outbound HTTP requests in playground with a single final ABI shared by native and WASM.
+
+| Task | File | Description |
+|------|------|-------------|
+| W3.1 | `lang/stdlib/net/http/http.vo` | Replace extern declaration and call site usage from `nativeHttpsRequest` to `nativeHttpDo` (single final ABI). |
+| W3.2 | `vo-stdlib/src/net/http/mod.rs` | Rename and re-register native bridge to `net_http_nativeHttpDo`; remove `nativeHttpsRequest` registration and implementation naming. |
+| W3.3 | `vo-web/runtime-wasm/src/net_http.rs` (new) + wasm registration | Implement `nativeHttpDo` via `fetch`: request mapping, response mapping, deterministic error mapping, timeout integration. |
+| W3.4 | W0 suspend/resume integration | Promise completion must wake the blocked fiber and continue VM scheduling; include cancellation and timeout wiring where supported. |
+| W3.5 | `vo-web/runtime-wasm/src/lib.rs` + `vo-web/src/lib.rs` | Register WASM net/http externs in runtime initialization and ensure no stale symbol names remain. |
+| W3.6 | `lang/stdlib/net/http/http.vo` docs/comments + playground docs | Document CORS behavior and browser limitations (forbidden headers, credential mode, opaque responses). |
+| W3.7 | Tests + symbol audit | Add tests that assert only `nativeHttpDo` is referenced/registered; fail fast if `nativeHttpsRequest` reappears. |
+
+**Exit criteria:** standard `http.Client.Do` path works in playground for CORS-allowed endpoints; error mapping and timeout behavior are deterministic; old `nativeHttpsRequest` symbol is fully removed.
+
+#### Phase W4: Regexp Engine Unification (~2-3 days)
+
+Goal: remove JS-vs-Rust behavior drift with a direct final-state cut (single backend).
+
+| Task | File | Description |
+|------|------|-------------|
+| W4.1 | `vo-stdlib/Cargo.toml` | Ensure `regex` is configured for `no_std + alloc` compatible build on wasm/native targets used by Vo. |
+| W4.2 | `vo-stdlib/src/regexp.rs` | Remove std-only registration/implementation gates; make Rust regex backend the canonical engine. |
+| W4.3 | `vo-stdlib/src/lib.rs` | Always register `regexp` externs from stdlib (not only under `std` feature). |
+| W4.4 | `vo-web/runtime-wasm/src/regexp.rs` + `vo-web/runtime-wasm/src/lib.rs` + `vo-web/src/lib.rs` | Remove WASM-specific regexp implementation and all related module references/registrations. |
+| W4.5 | Tests + symbol audit | Add tests to assert regexp externs are provided only by `vo-stdlib`; fail fast if WASM JS-regexp path is reintroduced. |
+
+**Exit criteria:** regexp conformance tests pass on both native and WASM with matching outputs for supported syntax; `vo-web/runtime-wasm` no longer registers regexp externs.
+
+#### Phase W5: `no_std` Hardening and CI Enforcement (~4-7 days)
+
+Finalize Tier-1 portability by removing remaining `std` coupling in core runtime/stdlib paths.
+
+| Task | File | Description |
+|------|------|-------------|
+| W5.1 | `vo-stdlib/src/rand.rs` | Replace `thread_local` RNG dependency in no_std path with global lock-free/lock-based no_std-safe RNG state; keep behavior deterministic under tests. |
+| W5.2 | `vo-stdlib/src/{math,bits,bytes,strings,strconv,unicode,fmt,json,toml_pkg,io}.rs` | Complete `std` → `core/alloc` audit and migration. |
+| W5.3 | `vo-stdlib/src/source.rs` + `vo-stdlib/Cargo.toml` | Split or gate source-embedding path so no_std builds do not pull `std`-only filesystem/embed dependencies. |
+| W5.4 | `vo-stdlib/src/lib.rs` + crate attrs | Make `no_std` default with explicit `alloc` usage; keep `std` feature only for OS/network/process modules. |
+| W5.5 | `vo-runtime` core path | Audit and remove remaining `std::` usage in VM-critical code paths needed by no_std targets. |
+| W5.6 | CI | Add mandatory build jobs for wasm and embedded no_std targets; fail PR on regression. |
+
+**Exit criteria:** `vo-stdlib` and `vo-runtime` compile in no_std targets used by project policy, and CI enforces it.
+
+#### Phase W — Effort Summary
+
+| Phase | Effort | Unlocks |
+|-------|--------|---------|
+| W0 (async substrate) | ~4-6 days | Shared suspend/resume foundation for timer + fetch in WASM/no_std |
+| W1 (timezone + rand entropy) | ~3-5 days | Fixes runtime gaps and entropy quality in playground |
+| W2 (Sleep + Timer WASM) | ~3-5 days | `time.Sleep`, `time.After`, `time.Timer`, `time.Ticker` in WASM |
+| W3 (net/http fetch) | ~5-8 days | HTTP client from playground; real API demos |
+| W4 (regexp unification) | ~2-3 days | Consistent regexp behavior native vs WASM |
+| W5 (no_std hardening) | ~4-7 days | Embedded/bare-metal readiness with CI enforcement |
+| **Total** | **~21-34 days** | |
+
+**Recommended order**: **W0 → W1 → W4 → W2 → W3 → W5**.
+
+Rationale:
+- W0 is the mandatory runtime foundation for W2/W3.
+- W1 removes immediate user-facing failures.
+- W4 is low-risk cleanup and reduces cross-platform divergence early.
+- W5 should land after behavior features are stable, then lock with CI.
 
 ---
 
@@ -482,16 +672,18 @@ Phase 1.5 (P0 polish) ────┤                        │
 
 ---
 
-## 6. stdlib.toml Target State
+## 6. stdlib.toml Current State
 
-After all phases complete, `stdlib.toml` should reflect the capability tiers:
+The actual `stdlib.toml` uses a two-tier structure (`core` / `std`). The `core_extended` and `runtime` tiers described in Section 1.2 are a logical classification only — they are not yet reflected as separate TOML sections.
 
 ```toml
 [meta]
-version = "0.2.0"
+version = "0.1.0"
 
-# --- core-baseline: VM/JIT/no_std/WASM, no OS deps ---
+# Core packages (no OS dependency, no_std compatible)
+# Note: also includes logically "core-extended" packages (fmt, json, regexp, etc.)
 [packages.core]
+fmt = { path = "fmt" }
 errors = { path = "errors" }
 strings = { path = "strings" }
 strconv = { path = "strconv" }
@@ -503,44 +695,41 @@ math = { path = "math" }
 sort = { path = "sort" }
 slices = { path = "slices" }
 maps = { path = "maps" }
+regexp = { path = "regexp" }
 dyn = { path = "dyn" }
 "encoding/hex" = { path = "encoding/hex" }
 "encoding/base64" = { path = "encoding/base64" }
-
-# --- core-extended: VM/JIT/WASM+std, allocator-heavy or complex algo ---
-[packages.core_extended]
-fmt = { path = "fmt" }
 "encoding/json" = { path = "encoding/json" }
 "encoding/toml" = { path = "encoding/toml" }
-regexp = { path = "regexp" }        # baseline: pure-Vo NFA; extended: Rust regex
-log = { path = "log" }              # baseline: runtime sink; extended: file/stderr
-flag = { path = "flag" }            # baseline: FlagSet.Parse(args); extended: os.Args
+"encoding/csv" = { path = "encoding/csv" }
+"encoding/binary" = { path = "encoding/binary" }
+cmp = { path = "cmp" }
+path = { path = "path" }
 
-# --- std: requires OS support ---
+# Standard packages (requires OS support)
+# Note: context and sync are island-local but listed here, not in a separate runtime section
 [packages.std]
 io = { path = "io" }
-"io/fs" = { path = "io/fs" }
-bufio = { path = "bufio" }
 os = { path = "os" }
-"os/exec" = { path = "os/exec" }
 time = { path = "time" }
 net = { path = "net" }
 "net/url" = { path = "net/url" }
 "net/http" = { path = "net/http" }
 "math/rand" = { path = "math/rand" }
 "path/filepath" = { path = "path/filepath" }
-
-# --- runtime: requires deep VM/scheduler integration ---
-[packages.runtime]
-sync = { path = "sync" }
+"os/exec" = { path = "os/exec" }
 context = { path = "context" }
+sync = { path = "sync" }
+bufio = { path = "bufio" }
+log = { path = "log" }
+flag = { path = "flag" }
+"io/fs" = { path = "io/fs" }
+
+# [packages.runtime]  # future: separate tier for deep VM/scheduler packages
 # reflect = { path = "reflect" }  # P2
-# runtime = { path = "runtime" }  # P2
 ```
 
-> **Note**: `regexp`, `log`, and `flag` live in `core_extended` because their baseline implementations are pure Vo.
-> Their std-extended features (Rust regex, file output, `os.Args`) activate automatically when the std tier is available.
-> If a std-extended feature is called in a core-only environment, it must return a clear error or panic — never silently degrade.
+> **Delta from original tier plan**: `core_extended` packages (`fmt`, `encoding/json`, `encoding/toml`, `regexp`, `log`, `flag`) are merged into `core`. `context` and `sync` are in `std` rather than a separate `runtime` section. The tier split can be applied in a future refactor if WASM/no_std builds require it.
 
 ---
 

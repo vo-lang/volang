@@ -902,7 +902,8 @@ class TestRunner:
             
             # Check vo-codegen, vo-analysis, vo-runtime (dependencies)
             if not needs_build:
-                for crate in ['vo-codegen', 'vo-analysis', 'vo-runtime', 'vo-vm', 'vo-common-core']:
+                for crate in ['vo-codegen', 'vo-analysis', 'vo-runtime', 'vo-vm', 'vo-common-core',
+                              'vo-stdlib', 'vo-web/runtime-wasm', 'vo-ffi-macro']:
                     crate_dir = PROJECT_ROOT / 'lang' / 'crates' / crate / 'src'
                     if crate_dir.exists():
                         for f in crate_dir.rglob('*.rs'):

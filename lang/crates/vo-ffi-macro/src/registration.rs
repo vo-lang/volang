@@ -156,6 +156,11 @@ fn generate_ext_trampoline(
                     ctx_ref.set_ext_wait_io(token);
                     vo_runtime::ffi::ext_abi::RESULT_WAIT_IO
                 }
+                Ok(vo_runtime::ffi::ExternResult::CallbackWait { .. }) |
+                Ok(vo_runtime::ffi::ExternResult::CallbackWaitAndResume { .. }) => {
+                    ctx_ref.set_ext_panic(std::string::String::from("CallbackWait not supported in extension trampoline"));
+                    vo_runtime::ffi::ext_abi::RESULT_PANIC
+                }
                 Err(panic_payload) => {
                     let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
                         s.clone()

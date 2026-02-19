@@ -599,6 +599,7 @@ pub extern "C" fn jit_call_extern(
     let fiber_inputs = ExternFiberInputs {
         fiber_opaque: ctx_ref.fiber,
         resume_io_token,
+        resume_callback_token: fiber.resume_callback_token.take(),
         replay_results: closure_replay_results,
         replay_panicked: closure_replay_panicked,
     };
@@ -633,6 +634,10 @@ pub extern "C" fn jit_call_extern(
         ExternResult::WaitIo { token } => {
             ctx_ref.wait_io_token = token;
             JitResult::WaitIo
+        }
+        ExternResult::CallbackWait { .. } | ExternResult::CallbackWaitAndResume { .. } => {
+            // Exit JIT — VM will handle blocking for callback
+            JitResult::Replay
         }
         ExternResult::NotRegistered(_) => {
             unsafe { *ctx_ref.panic_flag = true; }

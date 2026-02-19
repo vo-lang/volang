@@ -116,35 +116,6 @@ func (h Header) Clone() Header {
 	return h2
 }
 
-// Write writes a header in wire format to w.
-func (h Header) Write(w io.Writer) error {
-	for k, vv := range h {
-		for _, v := range vv {
-			line := k + ": " + v + "\r\n"
-			if _, err := io.WriteString(w, line); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// WriteSubset writes a header in wire format to w, excluding keys in exclude.
-func (h Header) WriteSubset(w io.Writer, exclude map[string]bool) error {
-	for k, vv := range h {
-		if exclude != nil && exclude[k] {
-			continue
-		}
-		for _, v := range vv {
-			line := k + ": " + v + "\r\n"
-			if _, err := io.WriteString(w, line); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 // ==================== Request ====================
 
 // Request represents an HTTP request received by a server or to be sent by a client.
@@ -380,44 +351,17 @@ func (c *Client) PostForm(rawurl string, data url.Values) (*Response, error) {
 }
 
 // Do sends an HTTP request and returns an HTTP response.
+// All requests (HTTP and HTTPS) are delegated to the native bridge:
+//   - Native: ureq on a background OS thread (non-blocking to scheduler)
+//   - WASM:   browser fetch API
 func (c *Client) Do(req *Request) (*Response, error) {
 	bodyBytes, err := readRequestBody(req)
 	if err != nil {
 		return nil, err
 	}
 
-	// HTTPS and timeout-enabled requests use the native bridge
 	rawURL := req.URL.String()
-	scheme := req.URL.Scheme
-	if scheme == "https" || c.Timeout > 0 {
-		return c.doNativeRequest(req, bodyBytes, rawURL)
-	}
-
-	// Plain HTTP: parse URL and use Vo TCP client
-	_, dialAddr, hostHeader, reqPath, err := parseURL(rawURL)
-	if err != nil {
-		return nil, err
-	}
-
-	conn, err := net.Dial("tcp", dialAddr)
-	if err != nil {
-		return nil, err
-	}
-
-	// Build and send HTTP request
-	if err := writeRequest(conn, req, hostHeader, reqPath, bodyBytes); err != nil {
-		conn.Close()
-		return nil, err
-	}
-
-	// Read and parse HTTP response
-	resp, err := readResponse(conn, req)
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-
-	return resp, nil
+	return c.doNativeRequest(req, bodyBytes, rawURL)
 }
 
 func readRequestBody(req *Request) ([]byte, error) {
@@ -434,7 +378,7 @@ func readRequestBody(req *Request) ([]byte, error) {
 }
 
 func (c *Client) doNativeRequest(req *Request, bodyBytes []byte, rawURL string) (*Response, error) {
-	headers := requestHeaderLines(req, "")
+	headers := requestHeaderLines(req)
 	timeoutNs := int64(0)
 	if c.Timeout > 0 {
 		timeoutNs = c.Timeout.Nanoseconds()
@@ -458,101 +402,8 @@ func (c *Client) doNativeRequest(req *Request, bodyBytes []byte, rawURL string) 
 	return resp, nil
 }
 
-// parseURL extracts host:port and path from URL.
-// Supports http://host:port/path, https://host/path and host/path formats.
-func parseURL(url string) (scheme, dialAddr, hostHeader, path string, err error) {
-	rest := url
-	scheme = "http"
-	if strings.HasPrefix(rest, "http://") {
-		rest = rest[7:]
-	} else if strings.HasPrefix(rest, "https://") {
-		scheme = "https"
-		rest = rest[8:]
-	}
-
-	idx := strings.Index(rest, "/")
-	qIdx := strings.Index(rest, "?")
-	if idx == -1 || (qIdx != -1 && qIdx < idx) {
-		idx = qIdx
-	}
-	if idx == -1 {
-		hostHeader = rest
-		path = "/"
-	} else {
-		hostHeader = rest[:idx]
-		path = rest[idx:]
-		if len(path) > 0 && path[0] == '?' {
-			path = "/" + path
-		}
-	}
-
-	if hostHeader == "" {
-		return "", "", "", "", errors.New("invalid URL: missing host")
-	}
-	if path == "" {
-		path = "/"
-	}
-
-	if hasAuthorityPort(hostHeader) {
-		dialAddr = hostHeader
-	} else if scheme == "https" {
-		dialAddr = hostHeader + ":443"
-	} else {
-		dialAddr = hostHeader + ":80"
-	}
-
-	return scheme, dialAddr, hostHeader, path, nil
-}
-
-func urlScheme(url string) string {
-	if strings.HasPrefix(url, "https://") {
-		return "https"
-	}
-	return "http"
-}
-
-func hasAuthorityPort(authority string) bool {
-	if strings.HasPrefix(authority, "[") {
-		return strings.Contains(authority, "]:")
-	}
-	return strings.Contains(authority, ":")
-}
-
-// writeRequest writes HTTP request to connection.
-func writeRequest(conn net.Conn, req *Request, hostHeader, path string, bodyBytes []byte) error {
-	// Request line: METHOD /path HTTP/1.1\r\n
-	line := req.Method + " " + path + " HTTP/1.1\r\n"
-	if _, err := conn.Write([]byte(line)); err != nil {
-		return err
-	}
-
-	for _, header := range requestHeaderLines(req, hostHeader) {
-		if _, err := conn.Write([]byte(header + "\r\n")); err != nil {
-			return err
-		}
-	}
-
-	// End of headers
-	if _, err := conn.Write([]byte("\r\n")); err != nil {
-		return err
-	}
-	
-	// Write body
-	if len(bodyBytes) > 0 {
-		if _, err := conn.Write(bodyBytes); err != nil {
-			return err
-		}
-	}
-	
-	return nil
-}
-
-func requestHeaderLines(req *Request, hostHeader string) []string {
-	lines := make([]string, 0, len(req.Header)+2)
-	if hostHeader != "" && req.Header.Get("Host") == "" {
-		lines = append(lines, "Host: "+hostHeader)
-	}
-
+func requestHeaderLines(req *Request) []string {
+	lines := make([]string, 0, len(req.Header)+1)
 	for key, values := range req.Header {
 		for _, val := range values {
 			lines = append(lines, key+": "+val)
@@ -589,152 +440,7 @@ func contentLengthFromHeaders(headers Header, fallback int64) int64 {
 	return fallback
 }
 
-// readResponse reads and parses HTTP response from connection.
-func readResponse(conn net.Conn, req *Request) (*Response, error) {
-	// Read response into buffer
-	buf := make([]byte, 4096)
-	var data []byte
-	
-	// Read headers (until \r\n\r\n)
-	for {
-		n, err := conn.Read(buf)
-		if err != nil && !errors.Is(err, io.EOF) {
-			if len(data) == 0 {
-				return nil, err
-			}
-			break
-		}
-		if n == 0 {
-			break
-		}
-		data = append(data, buf[:n]...)
-		
-		// Check if we have complete headers
-		if strings.Index(string(data), "\r\n\r\n") != -1 {
-			break
-		}
-	}
-	
-	if len(data) == 0 {
-		return nil, errors.New("empty response")
-	}
-	
-	// Parse response
-	text := string(data)
-	headerEnd := strings.Index(text, "\r\n\r\n")
-	if headerEnd == -1 {
-		return nil, errors.New("invalid response: no header end")
-	}
-	
-	headerPart := text[:headerEnd]
-	bodyStart := data[headerEnd+4:]
-	
-	// Parse status line: HTTP/1.1 200 OK
-	lines := strings.Split(headerPart, "\r\n")
-	if len(lines) == 0 {
-		return nil, errors.New("invalid response: no status line")
-	}
-	
-	statusLine := lines[0]
-	parts := strings.SplitN(statusLine, " ", 3)
-	if len(parts) < 2 {
-		return nil, errors.New("invalid status line")
-	}
-	
-	proto := parts[0]
-	statusCode, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return nil, errors.New("invalid status code")
-	}
-	status := statusLine
-	
-	// Parse headers
-	headers := make(Header)
-	for i := 1; i < len(lines); i++ {
-		line := lines[i]
-		colonIdx := strings.Index(line, ":")
-		if colonIdx == -1 {
-			continue
-		}
-		key := strings.TrimSpace(line[:colonIdx])
-		val := strings.TrimSpace(line[colonIdx+1:])
-		headers[key] = append(headers[key], val)
-	}
-	
-	// Get content length
-	contentLength := int64(-1)
-	if cl := headers.Get("Content-Length"); cl != "" {
-		if n, err := strconv.Atoi(cl); err == nil {
-			contentLength = int64(n)
-		}
-	}
-	
-	// Read remaining body if Content-Length specified
-	body := bodyStart
-	if contentLength > 0 && int64(len(body)) < contentLength {
-		remaining := contentLength - int64(len(body))
-		for remaining > 0 {
-			n, err := conn.Read(buf)
-			if err != nil {
-				break
-			}
-			body = append(body, buf[:n]...)
-			remaining -= int64(n)
-		}
-	}
-	
-	resp := &Response{
-		Status:        status,
-		StatusCode:    statusCode,
-		Proto:         proto,
-		Header:        headers,
-		Body:          &connBody{conn: conn, buf: body, pos: 0},
-		ContentLength: contentLength,
-		Request:       req,
-	}
-	
-	return resp, nil
-}
-
-// connBody implements io.ReadCloser for response body.
-type connBody struct {
-	conn net.Conn
-	buf  []byte
-	pos  int
-}
-
-func (b *connBody) Read(p []byte) (int, error) {
-	if b.pos >= len(b.buf) {
-		return 0, io.EOF
-	}
-	n := copy(p, b.buf[b.pos:])
-	b.pos += n
-	return n, nil
-}
-
-func (b *connBody) Close() error {
-	return b.conn.Close()
-}
-
 // ==================== ResponseWriter and related interfaces ====================
-
-// Flusher is implemented by ResponseWriters that allow an HTTP handler to flush
-// buffered data to the client.
-type Flusher interface {
-	Flush()
-}
-
-// Hijacker is implemented by ResponseWriters that allow an HTTP handler to
-// take over the connection.
-type Hijacker interface {
-	Hijack() (net.Conn, error)
-}
-
-// CloseNotifier is implemented by ResponseWriters which detect when the
-// underlying connection has gone away. Deprecated: use Request.Context().
-type CloseNotifier interface {
-	CloseNotify() <-chan bool
-}
 
 // ResponseWriter interface is used by an HTTP handler to construct an HTTP response.
 type ResponseWriter interface {
@@ -1345,63 +1051,6 @@ func parseWord(s string) (word, rest string) {
 }
 
 func nativeHttpsRequest(method, url string, headers []string, body []byte, timeoutNs int64) (int, string, string, []string, []byte, error)
-
-// DetectContentType implements the algorithm described at
-// https://mimesniff.spec.whatwg.org/ to determine the Content-Type
-// of the given data. It considers at most the first 512 bytes of data.
-func DetectContentType(data []byte) string {
-	if len(data) > 512 {
-		data = data[:512]
-	}
-	if len(data) >= 4 {
-		if data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
-			return "image/jpeg"
-		}
-		if data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 {
-			return "image/png"
-		}
-		if data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 {
-			return "image/gif"
-		}
-		if data[0] == 0x25 && data[1] == 0x50 && data[2] == 0x44 && data[3] == 0x46 {
-			return "application/pdf"
-		}
-		if data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04 {
-			return "application/zip"
-		}
-		if data[0] == 0x52 && data[1] == 0x49 && data[2] == 0x46 && data[3] == 0x46 {
-			return "audio/wave"
-		}
-	}
-	if len(data) >= 8 {
-		if data[0] == 0x42 && data[1] == 0x4D {
-			return "image/bmp"
-		}
-		if data[4] == 0x66 && data[5] == 0x74 && data[6] == 0x79 && data[7] == 0x70 {
-			return "video/mp4"
-		}
-	}
-	// Check for text-based types
-	s := string(data)
-	for _, b := range data {
-		if b > 0x7E && b < 0x80 {
-			continue
-		}
-		if b < 0x09 || (b >= 0x0E && b < 0x20 && b != 0x1B) {
-			return "application/octet-stream"
-		}
-	}
-	if strings.HasPrefix(s, "<?xml") || strings.HasPrefix(s, "<xml") {
-		return "text/xml; charset=utf-8"
-	}
-	if strings.HasPrefix(s, "<!DOCTYPE html") || strings.HasPrefix(s, "<html") || strings.HasPrefix(s, "<head") || strings.HasPrefix(s, "<body") {
-		return "text/html; charset=utf-8"
-	}
-	if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") {
-		return "application/json"
-	}
-	return "text/plain; charset=utf-8"
-}
 
 // ==================== File Serving ====================
 
