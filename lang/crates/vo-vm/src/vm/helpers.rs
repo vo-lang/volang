@@ -125,6 +125,7 @@ pub fn runtime_panic(
     kind: RuntimeTrapKind,
     msg: String,
 ) -> ExecResult {
+    fiber.capture_panic_source_loc();
     let panic_str = string::new_from_string(gc, msg);
     let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
     fiber.set_recoverable_trap(kind, InterfaceSlot::new(slot0, panic_str as u64));
@@ -150,6 +151,7 @@ pub fn runtime_panic_msg(
     module: &Module,
     msg: String,
 ) -> ExecResult {
+    fiber.capture_panic_source_loc();
     let panic_str = string::new_from_string(gc, msg);
     let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
     fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));
@@ -173,6 +175,7 @@ pub fn user_panic(
     val_reg: u16,
     module: &Module,
 ) -> ExecResult {
+    fiber.capture_panic_source_loc();
     let slot0 = stack_get(stack, bp + val_reg as usize);
     let slot1 = stack_get(stack, bp + val_reg as usize + 1);
     fiber.set_recoverable_panic(InterfaceSlot::new(slot0, slot1));

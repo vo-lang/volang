@@ -355,6 +355,9 @@ pub struct Fiber {
     /// Incremented each time a new panic starts. Used to determine which defers can recover.
     /// A defer registered at generation N can only recover panics with generation > N.
     pub panic_generation: u64,
+    /// Source location (func_id, pc) captured at panic initiation, before frames are unwound.
+    /// Used by kill_current() to report accurate error locations.
+    pub panic_source_loc: Option<(u32, u32)>,
     #[cfg(feature = "std")]
     pub resume_io_token: Option<IoToken>,
     /// Host event token set when fiber wakes via `HostEventWaitAndReplay`.
@@ -388,6 +391,7 @@ impl Fiber {
             panic_state: None,
             panic_trap_kind: None,
             panic_generation: 0,
+            panic_source_loc: None,
             #[cfg(feature = "std")]
             resume_io_token: None,
             resume_host_event_token: None,
@@ -411,6 +415,7 @@ impl Fiber {
         self.panic_state = None;
         self.panic_trap_kind = None;
         self.panic_generation = 0;
+        self.panic_source_loc = None;
         #[cfg(feature = "std")]
         {
             self.resume_io_token = None;
@@ -558,6 +563,17 @@ impl Fiber {
             Some(frame)
         } else {
             None
+        }
+    }
+
+    /// Capture the current frame as the panic source location, if not already set.
+    /// Call this before any frame unwinding begins. Uses pc-1 because the VM loop
+    /// increments pc before dispatching each instruction.
+    #[inline]
+    pub fn capture_panic_source_loc(&mut self) {
+        if self.panic_source_loc.is_none() {
+            self.panic_source_loc = self.frames.last()
+                .map(|f| (f.func_id as u32, f.pc.saturating_sub(1) as u32));
         }
     }
 

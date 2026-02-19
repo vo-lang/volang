@@ -47,6 +47,40 @@ fn create_default_panic_msg(gc: &mut vo_runtime::gc::Gc) -> InterfaceSlot {
     InterfaceSlot::new(slot0, msg_str as u64)
 }
 
+/// Shared JIT panic setup: materialize frames, capture source location, resolve panic message.
+///
+/// For user panics the message comes from ctx (set by JIT extern callback); for runtime errors
+/// or VM-fallback panics it may already be in fiber.panic_state — take() handles both, with a
+/// default message as fallback.
+///
+/// Source location uses `call_resume_pc-1` (the CallExtern site that triggered the panic).
+/// Falls back to 0 when the panic was not triggered from an extern call site (e.g. nil deref
+/// inside pure JIT opcodes where call_resume_pc is stale).
+///
+/// Returns the resolved panic message; caller must call `fiber.set_recoverable_panic(msg)`.
+fn setup_jit_panic(
+    ctx: &JitContextWrapper,
+    fiber: &mut Fiber,
+    gc: &mut vo_runtime::gc::Gc,
+    module: &Module,
+) -> InterfaceSlot {
+    if ctx.is_user_panic() {
+        fiber.set_recoverable_panic(ctx.panic_msg());
+    }
+    let panic_msg = fiber.take_recoverable_panic()
+        .unwrap_or_else(|| create_default_panic_msg(gc));
+
+    materialize_jit_frames(fiber, module, 0);
+
+    if fiber.panic_source_loc.is_none() {
+        let resume_pc = ctx.call_resume_pc();
+        fiber.panic_source_loc = fiber.current_frame()
+            .map(|f| (f.func_id as u32, resume_pc.saturating_sub(1)));
+    }
+
+    panic_msg
+}
+
 /// Execute a JIT-compiled function call.
 ///
 /// This function:
@@ -225,25 +259,7 @@ fn handle_jit_result(
             ExecResult::FrameChanged
         }
         JitResult::Panic => {
-            // Unified panic handling for JIT and VM:
-            // - User panic (via panic() call): is_user_panic=true, use ctx.panic_msg (may be nil)
-            // - Runtime error (nil deref, bounds): is_user_panic=false, create default message
-            // - VM fallback panic: fiber.panic_state already set
-            
-            let is_user_panic = ctx.is_user_panic();
-            if is_user_panic {
-                // User panic: use the value they passed (even if nil interface)
-                fiber.set_recoverable_panic(ctx.panic_msg());
-            }
-            // else: VM fallback may have set fiber.panic_state, or it's a runtime error
-            
-            // Get panic message from fiber, or create default for runtime errors
-            let panic_msg = fiber.take_recoverable_panic()
-                .unwrap_or_else(|| create_default_panic_msg(&mut vm.state.gc));
-            
-            materialize_jit_frames(fiber, module, 0);
-            
-            // Set panic state and start unwinding
+            let panic_msg = setup_jit_panic(&ctx, fiber, &mut vm.state.gc, module);
             fiber.set_recoverable_panic(panic_msg);
             let stack_ptr = fiber.stack_ptr();
             helpers::panic_unwind(fiber, stack_ptr, module)
@@ -710,14 +726,7 @@ pub fn dispatch_loop_osr(
             OsrResult::ExitPc(ctx.ctx.loop_exit_pc as usize)
         }
         JitResult::Panic => {
-            // Materialize any intermediate JIT frames so panic unwinding
-            // can correctly traverse the frame chain.
-            materialize_jit_frames(fiber, module, 0);
-            let panic_msg = if ctx.is_user_panic() {
-                ctx.panic_msg()
-            } else {
-                create_default_panic_msg(&mut vm.state.gc)
-            };
+            let panic_msg = setup_jit_panic(&ctx, fiber, &mut vm.state.gc, module);
             fiber.set_recoverable_panic(panic_msg);
             OsrResult::Panic
         }

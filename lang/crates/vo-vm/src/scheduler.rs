@@ -180,14 +180,15 @@ impl Scheduler {
     }
 
     /// Kill current fiber and return (trap_kind, panic_msg, error_location).
-    /// error_location is (func_id, pc) from the current frame if available.
+    /// error_location is (func_id, pc) captured at panic initiation (before frame unwind).
     /// * -> Dead.
     pub fn kill_current(&mut self) -> (Option<RuntimeTrapKind>, Option<String>, Option<(u32, u32)>) {
         if let Some(id) = self.current.take() {
             let fiber = &mut self.fibers[id.0 as usize];
             let trap_kind = fiber.panic_trap_kind.take();
             let msg = fiber.panic_message();
-            let loc = fiber.current_frame().map(|f| (f.func_id, f.pc as u32));
+            let loc = fiber.panic_source_loc.take()
+                .or_else(|| fiber.current_frame().map(|f| (f.func_id, f.pc as u32)));
             fiber.state = FiberState::Dead;
             self.free_slots.push(id.0);
             (trap_kind, msg, loc)

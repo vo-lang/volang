@@ -1,5 +1,6 @@
 //! Execution functions for Vo modules.
 
+use std::fmt;
 use vo_common_core::debug_info::SourceLoc;
 use vo_vm::bytecode::Module;
 use vo_vm::vm::{RuntimeTrapKind, Vm, VmError};
@@ -69,11 +70,17 @@ pub enum RunError {
     Runtime(RuntimeError),
 }
 
-impl std::fmt::Display for RunError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for RunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RunError::Compile(e) => write!(f, "{}", e),
-            RunError::Runtime(e) => write!(f, "{}", e.message),
+            RunError::Runtime(e) => {
+                if let Some(loc) = &e.location {
+                    write!(f, "{}:{}: {}", loc.file, loc.line, e.message)
+                } else {
+                    write!(f, "{}", e.message)
+                }
+            }
         }
     }
 }
