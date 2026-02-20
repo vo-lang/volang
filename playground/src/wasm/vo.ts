@@ -31,9 +31,9 @@ async function loadWasm(): Promise<any> {
       console.log('VFS initialized');
     }
 
-    const { default: init, compileAndRun, compileAndRunWithModules, version, initGuiApp, handleGuiEvent } = await import('@vo-playground/vo_playground.js');
+    const { default: init, compileAndRun, compileAndRunWithModules, version, initGuiApp, initGuiAppWithModules, handleGuiEvent } = await import('@vo-playground/vo_playground.js');
     await init();
-    wasmModule = { compileAndRun, compileAndRunWithModules, version, initGuiApp, handleGuiEvent };
+    wasmModule = { compileAndRun, compileAndRunWithModules, version, initGuiApp, initGuiAppWithModules, handleGuiEvent };
     console.log('Vo Playground WASM loaded:', version());
     return wasmModule;
   } catch (e) {
@@ -209,3 +209,61 @@ export async function runCodeWithModules(source: string): Promise<RunResult> {
     stderr: result.stderr || '',
   };
 }
+
+/// Initialize a vogui app that also imports `import "github.com/..."` modules.
+export async function initGuiAppWithModules(source: string): Promise<GuiResult> {
+  activeTimers.forEach((jsIntervalId) => nativeClearInterval(jsIntervalId));
+  activeTimers.clear();
+
+  const wasm = await loadWasm();
+  const result = await wasm.initGuiAppWithModules(source);
+  return {
+    status: result.status,
+    renderJson: result.renderJson || '',
+    error: result.error || '',
+  };
+}
+
+// ── Extension WASM dynamic loading ───────────────────────────────────────────
+//
+// Rust calls `window.voSetupExtModule(name, bytes)` after fetching a pre-built
+// .wasm binary from a module repo.  The returned Promise resolves once
+// WebAssembly.instantiate completes.  `window.voExtRender(svg)` is then
+// available for the resvg bridge ExternFn to call synchronously.
+
+const extInstances = new Map<string, WebAssembly.Instance>();
+
+// Called from Rust (returns Promise so Rust can await it).
+(window as any).voSetupExtModule = async (name: string, bytes: Uint8Array): Promise<void> => {
+  const { instance } = await WebAssembly.instantiate(bytes);
+  extInstances.set(name, instance);
+};
+
+// Called from Rust synchronously inside the VM execution.
+// Must be registered BEFORE voSetupExtModule resolves; safe because the VM
+// only calls this after the setup Promise has been awaited.
+(window as any).voExtRender = (svg: string): Uint8Array => {
+  const instance = extInstances.get('resvg');
+  if (!instance) return new Uint8Array(0);
+  const exp = instance.exports as any;
+  const encoder = new TextEncoder();
+  const svgBytes = encoder.encode(svg);
+
+  const svgPtr: number = exp.resvg_alloc(svgBytes.length);
+  new Uint8Array(exp.memory.buffer).set(svgBytes, svgPtr);
+
+  const outLenPtr: number = exp.resvg_alloc(4);
+  const pngPtr: number = exp.resvg_render(svgPtr, svgBytes.length, outLenPtr);
+  exp.resvg_dealloc(svgPtr, svgBytes.length);
+
+  if (pngPtr === 0) {
+    exp.resvg_dealloc(outLenPtr, 4);
+    return new Uint8Array(0);
+  }
+
+  const outLen: number = new Uint32Array(exp.memory.buffer, outLenPtr, 1)[0];
+  const pngBytes = new Uint8Array(exp.memory.buffer, pngPtr, outLen).slice();
+  exp.resvg_dealloc(pngPtr, outLen);
+  exp.resvg_dealloc(outLenPtr, 4);
+  return pngBytes;
+};

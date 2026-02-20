@@ -3,7 +3,7 @@
   import Output from '../components/Output.svelte';
   import FileExplorer from '../components/FileExplorer.svelte';
   import GuiPreview from '../components/GuiPreview.svelte';
-  import { runCode, runCodeWithModules, initGuiApp, handleGuiEvent, setRenderCallback, type RunStatus } from '../wasm/vo.ts';
+  import { runCode, runCodeWithModules, initGuiApp, initGuiAppWithModules, handleGuiEvent, setRenderCallback, type RunStatus } from '../wasm/vo.ts';
   import guiTetris from '../assets/examples/gui_tetris.vo?raw';
   import resvgDemo from '../assets/examples/resvg_demo.vo?raw';
 
@@ -51,7 +51,24 @@
     const hasModuleImports = /import\s+"github\.com\//.test(code);
 
     try {
-      if (isGuiCode) {
+      if (isGuiCode && hasModuleImports) {
+        // GUI app that also imports third-party modules (e.g. resvg demo)
+        const result = await initGuiAppWithModules(code);
+        if (result.status !== 'ok') {
+          stderr = result.error || 'Unknown error';
+          status = 'error';
+          activePanel = 'console';
+          return;
+        }
+        guiMode = true;
+        consoleCollapsed = true;
+        if (result.renderJson) {
+          const parsed = JSON.parse(result.renderJson);
+          renderData = { type: 'render', tree: parsed.tree };
+        }
+        status = 'success';
+        activePanel = 'gui';
+      } else if (isGuiCode) {
         // Use initGuiApp for GUI code
         const result = await initGuiApp(code);
         if (result.status !== 'ok') {

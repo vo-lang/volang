@@ -11,13 +11,15 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # Native: dynamic library extension loaded at runtime via dlopen
 default = ["native"]
-native = ["linkme", "vo-ext/native", "vo-runtime/std"]
-# WASM: compiled directly into the playground binary, no linkme
-wasm = ["vo-ext/wasm"]
+native = ["dep:linkme", "dep:vo-ext", "dep:vo-ffi-macro", "dep:vo-runtime", "vo-ext/native", "vo-runtime/std"]
+# WASM integrated: compiled directly into the playground binary
+wasm = ["dep:vo-ext", "dep:vo-ffi-macro", "dep:vo-runtime", "vo-ext/wasm"]
+# WASM standalone: pure C-ABI exports, no Vo runtime deps (used for pre-built .wasm in repo)
+wasm-standalone = []
 
 [dependencies]
 resvg = "0.43"
-vo-ext = { path = "../../../lang/crates/vo-ext", default-features = false }
-vo-ffi-macro = { path = "../../../lang/crates/vo-ffi-macro" }
-vo-runtime = { path = "../../../lang/crates/vo-runtime", default-features = false }
-linkme = { version = "0.3", optional = true }
+vo-ext     = { git = "https://github.com/vo-lang/volang", default-features = false, optional = true }
+vo-ffi-macro = { git = "https://github.com/vo-lang/volang", optional = true }
+vo-runtime = { git = "https://github.com/vo-lang/volang", default-features = false, optional = true }
+linkme     = { version = "0.3", optional = true }

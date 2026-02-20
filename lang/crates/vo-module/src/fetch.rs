@@ -75,33 +75,29 @@ pub fn github_tarball_url(module: &str, version: &str) -> Result<String, String>
 /// `MemoryFs` directly for use with `ModSource`.
 ///
 /// Only regular text files are returned (binary files are skipped).
+/// Compute the top-level directory prefix GitHub puts in every archive.
+///
+/// For `github.com/vo-lang/resvg` at `v0.1.0` the tarball root dir is
+/// `resvg-0.1.0/`.  GitHub strips the leading `v` from the version tag.
+fn github_strip_prefix(module_path: &str, version: &str) -> String {
+    let repo = module_path.splitn(4, '/').nth(2).unwrap_or("unknown");
+    let ver = version.trim_start_matches('v');
+    format!("{}-{}/", repo, ver)
+}
+
 pub fn extract_tarball_files(
     tarball: &[u8],
     module_path: &str,
+    version: &str,
+    include_rust_source: bool,
 ) -> Result<Vec<(PathBuf, String)>, String> {
     use flate2::read::GzDecoder;
     use tar::Archive;
 
-    // ── first pass: determine top-level strip prefix ──────────────────────
-    let prefix = {
-        let gz = GzDecoder::new(tarball);
-        let mut ar = Archive::new(gz);
-        let mut found = String::new();
-        for entry in ar.entries().map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let raw = entry.path().map_err(|e| e.to_string())?;
-            let s = raw.to_string_lossy();
-            if let Some(first) = s.splitn(2, '/').next() {
-                if !first.is_empty() {
-                    found = format!("{}/", first);
-                    break;
-                }
-            }
-        }
-        found
-    };
+    // GitHub always wraps archives in "<repo>-<ver>/"
+    let prefix = github_strip_prefix(module_path, version);
 
-    // ── second pass: extract .vo and .toml text files ─────────────────────
+    // Single pass: extract .vo / .toml / vo.mod / vo.sum
     let gz = GzDecoder::new(tarball);
     let mut ar = Archive::new(gz);
     let mut files: Vec<(PathBuf, String)> = Vec::new();
@@ -115,8 +111,8 @@ pub fn extract_tarball_files(
         let raw = entry.path().map_err(|e| e.to_string())?.into_owned();
         let rel = raw.to_string_lossy();
 
-        // Strip top-level directory
-        let stripped = if !prefix.is_empty() && rel.starts_with(prefix.as_str()) {
+        // Strip the GitHub top-level directory prefix
+        let stripped = if rel.starts_with(prefix.as_str()) {
             rel[prefix.len()..].to_string()
         } else {
             rel.to_string()
@@ -126,11 +122,16 @@ pub fn extract_tarball_files(
             continue;
         }
 
-        // Only keep .vo and .toml files (module source and manifests)
+        // Keep Vo source + module manifest files; optionally include rust/ source
+        let name = std::path::Path::new(&stripped)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
         let ext_ok = stripped.ends_with(".vo")
-            || stripped.ends_with(".toml")
-            || stripped == "vo.mod"
-            || stripped == "vo.sum";
+            || name == "vo.mod"
+            || name == "vo.sum"
+            || name == "vo.ext.toml"
+            || (include_rust_source && stripped.starts_with("rust/"));
         if !ext_ok {
             continue;
         }
@@ -147,6 +148,13 @@ pub fn extract_tarball_files(
         // Prefix with module path for MemoryFs lookup
         let vfs_path = PathBuf::from(format!("{}/{}", module_path, stripped));
         files.push((vfs_path, content));
+    }
+
+    if files.is_empty() {
+        return Err(format!(
+            "no Vo files found in tarball for {} {} (expected prefix '{}')",
+            module_path, version, prefix
+        ));
     }
 
     Ok(files)
@@ -194,7 +202,7 @@ mod native {
         fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
 
         // Write extracted files to disk
-        for (vfs_path, content) in extract_tarball_files(&tarball, module)? {
+        for (vfs_path, content) in extract_tarball_files(&tarball, module, version, true)? {
             // vfs_path is `<module>/<file>`, so strip the module prefix for disk path
             let rel: &std::path::Path = vfs_path.as_path();
             let components: Vec<_> = rel.components().collect();
@@ -213,6 +221,24 @@ mod native {
 
         let sum_path = mod_cache.join("vo.sum");
         update_sum_file(&sum_path, module, version, &hash)?;
+
+        // If the module ships Rust source, compile it into a native extension.
+        let rust_manifest = target_dir.join("rust").join("Cargo.toml");
+        if rust_manifest.exists() {
+            eprintln!("Building native extension for {} {}...", module, version);
+            // Build in the same profile as the current vo binary so {profile}
+            // in vo.ext.toml resolves correctly.
+            let release = !cfg!(debug_assertions);
+            let mut cmd = std::process::Command::new("cargo");
+            cmd.arg("build").arg("--manifest-path").arg(&rust_manifest);
+            if release { cmd.arg("--release"); }
+            let status = cmd.status()
+                .map_err(|e| format!("cargo build failed: {}", e))?;
+            if !status.success() {
+                return Err(format!("cargo build failed for {}", module));
+            }
+            eprintln!("Built native extension -> rust/target/release/");
+        }
 
         Ok(target_dir)
     }
@@ -302,15 +328,144 @@ mod wasm {
         Ok(array.to_vec())
     }
 
-    /// Fetch a GitHub module archive and return its files as `(vfs_path, content)` pairs
-    /// ready to be inserted into a `MemoryFs` for the compiler's `ModSource`.
+    /// Fetch a GitHub module's .vo source files using the GitHub Contents API.
+    ///
+    /// Uses `https://api.github.com/repos/{owner}/{repo}/contents?ref={version}` (CORS-OK)
+    /// to list root files, then fetches each .vo file from `raw.githubusercontent.com` (CORS-OK).
+    /// This avoids the tarball download which redirects to `codeload.github.com` (no CORS).
     pub async fn fetch_module_files(
         module: &str,
         version: &str,
     ) -> Result<Vec<(PathBuf, String)>, String> {
-        let url = github_tarball_url(module, version)?;
-        let tarball = fetch_bytes(&url).await?;
-        extract_tarball_files(&tarball, module)
+        let parts: Vec<&str> = module.splitn(4, '/').collect();
+        if parts.len() < 3 || parts[0] != "github.com" {
+            return Err(format!("not a github.com module path: {}", module));
+        }
+        let (owner, repo) = (parts[1], parts[2]);
+
+        // GitHub Contents API supports CORS from browsers
+        let api_url = format!(
+            "https://api.github.com/repos/{}/{}/contents?ref={}",
+            owner, repo, version
+        );
+        let json_bytes = fetch_bytes(&api_url).await
+            .map_err(|e| format!("GitHub API error for {}: {}", module, e))?;
+        let json_str = String::from_utf8(json_bytes).map_err(|e| e.to_string())?;
+
+        let mut result = Vec::new();
+        for entry in github_contents_entries(&json_str) {
+            // Only fetch .vo source files and vo.mod
+            if entry.name.ends_with(".vo") || entry.name == "vo.mod" {
+                let content_bytes = fetch_bytes(&entry.download_url).await
+                    .map_err(|e| format!("Failed to fetch {}: {}", entry.name, e))?;
+                let content = String::from_utf8(content_bytes).map_err(|e| e.to_string())?;
+                result.push((PathBuf::from(format!("{}/{}", module, entry.name)), content));
+            }
+        }
+        Ok(result)
+    }
+
+    struct GitHubFileEntry {
+        name: String,
+        download_url: String,
+    }
+
+    /// Parse a GitHub Contents API JSON response and return file entries.
+    fn github_contents_entries(json: &str) -> Vec<GitHubFileEntry> {
+        let mut entries = Vec::new();
+        let mut pos = 0;
+        while pos < json.len() {
+            let start = match json[pos..].find('{') {
+                Some(i) => pos + i,
+                None => break,
+            };
+            let mut depth = 0i32;
+            let mut end = start;
+            for (i, c) in json[start..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = start + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if end > start {
+                let obj = &json[start..end];
+                if json_str_field(obj, "type").as_deref() == Some("file") {
+                    if let (Some(name), Some(dl)) = (
+                        json_str_field(obj, "name"),
+                        json_str_field(obj, "download_url"),
+                    ) {
+                        entries.push(GitHubFileEntry { name, download_url: dl });
+                    }
+                }
+            }
+            pos = if end > start { end } else { pos + 1 };
+        }
+        entries
+    }
+
+    /// Extract the string value of a JSON field: `"key": "value"` or `"key":"value"`.
+    fn json_str_field(json: &str, key: &str) -> Option<String> {
+        let pat = format!("\"{}\":", key);
+        let after_colon = json.find(pat.as_str())? + pat.len();
+        // Skip whitespace after colon (GitHub API returns `"key": "value"`)
+        let trimmed = json[after_colon..].trim_start_matches([' ', '\t', '\n', '\r']);
+        if !trimmed.starts_with('"') {
+            return None; // value is not a string (e.g. null, number)
+        }
+        let mut v = String::new();
+        let mut esc = false;
+        for c in trimmed[1..].chars() {
+            if esc { v.push(c); esc = false; }
+            else if c == '\\' { esc = true; }
+            else if c == '"' { return Some(v); }
+            else { v.push(c); }
+        }
+        None
+    }
+
+    /// Try to fetch a pre-compiled `<module_name>.wasm` binary from the module
+    /// repo for dynamic WASM loading.  Returns `None` when the file is absent
+    /// (HTTP 404) so callers can fall back to static compilation.
+    pub async fn fetch_wasm_binary(module: &str, version: &str) -> Result<Option<Vec<u8>>, String> {
+        let parts: Vec<&str> = module.splitn(4, '/').collect();
+        if parts.len() < 3 {
+            return Ok(None);
+        }
+        let (owner, repo) = (parts[1], parts[2]);
+        let module_name = repo; // e.g. "resvg"
+        // raw.githubusercontent.com serves individual files at a specific ref
+        let url = format!(
+            "https://raw.githubusercontent.com/{}/{}/{}/{}.wasm",
+            owner, repo, version, module_name
+        );
+        let window = web_sys::window().ok_or("no window object")?;
+        let opts = web_sys::RequestInit::new();
+        opts.set_method("GET");
+        let request = web_sys::Request::new_with_str_and_init(&url, &opts)
+            .map_err(|e| e.as_string().unwrap_or_else(|| "request error".into()))?;
+        let resp_value = JsFuture::from(window.fetch_with_request(&request))
+            .await
+            .map_err(|e| e.as_string().unwrap_or_else(|| "fetch error".into()))?;
+        let resp: web_sys::Response = resp_value
+            .dyn_into()
+            .map_err(|_| "response cast error".to_string())?;
+        if resp.status() == 404 {
+            return Ok(None);
+        }
+        if !resp.ok() {
+            return Err(format!("HTTP {} fetching {}", resp.status(), url));
+        }
+        let ab = JsFuture::from(
+            resp.array_buffer().map_err(|e| e.as_string().unwrap_or_else(|| "ab error".into()))?
+        ).await.map_err(|e| e.as_string().unwrap_or_else(|| "ab await error".into()))?;
+        Ok(Some(js_sys::Uint8Array::new(&ab).to_vec()))
     }
 }
 

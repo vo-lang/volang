@@ -358,7 +358,7 @@ async fn wasm_callback_sleep_ms(ms: u32) {
 
 pub use vo_vm::vm::Vm;
 pub use vo_vm::bytecode::{Module, ExternDef};
-pub use vo_runtime::ffi::ExternRegistry;
+pub use vo_runtime::ffi::{ExternRegistry, ExternCallContext, ExternResult};
 pub use vo_runtime::gc::GcRef;
 
 /// Type alias for extern registration function.

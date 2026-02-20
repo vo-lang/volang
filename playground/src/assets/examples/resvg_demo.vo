@@ -1,11 +1,10 @@
 package main
 
+import "vogui"
 import "github.com/vo-lang/resvg"
 import "encoding/base64"
-import "fmt"
 
-func main() {
-	svg := `<svg width="320" height="200" xmlns="http://www.w3.org/2000/svg">
+const svgContent = `<svg width="320" height="200" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%"   stop-color="#1a1a2e"/>
@@ -47,12 +46,40 @@ func main() {
   <circle cx="172" cy="170" r="4" fill="#e94560" opacity="0.6"/>
 </svg>`
 
-	png, err := resvg.Render(svg)
-	if err != nil {
-		fmt.Println("error:", err)
-		return
-	}
+type State struct {
+	PngDataUrl string
+	Error      string
+}
 
-	// Output base64-encoded PNG so the playground can display it as an image.
-	fmt.Println("__PNG__" + base64.StdEncoding.EncodeToString(png))
+func initState() State {
+	png, err := resvg.Render(svgContent)
+	if err != nil {
+		return State{Error: err.Error()}
+	}
+	return State{PngDataUrl: "data:image/png;base64," + base64.EncodeToString(png)}
+}
+
+func view(state any) vogui.Node {
+	s := state.(*State)
+	if s.Error != "" {
+		return vogui.Column(
+			vogui.H2("SVG Rendering Demo"),
+			vogui.Alert("error", s.Error),
+		).P(24).Gap(16)
+	}
+	return vogui.Column(
+		vogui.H2("SVG → PNG via resvg"),
+		vogui.P("Rendered on the fly in pure Vo using github.com/vo-lang/resvg"),
+		vogui.Image(s.PngDataUrl).W(320).H(200).Rounded(12),
+	).P(24).Gap(16)
+}
+
+func main() {
+	vogui.Run(vogui.App{
+		Init: func() any {
+			s := initState()
+			return &s
+		},
+		View: view,
+	})
 }
