@@ -223,7 +223,39 @@ fn mul_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn div_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let a = e.read_var(inst.b); let b = e.read_var(inst.c);
+    let a = e.read_var(inst.b);
+    
+    // Constant divisor optimization: skip zero-check and overflow-check when divisor is known.
+    if let Some(const_b) = e.get_reg_const(inst.c) {
+        if const_b == 0 {
+            // Division by constant zero — always panic.
+            let one_val = e.builder().ins().iconst(types::I8, 1);
+            let zero_val = e.builder().ins().iconst(types::I8, 0);
+            let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
+            emit_panic_if(e, is_true);
+            // Unreachable, but satisfy SSA
+            let undef = e.builder().ins().iconst(types::I64, 0);
+            e.write_var(inst.a, undef);
+            return;
+        }
+        let b = e.read_var(inst.c);
+        if const_b == -1 {
+            // Only need overflow check (MIN_INT64 / -1)
+            let min_i64 = e.builder().ins().iconst(types::I64, i64::MIN);
+            let one = e.builder().ins().iconst(types::I64, 1);
+            let is_min = e.builder().ins().icmp(IntCC::Equal, a, min_i64);
+            let safe_b = e.builder().ins().select(is_min, one, b);
+            let r = e.builder().ins().sdiv(a, safe_b);
+            e.write_var(inst.a, r);
+        } else {
+            // Non-zero, non-(-1) constant: no checks needed at all
+            let r = e.builder().ins().sdiv(a, b);
+            e.write_var(inst.a, r);
+        }
+        return;
+    }
+    
+    let b = e.read_var(inst.c);
     // Check for division by zero
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_zero = e.builder().ins().icmp(IntCC::Equal, b, zero);
@@ -244,7 +276,36 @@ fn div_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn mod_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let a = e.read_var(inst.b); let b = e.read_var(inst.c);
+    let a = e.read_var(inst.b);
+    
+    // Constant divisor optimization
+    if let Some(const_b) = e.get_reg_const(inst.c) {
+        if const_b == 0 {
+            let one_val = e.builder().ins().iconst(types::I8, 1);
+            let zero_val = e.builder().ins().iconst(types::I8, 0);
+            let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
+            emit_panic_if(e, is_true);
+            let undef = e.builder().ins().iconst(types::I64, 0);
+            e.write_var(inst.a, undef);
+            return;
+        }
+        let b = e.read_var(inst.c);
+        if const_b == -1 {
+            // MIN_INT64 % -1 should be 0, but x86 idiv traps. Guard only for that.
+            let min_i64 = e.builder().ins().iconst(types::I64, i64::MIN);
+            let one = e.builder().ins().iconst(types::I64, 1);
+            let is_min = e.builder().ins().icmp(IntCC::Equal, a, min_i64);
+            let safe_b = e.builder().ins().select(is_min, one, b);
+            let r = e.builder().ins().srem(a, safe_b);
+            e.write_var(inst.a, r);
+        } else {
+            let r = e.builder().ins().srem(a, b);
+            e.write_var(inst.a, r);
+        }
+        return;
+    }
+    
+    let b = e.read_var(inst.c);
     // Check for division by zero
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_zero = e.builder().ins().icmp(IntCC::Equal, b, zero);
@@ -263,7 +324,26 @@ fn mod_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn div_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let a = e.read_var(inst.b); let b = e.read_var(inst.c);
+    let a = e.read_var(inst.b);
+    
+    // Constant divisor optimization: skip zero-check
+    if let Some(const_b) = e.get_reg_const(inst.c) {
+        if const_b == 0 {
+            let one_val = e.builder().ins().iconst(types::I8, 1);
+            let zero_val = e.builder().ins().iconst(types::I8, 0);
+            let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
+            emit_panic_if(e, is_true);
+            let undef = e.builder().ins().iconst(types::I64, 0);
+            e.write_var(inst.a, undef);
+            return;
+        }
+        let b = e.read_var(inst.c);
+        let r = e.builder().ins().udiv(a, b);
+        e.write_var(inst.a, r);
+        return;
+    }
+    
+    let b = e.read_var(inst.c);
     // Check for division by zero
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_zero = e.builder().ins().icmp(IntCC::Equal, b, zero);
@@ -273,7 +353,26 @@ fn div_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn mod_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let a = e.read_var(inst.b); let b = e.read_var(inst.c);
+    let a = e.read_var(inst.b);
+    
+    // Constant divisor optimization: skip zero-check
+    if let Some(const_b) = e.get_reg_const(inst.c) {
+        if const_b == 0 {
+            let one_val = e.builder().ins().iconst(types::I8, 1);
+            let zero_val = e.builder().ins().iconst(types::I8, 0);
+            let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
+            emit_panic_if(e, is_true);
+            let undef = e.builder().ins().iconst(types::I64, 0);
+            e.write_var(inst.a, undef);
+            return;
+        }
+        let b = e.read_var(inst.c);
+        let r = e.builder().ins().urem(a, b);
+        e.write_var(inst.a, r);
+        return;
+    }
+    
+    let b = e.read_var(inst.c);
     // Check for division by zero
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_zero = e.builder().ins().icmp(IntCC::Equal, b, zero);
@@ -387,6 +486,25 @@ fn shift_precheck<'a>(e: &mut impl IrEmitter<'a>, shift_amt: Value) -> (Value, V
 
 fn shl<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b); let b = e.read_var(inst.c);
+    // Constant shift optimization: skip precheck when shift amount is known valid
+    if let Some(const_b) = e.get_reg_const(inst.c) {
+        if const_b < 0 {
+            // Negative constant shift — always panic
+            let one_val = e.builder().ins().iconst(types::I8, 1);
+            let zero_val = e.builder().ins().iconst(types::I8, 0);
+            let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
+            emit_panic_if(e, is_true);
+            let undef = e.builder().ins().iconst(types::I64, 0);
+            e.write_var(inst.a, undef);
+        } else if const_b >= 64 {
+            let zero = e.builder().ins().iconst(types::I64, 0);
+            e.write_var(inst.a, zero);
+        } else {
+            let r = e.builder().ins().ishl(a, b);
+            e.write_var(inst.a, r);
+        }
+        return;
+    }
     let (zero, is_large) = shift_precheck(e, b);
     let shifted = e.builder().ins().ishl(a, b);
     let r = e.builder().ins().select(is_large, zero, shifted);
@@ -395,6 +513,28 @@ fn shl<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
 fn shr_s<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b); let b = e.read_var(inst.c);
+    // Constant shift optimization
+    if let Some(const_b) = e.get_reg_const(inst.c) {
+        if const_b < 0 {
+            let one_val = e.builder().ins().iconst(types::I8, 1);
+            let zero_val = e.builder().ins().iconst(types::I8, 0);
+            let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
+            emit_panic_if(e, is_true);
+            let undef = e.builder().ins().iconst(types::I64, 0);
+            e.write_var(inst.a, undef);
+        } else if const_b >= 64 {
+            // Arithmetic right shift >= 64: result is 0 or -1 depending on sign
+            let zero = e.builder().ins().iconst(types::I64, 0);
+            let minus_one = e.builder().ins().iconst(types::I64, -1i64);
+            let is_neg = e.builder().ins().icmp(IntCC::SignedLessThan, a, zero);
+            let r = e.builder().ins().select(is_neg, minus_one, zero);
+            e.write_var(inst.a, r);
+        } else {
+            let r = e.builder().ins().sshr(a, b);
+            e.write_var(inst.a, r);
+        }
+        return;
+    }
     let (zero, is_large) = shift_precheck(e, b);
     let shifted = e.builder().ins().sshr(a, b);
     let is_a_negative = e.builder().ins().icmp(IntCC::SignedLessThan, a, zero);
@@ -406,6 +546,24 @@ fn shr_s<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
 fn shr_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b); let b = e.read_var(inst.c);
+    // Constant shift optimization
+    if let Some(const_b) = e.get_reg_const(inst.c) {
+        if const_b < 0 {
+            let one_val = e.builder().ins().iconst(types::I8, 1);
+            let zero_val = e.builder().ins().iconst(types::I8, 0);
+            let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
+            emit_panic_if(e, is_true);
+            let undef = e.builder().ins().iconst(types::I64, 0);
+            e.write_var(inst.a, undef);
+        } else if const_b >= 64 {
+            let zero = e.builder().ins().iconst(types::I64, 0);
+            e.write_var(inst.a, zero);
+        } else {
+            let r = e.builder().ins().ushr(a, b);
+            e.write_var(inst.a, r);
+        }
+        return;
+    }
     let (zero, is_large) = shift_precheck(e, b);
     let shifted = e.builder().ins().ushr(a, b);
     let r = e.builder().ins().select(is_large, zero, shifted);
@@ -1046,21 +1204,19 @@ fn array_addr<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 // =============================================================================
 
 fn str_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().str_len.expect("str_len helper not registered");
+    // String uses SliceData layout — len is at the same offset as slice len.
+    // Inline: if s==0 { 0 } else { load(s, SLICE_FIELD_LEN) }
     let s = e.read_var(inst.b);
-    let call = e.builder().ins().call(func, &[s]);
-    let result = e.builder().inst_results(call)[0];
+    let result = emit_nil_guarded_load(e, s, SLICE_FIELD_LEN);
     e.write_var(inst.a, result);
 }
 
 fn str_index<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let str_index_func = e.helpers().str_index.expect("str_index helper not registered");
-    let str_len_func = e.helpers().str_len.expect("str_len helper not registered");
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    // Bounds check: get string length and compare
-    let len_call = e.builder().ins().call(str_len_func, &[s]);
-    let len = e.builder().inst_results(len_call)[0];
+    // Bounds check: inline len (String uses SliceData layout) instead of calling vo_str_len
+    let len = emit_nil_guarded_load(e, s, SLICE_FIELD_LEN);
     let out_of_bounds = e.builder().ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
     emit_panic_if(e, out_of_bounds);
     let call = e.builder().ins().call(str_index_func, &[s, idx]);

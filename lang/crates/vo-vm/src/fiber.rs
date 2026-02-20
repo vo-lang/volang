@@ -374,6 +374,19 @@ pub struct Fiber {
     pub ic_table: Vec<vo_runtime::jit_api::DynCallIC>,
     /// Closure callback suspend/replay state for extern functions.
     pub closure_replay: ClosureReplayState,
+    /// JIT panic flag — set by JIT code when a runtime error occurs (nil deref, bounds check).
+    /// Replaces the per-call Box<JitOwnedState> allocation.
+    #[cfg(feature = "jit")]
+    pub jit_panic_flag: bool,
+    /// JIT user panic flag — true when panic is from explicit `panic()` call, false for runtime errors.
+    #[cfg(feature = "jit")]
+    pub jit_is_user_panic: bool,
+    /// JIT safepoint flag — currently always false (GC safepoint is a no-op).
+    #[cfg(feature = "jit")]
+    pub jit_safepoint_flag: bool,
+    /// JIT panic message — the interface{} value passed to panic().
+    #[cfg(feature = "jit")]
+    pub jit_panic_msg: InterfaceSlot,
 }
 
 impl Fiber {
@@ -400,6 +413,14 @@ impl Fiber {
             #[cfg(feature = "jit")]
             ic_table: Vec::new(),  // Lazy: allocated on first JIT dispatch
             closure_replay: ClosureReplayState::new(),
+            #[cfg(feature = "jit")]
+            jit_panic_flag: false,
+            #[cfg(feature = "jit")]
+            jit_is_user_panic: false,
+            #[cfg(feature = "jit")]
+            jit_safepoint_flag: false,
+            #[cfg(feature = "jit")]
+            jit_panic_msg: InterfaceSlot::default(),
         }
     }
     
@@ -431,6 +452,12 @@ impl Fiber {
             }
         }
         self.closure_replay.reset();
+        #[cfg(feature = "jit")]
+        {
+            self.jit_panic_flag = false;
+            self.jit_is_user_panic = false;
+            self.jit_panic_msg = InterfaceSlot::default();
+        }
     }
     
     /// Ensure IC table is allocated (lazy allocation on first JIT dispatch).

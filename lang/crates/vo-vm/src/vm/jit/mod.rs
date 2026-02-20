@@ -164,11 +164,21 @@ fn invoke_jit_and_handle(
     ctx.ctx.stack_cap = fiber.stack.len() as u32;
     ctx.ctx.jit_bp = jit_bp as u32;
 
-    let mut ret: Vec<u64> = vec![0u64; ret_slots.max(1)];
+    // Stack buffer for return values — avoids heap allocation for the common case (≤16 slots).
+    // Most functions return 0-4 slots; 16 covers all practical cases.
+    const RET_STACK_MAX: usize = 16;
+    let mut ret_stack_buf = [0u64; RET_STACK_MAX];
+    let mut ret_heap_buf: Vec<u64>;
+    let ret: &mut [u64] = if ret_slots <= RET_STACK_MAX {
+        &mut ret_stack_buf[..ret_slots.max(1)]
+    } else {
+        ret_heap_buf = vec![0u64; ret_slots];
+        &mut ret_heap_buf
+    };
     let args_ptr = unsafe { fiber.stack_ptr().add(jit_bp) };
     let result = jit_func(ctx.as_ptr(), args_ptr, ret.as_mut_ptr());
 
-    handle_jit_result(vm, fiber, module, result, ctx, caller_bp, caller_arg_start, ret_slots, jit_bp, &ret)
+    handle_jit_result(vm, fiber, module, result, ctx, caller_bp, caller_arg_start, ret_slots, jit_bp, ret)
 }
 
 fn handle_jit_result(
