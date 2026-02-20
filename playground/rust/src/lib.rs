@@ -6,6 +6,7 @@ use wasm_bindgen::prelude::*;
 use include_dir::{include_dir, Dir};
 use vo_common::vfs::MemoryFs;
 use vo_web::{Vm, GcRef};
+use js_sys;
 
 // Embed vogui package source directory
 static VOGUI_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../libs/vogui");
@@ -187,6 +188,70 @@ fn add_vo_files_recursive(dir: &Dir, base_path: &str, fs: &mut MemoryFs) {
 
 // Re-export vo-web functions
 pub use vo_web::{compile_and_run, version, RunResult};
+
+// ── Module-aware compile and run ──────────────────────────────────────────────
+
+/// Compile and run Vo source that imports third-party GitHub modules.
+///
+/// 1. Scans source for `import "github.com/..."` paths.
+/// 2. Looks up the known version for each module (playground registry).
+/// 3. Fetches each module from GitHub via the browser Fetch API (no TypeScript).
+/// 4. Builds a `MemoryFs` and compiles with `compile_source_with_mod_fs`.
+/// 5. Runs with resvg externs registered in addition to stdlib+web.
+#[wasm_bindgen(js_name = "compileAndRunWithModules")]
+pub fn compile_and_run_with_modules(source: &str) -> js_sys::Promise {
+    let source = source.to_string();
+    wasm_bindgen_futures::future_to_promise(async move {
+        let (status, stdout, stderr) = run_with_modules_inner(&source).await;
+        Ok(vo_web::make_run_result_js(&status, &stdout, &stderr))
+    })
+}
+
+async fn run_with_modules_inner(source: &str) -> (String, String, String) {
+    let imports = vo_module::fetch::detect_github_imports(source);
+
+    // Build mod_fs from fetched module files
+    let mut mod_fs = vo_common::vfs::MemoryFs::new();
+    for module_path in &imports {
+        let version = match playground_module_version(module_path) {
+            Some(v) => v,
+            None => return (
+                "error".into(),
+                String::new(),
+                format!("Unknown module: {}. It is not in the playground module registry.", module_path),
+            ),
+        };
+        match vo_module::fetch::fetch_module_files(module_path, version).await {
+            Ok(files) => {
+                for (vfs_path, content) in files {
+                    mod_fs.add_file(vfs_path, content);
+                }
+            }
+            Err(e) => return (
+                "error".into(),
+                String::new(),
+                format!("Failed to fetch {}: {}", module_path, e),
+            ),
+        }
+    }
+
+    let std_fs = vo_web::build_stdlib_fs();
+    let bytecode = match vo_web::compile_source_with_mod_fs(source, "main.vo", std_fs, mod_fs) {
+        Ok(b) => b,
+        Err(e) => return ("compile_error".into(), String::new(), e),
+    };
+
+    vo_web::run_bytecode_async_with_externs(&bytecode, vo_resvg::register_externs).await
+}
+
+/// Version registry for modules supported by the playground.
+/// Expand this list as new modules are published.
+fn playground_module_version(module: &str) -> Option<&'static str> {
+    match module {
+        "github.com/vo-lang/resvg" => Some("v0.1.0"),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {

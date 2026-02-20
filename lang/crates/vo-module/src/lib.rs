@@ -27,6 +27,7 @@ mod resolver;
 mod error;
 pub mod vfs;
 mod ext_manifest;
+pub mod fetch;
 
 pub use modfile::{ModFile, Require};
 pub use resolver::{ModuleResolver, ModuleClosure, ResolvedPackage};

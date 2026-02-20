@@ -1,0 +1,23 @@
+[package]
+name = "vo-resvg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vo wrapper for resvg — SVG rendering to PNG"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Native: dynamic library extension loaded at runtime via dlopen
+default = ["native"]
+native = ["linkme", "vo-ext/native", "vo-runtime/std"]
+# WASM: compiled directly into the playground binary, no linkme
+wasm = ["vo-ext/wasm"]
+
+[dependencies]
+resvg = "0.43"
+vo-ext = { path = "../../../lang/crates/vo-ext", default-features = false }
+vo-ffi-macro = { path = "../../../lang/crates/vo-ffi-macro" }
+vo-runtime = { path = "../../../lang/crates/vo-runtime", default-features = false }
+linkme = { version = "0.3", optional = true }

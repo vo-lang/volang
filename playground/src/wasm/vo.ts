@@ -31,9 +31,9 @@ async function loadWasm(): Promise<any> {
       console.log('VFS initialized');
     }
 
-    const { default: init, compileAndRun, version, initGuiApp, handleGuiEvent } = await import('@vo-playground/vo_playground.js');
+    const { default: init, compileAndRun, compileAndRunWithModules, version, initGuiApp, handleGuiEvent } = await import('@vo-playground/vo_playground.js');
     await init();
-    wasmModule = { compileAndRun, version, initGuiApp, handleGuiEvent };
+    wasmModule = { compileAndRun, compileAndRunWithModules, version, initGuiApp, handleGuiEvent };
     console.log('Vo Playground WASM loaded:', version());
     return wasmModule;
   } catch (e) {
@@ -195,5 +195,17 @@ export async function handleGuiEvent(handlerId: number, payload: string): Promis
     status: result.status,
     renderJson: result.renderJson || '',
     error: result.error || '',
+  };
+}
+
+/// Run Vo source that contains `import "github.com/..."` statements.
+/// Module fetching is done entirely in Rust/WASM via the browser Fetch API.
+export async function runCodeWithModules(source: string): Promise<RunResult> {
+  const wasm = await loadWasm();
+  const result = await wasm.compileAndRunWithModules(source);
+  return {
+    status: result.status,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
   };
 }

@@ -1,6 +1,6 @@
 # Vo Module Specification (Transitive Closure Model)
 
-Version: 1.0  
+Version: 1.1  
 Status: Draft
 
 ## 1. Overview
@@ -22,15 +22,17 @@ Dependencies are declared in `vo.mod`, and transitive dependencies are discovere
 Every module has a `vo.mod` at its root containing:
 
 - Exactly one `module` line
+- Exactly one `vo` line
 - Zero or more `require` lines (direct dependencies)
 
 **Format:**
 
 ```
 module <module-path>
+vo <toolchain-version>
 
-require <module-path> <version>
-require <module-path> <version>
+require <alias> <module-path> <version>
+require <alias> <module-path> <version>
 ...
 ```
 
@@ -38,10 +40,14 @@ require <module-path> <version>
 
 ```
 module github.com/myuser/myproject
+vo 0.1
 
-require github.com/foo/bar v1.2.3
-require github.com/baz/qux v0.1.0
+require bar github.com/foo/bar v1.2.3
+require qux github.com/baz/qux v0.1.0
 ```
+
+`require` format is normative: `require <alias> <module-path> <version>`.
+External imports use alias form `@"alias"`.
 
 ### 2.2 Module Path
 
@@ -65,6 +71,7 @@ A typical project:
 ```
 myproject/
 ├── vo.mod
+├── vo.sum
 ├── main.vo
 ├── util/
 │   └── helper.vo
@@ -79,8 +86,14 @@ myproject/
 **Rules:**
 
 - `.vodeps/` is a local cache; it is not committed to VCS.
+- `vo.sum` is committed to VCS and records dependency checksums.
 - Each cached dependency module lives at: `.vodeps/<module-path>@<version>/`
 - The cached module root must contain its own `vo.mod`.
+
+### 3.1 Global Cache
+
+Implementations may additionally use a global cache (for example `~/.vo/mod`).
+When both project-local and global caches are available, tooling must behave deterministically and enforce the same version/checksum rules.
 
 ## 4. Standard Library
 
@@ -97,7 +110,7 @@ myproject/
 Given a root module R:
 
 1. Read `R/vo.mod`
-2. For each `require M V`, load module `M@V` from `.vodeps/M@V/vo.mod`
+2. For each `require A M V`, load module `M@V` from cache and read `vo.mod`
 3. Recursively repeat for each loaded module's `require` lines
 4. Maintain a visited set to avoid infinite recursion
 
@@ -112,10 +125,17 @@ A module path may appear at **only one version** across the entire closure.
 
 ### 5.3 Offline Build Rule
 
-`vo build` must not download anything.
+`vo build --offline` must not download anything.
 
-- If any required module directory is missing from `.vodeps`, the build fails.
+- If any required module directory is missing from cache, the build fails.
 - The error should indicate the missing `(module, version)` and suggest `vo get`.
+
+### 5.4 Lock/Checksum Rule (`vo.sum`)
+
+- `vo.sum` stores checksums for fetched dependencies.
+- `vo get` and `vo sync` update `vo.sum`.
+- Build/check must verify checksum when lock data exists.
+- A checksum mismatch is a hard error.
 
 ## 6. Imports and Resolution
 
@@ -353,15 +373,30 @@ Build constraints allow conditional compilation based on tags:
 package mypackage
 ```
 
-Or the legacy syntax:
+Files are included only when the build tags match.
 
-```go
-// +build linux
+### 12.1 Platform Build Tags
 
-package mypackage
+The two primary build tags for platform layering are `native` and `wasm`.
+
+Library authors use per-file build tags to provide platform-specific implementations:
+
+```
+mylib/
+├── add.vo            // shared types and pure Vo functions (no tag)
+├── add_native.vo     //go:build native  — extern declarations + native implementation
+└── add_wasm.vo       //go:build wasm    — pure Vo fallback
 ```
 
-Files are included only when the build tags match.
+**Key rule:** An `extern func` (a function declaration with no body) requires a concrete implementation for every target the module is built for. If a file with `extern func` declarations is included for a given target but no implementation is registered (via `vo.ext.toml` for native, or host bindings for wasm), the build fails.
+
+This means:
+
+- **Native-only library** (no WASM support): `extern func` in non-guarded or `//go:build native` files, no `//go:build wasm` file. WASM build fails at compile time — correct behavior.
+- **Cross-platform library**: `//go:build native` file with `extern func`, `//go:build wasm` file with pure Vo body. Both targets compile.
+- **Pure Vo library** (no extern): works on every target with no extra files.
+
+The toolchain is the sole arbiter of platform support: if it compiles for a target, it is supported.
 
 ## 13. CLI Commands
 
@@ -377,30 +412,48 @@ Creates `vo.mod`:
 
 ```
 module github.com/myuser/myproject
+vo 0.1
 ```
 
-### 13.2 `vo get <module-path>@<version>`
+### 13.2 `vo get <alias> <module-path>@<version>`
 
-- Downloads the module source to `.vodeps/<module>@<version>/`
-- Ensures `.vodeps/<module>@<version>/vo.mod` exists
-- Adds (or updates) a direct `require` line in the root `vo.mod`
+- Downloads the module source to cache (`.vodeps` and/or global cache)
+- Ensures `<module>@<version>/vo.mod` exists and module path matches
+- Adds (or updates) a direct `require <alias> <module> <version>` line in root `vo.mod`
+- Updates `vo.sum`
 - Does **not** resolve or upgrade other dependencies
 
 ```bash
-$ vo get github.com/foo/bar@v1.2.3
+$ vo get gin github.com/gin-gonic/gin@v1.9.0
 ```
 
-### 13.3 `vo build`
+### 13.3 `vo sync`
+
+- Reads root `vo.mod`
+- Ensures full transitive closure is present in cache
+- Refreshes/repairs `vo.sum` entries for resolved versions
+
+```bash
+$ vo sync
+```
+
+### 13.4 `vo build`
 
 - Reads root `vo.mod`
 - Computes transitive closure by reading dependency `vo.mod` files
 - Enforces single-version-per-module rule
 - Resolves imports using the algorithm in §6
-- **Never downloads modules** during the build
+- In `--offline` mode: never downloads modules
 
 ```bash
 $ vo build
+$ vo build --offline
 ```
+
+### 13.5 `vo check`
+
+- Uses the same module-resolution/closure rules as `vo build`
+- In `--offline` mode: never downloads modules
 
 ## 14. Not Supported (By Design)
 
@@ -411,18 +464,90 @@ $ vo build
 | Multiple versions of the same module in one build | Not supported |
 | `replace`/`exclude`/overrides | Not supported |
 | Vendor shadowing | Not supported |
-| Implicit network access during `vo build` | Not supported |
+| Implicit network access during `vo build --offline` | Not supported |
 
-## 15. Typical Errors
+## 15. Native Extensions
 
-### Missing Cached Module
+### 15.1 Overview
+
+Native extensions allow a module to provide Rust implementations for extern functions.
+An extension is discovered from `vo.ext.toml` in module/package roots and loaded as a dynamic library.
+
+### 15.2 Required Files
+
+For a module with native implementation:
+
+```
+<module-root>/
+├── vo.mod
+├── vo.sum
+├── vo.ext.toml
+├── <pkg>/*.vo
+└── rust/
+    ├── Cargo.toml
+    └── src/lib.rs
+```
+
+Build outputs (`*.so`, `*.dylib`, `*.dll`, `target/`) are not committed.
+
+### 15.3 Manifest Format (`vo.ext.toml`)
+
+`vo.ext.toml` must contain:
+
+```toml
+[extension]
+name = "mylib"
+
+[native]
+path = "rust/target/{profile}/libmylib"
+```
+
+Rules:
+
+- `extension.name` must be non-empty.
+- `native.path` is relative to manifest directory.
+- If extension suffix is omitted, the platform suffix is appended (`.so` / `.dylib` / `.dll`).
+- `{profile}` placeholder is allowed.
+
+### 15.4 ABI Compatibility
+
+Native libraries must export `vo_ext_get_entries`.
+Runtime validates ABI version. Mismatch is a hard load error.
+
+### 15.5 Platform Layering for Extension Modules
+
+A module that provides native extension implementations must decide how to handle non-native targets.
+
+**Option A — Native-only (WASM unsupported)**
+
+Place `extern func` declarations in a non-guarded or `//go:build native` file. Do not provide a `//go:build wasm` counterpart. WASM builds fail at compile time with a missing-implementation error. This is the correct outcome.
+
+**Option B — Native extension + WASM fallback**
+
+Provide two implementation files:
+
+```
+mylib/
+├── math.vo              // shared API surface (types, pure functions)
+├── math_native.vo       //go:build native  — extern func FastAdd(a, b int) int
+├── math_wasm.vo         //go:build wasm    — func FastAdd(a, b int) int { return a + b }
+└── vo.ext.toml          // registers Rust dylib for native target only
+```
+
+The `vo.ext.toml` is only activated when the ext loader runs (native builds). On WASM, the ext loader does not run, and the `//go:build wasm` file provides the Vo implementation. No manifest or capability declaration is needed — the compiler proves correctness by succeeding.
+
+**There is no third option.** A module cannot claim WASM support without providing WASM-compatible implementations for every `extern func` it exposes.
+
+## 16. Typical Errors
+
+### 16.1 Missing Cached Module
 
 ```
 error: cannot find module github.com/foo/bar@v1.2.3 in .vodeps
   run: vo get github.com/foo/bar@v1.2.3
 ```
 
-### Version Conflict
+### 16.2 Version Conflict
 
 ```
 error: module github.com/foo/bar required at both v1.2.3 and v1.2.4
@@ -430,13 +555,13 @@ error: module github.com/foo/bar required at both v1.2.3 and v1.2.4
   v1.2.4 required by: github.com/myuser/myproject -> github.com/baz/qux@v0.1.0
 ```
 
-### Unowned Import Path
+### 16.3 Unowned Import Path
 
 ```
 error: import path "github.com/unknown/pkg" is not in std/ and matches no module in the closure
 ```
 
-### Import Cycle
+### 16.4 Import Cycle
 
 ```
 error: import cycle detected
@@ -445,10 +570,21 @@ error: import cycle detected
   github.com/myuser/myproject/a
 ```
 
-### Internal Package Violation
+### 16.5 Internal Package Violation
 
 ```
 error: use of internal package not allowed
   github.com/other/project cannot import
   github.com/myuser/myproject/internal/secret
 ```
+
+### 16.6 Native Extension ABI Mismatch
+
+```
+error: failed to load extension mylib
+  ABI version mismatch: expected <runtime>, found <extension>
+```
+
+## 17. Related Specifications
+
+- `repository-layout.md` (GitHub repository layout and release conventions)

@@ -151,6 +151,21 @@ pub fn build_stdlib_fs() -> MemoryFs {
 /// Exported for libraries (like vogui) that need to add extra packages.
 #[cfg(feature = "compiler")]
 pub fn compile_source_with_std_fs(source: &str, filename: &str, std_fs: MemoryFs) -> Result<Vec<u8>, String> {
+    compile_source_with_mod_fs(source, filename, std_fs, MemoryFs::new())
+}
+
+/// Compile source with separate stdlib and external module filesystems.
+///
+/// `mod_fs` must have module files at paths matching the module path, e.g.
+/// `github.com/vo-lang/resvg/resvg.vo` for a module imported as
+/// `require resvg github.com/vo-lang/resvg v0.1.0`.
+#[cfg(feature = "compiler")]
+pub fn compile_source_with_mod_fs(
+    source: &str,
+    filename: &str,
+    std_fs: MemoryFs,
+    mod_fs: MemoryFs,
+) -> Result<Vec<u8>, String> {
     use vo_analysis::analyze_project;
     use vo_codegen::compile_project;
     use vo_module::vfs::{PackageResolver, StdSource, LocalSource, ModSource};
@@ -163,12 +178,11 @@ pub fn compile_source_with_std_fs(source: &str, filename: &str, std_fs: MemoryFs
     let file_set = FileSet::from_file(&fs, Path::new(filename), PathBuf::from("."))
         .map_err(|e| format!("Failed to read file: {}", e))?;
     
-    // Create package resolver with provided stdlib
-    let empty_fs = MemoryFs::new();
+    // Create package resolver with provided filesystems
     let resolver = PackageResolver {
         std: StdSource::with_fs(std_fs),
         local: LocalSource::with_fs(fs.clone()),
-        r#mod: ModSource::with_fs(empty_fs),
+        r#mod: ModSource::with_fs(mod_fs),
     };
     
     // Analyze project
@@ -217,6 +231,10 @@ pub fn compile_and_run(source: &str, filename: Option<String>) -> js_sys::Promis
     })
 }
 
+pub fn make_run_result_js(status: &str, stdout: &str, stderr: &str) -> JsValue {
+    make_run_result_obj(status, stdout, stderr)
+}
+
 fn make_run_result_obj(status: &str, stdout: &str, stderr: &str) -> JsValue {
     let obj = js_sys::Object::new();
     js_sys::Reflect::set(&obj, &JsValue::from_str("status"), &JsValue::from_str(status)).unwrap();
@@ -244,61 +262,7 @@ async fn run_vm_async(bytecode: &[u8]) -> (String, String, String) {
     vo_web_runtime_wasm::net_http::register_externs(reg, exts);
     vm.load(module);
 
-    let mut outcome = match vm.run_resumable() {
-        Ok(o) => o,
-        Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
-    };
-
-    'host_event_loop: while outcome == SchedulingOutcome::SuspendedForHostEvents {
-        // Drain all in-flight fetch Promises before processing timers.
-        // New fetches may spawn further fetches on resume, so loop until empty.
-        loop {
-            let fetches = vo_web_runtime_wasm::net_http::take_pending_fetch_promises();
-            if fetches.is_empty() { break; }
-            for (token, promise) in fetches {
-                outcome = match await_fetch(&mut vm, token, promise).await {
-                    Ok(o) => o,
-                    Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
-                };
-                if outcome != SchedulingOutcome::SuspendedForHostEvents { break 'host_event_loop; }
-            }
-        }
-
-        // Snapshot pending timer events after fetches are drained.
-        // Use real wall-clock time (batch_start_ms) as t=0 so that VM execution
-        // time between timer wakes is accounted for in each remaining computation.
-        let mut timer_events: Vec<_> = vm.scheduler.take_pending_host_events()
-            .into_iter()
-            .filter(|e| !e.replay)
-            .collect();
-        if timer_events.is_empty() { break; }
-        timer_events.sort_unstable_by_key(|e| e.delay_ms);
-        let batch_start_ms = js_now_ms();
-        for ev in timer_events {
-            let elapsed = js_now_ms() - batch_start_ms;
-            let remaining = ((ev.delay_ms as f64) - elapsed).ceil().max(0.0) as u32;
-            if remaining > 0 {
-                wasm_callback_sleep_ms(remaining).await;
-            }
-            vm.wake_host_event(ev.token);
-            outcome = match vm.run_scheduled_resumable() {
-                Ok(o) => o,
-                Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
-            };
-            if outcome != SchedulingOutcome::SuspendedForHostEvents { break 'host_event_loop; }
-
-            // Drain fetches spawned by this timer wake before firing the next timer.
-            for (ft, fp) in vo_web_runtime_wasm::net_http::take_pending_fetch_promises() {
-                outcome = match await_fetch(&mut vm, ft, fp).await {
-                    Ok(o) => o,
-                    Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
-                };
-                if outcome != SchedulingOutcome::SuspendedForHostEvents { break 'host_event_loop; }
-            }
-        }
-    }
-
-    ("ok".into(), vo_runtime::output::take_output(), String::new())
+    run_vm_async_inner(&mut vm).await
 }
 
 /// Await a single fetch Promise: resolve it, store the result, wake the fiber, and resume VM.
@@ -464,4 +428,87 @@ pub fn alloc_string(vm: &mut Vm, s: &str) -> GcRef {
 /// Take captured output since last clear.
 pub fn take_output() -> String {
     vo_runtime::output::take_output()
+}
+
+/// Async VM execution with an additional extern registrar on top of stdlib+web.
+///
+/// This is the WASM equivalent of `create_vm_from_module` but uses the full
+/// async event loop so WaitIo/Sleep/HTTP work correctly.
+/// Returns `(status, stdout, stderr)`.
+pub async fn run_bytecode_async_with_externs(
+    bytecode: &[u8],
+    extra_reg: ExternRegistrar,
+) -> (String, String, String) {
+    vo_runtime::output::clear_output();
+    let module = match Module::deserialize(bytecode) {
+        Ok(m) => m,
+        Err(e) => return ("error".into(), String::new(), format!("Failed to load bytecode: {:?}", e)),
+    };
+
+    let mut vm = vo_vm::vm::Vm::new();
+    let reg = &mut vm.state.extern_registry;
+    let exts = &module.externs;
+    vo_stdlib::register_externs(reg, exts);
+    vo_web_runtime_wasm::os::register_externs(reg, exts);
+    vo_web_runtime_wasm::time::register_externs(reg, exts);
+    vo_web_runtime_wasm::filepath::register_externs(reg, exts);
+    vo_web_runtime_wasm::net_http::register_externs(reg, exts);
+    extra_reg(reg, exts);
+    vm.load(module);
+
+    let (status, stdout, stderr) = run_vm_async_inner(&mut vm).await;
+    (status, stdout, stderr)
+}
+
+/// Shared inner async run loop (extracted so both run_vm_async variants can use it).
+async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, String, String) {
+    let mut outcome = match vm.run_resumable() {
+        Ok(o) => o,
+        Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
+    };
+
+    'host_event_loop: while outcome == SchedulingOutcome::SuspendedForHostEvents {
+        loop {
+            let fetches = vo_web_runtime_wasm::net_http::take_pending_fetch_promises();
+            if fetches.is_empty() { break; }
+            for (token, promise) in fetches {
+                outcome = match await_fetch(vm, token, promise).await {
+                    Ok(o) => o,
+                    Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
+                };
+                if outcome != SchedulingOutcome::SuspendedForHostEvents { break 'host_event_loop; }
+            }
+        }
+
+        let mut timer_events: Vec<_> = vm.scheduler.take_pending_host_events()
+            .into_iter()
+            .filter(|e| !e.replay)
+            .collect();
+        if timer_events.is_empty() { break; }
+        timer_events.sort_unstable_by_key(|e| e.delay_ms);
+        let batch_start_ms = js_now_ms();
+        for ev in timer_events {
+            let elapsed = js_now_ms() - batch_start_ms;
+            let remaining = ((ev.delay_ms as f64) - elapsed).ceil().max(0.0) as u32;
+            if remaining > 0 {
+                wasm_callback_sleep_ms(remaining).await;
+            }
+            vm.wake_host_event(ev.token);
+            outcome = match vm.run_scheduled_resumable() {
+                Ok(o) => o,
+                Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
+            };
+            if outcome != SchedulingOutcome::SuspendedForHostEvents { break 'host_event_loop; }
+
+            for (ft, fp) in vo_web_runtime_wasm::net_http::take_pending_fetch_promises() {
+                outcome = match await_fetch(vm, ft, fp).await {
+                    Ok(o) => o,
+                    Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
+                };
+                if outcome != SchedulingOutcome::SuspendedForHostEvents { break 'host_event_loop; }
+            }
+        }
+    }
+
+    ("ok".into(), vo_runtime::output::take_output(), String::new())
 }

@@ -1,0 +1,58 @@
+package main
+
+import "github.com/vo-lang/resvg"
+import "encoding/base64"
+import "fmt"
+
+func main() {
+	svg := `<svg width="320" height="200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#16213e"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#e94560"/>
+      <stop offset="100%" stop-color="#0f3460"/>
+    </linearGradient>
+  </defs>
+
+  <!-- background -->
+  <rect width="320" height="200" rx="16" fill="url(#bg)"/>
+
+  <!-- glow ring -->
+  <circle cx="64" cy="100" r="50" fill="none" stroke="url(#ring)"
+          stroke-width="4" opacity="0.9"/>
+  <!-- inner circle -->
+  <circle cx="64" cy="100" r="32" fill="#e94560" opacity="0.85"/>
+  <!-- Vo logo -->
+  <text x="64" y="108" text-anchor="middle"
+        font-family="Arial,sans-serif" font-size="26" font-weight="bold"
+        fill="white">Vo</text>
+
+  <!-- text block -->
+  <text x="192" y="78" text-anchor="middle"
+        font-family="Arial,sans-serif" font-size="22" font-weight="bold"
+        fill="white">resvg demo</text>
+  <text x="192" y="106" text-anchor="middle"
+        font-family="Arial,sans-serif" font-size="13"
+        fill="rgba(255,255,255,0.7)">SVG  →  PNG via Rust FFI</text>
+  <text x="192" y="128" text-anchor="middle"
+        font-family="Arial,sans-serif" font-size="12"
+        fill="rgba(255,255,255,0.5)">github.com/vo-lang/resvg</text>
+
+  <!-- decorative dots -->
+  <circle cx="140" cy="170" r="4" fill="#e94560" opacity="0.6"/>
+  <circle cx="156" cy="170" r="4" fill="#0f3460" opacity="0.6"/>
+  <circle cx="172" cy="170" r="4" fill="#e94560" opacity="0.6"/>
+</svg>`
+
+	png, err := resvg.Render(svg)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	// Output base64-encoded PNG so the playground can display it as an image.
+	fmt.Println("__PNG__" + base64.StdEncoding.EncodeToString(png))
+}

@@ -265,12 +265,57 @@ fn cmd_init(args: &[String]) -> i32 {
 fn cmd_get(args: &[String]) -> i32 {
     if args.is_empty() {
         eprintln!("usage: vo get <module@version>");
-        eprintln!("  e.g. vo get github.com/foo/bar@v1.0.0");
+        eprintln!("  e.g. vo get github.com/vo-lang/resvg@v0.1.0");
         return 1;
     }
 
-    let module_version = &args[0];
-    println!("Downloading: {}", module_version);
-    println!("Note: Package manager not yet implemented");
-    0
+    let spec = &args[0];
+    let (module, version) = match parse_module_version(spec) {
+        Ok(v) => v,
+        Err(e) => { eprintln!("[VO:GET] {}", e); return 1; }
+    };
+
+    match vo_module::fetch::install_module(&module, &version) {
+        Ok(target_dir) => {
+            println!("get {} {}", module, version);
+            println!("  -> {}", target_dir.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("[VO:GET] {}", e);
+            1
+        }
+    }
+}
+
+fn parse_module_version(spec: &str) -> Result<(String, String), String> {
+    match spec.rsplit_once('@') {
+        Some((m, v)) if !m.is_empty() && !v.is_empty() => Ok((m.to_string(), v.to_string())),
+        _ => Err(format!(
+            "invalid module spec {:?}: expected <module>@<version>, e.g. github.com/foo/bar@v1.0.0",
+            spec
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_module_version_ok() {
+        let (m, v) = parse_module_version("github.com/vo-lang/resvg@v0.1.0").unwrap();
+        assert_eq!(m, "github.com/vo-lang/resvg");
+        assert_eq!(v, "v0.1.0");
+    }
+
+    #[test]
+    fn test_parse_module_version_no_at() {
+        assert!(parse_module_version("github.com/vo-lang/resvg").is_err());
+    }
+
+    #[test]
+    fn test_parse_module_version_empty_version() {
+        assert!(parse_module_version("github.com/vo-lang/resvg@").is_err());
+    }
 }

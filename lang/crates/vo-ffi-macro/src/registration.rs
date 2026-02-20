@@ -8,11 +8,12 @@ use quote::{quote, format_ident};
 
 use crate::RegistrationFlavor;
 
-/// Normalize a package path for use in identifiers: replace `/` and `.` with `_`.
+/// Normalize a package path for use in identifiers: replace `/`, `.`, and `-` with `_`.
+/// Must match `normalize_pkg_path` in vo-codegen/src/expr/call.rs.
 pub fn make_lookup_name(pkg_path: &str, func_name: &str) -> String {
     format!(
         "{}_{}",
-        pkg_path.replace('/', "_").replace('.', "_"),
+        pkg_path.replace('/', "_").replace('.', "_").replace('-', "_"),
         func_name
     )
 }

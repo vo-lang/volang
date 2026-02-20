@@ -732,11 +732,15 @@ fn pack_variadic_args(
 }
 
 /// Normalize a package path for extern name generation.
-/// Removes `.` and `..` components and replaces `/` with `_`.
-/// E.g., "../../libs/vox" -> "libs_vox", "encoding/json" -> "encoding_json"
+/// Removes `.` and `..` components, replaces `/`, `.`, and `-` with `_`
+/// to match `make_lookup_name` in vo-ffi-macro and produce valid Rust identifiers.
+/// E.g., "../../libs/vox" -> "libs_vox", "encoding/json" -> "encoding_json",
+///       "github.com/vo-lang/resvg" -> "github_com_vo_lang_resvg"
 pub fn normalize_pkg_path(path: &str) -> String {
     path.split('/')
         .filter(|s| !s.is_empty() && *s != "." && *s != "..")
         .collect::<Vec<_>>()
         .join("_")
+        .replace('.', "_")
+        .replace('-', "_")
 }

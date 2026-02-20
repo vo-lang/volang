@@ -1,0 +1,3 @@
+[extension]
+name = "resvg"
+path = "../../target/{profile}/libvo_resvg"

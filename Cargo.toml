@@ -5,6 +5,7 @@ members = [
   "lang/crates/vo-web/runtime-wasm",
   "libs/vox/rust",
   "libs/vogui/rust",
+  "3rdparty/resvg/rust",
   "playground/rust",
   "cmd/vo",
   "cmd/vo-embed",

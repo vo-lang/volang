@@ -1,0 +1,28 @@
+package main
+
+import "github.com/vo-lang/resvg"
+import "fmt"
+
+func main() {
+	// This test verifies that `vo get github.com/vo-lang/resvg@v0.1.0` correctly
+	// downloads the module so it can be imported and type-checked.
+	//
+	// Run setup:
+	//   vo get github.com/vo-lang/resvg@v0.1.0
+	//   vo run tests/get/main.vo
+
+	svg := `<svg width="10" height="10" xmlns="http://www.w3.org/2000/svg">
+  <rect width="10" height="10" fill="red"/>
+</svg>`
+
+	png, err := resvg.Render(svg)
+	if err != nil {
+		fmt.Println("FAIL: render error:", err)
+		return
+	}
+	if len(png) == 0 {
+		fmt.Println("FAIL: empty PNG output")
+		return
+	}
+	fmt.Println("PASS: resvg.Render returned", len(png), "bytes")
+}

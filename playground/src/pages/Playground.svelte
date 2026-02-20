@@ -3,8 +3,9 @@
   import Output from '../components/Output.svelte';
   import FileExplorer from '../components/FileExplorer.svelte';
   import GuiPreview from '../components/GuiPreview.svelte';
-  import { runCode, initGuiApp, handleGuiEvent, setRenderCallback, type RunStatus } from '../wasm/vo.ts';
+  import { runCode, runCodeWithModules, initGuiApp, handleGuiEvent, setRenderCallback, type RunStatus } from '../wasm/vo.ts';
   import guiTetris from '../assets/examples/gui_tetris.vo?raw';
+  import resvgDemo from '../assets/examples/resvg_demo.vo?raw';
 
   let code = $state(guiTetris);
 
@@ -13,6 +14,7 @@
   let status: RunStatus = $state('idle');
   let currentFile = $state('gui_tetris.vo');
   let guiMode = $state(false);
+  let pngDataUrl = $state<string | null>(null);
   let renderData: { type: 'render' | 'patch'; tree?: any; patches?: any[] } | null = $state(null);
   let consoleCollapsed = $state(false);
   let guiFullscreen = $state(false);
@@ -39,11 +41,14 @@
     stderr = '';
     renderData = null;
     guiMode = false;
+    pngDataUrl = null;
     consoleCollapsed = false;
     activePanel = 'console';
 
     // Detect GUI code by checking for import "vogui"
     const isGuiCode = code.includes('import "vogui"');
+    // Detect third-party module imports (github.com/...)
+    const hasModuleImports = /import\s+"github\.com\//.test(code);
 
     try {
       if (isGuiCode) {
@@ -63,6 +68,20 @@
         }
         status = 'success';
         activePanel = 'gui';
+      } else if (hasModuleImports) {
+        // Code with third-party module imports: fetch modules from GitHub first
+        const result = await runCodeWithModules(code);
+        let output = result.stdout;
+        if (output.startsWith('__PNG__')) {
+          pngDataUrl = 'data:image/png;base64,' + output.slice(7).trim();
+          stdout = '';
+          activePanel = 'gui';
+        } else {
+          stdout = output;
+          activePanel = 'console';
+        }
+        stderr = result.stderr;
+        status = result.status === 'ok' ? 'success' : 'error';
       } else {
         // Regular code execution
         const result = await runCode(code);
@@ -138,6 +157,7 @@
     stderr = '';
     status = 'idle';
     guiMode = false;
+    pngDataUrl = null;
     renderData = null;
     activePanel = 'editor';
   }
@@ -178,6 +198,8 @@
       </div>
       {#if guiMode}
         <span class="mode-badge gui">GUI Mode</span>
+      {:else if pngDataUrl}
+        <span class="mode-badge resvg">SVG → PNG</span>
       {/if}
       {#if currentFile}
         <span class="current-file">{currentFile}</span>
@@ -210,11 +232,18 @@
       </div>
       <div 
         class="resizer" 
-        class:hidden={!guiMode}
+        class:hidden={!guiMode && !pngDataUrl}
         onmousedown={startResize}
       ></div>
-      <div class="gui-panel panel panel-gui" class:inactive={!guiMode} style:width="{guiPanelWidth}px">
-        <GuiPreview {renderData} interactive={guiMode} onEvent={guiMode ? onGuiEvent : undefined} />
+      <div class="gui-panel panel panel-gui" class:inactive={!guiMode && !pngDataUrl} style:width="{guiPanelWidth}px">
+        {#if pngDataUrl}
+          <div class="png-output">
+            <img src={pngDataUrl} alt="SVG rendered to PNG" />
+            <p class="png-caption">Rendered via <code>github.com/vo-lang/resvg</code></p>
+          </div>
+        {:else}
+          <GuiPreview {renderData} interactive={guiMode} onEvent={guiMode ? onGuiEvent : undefined} />
+        {/if}
         {#if guiMode}
           <div class="gui-mobile-toolbar">
             <button 
@@ -303,6 +332,41 @@
   .mode-badge.gui {
     background: var(--accent);
     color: white;
+  }
+
+  .mode-badge.resvg {
+    background: #e94560;
+    color: white;
+  }
+
+  .png-output {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    padding: 24px;
+    gap: 16px;
+    background: var(--bg-primary);
+  }
+
+  .png-output img {
+    max-width: 100%;
+    max-height: calc(100% - 48px);
+    border-radius: 8px;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+    image-rendering: pixelated;
+  }
+
+  .png-caption {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin: 0;
+  }
+
+  .png-caption code {
+    color: #e94560;
   }
 
   .current-file {
