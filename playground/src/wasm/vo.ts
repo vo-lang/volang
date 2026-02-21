@@ -45,7 +45,7 @@ async function loadWasm(): Promise<any> {
 export async function runCode(source: string): Promise<RunResult> {
   const wasm = await loadWasm();
 
-  const result = wasm.compileAndRun(source, 'main.vo');
+  const result = await wasm.compileAndRun(source, 'main.vo');
 
   return {
     status: result.status,
