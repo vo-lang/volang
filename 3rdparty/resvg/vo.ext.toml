@@ -1,3 +1,0 @@
-[extension]
-name = "resvg"
-path = "rust/target/{profile}/libvo_resvg"

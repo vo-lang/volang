@@ -1,6 +1,0 @@
-package resvg
-
-// Render renders an SVG document to PNG bytes.
-// On native targets the Rust resvg crate is used via a native extension.
-// On WASM targets the same Rust code is compiled directly into the runtime binary.
-func Render(svg string) ([]byte, error)
