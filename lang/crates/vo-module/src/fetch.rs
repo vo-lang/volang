@@ -17,34 +17,141 @@ use std::path::PathBuf;
 
 // ── Shared: import detection ─────────────────────────────────────────────────
 
-/// Scan Vo source code and return the top-level GitHub module paths it imports,
-/// e.g. `["github.com/vo-lang/resvg"]` for `import "github.com/vo-lang/resvg"`.
-pub fn detect_github_imports(source: &str) -> Vec<String> {
-    let mut found: Vec<String> = Vec::new();
+/// A GitHub module dependency parsed from a `github.com/...@version` import.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GitHubImport {
+    /// Top-level module path, e.g. `"github.com/vo-lang/resvg"`
+    pub module: String,
+    /// Semver tag, e.g. `"v0.1.0"`
+    pub version: String,
+}
+
+/// Parse a single line for a `github.com/...` import.
+///
+/// Returns `Some((module, version))` where `module` is the normalised top-level
+/// path (e.g. `"github.com/user/repo"`) and `version` is `Some("v1.2.3")` if an
+/// `@version` tag is present, or `None` otherwise.
+fn parse_github_import_line(line: &str) -> Option<(String, Option<String>)> {
+    let t = line.trim();
+    if !t.starts_with("import") {
+        return None;
+    }
+    let q_start = t.find('"')?;
+    let after = &t[q_start + 1..];
+    if !after.starts_with("github.com/") {
+        return None;
+    }
+    let q_end = after.find('"')?;
+    let raw = &after[..q_end]; // e.g. "github.com/user/repo/sub@v1.2.3"
+
+    let (path, version) = match raw.find('@') {
+        Some(at) => (&raw[..at], Some(raw[at + 1..].to_string())),
+        None => (raw, None),
+    };
+
+    let parts: Vec<&str> = path.splitn(4, '/').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    Some((parts[..3].join("/"), version))
+}
+
+/// Scan Vo source for `import "github.com/...@version"` lines and return
+/// deduplicated `GitHubImport` pairs.
+///
+/// Returns `Err` if any GitHub import is missing a `@version` tag, since a
+/// version is required for reproducible playground execution.
+///
+/// Sub-packages are normalised to the top-level module:
+/// `"github.com/user/repo/sub@v1.2.3"` → module `"github.com/user/repo"`, version `"v1.2.3"`
+pub fn detect_github_imports(source: &str) -> Result<Vec<GitHubImport>, String> {
+    let mut found: Vec<GitHubImport> = Vec::new();
     for line in source.lines() {
-        let t = line.trim();
-        if !t.starts_with("import") {
-            continue;
+        if let Some((module, version)) = parse_github_import_line(line) {
+            let version = version.ok_or_else(|| format!(
+                "GitHub import \"{}\" is missing a version tag.\n\
+                 Add a version: \"{}@v1.2.3\"",
+                module, module
+            ))?;
+            if !found.iter().any(|f| f.module == module) {
+                found.push(GitHubImport { module, version });
+            }
         }
-        if let Some(q_start) = t.find('"') {
-            let after = &t[q_start + 1..];
-            if after.starts_with("github.com/") {
-                if let Some(q_end) = after.find('"') {
-                    let path = &after[..q_end];
-                    // Normalise to top-level module: first 3 path components
-                    // github.com / owner / repo
-                    let parts: Vec<&str> = path.splitn(4, '/').collect();
-                    if parts.len() >= 3 {
-                        let m = parts[..3].join("/");
-                        if !found.contains(&m) {
-                            found.push(m);
-                        }
-                    }
-                }
+    }
+    Ok(found)
+}
+
+/// Scan Vo source for GitHub imports that carry an explicit `@version` tag and
+/// return them as `GitHubImport` pairs.  Imports **without** a `@version` suffix
+/// are silently skipped — the caller is expected to have installed them via
+/// `vo get` already.
+///
+/// Use this in native CLI contexts (`vo run`, `vo build`) where a missing version
+/// is legal.  Use [`detect_github_imports`] in playground/WASM contexts where
+/// every GitHub import must declare its version.
+pub fn detect_versioned_imports(source: &str) -> Vec<GitHubImport> {
+    let mut found: Vec<GitHubImport> = Vec::new();
+    for line in source.lines() {
+        if let Some((module, Some(version))) = parse_github_import_line(line) {
+            if !found.iter().any(|f| f.module == module) {
+                found.push(GitHubImport { module, version });
             }
         }
     }
     found
+}
+
+/// Strip `@version` suffixes from all import strings in Vo source code.
+///
+/// Used before passing source to the Vo compiler, which resolves modules by
+/// plain path and doesn't understand version tags.
+///
+/// `import "github.com/user/repo@v1.2.3"` → `import "github.com/user/repo"`
+pub fn strip_module_versions(source: &str) -> String {
+    let mut result = String::with_capacity(source.len());
+    for line in source.lines() {
+        let stripped = strip_versions_from_line(line);
+        result.push_str(&stripped);
+        result.push('\n');
+    }
+    // Preserve original trailing-newline behaviour
+    if !source.ends_with('\n') && result.ends_with('\n') {
+        result.pop();
+    }
+    result
+}
+
+/// Strip `@version` from quoted `github.com/` import paths on a single line.
+///
+/// Only strips from paths starting with `github.com/`; other quoted strings
+/// (e.g. string literals, non-GitHub imports) are left untouched.
+fn strip_versions_from_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(q_start) = rest.find('"') {
+        out.push_str(&rest[..q_start + 1]); // up to and including the opening quote
+        rest = &rest[q_start + 1..];
+        if let Some(q_end) = rest.find('"') {
+            let content = &rest[..q_end];
+            let clean = if content.starts_with("github.com/") {
+                // Strip @version from github.com/ import paths
+                match content.find('@') {
+                    Some(at) => &content[..at],
+                    None => content,
+                }
+            } else {
+                content
+            };
+            out.push_str(clean);
+            out.push('"');
+            rest = &rest[q_end + 1..];
+        } else {
+            out.push_str(rest);
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 // ── Shared: URL building ──────────────────────────────────────────────────────
@@ -478,29 +585,39 @@ mod tests {
     #[test]
     fn test_detect_github_imports_single() {
         let src = r#"package main
-import "github.com/vo-lang/resvg"
+import "github.com/vo-lang/resvg@v0.1.0"
 import "fmt"
 "#;
-        let mods = detect_github_imports(src);
-        assert_eq!(mods, vec!["github.com/vo-lang/resvg"]);
+        let mods = detect_github_imports(src).unwrap();
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].module, "github.com/vo-lang/resvg");
+        assert_eq!(mods[0].version, "v0.1.0");
     }
 
     #[test]
     fn test_detect_github_imports_sub_package() {
-        let src = r#"import "github.com/vo-lang/resvg/extra""#;
-        let mods = detect_github_imports(src);
-        assert_eq!(mods, vec!["github.com/vo-lang/resvg"]);
+        let src = r#"import "github.com/vo-lang/resvg/extra@v2.0.0""#;
+        let mods = detect_github_imports(src).unwrap();
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].module, "github.com/vo-lang/resvg");
+        assert_eq!(mods[0].version, "v2.0.0");
     }
 
     #[test]
     fn test_detect_github_imports_dedup() {
         let src = r#"
-import "github.com/vo-lang/resvg"
-import "github.com/vo-lang/resvg/extra"
+import "github.com/vo-lang/resvg@v0.1.0"
+import "github.com/vo-lang/resvg/extra@v0.1.0"
 "#;
-        let mods = detect_github_imports(src);
+        let mods = detect_github_imports(src).unwrap();
         assert_eq!(mods.len(), 1);
-        assert_eq!(mods[0], "github.com/vo-lang/resvg");
+        assert_eq!(mods[0].module, "github.com/vo-lang/resvg");
+    }
+
+    #[test]
+    fn test_detect_github_imports_missing_version() {
+        let src = r#"import "github.com/vo-lang/resvg""#;
+        assert!(detect_github_imports(src).is_err());
     }
 
     #[test]
@@ -508,7 +625,83 @@ import "github.com/vo-lang/resvg/extra"
         let src = r#"import "fmt"
 import "encoding/json"
 "#;
-        assert!(detect_github_imports(src).is_empty());
+        assert!(detect_github_imports(src).unwrap().is_empty());
+    }
+
+    // ── detect_versioned_imports ──────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_versioned_imports_with_version() {
+        let src = r#"import "github.com/vo-lang/resvg@v0.1.0""#;
+        let mods = detect_versioned_imports(src);
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].module, "github.com/vo-lang/resvg");
+        assert_eq!(mods[0].version, "v0.1.0");
+    }
+
+    #[test]
+    fn test_detect_versioned_imports_skips_unversioned() {
+        // No @version → silently skipped (user installed via `vo get`)
+        let src = r#"import "github.com/vo-lang/resvg""#;
+        assert!(detect_versioned_imports(src).is_empty());
+    }
+
+    #[test]
+    fn test_detect_versioned_imports_mixed() {
+        let src = concat!(
+            "import \"github.com/a/versioned@v1.0.0\"\n",
+            "import \"github.com/b/unversioned\"\n",
+        );
+        let mods = detect_versioned_imports(src);
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].module, "github.com/a/versioned");
+    }
+
+    #[test]
+    fn test_detect_versioned_imports_dedup() {
+        let src = concat!(
+            "import \"github.com/a/lib@v1.0.0\"\n",
+            "import \"github.com/a/lib/sub@v1.0.0\"\n",
+        );
+        let mods = detect_versioned_imports(src);
+        assert_eq!(mods.len(), 1);
+    }
+
+    #[test]
+    fn test_strip_module_versions_basic() {
+        let src = r#"import "github.com/vo-lang/resvg@v0.1.0""#;
+        let stripped = strip_module_versions(src);
+        assert_eq!(stripped, r#"import "github.com/vo-lang/resvg""#);
+    }
+
+    #[test]
+    fn test_strip_module_versions_sub_package() {
+        let src = r#"import "github.com/vo-lang/resvg/extra@v2.0.0""#;
+        let stripped = strip_module_versions(src);
+        assert_eq!(stripped, r#"import "github.com/vo-lang/resvg/extra""#);
+    }
+
+    #[test]
+    fn test_strip_module_versions_non_github() {
+        let src = r#"import "fmt""#;
+        assert_eq!(strip_module_versions(src), src);
+    }
+
+    #[test]
+    fn test_strip_module_versions_preserves_non_github_at() {
+        // Must NOT strip @... from non-github.com quoted strings
+        let src = r#"x := "user@v1.2.3""#;
+        assert_eq!(strip_module_versions(src), src);
+
+        let src2 = r#"fmt.Println("email@host.com")"#;
+        assert_eq!(strip_module_versions(src2), src2);
+    }
+
+    #[test]
+    fn test_strip_module_versions_multiline() {
+        let src = "import \"fmt\"\nimport \"github.com/a/b@v1.0.0\"\npackage main\n";
+        let stripped = strip_module_versions(src);
+        assert_eq!(stripped, "import \"fmt\"\nimport \"github.com/a/b\"\npackage main\n");
     }
 
     #[test]

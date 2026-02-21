@@ -1,14 +1,13 @@
 package main
 
-import "github.com/vo-lang/resvg"
+import "github.com/vo-lang/resvg@v0.1.0"
 import "fmt"
 
 func main() {
-	// This test verifies that `vo get github.com/vo-lang/resvg@v0.1.0` correctly
-	// downloads the module so it can be imported and type-checked.
+	// This test verifies that `vo run` auto-installs `github.com/vo-lang/resvg@v0.1.0`
+	// on first use, then runs the program.
 	//
-	// Run setup:
-	//   vo get github.com/vo-lang/resvg@v0.1.0
+	// Usage (no manual `vo get` needed):
 	//   vo run tests/get/main.vo
 
 	svg := `<svg width="10" height="10" xmlns="http://www.w3.org/2000/svg">

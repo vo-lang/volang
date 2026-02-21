@@ -14,32 +14,25 @@ cargo build -p vo
 ## Running the Test
 
 ```sh
-# 1. Download the module from GitHub
-./target/debug/vo get github.com/vo-lang/resvg@v0.1.0
-
-# 2. Verify the module was extracted
-ls ~/.vo/mod/github.com/vo-lang/resvg/
-# expected: resvg.vo  vo.mod  vo.ext.toml  ...
-
-# 3. Verify vo.sum was updated
-grep resvg ~/.vo/mod/vo.sum
-# expected: github.com/vo-lang/resvg v0.1.0 h1:...
-
-# 4. Type-check the test project (requires the module to be present)
-./target/debug/vo check tests/get
-
-# 5. Run the test (requires the resvg native extension .so to be built)
+# Auto-install path: @version in import triggers automatic download on first run
 ./target/debug/vo run tests/get/main.vo
-# expected: PASS: resvg.Render returned N bytes
+# expected: fetching github.com/vo-lang/resvg v0.1.0...
+#           PASS: resvg.Render returned N bytes
+
+# Manual install path (equivalent, for CI or offline prep)
+./target/debug/vo get github.com/vo-lang/resvg@v0.1.0
+./target/debug/vo run tests/get/main.vo
+# expected: PASS: resvg.Render returned N bytes (no fetch on second run)
 ```
 
 ## What is tested
 
 | Step | What is verified |
-|------|-----------------|
-| `vo get` | GitHub tarball download + extraction into `~/.vo/mod/` |
-| `vo get` | `vo.sum` entry written with `h1:SHA256(tarball)` |
-| `vo check` | Import `"github.com/vo-lang/resvg"` resolves via `ModSource` |
+|------|------------------|
+| `vo run` (first) | `@v0.1.0` in import triggers auto-download + extraction into `~/.vo/mod/` |
+| `vo run` (second) | Module already cached → no download, runs immediately |
+| `vo get` | Explicit download; `vo.sum` entry written with `h1:SHA256(tarball)` |
+| `vo check` | Import `"github.com/vo-lang/resvg@v0.1.0"` resolves via `ModSource` |
 | `vo run` | `resvg.Render` returns non-empty PNG bytes at runtime |
 
 ## Notes

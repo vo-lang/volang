@@ -7,7 +7,7 @@ mod compile;
 mod format;
 mod run;
 
-pub use compile::{compile, compile_with_cache, compile_string, CompileError, CompileOutput};
+pub use compile::{compile, compile_with_cache, compile_string, compile_source_at, compile_with_auto_install, CompileError, CompileOutput};
 pub use format::{format_text, parse_text};
 pub use run::{run, RunMode, RunError, RuntimeError, RuntimeErrorKind};
 

@@ -257,6 +257,8 @@ pub struct ExternCallContext<'a> {
     ret_start: u16,
     /// Return value slot count (u64 slots).
     ret_slots: u16,
+    /// Extern ID for this call (index into the bytecode's extern table).
+    extern_id: u32,
     /// GC for allocations.
     gc: &'a mut Gc,
     /// Module reference (provides struct_metas, interface_metas, named_type_metas,
@@ -313,6 +315,7 @@ impl<'a> ExternCallContext<'a> {
             arg_count: invoke.arg_slots,
             ret_start: invoke.ret_start,
             ret_slots: invoke.ret_slots,
+            extern_id: invoke.extern_id,
             gc: world.gc,
             module: world.module,
             itab_cache: world.itab_cache,
@@ -359,6 +362,12 @@ impl<'a> ExternCallContext<'a> {
     #[inline]
     pub fn ret_start(&self) -> u16 {
         self.ret_start
+    }
+
+    /// Get the extern ID for this call (index into the bytecode's extern table).
+    #[inline]
+    pub fn extern_id(&self) -> u32 {
+        self.extern_id
     }
 
     /// Read a raw slot value.

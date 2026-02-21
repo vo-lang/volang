@@ -16,7 +16,7 @@ use std::env;
 use std::fs;
 use std::process;
 
-use vo_engine::{compile, format_text, run, Module, RunMode};
+use vo_engine::{compile_with_auto_install, format_text, run, Module, RunMode};
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -95,7 +95,7 @@ fn cmd_run(args: &[String]) -> i32 {
         }
     }
 
-    let output = match compile(file) {
+    let output = match compile_with_auto_install(file) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("[VO:COMPILE] {}", e);
@@ -122,7 +122,7 @@ fn cmd_build(args: &[String]) -> i32 {
 
     println!("Building project: {}", path);
 
-    let output = match compile(path) {
+    let output = match compile_with_auto_install(path) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("[VO:COMPILE] {}", e);
@@ -146,7 +146,7 @@ fn cmd_check(args: &[String]) -> i32 {
 
     println!("Checking project: {}", path);
 
-    match compile(path) {
+    match compile_with_auto_install(path) {
         Ok(_) => {
             println!("Check passed");
             0
@@ -225,7 +225,7 @@ fn cmd_emit(args: &[String]) -> i32 {
         }
     }
 
-    let output = match compile(path) {
+    let output = match compile_with_auto_install(path) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("[VO:COMPILE] {}", e);

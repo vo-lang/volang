@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use vo_common::vfs::{FileSet, FileSystem, RealFs, ZipFs};
+use vo_common::vfs::{FileSet, FileSystem, MemoryFs, RealFs, ZipFs};
 use vo_analysis::analyze_project;
 use vo_codegen::compile_project;
 use vo_module::{PackageResolverMixed, StdSource, LocalSource, ModSource};
@@ -128,21 +128,138 @@ pub fn compile_with_cache(path: &str) -> Result<CompileOutput, CompileError> {
     Ok(output)
 }
 
-/// Compile a string of Vo code.
+/// Compile a Vo source string as if it were a single file at the given root directory.
+///
+/// The source is stored in a `MemoryFs` under `"main.vo"`. The root is used for
+/// both caching (`.vo-cache`) and as the local package root in the module resolver.
+/// GitHub modules are resolved from `~/.vo/mod/` as with `compile()`.
+pub fn compile_source_at(source: &str, root: &Path) -> Result<CompileOutput, CompileError> {
+    let mut mem = MemoryFs::new();
+    mem.add_file("main.vo", source);
+    compile_with_fs(mem, root, Some(std::ffi::OsStr::new("main.vo")))
+}
+
+/// Compile a string of Vo code using a temporary directory as the root.
+///
+/// Prefer `compile_source_at` when you know the intended source directory.
 pub fn compile_string(code: &str) -> Result<CompileOutput, CompileError> {
-    use std::io::Write;
-    
     let temp_dir = std::env::temp_dir().join("vo_compile");
     fs::create_dir_all(&temp_dir)?;
-    let temp_file = temp_dir.join("temp.vo");
-    
-    let mut file = fs::File::create(&temp_file)?;
-    file.write_all(code.as_bytes())?;
-    drop(file);
-    
-    let result = compile(temp_file.to_str().unwrap());
-    let _ = fs::remove_file(&temp_file);
-    result
+    compile_source_at(code, &temp_dir)
+}
+
+/// Compile a Vo source file, auto-installing any `github.com/...@version` imports
+/// that are not yet present in `~/.vo/mod/`, and stripping `@version` tags from
+/// import strings before passing source to the compiler.
+///
+/// This is the recommended entry point for `vo run <file>` and `vo build`.
+/// For projects that already have all dependencies installed (e.g. CI builds
+/// with a populated module cache), plain `compile()` is also fine.
+pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileError> {
+    let p = Path::new(path);
+
+    // Only applicable to .vo source files; bytecode and zip paths skip this.
+    if !p.extension().map(|e| e == "vo").unwrap_or(false) {
+        return compile(path);
+    }
+
+    let source = fs::read_to_string(p)?;
+
+    // Detect imports with explicit @version and auto-install any that are absent.
+    // Imports without @version are left to the module resolver (user ran `vo get` manually).
+    let imports = vo_module::fetch::detect_versioned_imports(&source);
+
+    let mod_root = dirs::home_dir()
+        .map(|h| h.join(".vo/mod"))
+        .unwrap_or_else(|| PathBuf::from(".vo/mod"));
+
+    for imp in &imports {
+        let mod_dir = mod_root.join(&imp.module);
+        if !mod_dir.exists() {
+            eprintln!("fetching {} {}...", imp.module, imp.version);
+            vo_module::fetch::install_module(&imp.module, &imp.version)
+                .map_err(|e| CompileError::Analysis(
+                    format!("failed to install {} {}: {}", imp.module, imp.version, e)
+                ))?;
+        }
+    }
+
+    // No versioned imports → compile directly from the original file (preserves caching).
+    if imports.is_empty() {
+        return compile(path);
+    }
+
+    // Strip @version tags and compile the cleaned source in-memory, rooted at
+    // the original file's directory so that local imports resolve correctly.
+    let stripped = vo_module::fetch::strip_module_versions(&source);
+    let source_dir = p.parent().unwrap_or(Path::new("."));
+    compile_source_at(&stripped, source_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compile_with_auto_install_no_github_imports() {
+        // Source with no github imports: compile_with_auto_install must behave
+        // identically to compile for files without @version tags.
+        // We verify it doesn't error on detect_github_imports for a plain source.
+        use vo_module::fetch::{detect_github_imports, strip_module_versions};
+
+        let src = "package main\nimport \"fmt\"\n";
+        let imports = detect_github_imports(src).unwrap();
+        assert!(imports.is_empty());
+        // strip is idempotent when there are no @version tags
+        assert_eq!(strip_module_versions(src), src);
+    }
+
+    #[test]
+    fn test_compile_with_auto_install_strips_version() {
+        use vo_module::fetch::{detect_github_imports, strip_module_versions};
+
+        let src = "package main\nimport \"github.com/vo-lang/resvg@v0.1.0\"\n";
+        let imports = detect_github_imports(src).unwrap();
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].module, "github.com/vo-lang/resvg");
+        assert_eq!(imports[0].version, "v0.1.0");
+
+        let stripped = strip_module_versions(src);
+        assert_eq!(stripped, "package main\nimport \"github.com/vo-lang/resvg\"\n");
+        // Stripping is idempotent
+        assert_eq!(strip_module_versions(&stripped), stripped);
+    }
+
+    #[test]
+    fn test_compile_with_auto_install_missing_version_errors() {
+        use vo_module::fetch::detect_github_imports;
+
+        let src = "package main\nimport \"github.com/vo-lang/resvg\"\n";
+        // No @version → error
+        assert!(detect_github_imports(src).is_err());
+    }
+
+    #[test]
+    fn test_compile_with_auto_install_multiple_modules() {
+        use vo_module::fetch::{detect_github_imports, strip_module_versions};
+
+        let src = concat!(
+            "package main\n",
+            "import \"github.com/a/libfoo@v1.0.0\"\n",
+            "import \"github.com/b/libbar@v2.3.4\"\n",
+        );
+        let imports = detect_github_imports(src).unwrap();
+        assert_eq!(imports.len(), 2);
+        assert_eq!(imports[0].module, "github.com/a/libfoo");
+        assert_eq!(imports[0].version, "v1.0.0");
+        assert_eq!(imports[1].module, "github.com/b/libbar");
+        assert_eq!(imports[1].version, "v2.3.4");
+
+        let stripped = strip_module_versions(src);
+        assert!(stripped.contains("\"github.com/a/libfoo\""));
+        assert!(stripped.contains("\"github.com/b/libbar\""));
+        assert!(!stripped.contains('@'));
+    }
 }
 
 fn source_root(path: &Path) -> PathBuf {

@@ -80,13 +80,13 @@ pub fn init_gui_app(source: &str, filename: Option<String>) -> WasmGuiResult {
     };
     
     // Run
-    init_gui_app_bytecode(&bytecode)
+    run_gui_bytecode(&bytecode, vogui::register_externs)
 }
 
 /// Initialize a GUI app from pre-compiled bytecode.
 #[wasm_bindgen(js_name = "initGuiAppBytecode")]
 pub fn init_gui_app_bytecode(bytecode: &[u8]) -> WasmGuiResult {
-    run_gui_bytecode(bytecode)
+    run_gui_bytecode(bytecode, vogui::register_externs)
 }
 
 /// Handle a GUI event.
@@ -99,36 +99,34 @@ pub fn handle_gui_event(handler_id: i32, payload: &str) -> WasmGuiResult {
 // Core Implementation
 // =============================================================================
 
-fn run_gui_bytecode(bytecode: &[u8]) -> WasmGuiResult {
-    // Clear previous state
+fn run_gui_bytecode(
+    bytecode: &[u8],
+    registrar: fn(&mut vo_web::ExternRegistry, &[vo_web::ExternDef]),
+) -> WasmGuiResult {
     GUI_STATE.with(|s| *s.borrow_mut() = None);
     vogui::clear_pending_handler();
-    
-    // Create VM using vo-web's generic API
-    let vm = match vo_web::create_vm(bytecode, vogui::register_externs) {
+
+    let vm = match vo_web::create_vm(bytecode, registrar) {
         Ok(vm) => vm,
         Err(e) => return WasmGuiResult::err(e),
     };
-    
-    // Extract render output
+
     let stdout = vo_web::take_output();
     let render_json = extract_render_json(&stdout);
-    
+
     if render_json.is_empty() {
         return WasmGuiResult::err(format!("No render output. stdout: {}", stdout));
     }
-    
-    // Get event handler (vogui protocol)
+
     let event_handler = match vogui::take_pending_handler() {
         Some(h) => h,
         None => return WasmGuiResult::err("registerEventHandler not called"),
     };
-    
-    // Store state
+
     GUI_STATE.with(|s| {
         *s.borrow_mut() = Some(GuiAppState { vm, event_handler });
     });
-    
+
     WasmGuiResult::ok(render_json)
 }
 
@@ -195,129 +193,63 @@ pub fn init_gui_app_with_modules(source: &str) -> js_sys::Promise {
     })
 }
 
-async fn init_gui_with_modules_inner(source: &str) -> WasmGuiResult {
-    let imports = vo_module::fetch::detect_github_imports(source);
-    let mut mod_fs = vo_common::vfs::MemoryFs::new();
+/// Fetch all GitHub module dependencies declared in `source`:
+/// - Downloads Vo source files into a `MemoryFs` for the compiler.
+/// - Fetches each module's `.wasm` binary and loads it via the ext bridge.
+/// - Returns the populated `MemoryFs` and the version-stripped source.
+async fn prepare_github_modules(
+    source: &str,
+) -> Result<(MemoryFs, String), String> {
+    let imports = vo_module::fetch::detect_github_imports(source)?;
+    let mut mod_fs = MemoryFs::new();
 
-    for module_path in &imports {
-        let version = match playground_module_version(module_path) {
-            Some(v) => v,
-            None => return WasmGuiResult::err(format!(
-                "Unknown module: {}. Not in the playground module registry.", module_path
-            )),
-        };
-
-        match vo_module::fetch::fetch_module_files(module_path, version).await {
+    for imp in &imports {
+        match vo_module::fetch::fetch_module_files(&imp.module, &imp.version).await {
             Ok(files) => {
                 for (vfs_path, content) in files {
                     mod_fs.add_file(vfs_path, content);
                 }
             }
-            Err(e) => return WasmGuiResult::err(format!("Failed to fetch {}: {}", module_path, e)),
+            Err(e) => return Err(format!("Failed to fetch {}: {}", imp.module, e)),
         }
 
-        match vo_module::fetch::fetch_wasm_binary(module_path, version).await {
+        match vo_module::fetch::fetch_wasm_binary(&imp.module, &imp.version).await {
             Ok(Some(bytes)) => {
-                let repo = module_path.splitn(4, '/').nth(2).unwrap_or(module_path);
-                let promise = js_setup_ext_module(repo, &bytes);
-                if let Err(e) = wasm_bindgen_futures::JsFuture::from(promise).await {
-                    return WasmGuiResult::err(format!("Failed to setup {}.wasm: {:?}", repo, e));
-                }
+                vo_web::ext_bridge::load_wasm_ext_module(&imp.module, &bytes).await?;
             }
             Ok(None) => {}
-            Err(e) => return WasmGuiResult::err(format!("Failed to fetch {}.wasm: {}", module_path, e)),
+            Err(e) => return Err(format!("Failed to fetch {}.wasm: {}", imp.module, e)),
         }
     }
+
+    let clean_source = vo_module::fetch::strip_module_versions(source);
+    Ok((mod_fs, clean_source))
+}
+
+async fn init_gui_with_modules_inner(source: &str) -> WasmGuiResult {
+    let (mod_fs, clean_source) = match prepare_github_modules(source).await {
+        Ok(v) => v,
+        Err(e) => return WasmGuiResult::err(e),
+    };
 
     let mut std_fs = vo_web::build_stdlib_fs();
     add_vogui_to_fs(&mut std_fs);
 
-    let bytecode = match vo_web::compile_source_with_mod_fs(source, "main.vo", std_fs, mod_fs) {
+    let bytecode = match vo_web::compile_source_with_mod_fs(&clean_source, "main.vo", std_fs, mod_fs) {
         Ok(b) => b,
         Err(e) => return WasmGuiResult::compile_err(e),
     };
 
-    run_gui_bytecode_with_ext(&bytecode)
-}
-
-fn run_gui_bytecode_with_ext(bytecode: &[u8]) -> WasmGuiResult {
-    GUI_STATE.with(|s| *s.borrow_mut() = None);
-    vogui::clear_pending_handler();
-
-    let vm = match vo_web::create_vm(bytecode, register_gui_and_ext_bridges) {
-        Ok(vm) => vm,
-        Err(e) => return WasmGuiResult::err(e),
-    };
-
-    let stdout = vo_web::take_output();
-    let render_json = extract_render_json(&stdout);
-
-    if render_json.is_empty() {
-        return WasmGuiResult::err(format!("No render output. stdout: {}", stdout));
-    }
-
-    let event_handler = match vogui::take_pending_handler() {
-        Some(h) => h,
-        None => return WasmGuiResult::err("registerEventHandler not called"),
-    };
-
-    GUI_STATE.with(|s| {
-        *s.borrow_mut() = Some(GuiAppState { vm, event_handler });
-    });
-
-    WasmGuiResult::ok(render_json)
+    run_gui_bytecode(&bytecode, register_gui_and_ext_bridges)
 }
 
 fn register_gui_and_ext_bridges(reg: &mut vo_web::ExternRegistry, externs: &[vo_web::ExternDef]) {
     vogui::register_externs(reg, externs);
-    register_ext_bridges(reg, externs);
+    vo_web::ext_bridge::register_wasm_ext_bridges(reg, externs);
 }
 
 // Re-export vo-web functions
 pub use vo_web::{compile_and_run, version, RunResult};
-
-// ── Module-aware compile and run ──────────────────────────────────────────────
-
-#[wasm_bindgen]
-extern "C" {
-    /// Called from Rust to set up an extension WASM module.
-    /// `bytes` is the raw .wasm binary; `module_name` is e.g. "resvg".
-    /// Returns a Promise that resolves when WebAssembly.instantiate completes.
-    #[wasm_bindgen(js_namespace = window, js_name = "voSetupExtModule")]
-    fn js_setup_ext_module(module_name: &str, bytes: &[u8]) -> js_sys::Promise;
-
-    /// JS bridge: renders SVG string → PNG bytes using the dynamically
-    /// loaded resvg.wasm instance.  Returns empty slice on error.
-    #[wasm_bindgen(js_namespace = window, js_name = "voExtRender")]
-    fn js_ext_render(svg: &str) -> Vec<u8>;
-}
-
-/// ExternFn bridge for `github.com/vo-lang/resvg.Render`.
-fn resvg_render_bridge(call: &mut vo_web::ExternCallContext) -> vo_web::ExternResult {
-    use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
-    let svg = call.arg_str(0).to_string();
-    let png = js_ext_render(&svg);
-    if png.is_empty() {
-        call.ret_nil(0);
-        write_error_to(call, 1, "resvg render failed");
-    } else {
-        let slice_ref = call.alloc_bytes(&png);
-        call.ret_ref(0, slice_ref);
-        write_nil_error(call, 1);
-    }
-    vo_web::ExternResult::Ok
-}
-
-/// Register all known extension bridge functions.
-/// For each extern in the bytecode whose name matches a known module function,
-/// register the corresponding JS bridge.
-fn register_ext_bridges(reg: &mut vo_web::ExternRegistry, externs: &[vo_web::ExternDef]) {
-    for (id, def) in externs.iter().enumerate() {
-        if def.name == "github_com_vo_lang_resvg_Render" {
-            reg.register(id as u32, resvg_render_bridge);
-        }
-    }
-}
 
 /// Compile and run Vo source that imports third-party GitHub modules.
 ///
@@ -336,59 +268,21 @@ pub fn compile_and_run_with_modules(source: &str) -> js_sys::Promise {
 }
 
 async fn run_with_modules_inner(source: &str) -> (String, String, String) {
-    let imports = vo_module::fetch::detect_github_imports(source);
-
-    let mut mod_fs = vo_common::vfs::MemoryFs::new();
-    for module_path in &imports {
-        let version = match playground_module_version(module_path) {
-            Some(v) => v,
-            None => return (
-                "error".into(),
-                String::new(),
-                format!("Unknown module: {}. Not in the playground module registry.", module_path),
-            ),
-        };
-
-        // Fetch Vo source files
-        match vo_module::fetch::fetch_module_files(module_path, version).await {
-            Ok(files) => {
-                for (vfs_path, content) in files {
-                    mod_fs.add_file(vfs_path, content);
-                }
-            }
-            Err(e) => return ("error".into(), String::new(), format!("Failed to fetch {}: {}", module_path, e)),
-        }
-
-        // Fetch pre-compiled .wasm binary and hand it to JS for instantiation
-        match vo_module::fetch::fetch_wasm_binary(module_path, version).await {
-            Ok(Some(bytes)) => {
-                let repo = module_path.splitn(4, '/').nth(2).unwrap_or(module_path);
-                let promise = js_setup_ext_module(repo, &bytes);
-                if let Err(e) = wasm_bindgen_futures::JsFuture::from(promise).await {
-                    return ("error".into(), String::new(),
-                        format!("Failed to setup {}.wasm: {:?}", repo, e));
-                }
-            }
-            Ok(None) => {} // no .wasm in repo — bridge calls will fail at runtime
-            Err(e) => return ("error".into(), String::new(), format!("Failed to fetch {}.wasm: {}", module_path, e)),
-        }
-    }
+    let (mod_fs, clean_source) = match prepare_github_modules(source).await {
+        Ok(v) => v,
+        Err(e) => return ("error".into(), String::new(), e),
+    };
 
     let std_fs = vo_web::build_stdlib_fs();
-    let bytecode = match vo_web::compile_source_with_mod_fs(source, "main.vo", std_fs, mod_fs) {
+    let bytecode = match vo_web::compile_source_with_mod_fs(&clean_source, "main.vo", std_fs, mod_fs) {
         Ok(b) => b,
         Err(e) => return ("compile_error".into(), String::new(), e),
     };
 
-    vo_web::run_bytecode_async_with_externs(&bytecode, register_ext_bridges).await
-}
-
-/// Version registry for modules known to the playground.
-fn playground_module_version(module: &str) -> Option<&'static str> {
-    match module {
-        "github.com/vo-lang/resvg" => Some("v0.1.0"),
-        _ => None,
-    }
+    vo_web::run_bytecode_async_with_externs(
+        &bytecode,
+        vo_web::ext_bridge::register_wasm_ext_bridges,
+    ).await
 }
 
 #[cfg(test)]

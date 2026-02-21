@@ -361,6 +361,10 @@ pub use vo_vm::bytecode::{Module, ExternDef};
 pub use vo_runtime::ffi::{ExternRegistry, ExternCallContext, ExternResult};
 pub use vo_runtime::gc::GcRef;
 
+/// Generic WASM extension bridge. Use this to load ext modules and auto-register
+/// their externs without any per-module hardcoding.
+pub use vo_web_runtime_wasm::ext_bridge;
+
 /// Type alias for extern registration function.
 pub type ExternRegistrar = fn(&mut ExternRegistry, &[ExternDef]);
 

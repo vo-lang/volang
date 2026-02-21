@@ -226,44 +226,68 @@ export async function initGuiAppWithModules(source: string): Promise<GuiResult> 
 
 // ── Extension WASM dynamic loading ───────────────────────────────────────────
 //
-// Rust calls `window.voSetupExtModule(name, bytes)` after fetching a pre-built
-// .wasm binary from a module repo.  The returned Promise resolves once
-// WebAssembly.instantiate completes.  `window.voExtRender(svg)` is then
-// available for the resvg bridge ExternFn to call synchronously.
+// Generic bridge: any Rust ext module that follows the standard Vo ext ABI
+// (vo_alloc / vo_dealloc / <extern_name>) can be loaded and called without
+// any per-module JS code.
 
+// Maps normalized module key (e.g. "github_com_vo_lang_resvg") → WASM instance.
+// Key matches normalize_module_key() in vo-web/runtime-wasm/src/ext_bridge.rs.
 const extInstances = new Map<string, WebAssembly.Instance>();
 
-// Called from Rust (returns Promise so Rust can await it).
-(window as any).voSetupExtModule = async (name: string, bytes: Uint8Array): Promise<void> => {
+/// Called from Rust via ext_bridge::load_wasm_ext_module.
+/// `key` is the normalized module path (e.g. "github_com_vo_lang_resvg").
+(window as any).voSetupExtModule = async (key: string, bytes: Uint8Array): Promise<void> => {
   const { instance } = await WebAssembly.instantiate(bytes);
-  extInstances.set(name, instance);
+  extInstances.set(key, instance);
 };
 
-// Called from Rust synchronously inside the VM execution.
-// Must be registered BEFORE voSetupExtModule resolves; safe because the VM
-// only calls this after the setup Promise has been awaited.
-(window as any).voExtRender = (svg: string): Uint8Array => {
-  const instance = extInstances.get('resvg');
-  if (!instance) return new Uint8Array(0);
+/// Called from Rust's wasm_ext_bridge for any ext module function.
+///
+/// Standard Vo ext ABI:
+///   vo_alloc(size) → ptr
+///   vo_dealloc(ptr, size)
+///   <extern_name>(input_ptr, input_len, out_len_ptr) → output_ptr
+///
+/// `externName` e.g. "github_com_vo_lang_resvg_Render"
+/// `input` is raw bytes (UTF-8 string, JSON, or binary)
+/// Returns result bytes, or empty Uint8Array on error.
+(window as any).voCallExt = (externName: string, input: Uint8Array): Uint8Array => {
+  // Find the instance: the module key is the longest prefix of externName
+  // that matches a loaded module key.
+  let instance: WebAssembly.Instance | undefined;
+  let matchedKey = '';
+  for (const [key, inst] of extInstances) {
+    if (externName.startsWith(key) && key.length > matchedKey.length) {
+      matchedKey = key;
+      instance = inst;
+    }
+  }
+  if (!instance) {
+    console.error('[voCallExt] No loaded module for extern:', externName);
+    return new Uint8Array(0);
+  }
+
   const exp = instance.exports as any;
-  const encoder = new TextEncoder();
-  const svgBytes = encoder.encode(svg);
+  if (typeof exp[externName] !== 'function') {
+    console.error('[voCallExt] Export not found:', externName);
+    return new Uint8Array(0);
+  }
 
-  const svgPtr: number = exp.resvg_alloc(svgBytes.length);
-  new Uint8Array(exp.memory.buffer).set(svgBytes, svgPtr);
+  const inputPtr: number = exp.vo_alloc(input.length);
+  new Uint8Array(exp.memory.buffer).set(input, inputPtr);
 
-  const outLenPtr: number = exp.resvg_alloc(4);
-  const pngPtr: number = exp.resvg_render(svgPtr, svgBytes.length, outLenPtr);
-  exp.resvg_dealloc(svgPtr, svgBytes.length);
+  const outLenPtr: number = exp.vo_alloc(4);
+  const outPtr: number = exp[externName](inputPtr, input.length, outLenPtr);
+  exp.vo_dealloc(inputPtr, input.length);
 
-  if (pngPtr === 0) {
-    exp.resvg_dealloc(outLenPtr, 4);
+  if (outPtr === 0) {
+    exp.vo_dealloc(outLenPtr, 4);
     return new Uint8Array(0);
   }
 
   const outLen: number = new Uint32Array(exp.memory.buffer, outLenPtr, 1)[0];
-  const pngBytes = new Uint8Array(exp.memory.buffer, pngPtr, outLen).slice();
-  exp.resvg_dealloc(pngPtr, outLen);
-  exp.resvg_dealloc(outLenPtr, 4);
-  return pngBytes;
+  const result = new Uint8Array(exp.memory.buffer, outPtr, outLen).slice();
+  exp.vo_dealloc(outPtr, outLen);
+  exp.vo_dealloc(outLenPtr, 4);
+  return result;
 };
