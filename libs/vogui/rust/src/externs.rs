@@ -21,10 +21,9 @@ pub fn register_event_handler(ctx: &mut ExternCallContext) -> ExternResult {
 #[vo_fn("vogui", "emitRender")]
 pub fn emit_render(ctx: &mut ExternCallContext) -> ExternResult {
     let json_ref = ctx.arg_ref(slots::ARG_JSON);
-    let json = if json_ref.is_null() { "" } else { string::as_str(json_ref) };
+    let json = if json_ref.is_null() { String::new() } else { string::as_str(json_ref).to_string() };
     
-    vo_runtime::output::write("__VOGUI__");
-    vo_runtime::output::writeln(json);
+    crate::PENDING_RENDER.with(|s| *s.borrow_mut() = Some(json));
     
     ExternResult::Ok
 }

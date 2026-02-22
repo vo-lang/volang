@@ -17,6 +17,9 @@ mod externs;
 thread_local! {
     /// Pending event handler closure (set by registerEventHandler, consumed by caller)
     pub static PENDING_HANDLER: RefCell<Option<GcRef>> = RefCell::new(None);
+
+    /// Pending render JSON (set by emitRender, consumed by caller)
+    pub static PENDING_RENDER: RefCell<Option<String>> = RefCell::new(None);
 }
 
 // =============================================================================
@@ -36,6 +39,16 @@ pub fn take_pending_handler() -> Option<GcRef> {
 /// Clear any pending handler.
 pub fn clear_pending_handler() {
     PENDING_HANDLER.with(|s| *s.borrow_mut() = None);
+}
+
+/// Take the pending render JSON (if emitRender was called).
+pub fn take_pending_render() -> Option<String> {
+    PENDING_RENDER.with(|s| s.borrow_mut().take())
+}
+
+/// Clear any pending render JSON.
+pub fn clear_pending_render() {
+    PENDING_RENDER.with(|s| *s.borrow_mut() = None);
 }
 
 // =============================================================================

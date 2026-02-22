@@ -1,6 +1,6 @@
 //! Vo Playground WASM - combines vo-web (system) and vogui (GUI library).
 
-use std::cell::RefCell;
+use std::cell::UnsafeCell;
 use std::path::PathBuf;
 use wasm_bindgen::prelude::*;
 use vo_common::vfs::MemoryFs;
@@ -20,7 +20,7 @@ struct GuiAppState {
 }
 
 thread_local! {
-    static GUI_STATE: RefCell<Option<GuiAppState>> = RefCell::new(None);
+    static GUI_STATE: UnsafeCell<Option<GuiAppState>> = UnsafeCell::new(None);
 }
 
 // =============================================================================
@@ -103,19 +103,30 @@ fn run_gui_bytecode(
     bytecode: &[u8],
     registrar: fn(&mut vo_web::ExternRegistry, &[vo_web::ExternDef]),
 ) -> WasmGuiResult {
-    GUI_STATE.with(|s| *s.borrow_mut() = None);
+    GUI_STATE.with(|s| unsafe { *s.get() = None });
     vogui::clear_pending_handler();
+    vogui::clear_pending_render();
 
     let vm = match vo_web::create_vm(bytecode, registrar) {
         Ok(vm) => vm,
         Err(e) => return WasmGuiResult::err(e),
     };
 
+    // Flush any user println output to console
     let stdout = vo_web::take_output();
-    let render_json = extract_render_json(&stdout);
+    if !stdout.is_empty() {
+        for line in stdout.lines() {
+            if !line.is_empty() {
+                web_sys::console::log_1(&format!("[Vo] {}", line).into());
+            }
+        }
+    }
+
+    // Read render JSON from dedicated channel (not stdout)
+    let render_json = vogui::take_pending_render().unwrap_or_default();
 
     if render_json.is_empty() {
-        return WasmGuiResult::err(format!("No render output. stdout: {}", stdout));
+        return WasmGuiResult::err("No render output. emitRender was not called.".to_string());
     }
 
     let event_handler = match vogui::take_pending_handler() {
@@ -123,8 +134,8 @@ fn run_gui_bytecode(
         None => return WasmGuiResult::err("registerEventHandler not called"),
     };
 
-    GUI_STATE.with(|s| {
-        *s.borrow_mut() = Some(GuiAppState { vm, event_handler });
+    GUI_STATE.with(|s| unsafe {
+        *s.get() = Some(GuiAppState { vm, event_handler });
     });
 
     WasmGuiResult::ok(render_json)
@@ -132,38 +143,38 @@ fn run_gui_bytecode(
 
 fn handle_event(handler_id: i32, payload: &str) -> WasmGuiResult {
     GUI_STATE.with(|s| {
-        let mut state_ref = s.borrow_mut();
-        let state = match state_ref.as_mut() {
+        // SAFETY: WASM is single-threaded. JS-side busy guard prevents reentrant calls.
+        // We use UnsafeCell instead of RefCell because WASM traps don't unwind,
+        // which would permanently leak RefCell borrow guards and poison all subsequent calls.
+        let state = unsafe { &mut *s.get() };
+        let state = match state.as_mut() {
             Some(st) => st,
             None => return WasmGuiResult::err("GUI app not initialized"),
         };
-        
+
         // Allocate payload string using vo-web API
         let payload_ref = vo_web::alloc_string(&mut state.vm, payload);
-        
+
         // Call closure using vo-web API
         let args = [handler_id as u64, payload_ref as u64];
         if let Err(e) = vo_web::call_closure(&mut state.vm, state.event_handler, &args) {
             return WasmGuiResult::err(e);
         }
-        
+
+        // Flush any user println output to console
         let stdout = vo_web::take_output();
-        let render_json = extract_render_json(&stdout);
-        
+        if !stdout.is_empty() {
+            for line in stdout.lines() {
+                if !line.is_empty() {
+                    web_sys::console::log_1(&format!("[Vo] {}", line).into());
+                }
+            }
+        }
+
+        // Read render JSON from dedicated channel
+        let render_json = vogui::take_pending_render().unwrap_or_default();
         WasmGuiResult::ok(render_json)
     })
-}
-
-fn extract_render_json(stdout: &str) -> String {
-    let mut render_json = String::new();
-    for line in stdout.lines() {
-        if let Some(json) = line.strip_prefix("__VOGUI__") {
-            render_json = json.to_string();
-        } else if !line.is_empty() {
-            web_sys::console::log_1(&format!("[Vo] {}", line).into());
-        }
-    }
-    render_json
 }
 
 fn add_vogui_to_fs(fs: &mut MemoryFs) {
@@ -215,7 +226,12 @@ async fn prepare_github_modules(
 
         match vo_module::fetch::fetch_wasm_binary(&imp.module, &imp.version).await {
             Ok(Some(bytes)) => {
-                vo_web::ext_bridge::load_wasm_ext_module(&imp.module, &bytes).await?;
+                // Check if a wasm-bindgen JS glue file exists alongside the .wasm
+                let js_glue_url = vo_module::fetch::fetch_wasm_js_glue_url(&imp.module, &imp.version)
+                    .await
+                    .unwrap_or(None)
+                    .unwrap_or_default();
+                vo_web::ext_bridge::load_wasm_ext_module(&imp.module, &bytes, &js_glue_url).await?;
             }
             Ok(None) => {}
             Err(e) => return Err(format!("Failed to fetch {}.wasm: {}", imp.module, e)),

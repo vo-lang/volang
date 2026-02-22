@@ -66,10 +66,30 @@ let onRender: RenderCallback | null = null;
 
 // Timer storage: Vo ID -> JS Interval ID
 const activeTimers = new Map<number, number>();
+const runningTimerHandlers = new Set<number>();
+const activeTimeouts = new Map<number, number>();
 
 // Save native timer functions before overriding
 const nativeSetInterval = window.setInterval.bind(window);
 const nativeClearInterval = window.clearInterval.bind(window);
+
+// Serialize GUI events to prevent re-entrant VM access.
+// Timers, timeouts, and UI events can fire while a previous event is still running.
+let guiEventChain: Promise<unknown> = Promise.resolve();
+
+// Synchronous busy guard: prevents re-entrant WASM calls.
+// WASM is single-threaded; if a trap occurs during a call, subsequent calls
+// must not attempt to re-enter the corrupted VM state.
+let wasmBusy = false;
+let wasmFatal = false;
+
+function clearAllTimers() {
+  activeTimers.forEach((jsId) => nativeClearInterval(jsId));
+  activeTimers.clear();
+  runningTimerHandlers.clear();
+  activeTimeouts.forEach((jsId) => clearTimeout(jsId));
+  activeTimeouts.clear();
+}
 
 export function setRenderCallback(callback: RenderCallback) {
   onRender = callback;
@@ -77,26 +97,28 @@ export function setRenderCallback(callback: RenderCallback) {
 
 // Expose global functions for WASM to call
 (window as any).startInterval = (id: number, ms: number) => {
-  console.log('[VoGUI] startInterval called:', id, ms);
-  if (activeTimers.has(id)) {
-    nativeClearInterval(activeTimers.get(id)!);
-  }
-  
-  const intervalId = nativeSetInterval(async () => {
-    console.log('[VoGUI] Timer tick:', id);
-    try {
-      const result = await handleGuiEvent(-1, JSON.stringify({ id: id }));
-      console.log('[VoGUI] Timer event result:', result.status, result.renderJson?.length || 0);
-      if (result.status === 'ok' && onRender) {
-        onRender(result.renderJson);
-      }
-    } catch (e) {
-      console.error('Timer handler failed:', e);
-    }
-  }, ms);
-  
-  activeTimers.set(id, intervalId);
-  console.log('[VoGUI] Timer registered, JS interval ID:', intervalId);
+	if (activeTimers.has(id)) {
+		nativeClearInterval(activeTimers.get(id)!);
+	}
+	
+	const intervalId = nativeSetInterval(async () => {
+		if (runningTimerHandlers.has(id)) {
+			return;
+		}
+		runningTimerHandlers.add(id);
+		try {
+			const result = await handleGuiEvent(-1, JSON.stringify({ id: id }));
+			if (result.status === 'ok' && onRender) {
+				onRender(result.renderJson);
+			}
+		} catch (e) {
+			console.error('Timer handler failed:', e);
+		} finally {
+			runningTimerHandlers.delete(id);
+		}
+	}, ms);
+	
+	activeTimers.set(id, intervalId);
 };
 
 (window as any).clearInterval = (id: number) => {
@@ -104,10 +126,8 @@ export function setRenderCallback(callback: RenderCallback) {
     nativeClearInterval(activeTimers.get(id)!);
     activeTimers.delete(id);
   }
+  runningTimerHandlers.delete(id);
 };
-
-// Timeout support
-const activeTimeouts = new Map<number, number>();
 
 (window as any).startTimeout = (id: number, ms: number) => {
   if (activeTimeouts.has(id)) {
@@ -174,10 +194,35 @@ window.addEventListener('popstate', async () => {
   }
 });
 
+// ============ Canvas Registry ============
+
+const voCanvasRegistry = new Map<string, HTMLCanvasElement>();
+
+(window as any).voGetCanvas = (id: string): HTMLCanvasElement | null => {
+  return voCanvasRegistry.get(id) ?? null;
+};
+
+(window as any).voRegisterCanvas = (id: string, canvas: HTMLCanvasElement) => {
+  voCanvasRegistry.set(id, canvas);
+};
+
+(window as any).voUnregisterCanvas = (id: string) => {
+  voCanvasRegistry.delete(id);
+};
+
+/** Clear all registered canvases (call on app reload). */
+export function clearCanvasRegistry() {
+  voCanvasRegistry.clear();
+}
+
 export async function initGuiApp(source: string): Promise<GuiResult> {
-  // Clear timers on reload - use native function with JS interval IDs
-  activeTimers.forEach((jsIntervalId) => nativeClearInterval(jsIntervalId));
-  activeTimers.clear();
+  // Reset fatal state so user can re-run after a crash
+  wasmFatal = false;
+  wasmBusy = false;
+
+  // Clear timers and canvas registry on reload
+  clearAllTimers();
+  voCanvasRegistry.clear();
 
   const wasm = await loadWasm();
   const result = wasm.initGuiApp(source, 'main.vo');
@@ -189,13 +234,42 @@ export async function initGuiApp(source: string): Promise<GuiResult> {
 }
 
 export async function handleGuiEvent(handlerId: number, payload: string): Promise<GuiResult> {
+  if (wasmFatal) {
+    return { status: 'error', renderJson: '', error: 'VM is in fatal state after a previous error' };
+  }
+
   const wasm = await loadWasm();
-  const result = wasm.handleGuiEvent(handlerId, payload);
-  return {
-    status: result.status,
-    renderJson: result.renderJson || '',
-    error: result.error || '',
+
+  const run = async (): Promise<GuiResult> => {
+    if (wasmBusy) {
+      return { status: 'error', renderJson: '', error: 'Re-entrant WASM call blocked' };
+    }
+    if (wasmFatal) {
+      return { status: 'error', renderJson: '', error: 'VM is in fatal state after a previous error' };
+    }
+    wasmBusy = true;
+    try {
+      const result = wasm.handleGuiEvent(handlerId, payload);
+      return {
+        status: result.status,
+        renderJson: result.renderJson || '',
+        error: result.error || '',
+      };
+    } catch (e) {
+      // WASM trap (e.g. unreachable, memory access out of bounds).
+      // Mark fatal and stop all timers to prevent cascading failures.
+      wasmFatal = true;
+      clearAllTimers();
+      console.error('[Vo] Fatal WASM error, all timers stopped:', e);
+      return { status: 'error', renderJson: '', error: String(e) };
+    } finally {
+      wasmBusy = false;
+    }
   };
+
+  const next = guiEventChain.then(run, run);
+  guiEventChain = next.then(() => undefined, () => undefined);
+  return next;
 }
 
 /// Run Vo source that contains `import "github.com/..."` statements.
@@ -212,8 +286,13 @@ export async function runCodeWithModules(source: string): Promise<RunResult> {
 
 /// Initialize a vogui app that also imports `import "github.com/..."` modules.
 export async function initGuiAppWithModules(source: string): Promise<GuiResult> {
-  activeTimers.forEach((jsIntervalId) => nativeClearInterval(jsIntervalId));
-  activeTimers.clear();
+  // Reset fatal state so user can re-run after a crash
+  wasmFatal = false;
+  wasmBusy = false;
+
+  // Clear timers and canvas registry on reload
+  clearAllTimers();
+  voCanvasRegistry.clear();
 
   const wasm = await loadWasm();
   const result = await wasm.initGuiAppWithModules(source);
@@ -234,26 +313,95 @@ export async function initGuiAppWithModules(source: string): Promise<GuiResult> 
 // Key matches normalize_module_key() in vo-web/runtime-wasm/src/ext_bridge.rs.
 const extInstances = new Map<string, WebAssembly.Instance>();
 
+// Maps normalized module key → wasm-bindgen module (has DOM access, can use canvas).
+const extBindgenModules = new Map<string, any>();
+
 /// Called from Rust via ext_bridge::load_wasm_ext_module.
 /// `key` is the normalized module path (e.g. "github_com_vo_lang_resvg").
-(window as any).voSetupExtModule = async (key: string, bytes: Uint8Array): Promise<void> => {
-  const { instance } = await WebAssembly.instantiate(bytes);
-  extInstances.set(key, instance);
+/// `jsGlueUrl` is optional: if provided, loads as wasm-bindgen module with DOM access.
+(window as any).voSetupExtModule = async (key: string, bytes: Uint8Array, jsGlueUrl?: string): Promise<void> => {
+  if (jsGlueUrl) {
+    // wasm-bindgen module: full DOM access (canvas, WebGL, WebGPU, etc.)
+    // Fetch JS glue text, then create a Blob URL with correct MIME type for import().
+    // raw.githubusercontent.com serves text/plain which browsers reject for import().
+    const resp = await fetch(jsGlueUrl);
+    if (!resp.ok) throw new Error(`Failed to fetch JS glue: HTTP ${resp.status}`);
+    const jsText = await resp.text();
+
+    const blob = new Blob([jsText], { type: 'application/javascript' });
+    const blobUrl = URL.createObjectURL(blob);
+    try {
+      const glue = await import(/* @vite-ignore */ blobUrl);
+      // Instantiate the WASM module (synchronous internals only — no async start).
+      await glue.default({ module_or_path: bytes.slice() });
+      // Generic async init: any wasm-bindgen module that needs async setup
+      // (GPU adapter, audio context, etc.) exports __voInit().
+      // Await it so the hardware is ready before Vo code runs.
+      if (typeof glue.__voInit === 'function') {
+        await glue.__voInit();
+      }
+      extBindgenModules.set(key, glue);
+    } finally {
+      URL.revokeObjectURL(blobUrl);
+    }
+  } else {
+    // Standalone module: current behavior (pure compute, no DOM access)
+    // slice() copies the bytes out of Rust WASM memory before the async boundary
+    const { instance } = await WebAssembly.instantiate(bytes.slice());
+    extInstances.set(key, instance);
+  }
 };
 
 /// Called from Rust's wasm_ext_bridge for any ext module function.
 ///
-/// Standard Vo ext ABI:
+/// Dispatches to wasm-bindgen modules first, then falls back to standalone modules.
+///
+/// Standard Vo ext ABI (standalone):
 ///   vo_alloc(size) → ptr
 ///   vo_dealloc(ptr, size)
 ///   <extern_name>(input_ptr, input_len, out_len_ptr) → output_ptr
+///
+/// wasm-bindgen ABI:
+///   Module exports named functions directly, called with Uint8Array input.
 ///
 /// `externName` e.g. "github_com_vo_lang_resvg_Render"
 /// `input` is raw bytes (UTF-8 string, JSON, or binary)
 /// Returns result bytes, or empty Uint8Array on error.
 (window as any).voCallExt = (externName: string, input: Uint8Array): Uint8Array => {
-  // Find the instance: the module key is the longest prefix of externName
-  // that matches a loaded module key.
+  // Try wasm-bindgen modules first (they have DOM/canvas access)
+  let bindgenModule: any = undefined;
+  let bindgenKey = '';
+  for (const [key, mod] of extBindgenModules) {
+    if (externName.startsWith(key) && key.length > bindgenKey.length) {
+      bindgenKey = key;
+      bindgenModule = mod;
+    }
+  }
+  if (bindgenModule) {
+    const funcName = externName.substring(bindgenKey.length + 1);
+    if (typeof bindgenModule[funcName] === 'function') {
+      let result: any;
+      try {
+        result = bindgenModule[funcName](input);
+      } catch (e) {
+        console.error('[voCallExt] Exception calling:', externName, e);
+        return new Uint8Array(0);
+      }
+      // If the bindgen function is async, it returns a Promise.
+      // Suppress the rejection so it doesn't become an unhandled rejection (SES_UNCAUGHT_EXCEPTION).
+      if (result instanceof Promise) {
+        result.catch(() => {});
+        return new Uint8Array(0);
+      }
+      if (result instanceof Uint8Array) return result;
+      if (typeof result === 'string') return new TextEncoder().encode(result);
+      return new Uint8Array(0);
+    }
+    console.error('[voCallExt] Bindgen export not found:', funcName, 'in module:', bindgenKey);
+    return new Uint8Array(0);
+  }
+
+  // Fall back to standalone modules
   let instance: WebAssembly.Instance | undefined;
   let matchedKey = '';
   for (const [key, inst] of extInstances) {
@@ -268,26 +416,61 @@ const extInstances = new Map<string, WebAssembly.Instance>();
   }
 
   const exp = instance.exports as any;
-  if (typeof exp[externName] !== 'function') {
+
+  // Extract function name from externName (e.g., "Render" from "github_com_vo_lang_resvg_Render")
+  const funcName = externName.substring(matchedKey.length + 1);
+
+  // Resolve the extern function: try standard vo ext ABI name first, then legacy naming.
+  // Standard: full externName (e.g., "github_com_vo_lang_resvg_Render")
+  // Legacy: {shortModule}_{lowercase_func} (e.g., "resvg_render")
+  let extFunc: Function | undefined;
+  if (typeof exp[externName] === 'function') {
+    extFunc = exp[externName];
+  } else {
+    const parts = matchedKey.split('_');
+    const shortName = parts[parts.length - 1];
+    const legacyName = `${shortName}_${funcName.toLowerCase()}`;
+    if (typeof exp[legacyName] === 'function') {
+      extFunc = exp[legacyName];
+    }
+  }
+  if (!extFunc) {
     console.error('[voCallExt] Export not found:', externName);
     return new Uint8Array(0);
   }
 
-  const inputPtr: number = exp.vo_alloc(input.length);
+  // Resolve alloc/dealloc: standard (vo_alloc) or legacy ({shortModule}_alloc)
+  let allocFn: Function | undefined;
+  let deallocFn: Function | undefined;
+  if (typeof exp.vo_alloc === 'function') {
+    allocFn = exp.vo_alloc;
+    deallocFn = exp.vo_dealloc;
+  } else {
+    const parts = matchedKey.split('_');
+    const shortName = parts[parts.length - 1];
+    allocFn = exp[`${shortName}_alloc`];
+    deallocFn = exp[`${shortName}_dealloc`];
+  }
+  if (!allocFn || !deallocFn) {
+    console.error('[voCallExt] Alloc/dealloc not found for module:', matchedKey);
+    return new Uint8Array(0);
+  }
+
+  const inputPtr: number = (allocFn as any)(input.length);
   new Uint8Array(exp.memory.buffer).set(input, inputPtr);
 
-  const outLenPtr: number = exp.vo_alloc(4);
-  const outPtr: number = exp[externName](inputPtr, input.length, outLenPtr);
-  exp.vo_dealloc(inputPtr, input.length);
+  const outLenPtr: number = (allocFn as any)(4);
+  const outPtr: number = (extFunc as any)(inputPtr, input.length, outLenPtr);
+  (deallocFn as any)(inputPtr, input.length);
 
   if (outPtr === 0) {
-    exp.vo_dealloc(outLenPtr, 4);
+    (deallocFn as any)(outLenPtr, 4);
     return new Uint8Array(0);
   }
 
   const outLen: number = new Uint32Array(exp.memory.buffer, outLenPtr, 1)[0];
   const result = new Uint8Array(exp.memory.buffer, outPtr, outLen).slice();
-  exp.vo_dealloc(outPtr, outLen);
-  exp.vo_dealloc(outLenPtr, 4);
+  (deallocFn as any)(outPtr, outLen);
+  (deallocFn as any)(outLenPtr, 4);
   return result;
 };

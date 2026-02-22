@@ -20,12 +20,15 @@
 //!
 //! The playground (or any vo-web consumer) must expose two globals:
 //!
-//! - `window.voSetupExtModule(key: string, bytes: Uint8Array): Promise<void>`
+//! - `window.voSetupExtModule(key: string, bytes: Uint8Array, jsGlueUrl?: string): Promise<void>`
 //!   Instantiates the WASM binary and stores it under `key`.
+//!   If `jsGlueUrl` is provided, loads as a wasm-bindgen module with DOM access
+//!   (for canvas/GPU extensions). Otherwise, loads as a standalone WASM module.
 //!
 //! - `window.voCallExt(extern_name: string, input: Uint8Array): Uint8Array`
 //!   Calls the named function in the correct WASM instance and returns the
-//!   result bytes (empty slice on error).
+//!   result bytes (empty slice on error). Dispatches to wasm-bindgen modules
+//!   first, then falls back to standalone modules.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -41,9 +44,10 @@ extern "C" {
     /// Set up a WASM extension module.
     ///
     /// `module_key` is the normalized module path (e.g. `"github_com_vo_lang_resvg"`).
-    /// Returns a Promise that resolves when `WebAssembly.instantiate` completes.
+    /// `js_glue_url` is optional: if provided, loads as wasm-bindgen module with DOM access.
+    /// Returns a Promise that resolves when the module is instantiated.
     #[wasm_bindgen(js_namespace = window, js_name = "voSetupExtModule")]
-    pub fn js_setup_ext_module(module_key: &str, bytes: &[u8]) -> js_sys::Promise;
+    pub fn js_setup_ext_module(module_key: &str, bytes: &[u8], js_glue_url: &str) -> js_sys::Promise;
 
     /// Invoke a function in a loaded WASM extension module.
     ///
@@ -83,11 +87,13 @@ pub fn normalize_module_key(module_path: &str) -> String {
 ///
 /// `module_path` is the Go-style module path (e.g. `"github.com/vo-lang/resvg"`).
 /// `bytes` is the pre-fetched `.wasm` binary.
+/// `js_glue_url` is optional: if non-empty, loads as wasm-bindgen module with DOM access
+/// (for canvas/GPU extensions). Pass "" for standalone (pure compute) modules.
 ///
 /// This calls `window.voSetupExtModule` and awaits the returned Promise.
-pub async fn load_wasm_ext_module(module_path: &str, bytes: &[u8]) -> Result<(), String> {
+pub async fn load_wasm_ext_module(module_path: &str, bytes: &[u8], js_glue_url: &str) -> Result<(), String> {
     let key = normalize_module_key(module_path);
-    let promise = js_setup_ext_module(&key, bytes);
+    let promise = js_setup_ext_module(&key, bytes, js_glue_url);
     wasm_bindgen_futures::JsFuture::from(promise)
         .await
         .map_err(|e: wasm_bindgen::JsValue| format!("Failed to instantiate {}: {:?}", module_path, e))?;

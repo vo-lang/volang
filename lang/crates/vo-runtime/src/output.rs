@@ -39,6 +39,18 @@ unsafe impl Sync for OutputBuffer {}
 #[cfg(not(feature = "std"))]
 static OUTPUT_BUFFER: OutputBuffer = OutputBuffer(UnsafeCell::new(String::new()));
 
+/// Optional write hook for immediate output (e.g. console.log in WASM).
+/// SAFETY: WASM is single-threaded, so static mut access is safe.
+#[cfg(not(feature = "std"))]
+static mut WRITE_HOOK: Option<fn(&str)> = None;
+
+/// Set a hook that is called for every writeln (in addition to buffering).
+/// Useful in WASM to flush output to console.log immediately.
+#[cfg(not(feature = "std"))]
+pub fn set_write_hook(hook: fn(&str)) {
+    unsafe { WRITE_HOOK = Some(hook); }
+}
+
 #[cfg(not(feature = "std"))]
 impl OutputBuffer {
     fn with<R>(&self, f: impl FnOnce(&mut String) -> R) -> R {
@@ -95,6 +107,11 @@ pub fn writeln(s: &str) {
         buf.push_str(s);
         buf.push('\n');
     });
+    unsafe {
+        if let Some(hook) = WRITE_HOOK {
+            hook(s);
+        }
+    }
 }
 
 /// Take all captured output and clear the buffer.

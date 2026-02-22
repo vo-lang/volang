@@ -376,8 +376,15 @@ pub fn create_vm(bytecode: &[u8], register_externs: ExternRegistrar) -> Result<V
     create_vm_from_module(module, register_externs)
 }
 
+/// Write hook: flush each Vo println line to browser console immediately.
+/// This ensures diagnostic output is visible even if a WASM trap occurs.
+fn wasm_write_hook(s: &str) {
+    web_sys::console::log_1(&format!("[Vo] {}", s).into());
+}
+
 /// Create a VM from a pre-deserialized module.
 pub fn create_vm_from_module(module: Module, register_externs: ExternRegistrar) -> Result<Vm, String> {
+    vo_runtime::output::set_write_hook(wasm_write_hook);
     vo_runtime::output::clear_output();
     
     let mut vm = Vm::new();

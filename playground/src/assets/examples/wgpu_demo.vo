@@ -1,0 +1,109 @@
+package main
+
+import "vogui"
+import "github.com/vo-lang/wgpu@main"
+
+type State struct {
+	Initialized   bool
+	Hue           float64
+}
+
+func main() {
+	vogui.Run(vogui.App{
+		Init: initState,
+		View: view,
+	})
+}
+
+func initState() any {
+	return &State{}
+}
+
+func view(state any) vogui.Node {
+	return vogui.Column(
+		vogui.Text("WebGPU Triangle Demo"),
+		vogui.Text("Rendering a triangle with animated background color via WebGPU."),
+		vogui.Canvas(vogui.CanvasOpts{
+			ID:     "gpu",
+			Width:  640,
+			Height: 480,
+			OnResize: vogui.OnResize(initCanvas),
+		}),
+	)
+}
+
+func initCanvas(s *State, _ vogui.ResizeEvent) {
+	if s.Initialized {
+		return
+	}
+	err := wgpu.InitCanvas("gpu")
+	if err != nil {
+		println("wgpu.InitCanvas failed:", err)
+		return
+	}
+	s.Initialized = true
+	startRenderLoop()
+}
+
+func startRenderLoop() {
+	vogui.SetInterval(16, func(state any) {
+		tick(state.(*State))
+	})
+}
+
+func tick(s *State) {
+	if !s.Initialized {
+		return
+	}
+
+	// Animate background color using a slow hue rotation
+	s.Hue = s.Hue + 0.005
+	if s.Hue > 1.0 {
+		s.Hue = s.Hue - 1.0
+	}
+	r, g, b := hslToRgb(s.Hue, 0.3, 0.15)
+
+	err := wgpu.RenderFrame(r, g, b, 1.0, true)
+	if err != nil {
+		println("wgpu.RenderFrame error:", err)
+	}
+}
+
+// hslToRgb converts HSL (h in 0-1, s in 0-1, l in 0-1) to RGB (each 0-1).
+func hslToRgb(h, s, l float64) (float64, float64, float64) {
+	if s == 0.0 {
+		return l, l, l
+	}
+
+	var q float64
+	if l < 0.5 {
+		q = l * (1.0 + s)
+	} else {
+		q = l + s - l*s
+	}
+	p := 2.0*l - q
+
+	r := hueToRgb(p, q, h+1.0/3.0)
+	g := hueToRgb(p, q, h)
+	b := hueToRgb(p, q, h-1.0/3.0)
+	return r, g, b
+}
+
+func hueToRgb(p, q, t float64) float64 {
+	if t < 0.0 {
+		t = t + 1.0
+	}
+	if t > 1.0 {
+		t = t - 1.0
+	}
+	if t < 1.0/6.0 {
+		return p + (q-p)*6.0*t
+	}
+	if t < 1.0/2.0 {
+		return q
+	}
+	if t < 2.0/3.0 {
+		return p + (q-p)*(2.0/3.0-t)*6.0
+	}
+	return p
+}

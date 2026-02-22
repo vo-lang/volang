@@ -12,6 +12,7 @@ members = [
 ]
 exclude = [
   "3rdparty/resvg/rust",
+  "3rdparty/wgpu/rust",
 ]
 
 [workspace.package]

@@ -1,0 +1,37 @@
+package main
+
+import "encoding/json"
+
+type Inner struct {
+	Nums [3]int
+	Flag bool
+}
+
+func main() {
+	v := Inner{
+		Nums: [3]int{10, 20, 30},
+		Flag: true,
+	}
+	data, err := json.Marshal(v)
+	assert(err == nil, "marshal error: ", err)
+	s := string(data)
+	println(s)
+
+	// Verify the JSON contains the array
+	assert(s == `{"nums":[10,20,30],"flag":true}`, "unexpected JSON: ", s)
+
+	// Also test with float array
+	type FloatStruct struct {
+		Vals [4]float64
+		Name string
+	}
+	fv := FloatStruct{
+		Vals: [4]float64{1.5, 2.5, 3.5, 4.5},
+		Name: "test",
+	}
+	data2, err2 := json.Marshal(fv)
+	assert(err2 == nil, "marshal float error: ", err2)
+	s2 := string(data2)
+	println(s2)
+	assert(s2 == `{"vals":[1.5,2.5,3.5,4.5],"name":"test"}`, "unexpected float JSON: ", s2)
+}

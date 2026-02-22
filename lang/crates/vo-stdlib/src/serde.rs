@@ -224,8 +224,9 @@ fn marshal_field_value_depth<W: FormatWriter>(
             marshal_slice_value_depth(call, slice_ref, rttid, writer, depth + 1)?;
         }
         ValueKind::Array => {
-            let arr_ref = field_ptr as GcRef;
-            marshal_array_value_depth(call, arr_ref, rttid, writer, depth + 1)?;
+            // Inline array in struct: no ArrayHeader, read directly from field_ptr.
+            // Get array metadata from RuntimeType instead of ArrayHeader.
+            marshal_inline_array_value_depth(call, field_ptr, rttid, writer, depth + 1)?;
         }
         ValueKind::Map => {
             let map_ref = unsafe { *(field_ptr as *const u64) } as GcRef;
@@ -355,6 +356,38 @@ fn marshal_array_value_depth<W: FormatWriter>(
     for i in 0..length {
         writer.write_array_elem_start(i == 0);
         marshal_elem_value_depth(call, array::data_ptr_bytes(arr_ref), i, elem_bytes, elem_vk, elem_rttid, writer, depth)?;
+        writer.write_array_elem_end();
+    }
+    writer.write_array_end();
+    Ok(())
+}
+
+/// Marshal an inline array (within a struct field). Unlike heap arrays, inline arrays
+/// have no ArrayHeader - the data starts directly at data_ptr. Array metadata (length,
+/// elem type) comes from the RuntimeType table via rttid.
+fn marshal_inline_array_value_depth<W: FormatWriter>(
+    call: &ExternCallContext,
+    data_ptr: *const u8,
+    rttid: u32,
+    writer: &mut W,
+    depth: usize,
+) -> Result<(), &'static str> {
+    let elem_value_rttid = call.get_elem_value_rttid_from_base(rttid);
+    let elem_vk = elem_value_rttid.value_kind();
+    let elem_rttid = elem_value_rttid.rttid();
+    let length = call.get_array_len_from_rttid(rttid);
+    let elem_slots = call.get_type_slot_count(elem_rttid) as usize;
+    let elem_bytes = match elem_vk {
+        ValueKind::Bool | ValueKind::Int8 | ValueKind::Uint8 => 1,
+        ValueKind::Int16 | ValueKind::Uint16 => 2,
+        ValueKind::Int32 | ValueKind::Uint32 | ValueKind::Float32 => 4,
+        _ => elem_slots * SLOT_BYTES,
+    };
+
+    writer.write_array_start();
+    for i in 0..length {
+        writer.write_array_elem_start(i == 0);
+        marshal_elem_value_depth(call, data_ptr as *mut u8, i, elem_bytes, elem_vk, elem_rttid, writer, depth)?;
         writer.write_array_elem_end();
     }
     writer.write_array_end();

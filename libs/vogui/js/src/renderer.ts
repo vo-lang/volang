@@ -1002,6 +1002,89 @@ export function renderNode(node: VoNode, config: RendererConfig, handlers?: Retu
       return el;
     }
     
+    // Canvas (GPU rendering)
+    case 'Canvas': {
+      const canvasId = node.props?.id ?? 'vo-canvas-0';
+      const width = node.props?.width ?? 300;
+      const height = node.props?.height ?? 150;
+
+      const el = document.createElement('canvas') as HTMLCanvasElement;
+      el.id = `vo-canvas-${canvasId}`;
+      el.className = 'vo-canvas';
+      el.width = width;
+      el.height = height;
+      if (style) el.style.cssText = style;
+      // Prevent canvas from being a drag target / interfering with touch scroll
+      el.style.touchAction = 'none';
+
+      // Register in platform canvas registry immediately.
+      // Canvas contexts (WebGL, 2D) can be obtained before DOM insertion,
+      // so extensions can access the canvas in the same render cycle.
+      const win = window as any;
+      if (typeof win.voRegisterCanvas === 'function') {
+        win.voRegisterCanvas(canvasId, el);
+      }
+
+      // Pointer events (unified mouse + touch)
+      if (interactive && config.onEvent && node.props?.onPointer !== undefined) {
+        const ptrHandler = node.props.onPointer as number;
+        const ptrEvents = ['pointerdown', 'pointerup', 'pointermove', 'pointerenter', 'pointerleave'];
+        for (const evtType of ptrEvents) {
+          el.addEventListener(evtType, (e: PointerEvent) => {
+            const rect = el.getBoundingClientRect();
+            const payload = JSON.stringify({
+              kind: evtType.replace('pointer', ''),
+              x: e.clientX - rect.left,
+              y: e.clientY - rect.top,
+              button: e.button,
+              buttons: e.buttons,
+            });
+            config.onEvent!(ptrHandler, payload);
+          });
+        }
+        // Prevent context menu on right-click inside canvas
+        el.addEventListener('contextmenu', (e) => e.preventDefault());
+      }
+
+      // Resize observer → onResize handler
+      if (interactive && config.onEvent && node.props?.onResize !== undefined) {
+        const resizeHandler = node.props.onResize as number;
+        const observer = new ResizeObserver((entries) => {
+          for (const entry of entries) {
+            const { width: w, height: h } = entry.contentRect;
+            config.onEvent!(resizeHandler, JSON.stringify({ width: Math.round(w), height: Math.round(h) }));
+          }
+        });
+        observer.observe(el);
+        // Store observer for cleanup
+        (el as any).__voResizeObserver = observer;
+      }
+
+      // Fullscreen support
+      if (node.props?.fullscreen) {
+        // requestFullscreen must be called from a user gesture
+        // Queue on next click if not already fullscreen
+        if (!document.fullscreenElement) {
+          el.addEventListener('click', () => {
+            el.requestFullscreen().catch(() => {});
+          }, { once: true });
+        }
+      }
+
+      // Listen for fullscreen exit → fire resize event
+      if (interactive && config.onEvent && node.props?.onResize !== undefined) {
+        const resizeHandler = node.props.onResize as number;
+        el.addEventListener('fullscreenchange', () => {
+          config.onEvent!(resizeHandler, JSON.stringify({
+            width: el.clientWidth,
+            height: el.clientHeight,
+          }));
+        });
+      }
+
+      return el;
+    }
+
     // Utility
     case 'Spacer': {
       const el = document.createElement('div');
@@ -1045,6 +1128,18 @@ export function render(container: HTMLElement, tree: VoNode | null, config: Rend
   // Use morphdom for efficient DOM updates
   morphdom(oldEl, newEl, {
     onBeforeElUpdated(fromEl, toEl) {
+      // Preserve canvas GPU state — never replace canvas elements
+      if (fromEl.tagName === 'CANVAS' && toEl.tagName === 'CANVAS') {
+        const fromCanvas = fromEl as HTMLCanvasElement;
+        const toCanvas = toEl as HTMLCanvasElement;
+        // Update dimensions if changed
+        if (fromCanvas.width !== toCanvas.width) fromCanvas.width = toCanvas.width;
+        if (fromCanvas.height !== toCanvas.height) fromCanvas.height = toCanvas.height;
+        // Update CSS
+        if (toCanvas.style.cssText) fromCanvas.style.cssText = toCanvas.style.cssText;
+        return false; // Do NOT replace the element — preserve WebGL/GPU context
+      }
+
       // Preserve focused input values
       if (document.activeElement === fromEl) {
         if ('value' in fromEl && 'value' in toEl) {
@@ -1062,6 +1157,20 @@ export function render(container: HTMLElement, tree: VoNode | null, config: Rend
         }
       }
       return true;
+    },
+    onNodeDiscarded(node: Node) {
+      // Cleanup canvas registry and resize observers when canvas is removed
+      if (node instanceof HTMLCanvasElement) {
+        const canvasId = node.id.replace('vo-canvas-', '');
+        const win = window as any;
+        if (typeof win.voUnregisterCanvas === 'function') {
+          win.voUnregisterCanvas(canvasId);
+        }
+        // Disconnect resize observer
+        if ((node as any).__voResizeObserver) {
+          (node as any).__voResizeObserver.disconnect();
+        }
+      }
     }
   });
 }

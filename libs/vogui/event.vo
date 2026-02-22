@@ -23,6 +23,8 @@ const (
 	handlerSelect     = 9
 	handlerSlider     = 10
 	handlerFiles      = 11
+	handlerPointer    = 12
+	handlerResize     = 13
 )
 
 // Handler represents an event handler binding.
@@ -150,6 +152,14 @@ func invokeHandler(state any, idx int, payload string) error {
 		var p struct{ Files []FileInfo }
 		json.Unmarshal([]byte(payload), &p)
 		return handler~>(state, p.Files)
+	case handlerPointer:
+		var p PointerEvent
+		json.Unmarshal([]byte(payload), &p)
+		return handler~>(state, p)
+	case handlerResize:
+		var p ResizeEvent
+		json.Unmarshal([]byte(payload), &p)
+		return handler~>(state, p)
 	}
 	return handler~>(state)
 }

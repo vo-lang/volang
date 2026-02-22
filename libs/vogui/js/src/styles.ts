@@ -848,6 +848,20 @@ export const voguiStyles = `
   font-weight: 500;
 }
 
+/* Canvas */
+.vo-canvas {
+  display: block;
+  background: #000;
+  border-radius: 4px;
+  image-rendering: pixelated;
+}
+
+.vo-canvas:fullscreen {
+  border-radius: 0;
+  width: 100vw;
+  height: 100vh;
+}
+
 /* Unknown/Error */
 .vo-unknown {
   padding: 4px 8px;

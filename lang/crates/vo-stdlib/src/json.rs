@@ -95,8 +95,12 @@ fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
     let pointed_rttid = get_pointed_type_rttid(call, rttid);
     
     match unmarshal_struct::<JsonReader>(call, ptr, pointed_rttid, json_str.trim()) {
-        Ok(()) => { call.ret_nil(0); call.ret_nil(1); }
-        Err(msg) => write_error_to(call, 0, msg),
+        Ok(()) => {
+            call.ret_nil(0); call.ret_nil(1);
+        }
+        Err(msg) => {
+            write_error_to(call, 0, msg);
+        }
     }
     ExternResult::Ok
 }

@@ -38,6 +38,7 @@
 //   - overlay.vo   : Overlay components (Modal, Drawer, Tooltip, Dropdown)
 //   - form.vo      : Form components (Form, FormField, FormError, etc.)
 //   - list.vo      : List/Table components (List, Table, TableRow, etc.)
+//   - canvas.vo    : Canvas component for GPU rendering (Canvas, CanvasOpts)
 //   - nav.vo       : Navigation components (Nav, Breadcrumb, Pagination, Steps)
 //   - util.vo      : Internal utilities
 package vogui

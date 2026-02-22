@@ -13,7 +13,6 @@ type App struct {
 // Internal state
 var currentState any
 var currentApp App
-var eventChan = make(chan Event, 100)
 var doneChan = make(chan struct{})
 
 // Run initializes the application and starts the event loop.
@@ -25,9 +24,6 @@ func Run(app App) {
 	// Register callback that sends events to channel
 	registerEventHandler(sendEvent)
 
-	// Start event loop goroutine
-	go eventLoop()
-
 	// Block main goroutine forever
 	<-doneChan
 }
@@ -37,36 +33,35 @@ func updatePath(path string) {
 	render()
 }
 
-// sendEvent is called by Rust - just sends to channel
+// sendEvent is called by Rust for each JS event.
+// Handle synchronously in the same callback to avoid channel backlog/blocking.
 func sendEvent(handlerID int, payload string) {
-	eventChan <- Event{HandlerID: handlerID, Payload: payload}
+	processEvent(Event{HandlerID: handlerID, Payload: payload})
 }
 
-// eventLoop processes events from channel
-func eventLoop() {
-	for event := range eventChan {
-		switch event.HandlerID {
-		case eventIDTimer:
-			var p struct{ Id int }
-			json.Unmarshal([]byte(event.Payload), &p)
-			invokeTimerHandler(p.Id, currentState)
-		case eventIDGlobalKey:
-			var p struct{ Key string }
-			json.Unmarshal([]byte(event.Payload), &p)
-			err := invokeGlobalKeyHandler(currentState, p.Key)
-			if err != nil {
-				println("VoGUI: global key handler error:", err)
-			}
-		case eventIDNavigation:
-			// popstate: just re-render
-		default:
-			err := invokeHandler(currentState, event.HandlerID, event.Payload)
-			if err != nil {
-				println("VoGUI: handler error:", err)
-			}
+
+func processEvent(event Event) {
+	switch event.HandlerID {
+	case eventIDTimer:
+		var p struct{ Id int }
+		json.Unmarshal([]byte(event.Payload), &p)
+		invokeTimerHandler(p.Id, currentState)
+	case eventIDGlobalKey:
+		var p struct{ Key string }
+		json.Unmarshal([]byte(event.Payload), &p)
+		err := invokeGlobalKeyHandler(currentState, p.Key)
+		if err != nil {
+			println("VoGUI: global key handler error:", err)
 		}
-		render()
+	case eventIDNavigation:
+		// popstate: just re-render
+	default:
+		err := invokeHandler(currentState, event.HandlerID, event.Payload)
+		if err != nil {
+			println("VoGUI: handler error:", err)
+		}
 	}
+	render()
 }
 
 func render() {

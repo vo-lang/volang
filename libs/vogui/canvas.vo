@@ -1,0 +1,64 @@
+// Canvas component for GPU rendering.
+// Third-party libraries access the canvas element via its ID.
+package vogui
+
+// CanvasOpts configures a Canvas element.
+type CanvasOpts struct {
+	ID         string  // Unique canvas identifier (required)
+	Width      int     // Canvas width in pixels (default 300)
+	Height     int     // Canvas height in pixels (default 150)
+	Fullscreen bool    // Whether canvas is in fullscreen mode
+	OnPointer  Handler // Pointer events (mouse + touch unified)
+	OnResize   Handler // Canvas resize events
+}
+
+// Canvas creates a GPU-capable canvas element.
+// Third-party libraries access this canvas via its ID through the platform registry.
+func Canvas(opts CanvasOpts) Node {
+	props := map[string]any{
+		"id": opts.ID,
+	}
+	if opts.Width > 0 {
+		props["width"] = opts.Width
+	}
+	if opts.Height > 0 {
+		props["height"] = opts.Height
+	}
+	if opts.Fullscreen {
+		props["fullscreen"] = true
+	}
+	if opts.OnPointer.Type != 0 {
+		props["onPointer"] = opts.OnPointer.ID
+	}
+	if opts.OnResize.Type != 0 {
+		props["onResize"] = opts.OnResize.ID
+	}
+	return Node{Type: "Canvas", Props: props}
+}
+
+// PointerEvent contains unified mouse/touch event data.
+type PointerEvent struct {
+	Kind    string  // "down", "up", "move", "enter", "leave"
+	X       float64 // Canvas-relative X coordinate
+	Y       float64 // Canvas-relative Y coordinate
+	Button  int     // 0=left, 1=middle, 2=right (mouse only)
+	Buttons int     // Bitmask of currently pressed buttons
+}
+
+// ResizeEvent contains canvas resize data.
+type ResizeEvent struct {
+	Width  int
+	Height int
+}
+
+// OnPointer wraps an action that receives pointer events.
+// Action signature: func(s *State, e PointerEvent)
+func OnPointer(action any) Handler {
+	return registerHandler(action, handlerPointer, 0)
+}
+
+// OnResize wraps an action that receives canvas resize events.
+// Action signature: func(s *State, e ResizeEvent)
+func OnResize(action any) Handler {
+	return registerHandler(action, handlerResize, 0)
+}

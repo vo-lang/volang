@@ -537,6 +537,44 @@ mod wasm {
         None
     }
 
+    /// Check if a wasm-bindgen JS glue file exists for this module.
+    ///
+    /// Returns the raw URL if `<module_name>.js` exists in the repo at the given version,
+    /// `None` if it doesn't (HTTP 404). The caller passes this URL to
+    /// `voSetupExtModule` which fetches the JS text, creates a Blob URL, and
+    /// `import()`s it to initialize the wasm-bindgen module.
+    pub async fn fetch_wasm_js_glue_url(module: &str, version: &str) -> Result<Option<String>, String> {
+        let parts: Vec<&str> = module.splitn(4, '/').collect();
+        if parts.len() < 3 {
+            return Ok(None);
+        }
+        let (owner, repo) = (parts[1], parts[2]);
+        let module_name = repo;
+        let url = format!(
+            "https://raw.githubusercontent.com/{}/{}/{}/{}.js",
+            owner, repo, version, module_name
+        );
+        // HEAD request to check existence without downloading
+        let window = web_sys::window().ok_or("no window object")?;
+        let opts = web_sys::RequestInit::new();
+        opts.set_method("HEAD");
+        let request = web_sys::Request::new_with_str_and_init(&url, &opts)
+            .map_err(|e| e.as_string().unwrap_or_else(|| "request error".into()))?;
+        let resp_value = JsFuture::from(window.fetch_with_request(&request))
+            .await
+            .map_err(|e| e.as_string().unwrap_or_else(|| "fetch error".into()))?;
+        let resp: web_sys::Response = resp_value
+            .dyn_into()
+            .map_err(|_| "response cast error".to_string())?;
+        if resp.status() == 404 {
+            return Ok(None);
+        }
+        if !resp.ok() {
+            return Err(format!("HTTP {} checking {}", resp.status(), url));
+        }
+        Ok(Some(url))
+    }
+
     /// Try to fetch a pre-compiled `<module_name>.wasm` binary from the module
     /// repo for dynamic WASM loading.  Returns `None` when the file is absent
     /// (HTTP 404) so callers can fall back to static compilation.
