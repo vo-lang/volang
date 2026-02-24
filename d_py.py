@@ -177,10 +177,36 @@ def build_wasm():
         print(f"{Colors.GREEN}✓ vo-playground:{Colors.NC} {size_kb:.1f} KB")
 
 
+def build_test_data_zip():
+    """Rebuild playground/public/test_data.zip from lang/test_data/ and tests/."""
+    import zipfile
+
+    out_path = PROJECT_ROOT / 'playground' / 'public' / 'test_data.zip'
+    print(f"{Colors.BOLD}Building test_data.zip...{Colors.NC}")
+
+    with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        # lang/test_data/**/*.vo  (flat name — existing behaviour)
+        for vo_file in sorted(TEST_DIR.rglob('*.vo')):
+            arcname = vo_file.relative_to(TEST_DIR).as_posix()
+            zf.write(vo_file, arcname)
+
+        # tests/<module>/main.vo  (stored as tests/<module>/main.vo)
+        tests_dir = PROJECT_ROOT / 'tests'
+        if tests_dir.exists():
+            for vo_file in sorted(tests_dir.rglob('*.vo')):
+                arcname = 'tests/' + vo_file.relative_to(tests_dir).as_posix()
+                zf.write(vo_file, arcname)
+
+    count = len(zipfile.ZipFile(out_path).namelist())
+    size_kb = out_path.stat().st_size / 1024
+    print(f"{Colors.GREEN}✓ test_data.zip:{Colors.NC} {count} files, {size_kb:.1f} KB")
+
+
 def run_playground(build_only: bool = False):
     """Build WASM and optionally start the playground dev server."""
+    build_test_data_zip()
     build_wasm()
-    
+
     if build_only:
         return
     

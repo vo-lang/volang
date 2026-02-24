@@ -733,17 +733,29 @@ impl CodegenContext {
     /// Get or register an extern function by string name.
     /// Uses builtin_extern_ret_slots for known externs, 0 for unknown.
     pub fn get_or_register_extern(&mut self, name: &str) -> u32 {
-        self.get_or_register_extern_with_ret_slots(name, builtin_extern_ret_slots(name))
+        self.get_or_register_extern_with_slots(name, builtin_extern_ret_slots(name), Vec::new())
     }
 
-    /// Get or register an extern function with explicit ret_slots.
-    /// If the extern already exists, updates ret_slots to the maximum of old and new.
+    /// Get or register an extern function with explicit ret_slots (no param_kinds).
     pub fn get_or_register_extern_with_ret_slots(&mut self, name: &str, ret_slots: u16) -> u32 {
+        self.get_or_register_extern_with_slots(name, ret_slots, Vec::new())
+    }
+
+    /// Get or register an extern function with ret_slots and param_kinds.
+    /// If already registered: updates ret_slots to max; sets param_kinds if not yet set.
+    pub fn get_or_register_extern_with_slots(
+        &mut self,
+        name: &str,
+        ret_slots: u16,
+        param_kinds: Vec<vo_vm::bytecode::ExtSlotKind>,
+    ) -> u32 {
         if let Some(&id) = self.extern_names.get(name) {
-            // Update ret_slots to max if needed
             let existing = &mut self.module.externs[id as usize];
             if ret_slots > existing.ret_slots {
                 existing.ret_slots = ret_slots;
+            }
+            if existing.param_kinds.is_empty() && !param_kinds.is_empty() {
+                existing.param_kinds = param_kinds;
             }
             return id;
         }
@@ -753,6 +765,7 @@ impl CodegenContext {
             param_slots: 0,
             ret_slots,
             is_blocking: name.contains("_blocking_"),
+            param_kinds,
         });
         self.extern_names.insert(name.to_string(), id);
         id

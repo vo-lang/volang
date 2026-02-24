@@ -1,6 +1,6 @@
 //! Generic WASM extension bridge for dynamically loaded Vo ext modules.
 //!
-//! # Standard Module ABI
+//! # Standard Module ABI (v2 — tagged binary protocol)
 //!
 //! Every Vo ext WASM binary (`wasm-standalone` feature) must export:
 //!
@@ -9,58 +9,55 @@
 //! void  vo_dealloc(void* ptr, uint32_t size);
 //!
 //! // One function per Vo extern, named exactly as the Vo extern name.
-//! // Two return conventions based on the Vo function's return type:
-//! //
-//! // Convention A — (input) -> ([]byte, error)   [ret_slots == 3]
-//! //   NULL + out_len=0  → error   (generic "ext call failed" message)
-//! //   non-NULL bytes    → success (bytes become the []byte return value)
-//! //
-//! // Convention B — (input) -> error              [ret_slots == 2]
-//! //   NULL + out_len=0  → success (nil error)
-//! //   non-NULL bytes    → error   (bytes are the UTF-8 error message)
+//! // Input:  tagged binary stream encoding all parameters (see INPUT ENCODING below).
+//! // Output: self-describing tagged binary stream of return values (see OUTPUT TAGS below).
 //! //
 //! void* <extern_name>(const void* input_ptr, uint32_t input_len, uint32_t* out_len);
 //! ```
 //!
+//! ## Input encoding (Vo → WASM, one entry per param slot in declaration order)
+//!
+//! ```
+//! Value slot (int/uint/bool/float/uint32): [u64 LE — 8 bytes]
+//! Bytes slot (string/[]byte):              [u32 LE len — 4 bytes][len bytes]
+//! ```
+//!
+//! ## Output tags (WASM → Vo, self-describing, concatenated)
+//!
+//! ```
+//! 0xE0                           → nil error          (2 slots: write_nil_error)
+//! 0xE1 [u16 LE len] [len bytes]  → error string       (2 slots: write_error_to)
+//! 0xE2 [u64 LE — 8 bytes]        → u64/i64 value      (1 slot:  ret_u64)
+//! 0xE3 [u32 LE len] [len bytes]  → []byte / string    (1 slot:  alloc_bytes + ret_ref)
+//! 0xE4                           → nil reference      (1 slot:  ret_nil)
+//! ```
+//!
 //! # JS Side (vo.ts)
 //!
-//! The playground (or any vo-web consumer) must expose two globals:
-//!
-//! - `window.voSetupExtModule(key: string, bytes: Uint8Array, jsGlueUrl?: string): Promise<void>`
-//!   Instantiates the WASM binary and stores it under `key`.
-//!   If `jsGlueUrl` is provided, loads as a wasm-bindgen module with DOM access
-//!   (for canvas/GPU extensions). Otherwise, loads as a standalone WASM module.
-//!
-//! - `window.voCallExt(extern_name: string, input: Uint8Array): Uint8Array`
-//!   Calls the named function in the correct WASM instance and returns the
-//!   result bytes (empty slice on error). Dispatches to wasm-bindgen modules
-//!   first, then falls back to standalone modules.
+//! - `window.voSetupExtModule(key, bytes, jsGlueUrl?): Promise<void>`
+//! - `window.voCallExt(extern_name, input): Uint8Array`
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
-use vo_runtime::bytecode::ExternDef;
+use vo_runtime::bytecode::{ExternDef, ExtSlotKind};
 use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
+
+// Output tag constants (WASM standalone modules use these)
+pub const TAG_NIL_ERROR:  u8 = 0xE0;
+pub const TAG_ERROR_STR:  u8 = 0xE1;
+pub const TAG_VALUE:      u8 = 0xE2;
+pub const TAG_BYTES:      u8 = 0xE3;
+pub const TAG_NIL_REF:    u8 = 0xE4;
 
 // ── JS bindings ───────────────────────────────────────────────────────────────
 
 #[wasm_bindgen]
 extern "C" {
-    /// Set up a WASM extension module.
-    ///
-    /// `module_key` is the normalized module path (e.g. `"github_com_vo_lang_resvg"`).
-    /// `js_glue_url` is optional: if provided, loads as wasm-bindgen module with DOM access.
-    /// Returns a Promise that resolves when the module is instantiated.
     #[wasm_bindgen(js_namespace = window, js_name = "voSetupExtModule")]
     pub fn js_setup_ext_module(module_key: &str, bytes: &[u8], js_glue_url: &str) -> js_sys::Promise;
 
-    /// Invoke a function in a loaded WASM extension module.
-    ///
-    /// `extern_name` is the full extern name as emitted by vo-codegen
-    /// (e.g. `"github_com_vo_lang_resvg_Render"`).
-    /// `input` is raw bytes (UTF-8-encoded string for string args, raw binary otherwise).
-    /// Returns result bytes, or an empty slice on error.
     #[wasm_bindgen(js_namespace = window, js_name = "voCallExt")]
     fn js_call_ext(extern_name: &str, input: &[u8]) -> Vec<u8>;
 }
@@ -68,20 +65,15 @@ extern "C" {
 // ── Thread-local state ────────────────────────────────────────────────────────
 
 thread_local! {
-    /// Normalized module path prefixes for all loaded WASM ext modules.
-    /// e.g. ["github_com_vo_lang_resvg", "github_com_vo_lang_plotters"]
     static LOADED_PREFIXES: RefCell<Vec<String>> = RefCell::new(Vec::new());
 
-    /// Maps extern_id → extern_name for the generic bridge dispatch.
-    /// Populated by `register_wasm_ext_bridges` and consumed by `wasm_ext_bridge`.
-    static EXTERN_ID_TO_NAME: RefCell<HashMap<u32, String>> = RefCell::new(HashMap::new());
+    /// Maps extern_id → (name, param_kinds).
+    /// param_kinds is non-empty for v2 externs; empty for legacy externs.
+    static EXTERN_ID_TO_INFO: RefCell<HashMap<u32, (String, Vec<ExtSlotKind>)>> = RefCell::new(HashMap::new());
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Normalize a module path to a JS-safe identifier prefix.
-///
-/// `"github.com/vo-lang/resvg"` → `"github_com_vo_lang_resvg"`
 pub fn normalize_module_key(module_path: &str) -> String {
     module_path
         .chars()
@@ -89,14 +81,6 @@ pub fn normalize_module_key(module_path: &str) -> String {
         .collect()
 }
 
-/// Load a WASM extension module and register it for bridge dispatch.
-///
-/// `module_path` is the Go-style module path (e.g. `"github.com/vo-lang/resvg"`).
-/// `bytes` is the pre-fetched `.wasm` binary.
-/// `js_glue_url` is optional: if non-empty, loads as wasm-bindgen module with DOM access
-/// (for canvas/GPU extensions). Pass "" for standalone (pure compute) modules.
-///
-/// This calls `window.voSetupExtModule` and awaits the returned Promise.
 pub async fn load_wasm_ext_module(module_path: &str, bytes: &[u8], js_glue_url: &str) -> Result<(), String> {
     let key = normalize_module_key(module_path);
     let promise = js_setup_ext_module(&key, bytes, js_glue_url);
@@ -107,33 +91,22 @@ pub async fn load_wasm_ext_module(module_path: &str, bytes: &[u8], js_glue_url: 
     Ok(())
 }
 
-/// Register generic WASM bridge functions for all externs whose module is loaded.
-///
-/// For each `ExternDef` whose name starts with a loaded module's normalized prefix,
-/// registers `wasm_ext_bridge` as the handler and stores the `id → name` mapping.
-///
-/// Combine with other registrars by calling them all in your `register_externs` callback:
-/// ```rust
-/// fn my_register(reg: &mut ExternRegistry, externs: &[ExternDef]) {
-///     vogui::register_externs(reg, externs);
-///     ext_bridge::register_wasm_ext_bridges(reg, externs);
-/// }
-/// ```
 pub fn register_wasm_ext_bridges(reg: &mut ExternRegistry, externs: &[ExternDef]) {
-    EXTERN_ID_TO_NAME.with(|m| m.borrow_mut().clear());
+    EXTERN_ID_TO_INFO.with(|m| m.borrow_mut().clear());
     for (id, def) in externs.iter().enumerate() {
         if is_wasm_ext_extern(&def.name) {
             let id = id as u32;
-            EXTERN_ID_TO_NAME.with(|m| m.borrow_mut().insert(id, def.name.clone()));
+            EXTERN_ID_TO_INFO.with(|m| {
+                m.borrow_mut().insert(id, (def.name.clone(), def.param_kinds.clone()));
+            });
             reg.register(id, wasm_ext_bridge);
         }
     }
 }
 
-/// Clear all loaded module state (call before re-running a program).
 pub fn clear_wasm_ext_state() {
     LOADED_PREFIXES.with(|p| p.borrow_mut().clear());
-    EXTERN_ID_TO_NAME.with(|m| m.borrow_mut().clear());
+    EXTERN_ID_TO_INFO.with(|m| m.borrow_mut().clear());
 }
 
 // ── Internal ──────────────────────────────────────────────────────────────────
@@ -144,39 +117,122 @@ fn is_wasm_ext_extern(name: &str) -> bool {
     })
 }
 
+/// Encode all parameter slots into tagged binary input bytes.
+///
+/// For each param slot according to param_kinds:
+///   Value → [u64 LE 8 bytes]
+///   Bytes → [u32 LE len][bytes]
+fn encode_ext_input(call: &ExternCallContext, param_kinds: &[ExtSlotKind]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for (i, kind) in param_kinds.iter().enumerate() {
+        match kind {
+            ExtSlotKind::Value => {
+                buf.extend_from_slice(&call.arg_u64(i as u16).to_le_bytes());
+            }
+            ExtSlotKind::Bytes => {
+                let b = call.arg_bytes(i as u16);
+                buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                buf.extend_from_slice(b);
+            }
+        }
+    }
+    buf
+}
+
+/// Decode self-describing tagged output bytes and write to Vo return slots.
+///
+/// Tags:
+///   0xE0              → nil error          (slot += 2)
+///   0xE1 [u16][msg]   → error string       (slot += 2)
+///   0xE2 [u64 LE]     → u64 value          (slot += 1)
+///   0xE3 [u32][bytes] → []byte / string    (slot += 1)
+///   0xE4              → nil reference      (slot += 1)
+fn decode_ext_output(call: &mut ExternCallContext, output: &[u8]) {
+    let mut pos = 0;
+    let mut slot = 0u16;
+    while pos < output.len() {
+        let tag = output[pos]; pos += 1;
+        match tag {
+            TAG_NIL_ERROR => {
+                write_nil_error(call, slot);
+                slot += 2;
+            }
+            TAG_ERROR_STR => {
+                if pos + 2 > output.len() { break; }
+                let len = u16::from_le_bytes([output[pos], output[pos + 1]]) as usize;
+                pos += 2;
+                if pos + len > output.len() { break; }
+                let msg = std::str::from_utf8(&output[pos..pos + len]).unwrap_or("ext error");
+                pos += len;
+                write_error_to(call, slot, msg);
+                slot += 2;
+            }
+            TAG_VALUE => {
+                if pos + 8 > output.len() { break; }
+                let v = u64::from_le_bytes(output[pos..pos + 8].try_into().unwrap());
+                pos += 8;
+                call.ret_u64(slot, v);
+                slot += 1;
+            }
+            TAG_BYTES => {
+                if pos + 4 > output.len() { break; }
+                let len = u32::from_le_bytes(output[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += 4;
+                if pos + len > output.len() { break; }
+                let r = call.alloc_bytes(&output[pos..pos + len]);
+                pos += len;
+                call.ret_ref(slot, r);
+                slot += 1;
+            }
+            TAG_NIL_REF => {
+                call.ret_nil(slot);
+                slot += 1;
+            }
+            _ => break,
+        }
+    }
+}
+
 /// Generic ExternFn that dispatches any ext module call via `window.voCallExt`.
 ///
-/// Dispatches using two calling conventions based on `call.ret_slots()`:
-///
-/// - **3 slots** `(input) -> ([]byte, error)`: empty output = error, non-empty = success bytes.
-/// - **2 slots** `(input) -> error`:          empty output = success (nil), non-empty = error message.
+/// V2 (param_kinds non-empty): tagged binary input + tagged output decoder.
+/// V1 legacy (param_kinds empty): arg_str(0) as raw input + Convention A/B output.
 fn wasm_ext_bridge(call: &mut ExternCallContext) -> ExternResult {
     let id = call.extern_id();
-    let name = EXTERN_ID_TO_NAME.with(|m| {
+    let (name, param_kinds) = EXTERN_ID_TO_INFO.with(|m| {
         m.borrow().get(&id).cloned()
-    }).unwrap_or_else(|| panic!("wasm_ext_bridge: extern_id {} not in EXTERN_ID_TO_NAME (registration bug)", id));
+    }).unwrap_or_else(|| panic!("wasm_ext_bridge: extern_id {} not registered", id));
 
-    let input = call.arg_str(0).as_bytes().to_vec();
+    let use_tagged = !param_kinds.is_empty();
+
+    let input = if use_tagged {
+        encode_ext_input(call, &param_kinds)
+    } else {
+        // Legacy: pass first arg as raw bytes (old protocol for pre-v2 modules)
+        call.arg_str(0).as_bytes().to_vec()
+    };
+
     let output = js_call_ext(&name, &input);
 
-    if call.ret_slots() == 2 {
-        // Convention B: (input) -> error
-        // NULL (empty) = success; non-NULL bytes = UTF-8 error message.
-        if output.is_empty() {
-            write_nil_error(call, 0);
-        } else {
-            write_error_to(call, 0, &String::from_utf8_lossy(&output));
-        }
+    if use_tagged {
+        decode_ext_output(call, &output);
     } else {
-        // Convention A: (input) -> ([]byte, error)
-        // NULL (empty) = error; non-NULL bytes = []byte result.
-        if output.is_empty() {
-            call.ret_nil(0);
-            write_error_to(call, 1, &format!("ext call failed: {}", name));
+        // Legacy Convention A/B based on ret_slots
+        if call.ret_slots() == 2 {
+            if output.is_empty() {
+                write_nil_error(call, 0);
+            } else {
+                write_error_to(call, 0, &String::from_utf8_lossy(&output));
+            }
         } else {
-            let slice_ref = call.alloc_bytes(&output);
-            call.ret_ref(0, slice_ref);
-            write_nil_error(call, 1);
+            if output.is_empty() {
+                call.ret_nil(0);
+                write_error_to(call, 1, &format!("ext call failed: {}", name));
+            } else {
+                let slice_ref = call.alloc_bytes(&output);
+                call.ret_ref(0, slice_ref);
+                write_nil_error(call, 1);
+            }
         }
     }
     ExternResult::Ok

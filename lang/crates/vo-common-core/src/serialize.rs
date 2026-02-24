@@ -23,8 +23,8 @@ use hashbrown::HashMap;
 use crate::types::{SlotType, ValueMeta, ValueRttid};
 use crate::RuntimeType;
 use crate::bytecode::{
-    Constant, ExternDef, FieldMeta, FunctionDef, GlobalDef, InterfaceMeta, InterfaceMethodMeta,
-    Itab, MethodInfo, Module, NamedTypeMeta, StructMeta, WellKnownTypes,
+    Constant, ExtSlotKind, ExternDef, FieldMeta, FunctionDef, GlobalDef, InterfaceMeta,
+    InterfaceMethodMeta, Itab, MethodInfo, Module, NamedTypeMeta, StructMeta, WellKnownTypes,
 };
 use crate::instruction::Instruction;
 
@@ -563,6 +563,7 @@ impl Module {
             w.write_u16(e.param_slots);
             w.write_u16(e.ret_slots);
             w.write_u8(e.is_blocking as u8);
+            w.write_vec(&e.param_kinds, |w, k| w.write_u8(*k as u8));
         });
 
         w.write_u32(self.entry_func);
@@ -766,11 +767,13 @@ impl Module {
             let param_slots = r.read_u16()?;
             let ret_slots = r.read_u16()?;
             let is_blocking = r.read_u8()? != 0;
+            let param_kinds = r.read_vec(|r| Ok(ExtSlotKind::from_u8(r.read_u8()?)))?;
             Ok(ExternDef {
                 name,
                 param_slots,
                 ret_slots,
                 is_blocking,
+                param_kinds,
             })
         })?;
 

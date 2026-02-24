@@ -488,20 +488,30 @@ pub fn compile_extern_call(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    use vo_vm::bytecode::ExtSlotKind;
+
     let func_type = info.expr_type(call.func.id);
     let is_variadic = info.is_variadic(func_type);
     let param_types = info.func_param_types(func_type);
-    
+
+    // Compute param_kinds from slot types for the WASM ext-bridge.
+    // GcRef slots → Bytes (string/[]byte that must be dereferenced); everything else → Value.
+    let param_kinds: Vec<ExtSlotKind> = param_types
+        .iter()
+        .flat_map(|&t| info.type_slot_types(t))
+        .map(|st| if st == SlotType::GcRef { ExtSlotKind::Bytes } else { ExtSlotKind::Value })
+        .collect();
+
     // Get return slot count from the function's result type
     let sig = info.as_signature(func_type);
     let ret_slots = info.type_slot_count(sig.results()) as u16;
-    let extern_id = ctx.get_or_register_extern_with_ret_slots(extern_name, ret_slots);
-    
+    let extern_id = ctx.get_or_register_extern_with_slots(extern_name, ret_slots, param_kinds);
+
     // Use compile_method_args for proper type conversion (e.g., boxing to `any`)
     let total_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
     let args_start = func.alloc_slots(&vec![SlotType::Value; total_slots.max(1) as usize]);
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
-    
+
     func.emit_with_flags(Opcode::CallExtern, total_slots as u8, dst, extern_id as u16, args_start);
     Ok(())
 }

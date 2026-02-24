@@ -92,6 +92,26 @@ impl FunctionDef {
     }
 }
 
+/// How a single slot in an ext function boundary is encoded across the WASM ext-bridge.
+///
+/// Input (Vo → WASM): Value = 8-byte LE u64; Bytes = [u32 len][data].
+/// Output (WASM → Vo): self-describing tagged stream (see ext_bridge.rs for tag constants).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ExtSlotKind {
+    /// Raw 64-bit integer / float / bool / uint32.  Serialised as 8 bytes LE.
+    Value = 0,
+    /// GC reference to string or []byte.  Serialised as [u32 LE len][bytes].
+    Bytes = 1,
+}
+
+impl ExtSlotKind {
+    #[inline]
+    pub fn from_u8(v: u8) -> Self {
+        if v == 1 { Self::Bytes } else { Self::Value }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ExternDef {
     pub name: String,
@@ -99,6 +119,11 @@ pub struct ExternDef {
     pub ret_slots: u16,
     /// True if extern may block and return WaitIo (name contains "blocking_").
     pub is_blocking: bool,
+    /// Ext-bridge encoding kind for each parameter slot.
+    /// Non-empty only for WASM ext externs; empty for native/builtin externs.
+    /// When non-empty, the ext_bridge uses tagged binary protocol for both
+    /// input (using these kinds) and output (self-describing tagged stream).
+    pub param_kinds: Vec<ExtSlotKind>,
 }
 
 #[derive(Debug, Clone)]
