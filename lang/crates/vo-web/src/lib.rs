@@ -197,6 +197,85 @@ pub fn compile_source_with_mod_fs(
     Ok(module.serialize())
 }
 
+/// Compile and run Vo source that imports third-party GitHub modules.
+///
+/// Detects `import "github.com/..."` patterns, fetches Vo source files and
+/// pre-compiled WASM binaries from GitHub, then compiles and runs with ext-bridge.
+#[cfg(feature = "compiler")]
+#[wasm_bindgen(js_name = "compileAndRunWithModules")]
+pub fn compile_and_run_with_modules(source: &str) -> js_sys::Promise {
+    let source = source.to_string();
+    wasm_bindgen_futures::future_to_promise(async move {
+        let (status, stdout, stderr) = run_with_modules_inner(&source).await;
+        Ok(make_run_result_js(&status, &stdout, &stderr))
+    })
+}
+
+/// Fetch module source + optional WASM binaries from GitHub.
+/// Public so playground can call it for GUI-with-modules flows.
+#[cfg(feature = "compiler")]
+pub async fn prepare_github_modules(source: &str) -> Result<(MemoryFs, String), String> {
+    use vo_module::fetch;
+    let imports = fetch::detect_github_imports(source)?;
+    let mut mod_fs = MemoryFs::new();
+    for imp in &imports {
+        match fetch::fetch_module_files(&imp.module, &imp.version).await {
+            Ok(files) => {
+                for (vfs_path, content) in files {
+                    mod_fs.add_file(vfs_path, content);
+                }
+            }
+            Err(e) => return Err(format!("Failed to fetch {}: {}", imp.module, e)),
+        }
+        match fetch::fetch_wasm_binary(&imp.module, &imp.version).await {
+            Ok(Some(bytes)) => {
+                let js_glue_url = fetch::fetch_wasm_js_glue_url(&imp.module, &imp.version)
+                    .await
+                    .unwrap_or(None)
+                    .unwrap_or_default();
+                ext_bridge::load_wasm_ext_module(&imp.module, &bytes, &js_glue_url).await?;
+            }
+            Ok(None) => {}
+            Err(e) => return Err(format!("Failed to fetch {}.wasm: {}", imp.module, e)),
+        }
+    }
+    let clean_source = fetch::strip_module_versions(source);
+    Ok((mod_fs, clean_source))
+}
+
+#[cfg(feature = "compiler")]
+async fn run_with_modules_inner(source: &str) -> (String, String, String) {
+    let (mod_fs, clean_source) = match prepare_github_modules(source).await {
+        Ok(v) => v,
+        Err(e) => return ("error".into(), String::new(), e),
+    };
+    let std_fs = build_stdlib_fs();
+    let bytecode = match compile_source_with_mod_fs(&clean_source, "main.vo", std_fs, mod_fs) {
+        Ok(b) => b,
+        Err(e) => return ("compile_error".into(), String::new(), e),
+    };
+    run_bytecode_async_with_externs(&bytecode, ext_bridge::register_wasm_ext_bridges).await
+}
+
+/// Pre-load a WASM extension module before running Vo code.
+///
+/// Use this to register locally-built or pre-bundled WASM modules.
+/// After pre-loading, `compileAndRunWithModules` will find the module
+/// already registered and skip the GitHub fetch for it.
+///
+/// `module_path` is the Go-style module path, e.g. `"github.com/vo-lang/zip"`.
+#[wasm_bindgen(js_name = "preloadExtModule")]
+pub fn preload_ext_module(module_path: &str, bytes: &[u8]) -> js_sys::Promise {
+    let module_path = module_path.to_string();
+    let bytes = bytes.to_vec();
+    wasm_bindgen_futures::future_to_promise(async move {
+        ext_bridge::load_wasm_ext_module(&module_path, &bytes, "")
+            .await
+            .map_err(|e| JsValue::from_str(&e))?;
+        Ok(JsValue::UNDEFINED)
+    })
+}
+
 /// Run bytecode.
 #[wasm_bindgen]
 pub fn run(bytecode: &[u8]) -> RunResult {

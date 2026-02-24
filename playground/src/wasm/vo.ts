@@ -1,5 +1,5 @@
 // Vo WASM runtime wrapper
-import { vfs, registerVFSBindings } from '@vo-web/vfs';
+import { vfs, initVFS } from '@vo-web';
 
 export type RunStatus = 'idle' | 'running' | 'success' | 'error';
 
@@ -25,8 +25,7 @@ async function loadWasm(): Promise<any> {
   try {
     // Initialize VFS first (load from OPFS)
     if (!vfsInitialized) {
-      await vfs.init();
-      registerVFSBindings();
+      await initVFS();
       vfsInitialized = true;
       console.log('VFS initialized');
     }
@@ -417,14 +416,17 @@ const extBindgenModules = new Map<string, any>();
 
   const exp = instance.exports as any;
 
-  // Extract function name from externName (e.g., "Render" from "github_com_vo_lang_resvg_Render")
+  // Extract function name from externName (e.g., "nativePack" from "github_com_vo_lang_zip_nativePack")
   const funcName = externName.substring(matchedKey.length + 1);
 
-  // Resolve the extern function: try standard vo ext ABI name first, then legacy naming.
-  // Standard: full externName (e.g., "github_com_vo_lang_resvg_Render")
-  // Legacy: {shortModule}_{lowercase_func} (e.g., "resvg_render")
+  // Resolve the extern function. Try in order:
+  // 1. Short name (e.g., "nativePack") — preferred; decouples WASM exports from module path.
+  // 2. Full extern name (e.g., "github_com_vo_lang_resvg_Render") — legacy full-name exports.
+  // 3. Legacy: {shortModule}_{lowercase_func} (e.g., "resvg_render") — oldest convention.
   let extFunc: Function | undefined;
-  if (typeof exp[externName] === 'function') {
+  if (typeof exp[funcName] === 'function') {
+    extFunc = exp[funcName];
+  } else if (typeof exp[externName] === 'function') {
     extFunc = exp[externName];
   } else {
     const parts = matchedKey.split('_');

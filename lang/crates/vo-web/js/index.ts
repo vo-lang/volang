@@ -11,15 +11,22 @@ export { vfs, VirtualFS, registerVFSBindings };
 let wasmModule: typeof import('../pkg/vo_web') | null = null;
 
 /**
- * Initialize vo-web runtime.
+ * Initialize only the VFS layer (MemoryFS + OPFS + window bindings).
+ * Use this when you load your own WASM (e.g. a custom build with extra externs).
+ * Must be called before running any Vo program.
+ */
+export async function initVFS(): Promise<void> {
+  await vfs.init();
+  registerVFSBindings();
+}
+
+/**
+ * Initialize vo-web runtime (VFS + built-in vo-web WASM).
  * Must be called before using any other vo-web functions.
  */
 export async function init(): Promise<void> {
-  // 1. Initialize VFS (load from OPFS)
-  await vfs.init();
-  registerVFSBindings();
+  await initVFS();
 
-  // 2. Initialize WASM
   const wasm = await import('../pkg/vo_web');
   await wasm.default();
   wasmModule = wasm;

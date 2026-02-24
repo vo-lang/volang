@@ -48,7 +48,7 @@
     // Detect GUI code by checking for import "vogui"
     const isGuiCode = code.includes('import "vogui"');
     // Detect third-party module imports (github.com/...)
-    const hasModuleImports = /import\s+"github\.com\//.test(code);
+    const hasModuleImports = /"github\.com\//.test(code);
 
     try {
       if (isGuiCode && hasModuleImports) {

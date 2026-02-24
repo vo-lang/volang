@@ -26,34 +26,93 @@ pub struct GitHubImport {
     pub version: String,
 }
 
-/// Parse a single line for a `github.com/...` import.
+/// Parse a `github.com/...` path from a quoted string inside an import statement.
 ///
 /// Returns `Some((module, version))` where `module` is the normalised top-level
 /// path (e.g. `"github.com/user/repo"`) and `version` is `Some("v1.2.3")` if an
 /// `@version` tag is present, or `None` otherwise.
-fn parse_github_import_line(line: &str) -> Option<(String, Option<String>)> {
-    let t = line.trim();
-    if !t.starts_with("import") {
+///
+/// The input `path_str` is the raw content inside the quotes, e.g.
+/// `"github.com/vo-lang/zip@v0.1.0"` — do NOT include the quote characters.
+fn parse_github_path(path_str: &str) -> Option<(String, Option<String>)> {
+    if !path_str.starts_with("github.com/") {
         return None;
     }
-    let q_start = t.find('"')?;
-    let after = &t[q_start + 1..];
-    if !after.starts_with("github.com/") {
-        return None;
-    }
-    let q_end = after.find('"')?;
-    let raw = &after[..q_end]; // e.g. "github.com/user/repo/sub@v1.2.3"
-
-    let (path, version) = match raw.find('@') {
-        Some(at) => (&raw[..at], Some(raw[at + 1..].to_string())),
-        None => (raw, None),
+    let (path, version) = match path_str.find('@') {
+        Some(at) => (&path_str[..at], Some(path_str[at + 1..].to_string())),
+        None => (path_str, None),
     };
-
     let parts: Vec<&str> = path.splitn(4, '/').collect();
     if parts.len() < 3 {
         return None;
     }
     Some((parts[..3].join("/"), version))
+}
+
+/// Extract the quoted path from a single-line import statement.
+///
+/// Handles:
+/// - `import "github.com/..."`        — direct
+/// - `import alias "github.com/..."`  — aliased
+///
+/// Returns the content between the quotes, or `None` if the line is not an
+/// import statement or contains no quoted `github.com/` path.
+fn quoted_path_from_import_line(line: &str) -> Option<&str> {
+    let t = line.trim();
+    if !t.starts_with("import") {
+        return None;
+    }
+    let q_start = t.find('"')? + 1;
+    let after = &t[q_start..];
+    let q_end = after.find('"')?;
+    Some(&after[..q_end])
+}
+
+/// Extract the quoted path from a line inside an `import (...)` block.
+///
+/// Handles:
+/// - `"github.com/..."`        — direct
+/// - `alias "github.com/..."`  — aliased
+///
+/// Returns the content between the quotes, or `None` if there is no quoted path.
+fn quoted_path_from_block_line(line: &str) -> Option<&str> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with("//") {
+        return None;
+    }
+    let q_start = t.find('"')? + 1;
+    let after = &t[q_start..];
+    let q_end = after.find('"')?;
+    Some(&after[..q_end])
+}
+
+/// Iterate over all `github.com/...` import paths found in Vo source.
+///
+/// Uses a proper import-block state machine:
+/// - Single-line `import "github.com/..."` (with optional alias) are matched
+///   only on lines starting with `import`.
+/// - Block-import entries inside `import ( ... )` are matched only within the block.
+///
+/// This prevents false positives from `github.com/` appearing in string literals.
+fn iter_github_imports(source: &str) -> impl Iterator<Item = (String, Option<String>)> + '_ {
+    let mut in_block = false;
+    source.lines().filter_map(move |line| {
+        let t = line.trim();
+        if t.starts_with("import") && t.contains('(') {
+            in_block = true;
+            return None;
+        }
+        if in_block && t == ")" {
+            in_block = false;
+            return None;
+        }
+        let raw = if in_block {
+            quoted_path_from_block_line(line)?
+        } else {
+            quoted_path_from_import_line(line)?
+        };
+        parse_github_path(raw)
+    })
 }
 
 /// Scan Vo source for `import "github.com/...@version"` lines and return
@@ -66,16 +125,14 @@ fn parse_github_import_line(line: &str) -> Option<(String, Option<String>)> {
 /// `"github.com/user/repo/sub@v1.2.3"` → module `"github.com/user/repo"`, version `"v1.2.3"`
 pub fn detect_github_imports(source: &str) -> Result<Vec<GitHubImport>, String> {
     let mut found: Vec<GitHubImport> = Vec::new();
-    for line in source.lines() {
-        if let Some((module, version)) = parse_github_import_line(line) {
-            let version = version.ok_or_else(|| format!(
-                "GitHub import \"{}\" is missing a version tag.\n\
-                 Add a version: \"{}@v1.2.3\"",
-                module, module
-            ))?;
-            if !found.iter().any(|f| f.module == module) {
-                found.push(GitHubImport { module, version });
-            }
+    for (module, version) in iter_github_imports(source) {
+        let version = version.ok_or_else(|| format!(
+            "GitHub import \"{}\" is missing a version tag.\n\
+             Add a version: \"{}@v1.2.3\"",
+            module, module
+        ))?;
+        if !found.iter().any(|f| f.module == module) {
+            found.push(GitHubImport { module, version });
         }
     }
     Ok(found)
@@ -91,11 +148,9 @@ pub fn detect_github_imports(source: &str) -> Result<Vec<GitHubImport>, String> 
 /// every GitHub import must declare its version.
 pub fn detect_versioned_imports(source: &str) -> Vec<GitHubImport> {
     let mut found: Vec<GitHubImport> = Vec::new();
-    for line in source.lines() {
-        if let Some((module, Some(version))) = parse_github_import_line(line) {
-            if !found.iter().any(|f| f.module == module) {
-                found.push(GitHubImport { module, version });
-            }
+    for (module, version) in iter_github_imports(source).filter_map(|(m, v)| v.map(|v| (m, v))) {
+        if !found.iter().any(|f| f.module == module) {
+            found.push(GitHubImport { module, version });
         }
     }
     found
@@ -459,7 +514,6 @@ pub use wasm::*;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
-    use super::{extract_tarball_files, github_tarball_url};
     use std::path::PathBuf;
     use wasm_bindgen::prelude::*;
     use wasm_bindgen_futures::JsFuture;
@@ -496,15 +550,61 @@ mod wasm {
         Ok(array.to_vec())
     }
 
+    /// Check if the host page has registered a `window._voGetLocalModule(module, version)` hook.
+    ///
+    /// Returns a JS object with `{files: [{name, content}]}` or null/undefined.
+    /// Used by the playground to serve locally-built or pre-bundled module sources
+    /// without requiring a GitHub network fetch.
+    fn try_local_module_override(
+        module: &str,
+        version: &str,
+    ) -> Option<Vec<(PathBuf, String)>> {
+        use wasm_bindgen::JsCast;
+        let global = js_sys::global();
+        let hook = js_sys::Reflect::get(&global, &wasm_bindgen::JsValue::from_str("_voGetLocalModule")).ok()?;
+        if !hook.is_function() {
+            return None;
+        }
+        let func = js_sys::Function::unchecked_from_js(hook);
+        let result = func.call2(
+            &wasm_bindgen::JsValue::NULL,
+            &wasm_bindgen::JsValue::from_str(module),
+            &wasm_bindgen::JsValue::from_str(version),
+        ).ok()?;
+        if result.is_null() || result.is_undefined() {
+            return None;
+        }
+        // result is an array of {name: string, content: string}
+        let arr = js_sys::Array::from(&result);
+        let mut files = Vec::new();
+        for i in 0..arr.length() {
+            let entry = arr.get(i);
+            let name = js_sys::Reflect::get(&entry, &wasm_bindgen::JsValue::from_str("name"))
+                .ok()?
+                .as_string()?;
+            let content = js_sys::Reflect::get(&entry, &wasm_bindgen::JsValue::from_str("content"))
+                .ok()?
+                .as_string()?;
+            let vfs_path = PathBuf::from(format!("{}/{}", module, name));
+            files.push((vfs_path, content));
+        }
+        Some(files)
+    }
+
     /// Fetch a GitHub module's .vo source files using the GitHub Contents API.
     ///
-    /// Uses `https://api.github.com/repos/{owner}/{repo}/contents?ref={version}` (CORS-OK)
-    /// to list root files, then fetches each .vo file from `raw.githubusercontent.com` (CORS-OK).
-    /// This avoids the tarball download which redirects to `codeload.github.com` (no CORS).
+    /// Checks `window._voGetLocalModule(module, version)` first, allowing the host
+    /// page to serve pre-bundled module sources without a network fetch.
+    /// Falls back to `https://api.github.com/repos/{owner}/{repo}/contents?ref={version}`.
     pub async fn fetch_module_files(
         module: &str,
         version: &str,
     ) -> Result<Vec<(PathBuf, String)>, String> {
+        // Check for locally-provided override first (e.g. playground dev mode)
+        if let Some(files) = try_local_module_override(module, version) {
+            return Ok(files);
+        }
+
         let parts: Vec<&str> = module.splitn(4, '/').collect();
         if parts.len() < 3 || parts[0] != "github.com" {
             return Err(format!("not a github.com module path: {}", module));
@@ -636,9 +736,32 @@ mod wasm {
         Ok(Some(url))
     }
 
+    /// Check if the host page has registered a `window._voGetLocalWasm(module, version)` hook.
+    ///
+    /// Returns a URL string to fetch the WASM from, or None to fall back to GitHub.
+    /// Used by the playground to redirect WASM fetches to locally-built binaries.
+    fn try_local_wasm_url(module: &str, version: &str) -> Option<String> {
+        use wasm_bindgen::JsCast;
+        let global = js_sys::global();
+        let hook = js_sys::Reflect::get(&global, &wasm_bindgen::JsValue::from_str("_voGetLocalWasm")).ok()?;
+        if !hook.is_function() {
+            return None;
+        }
+        let func = js_sys::Function::unchecked_from_js(hook);
+        let result = func.call2(
+            &wasm_bindgen::JsValue::NULL,
+            &wasm_bindgen::JsValue::from_str(module),
+            &wasm_bindgen::JsValue::from_str(version),
+        ).ok()?;
+        result.as_string()
+    }
+
     /// Try to fetch a pre-compiled `<module_name>.wasm` binary from the module
     /// repo for dynamic WASM loading.  Returns `None` when the file is absent
     /// (HTTP 404) so callers can fall back to static compilation.
+    ///
+    /// Checks `window._voGetLocalWasm(module, version)` first; if it returns a URL
+    /// string, fetches from that URL instead of raw.githubusercontent.com.
     pub async fn fetch_wasm_binary(module: &str, version: &str) -> Result<Option<Vec<u8>>, String> {
         let parts: Vec<&str> = module.splitn(4, '/').collect();
         if parts.len() < 3 {
@@ -646,11 +769,17 @@ mod wasm {
         }
         let (owner, repo) = (parts[1], parts[2]);
         let module_name = repo; // e.g. "resvg"
-        // raw.githubusercontent.com serves individual files at a specific ref
-        let url = format!(
-            "https://raw.githubusercontent.com/{}/{}/{}/{}.wasm",
-            owner, repo, version, module_name
-        );
+
+        // Check for local override URL first (e.g. playground dev mode)
+        let url = if let Some(local_url) = try_local_wasm_url(module, version) {
+            local_url
+        } else {
+            // raw.githubusercontent.com serves individual files at a specific ref
+            format!(
+                "https://raw.githubusercontent.com/{}/{}/{}/{}.wasm",
+                owner, repo, version, module_name
+            )
+        };
         let window = web_sys::window().ok_or("no window object")?;
         let opts = web_sys::RequestInit::new();
         opts.set_method("GET");
@@ -711,6 +840,22 @@ import "github.com/vo-lang/resvg/extra@v0.1.0"
         let mods = detect_github_imports(src).unwrap();
         assert_eq!(mods.len(), 1);
         assert_eq!(mods[0].module, "github.com/vo-lang/resvg");
+    }
+
+    #[test]
+    fn test_detect_github_imports_block_aliased() {
+        let src = r#"package main
+
+import (
+	"fmt"
+	"os"
+	zip "github.com/vo-lang/zip@v0.1.0"
+)
+"#;
+        let mods = detect_github_imports(src).unwrap();
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].module, "github.com/vo-lang/zip");
+        assert_eq!(mods[0].version, "v0.1.0");
     }
 
     #[test]

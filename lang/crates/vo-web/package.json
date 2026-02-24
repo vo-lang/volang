@@ -10,6 +10,10 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
+    "./vfs": {
+      "import": "./dist/vfs.js",
+      "types": "./dist/vfs.d.ts"
+    },
     "./wasm": {
       "import": "./pkg/vo_web.js",
       "types": "./pkg/vo_web.d.ts"

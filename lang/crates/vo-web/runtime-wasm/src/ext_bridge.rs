@@ -8,11 +8,17 @@
 //! void* vo_alloc(uint32_t size);
 //! void  vo_dealloc(void* ptr, uint32_t size);
 //!
-//! // One function per Vo extern, named exactly as the Vo extern name:
-//! // e.g. "github_com_vo_lang_resvg_Render"
-//! //   input:  raw bytes (UTF-8 string, JSON, or binary)
-//! //   output: raw bytes allocated by vo_alloc; caller frees via vo_dealloc
-//! //   returns 0 (null) + writes 0 to *out_len on error
+//! // One function per Vo extern, named exactly as the Vo extern name.
+//! // Two return conventions based on the Vo function's return type:
+//! //
+//! // Convention A — (input) -> ([]byte, error)   [ret_slots == 3]
+//! //   NULL + out_len=0  → error   (generic "ext call failed" message)
+//! //   non-NULL bytes    → success (bytes become the []byte return value)
+//! //
+//! // Convention B — (input) -> error              [ret_slots == 2]
+//! //   NULL + out_len=0  → success (nil error)
+//! //   non-NULL bytes    → error   (bytes are the UTF-8 error message)
+//! //
 //! void* <extern_name>(const void* input_ptr, uint32_t input_len, uint32_t* out_len);
 //! ```
 //!
@@ -140,10 +146,10 @@ fn is_wasm_ext_extern(name: &str) -> bool {
 
 /// Generic ExternFn that dispatches any ext module call via `window.voCallExt`.
 ///
-/// Calling convention (wire level):
-/// - arg 0: string input (UTF-8 bytes sent to the WASM function)
-/// - ret 0: `[]byte` output
-/// - ret 1+2: `error` interface (nil on success)
+/// Dispatches using two calling conventions based on `call.ret_slots()`:
+///
+/// - **3 slots** `(input) -> ([]byte, error)`: empty output = error, non-empty = success bytes.
+/// - **2 slots** `(input) -> error`:          empty output = success (nil), non-empty = error message.
 fn wasm_ext_bridge(call: &mut ExternCallContext) -> ExternResult {
     let id = call.extern_id();
     let name = EXTERN_ID_TO_NAME.with(|m| {
@@ -153,13 +159,25 @@ fn wasm_ext_bridge(call: &mut ExternCallContext) -> ExternResult {
     let input = call.arg_str(0).as_bytes().to_vec();
     let output = js_call_ext(&name, &input);
 
-    if output.is_empty() {
-        call.ret_nil(0);
-        write_error_to(call, 1, &format!("ext call failed: {}", name));
+    if call.ret_slots() == 2 {
+        // Convention B: (input) -> error
+        // NULL (empty) = success; non-NULL bytes = UTF-8 error message.
+        if output.is_empty() {
+            write_nil_error(call, 0);
+        } else {
+            write_error_to(call, 0, &String::from_utf8_lossy(&output));
+        }
     } else {
-        let slice_ref = call.alloc_bytes(&output);
-        call.ret_ref(0, slice_ref);
-        write_nil_error(call, 1);
+        // Convention A: (input) -> ([]byte, error)
+        // NULL (empty) = error; non-NULL bytes = []byte result.
+        if output.is_empty() {
+            call.ret_nil(0);
+            write_error_to(call, 1, &format!("ext call failed: {}", name));
+        } else {
+            let slice_ref = call.alloc_bytes(&output);
+            call.ret_ref(0, slice_ref);
+            write_nil_error(call, 1);
+        }
     }
     ExternResult::Ok
 }
