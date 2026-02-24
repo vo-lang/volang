@@ -1,0 +1,77 @@
+package main
+
+import (
+	"github.com/vo-lang/zip"
+	"os"
+	"path/filepath"
+)
+
+func main() {
+	tmpDir, err := os.MkdirTemp("", "vo-test-zip-*")
+	assert(err == nil, "create temp dir")
+	defer os.RemoveAll(tmpDir)
+
+	entries := []zip.Entry{
+		{Name: "a.txt", Data: []byte("A")},
+		{Name: "nested/b.txt", Data: []byte("BC")},
+	}
+
+	archive, err := zip.Pack(entries)
+	assert(err == nil, "zip.Pack succeeds")
+	assert(len(archive) > 0, "archive is not empty")
+
+	err = zip.Validate(archive)
+	assert(err == nil, "zip.Validate succeeds")
+
+	names, err := zip.ListNames(archive)
+	assert(err == nil, "zip.ListNames succeeds")
+	assert(len(names) >= 2, "zip.ListNames returns at least required entries")
+	assert(hasName(names, "a.txt"), "zip.ListNames contains a.txt")
+	assert(hasName(names, "nested/b.txt"), "zip.ListNames contains nested/b.txt")
+
+	listed, err := zip.ListEntries(archive)
+	assert(err == nil, "zip.ListEntries succeeds")
+	assert(len(listed) >= 2, "zip.ListEntries returns at least required entries")
+	assert(hasEntry(listed, "a.txt"), "zip.ListEntries contains a.txt")
+	assert(hasEntry(listed, "nested/b.txt"), "zip.ListEntries contains nested/b.txt")
+
+	unpacked, err := zip.Unpack(archive)
+	assert(err == nil, "zip.Unpack succeeds")
+	assert(len(unpacked) == 2, "zip.Unpack returns 2 files")
+
+	srcDir := filepath.Join([]string{tmpDir, "src"})
+	err = os.MkdirAll(srcDir, 0755)
+	assert(err == nil, "create source dir")
+	err = os.WriteFile(filepath.Join([]string{srcDir, "hello.txt"}), []byte("hello zip"), 0644)
+	assert(err == nil, "write source file")
+
+	zipPath := filepath.Join([]string{tmpDir, "dir.zip"})
+	err = zip.PackDir(srcDir, zipPath)
+	assert(err == nil, "zip.PackDir succeeds")
+
+	outDir := filepath.Join([]string{tmpDir, "out"})
+	err = zip.UnpackToDir(zipPath, outDir)
+	assert(err == nil, "zip.UnpackToDir succeeds")
+
+	content, err := os.ReadFile(filepath.Join([]string{outDir, "hello.txt"}))
+	assert(err == nil, "read unpacked file")
+	assert(string(content) == "hello zip", "unpacked file content matches")
+}
+
+func hasName(names []string, target string) bool {
+	for _, name := range names {
+		if name == target {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEntry(entries []zip.EntryInfo, target string) bool {
+	for _, entry := range entries {
+		if entry.Name == target {
+			return true
+		}
+	}
+	return false
+}

@@ -329,25 +329,70 @@ mod native {
         let sum_path = mod_cache.join("vo.sum");
         update_sum_file(&sum_path, module, version, &hash)?;
 
-        // If the module ships Rust source, compile it into a native extension.
-        let rust_manifest = target_dir.join("rust").join("Cargo.toml");
-        if rust_manifest.exists() {
-            eprintln!("Building native extension for {} {}...", module, version);
-            // Build in the same profile as the current vo binary so {profile}
-            // in vo.ext.toml resolves correctly.
-            let release = !cfg!(debug_assertions);
-            let mut cmd = std::process::Command::new("cargo");
-            cmd.arg("build").arg("--manifest-path").arg(&rust_manifest);
-            if release { cmd.arg("--release"); }
-            let status = cmd.status()
-                .map_err(|e| format!("cargo build failed: {}", e))?;
-            if !status.success() {
-                return Err(format!("cargo build failed for {}", module));
-            }
-            eprintln!("Built native extension -> rust/target/release/");
-        }
+        ensure_native_extension_built(&target_dir)?;
 
         Ok(target_dir)
+    }
+
+    /// Ensure the native extension for an already-installed module is compiled.
+    ///
+    /// - If no `rust/Cargo.toml` exists the module has no native extension; returns `Ok`.
+    /// - If `vo.ext.toml` is present and the resolved `.so` already exists; returns `Ok`.
+    /// - Otherwise runs `cargo build` (with local volang patches when available).
+    pub fn ensure_native_extension_built(module_dir: &Path) -> Result<(), String> {
+        let rust_manifest = module_dir.join("rust").join("Cargo.toml");
+        if !rust_manifest.exists() {
+            return Ok(());
+        }
+
+        // Skip build if the .so already exists (as declared in vo.ext.toml).
+        let already_built = crate::discover_extensions(module_dir)
+            .ok()
+            .and_then(|manifests| manifests.into_iter().next())
+            .map(|m| m.native_path.exists())
+            .unwrap_or(false);
+        if already_built {
+            return Ok(());
+        }
+
+        let release = !cfg!(debug_assertions);
+        let profile = if release { "release" } else { "debug" };
+        eprintln!("Building native extension in {} ({})...", module_dir.display(), profile);
+
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.arg("build").arg("--manifest-path").arg(&rust_manifest);
+        if release { cmd.arg("--release"); }
+
+        // Patch git deps to use the local volang repo so the extension's
+        // vo-runtime ABI matches the currently running vo binary exactly.
+        if let Some(repo_root) = detect_volang_repo_root() {
+            let crates = [
+                "vo-runtime", "vo-ext", "vo-ffi-macro",
+                "vo-common", "vo-common-core", "vo-syntax", "vo-module",
+            ];
+            for krate in crates {
+                let local_path = repo_root.join("lang").join("crates").join(krate);
+                if local_path.exists() {
+                    // Use dotted-key TOML syntax; cargo --config does not
+                    // accept inline tables.  Hyphens in crate names are valid
+                    // bare-key characters in TOML so no extra quoting needed.
+                    cmd.arg("--config").arg(format!(
+                        "patch.'https://github.com/vo-lang/volang'.{}.path=\"{}\"",
+                        krate,
+                        local_path.display()
+                    ));
+                }
+            }
+        }
+
+        let status = cmd.status()
+            .map_err(|e| format!("cargo build failed: {}", e))?;
+        if !status.success() {
+            return Err(format!("cargo build failed in {}", module_dir.display()));
+        }
+
+        eprintln!("Built native extension -> rust/target/{}/", profile);
+        Ok(())
     }
 
     /// Compute SHA-256 of `data` and return as `h1:<base64>`.
@@ -388,6 +433,22 @@ mod native {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         fs::write(sum_path, lines.join("\n") + "\n").map_err(|e| e.to_string())
+    }
+
+    /// Detect the local volang repo root from the currently running executable.
+    ///
+    /// The `vo` binary lives at `<repo>/target/{debug,release}/vo`, so walking
+    /// three levels up from the executable gives the repo root.  We confirm
+    /// identity by checking for `Cargo.toml` + `lang/` at that path.
+    pub fn detect_volang_repo_root() -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        // exe -> profile dir -> target -> repo root
+        let root = exe.parent()?.parent()?.parent()?;
+        if root.join("Cargo.toml").exists() && root.join("lang").exists() {
+            Some(root.to_path_buf())
+        } else {
+            None
+        }
     }
 }
 

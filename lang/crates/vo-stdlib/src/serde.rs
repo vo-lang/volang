@@ -11,7 +11,7 @@ use alloc::borrow::Cow;
 #[cfg(feature = "std")]
 use std::borrow::Cow;
 
-use vo_common_core::types::ValueKind;
+use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 use vo_common_core::runtime_type::RuntimeType;
 
 use vo_runtime::ffi::ExternCallContext;
@@ -55,6 +55,9 @@ pub trait FormatWriter {
     
     /// Write an i32 value.
     fn write_int32(&mut self, val: i32);
+
+    /// Write an unsigned 64-bit integer value.
+    fn write_uint(&mut self, val: u64);
     
     /// Write a float value. Returns error message if value is invalid.
     fn write_float(&mut self, val: f64) -> Result<(), &'static str>;
@@ -85,6 +88,7 @@ pub enum ParsedValue<'a> {
     Float(f64),
     String(Cow<'a, str>),
     Object(ParsedObject<'a>),
+    Array(Vec<ParsedValue<'a>>),
 }
 
 /// Parsed object with key-value iteration.
@@ -190,9 +194,37 @@ fn marshal_field_value_depth<W: FormatWriter>(
             let val = unsafe { *(field_ptr as *const i32) };
             writer.write_int32(val);
         }
+        ValueKind::Int8 => {
+            let val = unsafe { *(field_ptr as *const i8) };
+            writer.write_int(val as i64);
+        }
+        ValueKind::Int16 => {
+            let val = unsafe { *(field_ptr as *const i16) };
+            writer.write_int(val as i64);
+        }
+        ValueKind::Uint | ValueKind::Uint64 => {
+            let val = unsafe { *(field_ptr as *const u64) };
+            writer.write_uint(val);
+        }
+        ValueKind::Uint8 => {
+            let val = unsafe { *(field_ptr as *const u8) };
+            writer.write_int(val as i64);
+        }
+        ValueKind::Uint16 => {
+            let val = unsafe { *(field_ptr as *const u16) };
+            writer.write_int(val as i64);
+        }
+        ValueKind::Uint32 => {
+            let val = unsafe { *(field_ptr as *const u32) };
+            writer.write_uint(val as u64);
+        }
         ValueKind::Float64 => {
             let val = unsafe { *(field_ptr as *const f64) };
             writer.write_float(val)?;
+        }
+        ValueKind::Float32 => {
+            let val = unsafe { *(field_ptr as *const f32) };
+            writer.write_float(val as f64)?;
         }
         ValueKind::Bool => {
             let val = unsafe { *(field_ptr as *const u8) } != 0;
@@ -264,9 +296,19 @@ fn marshal_any_value_depth<W: FormatWriter>(
         ValueKind::Void => writer.write_null(),
         ValueKind::Int | ValueKind::Int64 => writer.write_int(slot1 as i64),
         ValueKind::Int32 => writer.write_int32(slot1 as i32),
+        ValueKind::Int8 => writer.write_int(slot1 as i8 as i64),
+        ValueKind::Int16 => writer.write_int(slot1 as i16 as i64),
+        ValueKind::Uint | ValueKind::Uint64 => writer.write_uint(slot1),
+        ValueKind::Uint8 => writer.write_int(slot1 as u8 as i64),
+        ValueKind::Uint16 => writer.write_int(slot1 as u16 as i64),
+        ValueKind::Uint32 => writer.write_uint(slot1 as u32 as u64),
         ValueKind::Float64 => {
             let val = f64::from_bits(slot1);
             writer.write_float(val)?;
+        }
+        ValueKind::Float32 => {
+            let val = f32::from_bits(slot1 as u32);
+            writer.write_float(val as f64)?;
         }
         ValueKind::Bool => writer.write_bool(slot1 != 0),
         ValueKind::String => {
@@ -534,9 +576,19 @@ fn marshal_map_val_depth<W: FormatWriter>(
     match val_vk {
         ValueKind::Int | ValueKind::Int64 => writer.write_int(val[0] as i64),
         ValueKind::Int32 => writer.write_int32(val[0] as i32),
+        ValueKind::Int8 => writer.write_int(val[0] as i8 as i64),
+        ValueKind::Int16 => writer.write_int(val[0] as i16 as i64),
+        ValueKind::Uint | ValueKind::Uint64 => writer.write_uint(val[0]),
+        ValueKind::Uint8 => writer.write_int(val[0] as u8 as i64),
+        ValueKind::Uint16 => writer.write_int(val[0] as u16 as i64),
+        ValueKind::Uint32 => writer.write_uint(val[0] as u32 as u64),
         ValueKind::Float64 => {
             let v = f64::from_bits(val[0]);
             writer.write_float(v)?;
+        }
+        ValueKind::Float32 => {
+            let v = f32::from_bits(val[0] as u32);
+            writer.write_float(v as f64)?;
         }
         ValueKind::Bool => writer.write_bool(val[0] != 0),
         ValueKind::String => {
@@ -646,7 +698,20 @@ fn unmarshal_field_value<'a, R: FormatReader<'a>>(
     rttid: u32,
     value: ParsedValue<'a>,
 ) -> Result<(), &'static str> {
-    let field_ptr = field_ptr as *mut u8;
+    write_typed_value::<R>(call, field_ptr as *mut u8, vk, rttid, value)
+}
+
+/// Write a parsed value to a raw memory pointer according to the Vo runtime type.
+///
+/// Used for both struct-field unmarshal and slice-element population.  The
+/// pointer must have the correct alignment and backing size for `vk`/`rttid`.
+fn write_typed_value<'a, R: FormatReader<'a>>(
+    call: &mut ExternCallContext,
+    ptr: *mut u8,
+    vk: ValueKind,
+    rttid: u32,
+    value: ParsedValue<'a>,
+) -> Result<(), &'static str> {
     match vk {
         ValueKind::Int | ValueKind::Int64 => {
             let val = match value {
@@ -654,37 +719,89 @@ fn unmarshal_field_value<'a, R: FormatReader<'a>>(
                 ParsedValue::Float(f) => f as i64,
                 _ => return Err("expected int"),
             };
-            unsafe { *(field_ptr as *mut i64) = val; }
+            unsafe { *(ptr as *mut i64) = val; }
         }
         ValueKind::Int32 => {
             let val = match value {
                 ParsedValue::Int(i) => i as i32,
                 ParsedValue::Float(f) => f as i32,
-                _ => return Err("expected int"),
+                _ => return Err("expected int32"),
             };
-            unsafe { *(field_ptr as *mut i32) = val; }
+            unsafe { *(ptr as *mut i32) = val; }
+        }
+        ValueKind::Int8 => {
+            let val = match value {
+                ParsedValue::Int(i) => i as i8,
+                _ => return Err("expected int8"),
+            };
+            unsafe { *(ptr as *mut i8) = val; }
+        }
+        ValueKind::Int16 => {
+            let val = match value {
+                ParsedValue::Int(i) => i as i16,
+                _ => return Err("expected int16"),
+            };
+            unsafe { *(ptr as *mut i16) = val; }
+        }
+        ValueKind::Uint | ValueKind::Uint64 => {
+            let val = match value {
+                ParsedValue::Int(i) => i as u64,
+                ParsedValue::Float(f) => f as u64,
+                _ => return Err("expected uint"),
+            };
+            unsafe { *(ptr as *mut u64) = val; }
+        }
+        ValueKind::Uint8 => {
+            let val = match value {
+                ParsedValue::Int(i) => i as u8,
+                _ => return Err("expected uint8"),
+            };
+            unsafe { *ptr = val; }
+        }
+        ValueKind::Uint16 => {
+            let val = match value {
+                ParsedValue::Int(i) => i as u16,
+                _ => return Err("expected uint16"),
+            };
+            unsafe { *(ptr as *mut u16) = val; }
+        }
+        ValueKind::Uint32 => {
+            let val = match value {
+                ParsedValue::Int(i) => i as u32,
+                ParsedValue::Float(f) => f as u32,
+                _ => return Err("expected uint32"),
+            };
+            unsafe { *(ptr as *mut u32) = val; }
         }
         ValueKind::Float64 => {
             let val = match value {
                 ParsedValue::Int(i) => i as f64,
                 ParsedValue::Float(f) => f,
-                _ => return Err("expected float"),
+                _ => return Err("expected float64"),
             };
-            unsafe { *(field_ptr as *mut f64) = val; }
+            unsafe { *(ptr as *mut f64) = val; }
+        }
+        ValueKind::Float32 => {
+            let val = match value {
+                ParsedValue::Int(i) => i as f32,
+                ParsedValue::Float(f) => f as f32,
+                _ => return Err("expected float32"),
+            };
+            unsafe { *(ptr as *mut f32) = val; }
         }
         ValueKind::Bool => {
             let val = match value {
                 ParsedValue::Bool(b) => b,
                 _ => return Err("expected bool"),
             };
-            unsafe { *(field_ptr as *mut u8) = val as u8; }
+            unsafe { *ptr = val as u8; }
         }
         ValueKind::String => {
             match value {
-                ParsedValue::Null => { unsafe { *(field_ptr as *mut u64) = 0; } }
+                ParsedValue::Null => unsafe { *(ptr as *mut u64) = 0; },
                 ParsedValue::String(s) => {
                     let str_ref = call.alloc_str(&s);
-                    unsafe { *(field_ptr as *mut u64) = str_ref as u64; }
+                    unsafe { *(ptr as *mut u64) = str_ref as u64; }
                 }
                 _ => return Err("expected string"),
             }
@@ -693,32 +810,204 @@ fn unmarshal_field_value<'a, R: FormatReader<'a>>(
             match value {
                 ParsedValue::Null => {}
                 ParsedValue::Object(obj) => {
-                    unmarshal_struct_from_object::<R>(call, field_ptr as GcRef, rttid, obj)?;
+                    unmarshal_struct_from_object::<R>(call, ptr as GcRef, rttid, obj)?;
                 }
                 _ => return Err("expected object"),
             }
         }
         ValueKind::Pointer => {
             match value {
-                ParsedValue::Null => {
-                    unsafe { *(field_ptr as *mut u64) = 0; }
-                }
+                ParsedValue::Null => unsafe { *(ptr as *mut u64) = 0; },
                 ParsedValue::Object(obj) => {
-                    let elem_rttid = get_pointed_type_rttid(call, rttid);
-                    let elem_meta_id = get_struct_meta_id(call, elem_rttid)?;
-                    let elem_meta = call.struct_meta(elem_meta_id as usize).ok_or("elem meta not found")?;
-                    let slot_count = elem_meta.slot_count();
-                    
+                    let inner_rttid = get_pointed_type_rttid(call, rttid);
+                    let meta_id = get_struct_meta_id(call, inner_rttid)?;
+                    let meta = call.struct_meta(meta_id as usize).ok_or("pointed meta not found")?;
+                    let slot_count = meta.slot_count();
                     let new_struct = call.gc_alloc(slot_count, &[]);
-                    unmarshal_struct_from_object::<R>(call, new_struct, elem_rttid, obj)?;
-                    unsafe { *(field_ptr as *mut u64) = new_struct as u64; }
+                    unmarshal_struct_from_object::<R>(call, new_struct, inner_rttid, obj)?;
+                    unsafe { *(ptr as *mut u64) = new_struct as u64; }
                 }
                 _ => return Err("expected object or null"),
+            }
+        }
+        ValueKind::Slice => {
+            match value {
+                ParsedValue::Null => unsafe { *(ptr as *mut u64) = 0; },
+                ParsedValue::Array(elems) => {
+                    let s = unmarshal_slice_value::<R>(call, rttid, elems)?;
+                    unsafe { *(ptr as *mut u64) = s as u64; }
+                }
+                _ => return Err("expected array or null for slice"),
+            }
+        }
+        ValueKind::Map => {
+            match value {
+                ParsedValue::Null => unsafe { *(ptr as *mut u64) = 0; },
+                ParsedValue::Object(obj) => {
+                    let m = unmarshal_map_value::<R>(call, rttid, obj)?;
+                    unsafe { *(ptr as *mut u64) = m as u64; }
+                }
+                _ => return Err("expected object or null for map"),
+            }
+        }
+        ValueKind::Interface => {
+            let (s0, s1) = json_to_iface_slots::<R>(call, value);
+            unsafe {
+                *(ptr as *mut u64) = s0;
+                *((ptr as *mut u64).add(1)) = s1;
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Resolve a Named or Map rttid to the underlying Map's key and value `ValueRttid`.
+fn get_map_key_val_rttids(
+    call: &ExternCallContext,
+    mut rttid: u32,
+) -> Result<(ValueRttid, ValueRttid), &'static str> {
+    loop {
+        let rts = call.runtime_types();
+        match rts.get(rttid as usize).ok_or("map rttid not found in runtime types")? {
+            RuntimeType::Map { key, val } => return Ok((*key, *val)),
+            RuntimeType::Named { id, .. } => {
+                rttid = call.named_type_underlying_rttid(*id);
+            }
+            _ => return Err("expected map type when resolving map key/val rttids"),
+        }
+    }
+}
+
+/// Pack a parsed JSON value into a two-slot Vo interface (any) representation.
+///
+/// Nested objects become `map[string]any`, nested arrays become `[]any`.
+fn json_to_iface_slots<'a, R: FormatReader<'a>>(
+    call: &mut ExternCallContext,
+    value: ParsedValue<'a>,
+) -> (u64, u64) {
+    match value {
+        ParsedValue::Null => (0, 0),
+        ParsedValue::Bool(b) => {
+            let rttid = call.find_basic_type_rttid(ValueKind::Bool);
+            (interface::pack_slot0(0, rttid, ValueKind::Bool), b as u64)
+        }
+        ParsedValue::Int(i) => {
+            // Go json.Unmarshal stores all JSON numbers as float64 in any context.
+            let rttid = call.find_basic_type_rttid(ValueKind::Float64);
+            (interface::pack_slot0(0, rttid, ValueKind::Float64), (i as f64).to_bits() as u64)
+        }
+        ParsedValue::Float(f) => {
+            let rttid = call.find_basic_type_rttid(ValueKind::Float64);
+            (interface::pack_slot0(0, rttid, ValueKind::Float64), f.to_bits() as u64)
+        }
+        ParsedValue::String(s) => {
+            let rttid = call.find_basic_type_rttid(ValueKind::String);
+            let str_ref = call.alloc_str(&s);
+            (interface::pack_slot0(0, rttid, ValueKind::String), str_ref as u64)
+        }
+        ParsedValue::Object(mut obj) => {
+            let key_meta = ValueMeta::new(0, ValueKind::String);
+            let val_meta = ValueMeta::new(0, ValueKind::Interface);
+            let m = call.alloc_map(key_meta, val_meta, 1, 2, 0);
+            while let Ok(Some((k, v))) = R::next_field(&mut obj) {
+                let (s0, s1) = json_to_iface_slots::<R>(call, v);
+                call.map_set_string_key(m, &k, &[s0, s1]);
+            }
+            (ValueKind::Map as u64, m as u64)
+        }
+        ParsedValue::Array(elems) => {
+            let elem_meta = ValueMeta::new(0, ValueKind::Interface);
+            let s = call.alloc_slice(elem_meta, 2 * SLOT_BYTES, elems.len());
+            let base_ptr = slice::data_ptr(s);
+            for (i, v) in elems.into_iter().enumerate() {
+                let (s0, s1) = json_to_iface_slots::<R>(call, v);
+                unsafe {
+                    let p = base_ptr.add(i * 2 * SLOT_BYTES) as *mut u64;
+                    *p = s0;
+                    *p.add(1) = s1;
+                }
+            }
+            (ValueKind::Slice as u64, s as u64)
+        }
+    }
+}
+
+/// Unmarshal a JSON object (`ParsedValue::Object`) into a Vo map.
+///
+/// Only `map[string]T` is supported (any string-keyed map).  The value type
+/// is determined from the RuntimeType referenced by `rttid` (Named types are
+/// resolved to their underlying Map type).
+fn unmarshal_map_value<'a, R: FormatReader<'a>>(
+    call: &mut ExternCallContext,
+    rttid: u32,
+    mut obj: ParsedObject<'a>,
+) -> Result<GcRef, &'static str> {
+    let (key_val_rttid, val_val_rttid) = get_map_key_val_rttids(call, rttid)?;
+    let key_vk = key_val_rttid.value_kind();
+    if key_vk != ValueKind::String {
+        return Err("JSON unmarshal: only map[string]T is supported");
+    }
+
+    let val_vk = val_val_rttid.value_kind();
+    let val_rttid_u32 = val_val_rttid.rttid();
+
+    let key_meta = ValueMeta::new(0, ValueKind::String);
+    let val_meta = ValueMeta::new(val_rttid_u32, val_vk);
+    let val_slots: u16 = if val_vk == ValueKind::Interface { 2 } else { 1 };
+
+    let m = call.alloc_map(key_meta, val_meta, 1, val_slots, 0);
+
+    while let Ok(Some((k, v))) = R::next_field(&mut obj) {
+        if val_vk == ValueKind::Interface {
+            let (s0, s1) = json_to_iface_slots::<R>(call, v);
+            call.map_set_string_key(m, &k, &[s0, s1]);
+        } else {
+            let mut buf = vec![0u64; val_slots as usize];
+            let ptr = buf.as_mut_ptr() as *mut u8;
+            write_typed_value::<R>(call, ptr, val_vk, val_rttid_u32, v).ok();
+            call.map_set_string_key(m, &k, &buf);
+        }
+    }
+
+    Ok(m)
+}
+
+fn unmarshal_slice_value<'a, R: FormatReader<'a>>(
+    call: &mut ExternCallContext,
+    rttid: u32,
+    elems: Vec<ParsedValue<'a>>,
+) -> Result<GcRef, &'static str> {
+    let elem_value_rttid = call.get_elem_value_rttid_from_base(rttid);
+    let elem_vk = elem_value_rttid.value_kind();
+    let elem_rttid = elem_value_rttid.rttid();
+
+    let elem_bytes = match elem_vk {
+        ValueKind::Bool | ValueKind::Int8 | ValueKind::Uint8 => 1,
+        ValueKind::Int16 | ValueKind::Uint16 => 2,
+        ValueKind::Int32 | ValueKind::Uint32 | ValueKind::Float32 => 4,
+        ValueKind::Struct => {
+            let meta_id = get_struct_meta_id(call, elem_rttid).unwrap_or(0);
+            call.struct_meta(meta_id as usize)
+                .map(|m| m.slot_count() as usize * SLOT_BYTES)
+                .unwrap_or(SLOT_BYTES)
+        }
+        _ => SLOT_BYTES,
+    };
+
+    let elem_meta = ValueMeta::new(elem_rttid, elem_vk);
+    let s = call.alloc_slice(elem_meta, elem_bytes, elems.len());
+    if elems.is_empty() {
+        return Ok(s);
+    }
+
+    let base_ptr = slice::data_ptr(s);
+    for (i, elem_val) in elems.into_iter().enumerate() {
+        let elem_ptr = unsafe { base_ptr.add(i * elem_bytes) };
+        write_typed_value::<R>(call, elem_ptr, elem_vk, elem_rttid, elem_val)?;
+    }
+
+    Ok(s)
 }
 
 // ==================== Helper Functions ====================

@@ -1,0 +1,38 @@
+package main
+
+import "github.com/vo-lang/rusqlite"
+
+func main() {
+	db, err := rusqlite.OpenInMemory()
+	assert(err == nil, "open in-memory db")
+
+	err = db.Exec("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+	assert(err == nil, "create table")
+
+	affected, err := db.Execute("INSERT INTO users(name) VALUES ('alice')")
+	assert(err == nil, "insert row")
+	assert(affected == 1, "one row inserted")
+
+	lastID, err := db.LastInsertRowID()
+	assert(err == nil, "last insert row id")
+	assert(lastID == 1, "first row id is 1")
+
+	rows, err := db.Query("SELECT id, name FROM users ORDER BY id")
+	assert(err == nil, "query rows")
+	assert(len(rows) == 1, "query returns one row")
+
+	var name string
+	name = rows[0]~>name?
+	assert(name == "alice", "queried name matches")
+
+	one, err := db.QueryOne("SELECT id, name FROM users LIMIT 1")
+	assert(err == nil, "query one row")
+	var id float64
+	id = one~>id?
+	assert(id == 1, "query one id matches")
+
+	err = db.Close()
+	assert(err == nil, "close db")
+	err = db.Close()
+	assert(err != nil, "closing db twice must fail")
+}

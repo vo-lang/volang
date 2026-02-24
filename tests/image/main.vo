@@ -1,0 +1,46 @@
+package main
+
+import (
+	"github.com/vo-lang/image"
+	"os"
+	"path/filepath"
+)
+
+func main() {
+	tmpDir, err := os.MkdirTemp("", "vo-test-image-*")
+	assert(err == nil, "create temp dir")
+	defer os.RemoveAll(tmpDir)
+
+	img, err := image.NewRGBA(32, 16)
+	assert(err == nil, "image.NewRGBA succeeds")
+
+	sz, err := img.Size()
+	assert(err == nil, "image.Size succeeds")
+	assert(sz.Width == 32, "initial width is 32")
+	assert(sz.Height == 16, "initial height is 16")
+
+	err = img.Resize(12, 10)
+	assert(err == nil, "image.Resize succeeds")
+	w, h, err := img.Dimensions()
+	assert(err == nil, "image.Dimensions succeeds")
+	assert(w == 12 && h == 10, "dimensions updated after resize")
+
+	pngData, err := img.EncodePNG()
+	assert(err == nil, "image.EncodePNG succeeds")
+	assert(len(pngData) > 0, "encoded png is not empty")
+
+	outPath := filepath.Join([]string{tmpDir, "out.png"})
+	err = img.Save(outPath)
+	assert(err == nil, "image.Save succeeds")
+
+	opened, err := image.Open(outPath)
+	assert(err == nil, "image.Open succeeds")
+	ow, oh, err := opened.Dimensions()
+	assert(err == nil, "opened image dimensions")
+	assert(ow > 0 && oh > 0, "opened image has positive size")
+
+	err = opened.Close()
+	assert(err == nil, "close opened image")
+	err = img.Close()
+	assert(err == nil, "close original image")
+}

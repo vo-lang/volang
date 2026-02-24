@@ -80,6 +80,10 @@ impl FormatWriter for JsonWriter {
     fn write_int32(&mut self, val: i32) {
         self.buf.extend_from_slice(format!("{}", val).as_bytes());
     }
+
+    fn write_uint(&mut self, val: u64) {
+        self.buf.extend_from_slice(format!("{}", val).as_bytes());
+    }
     
     fn write_float(&mut self, val: f64) -> Result<(), &'static str> {
         if val.is_nan() || val.is_infinite() {
@@ -259,9 +263,27 @@ fn parse_value<'a>(input: &'a str, bytes: &[u8], pos: &mut usize) -> Result<Pars
             }
         }
         b'[' => {
-            // Skip arrays for struct unmarshal
-            skip_array(bytes, pos)?;
-            Ok(ParsedValue::Null)
+            *pos += 1;
+            skip_ws(bytes, pos);
+            let mut elems = Vec::new();
+            if *pos < bytes.len() && bytes[*pos] == b']' {
+                *pos += 1;
+                return Ok(ParsedValue::Array(elems));
+            }
+            loop {
+                skip_ws(bytes, pos);
+                if *pos >= bytes.len() { return Err("unterminated array"); }
+                let elem = parse_value(input, bytes, pos)?;
+                elems.push(elem);
+                skip_ws(bytes, pos);
+                if *pos >= bytes.len() { return Err("unterminated array"); }
+                match bytes[*pos] {
+                    b',' => { *pos += 1; }
+                    b']' => { *pos += 1; break; }
+                    _ => return Err("expected ',' or ']' in array"),
+                }
+            }
+            Ok(ParsedValue::Array(elems))
         }
         _ => Err("unexpected character"),
     }
@@ -296,28 +318,6 @@ fn find_object_end(bytes: &[u8], pos: &mut usize) -> Result<usize, &'static str>
     Ok(start)
 }
 
-fn skip_array(bytes: &[u8], pos: &mut usize) -> Result<(), &'static str> {
-    if *pos >= bytes.len() || bytes[*pos] != b'[' { return Err("expected array"); }
-    *pos += 1;
-    let mut depth = 1;
-    while *pos < bytes.len() && depth > 0 {
-        match bytes[*pos] {
-            b'[' => depth += 1,
-            b']' => depth -= 1,
-            b'"' => {
-                *pos += 1;
-                while *pos < bytes.len() && bytes[*pos] != b'"' {
-                    if bytes[*pos] == b'\\' { *pos += 1; }
-                    *pos += 1;
-                }
-            }
-            _ => {}
-        }
-        *pos += 1;
-    }
-    if depth != 0 { return Err("unterminated array"); }
-    Ok(())
-}
 
 fn parse_string_content(s: &str) -> Result<Cow<'_, str>, &'static str> {
     if !s.contains('\\') {

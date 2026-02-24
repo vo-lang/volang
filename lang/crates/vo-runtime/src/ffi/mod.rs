@@ -1109,6 +1109,63 @@ impl<'a> ExternCallContext<'a> {
         self.ret_ref(n, ptr);
     }
 
+    /// Allocate a new empty slice with given element type metadata, element size, and length.
+    /// The backing array is zero-initialized. Caller is responsible for writing elements.
+    #[inline]
+    pub fn alloc_slice(&mut self, elem_meta: ValueMeta, elem_bytes: usize, len: usize) -> GcRef {
+        slice::create(self.gc, elem_meta, elem_bytes, len, len)
+    }
+
+    /// Allocate a new map with the given key and value type metadata.
+    ///
+    /// `key_slots` and `val_slots` are the number of 8-byte slots per key/value entry.
+    /// `key_rttid` is only meaningful for struct-keyed maps (deep hash/eq); pass `0` otherwise.
+    #[inline]
+    pub fn alloc_map(
+        &mut self,
+        key_meta: ValueMeta,
+        val_meta: ValueMeta,
+        key_slots: u16,
+        val_slots: u16,
+        key_rttid: u32,
+    ) -> GcRef {
+        crate::objects::map::create(self.gc, key_meta, val_meta, key_slots, val_slots, key_rttid)
+    }
+
+    /// Insert a string-keyed entry into a Vo map.
+    ///
+    /// The key is given as a Rust `&str`; a Vo string object is allocated internally.
+    /// `val` must be a slice of exactly `val_slots` u64 words.
+    #[inline]
+    pub fn map_set_string_key(&mut self, m: GcRef, key: &str, val: &[u64]) {
+        let str_ref = crate::objects::string::from_rust_str(self.gc, key);
+        crate::objects::map::set(m, &[str_ref as u64], val, None);
+    }
+
+    /// Find the rttid for a `RuntimeType::Basic(vk)` entry in this module.
+    ///
+    /// When boxing basic-type values into `any` interface slots the rttid must
+    /// match the compile-time registered rttid or type assertions will fail.
+    /// Returns `0` if not found (safe fallback for modules that omit the basic
+    /// type, though in practice all compiled modules register them).
+    pub fn find_basic_type_rttid(&self, vk: ValueKind) -> u32 {
+        use crate::RuntimeType;
+        self.module.runtime_types
+            .iter()
+            .position(|rt| matches!(rt, RuntimeType::Basic(k) if *k == vk))
+            .map(|i| i as u32)
+            .unwrap_or(0)
+    }
+
+    /// Return the underlying `ValueMeta.meta_id()` for a Named type.
+    ///
+    /// Used to resolve `RuntimeType::Named` → underlying concrete type rttid
+    /// without requiring callers to access `module.named_type_metas` directly.
+    #[inline]
+    pub fn named_type_underlying_rttid(&self, named_id: u32) -> u32 {
+        self.module.named_type_metas[named_id as usize].underlying_meta.meta_id()
+    }
+
     /// Allocate a new string slice ([]string).
     #[inline]
     pub fn alloc_string_slice(&mut self, strings: &[String]) -> GcRef {

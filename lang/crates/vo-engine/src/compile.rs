@@ -148,52 +148,64 @@ pub fn compile_string(code: &str) -> Result<CompileOutput, CompileError> {
     compile_source_at(code, &temp_dir)
 }
 
-/// Compile a Vo source file, auto-installing any `github.com/...@version` imports
-/// that are not yet present in `~/.vo/mod/`, and stripping `@version` tags from
-/// import strings before passing source to the compiler.
+/// Compile a Vo source file or directory project, auto-installing any missing
+/// `github.com/...` dependencies before compilation.
 ///
-/// This is the recommended entry point for `vo run <file>` and `vo build`.
-/// For projects that already have all dependencies installed (e.g. CI builds
-/// with a populated module cache), plain `compile()` is also fine.
+/// For **single `.vo` files**: detects `github.com/...@version` imports inline,
+/// installs missing ones, strips `@version` tags, and compiles.
+///
+/// For **directory projects with a `vo.mod`**: reads `require` directives,
+/// installs any `github.com/...` modules not yet present in `~/.vo/mod/`,
+/// then delegates to `compile(path)`.
+///
+/// This is the recommended entry point for `vo run`, `vo check`, and `vo build`.
 pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileError> {
     let p = Path::new(path);
-
-    // Only applicable to .vo source files; bytecode and zip paths skip this.
-    if !p.extension().map(|e| e == "vo").unwrap_or(false) {
-        return compile(path);
-    }
-
-    let source = fs::read_to_string(p)?;
-
-    // Detect imports with explicit @version and auto-install any that are absent.
-    // Imports without @version are left to the module resolver (user ran `vo get` manually).
-    let imports = vo_module::fetch::detect_versioned_imports(&source);
 
     let mod_root = dirs::home_dir()
         .map(|h| h.join(".vo/mod"))
         .unwrap_or_else(|| PathBuf::from(".vo/mod"));
 
-    for imp in &imports {
-        let mod_dir = mod_root.join(&imp.module);
-        if !mod_dir.exists() {
-            eprintln!("fetching {} {}...", imp.module, imp.version);
-            vo_module::fetch::install_module(&imp.module, &imp.version)
-                .map_err(|e| CompileError::Analysis(
-                    format!("failed to install {} {}: {}", imp.module, imp.version, e)
-                ))?;
+    // ── Single .vo file ────────────────────────────────────────────────────────
+    if p.extension().map(|e| e == "vo").unwrap_or(false) {
+        let source = fs::read_to_string(p)?;
+
+        let imports = vo_module::fetch::detect_versioned_imports(&source);
+        for imp in &imports {
+            ensure_module_ready(&imp.module, &imp.version, &mod_root)?;
+        }
+
+        if imports.is_empty() {
+            return compile(path);
+        }
+
+        let stripped = vo_module::fetch::strip_module_versions(&source);
+        let source_dir = p.parent().unwrap_or(Path::new("."));
+        return compile_source_at(&stripped, source_dir);
+    }
+
+    // ── Directory project ──────────────────────────────────────────────────────
+    if p.is_dir() {
+        let project_root = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let vomod_path = project_root.join("vo.mod");
+
+        if vomod_path.exists() {
+            match vo_module::ModFile::parse_file(&vomod_path) {
+                Ok(modfile) => {
+                    for req in &modfile.requires {
+                        if req.module.starts_with("github.com/") {
+                            ensure_module_ready(&req.module, &req.version, &mod_root)?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(CompileError::Analysis(format!("vo.mod parse error: {}", e)));
+                }
+            }
         }
     }
 
-    // No versioned imports → compile directly from the original file (preserves caching).
-    if imports.is_empty() {
-        return compile(path);
-    }
-
-    // Strip @version tags and compile the cleaned source in-memory, rooted at
-    // the original file's directory so that local imports resolve correctly.
-    let stripped = vo_module::fetch::strip_module_versions(&source);
-    let source_dir = p.parent().unwrap_or(Path::new("."));
-    compile_source_at(&stripped, source_dir)
+    compile(path)
 }
 
 #[cfg(test)]
@@ -260,6 +272,28 @@ mod tests {
         assert!(stripped.contains("\"github.com/b/libbar\""));
         assert!(!stripped.contains('@'));
     }
+}
+
+/// Ensure a GitHub module is installed and its native extension is compiled.
+///
+/// - Not installed → download via `install_module` (which also builds the extension).
+/// - Already installed → call `ensure_native_extension_built` in case the `.so`
+///   was missing (e.g. the module was manually placed or cargo clean was run).
+fn ensure_module_ready(module: &str, version: &str, mod_root: &Path) -> Result<(), CompileError> {
+    let module_dir = mod_root.join(module);
+    if !module_dir.exists() {
+        eprintln!("fetching {} {}...", module, version);
+        vo_module::fetch::install_module(module, version)
+            .map_err(|e| CompileError::Analysis(
+                format!("failed to install {} {}: {}", module, version, e)
+            ))?;
+    } else {
+        vo_module::fetch::ensure_native_extension_built(&module_dir)
+            .map_err(|e| CompileError::Analysis(
+                format!("failed to build extension for {}: {}", module, e)
+            ))?;
+    }
+    Ok(())
 }
 
 fn source_root(path: &Path) -> PathBuf {

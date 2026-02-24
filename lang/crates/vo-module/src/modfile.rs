@@ -4,11 +4,13 @@
 //! ```text
 //! module <module-path>
 //!
-//! require <alias> <module-path> <version>
-//! require <alias> <module-path> <version>
+//! require <module-path> <version>              -- alias derived from last path component
+//! require <alias> <module-path> <version>      -- explicit alias
 //! ```
 //!
 //! The alias is used in source code with `@"alias"` syntax for external imports.
+//! When the alias equals the last component of the module path it is omitted in
+//! serialized output so that `parse → serialize` is a no-op for user-written files.
 
 use std::fmt;
 use std::fs;
@@ -86,27 +88,39 @@ impl ModFile {
                 continue;
             }
 
-            // Parse require directive
+            // Skip language version declaration (e.g. "vo 0.1")
+            if line.starts_with("vo ") {
+                continue;
+            }
+
+            // Parse require directive.
+            // Supports two forms:
+            //   require <module> <version>          -- alias derived from last path component
+            //   require <alias> <module> <version>  -- explicit alias
             if line.starts_with("require ") {
                 let rest = line.strip_prefix("require ").unwrap().trim();
                 let parts: Vec<&str> = rest.split_whitespace().collect();
 
-                if parts.len() != 3 {
-                    return Err(ModuleError::ParseError {
-                        file: file_path.to_path_buf(),
-                        line: line_num,
-                        message: format!(
-                            "invalid require syntax, expected: require <alias> <module> <version>, got: {}",
-                            line
-                        ),
-                    });
-                }
+                let (req_alias, req_module, req_version, explicit_alias) = match parts.len() {
+                    2 => {
+                        // require <module> <version>: derive alias from last path component
+                        let derived = parts[0].split('/').last().unwrap_or(parts[0]);
+                        (derived, parts[0], parts[1], false)
+                    }
+                    3 => (parts[0], parts[1], parts[2], true),
+                    _ => {
+                        return Err(ModuleError::ParseError {
+                            file: file_path.to_path_buf(),
+                            line: line_num,
+                            message: format!(
+                                "invalid require syntax, expected: require <module> <version> or require <alias> <module> <version>, got: {}",
+                                line
+                            ),
+                        });
+                    }
+                };
 
-                let req_alias = parts[0];
-                let req_module = parts[1];
-                let req_version = parts[2];
-
-                if !is_valid_alias(req_alias) {
+                if explicit_alias && !is_valid_alias(req_alias) {
                     return Err(ModuleError::ParseError {
                         file: file_path.to_path_buf(),
                         line: line_num,
@@ -191,7 +205,12 @@ impl fmt::Display for ModFile {
         if !self.requires.is_empty() {
             writeln!(f)?;
             for req in &self.requires {
-                writeln!(f, "require {} {} {}", req.alias, req.module, req.version)?;
+                let derived = req.module.split('/').next_back().unwrap_or(&req.module);
+                if req.alias == derived {
+                    writeln!(f, "require {} {}", req.module, req.version)?;
+                } else {
+                    writeln!(f, "require {} {} {}", req.alias, req.module, req.version)?;
+                }
             }
         }
         Ok(())
@@ -392,11 +411,25 @@ require bar github.com/foo/bar 1.2.3
                 },
             ],
         };
+        // alias "bar" == last component of "github.com/foo/bar" → 2-field form
+        let expected = "module github.com/myuser/myproject\n\nrequire github.com/foo/bar v1.2.3\n";
+        assert_eq!(mod_file.to_string(), expected);
+    }
 
-        let expected = r#"module github.com/myuser/myproject
-
-require bar github.com/foo/bar v1.2.3
-"#;
+    #[test]
+    fn test_to_string_explicit_alias() {
+        let mod_file = ModFile {
+            module: "myproject".to_string(),
+            requires: vec![
+                Require {
+                    alias: "myhttplib".to_string(),
+                    module: "github.com/gin-gonic/gin".to_string(),
+                    version: "v1.9.0".to_string(),
+                },
+            ],
+        };
+        // alias "myhttplib" != last component "gin" → 3-field form
+        let expected = "module myproject\n\nrequire myhttplib github.com/gin-gonic/gin v1.9.0\n";
         assert_eq!(mod_file.to_string(), expected);
     }
 
@@ -544,20 +577,17 @@ require jwt github.com/golang-jwt/jwt v5.0.0
                     version: "v1.0.0".to_string(),
                 },
                 Require {
-                    alias: "bar".to_string(),
-                    module: "github.com/bar/bar".to_string(),
+                    // Explicit alias different from last path component
+                    alias: "mybar".to_string(),
+                    module: "github.com/bar/baz".to_string(),
                     version: "v2.0.0-beta.1".to_string(),
                 },
             ],
         };
         
-        // Serialize to string
         let serialized = original.to_string();
-        
-        // Parse back
         let parsed = ModFile::parse(&serialized, &PathBuf::from("vo.mod")).unwrap();
         
-        // Verify equality
         assert_eq!(parsed.module, original.module);
         assert_eq!(parsed.requires.len(), original.requires.len());
         for (p, o) in parsed.requires.iter().zip(original.requires.iter()) {
@@ -565,5 +595,17 @@ require jwt github.com/golang-jwt/jwt v5.0.0
             assert_eq!(p.module, o.module);
             assert_eq!(p.version, o.version);
         }
+    }
+
+    #[test]
+    fn test_roundtrip_no_alias() {
+        // 2-field form: alias is derived, serialize → parse → same alias
+        let input = "module test/zip\n\nrequire github.com/vo-lang/zip v0.1.0\n";
+        let parsed = ModFile::parse(input, &PathBuf::from("vo.mod")).unwrap();
+        assert_eq!(parsed.requires[0].alias, "zip");
+        assert_eq!(parsed.requires[0].module, "github.com/vo-lang/zip");
+        assert_eq!(parsed.requires[0].version, "v0.1.0");
+        // serialized back must be identical to input
+        assert_eq!(parsed.to_string(), input);
     }
 }

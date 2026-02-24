@@ -1,0 +1,37 @@
+package main
+
+import (
+	"github.com/vo-lang/notify"
+	"os"
+)
+
+func main() {
+	watchDir, err := os.MkdirTemp("", "vo-test-notify-*")
+	assert(err == nil, "create watch dir")
+	defer os.RemoveAll(watchDir)
+
+	watcher, err := notify.Create(watchDir, true)
+	assert(err == nil, "notify.Create succeeds")
+
+	watching, err := watcher.IsWatching(watchDir)
+	assert(err == nil, "notify.IsWatching succeeds")
+	assert(watching, "watcher tracks created path")
+
+	watches, err := watcher.ListWatches()
+	assert(err == nil, "notify.ListWatches succeeds")
+	assert(len(watches) == 1, "exactly one watch entry exists")
+	assert(watches[0].Path == watchDir, "watch entry path matches")
+	assert(watches[0].Recursive, "watch entry recursive is true")
+
+	err = watcher.Unwatch(watchDir)
+	assert(err == nil, "notify.Unwatch succeeds")
+
+	watching, err = watcher.IsWatching(watchDir)
+	assert(err == nil, "notify.IsWatching after unwatch succeeds")
+	assert(!watching, "path is not watched after unwatch")
+
+	err = watcher.Close()
+	assert(err == nil, "notify.Close succeeds")
+	err = watcher.Close()
+	assert(err != nil, "closing watcher twice must fail")
+}

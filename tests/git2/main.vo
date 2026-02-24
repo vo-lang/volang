@@ -1,0 +1,45 @@
+package main
+
+import (
+	"github.com/vo-lang/git2"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func main() {
+	tmpDir, err := os.MkdirTemp("", "vo-test-git2-*")
+	assert(err == nil, "create temp dir")
+	defer os.RemoveAll(tmpDir)
+
+	repoPath := filepath.Join([]string{tmpDir, "repo"})
+	repo, err := git2.Init(repoPath)
+	assert(err == nil, "git2.Init succeeds")
+
+	isBare, err := repo.IsBare()
+	assert(err == nil, "git2.Repo.IsBare succeeds")
+	assert(!isBare, "initialized repo is not bare")
+
+	workdir, exists, err := repo.Workdir()
+	assert(err == nil, "git2.Repo.Workdir succeeds")
+	assert(exists, "workdir exists")
+	assert(strings.Contains(workdir, "repo"), "workdir points to repo dir")
+
+	repoMetaPath, err := repo.RepoPath()
+	assert(err == nil, "git2.Repo.RepoPath succeeds")
+	assert(strings.Contains(repoMetaPath, ".git"), "repo path points to .git")
+
+	status, err := repo.Status()
+	assert(err == nil, "git2.Repo.Status succeeds")
+	assert(len(status) == 0, "new repo has empty status")
+
+	err = repo.Close()
+	assert(err == nil, "close repo succeeds")
+	err = repo.Close()
+	assert(err != nil, "closing repo twice must fail")
+
+	repo2, err := git2.Open(repoPath)
+	assert(err == nil, "git2.Open succeeds")
+	err = repo2.Close()
+	assert(err == nil, "close reopened repo")
+}

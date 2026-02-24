@@ -71,6 +71,10 @@ impl FormatWriter for TomlWriter {
     fn write_int32(&mut self, val: i32) {
         self.buf.extend_from_slice(format!("{}", val).as_bytes());
     }
+
+    fn write_uint(&mut self, val: u64) {
+        self.buf.extend_from_slice(format!("{}", val).as_bytes());
+    }
     
     fn write_float(&mut self, val: f64) -> Result<(), &'static str> {
         if val.is_nan() {
