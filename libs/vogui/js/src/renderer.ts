@@ -4,6 +4,32 @@
 import morphdom from 'morphdom';
 import { VoNode, RendererConfig, StylePropertyMap } from './types';
 
+// =============================================================================
+// Widget Registry
+// =============================================================================
+
+export interface WidgetFactory {
+  create(container: HTMLElement, props: any, onEvent: (payload: string) => void): WidgetInstance;
+}
+
+export interface WidgetInstance {
+  element: HTMLElement;
+  update(props: any): void;
+  destroy(): void;
+}
+
+const widgetRegistry = new Map<string, WidgetFactory>();
+const widgetInstances = new Map<string, WidgetInstance>();
+
+export function registerWidget(type: string, factory: WidgetFactory): void {
+  widgetRegistry.set(type, factory);
+}
+
+export function destroyAllWidgets(): void {
+  widgetInstances.forEach(inst => inst.destroy());
+  widgetInstances.clear();
+}
+
 /** Convert Vo style object to CSS string */
 export function styleToString(style: Record<string, any> | undefined): string {
   if (!style || typeof style !== 'object') return '';
@@ -1002,6 +1028,48 @@ export function renderNode(node: VoNode, config: RendererConfig, handlers?: Retu
       return el;
     }
     
+    // ExternalWidget — delegates to JS-native widget plugins
+    case 'ExternalWidget': {
+      const id = node.props?.id ?? 'widget-0';
+      const widgetType = node.props?.widgetType ?? '';
+      const domId = `vo-widget-${id}`;
+
+      // Return existing instance element if already mounted (morphdom preserves it)
+      let instance = widgetInstances.get(id);
+      if (instance) {
+        instance.update(node.props);
+        return instance.element;
+      }
+
+      const factory = widgetRegistry.get(widgetType);
+      if (!factory) {
+        const el = document.createElement('div');
+        el.className = 'vo-widget vo-widget-missing';
+        el.textContent = `Unknown widget: ${widgetType}`;
+        return el;
+      }
+
+      const container = document.createElement('div');
+      container.className = `vo-widget vo-widget-${widgetType}`;
+      container.id = domId;
+      container.dataset.widgetId = id;
+
+      const onEvent = (rawPayload: string) => {
+        if (interactive && config.onEvent && node.props?.onEvent !== undefined) {
+          config.onEvent(node.props.onEvent as number, rawPayload);
+        }
+      };
+
+      instance = factory.create(container, node.props, onEvent);
+      // factory.create sets instance.element = container or a child;
+      // ensure the outer element has the widget identity attrs
+      instance.element.className = `vo-widget vo-widget-${widgetType}`;
+      instance.element.id = domId;
+      instance.element.dataset.widgetId = id;
+      widgetInstances.set(id, instance);
+      return instance.element;
+    }
+
     // Canvas (GPU rendering)
     case 'Canvas': {
       const canvasId = node.props?.id ?? 'vo-canvas-0';
@@ -1128,6 +1196,15 @@ export function render(container: HTMLElement, tree: VoNode | null, config: Rend
   // Use morphdom for efficient DOM updates
   morphdom(oldEl, newEl, {
     onBeforeElUpdated(fromEl, toEl) {
+      // Preserve ExternalWidget elements — update via widget instance instead
+      if (fromEl.dataset?.widgetId && toEl.dataset?.widgetId
+          && fromEl.dataset.widgetId === toEl.dataset.widgetId) {
+        const instance = widgetInstances.get(fromEl.dataset.widgetId);
+        // props update already happened in renderNode (ExternalWidget case)
+        // just prevent DOM replacement
+        if (instance) return false;
+      }
+
       // Preserve canvas GPU state — never replace canvas elements
       if (fromEl.tagName === 'CANVAS' && toEl.tagName === 'CANVAS') {
         const fromCanvas = fromEl as HTMLCanvasElement;
@@ -1159,6 +1236,14 @@ export function render(container: HTMLElement, tree: VoNode | null, config: Rend
       return true;
     },
     onNodeDiscarded(node: Node) {
+      // Cleanup ExternalWidget instances when removed from DOM
+      if (node instanceof HTMLElement && node.dataset?.widgetId) {
+        const instance = widgetInstances.get(node.dataset.widgetId);
+        if (instance) {
+          instance.destroy();
+          widgetInstances.delete(node.dataset.widgetId);
+        }
+      }
       // Cleanup canvas registry and resize observers when canvas is removed
       if (node instanceof HTMLCanvasElement) {
         const canvasId = node.id.replace('vo-canvas-', '');

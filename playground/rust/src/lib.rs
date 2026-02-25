@@ -103,6 +103,9 @@ fn run_gui_bytecode(
     bytecode: &[u8],
     registrar: fn(&mut vo_web::ExternRegistry, &[vo_web::ExternDef]),
 ) -> WasmGuiResult {
+    #[cfg(target_arch = "wasm32")]
+    vogui::set_platform(Box::new(vogui::WasmPlatform));
+
     GUI_STATE.with(|s| unsafe { *s.get() = None });
     vogui::clear_pending_handler();
     vogui::clear_pending_render();

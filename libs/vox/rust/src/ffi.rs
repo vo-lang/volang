@@ -18,96 +18,50 @@ use crate::format::format_text;
 
 // ============ Module Storage ============
 
+#[derive(Clone)]
 struct StoredModule {
     module: Module,
     source_root: std::path::PathBuf,
     extensions: Vec<vo_runtime::ext_loader::ExtensionManifest>,
 }
 
-#[vo_fn("libs/vox", "RunJitCapture")]
-fn runner_run_jit_capture(ctx: &mut ExternCallContext) -> ExternResult {
-    let module_id = ctx.arg_any_as_i64(slots::ARG_M);
-
-    let stored = match get_module(module_id) {
-        Some(m) => m,
-        None => {
-            ctx.ret_str(slots::RET_0, "");
-            write_error_to(ctx, slots::RET_1, "invalid module handle");
-            return ExternResult::Ok;
-        }
-    };
-
-    let output_obj = CompileOutput {
-        module: stored.module,
-        source_root: stored.source_root,
-        extensions: stored.extensions,
-    };
-
-    output::start_capture();
-    let run_result = run(output_obj, RunMode::Jit, Vec::new());
-    let captured = output::stop_capture();
-
-    ctx.ret_str(slots::RET_0, &captured);
-    match run_result {
-        Ok(()) => ctx.ret_nil_error(slots::RET_1),
-        Err(e) => write_error_to(ctx, slots::RET_1, &e.to_string()),
+impl From<CompileOutput> for StoredModule {
+    fn from(o: CompileOutput) -> Self {
+        Self { module: o.module, source_root: o.source_root, extensions: o.extensions }
     }
-    ExternResult::Ok
+}
+
+impl From<StoredModule> for CompileOutput {
+    fn from(s: StoredModule) -> Self {
+        Self { module: s.module, source_root: s.source_root, extensions: s.extensions }
+    }
 }
 
 static MODULES: Mutex<Vec<Option<StoredModule>>> = Mutex::new(Vec::new());
 
 fn store_module(output: CompileOutput) -> i64 {
+    let stored = StoredModule::from(output);
     let mut modules = MODULES.lock().unwrap();
     for (i, slot) in modules.iter_mut().enumerate() {
         if slot.is_none() {
-            *slot = Some(StoredModule {
-                module: output.module,
-                source_root: output.source_root,
-                extensions: output.extensions,
-            });
+            *slot = Some(stored);
             return i as i64;
         }
     }
     let id = modules.len();
-    modules.push(Some(StoredModule {
-        module: output.module,
-        source_root: output.source_root,
-        extensions: output.extensions,
-    }));
+    modules.push(Some(stored));
     id as i64
-}
-
-#[allow(dead_code)]
-fn take_module(id: i64) -> Option<StoredModule> {
-    let mut modules = MODULES.lock().unwrap();
-    let idx = id as usize;
-    if idx < modules.len() {
-        modules[idx].take()
-    } else {
-        None
-    }
 }
 
 fn get_module(id: i64) -> Option<StoredModule> {
     let modules = MODULES.lock().unwrap();
-    let idx = id as usize;
-    if idx < modules.len() {
-        modules[idx].as_ref().map(|m| StoredModule {
-            module: m.module.clone(),
-            source_root: m.source_root.clone(),
-            extensions: m.extensions.clone(),
-        })
-    } else {
-        None
-    }
+    modules.get(id as usize).and_then(|s| s.clone())
 }
 
 fn free_module(id: i64) {
     let mut modules = MODULES.lock().unwrap();
-    let idx = id as usize;
-    if idx < modules.len() {
-        modules[idx] = None;
+    if let Some(slot) = modules.get_mut(id as usize) {
+        *slot = None;
     }
 }
 
@@ -202,26 +156,13 @@ fn runner_compile_string(ctx: &mut ExternCallContext) -> ExternResult {
 #[vo_fn("libs/vox", "Run")]
 fn runner_run(ctx: &mut ExternCallContext) -> ExternResult {
     let module_id = ctx.arg_any_as_i64(slots::ARG_M);
-    
     let stored = match get_module(module_id) {
         Some(m) => m,
-        None => {
-            write_error_to(ctx, slots::RET_0, "invalid module handle");
-            return ExternResult::Ok;
-        }
+        None => { write_error_to(ctx, slots::RET_0, "invalid module handle"); return ExternResult::Ok; }
     };
-
-    let output = CompileOutput {
-        module: stored.module,
-        source_root: stored.source_root,
-        extensions: stored.extensions,
-    };
-
-    match run(output, RunMode::Vm, Vec::new()) {
+    match run(stored.into(), RunMode::Vm, Vec::new()) {
         Ok(()) => ctx.ret_nil_error(slots::RET_0),
-        Err(e) => {
-            write_error_to(ctx, slots::RET_0, &e.to_string());
-        }
+        Err(e) => write_error_to(ctx, slots::RET_0, &e.to_string()),
     }
     ExternResult::Ok
 }
@@ -229,7 +170,6 @@ fn runner_run(ctx: &mut ExternCallContext) -> ExternResult {
 #[vo_fn("libs/vox", "RunCapture")]
 fn runner_run_capture(ctx: &mut ExternCallContext) -> ExternResult {
     let module_id = ctx.arg_any_as_i64(slots::ARG_M);
-
     let stored = match get_module(module_id) {
         Some(m) => m,
         None => {
@@ -238,17 +178,31 @@ fn runner_run_capture(ctx: &mut ExternCallContext) -> ExternResult {
             return ExternResult::Ok;
         }
     };
-
-    let output_obj = CompileOutput {
-        module: stored.module,
-        source_root: stored.source_root,
-        extensions: stored.extensions,
-    };
-
     output::start_capture();
-    let run_result = run(output_obj, RunMode::Vm, Vec::new());
+    let run_result = run(stored.into(), RunMode::Vm, Vec::new());
     let captured = output::stop_capture();
+    ctx.ret_str(slots::RET_0, &captured);
+    match run_result {
+        Ok(()) => ctx.ret_nil_error(slots::RET_1),
+        Err(e) => write_error_to(ctx, slots::RET_1, &e.to_string()),
+    }
+    ExternResult::Ok
+}
 
+#[vo_fn("libs/vox", "RunJitCapture")]
+fn runner_run_jit_capture(ctx: &mut ExternCallContext) -> ExternResult {
+    let module_id = ctx.arg_any_as_i64(slots::ARG_M);
+    let stored = match get_module(module_id) {
+        Some(m) => m,
+        None => {
+            ctx.ret_str(slots::RET_0, "");
+            write_error_to(ctx, slots::RET_1, "invalid module handle");
+            return ExternResult::Ok;
+        }
+    };
+    output::start_capture();
+    let run_result = run(stored.into(), RunMode::Jit, Vec::new());
+    let captured = output::stop_capture();
     ctx.ret_str(slots::RET_0, &captured);
     match run_result {
         Ok(()) => ctx.ret_nil_error(slots::RET_1),
@@ -260,26 +214,13 @@ fn runner_run_capture(ctx: &mut ExternCallContext) -> ExternResult {
 #[vo_fn("libs/vox", "RunJit")]
 fn runner_run_jit(ctx: &mut ExternCallContext) -> ExternResult {
     let module_id = ctx.arg_any_as_i64(slots::ARG_M);
-    
     let stored = match get_module(module_id) {
         Some(m) => m,
-        None => {
-            write_error_to(ctx, slots::RET_0, "invalid module handle");
-            return ExternResult::Ok;
-        }
+        None => { write_error_to(ctx, slots::RET_0, "invalid module handle"); return ExternResult::Ok; }
     };
-
-    let output = CompileOutput {
-        module: stored.module,
-        source_root: stored.source_root,
-        extensions: stored.extensions,
-    };
-
-    match run(output, RunMode::Jit, Vec::new()) {
+    match run(stored.into(), RunMode::Jit, Vec::new()) {
         Ok(()) => ctx.ret_nil_error(slots::RET_0),
-        Err(e) => {
-            write_error_to(ctx, slots::RET_0, &e.to_string());
-        }
+        Err(e) => write_error_to(ctx, slots::RET_0, &e.to_string()),
     }
     ExternResult::Ok
 }
@@ -456,9 +397,6 @@ fn runner_save_bytecode_text(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[vo_fn("libs/vox", "LoadBytecodeText")]
 fn runner_load_bytecode_text(ctx: &mut ExternCallContext) -> ExternResult {
-    let _path = ctx.arg_str(slots::ARG_PATH).to_string();
-    
-    // Text parsing not yet implemented
     ctx.ret_any(slots::RET_0, InterfaceSlot::nil());
     write_error_to(ctx, slots::RET_1, "bytecode text parsing not yet implemented");
     ExternResult::Ok
@@ -498,20 +436,138 @@ fn runner_load_bytecode_binary(ctx: &mut ExternCallContext) -> ExternResult {
         }
     };
     
+    let source_root = std::path::Path::new(&path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
     match Module::deserialize(&bytes) {
         Ok(module) => {
-            let output = CompileOutput {
-                module,
-                source_root: std::path::PathBuf::from(&path).parent().unwrap_or(std::path::Path::new(".")).to_path_buf(),
-                extensions: Vec::new(),
-            };
-            let id = store_module(output);
+            let id = store_module(CompileOutput { module, source_root, extensions: Vec::new() });
             ctx.ret_any(slots::RET_0, InterfaceSlot::from_i64(id));
             write_nil_error(ctx, slots::RET_1);
         }
         Err(e) => {
             ctx.ret_any(slots::RET_0, InterfaceSlot::nil());
             write_error_to(ctx, slots::RET_1, &format!("{:?}", e));
+        }
+    }
+    ExternResult::Ok
+}
+
+// ============ GUI Functions ============
+// Native: full implementation. WASM: stubs returning "not supported".
+
+#[cfg(target_arch = "wasm32")]
+#[vo_fn("libs/vox", "RunGui")]
+fn runner_run_gui_wasm(ctx: &mut ExternCallContext) -> ExternResult {
+    ctx.ret_str(slots::RET_0, "");
+    write_error_to(ctx, slots::RET_1, "RunGui not supported in web mode");
+    ExternResult::Ok
+}
+
+#[cfg(target_arch = "wasm32")]
+#[vo_fn("libs/vox", "SendGuiEvent")]
+fn runner_send_gui_event_wasm(ctx: &mut ExternCallContext) -> ExternResult {
+    ctx.ret_str(slots::RET_0, "");
+    write_error_to(ctx, slots::RET_1, "SendGuiEvent not supported in web mode");
+    ExternResult::Ok
+}
+
+#[cfg(target_arch = "wasm32")]
+#[vo_fn("libs/vox", "StopGui")]
+fn runner_stop_gui_wasm(_ctx: &mut ExternCallContext) -> ExternResult {
+    ExternResult::Ok
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[vo_fn("libs/vox", "RunGui")]
+fn runner_run_gui(ctx: &mut ExternCallContext) -> ExternResult {
+    let module_id = ctx.arg_any_as_i64(slots::ARG_M);
+
+    let stored = match get_module(module_id) {
+        Some(m) => m,
+        None => {
+            ctx.ret_str(slots::RET_0, "");
+            write_error_to(ctx, slots::RET_1, "invalid module handle");
+            return ExternResult::Ok;
+        }
+    };
+
+    match crate::gui::run_gui(stored.into()) {
+        Ok((json, handle)) => {
+            let guest_id = crate::gui::store_guest_handle(handle);
+            crate::gui::set_module_guest(module_id, guest_id);
+            ctx.ret_str(slots::RET_0, &json);
+            ctx.ret_nil_error(slots::RET_1);
+        }
+        Err(e) => {
+            ctx.ret_str(slots::RET_0, "");
+            write_error_to(ctx, slots::RET_1, &e);
+        }
+    }
+    ExternResult::Ok
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[vo_fn("libs/vox", "SendGuiEvent")]
+fn runner_send_gui_event(ctx: &mut ExternCallContext) -> ExternResult {
+    let module_id = ctx.arg_any_as_i64(slots::ARG_M);
+    let handler_id = ctx.arg_i64(slots::ARG_HANDLER_ID) as i32;
+    let payload = ctx.arg_str(slots::ARG_PAYLOAD).to_string();
+
+    let guest_id = match crate::gui::get_module_guest(module_id) {
+        Some(id) => id,
+        None => {
+            ctx.ret_str(slots::RET_0, "");
+            write_error_to(ctx, slots::RET_1, "no running GUI for this module");
+            return ExternResult::Ok;
+        }
+    };
+
+    let result = crate::gui::with_guest_handle(guest_id, |handle| {
+        crate::gui::send_gui_event(handle, handler_id, &payload)
+    });
+
+    match result {
+        Some(Ok(json)) => {
+            ctx.ret_str(slots::RET_0, &json);
+            ctx.ret_nil_error(slots::RET_1);
+        }
+        Some(Err(e)) => {
+            ctx.ret_str(slots::RET_0, "");
+            write_error_to(ctx, slots::RET_1, &e);
+        }
+        None => {
+            ctx.ret_str(slots::RET_0, "");
+            write_error_to(ctx, slots::RET_1, "GUI handle not found");
+        }
+    }
+    ExternResult::Ok
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[vo_fn("libs/vox", "StopGui")]
+fn runner_stop_gui(ctx: &mut ExternCallContext) -> ExternResult {
+    let module_id = ctx.arg_any_as_i64(slots::ARG_M);
+    if let Some(guest_id) = crate::gui::get_module_guest(module_id) {
+        crate::gui::take_guest_handle(guest_id);
+        crate::gui::clear_module_guest(module_id);
+    }
+    ExternResult::Ok
+}
+
+#[vo_fn("libs/vox", "CompileCheck")]
+fn runner_compile_check(ctx: &mut ExternCallContext) -> ExternResult {
+    let code = ctx.arg_str(slots::ARG_CODE).to_string();
+
+    match compile_string(&code) {
+        Ok(_) => {
+            ctx.ret_str(slots::RET_0, "");
+            ctx.ret_nil_error(slots::RET_1);
+        }
+        Err(e) => {
+            ctx.ret_str(slots::RET_0, &e.to_string());
+            ctx.ret_nil_error(slots::RET_1);
         }
     }
     ExternResult::Ok

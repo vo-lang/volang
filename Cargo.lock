@@ -1448,6 +1448,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "studio-core"
+version = "0.1.0"
+dependencies = [
+ "vo-common",
+]
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1828,6 +1835,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-studio-wasm"
+version = "0.1.0"
+dependencies = [
+ "studio-core",
+ "vo-common",
+ "vo-runtime",
+ "vo-web",
+ "vogui",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "vo-syntax"
 version = "0.1.0"
 dependencies = [
@@ -1875,6 +1895,7 @@ dependencies = [
  "vo-stdlib",
  "vo-syntax",
  "vo-vm",
+ "vogui",
 ]
 
 [[package]]

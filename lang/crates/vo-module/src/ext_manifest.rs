@@ -93,15 +93,16 @@ fn parse_manifest(path: &Path) -> Result<ExtensionManifest, ExtManifestError> {
 
 /// Resolve library path with platform-specific extension and profile.
 ///
-/// - Replaces `{profile}` with `debug` or `release-native` based on build mode
+/// - Replaces `{profile}` with the Cargo build profile (`debug`, `release`,
+///   `release-native`, …) captured at compile time via `build.rs`.
 /// - If the path doesn't have a known library extension (.so, .dylib, .dll),
 ///   automatically append the correct one for the current platform.
 fn resolve_library_path(path: PathBuf) -> PathBuf {
-    // Replace {profile} placeholder
+    // Replace {profile} placeholder with the actual Cargo profile name embedded
+    // by build.rs.  This correctly distinguishes debug / release / release-native.
     let path_str = path.to_string_lossy();
     let path = if path_str.contains("{profile}") {
-        let profile = if cfg!(debug_assertions) { "debug" } else { "release-native" };
-        PathBuf::from(path_str.replace("{profile}", profile))
+        PathBuf::from(path_str.replace("{profile}", env!("VO_BUILD_PROFILE")))
     } else {
         path
     };

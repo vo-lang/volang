@@ -6,6 +6,8 @@ members = [
   "libs/vox/rust",
   "libs/vogui/rust",
   "playground/rust",
+  "studio/core",
+  "studio/wasm",
   "cmd/vo",
   "cmd/vo-embed",
   "cmd/vo-test/rust",
@@ -13,6 +15,7 @@ members = [
 exclude = [
   "3rdparty/resvg/rust",
   "3rdparty/wgpu/rust",
+  "studio/src-tauri",
 ]
 
 [workspace.package]

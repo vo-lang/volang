@@ -281,66 +281,49 @@ impl Vm {
         handle
     }
 
-    pub fn run(&mut self) -> Result<(), VmError> {
+    /// Spawn the entry function as a new fiber.  Called by `run()` only.
+    fn spawn_entry(&mut self) -> Result<(), VmError> {
         let module = self.module.as_ref().ok_or(VmError::NoEntryFunction)?;
         let entry_func = module.entry_func;
-
         if entry_func as usize >= module.functions.len() {
             return Err(VmError::InvalidFunctionId(entry_func));
         }
-
-        let func = &module.functions[entry_func as usize];
-        
-        let mut fiber = Fiber::new(0);
-        fiber.push_frame(entry_func, func.local_slots, 0, 0);
-        self.scheduler.spawn(fiber);
-
-        match self.run_scheduling_loop(None)? {
-            SchedulingOutcome::Blocked => self.report_deadlock(),
-            _ => Ok(()),
-        }
-    }
-
-    /// Like `run()` but returns `SuspendedForHostEvents` to caller instead of treating it as complete.
-    /// Used by the WASM async entry point to handle timer/fetch suspension.
-    pub fn run_resumable(&mut self) -> Result<SchedulingOutcome, VmError> {
-        let module = self.module.as_ref().ok_or(VmError::NoEntryFunction)?;
-        let entry_func = module.entry_func;
-
-        if entry_func as usize >= module.functions.len() {
-            return Err(VmError::InvalidFunctionId(entry_func));
-        }
-
         let func = &module.functions[entry_func as usize];
         let mut fiber = Fiber::new(0);
         fiber.push_frame(entry_func, func.local_slots, 0, 0);
         self.scheduler.spawn(fiber);
-
-        let outcome = self.run_scheduling_loop(None)?;
-        if outcome == SchedulingOutcome::Blocked {
-            return Err(self.report_deadlock().unwrap_err());
-        }
-        Ok(outcome)
+        Ok(())
     }
 
-    /// Like `run_scheduled()` but returns `SuspendedForHostEvents` instead of treating it as complete.
-    pub fn run_scheduled_resumable(&mut self) -> Result<SchedulingOutcome, VmError> {
-        let outcome = self.run_scheduling_loop(None)?;
-        if outcome == SchedulingOutcome::Blocked {
-            return Err(self.report_deadlock().unwrap_err());
-        }
-        Ok(outcome)
+    /// Spawn the entry function and run all fibers.
+    ///
+    /// Returns `Ok(outcome)` where outcome is one of:
+    /// - `Completed`              — program exited normally
+    /// - `Blocked`                — all goroutines stuck on channels; call `deadlock_err()` for details
+    /// - `SuspendedForHostEvents` — waiting for async host callbacks (WASM timer/HTTP, GUI events)
+    ///
+    /// Callers decide whether `Blocked` is a deadlock error or expected behaviour (e.g. GUI host VM).
+    pub fn run(&mut self) -> Result<SchedulingOutcome, VmError> {
+        self.spawn_entry()?;
+        self.run_scheduling_loop(None)
     }
-    
-    /// Run existing runnable fibers without spawning entry fiber.
-    /// Used for event handling after initial run.
-    pub fn run_scheduled(&mut self) -> Result<(), VmError> {
-        match self.run_scheduling_loop(None)? {
-            SchedulingOutcome::Blocked => self.report_deadlock(),
-            _ => Ok(()),
-        }
+
+    /// Run existing fibers without spawning an entry fiber.
+    ///
+    /// Used for event dispatch after initial `run()`, island command handlers, and WASM async
+    /// continuation.  Same outcome semantics as `run()`.
+    pub fn run_scheduled(&mut self) -> Result<SchedulingOutcome, VmError> {
+        self.run_scheduling_loop(None)
     }
-    
+
+    /// Build a `VmError::Deadlock` with current fiber diagnostics.
+    ///
+    /// Call this when `run()` / `run_scheduled()` returns `Ok(SchedulingOutcome::Blocked)` and
+    /// you want to treat it as a fatal deadlock.
+    pub fn deadlock_err(&self) -> VmError {
+        self.report_deadlock().unwrap_err()
+    }
+
     /// Core scheduling loop - runs fibers until all block or limit reached.
     /// Returns outcome without handling deadlock - caller decides the appropriate response.
     fn run_scheduling_loop(&mut self, max_iterations: Option<usize>) -> Result<SchedulingOutcome, VmError> {

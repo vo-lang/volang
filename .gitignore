@@ -82,3 +82,7 @@ benchmarks/call-closure-mono/go_bench
 benchmarks/call-closure-poly4/go_bench
 benchmarks/call-iface-mono/go_bench
 benchmarks/call-iface-poly4/go_bench
+
+studio/node_modules/
+studio/dist/
+studio/wasm/pkg/

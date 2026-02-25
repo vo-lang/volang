@@ -4,4 +4,5 @@
 export type { VoNode, EventCallback, RendererConfig } from './types';
 export { StylePropertyMap } from './types';
 export { voguiStyles, injectStyles } from './styles';
-export { render, renderNode, styleToString, setupKeyHandler } from './renderer';
+export { render, renderNode, styleToString, setupKeyHandler, registerWidget, destroyAllWidgets } from './renderer';
+export type { WidgetFactory, WidgetInstance } from './renderer';

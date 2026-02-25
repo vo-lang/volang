@@ -1,0 +1,147 @@
+// IDE view function — builds the UI tree each render cycle.
+package studio
+
+import "vogui"
+
+// ── Theme ────────────────────────────────────────────────────────────────────
+
+const (
+	colorToolbar  = "#1e1e2e"
+	colorSidebar  = "#16162a"
+	colorOutput   = "#0d0d1a"
+	colorGuest    = "#1a1a2e"
+	colorBorder   = "#3b3b5c"
+	colorItem     = "#2d2d44"
+	colorAccent   = "#4c4cf7"
+	colorRun      = "#22c55e"
+	colorGui      = "#3b82f6"
+	colorStop     = "#ef4444"
+	colorWhite    = "#fff"
+	colorMuted    = "#ccc"
+	colorDim      = "#888"
+	colorFaint    = "#666"
+)
+
+// ── Root ─────────────────────────────────────────────────────────────────────
+
+// View is the root render function.
+func View(state any) vogui.Node {
+	s := state.(*State)
+	return vogui.Column(
+		toolbar(s),
+		vogui.Row(
+			sidebar(s),
+			mainArea(s),
+		).Flex(1).Overflow("hidden"),
+	).H("100vh").Overflow("hidden").Style("fontFamily", "system-ui, sans-serif")
+}
+
+// ── Toolbar ───────────────────────────────────────────────────────────────────
+
+func toolbar(s *State) vogui.Node {
+	return vogui.Row(
+		vogui.Text("Vibe Studio").Bold().Font(15).Fg(colorWhite),
+		vogui.Spacer(),
+		modeButton(s, "code", 0, "Code"),
+		modeButton(s, "split", 1, "Split"),
+		modeButton(s, "preview", 2, "Preview"),
+		vogui.Spacer(),
+		vogui.Button("▶ Run", vogui.On(runCode)).Bg(colorRun).Fg(colorWhite).Px(12).Rounded(4),
+		vogui.Button("▶ GUI", vogui.On(runGui)).Bg(colorGui).Fg(colorWhite).Px(12).Rounded(4),
+		vogui.Button("■ Stop", vogui.On(stopGuest)).Bg(colorStop).Fg(colorWhite).Px(12).Rounded(4),
+	).P(8).Gap(6).Bg(colorToolbar).Style("borderBottom", "1px solid "+colorBorder)
+}
+
+func modeButton(s *State, mode string, modeIdx int, label string) vogui.Node {
+	bg := colorItem
+	if s.Mode == mode {
+		bg = colorAccent
+	}
+	return vogui.Button(label, vogui.OnInt(setModeIdx, modeIdx)).Bg(bg).Fg(colorWhite).Px(10).Rounded(4)
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+
+func sidebar(s *State) vogui.Node {
+	items := make([]vogui.Node, len(s.Files))
+	for i, f := range s.Files {
+		bg := "transparent"
+		fg := colorMuted
+		if s.ActiveFile == i {
+			bg = colorItem
+			fg = colorWhite
+		}
+		items[i] = vogui.Button(f.Name, vogui.OnInt(switchFile, i)).
+			Bg(bg).Fg(fg).
+			Style("textAlign", "left").
+			Style("padding", "6px 12px").
+			Style("borderRadius", "0").
+			W("100%")
+	}
+	return vogui.Column(items...).
+		W(180).
+		Bg(colorSidebar).
+		Style("borderRight", "1px solid "+colorBorder).
+		Overflow("auto")
+}
+
+// ── Main area ─────────────────────────────────────────────────────────────────
+
+func mainArea(s *State) vogui.Node {
+	switch s.Mode {
+	case "preview":
+		return guestPanel(s).Flex(1)
+	case "split":
+		return vogui.Row(
+			editorPanel(s).Flex(1),
+			vogui.Column(
+				guestPanel(s).Flex(1),
+				outputPanel(s).H(160),
+			).Flex(1).Style("borderLeft", "1px solid "+colorBorder),
+		).Flex(1)
+	default: // "code"
+		return vogui.Column(
+			editorPanel(s).Flex(1),
+			outputPanel(s).H(160),
+		).Flex(1)
+	}
+}
+
+func editorPanel(s *State) vogui.Node {
+	content := ""
+	if s.ActiveFile >= 0 && s.ActiveFile < len(s.Files) {
+		content = s.Files[s.ActiveFile].Content
+	}
+	return vogui.ExternalWidget(vogui.ExternalWidgetOpts{
+		ID:      "editor",
+		Type:    "codemirror",
+		Props:   map[string]any{"content": content, "language": "vo"},
+		OnEvent: vogui.OnWidget(onEditorChange),
+	})
+}
+
+func guestPanel(s *State) vogui.Node {
+	if s.GuestModule == nil {
+		return vogui.Column(
+			vogui.Text("No GUI app running.").Fg(colorDim).Font(14),
+			vogui.Text("Click '▶ GUI' to run a vogui app.").Fg(colorFaint).Font(12),
+		).P(24).Gap(8).Bg(colorGuest).Style("alignItems", "center").Style("justifyContent", "center")
+	}
+	return vogui.ExternalWidget(vogui.ExternalWidgetOpts{
+		ID:      "guest",
+		Type:    "vogui-guest",
+		Props:   map[string]any{"renderJson": s.GuestRender},
+		OnEvent: vogui.OnWidget(sendGuestEvent),
+	})
+}
+
+func outputPanel(s *State) vogui.Node {
+	text := s.Output
+	if text == "" {
+		text = "Output will appear here..."
+	}
+	return vogui.Column(
+		vogui.Text("Output").Bold().Font(12).Fg(colorDim),
+		vogui.Text(text).Font(12).Fg(colorMuted).Style("whiteSpace", "pre-wrap").Overflow("auto").Flex(1),
+	).P(8).Gap(4).Bg(colorOutput).Style("borderTop", "1px solid "+colorBorder)
+}

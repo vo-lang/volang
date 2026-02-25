@@ -9,7 +9,7 @@ use std::env;
 use std::fs;
 use std::process;
 
-use vo_vm::vm::Vm;
+use vo_vm::vm::{SchedulingOutcome, Vm};
 use vo_common_core::bytecode::Module;
 
 fn main() {
@@ -49,9 +49,13 @@ fn main() {
     
     vm.load(module);
     
-    if let Err(e) = vm.run() {
-        eprintln!("Runtime error: {:?}", e);
-        process::exit(1);
+    match vm.run() {
+        Err(e) => { eprintln!("Runtime error: {:?}", e); process::exit(1); }
+        Ok(SchedulingOutcome::Blocked) => {
+            eprintln!("Runtime error: {:?}", vm.deadlock_err());
+            process::exit(1);
+        }
+        Ok(_) => {}
     }
     
     println!("[VO:OK]");

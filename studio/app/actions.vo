@@ -1,0 +1,125 @@
+// IDE action handlers (state mutations).
+package studio
+
+import (
+	"encoding/json"
+	"vox"
+)
+
+// stopRunningGuest stops any active guest VM and clears its state.
+func stopRunningGuest(s *State) {
+	if s.GuestModule != nil {
+		vox.StopGui(s.GuestModule)
+		s.GuestModule = nil
+		s.GuestRender = ""
+	}
+}
+
+// switchFile changes the active file in the sidebar.
+func switchFile(state any, idx int) {
+	s := state.(*State)
+	s.ActiveFile = idx
+	stopRunningGuest(s)
+}
+
+// onEditorChange updates file content when the CodeMirror widget reports a change.
+func onEditorChange(state any, payload string) {
+	s := state.(*State)
+	if s.ActiveFile >= 0 && s.ActiveFile < len(s.Files) {
+		s.Files[s.ActiveFile].Content = payload
+	}
+}
+
+// runCode compiles and runs the current file.
+func runCode(state any) {
+	s := state.(*State)
+	if s.ActiveFile < 0 || s.ActiveFile >= len(s.Files) {
+		return
+	}
+	code := s.Files[s.ActiveFile].Content
+	s.Output = ""
+	s.GuestRender = ""
+
+	m, err := vox.CompileString(code)
+	if err != nil {
+		s.Output = "Compile error:\n" + err.Error()
+		return
+	}
+
+	output, err := vox.RunCapture(m)
+	if err != nil {
+		s.Output = output + "\nRun error:\n" + err.Error()
+	} else {
+		s.Output = output
+	}
+	vox.Free(m)
+}
+
+// runGui compiles the current file as a vogui app and launches it.
+func runGui(state any) {
+	s := state.(*State)
+	if s.ActiveFile < 0 || s.ActiveFile >= len(s.Files) {
+		return
+	}
+	code := s.Files[s.ActiveFile].Content
+
+	stopRunningGuest(s)
+
+	m, err := vox.CompileString(code)
+	if err != nil {
+		s.Output = "Compile error:\n" + err.Error()
+		return
+	}
+
+	render, err := vox.RunGui(m)
+	if err != nil {
+		s.Output = "GUI error:\n" + err.Error()
+		vox.Free(m)
+		return
+	}
+
+	s.GuestModule = m
+	s.GuestRender = render
+	s.Output = ""
+	s.Mode = "split"
+}
+
+// sendGuestEvent forwards a GUI event from the guest widget to the guest VM.
+func sendGuestEvent(state any, payload string) {
+	s := state.(*State)
+	if s.GuestModule == nil {
+		return
+	}
+
+	var eventData struct {
+		HandlerID int    `json:"h"`
+		Payload   string `json:"p"`
+	}
+	if err := json.Unmarshal([]byte(payload), &eventData); err != nil {
+		s.Output = "Event decode error: " + err.Error()
+		return
+	}
+
+	render, err := vox.SendGuiEvent(s.GuestModule, eventData.HandlerID, eventData.Payload)
+	if err != nil {
+		s.Output = "Guest event error: " + err.Error()
+		return
+	}
+	s.GuestRender = render
+}
+
+// stopGuest stops the running guest app.
+func stopGuest(state any) {
+	s := state.(*State)
+	stopRunningGuest(s)
+	s.Mode = "code"
+}
+
+// setModeIdx changes the layout mode by integer index (0=code, 1=split, 2=preview).
+func setModeIdx(state any, idx int) {
+	s := state.(*State)
+	modes := []string{"code", "split", "preview"}
+	if idx >= 0 && idx < len(modes) {
+		s.Mode = modes[idx]
+	}
+}

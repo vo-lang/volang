@@ -15,7 +15,7 @@ gc-debug = ["vo-runtime/gc-debug"]
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-vo-engine = { path = "../../../lang/crates/vo-engine" }
+vo-engine = { path = "../../../lang/crates/vo-engine", default-features = false }
 vo-vm = { path = "../../../lang/crates/vo-vm" }
 vo-runtime = { path = "../../../lang/crates/vo-runtime" }
 vo-stdlib = { path = "../../../lang/crates/vo-stdlib", features = ["std"] }
@@ -23,4 +23,5 @@ vo-ext = { path = "../../../lang/crates/vo-ext" }
 vo-ffi-macro = { path = "../../../lang/crates/vo-ffi-macro" }
 vo-common = { path = "../../../lang/crates/vo-common" }
 vo-syntax = { path = "../../../lang/crates/vo-syntax" }
+vogui = { path = "../../vogui/rust", default-features = false }
 linkme = "0.3"

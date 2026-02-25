@@ -9,6 +9,7 @@
 mod ffi;
 mod printer;
 mod format;
+pub mod gui;
 
 /// Force link this crate's FFI functions.
 /// Call this from your main() to ensure linkme symbols are included.

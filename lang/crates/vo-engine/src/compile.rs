@@ -128,6 +128,20 @@ pub fn compile_with_cache(path: &str) -> Result<CompileOutput, CompileError> {
     Ok(output)
 }
 
+/// Compile a Vo project from an in-memory file system.
+///
+/// All packages must be laid out in `fs` as the resolver expects:
+/// - Root-level `.vo` files are the package being compiled.
+/// - Local dependencies are subdirectories: `"vogui/app.vo"`, `"vox/vox.vo"`, etc.
+///
+/// `root` is only used as the reported `source_root` in the output; it does not
+/// need to exist on the real filesystem.
+///
+/// GitHub modules are still resolved from `~/.vo/mod/` as with `compile()`.
+pub fn compile_from_memory(fs: MemoryFs, root: &Path) -> Result<CompileOutput, CompileError> {
+    compile_with_fs(fs, root, None)
+}
+
 /// Compile a Vo source string as if it were a single file at the given root directory.
 ///
 /// The source is stored in a `MemoryFs` under `"main.vo"`. The root is used for

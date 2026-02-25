@@ -1,0 +1,11 @@
+// Vibe Studio IDE entry point.
+package studio
+
+import "vogui"
+
+func main() {
+	vogui.Run(vogui.App{
+		Init: initState,
+		View: View,
+	})
+}

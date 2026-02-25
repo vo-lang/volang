@@ -224,6 +224,45 @@ def run_playground(build_only: bool = False):
         print(f"\n{Colors.GREEN}Playground stopped{Colors.NC}")
 
 
+def build_studio_wasm():
+    """Build vo-studio WASM (studio/wasm)."""
+    print(f"{Colors.BOLD}Building vo-studio WASM...{Colors.NC}")
+    studio_wasm_dir = PROJECT_ROOT / 'studio' / 'wasm'
+    build_cmd = ['wasm-pack', 'build', str(studio_wasm_dir), '--target', 'web', '--release']
+    code, stdout, stderr = run_cmd(build_cmd, capture=False)
+    if code != 0:
+        print(f"{Colors.RED}vo-studio WASM build failed{Colors.NC}")
+        sys.exit(1)
+
+    pkg_dir = studio_wasm_dir / 'pkg'
+    wasm_file = pkg_dir / 'vo_studio_bg.wasm'
+    if wasm_file.exists():
+        size_kb = wasm_file.stat().st_size / 1024
+        print(f"{Colors.GREEN}✓ vo-studio:{Colors.NC} {size_kb:.1f} KB")
+
+
+def run_studio(build_wasm: bool = False, build_only: bool = False):
+    """Optionally build studio WASM and start the studio dev server."""
+    if build_wasm or build_only:
+        build_studio_wasm()
+
+    if build_only:
+        return
+
+    studio_dir = PROJECT_ROOT / 'studio'
+    if not studio_dir.exists():
+        print(f"{Colors.RED}Studio directory not found: {studio_dir}{Colors.NC}")
+        sys.exit(1)
+
+    print(f"\n{Colors.BOLD}Starting Vibe Studio...{Colors.NC}")
+    print(f"{Colors.DIM}Press Ctrl+C to stop{Colors.NC}\n")
+
+    try:
+        subprocess.run(['npm', 'run', 'dev'], cwd=studio_dir, check=True)
+    except KeyboardInterrupt:
+        print(f"\n{Colors.GREEN}Studio stopped{Colors.NC}")
+
+
 def ensure_vox_extension_built(arch: str = '64', release: bool = False, native: bool = False):
     """Build vo-vox extension if needed."""
     if native:
@@ -1528,6 +1567,13 @@ def main():
     play_parser.add_argument('--build-only', action='store_true',
                              help='Only build WASM, do not start dev server')
 
+    # studio
+    studio_parser = subparsers.add_parser('studio', help='Start Vibe Studio dev server')
+    studio_parser.add_argument('--build-wasm', action='store_true',
+                               help='Build studio WASM before starting')
+    studio_parser.add_argument('--build-only', action='store_true',
+                               help='Only build studio WASM, do not start dev server')
+
     # run
     run_parser = subparsers.add_parser('run', help='Run a .vo file')
     run_parser.add_argument('file', help='.vo file to run')
@@ -1573,6 +1619,9 @@ def main():
 
     elif args.command == 'play':
         run_playground(build_only=args.build_only)
+
+    elif args.command == 'studio':
+        run_studio(build_wasm=args.build_wasm, build_only=args.build_only)
 
     elif args.command == 'run':
         run_vo_file(args.file, mode=args.mode, codegen=args.codegen)

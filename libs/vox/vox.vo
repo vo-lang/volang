@@ -80,3 +80,20 @@ func SaveBytecodeBinary(m Module, path string) error
 
 // LoadBytecodeBinary reads Module from a .vob file.
 func LoadBytecodeBinary(path string) (Module, error)
+
+// ============ GUI ============
+
+// RunGui starts a GUI app and returns the initial render JSON.
+// The module's VM stays alive for subsequent SendGuiEvent calls.
+func RunGui(m Module) (string, error)
+
+// SendGuiEvent sends an event to a running GUI app.
+// Returns the new render JSON after the event is processed.
+func SendGuiEvent(m Module, handlerId int, payload string) (string, error)
+
+// StopGui stops a running GUI app and releases its VM.
+func StopGui(m Module)
+
+// CompileCheck compiles source code and returns compile errors as a newline-separated string.
+// Returns ("", nil) on success.
+func CompileCheck(code string) (string, error)

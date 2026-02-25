@@ -3,7 +3,7 @@
 use std::fmt;
 use vo_common_core::debug_info::SourceLoc;
 use vo_vm::bytecode::Module;
-use vo_vm::vm::{RuntimeTrapKind, Vm, VmError};
+use vo_vm::vm::{RuntimeTrapKind, SchedulingOutcome, Vm, VmError};
 use vo_runtime::ext_loader::{ExtensionLoader, ExtensionManifest};
 
 use crate::compile::{CompileOutput, CompileError};
@@ -132,20 +132,24 @@ pub fn run(output: CompileOutput, mode: RunMode, args: Vec<String>) -> Result<()
     
     vm.set_program_args(args);
     vm.load_with_extensions(module, ext_loader.as_ref());
-    
-    match vm.run() {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let runtime_err = vm.module()
-                .map(|m| RuntimeError::from_vm_error(&e, m))
-                .unwrap_or_else(|| RuntimeError {
-                    message: format!("{:?}", e),
-                    location: None,
-                    kind: RuntimeErrorKind::Other,
-                });
-            Err(RunError::Runtime(runtime_err))
-        }
+
+    let outcome = vm.run().map_err(|e| vm_err_to_run_err(&vm, &e))?;
+    if outcome == SchedulingOutcome::Blocked {
+        let e = vm.deadlock_err();
+        return Err(vm_err_to_run_err(&vm, &e));
     }
+    Ok(())
+}
+
+fn vm_err_to_run_err(vm: &Vm, e: &VmError) -> RunError {
+    let runtime_err = vm.module()
+        .map(|m| RuntimeError::from_vm_error(e, m))
+        .unwrap_or_else(|| RuntimeError {
+            message: format!("{:?}", e),
+            location: None,
+            kind: RuntimeErrorKind::Other,
+        });
+    RunError::Runtime(runtime_err)
 }
 
 fn load_extensions(manifests: &[ExtensionManifest]) -> Result<Option<ExtensionLoader>, RunError> {

@@ -1,0 +1,32 @@
+// ExternalWidget — escape hatch for JS-native components (CodeMirror, xterm, etc.)
+package vogui
+
+// ExternalWidgetOpts configures an external JS widget.
+type ExternalWidgetOpts struct {
+	ID      string         // Unique widget instance ID (required)
+	Type    string         // Widget type name registered in JS
+	Props   map[string]any // Widget-specific configuration
+	OnEvent Handler        // Receives raw string events from the widget
+}
+
+// ExternalWidget creates a node that delegates rendering to a JS widget.
+// The JS renderer looks up the widget type in its registry and creates or
+// updates the widget instance. Widget instances are preserved across re-renders.
+func ExternalWidget(opts ExternalWidgetOpts) Node {
+	props := map[string]any{
+		"id":         opts.ID,
+		"widgetType": opts.Type,
+	}
+	for k, v := range opts.Props {
+		props[k] = v
+	}
+	if opts.OnEvent.Type != 0 {
+		props["onEvent"] = opts.OnEvent.ID
+	}
+	return Node{Type: "ExternalWidget", Props: props}
+}
+
+// OnWidget registers a handler for ExternalWidget events.
+// The action receives the raw payload string sent by the widget implementation.
+// Action signature: func(s *State, payload string)
+func OnWidget(action any) Handler { return registerHandler(action, handlerWidget, 0) }
