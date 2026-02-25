@@ -734,6 +734,7 @@ mod wasm {
         let window = web_sys::window().ok_or("no window object")?;
         let opts = web_sys::RequestInit::new();
         opts.set_method("HEAD");
+        let _ = js_sys::Reflect::set(&opts, &wasm_bindgen::JsValue::from_str("cache"), &wasm_bindgen::JsValue::from_str("no-store"));
         let request = web_sys::Request::new_with_str_and_init(&url, &opts)
             .map_err(|e| e.as_string().unwrap_or_else(|| "request error".into()))?;
         let resp_value = JsFuture::from(window.fetch_with_request(&request))
@@ -798,6 +799,7 @@ mod wasm {
         let window = web_sys::window().ok_or("no window object")?;
         let opts = web_sys::RequestInit::new();
         opts.set_method("GET");
+        let _ = js_sys::Reflect::set(&opts, &wasm_bindgen::JsValue::from_str("cache"), &wasm_bindgen::JsValue::from_str("no-store"));
         let request = web_sys::Request::new_with_str_and_init(&url, &opts)
             .map_err(|e| e.as_string().unwrap_or_else(|| "request error".into()))?;
         let resp_value = JsFuture::from(window.fetch_with_request(&request))
