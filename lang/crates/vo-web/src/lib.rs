@@ -166,61 +166,33 @@ pub fn compile_source_with_mod_fs(
     std_fs: MemoryFs,
     mod_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
+    use vo_analysis::analyze_project;
+    use vo_codegen::compile_project;
+    use vo_module::vfs::{PackageResolver, StdSource, LocalSource, ModSource};
+    
     // Create virtual file system with the source
     let mut fs = MemoryFs::new();
     fs.add_file(PathBuf::from(filename), source.to_string());
-
-    compile_entry_with_mod_fs(filename, fs, std_fs, mod_fs)
-}
-
-/// Compile an entry file from a provided local filesystem plus stdlib filesystem.
-///
-/// Unlike `compile_source_with_std_fs`, this supports multi-file local packages
-/// (all files in the same package directory are visible to type checking).
-#[cfg(feature = "compiler")]
-pub fn compile_entry_with_std_fs(
-    entry_filename: &str,
-    local_fs: MemoryFs,
-    std_fs: MemoryFs,
-) -> Result<Vec<u8>, String> {
-    compile_entry_with_mod_fs(entry_filename, local_fs, std_fs, MemoryFs::new())
-}
-
-/// Compile an entry file from local/std/module filesystems.
-#[cfg(feature = "compiler")]
-pub fn compile_entry_with_mod_fs(
-    entry_filename: &str,
-    local_fs: MemoryFs,
-    std_fs: MemoryFs,
-    mod_fs: MemoryFs,
-) -> Result<Vec<u8>, String> {
-    use vo_analysis::analyze_project;
-    use vo_codegen::compile_project;
-    use vo_module::vfs::{LocalSource, ModSource, PackageResolver, StdSource};
-
-    // Collect ALL .vo files in the entry's package directory so same-package
-    // symbols (e.g. initState, View) are visible to type checking.
-    let pkg_dir = Path::new(entry_filename)
-        .parent()
-        .unwrap_or(Path::new("."));
-    let file_set = FileSet::collect(&local_fs, pkg_dir, PathBuf::from("."))
-        .map_err(|e| format!("Failed to read package dir {:?}: {}", pkg_dir, e))?;
-
+    
+    // Create FileSet
+    let file_set = FileSet::from_file(&fs, Path::new(filename), PathBuf::from("."))
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+    
     // Create package resolver with provided filesystems
     let resolver = PackageResolver {
         std: StdSource::with_fs(std_fs),
-        local: LocalSource::with_fs(local_fs),
+        local: LocalSource::with_fs(fs.clone()),
         r#mod: ModSource::with_fs(mod_fs),
     };
-
+    
     // Analyze project
     let project = analyze_project(file_set, &resolver)
         .map_err(|e| format!("{}", e))?;
-
+    
     // Compile to bytecode
     let module = compile_project(&project)
         .map_err(|e| format!("{:?}", e))?;
-
+    
     // Serialize to bytes
     Ok(module.serialize())
 }
@@ -247,22 +219,20 @@ pub async fn prepare_github_modules(source: &str) -> Result<(MemoryFs, String), 
     let imports = fetch::detect_github_imports(source)?;
     let mut mod_fs = MemoryFs::new();
     for imp in &imports {
-        let module_files = fetch::fetch_module_files(&imp.module, &imp.version).await
-            .map_err(|e| format!("Failed to fetch {}: {}", imp.module, e))?;
-        let is_bindgen = fetch::is_bindgen_ext(&imp.module, &module_files);
-        for (vfs_path, content) in module_files {
-            mod_fs.add_file(vfs_path, content);
+        match fetch::fetch_module_files(&imp.module, &imp.version).await {
+            Ok(files) => {
+                for (vfs_path, content) in files {
+                    mod_fs.add_file(vfs_path, content);
+                }
+            }
+            Err(e) => return Err(format!("Failed to fetch {}: {}", imp.module, e)),
         }
         match fetch::fetch_wasm_binary(&imp.module, &imp.version).await {
             Ok(Some(bytes)) => {
-                let js_glue_url = if is_bindgen {
-                    fetch::fetch_wasm_js_glue_url(&imp.module, &imp.version)
-                        .await
-                        .unwrap_or(None)
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
+                let js_glue_url = fetch::fetch_wasm_js_glue_url(&imp.module, &imp.version)
+                    .await
+                    .unwrap_or(None)
+                    .unwrap_or_default();
                 ext_bridge::load_wasm_ext_module(&imp.module, &bytes, &js_glue_url).await?;
             }
             Ok(None) => {}
@@ -394,7 +364,7 @@ async fn await_fetch(
     };
     vo_web_runtime_wasm::net_http::store_fetch_result(token, fetch_result);
     vm.wake_host_event(token);
-    vm.run_scheduled()
+    vm.run_scheduled_resumable()
 }
 
 /// Best-effort monotonic clock in milliseconds for WASM host environments.
@@ -513,10 +483,7 @@ pub fn create_vm_from_module(module: Module, register_externs: ExternRegistrar) 
     register_externs(reg, exts);
     
     vm.load(module);
-    let outcome = vm.run().map_err(|e| format!("{:?}", e))?;
-    if outcome == SchedulingOutcome::Blocked {
-        return Err(format!("{:?}", vm.deadlock_err()));
-    }
+    vm.run().map_err(|e| format!("{:?}", e))?;
     Ok(vm)
 }
 
@@ -538,10 +505,8 @@ pub fn call_closure(vm: &mut Vm, closure: GcRef, args: &[u64]) -> Result<(), Str
     );
     
     vm.spawn_call(func_id, &full_args);
-    let outcome = vm.run_scheduled().map_err(|e| format!("{:?}", e))?;
-    if outcome == SchedulingOutcome::Blocked {
-        return Err(format!("{:?}", vm.deadlock_err()));
-    }
+    vm.run_scheduled().map_err(|e| format!("{:?}", e))?;
+    
     Ok(())
 }
 
@@ -587,7 +552,7 @@ pub async fn run_bytecode_async_with_externs(
 
 /// Shared inner async run loop (extracted so both run_vm_async variants can use it).
 async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, String, String) {
-    let mut outcome = match vm.run() {
+    let mut outcome = match vm.run_resumable() {
         Ok(o) => o,
         Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
     };
@@ -619,7 +584,7 @@ async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, String, String) 
                 wasm_callback_sleep_ms(remaining).await;
             }
             vm.wake_host_event(ev.token);
-            outcome = match vm.run_scheduled() {
+            outcome = match vm.run_scheduled_resumable() {
                 Ok(o) => o,
                 Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
             };
