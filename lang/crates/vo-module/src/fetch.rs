@@ -622,8 +622,8 @@ mod wasm {
 
         let mut result = Vec::new();
         for entry in github_contents_entries(&json_str) {
-            // Only fetch .vo source files and vo.mod
-            if entry.name.ends_with(".vo") || entry.name == "vo.mod" {
+            // Fetch .vo sources, vo.mod, and vo.ext.toml (for bindgen detection)
+            if entry.name.ends_with(".vo") || entry.name == "vo.mod" || entry.name == "vo.ext.toml" {
                 let content_bytes = fetch_bytes(&entry.download_url).await
                     .map_err(|e| format!("Failed to fetch {}: {}", entry.name, e))?;
                 let content = String::from_utf8(content_bytes).map_err(|e| e.to_string())?;
@@ -631,6 +631,16 @@ mod wasm {
             }
         }
         Ok(result)
+    }
+
+    /// Return true when the fetched module files declare `type = "wasm-bindgen"`
+    /// in their `vo.ext.toml`, meaning a separate JS glue file is needed.
+    pub fn is_bindgen_ext(module: &str, files: &[(PathBuf, String)]) -> bool {
+        let ext_toml_path = PathBuf::from(format!("{}/vo.ext.toml", module));
+        files.iter()
+            .find(|(p, _)| *p == ext_toml_path)
+            .map(|(_, content)| content.contains("\"wasm-bindgen\""))
+            .unwrap_or(false)
     }
 
     struct GitHubFileEntry {
