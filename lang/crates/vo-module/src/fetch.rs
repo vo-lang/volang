@@ -639,7 +639,12 @@ mod wasm {
         let ext_toml_path = PathBuf::from(format!("{}/vo.ext.toml", module));
         files.iter()
             .find(|(p, _)| *p == ext_toml_path)
-            .map(|(_, content)| content.contains("\"wasm-bindgen\""))
+            .map(|(_, content)| {
+                content.lines().any(|line| {
+                    let line = line.trim();
+                    line == r#"type = "wasm-bindgen""#
+                })
+            })
             .unwrap_or(false)
     }
 

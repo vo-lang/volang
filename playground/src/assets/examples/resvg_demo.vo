@@ -1,7 +1,7 @@
 package main
 
 import "vogui"
-import "github.com/vo-lang/resvg@v0.1.0"
+import "github.com/vo-lang/resvg@main"
 import "encoding/base64"
 
 const svgContent = `<svg width="320" height="200" xmlns="http://www.w3.org/2000/svg">
