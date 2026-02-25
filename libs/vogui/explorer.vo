@@ -1,0 +1,95 @@
+// FileExplorer provides a VS Code-style file explorer sidebar widget.
+// The widget implementation lives in TypeScript (ExternalWidget "file-explorer"),
+// so the host application must register the factory via registerWidget().
+// This file provides the clean Vo API wrapper.
+package vogui
+
+import "encoding/json"
+
+// ── Event types ───────────────────────────────────────────────────────────────
+
+// FileExplorerEventType enumerates the events emitted by the file explorer widget.
+const (
+	FileExplorerOpen   = "open"   // user opens a file; Path+Content set
+	FileExplorerCreate = "create" // user creates a new file; Path+Content set
+	FileExplorerRename = "rename" // user renames; Path=new, OldPath=old
+	FileExplorerDelete = "delete" // user deletes; Path set
+)
+
+// FileExplorerEvent is the parsed payload from an OnWidget handler attached to FileExplorer.
+//
+// Type is one of the FileExplorer* constants.
+// Use ParseFileExplorerEvent to obtain a typed value from the raw payload string.
+type FileExplorerEvent struct {
+	Type    string `json:"type"`
+	Path    string `json:"path"`    // new path (or current for open/delete)
+	OldPath string `json:"oldPath"` // previous path (rename only)
+	Content string `json:"content"` // file content (open/create only)
+}
+
+// ParseFileExplorerEvent parses a raw OnWidget payload into a FileExplorerEvent.
+// Use this inside your OnWidget handler for type-safe event handling:
+//
+//	func onExplorer(state any, payload string) {
+//	    evt, err := vogui.ParseFileExplorerEvent(payload)
+//	    if err != nil { return }
+//	    switch evt.Type {
+//	    case vogui.FileExplorerOpen:
+//	        ...
+//	    }
+//	}
+func ParseFileExplorerEvent(payload string) (FileExplorerEvent, error) {
+	var e FileExplorerEvent
+	err := json.Unmarshal([]byte(payload), &e)
+	return e, err
+}
+
+// ── Options ───────────────────────────────────────────────────────────────────
+
+// FileExplorerOptions configures the file explorer widget.
+type FileExplorerOptions struct {
+	// ActivePath is the currently open file path, used for active-row highlighting.
+	ActivePath string
+	// ReadOnly disables rename, delete, and create operations when true.
+	ReadOnly bool
+	// ShowHidden shows files and directories starting with "." when true.
+	ShowHidden bool
+	// Filter restricts visible files to those matching a glob pattern (e.g. "*.vo").
+	// Directories are always shown regardless of filter. Empty string = show all.
+	Filter string
+}
+
+// ── Constructors ──────────────────────────────────────────────────────────────
+
+// FileExplorer renders a file explorer sidebar with default options.
+// activePath highlights the currently open file.
+// handler receives FileExplorerEvent payloads; use ParseFileExplorerEvent to decode.
+//
+// Usage:
+//
+//	vogui.FileExplorer(s.ActiveFilePath, vogui.OnWidget(onExplorerEvent))
+func FileExplorer(activePath string, handler Handler) Node {
+	return FileExplorerWith(FileExplorerOptions{ActivePath: activePath}, handler)
+}
+
+// FileExplorerWith renders a file explorer sidebar with full configuration.
+//
+// Usage:
+//
+//	vogui.FileExplorerWith(vogui.FileExplorerOptions{
+//	    ActivePath: s.ActiveFilePath,
+//	    ReadOnly:   true,
+//	    Filter:     "*.vo",
+//	}, vogui.OnWidget(onExplorerEvent))
+func FileExplorerWith(opts FileExplorerOptions, handler Handler) Node {
+	return ExternalWidget(
+		"file-explorer",
+		map[string]any{
+			"activePath": opts.ActivePath,
+			"readOnly":   opts.ReadOnly,
+			"showHidden": opts.ShowHidden,
+			"filter":     opts.Filter,
+		},
+		handler,
+	)
+}

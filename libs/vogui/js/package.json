@@ -1,7 +1,7 @@
 {
   "name": "@vogui/runtime",
-  "version": "0.1.0",
-  "description": "VoGUI JavaScript runtime - DOM rendering for Vo GUI applications",
+  "version": "0.2.0",
+  "description": "VoGUI v2 JavaScript runtime - DOM rendering with managed components",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -32,11 +32,5 @@
     "vite": "^5.4.0",
     "vite-plugin-dts": "^4.0.0"
   },
-  "keywords": [
-    "vo",
-    "gui",
-    "vogui",
-    "wasm"
-  ],
   "license": "MIT"
 }

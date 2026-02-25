@@ -1,64 +1,58 @@
-// Router and navigation.
+// Client-side routing for single-page applications.
 package vogui
 
 import "strings"
 
-// Route defines a URL path and its corresponding view.
-// Paths can contain parameters like "/users/:id".
+// Route defines a URL pattern and its view function.
 type Route struct {
 	Path string
 	View func(state any, params map[string]string) Node
 }
 
-// Navigate changes the current URL and re-renders the app.
+// Navigate programmatically navigates to a path.
 func Navigate(path string) {
 	navigate(path)
 	updatePath(path)
 }
 
-// GetCurrentPath returns the current browser URL path.
+// GetCurrentPath returns the current URL path.
 func GetCurrentPath() string {
 	return getCurrentPath()
 }
 
-// matchRoute checks if url matches pattern and extracts parameters.
-// pattern: "/users/:id", url: "/users/123" -> matches=true, params={"id": "123"}
-func matchRoute(pattern string, url string) (map[string]string, bool) {
-	pParts := splitPath(pattern)
-	uParts := splitPath(url)
+// ============ Route Matching ============
 
-	if len(pParts) != len(uParts) {
+func splitPath(path string) []string {
+	parts := strings.Split(path, "/")
+	result := []string{}
+	for _, p := range parts {
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+func matchRoute(pattern string, path string) (map[string]string, bool) {
+	patternParts := splitPath(pattern)
+	pathParts := splitPath(path)
+
+	if len(patternParts) != len(pathParts) {
 		return nil, false
 	}
 
-	params := make(map[string]string)
-
-	for i := 0; i < len(pParts); i++ {
-		p := pParts[i]
-		u := uParts[i]
-
-		if len(p) > 0 && p[0] == ':' {
-			key := p[1:]
-			params[key] = u
-		} else if p != u {
+	params := map[string]string{}
+	for i, pp := range patternParts {
+		if strings.HasPrefix(pp, ":") {
+			params[pp[1:]] = pathParts[i]
+		} else if pp != pathParts[i] {
 			return nil, false
 		}
 	}
-
 	return params, true
 }
 
-func splitPath(path string) []string {
-	// Remove leading/trailing slashes for consistent splitting
-	path = strings.TrimPrefix(path, "/")
-	path = strings.TrimSuffix(path, "/")
-	if path == "" {
-		return []string{}
-	}
-	return strings.Split(path, "/")
-}
-
-// ============ Externs ============
+// ============ Extern Declarations ============
 
 func navigate(path string)
 func getCurrentPath() string

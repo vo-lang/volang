@@ -5,9 +5,6 @@ fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let vogui_root = Path::new(&manifest).join("../../libs/vogui");
 
-    // Tell cargo to re-run if any vogui .vo file changes
-    println!("cargo:rerun-if-changed={}", vogui_root.display());
-
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let out_path = Path::new(&out_dir).join("vogui_files.rs");
     let mut out = std::fs::File::create(&out_path).unwrap();
@@ -16,6 +13,13 @@ fn main() {
     let mut entries: Vec<(String, String)> = Vec::new();
     collect_vo_files(&vogui_root, &vogui_root, "vogui", &mut entries);
     entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Watch the directory for added/deleted files
+    println!("cargo:rerun-if-changed={}", vogui_root.display());
+    // Also watch each individual file so content changes trigger rebuild
+    for (_, abs_path) in &entries {
+        println!("cargo:rerun-if-changed={}", abs_path);
+    }
 
     writeln!(out, "static VOGUI_FILES: &[(&str, &[u8])] = &[").unwrap();
     for (vfs_path, abs_path) in &entries {
@@ -30,7 +34,7 @@ fn main() {
 }
 
 fn collect_vo_files(root: &Path, dir: &Path, vfs_prefix: &str, out: &mut Vec<(String, String)>) {
-    let skip_dirs = ["js", "rust", ".vo-cache", "target", "node_modules"];
+    let skip_dirs = ["js", "rust", ".vo-cache", "target", "node_modules", "examples"];
     let rd = match std::fs::read_dir(dir) {
         Ok(r) => r,
         Err(_) => return,

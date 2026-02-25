@@ -32,7 +32,7 @@ func View(state any) vogui.Node {
 		vogui.Row(
 			sidebar(s),
 			mainArea(s),
-		).Flex(1).Overflow("hidden"),
+		).Flex(1).Overflow("hidden").Style("alignItems", "stretch"),
 	).H("100vh").Overflow("hidden").Style("fontFamily", "system-ui, sans-serif")
 }
 
@@ -62,27 +62,14 @@ func modeButton(s *State, mode string, modeIdx int, label string) vogui.Node {
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 
+// sidebar renders the file explorer.
 func sidebar(s *State) vogui.Node {
-	items := make([]vogui.Node, len(s.Files))
-	for i, f := range s.Files {
-		bg := "transparent"
-		fg := colorMuted
-		if s.ActiveFile == i {
-			bg = colorItem
-			fg = colorWhite
-		}
-		items[i] = vogui.Button(f.Name, vogui.OnInt(switchFile, i)).
-			Bg(bg).Fg(fg).
-			Style("textAlign", "left").
-			Style("padding", "6px 12px").
-			Style("borderRadius", "0").
-			W("100%")
+	activeFile := ""
+	if s.ActiveFile >= 0 && s.ActiveFile < len(s.Files) {
+		activeFile = s.Files[s.ActiveFile].Path
 	}
-	return vogui.Column(items...).
-		W(180).
-		Bg(colorSidebar).
-		Style("borderRight", "1px solid "+colorBorder).
-		Overflow("auto")
+	return vogui.FileExplorer(activeFile, vogui.OnWidget(onExplorerEvent)).
+		W(240).Style("flexShrink", "0").Style("overflow", "hidden")
 }
 
 // ── Main area ─────────────────────────────────────────────────────────────────
@@ -112,12 +99,11 @@ func editorPanel(s *State) vogui.Node {
 	if s.ActiveFile >= 0 && s.ActiveFile < len(s.Files) {
 		content = s.Files[s.ActiveFile].Content
 	}
-	return vogui.ExternalWidget(vogui.ExternalWidgetOpts{
-		ID:      "editor",
-		Type:    "codemirror",
-		Props:   map[string]any{"content": content, "language": "vo"},
-		OnEvent: vogui.OnWidget(onEditorChange),
-	})
+	return vogui.ExternalWidget(
+		"codemirror",
+		map[string]any{"content": content, "language": "vo"},
+		vogui.OnWidget(onEditorChange),
+	).Key("editor")
 }
 
 func guestPanel(s *State) vogui.Node {
@@ -127,12 +113,11 @@ func guestPanel(s *State) vogui.Node {
 			vogui.Text("Click '▶ GUI' to run a vogui app.").Fg(colorFaint).Font(12),
 		).P(24).Gap(8).Bg(colorGuest).Style("alignItems", "center").Style("justifyContent", "center")
 	}
-	return vogui.ExternalWidget(vogui.ExternalWidgetOpts{
-		ID:      "guest",
-		Type:    "vogui-guest",
-		Props:   map[string]any{"renderJson": s.GuestRender},
-		OnEvent: vogui.OnWidget(sendGuestEvent),
-	})
+	return vogui.ExternalWidget(
+		"vogui-guest",
+		map[string]any{"renderJson": s.GuestRender},
+		vogui.OnWidget(sendGuestEvent),
+	).Key("guest")
 }
 
 func outputPanel(s *State) vogui.Node {

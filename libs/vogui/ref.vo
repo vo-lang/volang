@@ -1,0 +1,20 @@
+// DOM refs and imperative actions.
+// Refs allow Vo code to trigger imperative DOM operations
+// (focus, scroll, select) on named elements.
+package vogui
+
+// Focus sets focus on the element with the given ref name.
+// Must be called in an action function (after render).
+func Focus(refName string)
+
+// Blur removes focus from the element with the given ref name.
+func Blur(refName string)
+
+// ScrollTo scrolls the element to the given position.
+func ScrollTo(refName string, top int)
+
+// ScrollIntoView scrolls the element into the visible area.
+func ScrollIntoView(refName string)
+
+// SelectText selects all text in the input element.
+func SelectText(refName string)

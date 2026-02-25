@@ -10,9 +10,8 @@
  */
 
 import { registerWidget, render } from '@vogui/index';
-import type { WidgetInstance } from '@vogui/renderer';
-import type { VoNode } from '@vogui/types';
 import { injectStyles } from '@vogui/styles';
+import type { WidgetInstance, RenderMessage } from '@vogui/types';
 
 function createVoguiGuestWidget(
   container: HTMLElement,
@@ -35,18 +34,16 @@ function createVoguiGuestWidget(
     if (!renderJson || renderJson === lastRenderJson) return;
     lastRenderJson = renderJson;
 
-    let parsed: { type: string; tree: VoNode; handlers: any[] };
+    let msg: RenderMessage;
     try {
-      parsed = JSON.parse(renderJson);
+      msg = JSON.parse(renderJson) as RenderMessage;
     } catch {
       return;
     }
-    if (parsed.type !== 'render') return;
+    if (msg.type !== 'render') return;
 
-    render(inner, parsed.tree, {
-      interactive: true,
+    render(inner, msg, {
       onEvent(handlerId: number, payload: string) {
-        // Wrap event for the IDE host VM to forward to the guest VM
         onEvent(JSON.stringify({ h: handlerId, p: payload }));
       },
     });
@@ -58,7 +55,6 @@ function createVoguiGuestWidget(
   }
 
   return {
-    element: container,
     update(newProps: any) {
       if (newProps?.renderJson && newProps.renderJson !== lastRenderJson) {
         applyRender(newProps.renderJson);

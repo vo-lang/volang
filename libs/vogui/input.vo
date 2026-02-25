@@ -1,221 +1,185 @@
-// Input components for user interaction.
+// Input components: buttons, text inputs, checkboxes, selects, etc.
 package vogui
 
+import "fmt"
+
 // Button renders a clickable button.
-func Button(text string, onClick Handler) Node {
-	return Node{
-		Type: "Button",
-		Props: map[string]any{
-			"text":    text,
-			"onClick": onClick.ID,
-		},
-	}
+func Button(label string, handler Handler) Node {
+	return Node{Type: "button", Props: map[string]any{
+		"textContent": label,
+		"onClick":     handler.ID,
+	}}
 }
 
-// IconButton renders an icon-only button.
-func IconButton(icon string, onClick Handler) Node {
-	return Node{
-		Type: "IconButton",
-		Props: map[string]any{
-			"icon":    icon,
-			"onClick": onClick.ID,
-		},
-	}
+// IconButton renders a button with an icon.
+func IconButton(icon string, handler Handler) Node {
+	return Node{Type: "button", Props: map[string]any{
+		"icon":    icon,
+		"onClick": handler.ID,
+	}}.Class("vo-icon-btn")
 }
 
-// Input renders a text input field.
-func Input(value string, onChange Handler) Node {
-	return Node{
-		Type: "Input",
-		Props: map[string]any{
-			"value":    value,
-			"onChange": onChange.ID,
-		},
-	}
+// Input renders a text input.
+func Input(value string, handler Handler) Node {
+	return Node{Type: "input", Props: map[string]any{
+		"value":    value,
+		"onChange": handler.ID,
+	}}
 }
 
-// Password renders a password input field.
-func Password(value string, onChange Handler) Node {
-	return Node{
-		Type: "Password",
-		Props: map[string]any{
-			"value":    value,
-			"onChange": onChange.ID,
-		},
-	}
+// Password renders a password input.
+func Password(value string, handler Handler) Node {
+	return Node{Type: "input", Props: map[string]any{
+		"type":     "password",
+		"value":    value,
+		"onChange": handler.ID,
+	}}
 }
 
-// TextArea renders a multiline text input.
-func TextArea(value string, onChange Handler) Node {
-	return Node{
-		Type: "TextArea",
-		Props: map[string]any{
-			"value":    value,
-			"onChange": onChange.ID,
-		},
-	}
+// TextArea renders a multi-line text input.
+func TextArea(value string, handler Handler) Node {
+	return Node{Type: "textarea", Props: map[string]any{
+		"value":    value,
+		"onChange": handler.ID,
+	}}
 }
 
-// Checkbox renders a checkbox.
-func Checkbox(checked bool, onChange Handler) Node {
-	return Node{
-		Type: "Checkbox",
-		Props: map[string]any{
-			"checked":  checked,
-			"onChange": onChange.ID,
-		},
-	}
+// Placeholder sets the placeholder text on an input node.
+func (n Node) Placeholder(text string) Node {
+	return n.setProp("placeholder", text)
 }
 
-// CheckboxLabel renders a labeled checkbox.
-func CheckboxLabel(label string, checked bool, onChange Handler) Node {
-	return Node{
-		Type: "CheckboxLabel",
-		Props: map[string]any{
-			"label":    label,
-			"checked":  checked,
-			"onChange": onChange.ID,
-		},
-	}
+// Disabled marks an input as disabled.
+func (n Node) Disabled(d bool) Node {
+	return n.setProp("disabled", d)
 }
 
-// Switch renders a toggle switch.
-func Switch(on bool, onChange Handler) Node {
-	return Node{
-		Type: "Switch",
-		Props: map[string]any{
-			"on":       on,
-			"onChange": onChange.ID,
-		},
-	}
+// ReadOnly marks an input as read-only.
+func (n Node) ReadOnly(r bool) Node {
+	return n.setProp("readOnly", r)
+}
+
+// Checkbox renders a labeled checkbox input.
+func Checkbox(label string, checked bool, handler Handler) Node {
+	return Node{Type: "vo-checkbox", Props: map[string]any{
+		"textContent": label,
+		"checked":     checked,
+		"onChange":    handler.ID,
+	}}
+}
+
+// Switch renders a labeled toggle switch.
+func Switch(label string, checked bool, handler Handler) Node {
+	return Node{Type: "vo-switch", Props: map[string]any{
+		"textContent": label,
+		"checked":     checked,
+		"onChange":    handler.ID,
+	}}
 }
 
 // Radio renders a radio button.
-func Radio(value string, group string, selected string, onChange Handler) Node {
-	return Node{
-		Type: "Radio",
-		Props: map[string]any{
-			"value":    value,
-			"group":    group,
-			"selected": selected,
-			"onChange": onChange.ID,
-		},
-	}
+func Radio(label string, value string, selected string, handler Handler) Node {
+	return Node{Type: "vo-radio", Props: map[string]any{
+		"textContent": label,
+		"value":       value,
+		"selected":    selected,
+		"onChange":    handler.ID,
+	}}
 }
 
-// Select renders a dropdown select.
-func Select(value string, options []string, onChange Handler) Node {
-	return Node{
-		Type: "Select",
-		Props: map[string]any{
-			"value":    value,
-			"options":  options,
-			"onChange": onChange.ID,
-		},
-	}
-}
-
-// SelectOption represents a labeled option for SelectLabeled.
+// SelectOption represents an option in a select dropdown.
 type SelectOption struct {
-	Value string
 	Label string
+	Value string
 }
 
-// SelectLabeled renders a dropdown with labeled options.
-func SelectLabeled(value string, options []SelectOption, onChange Handler) Node {
-	return Node{
-		Type: "SelectLabeled",
-		Props: map[string]any{
-			"value":    value,
-			"options":  options,
-			"onChange": onChange.ID,
-		},
+// Select renders a select dropdown.
+func Select(value string, options []SelectOption, handler Handler) Node {
+	optAny := make([]any, len(options))
+	for i, o := range options {
+		optAny[i] = o
 	}
+	return Node{Type: "select", Props: map[string]any{
+		"value":    value,
+		"options":  optAny,
+		"onChange": handler.ID,
+	}}
 }
 
-// Slider renders a slider input.
-func Slider(value int, min int, max int, onChange Handler) Node {
-	return Node{
-		Type: "Slider",
-		Props: map[string]any{
-			"value":    value,
-			"min":      min,
-			"max":      max,
-			"onChange": onChange.ID,
-		},
-	}
+// Slider renders a range slider.
+func Slider(value int, min int, max int, handler Handler) Node {
+	return Node{Type: "vo-slider", Props: map[string]any{
+		"value":    value,
+		"min":      min,
+		"max":      max,
+		"onChange": handler.ID,
+	}}
 }
 
 // NumberInput renders a number input.
-func NumberInput(value int, onChange Handler) Node {
-	return Node{
-		Type: "NumberInput",
-		Props: map[string]any{
-			"value":    value,
-			"onChange": onChange.ID,
-		},
-	}
+func NumberInput(value string, handler Handler) Node {
+	return Node{Type: "input", Props: map[string]any{
+		"type":     "number",
+		"value":    value,
+		"onChange": handler.ID,
+	}}
 }
 
-// DateInput renders a date picker.
-func DateInput(value string, onChange Handler) Node {
-	return Node{
-		Type: "DateInput",
-		Props: map[string]any{
-			"value":    value,
-			"onChange": onChange.ID,
-		},
-	}
+// DateInput renders a date input.
+func DateInput(value string, handler Handler) Node {
+	return Node{Type: "input", Props: map[string]any{
+		"type":     "date",
+		"value":    value,
+		"onChange": handler.ID,
+	}}
 }
 
-// TimeInput renders a time picker.
-func TimeInput(value string, onChange Handler) Node {
-	return Node{
-		Type: "TimeInput",
-		Props: map[string]any{
-			"value":    value,
-			"onChange": onChange.ID,
-		},
-	}
+// TimeInput renders a time input.
+func TimeInput(value string, handler Handler) Node {
+	return Node{Type: "input", Props: map[string]any{
+		"type":     "time",
+		"value":    value,
+		"onChange": handler.ID,
+	}}
 }
 
 // ColorInput renders a color picker.
-func ColorInput(value string, onChange Handler) Node {
-	return Node{
-		Type: "ColorInput",
-		Props: map[string]any{
-			"value":    value,
-			"onChange": onChange.ID,
-		},
-	}
+func ColorInput(value string, handler Handler) Node {
+	return Node{Type: "input", Props: map[string]any{
+		"type":     "color",
+		"value":    value,
+		"onChange": handler.ID,
+	}}
 }
 
-// FileInfo represents information about a selected file.
-type FileInfo struct {
-	Name string
-	Size int
-	Type string
+// FileInput renders a file input.
+func FileInput(handler Handler) Node {
+	return Node{Type: "input", Props: map[string]any{
+		"type":     "file",
+		"onFiles":  handler.ID,
+	}}
 }
 
-// FileInput renders a file picker.
-func FileInput(accept string, onFiles Handler) Node {
-	return Node{
-		Type: "FileInput",
-		Props: map[string]any{
-			"accept":  accept,
-			"onFiles": onFiles.ID,
-		},
-	}
+// SearchInput renders a search input with icon.
+func SearchInput(value string, handler Handler) Node {
+	return Node{Type: "input", Props: map[string]any{
+		"type":     "search",
+		"value":    value,
+		"onChange": handler.ID,
+	}}
 }
 
-// SearchInput renders a search input with submit.
-func SearchInput(value string, onChange Handler, onSubmit Handler) Node {
-	return Node{
-		Type: "SearchInput",
-		Props: map[string]any{
-			"value":    value,
-			"onChange": onChange.ID,
-			"onSubmit": onSubmit.ID,
-		},
-	}
+// Label sets the label/aria-label for an input node.
+func (n Node) Label(text string) Node {
+	return n.setProp("label", text)
+}
+
+// InputType overrides the input type attribute.
+func (n Node) InputType(t string) Node {
+	return n.setProp("type", t)
+}
+
+// Rows sets the number of rows for a textarea.
+func (n Node) Rows(r int) Node {
+	return n.setProp("rows", fmt.Sprint(r))
 }

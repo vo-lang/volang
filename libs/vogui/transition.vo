@@ -1,0 +1,35 @@
+// Transition and TransitionGroup for enter/leave animations.
+package vogui
+
+// Transition wraps a conditional node with CSS-based enter/leave animation.
+// name refers to a built-in or custom transition (e.g., "fade", "slide-up", "scale").
+// The child should be a conditional node (from If or Show).
+//
+// Built-in transitions:
+//   - "fade"        opacity 0→1 / 1→0
+//   - "slide-down"  translateY(-10px)→0 / reverse
+//   - "slide-up"    translateY(10px)→0 / reverse
+//   - "slide-left"  translateX(10px)→0 / reverse
+//   - "slide-right" translateX(-10px)→0 / reverse
+//   - "scale"       scale(0.95)→1 / reverse
+//   - "collapse"    max-height 0→auto / reverse
+//
+// Custom transitions are defined via CSS classes:
+//   .vo-enter-from-{name} { ... }
+//   .vo-enter-active-{name} { transition: ... }
+//   .vo-leave-active-{name} { transition: ... }
+//   .vo-leave-to-{name} { ... }
+func Transition(name string, child Node) Node {
+	return Node{Type: "vo-transition", Props: map[string]any{
+		"transition": name,
+	}, Children: []Node{child}}
+}
+
+// TransitionGroup wraps a list of keyed nodes with animations for
+// entering, leaving, and reordering items.
+// Uses FLIP animation for smooth reordering.
+func TransitionGroup(name string, list Node) Node {
+	return Node{Type: "vo-transition-group", Props: map[string]any{
+		"transition": name,
+	}, Children: []Node{list}}
+}

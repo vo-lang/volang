@@ -1,7 +1,10 @@
-// Tetris Game
+// Tetris Game - demonstrates timers, global key handler, grid rendering
 package main
 
-import "vogui"
+import (
+	"fmt"
+	"vogui"
+)
 
 // ============ Constants ============
 
@@ -17,59 +20,42 @@ type Point struct {
 }
 
 type Piece struct {
-	Type  int // 0-6: I, J, L, O, S, T, Z
-	Rot   int // 0-3
+	Type  int
+	Rot   int
 	X     int
 	Y     int
-	Cells []Point // Relative coordinates
+	Cells []Point
 }
 
 type State struct {
-	Grid      []int // Rows * Cols, 0=empty, >0=colorIndex
-	Score     int
-	Level     int
-	GameOver  bool
-	Paused    bool
-	Current   Piece
-	TimerID   int
-	TickCount int
-    RngState  int
+	Grid     []int
+	Score    int
+	Level    int
+	GameOver bool
+	Paused   bool
+	Current  Piece
+	TimerID  int
+	RngState int
 }
 
-// Colors for pieces: 0=Empty, 1=Cyan, 2=Blue, 3=Orange, 4=Yellow, 5=Green, 6=Purple, 7=Red
-var colors = []string{
-	"#1a1a2e", // Background
-	"#00f0f0", // I - Cyan
-	"#0000f0", // J - Blue
-	"#f0a000", // L - Orange
-	"#f0f000", // O - Yellow
-	"#00f000", // S - Green
-	"#a000f0", // T - Purple
-	"#f00000", // Z - Red
+var pieceColors = []string{
+	"#1a1a2e", "#00f0f0", "#0000f0", "#f0a000",
+	"#f0f000", "#00f000", "#a000f0", "#f00000",
 }
 
-// Shapes: [Type][Rotation][4 cells]
-// Coordinates are relative to pivot
-// I: Type 0
-var shapeI = []Point{Point{-1, 0}, Point{0, 0}, Point{1, 0}, Point{2, 0}}
-// J: Type 1
-var shapeJ = []Point{Point{-1, -1}, Point{-1, 0}, Point{0, 0}, Point{1, 0}}
-// L: Type 2
-var shapeL = []Point{Point{1, -1}, Point{-1, 0}, Point{0, 0}, Point{1, 0}}
-// O: Type 3
-var shapeO = []Point{Point{0, 0}, Point{1, 0}, Point{0, 1}, Point{1, 1}}
-// S: Type 4
-var shapeS = []Point{Point{0, 0}, Point{1, 0}, Point{-1, 1}, Point{0, 1}}
-// T: Type 5
-var shapeT = []Point{Point{0, 0}, Point{-1, 0}, Point{1, 0}, Point{0, -1}}
-// Z: Type 6
-var shapeZ = []Point{Point{-1, 0}, Point{0, 0}, Point{0, 1}, Point{1, 1}}
+var shapeI = []Point{{-1, 0}, {0, 0}, {1, 0}, {2, 0}}
+var shapeJ = []Point{{-1, -1}, {-1, 0}, {0, 0}, {1, 0}}
+var shapeL = []Point{{1, -1}, {-1, 0}, {0, 0}, {1, 0}}
+var shapeO = []Point{{0, 0}, {1, 0}, {0, 1}, {1, 1}}
+var shapeS = []Point{{0, 0}, {1, 0}, {-1, 1}, {0, 1}}
+var shapeT = []Point{{0, 0}, {-1, 0}, {1, 0}, {0, -1}}
+var shapeZ = []Point{{-1, 0}, {0, 0}, {0, 1}, {1, 1}}
 
 // ============ App ============
 
 func main() {
-    gui.SetGlobalKeyHandler(handleKey)
-	gui.Run(gui.App{
+	vogui.SetGlobalKeyHandler(handleKey)
+	vogui.Run(vogui.App{
 		Init: initGame,
 		View: view,
 	})
@@ -78,28 +64,22 @@ func main() {
 func initGame() any {
 	s := &State{
 		Grid:     make([]int, Rows*Cols),
-		Score:    0,
 		Level:    1,
-		GameOver: false,
-		Paused:   false,
-        RngState: 12345, // Seed
+		RngState: 12345,
 	}
 	spawnPiece(s)
-	// Start timer: 500ms
-	s.TimerID = gui.SetInterval(500, func(state any) {
+	s.TimerID = vogui.SetInterval(func(state any) {
 		tick(state.(*State))
-	})
+	}, 500)
 	return s
 }
 
-// ============ Update Logic ============
+// ============ Logic ============
 
 func tick(s *State) {
 	if s.GameOver || s.Paused {
 		return
 	}
-	
-	// Move down
 	if canMove(s, s.Current, 0, 1) {
 		s.Current.Y++
 	} else {
@@ -110,28 +90,23 @@ func tick(s *State) {
 			s.GameOver = true
 		}
 	}
-    // We need to trigger render manually or rely on event loop
-    // In VoGUI, handler updates trigger render. Timer handler does too.
 }
 
 func handleKey(state any, key string) {
 	s := state.(*State)
 	if s.GameOver {
-        if key == "Enter" {
-            restart(s)
-        }
+		if key == "Enter" {
+			restart(s)
+		}
 		return
 	}
-    
-    if key == "p" || key == "P" {
-        s.Paused = !s.Paused
-        return
-    }
-
+	if key == "p" || key == "P" {
+		s.Paused = !s.Paused
+		return
+	}
 	if s.Paused {
 		return
 	}
-
 	switch key {
 	case "ArrowLeft":
 		if canMove(s, s.Current, -1, 0) {
@@ -147,243 +122,200 @@ func handleKey(state any, key string) {
 		}
 	case "ArrowUp":
 		rotatePiece(s)
-    case " ":
-        dropPiece(s)
+	case " ":
+		dropPiece(s)
 	}
 }
 
 func restart(s *State) {
-    s.Grid = make([]int, Rows*Cols)
-    s.Score = 0
-    s.Level = 1
-    s.GameOver = false
-    s.Paused = false
-    spawnPiece(s)
+	s.Grid = make([]int, Rows*Cols)
+	s.Score = 0
+	s.Level = 1
+	s.GameOver = false
+	s.Paused = false
+	spawnPiece(s)
 }
 
 func spawnPiece(s *State) {
-    // Random type 0-6
-    t := rand(s) % 7
-    s.Current = Piece{
-        Type: t,
-        Rot: 0,
-        X: Cols / 2 - 1,
-        Y: 0,
-        Cells: getCells(t, 0),
-    }
+	t := rand(s) % 7
+	s.Current = Piece{Type: t, X: Cols/2 - 1, Cells: getCells(t, 0)}
 }
 
 func getCells(t int, rot int) []Point {
-    var base []Point
-    if t == 0 { base = shapeI }
-    if t == 1 { base = shapeJ }
-    if t == 2 { base = shapeL }
-    if t == 3 { base = shapeO }
-    if t == 4 { base = shapeS }
-    if t == 5 { base = shapeT }
-    if t == 6 { base = shapeZ }
-    
-    // Rotate
-    cells := make([]Point, 4)
-    for i, p := range base {
-        x, y := p.X, p.Y
-        for r := 0; r < rot; r++ {
-            // Rotate 90 deg clockwise: (x, y) -> (-y, x)
-            x, y = -y, x
-        }
-        cells[i] = Point{x, y}
-    }
-    return cells
+	var base []Point
+	switch t {
+	case 0:
+		base = shapeI
+	case 1:
+		base = shapeJ
+	case 2:
+		base = shapeL
+	case 3:
+		base = shapeO
+	case 4:
+		base = shapeS
+	case 5:
+		base = shapeT
+	case 6:
+		base = shapeZ
+	}
+	cells := make([]Point, 4)
+	for i, p := range base {
+		x, y := p.X, p.Y
+		for r := 0; r < rot; r++ {
+			x, y = -y, x
+		}
+		cells[i] = Point{x, y}
+	}
+	return cells
 }
 
 func rotatePiece(s *State) {
-    newRot := (s.Current.Rot + 1) % 4
-    newCells := getCells(s.Current.Type, newRot)
-    
-    // Test if valid
-    p := s.Current
-    p.Rot = newRot
-    p.Cells = newCells
-    
-    if canMove(s, p, 0, 0) {
-        s.Current = p
-    } else {
-        // Wall kicks (simple)
-        if canMove(s, p, 1, 0) {
-            s.Current = p
-            s.Current.X++
-        } else if canMove(s, p, -1, 0) {
-            s.Current = p
-            s.Current.X--
-        }
-    }
+	newRot := (s.Current.Rot + 1) % 4
+	p := s.Current
+	p.Rot = newRot
+	p.Cells = getCells(s.Current.Type, newRot)
+	if canMove(s, p, 0, 0) {
+		s.Current = p
+	} else if canMove(s, p, 1, 0) {
+		s.Current = p
+		s.Current.X++
+	} else if canMove(s, p, -1, 0) {
+		s.Current = p
+		s.Current.X--
+	}
 }
 
 func canMove(s *State, p Piece, dx int, dy int) bool {
-    for _, cell := range p.Cells {
-        nx := p.X + cell.X + dx
-        ny := p.Y + cell.Y + dy
-        
-        if nx < 0 || nx >= Cols || ny >= Rows {
-            return false
-        }
-        if ny >= 0 {
-            idx := ny*Cols + nx
-            if s.Grid[idx] != 0 {
-                return false
-            }
-        }
-    }
-    return true
+	for _, cell := range p.Cells {
+		nx := p.X + cell.X + dx
+		ny := p.Y + cell.Y + dy
+		if nx < 0 || nx >= Cols || ny >= Rows {
+			return false
+		}
+		if ny >= 0 && s.Grid[ny*Cols+nx] != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func lockPiece(s *State) {
-    c := s.Current.Type + 1
-    for _, cell := range s.Current.Cells {
-        nx := s.Current.X + cell.X
-        ny := s.Current.Y + cell.Y
-        if ny >= 0 && ny < Rows && nx >= 0 && nx < Cols {
-            s.Grid[ny*Cols+nx] = c
-        }
-    }
+	c := s.Current.Type + 1
+	for _, cell := range s.Current.Cells {
+		nx := s.Current.X + cell.X
+		ny := s.Current.Y + cell.Y
+		if ny >= 0 && ny < Rows && nx >= 0 && nx < Cols {
+			s.Grid[ny*Cols+nx] = c
+		}
+	}
 }
 
 func clearLines(s *State) {
-    lines := 0
-    for y := Rows - 1; y >= 0; y-- {
-        full := true
-        for x := 0; x < Cols; x++ {
-            if s.Grid[y*Cols+x] == 0 {
-                full = false
-                break
-            }
-        }
-        if full {
-            lines++
-            // Move lines down
-            for ky := y; ky > 0; ky-- {
-                for kx := 0; kx < Cols; kx++ {
-                    s.Grid[ky*Cols+kx] = s.Grid[(ky-1)*Cols+kx]
-                }
-            }
-            // Clear top line
-            for kx := 0; kx < Cols; kx++ {
-                s.Grid[kx] = 0
-            }
-            y++ // Recheck this line
-        }
-    }
-    if lines > 0 {
-        s.Score += lines * 100 * s.Level
-    }
+	lines := 0
+	for y := Rows - 1; y >= 0; y-- {
+		full := true
+		for x := 0; x < Cols; x++ {
+			if s.Grid[y*Cols+x] == 0 {
+				full = false
+				break
+			}
+		}
+		if full {
+			lines++
+			for ky := y; ky > 0; ky-- {
+				for kx := 0; kx < Cols; kx++ {
+					s.Grid[ky*Cols+kx] = s.Grid[(ky-1)*Cols+kx]
+				}
+			}
+			for kx := 0; kx < Cols; kx++ {
+				s.Grid[kx] = 0
+			}
+			y++
+		}
+	}
+	if lines > 0 {
+		s.Score += lines * 100 * s.Level
+	}
 }
 
 func dropPiece(s *State) {
-    for canMove(s, s.Current, 0, 1) {
-        s.Current.Y++
-    }
-    lockPiece(s)
-    clearLines(s)
-    spawnPiece(s)
-    if !canMove(s, s.Current, 0, 0) {
-        s.GameOver = true
-    }
+	for canMove(s, s.Current, 0, 1) {
+		s.Current.Y++
+	}
+	lockPiece(s)
+	clearLines(s)
+	spawnPiece(s)
+	if !canMove(s, s.Current, 0, 0) {
+		s.GameOver = true
+	}
 }
 
-// Pseudo-random number generator
 func rand(s *State) int {
-    s.RngState = (s.RngState * 1103515245 + 12345) % 2147483648
-    if s.RngState < 0 {
-        s.RngState = -s.RngState
-    }
-    return s.RngState
+	s.RngState = (s.RngState*1103515245 + 12345) % 2147483648
+	if s.RngState < 0 {
+		s.RngState = -s.RngState
+	}
+	return s.RngState
 }
 
 // ============ View ============
 
-func view(state any) gui.Node {
+func view(state any) vogui.Node {
 	s := state.(*State)
-    
-	return gui.Center(
-		gui.Column(
-            // Header
-			gui.Row(
-				gui.H2("TETRIS").Fg("#a000f0"),
-				gui.Spacer(),
-				gui.Column(
-                    gui.Text("Score: ", s.Score).Font(16).Bold(),
-                    gui.Text("Level: ", s.Level).Font(12),
-                ),
-			).W(CellSize * Cols).M(10),
-            
-            // Game Board
-            gui.Column(
-                renderGrid(s),
-            ).Bg("#000").Border("2px solid #333").P(0),
-            
-            // Controls Info
-            gui.Text("Controls: Arrows to move/rotate, Space to drop").Font(12).Fg("#666").M(10),
-            
-            // Game Over Overlay
-            gui.Show(s.GameOver, 
-                gui.Center(
-                    gui.Column(
-                        gui.H2("GAME OVER").Fg("#f00"),
-                        gui.Text("Final Score: ", s.Score),
-                        gui.Button("Restart", gui.On(actionRestart)).Bg("#a000f0").Fg("#fff"),
-                    ).P(20).Bg("rgba(0,0,0,0.8)").Rounded(10),
-                ).Styles(map[string]any{
-                    "position": "absolute", 
-                    "top": "0", "left": "0", "right": "0", "bottom": "0",
-                }),
-            ),
-		).Styles(map[string]any{"position": "relative"}),
-	)
+	return vogui.Center(
+		vogui.Column(
+			vogui.Row(
+				vogui.H2("TETRIS").Fg("#a000f0"),
+				vogui.Spacer(),
+				vogui.Column(
+					vogui.Text("Score: "+fmt.Sprint(s.Score)).Font(16).Bold(),
+					vogui.Text("Level: "+fmt.Sprint(s.Level)).Font(12),
+				),
+			).W(CellSize * Cols),
+			renderGrid(s),
+			vogui.Text("Arrows: move/rotate | Space: drop | P: pause").Font(12).Fg("#666"),
+			vogui.Show(s.GameOver,
+				vogui.Center(
+					vogui.Column(
+						vogui.H2("GAME OVER").Fg("#f00"),
+						vogui.Text("Final Score: "+fmt.Sprint(s.Score)),
+						vogui.Button("Restart (Enter)", vogui.On(func(s *State) { restart(s) })).
+							Bg("#a000f0").Fg("#fff"),
+					).P(20).Bg("rgba(0,0,0,0.8)").Rounded(10).Gap(12),
+				).Style("position", "absolute").
+					Style("top", "0").Style("left", "0").
+					Style("right", "0").Style("bottom", "0"),
+			),
+		).Style("position", "relative").Gap(8),
+	).P(24)
 }
 
-func renderGrid(s *State) gui.Node {
-    // Create grid cells
-    // Since we don't have a canvas, we use a Flex/Grid layout or absolute positioning.
-    // A Grid layout is easiest.
-    
-    var cells []gui.Node
-    
-    // Fill with background grid
-    displayGrid := make([]int, Rows*Cols)
-    copy(displayGrid, s.Grid)
-    
-    // Draw current piece
-    if !s.GameOver {
-        c := s.Current.Type + 1
-        for _, cell := range s.Current.Cells {
-            nx := s.Current.X + cell.X
-            ny := s.Current.Y + cell.Y
-            if ny >= 0 && ny < Rows && nx >= 0 && nx < Cols {
-                displayGrid[ny*Cols+nx] = c
-            }
-        }
-    }
-    
-    for i := 0; i < Rows*Cols; i++ {
-        colorIdx := displayGrid[i]
-        color := colors[colorIdx]
-        cells = append(cells, 
-            gui.Node{Type: "Block"}.
-                W(CellSize).H(CellSize).
-                Bg(color).
-                Border("1px solid rgba(255,255,255,0.1)"),
-        )
-    }
-    
-    return gui.Grid(Cols, cells...).Gap(0)
+func renderGrid(s *State) vogui.Node {
+	displayGrid := make([]int, Rows*Cols)
+	copyGrid(displayGrid, s.Grid)
+	if !s.GameOver {
+		c := s.Current.Type + 1
+		for _, cell := range s.Current.Cells {
+			nx := s.Current.X + cell.X
+			ny := s.Current.Y + cell.Y
+			if ny >= 0 && ny < Rows && nx >= 0 && nx < Cols {
+				displayGrid[ny*Cols+nx] = c
+			}
+		}
+	}
+	var cells []vogui.Node
+	for i := 0; i < Rows*Cols; i++ {
+		cells = append(cells, vogui.Div().
+			W(CellSize).H(CellSize).
+			Bg(pieceColors[displayGrid[i]]).
+			Border("1px solid rgba(255,255,255,0.1)"))
+	}
+	return vogui.Grid(Cols, cells...).Gap(0).Bg("#000").Border("2px solid #333")
 }
 
-func actionRestart(s *State) {
-    restart(s)
-}
-
-func copy(dst []int, src []int) {
-    for i := 0; i < len(src); i++ {
-        dst[i] = src[i]
-    }
+func copyGrid(dst []int, src []int) {
+	for i := 0; i < len(src); i++ {
+		dst[i] = src[i]
+	}
 }

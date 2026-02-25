@@ -667,6 +667,8 @@ fn find_field_by_key<'a, R: FormatReader<'a>>(
     
     let mut embedded_fields = Vec::new();
     
+    let mut case_insensitive_match: Option<(GcRef, ValueKind, u32)> = None;
+
     for field in &struct_meta.fields {
         let field_ptr = unsafe { (ptr as *const u8).add(field.offset as usize * SLOT_BYTES) };
         
@@ -678,7 +680,15 @@ fn find_field_by_key<'a, R: FormatReader<'a>>(
             if field_name == key {
                 return Ok(Some((field_ptr as GcRef, field.type_info.value_kind(), field.type_info.rttid())));
             }
+            // Case-insensitive fallback (Go json.Unmarshal behavior)
+            if case_insensitive_match.is_none() && field_name.eq_ignore_ascii_case(key) {
+                case_insensitive_match = Some((field_ptr as GcRef, field.type_info.value_kind(), field.type_info.rttid()));
+            }
         }
+    }
+    
+    if let Some(m) = case_insensitive_match {
+        return Ok(Some(m));
     }
     
     for (embed_ptr, embed_rttid) in embedded_fields {

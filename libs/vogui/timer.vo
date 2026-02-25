@@ -1,63 +1,62 @@
-// Timer support.
+// Timer functions: setTimeout, setInterval, and their cleanup.
 package vogui
 
-// TimerHandler is a function called by a timer with the current state.
-type TimerHandler func(state any)
+// TimerHandler is a function that receives state for timer callbacks.
+// Signature: func(state any)
+type TimerHandler = any
 
 var timerHandlers = map[int]TimerHandler{}
-var timeoutHandlers = map[int]TimerHandler{}
-var nextTimerID = 1
+var nextTimerID int = 1
 
-// SetTimeout calls handler once after ms milliseconds.
-// Returns a timer ID that can be used to cancel it.
-func SetTimeout(ms int, handler TimerHandler) int {
-	id := nextTimerID
-	nextTimerID++
-	timeoutHandlers[id] = handler
-	startTimeout(id, ms)
-	return id
-}
-
-// ClearTimeout cancels a pending timeout.
-func ClearTimeout(id int) {
-	if _, ok := timeoutHandlers[id]; ok {
-		delete(timeoutHandlers, id)
-		clearTimeout(id)
-	}
-}
-
-// SetInterval starts a timer that calls handler every ms milliseconds.
-// Returns a timer ID that can be used to cancel it.
-func SetInterval(ms int, handler TimerHandler) int {
+func registerTimerHandler(handler TimerHandler) int {
 	id := nextTimerID
 	nextTimerID++
 	timerHandlers[id] = handler
-	startInterval(id, ms)
 	return id
 }
 
-// ClearInterval stops a timer.
-func ClearInterval(id int) {
-	if _, ok := timerHandlers[id]; ok {
-		delete(timerHandlers, id)
-		clearInterval(id)
-	}
-}
-
-// invokeTimerHandler is called by eventLoop with current state.
 func invokeTimerHandler(id int, state any) {
-	if handler, ok := timerHandlers[id]; ok {
-		handler(state)
+	handler, ok := timerHandlers[id]
+	if !ok {
+		return
 	}
-	if handler, ok := timeoutHandlers[id]; ok {
-		delete(timeoutHandlers, id)
-		handler(state)
+	err := handler~>(state)
+	if err != nil {
+		println("VoGUI: timer handler error:", err)
 	}
 }
 
-// ============ Externs ============
+// SetTimeout schedules a one-shot timer.
+// Returns a timer ID that can be used with ClearTimeout.
+func SetTimeout(handler TimerHandler, delayMs int) int {
+	id := registerTimerHandler(handler)
+	startTimeout(id, delayMs)
+	return id
+}
 
-func startTimeout(id int, ms int)
+// ClearTimeout cancels a scheduled timeout.
+func ClearTimeout(id int) {
+	delete(timerHandlers, id)
+	clearTimeout(id)
+}
+
+// SetInterval schedules a repeating timer.
+// Returns a timer ID that can be used with ClearInterval.
+func SetInterval(handler TimerHandler, intervalMs int) int {
+	id := registerTimerHandler(handler)
+	startInterval(id, intervalMs)
+	return id
+}
+
+// ClearInterval cancels a repeating timer.
+func ClearInterval(id int) {
+	delete(timerHandlers, id)
+	clearInterval(id)
+}
+
+// ============ Extern Declarations ============
+
+func startTimeout(id int, delayMs int)
 func clearTimeout(id int)
-func startInterval(id int, ms int)
+func startInterval(id int, intervalMs int)
 func clearInterval(id int)

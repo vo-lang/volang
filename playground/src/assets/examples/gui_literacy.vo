@@ -249,8 +249,8 @@ func viewHome(s *State) vogui.Node {
 			vogui.Column(
 				vogui.Text(fmt.Sprintf("已学习: %d / %d 字", s.TotalLearned, total)).Font(14).Fg(ColorText),
 				vogui.Row(
-					vogui.Node{Type: "Block"}.W(progress*2).H(8).Bg(ColorGreen).Rounded(4),
-					vogui.Node{Type: "Block"}.W((100-progress)*2).H(8).Bg("#ddd").Rounded(4),
+					vogui.Div().W(progress*2).H(8).Bg(ColorGreen).Rounded(4),
+					vogui.Div().W((100-progress)*2).H(8).Bg("#ddd").Rounded(4),
 				).Gap(0),
 			).M(10).P(10).Bg("#fff").Rounded(8).Border("2px solid "+ColorBorder),
 

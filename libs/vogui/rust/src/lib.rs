@@ -1,7 +1,11 @@
-//! VoGUI - Pure GUI extern library for Vo.
+//! VoGUI v2 - Declarative UI framework extern library for Vo.
 //!
-//! This crate provides only extern function implementations for GUI operations.
-//! VM management and event loop are handled by the caller (e.g., vo-playground).
+//! Two-layer state model:
+//! - Vo layer: Application state (data, business logic, routing)
+//! - JS layer: UI behavior state (dropdown open/close, tooltip, focus, animation)
+//!
+//! This crate provides extern function implementations for GUI operations.
+//! VM management and event loop are handled by the caller (e.g., playground, studio).
 
 use std::cell::RefCell;
 use std::sync::OnceLock;
@@ -27,7 +31,7 @@ thread_local! {
 // VoguiPlatform trait
 // =============================================================================
 
-/// Platform abstraction for timer and navigation operations.
+/// Platform abstraction for timer, navigation, and DOM operations.
 /// Implement this trait for different backends (WASM, Tauri, headless).
 pub trait VoguiPlatform: Send + Sync + 'static {
     fn start_timeout(&self, id: i32, ms: i32);
@@ -36,6 +40,15 @@ pub trait VoguiPlatform: Send + Sync + 'static {
     fn clear_interval(&self, id: i32);
     fn navigate(&self, path: &str);
     fn get_current_path(&self) -> String;
+    // v2 additions
+    fn focus(&self, _ref_name: &str) {}
+    fn blur(&self, _ref_name: &str) {}
+    fn scroll_to(&self, _ref_name: &str, _top: i32) {}
+    fn scroll_into_view(&self, _ref_name: &str) {}
+    fn select_text(&self, _ref_name: &str) {}
+    fn set_title(&self, _title: &str) {}
+    fn set_meta(&self, _name: &str, _content: &str) {}
+    fn toast(&self, _message: &str, _typ: &str, _duration_ms: i32) {}
 }
 
 static PLATFORM: OnceLock<Box<dyn VoguiPlatform>> = OnceLock::new();
@@ -98,6 +111,30 @@ mod wasm_js {
 
         #[wasm_bindgen(js_name = getCurrentPath)]
         pub fn get_current_path() -> String;
+
+        #[wasm_bindgen(js_name = voguiFocus)]
+        pub fn focus(ref_name: &str);
+
+        #[wasm_bindgen(js_name = voguiBlur)]
+        pub fn blur(ref_name: &str);
+
+        #[wasm_bindgen(js_name = voguiScrollTo)]
+        pub fn scroll_to(ref_name: &str, top: i32);
+
+        #[wasm_bindgen(js_name = voguiScrollIntoView)]
+        pub fn scroll_into_view(ref_name: &str);
+
+        #[wasm_bindgen(js_name = voguiSelectText)]
+        pub fn select_text(ref_name: &str);
+
+        #[wasm_bindgen(js_name = voguiSetTitle)]
+        pub fn set_title(title: &str);
+
+        #[wasm_bindgen(js_name = voguiSetMeta)]
+        pub fn set_meta(name: &str, content: &str);
+
+        #[wasm_bindgen(js_name = voguiToast)]
+        pub fn toast(message: &str, typ: &str, duration_ms: i32);
     }
 }
 
@@ -109,6 +146,14 @@ impl VoguiPlatform for WasmPlatform {
     fn clear_interval(&self, id: i32) { wasm_js::clear_interval(id); }
     fn navigate(&self, path: &str) { wasm_js::navigate(path); }
     fn get_current_path(&self) -> String { wasm_js::get_current_path() }
+    fn focus(&self, ref_name: &str) { wasm_js::focus(ref_name); }
+    fn blur(&self, ref_name: &str) { wasm_js::blur(ref_name); }
+    fn scroll_to(&self, ref_name: &str, top: i32) { wasm_js::scroll_to(ref_name, top); }
+    fn scroll_into_view(&self, ref_name: &str) { wasm_js::scroll_into_view(ref_name); }
+    fn select_text(&self, ref_name: &str) { wasm_js::select_text(ref_name); }
+    fn set_title(&self, title: &str) { wasm_js::set_title(title); }
+    fn set_meta(&self, name: &str, content: &str) { wasm_js::set_meta(name, content); }
+    fn toast(&self, message: &str, typ: &str, duration_ms: i32) { wasm_js::toast(message, typ, duration_ms); }
 }
 
 // =============================================================================

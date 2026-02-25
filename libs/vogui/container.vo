@@ -1,80 +1,12 @@
-// Container components.
+// Structural container components.
 package vogui
 
-// Card renders a card container.
+// Card renders a card container with optional header/footer.
 func Card(children ...Node) Node {
-	return Node{Type: "Card", Children: children}
+	return Node{Type: "vo-card", Children: children}
 }
 
-// CardHeader renders a card header.
-func CardHeader(title string) Node {
-	return Node{Type: "CardHeader", Props: map[string]any{"title": title}}
-}
-
-// CardBody renders card body content.
-func CardBody(children ...Node) Node {
-	return Node{Type: "CardBody", Children: children}
-}
-
-// CardFooter renders card footer content.
-func CardFooter(children ...Node) Node {
-	return Node{Type: "CardFooter", Children: children}
-}
-
-// Panel renders a panel with title.
-func Panel(title string, children ...Node) Node {
-	return Node{Type: "Panel", Props: map[string]any{"title": title}, Children: children}
-}
-
-// AccordionItem represents an accordion panel.
-type AccordionItem struct {
-	Title   string
-	Content Node
-	Open    bool
-}
-
-// Accordion renders collapsible panels.
-// onChange receives the clicked panel index. Use OnSlider(action) where action is func(s *State, idx int).
-func Accordion(items []AccordionItem, onChange Handler) Node {
-	itemsAny := make([]any, len(items))
-	for i, item := range items {
-		itemsAny[i] = map[string]any{
-			"title":   item.Title,
-			"content": item.Content,
-			"open":    item.Open,
-		}
-	}
-	return Node{
-		Type: "Accordion",
-		Props: map[string]any{
-			"items":    itemsAny,
-			"onChange": onChange.ID,
-		},
-	}
-}
-
-// TabItem represents a tab panel.
-type TabItem struct {
-	Label   string
-	Content Node
-}
-
-// Tabs renders tab panels.
-// onChange receives the clicked tab index. Use OnSlider(action) where action is func(s *State, idx int).
-func Tabs(active int, tabs []TabItem, onChange Handler) Node {
-	tabsAny := make([]any, len(tabs))
-	for i, tab := range tabs {
-		tabsAny[i] = map[string]any{
-			"label":   tab.Label,
-			"content": tab.Content,
-		}
-	}
-	return Node{
-		Type: "Tabs",
-		Props: map[string]any{
-			"active":   active,
-			"tabs":     tabsAny,
-			"onChange": onChange.ID,
-		},
-	}
+// Panel renders a bordered panel container.
+func Panel(children ...Node) Node {
+	return Node{Type: "vo-panel", Children: children}
 }

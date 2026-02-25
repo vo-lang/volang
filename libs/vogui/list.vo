@@ -1,47 +1,47 @@
-// List and Table components.
+// List and table components.
 package vogui
 
-// List renders an unordered list container.
+// List renders an unordered list.
 func List(children ...Node) Node {
-	return Node{Type: "List", Children: children}
+	return Node{Type: "ul", Children: children}
 }
 
 // ListItem renders a list item.
 func ListItem(children ...Node) Node {
-	return Node{Type: "ListItem", Children: children}
+	return Node{Type: "li", Children: children}
 }
 
-// OrderedList renders an ordered (numbered) list.
+// OrderedList renders an ordered list.
 func OrderedList(children ...Node) Node {
-	return Node{Type: "OrderedList", Children: children}
+	return Node{Type: "ol", Children: children}
 }
 
-// Table renders a table container.
+// Table renders a table element.
 func Table(children ...Node) Node {
-	return Node{Type: "Table", Children: children}
+	return Node{Type: "table", Children: children}
 }
 
 // TableHead renders a table header section.
 func TableHead(children ...Node) Node {
-	return Node{Type: "TableHead", Children: children}
+	return Node{Type: "thead", Children: children}
 }
 
 // TableBody renders a table body section.
 func TableBody(children ...Node) Node {
-	return Node{Type: "TableBody", Children: children}
+	return Node{Type: "tbody", Children: children}
 }
 
 // TableRow renders a table row.
 func TableRow(children ...Node) Node {
-	return Node{Type: "TableRow", Children: children}
+	return Node{Type: "tr", Children: children}
 }
 
-// TableCell renders a table data cell with children.
-func TableCell(children ...Node) Node {
-	return Node{Type: "TableCell", Children: children}
+// TableCell renders a table data cell.
+func TableCell(content any) Node {
+	return Node{Type: "td", Props: map[string]any{"textContent": toString(content)}}
 }
 
 // TableHeaderCell renders a table header cell.
-func TableHeaderCell(content string) Node {
-	return Node{Type: "TableHeaderCell", Props: map[string]any{"content": content}}
+func TableHeaderCell(content any) Node {
+	return Node{Type: "th", Props: map[string]any{"textContent": toString(content)}}
 }

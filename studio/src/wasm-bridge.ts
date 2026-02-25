@@ -11,7 +11,9 @@ import type { StudioBridge } from './main';
 export async function initStudioWasm(): Promise<StudioBridge> {
   // Dynamically load the studio WASM module.
   // Use runtime URL + @vite-ignore so Vite doesn't require this file in Tauri mode.
-  const wasmEntryUrl = new URL('../wasm/pkg/vo_studio.js', import.meta.url).href;
+  const v = Date.now();
+  const wasmEntryUrl = new URL(`../wasm/pkg/vo_studio_wasm.js?v=${v}`, import.meta.url).href;
+  const wasmBinaryUrl = new URL(`../wasm/pkg/vo_studio_wasm_bg.wasm?v=${v}`, import.meta.url).href;
   let wasmMod: any;
   try {
     wasmMod = await import(/* @vite-ignore */ wasmEntryUrl);
@@ -21,7 +23,7 @@ export async function initStudioWasm(): Promise<StudioBridge> {
       `Build it first under studio/wasm/pkg. Original error: ${e}`,
     );
   }
-  await wasmMod.default();
+  await wasmMod.default(wasmBinaryUrl);
 
   const result = wasmMod.studioInit();
   if (result.status !== 'ok') {

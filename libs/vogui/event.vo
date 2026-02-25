@@ -1,4 +1,4 @@
-// Event handling and handler registration.
+// Event handling and handler registration with generation protocol.
 package vogui
 
 import "encoding/json"
@@ -26,35 +26,44 @@ const (
 	handlerPointer    = 12
 	handlerResize     = 13
 	handlerWidget     = 14
+	handlerGeneric    = 15
 )
 
 // Handler represents an event handler binding.
 type Handler struct {
-	ID     int
-	Type   int
-	IntVal int // Pre-bound integer for OnInt variants
+	ID        int
+	Gen       int
+	Type      int
+	IntVal    int
+	Modifiers []string
+	KeyFilter string
 }
 
 // Event represents an event from JS.
 type Event struct {
+	Gen       int
 	HandlerID int
 	Payload   string
+}
+
+// FileInfo holds file upload data.
+type FileInfo struct {
+	Name string
+	Size int
+	Type string
+	Data string // base64 encoded
 }
 
 // Internal handler storage
 var handlers []any
 var handlerMetas []Handler
-var globalKeyHandler any  // func(state any, key string)
+var renderGen int
+var globalKeyHandler any
 
 func resetHandlers() {
 	handlers = []any{}
 	handlerMetas = []Handler{}
-}
-
-// SetGlobalKeyHandler registers a handler for global key events.
-// Handler signature: func(state any, key string)
-func SetGlobalKeyHandler(action any) {
-	globalKeyHandler = action
+	renderGen++
 }
 
 // ============ Handler Constructors ============
@@ -62,7 +71,7 @@ func SetGlobalKeyHandler(action any) {
 func registerHandler(action any, typ int, intVal int) Handler {
 	id := len(handlers)
 	handlers = append(handlers, action)
-	h := Handler{ID: id, Type: typ, IntVal: intVal}
+	h := Handler{ID: id, Gen: renderGen, Type: typ, IntVal: intVal}
 	handlerMetas = append(handlerMetas, h)
 	return h
 }
@@ -103,13 +112,64 @@ func OnSubmit(action any) Handler { return registerHandler(action, handlerSubmit
 // Action signature: func(s *State, value string)
 func OnSelect(action any) Handler { return registerHandler(action, handlerSelect, 0) }
 
-// OnSlider wraps an action for slider change.
+// OnSlider wraps an action for slider/tab index change.
 // Action signature: func(s *State, value int)
 func OnSlider(action any) Handler { return registerHandler(action, handlerSlider, 0) }
 
 // OnFiles wraps an action for file input change.
 // Action signature: func(s *State, files []FileInfo)
 func OnFiles(action any) Handler { return registerHandler(action, handlerFiles, 0) }
+
+// Handle creates a generic handler for arbitrary DOM events.
+// Use with node.On(eventName, handler) to bind to specific events.
+// Action signature: func(s *State, payload string)
+func Handle(action any) Handler { return registerHandler(action, handlerGeneric, 0) }
+
+// ============ Handler Modifiers ============
+
+// Prevent adds preventDefault modifier.
+func (h Handler) Prevent() Handler {
+	h.Modifiers = append(h.Modifiers, "prevent")
+	return h
+}
+
+// Stop adds stopPropagation modifier.
+func (h Handler) Stop() Handler {
+	h.Modifiers = append(h.Modifiers, "stop")
+	return h
+}
+
+// Once adds fire-once modifier.
+func (h Handler) Once() Handler {
+	h.Modifiers = append(h.Modifiers, "once")
+	return h
+}
+
+// Debounce adds debounce modifier with milliseconds.
+func (h Handler) Debounce(ms int) Handler {
+	h.Modifiers = append(h.Modifiers, "debounce:"+toString(ms))
+	return h
+}
+
+// Throttle adds throttle modifier with milliseconds.
+func (h Handler) Throttle(ms int) Handler {
+	h.Modifiers = append(h.Modifiers, "throttle:"+toString(ms))
+	return h
+}
+
+// Filter adds a key filter (for OnKey handlers).
+func (h Handler) Filter(key string) Handler {
+	h.KeyFilter = key
+	return h
+}
+
+// ============ Global Key Handler ============
+
+// SetGlobalKeyHandler registers a handler for global key events.
+// Handler signature: func(state any, key string)
+func SetGlobalKeyHandler(action any) {
+	globalKeyHandler = action
+}
 
 // ============ Handler Invocation ============
 
@@ -162,6 +222,8 @@ func invokeHandler(state any, idx int, payload string) error {
 		json.Unmarshal([]byte(payload), &p)
 		return handler~>(state, p)
 	case handlerWidget:
+		return handler~>(state, payload)
+	case handlerGeneric:
 		return handler~>(state, payload)
 	}
 	return handler~>(state)

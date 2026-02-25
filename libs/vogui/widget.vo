@@ -1,32 +1,22 @@
-// ExternalWidget — escape hatch for JS-native components (CodeMirror, xterm, etc.)
+// ExternalWidget provides an escape hatch for integrating JS-native components.
+// Use this for components that need direct DOM access (CodeMirror, charts, etc.).
 package vogui
 
-// ExternalWidgetOpts configures an external JS widget.
-type ExternalWidgetOpts struct {
-	ID      string         // Unique widget instance ID (required)
-	Type    string         // Widget type name registered in JS
-	Props   map[string]any // Widget-specific configuration
-	OnEvent Handler        // Receives raw string events from the widget
+// ExternalWidget renders a JS-managed widget.
+// widgetType identifies the widget factory registered in JS.
+// props are passed to the widget factory.
+// handler receives events from the widget.
+func ExternalWidget(widgetType string, props map[string]any, handler Handler) Node {
+	if props == nil {
+		props = map[string]any{}
+	}
+	props["widgetType"] = widgetType
+	props["onWidget"] = handler.ID
+	return Node{Type: "vo-external-widget", Props: props}
 }
 
-// ExternalWidget creates a node that delegates rendering to a JS widget.
-// The JS renderer looks up the widget type in its registry and creates or
-// updates the widget instance. Widget instances are preserved across re-renders.
-func ExternalWidget(opts ExternalWidgetOpts) Node {
-	props := map[string]any{
-		"id":         opts.ID,
-		"widgetType": opts.Type,
-	}
-	for k, v := range opts.Props {
-		props[k] = v
-	}
-	if opts.OnEvent.Type != 0 {
-		props["onEvent"] = opts.OnEvent.ID
-	}
-	return Node{Type: "ExternalWidget", Props: props}
-}
-
-// OnWidget registers a handler for ExternalWidget events.
-// The action receives the raw payload string sent by the widget implementation.
+// OnWidget wraps an action that receives widget events.
 // Action signature: func(s *State, payload string)
-func OnWidget(action any) Handler { return registerHandler(action, handlerWidget, 0) }
+func OnWidget(action any) Handler {
+	return registerHandler(action, handlerWidget, 0)
+}

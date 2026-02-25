@@ -1,57 +1,63 @@
-// Layout components.
+// Layout container components.
 package vogui
 
-// Column arranges children vertically.
-func Column(children ...Node) Node {
-	return Node{Type: "Column", Children: children}
+// Div is a generic container element.
+func Div(children ...Node) Node {
+	return Node{Type: "div", Children: children}
 }
 
 // Row arranges children horizontally.
 func Row(children ...Node) Node {
-	return Node{Type: "Row", Children: children}
+	return Node{Type: "vo-row", Children: children}
 }
 
-// Center centers its child.
-func Center(child Node) Node {
-	return Node{Type: "Center", Children: []Node{child}}
+// Column arranges children vertically.
+func Column(children ...Node) Node {
+	return Node{Type: "vo-column", Children: children}
 }
 
-// Stack layers children on top of each other (z-axis).
+// Center centers its children both horizontally and vertically.
+func Center(children ...Node) Node {
+	return Node{Type: "vo-center", Children: children}
+}
+
+// Stack layers children on top of each other (position relative).
 func Stack(children ...Node) Node {
-	return Node{Type: "Stack", Children: children}
+	return Node{Type: "vo-stack", Children: children}
 }
 
-// Spacer fills available space.
+// Grid creates a CSS grid container.
+func Grid(cols int, children ...Node) Node {
+	props := map[string]any{"cols": cols}
+	return Node{Type: "vo-grid", Props: props, Children: children}
+}
+
+// Spacer fills available space in a flex container.
 func Spacer() Node {
-	return Node{Type: "Spacer"}
+	return Node{Type: "vo-spacer"}
 }
 
-// Divider renders a horizontal line.
+// Divider renders a horizontal divider line.
 func Divider() Node {
-	return Node{Type: "Divider"}
+	return Node{Type: "vo-divider"}
 }
 
 // Scroll creates a scrollable container.
-func Scroll(child Node) Node {
-	return Node{Type: "Scroll", Children: []Node{child}}
+func Scroll(children ...Node) Node {
+	return Node{Type: "vo-scroll", Children: children}
 }
 
-// Wrap arranges children with flex wrap.
+// Wrap wraps children onto multiple lines.
 func Wrap(children ...Node) Node {
-	return Node{Type: "Wrap", Children: children}
+	return Node{Type: "vo-wrap", Children: children}
 }
 
-// Grid creates a CSS grid layout.
-func Grid(cols int, children ...Node) Node {
-	return Node{Type: "Grid", Props: map[string]any{"cols": cols}, Children: children}
-}
-
-// GridItem specifies column span for a grid child.
-func GridItem(span int, child Node) Node {
-	return Node{Type: "GridItem", Props: map[string]any{"span": span}, Children: []Node{child}}
-}
-
-// Fragment groups children without a wrapper element.
+// Fragment groups children without creating a DOM element.
 func Fragment(children ...Node) Node {
 	return Node{Type: "Fragment", Children: children}
+}
+
+// Empty returns an empty node (renders nothing).
+func Empty() Node {
+	return Node{}
 }

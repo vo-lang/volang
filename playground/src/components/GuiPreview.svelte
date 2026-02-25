@@ -1,20 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { 
-    type VoNode, 
+    type RenderMessage,
     type EventCallback,
     render as voguiRender, 
     setupKeyHandler,
     injectStyles 
   } from '../../../libs/vogui/js/src/index';
 
-  interface RenderData {
-    type: 'render';
-    tree?: VoNode;
-  }
-
   interface Props {
-    renderData: RenderData | null;
+    renderData: RenderMessage | null;
     interactive?: boolean;
     onEvent?: EventCallback;
   }
@@ -30,11 +25,7 @@
       if (renderEl) renderEl.innerHTML = '';
       return;
     }
-    
-    if (renderData.tree) {
-      // DOM morphing happens inside voguiRender
-      voguiRender(renderEl, renderData.tree, { interactive, onEvent });
-    }
+    voguiRender(renderEl, renderData, { onEvent });
   });
 
   onMount(() => {
@@ -50,7 +41,7 @@
       cleanupKeyHandler = null;
     }
     if (interactive && onEvent) {
-      cleanupKeyHandler = setupKeyHandler({ interactive, onEvent });
+      cleanupKeyHandler = setupKeyHandler({ onEvent });
     }
   });
 </script>

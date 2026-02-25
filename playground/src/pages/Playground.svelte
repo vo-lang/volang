@@ -4,6 +4,7 @@
   import FileExplorer from '../components/FileExplorer.svelte';
   import GuiPreview from '../components/GuiPreview.svelte';
   import { runCode, runCodeWithModules, initGuiApp, initGuiAppWithModules, handleGuiEvent, setRenderCallback, type RunStatus } from '../wasm/vo.ts';
+  import { type RenderMessage } from '../../../libs/vogui/js/src/index';
   import guiTetris from '../assets/examples/gui_tetris.vo?raw';
   import resvgDemo from '../assets/examples/resvg_demo.vo?raw';
 
@@ -15,7 +16,7 @@
   let currentFile = $state('gui_tetris.vo');
   let guiMode = $state(false);
   let pngDataUrl = $state<string | null>(null);
-  let renderData: { type: 'render' | 'patch'; tree?: any; patches?: any[] } | null = $state(null);
+  let renderData: RenderMessage | null = $state.raw(null);
   let consoleCollapsed = $state(false);
   let guiFullscreen = $state(false);
   let showTouchControls = $state(true);
@@ -28,8 +29,7 @@
   // Register render callback for async updates (timers)
   setRenderCallback((json: string) => {
     try {
-      const parsed = JSON.parse(json);
-      renderData = { type: 'render', tree: parsed.tree };
+      renderData = JSON.parse(json) as RenderMessage;
     } catch (e) {
       console.error('Failed to parse render JSON from timer:', e);
     }
@@ -45,8 +45,8 @@
     consoleCollapsed = false;
     activePanel = 'console';
 
-    // Detect GUI code by checking for import "vogui"
-    const isGuiCode = code.includes('import "vogui"');
+    // Detect GUI code by checking for import "vogui" (single-line or multi-line block)
+    const isGuiCode = code.includes('"vogui"');
     // Detect third-party module imports (github.com/...)
     const hasModuleImports = /"github\.com\//.test(code);
 
@@ -63,8 +63,7 @@
         guiMode = true;
         consoleCollapsed = true;
         if (result.renderJson) {
-          const parsed = JSON.parse(result.renderJson);
-          renderData = { type: 'render', tree: parsed.tree };
+          renderData = JSON.parse(result.renderJson) as RenderMessage;
         }
         status = 'success';
         activePanel = 'gui';
@@ -80,8 +79,7 @@
         guiMode = true;
         consoleCollapsed = true;
         if (result.renderJson) {
-          const parsed = JSON.parse(result.renderJson);
-          renderData = { type: 'render', tree: parsed.tree };
+          renderData = JSON.parse(result.renderJson) as RenderMessage;
         }
         status = 'success';
         activePanel = 'gui';
@@ -109,8 +107,7 @@
           guiMode = true;
           const jsonStr = output.slice(9).trim();
           try {
-            const parsed = JSON.parse(jsonStr);
-            renderData = { type: 'render', tree: parsed.tree };
+            renderData = JSON.parse(jsonStr) as RenderMessage;
             stdout = '';
           } catch (parseErr) {
             stderr = 'Failed to parse GUI output: ' + parseErr;
@@ -161,8 +158,7 @@
         return;
       }
       if (result.renderJson) {
-        const parsed = JSON.parse(result.renderJson);
-        renderData = { type: 'render', tree: parsed.tree };
+        renderData = JSON.parse(result.renderJson) as RenderMessage;
       }
     } catch (e) {
       stderr = e instanceof Error ? e.message : String(e);

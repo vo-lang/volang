@@ -1,116 +1,112 @@
-// Styled Demo - demonstrates chainable style methods
+// Styled Demo - demonstrates v2 theming, variants, utility classes, style methods
 package main
 
-import "vogui"
+import (
+	"fmt"
+	"vogui"
+)
 
 type State struct {
-	Theme   string
+	Dark    bool
 	Slider  int
-	Checked bool
 }
 
-func view(state any) gui.Node {
+func view(state any) vogui.Node {
 	s := state.(*State)
 
-	bgColor := "#f8f9fa"
-	textColor := "#212529"
-	if s.Theme == "dark" {
-		bgColor = "#1a1a2e"
-		textColor = "#e0e0e0"
-	}
+	return vogui.Column(
+		header(s),
+		vogui.Divider(),
+		vogui.Column(
+			// Variant cards
+			vogui.H3("Variants"),
+			vogui.Row(
+				variantCard("Primary", "primary"),
+				variantCard("Success", "success"),
+				variantCard("Warning", "warning"),
+				variantCard("Danger", "danger"),
+			).Gap(16).Class("flex-wrap"),
 
-	return gui.Column(
-		// Header
-		gui.Row(
-			gui.H2("Styled Demo"),
-			gui.Spacer(),
-			gui.Switch(s.Theme == "dark", gui.OnChecked(toggleTheme)),
-			gui.Text("Dark Mode").Fg(textColor),
-		).P(16).Bg(bgColor).Gap(12),
+			// Button variants
+			vogui.H3("Buttons"),
+			vogui.Row(
+				vogui.Button("Primary", vogui.On(noop)).Variant("primary"),
+				vogui.Button("Outline", vogui.On(noop)).Variant("outline"),
+				vogui.Button("Ghost", vogui.On(noop)).Variant("ghost"),
+				vogui.Button("Danger", vogui.On(noop)).Variant("danger"),
+			).Gap(8).Class("flex-wrap"),
 
-		gui.Divider(),
-
-		// Content
-		gui.Column(
-			// Cards row
-			gui.Row(
-				card("Primary", "#007bff", "#fff"),
-				card("Success", "#28a745", "#fff"),
-				card("Warning", "#ffc107", "#212529"),
-				card("Danger", "#dc3545", "#fff"),
-			).Gap(16),
-
-			// Slider demo
-			gui.Row(
-				gui.Text("Opacity:"),
-				gui.Slider(s.Slider, 0, 100, gui.OnSlider(setSlider)),
-				gui.Text(s.Slider, "%"),
-			).Gap(12),
-
-			// Opacity demo box
-			gui.Center(
-				gui.Text("Fading Box").
-					P(24).
-					Bg("#6c757d").
-					Fg("#fff").
-					Rounded(8).
-					Opacity(float64(s.Slider) / 100.0),
+			// Slider + opacity
+			vogui.H3("Opacity Control"),
+			vogui.Row(
+				vogui.Text("Opacity:"),
+				vogui.Slider(s.Slider, 0, 100, vogui.OnSlider(setSlider)),
+				vogui.Text(fmt.Sprint(s.Slider) + "%"),
+			).Gap(12).Class("items-center"),
+			vogui.Center(
+				vogui.Text("Fading Box").
+					P(24).Bg("var(--vo-primary)").Fg("#fff").
+					Rounded(8).Opacity(float64(s.Slider) / 100.0),
 			).H(100),
 
-			// Progress bar
-			gui.Progress(float64(s.Slider) / 100.0),
+			// Progress
+			vogui.H3("Progress"),
+			vogui.Progress(s.Slider, 100),
 
-			// Styled buttons
-			gui.Row(
-				gui.Button("Normal", gui.On(noop)),
-				gui.Button("Rounded", gui.On(noop)).Rounded(20),
-				gui.Button("Shadow", gui.On(noop)).Shadow("0 4px 12px rgba(0,0,0,0.2)"),
-				gui.Button("Custom", gui.On(noop)).
-					Bg("#9c27b0").
-					Rounded(8).
-					Shadow("0 2px 8px rgba(156,39,176,0.4)"),
-			).Gap(12),
+			// Alerts
+			vogui.H3("Alerts"),
+			vogui.Alert("info", "This is an informational message."),
+			vogui.Alert("success", "Operation completed successfully!"),
+			vogui.Alert("warning", "Please review before continuing."),
+			vogui.Alert("danger", "Something went wrong."),
 
-			// Alert examples
-			gui.Alert("info", "This is an info message"),
-			gui.Alert("success", "Operation completed successfully!"),
-
-			// Badge and tag row
-			gui.Row(
-				gui.Badge("New"),
-				gui.Badge("Hot"),
-				gui.Tag("Vo"),
-				gui.Tag("GUI"),
-				gui.Tag("Demo"),
+			// Badges & Tags
+			vogui.H3("Badges & Tags"),
+			vogui.Row(
+				vogui.Badge("New").Variant("info"),
+				vogui.Badge("Hot").Variant("danger"),
+				vogui.Tag("Vo"),
+				vogui.Tag("GUI"),
+				vogui.Tag("v2"),
 			).Gap(8),
-		).P(24).Gap(16).Bg(bgColor),
-	).Bg(bgColor)
+		).P(24).Gap(20),
+	)
 }
 
-func card(title string, bg string, fg string) gui.Node {
-	return gui.Column(
-		gui.Text(title).Bold().Font(16),
-		gui.Text("Card content here"),
-	).P(16).Bg(bg).Fg(fg).Rounded(8).W(150)
+func header(s *State) vogui.Node {
+	label := "Light"
+	if s.Dark {
+		label = "Dark"
+	}
+	return vogui.Row(
+		vogui.H2("Styled Demo"),
+		vogui.Spacer(),
+		vogui.Switch(label+" Mode", s.Dark, vogui.OnChecked(toggleTheme)),
+	).P(16).Class("items-center gap-3")
+}
+
+func variantCard(title string, variant string) vogui.Node {
+	return vogui.Card(
+		vogui.Text(title).Bold().Font(16),
+		vogui.Text("Card with "+variant+" styling"),
+	).Class("p-4 gap-2").W(160).Variant(variant)
 }
 
 func toggleTheme(s *State, dark bool) {
+	s.Dark = dark
 	if dark {
-		s.Theme = "dark"
+		vogui.SetTheme(vogui.DarkTheme())
 	} else {
-		s.Theme = "light"
+		vogui.SetTheme(vogui.DefaultTheme())
 	}
 }
 
-func setSlider(s *State, value int) {
-	s.Slider = value
-}
-
-func noop(s *State) {}
+func setSlider(s *State, value int) { s.Slider = value }
+func noop(s *State)                 {}
 
 func main() {
-	gui.Run(gui.App{
-		Init: func() any { return &State{Theme: "light", Slider: 50} },
+	vogui.Run(vogui.App{
+		Init: func() any { return &State{Slider: 50} },
 		View: view,
 	})
 }

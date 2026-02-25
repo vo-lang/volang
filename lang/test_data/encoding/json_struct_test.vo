@@ -96,6 +96,7 @@ func main() {
 	testLinkedList()
 	testTreeStructure()
 	testCyclicReference()
+	testCaseInsensitiveUnmarshal()
 	fmt.Println("All JSON struct tests passed!")
 }
 
@@ -384,4 +385,38 @@ func testCyclicReference() {
 	// If no error, should have some reasonable output (with depth limit)
 	s := string(data)
 	fmt.Println("testCyclicReference: OK - " + s)
+}
+
+type EventPayload struct {
+	Id  int
+	Key string
+}
+
+func testCaseInsensitiveUnmarshal() {
+	// Field "Id" should match JSON key "id" (Vo lowercase-first convention)
+	var p1 EventPayload
+	err := json.Unmarshal([]byte(`{"id":42,"key":"ArrowLeft"}`), &p1)
+	if err != nil {
+		panic("testCaseInsensitiveUnmarshal: unmarshal error: " + err.Error())
+	}
+	if p1.Id != 42 {
+		panic(fmt.Sprintf("testCaseInsensitiveUnmarshal: expected Id=42, got %d", p1.Id))
+	}
+	if p1.Key != "ArrowLeft" {
+		panic("testCaseInsensitiveUnmarshal: expected Key=ArrowLeft, got " + p1.Key)
+	}
+
+	// Field "Id" should also match JSON key "Id" (case-insensitive fallback)
+	var p2 EventPayload
+	err2 := json.Unmarshal([]byte(`{"Id":99,"Key":"Space"}`), &p2)
+	if err2 != nil {
+		panic("testCaseInsensitiveUnmarshal: unmarshal error: " + err2.Error())
+	}
+	if p2.Id != 99 {
+		panic(fmt.Sprintf("testCaseInsensitiveUnmarshal: expected Id=99, got %d", p2.Id))
+	}
+	if p2.Key != "Space" {
+		panic("testCaseInsensitiveUnmarshal: expected Key=Space, got " + p2.Key)
+	}
+	fmt.Println("testCaseInsensitiveUnmarshal: OK")
 }

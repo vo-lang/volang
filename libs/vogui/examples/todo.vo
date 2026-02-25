@@ -1,12 +1,15 @@
-// Todo App - demonstrates ForEach, OnInt, OnIntChecked, OnValue
+// Todo App - demonstrates ForEach, event handlers, conditional rendering
 package main
 
-import "vogui"
+import (
+	"fmt"
+	"vogui"
+)
 
 type State struct {
 	Items  []Todo
 	Input  string
-	Filter string
+	Filter string // "all", "active", "done"
 	NextID int
 }
 
@@ -16,63 +19,56 @@ type Todo struct {
 	Done bool
 }
 
-func view(state any) gui.Node {
+func view(state any) vogui.Node {
 	s := state.(*State)
-
-	return gui.Column(
-		gui.H1("Todo App"),
-
-		// Input row
-		gui.Row(
-			gui.Input(s.Input, gui.OnValue(setInput)),
-			gui.Button("Add", gui.On(addTodo)),
-		),
-
-		gui.Divider(),
-
-		// Filter buttons
-		gui.Row(
-			filterBtn(s, 0, "All"),
-			filterBtn(s, 1, "Active"),
-			filterBtn(s, 2, "Done"),
-		),
-
-		// Todo list
-		gui.ForEach(filtered(s), func(item any, i int) gui.Node {
-			todo := item.(Todo)
-			return gui.Row(
-				gui.Checkbox(todo.Done, gui.OnIntChecked(toggleTodo, todo.ID)),
-				gui.Text(todo.Text),
-				gui.Spacer(),
-				gui.IconButton("x", gui.OnInt(removeTodo, todo.ID)),
-			)
-		}),
-
-		gui.Divider(),
-
-		// Stats
-		gui.Text("Total: ", len(s.Items), " | Active: ", countActive(s)),
-	)
+	return vogui.Column(
+		vogui.H1("Todo App"),
+		vogui.Row(
+			vogui.Input(s.Input, vogui.OnValue(setInput)).Placeholder("What needs to be done?"),
+			vogui.Button("Add", vogui.On(addTodo)).Variant("primary"),
+		).Gap(8),
+		vogui.Divider(),
+		vogui.Row(
+			filterBtn(s, "all", "All"),
+			filterBtn(s, "active", "Active"),
+			filterBtn(s, "done", "Done"),
+		).Gap(4),
+		todoList(s),
+		vogui.Divider(),
+		vogui.Text(fmt.Sprintf("Total: %d | Active: %d", len(s.Items), countActive(s))).Fg("var(--vo-text-muted)"),
+	).Gap(12).P(24).MaxW("500px").Mx("auto")
 }
 
-func filterBtn(s *State, idx int, label string) gui.Node {
-	filters := []string{"all", "active", "done"}
-	active := s.Filter == filters[idx]
-	if active {
-		return gui.Button(label, gui.OnInt(setFilter, idx))
+func filterBtn(s *State, filter string, label string) vogui.Node {
+	if s.Filter == filter {
+		return vogui.Button(label, vogui.On(func(s *State) { s.Filter = filter })).Variant("primary")
 	}
-	return gui.Button(label, gui.OnInt(setFilter, idx))
+	return vogui.Button(label, vogui.On(func(s *State) { s.Filter = filter })).Variant("outline")
 }
 
-// Actions
-func setInput(s *State, value string) {
-	s.Input = value
+func todoList(s *State) vogui.Node {
+	items := filtered(s)
+	return vogui.ForEachKeyed(items, func(item any) string {
+		return fmt.Sprint(item.(Todo).ID)
+	}, func(item any, i int) vogui.Node {
+		todo := item.(Todo)
+		return todoRow(todo)
+	})
 }
 
-func setFilter(s *State, idx int) {
-	filters := []string{"all", "active", "done"}
-	s.Filter = filters[idx]
+func todoRow(todo Todo) vogui.Node {
+	text := vogui.Text(todo.Text)
+	if todo.Done {
+		text = text.Style("textDecoration", "line-through").Fg("var(--vo-text-muted)")
+	}
+	return vogui.Row(
+		vogui.Checkbox("", todo.Done, vogui.OnIntChecked(toggleTodo, todo.ID)),
+		text.Flex(1),
+		vogui.Button("x", vogui.OnInt(removeTodo, todo.ID)).Variant("ghost"),
+	).Gap(8).Py(4)
 }
+
+func setInput(s *State, value string)    { s.Input = value }
 
 func addTodo(s *State) {
 	if s.Input != "" {
@@ -123,7 +119,7 @@ func countActive(s *State) int {
 }
 
 func main() {
-	gui.Run(gui.App{
+	vogui.Run(vogui.App{
 		Init: func() any { return &State{Filter: "all"} },
 		View: view,
 	})

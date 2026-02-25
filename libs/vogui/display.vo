@@ -1,94 +1,112 @@
-// Display components for showing content.
+// Display components for rendering text, headings, links, images, etc.
 package vogui
 
-// Text displays text content.
-func Text(content ...any) Node {
-	s := ""
-	for _, c := range content {
-		s += toString(c)
-	}
-	return Node{Type: "Text", Props: map[string]any{"content": s}}
+// Text renders a text node.
+func Text(content any) Node {
+	return Node{Type: "vo-text", Props: map[string]any{"textContent": toString(content)}}
 }
 
-// H1-H6 render headings.
-func H1(text string) Node { return Node{Type: "H1", Props: map[string]any{"text": text}} }
-func H2(text string) Node { return Node{Type: "H2", Props: map[string]any{"text": text}} }
-func H3(text string) Node { return Node{Type: "H3", Props: map[string]any{"text": text}} }
-func H4(text string) Node { return Node{Type: "H4", Props: map[string]any{"text": text}} }
-func H5(text string) Node { return Node{Type: "H5", Props: map[string]any{"text": text}} }
-func H6(text string) Node { return Node{Type: "H6", Props: map[string]any{"text": text}} }
+// H1 renders a heading level 1.
+func H1(content any) Node {
+	return Node{Type: "h1", Props: map[string]any{"textContent": toString(content)}}
+}
+
+// H2 renders a heading level 2.
+func H2(content any) Node {
+	return Node{Type: "h2", Props: map[string]any{"textContent": toString(content)}}
+}
+
+// H3 renders a heading level 3.
+func H3(content any) Node {
+	return Node{Type: "h3", Props: map[string]any{"textContent": toString(content)}}
+}
+
+// H4 renders a heading level 4.
+func H4(content any) Node {
+	return Node{Type: "h4", Props: map[string]any{"textContent": toString(content)}}
+}
+
+// H5 renders a heading level 5.
+func H5(content any) Node {
+	return Node{Type: "h5", Props: map[string]any{"textContent": toString(content)}}
+}
+
+// H6 renders a heading level 6.
+func H6(content any) Node {
+	return Node{Type: "h6", Props: map[string]any{"textContent": toString(content)}}
+}
 
 // P renders a paragraph.
-func P(text string) Node {
-	return Node{Type: "P", Props: map[string]any{"text": text}}
+func P(content any) Node {
+	return Node{Type: "p", Props: map[string]any{"textContent": toString(content)}}
 }
 
 // Code renders inline code.
-func Code(code string) Node {
-	return Node{Type: "Code", Props: map[string]any{"code": code}}
+func Code(content string) Node {
+	return Node{Type: "code", Props: map[string]any{"textContent": content}}
 }
 
-// Pre renders a code block.
-func Pre(code string) Node {
-	return Node{Type: "Pre", Props: map[string]any{"code": code}}
+// Pre renders preformatted text.
+func Pre(content string) Node {
+	return Node{Type: "pre", Props: map[string]any{"textContent": content}}
 }
 
 // Strong renders bold text.
-func Strong(text string) Node {
-	return Node{Type: "Strong", Props: map[string]any{"text": text}}
+func Strong(content any) Node {
+	return Node{Type: "strong", Props: map[string]any{"textContent": toString(content)}}
 }
 
 // Em renders italic text.
-func Em(text string) Node {
-	return Node{Type: "Em", Props: map[string]any{"text": text}}
+func Em(content any) Node {
+	return Node{Type: "em", Props: map[string]any{"textContent": toString(content)}}
 }
 
-// Link renders a hyperlink.
-func Link(href string, text string) Node {
-	return Node{Type: "Link", Props: map[string]any{"href": href, "text": text}}
+// Link renders an anchor element.
+func Link(text string, href string) Node {
+	return Node{Type: "a", Props: map[string]any{"textContent": text, "href": href}}
 }
 
-// Badge renders a badge.
-func Badge(text string) Node {
-	return Node{Type: "Badge", Props: map[string]any{"text": text}}
+// Badge renders a small label/badge.
+func Badge(content string) Node {
+	return Node{Type: "vo-badge", Props: map[string]any{"textContent": content}}
 }
 
-// Tag renders a tag.
-func Tag(text string) Node {
-	return Node{Type: "Tag", Props: map[string]any{"text": text}}
+// Tag renders a tag element.
+func Tag(content string) Node {
+	return Node{Type: "vo-tag", Props: map[string]any{"textContent": content}}
 }
 
-// Progress renders a progress bar (0.0 to 1.0).
-func Progress(value float64) Node {
-	return Node{Type: "Progress", Props: map[string]any{"value": value}}
+// Progress renders a progress bar. value and max are integers (e.g., 75, 100).
+func Progress(value int, max int) Node {
+	return Node{Type: "vo-progress", Props: map[string]any{"value": value, "max": max}}
 }
 
 // Spinner renders a loading spinner.
 func Spinner() Node {
-	return Node{Type: "Spinner"}
+	return Node{Type: "vo-spinner"}
 }
 
-// Alert renders an alert message. kind: "info", "success", "warning", "error"
-func Alert(kind string, message string) Node {
-	return Node{Type: "Alert", Props: map[string]any{"kind": kind, "message": message}}
+// Alert renders an alert/notification box.
+func Alert(typ string, message string) Node {
+	return Node{Type: "vo-alert", Props: map[string]any{"alertType": typ, "textContent": message}}
 }
 
-// Image renders an image.
-func Image(src string) Node {
-	return Node{Type: "Image", Props: map[string]any{"src": src}}
+// Image renders an image element.
+func Image(src string, alt string) Node {
+	return Node{Type: "img", Props: map[string]any{"src": src, "alt": alt}}
 }
 
 // Avatar renders a circular avatar image.
 func Avatar(src string) Node {
-	return Node{Type: "Avatar", Props: map[string]any{"src": src}}
+	return Node{Type: "vo-avatar", Props: map[string]any{"src": src}}
 }
 
-// Video renders a video player.
-func Video(src string) Node {
-	return Node{Type: "Video", Props: map[string]any{"src": src}}
-}
-
-// Icon renders a Lucide icon.
+// Icon renders an icon by name.
 func Icon(name string) Node {
-	return Node{Type: "Icon", Props: map[string]any{"name": name}}
+	return Node{Type: "vo-icon", Props: map[string]any{"name": name}}
+}
+
+// Video renders a video element.
+func Video(src string) Node {
+	return Node{Type: "video", Props: map[string]any{"src": src}}
 }

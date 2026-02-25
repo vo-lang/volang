@@ -1,33 +1,32 @@
-// Counter demo - P1 target for VoGUI
+// Counter - minimal demo of TEA model (State → View → Action)
 package main
 
-import "vogui"
+import (
+	"fmt"
+	"vogui"
+)
 
 type State struct {
 	Count int
 }
 
-func view(state any) gui.Node {
+func view(state any) vogui.Node {
 	s := state.(*State)
-	return gui.Column(
-		gui.Text("Count: ", s.Count),
-		gui.Row(
-			gui.Button("-1", gui.On(decrement)),
-			gui.Button("+1", gui.On(increment)),
-		),
-	)
+	return vogui.Column(
+		vogui.H2("Counter"),
+		vogui.Text("Count: "+fmt.Sprint(s.Count)).Font(20),
+		vogui.Row(
+			vogui.Button("-1", vogui.On(decrement)).Variant("outline"),
+			vogui.Button("+1", vogui.On(increment)).Variant("primary"),
+		).Gap(8),
+	).Gap(16).P(24)
 }
 
-func increment(s *State) {
-	s.Count++
-}
-
-func decrement(s *State) {
-	s.Count--
-}
+func increment(s *State) { s.Count++ }
+func decrement(s *State) { s.Count-- }
 
 func main() {
-	gui.Run(gui.App{
+	vogui.Run(vogui.App{
 		Init: func() any { return &State{} },
 		View: view,
 	})

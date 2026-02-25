@@ -1,417 +1,263 @@
-// Shopping Cart Application
-// Demonstrates: state management, list operations, calculations, multiple handlers
+// Shopping Cart - demonstrates list rendering, state management, computed values
 package main
 
-import "vogui"
+import (
+	"fmt"
+	"vogui"
+)
 
-// ============ Data Models ============
+type State struct {
+	Products []Product
+	Cart     map[int]int // productID → quantity
+	Tab      int         // 0=shop, 1=cart
+	Coupon   string
+	Discount bool
+}
 
 type Product struct {
 	ID    int
 	Name  string
-	Price int    // cents
+	Price int // cents
 	Stock int
-	Image string // emoji
+	Emoji string
 }
 
-type CartItem struct {
-	Product  Product
-	Quantity int
+func initState() any {
+	return &State{
+		Products: []Product{
+			{ID: 1, Name: "Wireless Headphones", Price: 7999, Stock: 5, Emoji: "🎧"},
+			{ID: 2, Name: "Mechanical Keyboard", Price: 12999, Stock: 3, Emoji: "⌨️"},
+			{ID: 3, Name: "USB-C Hub", Price: 3499, Stock: 10, Emoji: "🔌"},
+			{ID: 4, Name: "Webcam HD", Price: 4999, Stock: 7, Emoji: "📷"},
+			{ID: 5, Name: "Mouse Pad XL", Price: 1999, Stock: 15, Emoji: "🖱️"},
+			{ID: 6, Name: "Monitor Stand", Price: 5999, Stock: 4, Emoji: "🖥️"},
+		},
+		Cart: map[int]int{},
+	}
 }
 
-type State struct {
-	Products     []Product
-	Cart         []CartItem
-	CouponCode   string
-	CouponApplied bool
-	CouponError   string
-	ActiveTab    int // 0=shop, 1=cart
-}
-
-// ============ View ============
-
-func view(state any) gui.Node {
+func view(state any) vogui.Node {
 	s := state.(*State)
-
-	return gui.Column(
-		// Header
-		gui.Row(
-			gui.H2("🛒 Vo Shop"),
-			gui.Spacer(),
-			cartBadge(s),
-		).P(16).Bg("#1a1a2e").Fg("#fff").Gap(12),
-
-		// Tab bar
-		gui.Row(
-			tabButton("Products", 0, s.ActiveTab),
-			tabButton("Cart ("+itoa(cartCount(s))+")", 1, s.ActiveTab),
-		).Gap(8).P(12).Bg("#f8f9fa"),
-
-		// Content
-		gui.IfElse(s.ActiveTab == 0,
-			productsView(s),
-			cartView(s),
-		),
+	return vogui.Column(
+		vogui.Row(
+			vogui.H1("VoShop"),
+			vogui.Spacer(),
+			vogui.Button("Shop", vogui.On(func(s *State) { s.Tab = 0 })).
+				Variant(tabVariant(s.Tab == 0)),
+			vogui.Button("Cart ("+fmt.Sprint(cartCount(s))+")", vogui.On(func(s *State) { s.Tab = 1 })).
+				Variant(tabVariant(s.Tab == 1)),
+		).Class("items-center gap-3 p-4 border-b"),
+		vogui.If(s.Tab == 0, shopView(s)),
+		vogui.If(s.Tab == 1, cartView(s)),
 	)
 }
 
-func tabButton(label string, tab int, active int) gui.Node {
-	bg := "#e9ecef"
-	if tab == active {
-		bg = "#007bff"
+func tabVariant(active bool) string {
+	if active {
+		return "primary"
 	}
-	fg := "#333"
-	if tab == active {
-		fg = "#fff"
-	}
-	return gui.Button(label, gui.OnInt(setTab, tab)).Bg(bg).Fg(fg).Rounded(4).Px(16).Py(8)
+	return "outline"
 }
 
-func cartBadge(s *State) gui.Node {
-	count := cartCount(s)
-	if count == 0 {
-		return gui.Text("")
+// ============ Shop View ============
+
+func shopView(s *State) vogui.Node {
+	items := make([]any, len(s.Products))
+	for i, p := range s.Products {
+		items[i] = p
 	}
-	return gui.Badge(itoa(count) + " items").Bg("#dc3545")
+	return vogui.Grid(3,
+		vogui.ForEach(items, func(item any, i int) vogui.Node {
+			return productCard(s, item.(Product))
+		}).Children...,
+	).Gap(16).P(24)
 }
 
-// ============ Products View ============
-
-func productsView(s *State) gui.Node {
-	var items []any
-	for _, p := range s.Products {
-		items = append(items, p)
-	}
-
-	return gui.Column(
-		gui.Grid(2,
-			gui.ForEach(items, func(item any, i int) gui.Node {
-				return productCard(item.(Product), s)
-			}),
-		).Gap(16).P(16),
-	).Overflow("auto")
-}
-
-func productCard(p Product, s *State) gui.Node {
-	inCart := getCartQuantity(s, p.ID)
-	stockText := itoa(p.Stock) + " in stock"
+func productCard(s *State, p Product) vogui.Node {
+	inCart := s.Cart[p.ID]
+	stockText := fmt.Sprint(p.Stock) + " in stock"
 	if p.Stock == 0 {
 		stockText = "Out of stock"
 	}
 
-	return gui.Column(
-		gui.Text(p.Image).Font(48).Center(),
-		gui.Text(p.Name).Bold().Font(16),
-		gui.Text("$" + formatPrice(p.Price)).Fg("#28a745").Font(18).Bold(),
-		gui.Text(stockText).Fg("#6c757d").Font(12),
-		gui.Show(inCart > 0,
-			gui.Row(
-				gui.IconButton("-", gui.OnInt(decrementCart, p.ID)),
-				gui.Text(itoa(inCart)).Px(12),
-				gui.IconButton("+", gui.OnInt(incrementCart, p.ID)),
-			).Gap(4),
+	return vogui.Card(
+		vogui.Text(p.Emoji).Font(48).Center(),
+		vogui.Text(p.Name).Bold().Font(16),
+		vogui.Text("$"+formatPrice(p.Price)).Fg("var(--vo-success)").Font(18).Bold(),
+		vogui.Text(stockText).Fg("var(--vo-text-muted)"),
+		vogui.If(inCart > 0,
+			vogui.Row(
+				vogui.Button("-", vogui.OnInt(decCart, p.ID)).Variant("outline"),
+				vogui.Text(fmt.Sprint(inCart)).Font(14).W(30).Center(),
+				vogui.Button("+", vogui.OnInt(incCart, p.ID)).Variant("outline"),
+			).Gap(4).Class("items-center justify-center"),
 		),
-		gui.Show(inCart == 0,
-			gui.Button("Add to Cart", gui.OnInt(addToCart, p.ID)).
-				Bg("#007bff").Rounded(4).
-				Opacity(boolToOpacity(p.Stock > 0)),
+		vogui.If(inCart == 0,
+			vogui.Button("Add to Cart", vogui.OnInt(incCart, p.ID)).Variant("primary").Class("w-full"),
 		),
-	).P(16).Bg("#fff").Rounded(8).Shadow("0 2px 8px rgba(0,0,0,0.1)").Gap(8)
+	).Gap(8).Class("p-4")
 }
 
 // ============ Cart View ============
 
-func cartView(s *State) gui.Node {
-	if len(s.Cart) == 0 {
-		return gui.Center(
-			gui.Column(
-				gui.Text("🛒").Font(64),
-				gui.Text("Your cart is empty"),
-				gui.Button("Start Shopping", gui.OnInt(setTab, 0)).Bg("#007bff").Rounded(4),
+func cartView(s *State) vogui.Node {
+	if cartCount(s) == 0 {
+		return vogui.Center(
+			vogui.Column(
+				vogui.Text("🛒").Font(64).Center(),
+				vogui.Text("Your cart is empty").Class("text-center"),
+				vogui.Button("Start Shopping", vogui.On(func(s *State) { s.Tab = 0 })).Variant("primary"),
 			).Gap(16),
 		).P(48)
 	}
 
-	var items []any
-	for _, c := range s.Cart {
-		items = append(items, c)
+	return vogui.Column(
+		cartItems(s),
+		vogui.Divider(),
+		couponSection(s),
+		vogui.Divider(),
+		orderSummary(s),
+	).P(24).Gap(16)
+}
+
+func cartItems(s *State) vogui.Node {
+	var nodes []vogui.Node
+	for _, p := range s.Products {
+		qty := s.Cart[p.ID]
+		if qty > 0 {
+			nodes = append(nodes, cartRow(s, p, qty))
+		}
 	}
+	return vogui.Column(nodes...).Gap(8)
+}
 
-	return gui.Column(
-		// Cart items
-		gui.ForEach(items, func(item any, i int) gui.Node {
-			return cartItemRow(item.(CartItem), s)
-		}),
+func cartRow(s *State, p Product, qty int) vogui.Node {
+	lineTotal := p.Price * qty
+	return vogui.Row(
+		vogui.Text(p.Emoji).Font(32),
+		vogui.Column(
+			vogui.Text(p.Name).Bold(),
+			vogui.Text("$"+formatPrice(p.Price)+" each").Fg("var(--vo-text-muted)"),
+		).Flex(1).Gap(2),
+		vogui.Row(
+			vogui.Button("-", vogui.OnInt(decCart, p.ID)).Variant("outline"),
+			vogui.Text(fmt.Sprint(qty)).Px(8).Font(14).Center(),
+			vogui.Button("+", vogui.OnInt(incCart, p.ID)).Variant("outline"),
+		).Gap(4).Class("items-center"),
+		vogui.Text("$"+formatPrice(lineTotal)).Bold().W(80),
+		vogui.Button("🗑", vogui.OnInt(removeFromCart, p.ID)).Variant("ghost"),
+	).Class("items-center gap-3 p-3 rounded").Bg("var(--vo-surface)")
+}
 
-		gui.Divider(),
-
-		// Coupon
-		gui.Row(
-			gui.Input(s.CouponCode, gui.OnValue(setCouponCode)).Flex(1),
-			gui.Button("Apply", gui.On(applyCoupon)).Bg("#6c757d").Rounded(4),
+func couponSection(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.Row(
+			vogui.Input(s.Coupon, vogui.OnValue(func(s *State, v string) { s.Coupon = v })).Placeholder("Coupon code"),
+			vogui.Button("Apply", vogui.On(applyCoupon)).Variant("outline"),
 		).Gap(8),
-		gui.Show(s.CouponError != "",
-			gui.Text(s.CouponError).Fg("#dc3545").Font(12),
-		),
-		gui.Show(s.CouponApplied,
-			gui.Text("✓ Coupon SAVE10 applied: 10% off").Fg("#28a745").Font(12),
-		),
-
-		gui.Divider(),
-
-		// Summary
-		summarySection(s),
-
-		// Checkout button
-		gui.Button("Checkout ($"+formatPrice(calculateTotal(s))+")", gui.On(checkout)).
-			Bg("#28a745").Rounded(4).P(12).Font(16).Bold(),
-	).P(16).Gap(12)
-}
-
-func cartItemRow(c CartItem, s *State) gui.Node {
-	lineTotal := c.Product.Price * c.Quantity
-
-	return gui.Row(
-		gui.Text(c.Product.Image).Font(32),
-		gui.Column(
-			gui.Text(c.Product.Name).Bold(),
-			gui.Text("$" + formatPrice(c.Product.Price) + " each").Fg("#6c757d").Font(12),
-		).Flex(1).Gap(4),
-		gui.Row(
-			gui.IconButton("-", gui.OnInt(decrementCart, c.Product.ID)),
-			gui.Text(itoa(c.Quantity)).Px(8).Font(14),
-			gui.IconButton("+", gui.OnInt(incrementCart, c.Product.ID)),
-		).Gap(4),
-		gui.Text("$" + formatPrice(lineTotal)).Bold().W(80),
-		gui.IconButton("🗑", gui.OnInt(removeFromCart, c.Product.ID)),
-	).P(12).Bg("#f8f9fa").Rounded(4).Gap(12)
-}
-
-func summarySection(s *State) gui.Node {
-	subtotal := calculateSubtotal(s)
-	discount := 0
-	if s.CouponApplied {
-		discount = subtotal / 10 // 10% off
-	}
-	shipping := 0
-	if subtotal < 5000 { // Free shipping over $50
-		shipping = 499
-	}
-	total := subtotal - discount + shipping
-
-	return gui.Column(
-		summaryRow("Subtotal", subtotal),
-		gui.Show(s.CouponApplied,
-			summaryRow("Discount (10%)", -discount),
-		),
-		summaryRow("Shipping", shipping),
-		gui.Show(subtotal < 5000,
-			gui.Text("Add $"+formatPrice(5000-subtotal)+" for free shipping").Fg("#6c757d").Font(12),
-		),
-		gui.Divider(),
-		gui.Row(
-			gui.Text("Total").Bold().Font(18),
-			gui.Spacer(),
-			gui.Text("$" + formatPrice(total)).Bold().Font(18).Fg("#28a745"),
+		vogui.If(s.Discount,
+			vogui.Text("✓ Coupon SAVE10 applied: 10% off").Fg("var(--vo-success)"),
 		),
 	).Gap(8)
 }
 
-func summaryRow(label string, amount int) gui.Node {
-	amountStr := "$" + formatPrice(amount)
-	if amount < 0 {
-		amountStr = "-$" + formatPrice(-amount)
+func orderSummary(s *State) vogui.Node {
+	subtotal := calcSubtotal(s)
+	discount := 0
+	if s.Discount {
+		discount = subtotal / 10
 	}
-	color := "#333"
-	if amount < 0 {
-		color = "#28a745"
+	shipping := 500
+	if subtotal >= 5000 {
+		shipping = 0
 	}
-	return gui.Row(
-		gui.Text(label),
-		gui.Spacer(),
-		gui.Text(amountStr).Fg(color),
+	total := subtotal - discount + shipping
+
+	return vogui.Column(
+		summaryRow("Subtotal", subtotal),
+		vogui.If(s.Discount, summaryRow("Discount (10%)", -discount)),
+		summaryRow("Shipping", shipping),
+		vogui.If(subtotal < 5000,
+			vogui.Text("Add $"+formatPrice(5000-subtotal)+" for free shipping").Fg("var(--vo-text-muted)"),
+		),
+		vogui.Divider(),
+		vogui.Row(
+			vogui.Text("Total").Bold().Font(18),
+			vogui.Spacer(),
+			vogui.Text("$"+formatPrice(total)).Bold().Font(18).Fg("var(--vo-success)"),
+		),
+		vogui.Button("Checkout ($"+formatPrice(total)+")", vogui.On(func(s *State) {})).
+			Variant("primary").Class("w-full p-3").Font(16).Bold(),
+	).Gap(8)
+}
+
+func summaryRow(label string, amount int) vogui.Node {
+	return vogui.Row(
+		vogui.Text(label),
+		vogui.Spacer(),
+		vogui.Text("$"+formatPrice(amount)),
 	)
 }
 
 // ============ Actions ============
 
-func setTab(s *State, tab int) {
-	s.ActiveTab = tab
-}
-
-func addToCart(s *State, productID int) {
+func incCart(s *State, id int) {
 	for _, p := range s.Products {
-		if p.ID == productID && p.Stock > 0 {
-			// Check if already in cart
-			for i := range s.Cart {
-				if s.Cart[i].Product.ID == productID {
-					if s.Cart[i].Quantity < p.Stock {
-						s.Cart[i].Quantity++
-					}
-					return
-				}
-			}
-			// Add new item
-			s.Cart = append(s.Cart, CartItem{Product: p, Quantity: 1})
+		if p.ID == id && s.Cart[id] < p.Stock {
+			s.Cart[id]++
 			return
 		}
 	}
 }
 
-func incrementCart(s *State, productID int) {
-	for i := range s.Cart {
-		if s.Cart[i].Product.ID == productID {
-			// Find product stock
-			for _, p := range s.Products {
-				if p.ID == productID && s.Cart[i].Quantity < p.Stock {
-					s.Cart[i].Quantity++
-					return
-				}
-			}
-		}
+func decCart(s *State, id int) {
+	if s.Cart[id] > 1 {
+		s.Cart[id]--
+	} else {
+		delete(s.Cart, id)
 	}
 }
 
-func decrementCart(s *State, productID int) {
-	for i := range s.Cart {
-		if s.Cart[i].Product.ID == productID {
-			s.Cart[i].Quantity--
-			if s.Cart[i].Quantity <= 0 {
-				s.Cart = append(s.Cart[:i], s.Cart[i+1:]...)
-			}
-			return
-		}
-	}
-}
-
-func removeFromCart(s *State, productID int) {
-	for i := range s.Cart {
-		if s.Cart[i].Product.ID == productID {
-			s.Cart = append(s.Cart[:i], s.Cart[i+1:]...)
-			return
-		}
-	}
-}
-
-func setCouponCode(s *State, code string) {
-	s.CouponCode = code
-	s.CouponError = ""
+func removeFromCart(s *State, id int) {
+	delete(s.Cart, id)
 }
 
 func applyCoupon(s *State) {
-	if s.CouponCode == "SAVE10" {
-		s.CouponApplied = true
-		s.CouponError = ""
-	} else if s.CouponCode == "" {
-		s.CouponError = "Please enter a coupon code"
-	} else {
-		s.CouponError = "Invalid coupon code"
-		s.CouponApplied = false
+	if s.Coupon == "SAVE10" {
+		s.Discount = true
 	}
-}
-
-func checkout(s *State) {
-	// Simulate checkout - clear cart
-	s.Cart = []CartItem{}
-	s.CouponApplied = false
-	s.CouponCode = ""
-	s.ActiveTab = 0
 }
 
 // ============ Helpers ============
 
 func cartCount(s *State) int {
-	count := 0
-	for _, c := range s.Cart {
-		count += c.Quantity
+	n := 0
+	for _, qty := range s.Cart {
+		n += qty
 	}
-	return count
+	return n
 }
 
-func getCartQuantity(s *State, productID int) int {
-	for _, c := range s.Cart {
-		if c.Product.ID == productID {
-			return c.Quantity
-		}
-	}
-	return 0
-}
-
-func calculateSubtotal(s *State) int {
+func calcSubtotal(s *State) int {
 	total := 0
-	for _, c := range s.Cart {
-		total += c.Product.Price * c.Quantity
+	for _, p := range s.Products {
+		total += p.Price * s.Cart[p.ID]
 	}
 	return total
 }
 
-func calculateTotal(s *State) int {
-	subtotal := calculateSubtotal(s)
-	discount := 0
-	if s.CouponApplied {
-		discount = subtotal / 10
-	}
-	shipping := 0
-	if subtotal < 5000 {
-		shipping = 499
-	}
-	return subtotal - discount + shipping
-}
-
-func boolToOpacity(b bool) float64 {
-	if b {
-		return 1.0
-	}
-	return 0.5
-}
-
 func formatPrice(cents int) string {
-	dollars := cents / 100
-	c := cents % 100
-	if c < 10 {
-		return itoa(dollars) + ".0" + itoa(c)
+	neg := ""
+	if cents < 0 {
+		neg = "-"
+		cents = -cents
 	}
-	return itoa(dollars) + "." + itoa(c)
+	return neg + fmt.Sprintf("%d.%02d", cents/100, cents%100)
 }
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	s := ""
-	for n > 0 {
-		s = string(rune('0'+n%10)) + s
-		n /= 10
-	}
-	if neg {
-		s = "-" + s
-	}
-	return s
-}
-
-// ============ Main ============
 
 func main() {
-	gui.Run(gui.App{
-		Init: func() any {
-			return &State{
-				Products: []Product{
-					{ID: 1, Name: "Wireless Earbuds", Price: 7999, Stock: 5, Image: "🎧"},
-					{ID: 2, Name: "Smart Watch", Price: 19999, Stock: 3, Image: "⌚"},
-					{ID: 3, Name: "Phone Case", Price: 1999, Stock: 10, Image: "📱"},
-					{ID: 4, Name: "USB-C Cable", Price: 1299, Stock: 20, Image: "🔌"},
-					{ID: 5, Name: "Laptop Stand", Price: 4999, Stock: 7, Image: "💻"},
-					{ID: 6, Name: "Webcam HD", Price: 8999, Stock: 0, Image: "📷"},
-				},
-				Cart:      []CartItem{},
-				ActiveTab: 0,
-			}
-		},
+	vogui.Run(vogui.App{
+		Init: initState,
 		View: view,
 	})
 }

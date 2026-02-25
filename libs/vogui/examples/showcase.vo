@@ -1,34 +1,26 @@
-// VoGUI Showcase - Comprehensive test of all components and features
+// Showcase - comprehensive demo of all v2 components and features
 package main
 
-import "vogui"
+import (
+	"fmt"
+	"vogui"
+)
 
 type State struct {
-	// Counter
-	Count int
-	
-	// Input fields
-	TextInput    string
-	PasswordVal  string
-	TextAreaVal  string
-	
-	// Toggle states
-	CheckboxVal  bool
-	SwitchVal    bool
-	
-	// Selection
-	SelectVal    string
-	SliderVal    int
-	
-	// UI state
-	ActiveTab    int
-	ShowModal    bool
-	Theme        string
-	
-	// Todo list
-	Todos        []any
-	TodoInput    string
-	TodoNextID   int
+	Count       int
+	TextInput   string
+	PasswordVal string
+	TextAreaVal string
+	CheckboxVal bool
+	SwitchVal   bool
+	SelectVal   string
+	SliderVal   int
+	ActiveTab   int
+	ShowDialog  bool
+	ShowDrawer  bool
+	TodoInput   string
+	Todos       []any
+	TodoNextID  int
 }
 
 type Todo struct {
@@ -37,307 +29,169 @@ type Todo struct {
 	Done bool
 }
 
-func view(state any) gui.Node {
+func view(state any) vogui.Node {
 	s := state.(*State)
-	
-	isDark := s.Theme == "dark"
-	bg := "#f8f9fa"
-	fg := "#212529"
-	if isDark {
-		bg = "#1a1a2e"
-		fg = "#e0e0e0"
-	}
-
-	return gui.Column(
-		// Header
-		header(s, bg, fg),
-		
-		// Main content
-		gui.Column(
-			// Section 1: Basic Components
-			section("1. Text & Typography", gui.Column(
-				gui.H1("Heading 1"),
-				gui.H2("Heading 2"),
-				gui.H3("Heading 3"),
-				gui.P("This is a paragraph with some text content."),
-				gui.Row(
-					gui.Text("Normal"),
-					gui.Strong("Bold"),
-					gui.Em("Italic"),
-					gui.Code("inline code"),
-				).Gap(12),
-				gui.Pre("func main() {\n    println(\"Hello, VoGUI!\")\n}"),
-				gui.Row(
-					gui.Link("https://github.com", "GitHub"),
-					gui.Badge("New"),
-					gui.Badge("Hot"),
-					gui.Tag("Vo"),
-					gui.Tag("GUI"),
-				).Gap(8),
-			)),
-			
-			// Section 2: Input Components
-			section("2. Input Components", gui.Column(
-				gui.Row(
-					gui.Text("Text Input:"),
-					gui.Input(s.TextInput, gui.OnValue(setTextInput)).Flex(1),
-				).Gap(8),
-				gui.Row(
-					gui.Text("Password:"),
-					gui.Password(s.PasswordVal, gui.OnValue(setPassword)).Flex(1),
-				).Gap(8),
-				gui.Text("TextArea:"),
-				gui.TextArea(s.TextAreaVal, gui.OnValue(setTextArea)),
-				gui.Row(
-					gui.CheckboxLabel("Checkbox", s.CheckboxVal, gui.OnChecked(setCheckbox)),
-					gui.Text("Switch:"),
-					gui.Switch(s.SwitchVal, gui.OnChecked(setSwitch)),
-				).Gap(16),
-				gui.Row(
-					gui.Text("Select:"),
-					gui.Select(s.SelectVal, []string{"Option A", "Option B", "Option C"}, gui.OnSelect(setSelect)),
-				).Gap(8),
-				gui.Row(
-					gui.Text("Slider:", s.SliderVal),
-					gui.Slider(s.SliderVal, 0, 100, gui.OnSlider(setSlider)).Flex(1),
-				).Gap(8),
-			)),
-			
-			// Section 3: Buttons
-			section("3. Buttons & Actions", gui.Column(
-				gui.Row(
-					gui.Button("Default", gui.On(noop)),
-					gui.Button("Rounded", gui.On(noop)).Rounded(20),
-					gui.Button("Primary", gui.On(noop)).Bg("#007bff"),
-					gui.Button("Success", gui.On(noop)).Bg("#28a745"),
-					gui.Button("Danger", gui.On(noop)).Bg("#dc3545"),
-				).Gap(8),
-				gui.Row(
-					gui.IconButton("+", gui.On(increment)),
-					gui.IconButton("-", gui.On(decrement)),
-					gui.Text("Count:", s.Count).Font(16).Bold(),
-				).Gap(8),
-				gui.Button("Open Modal", gui.On(openModal)),
-			)),
-			
-			// Section 4: Display Components
-			section("4. Display Components", gui.Column(
-				gui.Row(
-					gui.Alert("info", "This is an info alert"),
-				),
-				gui.Row(
-					gui.Alert("success", "Operation successful!"),
-				),
-				gui.Row(
-					gui.Alert("warning", "Please be careful"),
-				),
-				gui.Row(
-					gui.Alert("error", "Something went wrong"),
-				),
-				gui.Row(
-					gui.Text("Progress:"),
-					gui.Progress(float64(s.SliderVal) / 100.0).Flex(1),
-				).Gap(8),
-				gui.Row(
-					gui.Text("Loading:"),
-					gui.Spinner(),
-				).Gap(8),
-			)),
-			
-			// Section 5: Layout
-			section("5. Layout Components", gui.Column(
-				gui.Text("Row with Gap:"),
-				gui.Row(
-					box("1", "#007bff"),
-					box("2", "#28a745"),
-					box("3", "#ffc107"),
-					box("4", "#dc3545"),
-				).Gap(8),
-				gui.Divider(),
-				gui.Text("Grid (3 columns):"),
-				gui.Grid(3,
-					box("A", "#6c757d"),
-					box("B", "#6c757d"),
-					box("C", "#6c757d"),
-					box("D", "#6c757d"),
-					box("E", "#6c757d"),
-					box("F", "#6c757d"),
-				).Gap(8),
-				gui.Divider(),
-				gui.Text("Wrap:"),
-				gui.Wrap(
-					gui.Tag("Tag1"),
-					gui.Tag("Tag2"),
-					gui.Tag("Tag3"),
-					gui.Tag("Tag4"),
-					gui.Tag("Tag5"),
-					gui.Tag("Tag6"),
-					gui.Tag("Tag7"),
-					gui.Tag("Tag8"),
-				).Gap(4),
-			)),
-			
-			// Section 6: Control Flow
-			section("6. Control Flow", gui.Column(
-				gui.Row(
-					gui.Button("Toggle Show", gui.On(toggleCheckbox)),
-					gui.Show(s.CheckboxVal, gui.Text("👀 I'm visible!").Bg("#e3f2fd").P(8).Rounded(4)),
-				).Gap(8),
-				gui.IfElse(s.SwitchVal,
-					gui.Alert("success", "Switch is ON"),
-					gui.Alert("warning", "Switch is OFF"),
-				),
-				gui.Text("ForRange (1-5):"),
-				gui.Row(
-					gui.ForRange(1, 6, func(i int) gui.Node {
-						return gui.Badge(intToStr(i))
-					}),
-				).Gap(4),
-			)),
-			
-			// Section 7: Mini Todo App
-			section("7. Mini Todo App", gui.Column(
-				gui.Row(
-					gui.Input(s.TodoInput, gui.OnValue(setTodoInput)).Flex(1),
-					gui.Button("Add", gui.On(addTodo)),
-				).Gap(8),
-				gui.ForEach(s.Todos, func(item any, i int) gui.Node {
-					todo := item.(Todo)
-					return gui.Row(
-						gui.Checkbox(todo.Done, gui.OnIntChecked(toggleTodo, todo.ID)),
-						gui.Text(todo.Text).Flex(1).Fg(todoColor(todo.Done)),
-						gui.IconButton("x", gui.OnInt(removeTodo, todo.ID)),
-					).Gap(8).P(4).Bg("#f8f9fa").Rounded(4)
-				}),
-				gui.Text("Total:", len(s.Todos), " | Done:", countDone(s)),
-			)),
-			
-			// Section 8: Styling
-			section("8. Chainable Styles", gui.Column(
-				gui.Text("Styled boxes:"),
-				gui.Row(
-					gui.Text("Padding").P(16).Bg("#e3f2fd").Rounded(4),
-					gui.Text("Margin").M(8).Bg("#e8f5e9").Rounded(4),
-					gui.Text("Shadow").P(12).Shadow("0 4px 12px rgba(0,0,0,0.15)").Rounded(8),
-					gui.Text("Opacity").P(12).Bg("#6c757d").Fg("#fff").Opacity(0.6).Rounded(4),
-				).Gap(8),
-				gui.Text("Custom styled button:"),
-				gui.Button("Fancy", gui.On(noop)).
-					Bg("#9c27b0").
-					Rounded(25).
-					Shadow("0 4px 15px rgba(156,39,176,0.4)").
-					Px(24).Py(12),
-			)),
-		).P(24).Gap(24).Bg(bg),
-		
-		// Modal
-		gui.Show(s.ShowModal, modal(s)),
-	).Bg(bg)
+	return vogui.Column(
+		vogui.H1("VoGUI v2 Showcase").Class("text-center"),
+		vogui.Divider(),
+		sectionCounter(s),
+		vogui.Divider(),
+		sectionInputs(s),
+		vogui.Divider(),
+		sectionDialogDrawer(s),
+		vogui.Divider(),
+		sectionTabs(s),
+		vogui.Divider(),
+		sectionDropdownMenu(s),
+		vogui.Divider(),
+		sectionTodoList(s),
+		vogui.Divider(),
+		sectionAlertsBadges(),
+	).P(24).Gap(24).MaxW("700px").Mx("auto")
 }
 
-func header(s *State, bg string, fg string) gui.Node {
-	return gui.Row(
-		gui.H2("VoGUI Showcase").Fg(fg),
-		gui.Spacer(),
-		gui.Text("Theme:").Fg(fg),
-		gui.Switch(s.Theme == "dark", gui.OnChecked(toggleTheme)),
-	).P(16).Bg(bg).Gap(12).Border("0 0 1px 0 solid #dee2e6")
+// ============ Counter ============
+
+func sectionCounter(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.H2("Counter"),
+		vogui.Row(
+			vogui.Button("-", vogui.On(decrement)).Variant("outline"),
+			vogui.Text(fmt.Sprint(s.Count)).Font(20).Bold().W(60).Center(),
+			vogui.Button("+", vogui.On(increment)).Variant("outline"),
+		).Gap(8).Class("items-center"),
+	).Gap(12)
 }
-
-func section(title string, content gui.Node) gui.Node {
-	return gui.Column(
-		gui.H3(title),
-		content,
-	).Gap(12).P(16).Border("1px solid #dee2e6").Rounded(8)
-}
-
-func box(text string, bg string) gui.Node {
-	return gui.Center(gui.Text(text).Fg("#fff")).W(50).H(50).Bg(bg).Rounded(4)
-}
-
-func modal(s *State) gui.Node {
-	return gui.Center(
-		gui.Column(
-			gui.Row(
-				gui.H3("Modal Dialog"),
-				gui.Spacer(),
-				gui.IconButton("x", gui.On(closeModal)),
-			),
-			gui.Divider(),
-			gui.P("This is a modal dialog. Click outside or the X to close."),
-			gui.Row(
-				gui.Spacer(),
-				gui.Button("Cancel", gui.On(closeModal)).Bg("#6c757d"),
-				gui.Button("Confirm", gui.On(closeModal)),
-			).Gap(8),
-		).P(24).Bg("#fff").Rounded(12).Shadow("0 8px 32px rgba(0,0,0,0.3)").W(400),
-	).Style(map[string]any{
-		"position": "fixed",
-		"top": 0,
-		"left": 0,
-		"right": 0,
-		"bottom": 0,
-		"background": "rgba(0,0,0,0.5)",
-	})
-}
-
-func todoColor(done bool) string {
-	if done {
-		return "#999"
-	}
-	return "#333"
-}
-
-func countDone(s *State) int {
-	n := 0
-	for _, item := range s.Todos {
-		if item.(Todo).Done {
-			n++
-		}
-	}
-	return n
-}
-
-func intToStr(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	s := ""
-	for n > 0 {
-		s = string(rune('0'+n%10)) + s
-		n /= 10
-	}
-	return s
-}
-
-// ============ Actions ============
-
-func noop(s *State) {}
 
 func increment(s *State) { s.Count++ }
 func decrement(s *State) { s.Count-- }
 
-func setTextInput(s *State, v string)  { s.TextInput = v }
-func setPassword(s *State, v string)   { s.PasswordVal = v }
-func setTextArea(s *State, v string)   { s.TextAreaVal = v }
-func setCheckbox(s *State, v bool)     { s.CheckboxVal = v }
-func setSwitch(s *State, v bool)       { s.SwitchVal = v }
-func setSelect(s *State, v string)     { s.SelectVal = v }
-func setSlider(s *State, v int)        { s.SliderVal = v }
+// ============ Inputs ============
 
-func toggleCheckbox(s *State) { s.CheckboxVal = !s.CheckboxVal }
-func toggleTheme(s *State, dark bool) {
-	if dark {
-		s.Theme = "dark"
-	} else {
-		s.Theme = "light"
-	}
+func sectionInputs(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.H2("Inputs"),
+		vogui.FormField("Text Input",
+			vogui.Input(s.TextInput, vogui.OnValue(func(s *State, v string) { s.TextInput = v })).
+				Placeholder("Type something..."),
+		),
+		vogui.FormField("Password",
+			vogui.Password(s.PasswordVal, vogui.OnValue(func(s *State, v string) { s.PasswordVal = v })),
+		),
+		vogui.FormField("TextArea",
+			vogui.TextArea(s.TextAreaVal, vogui.OnValue(func(s *State, v string) { s.TextAreaVal = v })).
+				Placeholder("Multi-line text...").Rows(3),
+		),
+		vogui.Row(
+			vogui.Checkbox("Accept terms", s.CheckboxVal, vogui.OnChecked(func(s *State, v bool) { s.CheckboxVal = v })),
+			vogui.Switch("Notifications", s.SwitchVal, vogui.OnChecked(func(s *State, v bool) { s.SwitchVal = v })),
+		).Gap(24),
+		vogui.FormField("Select",
+			vogui.Select(s.SelectVal, []vogui.SelectOption{
+				{Label: "Option A", Value: "a"},
+				{Label: "Option B", Value: "b"},
+				{Label: "Option C", Value: "c"},
+			}, vogui.OnSelect(func(s *State, v string) { s.SelectVal = v })),
+		),
+		vogui.FormField("Slider ("+fmt.Sprint(s.SliderVal)+")",
+			vogui.Slider(s.SliderVal, 0, 100, vogui.OnSlider(func(s *State, v int) { s.SliderVal = v })),
+		),
+		vogui.Progress(s.SliderVal, 100),
+	).Gap(12)
 }
 
-func openModal(s *State)  { s.ShowModal = true }
-func closeModal(s *State) { s.ShowModal = false }
+// ============ Dialog & Drawer ============
 
-func setTodoInput(s *State, v string) { s.TodoInput = v }
+func sectionDialogDrawer(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.H2("Dialog & Drawer"),
+		vogui.Row(
+			vogui.Button("Open Dialog", vogui.On(func(s *State) { s.ShowDialog = true })).Variant("primary"),
+			vogui.Button("Open Drawer", vogui.On(func(s *State) { s.ShowDrawer = true })).Variant("outline"),
+		).Gap(8),
+		vogui.Dialog(vogui.DialogProps{Open: s.ShowDialog, OnClose: vogui.On(closeDialog)},
+			vogui.DialogTitle("Settings"),
+			vogui.DialogContent(
+				vogui.FormField("Username",
+					vogui.Input("admin", vogui.OnValue(func(s *State, v string) {})).Disabled(true),
+				),
+				vogui.Switch("Dark mode", s.SwitchVal, vogui.OnChecked(func(s *State, v bool) { s.SwitchVal = v })),
+			),
+			vogui.DialogActions(
+				vogui.Button("Cancel", vogui.On(closeDialog)).Variant("outline"),
+				vogui.Button("Save", vogui.On(closeDialog)).Variant("primary"),
+			),
+		),
+		vogui.Drawer(vogui.DrawerProps{Open: s.ShowDrawer, Side: "right", OnClose: vogui.On(closeDrawer)},
+			vogui.H3("Drawer Panel"),
+			vogui.Divider(),
+			vogui.Text("Slide-out content goes here."),
+			vogui.Spacer(),
+			vogui.Button("Close", vogui.On(closeDrawer)).Variant("outline"),
+		),
+	).Gap(12)
+}
+
+func closeDialog(s *State) { s.ShowDialog = false }
+func closeDrawer(s *State) { s.ShowDrawer = false }
+
+// ============ Tabs ============
+
+func sectionTabs(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.H2("Tabs"),
+		vogui.Tabs(s.ActiveTab, []vogui.TabItem{
+			{Label: "Overview", Content: vogui.Text("This is the overview tab content.")},
+			{Label: "Details", Content: vogui.Column(
+				vogui.Text("Detailed information here."),
+				vogui.Badge("Beta").Variant("info"),
+			).Gap(8)},
+			{Label: "Settings", Content: vogui.Text("Settings panel content.")},
+		}, vogui.OnSlider(func(s *State, idx int) { s.ActiveTab = idx })),
+	).Gap(12)
+}
+
+// ============ DropdownMenu ============
+
+func sectionDropdownMenu(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.H2("DropdownMenu"),
+		vogui.DropdownMenu(
+			vogui.Button("Actions", vogui.On(func(s *State) {})).Variant("outline"),
+			vogui.MenuItem("Edit", vogui.On(func(s *State) {})),
+			vogui.MenuItemWithIcon("copy", "Duplicate", vogui.On(func(s *State) {})),
+			vogui.MenuDivider(),
+			vogui.MenuItem("Delete", vogui.On(func(s *State) {})),
+		),
+	).Gap(12)
+}
+
+// ============ Todo List ============
+
+func sectionTodoList(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.H2("Inline Todo"),
+		vogui.Row(
+			vogui.Input(s.TodoInput, vogui.OnValue(func(s *State, v string) { s.TodoInput = v })).
+				Placeholder("Add task..."),
+			vogui.Button("Add", vogui.On(addTodo)).Variant("primary"),
+		).Gap(8),
+		vogui.ForEach(s.Todos, func(item any, i int) vogui.Node {
+			todo := item.(Todo)
+			return vogui.Row(
+				vogui.Checkbox("", todo.Done, vogui.OnIntChecked(toggleTodo, todo.ID)),
+				vogui.If(todo.Done,
+					vogui.Text(todo.Text).Style("textDecoration", "line-through").Fg("var(--vo-text-muted)"),
+				),
+				vogui.If(!todo.Done,
+					vogui.Text(todo.Text),
+				),
+				vogui.Spacer(),
+				vogui.Button("x", vogui.OnInt(removeTodo, todo.ID)).Variant("ghost"),
+			).Gap(8).Class("items-center").Key(fmt.Sprint(todo.ID))
+		}),
+	).Gap(12)
+}
 
 func addTodo(s *State) {
 	if s.TodoInput != "" {
@@ -349,10 +203,10 @@ func addTodo(s *State) {
 
 func toggleTodo(s *State, id int, done bool) {
 	for i := range s.Todos {
-		todo := s.Todos[i].(Todo)
-		if todo.ID == id {
-			todo.Done = done
-			s.Todos[i] = todo
+		t := s.Todos[i].(Todo)
+		if t.ID == id {
+			t.Done = done
+			s.Todos[i] = t
 			return
 		}
 	}
@@ -360,28 +214,36 @@ func toggleTodo(s *State, id int, done bool) {
 
 func removeTodo(s *State, id int) {
 	for i := range s.Todos {
-		if s.Todos[i].(Todo).ID == id {
+		t := s.Todos[i].(Todo)
+		if t.ID == id {
 			s.Todos = append(s.Todos[:i], s.Todos[i+1:]...)
 			return
 		}
 	}
 }
 
+// ============ Alerts & Badges ============
+
+func sectionAlertsBadges() vogui.Node {
+	return vogui.Column(
+		vogui.H2("Alerts & Badges"),
+		vogui.Alert("info", "Informational message."),
+		vogui.Alert("success", "Operation succeeded."),
+		vogui.Alert("warning", "Proceed with caution."),
+		vogui.Alert("danger", "An error occurred."),
+		vogui.Row(
+			vogui.Badge("New").Variant("info"),
+			vogui.Badge("Hot").Variant("danger"),
+			vogui.Badge("Sale").Variant("success"),
+			vogui.Tag("VoGUI"),
+			vogui.Tag("v2"),
+		).Gap(8),
+	).Gap(12)
+}
+
 func main() {
-	gui.Run(gui.App{
-		Init: func() any {
-			return &State{
-				Theme:     "light",
-				SelectVal: "Option A",
-				SliderVal: 50,
-				Todos: []any{
-					Todo{ID: 0, Text: "Learn VoGUI", Done: true},
-					Todo{ID: 1, Text: "Build something cool", Done: false},
-					Todo{ID: 2, Text: "Share with friends", Done: false},
-				},
-				TodoNextID: 3,
-			}
-		},
+	vogui.Run(vogui.App{
+		Init: func() any { return &State{SliderVal: 50, SelectVal: "a"} },
 		View: view,
 	})
 }

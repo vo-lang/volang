@@ -1,0 +1,10 @@
+// UnsafeHTML for rendering trusted HTML content.
+// The name makes the XSS risk explicit.
+package vogui
+
+// UnsafeHTML renders trusted HTML content via innerHTML.
+// The caller is responsible for sanitization.
+// Same risk model as Vue's v-html / Svelte's {@html}.
+func UnsafeHTML(content string) Node {
+	return Node{Type: "vo-unsafe-html", Props: map[string]any{"html": content}}
+}

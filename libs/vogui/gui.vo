@@ -1,44 +1,38 @@
-// Package gui provides a declarative UI framework for building web applications.
+// Package vogui provides a declarative UI framework for building web applications in Vo.
 //
-// Programming Model:
-//   State (user struct) → View (pure function) → Action (mutation function)
+// Programming model: State → View → Action (TEA - The Elm Architecture)
 //
-// Example:
+//   - State: A single user-defined struct holding all application data
+//   - View: A pure function that builds a Node tree from state
+//   - Action: Functions that mutate state in response to events
 //
-//   type State struct { Count int }
-//
-//   func view(state any) gui.Node {
-//       s := state.(*State)
-//       return gui.Column(
-//           gui.Text("Count: ", s.Count),
-//           gui.Button("+1", gui.On(increment)),
-//       )
-//   }
-//
-//   func increment(s *State) { s.Count++ }
-//
-//   func main() {
-//       gui.Run(gui.App{
-//           Init: func() any { return &State{} },
-//           View: view,
-//       })
-//   }
+// Two-layer state model:
+//   - Vo layer: Application state (data, business logic, routing)
+//   - JS layer: UI behavior state (dropdown open/close, tooltip, focus, animation)
 //
 // Files:
-//   - node.vo      : Node type and chainable style methods
-//   - layout.vo    : Layout components (Column, Row, Grid, Stack, etc.)
-//   - display.vo   : Display components (Text, H1-H6, Badge, Avatar, etc.)
-//   - input.vo     : Input components (Button, Input, Select, DateInput, etc.)
-//   - control.vo   : Control flow (If, IfElse, Show, ForEach, ForEachKeyed)
-//   - event.vo     : Event handlers (On, OnValue, OnInt, OnFiles, etc.)
-//   - app.vo       : Application lifecycle (Run, render, eventLoop)
-//   - timer.vo     : Timer API (SetTimeout, SetInterval, Clear*)
-//   - router.vo    : SPA routing (Route, Navigate, GetCurrentPath)
-//   - container.vo : Container components (Card, Panel, Accordion, Tabs)
-//   - overlay.vo   : Overlay components (Modal, Drawer, Tooltip, Dropdown)
-//   - form.vo      : Form components (Form, FormField, FormError, etc.)
-//   - list.vo      : List/Table components (List, Table, TableRow, etc.)
-//   - canvas.vo    : Canvas component for GPU rendering (Canvas, CanvasOpts)
-//   - nav.vo       : Navigation components (Nav, Breadcrumb, Pagination, Steps)
-//   - util.vo      : Internal utilities
+//   - gui.vo      Package overview
+//   - node.vo     Node struct and chainable methods
+//   - app.vo      Application lifecycle (Run, render)
+//   - event.vo    Handler system with generation protocol
+//   - theme.vo    Theme and CSS custom properties
+//   - control.vo  Control flow (If, Show, ForEach, etc.)
+//   - layout.vo   Layout containers (Row, Column, Grid, etc.)
+//   - display.vo  Display components (Text, Heading, Link, etc.)
+//   - input.vo    Input components (Button, Input, Select, etc.)
+//   - container.vo Structural containers (Card, Panel)
+//   - overlay.vo  Overlay components (Dialog, Drawer, Tooltip, DropdownMenu, etc.)
+//   - nav.vo      Navigation (Tabs, Accordion, Breadcrumb, Pagination, etc.)
+//   - form.vo     Form components (Form, FormField, etc.)
+//   - list.vo     List and table components
+//   - transition.vo Transition and TransitionGroup
+//   - ref.vo      DOM refs and imperative actions
+//   - portal.vo   Portal system
+//   - head.vo     Document head management
+//   - unsafe.vo   UnsafeHTML
+//   - widget.vo   ExternalWidget escape hatch
+//   - canvas.vo   Canvas/GPU rendering
+//   - timer.vo    Timer functions
+//   - router.vo   Client-side routing
+//   - util.vo     Utility functions
 package vogui

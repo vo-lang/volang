@@ -3,7 +3,7 @@ import { resolve } from 'path';
 
 export default defineConfig({
   server: {
-    port: 5173,
+    port: 5180,
     strictPort: true,
     fs: {
       // Studio imports source directly from ../libs/vogui/js/src during dev.

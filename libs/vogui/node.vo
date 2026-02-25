@@ -1,89 +1,116 @@
-// Node type and chainable style methods.
+// Node is the fundamental building block of the UI tree.
+// Every UI element is a Node with a type, properties, and children.
 package vogui
 
-// Node represents a UI element.
+// Node represents a UI element in the virtual tree.
 type Node struct {
 	Type     string
 	Props    map[string]any
 	Children []Node
 }
 
-// ============ Chainable Style Methods ============
+// ============ Style Methods ============
+// All style methods store CSS properties into Props["style"] map.
 
 func (n Node) setStyle(key string, value any) Node {
 	if n.Props == nil {
-		n.Props = make(map[string]any)
+		n.Props = map[string]any{}
 	}
-	style, ok := n.Props["style"].(map[string]any)
+	style, ok := n.Props["style"]
 	if !ok {
-		style = make(map[string]any)
-		n.Props["style"] = style
+		s := map[string]any{key: value}
+		n.Props["style"] = s
+		return n
 	}
-	style[key] = value
+	style.(map[string]any)[key] = value
 	return n
 }
 
-// W sets width. Accepts int (px) or string ("50%").
+// W sets width.
 func (n Node) W(v any) Node { return n.setStyle("width", v) }
 
-// H sets height. Accepts int (px) or string.
+// H sets height.
 func (n Node) H(v any) Node { return n.setStyle("height", v) }
 
+// MinW sets min-width.
+func (n Node) MinW(v any) Node { return n.setStyle("minWidth", v) }
+
+// MaxW sets max-width.
+func (n Node) MaxW(v any) Node { return n.setStyle("maxWidth", v) }
+
+// MinH sets min-height.
+func (n Node) MinH(v any) Node { return n.setStyle("minHeight", v) }
+
+// MaxH sets max-height.
+func (n Node) MaxH(v any) Node { return n.setStyle("maxHeight", v) }
+
 // P sets padding (all sides).
-func (n Node) P(v int) Node { return n.setStyle("padding", v) }
+func (n Node) P(v any) Node { return n.setStyle("padding", v) }
 
 // Px sets horizontal padding.
-func (n Node) Px(v int) Node {
+func (n Node) Px(v any) Node {
 	n = n.setStyle("paddingLeft", v)
 	return n.setStyle("paddingRight", v)
 }
 
 // Py sets vertical padding.
-func (n Node) Py(v int) Node {
+func (n Node) Py(v any) Node {
 	n = n.setStyle("paddingTop", v)
 	return n.setStyle("paddingBottom", v)
 }
 
 // M sets margin (all sides).
-func (n Node) M(v int) Node { return n.setStyle("margin", v) }
+func (n Node) M(v any) Node { return n.setStyle("margin", v) }
 
 // Mx sets horizontal margin.
-func (n Node) Mx(v int) Node {
+func (n Node) Mx(v any) Node {
 	n = n.setStyle("marginLeft", v)
 	return n.setStyle("marginRight", v)
 }
 
 // My sets vertical margin.
-func (n Node) My(v int) Node {
+func (n Node) My(v any) Node {
 	n = n.setStyle("marginTop", v)
 	return n.setStyle("marginBottom", v)
 }
 
+// Gap sets gap between flex/grid children.
+func (n Node) Gap(v any) Node { return n.setStyle("gap", v) }
+
 // Bg sets background color.
-func (n Node) Bg(c string) Node { return n.setStyle("background", c) }
+func (n Node) Bg(v string) Node { return n.setStyle("background", v) }
 
 // Fg sets text color.
-func (n Node) Fg(c string) Node { return n.setStyle("color", c) }
+func (n Node) Fg(v string) Node { return n.setStyle("color", v) }
 
-// Flex sets flex grow.
-func (n Node) Flex(v int) Node { return n.setStyle("flex", v) }
+// FontSize sets font size.
+func (n Node) FontSize(v any) Node { return n.setStyle("fontSize", v) }
 
-// Gap sets gap between children.
-func (n Node) Gap(v int) Node { return n.setStyle("gap", v) }
+// FontWeight sets font weight.
+func (n Node) FontWeight(v any) Node { return n.setStyle("fontWeight", v) }
 
-// Rounded sets border-radius.
-func (n Node) Rounded(v int) Node { return n.setStyle("borderRadius", v) }
+// Rounded sets border radius.
+func (n Node) Rounded(v any) Node { return n.setStyle("borderRadius", v) }
 
 // Border sets border.
 func (n Node) Border(v string) Node { return n.setStyle("border", v) }
 
-// Shadow sets box-shadow.
+// Shadow sets box shadow.
 func (n Node) Shadow(v string) Node { return n.setStyle("boxShadow", v) }
 
-// Opacity sets opacity (0.0 to 1.0).
-func (n Node) Opacity(v float64) Node { return n.setStyle("opacity", v) }
+// Opacity sets opacity.
+func (n Node) Opacity(v any) Node { return n.setStyle("opacity", v) }
 
-// Font sets font-size.
+// Overflow sets overflow.
+func (n Node) Overflow(v string) Node { return n.setStyle("overflow", v) }
+
+// Cursor sets cursor style.
+func (n Node) Cursor(v string) Node { return n.setStyle("cursor", v) }
+
+// Flex sets flex property.
+func (n Node) Flex(v any) Node { return n.setStyle("flex", v) }
+
+// Font sets font-size in pixels.
 func (n Node) Font(v int) Node { return n.setStyle("fontSize", v) }
 
 // Bold sets font-weight to bold.
@@ -95,16 +122,8 @@ func (n Node) Italic() Node { return n.setStyle("fontStyle", "italic") }
 // Center sets text-align to center.
 func (n Node) Center() Node { return n.setStyle("textAlign", "center") }
 
-// Cursor sets cursor style.
-func (n Node) Cursor(v string) Node { return n.setStyle("cursor", v) }
-
-// Overflow sets overflow behavior.
-func (n Node) Overflow(v string) Node { return n.setStyle("overflow", v) }
-
-// Style sets a single style property (key, value).
-func (n Node) Style(key string, value any) Node {
-	return n.setStyle(key, value)
-}
+// Style sets an arbitrary CSS property.
+func (n Node) Style(key string, value any) Node { return n.setStyle(key, value) }
 
 // Styles merges custom style properties from a map.
 func (n Node) Styles(props map[string]any) Node {
@@ -114,11 +133,64 @@ func (n Node) Styles(props map[string]any) Node {
 	return n
 }
 
-// AddHandler attaches a click handler to the node.
-func (n Node) AddHandler(h Handler) Node {
+// ============ Node Property Methods ============
+
+func (n Node) setProp(key string, value any) Node {
 	if n.Props == nil {
-		n.Props = make(map[string]any)
+		n.Props = map[string]any{}
 	}
-	n.Props["onClick"] = h.ID
+	n.Props[key] = value
 	return n
+}
+
+// Class adds CSS class names to the node.
+func (n Node) Class(cls string) Node { return n.setProp("class", cls) }
+
+// Variant sets the component variant (e.g., "primary", "outline", "danger").
+func (n Node) Variant(v string) Node { return n.setProp("variant", v) }
+
+// Key sets the diffing key for stable DOM identity in lists.
+func (n Node) Key(k string) Node { return n.setProp("key", k) }
+
+// Ref names the DOM element for imperative access.
+func (n Node) Ref(name string) Node { return n.setProp("ref", name) }
+
+// Attr sets an arbitrary HTML attribute (ARIA, data-*, role, etc.).
+func (n Node) Attr(key string, val any) Node {
+	if n.Props == nil {
+		n.Props = map[string]any{}
+	}
+	attrs, ok := n.Props["attrs"]
+	if !ok {
+		a := map[string]any{key: val}
+		n.Props["attrs"] = a
+		return n
+	}
+	attrs.(map[string]any)[key] = val
+	return n
+}
+
+// Transition sets the transition name for enter/leave animations.
+func (n Node) Transition(name string) Node { return n.setProp("transition", name) }
+
+// On binds an arbitrary DOM event to a handler on this node.
+// Example: gui.Div(children...).On("scroll", gui.Handle(onScroll))
+func (n Node) On(event string, h Handler) Node {
+	if n.Props == nil {
+		n.Props = map[string]any{}
+	}
+	events, ok := n.Props["events"]
+	if !ok {
+		e := map[string]any{event: h}
+		n.Props["events"] = e
+		return n
+	}
+	events.(map[string]any)[event] = h
+	return n
+}
+
+// AddHandler attaches a handler to the node using the handler's built-in event type.
+// Used by component constructors (Button, Input, etc.) that have implicit event types.
+func (n Node) AddHandler(h Handler) Node {
+	return n.setProp("handler_"+toString(h.Type), h.ID)
 }

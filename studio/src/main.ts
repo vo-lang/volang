@@ -7,9 +7,10 @@
  */
 
 import { render, injectStyles } from '@vogui/index';
-import type { VoNode } from '@vogui/types';
+import type { RenderMessage } from '@vogui/types';
 import { registerCodeMirrorWidget } from './widgets/codemirror';
 import { registerVoguiGuestWidget } from './widgets/vogui-guest';
+import './widgets/file-explorer';
 
 // =============================================================================
 // Platform abstraction
@@ -94,17 +95,16 @@ async function main() {
 
 function applyRender(container: HTMLElement, json: string) {
   if (!json) return;
-  let parsed: { type: string; tree: VoNode; handlers: any[] };
+  let msg: RenderMessage;
   try {
-    parsed = JSON.parse(json);
+    msg = JSON.parse(json) as RenderMessage;
   } catch (e) {
     console.error('[Studio] failed to parse render JSON:', e);
     return;
   }
-  if (parsed.type !== 'render') return;
+  if (msg.type !== 'render') return;
 
-  render(container, parsed.tree, {
-    interactive: true,
+  render(container, msg, {
     onEvent: async (handlerId: number, payload: string) => {
       try {
         const newJson = await bridge.sendEvent(handlerId, payload);

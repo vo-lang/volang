@@ -4,6 +4,7 @@ package studio
 import (
 	"encoding/json"
 	"vox"
+	"vogui"
 )
 
 // stopRunningGuest stops any active guest VM and clears its state.
@@ -15,18 +16,58 @@ func stopRunningGuest(s *State) {
 	}
 }
 
-// switchFile changes the active file in the sidebar.
-func switchFile(state any, idx int) {
-	s := state.(*State)
-	s.ActiveFile = idx
-	stopRunningGuest(s)
-}
-
 // onEditorChange updates file content when the CodeMirror widget reports a change.
 func onEditorChange(state any, payload string) {
 	s := state.(*State)
 	if s.ActiveFile >= 0 && s.ActiveFile < len(s.Files) {
 		s.Files[s.ActiveFile].Content = payload
+	}
+}
+
+// onExplorerEvent handles events from the file-explorer ExternalWidget.
+// Use vogui.ParseFileExplorerEvent to decode the payload into a typed struct.
+func onExplorerEvent(state any, payload string) {
+	s := state.(*State)
+	evt, err := vogui.ParseFileExplorerEvent(payload)
+	if err != nil {
+		return
+	}
+	switch evt.Type {
+	case vogui.FileExplorerOpen, vogui.FileExplorerCreate:
+		stopRunningGuest(s)
+		for i, f := range s.Files {
+			if f.Path == evt.Path {
+				s.Files[i].Content = evt.Content
+				s.ActiveFile = i
+				return
+			}
+		}
+		s.Files = append(s.Files, FileEntry{Path: evt.Path, Content: evt.Content})
+		s.ActiveFile = len(s.Files) - 1
+
+	case vogui.FileExplorerRename:
+		for i, f := range s.Files {
+			if f.Path == evt.OldPath {
+				s.Files[i].Path = evt.Path
+				if s.ActiveFile == i {
+					// active file path stays in sync
+				}
+				return
+			}
+		}
+
+	case vogui.FileExplorerDelete:
+		for i, f := range s.Files {
+			if f.Path == evt.Path {
+				s.Files = append(s.Files[:i], s.Files[i+1:]...)
+				if s.ActiveFile == i {
+					s.ActiveFile = -1
+				} else if s.ActiveFile > i {
+					s.ActiveFile--
+				}
+				return
+			}
+		}
 	}
 }
 
@@ -123,3 +164,4 @@ func setModeIdx(state any, idx int) {
 		s.Mode = modes[idx]
 	}
 }
+

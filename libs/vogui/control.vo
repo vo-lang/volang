@@ -1,67 +1,59 @@
-// Control flow components.
+// Control flow components for conditional and list rendering.
 package vogui
 
-// Empty returns an empty node that renders nothing.
-func Empty() Node {
-	return Node{Type: "Empty"}
-}
-
-// If conditionally renders a node.
-func If(cond bool, then Node) Node {
+// If renders child only when condition is true.
+func If(cond bool, child Node) Node {
 	if cond {
-		return then
+		return child
 	}
-	return Empty()
+	return Node{}
 }
 
-// IfElse conditionally renders one of two nodes.
-func IfElse(cond bool, then Node, els Node) Node {
+// IfElse renders trueChild when condition is true, falseChild otherwise.
+func IfElse(cond bool, trueChild Node, falseChild Node) Node {
 	if cond {
-		return then
+		return trueChild
 	}
-	return els
+	return falseChild
 }
 
-// Show renders child but hides it via CSS when not visible (keeps DOM).
-func Show(visible bool, child Node) Node {
-	return Node{
-		Type:     "Show",
-		Props:    map[string]any{"visible": visible},
-		Children: []Node{child},
+// Show renders child always but hides it via CSS when condition is false.
+// Unlike If, the DOM element is preserved (display:none).
+func Show(cond bool, child Node) Node {
+	if !cond {
+		child = child.setStyle("display", "none")
 	}
+	return child
 }
 
-// ForEach renders a list by iterating over a slice.
-// items must be []any. render receives (item any, index int).
-func ForEach(items []any, render func(item any, i int) Node) Node {
-	var children []Node
+// ForEach renders a list of nodes from a slice.
+// renderFn signature: func(item any, index int) Node
+func ForEach(items []any, renderFn func(item any, index int) Node) Node {
+	children := make([]Node, len(items))
 	for i, item := range items {
-		children = append(children, render(item, i))
+		children[i] = renderFn(item, i)
 	}
 	return Node{Type: "Fragment", Children: children}
 }
 
-// ForRange renders nodes for a range of integers [start, end).
-func ForRange(start int, end int, render func(i int) Node) Node {
-	var children []Node
-	for i := start; i < end; i++ {
-		children = append(children, render(i))
+// ForEachKeyed renders a list with stable keys for efficient DOM updates.
+// keyFn signature: func(item any) string
+// renderFn signature: func(item any, index int) Node
+func ForEachKeyed(items []any, keyFn func(item any) string, renderFn func(item any, index int) Node) Node {
+	children := make([]Node, len(items))
+	for i, item := range items {
+		child := renderFn(item, i)
+		child = child.Key(keyFn(item))
+		children[i] = child
 	}
 	return Node{Type: "Fragment", Children: children}
 }
 
-// ForEachKeyed renders a list with explicit keys for efficient updates.
-// Use when items may be reordered or filtered.
-func ForEachKeyed(items []any, keyFn func(item any) string, render func(item any, i int) Node) Node {
-	var children []Node
-	for i, item := range items {
-		child := render(item, i)
-		key := keyFn(item)
-		if child.Props == nil {
-			child.Props = make(map[string]any)
-		}
-		child.Props["key"] = key
-		children = append(children, child)
+// ForRange renders nodes for a range of integers [0, count).
+func ForRange(count int, renderFn func(index int) Node) Node {
+	children := make([]Node, count)
+	for i := 0; i < count; i++ {
+		children[i] = renderFn(i)
 	}
 	return Node{Type: "Fragment", Children: children}
 }

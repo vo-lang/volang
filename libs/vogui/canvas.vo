@@ -1,23 +1,16 @@
-// Canvas component for GPU rendering.
-// Third-party libraries access the canvas element via its ID.
+// Canvas component for GPU/2D rendering.
 package vogui
 
-// CanvasOpts configures a Canvas element.
+// CanvasOpts configures the canvas element.
 type CanvasOpts struct {
-	ID         string  // Unique canvas identifier (required)
-	Width      int     // Canvas width in pixels (default 300)
-	Height     int     // Canvas height in pixels (default 150)
-	Fullscreen bool    // Whether canvas is in fullscreen mode
-	OnPointer  Handler // Pointer events (mouse + touch unified)
-	OnResize   Handler // Canvas resize events
+	Width      int
+	Height     int
+	Fullscreen bool
 }
 
-// Canvas creates a GPU-capable canvas element.
-// Third-party libraries access this canvas via its ID through the platform registry.
+// Canvas renders a canvas element for GPU or 2D rendering.
 func Canvas(opts CanvasOpts) Node {
-	props := map[string]any{
-		"id": opts.ID,
-	}
+	props := map[string]any{}
 	if opts.Width > 0 {
 		props["width"] = opts.Width
 	}
@@ -26,12 +19,6 @@ func Canvas(opts CanvasOpts) Node {
 	}
 	if opts.Fullscreen {
 		props["fullscreen"] = true
-	}
-	if opts.OnPointer.Type != 0 {
-		props["onPointer"] = opts.OnPointer.ID
-	}
-	if opts.OnResize.Type != 0 {
-		props["onResize"] = opts.OnResize.ID
 	}
 	return Node{Type: "Canvas", Props: props}
 }

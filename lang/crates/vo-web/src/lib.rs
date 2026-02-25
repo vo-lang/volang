@@ -197,11 +197,96 @@ pub fn compile_source_with_mod_fs(
     Ok(module.serialize())
 }
 
+/// Compile a multi-file Vo package given a pre-populated local filesystem.
+///
+/// `entry` is the path to the package entry file inside `local_fs`
+/// (e.g. `"studio/main.vo"`). `local_fs` must contain all package source files.
+/// `std_fs` must contain stdlib + any extra packages (vogui, vox, etc.).
+#[cfg(feature = "compiler")]
+pub fn compile_entry_with_std_fs(entry: &str, local_fs: MemoryFs, std_fs: MemoryFs) -> Result<Vec<u8>, String> {
+    use vo_analysis::analyze_project;
+    use vo_codegen::compile_project;
+    use vo_module::vfs::{PackageResolver, StdSource, LocalSource, ModSource};
+
+    let pkg_dir = Path::new(entry).parent().unwrap_or(Path::new("."));
+    let file_set = FileSet::collect(&local_fs, pkg_dir, PathBuf::from("."))
+        .map_err(|e| format!("Failed to collect package files: {}", e))?;
+
+    let resolver = PackageResolver {
+        std: StdSource::with_fs(std_fs),
+        local: LocalSource::with_fs(local_fs),
+        r#mod: ModSource::with_fs(MemoryFs::new()),
+    };
+
+    let project = analyze_project(file_set, &resolver)
+        .map_err(|e| format!("{}", e))?;
+
+    let module = compile_project(&project)
+        .map_err(|e| format!("{:?}", e))?;
+
+    Ok(module.serialize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vo_common::vfs::MemoryFs;
+    use std::path::PathBuf;
+
+    #[test]
+    #[cfg(feature = "compiler")]
+    fn test_compile_studio_package() {
+        // Build stdlib fs (same as studio_init does)
+        let mut std_fs = build_stdlib_fs();
+
+        // Add vogui package files from disk
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../");
+        let vogui_dir = repo_root.join("libs/vogui");
+        let mut local_fs = MemoryFs::new();
+
+        for entry in std::fs::read_dir(&vogui_dir).expect("vogui dir") {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("vo") {
+                let name = path.file_name().unwrap().to_str().unwrap().to_string();
+                let content = std::fs::read_to_string(&path).unwrap();
+                std_fs.add_file(PathBuf::from(format!("vogui/{}", name)), content);
+            }
+        }
+
+        // Add vox package
+        let vox_file = repo_root.join("libs/vox/vox.vo");
+        if vox_file.exists() {
+            let content = std::fs::read_to_string(&vox_file).unwrap();
+            std_fs.add_file(PathBuf::from("vox/vox.vo"), content);
+        }
+
+        // Add studio app files at studio/ prefix
+        let app_dir = repo_root.join("studio/app");
+        for entry in std::fs::read_dir(&app_dir).expect("studio/app dir") {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("vo") {
+                let name = path.file_name().unwrap().to_str().unwrap().to_string();
+                let content = std::fs::read_to_string(&path).unwrap();
+                local_fs.add_file(PathBuf::from(format!("studio/{}", name)), content);
+            }
+        }
+
+        let result = compile_entry_with_std_fs("studio/main.vo", local_fs, std_fs);
+        match &result {
+            Err(e) => panic!("compile_entry_with_std_fs failed: {}", e),
+            Ok(bytes) => assert!(!bytes.is_empty(), "empty bytecode"),
+        }
+    }
+}
+
 /// Compile and run Vo source that imports third-party GitHub modules.
 ///
 /// Detects `import "github.com/..."` patterns, fetches Vo source files and
 /// pre-compiled WASM binaries from GitHub, then compiles and runs with ext-bridge.
-#[cfg(feature = "compiler")]
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 #[wasm_bindgen(js_name = "compileAndRunWithModules")]
 pub fn compile_and_run_with_modules(source: &str) -> js_sys::Promise {
     let source = source.to_string();
@@ -213,7 +298,7 @@ pub fn compile_and_run_with_modules(source: &str) -> js_sys::Promise {
 
 /// Fetch module source + optional WASM binaries from GitHub.
 /// Public so playground can call it for GUI-with-modules flows.
-#[cfg(feature = "compiler")]
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub async fn prepare_github_modules(source: &str) -> Result<(MemoryFs, String), String> {
     use vo_module::fetch;
     let imports = fetch::detect_github_imports(source)?;
@@ -250,7 +335,7 @@ pub async fn prepare_github_modules(source: &str) -> Result<(MemoryFs, String), 
     Ok((mod_fs, clean_source))
 }
 
-#[cfg(feature = "compiler")]
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 async fn run_with_modules_inner(source: &str) -> (String, String, String) {
     let (mod_fs, clean_source) = match prepare_github_modules(source).await {
         Ok(v) => v,

@@ -1,114 +1,201 @@
-// Personal Workspace - A comprehensive productivity app
-// Demonstrates most VoGUI components and features
+// Workspace - productivity app demonstrating v2 Dialog, Drawer, DropdownMenu, Tabs, Sidebar
 package main
 
-import "fmt"
-import "vogui"
-
-// ============ Types ============
+import (
+	"fmt"
+	"vogui"
+)
 
 type State struct {
 	// Navigation
-	ActiveTab string // "dashboard", "tasks", "pomodoro", "finance", "notes", "settings"
-	
+	ActiveTab string
+
 	// Tasks
-	Tasks          []Task
-	TaskFilter     string // "all", "active", "completed"
-	TaskSearch     string
-	ShowTaskModal  bool
-	EditingTask    *Task
-	NewTaskTitle   string
-	NewTaskDueDate string
-	NewTaskPriority string
-	
-	// Pomodoro
-	PomodoroTime     int  // seconds remaining
-	PomodoroRunning  bool
-	PomodoroMode     string // "work", "break"
-	PomodoroCount    int    // completed pomodoros today
-	PomodoroWorkMin  int
-	PomodoroBreakMin int
-	TimerID          int
-	
-	// Finance
-	Transactions     []Transaction
-	ShowAddTxModal   bool
-	NewTxAmount      int
-	NewTxCategory    string
-	NewTxNote        string
-	NewTxIsExpense   bool
-	FinanceMonth     int
-	
+	Tasks         []Task
+	TaskFilter    string // "all", "active", "completed"
+	ShowTaskDlg   bool
+	NewTaskTitle  string
+	NewTaskPri    string
+	TaskNextID    int
+
 	// Notes
 	Notes         []Note
 	ActiveNoteIdx int
-	NoteSearch    string
-	ShowNoteModal bool
+	ShowNoteDlg   bool
 	NewNoteTitle  string
-	
+	NoteNextID    int
+
 	// Settings
-	ShowSettings    bool
-	DarkMode        bool
-	NotifySound     bool
-	AccentColor     string
+	ShowSettings bool
+	DarkMode     bool
+	Username     string
 }
 
 type Task struct {
-	ID        int
-	Title     string
-	Completed bool
-	Priority  string // "low", "medium", "high"
-	DueDate   string
-	Category  string
-}
-
-type Transaction struct {
 	ID       int
-	Amount   int
-	Category string
-	Note     string
-	IsExpense bool
-	Date     string
+	Title    string
+	Priority string // "low", "medium", "high"
+	Done     bool
 }
 
 type Note struct {
 	ID      int
 	Title   string
 	Content string
-	Updated string
 }
 
-// ============ Actions ============
-
-// Navigation
-func setTab(s *State, tab string) {
-	s.ActiveTab = tab
+func initState() any {
+	return &State{
+		ActiveTab:  "tasks",
+		TaskFilter: "all",
+		NewTaskPri: "medium",
+		Tasks: []Task{
+			{ID: 1, Title: "Design v2 API", Priority: "high", Done: true},
+			{ID: 2, Title: "Implement renderer", Priority: "high"},
+			{ID: 3, Title: "Write documentation", Priority: "medium"},
+			{ID: 4, Title: "Add animations", Priority: "low"},
+		},
+		Notes: []Note{
+			{ID: 1, Title: "Meeting Notes", Content: "Discussed v2 architecture..."},
+			{ID: 2, Title: "Ideas", Content: "- Theming system\n- Managed components"},
+		},
+		TaskNextID:    5,
+		NoteNextID:    3,
+		ActiveNoteIdx: -1,
+		Username:      "admin",
+	}
 }
 
-// Task Actions
-func addTask(s *State) {
-	if s.NewTaskTitle == "" {
-		return
-	}
-	task := Task{
-		ID:       len(s.Tasks) + 1,
-		Title:    s.NewTaskTitle,
-		Priority: s.NewTaskPriority,
-		DueDate:  s.NewTaskDueDate,
-	}
-	if task.Priority == "" {
-		task.Priority = "medium"
-	}
-	s.Tasks = append(s.Tasks, task)
-	s.NewTaskTitle = ""
-	s.NewTaskDueDate = ""
-	s.NewTaskPriority = ""
-	s.ShowTaskModal = false
+func view(state any) vogui.Node {
+	s := state.(*State)
+	return vogui.Row(
+		sidebar(s),
+		vogui.Column(
+			topBar(s),
+			content(s),
+		).Flex(1),
+		settingsDrawer(s),
+		taskDialog(s),
+		noteDialog(s),
+	).Class("min-h-screen")
 }
 
-func toggleTask(s *State, idx int) {
-	if idx >= 0 && idx < len(s.Tasks) {
-		s.Tasks[idx].Completed = !s.Tasks[idx].Completed
+// ============ Sidebar ============
+
+func sidebar(s *State) vogui.Node {
+	return vogui.Sidebar(
+		vogui.H3("Workspace").Class("p-3"),
+		vogui.SidebarSection("MAIN"),
+		vogui.SidebarItem("Tasks", "check-square", s.ActiveTab == "tasks",
+			vogui.On(func(s *State) { s.ActiveTab = "tasks" })),
+		vogui.SidebarItem("Notes", "file-text", s.ActiveTab == "notes",
+			vogui.On(func(s *State) { s.ActiveTab = "notes" })),
+		vogui.Spacer(),
+		vogui.SidebarSection(""),
+		vogui.SidebarItem("Settings", "settings", false,
+			vogui.On(func(s *State) { s.ShowSettings = true })),
+	).Bg("var(--vo-surface)").H("100vh").Border("0 1px 0 0 solid var(--vo-border)")
+}
+
+// ============ Top Bar ============
+
+func topBar(s *State) vogui.Node {
+	title := "Tasks"
+	if s.ActiveTab == "notes" {
+		title = "Notes"
+	}
+	return vogui.Row(
+		vogui.H2(title),
+		vogui.Spacer(),
+		vogui.If(s.ActiveTab == "tasks",
+			vogui.Button("+ New Task", vogui.On(func(s *State) { s.ShowTaskDlg = true })).Variant("primary"),
+		),
+		vogui.If(s.ActiveTab == "notes",
+			vogui.Button("+ New Note", vogui.On(func(s *State) { s.ShowNoteDlg = true })).Variant("primary"),
+		),
+	).Class("items-center p-4 border-b gap-3")
+}
+
+// ============ Content ============
+
+func content(s *State) vogui.Node {
+	if s.ActiveTab == "tasks" {
+		return tasksView(s)
+	}
+	return notesView(s)
+}
+
+// ============ Tasks ============
+
+func tasksView(s *State) vogui.Node {
+	tabIdx := 0
+	if s.TaskFilter == "active" {
+		tabIdx = 1
+	} else if s.TaskFilter == "completed" {
+		tabIdx = 2
+	}
+	return vogui.Column(
+		vogui.Tabs(tabIdx, []vogui.TabItem{
+			{Label: "All", Content: vogui.Empty()},
+			{Label: "Active", Content: vogui.Empty()},
+			{Label: "Completed", Content: vogui.Empty()},
+		}, vogui.OnSlider(func(s *State, idx int) {
+			filters := []string{"all", "active", "completed"}
+			s.TaskFilter = filters[idx]
+		})),
+		taskList(s),
+		vogui.Text(fmt.Sprintf("%d tasks, %d completed", len(s.Tasks), countDone(s))).
+			Fg("var(--vo-text-muted)").Class("p-2"),
+	).P(16).Gap(12)
+}
+
+func taskList(s *State) vogui.Node {
+	var nodes []vogui.Node
+	for idx, task := range s.Tasks {
+		if s.TaskFilter == "active" && task.Done {
+			continue
+		}
+		if s.TaskFilter == "completed" && !task.Done {
+			continue
+		}
+		nodes = append(nodes, taskRow(task, idx))
+	}
+	return vogui.Column(nodes...).Gap(4)
+}
+
+func taskRow(task Task, idx int) vogui.Node {
+	priColor := "var(--vo-secondary)"
+	switch task.Priority {
+	case "high":
+		priColor = "var(--vo-danger)"
+	case "medium":
+		priColor = "var(--vo-warning)"
+	case "low":
+		priColor = "var(--vo-success)"
+	}
+
+	titleNode := vogui.Text(task.Title).Flex(1)
+	if task.Done {
+		titleNode = titleNode.Style("textDecoration", "line-through").Fg("var(--vo-text-muted)")
+	}
+
+	return vogui.Row(
+		vogui.Checkbox("", task.Done, vogui.OnIntChecked(toggleTask, task.ID)),
+		titleNode,
+		vogui.Badge(task.Priority).Bg(priColor).Fg("#fff"),
+		vogui.DropdownMenu(
+			vogui.Button("...", vogui.On(func(s *State) {})).Variant("ghost"),
+			vogui.MenuItem("Delete", vogui.OnInt(deleteTask, idx)),
+		),
+	).Class("items-center gap-3 p-2 rounded").Bg("var(--vo-surface)")
+}
+
+func toggleTask(s *State, id int, done bool) {
+	for i := range s.Tasks {
+		if s.Tasks[i].ID == id {
+			s.Tasks[i].Done = done
+			return
+		}
 	}
 }
 
@@ -118,804 +205,180 @@ func deleteTask(s *State, idx int) {
 	}
 }
 
-func setTaskFilter(s *State, filter string) {
-	s.TaskFilter = filter
-}
-
-func setTaskSearch(s *State, search string) {
-	s.TaskSearch = search
-}
-
-func openTaskModal(s *State) {
-	s.ShowTaskModal = true
-}
-
-func closeTaskModal(s *State) {
-	s.ShowTaskModal = false
-	s.NewTaskTitle = ""
-}
-
-func setNewTaskTitle(s *State, title string) {
-	s.NewTaskTitle = title
-}
-
-func setNewTaskDueDate(s *State, date string) {
-	s.NewTaskDueDate = date
-}
-
-func setNewTaskPriority(s *State, priority string) {
-	s.NewTaskPriority = priority
-}
-
-// Pomodoro Actions
-func startPomodoro(s *State) {
-	if s.PomodoroRunning {
-		return
-	}
-	s.PomodoroRunning = true
-	s.TimerID = vogui.SetInterval(1000, pomodoroTick)
-}
-
-func pausePomodoro(s *State) {
-	s.PomodoroRunning = false
-	if s.TimerID > 0 {
-		vogui.ClearInterval(s.TimerID)
-		s.TimerID = 0
-	}
-}
-
-func resetPomodoro(s *State) {
-	pausePomodoro(s)
-	if s.PomodoroMode == "work" {
-		s.PomodoroTime = s.PomodoroWorkMin * 60
-	} else {
-		s.PomodoroTime = s.PomodoroBreakMin * 60
-	}
-}
-
-func pomodoroTick(state any) {
-	s := state.(*State)
-	if s.PomodoroTime > 0 {
-		s.PomodoroTime--
-	} else {
-		pausePomodoro(s)
-		if s.PomodoroMode == "work" {
-			s.PomodoroCount++
-			s.PomodoroMode = "break"
-			s.PomodoroTime = s.PomodoroBreakMin * 60
-		} else {
-			s.PomodoroMode = "work"
-			s.PomodoroTime = s.PomodoroWorkMin * 60
-		}
-	}
-}
-
-func setPomodoroWorkMin(s *State, min int) {
-	s.PomodoroWorkMin = min
-	if s.PomodoroMode == "work" && !s.PomodoroRunning {
-		s.PomodoroTime = min * 60
-	}
-}
-
-func setPomodoroBreakMin(s *State, min int) {
-	s.PomodoroBreakMin = min
-	if s.PomodoroMode == "break" && !s.PomodoroRunning {
-		s.PomodoroTime = min * 60
-	}
-}
-
-// Finance Actions
-func openAddTxModal(s *State) {
-	s.ShowAddTxModal = true
-	s.NewTxIsExpense = true
-	s.NewTxCategory = "food"
-}
-
-func closeAddTxModal(s *State) {
-	s.ShowAddTxModal = false
-	s.NewTxAmount = 0
-	s.NewTxNote = ""
-}
-
-func addTransaction(s *State) {
-	if s.NewTxAmount <= 0 {
-		return
-	}
-	tx := Transaction{
-		ID:        len(s.Transactions) + 1,
-		Amount:    s.NewTxAmount,
-		Category:  s.NewTxCategory,
-		Note:      s.NewTxNote,
-		IsExpense: s.NewTxIsExpense,
-		Date:      "2026-01-21",
-	}
-	s.Transactions = append(s.Transactions, tx)
-	closeAddTxModal(s)
-}
-
-func setTxAmount(s *State, amount int) {
-	s.NewTxAmount = amount
-}
-
-func setTxCategory(s *State, cat string) {
-	s.NewTxCategory = cat
-}
-
-func setTxNote(s *State, note string) {
-	s.NewTxNote = note
-}
-
-func setTxIsExpense(s *State, isExpense bool) {
-	s.NewTxIsExpense = isExpense
-}
-
-func deleteTx(s *State, idx int) {
-	if idx >= 0 && idx < len(s.Transactions) {
-		s.Transactions = append(s.Transactions[:idx], s.Transactions[idx+1:]...)
-	}
-}
-
-// Note Actions
-func addNote(s *State) {
-	if s.NewNoteTitle == "" {
-		return
-	}
-	note := Note{
-		ID:      len(s.Notes) + 1,
-		Title:   s.NewNoteTitle,
-		Content: "",
-		Updated: "2026-01-21",
-	}
-	s.Notes = append(s.Notes, note)
-	s.ActiveNoteIdx = len(s.Notes) - 1
-	s.NewNoteTitle = ""
-	s.ShowNoteModal = false
-}
-
-func selectNote(s *State, idx int) {
-	s.ActiveNoteIdx = idx
-}
-
-func updateNoteContent(s *State, content string) {
-	if s.ActiveNoteIdx >= 0 && s.ActiveNoteIdx < len(s.Notes) {
-		s.Notes[s.ActiveNoteIdx].Content = content
-	}
-}
-
-func deleteNote(s *State, idx int) {
-	if idx >= 0 && idx < len(s.Notes) {
-		s.Notes = append(s.Notes[:idx], s.Notes[idx+1:]...)
-		if s.ActiveNoteIdx >= len(s.Notes) {
-			s.ActiveNoteIdx = len(s.Notes) - 1
-		}
-	}
-}
-
-func setNoteSearch(s *State, search string) {
-	s.NoteSearch = search
-}
-
-func openNoteModal(s *State) {
-	s.ShowNoteModal = true
-}
-
-func closeNoteModal(s *State) {
-	s.ShowNoteModal = false
-	s.NewNoteTitle = ""
-}
-
-func setNewNoteTitle(s *State, title string) {
-	s.NewNoteTitle = title
-}
-
-// Settings Actions
-func openSettings(s *State) {
-	s.ShowSettings = true
-}
-
-func closeSettings(s *State) {
-	s.ShowSettings = false
-}
-
-func toggleDarkMode(s *State, on bool) {
-	s.DarkMode = on
-}
-
-func toggleNotifySound(s *State, on bool) {
-	s.NotifySound = on
-}
-
-func setAccentColor(s *State, color string) {
-	s.AccentColor = color
-}
-
-// ============ Views ============
-
-func view(state any) vogui.Node {
-	s := state.(*State)
-	return vogui.Column(
-		viewNav(s),
-		vogui.Divider(),
-		viewContent(s),
-		viewModals(s),
-	).Style("height", "100vh")
-}
-
-func viewNav(s *State) vogui.Node {
-	return vogui.Row(
-		vogui.H2("🏠 Workspace").Style("margin", "0"),
-		vogui.Spacer(),
-		vogui.Nav(
-			vogui.NavItem("Dashboard", s.ActiveTab == "dashboard", vogui.On(func(s *State) { setTab(s, "dashboard") })),
-			vogui.NavItem("Tasks", s.ActiveTab == "tasks", vogui.On(func(s *State) { setTab(s, "tasks") })),
-			vogui.NavItem("Pomodoro", s.ActiveTab == "pomodoro", vogui.On(func(s *State) { setTab(s, "pomodoro") })),
-			vogui.NavItem("Finance", s.ActiveTab == "finance", vogui.On(func(s *State) { setTab(s, "finance") })),
-			vogui.NavItem("Notes", s.ActiveTab == "notes", vogui.On(func(s *State) { setTab(s, "notes") })),
-		),
-		vogui.Spacer(),
-		vogui.Tooltip("Settings", 
-			vogui.IconButton("settings", vogui.On(openSettings)),
-		),
-	).Style("padding", "12px 24px").Style("align-items", "center")
-}
-
-func viewContent(s *State) vogui.Node {
-	switch s.ActiveTab {
-	case "tasks":
-		return viewTasks(s)
-	case "pomodoro":
-		return viewPomodoro(s)
-	case "finance":
-		return viewFinance(s)
-	case "notes":
-		return viewNotes(s)
-	default:
-		return viewDashboard(s)
-	}
-}
-
-// ============ Dashboard ============
-
-func viewDashboard(s *State) vogui.Node {
-	activeTasks := 0
+func countDone(s *State) int {
+	n := 0
 	for _, t := range s.Tasks {
-		if !t.Completed {
-			activeTasks++
+		if t.Done {
+			n++
 		}
 	}
-	
-	totalExpense := 0
-	totalIncome := 0
-	for _, tx := range s.Transactions {
-		if tx.IsExpense {
-			totalExpense += tx.Amount
-		} else {
-			totalIncome += tx.Amount
-		}
-	}
-	
-	return vogui.Scroll(vogui.Column(
-		vogui.H1("Dashboard"),
-		
-		vogui.Grid(3,
-			vogui.Card(
-				vogui.CardHeader("📋 Tasks"),
-				vogui.CardBody(
-					vogui.H2(fmt.Sprint(activeTasks) + " active"),
-					vogui.Progress(float64(len(s.Tasks)-activeTasks) / float64(max(len(s.Tasks), 1))),
-					vogui.Text("Completed: ", len(s.Tasks)-activeTasks, "/", len(s.Tasks)),
-				),
-			),
-			vogui.Card(
-				vogui.CardHeader("🍅 Pomodoro"),
-				vogui.CardBody(
-					vogui.H2(fmt.Sprint(s.PomodoroCount) + " today"),
-					vogui.Text(formatTime(s.PomodoroTime)),
-					vogui.IfElse(s.PomodoroRunning,
-						vogui.Badge("Running"),
-						vogui.Badge("Paused"),
-					),
-				),
-			),
-			vogui.Card(
-				vogui.CardHeader("💰 Balance"),
-				vogui.CardBody(
-					vogui.H2("¥" + fmt.Sprint(totalIncome-totalExpense)),
-					vogui.Row(
-						vogui.Tag("↑ ¥" + fmt.Sprint(totalIncome)),
-						vogui.Tag("↓ ¥" + fmt.Sprint(totalExpense)),
-					).Style("gap", "8px"),
-				),
-			),
-		).Style("gap", "16px"),
-		
-		vogui.Panel("Recent Tasks",
-			vogui.IfElse(len(s.Tasks) == 0,
-				vogui.Text("No tasks yet"),
-				vogui.List(viewRecentTasks(s)...),
-			),
-		),
-		
-		vogui.Panel("Quick Actions",
-			vogui.Row(
-				vogui.Button("+ New Task", vogui.On(openTaskModal)),
-				vogui.Button("Start Focus", vogui.On(func(s *State) {
-					setTab(s, "pomodoro")
-					startPomodoro(s)
-				})),
-				vogui.Button("+ Add Expense", vogui.On(openAddTxModal)),
-			).Style("gap", "12px"),
-		),
-	).Style("padding", "24px").Style("gap", "24px"))
-}
-
-func viewRecentTasks(s *State) []vogui.Node {
-	var items []vogui.Node
-	count := 0
-	for i, task := range s.Tasks {
-		if count >= 5 {
-			break
-		}
-		if !task.Completed {
-			items = append(items, viewTaskItem(s, task, i))
-			count++
-		}
-	}
-	return items
-}
-
-// ============ Tasks ============
-
-func viewTasks(s *State) vogui.Node {
-	return vogui.Column(
-		vogui.Row(
-			vogui.H1("Tasks"),
-			vogui.Spacer(),
-			vogui.SearchInput(s.TaskSearch, vogui.OnValue(setTaskSearch), vogui.On(func(s *State) {})),
-			vogui.Button("+ Add Task", vogui.On(openTaskModal)),
-		).Style("align-items", "center").Style("gap", "12px"),
-		
-		vogui.Tabs(
-			tabIndex(s.TaskFilter),
-			[]vogui.TabItem{
-				{Label: "All", Content: vogui.Empty()},
-				{Label: "Active", Content: vogui.Empty()},
-				{Label: "Completed", Content: vogui.Empty()},
-			},
-			vogui.OnSlider(func(s *State, idx int) {
-				filters := []string{"all", "active", "completed"}
-				s.TaskFilter = filters[idx]
-			}),
-		),
-		
-		vogui.Scroll(vogui.Column(
-			viewFilteredTasks(s)...,
-		).Style("gap", "8px")),
-	).Style("padding", "24px").Style("gap", "16px").Style("height", "calc(100vh - 60px)")
-}
-
-func tabIndex(filter string) int {
-	switch filter {
-	case "active":
-		return 1
-	case "completed":
-		return 2
-	default:
-		return 0
-	}
-}
-
-func viewFilteredTasks(s *State) []vogui.Node {
-	var items []vogui.Node
-	for i, task := range s.Tasks {
-		if s.TaskSearch != "" && !contains(task.Title, s.TaskSearch) {
-			continue
-		}
-		if s.TaskFilter == "active" && task.Completed {
-			continue
-		}
-		if s.TaskFilter == "completed" && !task.Completed {
-			continue
-		}
-		items = append(items, viewTaskItem(s, task, i))
-	}
-	if len(items) == 0 {
-		items = append(items, vogui.Center(vogui.Text("No tasks found")))
-	}
-	return items
-}
-
-func viewTaskItem(s *State, task Task, idx int) vogui.Node {
-	color := "#f59e0b"
-	if task.Priority == "high" {
-		color = "#ef4444"
-	} else if task.Priority == "low" {
-		color = "#22c55e"
-	}
-	
-	return vogui.Card(
-		vogui.Row(
-			vogui.Checkbox(task.Completed, vogui.OnIntChecked(toggleTaskChecked, idx)),
-			vogui.Column(
-				vogui.IfElse(task.Completed,
-					vogui.Text(task.Title).Style("text-decoration", "line-through").Style("color", "#888"),
-					vogui.Strong(task.Title),
-				),
-				vogui.Row(
-					vogui.If(task.DueDate != "", vogui.Tag("📅 "+task.DueDate)),
-					vogui.Badge(task.Priority).Style("background", color),
-				).Style("gap", "8px"),
-			).Style("flex", "1"),
-			vogui.Dropdown(
-				[]vogui.DropdownItem{
-					{Label: "Delete", OnClick: vogui.OnInt(deleteTask, idx), Icon: "trash"},
-				},
-				vogui.IconButton("more-vertical", vogui.On(func(s *State) {})),
-			),
-		).Style("align-items", "center").Style("gap", "12px"),
-	)
-}
-
-func toggleTaskChecked(s *State, idx int, checked bool) {
-	toggleTask(s, idx)
-}
-
-// ============ Pomodoro ============
-
-func viewPomodoro(s *State) vogui.Node {
-	progress := 1.0 - float64(s.PomodoroTime)/float64(s.PomodoroWorkMin*60)
-	if s.PomodoroMode == "break" {
-		progress = 1.0 - float64(s.PomodoroTime)/float64(s.PomodoroBreakMin*60)
-	}
-	
-	return vogui.Center(vogui.Column(
-		vogui.H1("🍅 Pomodoro Timer"),
-		
-		vogui.Card(
-			vogui.CardBody(
-				vogui.Center(vogui.Column(
-					vogui.IfElse(s.PomodoroMode == "work",
-						vogui.Badge("FOCUS TIME"),
-						vogui.Badge("BREAK TIME").Style("background", "#22c55e"),
-					),
-					vogui.H1(formatTime(s.PomodoroTime)).Style("font-size", "72px").Style("margin", "24px 0"),
-					vogui.Progress(progress).Style("width", "300px").Style("height", "8px"),
-					vogui.Row(
-						vogui.IfElse(s.PomodoroRunning,
-							vogui.Button("⏸ Pause", vogui.On(pausePomodoro)),
-							vogui.Button("▶ Start", vogui.On(startPomodoro)),
-						),
-						vogui.Button("↺ Reset", vogui.On(resetPomodoro)),
-					).Style("gap", "12px").Style("margin-top", "24px"),
-				).Style("gap", "16px")),
-			),
-		).Style("width", "400px"),
-		
-		vogui.Row(
-			vogui.Text("Today's Pomodoros: "),
-			vogui.Badge(fmt.Sprint(s.PomodoroCount)),
-		).Style("margin-top", "24px"),
-		
-		vogui.Accordion(
-			[]vogui.AccordionItem{
-				{
-					Title: "⚙️ Timer Settings",
-					Content: vogui.Column(
-						vogui.FormField("Work Duration (min)",
-							vogui.Slider(s.PomodoroWorkMin, 5, 60, vogui.OnSlider(setPomodoroWorkMin)),
-						),
-						vogui.FormField("Break Duration (min)",
-							vogui.Slider(s.PomodoroBreakMin, 1, 30, vogui.OnSlider(setPomodoroBreakMin)),
-						),
-					).Style("gap", "16px"),
-					Open: false,
-				},
-			},
-			vogui.OnSlider(func(s *State, idx int) {}),
-		).Style("width", "400px").Style("margin-top", "24px"),
-	).Style("gap", "16px"))
-}
-
-func formatTime(seconds int) string {
-	m := seconds / 60
-	s := seconds % 60
-	ms := ""
-	ss := ""
-	if m < 10 {
-		ms = "0"
-	}
-	if s < 10 {
-		ss = "0"
-	}
-	return ms + fmt.Sprint(m) + ":" + ss + fmt.Sprint(s)
-}
-
-// ============ Finance ============
-
-func viewFinance(s *State) vogui.Node {
-	totalExpense := 0
-	totalIncome := 0
-	for _, tx := range s.Transactions {
-		if tx.IsExpense {
-			totalExpense += tx.Amount
-		} else {
-			totalIncome += tx.Amount
-		}
-	}
-	
-	return vogui.Column(
-		vogui.Row(
-			vogui.H1("💰 Finance"),
-			vogui.Spacer(),
-			vogui.Button("+ Add Transaction", vogui.On(openAddTxModal)),
-		).Style("align-items", "center"),
-		
-		vogui.Grid(3,
-			vogui.Card(
-				vogui.CardBody(
-					vogui.Text("Income"),
-					vogui.H2("¥" + fmt.Sprint(totalIncome)).Style("color", "#22c55e"),
-				),
-			),
-			vogui.Card(
-				vogui.CardBody(
-					vogui.Text("Expense"),
-					vogui.H2("¥" + fmt.Sprint(totalExpense)).Style("color", "#ef4444"),
-				),
-			),
-			vogui.Card(
-				vogui.CardBody(
-					vogui.Text("Balance"),
-					vogui.H2("¥" + fmt.Sprint(totalIncome-totalExpense)),
-				),
-			),
-		).Style("gap", "16px"),
-		
-		vogui.Panel("Transaction History",
-			vogui.IfElse(len(s.Transactions) == 0,
-				vogui.Center(vogui.Text("No transactions yet")),
-				vogui.Table(
-					vogui.TableHead(
-						vogui.TableRow(
-							vogui.TableHeaderCell("Type"),
-							vogui.TableHeaderCell("Category"),
-							vogui.TableHeaderCell("Amount"),
-							vogui.TableHeaderCell("Note"),
-							vogui.TableHeaderCell("Date"),
-							vogui.TableHeaderCell(""),
-						),
-					),
-					vogui.TableBody(viewTxRows(s)...),
-				),
-			),
-		),
-	).Style("padding", "24px").Style("gap", "24px")
-}
-
-func viewTxRows(s *State) []vogui.Node {
-	var rows []vogui.Node
-	for i, tx := range s.Transactions {
-		typeIcon := "↑"
-		typeColor := "#22c55e"
-		if tx.IsExpense {
-			typeIcon = "↓"
-			typeColor = "#ef4444"
-		}
-		rows = append(rows, vogui.TableRow(
-			vogui.TableCell(vogui.Text(typeIcon).Style("color", typeColor)),
-			vogui.TableCell(vogui.Text(tx.Category)),
-			vogui.TableCell(vogui.Text("¥" + fmt.Sprint(tx.Amount)).Style("color", typeColor)),
-			vogui.TableCell(vogui.Text(tx.Note)),
-			vogui.TableCell(vogui.Text(tx.Date)),
-			vogui.TableCell(vogui.IconButton("trash", vogui.OnInt(deleteTx, i))),
-		))
-	}
-	return rows
+	return n
 }
 
 // ============ Notes ============
 
-func viewNotes(s *State) vogui.Node {
+func notesView(s *State) vogui.Node {
 	return vogui.Row(
-		vogui.Column(
-			vogui.Row(
-				vogui.H3("Notes"),
-				vogui.Spacer(),
-				vogui.IconButton("plus", vogui.On(openNoteModal)),
-			).Style("align-items", "center"),
-			vogui.SearchInput(s.NoteSearch, vogui.OnValue(setNoteSearch), vogui.On(func(s *State) {})),
-			vogui.Scroll(vogui.List(viewNoteList(s)...)),
-		).Style("width", "250px").Style("padding", "16px").Style("gap", "12px").Style("border-right", "1px solid #eee"),
-		
-		vogui.IfElse(s.ActiveNoteIdx >= 0 && s.ActiveNoteIdx < len(s.Notes),
-			viewNoteEditor(s),
-			vogui.Center(vogui.Text("Select a note or create new one")),
+		noteList(s),
+		vogui.If(s.ActiveNoteIdx >= 0 && s.ActiveNoteIdx < len(s.Notes),
+			noteEditor(s),
 		),
-	).Style("height", "calc(100vh - 60px)")
+		vogui.If(s.ActiveNoteIdx < 0 || s.ActiveNoteIdx >= len(s.Notes),
+			vogui.Center(
+				vogui.Text("Select a note to edit").Fg("var(--vo-text-muted)"),
+			).Flex(1),
+		),
+	).Flex(1)
 }
 
-func viewNoteList(s *State) []vogui.Node {
-	var items []vogui.Node
+func noteList(s *State) vogui.Node {
+	var nodes []vogui.Node
 	for i, note := range s.Notes {
-		if s.NoteSearch != "" && !contains(note.Title, s.NoteSearch) {
-			continue
-		}
-		idx := i
-		bg := "transparent"
-		if s.ActiveNoteIdx == i {
-			bg = "#f0f0f0"
-		}
-		items = append(items, vogui.ListItem(
-			vogui.Row(
-				vogui.Column(
-					vogui.Strong(note.Title),
-					vogui.Text(note.Updated).Style("font-size", "12px").Style("color", "#888"),
-				).Style("flex", "1"),
-				vogui.If(s.ActiveNoteIdx == i, vogui.Badge("●")),
-			).Style("cursor", "pointer").AddHandler(vogui.On(func(s *State) { selectNote(s, idx) })),
-		).Style("padding", "8px").Style("background", bg))
+		active := i == s.ActiveNoteIdx
+		nodes = append(nodes, noteItem(note, i, active))
 	}
-	return items
+	return vogui.Column(nodes...).W(240).Bg("var(--vo-surface)").Border("0 1px 0 0 solid var(--vo-border)").Gap(1)
 }
 
-func viewNoteEditor(s *State) vogui.Node {
-	if s.ActiveNoteIdx < 0 || s.ActiveNoteIdx >= len(s.Notes) {
-		return vogui.Empty()
+func noteItem(note Note, idx int, active bool) vogui.Node {
+	n := vogui.Column(
+		vogui.Text(note.Title).Bold(),
+		vogui.Text(note.Content).Fg("var(--vo-text-muted)").Class("truncate"),
+	).Gap(2).P(12).Cursor("pointer")
+	if active {
+		n = n.Bg("rgba(59,130,246,0.08)")
 	}
+	return n.On("click", vogui.Handle(func(s *State, payload string) {
+		s.ActiveNoteIdx = idx
+	}))
+}
+
+func noteEditor(s *State) vogui.Node {
 	note := s.Notes[s.ActiveNoteIdx]
 	return vogui.Column(
-		vogui.Row(
-			vogui.H2(note.Title),
-			vogui.Spacer(),
-			vogui.IconButton("trash", vogui.OnInt(deleteNote, s.ActiveNoteIdx)),
-		).Style("align-items", "center"),
-		vogui.TextArea(note.Content, vogui.OnValue(updateNoteContent)).
-			Style("flex", "1").Style("resize", "none").Style("font-family", "monospace"),
-	).Style("flex", "1").Style("padding", "24px").Style("gap", "16px")
+		vogui.Input(note.Title, vogui.OnIntValue(setNoteTitle, s.ActiveNoteIdx)).
+			Font(18).Bold().Border("none").P(16),
+		vogui.Divider(),
+		vogui.TextArea(note.Content, vogui.OnIntValue(setNoteContent, s.ActiveNoteIdx)).
+			Flex(1).Border("none").P(16),
+	).Flex(1)
 }
 
-// ============ Modals ============
-
-func viewModals(s *State) vogui.Node {
-	return vogui.Fragment(
-		viewTaskModal(s),
-		viewAddTxModal(s),
-		viewNoteModal(s),
-		viewSettingsDrawer(s),
-	)
+func setNoteTitle(s *State, idx int, val string) {
+	if idx >= 0 && idx < len(s.Notes) {
+		s.Notes[idx].Title = val
+	}
 }
 
-func viewTaskModal(s *State) vogui.Node {
-	return vogui.Modal(s.ShowTaskModal, vogui.On(closeTaskModal),
-		vogui.ModalHeader("Add New Task"),
-		vogui.ModalBody(
-			vogui.Form(vogui.On(addTask),
-				vogui.FormField("Title",
-					vogui.Input(s.NewTaskTitle, vogui.OnValue(setNewTaskTitle)),
-				),
-				vogui.FormField("Due Date",
-					vogui.DateInput(s.NewTaskDueDate, vogui.OnValue(setNewTaskDueDate)),
-				),
-				vogui.FormField("Priority",
-					vogui.Select(s.NewTaskPriority, []string{"low", "medium", "high"}, vogui.OnValue(setNewTaskPriority)),
-				),
-			),
-		),
-		vogui.ModalFooter(
-			vogui.Row(
-				vogui.Button("Cancel", vogui.On(closeTaskModal)),
-				vogui.Button("Add Task", vogui.On(addTask)),
-			).Style("gap", "12px"),
-		),
-	)
+func setNoteContent(s *State, idx int, val string) {
+	if idx >= 0 && idx < len(s.Notes) {
+		s.Notes[idx].Content = val
+	}
 }
 
-func viewAddTxModal(s *State) vogui.Node {
-	return vogui.Modal(s.ShowAddTxModal, vogui.On(closeAddTxModal),
-		vogui.ModalHeader("Add Transaction"),
-		vogui.ModalBody(
-			vogui.Form(vogui.On(addTransaction),
-				vogui.FormField("Type",
-					vogui.Row(
-						vogui.CheckboxLabel("Expense", s.NewTxIsExpense, vogui.OnChecked(setTxIsExpense)),
-					),
-				),
-				vogui.FormField("Amount",
-					vogui.NumberInput(s.NewTxAmount, vogui.OnSlider(setTxAmount)),
-				),
-				vogui.FormField("Category",
-					vogui.Select(s.NewTxCategory, []string{"food", "transport", "shopping", "entertainment", "bills", "salary", "other"}, vogui.OnValue(setTxCategory)),
-				),
-				vogui.FormField("Note",
-					vogui.Input(s.NewTxNote, vogui.OnValue(setTxNote)),
-				),
-			),
-		),
-		vogui.ModalFooter(
-			vogui.Row(
-				vogui.Button("Cancel", vogui.On(closeAddTxModal)),
-				vogui.Button("Add", vogui.On(addTransaction)),
-			).Style("gap", "12px"),
-		),
-	)
-}
+// ============ Task Dialog ============
 
-func viewNoteModal(s *State) vogui.Node {
-	return vogui.Modal(s.ShowNoteModal, vogui.On(closeNoteModal),
-		vogui.ModalHeader("New Note"),
-		vogui.ModalBody(
+func taskDialog(s *State) vogui.Node {
+	return vogui.Dialog(vogui.DialogProps{Open: s.ShowTaskDlg, OnClose: vogui.On(closeTaskDlg)},
+		vogui.DialogTitle("New Task"),
+		vogui.DialogContent(
 			vogui.FormField("Title",
-				vogui.Input(s.NewNoteTitle, vogui.OnValue(setNewNoteTitle)),
+				vogui.Input(s.NewTaskTitle, vogui.OnValue(func(s *State, v string) { s.NewTaskTitle = v })).
+					Placeholder("Task title..."),
+			),
+			vogui.FormField("Priority",
+				vogui.Select(s.NewTaskPri, []vogui.SelectOption{
+					{Label: "Low", Value: "low"},
+					{Label: "Medium", Value: "medium"},
+					{Label: "High", Value: "high"},
+				}, vogui.OnSelect(func(s *State, v string) { s.NewTaskPri = v })),
 			),
 		),
-		vogui.ModalFooter(
-			vogui.Row(
-				vogui.Button("Cancel", vogui.On(closeNoteModal)),
-				vogui.Button("Create", vogui.On(addNote)),
-			).Style("gap", "12px"),
+		vogui.DialogActions(
+			vogui.Button("Cancel", vogui.On(closeTaskDlg)).Variant("outline"),
+			vogui.Button("Create", vogui.On(addTask)).Variant("primary"),
 		),
 	)
 }
 
-func viewSettingsDrawer(s *State) vogui.Node {
-	return vogui.Drawer(s.ShowSettings, "right", vogui.On(closeSettings),
+func closeTaskDlg(s *State) { s.ShowTaskDlg = false }
+
+func addTask(s *State) {
+	if s.NewTaskTitle != "" {
+		s.Tasks = append(s.Tasks, Task{
+			ID:       s.TaskNextID,
+			Title:    s.NewTaskTitle,
+			Priority: s.NewTaskPri,
+		})
+		s.TaskNextID++
+		s.NewTaskTitle = ""
+		s.NewTaskPri = "medium"
+		s.ShowTaskDlg = false
+	}
+}
+
+// ============ Note Dialog ============
+
+func noteDialog(s *State) vogui.Node {
+	return vogui.Dialog(vogui.DialogProps{Open: s.ShowNoteDlg, OnClose: vogui.On(closeNoteDlg)},
+		vogui.DialogTitle("New Note"),
+		vogui.DialogContent(
+			vogui.FormField("Title",
+				vogui.Input(s.NewNoteTitle, vogui.OnValue(func(s *State, v string) { s.NewNoteTitle = v })).
+					Placeholder("Note title..."),
+			),
+		),
+		vogui.DialogActions(
+			vogui.Button("Cancel", vogui.On(closeNoteDlg)).Variant("outline"),
+			vogui.Button("Create", vogui.On(addNote)).Variant("primary"),
+		),
+	)
+}
+
+func closeNoteDlg(s *State) { s.ShowNoteDlg = false }
+
+func addNote(s *State) {
+	if s.NewNoteTitle != "" {
+		s.Notes = append(s.Notes, Note{ID: s.NoteNextID, Title: s.NewNoteTitle})
+		s.NoteNextID++
+		s.NewNoteTitle = ""
+		s.ShowNoteDlg = false
+		s.ActiveNoteIdx = len(s.Notes) - 1
+	}
+}
+
+// ============ Settings Drawer ============
+
+func settingsDrawer(s *State) vogui.Node {
+	return vogui.Drawer(vogui.DrawerProps{
+		Open: s.ShowSettings, Side: "right",
+		OnClose: vogui.On(func(s *State) { s.ShowSettings = false }),
+	},
 		vogui.Column(
-			vogui.H2("⚙️ Settings"),
+			vogui.H3("Settings"),
 			vogui.Divider(),
-			vogui.FormSection("Appearance",
-				vogui.FormField("Dark Mode",
-					vogui.Switch(s.DarkMode, vogui.OnChecked(toggleDarkMode)),
-				),
-				vogui.FormField("Accent Color",
-					vogui.ColorInput(s.AccentColor, vogui.OnValue(setAccentColor)),
-				),
+			vogui.FormField("Username",
+				vogui.Input(s.Username, vogui.OnValue(func(s *State, v string) { s.Username = v })),
 			),
-			vogui.FormSection("Notifications",
-				vogui.FormField("Sound",
-					vogui.Switch(s.NotifySound, vogui.OnChecked(toggleNotifySound)),
-				),
-			),
+			vogui.Switch("Dark Mode", s.DarkMode, vogui.OnChecked(toggleDarkMode)),
 			vogui.Spacer(),
-			vogui.Button("Close", vogui.On(closeSettings)),
-		).Style("padding", "24px").Style("gap", "16px").Style("height", "100%"),
+			vogui.Button("Close", vogui.On(func(s *State) { s.ShowSettings = false })).Variant("outline"),
+		).Gap(16).H("100%"),
 	)
 }
 
-// ============ Helpers ============
-
-func contains(s string, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
+func toggleDarkMode(s *State, dark bool) {
+	s.DarkMode = dark
+	if dark {
+		vogui.SetTheme(vogui.DarkTheme())
+	} else {
+		vogui.SetTheme(vogui.DefaultTheme())
 	}
-	return false
 }
-
-func max(a int, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-// ============ Main ============
 
 func main() {
 	vogui.Run(vogui.App{
-		Init: func() any {
-			return &State{
-				ActiveTab:        "dashboard",
-				TaskFilter:       "all",
-				PomodoroTime:     25 * 60,
-				PomodoroMode:     "work",
-				PomodoroWorkMin:  25,
-				PomodoroBreakMin: 5,
-				ActiveNoteIdx:    -1,
-				AccentColor:      "#3b82f6",
-				NotifySound:      true,
-			}
-		},
+		Init: initState,
 		View: view,
 	})
 }

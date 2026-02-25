@@ -1,0 +1,20 @@
+// Portal system for rendering content into fixed DOM locations.
+// Used for toasts, notifications, popovers that need to escape overflow:hidden.
+package vogui
+
+// Portal renders children into a named container outside the normal component tree.
+// The JS runtime creates a container element for each unique portal name.
+// CSS positions these containers appropriately (e.g., toast at top-right).
+func Portal(name string, children ...Node) Node {
+	return Node{Type: "vo-portal", Props: map[string]any{
+		"portalName": name,
+	}, Children: children}
+}
+
+// Toast displays a temporary notification message.
+// Rendered via portal. Auto-dismisses after durationMs.
+func Toast(message string, typ string, durationMs int) {
+	toastEmit(message, typ, durationMs)
+}
+
+func toastEmit(message string, typ string, durationMs int) // extern

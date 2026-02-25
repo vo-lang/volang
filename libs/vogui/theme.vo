@@ -1,0 +1,78 @@
+// Theme and CSS custom properties.
+package vogui
+
+import "encoding/json"
+
+// Theme defines the application's design tokens.
+// These are emitted as CSS custom properties (--vo-primary, etc.).
+type Theme struct {
+	Primary    string
+	Secondary  string
+	Success    string
+	Danger     string
+	Warning    string
+	Info       string
+	Background string
+	Surface    string
+	Text       string
+	TextMuted  string
+	Border     string
+	Radius     string
+	FontFamily string
+}
+
+// DefaultTheme returns the default light theme.
+func DefaultTheme() Theme {
+	return Theme{
+		Primary:    "#3b82f6",
+		Secondary:  "#6b7280",
+		Success:    "#22c55e",
+		Danger:     "#ef4444",
+		Warning:    "#f59e0b",
+		Info:       "#06b6d4",
+		Background: "#ffffff",
+		Surface:    "#f8fafc",
+		Text:       "#0f172a",
+		TextMuted:  "#64748b",
+		Border:     "#e2e8f0",
+		Radius:     "6px",
+		FontFamily: "system-ui, -apple-system, sans-serif",
+	}
+}
+
+// DarkTheme returns the default dark theme.
+func DarkTheme() Theme {
+	return Theme{
+		Primary:    "#60a5fa",
+		Secondary:  "#9ca3af",
+		Success:    "#4ade80",
+		Danger:     "#f87171",
+		Warning:    "#fbbf24",
+		Info:       "#22d3ee",
+		Background: "#0f172a",
+		Surface:    "#1e293b",
+		Text:       "#f1f5f9",
+		TextMuted:  "#94a3b8",
+		Border:     "#334155",
+		Radius:     "6px",
+		FontFamily: "system-ui, -apple-system, sans-serif",
+	}
+}
+
+var currentTheme *Theme
+
+// SetTheme sets the application theme. Call before gui.Run() or in Init().
+func SetTheme(t Theme) {
+	currentTheme = &t
+}
+
+func themeToJSON() string {
+	if currentTheme == nil {
+		return ""
+	}
+	data, err := json.Marshal(currentTheme)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}

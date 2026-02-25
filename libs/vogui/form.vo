@@ -1,39 +1,33 @@
 // Form components.
 package vogui
 
-// Form renders a form container.
-func Form(onSubmit Handler, children ...Node) Node {
-	return Node{
-		Type:     "Form",
-		Props:    map[string]any{"onSubmit": onSubmit.ID},
-		Children: children,
-	}
+// Form renders a form element with submit handler.
+func Form(handler Handler, children ...Node) Node {
+	return Node{Type: "form", Props: map[string]any{
+		"onSubmit": handler.ID,
+	}, Children: children}
 }
 
-// FormField renders a labeled form field.
-func FormField(label string, child Node) Node {
-	return Node{
-		Type:     "FormField",
-		Props:    map[string]any{"label": label},
-		Children: []Node{child},
-	}
+// FormField renders a labeled form field wrapper.
+func FormField(label string, children ...Node) Node {
+	return Node{Type: "vo-form-field", Props: map[string]any{
+		"label": label,
+	}, Children: children}
 }
 
-// FormError renders an error message.
+// FormError renders a form error message.
 func FormError(message string) Node {
-	return Node{Type: "FormError", Props: map[string]any{"message": message}}
+	return Node{Type: "vo-form-error", Props: map[string]any{"textContent": message}}
 }
 
-// FormHelp renders help text.
+// FormHelp renders a form help text.
 func FormHelp(message string) Node {
-	return Node{Type: "FormHelp", Props: map[string]any{"message": message}}
+	return Node{Type: "vo-form-help", Props: map[string]any{"textContent": message}}
 }
 
-// FormSection renders a form section with title.
+// FormSection renders a grouped section within a form.
 func FormSection(title string, children ...Node) Node {
-	return Node{
-		Type:     "FormSection",
-		Props:    map[string]any{"title": title},
-		Children: children,
-	}
+	return Node{Type: "vo-form-section", Props: map[string]any{
+		"title": title,
+	}, Children: children}
 }

@@ -1,119 +1,177 @@
-// Overlay components (modals, drawers, tooltips, etc).
+// Overlay components: Dialog, Drawer, Tooltip, Popover, DropdownMenu, etc.
+// Many of these are "managed components" where JS handles UI behavior state.
 package vogui
 
-// Modal renders a modal dialog.
-func Modal(open bool, onClose Handler, children ...Node) Node {
-	return Node{
-		Type: "Modal",
-		Props: map[string]any{
-			"open":    open,
-			"onClose": onClose.ID,
-		},
-		Children: children,
+// ============ Dialog ============
+
+// DialogProps configures Dialog behavior.
+type DialogProps struct {
+	Open    bool
+	OnClose Handler
+}
+
+// Dialog renders a modal dialog using the native <dialog> element.
+// Structure via composition: DialogTitle, DialogContent, DialogActions as children.
+// Behavior via Props: Open, OnClose.
+// Per P6: when Open is provided, JS MUST respect it.
+func Dialog(props DialogProps, children ...Node) Node {
+	return Node{Type: "vo-dialog", Props: map[string]any{
+		"open":    props.Open,
+		"onClose": props.OnClose.ID,
+	}, Children: children}
+}
+
+// DialogTitle renders the dialog title.
+func DialogTitle(text string) Node {
+	return Node{Type: "vo-dialog-title", Props: map[string]any{"textContent": text}}
+}
+
+// DialogContent renders the dialog body content.
+func DialogContent(children ...Node) Node {
+	return Node{Type: "vo-dialog-content", Children: children}
+}
+
+// DialogActions renders the dialog action buttons area.
+func DialogActions(children ...Node) Node {
+	return Node{Type: "vo-dialog-actions", Children: children}
+}
+
+// ============ Drawer ============
+
+// DrawerProps configures Drawer behavior.
+type DrawerProps struct {
+	Open    bool
+	Side    string // "left", "right", "top", "bottom"; default "right"
+	OnClose Handler
+}
+
+// Drawer renders a slide-out panel.
+func Drawer(props DrawerProps, children ...Node) Node {
+	side := props.Side
+	if side == "" {
+		side = "right"
 	}
+	return Node{Type: "vo-drawer", Props: map[string]any{
+		"open":    props.Open,
+		"onClose": props.OnClose.ID,
+		"side":    side,
+	}, Children: children}
 }
 
-// ModalHeader renders modal header with title.
-func ModalHeader(title string) Node {
-	return Node{Type: "ModalHeader", Props: map[string]any{"title": title}}
+// ============ Tooltip (Managed) ============
+
+// Tooltip wraps a trigger element and shows content on hover.
+// JS manages: show/hide on hover, positioning, delay.
+func Tooltip(content string, trigger Node) Node {
+	return Node{Type: "vo-tooltip", Props: map[string]any{
+		"textContent": content,
+	}, Children: []Node{trigger}}
 }
 
-// ModalBody renders modal body content.
-func ModalBody(children ...Node) Node {
-	return Node{Type: "ModalBody", Children: children}
+// ============ Popover (Managed) ============
+
+// Popover wraps a trigger and shows content on click.
+// First child = trigger, remaining children = popover content.
+// JS manages: open/close on click, outside click dismiss, positioning.
+func Popover(children ...Node) Node {
+	return Node{Type: "vo-popover", Children: children}
 }
 
-// ModalFooter renders modal footer content.
-func ModalFooter(children ...Node) Node {
-	return Node{Type: "ModalFooter", Children: children}
+// ============ DropdownMenu (Managed) ============
+
+// DropdownMenu wraps a trigger button and menu items.
+// First child = trigger, remaining children = menu items.
+// JS manages: open/close, keyboard navigation, ARIA, focus trap.
+func DropdownMenu(children ...Node) Node {
+	return Node{Type: "vo-dropdown-menu", Children: children}
 }
 
-// Drawer renders a side drawer. side: "left", "right", "top", "bottom"
-func Drawer(open bool, side string, onClose Handler, children ...Node) Node {
-	return Node{
-		Type: "Drawer",
-		Props: map[string]any{
-			"open":    open,
-			"side":    side,
-			"onClose": onClose.ID,
-		},
-		Children: children,
+// MenuItem renders a clickable menu item.
+func MenuItem(label string, handler Handler) Node {
+	return Node{Type: "vo-menu-item", Props: map[string]any{
+		"textContent": label,
+		"onClick":     handler.ID,
+	}}
+}
+
+// MenuItemWithIcon renders a menu item with an icon.
+func MenuItemWithIcon(icon string, label string, handler Handler) Node {
+	return Node{Type: "vo-menu-item", Props: map[string]any{
+		"icon":        icon,
+		"textContent": label,
+		"onClick":     handler.ID,
+	}}
+}
+
+// MenuItemDisabled renders a disabled menu item.
+func MenuItemDisabled(label string) Node {
+	return Node{Type: "vo-menu-item", Props: map[string]any{
+		"textContent": label,
+		"disabled":    true,
+	}}
+}
+
+// MenuDivider renders a separator line in a menu.
+func MenuDivider() Node {
+	return Node{Type: "vo-menu-divider"}
+}
+
+// ============ HoverCard (Managed) ============
+
+// HoverCard shows a card on hover over trigger.
+// First child = trigger, second child = card content.
+// JS manages: show/hide with delay, positioning.
+func HoverCard(trigger Node, card Node) Node {
+	return Node{Type: "vo-hover-card", Children: []Node{trigger, card}}
+}
+
+// ============ Collapsible (Managed) ============
+
+// Collapsible wraps a trigger and collapsible content.
+// First child = trigger, remaining = content (collapsed by default).
+// JS manages: toggle open/close on trigger click.
+func Collapsible(children ...Node) Node {
+	return Node{Type: "vo-collapsible", Children: children}
+}
+
+// CollapsibleOpen same as Collapsible but starts expanded.
+func CollapsibleOpen(children ...Node) Node {
+	return Node{Type: "vo-collapsible", Props: map[string]any{"defaultOpen": true}, Children: children}
+}
+
+// ============ Combobox (Managed) ============
+
+// ComboboxProps configures Combobox behavior.
+type ComboboxProps struct {
+	Value       string
+	Placeholder string
+	OnSelect    Handler
+}
+
+// Combobox renders a searchable select dropdown.
+// Children are ComboboxOption elements.
+// JS manages: input filtering, keyboard nav, open/close.
+func Combobox(props ComboboxProps, children ...Node) Node {
+	p := map[string]any{
+		"value":       props.Value,
+		"placeholder": props.Placeholder,
+		"onSelect":    props.OnSelect.ID,
 	}
+	return Node{Type: "vo-combobox", Props: p, Children: children}
 }
 
-// Tooltip renders a tooltip on hover.
-func Tooltip(content string, child Node) Node {
-	return Node{
-		Type:     "Tooltip",
-		Props:    map[string]any{"content": content},
-		Children: []Node{child},
-	}
+// ComboboxOption renders an option in a Combobox.
+func ComboboxOption(label string, value string) Node {
+	return Node{Type: "vo-combobox-option", Props: map[string]any{
+		"textContent": label,
+		"value":       value,
+	}}
 }
 
-// Popover renders a popover on click.
-func Popover(content Node, child Node) Node {
-	return Node{
-		Type:     "Popover",
-		Props:    map[string]any{"content": content},
-		Children: []Node{child},
-	}
-}
+// ============ ContextMenu (Managed) ============
 
-// DropdownItem represents a dropdown menu item.
-type DropdownItem struct {
-	Label   string
-	OnClick Handler
-	Icon    string
-}
-
-// Dropdown renders a dropdown menu.
-func Dropdown(items []DropdownItem, child Node) Node {
-	itemsAny := make([]any, len(items))
-	for i, item := range items {
-		itemsAny[i] = map[string]any{
-			"label":   item.Label,
-			"onClick": item.OnClick.ID,
-			"icon":    item.Icon,
-		}
-	}
-	return Node{
-		Type:     "Dropdown",
-		Props:    map[string]any{"items": itemsAny},
-		Children: []Node{child},
-	}
-}
-
-// MenuItem represents a context menu item.
-type MenuItem struct {
-	Label    string
-	OnClick  Handler
-	Icon     string
-	Disabled bool
-	Children []MenuItem
-}
-
-func menuItemsToAny(items []MenuItem) []any {
-	result := make([]any, len(items))
-	for i, item := range items {
-		m := map[string]any{
-			"label":    item.Label,
-			"onClick":  item.OnClick.ID,
-			"icon":     item.Icon,
-			"disabled": item.Disabled,
-		}
-		if len(item.Children) > 0 {
-			m["children"] = menuItemsToAny(item.Children)
-		}
-		result[i] = m
-	}
-	return result
-}
-
-// ContextMenu renders a right-click menu.
-func ContextMenu(items []MenuItem, child Node) Node {
-	return Node{
-		Type:     "ContextMenu",
-		Props:    map[string]any{"items": menuItemsToAny(items)},
-		Children: []Node{child},
-	}
+// ContextMenu renders a right-click context menu.
+// First child = trigger area, remaining = menu items.
+func ContextMenu(children ...Node) Node {
+	return Node{Type: "vo-context-menu", Children: children}
 }

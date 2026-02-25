@@ -1,4 +1,3 @@
-// Internal utility functions.
 package vogui
 
 import "fmt"

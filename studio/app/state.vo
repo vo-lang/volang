@@ -1,25 +1,26 @@
 // IDE state definition and example files.
 package studio
 
-// FileEntry holds a file's name and content.
+// FileEntry holds a file or directory.
+// Directories have Path ending with "/" and empty Content.
 type FileEntry struct {
-	Name    string
+	Path    string
 	Content string
 }
 
 // State holds all IDE application state.
 type State struct {
-	Files       []FileEntry
-	ActiveFile  int
-	Output      string
-	GuestModule any    // vox.Module handle, nil when no guest is running
-	GuestRender string // latest render JSON from guest VM
-	Mode        string // "code" | "split" | "preview"
+	Files      []FileEntry
+	ActiveFile int    // index into Files; -1 = none
+	Output     string
+	GuestModule  any    // vox.Module handle, nil when no guest is running
+	GuestRender  string // latest render JSON from guest VM
+	Mode         string // "code" | "split" | "preview"
 }
 
 var exampleFiles = []FileEntry{
 	{
-		Name: "hello.vo",
+		Path: "hello.vo",
 		Content: `package main
 
 import "fmt"
@@ -30,7 +31,7 @@ func main() {
 `,
 	},
 	{
-		Name: "counter.vo",
+		Path: "counter.vo",
 		Content: `package main
 
 import "vogui"
@@ -60,7 +61,7 @@ func decrement(s any) { s.(*Counter).Count-- }
 `,
 	},
 	{
-		Name: "fibonacci.vo",
+		Path: "fibonacci.vo",
 		Content: `package main
 
 import "fmt"

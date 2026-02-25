@@ -1,8 +1,14 @@
-// VoGUI JavaScript/TypeScript runtime
-// Provides DOM rendering for VoGUI virtual node trees
+// VoGUI v2 JavaScript Runtime - Public API
 
-export type { VoNode, EventCallback, RendererConfig } from './types';
-export { StylePropertyMap } from './types';
-export { voguiStyles, injectStyles } from './styles';
-export { render, renderNode, styleToString, setupKeyHandler, registerWidget, destroyAllWidgets } from './renderer';
-export type { WidgetFactory, WidgetInstance } from './renderer';
+export type {
+    VoNode,
+    VoHandler,
+    RenderMessage,
+    EventCallback,
+    RendererConfig,
+    WidgetFactory,
+    WidgetInstance,
+} from './types';
+
+export { render, renderNode, setupKeyHandler, registerWidget, getRef, destroyAllWidgets } from './renderer';
+export { injectStyles, applyTheme, voguiStyles } from './styles';

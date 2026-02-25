@@ -1,33 +1,33 @@
+// Counter - minimal TEA demo using VoGUI v2
 package main
 
-import "vogui"
+import (
+	"fmt"
+	"vogui"
+)
 
 type State struct {
-    Count int
+	Count int
 }
 
 func view(state any) vogui.Node {
-    s := state.(*State)
-    return vogui.Column(
-        vogui.Text("Count: ", s.Count),
-        vogui.Row(
-            vogui.Button("-1", vogui.On(decrement)),
-            vogui.Button("+1", vogui.On(increment)),
-        ),
-    )
+	s := state.(*State)
+	return vogui.Column(
+		vogui.H2("Counter"),
+		vogui.Text("Count: "+fmt.Sprint(s.Count)).Font(20).Bold(),
+		vogui.Row(
+			vogui.Button("-1", vogui.On(decrement)).Variant("outline"),
+			vogui.Button("+1", vogui.On(increment)).Variant("primary"),
+		).Gap(8),
+	).Gap(16).P(24)
 }
 
-func increment(s *State) {
-    s.Count++
-}
-
-func decrement(s *State) {
-    s.Count--
-}
+func increment(s *State) { s.Count++ }
+func decrement(s *State) { s.Count-- }
 
 func main() {
-    vogui.Run(vogui.App{
-        Init: func() any { return &State{} },
-        View: view,
-    })
+	vogui.Run(vogui.App{
+		Init: func() any { return &State{} },
+		View: view,
+	})
 }

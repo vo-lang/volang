@@ -6,7 +6,7 @@
  */
 
 import { registerWidget } from '@vogui/index';
-import type { WidgetInstance } from '@vogui/renderer';
+import type { WidgetInstance } from '@vogui/types';
 
 function createCodeMirrorWidget(
   container: HTMLElement,
@@ -66,7 +66,6 @@ function createCodeMirrorWidget(
   })();
 
   return {
-    element: container,
     update(newProps: any) {
       const newContent = newProps?.content ?? '';
       if (editorView && newContent !== currentContent) {

@@ -21,10 +21,8 @@ func Run(app App) {
 	currentState = app.Init()
 	render()
 
-	// Register callback that sends events to channel
 	registerEventHandler(sendEvent)
 
-	// Block main goroutine forever
 	<-doneChan
 }
 
@@ -34,20 +32,28 @@ func updatePath(path string) {
 }
 
 // sendEvent is called by Rust for each JS event.
-// Handle synchronously in the same callback to avoid channel backlog/blocking.
 func sendEvent(handlerID int, payload string) {
 	processEvent(Event{HandlerID: handlerID, Payload: payload})
 }
 
+// timerPayload is the JSON structure for timer events.
+type timerPayload struct {
+	Id int
+}
+
+// keyPayload is the JSON structure for global key events.
+type keyPayload struct {
+	Key string
+}
 
 func processEvent(event Event) {
 	switch event.HandlerID {
 	case eventIDTimer:
-		var p struct{ Id int }
+		var p timerPayload
 		json.Unmarshal([]byte(event.Payload), &p)
 		invokeTimerHandler(p.Id, currentState)
 	case eventIDGlobalKey:
-		var p struct{ Key string }
+		var p keyPayload
 		json.Unmarshal([]byte(event.Payload), &p)
 		err := invokeGlobalKeyHandler(currentState, p.Key)
 		if err != nil {
@@ -66,10 +72,9 @@ func processEvent(event Event) {
 
 func render() {
 	resetHandlers()
-	
+
 	var tree Node
 	if len(currentApp.Routes) > 0 {
-		// Routing mode
 		path := GetCurrentPath()
 		matched := false
 		for _, route := range currentApp.Routes {
@@ -84,12 +89,12 @@ func render() {
 			tree = Text("404 Not Found: " + path)
 		}
 	} else {
-		// Single view mode
 		tree = currentApp.View(currentState)
 	}
 
 	output := map[string]any{
 		"type":     "render",
+		"gen":      renderGen,
 		"tree":     tree,
 		"handlers": handlerMetas,
 	}
@@ -102,11 +107,7 @@ func render() {
 }
 
 // ============ Extern Declarations ============
-// These functions are implemented in WASM layer.
 
-// registerEventHandler registers the event handler callback.
-// Rust will call this callback for each event from JS.
 func registerEventHandler(handler func(handlerID int, payload string))
 
-// emitRender sends render output to the JS runtime.
 func emitRender(json string)

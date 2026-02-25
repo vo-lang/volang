@@ -1,0 +1,15 @@
+// Document head management.
+package vogui
+
+// SetTitle sets the document title. Reactive — updates on every render if different.
+func SetTitle(title string) {
+	setDocTitle(title)
+}
+
+// SetMeta sets a meta tag. Future use for SEO.
+func SetMeta(name string, content string) {
+	setDocMeta(name, content)
+}
+
+func setDocTitle(title string) // extern
+func setDocMeta(name string, content string) // extern
