@@ -219,20 +219,22 @@ pub async fn prepare_github_modules(source: &str) -> Result<(MemoryFs, String), 
     let imports = fetch::detect_github_imports(source)?;
     let mut mod_fs = MemoryFs::new();
     for imp in &imports {
-        match fetch::fetch_module_files(&imp.module, &imp.version).await {
-            Ok(files) => {
-                for (vfs_path, content) in files {
-                    mod_fs.add_file(vfs_path, content);
-                }
-            }
-            Err(e) => return Err(format!("Failed to fetch {}: {}", imp.module, e)),
+        let module_files = fetch::fetch_module_files(&imp.module, &imp.version).await
+            .map_err(|e| format!("Failed to fetch {}: {}", imp.module, e))?;
+        let is_bindgen = fetch::is_bindgen_ext(&imp.module, &module_files);
+        for (vfs_path, content) in module_files {
+            mod_fs.add_file(vfs_path, content);
         }
         match fetch::fetch_wasm_binary(&imp.module, &imp.version).await {
             Ok(Some(bytes)) => {
-                let js_glue_url = fetch::fetch_wasm_js_glue_url(&imp.module, &imp.version)
-                    .await
-                    .unwrap_or(None)
-                    .unwrap_or_default();
+                let js_glue_url = if is_bindgen {
+                    fetch::fetch_wasm_js_glue_url(&imp.module, &imp.version)
+                        .await
+                        .unwrap_or(None)
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 ext_bridge::load_wasm_ext_module(&imp.module, &bytes, &js_glue_url).await?;
             }
             Ok(None) => {}
@@ -364,7 +366,7 @@ async fn await_fetch(
     };
     vo_web_runtime_wasm::net_http::store_fetch_result(token, fetch_result);
     vm.wake_host_event(token);
-    vm.run_scheduled_resumable()
+    vm.run_scheduled()
 }
 
 /// Best-effort monotonic clock in milliseconds for WASM host environments.
@@ -552,7 +554,7 @@ pub async fn run_bytecode_async_with_externs(
 
 /// Shared inner async run loop (extracted so both run_vm_async variants can use it).
 async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, String, String) {
-    let mut outcome = match vm.run_resumable() {
+    let mut outcome = match vm.run() {
         Ok(o) => o,
         Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
     };
@@ -584,7 +586,7 @@ async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, String, String) 
                 wasm_callback_sleep_ms(remaining).await;
             }
             vm.wake_host_event(ev.token);
-            outcome = match vm.run_scheduled_resumable() {
+            outcome = match vm.run_scheduled() {
                 Ok(o) => o,
                 Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
             };
