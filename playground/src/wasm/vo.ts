@@ -340,6 +340,7 @@ const extBindgenModules = new Map<string, any>();
         await glue.__voInit();
       }
       extBindgenModules.set(key, glue);
+      console.log('[voSetupExtModule] bindgen module ready:', key);
     } finally {
       URL.revokeObjectURL(blobUrl);
     }
@@ -386,6 +387,7 @@ const extBindgenModules = new Map<string, any>();
         console.error('[voCallExt] Exception calling:', externName, e);
         return new Uint8Array(0);
       }
+      console.log('[voCallExt] bindgen call:', externName, 'result type:', result instanceof Uint8Array ? `Uint8Array(${result.length})` : (result instanceof Promise ? 'Promise' : typeof result));
       // If the bindgen function is async, it returns a Promise.
       // Suppress the rejection so it doesn't become an unhandled rejection (SES_UNCAUGHT_EXCEPTION).
       if (result instanceof Promise) {

@@ -227,6 +227,7 @@ pub async fn prepare_github_modules(source: &str) -> Result<(MemoryFs, String), 
         }
         match fetch::fetch_wasm_binary(&imp.module, &imp.version).await {
             Ok(Some(bytes)) => {
+                web_sys::console::log_1(&format!("[vo-web] fetched {}.wasm ({} bytes), is_bindgen={}", &imp.module, bytes.len(), is_bindgen).into());
                 let js_glue_url = if is_bindgen {
                     fetch::fetch_wasm_js_glue_url(&imp.module, &imp.version)
                         .await
@@ -235,9 +236,13 @@ pub async fn prepare_github_modules(source: &str) -> Result<(MemoryFs, String), 
                 } else {
                     String::new()
                 };
+                web_sys::console::log_1(&format!("[vo-web] loading ext module {}, js_glue_url='{}'", &imp.module, &js_glue_url).into());
                 ext_bridge::load_wasm_ext_module(&imp.module, &bytes, &js_glue_url).await?;
+                web_sys::console::log_1(&format!("[vo-web] ext module {} loaded OK", &imp.module).into());
             }
-            Ok(None) => {}
+            Ok(None) => {
+                web_sys::console::log_1(&format!("[vo-web] no .wasm found for {} (skipped)", &imp.module).into());
+            }
             Err(e) => return Err(format!("Failed to fetch {}.wasm: {}", imp.module, e)),
         }
     }
