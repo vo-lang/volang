@@ -323,7 +323,7 @@ const extBindgenModules = new Map<string, any>();
     // wasm-bindgen module: full DOM access (canvas, WebGL, WebGPU, etc.)
     // Fetch JS glue text, then create a Blob URL with correct MIME type for import().
     // raw.githubusercontent.com serves text/plain which browsers reject for import().
-    const resp = await fetch(jsGlueUrl);
+    const resp = await fetch(jsGlueUrl, { cache: 'no-store' });
     if (!resp.ok) throw new Error(`Failed to fetch JS glue: HTTP ${resp.status}`);
     const jsText = await resp.text();
 
