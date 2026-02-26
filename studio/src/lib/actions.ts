@@ -2,7 +2,7 @@ import { get } from 'svelte/store';
 import { ide } from '../stores/ide';
 import type { EditTarget, ProjectMode } from '../stores/ide';
 import { explorer } from '../stores/explorer';
-import { github, createGist, updateGist, fetchGistFiles, createRepo, gitPushFiles, gitPullFiles } from '../stores/github';
+import { github, createGist, updateGist, fetchGistFiles, createRepo, gitPushFiles, gitPullFiles, renameGistFile, renameRepo } from '../stores/github';
 import { projects, persistManifest, loadProjects, syncState } from '../stores/projects';
 import type { ProjectEntry } from '../stores/projects';
 import { bridge } from './bridge';
@@ -319,6 +319,116 @@ export const actions = {
     if (project.remote) {
       await persistManifest();
     }
+  },
+
+  async renameProject(project: ProjectEntry, newName: string, root: string): Promise<void> {
+    const trimmed = newName.trim();
+    if (!trimmed) throw new Error('Name is required');
+    if (trimmed.includes('/')) throw new Error('Name cannot contain "/"');
+    if (trimmed === project.name) return;
+
+    const ps = get(projects);
+    const duplicated = ps.projects.some(
+      p => p.type === project.type && p.name === trimmed,
+    );
+    if (duplicated) throw new Error('Project name already exists');
+
+    let renamed: ProjectEntry = { ...project, name: trimmed };
+
+    // Rename remote first (network can fail; avoid touching local before remote is valid)
+    if (project.remote) {
+      const { token } = get(github);
+      if (!token) throw new Error('GitHub token not set');
+
+      if (project.remote.kind === 'gist' && project.remote.gistId) {
+        const files = await fetchGistFiles(token, project.remote.gistId);
+        const names = Object.keys(files);
+        const oldFilename =
+          names.find(n => n === `${project.name}.vo`) ??
+          names.find(n => n.endsWith('.vo')) ??
+          names[0];
+        if (!oldFilename) throw new Error('Gist has no files to rename');
+        await renameGistFile(
+          token,
+          project.remote.gistId,
+          oldFilename,
+          `${trimmed}.vo`,
+        );
+      } else if (project.remote.kind === 'repo' && project.remote.owner && project.remote.repo) {
+        const renamedRepo = await renameRepo(
+          token,
+          project.remote.owner,
+          project.remote.repo,
+          trimmed,
+        );
+        renamed = {
+          ...renamed,
+          remote: {
+            kind: 'repo',
+            owner: renamedRepo.owner.login,
+            repo: renamedRepo.name,
+          },
+        };
+      } else {
+        throw new Error('Invalid remote source');
+      }
+    }
+
+    if (project.localPath) {
+      const idx = project.localPath.lastIndexOf('/');
+      const parent = idx >= 0 ? project.localPath.slice(0, idx) : '';
+      const newLocalPath = project.type === 'single'
+        ? `${parent}/${trimmed}.vo`
+        : `${parent}/${trimmed}`;
+      await bridge().fsRename(project.localPath, newLocalPath);
+      renamed = { ...renamed, localPath: newLocalPath };
+
+      ide.update(s => {
+        let activeFilePath = s.activeFilePath;
+        if (activeFilePath === project.localPath) {
+          activeFilePath = newLocalPath;
+        } else if (project.type === 'multi' && activeFilePath.startsWith(project.localPath + '/')) {
+          activeFilePath = newLocalPath + activeFilePath.slice(project.localPath.length);
+        }
+
+        const workspaceRoot = s.workspaceRoot === project.localPath
+          ? newLocalPath
+          : s.workspaceRoot;
+        const editTarget = s.editTarget && s.editTarget.workspaceRoot === project.localPath
+          ? { ...s.editTarget, workspaceRoot: newLocalPath }
+          : s.editTarget;
+
+        const dirCache: Record<string, FsEntry[]> = {};
+        for (const [k, v] of Object.entries(s.dirCache)) {
+          if (k === project.localPath || k.startsWith(project.localPath + '/')) continue;
+          dirCache[k] = v;
+        }
+        const expandedDirs = s.expandedDirs.filter(
+          d => d !== project.localPath && !d.startsWith(project.localPath + '/'),
+        );
+
+        return {
+          ...s,
+          activeFilePath,
+          workspaceRoot,
+          editTarget,
+          dirCache,
+          expandedDirs,
+        };
+      });
+    }
+
+    projects.update(s => ({
+      ...s,
+      projects: s.projects.map(p =>
+        p.name === project.name && p.type === project.type ? renamed : p,
+      ),
+    }));
+
+    if (renamed.remote) {
+      await persistManifest();
+    }
+    await loadProjects(root);
   },
 
   async collectProjectFiles(dirPath: string): Promise<Record<string, string>> {

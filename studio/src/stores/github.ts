@@ -87,6 +87,18 @@ export async function createGist(
   });
 }
 
+export async function renameRepo(
+  token: string,
+  owner: string,
+  repo: string,
+  newName: string,
+): Promise<{ owner: { login: string }; name: string }> {
+  return githubFetch(token, `/repos/${owner}/${repo}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name: newName }),
+  });
+}
+
 export async function updateGist(
   token: string,
   gistId: string,
@@ -96,6 +108,23 @@ export async function updateGist(
   await githubFetch(token, `/gists/${gistId}`, {
     method: 'PATCH',
     body: JSON.stringify({ files: { [filename]: { content } } }),
+  });
+}
+
+export async function renameGistFile(
+  token: string,
+  gistId: string,
+  oldFilename: string,
+  newFilename: string,
+): Promise<void> {
+  if (oldFilename === newFilename) return;
+  await githubFetch(token, `/gists/${gistId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      files: {
+        [oldFilename]: { filename: newFilename },
+      },
+    }),
   });
 }
 
