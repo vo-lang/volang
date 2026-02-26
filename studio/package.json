@@ -6,20 +6,20 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:pages": "VITE_BASE=/vs/ vite build",
     "preview": "vite preview",
     "tauri": "tauri"
   },
   "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^3.0.0",
     "@tauri-apps/cli": "^2.0.0",
+    "svelte": "^4.2.0",
     "typescript": "^5.3.0",
-    "vite": "^5.0.0"
+    "vite": "^5.0.0",
+    "vite-plugin-monaco-editor": "^1.1.0"
   },
   "dependencies": {
-    "@codemirror/commands": "^6.3.0",
-    "@codemirror/state": "^6.4.0",
-    "@codemirror/theme-one-dark": "^6.1.0",
-    "@codemirror/view": "^6.24.0",
     "@tauri-apps/api": "^2.0.0",
-    "codemirror": "^6.0.1"
+    "monaco-editor": "^0.47.0"
   }
 }

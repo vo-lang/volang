@@ -1,119 +1,241 @@
-//! Tauri app commands for Vibe Studio.
+//! Tauri commands for Vibe Studio (Svelte-native frontend).
+//!
+//! The IDE UI is a Svelte app; this backend provides:
+//! - Filesystem commands (scoped to a workspace root)
+//! - Compile & run user Vo code via vo-engine / vox
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
-use vogui::{VoguiPlatform, set_platform};
-use vo_vox::gui::{run_gui, send_gui_event, store_guest_handle, with_guest_handle};
-use vo_engine::compile_from_memory;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use serde::Serialize;
+use vo_vox::gui::GuestHandle;
+use vo_vox::{compile, run, RunMode};
+use vo_runtime::output;
 
 // =============================================================================
-// TauriPlatform — native timers via AppHandle::emit + background threads
+// AppState
 // =============================================================================
 
-struct TauriPlatform {
-    app_handle: AppHandle,
-    timers: Arc<Mutex<HashMap<i32, Arc<AtomicBool>>>>,
+pub struct AppState {
+    workspace_root: PathBuf,
+    guest: Mutex<Option<GuestHandle>>,
 }
 
-impl TauriPlatform {
-    fn new(app_handle: AppHandle) -> Self {
-        Self { app_handle, timers: Arc::new(Mutex::new(HashMap::new())) }
-    }
+fn default_workspace() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".vibe-studio")
+        .join("workspace")
+}
 
-    fn cancel(&self, id: i32) {
-        if let Some(flag) = self.timers.lock().unwrap().remove(&id) {
-            flag.store(true, Ordering::Relaxed);
+// =============================================================================
+// FS types
+// =============================================================================
+
+#[derive(Serialize)]
+struct FsEntry {
+    name: String,
+    path: String,
+    #[serde(rename = "isDir")]
+    is_dir: bool,
+}
+
+// =============================================================================
+// FS commands
+// =============================================================================
+
+#[tauri::command]
+fn cmd_get_workspace_root(state: tauri::State<'_, AppState>) -> String {
+    state.workspace_root.to_string_lossy().to_string()
+}
+
+#[tauri::command]
+fn cmd_fs_list_dir(dir_path: String, state: tauri::State<'_, AppState>) -> Result<Vec<FsEntry>, String> {
+    let abs = resolve_path(&state.workspace_root, &dir_path)?;
+    let rd = std::fs::read_dir(&abs).map_err(|e| format!("{}: {}", abs.display(), e))?;
+
+    let mut entries: Vec<FsEntry> = Vec::new();
+    for item in rd.flatten() {
+        let name = item.file_name().to_string_lossy().to_string();
+        let is_dir = item.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let child_path = Path::new(&dir_path).join(&name);
+        entries.push(FsEntry {
+            name,
+            path: child_path.to_string_lossy().to_string(),
+            is_dir,
+        });
+    }
+    entries.sort_by(|a, b| {
+        if a.is_dir != b.is_dir {
+            return if a.is_dir { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+        }
+        a.name.cmp(&b.name)
+    });
+    Ok(entries)
+}
+
+#[tauri::command]
+fn cmd_fs_read_file(path: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let abs = resolve_path(&state.workspace_root, &path)?;
+    std::fs::read_to_string(&abs).map_err(|e| format!("{}: {}", abs.display(), e))
+}
+
+#[tauri::command]
+fn cmd_fs_write_file(path: String, content: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let abs = resolve_path(&state.workspace_root, &path)?;
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&abs, &content).map_err(|e| format!("{}: {}", abs.display(), e))
+}
+
+#[tauri::command]
+fn cmd_fs_mkdir(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let abs = resolve_path(&state.workspace_root, &path)?;
+    std::fs::create_dir_all(&abs).map_err(|e| format!("{}: {}", abs.display(), e))
+}
+
+#[tauri::command]
+fn cmd_fs_rename(old_path: String, new_path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let abs_old = resolve_path(&state.workspace_root, &old_path)?;
+    let abs_new = resolve_path(&state.workspace_root, &new_path)?;
+    std::fs::rename(&abs_old, &abs_new).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cmd_fs_remove(path: String, recursive: bool, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let abs = resolve_path(&state.workspace_root, &path)?;
+    if recursive {
+        std::fs::remove_dir_all(&abs).map_err(|e| e.to_string())
+    } else if abs.is_dir() {
+        std::fs::remove_dir(&abs).map_err(|e| e.to_string())
+    } else {
+        std::fs::remove_file(&abs).map_err(|e| e.to_string())
+    }
+}
+
+/// Resolve a path to an absolute path within the workspace, preventing escape.
+/// Accepts both absolute paths (must be under root) and relative paths (joined to root).
+fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
+    let p = Path::new(path);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    // For new files that don't exist yet, check the parent
+    let check_path = if abs.exists() {
+        abs.canonicalize().unwrap_or_else(|_| abs.clone())
+    } else if let Some(parent) = abs.parent() {
+        if parent.exists() {
+            let canon_parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+            canon_parent.join(abs.file_name().unwrap_or_default())
+        } else {
+            abs.clone()
+        }
+    } else {
+        abs.clone()
+    };
+    if !check_path.starts_with(&canonical_root) {
+        return Err(format!("path escapes workspace: {}", path));
+    }
+    Ok(abs)
+}
+
+// =============================================================================
+// Execution commands
+// =============================================================================
+
+/// Compile and run user code from an entry path, returning captured stdout.
+#[tauri::command]
+fn cmd_compile_run(entry_path: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let abs = resolve_path(&state.workspace_root, &entry_path)?;
+    let abs_str = abs.to_string_lossy().to_string();
+
+    let compile_output = compile(&abs_str).map_err(|e| e.to_string())?;
+    output::start_capture();
+    let result = run(compile_output, RunMode::Vm, Vec::new());
+    let captured = output::stop_capture();
+    match result {
+        Ok(()) => Ok(captured),
+        Err(e) => {
+            if captured.is_empty() {
+                Err(e.to_string())
+            } else {
+                Err(format!("{}\nRuntime error: {}", captured.trim_end(), e))
+            }
         }
     }
 }
 
-impl VoguiPlatform for TauriPlatform {
-    fn start_timeout(&self, id: i32, ms: i32) {
-        let handle = self.app_handle.clone();
-        let flag = Arc::new(AtomicBool::new(false));
-        self.timers.lock().unwrap().insert(id, flag.clone());
-        let ms = ms.max(0) as u64;
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(ms));
-            if !flag.load(Ordering::Relaxed) {
-                let _ = handle.emit("vo-timer", id);
-            }
-        });
-    }
-
-    fn clear_timeout(&self, id: i32) { self.cancel(id); }
-
-    fn start_interval(&self, id: i32, ms: i32) {
-        let handle = self.app_handle.clone();
-        let flag = Arc::new(AtomicBool::new(false));
-        self.timers.lock().unwrap().insert(id, flag.clone());
-        let ms = ms.max(1) as u64;
-        thread::spawn(move || {
-            loop {
-                thread::sleep(Duration::from_millis(ms));
-                if flag.load(Ordering::Relaxed) { break; }
-                if handle.emit("vo-timer", id).is_err() { break; }
-            }
-        });
-    }
-
-    fn clear_interval(&self, id: i32) { self.cancel(id); }
-
-    fn navigate(&self, path: &str) {
-        let _ = self.app_handle.emit("vo-navigate", path.to_string());
-    }
-
-    fn get_current_path(&self) -> String { "/".to_string() }
-}
-
-// =============================================================================
-// IDE host VM singleton
-// =============================================================================
-
-static HOST_HANDLE_ID: Mutex<Option<i64>> = Mutex::new(None);
-
-fn do_init_ide() -> Result<String, String> {
-    let fs = studio_core::build_native_fs();
-    let output = compile_from_memory(fs, std::path::Path::new("studio"))
-        .map_err(|e| format!("IDE compile error: {}", e))?;
-    let (json, handle) = run_gui(output)?;
-    let id = store_guest_handle(handle);
-    *HOST_HANDLE_ID.lock().unwrap() = Some(id);
-    Ok(json)
-}
-
-fn do_handle_ide_event(handler_id: i32, payload: &str) -> Result<String, String> {
-    let id = HOST_HANDLE_ID.lock().unwrap().ok_or("IDE not initialized")?;
-    with_guest_handle(id, |handle| send_gui_event(handle, handler_id, payload))
-        .ok_or_else(|| "IDE handle not found".to_string())?
-}
-
-// =============================================================================
-// Tauri commands
-// =============================================================================
-
+/// Compile user GUI code from entry path, start a guest VM thread, return initial render JSON.
 #[tauri::command]
-fn init_ide() -> Result<String, String> {
-    do_init_ide()
+fn cmd_run_gui(entry_path: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let abs = resolve_path(&state.workspace_root, &entry_path)?;
+    let abs_str = abs.to_string_lossy().to_string();
+
+    let _ = state.guest.lock().unwrap().take();
+
+    let compile_output = compile(&abs_str).map_err(|e| e.to_string())?;
+    let (initial_json, handle) = vo_vox::gui::run_gui(compile_output)?;
+    *state.guest.lock().unwrap() = Some(handle);
+    Ok(initial_json)
 }
 
+/// Send an event to the running guest VM and return the new render JSON.
 #[tauri::command]
-fn handle_ide_event(handler_id: i32, payload: String) -> Result<String, String> {
-    do_handle_ide_event(handler_id, &payload)
+fn cmd_send_gui_event(
+    handler_id: i32,
+    payload: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let mut guard = state.guest.lock().unwrap();
+    let handle = guard.as_mut().ok_or_else(|| "No guest VM running".to_string())?;
+    vo_vox::gui::send_gui_event(handle, handler_id, &payload)
 }
+
+/// Stop the running guest VM.
+#[tauri::command]
+fn cmd_stop_gui(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let _ = state.guest.lock().unwrap().take();
+    Ok(())
+}
+
+// =============================================================================
+// App entry
+// =============================================================================
 
 pub fn run() {
+    let workspace = default_workspace();
+    std::fs::create_dir_all(&workspace).ok();
+
+    // Seed a default main.vo if workspace is empty
+    let main_dir = workspace.join("main");
+    let main_file = main_dir.join("main.vo");
+    if !main_file.exists() {
+        std::fs::create_dir_all(&main_dir).ok();
+        std::fs::write(&main_file, "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"Hello, Vo!\")\n}\n").ok();
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .setup(|app| {
-            set_platform(Box::new(TauriPlatform::new(app.handle().clone())));
-            Ok(())
+        .manage(AppState {
+            workspace_root: workspace,
+            guest: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![init_ide, handle_ide_event])
+        .invoke_handler(tauri::generate_handler![
+            cmd_get_workspace_root,
+            cmd_fs_list_dir,
+            cmd_fs_read_file,
+            cmd_fs_write_file,
+            cmd_fs_mkdir,
+            cmd_fs_rename,
+            cmd_fs_remove,
+            cmd_compile_run,
+            cmd_run_gui,
+            cmd_send_gui_event,
+            cmd_stop_gui,
+        ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .expect("error while running Vibe Studio");
 }

@@ -10,9 +10,9 @@ wasm-opt = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-studio-core = { path = "../core" }
 vogui = { path = "../../libs/vogui/rust" }
 vo-web = { path = "../../lang/crates/vo-web" }
+vo-web-runtime-wasm = { path = "../../lang/crates/vo-web/runtime-wasm" }
 vo-common = { path = "../../lang/crates/vo-common" }
 vo-runtime = { path = "../../lang/crates/vo-runtime", default-features = false }
 wasm-bindgen = "0.2"

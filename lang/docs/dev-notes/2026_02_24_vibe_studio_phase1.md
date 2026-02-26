@@ -9,14 +9,14 @@
 ## 1. Deliverable
 
 A working Tauri desktop app where:
-1. The IDE UI is rendered by vogui (a Vo application)
-2. A CodeMirror editor (via ExternalWidget) lets you edit Vo code
-3. Clicking "Run" compiles and executes the code via vox
+1. The IDE UI is a Svelte application (dark-themed, professional layout)
+2. A CodeMirror 6 editor (native Svelte component) lets you edit Vo code
+3. Clicking "Run" compiles and executes the code via vox (Rust backend)
 4. Console output appears in an output panel
-5. GUI apps render in a preview panel (via guest vogui renderer)
-6. A file list lets you switch between example files
+5. GUI apps render in a preview panel (vogui/js renderer in a Svelte component)
+6. A file tree lets you switch between example files
 
-The same IDE also runs in the browser (WASM mode) with VFS instead of real filesystem.
+The same Svelte app also runs in the browser (WASM mode) with VFS instead of real filesystem. No Host VM, no ExternalWidget system, no Vo source for the IDE itself.
 
 ---
 
@@ -24,325 +24,58 @@ The same IDE also runs in the browser (WASM mode) with VFS instead of real files
 
 | Step | What | Where | Depends On |
 |------|------|-------|-----------|
-| S1 | ExternalWidget node type in vogui | `libs/vogui/` | — |
-| S2 | ExternalWidget rendering in JS | `libs/vogui/js/` | S1 |
-| S3 | VoguiPlatform trait refactor | `libs/vogui/rust/` | — |
-| S4 | vox GUI API (RunGui, SendGuiEvent, StopGui) | `libs/vox/` | — |
-| S5 | vo-tauri crate | `libs/vo-tauri/` | S3 |
-| S6 | IDE Vo source code | `studio/` | S1, S4 |
-| S7 | WebView shell + widget plugins | `studio/src/` | S2 |
-| S8 | Tauri app wiring | `studio/src-tauri/` | S5, S6, S7 |
-| S9 | WASM mode (web) | `studio/wasm/` | S6, S7 |
-| S10 | CodeMirror widget | `studio/src/widgets/` | S2 |
-| S11 | Guest app widget | `studio/src/widgets/` | S2, S4 |
+| S1 | vox Rust GUI API (run_gui, send_gui_event, stop_gui, compile_run) | `libs/vox/rust/` | — |
+| S2 | Tauri commands + AppState | `studio/src-tauri/` | S1 |
+| S3 | Svelte app skeleton + stores | `studio/src/` | — |
+| S4 | Bridge abstraction (Tauri vs WASM) | `studio/src/lib/bridge.ts` | S2 |
+| S5 | Editor.svelte (CodeMirror 6) | `studio/src/components/` | S3 |
+| S6 | PreviewPanel.svelte (vogui/js guest renderer) | `studio/src/components/` | S3, S4 |
+| S7 | Full IDE layout (Toolbar, FileTree, OutputPanel) | `studio/src/components/` | S3 |
+| S8 | WASM mode | `studio/wasm/` | S1 |
 
-S1-S4 are independent and can be done in parallel.
-S5-S11 depend on the foundations.
+S1, S3 are independent. S2 depends on S1. S4 depends on S2. S5-S7 depend on S3-S4. S8 depends on S1.
 
 ---
 
 ## 3. Step Details
 
-### S1: ExternalWidget Node Type (vogui Vo)
+### S1: vox Rust GUI API
 
-**New file: `libs/vogui/widget.vo`**
+**New: `libs/vox/rust/src/gui.rs`**
 
-```go
-package vogui
-
-// ExternalWidgetOpts configures an external JS widget.
-type ExternalWidgetOpts struct {
-    ID       string         // Unique widget instance ID (required)
-    Type     string         // Widget type name (registered in JS)
-    Props    map[string]any // Widget-specific configuration
-    OnEvent  Handler        // Receives events from the widget
-}
-
-// ExternalWidget creates a node that delegates rendering to a JS widget.
-// The JS renderer looks up the widget type in its registry and creates
-// or updates the widget instance.
-func ExternalWidget(opts ExternalWidgetOpts) Node {
-    props := map[string]any{
-        "id":         opts.ID,
-        "widgetType": opts.Type,
-    }
-    // Merge user props
-    for k, v := range opts.Props {
-        props[k] = v
-    }
-    if opts.OnEvent.ID >= 0 {
-        props["onEvent"] = opts.OnEvent.ID
-    }
-    return Node{Type: "ExternalWidget", Props: props}
-}
-```
-
-Also add `OnWidget` handler to `event.vo` (or `widget.vo`):
-
-```go
-// OnWidget registers a handler for ExternalWidget events.
-// The action receives the raw payload string sent by the widget implementation.
-// Action signature: func(s *State, payload string)
-func OnWidget(action any) Handler { return registerHandler(action, handlerWidget, 0) }
-```
-
-And in `invokeHandler` in `event.vo`, add the dispatch case:
-
-```go
-case handlerWidget:
-    fn := handler.action.(func(any, string))
-    fn(state, event.Payload)  // raw payload, no JSON unwrapping
-```
-
-No changes to `app.vo` or other existing files.
-
----
-
-### S2: ExternalWidget JS Rendering
-
-**Modified: `libs/vogui/js/src/renderer.ts`**
-
-Add widget registry infrastructure and the `ExternalWidget` case:
-
-```typescript
-// ── Widget Registry ──
-
-export interface WidgetFactory {
-  create(container: HTMLElement, props: any, onEvent: (payload: string) => void): WidgetInstance;
-}
-
-export interface WidgetInstance {
-  element: HTMLElement;
-  update(props: any): void;
-  destroy(): void;
-}
-
-const widgetRegistry = new Map<string, WidgetFactory>();
-const widgetInstances = new Map<string, WidgetInstance>();
-
-export function registerWidget(type: string, factory: WidgetFactory) {
-  widgetRegistry.set(type, factory);
-}
-
-export function destroyAllWidgets() {
-  widgetInstances.forEach(inst => inst.destroy());
-  widgetInstances.clear();
-}
-```
-
-Renderer case (inside the `switch (node.type)` block):
-
-```typescript
-case 'ExternalWidget': {
-  const id = node.props?.id ?? 'widget-0';
-  const widgetType = node.props?.widgetType ?? '';
-  const domId = `vo-widget-${id}`;
-
-  // Check if instance already exists (morphdom preserved the element)
-  let instance = widgetInstances.get(id);
-  if (instance) {
-    instance.update(node.props);
-    return instance.element;
-  }
-
-  // Create new instance
-  const factory = widgetRegistry.get(widgetType);
-  if (!factory) {
-    const el = document.createElement('div');
-    el.className = 'vo-widget vo-widget-missing';
-    el.textContent = `Unknown widget: ${widgetType}`;
-    return el;
-  }
-
-  // Widget implementations send raw string payloads.
-  // We route directly via config.onEvent (no handleInput wrapping) so
-  // the Vo side uses OnWidget which receives the raw string.
-  const onEvent = (rawPayload: string) => {
-    if (interactive && config.onEvent && node.props?.onEvent !== undefined) {
-      config.onEvent(node.props.onEvent, rawPayload);
-    }
-  };
-
-  instance = factory.create(
-    document.createElement('div'),
-    node.props,
-    onEvent
-  );
-  instance.element.className = `vo-widget vo-widget-${widgetType}`;
-  instance.element.id = domId;
-  instance.element.dataset.widgetId = id;
-  widgetInstances.set(id, instance);
-  return instance.element;
-}
-```
-
-**morphdom hooks** (in the `render()` function that calls morphdom):
-
-```typescript
-morphdom(target, newTree, {
-  onBeforeElUpdated(fromEl, toEl) {
-    // Preserve ExternalWidget elements
-    if (fromEl.dataset?.widgetId && toEl.dataset?.widgetId
-        && fromEl.dataset.widgetId === toEl.dataset.widgetId) {
-      const instance = widgetInstances.get(fromEl.dataset.widgetId);
-      if (instance) {
-        // Extract new props from toEl (stored as data attributes or parsed from the new tree)
-        // For now, the update happens in the renderNode case above
-        // since morphdom calls renderNode for the new tree first
-      }
-      return false; // Do NOT replace
-    }
-    // ... existing hooks (canvas, focus preservation, etc.)
-  },
-  onNodeDiscarded(node: Node) {
-    if (node instanceof HTMLElement && node.dataset?.widgetId) {
-      const instance = widgetInstances.get(node.dataset.widgetId);
-      if (instance) {
-        instance.destroy();
-        widgetInstances.delete(node.dataset.widgetId);
-      }
-    }
-  }
-});
-```
-
----
-
-### S3: VoguiPlatform Trait Refactor
-
-**Modified: `libs/vogui/rust/src/lib.rs`**
-
-Replace `#[cfg]` blocks with trait dispatch:
+Thread-per-guest isolation: each guest VM runs on its own OS thread. `PENDING_RENDER` and `PENDING_HANDLER` are `thread_local!`, so each guest thread has naturally isolated copies.
 
 ```rust
-use std::sync::OnceLock;
-
-pub trait VoguiPlatform: Send + Sync + 'static {
-    fn start_timeout(&self, id: i32, ms: i32);
-    fn clear_timeout(&self, id: i32);
-    fn start_interval(&self, id: i32, ms: i32);
-    fn clear_interval(&self, id: i32);
-    fn navigate(&self, path: &str);
-    fn get_current_path(&self) -> String;
-}
-
-static PLATFORM: OnceLock<Box<dyn VoguiPlatform>> = OnceLock::new();
-
-pub fn set_platform(platform: Box<dyn VoguiPlatform>) {
-    let _ = PLATFORM.set(platform);
-}
-
-pub fn platform() -> &'static dyn VoguiPlatform {
-    PLATFORM.get().map(|b| b.as_ref()).unwrap_or(&NoopPlatform)
-}
-```
-
-> **Phase 1 limitation**: The singleton platform means all VMs (host and guest) share the same timer namespace. In Phase 1 this is acceptable because guest apps that use `timer.SetTimeout` will fire events through the host platform — timer IDs may collide if both host and guest use timers simultaneously. Guest VMs in Phase 1 demos should be simple (no long-running timers). Timer ID namespacing (e.g., `(vm_id << 32) | timer_id`) is deferred to post-Phase 1.
-
-```rust
-
-struct NoopPlatform;
-impl VoguiPlatform for NoopPlatform {
-    fn start_timeout(&self, _id: i32, _ms: i32) {}
-    fn clear_timeout(&self, _id: i32) {}
-    fn start_interval(&self, _id: i32, _ms: i32) {}
-    fn clear_interval(&self, _id: i32) {}
-    fn navigate(&self, _path: &str) {}
-    fn get_current_path(&self) -> String { "/".to_string() }
-}
-```
-
-**Modified: `libs/vogui/rust/src/externs.rs`**
-
-Timer/navigation externs dispatch through `crate::platform()`:
-
-```rust
-#[vo_fn("vogui", "startTimeout")]
-pub fn start_timeout(ctx: &mut ExternCallContext) -> ExternResult {
-    let id = ctx.arg_i64(slots::ARG_ID) as i32;
-    let ms = ctx.arg_i64(slots::ARG_MS) as i32;
-    crate::platform().start_timeout(id, ms);
-    ExternResult::Ok
-}
-// ... same pattern for all timer/navigation externs
-```
-
-**WASM platform**: Extract current `wasm_bindgen` imports into `WasmPlatform` struct implementing the trait. Set it during WASM init.
-
-**Native stubs**: Removed — replaced by `NoopPlatform` (the default).
-
----
-
-### S4: vox GUI API
-
-**Modified: `libs/vox/vox.vo`** — add new functions:
-
-```go
-// RunGui starts a GUI app and returns the initial render JSON.
-// The module's VM stays alive for subsequent SendGuiEvent calls.
-func RunGui(m Module) (string, error)
-
-// SendGuiEvent sends an event to a running GUI app.
-// Returns the new render JSON.
-func SendGuiEvent(m Module, handlerId int, payload string) (string, error)
-
-// StopGui stops a running GUI app, signals its thread to exit, and releases its VM.
-func StopGui(m Module)
-
-// CompileCheck compiles source and returns error diagnostics without running.
-func CompileCheck(code string) ([]Diagnostic, error)
-
-type Diagnostic struct {
-    File    string
-    Line    int
-    Column  int
-    Message string
-}
-```
-
-**New: `libs/vox/rust/src/gui.rs`** — Rust implementation:
-
-The key challenge: running a guest vogui app inside the host's process without global state collision.
-
-**Approach: Thread-per-guest-VM**
-
-`ExternFn = fn(&mut ExternCallContext) -> ExternResult` is a raw function pointer — it cannot capture per-guest state. The solution is to run each guest VM on a **dedicated OS thread**. Because `PENDING_RENDER` and `PENDING_HANDLER` are thread-local (`thread_local!`), each guest thread has its own isolated copies. No changes to the extern registry or `ExternFn` signature are needed.
-
-```rust
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc;
 
 pub struct GuestHandle {
-    /// Channel to send events to the guest thread.
-    event_tx: mpsc::SyncSender<(i32, String)>,
-    /// Channel to receive new render JSON from the guest thread.
-    render_rx: mpsc::Receiver<Result<String, String>>,
+    /// Send (handler_id, payload) to the guest thread.
+    pub event_tx: mpsc::SyncSender<(i32, String)>,
+    /// Receive new render JSON from the guest thread.
+    pub render_rx: mpsc::Receiver<Result<String, String>>,
 }
 
-pub fn run_gui(module: vo_engine::Module) -> Result<(String, GuestHandle), String> {
+pub fn run_gui(code: &str) -> Result<(String, GuestHandle), String> {
+    let module = compile(code)?;
     let (event_tx, event_rx) = mpsc::sync_channel::<(i32, String)>(0);
     let (render_tx, render_rx) = mpsc::sync_channel::<Result<String, String>>(1);
 
     std::thread::spawn(move || {
-        // Each thread has its own PENDING_RENDER / PENDING_HANDLER TLS.
-        // Standard vogui externs (emitRender, registerEventHandler) work unchanged.
-        let mut vm = create_vm_from_module(&module);
+        let mut vm = create_vm_from_module(module);
         register_vogui_externs(&mut vm);
         vm.run_until_blocked();
         let json = vogui_rust::take_pending_render().unwrap_or_default();
         let _ = render_tx.send(Ok(json));
-        // Event loop
         while let Ok((handler_id, payload)) = event_rx.recv() {
             invoke_event_handler(&mut vm, handler_id, &payload);
             vm.run_until_blocked();
             let json = vogui_rust::take_pending_render().unwrap_or_default();
             let _ = render_tx.send(Ok(json));
         }
-        // event_rx closed → exit thread
     });
 
     let initial_json = render_rx.recv().map_err(|e| e.to_string())??;
-    let handle = GuestHandle { event_tx, render_rx };
-    Ok((initial_json, handle))
+    Ok((initial_json, GuestHandle { event_tx, render_rx }))
 }
 
 pub fn send_gui_event(handle: &GuestHandle, handler_id: i32, payload: String) -> Result<String, String> {
@@ -351,373 +84,82 @@ pub fn send_gui_event(handle: &GuestHandle, handler_id: i32, payload: String) ->
 }
 
 pub fn stop_gui(handle: GuestHandle) {
-    // Dropping event_tx closes the channel; guest thread exits its while-let loop.
-    drop(handle.event_tx);
+    drop(handle.event_tx);  // Closes channel; guest thread exits while-let
+}
+
+pub fn compile_run(code: &str) -> Result<String, String> {
+    let module = compile(code)?;
+    let mut vm = create_vm_from_module(module);
+    vm.run_captured()
 }
 ```
 
-The `GuestHandle` is stored in the `Module` handle (via a wrapper type with opaque `any` in Vo). `vox.StopGui` drops the handle, signaling the thread to exit.
+**Modified: `libs/vox/rust/src/ffi.rs`** — register `run_gui`, `send_gui_event`, `stop_gui`, `compile_run` as Tauri-callable functions (not vox Vo externs — these are called from Tauri commands directly).
 
 ---
 
-### S5: vo-tauri Crate
+### S2: Tauri Commands + AppState
 
-**Retained from 2026-02-22 design** with modifications. The crate now manages the **IDE's host VM**, not user code directly (the host VM manages user code via vox).
-
-**`libs/vo-tauri/src/lib.rs`**:
+**`studio/src-tauri/src/lib.rs`**:
 
 ```rust
-pub struct VoTauriState {
-    pub host: Mutex<HostVmState>,
-}
+use std::sync::Mutex;
+use vox::gui::{GuestHandle, compile_run, run_gui, send_gui_event, stop_gui};
 
-pub struct HostVmState {
-    vm: vo_engine::Vm,
-    event_handler: GcRef,  // The IDE's sendEvent closure
-}
-```
-
-**`libs/vo-tauri/src/commands.rs`**:
-
-```rust
-#[tauri::command]
-fn init_ide(state: tauri::State<VoTauriState>) -> Result<String, String> {
-    // 1. Compile IDE source (embedded or from disk)
-    // 2. Create host VM
-    // 3. Set TauriPlatform as vogui platform
-    // 4. Register vogui + vox externs
-    // 5. Run until blocked → take PENDING_RENDER
-    // 6. Store VM in state
-    // 7. Return initial render JSON
+pub struct AppState {
+    guest: Mutex<Option<GuestHandle>>,
 }
 
 #[tauri::command]
-fn handle_ide_event(
-    state: tauri::State<VoTauriState>,
+async fn cmd_compile_run(
+    code: String,
+    _state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    compile_run(&code)
+}
+
+#[tauri::command]
+async fn cmd_run_gui(
+    code: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let (initial_json, handle) = run_gui(&code)?;
+    *state.guest.lock().unwrap() = Some(handle);
+    Ok(initial_json)
+}
+
+#[tauri::command]
+async fn cmd_send_gui_event(
     handler_id: i32,
     payload: String,
+    state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    // 1. Get host VM from state
-    // 2. Invoke the event handler closure with (handler_id, payload)
-    // 3. Run VM until blocked → take PENDING_RENDER
-    // 4. Return new render JSON
+    let guard = state.guest.lock().unwrap();
+    let handle = guard.as_ref().ok_or("No guest running")?;
+    send_gui_event(handle, handler_id, payload)
+}
+
+#[tauri::command]
+async fn cmd_stop_gui(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    if let Some(handle) = state.guest.lock().unwrap().take() {
+        stop_gui(handle);
+    }
+    Ok(())
+}
+
+pub fn run() {
+    tauri::Builder::default()
+        .manage(AppState { guest: Mutex::new(None) })
+        .invoke_handler(tauri::generate_handler![
+            cmd_compile_run,
+            cmd_run_gui,
+            cmd_send_gui_event,
+            cmd_stop_gui,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error running Vibe Studio");
 }
 ```
-
-**`libs/vo-tauri/src/platform.rs`**:
-
-```rust
-pub struct TauriPlatform {
-    app_handle: tauri::AppHandle,
-}
-
-impl VoguiPlatform for TauriPlatform {
-    fn start_timeout(&self, id: i32, ms: i32) {
-        // Emit event to webview: webview JS starts setTimeout
-        let _ = self.app_handle.emit("vo-start-timeout", (id, ms));
-    }
-    fn start_interval(&self, id: i32, ms: i32) {
-        let _ = self.app_handle.emit("vo-start-interval", (id, ms));
-    }
-    // ... etc
-}
-```
-
-The WebView JS listens for these events and manages timers, calling `handle_ide_event` when timers fire (same pattern as playground's `vo.ts`).
-
----
-
-### S6: IDE Vo Source Code
-
-**Minimal IDE for Phase 1**:
-
-```
-studio/app/
-├── main.vo
-├── state.vo
-├── view.vo
-├── actions.vo
-└── vo.mod
-```
-
-**`state.vo`**:
-
-```go
-package main
-
-type Panel int
-
-const (
-    PanelEditor Panel = iota
-    PanelOutput
-    PanelPreview
-)
-
-type FileEntry struct {
-    Name    string
-    Content string
-}
-
-type State struct {
-    // File management
-    Files      []FileEntry
-    ActiveIdx  int
-
-    // Editor
-    Code string
-
-    // Execution
-    Output       string
-    IsRunning    bool
-    IsGuiApp     bool
-    GuestRender  string
-    GuestModule  vox.Module // nil when not running
-    CompileError string
-
-    // UI
-    RightPanel Panel
-}
-```
-
-**`view.vo`**:
-
-```go
-package main
-
-import "vogui"
-
-func view(state any) vogui.Node {
-    s := state.(*State)
-    return vogui.Column(
-        toolbar(s),
-        vogui.Row(
-            fileList(s).W(200),
-            editor(s).Flex(1),
-            rightPanel(s).W(400),
-        ).Flex(1),
-    )
-}
-
-func toolbar(s *State) vogui.Node {
-    return vogui.Row(
-        vogui.Button("Run", vogui.On(runCode)).Bg("#22c55e").Fg("#fff"),
-        vogui.Button("Stop", vogui.On(stopCode)).Bg("#ef4444").Fg("#fff"),
-        vogui.Text(activeFileName(s)).Fg("#888"),
-        vogui.Spacer(),
-        vogui.Text("Vibe Studio").Bold().Fg("#666"),
-    ).P(8).Gap(8).Bg("#1e1e2e")
-}
-
-func fileList(s *State) vogui.Node {
-    var items []any
-    for _, f := range s.Files {
-        items = append(items, f)
-    }
-    return vogui.Column(
-        vogui.Text("Files").Bold().Font(12).Fg("#888"),
-        vogui.ForEach(items, func(item any, i int) vogui.Node {
-            f := item.(FileEntry)
-            active := i == s.ActiveIdx
-            bg := "#transparent"
-            if active {
-                bg = "#333"
-            }
-            return vogui.Text(f.Name).
-                P(6).Bg(bg).Fg("#ccc").Cursor("pointer").
-                W("100%").
-                On(vogui.OnInt(openFile, i))
-        }),
-    ).Bg("#181825").P(8).Gap(4)
-}
-
-func editor(s *State) vogui.Node {
-    return vogui.ExternalWidget(vogui.ExternalWidgetOpts{
-        ID:   "main-editor",
-        Type: "codemirror",
-        Props: map[string]any{
-            "value":    s.Code,
-            "language": "go",
-        },
-        OnEvent: vogui.OnWidget(onEditorChange),
-    })
-}
-
-func rightPanel(s *State) vogui.Node {
-    if s.IsGuiApp && s.GuestRender != "" {
-        return vogui.ExternalWidget(vogui.ExternalWidgetOpts{
-            ID:   "guest-preview",
-            Type: "vogui-guest",
-            Props: map[string]any{
-                "tree":        s.GuestRender,
-                "interactive": true,
-            },
-            OnEvent: vogui.OnWidget(onGuestEvent),
-        })
-    }
-    // Console output
-    return vogui.Column(
-        vogui.Text("Output").Bold().Font(12).Fg("#888"),
-        vogui.Pre(s.Output).Flex(1).Fg("#ccc").Bg("#11111b").P(8),
-    ).Bg("#181825")
-}
-```
-
-**`actions.vo`**:
-
-```go
-package main
-
-import "libs/vox"
-
-func onEditorChange(s *State, value string) {
-    s.Code = value
-}
-
-func runCode(s *State) {
-    s.Output = ""
-    s.CompileError = ""
-    s.GuestRender = ""
-    s.IsGuiApp = false
-
-    m, err := vox.CompileString(s.Code)
-    if err != nil {
-        s.CompileError = err.Error()
-        s.Output = "Compile error: " + err.Error()
-        return
-    }
-
-    // Detect GUI app
-    isGui := containsGuiImport(s.Code)
-    if isGui {
-        json, err := vox.RunGui(m)
-        if err != nil {
-            s.Output = "Runtime error: " + err.Error()
-            return
-        }
-        s.IsGuiApp = true
-        s.GuestRender = json
-        s.GuestModule = m
-        s.RightPanel = PanelPreview
-    } else {
-        output, err := vox.RunCapture(m)
-        if err != nil {
-            s.Output = "Runtime error: " + err.Error()
-        } else {
-            s.Output = output
-        }
-        s.RightPanel = PanelOutput
-    }
-}
-
-func stopCode(s *State) {
-    if s.IsGuiApp && s.GuestModule != nil {
-        vox.StopGui(s.GuestModule)
-        s.GuestModule = nil
-    }
-    s.IsGuiApp = false
-    s.GuestRender = ""
-    s.IsRunning = false
-}
-
-func onGuestEvent(s *State, payload string) {
-    // payload is raw JSON: {"handlerId": N, "payload": "..."}
-    var evt struct {
-        HandlerID int    `json:"handlerId"`
-        Payload   string `json:"payload"`
-    }
-    if err := json.Unmarshal([]byte(payload), &evt); err != nil {
-        s.Output = "Guest event parse error: " + err.Error()
-        return
-    }
-    newRender, err := vox.SendGuiEvent(s.GuestModule, evt.HandlerID, evt.Payload)
-    if err != nil {
-        s.Output = "Guest runtime error: " + err.Error()
-        s.IsGuiApp = false
-        return
-    }
-    s.GuestRender = newRender
-}
-
-func containsGuiImport(code string) bool {
-    // Simple string check for `import "vogui"`
-    return strings.Contains(code, `"vogui"`)
-}
-```
-
----
-
-### S7: WebView Shell
-
-**`studio/src/index.html`**:
-
-```html
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Vibe Studio</title>
-  <link rel="stylesheet" href="./styles/vogui.css" />
-  <link rel="stylesheet" href="./styles/studio.css" />
-</head>
-<body>
-  <div id="app"></div>
-  <script type="module" src="./main.ts"></script>
-</body>
-</html>
-```
-
-**`studio/src/main.ts`**:
-
-```typescript
-import { render, registerWidget, destroyAllWidgets } from '@vogui/renderer';
-import { codemirrorWidget } from './widgets/codemirror';
-import { voguiGuestWidget } from './widgets/vogui-guest';
-import './styles/vogui.css';
-
-// Register widget plugins
-registerWidget('codemirror', codemirrorWidget);
-registerWidget('vogui-guest', voguiGuestWidget);
-
-// Platform detection: Tauri or WASM
-const isTauri = '__TAURI__' in window;
-
-let handleEvent: (id: number, payload: string) => Promise<string>;
-
-async function init() {
-  let initialJson: string;
-
-  if (isTauri) {
-    const { invoke } = await import('@tauri-apps/api/core');
-    initialJson = await invoke('init_ide');
-    handleEvent = (id, payload) => invoke('handle_ide_event', { handlerId: id, payload });
-  } else {
-    // WASM mode
-    const wasm = await import('./wasm/studio.js');
-    await wasm.default();
-    initialJson = wasm.init_ide();
-    handleEvent = async (id, payload) => wasm.handle_ide_event(id, payload);
-  }
-
-  // Initial render
-  const app = document.getElementById('app')!;
-  render(app, JSON.parse(initialJson).tree, {
-    interactive: true,
-    onEvent: async (handlerId: number, payload: string) => {
-      const newJson = await handleEvent(handlerId, payload);
-      const parsed = JSON.parse(newJson);
-      render(app, parsed.tree, { interactive: true, onEvent: /* same */ });
-    },
-  });
-}
-
-init();
-```
-
-Note: The `render()` function from vogui/js wraps `renderNode` + morphdom. This may need a small addition to vogui/js to export a top-level `render(target, tree, config)` function.
-
----
-
-### S8: Tauri App Wiring
 
 **`studio/src-tauri/Cargo.toml`**:
 
@@ -731,132 +173,471 @@ edition = "2021"
 tauri = { version = "2", features = ["protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-vo-tauri = { path = "../../libs/vo-tauri" }
+vox = { path = "../../libs/vox/rust" }
 
 [build-dependencies]
 tauri-build = { version = "2" }
 ```
 
-**`studio/src-tauri/src/main.rs`**:
+---
 
-```rust
-fn main() {
-    let builder = tauri::Builder::default();
-    let builder = vo_tauri::register_commands(builder);
-    builder
-        .run(tauri::generate_context!())
-        .expect("error running Vibe Studio");
+### S3: Svelte App Skeleton + Stores
+
+**`studio/src/stores/ide.ts`**:
+
+```typescript
+import { writable } from 'svelte/store';
+
+export interface FileEntry {
+  name: string;
+  content: string;
+}
+
+export interface IdeState {
+  files: FileEntry[];
+  activeIdx: number;
+  code: string;
+  output: string;
+  isRunning: boolean;
+  isGuiApp: boolean;
+  guestRender: string;
+  compileError: string;
+}
+
+const EXAMPLE_FILES: FileEntry[] = [
+  {
+    name: 'hello.vo',
+    content: `package main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println("Hello, Vo!")\n}\n`,
+  },
+  {
+    name: 'counter.vo',
+    content: `package main\n\nimport "vogui"\n\ntype State struct { Count int }\n\nfunc view(state any) vogui.Node {\n    s := state.(*State)\n    return vogui.Column(\n        vogui.Text(fmt.Sprintf("Count: %d", s.Count)),\n        vogui.Button("+", vogui.On(inc)),\n    )\n}\n\nfunc inc(s *State) { s.Count++ }\n\nfunc main() {\n    vogui.Run(vogui.App{Init: func() any { return &State{} }, View: view})\n}\n`,
+  },
+];
+
+export const ide = writable<IdeState>({
+  files: EXAMPLE_FILES,
+  activeIdx: 0,
+  code: EXAMPLE_FILES[0].content,
+  output: '',
+  isRunning: false,
+  isGuiApp: false,
+  guestRender: '',
+  compileError: '',
+});
+```
+
+**`studio/src/App.svelte`**:
+
+```svelte
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import Toolbar from './components/Toolbar.svelte';
+  import FileTree from './components/FileTree.svelte';
+  import Editor from './components/Editor.svelte';
+  import OutputPanel from './components/OutputPanel.svelte';
+  import PreviewPanel from './components/PreviewPanel.svelte';
+  import { ide } from './stores/ide';
+  import { initBridge } from './lib/bridge';
+  import { actions } from './lib/actions';
+
+  onMount(async () => {
+    await initBridge();
+  });
+
+  $: isGuiApp = $ide.isGuiApp && $ide.guestRender !== '';
+</script>
+
+<div class="ide-root">
+  <Toolbar />
+  <div class="ide-main">
+    <FileTree />
+    <Editor value={$ide.code} on:change={(e) => actions.onEditorChange(e.detail)} />
+    {#if isGuiApp}
+      <PreviewPanel guestRender={$ide.guestRender} />
+    {:else}
+      <OutputPanel output={$ide.output} compileError={$ide.compileError} />
+    {/if}
+  </div>
+</div>
+
+<style>
+  .ide-root { display: flex; flex-direction: column; height: 100vh; background: #1e1e2e; }
+  .ide-main { display: flex; flex: 1; overflow: hidden; }
+</style>
+```
+
+---
+
+### S4: Bridge Abstraction
+
+**`studio/src/lib/bridge.ts`**:
+
+```typescript
+export interface Bridge {
+  compileRun(code: string): Promise<string>;
+  runGui(code: string): Promise<string>;
+  sendGuiEvent(handlerId: number, payload: string): Promise<string>;
+  stopGui(): Promise<void>;
+}
+
+let _bridge: Bridge | null = null;
+
+export function bridge(): Bridge {
+  return _bridge!;
+}
+
+export async function initBridge(): Promise<void> {
+  if ('__TAURI__' in window) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    _bridge = {
+      compileRun:   (code)               => invoke('cmd_compile_run', { code }),
+      runGui:       (code)               => invoke('cmd_run_gui', { code }),
+      sendGuiEvent: (handlerId, payload) => invoke('cmd_send_gui_event', { handlerId, payload }),
+      stopGui:      ()                   => invoke('cmd_stop_gui'),
+    };
+  } else {
+    const wasm = await import('../wasm/studio.js');
+    await wasm.default();
+    _bridge = {
+      compileRun:   (code)               => Promise.resolve(wasm.compile_run(code)),
+      runGui:       (code)               => Promise.resolve(wasm.run_gui(code)),
+      sendGuiEvent: (handlerId, payload) => Promise.resolve(wasm.send_gui_event(handlerId, payload)),
+      stopGui:      ()                   => { wasm.stop_gui(); return Promise.resolve(); },
+    };
+  }
 }
 ```
 
-**`studio/src-tauri/tauri.conf.json`** — standard Tauri config pointing to `../src` as the frontend directory.
-
----
-
-### S10: CodeMirror Widget
-
-**`studio/src/widgets/codemirror.ts`**:
+**`studio/src/lib/actions.ts`**:
 
 ```typescript
-import { EditorView, basicSetup } from 'codemirror';
-import { EditorState } from '@codemirror/state';
-import { go } from '@codemirror/lang-go';
-import { oneDark } from '@codemirror/theme-one-dark';
-import type { WidgetFactory, WidgetInstance } from '@vogui/renderer';
+import { ide } from '../stores/ide';
+import { bridge } from './bridge';
+import { get } from 'svelte/store';
 
-export const codemirrorWidget: WidgetFactory = {
-  create(container, props, onEvent) {
-    const state = EditorState.create({
-      doc: props.value ?? '',
-      extensions: [
-        basicSetup,
-        go(),
-        oneDark,
-        EditorView.updateListener.of((update) => {
-          if (update.docChanged) {
-            // Send raw content string; Vo side uses OnWidget which receives it verbatim.
-            onEvent(update.state.doc.toString());
-          }
-        }),
-      ],
-    });
-    const view = new EditorView({ state, parent: container });
+function isGuiCode(code: string): boolean {
+  return code.includes('"vogui"');
+}
 
-    return {
-      element: container,
-      update(newProps) {
-        const currentDoc = view.state.doc.toString();
-        if (newProps.value !== undefined && newProps.value !== currentDoc) {
-          view.dispatch({
-            changes: { from: 0, to: currentDoc.length, insert: newProps.value },
-          });
-        }
-      },
-      destroy() {
-        view.destroy();
-      },
-    } satisfies WidgetInstance;
+export const actions = {
+  onEditorChange(code: string) {
+    ide.update(s => ({ ...s, code }));
   },
-};
-```
 
----
+  switchFile(idx: number) {
+    ide.update(s => ({
+      ...s,
+      activeIdx: idx,
+      code: s.files[idx].content,
+    }));
+  },
 
-### S11: Guest App Widget
+  async runCode() {
+    const s = get(ide);
+    ide.update(s => ({ ...s, isRunning: true, output: '', compileError: '', guestRender: '' }));
 
-**`studio/src/widgets/vogui-guest.ts`**:
-
-```typescript
-import { renderNode } from '@vogui/renderer';
-import morphdom from 'morphdom';
-import type { WidgetFactory, WidgetInstance } from '@vogui/renderer';
-
-export const voguiGuestWidget: WidgetFactory = {
-  create(container, props, onEvent) {
-    const root = document.createElement('div');
-    root.className = 'vogui-guest-root';
-    container.appendChild(root);
-
-    function renderTree(treeJson: string) {
-      if (!treeJson) return;
-      try {
-        const parsed = JSON.parse(treeJson);
-        const tree = parsed.tree ?? parsed;
-        const newDom = renderNode(tree, {
-          interactive: props.interactive ?? true,
-          onEvent: (handlerId: number, payload: string) => {
-            // Route guest events back to IDE via the widget's onEvent
-            onEvent(JSON.stringify({ handlerId, payload }));
-          },
-        });
-        if (newDom) {
-          if (root.firstChild) {
-            morphdom(root.firstChild, newDom);
-          } else {
-            root.appendChild(newDom);
-          }
-        }
-      } catch (e) {
-        root.textContent = 'Guest render error: ' + e;
+    try {
+      if (isGuiCode(s.code)) {
+        const json = await bridge().runGui(s.code);
+        ide.update(s => ({ ...s, isRunning: true, isGuiApp: true, guestRender: json }));
+      } else {
+        const output = await bridge().compileRun(s.code);
+        ide.update(s => ({ ...s, isRunning: false, isGuiApp: false, output }));
       }
+    } catch (e: any) {
+      ide.update(s => ({ ...s, isRunning: false, compileError: String(e) }));
     }
+  },
 
-    renderTree(props.tree);
-
-    return {
-      element: container,
-      update(newProps) {
-        if (newProps.tree) {
-          renderTree(newProps.tree);
-        }
-      },
-      destroy() {
-        root.innerHTML = '';
-      },
-    } satisfies WidgetInstance;
+  async stopCode() {
+    await bridge().stopGui();
+    ide.update(s => ({ ...s, isRunning: false, isGuiApp: false, guestRender: '' }));
   },
 };
 ```
+
+---
+
+### S5: Editor.svelte (CodeMirror 6)
+
+**`studio/src/components/Editor.svelte`**:
+
+```svelte
+<script lang="ts">
+  import { onMount, onDestroy, createEventDispatcher } from 'svelte';
+  import { EditorView, basicSetup } from 'codemirror';
+  import { EditorState } from '@codemirror/state';
+  import { go } from '@codemirror/lang-go';
+  import { oneDark } from '@codemirror/theme-one-dark';
+
+  export let value: string = '';
+
+  const dispatch = createEventDispatcher<{ change: string }>();
+
+  let container: HTMLDivElement;
+  let view: EditorView;
+  let suppressUpdate = false;
+
+  onMount(() => {
+    view = new EditorView({
+      state: EditorState.create({
+        doc: value,
+        extensions: [
+          basicSetup,
+          go(),
+          oneDark,
+          EditorView.updateListener.of((update) => {
+            if (update.docChanged && !suppressUpdate) {
+              dispatch('change', update.state.doc.toString());
+            }
+          }),
+        ],
+      }),
+      parent: container,
+    });
+  });
+
+  $: if (view) {
+    const current = view.state.doc.toString();
+    if (current !== value) {
+      suppressUpdate = true;
+      view.dispatch({ changes: { from: 0, to: current.length, insert: value } });
+      suppressUpdate = false;
+    }
+  }
+
+  onDestroy(() => view?.destroy());
+</script>
+
+<div bind:this={container} class="editor-container"></div>
+
+<style>
+  .editor-container { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+  .editor-container :global(.cm-editor) { height: 100%; }
+  .editor-container :global(.cm-scroller) { overflow: auto; }
+</style>
+```
+
+---
+
+### S6: PreviewPanel.svelte
+
+**`studio/src/components/PreviewPanel.svelte`**:
+
+```svelte
+<script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
+  import { renderNode } from '@vogui/renderer';
+  import morphdom from 'morphdom';
+  import { bridge } from '../lib/bridge';
+  import { ide } from '../stores/ide';
+
+  export let guestRender: string = '';
+
+  let root: HTMLDivElement;
+  let currentDom: Element | null = null;
+
+  $: if (root && guestRender) {
+    applyRender(guestRender);
+  }
+
+  function applyRender(json: string) {
+    let parsed: any;
+    try {
+      parsed = JSON.parse(json);
+    } catch {
+      return;
+    }
+    const tree = parsed.tree ?? parsed;
+    const newDom = renderNode(tree, {
+      interactive: true,
+      onEvent: async (handlerId: number, payload: string) => {
+        try {
+          const newJson = await bridge().sendGuiEvent(handlerId, payload);
+          applyRender(newJson);
+        } catch (e: any) {
+          ide.update(s => ({ ...s, isGuiApp: false, guestRender: '', output: String(e) }));
+        }
+      },
+    });
+    if (!newDom) return;
+    if (currentDom) {
+      morphdom(currentDom, newDom);
+    } else {
+      root.appendChild(newDom);
+      currentDom = newDom as Element;
+    }
+  }
+
+  onDestroy(() => {
+    root?.replaceChildren();
+    currentDom = null;
+  });
+</script>
+
+<div bind:this={root} class="preview-panel"></div>
+
+<style>
+  .preview-panel {
+    flex: 0 0 400px;
+    overflow: auto;
+    background: #181825;
+    border-left: 1px solid #313244;
+  }
+</style>
+```
+
+---
+
+### S7: Remaining Svelte Components
+
+**`studio/src/components/Toolbar.svelte`**:
+
+```svelte
+<script lang="ts">
+  import { ide } from '../stores/ide';
+  import { actions } from '../lib/actions';
+
+  $: activeFile = $ide.files[$ide.activeIdx]?.name ?? '';
+  $: isRunning = $ide.isRunning;
+</script>
+
+<div class="toolbar">
+  <button class="btn-run" on:click={actions.runCode} disabled={isRunning}>
+    {isRunning ? '⏳ Running…' : '▶ Run'}
+  </button>
+  <button class="btn-stop" on:click={actions.stopCode} disabled={!isRunning}>
+    ■ Stop
+  </button>
+  <span class="filename">{activeFile}</span>
+  <span class="spacer"></span>
+  <span class="title">Vibe Studio</span>
+</div>
+
+<style>
+  .toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+             background: #181825; border-bottom: 1px solid #313244; flex-shrink: 0; }
+  .btn-run  { background: #22c55e; color: #fff; border: none; border-radius: 4px;
+              padding: 4px 12px; cursor: pointer; font-weight: 600; }
+  .btn-stop { background: #ef4444; color: #fff; border: none; border-radius: 4px;
+              padding: 4px 12px; cursor: pointer; font-weight: 600; }
+  .filename { color: #888; font-size: 13px; }
+  .spacer   { flex: 1; }
+  .title    { color: #cdd6f4; font-weight: 700; font-size: 14px; }
+</style>
+```
+
+**`studio/src/components/FileTree.svelte`**:
+
+```svelte
+<script lang="ts">
+  import { ide } from '../stores/ide';
+  import { actions } from '../lib/actions';
+</script>
+
+<div class="filetree">
+  <div class="label">Files</div>
+  {#each $ide.files as file, i}
+    <button
+      class="file-entry"
+      class:active={i === $ide.activeIdx}
+      on:click={() => actions.switchFile(i)}
+    >
+      {file.name}
+    </button>
+  {/each}
+</div>
+
+<style>
+  .filetree  { width: 200px; background: #181825; border-right: 1px solid #313244;
+               padding: 8px; display: flex; flex-direction: column; gap: 2px; flex-shrink: 0; }
+  .label     { color: #888; font-size: 11px; font-weight: 700; padding: 4px 6px;
+               text-transform: uppercase; letter-spacing: 0.05em; }
+  .file-entry { background: none; border: none; color: #cdd6f4; text-align: left;
+                padding: 6px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; width: 100%; }
+  .file-entry:hover { background: #24273a; }
+  .file-entry.active { background: #313244; color: #cba6f7; }
+</style>
+```
+
+**`studio/src/components/OutputPanel.svelte`**:
+
+```svelte
+<script lang="ts">
+  export let output: string = '';
+  export let compileError: string = '';
+</script>
+
+<div class="output-panel">
+  <div class="label">Output</div>
+  {#if compileError}
+    <pre class="error">{compileError}</pre>
+  {:else}
+    <pre class="output">{output || '(no output)'}</pre>
+  {/if}
+</div>
+
+<style>
+  .output-panel { flex: 0 0 400px; background: #181825; border-left: 1px solid #313244;
+                  display: flex; flex-direction: column; overflow: hidden; }
+  .label   { color: #888; font-size: 11px; font-weight: 700; padding: 8px 12px;
+             border-bottom: 1px solid #313244; text-transform: uppercase; }
+  .output, .error { flex: 1; padding: 12px; margin: 0; overflow: auto; font-size: 13px;
+                    font-family: 'JetBrains Mono', monospace; white-space: pre-wrap; }
+  .output { color: #cdd6f4; }
+  .error  { color: #f38ba8; }
+</style>
+```
+
+---
+
+### S8: WASM Mode
+
+**`studio/wasm/src/lib.rs`**:
+
+```rust
+use wasm_bindgen::prelude::*;
+use vox::gui::{GuestHandle, compile_run, run_gui, send_gui_event, stop_gui};
+use std::cell::RefCell;
+
+thread_local! {
+    static GUEST: RefCell<Option<GuestHandle>> = RefCell::new(None);
+}
+
+#[wasm_bindgen]
+pub fn compile_run(code: &str) -> Result<String, JsValue> {
+    vox::gui::compile_run(code).map_err(|e| JsValue::from_str(&e))
+}
+
+#[wasm_bindgen]
+pub fn run_gui(code: &str) -> Result<String, JsValue> {
+    let (initial_json, handle) = vox::gui::run_gui(code).map_err(|e| JsValue::from_str(&e))?;
+    GUEST.with(|g| *g.borrow_mut() = Some(handle));
+    Ok(initial_json)
+}
+
+#[wasm_bindgen]
+pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<String, JsValue> {
+    GUEST.with(|g| {
+        let borrow = g.borrow();
+        let handle = borrow.as_ref().ok_or_else(|| JsValue::from_str("No guest running"))?;
+        vox::gui::send_gui_event(handle, handler_id, payload.to_string())
+            .map_err(|e| JsValue::from_str(&e))
+    })
+}
+
+#[wasm_bindgen]
+pub fn stop_gui() {
+    GUEST.with(|g| {
+        if let Some(handle) = g.borrow_mut().take() {
+            vox::gui::stop_gui(handle);
+        }
+    });
+}
+```
+
+> **Note**: In WASM, `run_gui` cannot spawn OS threads. The guest VM runs synchronously on the WASM thread — `run_until_blocked` returns when the fiber suspends on its event channel. This works because WASM vogui apps block on an `mpsc::channel::recv()` which in a single-threaded WASM context means "I've emitted my render, return to caller." The guest loop for WASM is: run → blocked → return render JSON → JS calls send_gui_event → guest resumes → blocked → return render JSON.
 
 ---
 
@@ -864,58 +645,46 @@ export const voguiGuestWidget: WidgetFactory = {
 
 ```
 studio/
-├── app/                          # IDE Vo source
-│   ├── main.vo
-│   ├── state.vo
-│   ├── view.vo
-│   ├── actions.vo
-│   └── vo.mod
-├── src/                          # WebView frontend (minimal)
-│   ├── index.html
-│   ├── main.ts                   # Bootstrap: init + render loop
-│   ├── styles/
-│   │   ├── vogui.css             # Symlink to libs/vogui/js/src/styles.ts output
-│   │   └── studio.css            # IDE-specific styles (dark theme)
-│   └── widgets/
-│       ├── codemirror.ts         # CodeMirror 6 widget
-│       └── vogui-guest.ts        # Nested vogui renderer widget
+├── src/                          # Svelte frontend
+│   ├── App.svelte                # Root layout + bridge init
+│   ├── components/
+│   │   ├── Toolbar.svelte        # Run/Stop, file name, status
+│   │   ├── FileTree.svelte       # File list
+│   │   ├── Editor.svelte         # CodeMirror 6 native component
+│   │   ├── OutputPanel.svelte    # Console output + compile errors
+│   │   └── PreviewPanel.svelte   # Guest vogui app via renderNode
+│   ├── stores/
+│   │   └── ide.ts                # IdeState writable store + example files
+│   ├── lib/
+│   │   ├── bridge.ts             # Tauri | WASM abstraction
+│   │   └── actions.ts            # runCode, stopCode, switchFile, onEditorChange
+│   └── main.ts                   # Svelte mount
 ├── src-tauri/                    # Tauri Rust backend
 │   ├── Cargo.toml
 │   ├── tauri.conf.json
 │   ├── build.rs
 │   └── src/
-│       └── main.rs
+│       ├── main.rs               # fn main() → lib::run()
+│       └── lib.rs                # AppState + Tauri commands
 ├── wasm/                         # WASM entry point (for web mode)
 │   ├── Cargo.toml
-│   └── src/lib.rs                # init_ide() + handle_ide_event() WASM exports
-├── package.json                  # npm: codemirror, morphdom, @tauri-apps/api
-└── vite.config.ts                # Vite for bundling frontend
+│   └── src/lib.rs                # compile_run, run_gui, send_gui_event, stop_gui exports
+├── package.json
+├── vite.config.ts
+└── svelte.config.ts
 ```
 
 Changes in existing code:
 
 ```
-libs/vogui/
-├── widget.vo                     # NEW: ExternalWidget node type
-├── js/src/renderer.ts            # MODIFIED: ExternalWidget case + widget registry
-└── rust/src/
-    ├── lib.rs                    # MODIFIED: VoguiPlatform trait + set_platform()
-    └── externs.rs                # MODIFIED: dispatch through platform()
-
 libs/vox/
-├── vox.vo                        # MODIFIED: add RunGui, SendGuiEvent, StopGui, CompileCheck
+├── vox.vo                        # MODIFIED: add RunGui, SendGuiEvent, StopGui, CompileRun
 └── rust/src/
-    ├── gui.rs                    # NEW: GuestGuiState, run_gui, send_gui_event
-    └── ffi.rs                    # MODIFIED: register new FFI functions
-
-libs/vo-tauri/                    # NEW: Tauri bridge crate
-├── Cargo.toml
-└── src/
-    ├── lib.rs
-    ├── commands.rs
-    ├── gui_state.rs
-    └── platform.rs
+    ├── gui.rs                    # NEW: GuestHandle, run_gui, send_gui_event, stop_gui, compile_run
+    └── ffi.rs                    # MODIFIED: register new vox externs
 ```
+
+No changes to `libs/vogui/` at all. The vogui/js renderer is imported as a package by `PreviewPanel.svelte` — no new features needed.
 
 ---
 
@@ -925,48 +694,39 @@ libs/vo-tauri/                    # NEW: Tauri bridge crate
 
 ```bash
 cd studio
-npm install                        # CodeMirror, morphdom, etc.
-cargo tauri dev                    # Builds Rust + serves frontend
+npm install                        # svelte, codemirror, morphdom, @tauri-apps/api
+cargo tauri dev                    # Builds Rust + starts Vite dev server + opens window
 ```
-
-The Tauri dev server:
-1. Builds `src-tauri/` (links vo-tauri, vo-engine, vox, vogui/rust)
-2. Starts Vite dev server for `src/`
-3. Opens a native window with the WebView
 
 ### Web (WASM)
 
 ```bash
 cd studio/wasm
-wasm-pack build --target web       # Builds WASM binary with embedded IDE source
+wasm-pack build --target web --out-dir ../src/wasm
 cd ..
-npm run dev                        # Vite serves src/ + WASM
+npm run dev                        # Vite serves src/ + WASM binary
 ```
 
 ---
 
 ## 6. Milestone Criteria (Phase 1 Done)
 
-- [ ] ExternalWidget renders in vogui (unit test: widget appears in DOM)
-- [ ] VoguiPlatform trait works (WASM + Tauri + Noop)
-- [ ] `vox.RunGui` / `SendGuiEvent` work (test: guest tetris renders + responds to events)
-- [ ] Tauri app launches, shows IDE UI rendered by vogui
-- [ ] CodeMirror editor is usable (type code, syntax highlight, content flows to State)
-- [ ] Click "Run" on console app → output appears in panel
-- [ ] Click "Run" on GUI app → guest vogui renders in preview panel
-- [ ] Guest app events work (click buttons in preview → guest app responds)
-- [ ] File list lets you switch between 3+ example files
-- [ ] Web WASM mode works (same UI in browser, no Tauri)
+- [ ] Tauri app launches, shows Svelte IDE (dark theme, three-panel layout)
+- [ ] CodeMirror editor loads with syntax highlighting, edits update store
+- [ ] File tree shows example files, clicking switches editor content
+- [ ] Click "Run" on console app → `compile_run` → output in OutputPanel
+- [ ] Click "Run" on vogui app → `run_gui` → guest renders in PreviewPanel
+- [ ] Guest app events work (click button → `send_gui_event` → guest re-renders)
+- [ ] Click "Stop" → `stop_gui` → guest thread exits, panel cleared
+- [ ] Web WASM mode: same UI in browser, no Tauri
 
 ---
 
 ## 7. What's NOT in Phase 1
 
-These will be added iteratively as the IDE matures:
-
-- Real filesystem integration (Tauri FS API) — Phase 1 uses embedded example files
-- LSP / diagnostics overlay in editor
-- Terminal widget (xterm)
+- Real filesystem (open folder, save to disk) — Phase 1 uses embedded example files
+- LSP / inline diagnostics in editor
+- Terminal emulator (xterm)
 - Split pane resizing (fixed widths in Phase 1)
 - Hot reload
 - Debug mode / breakpoints
