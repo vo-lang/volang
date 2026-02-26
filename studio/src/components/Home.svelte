@@ -228,9 +228,9 @@ func main() {
   function viewOnGitHub(p: ProjectEntry) {
     if (!p.remote) return;
     if (p.remote.kind === 'gist') {
-      window.open(`https://gist.github.com/${p.remote.gistId}`, '_blank');
+      window.open(`https://gist.github.com/${p.remote.gistId}`, '_blank', 'noopener,noreferrer');
     } else {
-      window.open(`https://github.com/${p.remote.owner}/${p.remote.repo}`, '_blank');
+      window.open(`https://github.com/${p.remote.owner}/${p.remote.repo}`, '_blank', 'noopener,noreferrer');
     }
   }
 

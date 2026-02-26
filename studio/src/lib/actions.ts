@@ -12,6 +12,31 @@ function isGuiCode(code: string): boolean {
   return code.includes('"vogui"');
 }
 
+function assertSafeSingleFileName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error('Invalid remote filename');
+  if (trimmed.includes('/') || trimmed.includes('\\')) {
+    throw new Error(`Invalid remote filename: ${trimmed}`);
+  }
+  if (trimmed === '.' || trimmed === '..') {
+    throw new Error(`Invalid remote filename: ${trimmed}`);
+  }
+  return trimmed;
+}
+
+function assertSafeRelativeRepoPath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) throw new Error('Invalid remote path');
+  if (trimmed.startsWith('/') || trimmed.startsWith('\\') || trimmed.includes('\\')) {
+    throw new Error(`Invalid remote path: ${trimmed}`);
+  }
+  const segments = trimmed.split('/');
+  if (segments.some(seg => !seg || seg === '.' || seg === '..')) {
+    throw new Error(`Invalid remote path: ${trimmed}`);
+  }
+  return trimmed;
+}
+
 export const actions = {
   // =========================================================================
   // Workspace init — called once after bridge is ready
@@ -238,17 +263,22 @@ export const actions = {
       const fileNames = Object.keys(files);
       const voFile = fileNames.find(f => f.endsWith('.vo')) ?? fileNames[0];
       if (!voFile) throw new Error('Gist has no files');
-      const localPath = root + '/' + voFile;
+      const safeFileName = assertSafeSingleFileName(voFile);
+      const localPath = root + '/' + safeFileName;
       await b.fsWriteFile(localPath, files[voFile]);
       project = { ...project, localPath };
     } else if (project.remote.kind === 'repo' && project.remote.owner && project.remote.repo) {
       // Multi-file: pull from repo via Git Data API
       const files = await gitPullFiles(token, project.remote.owner, project.remote.repo);
+      const safeEntries = Object.entries(files).map(([name, content]) => [
+        assertSafeRelativeRepoPath(name),
+        content,
+      ] as const);
       const dir = root + '/' + project.name;
       try { await b.fsMkdir(dir); } catch { /* may already exist */ }
       // Ensure all intermediate directories exist
       const createdDirs = new Set<string>();
-      for (const name of Object.keys(files)) {
+      for (const [name] of safeEntries) {
         if (name.includes('/')) {
           const parts = name.split('/');
           let cur = dir;
@@ -261,7 +291,7 @@ export const actions = {
           }
         }
       }
-      for (const [name, content] of Object.entries(files)) {
+      for (const [name, content] of safeEntries) {
         await b.fsWriteFile(dir + '/' + name, content);
       }
       project = { ...project, localPath: dir };

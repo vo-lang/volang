@@ -4,11 +4,11 @@
 //! - Filesystem commands (scoped to a workspace root)
 //! - Compile & run user Vo code via vo-engine / vox
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use serde::Serialize;
 use vo_vox::gui::GuestHandle;
-use vo_vox::{compile, run, RunMode};
+use vo_vox::{compile, run as run_vox, RunMode};
 use vo_runtime::output;
 
 // =============================================================================
@@ -116,29 +116,51 @@ fn cmd_fs_remove(path: String, recursive: bool, state: tauri::State<'_, AppState
 /// Resolve a path to an absolute path within the workspace, preventing escape.
 /// Accepts both absolute paths (must be under root) and relative paths (joined to root).
 fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
-    let p = Path::new(path);
-    let abs = if p.is_absolute() {
-        p.to_path_buf()
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|e| format!("{}: {}", root.display(), e))?;
+
+    let input = Path::new(path);
+    let rel = if input.is_absolute() {
+        input
+            .strip_prefix(&canonical_root)
+            .map_err(|_| format!("path escapes workspace: {}", path))?
     } else {
-        root.join(path)
+        input
     };
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    // For new files that don't exist yet, check the parent
-    let check_path = if abs.exists() {
-        abs.canonicalize().unwrap_or_else(|_| abs.clone())
-    } else if let Some(parent) = abs.parent() {
-        if parent.exists() {
-            let canon_parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
-            canon_parent.join(abs.file_name().unwrap_or_default())
-        } else {
-            abs.clone()
+
+    let mut normalized_rel = PathBuf::new();
+    for comp in rel.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::Normal(seg) => normalized_rel.push(seg),
+            Component::ParentDir => {
+                if !normalized_rel.pop() {
+                    return Err(format!("path escapes workspace: {}", path));
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("path escapes workspace: {}", path));
+            }
         }
-    } else {
-        abs.clone()
-    };
-    if !check_path.starts_with(&canonical_root) {
+    }
+
+    let abs = canonical_root.join(&normalized_rel);
+
+    // Reject symlink-based escapes by validating the closest existing ancestor.
+    let mut probe = abs.as_path();
+    while !probe.exists() {
+        probe = probe
+            .parent()
+            .ok_or_else(|| format!("path escapes workspace: {}", path))?;
+    }
+    let canonical_probe = probe
+        .canonicalize()
+        .map_err(|e| format!("{}: {}", probe.display(), e))?;
+    if !canonical_probe.starts_with(&canonical_root) {
         return Err(format!("path escapes workspace: {}", path));
     }
+
     Ok(abs)
 }
 
@@ -154,7 +176,7 @@ fn cmd_compile_run(entry_path: String, state: tauri::State<'_, AppState>) -> Res
 
     let compile_output = compile(&abs_str).map_err(|e| e.to_string())?;
     output::start_capture();
-    let result = run(compile_output, RunMode::Vm, Vec::new());
+    let result = run_vox(compile_output, RunMode::Vm, Vec::new());
     let captured = output::stop_capture();
     match result {
         Ok(()) => Ok(captured),

@@ -15,7 +15,8 @@ export interface GitHubState {
   error: string;
 }
 
-const STORAGE_KEY = 'vibe_studio_github_token';
+const TOKEN_STORAGE_KEY = 'vibe_studio_github_token';
+const LEGACY_TOKEN_SESSION_KEY = 'vibe_studio_github_token_session';
 
 export const github = writable<GitHubState>({
   token: null,
@@ -51,7 +52,8 @@ export async function loginWithToken(token: string): Promise<void> {
   github.update(s => ({ ...s, isLoading: true, error: '' }));
   try {
     const user: GitHubUser = await githubFetch(token, '/user');
-    localStorage.setItem(STORAGE_KEY, token);
+    localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    sessionStorage.removeItem(LEGACY_TOKEN_SESSION_KEY);
     github.update(s => ({ ...s, token, user, isLoading: false }));
   } catch (e: any) {
     github.update(s => ({ ...s, isLoading: false, error: String(e) }));
@@ -60,12 +62,19 @@ export async function loginWithToken(token: string): Promise<void> {
 }
 
 export function logout(): void {
-  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(TOKEN_STORAGE_KEY);
+  sessionStorage.removeItem(LEGACY_TOKEN_SESSION_KEY);
   github.update(() => ({ token: null, user: null, isLoading: false, error: '' }));
 }
 
 export function loadSavedToken(): void {
-  const saved = localStorage.getItem(STORAGE_KEY);
+  const savedFromLocal = localStorage.getItem(TOKEN_STORAGE_KEY);
+  const savedFromLegacySession = sessionStorage.getItem(LEGACY_TOKEN_SESSION_KEY);
+  const saved = savedFromLocal ?? savedFromLegacySession;
+  if (!savedFromLocal && savedFromLegacySession) {
+    localStorage.setItem(TOKEN_STORAGE_KEY, savedFromLegacySession);
+  }
+  sessionStorage.removeItem(LEGACY_TOKEN_SESSION_KEY);
   if (saved) {
     loginWithToken(saved).catch(() => logout());
   }
