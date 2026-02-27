@@ -83,13 +83,13 @@ func LoadBytecodeBinary(path string) (Module, error)
 
 // ============ GUI ============
 
-// RunGui starts a GUI app and returns the initial render JSON.
+// RunGui starts a GUI app and returns the initial render bytes.
 // The module's VM stays alive for subsequent SendGuiEvent calls.
-func RunGui(m Module) (string, error)
+func RunGui(m Module) ([]byte, error)
 
 // SendGuiEvent sends an event to a running GUI app.
-// Returns the new render JSON after the event is processed.
-func SendGuiEvent(m Module, handlerId int, payload string) (string, error)
+// Returns the new render bytes after the event is processed.
+func SendGuiEvent(m Module, handlerId int, payload string) ([]byte, error)
 
 // StopGui stops a running GUI app and releases its VM.
 func StopGui(m Module)

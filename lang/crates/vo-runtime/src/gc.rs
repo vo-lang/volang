@@ -173,7 +173,7 @@ pub struct Gc {
     // ========== Memory Stats ==========
     total_bytes: usize,      // Total allocated bytes
     estimate: usize,         // Estimated live bytes after last GC
-    debt: isize,             // Work debt (triggers GC when > 0)
+    debt: i64,               // Work debt (triggers GC when > 0)
     
     // ========== Parameters ==========
     pause: u16,              // Pause multiplier (default 200 = 2x)
@@ -289,7 +289,7 @@ impl Gc {
 
         self.all_objects.push(data_ptr);
         self.total_bytes += total_size;
-        self.debt += total_size as isize;
+        self.debt += total_size as i64;
 
         #[cfg(feature = "gc-debug")]
         crate::gc_debug::on_alloc(data_ptr);
@@ -512,7 +512,7 @@ impl Gc {
             }
         }
         
-        self.debt -= work as isize;
+        self.debt -= work as i64;
         work
     }
     
@@ -611,8 +611,8 @@ impl Gc {
         self.state = GcState::Pause;
         
         // Set debt threshold for next cycle
-        let threshold = (self.estimate as u64 * self.pause as u64 / 100) as isize;
-        self.debt = self.debt.min(-(threshold.max(1024) as isize));
+        let threshold = (self.estimate as u64 * self.pause as u64 / 100) as i64;
+        self.debt = self.debt.min(-(threshold.max(1024) as i64));
     }
 
     pub fn total_bytes(&self) -> usize {

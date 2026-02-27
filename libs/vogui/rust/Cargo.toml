@@ -16,6 +16,7 @@ web-sys = { version = "0.3", features = ["console", "Window"] }
 
 # Native-only dependencies (for cargo check on non-wasm targets)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+vo-vm = { path = "../../../lang/crates/vo-vm", features = ["std"] }
 vo-runtime = { path = "../../../lang/crates/vo-runtime" }
 vo-ext = { path = "../../../lang/crates/vo-ext" }
 linkme = "0.3"

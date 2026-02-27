@@ -97,7 +97,7 @@ type SelectOption struct {
 func Select(value string, options []SelectOption, handler Handler) Node {
 	optAny := make([]any, len(options))
 	for i, o := range options {
-		optAny[i] = o
+		optAny[i] = map[string]any{"label": o.Label, "value": o.Value}
 	}
 	return Node{Type: "select", Props: map[string]any{
 		"value":    value,

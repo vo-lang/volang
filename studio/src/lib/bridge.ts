@@ -23,12 +23,12 @@ export interface Bridge {
 
   // Execution (entry path relative to workspace root)
   compileRun(entryPath: string): Promise<string>;
-  runGui(entryPath: string): Promise<string>;
-  sendGuiEvent(handlerId: number, payload: string): Promise<string>;
+  runGui(entryPath: string): Promise<Uint8Array>;
+  sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array>;
   stopGui(): Promise<void>;
 
-  // GUI render callback — called by JS timer/timeout callbacks with fresh render JSON
-  setGuiRenderCallback(cb: (json: string) => void): void;
+  // GUI render callback — called by JS timer/timeout callbacks with fresh render bytes
+  setGuiRenderCallback(cb: (bytes: Uint8Array) => void): void;
   clearGuiRenderCallback(): void;
 
   // Workspace root (for display)
@@ -66,12 +66,12 @@ async function initTauriBridge(): Promise<void> {
     fsRemove:     (path, recursive)  => invoke('cmd_fs_remove', { path, recursive }),
 
     compileRun:   (entryPath)            => invoke('cmd_compile_run', { entryPath }),
-    runGui:       (entryPath)            => invoke('cmd_run_gui', { entryPath }),
-    sendGuiEvent: (handlerId, payload)   => invoke('cmd_send_gui_event', { handlerId, payload }),
+    runGui:       async (entryPath) => new Uint8Array(await invoke<number[]>('cmd_run_gui', { entryPath })),
+    sendGuiEvent: async (handlerId, payload) => new Uint8Array(await invoke<number[]>('cmd_send_gui_event', { handlerId, payload })),
     stopGui:      ()                     => invoke('cmd_stop_gui'),
 
     // Tauri handles timers natively in its own process; no JS-side render callback needed
-    setGuiRenderCallback(_cb: (json: string) => void) {},
+    setGuiRenderCallback(_cb: (bytes: Uint8Array) => void) {},
     clearGuiRenderCallback() {},
   };
 }
@@ -125,33 +125,79 @@ async function initWasmBridge(): Promise<void> {
   }
 
   // 4) Set up WasmPlatform globals — called by WASM at runtime (resolved at call time, not import time)
-  let guiRenderCallback: ((json: string) => void) | null = null;
+  let guiRenderCallback: ((bytes: Uint8Array) => void) | null = null;
   const activeTimers = new Map<number, number>();
   const activeTimeouts = new Map<number, number>();
+  const activeAnimFrames = new Map<number, number>();
+  const activeGameLoops = new Map<number, { rafId: number; lastTs: number }>();
+  let guiEventInFlight = false;
+  const guiEventQueue: Array<{
+    handlerId: number;
+    payload: string;
+    emitRender: boolean;
+    resolve: (bytes: Uint8Array) => void;
+    reject: (err: unknown) => void;
+  }> = [];
 
   const nativeSetInterval = window.setInterval.bind(window);
   const nativeClearInterval = window.clearInterval.bind(window);
   const nativeSetTimeout = window.setTimeout.bind(window);
   const nativeClearTimeout = window.clearTimeout.bind(window);
 
+  function drainGuiEventQueue() {
+    if (guiEventInFlight) return;
+    const next = guiEventQueue.shift();
+    if (!next) return;
+
+    guiEventInFlight = true;
+    try {
+      const result = wasmMod.sendGuiEvent(next.handlerId, next.payload);
+      if (result instanceof Error) throw result;
+      const bytes = result as Uint8Array;
+      if (next.emitRender && bytes && bytes.length > 0 && guiRenderCallback) {
+        guiRenderCallback(bytes);
+      }
+      next.resolve(bytes);
+    } catch (e) {
+      next.reject(e);
+    } finally {
+      guiEventInFlight = false;
+      if (guiEventQueue.length > 0) queueMicrotask(drainGuiEventQueue);
+    }
+  }
+
+  function queueGuiEvent(handlerId: number, payload: string, emitRender: boolean): Promise<Uint8Array> {
+    return new Promise((resolve, reject) => {
+      guiEventQueue.push({ handlerId, payload, emitRender, resolve, reject });
+      drainGuiEventQueue();
+    });
+  }
+
+  function resetGuiEventQueue() {
+    guiEventQueue.length = 0;
+    guiEventInFlight = false;
+  }
+
   function clearAllGuiTimers() {
     activeTimers.forEach((jsId) => nativeClearInterval(jsId));
     activeTimers.clear();
     activeTimeouts.forEach((jsId) => nativeClearTimeout(jsId));
     activeTimeouts.clear();
+    activeAnimFrames.forEach((rafId) => cancelAnimationFrame(rafId));
+    activeAnimFrames.clear();
+    activeGameLoops.forEach((state) => cancelAnimationFrame(state.rafId));
+    activeGameLoops.clear();
+    resetGuiEventQueue();
   }
 
   (window as any).startInterval = (voId: number, ms: number) => {
     if (activeTimers.has(voId)) nativeClearInterval(activeTimers.get(voId)!);
     const jsId = nativeSetInterval(() => {
-      try {
-        const json = wasmMod.sendGuiEvent(-1, JSON.stringify({ id: voId })) as string;
-        if (json && guiRenderCallback) guiRenderCallback(json);
-      } catch (e) {
+      queueGuiEvent(-1, JSON.stringify({ id: voId }), true).catch((e) => {
         console.error('[studio] Timer handler error:', e);
         const staleJsId = activeTimers.get(voId);
         if (staleJsId !== undefined) { nativeClearInterval(staleJsId); activeTimers.delete(voId); }
-      }
+      });
     }, ms);
     activeTimers.set(voId, jsId);
   };
@@ -165,12 +211,9 @@ async function initWasmBridge(): Promise<void> {
     if (activeTimeouts.has(voId)) nativeClearTimeout(activeTimeouts.get(voId)!);
     const jsId = nativeSetTimeout(() => {
       activeTimeouts.delete(voId);
-      try {
-        const json = wasmMod.sendGuiEvent(-1, JSON.stringify({ id: voId })) as string;
-        if (json && guiRenderCallback) guiRenderCallback(json);
-      } catch (e) {
+      queueGuiEvent(-1, JSON.stringify({ id: voId }), true).catch((e) => {
         console.error('[studio] Timeout handler error:', e);
-      }
+      });
     }, ms);
     activeTimeouts.set(voId, jsId);
   };
@@ -182,6 +225,52 @@ async function initWasmBridge(): Promise<void> {
     } else {
       nativeClearTimeout(id);
     }
+  };
+
+  // Animation frame & game loop — eventIDAnimFrame=-4, eventIDGameLoop=-5
+  (window as any).voguiStartAnimFrame = (id: number) => {
+    if (activeAnimFrames.has(id)) cancelAnimationFrame(activeAnimFrames.get(id)!);
+    const rafId = requestAnimationFrame(() => {
+      activeAnimFrames.delete(id);
+      queueGuiEvent(-4, JSON.stringify({ Id: id }), true)
+        .catch((e) => { console.error('[studio] AnimFrame handler error:', e); });
+    });
+    activeAnimFrames.set(id, rafId);
+  };
+
+  (window as any).voguiCancelAnimFrame = (id: number) => {
+    if (activeAnimFrames.has(id)) {
+      cancelAnimationFrame(activeAnimFrames.get(id)!);
+      activeAnimFrames.delete(id);
+    }
+  };
+
+  (window as any).voguiStartGameLoop = (id: number) => {
+    if (activeGameLoops.has(id)) cancelAnimationFrame(activeGameLoops.get(id)!.rafId);
+    const state = { rafId: 0, lastTs: 0 };
+    activeGameLoops.set(id, state);
+    function tick(ts: number): void {
+      if (!activeGameLoops.has(id)) return;
+      const loop = activeGameLoops.get(id)!;
+      const dt = loop.lastTs === 0 ? 0 : ts - loop.lastTs;
+      loop.lastTs = ts;
+      queueGuiEvent(-5, JSON.stringify({ Dt: dt }), true)
+        .then(() => {
+          if (activeGameLoops.has(id)) {
+            activeGameLoops.get(id)!.rafId = requestAnimationFrame(tick);
+          }
+        })
+        .catch((e) => {
+          console.error('[studio] GameLoop handler error:', e);
+          activeGameLoops.delete(id);
+        });
+    }
+    state.rafId = requestAnimationFrame(tick);
+  };
+
+  (window as any).voguiStopGameLoop = (id: number) => {
+    const loop = activeGameLoops.get(id);
+    if (loop) { cancelAnimationFrame(loop.rafId); activeGameLoops.delete(id); }
   };
 
   // DOM platform hooks — no-ops for studio
@@ -248,17 +337,15 @@ async function initWasmBridge(): Promise<void> {
       return result as string;
     },
 
-    async runGui(entryPath: string): Promise<string> {
+    async runGui(entryPath: string): Promise<Uint8Array> {
       clearAllGuiTimers();  // clear any leftover timers from a previous run
       const result = wasmMod.runGuiEntry(entryPath);
       if (result instanceof Error) throw result;
-      return result as string;
+      return result as Uint8Array;
     },
 
-    async sendGuiEvent(handlerId: number, payload: string): Promise<string> {
-      const result = wasmMod.sendGuiEvent(handlerId, payload);
-      if (result instanceof Error) throw result;
-      return result as string;
+    async sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
+      return queueGuiEvent(handlerId, payload, false);
     },
 
     async stopGui(): Promise<void> {
@@ -266,7 +353,7 @@ async function initWasmBridge(): Promise<void> {
       wasmMod.stopGui();
     },
 
-    setGuiRenderCallback(cb: (json: string) => void) {
+    setGuiRenderCallback(cb: (bytes: Uint8Array) => void) {
       guiRenderCallback = cb;
     },
 

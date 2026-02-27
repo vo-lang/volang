@@ -173,7 +173,7 @@ export const actions = {
       dirty: false,
       output: '',
       compileError: '',
-      guestRender: '',
+      guestRender: null,
       isGuiApp: false,
       isRunning: false,
     }));
@@ -516,14 +516,14 @@ export const actions = {
       isRunning: true,
       output: '',
       compileError: '',
-      guestRender: '',
+      guestRender: null,
       isGuiApp: false,
     }));
 
     try {
       if (isGuiCode(codeToCheck)) {
-        const json = await bridge().runGui(entryPath);
-        ide.update(s => ({ ...s, isRunning: true, isGuiApp: true, guestRender: json }));
+        const bytes = await bridge().runGui(entryPath);
+        ide.update(s => ({ ...s, isRunning: true, isGuiApp: true, guestRender: bytes }));
       } else {
         const output = await bridge().compileRun(entryPath);
         ide.update(s => ({ ...s, isRunning: false, isGuiApp: false, output }));
@@ -543,7 +543,7 @@ export const actions = {
       ...s,
       isRunning: false,
       isGuiApp: false,
-      guestRender: '',
+      guestRender: null,
     }));
   },
 

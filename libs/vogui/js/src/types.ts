@@ -17,12 +17,26 @@ export interface VoHandler {
     keyFilter?: string;
 }
 
+/** Canvas draw command from Vo. */
+export interface CanvasCommand {
+    c: string;
+    a?: any[];
+}
+
+/** Canvas command batch targeting a specific canvas ref. */
+export interface CanvasBatch {
+    ref: string;
+    cmds: CanvasCommand[];
+}
+
 /** Render message from Vo. */
 export interface RenderMessage {
     type: 'render';
     gen: number;
     tree: VoNode;
     handlers: VoHandler[];
+    styles?: string[];
+    canvas?: CanvasBatch[];
 }
 
 /** Event callback signature. */

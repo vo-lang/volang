@@ -11,6 +11,12 @@ use std::path::PathBuf;
 use wasm_bindgen::prelude::*;
 use vo_common::vfs::MemoryFs;
 
+fn ensure_panic_hook() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| console_error_panic_hook::set_once());
+}
+
 // Embed all top-level vogui .vo files for user code that imports "vogui".
 include!(concat!(env!("OUT_DIR"), "/vogui_embedded.rs"));
 
@@ -20,7 +26,6 @@ include!(concat!(env!("OUT_DIR"), "/vogui_embedded.rs"));
 
 struct GuestState {
     vm: vo_web::Vm,
-    event_handler: vo_web::GcRef,
 }
 
 thread_local! {
@@ -117,6 +122,7 @@ fn compile_from_vfs(entry_path: &str) -> Result<Vec<u8>, String> {
 /// Compile and run user Vo code (console app) from VFS entry path, returning captured stdout.
 #[wasm_bindgen(js_name = "compileRunEntry")]
 pub fn compile_run_entry(entry_path: &str) -> Result<String, JsValue> {
+    ensure_panic_hook();
     let bytecode = compile_from_vfs(entry_path).map_err(|e| JsValue::from_str(&e))?;
     vo_web::take_output();
 
@@ -127,12 +133,16 @@ pub fn compile_run_entry(entry_path: &str) -> Result<String, JsValue> {
     Ok(output)
 }
 
-/// Compile and start a guest vogui app from VFS entry path, returning initial render JSON.
+/// Compile and start a guest vogui app from VFS entry path, returning initial render bytes.
+///
+/// The Vo app's `Run()` does initial render then blocks on `waitForEvent()`.
+/// `vm.run()` returns `SuspendedForHostEvents` once the main fiber blocks.
 #[wasm_bindgen(js_name = "runGuiEntry")]
-pub fn run_gui_entry(entry_path: &str) -> Result<String, JsValue> {
+pub fn run_gui_entry(entry_path: &str) -> Result<Vec<u8>, JsValue> {
+    ensure_panic_hook();
     GUEST.with(|g| *g.borrow_mut() = None);
     vogui::clear_pending_render();
-    vogui::clear_pending_handler();
+    vogui::clear_event_state();
 
     let bytecode = compile_from_vfs(entry_path).map_err(|e| JsValue::from_str(&e))?;
 
@@ -143,38 +153,46 @@ pub fn run_gui_entry(entry_path: &str) -> Result<String, JsValue> {
         vogui::register_externs(reg, exts);
     }).map_err(|e| JsValue::from_str(&e))?;
 
-    let render_json = vogui::take_pending_render()
+    let render_bytes = vogui::take_pending_render_bytes()
         .ok_or_else(|| JsValue::from_str("guest app did not emit a render"))?;
-    let event_handler = vogui::take_pending_handler()
-        .ok_or_else(|| JsValue::from_str("guest app did not register an event handler"))?;
 
-    GUEST.with(|g| *g.borrow_mut() = Some(GuestState { vm, event_handler }));
-    Ok(render_json)
+    GUEST.with(|g| *g.borrow_mut() = Some(GuestState { vm }));
+    Ok(render_bytes)
 }
 
-/// Send an event to the running guest app, returning the new render JSON.
+/// Send an event to the running guest app, returning the new render bytes.
+///
+/// Stores event data and wakes the main fiber (blocked on waitForEvent).
+/// The fiber processes the event inline and blocks again on waitForEvent.
+/// No new fiber is created — zero allocation per event.
 #[wasm_bindgen(js_name = "sendGuiEvent")]
-pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<String, JsValue> {
-    GUEST.with(|g| {
-        let mut borrow = g.borrow_mut();
-        let state = borrow.as_mut()
-            .ok_or_else(|| JsValue::from_str("No guest app running"))?;
+pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<Vec<u8>, JsValue> {
+    let mut guest = GUEST.with(|g| g.borrow_mut().take())
+        .ok_or_else(|| JsValue::from_str("No guest app running"))?;
 
-        vogui::clear_pending_render();
+    vogui::clear_pending_render();
+    vo_runtime::output::clear_output();
 
-        let payload_ref = vo_web::alloc_string(&mut state.vm, payload);
-        let args = [handler_id as u64, payload_ref as u64];
-        vo_web::call_closure(&mut state.vm, state.event_handler, &args)
-            .map_err(|e| JsValue::from_str(&e))?;
+    // Store event data and get the token to wake the blocked fiber
+    let token = vogui::send_event(handler_id, payload.to_string())
+        .ok_or_else(|| JsValue::from_str("Main fiber not waiting for events"))?;
 
-        let stdout = vo_web::take_output();
-        if !stdout.is_empty() {
-            web_sys::console::log_1(&format!("[guest] {}", stdout.trim_end()).into());
-        }
+    // Wake the fiber and run until it blocks on waitForEvent again
+    guest.vm.scheduler.wake_host_event(token);
+    let run_result = guest.vm.run_scheduled();
 
-        let render_json = vogui::take_pending_render().unwrap_or_default();
-        Ok(render_json)
-    })
+    // Put state back before checking result
+    GUEST.with(|g| *g.borrow_mut() = Some(guest));
+
+    run_result.map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+    let stdout = vo_web::take_output();
+    if !stdout.is_empty() {
+        web_sys::console::log_1(&format!("[guest] {}", stdout.trim_end()).into());
+    }
+
+    let render_bytes = vogui::take_pending_render_bytes().unwrap_or_default();
+    Ok(render_bytes)
 }
 
 /// Stop the running guest app (clears state).
@@ -182,5 +200,5 @@ pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<String, JsValue>
 pub fn stop_gui() {
     GUEST.with(|g| *g.borrow_mut() = None);
     vogui::clear_pending_render();
-    vogui::clear_pending_handler();
+    vogui::clear_event_state();
 }

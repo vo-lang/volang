@@ -1,0 +1,315 @@
+// Style combinator system for reusable, composable CSS styles.
+// Styles compile to CSS class names with pseudo-class and media query support.
+package vogui
+
+import (
+	"fmt"
+	"strings"
+	"unicode"
+)
+
+// Style is a reusable, composable style definition.
+// It compiles to a CSS class injected into the document at render time.
+type Style struct {
+	id     int
+	props  map[string]any
+	hover  map[string]any
+	focus  map[string]any
+	active map[string]any
+	media  map[string]map[string]any
+}
+
+// Internal style registry: id -> CSS text (already injected)
+var styleRegistry = map[int]bool{}
+
+// Pending styles to send with the next render
+var pendingStyles []string
+
+// Global style ID counter
+var nextStyleID int
+
+// NewStyle creates a new empty Style.
+func NewStyle() Style {
+	nextStyleID++
+	return Style{
+		id:    nextStyleID,
+		props: map[string]any{},
+	}
+}
+
+// Extend creates a new Style that inherits all properties from this one.
+func (s Style) Extend() Style {
+	nextStyleID++
+	ns := Style{
+		id:    nextStyleID,
+		props: copyMap(s.props),
+	}
+	if s.hover != nil {
+		ns.hover = copyMap(s.hover)
+	}
+	if s.focus != nil {
+		ns.focus = copyMap(s.focus)
+	}
+	if s.active != nil {
+		ns.active = copyMap(s.active)
+	}
+	if s.media != nil {
+		ns.media = map[string]map[string]any{}
+		for q, m := range s.media {
+			ns.media[q] = copyMap(m)
+		}
+	}
+	return ns
+}
+
+func copyMap(m map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// ============ Style Property Methods ============
+// These mirror Node's style methods but operate on Style.
+
+func (s Style) W(v any) Style      { s.props["width"] = v; return s }
+func (s Style) H(v any) Style      { s.props["height"] = v; return s }
+func (s Style) MinW(v any) Style   { s.props["minWidth"] = v; return s }
+func (s Style) MaxW(v any) Style   { s.props["maxWidth"] = v; return s }
+func (s Style) MinH(v any) Style   { s.props["minHeight"] = v; return s }
+func (s Style) MaxH(v any) Style   { s.props["maxHeight"] = v; return s }
+func (s Style) P(v any) Style      { s.props["padding"] = v; return s }
+func (s Style) M(v any) Style      { s.props["margin"] = v; return s }
+func (s Style) Gap(v any) Style    { s.props["gap"] = v; return s }
+func (s Style) Bg(v string) Style  { s.props["background"] = v; return s }
+func (s Style) Fg(v string) Style  { s.props["color"] = v; return s }
+func (s Style) Cursor(v string) Style   { s.props["cursor"] = v; return s }
+func (s Style) Opacity(v any) Style     { s.props["opacity"] = v; return s }
+func (s Style) Overflow(v string) Style { s.props["overflow"] = v; return s }
+func (s Style) Flex(v any) Style        { s.props["flex"] = v; return s }
+func (s Style) Font(v int) Style        { s.props["fontSize"] = v; return s }
+func (s Style) FontSize(v any) Style    { s.props["fontSize"] = v; return s }
+func (s Style) FontWeight(v any) Style  { s.props["fontWeight"] = v; return s }
+func (s Style) Rounded(v any) Style     { s.props["borderRadius"] = v; return s }
+func (s Style) Border(v string) Style   { s.props["border"] = v; return s }
+func (s Style) Shadow(v string) Style   { s.props["boxShadow"] = v; return s }
+
+func (s Style) Px(v any) Style {
+	s.props["paddingLeft"] = v
+	s.props["paddingRight"] = v
+	return s
+}
+
+func (s Style) Py(v any) Style {
+	s.props["paddingTop"] = v
+	s.props["paddingBottom"] = v
+	return s
+}
+
+func (s Style) Mx(v any) Style {
+	s.props["marginLeft"] = v
+	s.props["marginRight"] = v
+	return s
+}
+
+func (s Style) My(v any) Style {
+	s.props["marginTop"] = v
+	s.props["marginBottom"] = v
+	return s
+}
+
+func (s Style) Bold() Style   { s.props["fontWeight"] = "bold"; return s }
+func (s Style) Italic() Style { s.props["fontStyle"] = "italic"; return s }
+
+// Style sets an arbitrary CSS property.
+func (s Style) Style(key string, value any) Style {
+	s.props[key] = value
+	return s
+}
+
+// ============ Pseudo-Class Methods ============
+
+// Hover sets :hover styles.
+func (s Style) Hover(h Style) Style {
+	s.hover = h.props
+	return s
+}
+
+// Focus sets :focus styles.
+func (s Style) Focus(f Style) Style {
+	s.focus = f.props
+	return s
+}
+
+// Active sets :active styles.
+func (s Style) Active(a Style) Style {
+	s.active = a.props
+	return s
+}
+
+// ============ Media Query Methods ============
+
+// Media adds a media query with the given styles.
+func (s Style) Media(query string, m Style) Style {
+	if s.media == nil {
+		s.media = map[string]map[string]any{}
+	}
+	s.media[query] = m.props
+	return s
+}
+
+// ============ CSS Generation ============
+
+// className returns the generated CSS class name for this Style.
+func (s Style) className() string {
+	return fmt.Sprintf("vo-s-%d", s.id)
+}
+
+// generateCSS produces the full CSS text for this Style.
+func (s Style) generateCSS() string {
+	cls := "." + s.className()
+	var b strings.Builder
+
+	// Base rule
+	b.WriteString(cls)
+	b.WriteString(" { ")
+	writeProps(&b, s.props)
+	b.WriteString("}\n")
+
+	// :hover
+	if s.hover != nil && len(s.hover) > 0 {
+		b.WriteString(cls)
+		b.WriteString(":hover { ")
+		writeProps(&b, s.hover)
+		b.WriteString("}\n")
+	}
+
+	// :focus
+	if s.focus != nil && len(s.focus) > 0 {
+		b.WriteString(cls)
+		b.WriteString(":focus { ")
+		writeProps(&b, s.focus)
+		b.WriteString("}\n")
+	}
+
+	// :active
+	if s.active != nil && len(s.active) > 0 {
+		b.WriteString(cls)
+		b.WriteString(":active { ")
+		writeProps(&b, s.active)
+		b.WriteString("}\n")
+	}
+
+	// Media queries
+	if s.media != nil {
+		for query, mprops := range s.media {
+			b.WriteString("@media ")
+			b.WriteString(query)
+			b.WriteString(" { ")
+			b.WriteString(cls)
+			b.WriteString(" { ")
+			writeProps(&b, mprops)
+			b.WriteString("} }\n")
+		}
+	}
+
+	return b.String()
+}
+
+// writeProps writes CSS property declarations from a map.
+func writeProps(b *strings.Builder, props map[string]any) {
+	for key, val := range props {
+		cssProp := camelToKebab(key)
+		cssVal := cssValue(cssProp, val)
+		b.WriteString(cssProp)
+		b.WriteString(": ")
+		b.WriteString(cssVal)
+		b.WriteString("; ")
+	}
+}
+
+// cssValue converts a value to a CSS string with appropriate units.
+func cssValue(cssProp string, val any) string {
+	switch v := val.(type) {
+	case int:
+		if isUnitless(cssProp) {
+			return fmt.Sprint(v)
+		}
+		return fmt.Sprintf("%dpx", v)
+	case float64:
+		if isUnitless(cssProp) {
+			return fmt.Sprint(v)
+		}
+		return fmt.Sprintf("%gpx", v)
+	case string:
+		return v
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+// isUnitless returns true for CSS properties that don't take px units.
+func isUnitless(prop string) bool {
+	switch prop {
+	case "flex", "flex-grow", "flex-shrink", "opacity", "z-index", "order",
+		"line-height", "font-weight", "orphans", "widows", "columns",
+		"column-count", "tab-size":
+		return true
+	}
+	return false
+}
+
+// camelToKebab converts camelCase to kebab-case.
+// e.g., "borderRadius" -> "border-radius"
+func camelToKebab(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if unicode.IsUpper(r) {
+			if i > 0 {
+				b.WriteByte('-')
+			}
+			b.WriteRune(unicode.ToLower(r))
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// ============ Node Integration ============
+
+// ApplyStyle applies a Style to the Node, setting the generated CSS class.
+// The Style's CSS is registered for injection on the next render.
+func (n Node) ApplyStyle(s Style) Node {
+	if !styleRegistry[s.id] {
+		css := s.generateCSS()
+		styleRegistry[s.id] = true
+		pendingStyles = append(pendingStyles, css)
+	}
+
+	// Append class name to existing classes
+	existing, ok := n.Props["class"]
+	if ok {
+		return n.setProp("class", existing.(string)+" "+s.className())
+	}
+	return n.setProp("class", s.className())
+}
+
+// ApplyStyles applies multiple Styles to the Node.
+func (n Node) ApplyStyles(styles ...Style) Node {
+	for _, s := range styles {
+		n = n.ApplyStyle(s)
+	}
+	return n
+}
+
+// flushPendingStyles returns and clears pending style CSS strings.
+func flushPendingStyles() []string {
+	if len(pendingStyles) == 0 {
+		return nil
+	}
+	result := pendingStyles
+	pendingStyles = nil
+	return result
+}

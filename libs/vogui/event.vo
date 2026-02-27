@@ -31,12 +31,13 @@ const (
 
 // Handler represents an event handler binding.
 type Handler struct {
-	ID        int
-	Gen       int
-	Type      int
-	IntVal    int
-	Modifiers []string
-	KeyFilter string
+	ID           int
+	Gen          int
+	Type         int
+	IntVal       int
+	Modifiers    []string
+	KeyFilter    string
+	ComponentCtx any // non-nil when registered inside Mount()
 }
 
 // Event represents an event from JS.
@@ -58,12 +59,16 @@ type FileInfo struct {
 var handlers []any
 var handlerMetas []Handler
 var renderGen int
+
+// currentComponentCtx is set during Mount()'s View() call for handler scoping.
+var currentComponentCtx any
 var globalKeyHandler any
 
 func resetHandlers() {
 	handlers = []any{}
 	handlerMetas = []Handler{}
 	renderGen++
+	currentComponentCtx = nil
 }
 
 // ============ Handler Constructors ============
@@ -71,7 +76,7 @@ func resetHandlers() {
 func registerHandler(action any, typ int, intVal int) Handler {
 	id := len(handlers)
 	handlers = append(handlers, action)
-	h := Handler{ID: id, Gen: renderGen, Type: typ, IntVal: intVal}
+	h := Handler{ID: id, Gen: renderGen, Type: typ, IntVal: intVal, ComponentCtx: currentComponentCtx}
 	handlerMetas = append(handlerMetas, h)
 	return h
 }
@@ -180,53 +185,59 @@ func invokeHandler(state any, idx int, payload string) error {
 	handler := handlers[idx]
 	meta := handlerMetas[idx]
 
+	// Route to component context when handler was registered inside Mount()
+	target := state
+	if meta.ComponentCtx != nil {
+		target = meta.ComponentCtx
+	}
+
 	switch meta.Type {
 	case handlerClick, handlerSubmit:
-		return handler~>(state)
+		return handler~>(target)
 	case handlerValue, handlerSelect:
 		var p struct{ Value string }
 		json.Unmarshal([]byte(payload), &p)
-		return handler~>(state, p.Value)
+		return handler~>(target, p.Value)
 	case handlerChecked:
 		var p struct{ Checked bool }
 		json.Unmarshal([]byte(payload), &p)
-		return handler~>(state, p.Checked)
+		return handler~>(target, p.Checked)
 	case handlerInt:
-		return handler~>(state, meta.IntVal)
+		return handler~>(target, meta.IntVal)
 	case handlerIntValue:
 		var p struct{ Value string }
 		json.Unmarshal([]byte(payload), &p)
-		return handler~>(state, meta.IntVal, p.Value)
+		return handler~>(target, meta.IntVal, p.Value)
 	case handlerIntChecked:
 		var p struct{ Checked bool }
 		json.Unmarshal([]byte(payload), &p)
-		return handler~>(state, meta.IntVal, p.Checked)
+		return handler~>(target, meta.IntVal, p.Checked)
 	case handlerKey:
 		var p struct{ Key string }
 		json.Unmarshal([]byte(payload), &p)
-		return handler~>(state, p.Key)
+		return handler~>(target, p.Key)
 	case handlerSlider:
 		var p struct{ Value int }
 		json.Unmarshal([]byte(payload), &p)
-		return handler~>(state, p.Value)
+		return handler~>(target, p.Value)
 	case handlerFiles:
 		var p struct{ Files []FileInfo }
 		json.Unmarshal([]byte(payload), &p)
-		return handler~>(state, p.Files)
+		return handler~>(target, p.Files)
 	case handlerPointer:
 		var p PointerEvent
 		json.Unmarshal([]byte(payload), &p)
-		return handler~>(state, p)
+		return handler~>(target, p)
 	case handlerResize:
 		var p ResizeEvent
 		json.Unmarshal([]byte(payload), &p)
-		return handler~>(state, p)
+		return handler~>(target, p)
 	case handlerWidget:
-		return handler~>(state, payload)
+		return handler~>(target, payload)
 	case handlerGeneric:
-		return handler~>(state, payload)
+		return handler~>(target, payload)
 	}
-	return handler~>(state)
+	return handler~>(target)
 }
 
 func invokeGlobalKeyHandler(state any, key string) error {

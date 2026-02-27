@@ -11,7 +11,7 @@ export interface RunResult {
 
 export interface GuiResult {
   status: 'ok' | 'error' | 'compile_error';
-  renderJson: string;
+  renderBytes: Uint8Array;
   error: string;
 }
 
@@ -60,13 +60,19 @@ export async function getVersion(): Promise<string> {
 
 // ============ GUI API ============
 
-type RenderCallback = (json: string) => void;
+type RenderCallback = (bytes: Uint8Array) => void;
 let onRender: RenderCallback | null = null;
 
 // Timer storage: Vo ID -> JS Interval ID
 const activeTimers = new Map<number, number>();
 const runningTimerHandlers = new Set<number>();
 const activeTimeouts = new Map<number, number>();
+
+// Animation frame registry: Vo animframe ID -> rAF request ID
+const activeAnimFrames = new Map<number, number>();
+
+// Game loop registry: Vo loop ID -> { rafId, lastTs }
+const activeGameLoops = new Map<number, { rafId: number; lastTs: number }>();
 
 // Save native timer functions before overriding
 const nativeSetInterval = window.setInterval.bind(window);
@@ -88,11 +94,17 @@ function clearAllTimers() {
   runningTimerHandlers.clear();
   activeTimeouts.forEach((jsId) => clearTimeout(jsId));
   activeTimeouts.clear();
+  activeAnimFrames.forEach((rafId) => cancelAnimationFrame(rafId));
+  activeAnimFrames.clear();
+  activeGameLoops.forEach((state) => cancelAnimationFrame(state.rafId));
+  activeGameLoops.clear();
 }
 
 export function setRenderCallback(callback: RenderCallback) {
   onRender = callback;
 }
+
+const EMPTY_BYTES = new Uint8Array(0);
 
 // Expose global functions for WASM to call
 (window as any).startInterval = (id: number, ms: number) => {
@@ -108,7 +120,7 @@ export function setRenderCallback(callback: RenderCallback) {
 		try {
 			const result = await handleGuiEvent(-1, JSON.stringify({ id: id }));
 			if (result.status === 'ok' && onRender) {
-				onRender(result.renderJson);
+				onRender(result.renderBytes);
 			}
 		} catch (e) {
 			console.error('Timer handler failed:', e);
@@ -138,7 +150,7 @@ export function setRenderCallback(callback: RenderCallback) {
     try {
       const result = await handleGuiEvent(-1, JSON.stringify({ id: id }));
       if (result.status === 'ok' && onRender) {
-        onRender(result.renderJson);
+        onRender(result.renderBytes);
       }
     } catch (e) {
       console.error('Timeout handler failed:', e);
@@ -185,13 +197,84 @@ window.addEventListener('popstate', async () => {
       try {
         const result = await handleGuiEvent(-3, JSON.stringify({ path: window.location.pathname }));
         if (result.status === 'ok' && onRender) {
-            onRender(result.renderJson);
+            onRender(result.renderBytes);
         }
       } catch (e) {
           console.error("Failed to handle popstate:", e);
       }
   }
 });
+
+// ============ Animation Frame & Game Loop ============
+
+// eventIDAnimFrame = -4, eventIDGameLoop = -5 (must match canvas.vo constants)
+
+(window as any).voguiStartAnimFrame = (id: number) => {
+  if (activeAnimFrames.has(id)) {
+    cancelAnimationFrame(activeAnimFrames.get(id)!);
+  }
+  const rafId = requestAnimationFrame(async () => {
+    activeAnimFrames.delete(id);
+    const result = await handleGuiEvent(-4, JSON.stringify({ Id: id }));
+    if (result.status === 'ok' && onRender) {
+      onRender(result.renderBytes);
+    }
+  });
+  activeAnimFrames.set(id, rafId);
+};
+
+(window as any).voguiCancelAnimFrame = (id: number) => {
+  if (activeAnimFrames.has(id)) {
+    cancelAnimationFrame(activeAnimFrames.get(id)!);
+    activeAnimFrames.delete(id);
+  }
+};
+
+(window as any).voguiStartGameLoop = (id: number) => {
+  if (activeGameLoops.has(id)) {
+    cancelAnimationFrame(activeGameLoops.get(id)!.rafId);
+  }
+  const state = { rafId: 0, lastTs: 0 };
+  activeGameLoops.set(id, state);
+
+  function tick(ts: number): void {
+    if (!activeGameLoops.has(id)) return;
+    const loop = activeGameLoops.get(id)!;
+    const dt = loop.lastTs === 0 ? 0 : ts - loop.lastTs;
+    loop.lastTs = ts;
+    // handleGuiEvent manages guiEventChain internally; call it directly
+    // (same pattern as startInterval). Schedule next rAF after completion.
+    handleGuiEvent(-5, JSON.stringify({ Dt: dt })).then(
+      (result) => {
+        if (result.status === 'ok' && onRender) {
+          onRender(result.renderBytes);
+        }
+        if (result.status === 'error') {
+          console.error('[playground] GameLoop error:', result.error);
+          activeGameLoops.delete(id);
+          return;
+        }
+        if (activeGameLoops.has(id)) {
+          activeGameLoops.get(id)!.rafId = requestAnimationFrame(tick);
+        }
+      },
+      (e) => {
+        console.error('[playground] GameLoop handler error:', e);
+        activeGameLoops.delete(id);
+      }
+    );
+  }
+
+  state.rafId = requestAnimationFrame(tick);
+};
+
+(window as any).voguiStopGameLoop = (id: number) => {
+  const loop = activeGameLoops.get(id);
+  if (loop) {
+    cancelAnimationFrame(loop.rafId);
+    activeGameLoops.delete(id);
+  }
+};
 
 // ============ Canvas Registry ============
 
@@ -227,31 +310,31 @@ export async function initGuiApp(source: string): Promise<GuiResult> {
   const result = wasm.initGuiApp(source, 'main.vo');
   return {
     status: result.status,
-    renderJson: result.renderJson || '',
+    renderBytes: result.renderBytes instanceof Uint8Array ? result.renderBytes : EMPTY_BYTES,
     error: result.error || '',
   };
 }
 
 export async function handleGuiEvent(handlerId: number, payload: string): Promise<GuiResult> {
   if (wasmFatal) {
-    return { status: 'error', renderJson: '', error: 'VM is in fatal state after a previous error' };
+    return { status: 'error', renderBytes: EMPTY_BYTES, error: 'VM is in fatal state after a previous error' };
   }
 
   const wasm = await loadWasm();
 
   const run = async (): Promise<GuiResult> => {
     if (wasmBusy) {
-      return { status: 'error', renderJson: '', error: 'Re-entrant WASM call blocked' };
+      return { status: 'error', renderBytes: EMPTY_BYTES, error: 'Re-entrant WASM call blocked' };
     }
     if (wasmFatal) {
-      return { status: 'error', renderJson: '', error: 'VM is in fatal state after a previous error' };
+      return { status: 'error', renderBytes: EMPTY_BYTES, error: 'VM is in fatal state after a previous error' };
     }
     wasmBusy = true;
     try {
       const result = wasm.handleGuiEvent(handlerId, payload);
       return {
         status: result.status,
-        renderJson: result.renderJson || '',
+        renderBytes: result.renderBytes instanceof Uint8Array ? result.renderBytes : EMPTY_BYTES,
         error: result.error || '',
       };
     } catch (e) {
@@ -260,7 +343,7 @@ export async function handleGuiEvent(handlerId: number, payload: string): Promis
       wasmFatal = true;
       clearAllTimers();
       console.error('[Vo] Fatal WASM error, all timers stopped:', e);
-      return { status: 'error', renderJson: '', error: String(e) };
+      return { status: 'error', renderBytes: EMPTY_BYTES, error: String(e) };
     } finally {
       wasmBusy = false;
     }
@@ -297,7 +380,7 @@ export async function initGuiAppWithModules(source: string): Promise<GuiResult> 
   const result = await wasm.initGuiAppWithModules(source);
   return {
     status: result.status,
-    renderJson: result.renderJson || '',
+    renderBytes: result.renderBytes instanceof Uint8Array ? result.renderBytes : EMPTY_BYTES,
     error: result.error || '',
   };
 }

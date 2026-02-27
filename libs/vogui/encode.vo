@@ -1,0 +1,208 @@
+// Binary render protocol encoder.
+//
+// Wire format (little-endian):
+//   [u32: gen][u8: flags][NODE][u16: handlerCount][HANDLER...][styles?][canvas?]
+//
+// Node tags: 0=null 1=element 2=text 3=fragment
+// Value tags: 0=null 1=bool 2=int 3=float64 4=string 5=map 6=array 7=node
+package vogui
+
+// Private extern: returns the IEEE-754 bit representation of f as int64.
+func float64bits(f float64) int64
+
+const (
+	binNodeNull      = 0
+	binNodeElement   = 1
+	binNodeText      = 2
+	binNodeFrag      = 3
+	binNodeComponent = 4 // u32: componentID, then the subtree node
+	binNodeCached    = 5 // u32: componentID; JS reuses stored DOM subtree
+
+	binValNull    = 0
+	binValBool    = 1
+	binValInt     = 2
+	binValFloat64 = 3
+	binValString  = 4
+	binValMap     = 5
+	binValArray   = 6
+	binValNode    = 7
+)
+
+// BinWriter is a growable byte buffer for binary encoding.
+type BinWriter struct {
+	buf []byte
+}
+
+func (w *BinWriter) u8(v int) {
+	w.buf = append(w.buf, byte(v))
+}
+
+func (w *BinWriter) u16(v int) {
+	w.buf = append(w.buf, byte(v), byte(v>>8))
+}
+
+func (w *BinWriter) u32(v int) {
+	w.buf = append(w.buf, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+}
+
+func (w *BinWriter) i32(v int) {
+	w.u32(v)
+}
+
+func (w *BinWriter) f64(v float64) {
+	var bits int64 = float64bits(v)
+	w.buf = append(w.buf,
+		byte(bits), byte(bits>>8), byte(bits>>16), byte(bits>>24),
+		byte(bits>>32), byte(bits>>40), byte(bits>>48), byte(bits>>56))
+}
+
+func (w *BinWriter) str(s string) {
+	b := []byte(s)
+	w.u16(len(b))
+	w.buf = append(w.buf, b...)
+}
+
+func (w *BinWriter) writeValue(v any) {
+	if v == nil {
+		w.u8(binValNull)
+		return
+	}
+	switch val := v.(type) {
+	case bool:
+		w.u8(binValBool)
+		if val {
+			w.u8(1)
+		} else {
+			w.u8(0)
+		}
+	case int:
+		w.u8(binValInt)
+		w.i32(val)
+	case float64:
+		w.u8(binValFloat64)
+		w.f64(val)
+	case string:
+		w.u8(binValString)
+		w.str(val)
+	case map[string]any:
+		w.u8(binValMap)
+		w.u16(len(val))
+		for k, mv := range val {
+			w.str(k)
+			w.writeValue(mv)
+		}
+	case []any:
+		w.u8(binValArray)
+		w.u32(len(val))
+		for _, av := range val {
+			w.writeValue(av)
+		}
+	case Node:
+		w.u8(binValNode)
+		w.writeNode(val)
+	default:
+		w.u8(binValNull)
+	}
+}
+
+func (w *BinWriter) writeNode(n Node) {
+	if n.Type == "" {
+		w.u8(binNodeNull)
+		return
+	}
+	if n.Type == "__cached__" {
+		w.u8(binNodeCached)
+		w.u32(n.Props["_cid"].(int))
+		return
+	}
+	if n.Type == "__comp__" {
+		w.u8(binNodeComponent)
+		w.u32(n.Props["_cid"].(int))
+		if len(n.Children) > 0 {
+			w.writeNode(n.Children[0])
+		} else {
+			w.u8(binNodeNull)
+		}
+		return
+	}
+	if n.Type == "Fragment" {
+		w.u8(binNodeFrag)
+		w.u16(len(n.Children))
+		for _, child := range n.Children {
+			w.writeNode(child)
+		}
+		return
+	}
+	w.u8(binNodeElement)
+	w.str(n.Type)
+	w.u16(len(n.Props))
+	for k, v := range n.Props {
+		w.str(k)
+		w.writeValue(v)
+	}
+	w.u32(len(n.Children))
+	for _, child := range n.Children {
+		w.writeNode(child)
+	}
+}
+
+func (w *BinWriter) writeHandlerMeta(h Handler) {
+	w.u16(h.ID)
+	w.u16(h.Gen)
+	w.u8(h.Type)
+	w.i32(h.IntVal)
+	w.u8(len(h.Modifiers))
+	for _, mod := range h.Modifiers {
+		w.str(mod)
+	}
+	w.str(h.KeyFilter)
+}
+
+// encodeRender encodes the full render message to a binary byte slice.
+func encodeRender(gen int, tree Node, styles []string, canvasCmds []map[string]any) []byte {
+	w := &BinWriter{}
+
+	w.u32(gen)
+
+	flags := 0
+	if len(styles) > 0 {
+		flags |= 1
+	}
+	if len(canvasCmds) > 0 {
+		flags |= 2
+	}
+	w.u8(flags)
+
+	w.writeNode(tree)
+
+	w.u16(len(handlerMetas))
+	for _, h := range handlerMetas {
+		w.writeHandlerMeta(h)
+	}
+
+	if len(styles) > 0 {
+		w.u16(len(styles))
+		for _, s := range styles {
+			w.str(s)
+		}
+	}
+
+	if len(canvasCmds) > 0 {
+		w.u16(len(canvasCmds))
+		for _, batch := range canvasCmds {
+			ref := batch["ref"].(string)
+			w.str(ref)
+			cmds := batch["cmds"].([]canvasCommand)
+			w.u32(len(cmds))
+			for _, cmd := range cmds {
+				w.str(cmd.Cmd)
+				w.u8(len(cmd.Args))
+				for _, arg := range cmd.Args {
+					w.writeValue(arg)
+				}
+			}
+		}
+	}
+
+	return w.buf
+}

@@ -4,7 +4,7 @@
   import FileExplorer from '../components/FileExplorer.svelte';
   import GuiPreview from '../components/GuiPreview.svelte';
   import { runCode, runCodeWithModules, initGuiApp, initGuiAppWithModules, handleGuiEvent, setRenderCallback, type RunStatus } from '../wasm/vo.ts';
-  import { type RenderMessage } from '../../../libs/vogui/js/src/index';
+  import { type RenderMessage, decodeBinaryRender } from '../../../libs/vogui/js/src/index';
   import guiTetris from '../assets/examples/gui_tetris.vo?raw';
   import resvgDemo from '../assets/examples/resvg_demo.vo?raw';
 
@@ -27,12 +27,8 @@
   let isResizing = $state(false);
 
   // Register render callback for async updates (timers)
-  setRenderCallback((json: string) => {
-    try {
-      renderData = JSON.parse(json) as RenderMessage;
-    } catch (e) {
-      console.error('Failed to parse render JSON from timer:', e);
-    }
+  setRenderCallback((bytes: Uint8Array) => {
+    renderData = decodeBinaryRender(bytes);
   });
 
   async function handleRun() {
@@ -62,8 +58,8 @@
         }
         guiMode = true;
         consoleCollapsed = true;
-        if (result.renderJson) {
-          renderData = JSON.parse(result.renderJson) as RenderMessage;
+        if (result.renderBytes.length > 0) {
+          renderData = decodeBinaryRender(result.renderBytes);
         }
         status = 'success';
         activePanel = 'gui';
@@ -78,8 +74,8 @@
         }
         guiMode = true;
         consoleCollapsed = true;
-        if (result.renderJson) {
-          renderData = JSON.parse(result.renderJson) as RenderMessage;
+        if (result.renderBytes.length > 0) {
+          renderData = decodeBinaryRender(result.renderBytes);
         }
         status = 'success';
         activePanel = 'gui';
@@ -157,8 +153,8 @@
         stderr = result.error;
         return;
       }
-      if (result.renderJson) {
-        renderData = JSON.parse(result.renderJson) as RenderMessage;
+      if (result.renderBytes.length > 0) {
+        renderData = decodeBinaryRender(result.renderBytes);
       }
     } catch (e) {
       stderr = e instanceof Error ? e.message : String(e);

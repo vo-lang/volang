@@ -6,6 +6,9 @@ edition = "2021"
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
 
+[profile.release]
+debug = true
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
@@ -17,3 +20,4 @@ vo-common = { path = "../../lang/crates/vo-common" }
 vo-runtime = { path = "../../lang/crates/vo-runtime", default-features = false }
 wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["console"] }
+console_error_panic_hook = "0.1"

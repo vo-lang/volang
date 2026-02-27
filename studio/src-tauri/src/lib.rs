@@ -190,27 +190,27 @@ fn cmd_compile_run(entry_path: String, state: tauri::State<'_, AppState>) -> Res
     }
 }
 
-/// Compile user GUI code from entry path, start a guest VM thread, return initial render JSON.
+/// Compile user GUI code from entry path, start a guest VM thread, return initial render bytes.
 #[tauri::command]
-fn cmd_run_gui(entry_path: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+fn cmd_run_gui(entry_path: String, state: tauri::State<'_, AppState>) -> Result<Vec<u8>, String> {
     let abs = resolve_path(&state.workspace_root, &entry_path)?;
     let abs_str = abs.to_string_lossy().to_string();
 
     let _ = state.guest.lock().unwrap().take();
 
     let compile_output = compile(&abs_str).map_err(|e| e.to_string())?;
-    let (initial_json, handle) = vo_vox::gui::run_gui(compile_output)?;
+    let (initial_bytes, handle) = vo_vox::gui::run_gui(compile_output)?;
     *state.guest.lock().unwrap() = Some(handle);
-    Ok(initial_json)
+    Ok(initial_bytes)
 }
 
-/// Send an event to the running guest VM and return the new render JSON.
+/// Send an event to the running guest VM and return the new render bytes.
 #[tauri::command]
 fn cmd_send_gui_event(
     handler_id: i32,
     payload: String,
     state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<Vec<u8>, String> {
     let mut guard = state.guest.lock().unwrap();
     let handle = guard.as_mut().ok_or_else(|| "No guest VM running".to_string())?;
     vo_vox::gui::send_gui_event(handle, handler_id, &payload)

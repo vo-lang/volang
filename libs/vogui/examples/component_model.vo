@@ -1,0 +1,137 @@
+// Component Model demo: local state, lifecycle (Init/Destroy), handler scoping.
+package main
+
+import (
+	"fmt"
+	"vogui"
+)
+
+// ============ Counter Component ============
+
+type Counter struct {
+	Count   int
+	Label   string
+	timerID int
+}
+
+func (c *Counter) Init() {
+	// Auto-increment every 2 seconds
+	c.timerID = vogui.SetInterval(func(_ any) {
+		c.Count++
+	}, 2000)
+}
+
+func (c *Counter) Destroy() {
+	vogui.ClearInterval(c.timerID)
+}
+
+func (c *Counter) ShouldUpdate() bool {
+	return true // always re-render (default)
+}
+
+func (c *Counter) View() vogui.Node {
+	return vogui.Row(
+		vogui.Text(c.Label+":").P(4),
+		vogui.Button("-", vogui.On(func(c *Counter) { c.Count-- })),
+		vogui.Text(fmt.Sprint(c.Count)).P(8),
+		vogui.Button("+", vogui.On(func(c *Counter) { c.Count++ })),
+	).Gap(8)
+}
+
+// ============ TaskList Component ============
+
+type TaskList struct {
+	Tasks    []string
+	OnDelete func(idx int)
+}
+
+func (t *TaskList) View() vogui.Node {
+	items := make([]vogui.Node, len(t.Tasks))
+	for i, task := range t.Tasks {
+		idx := i // capture
+		items[i] = vogui.Row(
+			vogui.Text(task).Flex(1),
+			vogui.Button("×", vogui.OnInt(func(t *TaskList, i int) {
+				if t.OnDelete != nil {
+					t.OnDelete(i)
+				}
+			}, idx)),
+		).Gap(8).P(4)
+	}
+	return vogui.Column(items...)
+}
+
+// ============ App State ============
+
+type AppState struct {
+	ShowCounter bool
+	CounterA    Counter
+	CounterB    Counter
+	Tasks       []string
+	TaskInput   string
+	TaskPanel   TaskList
+}
+
+func newState() any {
+	return &AppState{
+		ShowCounter: true,
+		CounterA:    Counter{Label: "Counter A"},
+		CounterB:    Counter{Label: "Counter B", Count: 10},
+		Tasks:       []string{"Buy groceries", "Write tests"},
+	}
+}
+
+func view(state any) vogui.Node {
+	s := state.(*AppState)
+
+	// Wire TaskList callback
+	s.TaskPanel.Tasks = s.Tasks
+	s.TaskPanel.OnDelete = func(idx int) {
+		s.Tasks = append(s.Tasks[:idx], s.Tasks[idx+1:]...)
+	}
+
+	// Conditional component mounting — tests Init/Destroy lifecycle.
+	// Counter subtree is built only when ShowCounter is true, so Init()/Destroy()
+	// fire correctly as the component enters/leaves the tree.
+	var counterSection vogui.Node
+	if s.ShowCounter {
+		counterSection = vogui.Column(
+			vogui.Mount(&s.CounterA),
+			vogui.Mount(&s.CounterB),
+		).Gap(8).P(8)
+	}
+
+	return vogui.Column(
+		vogui.Text("Component Model Demo").P(12),
+
+		// Toggle counter visibility
+		vogui.Row(
+			vogui.Checkbox("Show counters", s.ShowCounter,
+				vogui.OnChecked(func(s *AppState, v bool) { s.ShowCounter = v }),
+			),
+		).P(8),
+
+		counterSection,
+
+		// TaskList component with callback
+		vogui.Text("Tasks:").P(8),
+		vogui.Mount(&s.TaskPanel).P(8),
+
+		// Add task
+		vogui.Row(
+			vogui.Input(s.TaskInput,
+				vogui.OnValue(func(s *AppState, v string) { s.TaskInput = v }),
+			),
+			vogui.Button("Add", vogui.On(func(s *AppState) {
+				if s.TaskInput != "" {
+					s.Tasks = append(s.Tasks, s.TaskInput)
+					s.TaskInput = ""
+				}
+			})),
+		).Gap(8).P(8),
+	)
+}
+
+func main() {
+	vogui.Run(vogui.App{Init: newState, View: view})
+}

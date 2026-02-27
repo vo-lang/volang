@@ -17,7 +17,7 @@ type TabItem struct {
 func Tabs(activeIndex int, items []TabItem, handler Handler) Node {
 	itemsAny := make([]any, len(items))
 	for i, item := range items {
-		itemsAny[i] = item
+		itemsAny[i] = map[string]any{"label": item.Label, "content": item.Content}
 	}
 	return Node{Type: "vo-tabs", Props: map[string]any{
 		"activeIndex": activeIndex,
@@ -35,15 +35,17 @@ type AccordionItem struct {
 }
 
 // Accordion renders a collapsible accordion.
-// JS manages: keyboard expand/collapse, ARIA, optional transitions.
-func Accordion(items []AccordionItem, handler Handler) Node {
+// openIndex is the currently expanded panel (-1 for none).
+// Clicking a header emits onChange with {Value: index}; Vo owns the open state.
+func Accordion(items []AccordionItem, openIndex int, handler Handler) Node {
 	itemsAny := make([]any, len(items))
 	for i, item := range items {
-		itemsAny[i] = item
+		itemsAny[i] = map[string]any{"title": item.Title, "content": item.Content}
 	}
 	return Node{Type: "vo-accordion", Props: map[string]any{
-		"items":    itemsAny,
-		"onChange": handler.ID,
+		"items":     itemsAny,
+		"openIndex": openIndex,
+		"onChange":  handler.ID,
 	}}
 }
 
@@ -59,7 +61,7 @@ type BreadcrumbItem struct {
 func Breadcrumb(items []BreadcrumbItem) Node {
 	itemsAny := make([]any, len(items))
 	for i, item := range items {
-		itemsAny[i] = item
+		itemsAny[i] = map[string]any{"label": item.Label, "href": item.Href}
 	}
 	return Node{Type: "vo-breadcrumb", Props: map[string]any{"items": itemsAny}}
 }
@@ -87,7 +89,7 @@ type StepItem struct {
 func Steps(current int, items []StepItem) Node {
 	itemsAny := make([]any, len(items))
 	for i, item := range items {
-		itemsAny[i] = item
+		itemsAny[i] = map[string]any{"label": item.Label, "description": item.Description}
 	}
 	return Node{Type: "vo-steps", Props: map[string]any{
 		"current": current,

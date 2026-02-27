@@ -27,7 +27,7 @@
     }
   });
 
-  $: isGuiApp = $ide.isGuiApp && $ide.guestRender !== '';
+  $: isGuiApp = $ide.isGuiApp && $ide.guestRender !== null && $ide.guestRender.length > 0;
   $: appMode  = $explorer.appMode;
   $: fileName = $ide.activeFilePath ? $ide.activeFilePath.split('/').pop() ?? '' : '';
   $: ctxLabel = $ide.editTarget ? editTargetLabel($ide.editTarget) : '';

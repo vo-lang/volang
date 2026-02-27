@@ -513,13 +513,14 @@ tbody tr:hover { background: var(--vo-surface); }
 
 let stylesInjected = false;
 
-/** Inject VoGUI default styles into the document head. */
+/** Inject VoGUI default styles and managed component styles into the document head. */
 export function injectStyles(): void {
     if (stylesInjected) return;
     const style = document.createElement('style');
     style.id = 'vogui-styles';
     style.textContent = voguiStyles;
     document.head.appendChild(style);
+    injectManagedStyles();
     stylesInjected = true;
 }
 
@@ -544,3 +545,226 @@ export function applyTheme(theme: Record<string, string>): void {
 }
 
 export { voguiStyles };
+
+const managedStyles = `
+/* =============================================================================
+   Managed Component Styles
+   ============================================================================= */
+
+/* Tabs */
+.vo-tabs { display: flex; flex-direction: column; }
+.vo-tabs-header {
+    display: flex; flex-direction: row; border-bottom: 2px solid var(--vo-border);
+    gap: 0;
+}
+.vo-tab {
+    background: none; border: none; cursor: pointer;
+    padding: 8px 16px; font-size: 0.9rem; color: var(--vo-text-muted);
+    border-bottom: 2px solid transparent; margin-bottom: -2px;
+    transition: color 0.15s, border-color 0.15s;
+}
+.vo-tab:hover { color: var(--vo-text); }
+.vo-tab.active { color: var(--vo-primary); border-bottom-color: var(--vo-primary); font-weight: 500; }
+.vo-tabs-content { padding: 16px 0; }
+.vo-tab-panel { }
+
+/* Accordion */
+.vo-accordion { display: flex; flex-direction: column; border: 1px solid var(--vo-border); border-radius: var(--vo-radius); overflow: hidden; }
+.vo-accordion-item { border-bottom: 1px solid var(--vo-border); }
+.vo-accordion-item:last-child { border-bottom: none; }
+.vo-accordion-header {
+    display: flex; justify-content: space-between; align-items: center;
+    width: 100%; background: none; border: none; cursor: pointer;
+    padding: 12px 16px; font-size: 0.9rem; font-weight: 500;
+    color: var(--vo-text); text-align: left;
+    transition: background 0.15s;
+}
+.vo-accordion-header:hover { background: var(--vo-surface); }
+.vo-accordion-item.open .vo-accordion-header { color: var(--vo-primary); }
+.vo-accordion-chevron { font-size: 0.7rem; color: var(--vo-text-muted); }
+.vo-accordion-panel { padding: 0 16px 12px; }
+
+/* Breadcrumb */
+.vo-breadcrumb ol { display: flex; align-items: center; list-style: none; flex-wrap: wrap; gap: 4px; }
+.vo-breadcrumb-item a { color: var(--vo-primary); text-decoration: none; font-size: 0.875rem; }
+.vo-breadcrumb-item a:hover { text-decoration: underline; }
+.vo-breadcrumb-item.current { color: var(--vo-text-muted); font-size: 0.875rem; }
+.vo-breadcrumb-sep { color: var(--vo-text-muted); font-size: 0.75rem; user-select: none; }
+
+/* Pagination */
+.vo-pagination { display: flex; align-items: center; gap: 4px; }
+.vo-page-btn {
+    background: none; border: 1px solid var(--vo-border); cursor: pointer;
+    padding: 6px 10px; border-radius: var(--vo-radius); font-size: 0.875rem;
+    color: var(--vo-text); transition: background 0.15s, border-color 0.15s;
+    min-width: 36px;
+}
+.vo-page-btn:hover:not(:disabled) { background: var(--vo-surface); border-color: var(--vo-primary); }
+.vo-page-btn.active { background: var(--vo-primary); border-color: var(--vo-primary); color: #fff; }
+.vo-page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.vo-page-ellipsis { padding: 6px 4px; color: var(--vo-text-muted); font-size: 0.875rem; }
+
+/* Steps */
+.vo-steps { display: flex; gap: 0; }
+.vo-step {
+    display: flex; flex-direction: column; align-items: center;
+    flex: 1; gap: 6px; position: relative;
+}
+.vo-step:not(:last-child)::after {
+    content: ''; position: absolute; top: 16px; left: 50%; width: 100%;
+    height: 2px; background: var(--vo-border); z-index: 0;
+}
+.vo-step.completed::after { background: var(--vo-primary); }
+.vo-step-indicator {
+    width: 32px; height: 32px; border-radius: 50%; border: 2px solid var(--vo-border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.8rem; font-weight: 600; background: var(--vo-bg);
+    position: relative; z-index: 1; color: var(--vo-text-muted);
+}
+.vo-step.completed .vo-step-indicator { background: var(--vo-primary); border-color: var(--vo-primary); color: #fff; }
+.vo-step.active .vo-step-indicator { border-color: var(--vo-primary); color: var(--vo-primary); }
+.vo-step-label { font-size: 0.8rem; font-weight: 500; color: var(--vo-text-muted); text-align: center; }
+.vo-step.active .vo-step-label, .vo-step.completed .vo-step-label { color: var(--vo-text); }
+.vo-step-description { font-size: 0.75rem; color: var(--vo-text-muted); text-align: center; }
+
+/* Checkbox */
+.vo-checkbox {
+    display: inline-flex; align-items: center; gap: 8px;
+    cursor: pointer; user-select: none; font-size: 0.9rem;
+}
+.vo-checkbox input[type="checkbox"] {
+    width: 16px; height: 16px; accent-color: var(--vo-primary); cursor: pointer;
+}
+.vo-checkbox input:disabled { cursor: not-allowed; opacity: 0.6; }
+
+/* Switch */
+.vo-switch {
+    display: inline-flex; align-items: center; gap: 10px;
+    cursor: pointer; user-select: none; font-size: 0.9rem;
+}
+.vo-switch input[type="checkbox"] { display: none; }
+.vo-switch-track {
+    position: relative; width: 40px; height: 22px; border-radius: 11px;
+    background: var(--vo-border); transition: background 0.2s;
+}
+.vo-switch input:checked + .vo-switch-track { background: var(--vo-primary); }
+.vo-switch-thumb {
+    position: absolute; top: 3px; left: 3px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; transition: transform 0.2s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.vo-switch input:checked + .vo-switch-track .vo-switch-thumb { transform: translateX(18px); }
+.vo-switch-label { }
+
+/* Radio */
+.vo-radio {
+    display: inline-flex; align-items: center; gap: 8px;
+    cursor: pointer; user-select: none; font-size: 0.9rem;
+}
+.vo-radio input[type="radio"] {
+    width: 16px; height: 16px; accent-color: var(--vo-primary); cursor: pointer;
+}
+.vo-radio input:disabled { cursor: not-allowed; opacity: 0.6; }
+
+/* Slider */
+.vo-slider { display: flex; align-items: center; width: 100%; }
+.vo-slider input[type="range"] {
+    width: 100%; accent-color: var(--vo-primary); cursor: pointer; height: 4px;
+}
+
+/* Tooltip (CSS hover-driven) */
+.vo-tooltip { position: relative; display: inline-block; }
+.vo-tooltip-content {
+    position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+    background: #1e293b; color: #fff; padding: 4px 10px; border-radius: 4px;
+    font-size: 0.8rem; white-space: nowrap; pointer-events: none;
+    opacity: 0; transition: opacity 0.15s; z-index: 1000;
+}
+.vo-tooltip:hover .vo-tooltip-content { opacity: 1; }
+
+/* HoverCard (CSS hover-driven) */
+.vo-hover-card { position: relative; display: inline-block; }
+.vo-hover-card-trigger { display: inline-block; }
+.vo-hover-card-content {
+    position: absolute; top: calc(100% + 8px); left: 0; z-index: 1000;
+    background: var(--vo-bg); border: 1px solid var(--vo-border); border-radius: var(--vo-radius);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.12); padding: 12px;
+    min-width: 200px; opacity: 0; pointer-events: none;
+    transform: translateY(-4px); transition: opacity 0.15s, transform 0.15s;
+}
+.vo-hover-card:hover .vo-hover-card-content { opacity: 1; pointer-events: auto; transform: translateY(0); }
+
+/* Popover */
+.vo-popover { position: relative; display: inline-block; }
+.vo-popover-trigger { display: inline-block; cursor: pointer; }
+.vo-popover-content {
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 1000;
+    background: var(--vo-bg); border: 1px solid var(--vo-border); border-radius: var(--vo-radius);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.12); padding: 12px; min-width: 180px;
+    display: none;
+}
+.vo-popover.open .vo-popover-content { display: block; }
+
+/* Dropdown Menu */
+.vo-dropdown-menu { position: relative; display: inline-block; }
+.vo-dropdown-trigger { display: inline-block; cursor: pointer; }
+.vo-dropdown-list {
+    position: absolute; top: calc(100% + 4px); left: 0; z-index: 1000;
+    background: var(--vo-bg); border: 1px solid var(--vo-border); border-radius: var(--vo-radius);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.12); min-width: 160px;
+    display: none; padding: 4px 0;
+}
+.vo-dropdown-menu.open .vo-dropdown-list { display: block; }
+.vo-menu-item {
+    padding: 8px 14px; cursor: pointer; font-size: 0.875rem;
+    display: flex; align-items: center; gap: 8px;
+    transition: background 0.1s;
+}
+.vo-menu-item:hover:not(.disabled) { background: var(--vo-surface); }
+.vo-menu-item.disabled { opacity: 0.5; cursor: not-allowed; }
+.vo-menu-divider { border: none; border-top: 1px solid var(--vo-border); margin: 4px 0; }
+
+/* Collapsible */
+.vo-collapsible { }
+.vo-collapsible-trigger { cursor: pointer; }
+.vo-collapsible-panel { }
+
+/* Combobox */
+.vo-combobox { position: relative; display: inline-block; }
+.vo-combobox-input {
+    width: 100%; padding: 8px 12px; border: 1px solid var(--vo-border);
+    border-radius: var(--vo-radius); font-size: 0.875rem; outline: none;
+    background: var(--vo-bg);
+}
+.vo-combobox-input:focus { border-color: var(--vo-primary); box-shadow: 0 0 0 2px rgba(59,130,246,0.15); }
+.vo-combobox-listbox {
+    position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1000;
+    background: var(--vo-bg); border: 1px solid var(--vo-border); border-radius: var(--vo-radius);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.12); max-height: 200px; overflow-y: auto;
+}
+.vo-combobox-option {
+    padding: 8px 12px; cursor: pointer; font-size: 0.875rem;
+    transition: background 0.1s;
+}
+.vo-combobox-option:hover { background: var(--vo-surface); }
+
+/* Context Menu */
+.vo-context-menu { }
+.vo-context-menu-trigger { }
+.vo-context-menu-list {
+    position: fixed; z-index: 9999;
+    background: var(--vo-bg); border: 1px solid var(--vo-border); border-radius: var(--vo-radius);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.15); min-width: 150px; padding: 4px 0;
+    display: none;
+}
+.vo-context-menu.open .vo-context-menu-list { display: block; }
+`;
+
+export function injectManagedStyles(): void {
+    if (document.getElementById('vogui-managed-styles')) return;
+    const el = document.createElement('style');
+    el.id = 'vogui-managed-styles';
+    el.textContent = managedStyles;
+    document.head.appendChild(el);
+}

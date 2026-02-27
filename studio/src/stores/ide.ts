@@ -25,7 +25,7 @@ export interface IdeState {
   output: string;
   isRunning: boolean;
   isGuiApp: boolean;
-  guestRender: string;
+  guestRender: Uint8Array | null;
   compileError: string;
 }
 
@@ -41,6 +41,6 @@ export const ide = writable<IdeState>({
   output: '',
   isRunning: false,
   isGuiApp: false,
-  guestRender: '',
+  guestRender: null,
   compileError: '',
 });

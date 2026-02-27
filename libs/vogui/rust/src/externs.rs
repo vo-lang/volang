@@ -3,23 +3,39 @@
 use vo_ext::prelude::*;
 use vo_runtime::objects::string;
 
-use crate::PENDING_HANDLER;
-
 // =============================================================================
 // App Externs
 // =============================================================================
 
-#[vo_fn("vogui", "registerEventHandler")]
-pub fn register_event_handler(ctx: &mut ExternCallContext) -> ExternResult {
-    let handler = ctx.arg_ref(slots::ARG_HANDLER);
-    PENDING_HANDLER.with(|s| *s.borrow_mut() = Some(handler));
+#[vo_fn("vogui", "waitForEvent")]
+pub fn wait_for_event(ctx: &mut ExternCallContext) -> ExternResult {
+    // Replay path: host stored event data and woke us
+    if let Some(_token) = ctx.take_resume_host_event_token() {
+        let event = crate::PENDING_EVENT.with(|s| s.borrow_mut().take())
+            .expect("waitForEvent woke but no PENDING_EVENT");
+        ctx.ret_i64(slots::RET_0, event.handler_id as i64);
+        let payload_ref = vo_runtime::objects::string::from_rust_str(ctx.gc(), &event.payload);
+        ctx.ret_ref(slots::RET_1, payload_ref);
+        return ExternResult::Ok;
+    }
+
+    // First call: generate token, store it, block fiber
+    let token = crate::next_event_token();
+    crate::EVENT_WAIT_TOKEN.with(|s| *s.borrow_mut() = Some(token));
+    ExternResult::HostEventWaitAndReplay { token }
+}
+
+#[vo_fn("vogui", "emitRenderBinary")]
+pub fn emit_render_binary(ctx: &mut ExternCallContext) -> ExternResult {
+    let data = ctx.arg_bytes(slots::ARG_DATA).to_vec();
+    crate::PENDING_RENDER.with(|s| *s.borrow_mut() = Some(data));
     ExternResult::Ok
 }
 
-#[vo_fn("vogui", "emitRender")]
-pub fn emit_render(ctx: &mut ExternCallContext) -> ExternResult {
-    let json = ctx.arg_str(slots::ARG_JSON).to_string();
-    crate::PENDING_RENDER.with(|s| *s.borrow_mut() = Some(json));
+#[vo_fn("vogui", "float64bits")]
+pub fn float64_bits(ctx: &mut ExternCallContext) -> ExternResult {
+    let f = ctx.arg_f64(slots::ARG_F);
+    ctx.ret_i64(slots::RET_0, f.to_bits() as i64);
     ExternResult::Ok
 }
 
@@ -136,6 +152,38 @@ pub fn set_doc_meta(ctx: &mut ExternCallContext) -> ExternResult {
 }
 
 // =============================================================================
+// Animation Frame & Game Loop Externs
+// =============================================================================
+
+#[vo_fn("vogui", "startAnimFrame")]
+pub fn start_anim_frame(ctx: &mut ExternCallContext) -> ExternResult {
+    let id = ctx.arg_i64(slots::ARG_ID) as i32;
+    crate::platform().start_anim_frame(id);
+    ExternResult::Ok
+}
+
+#[vo_fn("vogui", "cancelAnimFrame")]
+pub fn cancel_anim_frame(ctx: &mut ExternCallContext) -> ExternResult {
+    let id = ctx.arg_i64(slots::ARG_ID) as i32;
+    crate::platform().cancel_anim_frame(id);
+    ExternResult::Ok
+}
+
+#[vo_fn("vogui", "startGameLoop")]
+pub fn start_game_loop(ctx: &mut ExternCallContext) -> ExternResult {
+    let id = ctx.arg_i64(slots::ARG_ID) as i32;
+    crate::platform().start_game_loop(id);
+    ExternResult::Ok
+}
+
+#[vo_fn("vogui", "stopGameLoop")]
+pub fn stop_game_loop(ctx: &mut ExternCallContext) -> ExternResult {
+    let id = ctx.arg_i64(slots::ARG_ID) as i32;
+    crate::platform().stop_game_loop(id);
+    ExternResult::Ok
+}
+
+// =============================================================================
 // Toast Extern
 // =============================================================================
 
@@ -154,8 +202,9 @@ pub fn toast_emit(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[cfg(target_arch = "wasm32")]
 vo_ext::export_extensions!(
-    __STDLIB_vogui_registerEventHandler,
-    __STDLIB_vogui_emitRender,
+    __STDLIB_vogui_waitForEvent,
+    __STDLIB_vogui_emitRenderBinary,
+    __STDLIB_vogui_float64bits,
     __STDLIB_vogui_startTimeout,
     __STDLIB_vogui_clearTimeout,
     __STDLIB_vogui_startInterval,
@@ -169,7 +218,11 @@ vo_ext::export_extensions!(
     __STDLIB_vogui_SelectText,
     __STDLIB_vogui_setDocTitle,
     __STDLIB_vogui_setDocMeta,
-    __STDLIB_vogui_toastEmit
+    __STDLIB_vogui_toastEmit,
+    __STDLIB_vogui_startAnimFrame,
+    __STDLIB_vogui_cancelAnimFrame,
+    __STDLIB_vogui_startGameLoop,
+    __STDLIB_vogui_stopGameLoop
 );
 
 // =============================================================================

@@ -555,6 +555,7 @@ fn wasm_write_hook(s: &str) {
 
 /// Create a VM from a pre-deserialized module.
 pub fn create_vm_from_module(module: Module, register_externs: ExternRegistrar) -> Result<Vm, String> {
+    #[cfg(target_arch = "wasm32")]
     vo_runtime::output::set_write_hook(wasm_write_hook);
     vo_runtime::output::clear_output();
     

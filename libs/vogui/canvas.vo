@@ -1,4 +1,4 @@
-// Canvas component for GPU/2D rendering.
+// Canvas component for GPU/2D rendering with 2D drawing API.
 package vogui
 
 // CanvasOpts configures the canvas element.
@@ -49,3 +49,307 @@ func OnPointer(action any) Handler {
 func OnResize(action any) Handler {
 	return registerHandler(action, handlerResize, 0)
 }
+
+// ============ Canvas 2D Drawing API ============
+
+// canvasCommand represents a single drawing operation.
+type canvasCommand struct {
+	Cmd  string    `json:"c"`
+	Args []any     `json:"a,omitempty"`
+}
+
+// CanvasCtx is a drawing context for a named canvas element.
+// Commands are buffered and sent to JS on Flush().
+type CanvasCtx struct {
+	ref      string
+	commands []canvasCommand
+}
+
+// Pending canvas command batches to include in render output.
+// Each entry maps ref name -> commands.
+var pendingCanvasCommands []map[string]any
+
+// GetCanvas returns a drawing context for a canvas identified by its Ref name.
+func GetCanvas(refName string) *CanvasCtx {
+	return &CanvasCtx{ref: refName}
+}
+
+// Flush sends all buffered commands to JS for execution on the canvas.
+func (c *CanvasCtx) Flush() {
+	if len(c.commands) == 0 {
+		return
+	}
+	pendingCanvasCommands = append(pendingCanvasCommands, map[string]any{
+		"ref":  c.ref,
+		"cmds": c.commands,
+	})
+	c.commands = nil
+}
+
+func (c *CanvasCtx) cmd(name string, args ...any) {
+	c.commands = append(c.commands, canvasCommand{Cmd: name, Args: args})
+}
+
+// flushPendingCanvasCommands returns and clears pending canvas command batches.
+func flushPendingCanvasCommands() []map[string]any {
+	if len(pendingCanvasCommands) == 0 {
+		return nil
+	}
+	result := pendingCanvasCommands
+	pendingCanvasCommands = nil
+	return result
+}
+
+// ============ State Commands ============
+
+// Clear clears the entire canvas.
+func (c *CanvasCtx) Clear() { c.cmd("clear") }
+
+// SetFill sets the fill color/style.
+func (c *CanvasCtx) SetFill(color string) { c.cmd("fill", color) }
+
+// SetStroke sets the stroke color/style.
+func (c *CanvasCtx) SetStroke(color string) { c.cmd("stroke", color) }
+
+// SetLineWidth sets the line width.
+func (c *CanvasCtx) SetLineWidth(w float64) { c.cmd("lw", w) }
+
+// SetFont sets the font for text drawing.
+func (c *CanvasCtx) SetFont(font string) { c.cmd("font", font) }
+
+// SetAlpha sets the global alpha (opacity).
+func (c *CanvasCtx) SetAlpha(a float64) { c.cmd("alpha", a) }
+
+// SetTextAlign sets the text alignment ("left", "center", "right", "start", "end").
+func (c *CanvasCtx) SetTextAlign(align string) { c.cmd("ta", align) }
+
+// SetTextBaseline sets the text baseline ("top", "middle", "bottom", "alphabetic").
+func (c *CanvasCtx) SetTextBaseline(baseline string) { c.cmd("tb", baseline) }
+
+// SetLineCap sets the line cap style ("butt", "round", "square").
+func (c *CanvasCtx) SetLineCap(cap string) { c.cmd("lc", cap) }
+
+// SetLineJoin sets the line join style ("miter", "round", "bevel").
+func (c *CanvasCtx) SetLineJoin(join string) { c.cmd("lj", join) }
+
+// SetShadow sets the shadow properties.
+func (c *CanvasCtx) SetShadow(offsetX, offsetY, blur float64, color string) {
+	c.cmd("shadow", offsetX, offsetY, blur, color)
+}
+
+// ============ Shape Commands ============
+
+// FillRect fills a rectangle.
+func (c *CanvasCtx) FillRect(x, y, w, h float64) { c.cmd("fr", x, y, w, h) }
+
+// StrokeRect strokes a rectangle outline.
+func (c *CanvasCtx) StrokeRect(x, y, w, h float64) { c.cmd("sr", x, y, w, h) }
+
+// ClearRect clears a rectangular area.
+func (c *CanvasCtx) ClearRect(x, y, w, h float64) { c.cmd("cr", x, y, w, h) }
+
+// FillCircle fills a circle.
+func (c *CanvasCtx) FillCircle(cx, cy, r float64) { c.cmd("fc", cx, cy, r) }
+
+// StrokeCircle strokes a circle outline.
+func (c *CanvasCtx) StrokeCircle(cx, cy, r float64) { c.cmd("sc", cx, cy, r) }
+
+// FillRoundRect fills a rectangle with rounded corners.
+func (c *CanvasCtx) FillRoundRect(x, y, w, h, r float64) { c.cmd("frr", x, y, w, h, r) }
+
+// StrokeRoundRect strokes a rectangle outline with rounded corners.
+func (c *CanvasCtx) StrokeRoundRect(x, y, w, h, r float64) { c.cmd("srr", x, y, w, h, r) }
+
+// FillEllipse fills an ellipse.
+func (c *CanvasCtx) FillEllipse(cx, cy, rx, ry float64) { c.cmd("fe", cx, cy, rx, ry) }
+
+// StrokeEllipse strokes an ellipse outline.
+func (c *CanvasCtx) StrokeEllipse(cx, cy, rx, ry float64) { c.cmd("se", cx, cy, rx, ry) }
+
+// ============ Path Commands ============
+
+// BeginPath starts a new path.
+func (c *CanvasCtx) BeginPath() { c.cmd("bp") }
+
+// MoveTo moves to a point without drawing.
+func (c *CanvasCtx) MoveTo(x, y float64) { c.cmd("mt", x, y) }
+
+// LineTo draws a line to a point.
+func (c *CanvasCtx) LineTo(x, y float64) { c.cmd("lt", x, y) }
+
+// ArcTo draws an arc between two tangent lines.
+func (c *CanvasCtx) ArcTo(x1, y1, x2, y2, r float64) { c.cmd("at", x1, y1, x2, y2, r) }
+
+// Arc draws an arc (portion of a circle).
+func (c *CanvasCtx) Arc(cx, cy, r, startAngle, endAngle float64) {
+	c.cmd("arc", cx, cy, r, startAngle, endAngle)
+}
+
+// QuadraticCurveTo draws a quadratic Bezier curve.
+func (c *CanvasCtx) QuadraticCurveTo(cpx, cpy, x, y float64) { c.cmd("qct", cpx, cpy, x, y) }
+
+// BezierCurveTo draws a cubic Bezier curve.
+func (c *CanvasCtx) BezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y float64) {
+	c.cmd("bct", cp1x, cp1y, cp2x, cp2y, x, y)
+}
+
+// ClosePath closes the current path.
+func (c *CanvasCtx) ClosePath() { c.cmd("cp") }
+
+// Fill fills the current path.
+func (c *CanvasCtx) Fill() { c.cmd("f") }
+
+// Stroke strokes the current path.
+func (c *CanvasCtx) Stroke() { c.cmd("s") }
+
+// Clip sets the current path as the clipping region.
+func (c *CanvasCtx) Clip() { c.cmd("clip") }
+
+// ============ Text Commands ============
+
+// FillText draws filled text.
+func (c *CanvasCtx) FillText(text string, x, y float64) { c.cmd("ft", text, x, y) }
+
+// StrokeText draws stroked text.
+func (c *CanvasCtx) StrokeText(text string, x, y float64) { c.cmd("st", text, x, y) }
+
+// ============ Image Commands ============
+
+// DrawImage draws an image at position. The image is identified by URL.
+// The image is loaded and cached by the JS runtime on first use.
+func (c *CanvasCtx) DrawImage(url string, x, y float64) {
+	c.cmd("di", url, x, y)
+}
+
+// DrawImageScaled draws an image scaled to a specific size.
+func (c *CanvasCtx) DrawImageScaled(url string, x, y, w, h float64) {
+	c.cmd("dis", url, x, y, w, h)
+}
+
+// DrawImageSub draws a sub-rectangle of an image to a destination rectangle.
+func (c *CanvasCtx) DrawImageSub(url string, sx, sy, sw, sh, dx, dy, dw, dh float64) {
+	c.cmd("disub", url, sx, sy, sw, sh, dx, dy, dw, dh)
+}
+
+// ============ Transform Commands ============
+
+// Save saves the current canvas state.
+func (c *CanvasCtx) Save() { c.cmd("save") }
+
+// Restore restores the previously saved canvas state.
+func (c *CanvasCtx) Restore() { c.cmd("rest") }
+
+// Translate translates the canvas origin.
+func (c *CanvasCtx) Translate(x, y float64) { c.cmd("tr", x, y) }
+
+// Rotate rotates the canvas (angle in radians).
+func (c *CanvasCtx) Rotate(angle float64) { c.cmd("rot", angle) }
+
+// Scale scales the canvas.
+func (c *CanvasCtx) Scale(sx, sy float64) { c.cmd("scl", sx, sy) }
+
+// ResetTransform resets the transform to identity.
+func (c *CanvasCtx) ResetTransform() { c.cmd("rt") }
+
+// ============ Gradient & Pattern Commands ============
+
+// SetLinearGradient sets the fill style to a linear gradient.
+func (c *CanvasCtx) SetLinearGradient(x0, y0, x1, y1 float64, stops []GradientStop) {
+	c.cmd("lg", x0, y0, x1, y1, stops)
+}
+
+// SetRadialGradient sets the fill style to a radial gradient.
+func (c *CanvasCtx) SetRadialGradient(x0, y0, r0, x1, y1, r1 float64, stops []GradientStop) {
+	c.cmd("rg", x0, y0, r0, x1, y1, r1, stops)
+}
+
+// GradientStop defines a color stop in a gradient.
+type GradientStop struct {
+	Offset float64 `json:"offset"`
+	Color  string  `json:"color"`
+}
+
+// ============ requestAnimationFrame & Game Loop ============
+
+// Animation frame handler type constants
+const (
+	eventIDAnimFrame = -4
+	eventIDGameLoop  = -5
+)
+
+var animFrameHandlers = map[int]any{}
+var nextAnimFrameID int = 1
+
+// RequestAnimationFrame schedules a callback for the next animation frame.
+// Returns a cancel ID.
+// Handler signature: func(state any)
+func RequestAnimationFrame(handler any) int {
+	id := nextAnimFrameID
+	nextAnimFrameID++
+	animFrameHandlers[id] = handler
+	startAnimFrame(id)
+	return id
+}
+
+// CancelAnimationFrame cancels a pending animation frame request.
+func CancelAnimationFrame(id int) {
+	delete(animFrameHandlers, id)
+	cancelAnimFrame(id)
+}
+
+// GameLoop state
+var gameLoopHandler any
+var gameLoopID int
+var gameLoopActive bool
+
+// RunGameLoop starts a continuous game loop that calls handler every frame.
+// Handler signature: func(state any, dt float64)
+// dt is milliseconds since last frame.
+// Returns a loop ID for StopGameLoop.
+func RunGameLoop(handler any) int {
+	gameLoopHandler = handler
+	gameLoopActive = true
+	gameLoopID = nextAnimFrameID
+	nextAnimFrameID++
+	startGameLoop(gameLoopID)
+	return gameLoopID
+}
+
+// StopGameLoop stops a running game loop.
+func StopGameLoop(id int) {
+	if id == gameLoopID {
+		gameLoopActive = false
+		gameLoopHandler = nil
+		stopGameLoop(id)
+	}
+}
+
+func invokeAnimFrameHandler(id int, state any) {
+	handler, ok := animFrameHandlers[id]
+	if !ok {
+		return
+	}
+	delete(animFrameHandlers, id)
+	err := handler~>(state)
+	if err != nil {
+		println("VoGUI: animFrame handler error:", err)
+	}
+}
+
+func invokeGameLoopHandler(state any, dt float64) {
+	if !gameLoopActive || gameLoopHandler == nil {
+		return
+	}
+	err := gameLoopHandler~>(state, dt)
+	if err != nil {
+		println("VoGUI: gameLoop handler error:", err)
+	}
+}
+
+// ============ Extern Declarations ============
+
+func startAnimFrame(id int)
+func cancelAnimFrame(id int)
+func startGameLoop(id int)
+func stopGameLoop(id int)
+

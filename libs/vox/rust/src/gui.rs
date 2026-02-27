@@ -1,7 +1,7 @@
 //! Guest GUI VM management: RunGui, SendGuiEvent, StopGui.
 //!
 //! Each guest GUI app runs on a dedicated OS thread with its own TLS-isolated
-//! PENDING_RENDER / PENDING_HANDLER state, so multiple guest VMs never interfere.
+//! PENDING_RENDER / PENDING_EVENT state, so multiple guest VMs never interfere.
 //!
 //! This module is only available on non-WASM targets; WASM builds return errors from the externs.
 
@@ -10,9 +10,6 @@
 use std::sync::{mpsc, Mutex};
 use vo_engine::CompileOutput;
 use vo_vm::vm::Vm;
-use vo_vm::vm::helpers::build_closure_args;
-use vo_runtime::gc::GcRef;
-use vo_runtime::objects::closure;
 
 // =============================================================================
 // GuestHandle
@@ -20,7 +17,7 @@ use vo_runtime::objects::closure;
 
 pub struct GuestHandle {
     pub event_tx: mpsc::SyncSender<(i32, String)>,
-    pub render_rx: mpsc::Receiver<Result<String, String>>,
+    pub render_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
 }
 
 // =============================================================================
@@ -94,9 +91,9 @@ pub fn clear_module_guest(module_id: i64) {
 // run_gui: start a guest VM thread and return the initial render JSON
 // =============================================================================
 
-pub fn run_gui(output: CompileOutput) -> Result<(String, GuestHandle), String> {
+pub fn run_gui(output: CompileOutput) -> Result<(Vec<u8>, GuestHandle), String> {
     let (event_tx, event_rx) = mpsc::sync_channel::<(i32, String)>(0);
-    let (render_tx, render_rx) = mpsc::sync_channel::<Result<String, String>>(1);
+    let (render_tx, render_rx) = mpsc::sync_channel::<Result<Vec<u8>, String>>(1);
 
     std::thread::spawn(move || {
         run_gui_thread(output, render_tx, event_rx);
@@ -115,7 +112,7 @@ pub fn run_gui(output: CompileOutput) -> Result<(String, GuestHandle), String> {
 // send_gui_event: post an event and wait for new render JSON
 // =============================================================================
 
-pub fn send_gui_event(handle: &mut GuestHandle, handler_id: i32, payload: &str) -> Result<String, String> {
+pub fn send_gui_event(handle: &mut GuestHandle, handler_id: i32, payload: &str) -> Result<Vec<u8>, String> {
     handle.event_tx
         .send((handler_id, payload.to_string()))
         .map_err(|_| "guest VM stopped".to_string())?;
@@ -148,38 +145,9 @@ fn build_gui_vm(output: CompileOutput) -> Result<Vm, String> {
     Ok(vm)
 }
 
-fn invoke_gui_event(vm: &mut Vm, handler: GcRef, handler_id: i32, payload: &str) -> Result<(), String> {
-    let func_id = closure::func_id(handler);
-
-    // Clone func_def before mutably borrowing vm.state.gc (borrow checker requires separation)
-    let func_def = vm.module().expect("module not set").functions[func_id as usize].clone();
-
-    // Allocate payload string in GC
-    let payload_ref = vo_runtime::objects::string::from_rust_str(&mut vm.state.gc, payload);
-
-    // Build args: handler_id (int, 1 slot), payload (string/GcRef, 1 slot)
-    let raw_args: [u64; 2] = [handler_id as u64, payload_ref as u64];
-    // SAFETY: raw_args is stack-allocated and lives for the duration of this call.
-    let full_args = unsafe {
-        build_closure_args(
-            handler as u64,
-            handler,
-            &func_def,
-            raw_args.as_ptr(),
-            raw_args.len() as u32,
-        )
-    };
-
-    vm.spawn_call(func_id, &full_args);
-    // Blocked is expected: GUI goroutines wait on channels between events.
-    vm.run_scheduled()
-        .map(|_| ())
-        .map_err(|e| format!("{:?}", e))
-}
-
 fn run_gui_thread(
     output: CompileOutput,
-    render_tx: mpsc::SyncSender<Result<String, String>>,
+    render_tx: mpsc::SyncSender<Result<Vec<u8>, String>>,
     event_rx: mpsc::Receiver<(i32, String)>,
 ) {
     let mut vm = match build_gui_vm(output) {
@@ -190,38 +158,41 @@ fn run_gui_thread(
         }
     };
 
-    // Run until vogui app calls emitRender + blocks on <-doneChan.
-    // `Blocked` is expected here: all goroutines park on channels awaiting events.
+    // Run until vogui app blocks on waitForEvent().
+    // Returns SuspendedForHostEvents once the main fiber blocks.
     vogui::clear_pending_render();
-    vogui::clear_pending_handler();
+    vogui::clear_event_state();
     if let Err(e) = vm.run() {
         let _ = render_tx.send(Err(format!("{:?}", e)));
         return;
     }
 
-    let json = vogui::take_pending_render().unwrap_or_default();
-    let _ = render_tx.send(Ok(json));
-
-    // Persist the event handler: registerEventHandler is called once by vogui::Run.
-    let handler = match vogui::take_pending_handler() {
-        Some(h) => h,
-        None => {
-            let _ = render_tx.send(Err("vogui app did not register event handler".to_string()));
-            return;
-        }
-    };
+    let bytes = vogui::take_pending_render_bytes().unwrap_or_default();
+    let _ = render_tx.send(Ok(bytes));
 
     // Event loop: blocked waiting for events from the IDE thread.
+    // Each event wakes the main fiber (blocked on waitForEvent), which processes
+    // the event and blocks again. No new fiber is spawned per event.
     while let Ok((handler_id, payload)) = event_rx.recv() {
         vogui::clear_pending_render();
+        vo_runtime::output::clear_output();
 
-        if let Err(e) = invoke_gui_event(&mut vm, handler, handler_id, &payload) {
-            let _ = render_tx.send(Err(e));
+        let token = match vogui::send_event(handler_id, payload) {
+            Some(t) => t,
+            None => {
+                let _ = render_tx.send(Err("Main fiber not waiting for events".to_string()));
+                return;
+            }
+        };
+
+        vm.scheduler.wake_host_event(token);
+        if let Err(e) = vm.run_scheduled() {
+            let _ = render_tx.send(Err(format!("{:?}", e)));
             return;
         }
 
-        let json = vogui::take_pending_render().unwrap_or_default();
-        let _ = render_tx.send(Ok(json));
+        let bytes = vogui::take_pending_render_bytes().unwrap_or_default();
+        let _ = render_tx.send(Ok(bytes));
     }
     // event_rx closed (StopGui dropped the sender) — thread exits cleanly.
 }

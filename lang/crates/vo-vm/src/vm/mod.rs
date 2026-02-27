@@ -1812,25 +1812,26 @@ impl Vm {
 
     /// Spawn a new fiber that calls a function with the given arguments.
     /// The fiber is added to the ready queue and will be executed by run_scheduled().
+    /// Reuses a dead fiber's stack allocation when available to avoid repeated 64KB allocs.
     pub fn spawn_call(&mut self, func_id: u32, args: &[u64]) {
         let module = self.module.as_ref().expect("spawn_call: module not set");
         let func_def = &module.functions[func_id as usize];
-        
-        let mut fiber = Fiber::new(0);
+
+        let fiber_id = self.scheduler.reuse_or_spawn();
+        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+
         let bp = fiber.sp;
         let local_slots = func_def.local_slots as usize;
         let new_sp = bp + local_slots;
         fiber.ensure_capacity(new_sp);
-        
+
         // Zero locals, then copy args
         unsafe { core::ptr::write_bytes(fiber.stack.as_mut_ptr().add(bp), 0, local_slots) };
         let n = (func_def.param_slots as usize).min(args.len());
         fiber.stack[bp..bp + n].copy_from_slice(&args[..n]);
-        
+
         fiber.sp = new_sp;
         fiber.frames.push(CallFrame::new(func_id, bp, 0, func_def.ret_slots));
-        
-        self.scheduler.spawn(fiber);
     }
 }
 

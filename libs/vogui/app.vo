@@ -13,27 +13,24 @@ type App struct {
 // Internal state
 var currentState any
 var currentApp App
-var doneChan = make(chan struct{})
 
 // Run initializes the application and starts the event loop.
+// The main fiber blocks on waitForEvent() and processes events inline —
+// no separate fiber is spawned per event.
 func Run(app App) {
 	currentApp = app
 	currentState = app.Init()
 	render()
 
-	registerEventHandler(sendEvent)
-
-	<-doneChan
+	for {
+		handlerID, payload := waitForEvent()
+		processEvent(Event{HandlerID: handlerID, Payload: payload})
+	}
 }
 
 // updatePath is called by Navigate to trigger a re-render.
 func updatePath(path string) {
 	render()
-}
-
-// sendEvent is called by Rust for each JS event.
-func sendEvent(handlerID int, payload string) {
-	processEvent(Event{HandlerID: handlerID, Payload: payload})
 }
 
 // timerPayload is the JSON structure for timer events.
@@ -44,6 +41,16 @@ type timerPayload struct {
 // keyPayload is the JSON structure for global key events.
 type keyPayload struct {
 	Key string
+}
+
+// animFramePayload is the JSON structure for animation frame events.
+type animFramePayload struct {
+	Id int
+}
+
+// gameLoopPayload is the JSON structure for game loop events.
+type gameLoopPayload struct {
+	Dt float64
 }
 
 func processEvent(event Event) {
@@ -61,6 +68,14 @@ func processEvent(event Event) {
 		}
 	case eventIDNavigation:
 		// popstate: just re-render
+	case eventIDAnimFrame:
+		var p animFramePayload
+		json.Unmarshal([]byte(event.Payload), &p)
+		invokeAnimFrameHandler(p.Id, currentState)
+	case eventIDGameLoop:
+		var p gameLoopPayload
+		json.Unmarshal([]byte(event.Payload), &p)
+		invokeGameLoopHandler(currentState, p.Dt)
 	default:
 		err := invokeHandler(currentState, event.HandlerID, event.Payload)
 		if err != nil {
@@ -92,22 +107,19 @@ func render() {
 		tree = currentApp.View(currentState)
 	}
 
-	output := map[string]any{
-		"type":     "render",
-		"gen":      renderGen,
-		"tree":     tree,
-		"handlers": handlerMetas,
-	}
-	data, err := json.Marshal(output)
-	if err != nil {
-		println("VoGUI marshal error:", err)
-		return
-	}
-	emitRender(string(data))
+	// Clean up components that are no longer in the tree
+	cleanupDestroyedComponents()
+
+	styles := flushPendingStyles()
+	canvasCmds := flushPendingCanvasCommands()
+	data := encodeRender(renderGen, tree, styles, canvasCmds)
+	emitRenderBinary(data)
 }
 
 // ============ Extern Declarations ============
 
-func registerEventHandler(handler func(handlerID int, payload string))
+// waitForEvent blocks the current fiber until the host sends an event.
+// Returns (handlerID, payload) when woken.
+func waitForEvent() (int, string)
 
-func emitRender(json string)
+func emitRenderBinary(data []byte)

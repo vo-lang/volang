@@ -1,0 +1,91 @@
+// Component Model: local state, lifecycle, and memo.
+//
+// A Component is any struct with a View() Node method.
+// Optional: Init(), Destroy(), ShouldUpdate() bool
+//
+// Handlers inside View() close over the component pointer directly:
+//
+//   type Counter struct{ Count int }
+//   func (c *Counter) View() vogui.Node {
+//       return vogui.Row(
+//           vogui.Text(fmt.Sprint(c.Count)),
+//           vogui.Button("+", vogui.On(func(_ any) { c.Count++ })),
+//       )
+//   }
+//
+//   // In parent View (component must live on the parent state struct):
+//   return vogui.Mount(&s.Counter)
+package vogui
+
+// componentEntry tracks a mounted component's lifecycle state.
+type componentEntry struct {
+	ptr      any
+	cached   Node
+	hasCache bool
+	inited   bool
+	alive    bool
+}
+
+var componentRegistry = map[int]*componentEntry{}
+var componentPtrToID  = map[any]int{}
+var nextComponentID   = 1
+
+// Mount renders a Component, managing Init/Destroy lifecycle and optional ShouldUpdate memo.
+// component must be a pointer to a struct with a View() Node method.
+func Mount(component any) Node {
+	id, entry := getOrCreateEntry(component)
+	entry.alive = true
+
+	if !entry.inited {
+		entry.inited = true
+		component~>Init()
+	}
+
+	if entry.hasCache {
+		skip, err := component~>ShouldUpdate()
+		if err == nil && !skip.(bool) {
+			// Return cached marker: JS reuses stored DOM subtree without re-diffing.
+			return Node{Type: "__cached__", Props: map[string]any{"_cid": id}}
+		}
+	}
+
+	// Set component context so handlers registered during View() are scoped to this component.
+	prevCtx := currentComponentCtx
+	currentComponentCtx = component
+	result, _ := component~>View()
+	currentComponentCtx = prevCtx
+
+	tree := result.(Node)
+	// Wrap with component marker so JS can track the subtree root for cache reuse.
+	wrapped := Node{Type: "__comp__", Props: map[string]any{"_cid": id}, Children: []Node{tree}}
+	entry.cached = wrapped
+	entry.hasCache = true
+	return wrapped
+}
+
+func getOrCreateEntry(component any) (int, *componentEntry) {
+	if id, ok := componentPtrToID[component]; ok {
+		return id, componentRegistry[id]
+	}
+	id := nextComponentID
+	nextComponentID++
+	entry := &componentEntry{ptr: component}
+	componentPtrToID[component] = id
+	componentRegistry[id] = entry
+	return id, entry
+}
+
+// cleanupDestroyedComponents calls Destroy() on components absent from the last render.
+func cleanupDestroyedComponents() {
+	for id, entry := range componentRegistry {
+		if !entry.alive {
+			entry.ptr~>Destroy()
+			delete(componentRegistry, id)
+			delete(componentPtrToID, entry.ptr)
+		}
+	}
+	for _, entry := range componentRegistry {
+		entry.alive = false
+	}
+}
+

@@ -11,28 +11,31 @@
 //   - JS layer: UI behavior state (dropdown open/close, tooltip, focus, animation)
 //
 // Files:
-//   - gui.vo      Package overview
-//   - node.vo     Node struct and chainable methods
-//   - app.vo      Application lifecycle (Run, render)
-//   - event.vo    Handler system with generation protocol
-//   - theme.vo    Theme and CSS custom properties
-//   - control.vo  Control flow (If, Show, ForEach, etc.)
-//   - layout.vo   Layout containers (Row, Column, Grid, etc.)
-//   - display.vo  Display components (Text, Heading, Link, etc.)
-//   - input.vo    Input components (Button, Input, Select, etc.)
+//   - gui.vo       Package overview
+//   - node.vo      Node struct and chainable methods
+//   - app.vo       Application lifecycle (Run, render)
+//   - event.vo     Handler system with generation protocol
+//   - component.vo Component Model (Mount, lifecycle, handler scoping, memo)
+//   - style.vo     Style combinator system (reusable styles, pseudo-classes, media queries)
+//   - theme.vo     Theme and CSS custom properties
+//   - control.vo   Control flow (If, Show, ForEach, etc.)
+//   - layout.vo    Layout containers (Row, Column, Grid, etc.)
+//   - display.vo   Display components (Text, Heading, Link, etc.)
+//   - input.vo     Input components (Button, Input, Select, etc.)
 //   - container.vo Structural containers (Card, Panel)
-//   - overlay.vo  Overlay components (Dialog, Drawer, Tooltip, DropdownMenu, etc.)
-//   - nav.vo      Navigation (Tabs, Accordion, Breadcrumb, Pagination, etc.)
-//   - form.vo     Form components (Form, FormField, etc.)
-//   - list.vo     List and table components
+//   - overlay.vo   Overlay components (Dialog, Drawer, Tooltip, DropdownMenu, etc.)
+//   - nav.vo       Navigation (Tabs, Accordion, Breadcrumb, Pagination, etc.)
+//   - form.vo      Form components (Form, FormField, etc.)
+//   - list.vo      List and table components
 //   - transition.vo Transition and TransitionGroup
-//   - ref.vo      DOM refs and imperative actions
-//   - portal.vo   Portal system
-//   - head.vo     Document head management
-//   - unsafe.vo   UnsafeHTML
-//   - widget.vo   ExternalWidget escape hatch
-//   - canvas.vo   Canvas/GPU rendering
-//   - timer.vo    Timer functions
-//   - router.vo   Client-side routing
-//   - util.vo     Utility functions
+//   - ref.vo       DOM refs and imperative actions
+//   - portal.vo    Portal system
+//   - head.vo      Document head management
+//   - unsafe.vo    UnsafeHTML
+//   - widget.vo    ExternalWidget escape hatch
+//   - canvas.vo    Canvas 2D drawing API, requestAnimationFrame, game loop
+//   - timer.vo     Timer functions
+//   - router.vo    Client-side routing
+//   - util.vo      Utility functions
+//   - explorer.vo  FileExplorer external widget
 package vogui

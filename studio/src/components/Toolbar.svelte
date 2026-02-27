@@ -12,14 +12,14 @@
 <div class="toolbar">
   <button
     class="btn btn-run"
-    on:click={actions.runCode}
+    on:click={() => actions.runCode()}
     disabled={isRunning}
   >
     {isRunning ? '⏳ Running…' : '▶ Run'}
   </button>
   <button
     class="btn btn-stop"
-    on:click={actions.stopCode}
+    on:click={() => actions.stopCode()}
     disabled={!isRunning}
   >
     ■ Stop

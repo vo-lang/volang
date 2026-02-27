@@ -487,21 +487,21 @@ fn runner_run_gui(ctx: &mut ExternCallContext) -> ExternResult {
     let stored = match get_module(module_id) {
         Some(m) => m,
         None => {
-            ctx.ret_str(slots::RET_0, "");
+            ctx.ret_bytes(slots::RET_0, &[]);
             write_error_to(ctx, slots::RET_1, "invalid module handle");
             return ExternResult::Ok;
         }
     };
 
     match crate::gui::run_gui(stored.into()) {
-        Ok((json, handle)) => {
+        Ok((bytes, handle)) => {
             let guest_id = crate::gui::store_guest_handle(handle);
             crate::gui::set_module_guest(module_id, guest_id);
-            ctx.ret_str(slots::RET_0, &json);
+            ctx.ret_bytes(slots::RET_0, &bytes);
             ctx.ret_nil_error(slots::RET_1);
         }
         Err(e) => {
-            ctx.ret_str(slots::RET_0, "");
+            ctx.ret_bytes(slots::RET_0, &[]);
             write_error_to(ctx, slots::RET_1, &e);
         }
     }
@@ -518,7 +518,7 @@ fn runner_send_gui_event(ctx: &mut ExternCallContext) -> ExternResult {
     let guest_id = match crate::gui::get_module_guest(module_id) {
         Some(id) => id,
         None => {
-            ctx.ret_str(slots::RET_0, "");
+            ctx.ret_bytes(slots::RET_0, &[]);
             write_error_to(ctx, slots::RET_1, "no running GUI for this module");
             return ExternResult::Ok;
         }
@@ -529,16 +529,16 @@ fn runner_send_gui_event(ctx: &mut ExternCallContext) -> ExternResult {
     });
 
     match result {
-        Some(Ok(json)) => {
-            ctx.ret_str(slots::RET_0, &json);
+        Some(Ok(bytes)) => {
+            ctx.ret_bytes(slots::RET_0, &bytes);
             ctx.ret_nil_error(slots::RET_1);
         }
         Some(Err(e)) => {
-            ctx.ret_str(slots::RET_0, "");
+            ctx.ret_bytes(slots::RET_0, &[]);
             write_error_to(ctx, slots::RET_1, &e);
         }
         None => {
-            ctx.ret_str(slots::RET_0, "");
+            ctx.ret_bytes(slots::RET_0, &[]);
             write_error_to(ctx, slots::RET_1, "GUI handle not found");
         }
     }

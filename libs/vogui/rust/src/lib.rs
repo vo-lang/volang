@@ -9,8 +9,8 @@
 
 use std::cell::RefCell;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use vo_runtime::ffi::ExternRegistry;
-use vo_runtime::gc::GcRef;
 use vo_vm::bytecode::ExternDef;
 
 mod externs;
@@ -19,12 +19,31 @@ mod externs;
 // Global State (for extern functions)
 // =============================================================================
 
-thread_local! {
-    /// Pending event handler closure (set by registerEventHandler, consumed by caller)
-    pub static PENDING_HANDLER: RefCell<Option<GcRef>> = RefCell::new(None);
+/// Pending event data: (handler_id, payload).
+/// Written by host before waking the fiber, read by waitForEvent extern on replay.
+pub struct PendingEvent {
+    pub handler_id: i32,
+    pub payload: String,
+}
 
-    /// Pending render JSON (set by emitRender, consumed by caller)
-    pub static PENDING_RENDER: RefCell<Option<String>> = RefCell::new(None);
+/// Monotonic token counter for HostEventWaitAndReplay.
+static EVENT_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Generate a unique host event token.
+pub fn next_event_token() -> u64 {
+    EVENT_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+thread_local! {
+    /// Pending render bytes (set by emitRenderBinary, consumed by caller)
+    pub static PENDING_RENDER: RefCell<Option<Vec<u8>>> = RefCell::new(None);
+
+    /// Pending event for the blocked main fiber (set by host, consumed by waitForEvent extern).
+    pub static PENDING_EVENT: RefCell<Option<PendingEvent>> = RefCell::new(None);
+
+    /// The host event token used by the main fiber's waitForEvent block.
+    /// Set when waitForEvent first blocks; used by send_event to wake the fiber.
+    pub static EVENT_WAIT_TOKEN: RefCell<Option<u64>> = RefCell::new(None);
 }
 
 // =============================================================================
@@ -49,6 +68,11 @@ pub trait VoguiPlatform: Send + Sync + 'static {
     fn set_title(&self, _title: &str) {}
     fn set_meta(&self, _name: &str, _content: &str) {}
     fn toast(&self, _message: &str, _typ: &str, _duration_ms: i32) {}
+    // v3 additions: animation frame and game loop
+    fn start_anim_frame(&self, _id: i32) {}
+    fn cancel_anim_frame(&self, _id: i32) {}
+    fn start_game_loop(&self, _id: i32) {}
+    fn stop_game_loop(&self, _id: i32) {}
 }
 
 static PLATFORM: OnceLock<Box<dyn VoguiPlatform>> = OnceLock::new();
@@ -135,6 +159,18 @@ mod wasm_js {
 
         #[wasm_bindgen(js_name = voguiToast)]
         pub fn toast(message: &str, typ: &str, duration_ms: i32);
+
+        #[wasm_bindgen(js_name = voguiStartAnimFrame)]
+        pub fn start_anim_frame(id: i32);
+
+        #[wasm_bindgen(js_name = voguiCancelAnimFrame)]
+        pub fn cancel_anim_frame(id: i32);
+
+        #[wasm_bindgen(js_name = voguiStartGameLoop)]
+        pub fn start_game_loop(id: i32);
+
+        #[wasm_bindgen(js_name = voguiStopGameLoop)]
+        pub fn stop_game_loop(id: i32);
     }
 }
 
@@ -154,6 +190,10 @@ impl VoguiPlatform for WasmPlatform {
     fn set_title(&self, title: &str) { wasm_js::set_title(title); }
     fn set_meta(&self, name: &str, content: &str) { wasm_js::set_meta(name, content); }
     fn toast(&self, message: &str, typ: &str, duration_ms: i32) { wasm_js::toast(message, typ, duration_ms); }
+    fn start_anim_frame(&self, id: i32) { wasm_js::start_anim_frame(id); }
+    fn cancel_anim_frame(&self, id: i32) { wasm_js::cancel_anim_frame(id); }
+    fn start_game_loop(&self, id: i32) { wasm_js::start_game_loop(id); }
+    fn stop_game_loop(&self, id: i32) { wasm_js::stop_game_loop(id); }
 }
 
 // =============================================================================
@@ -165,22 +205,26 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     externs::vo_ext_register(registry, externs);
 }
 
-/// Take the pending event handler (if registerEventHandler was called).
-pub fn take_pending_handler() -> Option<GcRef> {
-    PENDING_HANDLER.with(|s| s.borrow_mut().take())
-}
-
-/// Clear any pending handler.
-pub fn clear_pending_handler() {
-    PENDING_HANDLER.with(|s| *s.borrow_mut() = None);
-}
-
-/// Take the pending render JSON (if emitRender was called).
-pub fn take_pending_render() -> Option<String> {
+/// Take the pending render bytes (if emitRenderBinary was called).
+pub fn take_pending_render_bytes() -> Option<Vec<u8>> {
     PENDING_RENDER.with(|s| s.borrow_mut().take())
 }
 
-/// Clear any pending render JSON.
+/// Clear any pending render bytes.
 pub fn clear_pending_render() {
     PENDING_RENDER.with(|s| *s.borrow_mut() = None);
+}
+
+/// Store an event for the blocked main fiber and return the token to wake it.
+/// Returns None if waitForEvent hasn't been called yet (main fiber not blocking).
+pub fn send_event(handler_id: i32, payload: String) -> Option<u64> {
+    let token = EVENT_WAIT_TOKEN.with(|s| s.borrow().as_ref().copied())?;
+    PENDING_EVENT.with(|s| *s.borrow_mut() = Some(PendingEvent { handler_id, payload }));
+    Some(token)
+}
+
+/// Clear all event-loop state (for stop_gui).
+pub fn clear_event_state() {
+    PENDING_EVENT.with(|s| *s.borrow_mut() = None);
+    EVENT_WAIT_TOKEN.with(|s| *s.borrow_mut() = None);
 }

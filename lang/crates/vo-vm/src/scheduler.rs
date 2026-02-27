@@ -108,6 +108,27 @@ impl Scheduler {
         }
     }
 
+    /// Reuse a dead fiber (keeping its stack allocation) or create a new one.
+    /// Returns the FiberId. The fiber is reset and added to the ready queue.
+    /// Caller should set up the fiber's stack, sp, and frames after this call.
+    pub fn reuse_or_spawn(&mut self) -> FiberId {
+        if let Some(slot) = self.free_slots.pop() {
+            let fiber = &mut *self.fibers[slot as usize];
+            fiber.reset();
+            fiber.id = slot;
+            let id = FiberId(slot);
+            self.ready_queue.push_back(id);
+            id
+        } else {
+            let id = self.fibers.len() as u32;
+            let fiber = Fiber::new(id);
+            self.fibers.push(Box::new(fiber));
+            let fid = FiberId(id);
+            self.ready_queue.push_back(fid);
+            fid
+        }
+    }
+
     /// Get fiber by FiberId (O(1) index access).
     #[inline]
     pub fn get_fiber(&self, id: FiberId) -> &Fiber {

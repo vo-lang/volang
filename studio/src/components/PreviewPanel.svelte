@@ -1,12 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { render } from '@vogui/index';
-  import { injectStyles } from '@vogui/styles';
-  import type { RenderMessage, RendererConfig } from '@vogui/types';
+  import { render, injectStyles, decodeBinaryRender } from '@vogui/index';
+  import type { RendererConfig } from '@vogui/types';
   import { bridge } from '../lib/bridge';
   import { ide } from '../stores/ide';
 
-  export let guestRender: string = '';
+  export let guestRender: Uint8Array | null = null;
 
   let root: HTMLDivElement;
   let stylesInjected = false;
@@ -14,13 +13,13 @@
 
   async function onEvent(handlerId: number, payload: string): Promise<void> {
     try {
-      const newJson = await bridge().sendGuiEvent(handlerId, payload);
-      if (newJson) ide.update(s => ({ ...s, guestRender: newJson }));
+      const newBytes = await bridge().sendGuiEvent(handlerId, payload);
+      if (newBytes.length > 0) ide.update(s => ({ ...s, guestRender: newBytes }));
     } catch (e: any) {
       ide.update(s => ({
         ...s,
         isGuiApp: false,
-        guestRender: '',
+        guestRender: null,
         isRunning: false,
         output: String(e),
       }));
@@ -30,8 +29,8 @@
   const config: RendererConfig = { onEvent };
 
   onMount(() => {
-    bridge().setGuiRenderCallback((json) => {
-      if (json) ide.update(s => ({ ...s, guestRender: json }));
+    bridge().setGuiRenderCallback((bytes) => {
+      if (bytes.length > 0) ide.update(s => ({ ...s, guestRender: bytes }));
     });
 
     const gameKeys = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'PageUp', 'PageDown']);
@@ -56,22 +55,17 @@
     if (root) root.innerHTML = '';
   });
 
-  $: if (root && guestRender) {
+  $: if (root && guestRender && guestRender.length > 0) {
     applyRender(guestRender);
   }
 
-  function applyRender(json: string) {
-    if (!json) return;
+  function applyRender(bytes: Uint8Array) {
+    if (!bytes || bytes.length === 0) return;
     if (!stylesInjected) {
       injectStyles();
       stylesInjected = true;
     }
-    let msg: RenderMessage;
-    try {
-      msg = JSON.parse(json) as RenderMessage;
-    } catch {
-      return;
-    }
+    const msg = decodeBinaryRender(bytes);
     if (msg.type !== 'render') return;
     render(root, msg, config);
   }
@@ -128,5 +122,8 @@
     flex: 1;
     overflow: auto;
     position: relative;
+    color: #0f172a;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 14px;
   }
 </style>
