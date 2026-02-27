@@ -1031,11 +1031,13 @@ impl CodegenContext {
         let (func_id_low, func_id_high) = crate::type_info::encode_func_id(method_func_id);
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
         code.push(Instruction::with_flags(Opcode::Call, func_id_high, func_id_low, recv_reg, call_c));
-        code.push(Instruction::with_flags(Opcode::Return, 0, recv_reg, ret_slots, 0));
+        // Return values live at recv_reg + param_slots (new call buffer layout).
+        let ret_start = recv_reg + param_slots;
+        code.push(Instruction::with_flags(Opcode::Return, 0, ret_start, ret_slots, 0));
         
         let suffix = if needs_deref { "" } else { "_ptr" };
         let wrapper_name = format!("__method_value{}_{}", suffix, method_func_id);
-        let local_slots = wrapper_param_slots + param_slots.max(ret_slots);
+        let local_slots = wrapper_param_slots + (param_slots + ret_slots).max(1);
         let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, cache_key);
         Ok(wrapper_id)
     }
@@ -1072,11 +1074,12 @@ impl CodegenContext {
         
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
         code.push(Instruction::with_flags(Opcode::CallIface, method_idx as u8, iface_reg, args_start, call_c));
-        code.push(Instruction::with_flags(Opcode::Return, 0, args_start, ret_slots, 0));
+        // Return values live at args_start + param_slots (new call buffer layout).
+        let ret_start = args_start + param_slots;
+        code.push(Instruction::with_flags(Opcode::Return, 0, ret_start, ret_slots, 0));
         
         let wrapper_name = format!("__method_value_iface_{}_{}", method_name, method_idx);
-        // Fix: use max(param_slots, ret_slots) for consistency
-        let local_slots = wrapper_param_slots + iface_slots + param_slots.max(ret_slots);
+        let local_slots = wrapper_param_slots + iface_slots + (param_slots + ret_slots).max(1);
         let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, cache_key);
         Ok(wrapper_id)
     }
@@ -1116,10 +1119,12 @@ impl CodegenContext {
         
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
         code.push(Instruction::with_flags(Opcode::CallIface, method_idx as u8, iface_reg, args_start, call_c));
-        code.push(Instruction::with_flags(Opcode::Return, 0, args_start, ret_slots, 0));
+        // Return values live at args_start + param_slots (new call buffer layout).
+        let ret_start = args_start + param_slots;
+        code.push(Instruction::with_flags(Opcode::Return, 0, ret_start, ret_slots, 0));
         
         let wrapper_name = format!("__method_value_embed_iface_{}_{}", method_name, method_idx);
-        let local_slots = wrapper_param_slots + 1 + iface_slots + param_slots.max(ret_slots);
+        let local_slots = wrapper_param_slots + 1 + iface_slots + (param_slots + ret_slots).max(1);
         let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, cache_key);
         Ok(wrapper_id)
     }

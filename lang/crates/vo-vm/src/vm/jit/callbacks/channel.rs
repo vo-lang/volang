@@ -58,6 +58,13 @@ pub extern "C" fn jit_chan_send(
         .map(|i| unsafe { *val_ptr.add(i) })
         .collect();
 
+    // Write barrier: type-aware to avoid UB on mixed-slot types.
+    let em = queue_state::elem_meta(ch);
+    if em.value_kind().may_contain_gc_refs() {
+        let module = vm.module.as_ref();
+        vo_runtime::gc_types::typed_write_barrier_by_meta(&mut vm.state.gc, ch, &value, em, module);
+    }
+
     let cap = queue_state::capacity(ch);
     let state = channel::get_state(ch);
 

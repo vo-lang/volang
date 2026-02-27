@@ -344,6 +344,13 @@ impl Gc {
         if obj.is_null() {
             return;
         }
+        // TODO: These guards mask a real bug where map iterator state or other
+        // non-GcRef values occupy GcRef-typed stack slots during GC root scanning.
+        // Root cause: slot_types don't account for runtime-reused slots (e.g., map
+        // iterator state overwriting typed locals). Fix the slot_types, then remove.
+        if (obj as usize) & (SLOT_BYTES - 1) != 0 || (obj as usize) < 4096 {
+            return;
+        }
         let header = Self::header_mut(obj);
         if header.is_white() {
             header.set_gray();
@@ -361,6 +368,10 @@ impl Gc {
             return;
         }
         if parent.is_null() || child.is_null() {
+            return;
+        }
+        // TODO: Same slot_types bug as mark_gray — remove when root cause is fixed.
+        if (parent as usize) & (SLOT_BYTES - 1) != 0 || (child as usize) & (SLOT_BYTES - 1) != 0 {
             return;
         }
         let p_header = Self::header(parent);

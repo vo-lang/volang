@@ -240,10 +240,12 @@ impl PanicState {
 #[derive(Debug, Clone)]
 pub struct ClosureReplayState {
     /// Accumulated closure call results for extern replay.
-    /// Each entry is the return values from one closure call.
+    /// Each entry is (return_values, slot_types) from one closure call.
+    /// slot_types are needed for GC scanning — without them, non-GcRef values
+    /// (int, float, interface slot0 metadata) would be dereferenced as pointers.
     /// On extern replay, results are consumed in order via `index`.
     /// Cleared when extern finally returns Ok/Panic (not CallClosure).
-    pub results: Vec<Vec<u64>>,
+    pub results: Vec<(Vec<u64>, Vec<vo_runtime::SlotType>)>,
     /// Consumption index during extern replay.
     /// Tracks how many cached results have been consumed in the current replay.
     /// Reset to 0 at the start of each CallExtern execution.
@@ -281,8 +283,10 @@ impl ClosureReplayState {
 
     /// Prepare for a new CallExtern execution: take results, reset index.
     /// Returns (results, panicked) for passing to the extern call.
+    /// The results are stripped of slot_types (only needed for GC scanning while cached).
     pub fn take_for_extern(&mut self) -> (Vec<Vec<u64>>, bool) {
-        let results = core::mem::take(&mut self.results);
+        let typed_results = core::mem::take(&mut self.results);
+        let results: Vec<Vec<u64>> = typed_results.into_iter().map(|(vals, _)| vals).collect();
         let panicked = self.panicked;
         self.panicked = false;
         self.index = 0;
@@ -580,6 +584,13 @@ impl Fiber {
         let bp = self.sp;
         let new_sp = bp + local_slots as usize;
         self.ensure_capacity(new_sp);
+        // Zero the new frame's slots. ensure_capacity zeros newly-allocated memory, but
+        // previously-used slots (from prior calls that shared this stack region) contain
+        // stale values. GC root scanning uses slot_types to determine which slots hold
+        // GcRefs — a stale integer in a GcRef-typed slot causes mark_gray to segfault.
+        // This zero-fill is the canonical fix (same approach as JVM/CLR).
+        // Safety: ensure_capacity guarantees stack[bp..new_sp] is valid.
+        for s in &mut self.stack[bp..new_sp] { *s = 0; }
         self.sp = new_sp;
         self.frames.push(CallFrame::new(func_id, bp, ret_reg, ret_count));
     }

@@ -829,7 +829,19 @@ pub extern "C" fn vo_map_set(ctx: *mut JitContext, m: u64, key_ptr: *const u64, 
         }
     }
     
-    map::set(m as crate::gc::GcRef, key, val, module);
+    let m_ref = m as crate::gc::GcRef;
+    map::set(m_ref, key, val, module);
+    
+    // Write barrier: use map's stored metadata to barrier only actual GcRef slots.
+    let gc = unsafe { &mut *(*ctx).gc };
+    let km = map::key_meta(m_ref);
+    let vm = map::val_meta(m_ref);
+    if km.value_kind().may_contain_gc_refs() {
+        crate::gc_types::typed_write_barrier_by_meta(gc, m_ref, key, km, module);
+    }
+    if vm.value_kind().may_contain_gc_refs() {
+        crate::gc_types::typed_write_barrier_by_meta(gc, m_ref, val, vm, module);
+    }
     0
 }
 
@@ -1209,7 +1221,7 @@ pub extern "C" fn vo_slice_append(gc: *mut Gc, elem_meta: u32, elem_bytes: u32, 
         let gc = &mut *gc;
         let val_slots = slots_for_bytes(elem_bytes as usize);
         let val = core::slice::from_raw_parts(val_ptr, val_slots);
-        slice::append(gc, ValueMeta::from_raw(elem_meta), elem_bytes as usize, s as crate::gc::GcRef, val) as u64
+        slice::append(gc, ValueMeta::from_raw(elem_meta), elem_bytes as usize, s as crate::gc::GcRef, val, None) as u64
     }
 }
 

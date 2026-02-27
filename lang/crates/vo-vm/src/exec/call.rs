@@ -32,10 +32,10 @@ pub fn exec_call(
     let new_sp = new_bp + func.local_slots as usize;
     
     fiber.ensure_capacity(new_sp);
+    // Zero frame slots: stale integer values in GcRef-typed slots cause GC segfault.
+    // Args are copied on top of the zeroed region immediately after.
+    fiber.stack[new_bp..new_sp].fill(0);
     let stack = fiber.stack_ptr();
-    
-    // Note: We don't zero local slots here - codegen handles zero-initialization
-    // for all variables that need it (named returns, var declarations, etc.)
     
     // Copy args from caller's frame to new frame
     for i in 0..arg_slots {
@@ -44,7 +44,9 @@ pub fn exec_call(
     
     // Update sp and push frame
     fiber.sp = new_sp;
-    fiber.frames.push(CallFrame::new(func_id, new_bp, inst.b, ret_slots as u16));
+    // ret_reg points past arg slots: return values are written to args_start + arg_slots
+    // in the caller's frame (call buffer layout: [Value×arg_slots | ret_slot_types]).
+    fiber.frames.push(CallFrame::new(func_id, new_bp, inst.b + arg_slots as u16, ret_slots as u16));
 
     ExecResult::FrameChanged
 }
@@ -69,9 +71,9 @@ pub fn exec_call_closure(
     let new_sp = new_bp + func.local_slots as usize;
     
     fiber.ensure_capacity(new_sp);
+    // Zero frame slots: stale integer values in GcRef-typed slots cause GC segfault.
+    fiber.stack[new_bp..new_sp].fill(0);
     let stack = fiber.stack_ptr();
-    
-    // Note: We don't zero local slots here - codegen handles zero-initialization
     
     // Use common closure call layout logic
     let layout = vo_runtime::objects::closure::call_layout(
@@ -92,7 +94,8 @@ pub fn exec_call_closure(
     
     // Update sp and push frame
     fiber.sp = new_sp;
-    fiber.frames.push(CallFrame::new(func_id, new_bp, inst.b, ret_slots));
+    // ret_reg points past arg slots: return values are written to args_start + arg_slots.
+    fiber.frames.push(CallFrame::new(func_id, new_bp, inst.b + arg_slots as u16, ret_slots));
 
     ExecResult::FrameChanged
 }
@@ -123,9 +126,9 @@ pub fn exec_call_iface(
     let new_sp = new_bp + func.local_slots as usize;
     
     fiber.ensure_capacity(new_sp);
+    // Zero frame slots: stale integer values in GcRef-typed slots cause GC segfault.
+    fiber.stack[new_bp..new_sp].fill(0);
     let stack = fiber.stack_ptr();
-    
-    // Note: We don't zero local slots here - codegen handles zero-initialization
     
     // Pass slot1 directly as receiver (1 slot: GcRef or primitive)
     stack_set(stack, new_bp, slot1);
@@ -137,7 +140,8 @@ pub fn exec_call_iface(
     
     // Update sp and push frame
     fiber.sp = new_sp;
-    fiber.frames.push(CallFrame::new(func_id, new_bp, inst.b, ret_slots as u16));
+    // ret_reg points past arg slots: return values are written to args_start + arg_slots.
+    fiber.frames.push(CallFrame::new(func_id, new_bp, inst.b + arg_slots as u16, ret_slots as u16));
 
     ExecResult::FrameChanged
 }

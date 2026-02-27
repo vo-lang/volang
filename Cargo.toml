@@ -36,3 +36,15 @@ opt-level = 3
 lto = "thin"
 debug-assertions = false
 overflow-checks = false
+
+# Release with debug symbols (for crash investigation)
+[profile.release-dbg]
+inherits = "release"
+strip = false
+debug = true
+lto = false
+
+# Release without LTO (for LTO crash isolation)
+[profile.release-nolto]
+inherits = "release"
+lto = false

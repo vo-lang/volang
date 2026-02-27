@@ -287,7 +287,7 @@ pub fn with_new_len(gc: &mut Gc, s: GcRef, new_len: usize) -> GcRef {
 
 /// Append single element to slice.
 /// elem_bytes: actual byte size per element
-pub fn append(gc: &mut Gc, em: ValueMeta, elem_bytes: usize, s: GcRef, val: &[u64]) -> GcRef {
+pub fn append(gc: &mut Gc, em: ValueMeta, elem_bytes: usize, s: GcRef, val: &[u64], module: Option<&vo_common_core::bytecode::Module>) -> GcRef {
     if s.is_null() {
         let new_arr = array::create(gc, em, elem_bytes, 4);
         array::set_n(new_arr, 0, val, elem_bytes);
@@ -307,6 +307,14 @@ pub fn append(gc: &mut Gc, em: ValueMeta, elem_bytes: usize, s: GcRef, val: &[u6
             _ => {
                 let src_bytes = val.as_ptr() as *const u8;
                 unsafe { core::ptr::copy_nonoverlapping(src_bytes, ptr, elem_bytes) };
+            }
+        }
+        // Write barrier: reusing existing backing array that may be BLACK.
+        // Type-aware to avoid UB on mixed-slot types (e.g., struct with int + pointer).
+        if em.value_kind().may_contain_gc_refs() {
+            let arr_ref = slot_to_ptr::<u64>(data.array) as GcRef;
+            if !arr_ref.is_null() {
+                crate::gc_types::typed_write_barrier_by_meta(gc, arr_ref, val, em, module);
             }
         }
         // Go semantics: append never modifies original slice header

@@ -10,6 +10,79 @@ use vo_common_core::bytecode::StructMeta;
 use vo_common_core::types::{SlotType, ValueKind};
 
 
+/// Type-safe write barrier for mixed-slot values.
+///
+/// Only barriers slots that are actually GcRefs (SlotType::GcRef) or
+/// interface data slots (SlotType::Interface0 + data_is_gc_ref check).
+/// Avoids UB from passing non-pointer values (int, float, slot0 metadata)
+/// to write_barrier, which would dereference them as GcHeader pointers.
+///
+/// Used by MapSet, ChanSend, and any operation writing mixed-type values into heap objects.
+pub fn typed_write_barrier(gc: &mut Gc, parent: GcRef, vals: &[u64], slot_types: &[SlotType]) {
+    let mut i = 0;
+    while i < slot_types.len() && i < vals.len() {
+        match slot_types[i] {
+            SlotType::GcRef => {
+                if vals[i] != 0 {
+                    gc.write_barrier(parent, vals[i] as GcRef);
+                }
+            }
+            SlotType::Interface0 => {
+                if i + 1 < vals.len()
+                    && interface::data_is_gc_ref(vals[i])
+                    && vals[i + 1] != 0
+                {
+                    gc.write_barrier(parent, vals[i + 1] as GcRef);
+                }
+                i += 1; // skip data slot (Interface1)
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+/// Type-safe write barrier driven by ValueMeta (for JIT paths that don't have slot_types directly).
+/// Resolves struct slot_types from Module when needed. For simple reference types, barriers directly.
+pub fn typed_write_barrier_by_meta(
+    gc: &mut Gc,
+    parent: GcRef,
+    vals: &[u64],
+    meta: vo_common_core::types::ValueMeta,
+    module: Option<&vo_common_core::bytecode::Module>,
+) {
+    use vo_common_core::types::ValueKind;
+    let vk = meta.value_kind();
+    match vk {
+        // Single-slot reference types: the entire value is a GcRef
+        ValueKind::String | ValueKind::Slice | ValueKind::Map | ValueKind::Closure |
+        ValueKind::Channel | ValueKind::Pointer | ValueKind::Port | ValueKind::Island => {
+            if !vals.is_empty() && vals[0] != 0 {
+                gc.write_barrier(parent, vals[0] as GcRef);
+            }
+        }
+        // Struct/Array with mixed slots: need slot_types from struct_metas
+        ValueKind::Struct | ValueKind::Array => {
+            if let Some(module) = module {
+                let meta_id = meta.meta_id() as usize;
+                if meta_id < module.struct_metas.len() {
+                    typed_write_barrier(gc, parent, vals, &module.struct_metas[meta_id].slot_types);
+                }
+            }
+        }
+        // Interface: 2 slots (slot0=header, slot1=data). Only barrier data if it's a GcRef.
+        ValueKind::Interface => {
+            if vals.len() >= 2 {
+                if interface::data_is_gc_ref(vals[0]) && vals[1] != 0 {
+                    gc.write_barrier(parent, vals[1] as GcRef);
+                }
+            }
+        }
+        // Primitive types: no GcRefs
+        _ => {}
+    }
+}
+
 /// Scan a GC object and mark its children.
 pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
     let gc_header = Gc::header(obj);
@@ -38,14 +111,33 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
         }
 
         ValueKind::Map => {
-            scan_map(gc, obj, struct_metas);
+            if gc_header.slots == map::DATA_SLOTS {
+                scan_map(gc, obj, struct_metas);
+            } else {
+                scan_slots_as_gcrefs(gc, obj, gc_header.slots);
+            }
         }
 
         ValueKind::Channel => {
-            scan_channel(gc, obj, struct_metas);
+            if gc_header.slots == queue_state::DATA_SLOTS {
+                scan_channel(gc, obj, struct_metas);
+            } else {
+                scan_slots_as_gcrefs(gc, obj, gc_header.slots);
+            }
         }
 
         _ => {}
+    }
+}
+
+/// Scan all slots of a GC object as potential GcRefs.
+/// Used for PtrNew pointer-to-T objects (e.g., heap-return for `*map[K]V`)
+/// where slots < DATA_SLOTS and each slot holds a reference to the actual object.
+#[inline]
+fn scan_slots_as_gcrefs(gc: &mut Gc, obj: GcRef, slots: u16) {
+    for i in 0..slots as usize {
+        let slot = unsafe { Gc::read_slot(obj, i) };
+        if slot != 0 { gc.mark_gray(slot_to_ptr(slot)); }
     }
 }
 
@@ -60,8 +152,11 @@ fn scan_array(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
     let elem_bytes = array::elem_bytes(obj);
     let elem_slots = elem_bytes / SLOT_BYTES;
     
-    // For struct/pointer elements, use slot_types from struct_metas
-    if matches!(elem_kind, ValueKind::Struct | ValueKind::Pointer) {
+    // For INLINE struct elements (ValueKind::Struct), use field slot_types from struct_metas.
+    // Pointer elements (ValueKind::Pointer) are a single GcRef slot each — using the
+    // pointed-to struct's slot_types here would read beyond each 1-slot element into adjacent
+    // array slots and past the array end, causing mark_gray to be called on invalid addresses.
+    if elem_kind == ValueKind::Struct {
         let meta_id = elem_meta.meta_id() as usize;
         if meta_id < struct_metas.len() {
             let slot_types = &struct_metas[meta_id].slot_types;
@@ -70,6 +165,24 @@ fn scan_array(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
             }
             return;
         }
+    }
+
+    // Interface elements: 2 slots per element (slot0=itab, slot1=data).
+    // The generic handler below treats every slot as a GcRef, but slot0 (itab) is a
+    // static code pointer — NOT a GcRef. In release builds itab addresses are >= 4096
+    // and pass all mark_gray guards, causing mark_gray to read from the code section
+    // as a GcHeader → SIGSEGV. Handle Interface explicitly using data_is_gc_ref.
+    if elem_kind == ValueKind::Interface {
+        let base_off = byte_offset_for_slots(array::HEADER_SLOTS);
+        for idx in 0..len {
+            let elem_off = base_off + idx * elem_bytes;
+            let itab_slot = unsafe { *((obj as *const u8).add(elem_off) as *const Slot) };
+            if interface::data_is_gc_ref(itab_slot) {
+                let data_slot = unsafe { *((obj as *const u8).add(elem_off + SLOT_BYTES) as *const Slot) };
+                if data_slot != 0 { gc.mark_gray(slot_to_ptr(data_slot)); }
+            }
+        }
+        return;
     }
     
     // For reference types (slice, map, string, etc.), each element is a single GcRef
@@ -197,9 +310,21 @@ fn scan_struct(gc: &mut Gc, obj: GcRef, meta_id: usize, struct_metas: &[StructMe
 pub fn finalize_object(obj: GcRef) {
     let header = Gc::header(obj);
     match header.kind() {
-        ValueKind::Channel => unsafe { channel::drop_inner(obj); }
-        ValueKind::Map => unsafe { map::drop_inner(obj); }
-        ValueKind::Port => unsafe { port::drop_inner(obj); }
+        ValueKind::Channel => {
+            if Gc::header(obj).slots == queue_state::DATA_SLOTS {
+                unsafe { channel::drop_inner(obj); }
+            }
+        }
+        ValueKind::Map => {
+            if Gc::header(obj).slots == map::DATA_SLOTS {
+                unsafe { map::drop_inner(obj); }
+            }
+        }
+        ValueKind::Port => {
+            if Gc::header(obj).slots == queue_state::DATA_SLOTS {
+                unsafe { port::drop_inner(obj); }
+            }
+        }
         // Island has no native resources to finalize (channels managed by VM)
         _ => {}
     }

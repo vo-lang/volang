@@ -213,12 +213,19 @@ fn handle_initial_return(
         let current_bp = fiber.frames.last().unwrap().bp;
         let stack = fiber.stack.as_ptr();
         
-        // Cache return values — append to accumulated results
+        // Cache return values with slot_types for safe GC scanning.
+        // Without slot_types, the GC would treat all cached values as GcRefs,
+        // causing UB when non-pointer values (int, float, slot0 metadata) are dereferenced.
         let vals: Vec<u64> = (0..ret_count)
             .map(|i| stack_get(stack, current_bp + ret_start + i))
             .collect();
+        let ret_slot_types: Vec<vo_runtime::SlotType> = if ret_start + ret_count <= func.slot_types.len() {
+            func.slot_types[ret_start..ret_start + ret_count].to_vec()
+        } else {
+            Vec::new()
+        };
         
-        fiber.closure_replay.results.push(vals);
+        fiber.closure_replay.results.push((vals, ret_slot_types));
         fiber.closure_replay.pop_depth();
         
         // Check for defers in the closure — they must run first

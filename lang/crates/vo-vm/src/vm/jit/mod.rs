@@ -123,11 +123,12 @@ pub fn dispatch_jit_call(
     
     fiber.sp = jit_bp + local_slots;
     
-    // Push frame so panic_unwind has correct frame info
-    // ret_reg = arg_start so return values go to correct location in caller's stack
-    fiber.frames.push(CallFrame::new(func_id, jit_bp, arg_start as u16, ret_slots as u16));
+    // Push frame so panic_unwind has correct frame info.
+    // ret_reg = arg_start + arg_slots: return values live after the arg slots
+    // in the call buffer (layout: [Value×arg_slots | ret_slot_types]).
+    fiber.frames.push(CallFrame::new(func_id, jit_bp, (arg_start + arg_slots) as u16, ret_slots as u16));
 
-    invoke_jit_and_handle(vm, fiber, module, jit_func, jit_bp, ret_slots, caller_bp, arg_start)
+    invoke_jit_and_handle(vm, fiber, module, jit_func, jit_bp, ret_slots, caller_bp, arg_start + arg_slots)
 }
 
 /// Execute a JIT callee when frame is already set up (from Call request).
@@ -318,7 +319,8 @@ fn handle_jit_result(
             if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
                 let callee_func_def = &module.functions[callee_func_id as usize];
                 if let Some(jit_func) = jit_mgr.resolve_call(callee_func_id, callee_func_def, module) {
-                    return execute_jit_callee(vm, fiber, module, jit_func, callee_func_id, callee_bp, callee_ret_slots, actual_caller_bp, call_arg_start);
+                    // Pass call_ret_reg (= arg_start + arg_slots) as the return value destination.
+                    return execute_jit_callee(vm, fiber, module, jit_func, callee_func_id, callee_bp, callee_ret_slots, actual_caller_bp, call_ret_reg as usize);
                 }
             }
 

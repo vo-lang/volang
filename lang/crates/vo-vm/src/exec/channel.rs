@@ -47,7 +47,7 @@ pub fn exec_chan_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut G
     }
 }
 
-pub fn exec_chan_send(stack: *const Slot, bp: usize, fiber_id: u32, inst: &Instruction) -> ChanResult {
+pub fn exec_chan_send(stack: *const Slot, bp: usize, fiber_id: u32, inst: &Instruction, gc: &mut Gc, module: Option<&vo_runtime::bytecode::Module>) -> ChanResult {
     let ch = stack_get(stack, bp + inst.a as usize) as GcRef;
     if ch.is_null() {
         return ChanResult::Trap(RuntimeTrapKind::SendOnNilChannel);
@@ -56,6 +56,14 @@ pub fn exec_chan_send(stack: *const Slot, bp: usize, fiber_id: u32, inst: &Instr
     let src_start = bp + inst.b as usize;
 
     let value: Box<[u64]> = (0..elem_slots).map(|i| stack_get(stack, src_start + i)).collect();
+
+    // Write barrier: type-aware to avoid UB on mixed-slot types.
+    // Must be done before try_send because the value is moved into the buffer.
+    let em = queue_state::elem_meta(ch);
+    if em.value_kind().may_contain_gc_refs() {
+        vo_runtime::gc_types::typed_write_barrier_by_meta(gc, ch, &value, em, module);
+    }
+
     let cap = queue_state::capacity(ch);
     let state = channel::get_state(ch);
 

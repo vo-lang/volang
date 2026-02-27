@@ -505,7 +505,7 @@ impl<'a> FunctionCompiler<'a> {
             crate::call_helpers::emit_jit_call_with_fallback(self, crate::call_helpers::JitCallWithFallbackConfig {
                 func_id: target_func_id,
                 arg_start,
-                ret_reg: arg_start,
+                ret_reg: arg_start + arg_slots,
                 arg_slots,
                 call_ret_slots,
                 func_ret_slots: target_func.ret_slots as usize,
@@ -520,7 +520,7 @@ impl<'a> FunctionCompiler<'a> {
             crate::call_helpers::emit_call_via_vm(self, crate::call_helpers::CallViaVmConfig {
                 func_id: target_func_id,
                 arg_start,
-                ret_reg: arg_start,
+                ret_reg: arg_start + arg_slots,
                 resume_pc: self.current_pc + 1,
                 ret_slots: call_ret_slots,
             });
@@ -571,7 +571,8 @@ impl<'a> FunctionCompiler<'a> {
         // Constants for slow path
         let func_id_val = self.builder.ins().iconst(types::I32, self.func_id as i64);
         let local_slots_val = self.builder.ins().iconst(types::I32, callee_local_slots as i64);
-        let ret_reg_val = self.builder.ins().iconst(types::I32, arg_start as i64);
+        // ret_reg = arg_start + arg_slots: return values live after the arg region.
+        let ret_reg_val = self.builder.ins().iconst(types::I32, (arg_start + arg_slots) as i64);
         let ret_slots_val = self.builder.ins().iconst(types::I32, call_ret_slots as i64);
         let caller_resume_pc_val = self.builder.ins().iconst(types::I32, (self.current_pc + 1) as i64);
         
@@ -626,10 +627,11 @@ impl<'a> FunctionCompiler<'a> {
         self.builder.ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
         self.builder.ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
         
-        // Copy return values to caller's locals_slot
+        // Copy return values to caller's locals_slot.
+        // Return values live at arg_start + arg_slots (new call buffer layout).
         for i in 0..call_ret_slots {
             let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-            self.store_local((arg_start + i) as u16, val);
+            self.store_local((arg_start + arg_slots + i) as u16, val);
         }
     }
     

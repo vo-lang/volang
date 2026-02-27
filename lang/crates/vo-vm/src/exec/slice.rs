@@ -94,7 +94,7 @@ pub fn exec_slice_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mu
 }
 
 #[inline]
-pub fn exec_slice_append(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) {
+pub fn exec_slice_append(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc, module: Option<&vo_runtime::bytecode::Module>) {
     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
     // flags: 0=dynamic (read from c+1), 1-63=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
     // When flags!=0: c=[elem_meta], c+1..=[elem]
@@ -115,6 +115,6 @@ pub fn exec_slice_append(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &m
 
     // Copy values to a Vec for the append call
     let val: Vec<u64> = (0..elem_slots).map(|i| stack_get(stack, src_start + i)).collect();
-    let result = slice::append(gc, elem_meta, elem_bytes, s, &val);
+    let result = slice::append(gc, elem_meta, elem_bytes, s, &val, module);
     stack_set(stack, bp + inst.a as usize, result as u64);
 }

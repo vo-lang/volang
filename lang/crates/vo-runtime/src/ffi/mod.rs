@@ -96,6 +96,12 @@ impl SentinelErrorCache {
     pub fn insert(&mut self, pkg: &'static str, errors: Vec<(u64, u64)>) {
         self.inner.insert(pkg, errors);
     }
+
+    /// Iterate all cached error values (for GC root scanning).
+    /// Each entry is a slice of (slot0, slot1) interface pairs.
+    pub fn iter_values(&self) -> impl Iterator<Item = &[(u64, u64)]> {
+        self.inner.values().map(|v| v.as_slice())
+    }
 }
 
 /// Extern function execution result.

@@ -129,6 +129,7 @@ struct IcHitParams {
     old_fiber_sp: Value,
     merge_block: cranelift_codegen::ir::Block,
     arg_start: usize,
+    arg_slots: usize,
     ret_slots: usize,
     resume_pc: usize,
 }
@@ -199,7 +200,8 @@ fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(ic_non_ok_block);
     emitter.builder().seal_block(ic_non_ok_block);
     
-    let ic_ret_reg_val = emitter.builder().ins().iconst(types::I32, p.arg_start as i64);
+    // ret_reg = arg_start + arg_slots: return values live after the arg region.
+    let ic_ret_reg_val = emitter.builder().ins().iconst(types::I32, (p.arg_start + p.arg_slots) as i64);
     let ic_ret_slots_val = emitter.builder().ins().iconst(types::I32, p.ret_slots as i64);
     let ic_resume_pc_val = emitter.builder().ins().iconst(types::I32, p.resume_pc as i64);
     
@@ -458,7 +460,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         ctx, ic_jit_ptr, ic_args_ptr, ic_arg_offset,
         ic_local_slots, ic_func_id, ic_is_leaf, ret_ptr,
         caller_bp, old_fiber_sp, merge_block,
-        arg_start, ret_slots, resume_pc,
+        arg_start, arg_slots, ret_slots, resume_pc,
     }, &user_arg_vals);
     
     // =====================================================================
@@ -490,7 +492,8 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     );
     let prepare_sig = import_prepare_closure_sig(emitter);
     
-    let ret_reg_val = emitter.builder().ins().iconst(types::I32, arg_start as i64);
+    // ret_reg = arg_start + arg_slots: return values live after the arg region.
+    let ret_reg_val = emitter.builder().ins().iconst(types::I32, (arg_start + arg_slots) as i64);
     let ret_slots_val = emitter.builder().ins().iconst(types::I32, ret_slots as i64);
     let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
     let arg_count_val = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
@@ -513,9 +516,10 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     // Merge: copy return values to SSA vars (shared by IC hit OK + prepared OK)
     // =====================================================================
     // merge_block is already switched to and sealed by emit_prepared_call
+    // Return values live at arg_start + arg_slots (new call buffer layout).
     for i in 0..ret_slots {
         let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-        emitter.write_var((arg_start + i) as u16, val);
+        emitter.write_var((arg_start + arg_slots + i) as u16, val);
     }
 }
 
@@ -634,7 +638,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
         ctx, ic_jit_ptr, ic_args_ptr, ic_arg_offset,
         ic_local_slots, ic_func_id, ic_is_leaf, ret_ptr,
         caller_bp, old_fiber_sp, merge_block,
-        arg_start, ret_slots, resume_pc,
+        arg_start, arg_slots, ret_slots, resume_pc,
     }, &user_arg_vals);
     
     // =====================================================================
@@ -667,7 +671,8 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     let prepare_sig = import_prepare_iface_sig(emitter);
     
     let method_idx_val = emitter.builder().ins().iconst(types::I32, method_idx as i64);
-    let ret_reg_val = emitter.builder().ins().iconst(types::I32, arg_start as i64);
+    // ret_reg = arg_start + arg_slots: return values live after the arg region.
+    let ret_reg_val = emitter.builder().ins().iconst(types::I32, (arg_start + arg_slots) as i64);
     let ret_slots_val = emitter.builder().ins().iconst(types::I32, ret_slots as i64);
     let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
     let arg_count_val = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
@@ -686,9 +691,10 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     // =====================================================================
     // Merge: copy return values
     // =====================================================================
+    // Return values live at arg_start + arg_slots (new call buffer layout).
     for i in 0..ret_slots {
         let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-        emitter.write_var((arg_start + i) as u16, val);
+        emitter.write_var((arg_start + arg_slots + i) as u16, val);
     }
 }
 
@@ -1137,10 +1143,11 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         emitter.builder().switch_to_block(merge_block);
         emitter.builder().seal_block(merge_block);
         
-        // Copy return values and return early for indirect path
+        // Copy return values and return early for indirect path.
+        // Return values live at config.ret_reg (= arg_start + arg_slots).
         for i in 0..config.call_ret_slots {
             let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-            emitter.write_var((config.arg_start + i) as u16, val);
+            emitter.write_var((config.ret_reg + i) as u16, val);
         }
         return;
     };
@@ -1171,9 +1178,10 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emitter.builder().ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
     emitter.builder().ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
     
+    // Return values live at config.ret_reg (= arg_start + arg_slots).
     for i in 0..config.call_ret_slots {
         let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-        emitter.write_var((config.arg_start + i) as u16, val);
+        emitter.write_var((config.ret_reg + i) as u16, val);
     }
 }
 

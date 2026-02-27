@@ -52,10 +52,13 @@ fn emit_call(builder: &mut FuncBuilder, func_id: u32, args_start: u16, arg_slots
 }
 
 /// Emit call and return - common wrapper epilogue.
+/// With the new call buffer layout [Value×arg_slots | ret_slots], return values
+/// live at args_start + arg_slots, not at args_start.
 fn emit_call_and_return(builder: &mut FuncBuilder, func_id: u32, args_start: u16, arg_slots: u16, ret_slots: u16) {
     emit_call(builder, func_id, args_start, arg_slots, ret_slots);
     builder.set_ret_slots(ret_slots);
-    builder.emit_op(Opcode::Return, args_start, ret_slots, 0);
+    let ret_start = args_start + arg_slots;
+    builder.emit_op(Opcode::Return, ret_start, ret_slots, 0);
 }
 
 // =============================================================================
@@ -106,10 +109,12 @@ pub fn generate_iface_wrapper(
         .map(|r| info.type_expr_layout(r.ty.id).0)
         .sum();
     
-    // Allocate args area for call (ensure enough space for return values)
+    // Allocate call buffer: [Value×arg_slots | Value×ret_slots]
+    // New layout keeps arg and ret regions separate to prevent GC from scanning
+    // arg values as GcRefs when a timeslice boundary occurs mid-call.
     let forwarded_param_slots: u16 = wrapper_param_slots.iter().map(|(_, s)| *s).sum();
     let total_arg_slots = recv_slots + forwarded_param_slots;
-    let alloc_slots = total_arg_slots.max(ret_slots);
+    let alloc_slots = (total_arg_slots + ret_slots).max(1);
     let args_start = builder.alloc_slots(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
     
     if needs_unbox {
@@ -202,9 +207,9 @@ pub fn generate_method_expr_promoted_wrapper(
     // Define forwarded params
     let first_param_slot = define_forwarded_params(&mut builder, forwarded_param_slots);
     
-    // Allocate args area for call
+    // Allocate call buffer: [Value×arg_slots | Value×ret_slots]
     let total_arg_slots = recv_slots_for_call + forwarded_param_slots;
-    let alloc_slots = total_arg_slots.max(ret_slots);
+    let alloc_slots = (total_arg_slots + ret_slots).max(1);
     let args_start = builder.alloc_slots(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
     
     // Emit receiver extraction based on path
@@ -275,9 +280,9 @@ pub fn generate_promoted_wrapper(
     // Define forwarded params
     let first_param_slot = define_forwarded_params(&mut builder, forwarded_param_slots);
     
-    // Allocate args area for call (ensure enough space for return values)
+    // Allocate call buffer: [Value×arg_slots | Value×ret_slots]
     let total_arg_slots = recv_slots_for_call + forwarded_param_slots;
-    let alloc_slots = total_arg_slots.max(ret_slots);
+    let alloc_slots = (total_arg_slots + ret_slots).max(1);
     let args_start = builder.alloc_slots(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
     
     // Emit receiver loading based on embedding type
@@ -376,17 +381,18 @@ fn generate_embedded_iface_wrapper_impl(
     let start = crate::embed::TraverseStart::new(outer_recv, outer_is_pointer);
     crate::embed::emit_embed_path_traversal(&mut builder, start, &embed_path.steps, false, 2, iface_slot);
     
-    // Allocate args and copy forwarded params
-    let args_start = builder.alloc_slots(&vec![vo_runtime::SlotType::Value; param_slots.max(ret_slots).max(1) as usize]);
+    // Allocate call buffer: [Value×param_slots | Value×ret_slots]
+    let args_start = builder.alloc_slots(&vec![vo_runtime::SlotType::Value; (param_slots + ret_slots).max(1) as usize]);
     if let Some(first_param) = first_param_slot {
         builder.emit_copy(args_start, first_param, param_slots);
     }
     
-    // CallIface and return
+    // CallIface: result at args_start + param_slots (new call buffer layout)
     let c = crate::type_info::encode_call_args(param_slots, ret_slots);
     builder.emit_with_flags(Opcode::CallIface, method_idx as u8, iface_slot, args_start, c);
+    let ret_start = args_start + param_slots;
     builder.set_ret_slots(ret_slots);
-    builder.emit_op(Opcode::Return, args_start, ret_slots, 0);
+    builder.emit_op(Opcode::Return, ret_start, ret_slots, 0);
     
     ctx.add_function(builder.build())
 }
@@ -416,8 +422,9 @@ fn generate_iface_call_wrapper(
     // Forward other parameters
     let first_param_slot = define_forwarded_params(&mut builder, param_slots);
     
-    // Allocate args buffer
-    let args_start = builder.alloc_slots(&vec![vo_runtime::SlotType::Value; param_slots.max(ret_slots).max(1) as usize]);
+    // Allocate call buffer: [Value×param_slots | Value×ret_slots]
+    let alloc_count = (param_slots + ret_slots).max(1);
+    let args_start = builder.alloc_slots(&vec![vo_runtime::SlotType::Value; alloc_count as usize]);
     if let Some(first_param) = first_param_slot {
         builder.emit_copy(args_start, first_param, param_slots);
     }
@@ -426,9 +433,10 @@ fn generate_iface_call_wrapper(
     let c = crate::type_info::encode_call_args(param_slots, ret_slots);
     builder.emit_with_flags(Opcode::CallIface, method_idx as u8, iface_slot, args_start, c);
     
-    // Return
+    // Return: result at args_start + param_slots (new call buffer layout)
+    let ret_start = args_start + param_slots;
     builder.set_ret_slots(ret_slots);
-    builder.emit_op(Opcode::Return, args_start, ret_slots, 0);
+    builder.emit_op(Opcode::Return, ret_start, ret_slots, 0);
     
     ctx.register_wrapper_from_builder(wrapper_name, builder)
 }

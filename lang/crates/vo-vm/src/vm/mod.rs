@@ -355,6 +355,9 @@ impl Vm {
                 None => break,
             };
 
+            // GC step at scheduling boundary — between fiber runs, all stacks are stable.
+            self.gc_step();
+
             let result = self.run_fiber(fiber_id);
             match self.handle_exec_result(result, max_iterations.is_some()) {
                 None => {} // continue scheduling
@@ -1501,7 +1504,7 @@ impl Vm {
                     }
                 }
                 Opcode::SliceAppend => {
-                    exec::exec_slice_append(stack, bp, &inst, &mut self.state.gc);
+                    exec::exec_slice_append(stack, bp, &inst, &mut self.state.gc, Some(module));
                 }
                 Opcode::SliceAddr => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -1552,7 +1555,7 @@ impl Vm {
                 }
                 Opcode::ChanSend => {
                     let result = Self::handle_chan_result(
-                        exec::exec_chan_send(stack, bp, fiber_id.to_raw(), &inst),
+                        exec::exec_chan_send(stack, bp, fiber_id.to_raw(), &inst, &mut self.state.gc, Some(module)),
                         &mut self.state.gc, fiber, stack, module, &mut self.scheduler, false);
                     if matches!(result, ExecResult::FrameChanged) { refetch!(); } else { return result; }
                 }

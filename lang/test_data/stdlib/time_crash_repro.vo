@@ -1,0 +1,141 @@
+package main
+
+import "time"
+
+func main() {
+	testFormat()
+}
+
+func testFormat() {
+	t := time.Date(2024, time.March, 15, 14, 30, 45, 0)
+	assert(t.Format(time.DateTime) == "2024-03-15 14:30:45")
+}
+
+func testFormatLayouts() {
+	t := time.Date(2024, time.March, 5, 9, 5, 3, 123000000)
+	assert(t.Format("January 2, 2006") == "March 5, 2024")
+	assert(t.Format("Jan 2, 2006") == "Mar 5, 2024")
+	assert(t.Format("2006-01-02") == "2024-03-05")
+	assert(t.Format("15:04:05.000") == "09:05:03.123")
+	assert(t.Format("15:04:05.999") == "09:05:03.123")
+	t2 := time.Date(2024, time.March, 5, 9, 5, 3, 0)
+	assert(t2.Format("15:04:05.999") == "09:05:03")
+	tAM := time.Date(2024, time.January, 1, 9, 30, 0, 0)
+	assert(tAM.Format("3:04PM") == "9:30AM")
+	tPM := time.Date(2024, time.January, 1, 14, 30, 0, 0)
+	assert(tPM.Format("3:04PM") == "2:30PM")
+	assert(t.Format("Monday") == "Tuesday")
+	assert(t.Format("Mon") == "Tue")
+	assert(t.Format("06") == "24")
+}
+
+func testParse() {
+	t, err := time.Parse(time.DateOnly, "2024-03-15")
+	assert(err == nil)
+	assert(t.Year() == 2024)
+	assert(t.Month() == time.March)
+	assert(t.Day() == 15)
+	t2, err2 := time.Parse(time.DateTime, "2024-03-15 14:30:45")
+	assert(err2 == nil)
+	assert(t2.Year() == 2024)
+	t3, err3 := time.Parse(time.RFC3339, "2024-03-15T14:30:45Z")
+	assert(err3 == nil)
+	assert(t3.Year() == 2024)
+	t4, err4 := time.Parse(time.RFC3339, "2024-03-15T14:30:45+05:30")
+	assert(err4 == nil)
+	assert(t4.Year() == 2024)
+}
+
+func testParseFormats() {
+	t, err := time.Parse("January 2, 2006", "March 15, 2024")
+	assert(err == nil)
+	assert(t.Year() == 2024)
+	t2, err2 := time.Parse("Jan 2, 2006", "Mar 15, 2024")
+	assert(err2 == nil)
+	assert(t2.Month() == time.March)
+	t3, err3 := time.Parse(time.RFC3339Nano, "2024-03-15T14:30:45.123456789Z")
+	assert(err3 == nil)
+	assert(t3.Nanosecond() == 123456789)
+	t4, err4 := time.Parse("06-01-02", "24-03-15")
+	assert(err4 == nil)
+	assert(t4.Year() == 2024)
+	_, err5 := time.Parse(time.DateOnly, "not-a-date")
+	assert(err5 != nil)
+}
+
+func testString() {
+	t := time.Date(2024, time.March, 15, 14, 30, 45, 0)
+	s := t.String()
+	assert(len(s) > 0)
+}
+
+func testTruncateRound() {
+	t := time.Date(2024, time.March, 15, 14, 30, 45, 123456789)
+	truncated := t.Truncate(time.Second)
+	assert(truncated.Nanosecond() == 0)
+	assert(truncated.Second() == 45)
+	rounded := t.Round(time.Second)
+	assert(rounded.Nanosecond() == 0)
+}
+
+func testDurationString() {
+	assert(time.Hour.String() == "1h0m0s")
+	assert(time.Minute.String() == "1m0s")
+	assert(time.Second.String() == "1s")
+	assert((90 * time.Minute).String() == "1h30m0s")
+	assert((500 * time.Millisecond).String() == "500ms")
+	assert((1500 * time.Millisecond).String() == "1.5s")
+}
+
+func testParseDuration() {
+	d, err := time.ParseDuration("300ms")
+	assert(err == nil)
+	assert(d == 300*time.Millisecond)
+	d2, err2 := time.ParseDuration("2h45m")
+	assert(err2 == nil)
+	assert(d2 == 2*time.Hour+45*time.Minute)
+	d3, err3 := time.ParseDuration("-1.5s")
+	assert(err3 == nil)
+	assert(d3 == -1500*time.Millisecond)
+	_, err7 := time.ParseDuration("invalid")
+	assert(err7 != nil)
+}
+
+func testAppendFormat() {
+	t := time.Date(2024, time.March, 15, 14, 30, 45, 0)
+	var buf []byte
+	buf = append(buf, "time: "...)
+	buf = t.AppendFormat(buf, time.DateOnly)
+	assert(string(buf) == "time: 2024-03-15")
+}
+
+func testNegativeTimestamps() {
+	t := time.Unix(-1, 0)
+	assert(t.Year() == 1969)
+	assert(t.Month() == time.December)
+	assert(t.Day() == 31)
+	assert(t.Hour() == 23)
+	assert(t.Minute() == 59)
+	assert(t.Second() == 59)
+	assert(t.Weekday() == time.Wednesday)
+}
+
+func testEdgeCases() {
+	t := time.Date(2024, time.February, 29, 0, 0, 0, 0)
+	assert(t.Month() == time.February)
+	assert(t.Day() == 29)
+	t2 := time.Date(2023, time.February, 29, 0, 0, 0, 0)
+	assert(t2.Month() == time.March)
+	assert(t2.Day() == 1)
+	var zero time.Time
+	assert(zero.IsZero())
+	assert(zero.Year() == 1970)
+	assert(zero.Month() == time.January)
+	assert(zero.Day() == 1)
+	t5 := time.Date(2024, time.March, 15, 14, 30, 45, 123456789)
+	formatted := t5.Format(time.RFC3339Nano)
+	parsed, err := time.Parse(time.RFC3339Nano, formatted)
+	assert(err == nil)
+	assert(parsed.Year() == t5.Year())
+	assert(parsed.Nanosecond() == t5.Nanosecond())
+}

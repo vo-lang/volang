@@ -404,7 +404,7 @@ impl<'a> LoopCompiler<'a> {
             crate::call_helpers::emit_jit_call_with_fallback(self, crate::call_helpers::JitCallWithFallbackConfig {
                 func_id,
                 arg_start,
-                ret_reg: arg_start,
+                ret_reg: arg_start + arg_slots,
                 arg_slots,
                 call_ret_slots,
                 func_ret_slots: target_func.ret_slots as usize,
@@ -417,7 +417,7 @@ impl<'a> LoopCompiler<'a> {
             crate::call_helpers::emit_call_via_vm(self, crate::call_helpers::CallViaVmConfig {
                 func_id,
                 arg_start,
-                ret_reg: arg_start,
+                ret_reg: arg_start + arg_slots,
                 resume_pc: self.current_pc + 1,
                 ret_slots: call_ret_slots,
             });

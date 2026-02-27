@@ -101,23 +101,15 @@ pub fn exec_map_set(stack: *const Slot, bp: usize, inst: &Instruction, gc: &mut 
 
     map::set(m, &key, &val, module);
     
-    // Write barrier: if key or val may contain GcRef, barrier the map
-    // For maps, we use backward barrier on the map itself
+    // Write barrier: only barrier slots that are actually GcRefs.
+    // Uses typed_write_barrier_by_meta to avoid UB on mixed-slot types
+    // (e.g., struct with int + pointer fields) where write_barrier would
+    // dereference a non-pointer value as a GcHeader.
     if (inst.flags & 0b01) != 0 {
-        // Key contains GcRef
-        for &k in &key {
-            if k != 0 {
-                gc.write_barrier(m, k as GcRef);
-            }
-        }
+        vo_runtime::gc_types::typed_write_barrier_by_meta(gc, m, &key, map::key_meta(m), module);
     }
     if (inst.flags & 0b10) != 0 {
-        // Val contains GcRef
-        for &v in &val {
-            if v != 0 {
-                gc.write_barrier(m, v as GcRef);
-            }
-        }
+        vo_runtime::gc_types::typed_write_barrier_by_meta(gc, m, &val, map::val_meta(m), module);
     }
     true
 }
