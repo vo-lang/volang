@@ -533,6 +533,14 @@ impl Gc {
             let header = Self::header(obj);
             let obj_white = header.marked & WHITE_BITS;
             
+            // Gray objects should never exist during sweep — atomic phase processes all of them.
+            // If one leaks here, it would be silently dropped (memory leak). Catch it early.
+            debug_assert!(
+                header.is_black() || obj_white != 0,
+                "sweep_step: gray object {:p} found during sweep (neither white nor black)",
+                obj
+            );
+            
             if header.is_black() || obj_white == self.current_white {
                 // Alive: reset to current white
                 Self::header_mut(obj).set_white(self.current_white);

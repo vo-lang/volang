@@ -152,22 +152,16 @@ pub fn get(m: GcRef, key: &[u64], module: Option<&Module>) -> Option<&'static [u
         MapInner::StructKey(map) => {
             let module = module.expect("StructKey requires Module");
             let rttid = key_rttid(m);
-            for (_, entry) in map.iter() {
-                if deep_eq_struct_inline(key, &entry.key, rttid, module) {
-                    return Some(entry.val.as_ref());
-                }
-            }
-            None
+            let hash = struct_key_hash(m, key, module);
+            map.find_by(hash, |_, entry| deep_eq_struct_inline(key, &entry.key, rttid, module))
+                .map(|entry| entry.val.as_ref())
         }
         MapInner::InterfaceKey(map) => {
             let module = module.expect("InterfaceKey requires Module");
             let (slot0, slot1) = (key[0], key[1]);
-            for (_, entry) in map.iter() {
-                if iface_eq(slot0, slot1, entry.key[0], entry.key[1], module) == 1 {
-                    return Some(entry.val.as_ref());
-                }
-            }
-            None
+            let hash = iface_hash(slot0, slot1, module);
+            map.find_by(hash, |_, entry| iface_eq(slot0, slot1, entry.key[0], entry.key[1], module) == 1)
+                .map(|entry| entry.val.as_ref())
         }
     }
 }
@@ -195,12 +189,10 @@ pub fn set(m: GcRef, key: &[u64], val: &[u64], module: Option<&Module>) {
             let module = module.expect("StructKey requires Module");
             let hash = struct_key_hash(m, key, module);
             let rttid = key_rttid(m);
-            // Check if key exists and update
-            for (_, entry) in map.iter_mut() {
-                if deep_eq_struct_inline(key, &entry.key, rttid, module) {
-                    entry.val = val_box;
-                    return;
-                }
+            // Check if key exists and update (O(1) average via hash probe)
+            if let Some(entry) = map.find_by_mut(hash, |_, e| deep_eq_struct_inline(key, &e.key, rttid, module)) {
+                entry.val = val_box;
+                return;
             }
             // Key not found, insert new
             map.insert(hash, StructKeyEntry { key: key.into(), val: val_box });
@@ -209,12 +201,10 @@ pub fn set(m: GcRef, key: &[u64], val: &[u64], module: Option<&Module>) {
             let module = module.expect("InterfaceKey requires Module");
             let (slot0, slot1) = (key[0], key[1]);
             let hash = iface_hash(slot0, slot1, module);
-            // Check if key exists and update
-            for (_, entry) in map.iter_mut() {
-                if iface_eq(slot0, slot1, entry.key[0], entry.key[1], module) == 1 {
-                    entry.val = val_box;
-                    return;
-                }
+            // Check if key exists and update (O(1) average via hash probe)
+            if let Some(entry) = map.find_by_mut(hash, |_, e| iface_eq(slot0, slot1, e.key[0], e.key[1], module) == 1) {
+                entry.val = val_box;
+                return;
             }
             // Key not found, insert new
             map.insert(hash, InterfaceKeyEntry { key: [slot0, slot1], val: val_box });
@@ -237,30 +227,14 @@ pub fn delete(m: GcRef, key: &[u64], module: Option<&Module>) {
         MapInner::StructKey(map) => {
             let module = module.expect("StructKey requires Module");
             let rttid = key_rttid(m);
-            let mut to_remove = None;
-            for (h, entry) in map.iter() {
-                if deep_eq_struct_inline(key, &entry.key, rttid, module) {
-                    to_remove = Some(*h);
-                    break;
-                }
-            }
-            if let Some(h) = to_remove {
-                map.remove(&h);
-            }
+            let hash = struct_key_hash(m, key, module);
+            map.remove_by(hash, |_, entry| deep_eq_struct_inline(key, &entry.key, rttid, module));
         }
         MapInner::InterfaceKey(map) => {
             let module = module.expect("InterfaceKey requires Module");
             let (slot0, slot1) = (key[0], key[1]);
-            let mut to_remove = None;
-            for (h, entry) in map.iter() {
-                if iface_eq(slot0, slot1, entry.key[0], entry.key[1], module) == 1 {
-                    to_remove = Some(*h);
-                    break;
-                }
-            }
-            if let Some(h) = to_remove {
-                map.remove(&h);
-            }
+            let hash = iface_hash(slot0, slot1, module);
+            map.remove_by(hash, |_, entry| iface_eq(slot0, slot1, entry.key[0], entry.key[1], module) == 1);
         }
     }
 }

@@ -1384,19 +1384,44 @@ impl Vm {
                         2 | 130 => unsafe { *(base.offset(off * 2) as *mut u16) = val as u16 },
                         4 | 132 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                         0x44 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
-                        8 => unsafe { *(base.offset(off * 8) as *mut u64) = val },
+                        8 => {
+                            unsafe { *(base.offset(off * 8) as *mut u64) = val };
+                            // Write barrier for GcRef elements (string, slice, map, pointer, etc.)
+                            let em = array::elem_meta(arr);
+                            if em.value_kind().may_contain_gc_refs() {
+                                self.state.gc.write_barrier(arr, val as GcRef);
+                            }
+                        }
                         0 => {
                             let elem_bytes = stack_get(stack, bp + inst.b as usize + 1) as usize;
-                            for i in 0..(elem_bytes + 7) / 8 {
+                            let elem_slots = (elem_bytes + 7) / 8;
+                            for i in 0..elem_slots {
                                 let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
                                 unsafe { *ptr = stack_get(stack, src + i) };
+                            }
+                            // Write barrier for multi-slot elements that may contain GcRefs
+                            let em = array::elem_meta(arr);
+                            if em.value_kind().may_contain_gc_refs() {
+                                let vals: Vec<u64> = (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
+                                vo_runtime::gc_types::typed_write_barrier_by_meta(
+                                    &mut self.state.gc, arr, &vals, em, Some(module));
                             }
                         }
                         _ => {
                             let elem_bytes = inst.flags as usize;
-                            for i in 0..(elem_bytes + 7) / 8 {
+                            let elem_slots = (elem_bytes + 7) / 8;
+                            for i in 0..elem_slots {
                                 let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
                                 unsafe { *ptr = stack_get(stack, src + i) };
+                            }
+                            // Write barrier for multi-slot elements that may contain GcRefs
+                            if elem_bytes >= 8 {
+                                let em = array::elem_meta(arr);
+                                if em.value_kind().may_contain_gc_refs() {
+                                    let vals: Vec<u64> = (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
+                                    vo_runtime::gc_types::typed_write_barrier_by_meta(
+                                        &mut self.state.gc, arr, &vals, em, Some(module));
+                                }
                             }
                         }
                     }
@@ -1470,19 +1495,53 @@ impl Vm {
                         2 | 130 => unsafe { *(base.add(idx * 2) as *mut u16) = val as u16 },
                         4 | 132 => unsafe { *(base.add(idx * 4) as *mut u32) = val as u32 },
                         0x44 => unsafe { *(base.add(idx * 4) as *mut u32) = val as u32 },
-                        8 => unsafe { *(base.add(idx * 8) as *mut u64) = val },
+                        8 => {
+                            unsafe { *(base.add(idx * 8) as *mut u64) = val };
+                            // Write barrier: backing array may be BLACK, val may be WHITE GcRef
+                            let arr_ref = vo_runtime::objects::slice::array_ref(s);
+                            if !arr_ref.is_null() {
+                                let em = array::elem_meta(arr_ref);
+                                if em.value_kind().may_contain_gc_refs() {
+                                    self.state.gc.write_barrier(arr_ref, val as GcRef);
+                                }
+                            }
+                        }
                         0 => {
                             let elem_bytes = stack_get(stack, bp + inst.b as usize + 1) as usize;
-                            for i in 0..(elem_bytes + 7) / 8 {
+                            let elem_slots = (elem_bytes + 7) / 8;
+                            for i in 0..elem_slots {
                                 let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
                                 unsafe { *ptr = stack_get(stack, src + i) };
+                            }
+                            // Write barrier for multi-slot elements that may contain GcRefs
+                            let arr_ref = vo_runtime::objects::slice::array_ref(s);
+                            if !arr_ref.is_null() {
+                                let em = array::elem_meta(arr_ref);
+                                if em.value_kind().may_contain_gc_refs() {
+                                    let vals: Vec<u64> = (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
+                                    vo_runtime::gc_types::typed_write_barrier_by_meta(
+                                        &mut self.state.gc, arr_ref, &vals, em, Some(module));
+                                }
                             }
                         }
                         _ => {
                             let elem_bytes = inst.flags as usize;
-                            for i in 0..(elem_bytes + 7) / 8 {
+                            let elem_slots = (elem_bytes + 7) / 8;
+                            for i in 0..elem_slots {
                                 let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
                                 unsafe { *ptr = stack_get(stack, src + i) };
+                            }
+                            // Write barrier for multi-slot elements that may contain GcRefs
+                            if elem_bytes >= 8 {
+                                let arr_ref = vo_runtime::objects::slice::array_ref(s);
+                                if !arr_ref.is_null() {
+                                    let em = array::elem_meta(arr_ref);
+                                    if em.value_kind().may_contain_gc_refs() {
+                                        let vals: Vec<u64> = (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
+                                        vo_runtime::gc_types::typed_write_barrier_by_meta(
+                                            &mut self.state.gc, arr_ref, &vals, em, Some(module));
+                                    }
+                                }
                             }
                         }
                     }

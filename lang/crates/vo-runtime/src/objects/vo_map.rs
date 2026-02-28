@@ -257,6 +257,99 @@ impl<K: Eq + Hash, V> VoMap<K, V> {
         self.get(key).is_some()
     }
 
+    /// Find value by hash + custom predicate (for types where K is a hash proxy).
+    /// Probes from the hash-determined bucket, checking predicate on each occupied entry.
+    /// This gives O(1) average lookup for struct/interface keys where K=u64 (hash)
+    /// and the actual equality check is done by the predicate on the value.
+    pub fn find_by<P>(&self, hash: u64, predicate: P) -> Option<&V>
+    where
+        P: Fn(&K, &V) -> bool,
+    {
+        if self.buckets.is_empty() {
+            return None;
+        }
+        // hash_one matches insert's internal hashing: insert calls hash_one(key)
+        let bucket_hash = hash_one(&hash);
+        let mut idx = self.bucket_index(bucket_hash);
+        loop {
+            match &self.buckets[idx] {
+                Bucket::Empty => return None,
+                Bucket::Tombstone => {}
+                Bucket::Occupied { key, value, .. } => {
+                    if predicate(key, value) {
+                        return Some(value);
+                    }
+                }
+            }
+            idx = (idx + 1) & (self.buckets.len() - 1);
+        }
+    }
+
+    /// Mutable version of find_by. Returns mutable reference to the value.
+    /// Uses index-based lookup to satisfy the borrow checker.
+    pub fn find_by_mut<P>(&mut self, hash: u64, predicate: P) -> Option<&mut V>
+    where
+        P: Fn(&K, &V) -> bool,
+    {
+        if self.buckets.is_empty() {
+            return None;
+        }
+        // Phase 1: find index with immutable borrows
+        let found_idx = {
+            let bucket_hash = hash_one(&hash);
+            let mut idx = self.bucket_index(bucket_hash);
+            loop {
+                match &self.buckets[idx] {
+                    Bucket::Empty => break None,
+                    Bucket::Tombstone => {}
+                    Bucket::Occupied { key, value, .. } => {
+                        if predicate(key, value) {
+                            break Some(idx);
+                        }
+                    }
+                }
+                idx = (idx + 1) & (self.buckets.len() - 1);
+            }
+        };
+        // Phase 2: re-borrow mutably at found index
+        found_idx.and_then(move |idx| {
+            if let Bucket::Occupied { value, .. } = &mut self.buckets[idx] {
+                Some(value)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Remove by hash + custom predicate. Returns removed value if found.
+    pub fn remove_by<P>(&mut self, hash: u64, predicate: P) -> Option<V>
+    where
+        P: Fn(&K, &V) -> bool,
+    {
+        if self.buckets.is_empty() {
+            return None;
+        }
+        let bucket_hash = hash_one(&hash);
+        let mut idx = self.bucket_index(bucket_hash);
+        loop {
+            match &self.buckets[idx] {
+                Bucket::Empty => return None,
+                Bucket::Tombstone => {}
+                Bucket::Occupied { key, value, .. } => {
+                    if predicate(key, value) {
+                        let old = core::mem::replace(&mut self.buckets[idx], Bucket::Tombstone);
+                        self.len -= 1;
+                        if let Bucket::Occupied { value, .. } = old {
+                            return Some(value);
+                        }
+                        unreachable!();
+                    }
+                }
+            }
+            idx = (idx + 1) & (self.buckets.len() - 1);
+        }
+    }
+
     /// Resize and rehash
     fn resize<F>(&mut self, hasher: &F)
     where

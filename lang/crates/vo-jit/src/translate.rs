@@ -984,6 +984,12 @@ fn slice_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         let val = e.read_var(inst.c);
         let addr = e.builder().ins().iadd(data_ptr, off);
         store_element(e, addr, val, elem_bytes);
+        // Write barrier for 8-byte elements that may be GcRefs.
+        // Load backing array from SliceData.array (offset 0) and use it as barrier parent.
+        if elem_bytes == 8 {
+            let arr = e.builder().ins().load(types::I64, MemFlags::trusted(), s, 0);
+            emit_array_write_barrier(e, arr, val);
+        }
     } else {
         let elem_slots = (elem_bytes + 7) / 8;
         for i in 0..elem_slots {
@@ -992,6 +998,9 @@ fn slice_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             let addr = e.builder().ins().iadd(data_ptr, slot_off);
             e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
         }
+        // Write barrier for multi-slot elements: load backing array for barrier parent.
+        let arr = e.builder().ins().load(types::I64, MemFlags::trusted(), s, 0);
+        emit_array_write_barrier_multi(e, arr, inst.c, elem_slots);
     }
 }
 
@@ -1177,6 +1186,12 @@ fn array_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         let val = e.read_var(inst.c);
         let addr = e.builder().ins().iadd(arr, off);
         store_element(e, addr, val, elem_bytes);
+        // Write barrier for 8-byte elements that may be GcRefs.
+        // Read elem_meta from ArrayHeader (offset 8, low byte is value_kind).
+        // may_contain_gc_refs iff value_kind >= ValueKind::Array (14).
+        if elem_bytes == 8 {
+            emit_array_write_barrier(e, arr, val);
+        }
     } else {
         let elem_slots = (elem_bytes + 7) / 8;
         for i in 0..elem_slots {
@@ -1185,7 +1200,70 @@ fn array_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             let addr = e.builder().ins().iadd(arr, slot_off);
             e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
         }
+        // Write barrier for multi-slot elements: barrier each slot that could be a GcRef.
+        // Conservative: barrier all slots. write_barrier is a no-op for non-GcRef values
+        // when parent is not black or child is not white, so false positives are safe.
+        // For correctness, only barrier when elem may contain GcRefs.
+        emit_array_write_barrier_multi(e, arr, inst.c, elem_slots);
     }
+}
+
+/// Emit write barrier for a single-slot array/slice element write.
+/// Checks elem_meta.value_kind >= Array (14) at runtime to skip non-GcRef elements.
+fn emit_array_write_barrier<'a>(e: &mut impl IrEmitter<'a>, arr: Value, val: Value) {
+    // ArrayHeader layout: [len:8][elem_meta:4 (low byte = value_kind)][elem_bytes:4]
+    // elem_meta is at offset 8 from arr (which points to data after GcHeader).
+    // Read the low byte (value_kind) of elem_meta.
+    let elem_meta_raw = e.builder().ins().load(types::I32, MemFlags::trusted(), arr, 8);
+    let vk = e.builder().ins().band_imm(elem_meta_raw, 0xFF);
+    let gc_ref_threshold = e.builder().ins().iconst(types::I32, vo_runtime::ValueKind::Array as i64);
+    let needs_barrier = e.builder().ins().icmp(IntCC::UnsignedGreaterThanOrEqual, vk, gc_ref_threshold);
+    
+    let barrier_block = e.builder().create_block();
+    let continue_block = e.builder().create_block();
+    e.builder().ins().brif(needs_barrier, barrier_block, &[], continue_block, &[]);
+    
+    e.builder().switch_to_block(barrier_block);
+    e.builder().seal_block(barrier_block);
+    if let Some(wb_ref) = e.helpers().write_barrier {
+        let gc = e.gc_ptr();
+        let zero_offset = e.builder().ins().iconst(types::I32, 0);
+        e.builder().ins().call(wb_ref, &[gc, arr, zero_offset, val]);
+    }
+    e.builder().ins().jump(continue_block, &[]);
+    
+    e.builder().switch_to_block(continue_block);
+    e.builder().seal_block(continue_block);
+}
+
+/// Emit write barrier for multi-slot array/slice element write.
+/// Only emits barrier if elem_meta indicates GcRef-containing type.
+fn emit_array_write_barrier_multi<'a>(e: &mut impl IrEmitter<'a>, arr: Value, src_start: u16, elem_slots: usize) {
+    let elem_meta_raw = e.builder().ins().load(types::I32, MemFlags::trusted(), arr, 8);
+    let vk = e.builder().ins().band_imm(elem_meta_raw, 0xFF);
+    let gc_ref_threshold = e.builder().ins().iconst(types::I32, vo_runtime::ValueKind::Array as i64);
+    let needs_barrier = e.builder().ins().icmp(IntCC::UnsignedGreaterThanOrEqual, vk, gc_ref_threshold);
+    
+    let barrier_block = e.builder().create_block();
+    let continue_block = e.builder().create_block();
+    e.builder().ins().brif(needs_barrier, barrier_block, &[], continue_block, &[]);
+    
+    e.builder().switch_to_block(barrier_block);
+    e.builder().seal_block(barrier_block);
+    if let Some(wb_ref) = e.helpers().write_barrier {
+        let gc = e.gc_ptr();
+        let zero_offset = e.builder().ins().iconst(types::I32, 0);
+        // Barrier each slot - write_barrier checks colors so non-GcRef slots are harmless
+        // when the parent-child color check fails (which it will for non-pointer values).
+        for i in 0..elem_slots {
+            let v = e.read_var(src_start + i as u16);
+            e.builder().ins().call(wb_ref, &[gc, arr, zero_offset, v]);
+        }
+    }
+    e.builder().ins().jump(continue_block, &[]);
+    
+    e.builder().switch_to_block(continue_block);
+    e.builder().seal_block(continue_block);
 }
 
 fn array_addr<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
