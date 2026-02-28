@@ -69,10 +69,10 @@ impl Vm {
         let fibers = &self.scheduler.fibers;
         let module_ref = unsafe { &*module };
 
-        // Collect function slot_types for closure scanning.
+        // Collect capture_slot_types for closure scanning.
         // Each entry is indexed by func_id — used by scan_closure to get capture types.
-        let func_slot_types: Vec<&[vo_runtime::SlotType]> = module_ref.functions.iter()
-            .map(|f| f.slot_types.as_slice())
+        let func_capture_slot_types: Vec<&[vo_runtime::SlotType]> = module_ref.functions.iter()
+            .map(|f| f.capture_slot_types.as_slice())
             .collect();
 
         unsafe { &mut *gc_ptr }.step(
@@ -82,7 +82,7 @@ impl Vm {
                 scan_sentinel_errors(gc, sentinel_errors);
             },
             |gc, obj| {
-                vo_runtime::gc_types::scan_object(gc, obj, &module_ref.struct_metas, &func_slot_types);
+                vo_runtime::gc_types::scan_object(gc, obj, &module_ref.struct_metas, &func_capture_slot_types);
             },
             |obj| {
                 vo_runtime::gc_types::finalize_object(obj);

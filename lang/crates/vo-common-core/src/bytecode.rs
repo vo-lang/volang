@@ -67,6 +67,12 @@ pub struct FunctionDef {
     /// Each entry: (ValueMeta raw, slot_count) for the captured variable's inner type.
     /// Empty for non-closure functions.
     pub capture_types: Vec<(u32, u16)>,
+    /// SlotTypes for closure captures, used by GC to scan closure objects.
+    /// Length = total slots across all captures (e.g., 2 for an interface capture).
+    /// For regular closures, all entries are GcRef (escape boxes).
+    /// For method value wrappers, may contain Interface0/Interface1.
+    /// Empty for non-closure functions.
+    pub capture_slot_types: Vec<SlotType>,
     /// Parameter types for cross-island transfer.
     /// Each entry: (ValueMeta raw, slot_count) for one parameter.
     /// Empty if function has no parameters or types not needed.

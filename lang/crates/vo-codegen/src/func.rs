@@ -154,6 +154,8 @@ pub struct FuncBuilder {
     // Capture types for cross-island transfer (closures only).
     // Each entry: (ValueMeta raw, slot_count) for the captured variable's inner type.
     capture_types: Vec<(u32, u16)>,
+    // SlotTypes for closure captures, used by GC to scan closure objects.
+    capture_slot_types: Vec<SlotType>,
     // Parameter types for cross-island transfer.
     // Each entry: (ValueMeta raw, slot_count) for one parameter.
     param_types: Vec<(u32, u16)>,
@@ -186,6 +188,7 @@ impl FuncBuilder {
             is_closure: false,
             error_ret_slot: -1,
             capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
             param_types: Vec::new(),
             temp_checkpoint_stack: Vec::new(),
         }
@@ -1158,6 +1161,7 @@ impl FuncBuilder {
             code: self.code,
             slot_types: self.slot_types,
             capture_types: self.capture_types,
+            capture_slot_types: self.capture_slot_types,
             param_types: self.param_types,
         }
     }
@@ -1165,6 +1169,11 @@ impl FuncBuilder {
     /// Add a capture type for cross-island serialization.
     pub fn add_capture_type(&mut self, meta_raw: u32, slots: u16) {
         self.capture_types.push((meta_raw, slots));
+    }
+    
+    /// Add capture SlotTypes for GC scanning.
+    pub fn add_capture_slot_types(&mut self, types: &[SlotType]) {
+        self.capture_slot_types.extend_from_slice(types);
     }
     
     /// Add a parameter type for cross-island serialization.

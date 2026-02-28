@@ -434,6 +434,8 @@ pub fn compile_func_lit(
         // Compute raw ValueMeta directly (not constant pool index)
         let meta_raw = ctx.compute_value_meta_raw(type_key, info);
         closure_builder.add_capture_type(meta_raw, slots);
+        // All regular closure captures are GcRef (pointers to heap-boxed escaped vars)
+        closure_builder.add_capture_slot_types(&[SlotType::GcRef]);
     }
     
     // Define parameters and collect escaped ones for boxing

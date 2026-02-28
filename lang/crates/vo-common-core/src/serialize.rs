@@ -552,6 +552,10 @@ impl Module {
                 w.write_u32(*meta);
                 w.write_u16(*slots);
             });
+            // GC capture slot types
+            w.write_vec(&f.capture_slot_types, |w, st| {
+                w.write_u8(*st as u8);
+            });
             w.write_vec(&f.param_types, |w, (meta, slots)| {
                 w.write_u32(*meta);
                 w.write_u16(*slots);
@@ -735,6 +739,9 @@ impl Module {
                 let slots = r.read_u16()?;
                 Ok((meta, slots))
             })?;
+            let capture_slot_types = r.read_vec(|r| {
+                Ok(SlotType::from_u8(r.read_u8()?))
+            })?;
             let param_types = r.read_vec(|r| {
                 let meta = r.read_u32()?;
                 let slots = r.read_u16()?;
@@ -758,6 +765,7 @@ impl Module {
                 slot_types,
                 code,
                 capture_types,
+                capture_slot_types,
                 param_types,
             })
         })?;
@@ -878,6 +886,7 @@ mod tests {
                 Instruction::new(Opcode::Return, 0, 0, 0),
             ],
             capture_types: vec![],
+            capture_slot_types: vec![],
             param_types: vec![],
         });
 

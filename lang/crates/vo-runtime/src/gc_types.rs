@@ -85,9 +85,9 @@ pub fn typed_write_barrier_by_meta(
 
 /// Scan a GC object and mark its children.
 ///
-/// `func_slot_types`: indexed by func_id, each entry is the slot_types for that function.
+/// `func_capture_slot_types`: indexed by func_id, each entry is the capture_slot_types for that function.
 /// Used to scan closure captures with correct types (Interface0/Interface1 vs GcRef).
-pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_slot_types: &[&[SlotType]]) {
+pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_capture_slot_types: &[&[SlotType]]) {
     let gc_header = Gc::header(obj);
     
     match gc_header.kind() {
@@ -107,7 +107,7 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_sl
         }
 
         ValueKind::Closure => {
-            scan_closure(gc, obj, func_slot_types);
+            scan_closure(gc, obj, func_capture_slot_types);
         }
 
         ValueKind::Map => {
@@ -137,50 +137,33 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_sl
     }
 }
 
-/// Scan closure captures using the wrapper function's slot_types.
+/// Scan closure captures using the function's capture_slot_types.
 ///
 /// Closure layout: [ClosureHeader (1 slot)] [capture_0] [capture_1] ...
 /// For regular closures, all captures are GcRef (pointers to heap-boxed escaped vars).
 /// For method value closures, captures may include interface data (itab + data).
-/// The wrapper function's slot_types[0..capture_count] describes the capture layout:
-/// slot 0 = closure ref (GcRef), so captures start at slot_types[1..].
-fn scan_closure(gc: &mut Gc, obj: GcRef, func_slot_types: &[&[SlotType]]) {
+/// The function's capture_slot_types describes the capture layout directly.
+fn scan_closure(gc: &mut Gc, obj: GcRef, func_capture_slot_types: &[&[SlotType]]) {
     let func_id = closure::func_id(obj);
     let cap_count = closure::capture_count(obj);
     if cap_count == 0 { return; }
 
-    let slot_types = func_slot_types.get(func_id as usize)
-        .unwrap_or_else(|| panic!("scan_closure: missing slot_types for func_id {}", func_id));
-    
-    // Wrapper function slot_types: [closure_ref(GcRef), params..., locals...]
-    // Captures are stored at closure object offsets [0..cap_count),
-    // but their types correspond to what ClosureGet reads into the function body.
-    // For closure functions, slot 0 is the closure ref itself.
-    // The captures are read by ClosureGet instructions and their types are
-    // determined by how the wrapper uses them.
-    //
-    // If we have slot_types and the function is a closure (slot_types[0] = GcRef for closure ref),
-    // then captures correspond to what ClosureGet reads. For method value wrappers with
-    // interface receivers, capture 0 = Interface0, capture 1 = Interface1.
-    //
-    if cap_count + 1 > slot_types.len() {
-        panic!(
-            "scan_closure: capture layout overflow for func_id {} (captures={}, slot_types={})",
-            func_id,
-            cap_count,
-            slot_types.len(),
-        );
-    }
-    
-    // Use slot_types[1..1+cap_count] for capture types (slot 0 = closure ref)
     let capture_slots = unsafe {
         core::slice::from_raw_parts(
             (obj as *const u64).add(closure::HEADER_SLOTS),
             cap_count,
         )
     };
-    let capture_types = &slot_types[1..1 + cap_count];
-    scan_slots_by_types(gc, capture_slots, capture_types);
+
+    let capture_types = func_capture_slot_types.get(func_id as usize).copied().unwrap_or(&[]);
+    if capture_types.is_empty() {
+        // No capture_slot_types available: treat all captures as GcRef (safe default).
+        for &slot in capture_slots {
+            if slot != 0 { gc.mark_gray(slot_to_ptr(slot)); }
+        }
+    } else {
+        scan_slots_by_types(gc, capture_slots, capture_types);
+    }
 }
 
 /// Scan all slots of a GC object as potential GcRefs.

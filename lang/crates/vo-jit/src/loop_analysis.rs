@@ -433,6 +433,7 @@ mod tests {
             heap_ret_slots: vec![],
             is_closure: false,
             capture_types: vec![],
+            capture_slot_types: vec![],
             error_ret_slot: -1,
             has_defer: false,
             has_calls,

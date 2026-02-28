@@ -692,6 +692,7 @@ impl CodegenContext {
             code: Vec::new(),
             slot_types: Vec::new(),
             capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
             param_types: Vec::new(),
         });
         // Methods: register to func_indices for embed.rs method lookup (TypeKey is unique)
@@ -974,6 +975,7 @@ impl CodegenContext {
         local_slots: u16,
         code: Vec<vo_vm::instruction::Instruction>,
         slot_types: Vec<vo_runtime::SlotType>,
+        capture_slot_types: Vec<vo_runtime::SlotType>,
         cache_key: MethodValueWrapperKey,
     ) -> u32 {
         use vo_vm::bytecode::FunctionDef;
@@ -996,6 +998,7 @@ impl CodegenContext {
             code,
             slot_types,
             capture_types: Vec::new(),
+            capture_slot_types,
             param_types: Vec::new(),
         };
         let wrapper_id = self.module.functions.len() as u32;
@@ -1061,11 +1064,10 @@ impl CodegenContext {
         let suffix = if needs_deref { "" } else { "_ptr" };
         let wrapper_name = format!("__method_value{}_{}", suffix, method_func_id);
         let local_slots = wrapper_param_slots + (param_slots + ret_slots).max(1);
-        // slot_types: [GcRef(closure_ref), params..., locals...]
-        // Capture 0 = GcRef (pointer to boxed receiver)
         let mut slot_types = vec![vo_runtime::SlotType::GcRef]; // closure ref
         slot_types.extend(std::iter::repeat(vo_runtime::SlotType::Value).take((local_slots - 1) as usize));
-        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, slot_types, cache_key);
+        let capture_slot_types = vec![vo_runtime::SlotType::GcRef];
+        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, slot_types, capture_slot_types, cache_key);
         Ok(wrapper_id)
     }
     
@@ -1107,15 +1109,15 @@ impl CodegenContext {
         
         let wrapper_name = format!("__method_value_iface_{}_{}", method_name, method_idx);
         let local_slots = wrapper_param_slots + iface_slots + (param_slots + ret_slots).max(1);
-        // slot_types: [GcRef(closure_ref), Interface0, Interface1, params..., locals...]
-        // Captures 0-1 = interface (itab + data)
+        // Interface wrapper: ClosureGet writes itab/data to slots 1-2, so slot_types must match.
         let mut slot_types = vec![
             vo_runtime::SlotType::GcRef,       // closure ref
-            vo_runtime::SlotType::Interface0,   // capture 0: itab
-            vo_runtime::SlotType::Interface1,   // capture 1: data
+            vo_runtime::SlotType::Interface0,   // slot for ClosureGet capture 0
+            vo_runtime::SlotType::Interface1,   // slot for ClosureGet capture 1
         ];
         slot_types.extend(std::iter::repeat(vo_runtime::SlotType::Value).take((local_slots as usize).saturating_sub(3)));
-        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, slot_types, cache_key);
+        let capture_slot_types = vec![vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1];
+        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, slot_types, capture_slot_types, cache_key);
         Ok(wrapper_id)
     }
     
@@ -1160,11 +1162,10 @@ impl CodegenContext {
         
         let wrapper_name = format!("__method_value_embed_iface_{}_{}", method_name, method_idx);
         let local_slots = wrapper_param_slots + 1 + iface_slots + (param_slots + ret_slots).max(1);
-        // slot_types: [GcRef(closure_ref), GcRef(capture: boxed struct ptr), ...]
-        // Capture 0 = GcRef (pointer to boxed outer struct)
-        let mut slot_types = vec![vo_runtime::SlotType::GcRef; 2]; // closure ref + capture
+        let mut slot_types = vec![vo_runtime::SlotType::GcRef; 2]; // closure ref + ClosureGet dest
         slot_types.extend(std::iter::repeat(vo_runtime::SlotType::Value).take((local_slots as usize).saturating_sub(2)));
-        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, slot_types, cache_key);
+        let capture_slot_types = vec![vo_runtime::SlotType::GcRef];
+        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, slot_types, capture_slot_types, cache_key);
         Ok(wrapper_id)
     }
 

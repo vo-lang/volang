@@ -23,6 +23,11 @@ pub fn exec_ptr_get(stack: *mut Slot, bp: usize, inst: &Instruction) -> bool {
     if ptr.is_null() {
         return false;
     }
+    debug_assert!(
+        (ptr as usize) & 7 == 0,
+        "exec_ptr_get: misaligned ptr={:#x} bp={} a={} b={} c={} flags={}",
+        ptr as usize, bp, inst.a, inst.b, inst.c, inst.flags,
+    );
     let offset = inst.c as usize;
     let val = unsafe { Gc::read_slot(ptr, offset) };
     stack_set(stack, bp + inst.a as usize, val);
