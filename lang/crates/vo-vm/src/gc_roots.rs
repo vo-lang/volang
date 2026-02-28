@@ -2,6 +2,8 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use vo_runtime::gc::{scan_slots_by_types, Gc, GcRef};
 use vo_runtime::ffi::SentinelErrorCache;

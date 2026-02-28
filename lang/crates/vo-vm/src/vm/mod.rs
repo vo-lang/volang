@@ -466,9 +466,13 @@ impl Vm {
                     crate::fiber::BlockReason::Queue => {
                         self.scheduler.block_for_queue();
                     }
-                    crate::fiber::BlockReason::HostEvent(_) |
-                    crate::fiber::BlockReason::HostEventReplay(_) => {
-                        unreachable!("HostEvent blocked directly in scheduling loop, not via ExecResult");
+                    crate::fiber::BlockReason::HostEvent { token, delay_ms } => {
+                        self.scheduler.block_for_host_event(token, delay_ms);
+                    }
+                    crate::fiber::BlockReason::HostEventReplay(token) => {
+                        let fiber = self.scheduler.current_fiber_mut().unwrap();
+                        fiber.current_frame_mut().unwrap().pc -= 1;
+                        self.scheduler.block_for_host_event_replay(token);
                     }
                     #[cfg(feature = "std")]
                     crate::fiber::BlockReason::Io(token) => {
@@ -1165,15 +1169,10 @@ impl Vm {
                         ExternResult::Yield => { return ExecResult::TimesliceExpired; }
                         ExternResult::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
                         ExternResult::HostEventWait { token, delay_ms } => {
-                            self.scheduler.block_for_host_event(token, delay_ms);
-                            return ExecResult::TimesliceExpired;
+                            return ExecResult::Block(crate::fiber::BlockReason::HostEvent { token, delay_ms });
                         }
                         ExternResult::HostEventWaitAndReplay { token } => {
-                            // Undo PC so extern replays on wake (like CallClosure)
-                            let frame = fiber.current_frame_mut().unwrap();
-                            frame.pc -= 1;
-                            self.scheduler.block_for_host_event_replay(token);
-                            return ExecResult::TimesliceExpired;
+                            return ExecResult::Block(crate::fiber::BlockReason::HostEventReplay(token));
                         }
                         #[cfg(feature = "std")]
                         ExternResult::WaitIo { token } => {

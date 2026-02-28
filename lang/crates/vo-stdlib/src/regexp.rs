@@ -14,6 +14,8 @@ use vo_runtime::ffi::{ExternCallContext, ExternResult};
 fn match_string(call: &mut ExternCallContext) -> ExternResult {
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let s = call.arg_str(slots::ARG_S);
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&format!("[regexp.matchString] pattern={:?} s_len={}", pattern, s.len()).into());
     let (matched, valid) = match Regex::new(pattern) {
         Ok(re) => (re.is_match(s), true),
         Err(_) => (false, false),

@@ -198,7 +198,8 @@ pub enum BlockReason {
     Io(vo_runtime::io::IoToken),
     /// Waiting for a host-side event (e.g. setTimeout, platform timer).
     /// Fiber resumes at next instruction after wake.
-    HostEvent(u64),
+    /// `delay_ms` is a hint to the platform (e.g. setTimeout ms); 0 = no hint.
+    HostEvent { token: u64, delay_ms: u32 },
     /// Waiting for a host-side async op that produces a result (e.g. fetch Promise).
     /// Fiber re-executes the extern on wake (PC was undone before blocking).
     HostEventReplay(u64),
@@ -430,7 +431,7 @@ impl Fiber {
     
     /// Reset fiber for reuse.
     pub fn reset(&mut self) {
-        self.state = FiberState::Running;
+        self.state = FiberState::Runnable;
         self.sp = 0;
         self.frames.clear();
         self.defer_stack.clear();

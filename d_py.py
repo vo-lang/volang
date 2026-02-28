@@ -224,6 +224,45 @@ def run_playground(build_only: bool = False):
         print(f"\n{Colors.GREEN}Playground stopped{Colors.NC}")
 
 
+STUDIO_WASM_FILE = PROJECT_ROOT / 'studio' / 'wasm' / 'pkg' / 'vo_studio_wasm_bg.wasm'
+
+STUDIO_WASM_SOURCE_CRATES = [
+    'vo-codegen', 'vo-analysis', 'vo-runtime', 'vo-vm', 'vo-common-core',
+    'vo-stdlib', 'vo-web', 'vo-web/runtime-wasm', 'vo-ffi-macro', 'vo-common',
+]
+
+
+def studio_wasm_needs_build() -> bool:
+    """Return True if studio WASM is missing or any source file is newer than it."""
+    if not STUDIO_WASM_FILE.exists():
+        return True
+
+    wasm_mtime = STUDIO_WASM_FILE.stat().st_mtime
+
+    # studio/wasm/src/
+    studio_src = PROJECT_ROOT / 'studio' / 'wasm' / 'src'
+    if get_newest_mtime(studio_src, pattern='*.rs') > wasm_mtime:
+        return True
+
+    # libs/vogui/rust/src/
+    vogui_src = PROJECT_ROOT / 'libs' / 'vogui' / 'rust' / 'src'
+    if get_newest_mtime(vogui_src, pattern='*.rs') > wasm_mtime:
+        return True
+
+    # lang/crates/* dependencies
+    for crate in STUDIO_WASM_SOURCE_CRATES:
+        crate_src = PROJECT_ROOT / 'lang' / 'crates' / crate / 'src'
+        if get_newest_mtime(crate_src, pattern='*.rs') > wasm_mtime:
+            return True
+
+    # lang/stdlib/*.vo — embedded via include_dir!
+    stdlib_dir = PROJECT_ROOT / 'lang' / 'stdlib'
+    if get_newest_mtime(stdlib_dir, pattern='*.vo') > wasm_mtime:
+        return True
+
+    return False
+
+
 def build_studio_wasm():
     """Build vo-studio WASM (studio/wasm)."""
     print(f"{Colors.BOLD}Building vo-studio WASM...{Colors.NC}")
@@ -234,17 +273,17 @@ def build_studio_wasm():
         print(f"{Colors.RED}vo-studio WASM build failed{Colors.NC}")
         sys.exit(1)
 
-    pkg_dir = studio_wasm_dir / 'pkg'
-    wasm_file = pkg_dir / 'vo_studio_bg.wasm'
-    if wasm_file.exists():
-        size_kb = wasm_file.stat().st_size / 1024
+    if STUDIO_WASM_FILE.exists():
+        size_kb = STUDIO_WASM_FILE.stat().st_size / 1024
         print(f"{Colors.GREEN}✓ vo-studio:{Colors.NC} {size_kb:.1f} KB")
 
 
 def run_studio(build_wasm: bool = False, build_only: bool = False):
-    """Optionally build studio WASM and start the studio dev server."""
-    if build_wasm or build_only:
+    """Auto-rebuild studio WASM when stale, then start the dev server."""
+    if build_wasm or build_only or studio_wasm_needs_build():
         build_studio_wasm()
+    else:
+        print(f"{Colors.DIM}studio WASM up-to-date{Colors.NC}")
 
     if build_only:
         return

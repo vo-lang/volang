@@ -238,18 +238,18 @@ impl Scheduler {
     }
 
     /// Block current fiber waiting for a host-side event (e.g. setTimeout).
-    /// Running -> Blocked(HostEvent(token)).
+    /// Running -> Blocked(HostEvent { token, delay_ms }).
     pub fn block_for_host_event(&mut self, token: u64, delay_ms: u32) {
         if let Some(id) = self.current.take() {
             let fiber = &mut self.fibers[id.0 as usize];
-            fiber.state = FiberState::Blocked(BlockReason::HostEvent(token));
+            fiber.state = FiberState::Blocked(BlockReason::HostEvent { token, delay_ms });
             self.blocked_count += 1;
             self.host_event_waiters.push(HostEventWaiter { token, delay_ms, replay: false, fiber_id: id });
         }
     }
 
     /// Block current fiber waiting for a host-side async op result (e.g. fetch Promise).
-    /// The extern's PC was already undone; on wake the extern re-executes.
+    /// The extern's PC was already undone by caller; on wake the extern re-executes.
     /// Running -> Blocked(HostEventReplay(token)).
     pub fn block_for_host_event_replay(&mut self, token: u64) {
         if let Some(id) = self.current.take() {
@@ -341,6 +341,72 @@ impl Scheduler {
             }
         }
         self.wake_fiber(fiber_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_for_host_event_sets_state_and_records_waiter() {
+        let mut scheduler = Scheduler::new();
+        let fid = scheduler.spawn(Fiber::new(0));
+        scheduler.schedule_next().expect("expected runnable fiber");
+
+        scheduler.block_for_host_event(77, 123);
+
+        assert!(scheduler.current.is_none());
+        assert_eq!(scheduler.blocked_count, 1);
+        assert!(scheduler.get_fiber(fid).state == FiberState::Blocked(BlockReason::HostEvent { token: 77, delay_ms: 123 }));
+        assert_eq!(scheduler.host_event_waiters.len(), 1);
+        let waiter = &scheduler.host_event_waiters[0];
+        assert_eq!(waiter.token, 77);
+        assert_eq!(waiter.delay_ms, 123);
+        assert!(!waiter.replay);
+    }
+
+    #[test]
+    fn block_for_host_event_replay_sets_state_and_records_waiter() {
+        let mut scheduler = Scheduler::new();
+        let fid = scheduler.spawn(Fiber::new(0));
+        scheduler.schedule_next().expect("expected runnable fiber");
+
+        scheduler.block_for_host_event_replay(42);
+
+        assert!(scheduler.current.is_none());
+        assert_eq!(scheduler.blocked_count, 1);
+        assert!(scheduler.get_fiber(fid).state == FiberState::Blocked(BlockReason::HostEventReplay(42)));
+        assert_eq!(scheduler.host_event_waiters.len(), 1);
+        assert!(scheduler.host_event_waiters[0].replay);
+    }
+
+    #[test]
+    fn wake_host_event_transitions_to_runnable() {
+        let mut scheduler = Scheduler::new();
+        let fid = scheduler.spawn(Fiber::new(0));
+        scheduler.schedule_next();
+
+        scheduler.block_for_host_event(99, 0);
+        assert_eq!(scheduler.blocked_count, 1);
+        assert!(scheduler.ready_queue.is_empty());
+
+        scheduler.wake_host_event(99);
+        assert_eq!(scheduler.blocked_count, 0);
+        assert!(scheduler.get_fiber(fid).state.is_runnable());
+        assert_eq!(scheduler.ready_queue.len(), 1);
+    }
+
+    #[test]
+    fn wake_host_event_replay_sets_resume_token() {
+        let mut scheduler = Scheduler::new();
+        let fid = scheduler.spawn(Fiber::new(0));
+        scheduler.schedule_next();
+
+        scheduler.block_for_host_event_replay(55);
+        scheduler.wake_host_event(55);
+
+        assert_eq!(scheduler.get_fiber(fid).resume_host_event_token, Some(55));
     }
 }
 
