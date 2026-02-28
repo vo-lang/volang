@@ -17,7 +17,7 @@ use crate::func::{FuncBuilder, StorageKind};
 use crate::type_info::TypeInfoWrapper;
 
 /// Container kind for index operations.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ContainerKind {
     /// Stack-allocated array: base_slot + index * elem_slots
     StackArray { base_slot: u16, elem_slots: u16, len: u16 },
@@ -26,7 +26,7 @@ pub enum ContainerKind {
     /// Slice: SliceGet/SliceSet with elem_bytes and elem_vk
     Slice { elem_bytes: u16, elem_vk: vo_common_core::ValueKind },
     /// Map: MapGet/MapSet with meta encoding
-    Map { key_slots: u16, val_slots: u16, key_may_gc: bool, val_may_gc: bool },
+    Map { key_slots: u16, val_slots: u16, key_slot_types: Vec<SlotType>, val_may_gc: bool },
     /// String: StrIndex (read-only)
     String,
 }
@@ -364,10 +364,10 @@ fn resolve_index_lvalue(
         let (key_type, _) = info.map_key_val_types(container_type);
         let index_reg = crate::expr::compile_map_key_expr(&idx.index, key_type, ctx, func, info)?;
         let (key_slots, val_slots) = info.map_key_val_slots(container_type);
-        let key_may_gc = info.map_key_value_kind(container_type).may_contain_gc_refs();
+        let key_slot_types = info.map_key_slot_types(container_type);
         let val_may_gc = info.map_val_value_kind(container_type).may_contain_gc_refs();
         return Ok(LValue::Index {
-            kind: ContainerKind::Map { key_slots, val_slots, key_may_gc, val_may_gc },
+            kind: ContainerKind::Map { key_slots, val_slots, key_slot_types, val_may_gc },
             container_reg,
             index_reg,
         });
@@ -665,10 +665,10 @@ pub fn emit_lvalue_load(
                 ContainerKind::Slice { elem_bytes, elem_vk } => {
                     func.emit_slice_get(dst, *container_reg, *index_reg, *elem_bytes as usize, *elem_vk, ctx);
                 }
-                ContainerKind::Map { key_slots, val_slots, key_may_gc, .. } => {
+                ContainerKind::Map { key_slots, val_slots, key_slot_types, .. } => {
                     // MapGet: a=dst, b=map, c=meta_and_key
                     let meta = crate::type_info::encode_map_get_meta(*key_slots, *val_slots, false);
-                    let meta_reg = func.alloc_slots(&build_map_meta_key_slot_types(*key_slots, *key_may_gc));
+                    let meta_reg = func.alloc_slots(&build_map_meta_key_slot_types(key_slot_types));
                     let meta_idx = ctx.const_int(meta as i64);
                     func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
                     func.emit_copy(meta_reg + 1, *index_reg, *key_slots);
@@ -735,15 +735,16 @@ pub fn emit_lvalue_store(
                 ContainerKind::Slice { elem_bytes, elem_vk } => {
                     func.emit_slice_set(*container_reg, *index_reg, src, *elem_bytes as usize, *elem_vk, ctx);
                 }
-                ContainerKind::Map { key_slots, val_slots, key_may_gc, val_may_gc } => {
+                ContainerKind::Map { key_slots, val_slots, key_slot_types, val_may_gc } => {
                     // MapSet: a=map, b=meta_and_key, c=val
                     // flags: bit0 = key may contain GcRef, bit1 = val may contain GcRef
                     let meta = crate::type_info::encode_map_set_meta(*key_slots, *val_slots);
-                    let meta_and_key_reg = func.alloc_slots(&build_map_meta_key_slot_types(*key_slots, *key_may_gc));
+                    let meta_and_key_reg = func.alloc_slots(&build_map_meta_key_slot_types(key_slot_types));
                     let meta_idx = ctx.const_int(meta as i64);
                     func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
                     func.emit_copy(meta_and_key_reg + 1, *index_reg, *key_slots);
-                    let flags = (*key_may_gc as u8) | ((*val_may_gc as u8) << 1);
+                    let key_may_gc = key_slot_types.iter().any(|st| matches!(st, SlotType::GcRef | SlotType::Interface0));
+                    let flags = (key_may_gc as u8) | ((*val_may_gc as u8) << 1);
                     func.emit_with_flags(Opcode::MapSet, flags, *container_reg, meta_and_key_reg, src);
                 }
                 ContainerKind::String => {
@@ -777,14 +778,14 @@ pub fn emit_lvalue_store(
 pub fn snapshot_lvalue_index(lv: &mut LValue, func: &mut FuncBuilder) {
     match lv {
         LValue::Index { kind, index_reg, .. } => {
-            let key_slots = match kind {
-                ContainerKind::Map { key_slots, .. } => *key_slots,
-                ContainerKind::StackArray { elem_slots, .. } => 1.min(*elem_slots),
-                _ => 1,
+            let (key_slots, key_types) = match kind {
+                ContainerKind::Map { key_slots, key_slot_types, .. } => (*key_slots, key_slot_types.clone()),
+                ContainerKind::StackArray { elem_slots, .. } => (1.min(*elem_slots), vec![SlotType::Value]),
+                _ => (1, vec![SlotType::Value]),
             };
             // Only snapshot if index_reg might be a variable slot that could be modified
             // Always copy to be safe - the cost is minimal (one copy instruction)
-            let tmp = func.alloc_slots(&vec![SlotType::Value; key_slots as usize]);
+            let tmp = func.alloc_slots(&key_types);
             func.emit_copy(tmp, *index_reg, key_slots);
             *index_reg = tmp;
         }
@@ -800,11 +801,10 @@ pub fn snapshot_lvalue_index(lv: &mut LValue, func: &mut FuncBuilder) {
 
 // === Internal helpers ===
 
-/// Build slot types for map meta + key: [Value (meta), key_slots...]
-fn build_map_meta_key_slot_types(key_slots: u16, key_may_gc: bool) -> Vec<SlotType> {
-    let key_slot_type = if key_may_gc { SlotType::GcRef } else { SlotType::Value };
+/// Build slot types for map meta + key: [Value (meta), key_slot_types...]
+fn build_map_meta_key_slot_types(key_slot_types: &[SlotType]) -> Vec<SlotType> {
     let mut slot_types = vec![SlotType::Value]; // meta
-    slot_types.extend(std::iter::repeat(key_slot_type).take(key_slots as usize));
+    slot_types.extend_from_slice(key_slot_types);
     slot_types
 }
 

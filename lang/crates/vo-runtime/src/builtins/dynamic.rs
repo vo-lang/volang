@@ -1350,7 +1350,8 @@ fn pack_returns(
             let boxed = call.box_to_interface(actual_rttid, actual_vk, raw_slots);
             call.ret_any(dst_off, boxed);
         } else if (expected_vk == ValueKind::Struct || expected_vk == ValueKind::Array) && actual_width > 2 {
-            let new_ref = call.alloc_and_copy_slots(raw_slots);
+            let struct_meta_id = call.get_struct_meta_id_from_rttid(actual_rttid).unwrap_or(0);
+            let new_ref = call.alloc_and_copy_slots(raw_slots, struct_meta_id);
             call.ret_u64(dst_off, 0);
             call.ret_u64(dst_off + 1, new_ref as u64);
         } else {

@@ -232,7 +232,8 @@ pub(crate) fn compile_for_range(
             _ => (crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?, false, 0),
         };
         let evk = sc.info.type_value_kind(et);
-        let key_info = range_var_info(&mut sc, key.as_ref(), et, define)?;
+        let int_type = sc.info.int_type();
+        let key_info = range_var_info(&mut sc, key.as_ref(), int_type, define)?;
         let val_info = range_var_info(&mut sc, value.as_ref(), et, define)?;
         let ls = sc.func.alloc_slots(&[SlotType::Value]);
         sc.func.emit_op(Opcode::LoadInt, ls, len as u16, (len >> 16) as u16);
@@ -262,7 +263,8 @@ pub(crate) fn compile_for_range(
         let et = sc.info.slice_elem_type(range_type);
         let evk = sc.info.type_value_kind(et);
         let reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
-        let key_info = range_var_info(&mut sc, key.as_ref(), et, define)?;
+        let int_type = sc.info.int_type();
+        let key_info = range_var_info(&mut sc, key.as_ref(), int_type, define)?;
         let val_info = range_var_info(&mut sc, value.as_ref(), et, define)?;
         let ls = sc.func.alloc_slots(&[SlotType::Value]);
         sc.func.emit_op(Opcode::SliceLen, ls, reg, 0);
@@ -343,7 +345,6 @@ pub(crate) fn compile_for_range(
         
     } else if sc.info.is_map(range_type) {
         // Map iteration using stateful iterator
-        const MAP_ITER_SLOTS: usize = vo_runtime::objects::map::MAP_ITER_SLOTS;
         
         let map_reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
         let (kn, vn) = sc.info.map_key_val_slots(range_type);
@@ -351,7 +352,14 @@ pub(crate) fn compile_for_range(
         let key_info = range_var_info(&mut sc, key.as_ref(), kt, define)?;
         let val_info = range_var_info(&mut sc, value.as_ref(), vt, define)?;
         
-        let iter_slot = sc.func.alloc_slots(&[SlotType::Value; MAP_ITER_SLOTS]);
+        // Dedicated contiguous buffer for MapIterNext output.
+        // MapIterNext writes key+value contiguously to inst.a, so the buffer
+        // must have correct slot_types for BOTH key and value portions.
+        let mut iter_kv_types = sc.info.type_slot_types(kt);
+        iter_kv_types.extend(sc.info.type_slot_types(vt));
+        let iter_kv_slot = sc.func.alloc_slots(&iter_kv_types);
+        
+        let iter_slot = sc.func.alloc_slots(&vo_runtime::objects::map::MAP_ITER_SLOT_TYPES);
         let ok_slot = sc.func.alloc_slots(&[SlotType::Value]);
         
         // MapIterInit: a=iter_slot, b=map_reg
@@ -362,8 +370,8 @@ pub(crate) fn compile_for_range(
         let loop_start = sc.func.current_pc();
         sc.func.set_loop_start(loop_start);
         
-        // MapIterNext: a=key_slot, b=iter_slot, c=ok_slot, flags=kn|(vn<<4)
-        sc.func.emit_with_flags(Opcode::MapIterNext, (kn as u8) | ((vn as u8) << 4), key_info.slot, iter_slot, ok_slot);
+        // MapIterNext: a=iter_kv_slot, b=iter_slot, c=ok_slot, flags=kn|(vn<<4)
+        sc.func.emit_with_flags(Opcode::MapIterNext, (kn as u8) | ((vn as u8) << 4), iter_kv_slot, iter_slot, ok_slot);
         
         // if !ok { goto end }
         let end_jump = sc.func.emit_jump(Opcode::JumpIfNot, ok_slot);
@@ -372,16 +380,20 @@ pub(crate) fn compile_for_range(
         emit_range_var_alloc(sc.func, &key_info);
         emit_range_var_alloc(sc.func, &val_info);
         
-        // Store key to escaped variable if needed
+        // Copy key from buffer to key variable slot
         if key.is_some() {
+            if key_info.slot != iter_kv_slot {
+                if kn == 1 { sc.func.emit_op(Opcode::Copy, key_info.slot, iter_kv_slot, 0); }
+                else { sc.func.emit_with_flags(Opcode::CopyN, kn as u8, key_info.slot, iter_kv_slot, kn); }
+            }
             emit_range_var_store(sc.ctx, sc.func, sc.info, &key_info)?;
         }
         
-        // Copy value to val_info.slot if needed (value is written at key_info.slot + kn)
+        // Copy value from buffer to value variable slot
         if value.is_some() {
-            if val_info.slot != key_info.slot + kn {
-                if vn == 1 { sc.func.emit_op(Opcode::Copy, val_info.slot, key_info.slot + kn, 0); }
-                else { sc.func.emit_with_flags(Opcode::CopyN, vn as u8, val_info.slot, key_info.slot + kn, 0); }
+            if val_info.slot != iter_kv_slot + kn {
+                if vn == 1 { sc.func.emit_op(Opcode::Copy, val_info.slot, iter_kv_slot + kn, 0); }
+                else { sc.func.emit_with_flags(Opcode::CopyN, vn as u8, val_info.slot, iter_kv_slot + kn, vn); }
             }
             emit_range_var_store(sc.ctx, sc.func, sc.info, &val_info)?;
         }

@@ -19,7 +19,7 @@ use crate::gc::{Gc, GcRef};
 use crate::slot::{ptr_to_slot, slot_to_ptr, Slot, SLOT_BYTES};
 use crate::objects::string;
 use vo_common_core::bytecode::Module;
-use vo_common_core::types::{ValueKind, ValueMeta};
+use vo_common_core::types::{SlotType, ValueKind, ValueMeta};
 
 use super::compare::{deep_eq_struct_inline, deep_hash_struct_inline, iface_eq, iface_hash};
 
@@ -286,6 +286,26 @@ pub struct MapIterator {
 pub const MAP_ITER_SLOTS: usize = core::mem::size_of::<MapIterator>() / SLOT_BYTES;
 const _: () = assert!(core::mem::size_of::<MapIterator>() == MAP_ITER_SLOTS * SLOT_BYTES);
 const _: () = assert!(MAP_ITER_SLOTS == 7);
+
+/// Slot types for MapIterator — single source of truth for codegen and JIT.
+///
+/// Layout:
+///   [0] tag + pad + generation  (Value)
+///   [1] current_index           (Value)
+///   [2] _reserved[0]            (GcRef — StringKeyMap stores key GcRef here)
+///   [3] _reserved[1]            (Value)
+///   [4] _reserved[2]            (Value)
+///   [5] _reserved[3]            (Value)
+///   [6] map_ref                 (GcRef — always points to the map being iterated)
+pub const MAP_ITER_SLOT_TYPES: [SlotType; MAP_ITER_SLOTS] = [
+    SlotType::Value,  // tag + pad + generation
+    SlotType::Value,  // current_index
+    SlotType::GcRef,  // _reserved[0]: StringKeyMap key GcRef
+    SlotType::Value,  // _reserved[1]
+    SlotType::Value,  // _reserved[2]
+    SlotType::Value,  // _reserved[3]
+    SlotType::GcRef,  // map_ref
+];
 
 const TAG_SINGLE_KEY: u8 = 0;
 const TAG_MULTI_KEY: u8 = 1;

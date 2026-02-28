@@ -188,8 +188,6 @@ const PS_EXITED: usize = 2;
 const PS_SIGNALED: usize = 3;
 #[cfg(feature = "std")]
 const PS_SIGNAL: usize = 4;
-#[cfg(feature = "std")]
-const PS_NUM_SLOTS: u16 = 5;
 
 #[cfg(feature = "std")]
 fn write_process_state(
@@ -197,7 +195,7 @@ fn write_process_state(
     pid: i32,
     status: &std::process::ExitStatus,
 ) -> GcRef {
-    let state = call.gc_alloc(PS_NUM_SLOTS, &[]);
+    let state = call.gc_alloc_struct("os/exec.ProcessState");
     unsafe {
         Gc::write_slot(state, PS_PID, pid as u64);
         Gc::write_slot(state, PS_EXIT_CODE, status.code().unwrap_or(-1) as u64);

@@ -155,8 +155,7 @@ fn write_io_error(call: &mut ExternCallContext, ret_slot: u16, err: std::io::Err
 
 #[cfg(feature = "std")]
 fn metadata_to_file_info(call: &mut ExternCallContext, name: &str, meta: &fs::Metadata) -> GcRef {
-    let slots = 5u16;
-    let file_info = call.gc_alloc(slots, &[]);
+    let file_info = call.gc_alloc_struct("os.FileInfo");
     let name_ref = call.alloc_str(name);
     let size = meta.len() as i64;
     let mut mode = meta.permissions().mode();

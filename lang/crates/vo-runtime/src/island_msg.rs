@@ -226,9 +226,9 @@ fn detect_port_typed(slot: Slot, idx: u16, is_arg: bool, value_kind: ValueKind) 
     let header = Gc::header(gcref);
     
     // Determine if direct port or boxed port, get the actual port GcRef
-    let (port_ref, is_boxed) = if header.value_kind() == ValueKind::Port {
+    let (port_ref, is_boxed) = if header.kind() == ValueKind::Port {
         (gcref, false)
-    } else if header.value_kind() == ValueKind::Struct && header.slots == 1 {
+    } else if header.kind() == ValueKind::Struct && header.slots == 1 {
         let inner = unsafe { Gc::read_slot(gcref, 0) };
         if inner == 0 { return None; }
         (inner as GcRef, true)

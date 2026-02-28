@@ -833,7 +833,7 @@ fn write_typed_value<'a, R: FormatReader<'a>>(
                     let meta_id = get_struct_meta_id(call, inner_rttid)?;
                     let meta = call.struct_meta(meta_id as usize).ok_or("pointed meta not found")?;
                     let slot_count = meta.slot_count();
-                    let new_struct = call.gc_alloc(slot_count, &[]);
+                    let new_struct = call.gc_alloc_raw(slot_count, meta_id);
                     unmarshal_struct_from_object::<R>(call, new_struct, inner_rttid, obj)?;
                     unsafe { *(ptr as *mut u64) = new_struct as u64; }
                 }

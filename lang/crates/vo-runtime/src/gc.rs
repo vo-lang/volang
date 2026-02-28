@@ -26,8 +26,11 @@ use vo_common_core::types::{ValueKind, ValueMeta};
 /// - value_kind (8 bits): ValueKind enum
 ///
 /// meta_id meaning depends on kind:
-/// - Struct, Pointer: struct_metas[] index
-/// - Array: element's meta_id
+/// - Struct: struct_metas[] index (for field layout / GC scan)
+/// - Pointer: struct_metas[] index of the *pointee* struct (for PtrNew-created
+///   objects that hold the full struct data). For heap-boxed pointer variables
+///   (1-slot GcRef container), meta_id = 0 (ref box).
+/// - Array: element's ValueMeta (elem_kind + elem_meta_id)
 /// - Interface: interface_metas[] index
 /// - Others: 0
 #[repr(C)]
@@ -141,11 +144,6 @@ impl GcHeader {
     }
 
     #[inline]
-    pub fn value_kind(&self) -> ValueKind {
-        self.kind()
-    }
-
-    #[inline]
     pub fn value_meta(&self) -> ValueMeta {
         self.value_meta
     }
@@ -179,6 +177,7 @@ pub struct Gc {
     pause: u16,              // Pause multiplier (default 200 = 2x)
     stepmul: u16,            // Step multiplier (default 100)
     stepsize: usize,         // Bytes per step (default 8KB)
+    
 }
 
 impl Gc {
@@ -340,22 +339,28 @@ impl Gc {
     }
 
     /// Mark an object as gray (pending scan).
+    #[inline]
     pub fn mark_gray(&mut self, obj: GcRef) {
         if obj.is_null() {
             return;
         }
-        // TODO: These guards mask a real bug where map iterator state or other
-        // non-GcRef values occupy GcRef-typed stack slots during GC root scanning.
-        // Root cause: slot_types don't account for runtime-reused slots (e.g., map
-        // iterator state overwriting typed locals). Fix the slot_types, then remove.
         if (obj as usize) & (SLOT_BYTES - 1) != 0 || (obj as usize) < 4096 {
-            return;
+            self.mark_gray_fail(obj);
         }
         let header = Self::header_mut(obj);
         if header.is_white() {
             header.set_gray();
             self.gray.push(obj);
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn mark_gray_fail(&self, obj: GcRef) -> ! {
+        panic!(
+            "mark_gray: invalid GcRef {:p} (raw={:#x}) — non-GcRef value in GcRef-typed slot",
+            obj, obj as usize
+        );
     }
 
     /// Write barrier for incremental GC (backward barrier).
@@ -368,10 +373,6 @@ impl Gc {
             return;
         }
         if parent.is_null() || child.is_null() {
-            return;
-        }
-        // TODO: Same slot_types bug as mark_gray — remove when root cause is fixed.
-        if (parent as usize) & (SLOT_BYTES - 1) != 0 || (child as usize) & (SLOT_BYTES - 1) != 0 {
             return;
         }
         let p_header = Self::header(parent);
@@ -409,59 +410,6 @@ impl Gc {
         self.debt > 0
     }
 
-    /// Run garbage collection (legacy full GC, kept for compatibility).
-    /// - `scan_object`: marks children of an object (mark phase)
-    /// - `finalize_object`: releases native resources before dealloc (sweep phase)
-    pub fn collect<S, F>(&mut self, mut scan_object: S, mut finalize_object: F)
-    where
-        S: FnMut(&mut Gc, GcRef),
-        F: FnMut(GcRef),
-    {
-        // Mark phase
-        while let Some(obj) = self.gray.pop() {
-            let header = Self::header_mut(obj);
-            if header.is_gray() {
-                header.set_black();
-                scan_object(self, obj);
-            }
-        }
-        
-        // Process grayagain
-        while let Some(obj) = self.grayagain.pop() {
-            let header = Self::header_mut(obj);
-            header.set_black();
-            scan_object(self, obj);
-        }
-
-        // Sweep phase
-        let mut new_objects = Vec::new();
-        let mut freed_bytes = 0;
-
-        for obj in self.all_objects.drain(..) {
-            let header = Self::header(obj);
-            if header.is_black() {
-                Self::header_mut(obj).set_white(self.current_white);
-                new_objects.push(obj);
-            } else {
-                let size_bytes = Self::object_size_bytes(obj);
-                finalize_object(obj);
-                freed_bytes += size_bytes;
-                let raw_ptr = unsafe { (obj as *mut u8).sub(GcHeader::SIZE) };
-                let layout =
-                    core::alloc::Layout::from_size_align(size_bytes, 8).unwrap();
-                unsafe { heap_alloc::dealloc(raw_ptr, layout) };
-            }
-        }
-
-        self.all_objects = new_objects;
-        self.total_bytes -= freed_bytes;
-        self.estimate = self.total_bytes;
-        self.debt = 0;
-        
-        // Flip white for next cycle
-        self.current_white ^= WHITE_BITS;
-    }
-    
     /// Incremental GC step. Returns work done (bytes processed).
     /// Call this when debt > 0, passing scan_roots and scan_object callbacks.
     pub fn step<R, S, F>(

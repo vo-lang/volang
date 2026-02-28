@@ -267,8 +267,10 @@ fn compile_builtin_call_impl(
             let ptr_type_key = info.expr_type(expr.id);
             let type_key = info.pointer_elem(ptr_type_key);
             let slots = info.type_slot_count(type_key);
-            // PtrNew: a=dst, b=0 (zero init), flags=slots
-            func.emit_with_flags(Opcode::PtrNew, slots as u8, dst, 0, 0);
+            let meta_idx = ctx.get_or_create_value_meta(type_key, info);
+            let meta_reg = func.alloc_slots(&[SlotType::Value]);
+            func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+            func.emit_with_flags(Opcode::PtrNew, slots as u8, dst, meta_reg, 0);
         }
         "append" => {
             // append(slice, elem...) - variadic, supports multiple elements

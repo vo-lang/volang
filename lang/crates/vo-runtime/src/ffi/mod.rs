@@ -755,11 +755,41 @@ impl<'a> ExternCallContext<'a> {
         string::from_rust_str(self.gc, s)
     }
 
-    /// Allocate a struct on the heap.
+    /// Allocate a named struct on the heap by its fully qualified Vo type name
+    /// (e.g. "os.FileInfo", "net.TCPAddr", "os/exec.ProcessState").
+    ///
+    /// Resolves struct_meta_id and slot count from the module's type system.
+    /// This is the canonical way to create struct GC objects from stdlib externs.
+    /// Panics if the type is not found (stdlib .vo out of sync with Rust extern).
+    pub fn gc_alloc_struct(&mut self, type_name: &str) -> GcRef {
+        let (struct_meta_id, slot_count) = self.resolve_named_struct(type_name);
+        self.gc_alloc_raw(slot_count, struct_meta_id)
+    }
+
+    /// Resolve a named struct type's (struct_meta_id, slot_count) by name.
+    fn resolve_named_struct(&self, type_name: &str) -> (u32, u16) {
+        for meta in &self.module.named_type_metas {
+            if meta.name == type_name {
+                let struct_meta_id = meta.underlying_meta.meta_id();
+                let slot_count = self.module.struct_metas
+                    .get(struct_meta_id as usize)
+                    .map(|sm| sm.slot_count())
+                    .unwrap_or_else(|| panic!(
+                        "gc_alloc_struct: type '{}' has struct_meta_id={} but no StructMeta entry",
+                        type_name, struct_meta_id
+                    ));
+                return (struct_meta_id, slot_count);
+            }
+        }
+        panic!("gc_alloc_struct: type '{}' not found in module — stdlib .vo and Rust extern out of sync", type_name);
+    }
+
+    /// Low-level struct allocation with explicit struct_meta_id and slot count.
+    /// Prefer `gc_alloc_struct` for named types. Use this only when meta_id
+    /// is resolved from rttid (e.g. dynamic call boxing).
     #[inline]
-    pub fn gc_alloc(&mut self, slots: u16, _slot_types: &[crate::SlotType]) -> GcRef {
-        // Use generic struct meta for dynamic field access
-        let value_meta = crate::ValueMeta::new(0, crate::ValueKind::Struct);
+    pub fn gc_alloc_raw(&mut self, slots: u16, struct_meta_id: u32) -> GcRef {
+        let value_meta = crate::ValueMeta::new(struct_meta_id, crate::ValueKind::Struct);
         self.gc.alloc(value_meta, slots)
     }
 
@@ -800,7 +830,10 @@ impl<'a> ExternCallContext<'a> {
 
         match vk {
             ValueKind::Struct => {
-                let new_ref = self.alloc_and_copy_slots(raw_slots);
+                // Resolve struct_meta_id from rttid so the GC object gets correct
+                // slot_types for scanning (prevents misinterpreting int as GcRef).
+                let struct_meta_id = self.get_struct_meta_id_from_rttid(rttid).unwrap_or(0);
+                let new_ref = self.alloc_and_copy_slots(raw_slots, struct_meta_id);
                 let slot0 = interface::pack_slot0(0, rttid, vk);
                 InterfaceSlot::new(slot0, new_ref as u64)
             }
@@ -844,10 +877,10 @@ impl<'a> ExternCallContext<'a> {
     }
 
     /// Allocate a GcRef and copy raw slots into it.
-    /// Used for boxing large structs/arrays to heap.
-    pub fn alloc_and_copy_slots(&mut self, raw_slots: &[u64]) -> GcRef {
+    /// `struct_meta_id` is the StructMeta index for correct GC scanning.
+    pub fn alloc_and_copy_slots(&mut self, raw_slots: &[u64], struct_meta_id: u32) -> GcRef {
         let slot_count = raw_slots.len();
-        let new_ref = self.gc_alloc(slot_count as u16, &[]);
+        let new_ref = self.gc_alloc_raw(slot_count as u16, struct_meta_id);
         for (i, &val) in raw_slots.iter().enumerate() {
             unsafe { Gc::write_slot(new_ref, i, val) };
         }

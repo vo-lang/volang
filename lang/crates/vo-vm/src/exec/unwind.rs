@@ -725,6 +725,9 @@ fn call_defer_entry(
     let total_slots = (func.local_slots as usize).max(arg_space);
     let new_sp = args_start + total_slots;
     fiber.ensure_capacity(new_sp);
+    // Zero frame slots: stale values in GcRef-typed slots cause GC segfault.
+    // Args are copied on top of the zeroed region immediately after.
+    fiber.stack[args_start..new_sp].fill(0);
     fiber.sp = new_sp;
     let stack = fiber.stack_ptr();
 

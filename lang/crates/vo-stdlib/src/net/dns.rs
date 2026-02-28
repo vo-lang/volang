@@ -246,9 +246,8 @@ fn alloc_bytes(gc: &mut Gc, bytes: &[u8]) -> GcRef {
 }
 
 fn alloc_socket_addr(call: &mut ExternCallContext, addr: &std::net::SocketAddr) -> GcRef {
-    // TCPAddr/UDPAddr struct: { IP []byte, Port int, Zone string }
-    // 3 slots total (IP is slice = 1 slot ref, Port = 1 slot, Zone = 1 slot ref)
-    let struct_ref = call.gc_alloc(3, &[]);
+    // TCPAddr/UDPAddr share layout: { IP []byte, Port int, Zone string }
+    let struct_ref = call.gc_alloc_struct("net.TCPAddr");
     
     let ip_bytes = match addr.ip() {
         std::net::IpAddr::V4(v4) => v4.octets().to_vec(),

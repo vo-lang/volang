@@ -1097,7 +1097,7 @@ fn compile_func_body(
     
     // Now emit PtrNew for all escaped returns (after all GcRef slots are allocated contiguously)
     for er in escaped_returns {
-        let meta_idx = ctx.get_or_create_value_meta(er.result_type, info);
+        let meta_idx = ctx.get_boxing_meta(er.result_type, info);
         let meta_reg = builder.alloc_slots(&[vo_runtime::SlotType::Value]);
         builder.emit_op(vo_vm::instruction::Opcode::LoadConst, meta_reg, meta_idx, 0);
         builder.emit_with_flags(vo_vm::instruction::Opcode::PtrNew, er.slots as u8, er.gcref_slot, meta_reg, 0);

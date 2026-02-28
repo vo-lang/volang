@@ -533,7 +533,7 @@ pub fn compile_func_lit(
     
     // Emit PtrNew for escaped returns
     for er in escaped_returns {
-        let meta_idx = ctx.get_or_create_value_meta(er.result_type, info);
+        let meta_idx = ctx.get_boxing_meta(er.result_type, info);
         let meta_reg = closure_builder.alloc_slots(&[SlotType::Value]);
         closure_builder.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         closure_builder.emit_with_flags(Opcode::PtrNew, er.slots as u8, er.gcref_slot, meta_reg, 0);

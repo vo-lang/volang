@@ -827,9 +827,27 @@ impl CodegenContext {
 
     /// Compute raw ValueMeta value for a type.
     /// Format: [meta_id:24 | value_kind:8]
-    /// - Struct/Pointer: meta_id = struct_meta_id (index into struct_metas[])
-    /// - Interface: meta_id = iface_meta_id (index into interface_metas[])
+    /// - Struct: meta_id = struct_metas[] index of the underlying struct
+    /// - Pointer: meta_id = struct_metas[] index of the *pointee* struct
+    ///   (for PtrNew objects that hold full struct data; heap-boxed pointer
+    ///   variables use get_boxing_meta which returns ref box meta_id=0)
+    /// - Interface: meta_id = interface_metas[] index
     /// - Others: meta_id = 0
+    fn ensure_struct_meta_id(
+        &mut self,
+        struct_type: TypeKey,
+        info: &crate::type_info::TypeInfoWrapper,
+    ) -> u32 {
+        let canonical = vo_analysis::typ::underlying_type(struct_type, &info.project.tc_objs);
+        if let Some(id) = self.get_struct_meta_id(canonical) {
+            return id;
+        }
+        // Materialize anonymous/nested struct metadata on demand.
+        self.intern_type_key(canonical, info);
+        self.get_struct_meta_id(canonical)
+            .unwrap_or_else(|| panic!("compute_value_meta_raw: missing struct meta for type {:?}", canonical))
+    }
+
     pub fn compute_value_meta_raw(
         &mut self,
         type_key: TypeKey,
@@ -839,8 +857,12 @@ impl CodegenContext {
         
         let vk = info.type_value_kind(type_key);
         let meta_id: u32 = match vk {
-            ValueKind::Struct | ValueKind::Pointer => self.get_struct_meta_id(type_key).unwrap_or(0),
-            ValueKind::Interface => self.get_interface_meta_id(type_key).unwrap_or(0),
+            ValueKind::Struct => self.ensure_struct_meta_id(type_key, info),
+            ValueKind::Pointer => {
+                let base = info.pointer_base(type_key);
+                self.ensure_struct_meta_id(base, info)
+            }
+            ValueKind::Interface => info.get_or_create_interface_meta_id(type_key, self),
             _ => 0,
         };
         (meta_id << 8) | (vk as u32)
@@ -951,6 +973,7 @@ impl CodegenContext {
         ret_slots: u16,
         local_slots: u16,
         code: Vec<vo_vm::instruction::Instruction>,
+        slot_types: Vec<vo_runtime::SlotType>,
         cache_key: MethodValueWrapperKey,
     ) -> u32 {
         use vo_vm::bytecode::FunctionDef;
@@ -971,7 +994,7 @@ impl CodegenContext {
             has_calls,
             has_call_extern,
             code,
-            slot_types: Vec::new(),
+            slot_types,
             capture_types: Vec::new(),
             param_types: Vec::new(),
         };
@@ -1038,7 +1061,11 @@ impl CodegenContext {
         let suffix = if needs_deref { "" } else { "_ptr" };
         let wrapper_name = format!("__method_value{}_{}", suffix, method_func_id);
         let local_slots = wrapper_param_slots + (param_slots + ret_slots).max(1);
-        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, cache_key);
+        // slot_types: [GcRef(closure_ref), params..., locals...]
+        // Capture 0 = GcRef (pointer to boxed receiver)
+        let mut slot_types = vec![vo_runtime::SlotType::GcRef]; // closure ref
+        slot_types.extend(std::iter::repeat(vo_runtime::SlotType::Value).take((local_slots - 1) as usize));
+        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, slot_types, cache_key);
         Ok(wrapper_id)
     }
     
@@ -1080,7 +1107,15 @@ impl CodegenContext {
         
         let wrapper_name = format!("__method_value_iface_{}_{}", method_name, method_idx);
         let local_slots = wrapper_param_slots + iface_slots + (param_slots + ret_slots).max(1);
-        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, cache_key);
+        // slot_types: [GcRef(closure_ref), Interface0, Interface1, params..., locals...]
+        // Captures 0-1 = interface (itab + data)
+        let mut slot_types = vec![
+            vo_runtime::SlotType::GcRef,       // closure ref
+            vo_runtime::SlotType::Interface0,   // capture 0: itab
+            vo_runtime::SlotType::Interface1,   // capture 1: data
+        ];
+        slot_types.extend(std::iter::repeat(vo_runtime::SlotType::Value).take((local_slots as usize).saturating_sub(3)));
+        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, slot_types, cache_key);
         Ok(wrapper_id)
     }
     
@@ -1125,7 +1160,11 @@ impl CodegenContext {
         
         let wrapper_name = format!("__method_value_embed_iface_{}_{}", method_name, method_idx);
         let local_slots = wrapper_param_slots + 1 + iface_slots + (param_slots + ret_slots).max(1);
-        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, cache_key);
+        // slot_types: [GcRef(closure_ref), GcRef(capture: boxed struct ptr), ...]
+        // Capture 0 = GcRef (pointer to boxed outer struct)
+        let mut slot_types = vec![vo_runtime::SlotType::GcRef; 2]; // closure ref + capture
+        slot_types.extend(std::iter::repeat(vo_runtime::SlotType::Value).take((local_slots as usize).saturating_sub(2)));
+        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, slot_types, cache_key);
         Ok(wrapper_id)
     }
 

@@ -1192,6 +1192,8 @@ impl Vm {
                             let local_slots = func_def.local_slots as usize;
                             let new_sp = new_bp + local_slots;
                             fiber.ensure_capacity(new_sp);
+                            // Zero frame slots: stale values in GcRef-typed slots cause GC segfault.
+                            fiber.stack[new_bp..new_sp].fill(0);
                             
                             // Use call_layout for correct slot placement (matches exec_call_closure)
                             let layout = vo_runtime::objects::closure::call_layout(

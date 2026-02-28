@@ -58,9 +58,13 @@ pub(crate) fn compile_select(
                 let elem_slots = info.chan_elem_slots(chan_type);
                 let has_ok = recv.lhs.len() > 1;
                 
-                // Allocate destination: elem slots + optional ok bool
-                let total_slots = elem_slots + if has_ok { 1 } else { 0 };
-                let dst_reg = func.alloc_slots(&vec![SlotType::Value; total_slots as usize]);
+                // Allocate destination with correct slot types for GC scanning
+                let elem_type = info.chan_elem_type(chan_type);
+                let mut recv_types = info.type_slot_types(elem_type);
+                if has_ok {
+                    recv_types.push(SlotType::Value); // ok bool
+                }
+                let dst_reg = func.alloc_slots(&recv_types);
                 
                 let flags = ((elem_slots as u8) << 1) | (has_ok as u8);
                 func.emit_with_flags(Opcode::SelectRecv, flags, dst_reg, chan_reg, case_idx as u16);

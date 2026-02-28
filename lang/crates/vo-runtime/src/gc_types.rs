@@ -7,7 +7,7 @@ use crate::gc::{scan_slots_by_types, Gc, GcRef};
 use crate::objects::{array, channel, closure, interface, map, port, queue_state, slice};
 use crate::slot::{byte_offset_for_slots, slot_to_ptr, Slot, SLOT_BYTES};
 use vo_common_core::bytecode::StructMeta;
-use vo_common_core::types::{SlotType, ValueKind};
+use vo_common_core::types::{SlotType, ValueKind, ValueMeta};
 
 
 /// Type-safe write barrier for mixed-slot values.
@@ -84,7 +84,10 @@ pub fn typed_write_barrier_by_meta(
 }
 
 /// Scan a GC object and mark its children.
-pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
+///
+/// `func_slot_types`: indexed by func_id, each entry is the slot_types for that function.
+/// Used to scan closure captures with correct types (Interface0/Interface1 vs GcRef).
+pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_slot_types: &[&[SlotType]]) {
     let gc_header = Gc::header(obj);
     
     match gc_header.kind() {
@@ -104,13 +107,13 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
         }
 
         ValueKind::Closure => {
-            for i in 0..closure::capture_count(obj) {
-                let cap = closure::get_capture(obj, i);
-                if cap != 0 { gc.mark_gray(cap as GcRef); }
-            }
+            scan_closure(gc, obj, func_slot_types);
         }
 
         ValueKind::Map => {
+            // PtrNew creates heap-boxed map variables with kind=Map but slots=1
+            // (single GcRef to the real map). Only scan as map if it's a real
+            // MapData object (DATA_SLOTS=3). Otherwise scan slots as GcRefs.
             if gc_header.slots == map::DATA_SLOTS {
                 scan_map(gc, obj, struct_metas);
             } else {
@@ -126,8 +129,58 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
             }
         }
 
+        // Port: state is Arc<Mutex<>> on Rust heap, not a GC object.
+        // Elements live in QueueState's Vecs, also Rust heap. No GC refs to scan.
+        // Island: id only, no GC refs.
+        // Primitives: no GC refs.
         _ => {}
     }
+}
+
+/// Scan closure captures using the wrapper function's slot_types.
+///
+/// Closure layout: [ClosureHeader (1 slot)] [capture_0] [capture_1] ...
+/// For regular closures, all captures are GcRef (pointers to heap-boxed escaped vars).
+/// For method value closures, captures may include interface data (itab + data).
+/// The wrapper function's slot_types[0..capture_count] describes the capture layout:
+/// slot 0 = closure ref (GcRef), so captures start at slot_types[1..].
+fn scan_closure(gc: &mut Gc, obj: GcRef, func_slot_types: &[&[SlotType]]) {
+    let func_id = closure::func_id(obj);
+    let cap_count = closure::capture_count(obj);
+    if cap_count == 0 { return; }
+
+    let slot_types = func_slot_types.get(func_id as usize)
+        .unwrap_or_else(|| panic!("scan_closure: missing slot_types for func_id {}", func_id));
+    
+    // Wrapper function slot_types: [closure_ref(GcRef), params..., locals...]
+    // Captures are stored at closure object offsets [0..cap_count),
+    // but their types correspond to what ClosureGet reads into the function body.
+    // For closure functions, slot 0 is the closure ref itself.
+    // The captures are read by ClosureGet instructions and their types are
+    // determined by how the wrapper uses them.
+    //
+    // If we have slot_types and the function is a closure (slot_types[0] = GcRef for closure ref),
+    // then captures correspond to what ClosureGet reads. For method value wrappers with
+    // interface receivers, capture 0 = Interface0, capture 1 = Interface1.
+    //
+    if cap_count + 1 > slot_types.len() {
+        panic!(
+            "scan_closure: capture layout overflow for func_id {} (captures={}, slot_types={})",
+            func_id,
+            cap_count,
+            slot_types.len(),
+        );
+    }
+    
+    // Use slot_types[1..1+cap_count] for capture types (slot 0 = closure ref)
+    let capture_slots = unsafe {
+        core::slice::from_raw_parts(
+            (obj as *const u64).add(closure::HEADER_SLOTS),
+            cap_count,
+        )
+    };
+    let capture_types = &slot_types[1..1 + cap_count];
+    scan_slots_by_types(gc, capture_slots, capture_types);
 }
 
 /// Scan all slots of a GC object as potential GcRefs.
@@ -150,7 +203,6 @@ fn scan_array(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
     
     let len = array::len(obj);
     let elem_bytes = array::elem_bytes(obj);
-    let elem_slots = elem_bytes / SLOT_BYTES;
     
     // For INLINE struct elements (ValueKind::Struct), use field slot_types from struct_metas.
     // Pointer elements (ValueKind::Pointer) are a single GcRef slot each — using the
@@ -163,8 +215,11 @@ fn scan_array(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
             for idx in 0..len {
                 scan_array_struct_elem(gc, obj, idx, elem_bytes, slot_types);
             }
-            return;
         }
+        // No struct_meta available — skip scanning (matches scan_struct behavior).
+        // Falling through to the generic "all GcRef" path would be wrong for structs
+        // with mixed Value/GcRef fields.
+        return;
     }
 
     // Interface elements: 2 slots per element (slot0=itab, slot1=data).
@@ -186,14 +241,11 @@ fn scan_array(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
     }
     
     // For reference types (slice, map, string, etc.), each element is a single GcRef
+    let base_off = byte_offset_for_slots(array::HEADER_SLOTS);
     for idx in 0..len {
-        for slot in 0..elem_slots {
-            let byte_off = idx * elem_bytes + slot * SLOT_BYTES;
-            let base_off = byte_offset_for_slots(array::HEADER_SLOTS);
-            let ptr = unsafe { (obj as *const u8).add(base_off + byte_off) as *const Slot };
-            let child = unsafe { *ptr };
-            if child != 0 { gc.mark_gray(slot_to_ptr(child)); }
-        }
+        let ptr = unsafe { (obj as *const u8).add(base_off + idx * elem_bytes) as *const Slot };
+        let child = unsafe { *ptr };
+        if child != 0 { gc.mark_gray(slot_to_ptr(child)); }
     }
 }
 
@@ -225,17 +277,64 @@ fn scan_channel(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
     let elem_kind = elem_meta.value_kind();
     if !elem_kind.may_contain_gc_refs() { return; }
     
-    let elem_slot_types = if matches!(elem_kind, ValueKind::Struct | ValueKind::Pointer) {
-        let meta_id = elem_meta.meta_id() as usize;
-        if meta_id < struct_metas.len() { Some(&struct_metas[meta_id].slot_types) } else { None }
-    } else { None };
+    let elem_scan = resolve_elem_scan(elem_kind, elem_meta, true, struct_metas);
+    if matches!(elem_scan, ElemScan::Skip) { return; }
     
     let state = channel::get_state(obj);
     for elem in state.iter_buffer() {
-        scan_slots_with_types(gc, elem, elem_slot_types);
+        scan_elem(gc, elem, &elem_scan);
     }
     for elem in state.iter_waiting_values() {
-        scan_slots_with_types(gc, elem, elem_slot_types);
+        scan_elem(gc, elem, &elem_scan);
+    }
+}
+
+/// Strategy for scanning a composite element (map key/value, channel element).
+enum ElemScan<'a> {
+    Skip,
+    GcRefs,
+    Interface,
+    Typed(&'a [SlotType]),
+}
+
+fn resolve_elem_scan<'a>(kind: ValueKind, meta: ValueMeta, should_scan: bool, struct_metas: &'a [StructMeta]) -> ElemScan<'a> {
+    if !should_scan { return ElemScan::Skip; }
+    match kind {
+        ValueKind::Struct => {
+            let meta_id = meta.meta_id() as usize;
+            if meta_id < struct_metas.len() {
+                ElemScan::Typed(&struct_metas[meta_id].slot_types)
+            } else {
+                ElemScan::Skip
+            }
+        }
+        // Pointer is a single GcRef slot (address of heap struct), NOT an inline struct.
+        // Using Typed(struct_slot_types) here would interpret the pointer address bytes
+        // as struct fields — completely wrong.
+        ValueKind::Pointer => ElemScan::GcRefs,
+        ValueKind::Interface => ElemScan::Interface,
+        _ => ElemScan::GcRefs,
+    }
+}
+
+fn scan_elem(gc: &mut Gc, slots: &[u64], scan: &ElemScan) {
+    match scan {
+        ElemScan::Skip => {}
+        ElemScan::GcRefs => {
+            for &slot in slots {
+                if slot != 0 { gc.mark_gray(slot as GcRef); }
+            }
+        }
+        ElemScan::Interface => {
+            if slots.len() >= 2 {
+                if interface::data_is_gc_ref(slots[0]) && slots[1] != 0 {
+                    gc.mark_gray(slots[1] as GcRef);
+                }
+            }
+        }
+        ElemScan::Typed(types) => {
+            scan_slots_by_types(gc, slots, types);
+        }
     }
 }
 
@@ -245,41 +344,17 @@ fn scan_map(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
     let key_kind = key_meta.value_kind();
     let val_kind = val_meta.value_kind();
     
-    let scan_key = key_kind.may_contain_gc_refs();
-    let scan_val = val_kind.may_contain_gc_refs();
-    if !scan_key && !scan_val { return; }
+    if !key_kind.may_contain_gc_refs() && !val_kind.may_contain_gc_refs() { return; }
     
-    // Get slot_types for struct keys/values
-    let key_slot_types = if matches!(key_kind, ValueKind::Struct | ValueKind::Pointer) {
-        let meta_id = key_meta.meta_id() as usize;
-        if meta_id < struct_metas.len() { Some(&struct_metas[meta_id].slot_types) } else { None }
-    } else { None };
+    let key_scan = resolve_elem_scan(key_kind, key_meta, key_kind.may_contain_gc_refs(), struct_metas);
+    let val_scan = resolve_elem_scan(val_kind, val_meta, val_kind.may_contain_gc_refs(), struct_metas);
     
-    let val_slot_types = if matches!(val_kind, ValueKind::Struct | ValueKind::Pointer) {
-        let meta_id = val_meta.meta_id() as usize;
-        if meta_id < struct_metas.len() { Some(&struct_metas[meta_id].slot_types) } else { None }
-    } else { None };
+    if matches!(key_scan, ElemScan::Skip) && matches!(val_scan, ElemScan::Skip) { return; }
     
     let mut iter = map::iter_init(obj);
     while let Some((k, v)) = map::iter_next(&mut iter) {
-        if scan_key {
-            scan_slots_with_types(gc, k, key_slot_types);
-        }
-        if scan_val {
-            scan_slots_with_types(gc, v, val_slot_types);
-        }
-    }
-}
-
-/// Scan slots, using slot_types if available (for structs), otherwise treat all as GcRefs.
-fn scan_slots_with_types(gc: &mut Gc, slots: &[u64], slot_types: Option<&Vec<SlotType>>) {
-    if let Some(types) = slot_types {
-        scan_slots_by_types(gc, slots, types);
-    } else {
-        // Reference types: all slots are GcRefs
-        for &slot in slots {
-            if slot != 0 { gc.mark_gray(slot as GcRef); }
-        }
+        scan_elem(gc, k, &key_scan);
+        scan_elem(gc, v, &val_scan);
     }
 }
 
@@ -311,17 +386,19 @@ pub fn finalize_object(obj: GcRef) {
     let header = Gc::header(obj);
     match header.kind() {
         ValueKind::Channel => {
-            if Gc::header(obj).slots == queue_state::DATA_SLOTS {
+            // Only finalize real channel objects (DATA_SLOTS=3), not heap-boxed
+            // pointer-to-channel (1 slot) created by PtrNew.
+            if header.slots == queue_state::DATA_SLOTS {
                 unsafe { channel::drop_inner(obj); }
             }
         }
         ValueKind::Map => {
-            if Gc::header(obj).slots == map::DATA_SLOTS {
+            if header.slots == map::DATA_SLOTS {
                 unsafe { map::drop_inner(obj); }
             }
         }
         ValueKind::Port => {
-            if Gc::header(obj).slots == queue_state::DATA_SLOTS {
+            if header.slots == queue_state::DATA_SLOTS {
                 unsafe { port::drop_inner(obj); }
             }
         }
