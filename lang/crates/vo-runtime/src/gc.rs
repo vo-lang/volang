@@ -487,6 +487,11 @@ impl Gc {
         let mut work = 0;
         
         while let Some(obj) = self.gray.pop() {
+            // Validate gray object before processing
+            debug_assert!(
+                !obj.is_null() && (obj as usize) & (SLOT_BYTES - 1) == 0 && (obj as usize) >= 4096,
+                "propagate_step: invalid GcRef {:p} in gray queue", obj
+            );
             let header = Self::header_mut(obj);
             if !header.is_black() {
                 header.set_black();

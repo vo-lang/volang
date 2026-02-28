@@ -889,9 +889,13 @@ impl CodegenContext {
         type_key: TypeKey,
         info: &crate::type_info::TypeInfoWrapper,
     ) -> u16 {
-        if info.is_reference_type(type_key) {
+        // Reference types and arrays: use ref box meta (Struct with meta_id=0).
+        // PtrNew boxes for these types contain GcRef(s) pointing to the real object,
+        // NOT the object's native layout. Using the actual ValueKind (e.g. Array)
+        // would cause GC scan_object to dispatch to type-specific scanning (scan_array)
+        // which expects ArrayHeader layout — but PtrNew boxes don't have ArrayHeader.
+        if info.is_reference_type(type_key) || info.is_array(type_key) {
             use vo_runtime::ValueKind;
-            // meta_id=0 (ref box struct), value_kind=Struct
             let value_meta = (0u32 << 8) | (ValueKind::Struct as u32);
             self.add_const(Constant::Int(value_meta as i64))
         } else {
@@ -1109,13 +1113,21 @@ impl CodegenContext {
         
         let wrapper_name = format!("__method_value_iface_{}_{}", method_name, method_idx);
         let local_slots = wrapper_param_slots + iface_slots + (param_slots + ret_slots).max(1);
-        // Interface wrapper: ClosureGet writes itab/data to slots 1-2, so slot_types must match.
-        let mut slot_types = vec![
-            vo_runtime::SlotType::GcRef,       // closure ref
-            vo_runtime::SlotType::Interface0,   // slot for ClosureGet capture 0
-            vo_runtime::SlotType::Interface1,   // slot for ClosureGet capture 1
-        ];
-        slot_types.extend(std::iter::repeat(vo_runtime::SlotType::Value).take((local_slots as usize).saturating_sub(3)));
+        // Interface wrapper: ClosureGet writes itab/data to iface_reg and iface_reg+1.
+        // iface_reg = wrapper_param_slots = 1 + param_slots, NOT always slot 1.
+        // slot_types must place Interface0/Interface1 at the correct offset.
+        let mut slot_types = vec![vo_runtime::SlotType::GcRef]; // slot 0: closure ref
+        // slots 1..wrapper_param_slots: forwarded params (Value)
+        for _ in 1..wrapper_param_slots {
+            slot_types.push(vo_runtime::SlotType::Value);
+        }
+        // slots wrapper_param_slots..wrapper_param_slots+2: interface from ClosureGet
+        slot_types.push(vo_runtime::SlotType::Interface0);
+        slot_types.push(vo_runtime::SlotType::Interface1);
+        // remaining slots: Value
+        while slot_types.len() < local_slots as usize {
+            slot_types.push(vo_runtime::SlotType::Value);
+        }
         let capture_slot_types = vec![vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1];
         let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, slot_types, capture_slot_types, cache_key);
         Ok(wrapper_id)

@@ -416,6 +416,23 @@ impl FuncBuilder {
         &self.named_return_slots
     }
 
+    /// Get slot types for a range of slots. Returns a slice from the internal slot_types array.
+    /// Used by bare return to extract correct GC slot types for named return variables.
+    pub fn get_slot_types(&self, start: u16, count: usize) -> Vec<SlotType> {
+        let s = start as usize;
+        let end = (s + count).min(self.slot_types.len());
+        if s >= self.slot_types.len() {
+            vec![SlotType::Value; count]
+        } else {
+            let mut result = self.slot_types[s..end].to_vec();
+            // Pad with Value if slot_types is shorter than requested
+            while result.len() < count {
+                result.push(SlotType::Value);
+            }
+            result
+        }
+    }
+
     // === Scope management for variable shadowing ===
 
     /// Enter a new scope. Variables defined in this scope that shadow outer

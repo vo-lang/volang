@@ -316,8 +316,20 @@ pub fn unpack_captures(
         unpack_slots(gc, &packed, &mut value_slots, struct_metas, runtime_types);
         offset += len;
 
-        // Allocate a box for the capture
-        let box_ref = gc.alloc(value_meta, slots);
+        // Allocate a box for the capture.
+        // Use Struct for reference/array types to avoid scan_object misinterpreting
+        // the box content as type-specific layout (e.g. ArrayHeader).
+        let box_vk = value_meta.value_kind();
+        let box_meta = if box_vk == ValueKind::Array || box_vk == ValueKind::Map
+            || box_vk == ValueKind::Channel || box_vk == ValueKind::Slice
+            || box_vk == ValueKind::String || box_vk == ValueKind::Closure
+            || box_vk == ValueKind::Port || box_vk == ValueKind::Island
+        {
+            ValueMeta::new(0, ValueKind::Struct)
+        } else {
+            value_meta
+        };
+        let box_ref = gc.alloc(box_meta, slots);
         for j in 0..slots as usize {
             unsafe { Gc::write_slot(box_ref, j, value_slots[j]); }
         }

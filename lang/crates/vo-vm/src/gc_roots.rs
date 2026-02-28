@@ -22,13 +22,35 @@ fn scan_gcrefs(gc: &mut Gc, gcrefs: &[u64]) {
 }
 
 /// Scan DeferEntry for GC refs.
+///
+/// Closure and args GcRefs are marked directly. Args content is scanned
+/// precisely using the deferred function's slot_types (args are stored as
+/// ValueKind::Void objects which scan_object skips).
 #[inline]
-fn scan_defer_entry(gc: &mut Gc, entry: &DeferEntry) {
+fn scan_defer_entry(gc: &mut Gc, entry: &DeferEntry, functions: &[FunctionDef]) {
     if !entry.closure.is_null() {
         gc.mark_gray(entry.closure);
     }
     if !entry.args.is_null() {
         gc.mark_gray(entry.args);
+        // Scan args content using deferred function's slot_types.
+        // Args are raw copies of the function's parameters, so slot_types[0..arg_slots]
+        // describes their types precisely.
+        let func_id = if entry.is_closure {
+            vo_runtime::objects::closure::func_id(entry.closure)
+        } else {
+            entry.func_id
+        };
+        let arg_slots = entry.arg_slots as usize;
+        if arg_slots > 0 {
+            if let Some(func) = functions.get(func_id as usize) {
+                let args_data = unsafe {
+                    core::slice::from_raw_parts(entry.args as *const u64, arg_slots)
+                };
+                let slot_types = &func.slot_types[..arg_slots.min(func.slot_types.len())];
+                scan_slots_by_types(gc, args_data, slot_types);
+            }
+        }
     }
 }
 
@@ -130,13 +152,13 @@ fn scan_fibers(gc: &mut Gc, fibers: &[Box<Fiber>], functions: &[FunctionDef]) {
 
         // Scan defer_stack
         for entry in &fiber.defer_stack {
-            scan_defer_entry(gc, entry);
+            scan_defer_entry(gc, entry, functions);
         }
 
         // Scan unwinding state (return/panic unwinding with pending defers)
         if let Some(state) = &fiber.unwinding {
             for entry in &state.pending {
-                scan_defer_entry(gc, entry);
+                scan_defer_entry(gc, entry, functions);
             }
             // Scan return values
             if let Some(ref rv) = state.return_values {

@@ -188,12 +188,14 @@ pub(super) fn compile_return(
             } else {
                 // Mixed or non-escaped: use helper to read all named returns
                 let total_ret_slots: u16 = named_return_slots.iter().map(|(_, s, _)| *s).sum();
-                let mut ret_slot_types = Vec::new();
-                for (_, slots, _) in &named_return_slots {
-                    for _ in 0..*slots {
-                        ret_slot_types.push(SlotType::Value);
-                    }
-                }
+                // Use actual slot types from named return variables for correct GC scanning.
+                // If we used SlotType::Value for GcRef-typed returns, GC would miss them
+                // during defer execution when return values are cached in ReturnValues::Stack.
+                let ret_slot_types: Vec<SlotType> = named_return_slots.iter()
+                    .flat_map(|&(slot, slots, _)| {
+                        func.get_slot_types(slot, slots as usize)
+                    })
+                    .collect();
                 let ret_start = func.alloc_slots(&ret_slot_types);
                 
                 // Read all named returns (no error override for normal return)

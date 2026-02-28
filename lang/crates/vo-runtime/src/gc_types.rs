@@ -90,8 +90,23 @@ pub fn typed_write_barrier_by_meta(
 pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_capture_slot_types: &[&[SlotType]]) {
     let gc_header = Gc::header(obj);
     
+    
     match gc_header.kind() {
-        ValueKind::Array => scan_array(gc, obj, struct_metas),
+        ValueKind::Array => {
+            // Real arrays are created by array::create with [ArrayHeader(2)][elements] layout.
+            // PtrNew heap-boxed array variables have kind=Struct (fixed by get_boxing_meta).
+            // Defer args have kind=Void (fixed by exec_defer_push).
+            // Any ValueKind::Array object with slots < HEADER_SLOTS is a codegen bug.
+            debug_assert!(
+                gc_header.slots >= array::HEADER_SLOTS as u16,
+                "scan_object: Array object {:p} has slots={} < HEADER_SLOTS={} — codegen bug (PtrNew box should use Struct)",
+                obj, gc_header.slots, array::HEADER_SLOTS
+            );
+            if gc_header.slots >= array::HEADER_SLOTS as u16 {
+                scan_array(gc, obj, struct_metas);
+            }
+            // slots < HEADER_SLOTS: skip scanning (should not happen; debug_assert catches it)
+        }
         ValueKind::String => {
             let arr = slice::array_ref(obj);
             if !arr.is_null() { gc.mark_gray(arr); }
@@ -111,27 +126,34 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_ca
         }
 
         ValueKind::Map => {
-            // PtrNew creates heap-boxed map variables with kind=Map but slots=1
-            // (single GcRef to the real map). Only scan as map if it's a real
-            // MapData object (DATA_SLOTS=3). Otherwise scan slots as GcRefs.
+            // Real maps: created by map::create with DATA_SLOTS=3 (MapData layout).
+            // PtrNew heap-boxed map variables: kind=Struct (fixed by get_boxing_meta),
+            // so they never reach this branch. Any Map with wrong slots is a bug.
+            debug_assert!(
+                gc_header.slots == map::DATA_SLOTS,
+                "scan_object: Map object {:p} has slots={} != DATA_SLOTS={} — codegen bug",
+                obj, gc_header.slots, map::DATA_SLOTS
+            );
             if gc_header.slots == map::DATA_SLOTS {
                 scan_map(gc, obj, struct_metas);
-            } else {
-                scan_slots_as_gcrefs(gc, obj, gc_header.slots);
             }
         }
 
         ValueKind::Channel => {
+            debug_assert!(
+                gc_header.slots == queue_state::DATA_SLOTS,
+                "scan_object: Channel object {:p} has slots={} != DATA_SLOTS={} — codegen bug",
+                obj, gc_header.slots, queue_state::DATA_SLOTS
+            );
             if gc_header.slots == queue_state::DATA_SLOTS {
                 scan_channel(gc, obj, struct_metas);
-            } else {
-                scan_slots_as_gcrefs(gc, obj, gc_header.slots);
             }
         }
 
         // Port: state is Arc<Mutex<>> on Rust heap, not a GC object.
         // Elements live in QueueState's Vecs, also Rust heap. No GC refs to scan.
         // Island: id only, no GC refs.
+        // Void: used for defer args storage — scanned precisely by scan_defer_entry.
         // Primitives: no GC refs.
         _ => {}
     }
@@ -156,24 +178,21 @@ fn scan_closure(gc: &mut Gc, obj: GcRef, func_capture_slot_types: &[&[SlotType]]
     };
 
     let capture_types = func_capture_slot_types.get(func_id as usize).copied().unwrap_or(&[]);
+    debug_assert!(
+        !capture_types.is_empty(),
+        "scan_closure: func_id={} has {} captures but empty capture_slot_types — codegen must set capture_slot_types for all closures with captures",
+        func_id, cap_count
+    );
     if capture_types.is_empty() {
-        // No capture_slot_types available: treat all captures as GcRef (safe default).
+        // Fallback for old bytecode: treat all captures as GcRef.
+        // This is ONLY correct for regular closures (all captures are GcRef escape boxes).
+        // Method value wrappers have Interface0/Interface1 captures that would crash here.
+        // The debug_assert above catches this in debug builds.
         for &slot in capture_slots {
             if slot != 0 { gc.mark_gray(slot_to_ptr(slot)); }
         }
     } else {
         scan_slots_by_types(gc, capture_slots, capture_types);
-    }
-}
-
-/// Scan all slots of a GC object as potential GcRefs.
-/// Used for PtrNew pointer-to-T objects (e.g., heap-return for `*map[K]V`)
-/// where slots < DATA_SLOTS and each slot holds a reference to the actual object.
-#[inline]
-fn scan_slots_as_gcrefs(gc: &mut Gc, obj: GcRef, slots: u16) {
-    for i in 0..slots as usize {
-        let slot = unsafe { Gc::read_slot(obj, i) };
-        if slot != 0 { gc.mark_gray(slot_to_ptr(slot)); }
     }
 }
 

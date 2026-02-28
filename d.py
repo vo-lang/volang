@@ -3,7 +3,7 @@
 Vo Development Tool - Wrapper for vo-test and other utilities
 
 Usage:
-    ./d.py test [vm|jit|osr|both|gc|nostd|wasm] [-v] [--jobs N] [file]
+    ./d.py test [vm|jit|osr|both|gc|nostd|wasm] [-v] [--jobs N] [--repeat N|-n N] [file]
     ./d.py bench [all|vo|<name>|score] [--all-langs]
     ./d.py loc [--with-tests]
     ./d.py clean [all|vo|rust]
@@ -33,6 +33,58 @@ if USE_RELEASE:
 _PROFILE_DIR = 'release' if USE_RELEASE else 'debug'
 VO_TEST_BIN = PROJECT_ROOT / 'target' / _PROFILE_DIR / 'vo-test'
 VO_BIN = PROJECT_ROOT / 'target' / _PROFILE_DIR / 'vo'
+
+
+def parse_test_repeat_args(args: list[str]) -> tuple[list[str], int]:
+    """Extract --repeat / -n from test args and return (forward_args, repeat)."""
+    repeat = 1
+    forward_args: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ('--repeat', '-n'):
+            if i + 1 >= len(args):
+                print(f"Error: {arg} requires a positive integer", file=sys.stderr)
+                sys.exit(2)
+            raw = args[i + 1]
+            i += 2
+        elif arg.startswith('--repeat='):
+            raw = arg.split('=', 1)[1]
+            i += 1
+        else:
+            forward_args.append(arg)
+            i += 1
+            continue
+
+        try:
+            parsed = int(raw)
+        except ValueError:
+            print(f"Error: invalid repeat count: {raw}", file=sys.stderr)
+            sys.exit(2)
+
+        if parsed <= 0:
+            print(f"Error: repeat count must be > 0, got {parsed}", file=sys.stderr)
+            sys.exit(2)
+
+        repeat = parsed
+
+    return forward_args, repeat
+
+
+def run_repeated(cmd: list[str], *, repeat: int, label: str) -> int:
+    """Run command repeatedly, stop at first failure."""
+    for i in range(1, repeat + 1):
+        if repeat > 1:
+            print(f"[d.py] {label} run {i}/{repeat}")
+        result = subprocess.run(cmd, cwd=PROJECT_ROOT)
+        if result.returncode != 0:
+            if repeat > 1:
+                print(
+                    f"[d.py] {label} failed at run {i}/{repeat} (exit {result.returncode})",
+                    file=sys.stderr,
+                )
+            return result.returncode
+    return 0
 
 
 
@@ -87,8 +139,7 @@ def run_test(args):
     
     # Forward all arguments to vo-test
     cmd = [str(VO_TEST_BIN)] + args
-    result = subprocess.run(cmd, cwd=PROJECT_ROOT)
-    sys.exit(result.returncode)
+    return run_repeated(cmd, repeat=1, label='test')
 
 
 def run_vo_cli(args, jit_mode=False):
@@ -100,7 +151,7 @@ def run_vo_cli(args, jit_mode=False):
         env = os.environ.copy()
         env['VO_JIT_CALL_THRESHOLD'] = '1'
     result = subprocess.run(cmd, cwd=PROJECT_ROOT, env=env)
-    sys.exit(result.returncode)
+    return result.returncode
 
 
 def run_other_command(command, args):
@@ -111,8 +162,7 @@ def run_other_command(command, args):
         sys.exit(1)
     
     cmd = [str(d_py), command] + args
-    result = subprocess.run(cmd, cwd=PROJECT_ROOT)
-    sys.exit(result.returncode)
+    return run_repeated(cmd, repeat=1, label=command)
 
 
 def main():
@@ -124,18 +174,30 @@ def main():
     rest_args = sys.argv[2:]
     
     if command == 'test':
+        rest_args, repeat = parse_test_repeat_args(rest_args)
+
         # wasm tests use d_py.py (node-based test runner)
         if rest_args and rest_args[0] == 'wasm':
-            run_other_command(command, rest_args)
+            cmd = [str(PROJECT_ROOT / 'd_py.py'), command] + rest_args
+            sys.exit(run_repeated(cmd, repeat=repeat, label='test'))
         else:
-            run_test(rest_args)
+            # 'embed' is alias for 'nostd'
+            test_args = rest_args
+            if test_args and test_args[0] == 'embed':
+                test_args = ['nostd'] + test_args[1:]
+
+            need_embed = 'nostd' in test_args
+            ensure_vo_test_built(need_embed=need_embed)
+
+            cmd = [str(VO_TEST_BIN)] + test_args
+            sys.exit(run_repeated(cmd, repeat=repeat, label='test'))
     elif command == 'run':
         jit_mode = '--mode=jit' in rest_args or '-mode=jit' in rest_args
-        run_vo_cli(['run'] + rest_args, jit_mode=jit_mode)
+        sys.exit(run_vo_cli(['run'] + rest_args, jit_mode=jit_mode))
     elif command == 'vo':
-        run_vo_cli(rest_args)
+        sys.exit(run_vo_cli(rest_args))
     elif command in ('bench', 'loc', 'clean', 'play', 'studio'):
-        run_other_command(command, rest_args)
+        sys.exit(run_other_command(command, rest_args))
     elif command in ('-h', '--help', 'help'):
         print(__doc__)
         sys.exit(0)
@@ -145,7 +207,7 @@ def main():
         #   ./d.py version
         #   ./d.py build <path>
         #   ./d.py check <path>
-        run_vo_cli([command] + rest_args)
+        sys.exit(run_vo_cli([command] + rest_args))
 
 
 if __name__ == '__main__':
