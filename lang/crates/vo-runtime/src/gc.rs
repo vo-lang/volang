@@ -178,6 +178,11 @@ pub struct Gc {
     stepmul: u16,            // Step multiplier (default 100)
     stepsize: usize,         // Bytes per step (default 8KB)
     
+    // ========== Phase Budget ==========
+    /// Fixed per-step budget for sweep phase, snapshotted at sweep start.
+    /// Using a constant prevents convergence issues (total_bytes shrinks as dead
+    /// objects are freed, causing dynamically-computed limits to shrink too).
+    sweep_budget: usize,
 }
 
 impl Gc {
@@ -201,6 +206,7 @@ impl Gc {
             pause: Self::DEFAULT_PAUSE,
             stepmul: Self::DEFAULT_STEPMUL,
             stepsize: Self::DEFAULT_STEPSIZE,
+            sweep_budget: 0,
         }
     }
     
@@ -424,8 +430,20 @@ impl Gc {
         F: FnMut(GcRef),
     {
         let mut work = 0usize;
-        let work_limit = self.stepsize * self.stepmul as usize / 100;
-        
+        let base = self.stepsize * self.stepmul as usize / 100;
+
+        // work_limit: allocation-proportional budget for DEBT TRACKING only.
+        // This controls how much debt is repaid per step; it does NOT control
+        // how much work a step actually does (that's phase_limit's job).
+        let work_limit = base.max(self.debt.max(0) as usize);
+
+        // Target frame count for each GC phase (Propagate/Sweep).
+        // Each phase aims to complete within this many gc_step calls.
+        // Without this, per-frame allocation (~260KB) << heap size (~100MB+),
+        // causing phases to take 100s-1000s of frames. Objects allocated during
+        // long phases survive as current_white, bloating estimate each cycle.
+        const TARGET_PHASE_FRAMES: usize = 32;
+
         loop {
             match self.state {
                 GcState::Pause => {
@@ -433,45 +451,57 @@ impl Gc {
                     self.start_cycle(&mut scan_roots);
                     self.state = GcState::Propagate;
                 }
-                
+
                 GcState::Propagate => {
-                    // Incremental marking
-                    work += self.propagate_step(&mut scan_object, work_limit.saturating_sub(work));
-                    
+                    // phase_limit for Propagate: total_bytes / TARGET.
+                    // total_bytes only increases during Propagate (new allocs, no frees),
+                    // so this is stable/increasing across steps — no convergence issue.
+                    // Use .max(base) NOT .max(work_limit) to avoid first-cycle spikes
+                    // where debt = total_bytes would make phase_limit = entire heap.
+                    let phase_limit = (self.total_bytes / TARGET_PHASE_FRAMES).max(base);
+                    work += self.propagate_step(&mut scan_object, phase_limit.saturating_sub(work));
+
                     if self.gray.is_empty() {
-                        // Move to atomic phase
                         self.state = GcState::Atomic;
-                    } else if work >= work_limit {
-                        // Yield - done enough work this step
+                    } else if work >= phase_limit {
                         break;
                     }
                 }
-                
+
                 GcState::Atomic => {
-                    // Atomic phase: process grayagain, finalize marking
                     self.atomic_phase(&mut scan_object);
                     self.state = GcState::Sweep;
                     self.sweep_pos = 0;
                     self.sweep_write_pos = 0;
+                    // Snapshot sweep budget at sweep start. total_bytes here includes
+                    // all objects (alive + dead). Using a fixed budget prevents the
+                    // convergence problem: if we recomputed total_bytes/TARGET each step,
+                    // freed dead bytes would shrink total_bytes, shrinking the budget,
+                    // causing exponential decay instead of linear progress (99% dead heap
+                    // would need ~130 steps instead of 32).
+                    self.sweep_budget = (self.total_bytes / TARGET_PHASE_FRAMES).max(base);
                 }
-                
+
                 GcState::Sweep => {
-                    // Incremental sweeping
-                    work += self.sweep_step(&mut finalize_object, work_limit.saturating_sub(work));
-                    
+                    work += self.sweep_step(
+                        &mut finalize_object,
+                        self.sweep_budget.saturating_sub(work),
+                    );
+
                     if self.sweep_pos >= self.all_objects.len() {
-                        // Sweep complete
                         self.finish_cycle();
                         break;
-                    } else if work >= work_limit {
-                        // Yield
+                    } else if work >= self.sweep_budget {
                         break;
                     }
                 }
             }
         }
-        
-        self.debt -= work as i64;
+
+        // Debt tracks allocation-proportional work. Phase-accelerated work (done to
+        // finish within TARGET_PHASE_FRAMES) may far exceed the allocation budget;
+        // crediting all of it would make debt hugely negative and delay the next cycle.
+        self.debt -= (work as i64).min(work_limit as i64);
         work
     }
     
@@ -546,17 +576,23 @@ impl Gc {
                 obj
             );
             
+            // Compute size once — both alive and dead branches need it for work accounting.
+            let size_bytes = Self::object_size_bytes(obj);
+            
             if header.is_black() || obj_white == self.current_white {
                 // Alive: reset to current white
                 Self::header_mut(obj).set_white(self.current_white);
                 self.all_objects[self.sweep_write_pos] = obj;
                 self.sweep_write_pos += 1;
+                // Count alive objects toward work budget. Without this, a mostly-alive
+                // heap (e.g. 99% alive) would have work ≈ 0 and the loop would process
+                // the entire heap in one call — a 500MB heap causes a 625ms latency spike.
+                work += size_bytes;
             } else if obj_white == dead_white {
                 // Dead: free it
                 #[cfg(feature = "gc-debug")]
                 crate::gc_debug::on_free(obj);
                 
-                let size_bytes = Self::object_size_bytes(obj);
                 finalize_object(obj);
                 self.total_bytes -= size_bytes;
                 work += size_bytes;
@@ -593,6 +629,14 @@ impl Gc {
 
     pub fn object_count(&self) -> usize {
         self.all_objects.len()
+    }
+
+    pub fn debt(&self) -> i64 {
+        self.debt
+    }
+
+    pub fn estimate(&self) -> usize {
+        self.estimate
     }
 
     /// Deep copy (clone) a heap object.
