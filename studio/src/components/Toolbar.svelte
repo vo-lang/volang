@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ide } from '../stores/ide';
+  import { explorer } from '../stores/explorer';
   import { actions } from '../lib/actions';
 
   $: fileName = $ide.activeFilePath
@@ -7,6 +8,10 @@
     : '';
   $: isRunning = $ide.isRunning;
   $: dirty = $ide.dirty;
+
+  function launchRunMode() {
+    explorer.update(e => ({ ...e, appMode: 'run' }));
+  }
 </script>
 
 <div class="toolbar">
@@ -26,6 +31,12 @@
   </button>
   <span class="filename">{fileName}{dirty ? ' *' : ''}</span>
   <span class="spacer"></span>
+  <button class="btn btn-launch" on:click={launchRunMode} title="Launch app in full-screen run mode">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+    </svg>
+    Launch
+  </button>
   <span class="title">Vibe Studio</span>
 </div>
 
@@ -56,8 +67,17 @@
     cursor: not-allowed;
   }
 
-  .btn-run  { background: #22c55e; color: #fff; }
-  .btn-stop { background: #ef4444; color: #fff; }
+  .btn-run   { background: #22c55e; color: #fff; }
+  .btn-stop  { background: #ef4444; color: #fff; }
+  .btn-launch {
+    background: none;
+    border: 1px solid #313244;
+    color: #7f849c;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .btn-launch:hover:not(:disabled) { background: #252535; color: #cdd6f4; border-color: #45475a; }
 
   .filename {
     color: #888;

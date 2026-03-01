@@ -1,9 +1,9 @@
 import { get } from 'svelte/store';
-import { ide } from '../stores/ide';
+import { ide, consolePush, consolePushLines, consoleClear } from '../stores/ide';
 import type { EditTarget, ProjectMode } from '../stores/ide';
 import { explorer } from '../stores/explorer';
-import { github, createGist, updateGist, fetchGistFiles, createRepo, gitPushFiles, gitPullFiles, renameGistFile, renameRepo } from '../stores/github';
-import { projects, persistManifest, loadProjects, syncState } from '../stores/projects';
+import { github, githubFetch, createGist, updateGist, fetchGistFiles, createRepo, gitPushFiles, gitPullFiles, renameGistFile, renameRepo } from '../stores/github';
+import { projects, persistManifest, loadProjects, syncState, hashContent, hashFiles } from '../stores/projects';
 import type { ProjectEntry } from '../stores/projects';
 import { bridge } from './bridge';
 import type { FsEntry } from './bridge';
@@ -171,8 +171,6 @@ export const actions = {
       activeFilePath: filePath,
       code: content,
       dirty: false,
-      output: '',
-      compileError: '',
       guestRender: null,
       isGuiApp: false,
       isRunning: false,
@@ -208,39 +206,54 @@ export const actions = {
 
     const b = bridge();
     const now = new Date().toISOString();
+    let contentHash: string;
 
     if (project.type === 'single') {
       const filename = project.name + '.vo';
       const content = await b.fsReadFile(project.localPath);
+      contentHash = hashContent(content);
 
       if (project.remote?.kind === 'gist' && project.remote.gistId) {
-        // Update existing gist
         await updateGist(token, project.remote.gistId, filename, content);
       } else {
-        // Create new gist
         const result = await createGist(token, filename, content, project.name);
         project = { ...project, remote: { kind: 'gist', gistId: result.id } };
       }
-      project = { ...project, pushedAt: now };
     } else {
-      // Multi-file project: collect all files and git push to repo
       const files = await this.collectProjectFiles(project.localPath);
+      contentHash = hashFiles(files);
 
       if (project.remote?.kind === 'repo' && project.remote.owner && project.remote.repo) {
-        // Push to existing repo
         await gitPushFiles(token, project.remote.owner, project.remote.repo, files);
       } else {
-        // Create new repo and push
         const { user } = get(github);
         if (!user) throw new Error('GitHub user not loaded');
-        const repo = await createRepo(token, project.name);
+        let repo: { owner: { login: string }; name: string };
+        try {
+          repo = await createRepo(token, project.name);
+        } catch (createErr: any) {
+          // Repo already exists on GitHub — fetch it instead of failing
+          const msg: string = createErr?.message ?? '';
+          if (msg.includes('already exists') || msg.includes('creation failed')) {
+            repo = await githubFetch(token, `/repos/${user.login}/${project.name}`);
+          } else {
+            throw createErr;
+          }
+        }
         await gitPushFiles(token, repo.owner.login, repo.name, files);
         project = { ...project, remote: { kind: 'repo', owner: repo.owner.login, repo: repo.name } };
       }
-      project = { ...project, pushedAt: now };
     }
 
-    // Update projects store and persist manifest
+    // After push, local and remote are identical
+    project = {
+      ...project,
+      pushedAt: now,
+      syncedHash: contentHash,
+      currentLocalHash: contentHash,
+      currentRemoteHash: contentHash,
+    };
+
     projects.update(s => ({
       ...s,
       projects: s.projects.map(p =>
@@ -256,6 +269,8 @@ export const actions = {
     if (!project.remote) throw new Error('No remote source to pull from');
 
     const b = bridge();
+    const now = new Date().toISOString();
+    let contentHash: string;
 
     if (project.remote.kind === 'gist' && project.remote.gistId) {
       // Single-file: pull from gist
@@ -266,6 +281,7 @@ export const actions = {
       const safeFileName = assertSafeSingleFileName(voFile);
       const localPath = root + '/' + safeFileName;
       await b.fsWriteFile(localPath, files[voFile]);
+      contentHash = hashContent(files[voFile]);
       project = { ...project, localPath };
     } else if (project.remote.kind === 'repo' && project.remote.owner && project.remote.repo) {
       // Multi-file: pull from repo via Git Data API
@@ -276,7 +292,6 @@ export const actions = {
       ] as const);
       const dir = root + '/' + project.name;
       try { await b.fsMkdir(dir); } catch { /* may already exist */ }
-      // Ensure all intermediate directories exist
       const createdDirs = new Set<string>();
       for (const [name] of safeEntries) {
         if (name.includes('/')) {
@@ -294,18 +309,28 @@ export const actions = {
       for (const [name, content] of safeEntries) {
         await b.fsWriteFile(dir + '/' + name, content);
       }
+      contentHash = hashFiles(files);
       project = { ...project, localPath: dir };
     } else {
       throw new Error('Invalid remote source');
     }
 
-    // Update projects store
+    // After pull, local and remote are identical
+    project = {
+      ...project,
+      pushedAt: now,
+      syncedHash: contentHash,
+      currentLocalHash: contentHash,
+      currentRemoteHash: contentHash,
+    };
+
     projects.update(s => ({
       ...s,
       projects: s.projects.map(p =>
         p.name === project.name && p.type === project.type ? project : p
       ),
     }));
+    await persistManifest();
   },
 
   async openProjectEntry(project: ProjectEntry, root: string): Promise<void> {
@@ -511,11 +536,16 @@ export const actions = {
       }
     }
 
+    const fileName = entryPath.split('/').pop() ?? entryPath;
+    consoleClear();
+    consolePush('system', `Compiling ${fileName}…`);
+    const startTime = Date.now();
+
     ide.update(s => ({
       ...s,
       isRunning: true,
-      output: '',
-      compileError: '',
+      runStatus: 'compiling',
+      runDurationMs: null,
       guestRender: null,
       isGuiApp: false,
     }));
@@ -523,13 +553,41 @@ export const actions = {
     try {
       if (isGuiCode(codeToCheck)) {
         const bytes = await bridge().runGui(entryPath);
-        ide.update(s => ({ ...s, isRunning: true, isGuiApp: true, guestRender: bytes }));
+        const elapsed = Date.now() - startTime;
+        consolePush('system', 'GUI app started');
+        ide.update(s => ({
+          ...s,
+          isRunning: true,
+          isGuiApp: true,
+          guestRender: bytes,
+          runStatus: 'running',
+          runDurationMs: elapsed,
+        }));
       } else {
+        ide.update(s => ({ ...s, runStatus: 'running' }));
         const output = await bridge().compileRun(entryPath);
-        ide.update(s => ({ ...s, isRunning: false, isGuiApp: false, output }));
+        const elapsed = Date.now() - startTime;
+        consolePushLines('stdout', output);
+        consolePush('success', `✓ Process exited`);
+        ide.update(s => ({
+          ...s,
+          isRunning: false,
+          isGuiApp: false,
+          runStatus: 'done',
+          runDurationMs: elapsed,
+        }));
       }
     } catch (e: any) {
-      ide.update(s => ({ ...s, isRunning: false, compileError: String(e) }));
+      const elapsed = Date.now() - startTime;
+      const msg = String(e);
+      consolePushLines('stderr', msg);
+      consolePush('system', '✗ Failed');
+      ide.update(s => ({
+        ...s,
+        isRunning: false,
+        runStatus: 'error',
+        runDurationMs: elapsed,
+      }));
     }
   },
 
@@ -539,11 +597,13 @@ export const actions = {
     } catch {
       // ignore errors on stop
     }
+    consolePush('system', 'Stopped');
     ide.update(s => ({
       ...s,
       isRunning: false,
       isGuiApp: false,
       guestRender: null,
+      runStatus: 'idle',
     }));
   },
 

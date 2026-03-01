@@ -3,10 +3,11 @@
   import { get } from 'svelte/store';
   import { explorer } from '../stores/explorer';
   import { github, loginWithToken, logout, loadSavedToken } from '../stores/github';
-  import { projects, loadProjects, syncState } from '../stores/projects';
+  import { projects, loadProjects, syncState, syncStateLabel } from '../stores/projects';
   import type { ProjectEntry, SyncState } from '../stores/projects';
   import { actions } from '../lib/actions';
   import { bridge } from '../lib/bridge';
+  import SyncDetailModal from './SyncDetailModal.svelte';
 
   // ── Auth ───────────────────────────────────────────────────────────────────
   let tokenInput = '';
@@ -151,26 +152,46 @@ func main() {
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
-  function stateLabel(state: SyncState): string {
-    if (state === 'local-only') return 'Local';
-    if (state === 'remote-only') return 'Cloud';
-    return 'Synced';
-  }
-
-  function formatPushedAt(value: string | null): string {
+  function formatTimestamp(value: string | null): string {
     if (!value) return '';
     const d = new Date(value);
     if (Number.isNaN(d.getTime())) return '';
     return d.toLocaleString(undefined, {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-      timeZoneName: 'short',
+      month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: false,
     });
+  }
+
+  function syncIcon(state: SyncState): string {
+    switch (state) {
+      case 'in-sync': return '✓';
+      case 'local-ahead': return '↑';
+      case 'remote-ahead': return '↓';
+      case 'diverged': return '⇅';
+      case 'local-only': return '→';
+      case 'remote-only': return '←';
+    }
+  }
+
+  // ── Sync detail modal ──────────────────────────────────────────────────────
+  let syncDetailProject: { project: ProjectEntry; state: SyncState } | null = null;
+
+  function openSyncDetail(p: ProjectEntry, state: SyncState) {
+    syncDetailProject = { project: p, state };
+  }
+
+  async function handleSyncPush() {
+    if (!syncDetailProject) return;
+    const p = syncDetailProject.project;
+    syncDetailProject = null;
+    await pushProject(p);
+  }
+
+  async function handleSyncPull() {
+    if (!syncDetailProject) return;
+    const p = syncDetailProject.project;
+    syncDetailProject = null;
+    await pullProject(p);
   }
 
   // ── Filtered / sorted list ─────────────────────────────────────────────────
@@ -236,7 +257,8 @@ func main() {
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
-      if (ctxMenu) { ctxMenu = null; }
+      if (syncDetailProject) { syncDetailProject = null; }
+      else if (ctxMenu) { ctxMenu = null; }
       else if (renameModal) { renameModal = null; }
       else if (showAuthModal) { showAuthModal = false; connectError = ''; }
     }
@@ -397,21 +419,42 @@ func main() {
                 <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
               {/if}
             </div>
-            <!-- Info + always-visible sync status -->
+            <!-- Info + sync status -->
             <div class="card-body">
               <span class="card-name">{p.name}</span>
               <div class="sync-row">
-                <span class="loc-badge" class:present={!!p.localPath}>
-                  <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                  Local
-                </span>
-                <span class="sync-conn" class:local-only={state === 'local-only'} class:remote-only={state === 'remote-only'} class:synced={state === 'synced'}>
-                  {#if state === 'synced'}✓{:else if state === 'local-only'}→{:else}←{/if}
-                </span>
-                <span class="loc-badge github" class:present={!!p.remote}>
-                  <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-                  GitHub
-                </span>
+                <!-- Sync state badge (clickable to open diff when both local+remote exist) -->
+                {#if p.localPath && p.remote}
+                  <button class="sync-badge {state}" title="View sync details" on:click|stopPropagation={() => openSyncDetail(p, state)}>
+                    <span class="sync-icon">{syncIcon(state)}</span>
+                    {syncStateLabel(state)}
+                  </button>
+                {:else}
+                  <span class="sync-badge {state}">
+                    <span class="sync-icon">{syncIcon(state)}</span>
+                    {syncStateLabel(state)}
+                  </span>
+                {/if}
+
+                <!-- Timestamps -->
+                {#if p.localPath && p.remote}
+                  {#if state !== 'in-sync'}
+                    <span class="sync-ts local" title="Last synced">
+                      <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                      {formatTimestamp(p.pushedAt) || 'never'}
+                    </span>
+                    {#if p.remoteUpdatedAt}
+                      <span class="sync-ts remote" title="Remote updated">
+                        <svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                        {formatTimestamp(p.remoteUpdatedAt)}
+                      </span>
+                    {/if}
+                  {:else}
+                    <span class="sync-ts synced" title="Last synced">{formatTimestamp(p.pushedAt)}</span>
+                  {/if}
+                {/if}
+
+                <!-- Action buttons -->
                 {#if state === 'local-only' && $github.token}
                   <button class="sync-act push" title="Push to GitHub" disabled={busy} on:click|stopPropagation={() => pushProject(p)}>
                     <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
@@ -422,8 +465,22 @@ func main() {
                     <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
                     Pull
                   </button>
-                {:else if state === 'synced'}
-                  <span class="sync-ts">{formatPushedAt(p.pushedAt)}</span>
+                {:else if state === 'local-ahead' || state === 'diverged'}
+                  <button class="sync-act push" title="Push local to remote (overwrite)" disabled={busy} on:click|stopPropagation={() => pushProject(p)}>
+                    <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+                    Push
+                  </button>
+                  {#if state === 'diverged'}
+                    <button class="sync-act pull" title="Pull remote to local (overwrite)" disabled={busy} on:click|stopPropagation={() => pullProject(p)}>
+                      <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
+                      Pull
+                    </button>
+                  {/if}
+                {:else if state === 'remote-ahead'}
+                  <button class="sync-act pull" title="Pull remote to local (overwrite)" disabled={busy} on:click|stopPropagation={() => pullProject(p)}>
+                    <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
+                    Pull
+                  </button>
                 {/if}
               </div>
             </div>
@@ -454,13 +511,19 @@ func main() {
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 113 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
           Rename
         </button>
-        {#if (s === 'local-only' && $github.token) || s === 'synced'}
+        {#if p.localPath && p.remote}
+          <button class="ctx-item" on:click={() => { ctxMenu = null; openSyncDetail(p, s); }}>
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10M18 20V4M6 20v-4"/></svg>
+            View Diff
+          </button>
+        {/if}
+        {#if (s === 'local-only' && $github.token) || s === 'in-sync' || s === 'local-ahead' || s === 'diverged'}
           <button class="ctx-item" on:click={() => { ctxMenu = null; pushProject(p); }}>
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
             Push to GitHub
           </button>
         {/if}
-        {#if s === 'remote-only' || s === 'synced'}
+        {#if s === 'remote-only' || s === 'in-sync' || s === 'remote-ahead' || s === 'diverged'}
           <button class="ctx-item" on:click={() => { ctxMenu = null; pullProject(p); }}>
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
             Pull from GitHub
@@ -512,6 +575,17 @@ func main() {
         </div>
       </div>
     </div>
+  {/if}
+
+  {#if syncDetailProject}
+    <SyncDetailModal
+      project={syncDetailProject.project}
+      state={syncDetailProject.state}
+      busy={busyProject === projectKey(syncDetailProject.project)}
+      on:close={() => (syncDetailProject = null)}
+      on:push={handleSyncPush}
+      on:pull={handleSyncPull}
+    />
   {/if}
 </div>
 
@@ -880,28 +954,55 @@ func main() {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
 
-  /* ── Sync row (always visible, shows both locations) ── */
+  /* ── Sync row (always visible, shows status + timestamps + actions) ── */
   .sync-row {
     display: flex; align-items: center; gap: 5px;
     flex-wrap: nowrap; min-width: 0;
   }
-  .loc-badge {
+
+  /* ── Sync badge ── */
+  .sync-badge {
     display: inline-flex; align-items: center; gap: 3px;
-    padding: 2px 6px; border-radius: 4px;
-    font-size: 10px; font-weight: 600; letter-spacing: 0.03em;
-    border: 1px solid #252535; background: #181825; color: #313244;
-    white-space: nowrap; flex-shrink: 0;
-    transition: all 0.15s; user-select: none;
+    padding: 2px 7px; border-radius: 4px;
+    font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
+    border: 1px solid; white-space: nowrap; flex-shrink: 0;
+    user-select: none; transition: all 0.12s;
+    background: none; font-family: inherit; color: inherit;
   }
-  .loc-badge.present { border-color: rgba(249,226,175,0.3); background: rgba(249,226,175,0.07); color: #f9e2af; }
-  .loc-badge.github.present { border-color: rgba(137,180,250,0.3); background: rgba(137,180,250,0.07); color: #89b4fa; }
-  .sync-conn {
-    font-size: 11px; font-weight: 800; flex-shrink: 0;
-    color: #252535; line-height: 1; transition: color 0.15s;
+  button.sync-badge { cursor: pointer; }
+  button.sync-badge:hover { filter: brightness(1.15); }
+  .sync-icon { font-weight: 800; font-size: 11px; line-height: 1; }
+
+  .sync-badge.in-sync {
+    color: #a6e3a1; border-color: rgba(166,227,161,0.3); background: rgba(166,227,161,0.08);
   }
-  .sync-conn.synced { color: #a6e3a1; }
-  .sync-conn.local-only { color: #313244; }
-  .sync-conn.remote-only { color: #313244; }
+  .sync-badge.local-ahead {
+    color: #f9e2af; border-color: rgba(249,226,175,0.3); background: rgba(249,226,175,0.08);
+  }
+  .sync-badge.remote-ahead {
+    color: #89b4fa; border-color: rgba(137,180,250,0.3); background: rgba(137,180,250,0.08);
+  }
+  .sync-badge.diverged {
+    color: #f38ba8; border-color: rgba(243,139,168,0.3); background: rgba(243,139,168,0.08);
+  }
+  .sync-badge.local-only {
+    color: #45475a; border-color: #252535; background: rgba(69,71,90,0.06);
+  }
+  .sync-badge.remote-only {
+    color: #585b70; border-color: #252535; background: rgba(88,91,112,0.06);
+  }
+
+  /* ── Sync timestamps ── */
+  .sync-ts {
+    display: inline-flex; align-items: center; gap: 3px;
+    font-size: 10px; color: #45475a; white-space: nowrap; flex-shrink: 0;
+  }
+  .sync-ts svg { flex-shrink: 0; opacity: 0.6; }
+  .sync-ts.local { color: #585b70; }
+  .sync-ts.remote { color: #585b70; }
+  .sync-ts.synced { color: #45475a; font-style: italic; }
+
+  /* ── Sync action buttons ── */
   .sync-act {
     display: inline-flex; align-items: center; gap: 4px;
     padding: 2px 7px; border-radius: 4px;
@@ -914,7 +1015,6 @@ func main() {
   .sync-act.push:hover:not(:disabled) { background: rgba(137,180,250,0.2); border-color: #89b4fa; }
   .sync-act.pull { color: #a6e3a1; background: rgba(166,227,161,0.08); border-color: rgba(166,227,161,0.3); }
   .sync-act.pull:hover:not(:disabled) { background: rgba(166,227,161,0.2); border-color: #a6e3a1; }
-  .sync-ts { font-size: 10px; color: #45475a; font-style: italic; }
 
   /* ── Delete button (revealed on card hover) ── */
   .del-wrap { flex-shrink: 0; }

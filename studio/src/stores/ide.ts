@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 import type { FsEntry } from '../lib/bridge';
 
 export type ProjectMode = 'single' | 'multi';
@@ -13,6 +13,16 @@ export function editTargetLabel(t: EditTarget): string {
   return `${t.mode === 'multi' ? 'Project' : 'File'} · ${name}`;
 }
 
+export type ConsoleLineKind = 'stdout' | 'stderr' | 'system' | 'success';
+
+export interface ConsoleLine {
+  text: string;
+  kind: ConsoleLineKind;
+  ts: number; // Date.now()
+}
+
+export type RunStatus = 'idle' | 'compiling' | 'running' | 'done' | 'error';
+
 export interface IdeState {
   workspaceRoot: string;
   projectMode: ProjectMode;
@@ -22,11 +32,17 @@ export interface IdeState {
   activeFilePath: string;
   code: string;
   dirty: boolean;
-  output: string;
+  // Console
+  consoleLines: ConsoleLine[];
+  runStatus: RunStatus;
+  runDurationMs: number | null;
+  // Execution
   isRunning: boolean;
   isGuiApp: boolean;
   guestRender: Uint8Array | null;
-  compileError: string;
+  // Console UI preferences
+  consoleShowTimestamps: boolean;
+  consoleWordWrap: boolean;
 }
 
 export const ide = writable<IdeState>({
@@ -38,9 +54,38 @@ export const ide = writable<IdeState>({
   activeFilePath: '',
   code: '',
   dirty: false,
-  output: '',
+  consoleLines: [],
+  runStatus: 'idle',
+  runDurationMs: null,
   isRunning: false,
   isGuiApp: false,
   guestRender: null,
-  compileError: '',
+  consoleShowTimestamps: true,
+  consoleWordWrap: true,
 });
+
+// Helper to append console lines from the store
+export function consolePush(kind: ConsoleLineKind, text: string) {
+  const ts = Date.now();
+  ide.update(s => ({
+    ...s,
+    consoleLines: [...s.consoleLines, { text, kind, ts }],
+  }));
+}
+
+export function consolePushLines(kind: ConsoleLineKind, text: string) {
+  if (!text) return;
+  const ts = Date.now();
+  const lines = text.split('\n');
+  // Remove trailing empty line from split
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  const newLines: ConsoleLine[] = lines.map(line => ({ text: line, kind, ts }));
+  ide.update(s => ({
+    ...s,
+    consoleLines: [...s.consoleLines, ...newLines],
+  }));
+}
+
+export function consoleClear() {
+  ide.update(s => ({ ...s, consoleLines: [] }));
+}

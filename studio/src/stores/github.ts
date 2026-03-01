@@ -169,6 +169,7 @@ export interface ManifestProject {
   type: 'single' | 'multi';
   remote: RemoteSource;
   pushedAt: string;
+  contentHash?: string;         // hash of content at last sync
 }
 
 export interface Manifest {
@@ -252,6 +253,58 @@ export async function fetchGistFiles(
   return result;
 }
 
+// ── Remote metadata helpers ───────────────────────────────────────────────────
+
+export interface RemoteMetadata {
+  updatedAt: string;              // ISO timestamp from GitHub API
+  files: Record<string, string>;  // filename → content
+}
+
+export async function fetchGistMetadata(
+  token: string,
+  gistId: string,
+): Promise<RemoteMetadata> {
+  const full = await githubFetch(token, `/gists/${gistId}`);
+  const files: Record<string, string> = {};
+  for (const [name, file] of Object.entries(full.files as Record<string, { content?: string }>)) {
+    if (name === MANIFEST_FILENAME) continue;
+    if ((file as any).content != null) files[name] = (file as any).content;
+  }
+  return {
+    updatedAt: full.updated_at ?? full.created_at ?? '',
+    files,
+  };
+}
+
+export async function fetchRepoMetadata(
+  token: string,
+  owner: string,
+  repo: string,
+): Promise<RemoteMetadata> {
+  const repoPath = `/repos/${owner}/${repo}`;
+  const repoInfo = await githubFetch(token, repoPath);
+  const updatedAt: string = repoInfo.pushed_at ?? repoInfo.updated_at ?? '';
+
+  let branch = repoInfo.default_branch || 'main';
+  let files: Record<string, string> = {};
+  try {
+    const { tree, truncated } = await githubFetch(
+      token, `${repoPath}/git/trees/${branch}?recursive=1`,
+    );
+    if (!truncated) {
+      for (const item of (tree as any[])) {
+        if (item.type !== 'blob') continue;
+        if (item.size > 1_000_000) continue;
+        const blob = await githubFetch(token, `${repoPath}/git/blobs/${item.sha}`);
+        files[item.path] = base64ToStr(blob.content);
+      }
+    }
+  } catch {
+    // Empty repo or network error — files stays empty
+  }
+  return { updatedAt, files };
+}
+
 // ── Git Data API (Repo push/pull) ─────────────────────────────────────────────
 
 export async function createRepo(
@@ -265,7 +318,7 @@ export async function createRepo(
       name,
       description: description || 'Created by Vibe Studio',
       private: false,
-      auto_init: false,
+      auto_init: true,  // ensures git DB is initialized so Git Data API always works
     }),
   });
 }
@@ -279,34 +332,44 @@ export async function gitPushFiles(
 ): Promise<void> {
   const repoPath = `/repos/${owner}/${repo}`;
 
-  // 1. Get current HEAD ref to find parent commit
+  // 1. Get current HEAD ref (just need parent SHA, not the tree)
   let parentSha: string | null = null;
-  let baseTreeSha: string | null = null;
   try {
     const ref = await githubFetch(token, `${repoPath}/git/ref/heads/main`);
     parentSha = ref.object.sha;
-    const parentCommit = await githubFetch(token, `${repoPath}/git/commits/${parentSha}`);
-    baseTreeSha = parentCommit.tree.sha;
   } catch {
-    // New repo with no commits yet — that's fine, parentSha stays null
+    // No commits on 'main' yet — parentSha stays null
   }
 
-  // 2. Create blobs for each file
+  // 2. Create blobs for each file.
+  //    Truly uninitialized repos (auto_init:false, never pushed) return 409 here —
+  //    bootstrap via Contents API and retry.
   const treeItems: { path: string; mode: string; type: string; sha: string }[] = [];
   for (const [path, content] of Object.entries(files)) {
-    const blob = await githubFetch(token, `${repoPath}/git/blobs`, {
-      method: 'POST',
-      body: JSON.stringify({ content: strToBase64(content), encoding: 'base64' }),
-    });
+    let blob: { sha: string };
+    try {
+      blob = await githubFetch(token, `${repoPath}/git/blobs`, {
+        method: 'POST',
+        body: JSON.stringify({ content: strToBase64(content), encoding: 'base64' }),
+      });
+    } catch (e: any) {
+      if ((String(e.message ?? '')).toLowerCase().includes('empty')) {
+        // Initialize the git DB via Contents API, then retry the whole push
+        await githubFetch(token, `${repoPath}/contents/.gitkeep`, {
+          method: 'PUT',
+          body: JSON.stringify({ message: 'Initialize repository', content: strToBase64('') }),
+        });
+        return gitPushFiles(token, owner, repo, files, message);
+      }
+      throw e;
+    }
     treeItems.push({ path, mode: '100644', type: 'blob', sha: blob.sha });
   }
 
-  // 3. Create tree
-  const treeBody: any = { tree: treeItems };
-  if (baseTreeSha) treeBody.base_tree = baseTreeSha;
+  // 3. Create a fresh tree — no base_tree, so the commit contains exactly our files
   const tree = await githubFetch(token, `${repoPath}/git/trees`, {
     method: 'POST',
-    body: JSON.stringify(treeBody),
+    body: JSON.stringify({ tree: treeItems }),
   });
 
   // 4. Create commit
@@ -317,7 +380,7 @@ export async function gitPushFiles(
     body: JSON.stringify(commitBody),
   });
 
-  // 5. Update ref (or create it)
+  // 5. Update or create the ref
   if (parentSha) {
     await githubFetch(token, `${repoPath}/git/refs/heads/main`, {
       method: 'PATCH',

@@ -6,22 +6,52 @@
   import { ide } from '../stores/ide';
 
   export let guestRender: Uint8Array | null = null;
+  export let chromeless: boolean = false;
 
   let root: HTMLDivElement;
   let stylesInjected = false;
   let cleanupKeyHandler: (() => void) | null = null;
+
+  // Resizable width (panel mode only)
+  let panelWidth = 400;
+  let isResizing = false;
+  let resizeStartX = 0;
+  let resizeStartWidth = 0;
+
+  function onResizeStart(e: MouseEvent) {
+    isResizing = true;
+    resizeStartX = e.clientX;
+    resizeStartWidth = panelWidth;
+    e.preventDefault();
+    window.addEventListener('mousemove', onResizeMove);
+    window.addEventListener('mouseup', onResizeEnd);
+  }
+
+  function onResizeMove(e: MouseEvent) {
+    if (!isResizing) return;
+    const delta = resizeStartX - e.clientX;
+    panelWidth = Math.max(220, Math.min(800, resizeStartWidth + delta));
+  }
+
+  function onResizeEnd() {
+    isResizing = false;
+    window.removeEventListener('mousemove', onResizeMove);
+    window.removeEventListener('mouseup', onResizeEnd);
+  }
 
   async function onEvent(handlerId: number, payload: string): Promise<void> {
     try {
       const newBytes = await bridge().sendGuiEvent(handlerId, payload);
       if (newBytes.length > 0) ide.update(s => ({ ...s, guestRender: newBytes }));
     } catch (e: any) {
+      const { consolePushLines } = await import('../stores/ide');
+      consolePushLines('stderr', String(e));
       ide.update(s => ({
         ...s,
         isGuiApp: false,
         guestRender: null,
         isRunning: false,
-        output: String(e),
+        runStatus: 'error',
       }));
     }
   }
@@ -71,22 +101,71 @@
   }
 </script>
 
-<div class="preview-panel">
-  <div class="panel-header">
-    <span class="label">Preview</span>
-    <span class="badge gui-badge">GUI</span>
-  </div>
+<div
+  class="preview-panel"
+  class:chromeless
+  class:resizing={isResizing}
+  style={chromeless ? '' : `width: ${panelWidth}px; flex: 0 0 ${panelWidth}px;`}
+>
+  {#if !chromeless}
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div class="resize-handle" on:mousedown={onResizeStart}>
+      <div class="resize-bar"></div>
+    </div>
+    <div class="panel-header">
+      <span class="label">Preview</span>
+      <span class="badge gui-badge">GUI</span>
+    </div>
+  {/if}
   <div bind:this={root} class="preview-root"></div>
 </div>
 
 <style>
   .preview-panel {
-    flex: 0 0 400px;
+    /* width / flex-basis set via inline style when not chromeless */
+    flex-shrink: 0;
     background: #ffffff;
-    border-left: 1px solid #313244;
+    border-left: 1px solid #1e1e2e;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    position: relative;
+  }
+
+  .preview-panel.chromeless {
+    flex: 1;
+    border-left: none;
+  }
+
+  .preview-panel.resizing {
+    user-select: none;
+  }
+
+  /* Left-edge resize handle */
+  .resize-handle {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 5px;
+    cursor: ew-resize;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .resize-handle:hover .resize-bar,
+  .preview-panel.resizing .resize-bar {
+    background: #3b3f5c;
+  }
+
+  .resize-bar {
+    width: 2px;
+    height: 40px;
+    border-radius: 1px;
+    background: #252535;
+    transition: background 0.15s;
   }
 
   .panel-header {
