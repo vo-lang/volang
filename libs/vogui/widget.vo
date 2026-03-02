@@ -7,12 +7,14 @@ package vogui
 // props are passed to the widget factory.
 // handler receives events from the widget.
 func ExternalWidget(widgetType string, props map[string]any, handler Handler) Node {
-	if props == nil {
-		props = map[string]any{}
+	// Copy props to avoid mutating the caller's map.
+	p := make(map[string]any, len(props)+2)
+	for k, v := range props {
+		p[k] = v
 	}
-	props["widgetType"] = widgetType
-	props["onWidget"] = handler.ID
-	return Node{Type: "vo-external-widget", Props: props}
+	p["widgetType"] = widgetType
+	p["onWidget"] = handler.ID
+	return Node{Type: "vo-external-widget", Props: p}
 }
 
 // OnWidget wraps an action that receives widget events.

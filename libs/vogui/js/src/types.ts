@@ -1,6 +1,6 @@
-// VoGUI v2 TypeScript type definitions.
+// VoGUI v4 TypeScript type definitions.
 
-/** VoNode is the JSON representation of a Vo Node struct. */
+/** VoNode is the decoded representation of a Vo Node struct. */
 export interface VoNode {
     type: string;
     props?: Record<string, any>;
@@ -37,6 +37,7 @@ export interface RenderMessage {
     handlers: VoHandler[];
     styles?: string[];
     canvas?: CanvasBatch[];
+    theme?: Record<string, string>;
 }
 
 /** Event callback signature. */
@@ -110,11 +111,14 @@ export const StylePropertyMap: Record<string, string> = {
     gridColumn: 'grid-column',
     gridRow: 'grid-row',
     alignItems: 'align-items',
+    alignSelf: 'align-self',
     justifyContent: 'justify-content',
+    justifySelf: 'justify-self',
     flexDirection: 'flex-direction',
     flexWrap: 'flex-wrap',
     flexGrow: 'flex-grow',
     flexShrink: 'flex-shrink',
+    fontStyle: 'font-style',
     maxLines: '-webkit-line-clamp',
 };
 
@@ -123,6 +127,7 @@ const UNITLESS_PROPERTIES = new Set([
     'flex', 'flex-grow', 'flex-shrink', 'opacity', 'z-index', 'order',
     'line-height', 'font-weight', 'orphans', 'widows', 'columns',
     'column-count', 'tab-size', 'counter-increment', 'counter-reset',
+    '-webkit-line-clamp',
 ]);
 
 /** Convert a value to CSS string. Numbers get 'px' unless the property is unitless. */

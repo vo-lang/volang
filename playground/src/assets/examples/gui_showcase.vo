@@ -1,0 +1,252 @@
+// Showcase - comprehensive demo of all v2 components and features
+package main
+
+import (
+	"fmt"
+	"vogui"
+)
+
+type State struct {
+	Count       int
+	TextInput   string
+	PasswordVal string
+	TextAreaVal string
+	CheckboxVal bool
+	SwitchVal   bool
+	SelectVal   string
+	SliderVal   int
+	ActiveTab   int
+	ShowDialog  bool
+	ShowDrawer  bool
+	TodoInput   string
+	Todos       []any
+	TodoNextID  int
+}
+
+type Todo struct {
+	ID   int
+	Text string
+	Done bool
+}
+
+func view(state any) vogui.Node {
+	s := state.(*State)
+	return vogui.Column(
+		vogui.H1("VoGUI v2 Showcase").Class("text-center"),
+		vogui.Divider(),
+		sectionCounter(s),
+		vogui.Divider(),
+		sectionInputs(s),
+		vogui.Divider(),
+		sectionDialogDrawer(s),
+		vogui.Divider(),
+		sectionTabs(s),
+		vogui.Divider(),
+		sectionDropdownMenu(s),
+		vogui.Divider(),
+		sectionTodoList(s),
+		vogui.Divider(),
+		sectionAlertsBadges(),
+	).P(24).Gap(24).MaxW("700px").Mx("auto")
+}
+
+// ============ Counter ============
+
+func sectionCounter(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.H2("Counter"),
+		vogui.Row(
+			vogui.Button("-", vogui.OnClick(decrement)).Variant("outline"),
+			vogui.Text(fmt.Sprint(s.Count)).Font(20).Bold().W(60).TextCenter(),
+			vogui.Button("+", vogui.OnClick(increment)).Variant("outline"),
+		).Gap(8).Class("items-center"),
+	).Gap(12)
+}
+
+func increment(s *State) { s.Count++ }
+func decrement(s *State) { s.Count-- }
+
+// ============ Inputs ============
+
+func sectionInputs(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.H2("Inputs"),
+		vogui.FormField("Text Input",
+			vogui.Input(s.TextInput, vogui.OnValue(func(s *State, v string) { s.TextInput = v })).
+				Placeholder("Type something..."),
+		),
+		vogui.FormField("Password",
+			vogui.Password(s.PasswordVal, vogui.OnValue(func(s *State, v string) { s.PasswordVal = v })),
+		),
+		vogui.FormField("TextArea",
+			vogui.TextArea(s.TextAreaVal, vogui.OnValue(func(s *State, v string) { s.TextAreaVal = v })).
+				Placeholder("Multi-line text...").Rows(3),
+		),
+		vogui.Row(
+			vogui.Checkbox(s.CheckboxVal, vogui.OnChecked(func(s *State, v bool) { s.CheckboxVal = v })).Text("Accept terms"),
+			vogui.Switch(s.SwitchVal, vogui.OnChecked(func(s *State, v bool) { s.SwitchVal = v })).Text("Notifications"),
+		).Gap(24),
+		vogui.FormField("Select",
+			vogui.Select(s.SelectVal, []vogui.SelectOption{
+				{Label: "Option A", Value: "a"},
+				{Label: "Option B", Value: "b"},
+				{Label: "Option C", Value: "c"},
+			}, vogui.OnSelect(func(s *State, v string) { s.SelectVal = v })),
+		),
+		vogui.FormField("Slider ("+fmt.Sprint(s.SliderVal)+")",
+			vogui.Slider(s.SliderVal, 0, 100, vogui.OnIndex(func(s *State, v int) { s.SliderVal = v })),
+		),
+		vogui.Progress(s.SliderVal, 100),
+	).Gap(12)
+}
+
+// ============ Dialog & Drawer ============
+
+func sectionDialogDrawer(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.H2("Dialog & Drawer"),
+		vogui.Row(
+			vogui.Button("Open Dialog", vogui.OnClick(func(s *State) { s.ShowDialog = true })).Variant("primary"),
+			vogui.Button("Open Drawer", vogui.OnClick(func(s *State) { s.ShowDrawer = true })).Variant("outline"),
+		).Gap(8),
+		vogui.Dialog(vogui.DialogProps{Open: s.ShowDialog, OnClose: vogui.OnClick(closeDialog)},
+			vogui.DialogTitle("Settings"),
+			vogui.DialogContent(
+				vogui.FormField("Username",
+					vogui.Input("admin", vogui.OnValue(func(s *State, v string) {})).Disabled(true),
+				),
+				vogui.Switch(s.SwitchVal, vogui.OnChecked(func(s *State, v bool) { s.SwitchVal = v })).Text("Dark mode"),
+			),
+			vogui.DialogActions(
+				vogui.Button("Cancel", vogui.OnClick(closeDialog)).Variant("outline"),
+				vogui.Button("Save", vogui.OnClick(closeDialog)).Variant("primary"),
+			),
+		),
+		vogui.Drawer(vogui.DrawerProps{Open: s.ShowDrawer, Side: "right", OnClose: vogui.OnClick(closeDrawer)},
+			vogui.H3("Drawer Panel"),
+			vogui.Divider(),
+			vogui.Text("Slide-out content goes here."),
+			vogui.Spacer(),
+			vogui.Button("Close", vogui.OnClick(closeDrawer)).Variant("outline"),
+		),
+	).Gap(12)
+}
+
+func closeDialog(s *State) { s.ShowDialog = false }
+func closeDrawer(s *State) { s.ShowDrawer = false }
+
+// ============ Tabs ============
+
+func sectionTabs(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.H2("Tabs"),
+		vogui.Tabs(vogui.TabsProps{
+			Active: s.ActiveTab,
+			OnChange: vogui.OnIndex(func(s *State, idx int) { s.ActiveTab = idx }),
+		}, []vogui.TabItem{
+			{Label: "Overview", Content: vogui.Text("This is the overview tab content.")},
+			{Label: "Details", Content: vogui.Column(
+				vogui.Text("Detailed information here."),
+				vogui.Badge("Beta").Variant("info"),
+			).Gap(8)},
+			{Label: "Settings", Content: vogui.Text("Settings panel content.")},
+		}),
+	).Gap(12)
+}
+
+// ============ DropdownMenu ============
+
+func sectionDropdownMenu(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.H2("DropdownMenu"),
+		vogui.DropdownMenu(
+			vogui.Button("Actions", vogui.OnClick(func(s *State) {})).Variant("outline"),
+			vogui.MenuItem("Edit", vogui.OnClick(func(s *State) {})),
+			vogui.MenuItem("Duplicate", vogui.OnClick(func(s *State) {})).Icon("copy"),
+			vogui.MenuDivider(),
+			vogui.MenuItem("Delete", vogui.OnClick(func(s *State) {})),
+		),
+	).Gap(12)
+}
+
+// ============ Todo List ============
+
+func sectionTodoList(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.H2("Inline Todo"),
+		vogui.Row(
+			vogui.Input(s.TodoInput, vogui.OnValue(func(s *State, v string) { s.TodoInput = v })).
+				Placeholder("Add task..."),
+			vogui.Button("Add", vogui.OnClick(addTodo)).Variant("primary"),
+		).Gap(8),
+		vogui.ForEach(s.Todos, func(item any, i int) vogui.Node {
+			todo := item.(Todo)
+			return vogui.Row(
+				vogui.Checkbox(todo.Done, vogui.OnIntChecked(toggleTodo, todo.ID)),
+				vogui.If(todo.Done,
+					vogui.Text(todo.Text).Style("textDecoration", "line-through").Fg("var(--vo-text-muted)"),
+				),
+				vogui.If(!todo.Done,
+					vogui.Text(todo.Text),
+				),
+				vogui.Spacer(),
+				vogui.Button("x", vogui.OnInt(removeTodo, todo.ID)).Variant("ghost"),
+			).Gap(8).Class("items-center").Key(fmt.Sprint(todo.ID))
+		}),
+	).Gap(12)
+}
+
+func addTodo(s *State) {
+	if s.TodoInput != "" {
+		s.Todos = append(s.Todos, Todo{ID: s.TodoNextID, Text: s.TodoInput})
+		s.TodoNextID++
+		s.TodoInput = ""
+	}
+}
+
+func toggleTodo(s *State, id int, done bool) {
+	for i := range s.Todos {
+		t := s.Todos[i].(Todo)
+		if t.ID == id {
+			t.Done = done
+			s.Todos[i] = t
+			return
+		}
+	}
+}
+
+func removeTodo(s *State, id int) {
+	for i := range s.Todos {
+		t := s.Todos[i].(Todo)
+		if t.ID == id {
+			s.Todos = append(s.Todos[:i], s.Todos[i+1:]...)
+			return
+		}
+	}
+}
+
+// ============ Alerts & Badges ============
+
+func sectionAlertsBadges() vogui.Node {
+	return vogui.Column(
+		vogui.H2("Alerts & Badges"),
+		vogui.Alert("Informational message.").Variant("info"),
+		vogui.Alert("Operation succeeded.").Variant("success"),
+		vogui.Alert("Proceed with caution.").Variant("warning"),
+		vogui.Alert("An error occurred.").Variant("danger"),
+		vogui.Row(
+			vogui.Badge("New").Variant("info"),
+			vogui.Badge("Hot").Variant("danger"),
+			vogui.Badge("Sale").Variant("success"),
+			vogui.Tag("VoGUI"),
+			vogui.Tag("v2"),
+		).Gap(8),
+	).Gap(12)
+}
+
+func main() {
+	vogui.Run(vogui.App{
+		Init: func() any { return &State{SliderVal: 50, SelectVal: "a"} },
+		View: view,
+	})
+}

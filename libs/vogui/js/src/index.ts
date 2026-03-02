@@ -1,4 +1,7 @@
-// VoGUI v2 JavaScript Runtime - Public API
+// VoGUI v4 JavaScript Runtime — Public API
+// Preact + Radix UI + Tailwind CSS renderer
+
+import './vogui.css';
 
 export type {
     VoNode,
@@ -12,7 +15,9 @@ export type {
     CanvasBatch,
 } from './types';
 
-export { render, renderNode, setupKeyHandler, registerWidget, getRef, destroyAllWidgets } from './renderer';
-export { injectStyles, applyTheme, voguiStyles } from './styles';
+export { render, voNodeToVNode, registerWidget, destroyWidgets } from './renderer';
+export { injectStyles, applyTheme, injectDynamicStyles, toggleDarkMode, setDarkMode, isDarkMode } from './styles';
 export { executeCanvasBatch } from './canvas';
 export { decodeBinaryRender } from './decoder';
+export { getRef } from './refs';
+export { emit, setRenderContext, setupKeyHandler } from './events';

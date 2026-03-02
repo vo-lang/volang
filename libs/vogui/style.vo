@@ -1,5 +1,16 @@
-// Style combinator system for reusable, composable CSS styles.
-// Styles compile to CSS class names with pseudo-class and media query support.
+// Style combinator system for reusable and composable CSS styles.
+//
+// Styles are compiled into unique CSS class names and injected once.
+// Supports pseudo-classes (:hover, :focus, :active) and media queries.
+//
+// Usage:
+//
+//   var cardStyle = vogui.NewStyle().P(16).Bg("var(--vo-surface)").Rounded(8).
+//       Hover(vogui.NewStyle().Shadow("0 2px 8px rgba(0,0,0,0.1)"))
+//
+//   func view(s *State) vogui.Node {
+//       return vogui.Div(children...).ApplyStyle(cardStyle)
+//   }
 package vogui
 
 import (
@@ -82,7 +93,7 @@ func (s Style) MaxH(v any) Style   { s.props["maxHeight"] = v; return s }
 func (s Style) P(v any) Style      { s.props["padding"] = v; return s }
 func (s Style) M(v any) Style      { s.props["margin"] = v; return s }
 func (s Style) Gap(v any) Style    { s.props["gap"] = v; return s }
-func (s Style) Bg(v string) Style  { s.props["background"] = v; return s }
+func (s Style) Bg(v string) Style  { s.props["background"] = v; return s } // CSS shorthand: color, gradient, or image
 func (s Style) Fg(v string) Style  { s.props["color"] = v; return s }
 func (s Style) Cursor(v string) Style   { s.props["cursor"] = v; return s }
 func (s Style) Opacity(v any) Style     { s.props["opacity"] = v; return s }
@@ -107,6 +118,11 @@ func (s Style) Py(v any) Style {
 	return s
 }
 
+func (s Style) Pt(v any) Style { s.props["paddingTop"] = v; return s }
+func (s Style) Pb(v any) Style { s.props["paddingBottom"] = v; return s }
+func (s Style) Pl(v any) Style { s.props["paddingLeft"] = v; return s }
+func (s Style) Pr(v any) Style { s.props["paddingRight"] = v; return s }
+
 func (s Style) Mx(v any) Style {
 	s.props["marginLeft"] = v
 	s.props["marginRight"] = v
@@ -119,8 +135,46 @@ func (s Style) My(v any) Style {
 	return s
 }
 
+func (s Style) Mt(v any) Style { s.props["marginTop"] = v; return s }
+func (s Style) Mb(v any) Style { s.props["marginBottom"] = v; return s }
+func (s Style) Ml(v any) Style { s.props["marginLeft"] = v; return s }
+func (s Style) Mr(v any) Style { s.props["marginRight"] = v; return s }
+
+func (s Style) Grow(v any) Style      { s.props["flexGrow"] = v; return s }
+func (s Style) Shrink(v any) Style    { s.props["flexShrink"] = v; return s }
+func (s Style) Display(v string) Style { s.props["display"] = v; return s }
+func (s Style) Position(v string) Style { s.props["position"] = v; return s }
+func (s Style) ZIndex(v int) Style    { s.props["zIndex"] = v; return s }
+func (s Style) AlignSelf(v string) Style  { s.props["alignSelf"] = v; return s }
+func (s Style) JustifySelf(v string) Style { s.props["justifySelf"] = v; return s }
+func (s Style) TextAlign(v string) Style { s.props["textAlign"] = v; return s }
+func (s Style) TextCenter() Style     { s.props["textAlign"] = "center"; return s }
+func (s Style) LineHeight(v any) Style { s.props["lineHeight"] = v; return s }
+
 func (s Style) Bold() Style   { s.props["fontWeight"] = "bold"; return s }
 func (s Style) Italic() Style { s.props["fontStyle"] = "italic"; return s }
+
+func (s Style) MaxLines(v int) Style {
+	s.props["maxLines"] = v
+	s.props["overflow"] = "hidden"
+	s.props["display"] = "-webkit-box"
+	s.props["-webkit-box-orient"] = "vertical"
+	return s
+}
+
+func (s Style) Top(v any) Style          { s.props["top"] = v; return s }
+func (s Style) Right(v any) Style        { s.props["right"] = v; return s }
+func (s Style) Bottom(v any) Style       { s.props["bottom"] = v; return s }
+func (s Style) Left(v any) Style         { s.props["left"] = v; return s }
+func (s Style) WhiteSpace(v string) Style    { s.props["whiteSpace"] = v; return s }
+func (s Style) WordBreak(v string) Style     { s.props["wordBreak"] = v; return s }
+func (s Style) UserSelect(v string) Style    { s.props["userSelect"] = v; return s }
+func (s Style) PointerEvents(v string) Style { s.props["pointerEvents"] = v; return s }
+func (s Style) Transform(v string) Style     { s.props["transform"] = v; return s }
+func (s Style) OverflowX(v string) Style     { s.props["overflowX"] = v; return s }
+func (s Style) OverflowY(v string) Style     { s.props["overflowY"] = v; return s }
+func (s Style) GridCol(v string) Style       { s.props["gridColumn"] = v; return s }
+func (s Style) GridRow(v string) Style       { s.props["gridRow"] = v; return s }
 
 // Style sets an arbitrary CSS property.
 func (s Style) Style(key string, value any) Style {
@@ -220,13 +274,26 @@ func (s Style) generateCSS() string {
 // writeProps writes CSS property declarations from a map.
 func writeProps(b *strings.Builder, props map[string]any) {
 	for key, val := range props {
-		cssProp := camelToKebab(key)
+		cssProp := propToCss(key)
 		cssVal := cssValue(cssProp, val)
 		b.WriteString(cssProp)
 		b.WriteString(": ")
 		b.WriteString(cssVal)
 		b.WriteString("; ")
 	}
+}
+
+// propToCss converts a Vo style property name to its CSS property name.
+// Handles special mappings that camelToKebab cannot infer.
+func propToCss(key string) string {
+	if key == "maxLines" {
+		return "-webkit-line-clamp"
+	}
+	// Keys already in kebab-case (e.g., "-webkit-box-orient") pass through
+	if len(key) > 0 && key[0] == '-' {
+		return key
+	}
+	return camelToKebab(key)
 }
 
 // cssValue converts a value to a CSS string with appropriate units.
@@ -254,7 +321,7 @@ func isUnitless(prop string) bool {
 	switch prop {
 	case "flex", "flex-grow", "flex-shrink", "opacity", "z-index", "order",
 		"line-height", "font-weight", "orphans", "widows", "columns",
-		"column-count", "tab-size":
+		"column-count", "tab-size", "-webkit-line-clamp":
 		return true
 	}
 	return false

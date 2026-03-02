@@ -86,14 +86,14 @@ func sidebar(s *State) vogui.Node {
 	return vogui.Sidebar(
 		vogui.H3("Workspace").Class("p-3"),
 		vogui.SidebarSection("MAIN"),
-		vogui.SidebarItem("Tasks", "check-square", s.ActiveTab == "tasks",
-			vogui.On(func(s *State) { s.ActiveTab = "tasks" })),
-		vogui.SidebarItem("Notes", "file-text", s.ActiveTab == "notes",
-			vogui.On(func(s *State) { s.ActiveTab = "notes" })),
+		vogui.SidebarItem("Tasks",
+			vogui.OnClick(func(s *State) { s.ActiveTab = "tasks" })).Icon("check-square").Active(s.ActiveTab == "tasks"),
+		vogui.SidebarItem("Notes",
+			vogui.OnClick(func(s *State) { s.ActiveTab = "notes" })).Icon("file-text").Active(s.ActiveTab == "notes"),
 		vogui.Spacer(),
 		vogui.SidebarSection(""),
-		vogui.SidebarItem("Settings", "settings", false,
-			vogui.On(func(s *State) { s.ShowSettings = true })),
+		vogui.SidebarItem("Settings",
+			vogui.OnClick(func(s *State) { s.ShowSettings = true })).Icon("settings"),
 	).Bg("var(--vo-surface)").H("100vh").Border("0 1px 0 0 solid var(--vo-border)")
 }
 
@@ -108,10 +108,10 @@ func topBar(s *State) vogui.Node {
 		vogui.H2(title),
 		vogui.Spacer(),
 		vogui.If(s.ActiveTab == "tasks",
-			vogui.Button("+ New Task", vogui.On(func(s *State) { s.ShowTaskDlg = true })).Variant("primary"),
+			vogui.Button("+ New Task", vogui.OnClick(func(s *State) { s.ShowTaskDlg = true })).Variant("primary"),
 		),
 		vogui.If(s.ActiveTab == "notes",
-			vogui.Button("+ New Note", vogui.On(func(s *State) { s.ShowNoteDlg = true })).Variant("primary"),
+			vogui.Button("+ New Note", vogui.OnClick(func(s *State) { s.ShowNoteDlg = true })).Variant("primary"),
 		),
 	).Class("items-center p-4 border-b gap-3")
 }
@@ -135,14 +135,17 @@ func tasksView(s *State) vogui.Node {
 		tabIdx = 2
 	}
 	return vogui.Column(
-		vogui.Tabs(tabIdx, []vogui.TabItem{
+		vogui.Tabs(vogui.TabsProps{
+			Active: tabIdx,
+			OnChange: vogui.OnIndex(func(s *State, idx int) {
+				filters := []string{"all", "active", "completed"}
+				s.TaskFilter = filters[idx]
+			}),
+		}, []vogui.TabItem{
 			{Label: "All", Content: vogui.Empty()},
 			{Label: "Active", Content: vogui.Empty()},
 			{Label: "Completed", Content: vogui.Empty()},
-		}, vogui.OnSlider(func(s *State, idx int) {
-			filters := []string{"all", "active", "completed"}
-			s.TaskFilter = filters[idx]
-		})),
+		}),
 		taskList(s),
 		vogui.Text(fmt.Sprintf("%d tasks, %d completed", len(s.Tasks), countDone(s))).
 			Fg("var(--vo-text-muted)").Class("p-2"),
@@ -180,11 +183,11 @@ func taskRow(task Task, idx int) vogui.Node {
 	}
 
 	return vogui.Row(
-		vogui.Checkbox("", task.Done, vogui.OnIntChecked(toggleTask, task.ID)),
+		vogui.Checkbox(task.Done, vogui.OnIntChecked(toggleTask, task.ID)),
 		titleNode,
 		vogui.Badge(task.Priority).Bg(priColor).Fg("#fff"),
 		vogui.DropdownMenu(
-			vogui.Button("...", vogui.On(func(s *State) {})).Variant("ghost"),
+			vogui.Button("...", vogui.OnClick(func(s *State) {})).Variant("ghost"),
 			vogui.MenuItem("Delete", vogui.OnInt(deleteTask, idx)),
 		),
 	).Class("items-center gap-3 p-2 rounded").Bg("var(--vo-surface)")
@@ -248,7 +251,7 @@ func noteItem(note Note, idx int, active bool) vogui.Node {
 	if active {
 		n = n.Bg("rgba(59,130,246,0.08)")
 	}
-	return n.On("click", vogui.Handle(func(s *State, payload string) {
+	return n.On("click", vogui.OnEvent(func(s *State, payload string) {
 		s.ActiveNoteIdx = idx
 	}))
 }
@@ -279,7 +282,7 @@ func setNoteContent(s *State, idx int, val string) {
 // ============ Task Dialog ============
 
 func taskDialog(s *State) vogui.Node {
-	return vogui.Dialog(vogui.DialogProps{Open: s.ShowTaskDlg, OnClose: vogui.On(closeTaskDlg)},
+	return vogui.Dialog(vogui.DialogProps{Open: s.ShowTaskDlg, OnClose: vogui.OnClick(closeTaskDlg)},
 		vogui.DialogTitle("New Task"),
 		vogui.DialogContent(
 			vogui.FormField("Title",
@@ -295,8 +298,8 @@ func taskDialog(s *State) vogui.Node {
 			),
 		),
 		vogui.DialogActions(
-			vogui.Button("Cancel", vogui.On(closeTaskDlg)).Variant("outline"),
-			vogui.Button("Create", vogui.On(addTask)).Variant("primary"),
+			vogui.Button("Cancel", vogui.OnClick(closeTaskDlg)).Variant("outline"),
+			vogui.Button("Create", vogui.OnClick(addTask)).Variant("primary"),
 		),
 	)
 }
@@ -320,7 +323,7 @@ func addTask(s *State) {
 // ============ Note Dialog ============
 
 func noteDialog(s *State) vogui.Node {
-	return vogui.Dialog(vogui.DialogProps{Open: s.ShowNoteDlg, OnClose: vogui.On(closeNoteDlg)},
+	return vogui.Dialog(vogui.DialogProps{Open: s.ShowNoteDlg, OnClose: vogui.OnClick(closeNoteDlg)},
 		vogui.DialogTitle("New Note"),
 		vogui.DialogContent(
 			vogui.FormField("Title",
@@ -329,8 +332,8 @@ func noteDialog(s *State) vogui.Node {
 			),
 		),
 		vogui.DialogActions(
-			vogui.Button("Cancel", vogui.On(closeNoteDlg)).Variant("outline"),
-			vogui.Button("Create", vogui.On(addNote)).Variant("primary"),
+			vogui.Button("Cancel", vogui.OnClick(closeNoteDlg)).Variant("outline"),
+			vogui.Button("Create", vogui.OnClick(addNote)).Variant("primary"),
 		),
 	)
 }
@@ -352,7 +355,7 @@ func addNote(s *State) {
 func settingsDrawer(s *State) vogui.Node {
 	return vogui.Drawer(vogui.DrawerProps{
 		Open: s.ShowSettings, Side: "right",
-		OnClose: vogui.On(func(s *State) { s.ShowSettings = false }),
+		OnClose: vogui.OnClick(func(s *State) { s.ShowSettings = false }),
 	},
 		vogui.Column(
 			vogui.H3("Settings"),
@@ -360,9 +363,9 @@ func settingsDrawer(s *State) vogui.Node {
 			vogui.FormField("Username",
 				vogui.Input(s.Username, vogui.OnValue(func(s *State, v string) { s.Username = v })),
 			),
-			vogui.Switch("Dark Mode", s.DarkMode, vogui.OnChecked(toggleDarkMode)),
+			vogui.Switch(s.DarkMode, vogui.OnChecked(toggleDarkMode)).Text("Dark Mode"),
 			vogui.Spacer(),
-			vogui.Button("Close", vogui.On(func(s *State) { s.ShowSettings = false })).Variant("outline"),
+			vogui.Button("Close", vogui.OnClick(func(s *State) { s.ShowSettings = false })).Variant("outline"),
 		).Gap(16).H("100%"),
 	)
 }

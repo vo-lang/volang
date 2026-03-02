@@ -46,8 +46,8 @@ func ParseFileExplorerEvent(payload string) (FileExplorerEvent, error) {
 
 // ── Options ───────────────────────────────────────────────────────────────────
 
-// FileExplorerOptions configures the file explorer widget.
-type FileExplorerOptions struct {
+// FileExplorerProps configures the file explorer widget.
+type FileExplorerProps struct {
 	// ActivePath is the currently open file path, used for active-row highlighting.
 	ActivePath string
 	// ReadOnly disables rename, delete, and create operations when true.
@@ -69,19 +69,19 @@ type FileExplorerOptions struct {
 //
 //	vogui.FileExplorer(s.ActiveFilePath, vogui.OnWidget(onExplorerEvent))
 func FileExplorer(activePath string, handler Handler) Node {
-	return FileExplorerWith(FileExplorerOptions{ActivePath: activePath}, handler)
+	return FileExplorerWith(FileExplorerProps{ActivePath: activePath}, handler)
 }
 
 // FileExplorerWith renders a file explorer sidebar with full configuration.
 //
 // Usage:
 //
-//	vogui.FileExplorerWith(vogui.FileExplorerOptions{
+//	vogui.FileExplorerWith(vogui.FileExplorerProps{
 //	    ActivePath: s.ActiveFilePath,
 //	    ReadOnly:   true,
 //	    Filter:     "*.vo",
 //	}, vogui.OnWidget(onExplorerEvent))
-func FileExplorerWith(opts FileExplorerOptions, handler Handler) Node {
+func FileExplorerWith(opts FileExplorerProps, handler Handler) Node {
 	return ExternalWidget(
 		"file-explorer",
 		map[string]any{

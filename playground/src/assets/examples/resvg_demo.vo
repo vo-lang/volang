@@ -64,7 +64,7 @@ func view(state any) vogui.Node {
 	if s.Error != "" {
 		return vogui.Column(
 			vogui.H2("SVG Rendering Demo"),
-			vogui.Alert("error", s.Error),
+			vogui.Alert(s.Error).Variant("danger"),
 		).P(24).Gap(16)
 	}
 	return vogui.Column(

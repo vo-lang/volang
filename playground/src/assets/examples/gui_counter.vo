@@ -16,8 +16,8 @@ func view(state any) vogui.Node {
 		vogui.H2("Counter"),
 		vogui.Text("Count: "+fmt.Sprint(s.Count)).Font(20).Bold(),
 		vogui.Row(
-			vogui.Button("-1", vogui.On(decrement)).Variant("outline"),
-			vogui.Button("+1", vogui.On(increment)).Variant("primary"),
+			vogui.Button("-1", vogui.OnClick(decrement)).Variant("outline"),
+			vogui.Button("+1", vogui.OnClick(increment)).Variant("primary"),
 		).Gap(8),
 	).Gap(16).P(24)
 }

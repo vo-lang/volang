@@ -1,15 +1,17 @@
 // Canvas component for GPU/2D rendering with 2D drawing API.
 package vogui
 
-// CanvasOpts configures the canvas element.
-type CanvasOpts struct {
+// CanvasProps configures the canvas element.
+type CanvasProps struct {
 	Width      int
 	Height     int
 	Fullscreen bool
+	OnPointer  Handler // receives PointerEvent on mouse/touch interactions
+	OnResize   Handler // receives ResizeEvent when canvas size changes
 }
 
 // Canvas renders a canvas element for GPU or 2D rendering.
-func Canvas(opts CanvasOpts) Node {
+func Canvas(opts CanvasProps) Node {
 	props := map[string]any{}
 	if opts.Width > 0 {
 		props["width"] = opts.Width
@@ -19,6 +21,12 @@ func Canvas(opts CanvasOpts) Node {
 	}
 	if opts.Fullscreen {
 		props["fullscreen"] = true
+	}
+	if opts.OnPointer.IsSet() {
+		props["onPointer"] = opts.OnPointer.ID
+	}
+	if opts.OnResize.IsSet() {
+		props["onResize"] = opts.OnResize.ID
 	}
 	return Node{Type: "Canvas", Props: props}
 }

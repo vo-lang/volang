@@ -1,9 +1,14 @@
 // Layout container components.
 package vogui
 
-// Div is a generic container element.
+// Div is a generic block container element.
 func Div(children ...Node) Node {
 	return Node{Type: "div", Children: children}
+}
+
+// Span is a generic inline container element.
+func Span(children ...Node) Node {
+	return Node{Type: "span", Children: children}
 }
 
 // Row arranges children horizontally.
@@ -57,7 +62,19 @@ func Fragment(children ...Node) Node {
 	return Node{Type: "Fragment", Children: children}
 }
 
-// Empty returns an empty node (renders nothing).
+// Empty returns an empty (null) node.
 func Empty() Node {
 	return Node{}
+}
+
+// AspectRatio constrains children to a fixed aspect ratio (width/height).
+func AspectRatio(ratio float64, children ...Node) Node {
+	return Node{Type: "vo-aspect-ratio", Props: map[string]any{
+		"ratio": ratio,
+	}, Children: children}
+}
+
+// VerticalDivider renders a vertical separator line.
+func VerticalDivider() Node {
+	return Node{Type: "vo-vertical-divider"}
 }

@@ -1,8 +1,6 @@
 // Navigation components: Tabs, Accordion, Breadcrumb, Pagination, Steps, Nav.
 package vogui
 
-import "fmt"
-
 // ============ Tabs (Managed: keyboard nav + ARIA) ============
 
 // TabItem represents a single tab.
@@ -11,19 +9,31 @@ type TabItem struct {
 	Content Node
 }
 
+// TabsProps configures a Tabs component.
+type TabsProps struct {
+	Active   int
+	OnChange Handler
+}
+
 // Tabs renders a tabbed interface.
-// activeIndex is the currently selected tab index.
 // JS manages: arrow key navigation, Home/End, ARIA roles.
-func Tabs(activeIndex int, items []TabItem, handler Handler) Node {
+//
+// Always controlled: Vo owns the active tab via Active (0-indexed).
+// OnChange fires with the new index when the user clicks a tab; update your state
+// to set Active in the handler. Without OnChange, tabs display but clicks have no effect.
+func Tabs(props TabsProps, items []TabItem) Node {
 	itemsAny := make([]any, len(items))
 	for i, item := range items {
 		itemsAny[i] = map[string]any{"label": item.Label, "content": item.Content}
 	}
-	return Node{Type: "vo-tabs", Props: map[string]any{
-		"activeIndex": activeIndex,
+	p := map[string]any{
+		"activeIndex": props.Active,
 		"items":       itemsAny,
-		"onChange":    handler.ID,
-	}}
+	}
+	if props.OnChange.IsSet() {
+		p["onChange"] = props.OnChange.ID
+	}
+	return Node{Type: "vo-tabs", Props: p}
 }
 
 // ============ Accordion (Managed: keyboard nav + transitions) ============
@@ -34,19 +44,30 @@ type AccordionItem struct {
 	Content Node
 }
 
+// AccordionProps configures an Accordion component.
+type AccordionProps struct {
+	Open     int // currently expanded panel index (-1 for none)
+	OnChange Handler
+}
+
 // Accordion renders a collapsible accordion.
-// openIndex is the currently expanded panel (-1 for none).
-// Clicking a header emits onChange with {Value: index}; Vo owns the open state.
-func Accordion(items []AccordionItem, openIndex int, handler Handler) Node {
+//
+// Always controlled: Vo owns the expanded panel via Open (0-indexed, -1 for none).
+// OnChange fires with the clicked panel index; update your state to set Open in
+// the handler. Without OnChange, panels display but clicks have no effect.
+func Accordion(props AccordionProps, items []AccordionItem) Node {
 	itemsAny := make([]any, len(items))
 	for i, item := range items {
 		itemsAny[i] = map[string]any{"title": item.Title, "content": item.Content}
 	}
-	return Node{Type: "vo-accordion", Props: map[string]any{
+	p := map[string]any{
 		"items":     itemsAny,
-		"openIndex": openIndex,
-		"onChange":  handler.ID,
-	}}
+		"openIndex": props.Open,
+	}
+	if props.OnChange.IsSet() {
+		p["onChange"] = props.OnChange.ID
+	}
+	return Node{Type: "vo-accordion", Props: p}
 }
 
 // ============ Breadcrumb ============
@@ -68,13 +89,25 @@ func Breadcrumb(items []BreadcrumbItem) Node {
 
 // ============ Pagination ============
 
+// PaginationProps configures a Pagination component.
+type PaginationProps struct {
+	Current  int
+	Total    int
+	OnChange Handler
+}
+
 // Pagination renders page navigation controls.
-func Pagination(current int, total int, handler Handler) Node {
-	return Node{Type: "vo-pagination", Props: map[string]any{
-		"current":  current,
-		"total":    total,
-		"onChange": handler.ID,
-	}}
+// Always controlled: Vo owns the current page via Current (1-indexed).
+// OnChange fires with the new page number; update your state in the handler.
+func Pagination(props PaginationProps) Node {
+	p := map[string]any{
+		"current": props.Current,
+		"total":   props.Total,
+	}
+	if props.OnChange.IsSet() {
+		p["onChange"] = props.OnChange.ID
+	}
+	return Node{Type: "vo-pagination", Props: p}
 }
 
 // ============ Steps ============
@@ -139,13 +172,13 @@ func Sidebar(children ...Node) Node {
 }
 
 // SidebarItem renders a sidebar navigation item.
-func SidebarItem(label string, icon string, active bool, handler Handler) Node {
-	return Node{Type: "vo-sidebar-item", Props: map[string]any{
-		"textContent": label,
-		"icon":        icon,
-		"active":      active,
-		"onClick":     handler.ID,
-	}}
+// Chain .Icon(name) and .Active(true) to configure.
+func SidebarItem(label string, handler Handler) Node {
+	p := map[string]any{"textContent": label}
+	if handler.IsSet() {
+		p["onClick"] = handler.ID
+	}
+	return Node{Type: "vo-sidebar-item", Props: p}
 }
 
 // SidebarSection renders a labeled section in the sidebar.
@@ -155,4 +188,3 @@ func SidebarSection(label string, children ...Node) Node {
 	}, Children: children}
 }
 
-var _ = fmt.Sprint // keep import

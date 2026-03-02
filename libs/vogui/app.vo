@@ -4,10 +4,20 @@ package vogui
 import "encoding/json"
 
 // App defines the application structure.
+//
+// Required fields:
+//   - Init: returns the initial state value; called once at startup.
+//   - View: renders the UI from the current state. Required when Routes is empty.
+//
+// Optional fields:
+//   - Routes: if non-empty, route-based rendering is used instead of View.
+//     When both Routes and View are set, Routes takes priority.
+//   - OnError: called on handler errors; defaults to println if nil.
 type App struct {
-	Init   func() any
-	View   func(state any) Node
-	Routes []Route
+	Init    func() any
+	View    func(state any) Node
+	Routes  []Route
+	OnError func(err error)
 }
 
 // Internal state
@@ -57,29 +67,41 @@ func processEvent(event Event) {
 	switch event.HandlerID {
 	case eventIDTimer:
 		var p timerPayload
-		json.Unmarshal([]byte(event.Payload), &p)
+		if err := json.Unmarshal([]byte(event.Payload), &p); err != nil {
+			reportError(err)
+			return
+		}
 		invokeTimerHandler(p.Id, currentState)
 	case eventIDGlobalKey:
 		var p keyPayload
-		json.Unmarshal([]byte(event.Payload), &p)
+		if err := json.Unmarshal([]byte(event.Payload), &p); err != nil {
+			reportError(err)
+			return
+		}
 		err := invokeGlobalKeyHandler(currentState, p.Key)
 		if err != nil {
-			println("VoGUI: global key handler error:", err)
+			reportError(err)
 		}
 	case eventIDNavigation:
 		// popstate: just re-render
 	case eventIDAnimFrame:
 		var p animFramePayload
-		json.Unmarshal([]byte(event.Payload), &p)
+		if err := json.Unmarshal([]byte(event.Payload), &p); err != nil {
+			reportError(err)
+			return
+		}
 		invokeAnimFrameHandler(p.Id, currentState)
 	case eventIDGameLoop:
 		var p gameLoopPayload
-		json.Unmarshal([]byte(event.Payload), &p)
+		if err := json.Unmarshal([]byte(event.Payload), &p); err != nil {
+			reportError(err)
+			return
+		}
 		invokeGameLoopHandler(currentState, p.Dt)
 	default:
 		err := invokeHandler(currentState, event.HandlerID, event.Payload)
 		if err != nil {
-			println("VoGUI: handler error:", err)
+			reportError(err)
 		}
 	}
 	render()
@@ -112,8 +134,17 @@ func render() {
 
 	styles := flushPendingStyles()
 	canvasCmds := flushPendingCanvasCommands()
-	data := encodeRender(renderGen, tree, styles, canvasCmds)
+	themeVars := themeToCSSVars()
+	data := encodeRender(renderGen, tree, styles, canvasCmds, themeVars)
 	emitRenderBinary(data)
+}
+
+func reportError(err error) {
+	if currentApp.OnError != nil {
+		currentApp.OnError(err)
+	} else {
+		println("VoGUI: error:", err)
+	}
 }
 
 // ============ Extern Declarations ============

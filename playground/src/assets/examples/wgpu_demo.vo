@@ -23,12 +23,9 @@ func view(state any) vogui.Node {
 	return vogui.Column(
 		vogui.Text("WebGPU Triangle Demo"),
 		vogui.Text("Rendering a triangle with animated background color via WebGPU."),
-		vogui.Canvas(vogui.CanvasOpts{
-			ID:     "gpu",
-			Width:  640,
-			Height: 480,
-			OnResize: vogui.OnResize(initCanvas),
-		}),
+		vogui.Canvas(vogui.CanvasProps{Width: 640, Height: 480}).
+			Ref("gpu").
+			On("resize", vogui.OnResize(initCanvas)),
 	)
 }
 

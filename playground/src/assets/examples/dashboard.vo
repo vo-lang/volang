@@ -1,0 +1,618 @@
+// Dashboard - analytics dashboard demonstrating VoGUI v4 composition patterns:
+// Sidebar nav, stat cards, sparkline chart, data table, dialogs, dark mode.
+package main
+
+import (
+	"fmt"
+	"vogui"
+)
+
+// ============ Data Types ============
+
+type Order struct {
+	ID      int
+	User    string
+	Product string
+	Amount  int // cents
+	Status  string // "completed", "pending", "cancelled"
+	Date    string
+}
+
+type User struct {
+	ID     int
+	Name   string
+	Email  string
+	Role   string
+	Active bool
+}
+
+// ============ State ============
+
+type State struct {
+	ActiveTab    string // "overview", "analytics", "users", "orders", "settings"
+	DarkMode     bool
+	ShowNewOrder bool
+	SearchQuery  string
+
+	// New order form
+	NewOrderUser    string
+	NewOrderProduct string
+	NewOrderAmount  string
+
+	Orders []Order
+	Users  []User
+}
+
+func initState() any {
+	return &State{
+		ActiveTab: "overview",
+		Orders: []Order{
+			{ID: 1001, User: "Alice Chen", Product: "Pro Plan", Amount: 4900, Status: "completed", Date: "2026-03-01"},
+			{ID: 1002, User: "Bob Smith", Product: "Starter Plan", Amount: 1900, Status: "pending", Date: "2026-03-01"},
+			{ID: 1003, User: "Carol Wu", Product: "Enterprise", Amount: 19900, Status: "completed", Date: "2026-02-28"},
+			{ID: 1004, User: "David Kim", Product: "Pro Plan", Amount: 4900, Status: "cancelled", Date: "2026-02-28"},
+			{ID: 1005, User: "Eve Torres", Product: "Starter Plan", Amount: 1900, Status: "completed", Date: "2026-02-27"},
+			{ID: 1006, User: "Frank Liu", Product: "Pro Plan", Amount: 4900, Status: "completed", Date: "2026-02-27"},
+			{ID: 1007, User: "Grace Park", Product: "Enterprise", Amount: 19900, Status: "pending", Date: "2026-02-26"},
+			{ID: 1008, User: "Henry Zhao", Product: "Starter Plan", Amount: 1900, Status: "completed", Date: "2026-02-26"},
+		},
+		Users: []User{
+			{ID: 1, Name: "Alice Chen", Email: "alice@example.com", Role: "Admin", Active: true},
+			{ID: 2, Name: "Bob Smith", Email: "bob@example.com", Role: "User", Active: true},
+			{ID: 3, Name: "Carol Wu", Email: "carol@example.com", Role: "User", Active: false},
+			{ID: 4, Name: "David Kim", Email: "david@example.com", Role: "Editor", Active: true},
+			{ID: 5, Name: "Eve Torres", Email: "eve@example.com", Role: "User", Active: true},
+		},
+		NewOrderUser:    "",
+		NewOrderProduct: "starter",
+		NewOrderAmount:  "",
+	}
+}
+
+// ============ Root View ============
+
+func view(state any) vogui.Node {
+	s := state.(*State)
+	return vogui.Row(
+		sidebar(s),
+		vogui.Column(
+			topBar(s),
+			mainContent(s),
+		).Flex(1).Overflow("auto"),
+		newOrderDialog(s),
+	).H("100vh").Overflow("hidden")
+}
+
+// ============ Sidebar ============
+
+func sidebar(s *State) vogui.Node {
+	return vogui.Sidebar(
+		vogui.Column(
+			vogui.Row(
+				vogui.Text("⬡").Font(24).Fg("var(--vo-primary)"),
+				vogui.H3("Volytics"),
+			).Gap(8).Class("items-center").P(16),
+			vogui.Divider(),
+		),
+		vogui.SidebarSection("MAIN"),
+		navItem(s, "overview", "📊", "Overview"),
+		navItem(s, "analytics", "📈", "Analytics"),
+		navItem(s, "orders", "🛒", "Orders"),
+		navItem(s, "users", "👥", "Users"),
+		vogui.SidebarSection("SYSTEM"),
+		navItem(s, "settings", "⚙", "Settings"),
+		vogui.Spacer(),
+		vogui.Column(
+			vogui.Divider(),
+			vogui.Row(
+				vogui.Text("👤").Font(20),
+				vogui.Column(
+					vogui.Text("Admin").Bold(),
+					vogui.Text("admin@example.com").Fg("var(--vo-text-muted)").Font(11),
+				).Flex(1).Gap(1),
+			).Gap(8).Class("items-center").P(12),
+		),
+	)
+}
+
+func navItem(s *State, tab string, icon string, label string) vogui.Node {
+	active := s.ActiveTab == tab
+	n := vogui.SidebarItem(icon+" "+label, "", active,
+		vogui.OnClick(func(s *State) { s.ActiveTab = tab }))
+	return n
+}
+
+// ============ Top Bar ============
+
+func topBar(s *State) vogui.Node {
+	titles := map[string]string{
+		"overview":  "Overview",
+		"analytics": "Analytics",
+		"orders":    "Orders",
+		"users":     "Users",
+		"settings":  "Settings",
+	}
+	title := titles[s.ActiveTab]
+
+	return vogui.Row(
+		vogui.H2(title),
+		vogui.Spacer(),
+		vogui.If(s.ActiveTab == "orders",
+			vogui.Button("+ New Order", vogui.OnClick(func(s *State) { s.ShowNewOrder = true })).Variant("primary"),
+		),
+		vogui.DropdownMenu(
+			vogui.Button("☀ / ☾", vogui.OnClick(func(s *State) {})).Variant("outline"),
+			vogui.MenuItem("Light Mode", vogui.OnClick(setLightMode)),
+			vogui.MenuItem("Dark Mode", vogui.OnClick(setDarkMode)),
+		),
+	).Class("items-center gap-3 p-4 border-b").Bg("var(--vo-background)")
+}
+
+func setLightMode(s *State) {
+	s.DarkMode = false
+	vogui.SetTheme(vogui.DefaultTheme())
+}
+
+func setDarkMode(s *State) {
+	s.DarkMode = true
+	vogui.SetTheme(vogui.DarkTheme())
+}
+
+// ============ Main Content ============
+
+func mainContent(s *State) vogui.Node {
+	switch s.ActiveTab {
+	case "overview":
+		return overviewPage(s)
+	case "analytics":
+		return analyticsPage(s)
+	case "orders":
+		return ordersPage(s)
+	case "users":
+		return usersPage(s)
+	case "settings":
+		return settingsPage(s)
+	}
+	return vogui.Empty()
+}
+
+// ============ Overview Page ============
+
+func overviewPage(s *State) vogui.Node {
+	return vogui.Column(
+		statsRow(s),
+		vogui.Grid(2,
+			recentOrdersCard(s),
+			activityCard(s),
+		).Gap(16),
+	).P(24).Gap(16)
+}
+
+func statsRow(s *State) vogui.Node {
+	total, revenue, pending := calcStats(s)
+	return vogui.Grid(4,
+		statCard("Total Orders", fmt.Sprint(total), "+12% vs last month", "success"),
+		statCard("Revenue", "$"+formatCents(revenue), "+8.3% vs last month", "primary"),
+		statCard("Pending", fmt.Sprint(pending), "Awaiting fulfillment", "warning"),
+		statCard("Users", fmt.Sprint(len(s.Users)), "2 new this week", "info"),
+	).Gap(16)
+}
+
+func statCard(title string, value string, subtitle string, color string) vogui.Node {
+	dotColor := "var(--vo-" + color + ")"
+	return vogui.Card(
+		vogui.Row(
+			vogui.Text(title).Fg("var(--vo-text-muted)").Font(13),
+			vogui.Spacer(),
+			vogui.Div().W(8).H(8).Rounded(4).Bg(dotColor),
+		).Class("items-center"),
+		vogui.Text(value).Font(28).Bold(),
+		vogui.Text(subtitle).Fg("var(--vo-text-muted)").Font(12),
+	).Gap(4).P(16)
+}
+
+func recentOrdersCard(s *State) vogui.Node {
+	var rows []vogui.Node
+	limit := 5
+	if len(s.Orders) < limit {
+		limit = len(s.Orders)
+	}
+	for i := 0; i < limit; i++ {
+		o := s.Orders[i]
+		rows = append(rows, vogui.Row(
+			vogui.Column(
+				vogui.Text(o.User).Bold().Font(13),
+				vogui.Text(o.Product).Fg("var(--vo-text-muted)").Font(12),
+			).Flex(1).Gap(2),
+			vogui.Column(
+				vogui.Text("$"+formatCents(o.Amount)).Bold().Font(13),
+				statusBadge(o.Status),
+			).Gap(4).Class("items-end"),
+		).Class("items-center py-2"))
+	}
+	return vogui.Card(
+		vogui.Row(
+			vogui.H3("Recent Orders"),
+			vogui.Spacer(),
+			vogui.Button("View all", vogui.OnClick(func(s *State) { s.ActiveTab = "orders" })).Variant("ghost"),
+		).Class("items-center"),
+		vogui.Divider(),
+		vogui.Column(rows...).Gap(0),
+	).Gap(8).P(16)
+}
+
+func activityCard(s *State) vogui.Node {
+	// Fake sparkline: 7 days of revenue as relative bar heights
+	bars := []int{42, 58, 35, 71, 55, 88, 64}
+	maxBar := 88
+	var barNodes []vogui.Node
+	for i, h := range bars {
+		days := []string{"M", "T", "W", "T", "F", "S", "S"}
+		pct := h * 100 / maxBar
+		barNodes = append(barNodes, vogui.Column(
+			vogui.Spacer(),
+			vogui.Div().W(24).H(pct).Bg("var(--vo-primary)").Rounded(4).Opacity(0.3+float64(pct)/200.0),
+			vogui.Text(days[i]).Font(10).Fg("var(--vo-text-muted)").TextCenter(),
+		).Gap(2).Class("items-center flex-1").H(120))
+	}
+	return vogui.Card(
+		vogui.Row(
+			vogui.H3("Revenue (7 days)"),
+			vogui.Spacer(),
+			vogui.Badge("+8.3%").Variant("success"),
+		).Class("items-center"),
+		vogui.Divider(),
+		vogui.Row(barNodes...).Gap(4).H(120).Class("items-end"),
+	).Gap(8).P(16)
+}
+
+// ============ Analytics Page ============
+
+func analyticsPage(s *State) vogui.Node {
+	total, revenue, pending := calcStats(s)
+	cancelled := countByStatus(s, "cancelled")
+	convRate := 0
+	if total > 0 {
+		convRate = (total - cancelled) * 100 / total
+	}
+	return vogui.Column(
+		vogui.Grid(2,
+			metricPanel("Conversion Rate", fmt.Sprint(convRate)+"%",
+				"Completed + pending vs total"),
+			metricPanel("Avg Order Value", "$"+formatCents(avgOrderValue(s)),
+				"Across all completed orders"),
+			metricPanel("Monthly Revenue", "$"+formatCents(revenue),
+				fmt.Sprint(total-pending)+" completed orders"),
+			metricPanel("Pending Value", "$"+formatCents(pendingRevenue(s)),
+				fmt.Sprint(pending)+" orders awaiting"),
+		).Gap(16),
+		vogui.Card(
+			vogui.H3("Orders by Status"),
+			vogui.Divider(),
+			statusBreakdown(s),
+		).Gap(8).P(16),
+	).P(24).Gap(16)
+}
+
+func metricPanel(title string, value string, desc string) vogui.Node {
+	return vogui.Card(
+		vogui.Text(title).Fg("var(--vo-text-muted)").Font(13),
+		vogui.Text(value).Font(32).Bold().Fg("var(--vo-primary)"),
+		vogui.Text(desc).Fg("var(--vo-text-muted)").Font(12),
+	).Gap(8).P(16)
+}
+
+func statusBreakdown(s *State) vogui.Node {
+	completed := countByStatus(s, "completed")
+	pending := countByStatus(s, "pending")
+	cancelled := countByStatus(s, "cancelled")
+	total := len(s.Orders)
+	return vogui.Column(
+		progressRow("Completed", completed, total, "success"),
+		progressRow("Pending", pending, total, "warning"),
+		progressRow("Cancelled", cancelled, total, "danger"),
+	).Gap(12)
+}
+
+func progressRow(label string, count int, total int, color string) vogui.Node {
+	pct := 0
+	if total > 0 {
+		pct = count * 100 / total
+	}
+	return vogui.Column(
+		vogui.Row(
+			vogui.Text(label).Font(13),
+			vogui.Spacer(),
+			vogui.Text(fmt.Sprint(count)+" ("+fmt.Sprint(pct)+"%)").Fg("var(--vo-text-muted)").Font(12),
+		).Class("items-center"),
+		vogui.Div(
+			vogui.Div().H(8).Bg("var(--vo-"+color+")").Rounded(4).W(fmt.Sprint(pct)+"%"),
+		).H(8).Bg("var(--vo-surface)").Rounded(4).W("100%").Overflow("hidden"),
+	).Gap(4)
+}
+
+// ============ Orders Page ============
+
+func ordersPage(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.Row(
+			vogui.Input(s.SearchQuery, vogui.OnValue(func(s *State, v string) { s.SearchQuery = v })).
+				Placeholder("Search orders...").W(280),
+			vogui.Spacer(),
+			vogui.Text(fmt.Sprint(len(s.Orders))+" total orders").Fg("var(--vo-text-muted)"),
+		).Class("items-center gap-3"),
+		ordersTable(s),
+	).P(24).Gap(16)
+}
+
+func ordersTable(s *State) vogui.Node {
+	return vogui.Card(
+		vogui.Column(
+			vogui.Row(
+				tableHeader("Order ID", "2").Class("font-semibold"),
+				tableHeader("Customer", "3"),
+				tableHeader("Product", "3"),
+				tableHeader("Amount", "2"),
+				tableHeader("Status", "2"),
+				tableHeader("Date", "2"),
+			).Class("border-b text-xs uppercase tracking-wider").Fg("var(--vo-text-muted)").Py(8).Px(4),
+			orderRows(s),
+		),
+	).P(0).Overflow("hidden")
+}
+
+func tableHeader(label string, flex string) vogui.Node {
+	return vogui.Text(label).Flex(flex).Px(8)
+}
+
+func orderRows(s *State) vogui.Node {
+	var rows []vogui.Node
+	for _, o := range s.Orders {
+		if s.SearchQuery != "" && !containsStr(o.User, s.SearchQuery) && !containsStr(o.Product, s.SearchQuery) {
+			continue
+		}
+		rows = append(rows, orderRow(o))
+	}
+	if len(rows) == 0 {
+		return vogui.Center(
+			vogui.Text("No orders match your search.").Fg("var(--vo-text-muted)"),
+		).P(32)
+	}
+	return vogui.Column(rows...)
+}
+
+func orderRow(o Order) vogui.Node {
+	return vogui.Row(
+		vogui.Text("#"+fmt.Sprint(o.ID)).Flex("2").Px(8).Font(13).Fg("var(--vo-text-muted)"),
+		vogui.Text(o.User).Flex("3").Px(8).Font(13).Bold(),
+		vogui.Text(o.Product).Flex("3").Px(8).Font(13),
+		vogui.Text("$"+formatCents(o.Amount)).Flex("2").Px(8).Font(13).Bold(),
+		vogui.Div(statusBadge(o.Status)).Flex("2").Px(8),
+		vogui.Text(o.Date).Flex("2").Px(8).Font(12).Fg("var(--vo-text-muted)"),
+	).Class("items-center border-b hover:bg-accent/50 transition-colors").Py(10).Key(fmt.Sprint(o.ID))
+}
+
+func statusBadge(status string) vogui.Node {
+	switch status {
+	case "completed":
+		return vogui.Badge("Completed").Variant("success")
+	case "pending":
+		return vogui.Badge("Pending").Variant("warning")
+	case "cancelled":
+		return vogui.Badge("Cancelled").Variant("danger")
+	}
+	return vogui.Badge(status)
+}
+
+// ============ Users Page ============
+
+func usersPage(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.Row(
+			vogui.H3("Team Members"),
+			vogui.Spacer(),
+			vogui.Badge(fmt.Sprint(len(s.Users))+" members"),
+		).Class("items-center"),
+		usersTable(s),
+	).P(24).Gap(16)
+}
+
+func usersTable(s *State) vogui.Node {
+	var rows []vogui.Node
+	for _, u := range s.Users {
+		rows = append(rows, userRow(u))
+	}
+	return vogui.Card(
+		vogui.Column(
+			vogui.Row(
+				vogui.Text("Name").Flex("3").Px(8).Font(11).Fg("var(--vo-text-muted)").Bold(),
+				vogui.Text("Email").Flex("4").Px(8).Font(11).Fg("var(--vo-text-muted)").Bold(),
+				vogui.Text("Role").Flex("2").Px(8).Font(11).Fg("var(--vo-text-muted)").Bold(),
+				vogui.Text("Status").Flex("2").Px(8).Font(11).Fg("var(--vo-text-muted)").Bold(),
+			).Class("border-b").Py(8),
+			vogui.Column(rows...),
+		),
+	).P(0).Overflow("hidden")
+}
+
+func userRow(u User) vogui.Node {
+	statusNode := vogui.Badge("Active").Variant("success")
+	if !u.Active {
+		statusNode = vogui.Badge("Inactive").Variant("secondary")
+	}
+	roleVariant := "outline"
+	if u.Role == "Admin" {
+		roleVariant = "primary"
+	} else if u.Role == "Editor" {
+		roleVariant = "info"
+	}
+	return vogui.Row(
+		vogui.Row(
+			vogui.Center(vogui.Text(string([]rune(u.Name)[0])).Font(13).Fg("var(--vo-primary-foreground)")).
+				W(32).H(32).Rounded(16).Bg("var(--vo-primary)"),
+			vogui.Text(u.Name).Bold().Font(13),
+		).Gap(8).Class("items-center").Flex("3").Px(8),
+		vogui.Text(u.Email).Flex("4").Px(8).Font(13).Fg("var(--vo-text-muted)"),
+		vogui.Div(vogui.Badge(u.Role).Variant(roleVariant)).Flex("2").Px(8),
+		vogui.Div(statusNode).Flex("2").Px(8),
+	).Class("items-center border-b hover:bg-accent/50 transition-colors").Py(10).Key(fmt.Sprint(u.ID))
+}
+
+// ============ Settings Page ============
+
+func settingsPage(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.Card(
+			vogui.H3("Appearance"),
+			vogui.Divider(),
+			vogui.FormField("Theme",
+				vogui.Row(
+					vogui.Button("Light", vogui.OnClick(setLightMode)).Variant(modeVariant(!s.DarkMode)),
+					vogui.Button("Dark", vogui.OnClick(setDarkMode)).Variant(modeVariant(s.DarkMode)),
+				).Gap(8),
+			),
+		).Gap(12).P(16),
+		vogui.Card(
+			vogui.H3("About"),
+			vogui.Divider(),
+			vogui.Row(vogui.Text("VoGUI Version").Fg("var(--vo-text-muted)"), vogui.Spacer(), vogui.Text("v4.0.0")).Class("items-center"),
+			vogui.Row(vogui.Text("Renderer").Fg("var(--vo-text-muted)"), vogui.Spacer(), vogui.Text("Preact + Tailwind")).Class("items-center"),
+			vogui.Row(vogui.Text("Framework").Fg("var(--vo-text-muted)"), vogui.Spacer(), vogui.Text("Vo / WASM")).Class("items-center"),
+		).Gap(12).P(16),
+	).P(24).Gap(16).MaxW("600px")
+}
+
+func modeVariant(active bool) string {
+	if active {
+		return "primary"
+	}
+	return "outline"
+}
+
+// ============ New Order Dialog ============
+
+func newOrderDialog(s *State) vogui.Node {
+	return vogui.Dialog(
+		vogui.DialogProps{Open: s.ShowNewOrder, OnClose: vogui.OnClick(closeNewOrder)},
+		vogui.DialogTitle("New Order"),
+		vogui.DialogContent(
+			vogui.FormField("Customer Name",
+				vogui.Input(s.NewOrderUser, vogui.OnValue(func(s *State, v string) { s.NewOrderUser = v })).
+					Placeholder("e.g. Alice Chen"),
+			),
+			vogui.FormField("Plan",
+				vogui.Select(s.NewOrderProduct, []vogui.SelectOption{
+					{Label: "Starter — $19/mo", Value: "starter"},
+					{Label: "Pro — $49/mo", Value: "pro"},
+					{Label: "Enterprise — $199/mo", Value: "enterprise"},
+				}, vogui.OnSelect(func(s *State, v string) { s.NewOrderProduct = v })),
+			),
+		),
+		vogui.DialogActions(
+			vogui.Button("Cancel", vogui.OnClick(closeNewOrder)).Variant("outline"),
+			vogui.Button("Create Order", vogui.OnClick(createOrder)).Variant("primary"),
+		),
+	)
+}
+
+func closeNewOrder(s *State) { s.ShowNewOrder = false }
+
+func createOrder(s *State) {
+	if s.NewOrderUser == "" {
+		return
+	}
+	products := map[string]string{
+		"starter":    "Starter Plan",
+		"pro":        "Pro Plan",
+		"enterprise": "Enterprise",
+	}
+	amounts := map[string]int{
+		"starter":    1900,
+		"pro":        4900,
+		"enterprise": 19900,
+	}
+	nextID := 1000 + len(s.Orders) + 1
+	s.Orders = append([]Order{{
+		ID:      nextID,
+		User:    s.NewOrderUser,
+		Product: products[s.NewOrderProduct],
+		Amount:  amounts[s.NewOrderProduct],
+		Status:  "pending",
+		Date:    "2026-03-02",
+	}}, s.Orders...)
+	s.NewOrderUser = ""
+	s.NewOrderProduct = "starter"
+	s.ShowNewOrder = false
+}
+
+// ============ Helpers ============
+
+func calcStats(s *State) (total int, revenue int, pending int) {
+	total = len(s.Orders)
+	for _, o := range s.Orders {
+		if o.Status == "completed" {
+			revenue += o.Amount
+		}
+		if o.Status == "pending" {
+			pending++
+		}
+	}
+	return
+}
+
+func countByStatus(s *State, status string) int {
+	n := 0
+	for _, o := range s.Orders {
+		if o.Status == status {
+			n++
+		}
+	}
+	return n
+}
+
+func avgOrderValue(s *State) int {
+	n, total := 0, 0
+	for _, o := range s.Orders {
+		if o.Status == "completed" {
+			total += o.Amount
+			n++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return total / n
+}
+
+func pendingRevenue(s *State) int {
+	total := 0
+	for _, o := range s.Orders {
+		if o.Status == "pending" {
+			total += o.Amount
+		}
+	}
+	return total
+}
+
+func formatCents(cents int) string {
+	return fmt.Sprintf("%d.%02d", cents/100, cents%100)
+}
+
+func containsStr(s string, sub string) bool {
+	if len(sub) > len(s) {
+		return false
+	}
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
+func main() {
+	vogui.Run(vogui.App{
+		Init: initState,
+		View: view,
+	})
+}

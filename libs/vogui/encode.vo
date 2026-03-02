@@ -97,6 +97,33 @@ func (w *BinWriter) writeValue(v any) {
 		for _, av := range val {
 			w.writeValue(av)
 		}
+	case Handler:
+		// Serialize Handler as a map so JS can reconstruct VoHandler with modifiers/keyFilter
+		w.u8(binValMap)
+		count := 2 // iD, gen always present
+		if len(val.Modifiers) > 0 {
+			count++
+		}
+		if val.KeyFilter != "" {
+			count++
+		}
+		w.u16(count)
+		w.str("iD")
+		w.writeValue(val.ID)
+		w.str("gen")
+		w.writeValue(val.Gen)
+		if len(val.Modifiers) > 0 {
+			w.str("modifiers")
+			modsAny := make([]any, len(val.Modifiers))
+			for i, m := range val.Modifiers {
+				modsAny[i] = m
+			}
+			w.writeValue(modsAny)
+		}
+		if val.KeyFilter != "" {
+			w.str("keyFilter")
+			w.writeValue(val.KeyFilter)
+		}
 	case Node:
 		w.u8(binValNode)
 		w.writeNode(val)
@@ -159,7 +186,7 @@ func (w *BinWriter) writeHandlerMeta(h Handler) {
 }
 
 // encodeRender encodes the full render message to a binary byte slice.
-func encodeRender(gen int, tree Node, styles []string, canvasCmds []map[string]any) []byte {
+func encodeRender(gen int, tree Node, styles []string, canvasCmds []map[string]any, themeVars map[string]string) []byte {
 	w := &BinWriter{}
 
 	w.u32(gen)
@@ -170,6 +197,9 @@ func encodeRender(gen int, tree Node, styles []string, canvasCmds []map[string]a
 	}
 	if len(canvasCmds) > 0 {
 		flags |= 2
+	}
+	if len(themeVars) > 0 {
+		flags |= 4
 	}
 	w.u8(flags)
 
@@ -201,6 +231,14 @@ func encodeRender(gen int, tree Node, styles []string, canvasCmds []map[string]a
 					w.writeValue(arg)
 				}
 			}
+		}
+	}
+
+	if len(themeVars) > 0 {
+		w.u16(len(themeVars))
+		for k, v := range themeVars {
+			w.str(k)
+			w.str(v)
 		}
 	}
 

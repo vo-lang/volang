@@ -74,42 +74,45 @@ func view(state any) vogui.Node {
 			s.Checked, s.Toggled, s.RadioVal, s.SliderVal, s.SelectVal,
 		)).P(8),
 
-		vogui.Tabs(s.ActiveTab, tabItems,
-			vogui.OnSlider(func(s *State, idx int) { s.ActiveTab = idx }),
-		).P(8),
+		vogui.Tabs(vogui.TabsProps{
+			Active: s.ActiveTab,
+			OnChange: vogui.OnIndex(func(s *State, idx int) { s.ActiveTab = idx }),
+		}, tabItems).P(8),
 
-		vogui.Accordion(accordionItems, s.OpenPanel,
-			vogui.OnSlider(func(s *State, idx int) { s.OpenPanel = idx }),
-		).P(8),
+		vogui.Accordion(vogui.AccordionProps{
+			Open: s.OpenPanel,
+			OnChange: vogui.OnIndex(func(s *State, idx int) { s.OpenPanel = idx }),
+		}, accordionItems).P(8),
 
 		vogui.Breadcrumb(breadcrumbItems).P(8),
 
-		vogui.Pagination(s.Page, 10,
-			vogui.OnSlider(func(s *State, page int) { s.Page = page }),
-		).P(8),
+		vogui.Pagination(vogui.PaginationProps{
+			Current: s.Page,
+			Total: 10,
+			OnChange: vogui.OnIndex(func(s *State, page int) { s.Page = page }),
+		}).P(8),
 
 		vogui.Steps(s.Step, stepItems).P(8),
 
 		vogui.Row(
-			vogui.Checkbox("Enable feature", s.Checked,
+			vogui.Checkbox(s.Checked,
 				vogui.OnChecked(func(s *State, checked bool) { s.Checked = checked }),
-			),
-			vogui.Switch("Dark mode", s.Toggled,
+			).Text("Enable feature"),
+			vogui.Switch(s.Toggled,
 				vogui.OnChecked(func(s *State, checked bool) { s.Toggled = checked }),
-			),
+			).Text("Dark mode"),
 		).Gap(16).P(8),
 
-		vogui.Row(
-			vogui.Radio("Option A", "a", s.RadioVal,
-				vogui.OnSelect(func(s *State, val string) { s.RadioVal = val }),
-			),
-			vogui.Radio("Option B", "b", s.RadioVal,
-				vogui.OnSelect(func(s *State, val string) { s.RadioVal = val }),
-			),
-		).Gap(16).P(8),
+		vogui.RadioGroup(vogui.RadioGroupProps{
+			Value: s.RadioVal,
+			OnChange: vogui.OnSelect(func(s *State, val string) { s.RadioVal = val }),
+		},
+			vogui.RadioOption("a").Text("Option A"),
+			vogui.RadioOption("b").Text("Option B"),
+		).P(8),
 
 		vogui.Slider(s.SliderVal, 0, 100,
-			vogui.OnSlider(func(s *State, val int) { s.SliderVal = val }),
+			vogui.OnIndex(func(s *State, val int) { s.SliderVal = val }),
 		).P(8),
 
 		vogui.Select(s.SelectVal, opts,

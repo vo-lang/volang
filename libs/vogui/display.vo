@@ -1,7 +1,7 @@
-// Display components for rendering text, headings, links, images, etc.
+// Display components: text, headings, links, images, badges, and other read-only elements.
 package vogui
 
-// Text renders a text node.
+// Text renders a text node. Accepts any value (converted via fmt.Sprint).
 func Text(content any) Node {
 	return Node{Type: "vo-text", Props: map[string]any{"textContent": toString(content)}}
 }
@@ -62,8 +62,10 @@ func Em(content any) Node {
 }
 
 // Link renders an anchor element.
-func Link(text string, href string) Node {
-	return Node{Type: "a", Props: map[string]any{"textContent": text, "href": href}}
+// For text links: Link("/path", Text("click here"))
+// For complex links: Link("/path", Image(src, alt), Text("caption"))
+func Link(href string, children ...Node) Node {
+	return Node{Type: "a", Props: map[string]any{"href": href}, Children: children}
 }
 
 // Badge renders a small label/badge.
@@ -87,8 +89,9 @@ func Spinner() Node {
 }
 
 // Alert renders an alert/notification box.
-func Alert(typ string, message string) Node {
-	return Node{Type: "vo-alert", Props: map[string]any{"alertType": typ, "textContent": message}}
+// Use .Variant("info"|"success"|"warning"|"danger") to set the alert type.
+func Alert(message string) Node {
+	return Node{Type: "vo-alert", Props: map[string]any{"textContent": message}}
 }
 
 // Image renders an image element.
@@ -109,4 +112,15 @@ func Icon(name string) Node {
 // Video renders a video element.
 func Video(src string) Node {
 	return Node{Type: "video", Props: map[string]any{"src": src}}
+}
+
+// Skeleton renders a loading placeholder.
+// Chain .W(), .H(), .Rounded() to configure size and shape.
+func Skeleton() Node {
+	return Node{Type: "vo-skeleton"}
+}
+
+// VisuallyHidden renders content that is hidden visually but accessible to screen readers.
+func VisuallyHidden(children ...Node) Node {
+	return Node{Type: "vo-visually-hidden", Children: children}
 }

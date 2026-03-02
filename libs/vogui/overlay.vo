@@ -6,19 +6,26 @@ package vogui
 
 // DialogProps configures Dialog behavior.
 type DialogProps struct {
+	Title   string
 	Open    bool
 	OnClose Handler
 }
 
 // Dialog renders a modal dialog using the native <dialog> element.
 // Structure via composition: DialogTitle, DialogContent, DialogActions as children.
-// Behavior via Props: Open, OnClose.
-// Per P6: when Open is provided, JS MUST respect it.
+//
+// Always controlled: Vo owns the open state. Set Open=true to show, Open=false to hide.
+// OnClose fires when the user clicks the backdrop or presses Escape; update your state
+// to set Open=false in the handler.
 func Dialog(props DialogProps, children ...Node) Node {
-	return Node{Type: "vo-dialog", Props: map[string]any{
-		"open":    props.Open,
-		"onClose": props.OnClose.ID,
-	}, Children: children}
+	p := map[string]any{"open": props.Open}
+	if props.Title != "" {
+		p["title"] = props.Title
+	}
+	if props.OnClose.IsSet() {
+		p["onClose"] = props.OnClose.ID
+	}
+	return Node{Type: "vo-dialog", Props: p, Children: children}
 }
 
 // DialogTitle renders the dialog title.
@@ -40,29 +47,34 @@ func DialogActions(children ...Node) Node {
 
 // DrawerProps configures Drawer behavior.
 type DrawerProps struct {
+	Title   string
 	Open    bool
 	Side    string // "left", "right", "top", "bottom"; default "right"
 	OnClose Handler
 }
 
 // Drawer renders a slide-out panel.
+// Always controlled: same model as Dialog — Vo owns Open, OnClose signals dismiss intent.
 func Drawer(props DrawerProps, children ...Node) Node {
 	side := props.Side
 	if side == "" {
 		side = "right"
 	}
-	return Node{Type: "vo-drawer", Props: map[string]any{
-		"open":    props.Open,
-		"onClose": props.OnClose.ID,
-		"side":    side,
-	}, Children: children}
+	p := map[string]any{"open": props.Open, "side": side}
+	if props.Title != "" {
+		p["title"] = props.Title
+	}
+	if props.OnClose.IsSet() {
+		p["onClose"] = props.OnClose.ID
+	}
+	return Node{Type: "vo-drawer", Props: p, Children: children}
 }
 
 // ============ Tooltip (Managed) ============
 
 // Tooltip wraps a trigger element and shows content on hover.
 // JS manages: show/hide on hover, positioning, delay.
-func Tooltip(content string, trigger Node) Node {
+func Tooltip(trigger Node, content string) Node {
 	return Node{Type: "vo-tooltip", Props: map[string]any{
 		"textContent": content,
 	}, Children: []Node{trigger}}
@@ -86,29 +98,14 @@ func DropdownMenu(children ...Node) Node {
 	return Node{Type: "vo-dropdown-menu", Children: children}
 }
 
-// MenuItem renders a clickable menu item.
+// MenuItem renders a menu item.
+// Chain .Icon(name) for an icon, .Disabled(true) to disable.
 func MenuItem(label string, handler Handler) Node {
-	return Node{Type: "vo-menu-item", Props: map[string]any{
-		"textContent": label,
-		"onClick":     handler.ID,
-	}}
-}
-
-// MenuItemWithIcon renders a menu item with an icon.
-func MenuItemWithIcon(icon string, label string, handler Handler) Node {
-	return Node{Type: "vo-menu-item", Props: map[string]any{
-		"icon":        icon,
-		"textContent": label,
-		"onClick":     handler.ID,
-	}}
-}
-
-// MenuItemDisabled renders a disabled menu item.
-func MenuItemDisabled(label string) Node {
-	return Node{Type: "vo-menu-item", Props: map[string]any{
-		"textContent": label,
-		"disabled":    true,
-	}}
+	p := map[string]any{"textContent": label}
+	if handler.IsSet() {
+		p["onClick"] = handler.ID
+	}
+	return Node{Type: "vo-menu-item", Props: p}
 }
 
 // MenuDivider renders a separator line in a menu.
@@ -127,16 +124,28 @@ func HoverCard(trigger Node, card Node) Node {
 
 // ============ Collapsible (Managed) ============
 
-// Collapsible wraps a trigger and collapsible content.
-// First child = trigger, remaining = content (collapsed by default).
-// JS manages: toggle open/close on trigger click.
-func Collapsible(children ...Node) Node {
-	return Node{Type: "vo-collapsible", Children: children}
+// CollapsibleProps configures Collapsible behavior.
+type CollapsibleProps struct {
+	Open     bool
+	OnChange Handler
 }
 
-// CollapsibleOpen same as Collapsible but starts expanded.
-func CollapsibleOpen(children ...Node) Node {
-	return Node{Type: "vo-collapsible", Props: map[string]any{"defaultOpen": true}, Children: children}
+// Collapsible wraps a trigger and collapsible content.
+// First child = trigger, remaining = content.
+//
+// Controlled mode (OnChange set): Vo owns the open state.
+// Uncontrolled mode (OnChange not set): JS manages toggle; Open sets default.
+func Collapsible(props CollapsibleProps, children ...Node) Node {
+	p := map[string]any{}
+	if props.OnChange.IsSet() {
+		// Controlled: Vo drives open state
+		p["open"] = props.Open
+		p["onChange"] = props.OnChange.ID
+	} else if props.Open {
+		// Uncontrolled but start expanded
+		p["defaultOpen"] = true
+	}
+	return Node{Type: "vo-collapsible", Props: p, Children: children}
 }
 
 // ============ Combobox (Managed) ============
@@ -155,7 +164,9 @@ func Combobox(props ComboboxProps, children ...Node) Node {
 	p := map[string]any{
 		"value":       props.Value,
 		"placeholder": props.Placeholder,
-		"onSelect":    props.OnSelect.ID,
+	}
+	if props.OnSelect.IsSet() {
+		p["onSelect"] = props.OnSelect.ID
 	}
 	return Node{Type: "vo-combobox", Props: p, Children: children}
 }

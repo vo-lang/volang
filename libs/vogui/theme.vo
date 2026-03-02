@@ -1,78 +1,174 @@
 // Theme and CSS custom properties.
 package vogui
 
-import "encoding/json"
-
 // Theme defines the application's design tokens.
 // These are emitted as CSS custom properties (--vo-primary, etc.).
 type Theme struct {
-	Primary    string
-	Secondary  string
-	Success    string
-	Danger     string
-	Warning    string
-	Info       string
+	// Core semantic colors
+	Primary           string
+	PrimaryForeground string
+	Secondary           string
+	SecondaryForeground string
+	Success             string
+	SuccessForeground   string
+	Danger              string
+	DangerForeground    string
+	Warning             string
+	WarningForeground   string
+	Info                string
+	InfoForeground      string
+
+	// Surface colors
 	Background string
 	Surface    string
+	Card            string
+	CardForeground  string
+	Popover            string
+	PopoverForeground  string
+	Muted              string
+
+	// Interactive colors
+	Accent           string
+	AccentForeground string
+	Ring             string
+	InputBorder      string
+
+	// Text colors
 	Text       string
 	TextMuted  string
+
+	// Border
 	Border     string
+
+	// Layout tokens
 	Radius     string
+	RadiusLg   string
+	RadiusSm   string
 	FontFamily string
 }
 
 // DefaultTheme returns the default light theme.
 func DefaultTheme() Theme {
 	return Theme{
-		Primary:    "#3b82f6",
-		Secondary:  "#6b7280",
-		Success:    "#22c55e",
-		Danger:     "#ef4444",
-		Warning:    "#f59e0b",
-		Info:       "#06b6d4",
-		Background: "#ffffff",
-		Surface:    "#f8fafc",
-		Text:       "#0f172a",
-		TextMuted:  "#64748b",
-		Border:     "#e2e8f0",
-		Radius:     "6px",
-		FontFamily: "system-ui, -apple-system, sans-serif",
+		Primary:             "#3b82f6",
+		PrimaryForeground:   "#ffffff",
+		Secondary:           "#6b7280",
+		SecondaryForeground: "#ffffff",
+		Success:             "#22c55e",
+		SuccessForeground:   "#ffffff",
+		Danger:              "#ef4444",
+		DangerForeground:    "#ffffff",
+		Warning:             "#f59e0b",
+		WarningForeground:   "#ffffff",
+		Info:                "#06b6d4",
+		InfoForeground:      "#ffffff",
+		Background:          "#ffffff",
+		Surface:             "#f8fafc",
+		Card:                "#ffffff",
+		CardForeground:      "#0f172a",
+		Popover:             "#ffffff",
+		PopoverForeground:   "#0f172a",
+		Muted:               "#f1f5f9",
+		Accent:              "#f1f5f9",
+		AccentForeground:    "#0f172a",
+		Ring:                "#3b82f6",
+		InputBorder:         "#e2e8f0",
+		Text:                "#0f172a",
+		TextMuted:           "#64748b",
+		Border:              "#e2e8f0",
+		Radius:              "6px",
+		RadiusLg:            "8px",
+		RadiusSm:            "4px",
+		FontFamily:          "system-ui, -apple-system, sans-serif",
 	}
 }
 
 // DarkTheme returns the default dark theme.
 func DarkTheme() Theme {
 	return Theme{
-		Primary:    "#60a5fa",
-		Secondary:  "#9ca3af",
-		Success:    "#4ade80",
-		Danger:     "#f87171",
-		Warning:    "#fbbf24",
-		Info:       "#22d3ee",
-		Background: "#0f172a",
-		Surface:    "#1e293b",
-		Text:       "#f1f5f9",
-		TextMuted:  "#94a3b8",
-		Border:     "#334155",
-		Radius:     "6px",
-		FontFamily: "system-ui, -apple-system, sans-serif",
+		Primary:             "#60a5fa",
+		PrimaryForeground:   "#0f172a",
+		Secondary:           "#9ca3af",
+		SecondaryForeground: "#0f172a",
+		Success:             "#4ade80",
+		SuccessForeground:   "#0f172a",
+		Danger:              "#f87171",
+		DangerForeground:    "#0f172a",
+		Warning:             "#fbbf24",
+		WarningForeground:   "#0f172a",
+		Info:                "#22d3ee",
+		InfoForeground:      "#0f172a",
+		Background:          "#0f172a",
+		Surface:             "#1e293b",
+		Card:                "#1e293b",
+		CardForeground:      "#f1f5f9",
+		Popover:             "#1e293b",
+		PopoverForeground:   "#f1f5f9",
+		Muted:               "#334155",
+		Accent:              "#334155",
+		AccentForeground:    "#f1f5f9",
+		Ring:                "#60a5fa",
+		InputBorder:         "#334155",
+		Text:                "#f1f5f9",
+		TextMuted:           "#94a3b8",
+		Border:              "#334155",
+		Radius:              "6px",
+		RadiusLg:            "8px",
+		RadiusSm:            "4px",
+		FontFamily:          "system-ui, -apple-system, sans-serif",
 	}
 }
 
 var currentTheme *Theme
 
-// SetTheme sets the application theme. Call before gui.Run() or in Init().
+// SetTheme sets the application theme. Call before vogui.Run() or in Init().
 func SetTheme(t Theme) {
 	currentTheme = &t
 }
 
-func themeToJSON() string {
+// themeToCSSVars converts the current theme to a map of CSS custom property
+// names to values, suitable for encoding in the binary render protocol.
+// Returns nil if no theme is set.
+func themeToCSSVars() map[string]string {
 	if currentTheme == nil {
-		return ""
+		return nil
 	}
-	data, err := json.Marshal(currentTheme)
-	if err != nil {
-		return ""
+	t := currentTheme
+	m := map[string]string{}
+	set := func(k string, v string) {
+		if v != "" {
+			m[k] = v
+		}
 	}
-	return string(data)
+	set("--vo-primary", t.Primary)
+	set("--vo-primary-foreground", t.PrimaryForeground)
+	set("--vo-secondary", t.Secondary)
+	set("--vo-secondary-foreground", t.SecondaryForeground)
+	set("--vo-success", t.Success)
+	set("--vo-success-foreground", t.SuccessForeground)
+	set("--vo-danger", t.Danger)
+	set("--vo-danger-foreground", t.DangerForeground)
+	set("--vo-warning", t.Warning)
+	set("--vo-warning-foreground", t.WarningForeground)
+	set("--vo-info", t.Info)
+	set("--vo-info-foreground", t.InfoForeground)
+	set("--vo-background", t.Background)
+	set("--vo-surface", t.Surface)
+	set("--vo-card", t.Card)
+	set("--vo-card-foreground", t.CardForeground)
+	set("--vo-popover", t.Popover)
+	set("--vo-popover-foreground", t.PopoverForeground)
+	set("--vo-muted", t.Muted)
+	set("--vo-accent", t.Accent)
+	set("--vo-accent-foreground", t.AccentForeground)
+	set("--vo-ring", t.Ring)
+	set("--vo-input-border", t.InputBorder)
+	set("--vo-text", t.Text)
+	set("--vo-text-muted", t.TextMuted)
+	set("--vo-border", t.Border)
+	set("--vo-radius", t.Radius)
+	set("--vo-radius-lg", t.RadiusLg)
+	set("--vo-radius-sm", t.RadiusSm)
+	set("--vo-font-family", t.FontFamily)
+	return m
 }

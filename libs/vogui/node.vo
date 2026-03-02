@@ -1,5 +1,8 @@
 // Node is the fundamental building block of the UI tree.
 // Every UI element is a Node with a type, properties, and children.
+//
+// Nodes are value types with copy-on-write maps. All methods return a new Node,
+// so chaining is safe: Text("hi").Bold().Fg("red") creates independent copies.
 package vogui
 
 // Node represents a UI element in the virtual tree.
@@ -10,19 +13,31 @@ type Node struct {
 }
 
 // ============ Style Methods ============
-// All style methods store CSS properties into Props["style"] map.
+// Style methods set CSS properties in Props["style"]. Values accept:
+//   - int:    interpreted as pixels (e.g., W(200) → "200px")
+//   - string: used as-is (e.g., W("50%"), Bg("var(--vo-primary)"))
+// String-only methods (Bg, Fg, Border, etc.) take CSS values directly.
 
 func (n Node) setStyle(key string, value any) Node {
-	if n.Props == nil {
-		n.Props = map[string]any{}
+	// Copy Props map (copy-on-write: Node is a value type but Props is a reference).
+	props := make(map[string]any, len(n.Props)+1)
+	for k, v := range n.Props {
+		props[k] = v
 	}
-	style, ok := n.Props["style"]
-	if !ok {
-		s := map[string]any{key: value}
-		n.Props["style"] = s
-		return n
+	// Copy style sub-map.
+	var style map[string]any
+	if s, ok := props["style"]; ok {
+		old := s.(map[string]any)
+		style = make(map[string]any, len(old)+1)
+		for k, v := range old {
+			style[k] = v
+		}
+	} else {
+		style = make(map[string]any, 4)
 	}
-	style.(map[string]any)[key] = value
+	style[key] = value
+	props["style"] = style
+	n.Props = props
 	return n
 }
 
@@ -59,6 +74,18 @@ func (n Node) Py(v any) Node {
 	return n.setStyle("paddingBottom", v)
 }
 
+// Pt sets padding-top.
+func (n Node) Pt(v any) Node { return n.setStyle("paddingTop", v) }
+
+// Pb sets padding-bottom.
+func (n Node) Pb(v any) Node { return n.setStyle("paddingBottom", v) }
+
+// Pl sets padding-left.
+func (n Node) Pl(v any) Node { return n.setStyle("paddingLeft", v) }
+
+// Pr sets padding-right.
+func (n Node) Pr(v any) Node { return n.setStyle("paddingRight", v) }
+
 // M sets margin (all sides).
 func (n Node) M(v any) Node { return n.setStyle("margin", v) }
 
@@ -74,10 +101,22 @@ func (n Node) My(v any) Node {
 	return n.setStyle("marginBottom", v)
 }
 
+// Mt sets margin-top.
+func (n Node) Mt(v any) Node { return n.setStyle("marginTop", v) }
+
+// Mb sets margin-bottom.
+func (n Node) Mb(v any) Node { return n.setStyle("marginBottom", v) }
+
+// Ml sets margin-left.
+func (n Node) Ml(v any) Node { return n.setStyle("marginLeft", v) }
+
+// Mr sets margin-right.
+func (n Node) Mr(v any) Node { return n.setStyle("marginRight", v) }
+
 // Gap sets gap between flex/grid children.
 func (n Node) Gap(v any) Node { return n.setStyle("gap", v) }
 
-// Bg sets background color.
+// Bg sets background color, gradient, or image.
 func (n Node) Bg(v string) Node { return n.setStyle("background", v) }
 
 // Fg sets text color.
@@ -110,8 +149,14 @@ func (n Node) Cursor(v string) Node { return n.setStyle("cursor", v) }
 // Flex sets flex property.
 func (n Node) Flex(v any) Node { return n.setStyle("flex", v) }
 
-// Font sets font-size in pixels.
+// Font sets font-size in pixels. Use FontSize for CSS string values like "1.5rem".
 func (n Node) Font(v int) Node { return n.setStyle("fontSize", v) }
+
+// Grow sets flex-grow.
+func (n Node) Grow(v any) Node { return n.setStyle("flexGrow", v) }
+
+// Shrink sets flex-shrink.
+func (n Node) Shrink(v any) Node { return n.setStyle("flexShrink", v) }
 
 // Bold sets font-weight to bold.
 func (n Node) Bold() Node { return n.setStyle("fontWeight", "bold") }
@@ -119,35 +164,94 @@ func (n Node) Bold() Node { return n.setStyle("fontWeight", "bold") }
 // Italic sets font-style to italic.
 func (n Node) Italic() Node { return n.setStyle("fontStyle", "italic") }
 
-// Center sets text-align to center.
-func (n Node) Center() Node { return n.setStyle("textAlign", "center") }
+// TextAlign sets the CSS text-align property.
+func (n Node) TextAlign(v string) Node { return n.setStyle("textAlign", v) }
 
-// Style sets an arbitrary CSS property.
+// TextCenter sets text-align to center.
+func (n Node) TextCenter() Node { return n.setStyle("textAlign", "center") }
+
+// LineHeight sets the CSS line-height.
+func (n Node) LineHeight(v any) Node { return n.setStyle("lineHeight", v) }
+
+// Display sets the CSS display property.
+func (n Node) Display(v string) Node { return n.setStyle("display", v) }
+
+// Position sets the CSS position property.
+func (n Node) Position(v string) Node { return n.setStyle("position", v) }
+
+// ZIndex sets the CSS z-index.
+func (n Node) ZIndex(v int) Node { return n.setStyle("zIndex", v) }
+
+// AlignSelf sets align-self on a flex/grid child.
+func (n Node) AlignSelf(v string) Node { return n.setStyle("alignSelf", v) }
+
+// JustifySelf sets justify-self on a grid child.
+func (n Node) JustifySelf(v string) Node { return n.setStyle("justifySelf", v) }
+
+// MaxLines clamps text to a maximum number of visible lines (CSS -webkit-line-clamp).
+// Automatically sets overflow:hidden and display:-webkit-box.
+func (n Node) MaxLines(v int) Node {
+	n = n.setStyle("maxLines", v)
+	n = n.setStyle("overflow", "hidden")
+	n = n.setStyle("display", "-webkit-box")
+	return n.setStyle("-webkit-box-orient", "vertical")
+}
+
+// Style sets an arbitrary CSS property by camelCase name.
+//   node.Style("textDecoration", "underline")
 func (n Node) Style(key string, value any) Node { return n.setStyle(key, value) }
 
-// Styles merges custom style properties from a map.
-func (n Node) Styles(props map[string]any) Node {
-	for k, v := range props {
-		n = n.setStyle(k, v)
+// Styles merges multiple CSS properties from a map in one operation.
+func (n Node) Styles(styles map[string]any) Node {
+	props := make(map[string]any, len(n.Props)+1)
+	for k, v := range n.Props {
+		props[k] = v
 	}
+	var sm map[string]any
+	if s, ok := props["style"]; ok {
+		old := s.(map[string]any)
+		sm = make(map[string]any, len(old)+len(styles))
+		for k, v := range old {
+			sm[k] = v
+		}
+	} else {
+		sm = make(map[string]any, len(styles))
+	}
+	for k, v := range styles {
+		sm[k] = v
+	}
+	props["style"] = sm
+	n.Props = props
 	return n
 }
 
 // ============ Node Property Methods ============
+// Property methods set values directly in Props (not in the style sub-map).
 
 func (n Node) setProp(key string, value any) Node {
-	if n.Props == nil {
-		n.Props = map[string]any{}
+	// Copy Props map (copy-on-write).
+	props := make(map[string]any, len(n.Props)+1)
+	for k, v := range n.Props {
+		props[k] = v
 	}
-	n.Props[key] = value
+	props[key] = value
+	n.Props = props
 	return n
 }
 
-// Class adds CSS class names to the node.
-func (n Node) Class(cls string) Node { return n.setProp("class", cls) }
+// Class appends CSS class names to the node.
+func (n Node) Class(cls string) Node {
+	if existing, ok := n.Props["class"]; ok {
+		return n.setProp("class", existing.(string)+" "+cls)
+	}
+	return n.setProp("class", cls)
+}
 
 // Variant sets the component variant (e.g., "primary", "outline", "danger").
 func (n Node) Variant(v string) Node { return n.setProp("variant", v) }
+
+// Size sets the component size (e.g., "sm", "md", "lg").
+func (n Node) Size(s string) Node { return n.setProp("size", s) }
 
 // Key sets the diffing key for stable DOM identity in lists.
 func (n Node) Key(k string) Node { return n.setProp("key", k) }
@@ -155,42 +259,123 @@ func (n Node) Key(k string) Node { return n.setProp("key", k) }
 // Ref names the DOM element for imperative access.
 func (n Node) Ref(name string) Node { return n.setProp("ref", name) }
 
-// Attr sets an arbitrary HTML attribute (ARIA, data-*, role, etc.).
+// Attr sets an arbitrary HTML attribute.
+//   node.Attr("role", "navigation").Attr("aria-label", "Main menu")
 func (n Node) Attr(key string, val any) Node {
-	if n.Props == nil {
-		n.Props = map[string]any{}
+	// Copy Props (copy-on-write).
+	props := make(map[string]any, len(n.Props)+1)
+	for k, v := range n.Props {
+		props[k] = v
 	}
-	attrs, ok := n.Props["attrs"]
-	if !ok {
-		a := map[string]any{key: val}
-		n.Props["attrs"] = a
-		return n
+	// Copy attrs sub-map.
+	var attrs map[string]any
+	if a, ok := props["attrs"]; ok {
+		old := a.(map[string]any)
+		attrs = make(map[string]any, len(old)+1)
+		for k, v := range old {
+			attrs[k] = v
+		}
+	} else {
+		attrs = make(map[string]any, 2)
 	}
-	attrs.(map[string]any)[key] = val
+	attrs[key] = val
+	props["attrs"] = attrs
+	n.Props = props
 	return n
 }
 
-// Transition sets the transition name for enter/leave animations.
-func (n Node) Transition(name string) Node { return n.setProp("transition", name) }
+// Side sets the preferred side for overlay positioning (e.g., "top", "bottom", "left", "right").
+// Used by Tooltip, Popover, and similar overlay components.
+func (n Node) Side(s string) Node { return n.setProp("side", s) }
 
-// On binds an arbitrary DOM event to a handler on this node.
-// Example: gui.Div(children...).On("scroll", gui.Handle(onScroll))
+// AnimateWith sets the transition name for enter/leave animations.
+func (n Node) AnimateWith(name string) Node { return n.setProp("transition", name) }
+
+// On binds a named DOM event to a handler on this node.
+//   Div(children...).On("scroll", OnEvent(onScroll))
+// For common events, prefer the typed handler constructor directly:
+//   Button("Save", OnClick(save))  // click is implicit via Button
 func (n Node) On(event string, h Handler) Node {
-	if n.Props == nil {
-		n.Props = map[string]any{}
+	// Copy Props (copy-on-write).
+	props := make(map[string]any, len(n.Props)+1)
+	for k, v := range n.Props {
+		props[k] = v
 	}
-	events, ok := n.Props["events"]
-	if !ok {
-		e := map[string]any{event: h}
-		n.Props["events"] = e
-		return n
+	// Copy events sub-map.
+	var events map[string]any
+	if e, ok := props["events"]; ok {
+		old := e.(map[string]any)
+		events = make(map[string]any, len(old)+1)
+		for k, v := range old {
+			events[k] = v
+		}
+	} else {
+		events = make(map[string]any, 2)
 	}
-	events.(map[string]any)[event] = h
+	events[event] = h
+	props["events"] = events
+	n.Props = props
 	return n
 }
 
-// AddHandler attaches a handler to the node using the handler's built-in event type.
-// Used by component constructors (Button, Input, etc.) that have implicit event types.
-func (n Node) AddHandler(h Handler) Node {
-	return n.setProp("handler_"+toString(h.Type), h.ID)
-}
+// ============ Content & Semantic Props ============
+
+// Text sets the text content of a node. Use to add labels to components:
+//   Checkbox(checked, handler).Text("Enable feature")
+//   SidebarItem("Home", handler).Icon("home").Active(true)
+func (n Node) Text(content string) Node { return n.setProp("textContent", content) }
+
+// Icon sets the icon name on a node.
+func (n Node) Icon(name string) Node { return n.setProp("icon", name) }
+
+// Active marks a node as active (e.g., current nav item, selected sidebar item).
+func (n Node) Active(a bool) Node { return n.setProp("active", a) }
+
+// ============ Position Offset Styles ============
+
+// Top sets the CSS top property.
+func (n Node) Top(v any) Node { return n.setStyle("top", v) }
+
+// Right sets the CSS right property.
+func (n Node) Right(v any) Node { return n.setStyle("right", v) }
+
+// Bottom sets the CSS bottom property.
+func (n Node) Bottom(v any) Node { return n.setStyle("bottom", v) }
+
+// Left sets the CSS left property.
+func (n Node) Left(v any) Node { return n.setStyle("left", v) }
+
+// ============ Text Layout Styles ============
+
+// WhiteSpace sets the CSS white-space property.
+func (n Node) WhiteSpace(v string) Node { return n.setStyle("whiteSpace", v) }
+
+// WordBreak sets the CSS word-break property.
+func (n Node) WordBreak(v string) Node { return n.setStyle("wordBreak", v) }
+
+// ============ Interaction Styles ============
+
+// UserSelect sets the CSS user-select property.
+func (n Node) UserSelect(v string) Node { return n.setStyle("userSelect", v) }
+
+// PointerEvents sets the CSS pointer-events property.
+func (n Node) PointerEvents(v string) Node { return n.setStyle("pointerEvents", v) }
+
+// ============ Transform & Overflow ============
+
+// Transform sets the CSS transform property.
+func (n Node) Transform(v string) Node { return n.setStyle("transform", v) }
+
+// OverflowX sets the CSS overflow-x property.
+func (n Node) OverflowX(v string) Node { return n.setStyle("overflowX", v) }
+
+// OverflowY sets the CSS overflow-y property.
+func (n Node) OverflowY(v string) Node { return n.setStyle("overflowY", v) }
+
+// ============ Grid Child Styles ============
+
+// GridCol sets the CSS grid-column property.
+func (n Node) GridCol(v string) Node { return n.setStyle("gridColumn", v) }
+
+// GridRow sets the CSS grid-row property.
+func (n Node) GridRow(v string) Node { return n.setStyle("gridRow", v) }

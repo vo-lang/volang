@@ -244,9 +244,19 @@ def studio_wasm_needs_build() -> bool:
     if get_newest_mtime(studio_src, pattern='*.rs') > wasm_mtime:
         return True
 
+    # studio/wasm build metadata (build.rs/Cargo.toml) can change embedded file behavior
+    studio_build = PROJECT_ROOT / 'studio' / 'wasm'
+    if get_newest_mtime(studio_build / 'build.rs', studio_build / 'Cargo.toml') > wasm_mtime:
+        return True
+
     # libs/vogui/rust/src/
     vogui_src = PROJECT_ROOT / 'libs' / 'vogui' / 'rust' / 'src'
     if get_newest_mtime(vogui_src, pattern='*.rs') > wasm_mtime:
+        return True
+
+    # libs/vogui/*.vo — embedded into studio WASM for user imports
+    vogui_vo = PROJECT_ROOT / 'libs' / 'vogui'
+    if get_newest_mtime(vogui_vo, pattern='*.vo') > wasm_mtime:
         return True
 
     # lang/crates/* dependencies

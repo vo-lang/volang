@@ -1,4 +1,8 @@
-// Control flow components for conditional and list rendering.
+// Control flow helpers for conditional and list rendering.
+//
+// If vs Show:
+//   - If:   removes/adds DOM nodes (cheaper when rarely toggled)
+//   - Show: hides via display:none (preserves DOM state, cheaper when toggled often)
 package vogui
 
 // If renders child only when condition is true.

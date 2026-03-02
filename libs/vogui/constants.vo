@@ -1,0 +1,61 @@
+// Predefined constants for component variants, sizes, sides, toast types,
+// and transition names. Using these instead of raw strings gives compile-time
+// typo protection and IDE discoverability.
+package vogui
+
+// ============ Button / Badge / Alert Variants ============
+
+const (
+	VariantDefault     = "default"
+	VariantPrimary     = "primary"
+	VariantSecondary   = "secondary"
+	VariantOutline     = "outline"
+	VariantGhost       = "ghost"
+	VariantLink        = "link"
+	VariantDanger      = "danger"
+	VariantDestructive = "destructive" // alias for Danger
+	VariantSuccess     = "success"
+	VariantWarning     = "warning"
+	VariantInfo        = "info"
+)
+
+// ============ Component Sizes ============
+
+const (
+	SizeXs   = "xs"
+	SizeSm   = "sm"
+	SizeMd   = "md"
+	SizeLg   = "lg"
+	SizeXl   = "xl"
+	SizeIcon = "icon"
+)
+
+// ============ Drawer / Overlay Sides ============
+
+const (
+	SideLeft   = "left"
+	SideRight  = "right"
+	SideTop    = "top"
+	SideBottom = "bottom"
+)
+
+// ============ Toast Types ============
+
+const (
+	ToastInfo    = "info"
+	ToastSuccess = "success"
+	ToastWarning = "warning"
+	ToastDanger  = "danger"
+)
+
+// ============ Built-in Transition Names ============
+
+const (
+	TransitionFade       = "fade"
+	TransitionSlideDown  = "slide-down"
+	TransitionSlideUp    = "slide-up"
+	TransitionSlideLeft  = "slide-left"
+	TransitionSlideRight = "slide-right"
+	TransitionScale      = "scale"
+	TransitionCollapse   = "collapse"
+)

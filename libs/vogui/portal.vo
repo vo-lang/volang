@@ -13,6 +13,7 @@ func Portal(name string, children ...Node) Node {
 
 // Toast displays a temporary notification message.
 // Rendered via portal. Auto-dismisses after durationMs.
+// typ: "info", "success", "warning", or "danger".
 func Toast(message string, typ string, durationMs int) {
 	toastEmit(message, typ, durationMs)
 }

@@ -1,7 +1,7 @@
 // Binary render protocol decoder.
 // Mirrors the format produced by libs/vogui/encode.vo (little-endian).
 //
-// Node tags: 0=null 1=element 2=text 3=fragment
+// Node tags: 0=null 1=element 2=text 3=fragment 4=component 5=cached
 // Value tags: 0=null 1=bool 2=int 3=float64 4=string 5=map 6=array 7=node
 
 import type { VoNode, VoHandler, RenderMessage, CanvasBatch, CanvasCommand } from './types';
@@ -97,13 +97,11 @@ class BinReader {
             return { type: 'Fragment', props: {}, children };
         }
         if (tag === 4) {
-            // binNodeComponent: u32 componentID + subtree node
             const cid = this.u32();
             const child = this.node();
             return { type: '__comp__', props: { _cid: cid }, children: child ? [child] : [] };
         }
         if (tag === 5) {
-            // binNodeCached: u32 componentID; JS reuses stored DOM subtree
             const cid = this.u32();
             return { type: '__cached__', props: { _cid: cid }, children: [] };
         }
@@ -189,5 +187,16 @@ export function decodeBinaryRender(data: Uint8Array): RenderMessage {
         }
     }
 
-    return { type: 'render', gen, tree, handlers, styles, canvas };
+    let theme: Record<string, string> | undefined;
+    if (flags & 4) {
+        const n = r.u16();
+        theme = {};
+        for (let i = 0; i < n; i++) {
+            const k = r.str();
+            const v = r.str();
+            theme[k] = v;
+        }
+    }
+
+    return { type: 'render', gen, tree, handlers, styles, canvas, theme };
 }

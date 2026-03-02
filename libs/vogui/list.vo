@@ -37,11 +37,11 @@ func TableRow(children ...Node) Node {
 }
 
 // TableCell renders a table data cell.
-func TableCell(content any) Node {
-	return Node{Type: "td", Props: map[string]any{"textContent": toString(content)}}
+func TableCell(children ...Node) Node {
+	return Node{Type: "td", Children: children}
 }
 
 // TableHeaderCell renders a table header cell.
-func TableHeaderCell(content any) Node {
-	return Node{Type: "th", Props: map[string]any{"textContent": toString(content)}}
+func TableHeaderCell(children ...Node) Node {
+	return Node{Type: "th", Children: children}
 }

@@ -1,41 +1,224 @@
 // Package vogui provides a declarative UI framework for building web applications in Vo.
+// It follows TEA (The Elm Architecture): State → View → Event → Action → State → ...
 //
-// Programming model: State → View → Action (TEA - The Elm Architecture)
+// State is a single struct owned by Vo. View is a pure function over state. Actions mutate
+// state via a concrete pointer (*YourState); the framework re-renders after each action.
+// JS manages ephemeral UI behavior state (open/close, focus, animation) transparently.
 //
-//   - State: A single user-defined struct holding all application data
-//   - View: A pure function that builds a Node tree from state
-//   - Action: Functions that mutate state in response to events
+// # Quick Start
 //
-// Two-layer state model:
-//   - Vo layer: Application state (data, business logic, routing)
-//   - JS layer: UI behavior state (dropdown open/close, tooltip, focus, animation)
+//   type State struct {
+//       Count int
+//       Name  string
+//   }
 //
-// Files:
-//   - gui.vo       Package overview
-//   - node.vo      Node struct and chainable methods
-//   - app.vo       Application lifecycle (Run, render)
-//   - event.vo     Handler system with generation protocol
-//   - component.vo Component Model (Mount, lifecycle, handler scoping, memo)
-//   - style.vo     Style combinator system (reusable styles, pseudo-classes, media queries)
-//   - theme.vo     Theme and CSS custom properties
-//   - control.vo   Control flow (If, Show, ForEach, etc.)
-//   - layout.vo    Layout containers (Row, Column, Grid, etc.)
-//   - display.vo   Display components (Text, Heading, Link, etc.)
-//   - input.vo     Input components (Button, Input, Select, etc.)
-//   - container.vo Structural containers (Card, Panel)
-//   - overlay.vo   Overlay components (Dialog, Drawer, Tooltip, DropdownMenu, etc.)
-//   - nav.vo       Navigation (Tabs, Accordion, Breadcrumb, Pagination, etc.)
-//   - form.vo      Form components (Form, FormField, etc.)
-//   - list.vo      List and table components
-//   - transition.vo Transition and TransitionGroup
-//   - ref.vo       DOM refs and imperative actions
-//   - portal.vo    Portal system
-//   - head.vo      Document head management
-//   - unsafe.vo    UnsafeHTML
-//   - widget.vo    ExternalWidget escape hatch
-//   - canvas.vo    Canvas 2D drawing API, requestAnimationFrame, game loop
-//   - timer.vo     Timer functions
-//   - router.vo    Client-side routing
-//   - util.vo      Utility functions
-//   - explorer.vo  FileExplorer external widget
+//   func view(state any) vogui.Node {
+//       s := state.(*State)
+//       return vogui.Column(
+//           vogui.Input(s.Name, vogui.OnValue(func(s *State, v string) { s.Name = v })).
+//               Placeholder("Your name"),
+//           vogui.Row(
+//               vogui.Button("-1", vogui.OnClick(func(s *State) { s.Count-- })).Variant(vogui.VariantOutline),
+//               vogui.Text(fmt.Sprint(s.Count)).Font(20).Px(16),
+//               vogui.Button("+1", vogui.OnClick(func(s *State) { s.Count++ })).Variant(vogui.VariantPrimary),
+//           ).Gap(8).Class("items-center"),
+//       ).Gap(12).P(24)
+//   }
+//
+//   func main() {
+//       vogui.SetTheme(vogui.DefaultTheme())
+//       vogui.Run(vogui.App{
+//           Init: func() any { return &State{Name: "World"} },
+//           View: view,
+//       })
+//   }
+//
+// # Handlers
+//
+// Every handler takes an action whose first parameter is *YourState. Dispatched via
+// dynamic call (~>); no interface or type registration required.
+//
+//   OnClick(func(s *S))                               button, menu item click
+//   OnValue(func(s *S, v string))                     text input — fires per keystroke
+//   OnChecked(func(s *S, checked bool))               checkbox, switch
+//   OnIndex(func(s *S, i int))                        tabs, accordion, pagination, slider
+//   OnSelect(func(s *S, v string))                    combobox / select option chosen
+//   OnSubmit(func(s *S))                              form submit (prevents default)
+//   OnFiles(func(s *S, files []FileInfo))             file input
+//   OnKey(func(s *S, key string))                     keyboard event
+//   OnEvent(func(s *S, payload string))               generic DOM event (JSON: Type/Value/Key/ClientX/Y/…)
+//   OnPointer(func(s *S, e PointerEvent))             canvas mouse/touch (Kind/X/Y/Button/Buttons)
+//   OnResize(func(s *S, e ResizeEvent))               canvas resize (Width/Height)
+//   OnInt(func(s *S, n int), n)                       click + pre-bound integer (list items)
+//   OnIntValue(func(s *S, n int, v string), n)        value change + pre-bound integer
+//   OnIntChecked(func(s *S, n int, b bool), n)        checked change + pre-bound integer
+//
+// Modifiers (chain on any Handler, return new Handler):
+//   .Prevent()       e.preventDefault()
+//   .Stop()          e.stopPropagation()
+//   .Once()          fire once then detach
+//   .Debounce(ms)    coalesce rapid events
+//   .Throttle(ms)    rate-limit events
+//   .Key(key)        filter keyboard events to a specific key ("Enter", "Escape", …)
+//
+// # Node Chaining API
+//
+// Every component returns a Node. All methods return a new Node (copy-on-write).
+//
+//   Size:      .W(n)  .H(n)  .MinW(n)  .MaxW(n)  .MinH(n)  .MaxH(n)
+//   Padding:   .P(n)  .Px(n)  .Py(n)  .Pt(n)  .Pb(n)  .Pl(n)  .Pr(n)
+//   Margin:    .M(n)  .Mx(n)  .My(n)  .Mt(n)  .Mb(n)  .Ml(n)  .Mr(n)
+//   Flex:      .Gap(n)  .Flex(n)  .Grow(n)  .Shrink(n)
+//   Visual:    .Bg(s)  .Fg(s)  .Opacity(n)  .Rounded(n)  .Border(s)  .Shadow(s)
+//   Position:  .Position(s)  .Top(n)  .Right(n)  .Bottom(n)  .Left(n)  .ZIndex(n)
+//   Layout:    .Display(s)  .Overflow(s)  .OverflowX(s)  .OverflowY(s)
+//              .GridCol(s)  .GridRow(s)  .AlignSelf(s)  .JustifySelf(s)
+//   Text:      .Font(n)  .FontSize(n)  .FontWeight(n)  .Bold()  .Italic()
+//              .TextAlign(s)  .TextCenter()  .LineHeight(n)  .MaxLines(n)
+//   Props:     .Class(s)  .Variant(s)  .Size(s)  .Key(s)  .Ref(s)
+//              .Attr(k,v)  .Side(s)  .Icon(s)  .Text(s)  .Active(b)
+//              .AnimateWith(name)
+//   Events:    .On("eventName", handler)
+//   Styles:    .Style(key, val)  .Styles(map)  .ApplyStyle(style)  .ApplyStyles(styles...)
+//
+// Integer values are treated as px. Strings pass through as CSS ("50%", "1fr", "var(--vo-primary)").
+//
+// # Constants
+//
+// Use exported constants instead of magic strings (defined in constants.vo):
+//
+//   Variant:    VariantPrimary  VariantSecondary  VariantOutline  VariantGhost
+//               VariantLink     VariantDanger      VariantSuccess  VariantWarning  VariantInfo
+//   Size:       SizeXs  SizeSm  SizeMd  SizeLg  SizeXl  SizeIcon
+//   Side:       SideLeft  SideRight  SideTop  SideBottom          (Drawer, Tooltip, Popover)
+//   Toast:      ToastInfo  ToastSuccess  ToastWarning  ToastDanger
+//   Transition: TransitionFade  TransitionScale  TransitionCollapse
+//               TransitionSlideDown  TransitionSlideUp  TransitionSlideLeft  TransitionSlideRight
+//
+// # Controlled Components
+//
+// Most interactive components are always controlled: Vo owns state, JS owns ephemeral behavior.
+// Collapsible is the only component that also supports uncontrolled mode.
+//
+//   Tabs(TabsProps{Active: s.Tab, OnChange: OnIndex(setTab)}, items...)
+//   Accordion(AccordionProps{Active: s.Open, OnChange: OnIndex(setOpen)}, items...)
+//   Pagination(PaginationProps{Page: s.Page, Total: s.Total, OnChange: OnIndex(setPage)})
+//   Dialog(DialogProps{Open: s.Show, OnClose: OnClick(close)}, children...)
+//   Drawer(DrawerProps{Open: s.Show, Side: SideRight, OnClose: OnClick(close)})
+//   Combobox(ComboboxProps{Value: s.V, OnSelect: OnSelect(setV)}, options...)
+//   // Collapsible controlled:   CollapsibleProps{Open: s.Open, OnChange: OnChecked(setOpen)}
+//   // Collapsible uncontrolled: CollapsibleProps{Open: true}   // JS manages toggle
+//
+// # Reusable Styles
+//
+//   var cardStyle = vogui.NewStyle().P(16).Bg("var(--vo-surface)").Rounded(8).
+//       Hover(vogui.NewStyle().Shadow("0 4px 12px rgba(0,0,0,0.1)"))
+//
+//   var mobileCard = cardStyle.Extend().Media("(max-width:640px)", vogui.NewStyle().P(8))
+//
+//   // In View:
+//   vogui.Card(children...).ApplyStyle(cardStyle)
+//
+// # Component Model
+//
+// Mount() encapsulates a subtree with its own state pointer and optional lifecycle.
+// The component struct lives on the parent state; Mount() is called each render cycle.
+//
+//   type Counter struct{ Count int }
+//
+//   func (c *Counter) View() vogui.Node {
+//       return vogui.Row(
+//           vogui.Text(fmt.Sprint(c.Count)),
+//           vogui.Button("+", vogui.OnClick(func(c *Counter) { c.Count++ })),
+//       )
+//   }
+//   func (c *Counter) Init()              {}               // optional; called once on first Mount
+//   func (c *Counter) Destroy()           {}               // optional; called when removed from tree
+//   func (c *Counter) ShouldUpdate() bool { return true }  // optional; false reuses cached DOM
+//
+//   // In parent View (Counter field lives on parent state struct):
+//   return vogui.Mount(&s.Counter)
+//
+// # Routing
+//
+//   vogui.Run(vogui.App{
+//       Init: func() any { return &State{} },
+//       Routes: []vogui.Route{
+//           {Path: "/",         View: func(state any, _ map[string]string) vogui.Node { ... }},
+//           {Path: "/user/:id", View: func(state any, p map[string]string) vogui.Node {
+//               // p["id"] contains the captured segment
+//               ...
+//           }},
+//       },
+//   })
+//
+//   vogui.Navigate("/user/42")   // programmatic navigation; triggers re-render
+//   vogui.GetCurrentPath()       // returns "/user/42"
+//
+// # Theming
+//
+//   func main() {
+//       vogui.SetTheme(vogui.DarkTheme())   // or DefaultTheme(), or custom Theme{}
+//       vogui.Run(...)
+//   }
+//
+// CSS custom properties emitted: --vo-primary, --vo-primary-foreground, --vo-secondary,
+// --vo-background, --vo-surface, --vo-card, --vo-text, --vo-text-muted, --vo-border,
+// --vo-danger, --vo-success, --vo-warning, --vo-info, --vo-radius, --vo-font-family, …
+// Use in style strings: .Bg("var(--vo-surface)")  .Fg("var(--vo-text-muted)")
+//
+// # Canvas
+//
+//   // Declare canvas in View (bind ref for later drawing):
+//   vogui.Canvas(vogui.CanvasProps{Width: 800, Height: 600, OnPointer: vogui.OnPointer(onPtr)}).Ref("game")
+//
+//   // Draw in an action (commands batched and sent with next render):
+//   ctx := vogui.GetCanvas("game")
+//   ctx.SetFill("#3b82f6")
+//   ctx.FillRect(x, y, w, h)
+//   ctx.FillText("Score: "+fmt.Sprint(score), 10, 24)
+//   ctx.Flush()
+//
+//   // Game loop — handler: func(state any, dt float64), dt = ms since last frame:
+//   id := vogui.RunGameLoop(func(state any, dt float64) { ... })
+//   vogui.StopGameLoop(id)
+//
+//   // One-shot frame:
+//   vogui.RequestAnimationFrame(func(state any) { ... })
+//
+// # File Index
+//
+//   node.vo        Node; .W .H .P .Gap .Bg .Fg .Bold .Class .Variant .Key .Ref .On …
+//   app.vo         App{Init, View, Routes, OnError}; Run()
+//   event.vo       OnClick OnValue OnChecked OnIndex OnSelect OnSubmit OnFiles
+//                  OnKey OnEvent OnPointer OnResize OnInt OnIntValue OnIntChecked
+//   constants.vo   VariantXxx  SizeXxx  SideXxx  ToastXxx  TransitionXxx
+//   component.vo   Mount(ptr); lifecycle: View() Init() Destroy() ShouldUpdate() bool
+//   style.vo       NewStyle(); .Hover() .Focus() .Active() .Media(); .Extend(); ApplyStyle()
+//   theme.vo       Theme{}  SetTheme()  DefaultTheme()  DarkTheme()
+//   layout.vo      Row  Column  Grid  Stack  Center  Wrap  Spacer  Divider  Scroll
+//   control.vo     If  IfElse  Show  ForEach  ForEachKeyed  ForRange
+//   display.vo     Text  H1–H6  P  Code  Pre  Strong  Em  Link  Badge  Tag  Icon
+//                  Image  Avatar  Video  Progress  Spinner  Alert  Skeleton  VisuallyHidden
+//   input.vo       Button  Input  Textarea  Checkbox  Switch  Select  MultiSelect  Slider
+//                  RadioGroup  FileInput  ColorPicker  DatePicker
+//   container.vo   Card  CardHeader  CardBody  CardFooter  Panel
+//   overlay.vo     Dialog  Drawer  Tooltip  Popover  DropdownMenu  ContextMenu  HoverCard
+//                  Collapsible  Combobox  MenuItem  MenuDivider
+//   nav.vo         Tabs  Accordion  Breadcrumb  Pagination  Sidebar  SidebarItem  Steps  NavLink
+//   form.vo        Form  FormField  FormError  FormHelp  FormSection
+//   list.vo        List  ListItem  Table  TableRow  TableCell
+//   canvas.vo      Canvas(CanvasProps)  GetCanvas(ref) *CanvasCtx  ctx.{FillRect,FillText,…}
+//                  RunGameLoop(fn)  StopGameLoop(id)
+//                  RequestAnimationFrame(fn)  CancelAnimationFrame(id)
+//   transition.vo  Transition(name, child)  TransitionGroup(name, list)
+//   timer.vo       SetTimeout(fn, ms) int  ClearTimeout(id)
+//                  SetInterval(fn, ms) int  ClearInterval(id)
+//   router.vo      Route{Path, View}  Navigate(path)  GetCurrentPath() string
+//   ref.vo         Focus  Blur  ScrollTo  ScrollIntoView  SelectText  — bind via .Ref("name")
+//   portal.vo      Portal(name, children…)  Toast(msg, ToastXxx, durationMs)
+//   head.vo        SetTitle(s)  SetMeta(name, content)
+//   unsafe.vo      UnsafeHTML(html string)
+//   widget.vo      ExternalWidget(widgetType, handler, props…)
+//   explorer.vo    FileExplorer widget
 package vogui

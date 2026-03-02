@@ -489,7 +489,7 @@ func view(state any) vogui.Node {
 					vogui.Text("Level: "+fmt.Sprint(s.Level)).Font(12).Fg("#aaa"),
 				).Gap(2),
 			).W(CanvasW),
-			vogui.Canvas(vogui.CanvasOpts{Width: CanvasW, Height: CanvasH}).
+			vogui.Canvas(vogui.CanvasProps{Width: CanvasW, Height: CanvasH}).
 				Ref("tetris").
 				Border("2px solid #333").Rounded(4),
 			vogui.Text("← → move  ↑ rotate  ↓ soft drop  Space: drop  P: pause").

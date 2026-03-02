@@ -32,9 +32,9 @@ func (c *Counter) ShouldUpdate() bool {
 func (c *Counter) View() vogui.Node {
 	return vogui.Row(
 		vogui.Text(c.Label+":").P(4),
-		vogui.Button("-", vogui.On(func(c *Counter) { c.Count-- })),
+		vogui.Button("-", vogui.OnClick(func(c *Counter) { c.Count-- })),
 		vogui.Text(fmt.Sprint(c.Count)).P(8),
-		vogui.Button("+", vogui.On(func(c *Counter) { c.Count++ })),
+		vogui.Button("+", vogui.OnClick(func(c *Counter) { c.Count++ })),
 	).Gap(8)
 }
 
@@ -106,9 +106,9 @@ func view(state any) vogui.Node {
 
 		// Toggle counter visibility
 		vogui.Row(
-			vogui.Checkbox("Show counters", s.ShowCounter,
+			vogui.Checkbox(s.ShowCounter,
 				vogui.OnChecked(func(s *AppState, v bool) { s.ShowCounter = v }),
-			),
+			).Text("Show counters"),
 		).P(8),
 
 		counterSection,
@@ -122,7 +122,7 @@ func view(state any) vogui.Node {
 			vogui.Input(s.TaskInput,
 				vogui.OnValue(func(s *AppState, v string) { s.TaskInput = v }),
 			),
-			vogui.Button("Add", vogui.On(func(s *AppState) {
+			vogui.Button("Add", vogui.OnClick(func(s *AppState) {
 				if s.TaskInput != "" {
 					s.Tasks = append(s.Tasks, s.TaskInput)
 					s.TaskInput = ""

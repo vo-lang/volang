@@ -1,9 +1,24 @@
 // Structural container components.
 package vogui
 
-// Card renders a card container with optional header/footer.
+// Card renders a card container with surface background and border.
 func Card(children ...Node) Node {
 	return Node{Type: "vo-card", Children: children}
+}
+
+// CardHeader renders the card header section (title/subtitle area).
+func CardHeader(children ...Node) Node {
+	return Node{Type: "vo-card-header", Children: children}
+}
+
+// CardBody renders the card main content area.
+func CardBody(children ...Node) Node {
+	return Node{Type: "vo-card-body", Children: children}
+}
+
+// CardFooter renders the card footer section (action buttons area).
+func CardFooter(children ...Node) Node {
+	return Node{Type: "vo-card-footer", Children: children}
 }
 
 // Panel renders a bordered panel container.

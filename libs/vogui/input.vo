@@ -1,7 +1,8 @@
 // Input components: buttons, text inputs, checkboxes, selects, etc.
+//
+// All input components take the current value and a handler, following the
+// controlled component pattern: Vo owns the value, JS reports changes.
 package vogui
-
-import "fmt"
 
 // Button renders a clickable button.
 func Button(label string, handler Handler) Node {
@@ -59,32 +60,46 @@ func (n Node) ReadOnly(r bool) Node {
 	return n.setProp("readOnly", r)
 }
 
-// Checkbox renders a labeled checkbox input.
-func Checkbox(label string, checked bool, handler Handler) Node {
+// Checkbox renders a checkbox input.
+// Chain .Text("label") to add a visible label.
+func Checkbox(checked bool, handler Handler) Node {
 	return Node{Type: "vo-checkbox", Props: map[string]any{
-		"textContent": label,
-		"checked":     checked,
-		"onChange":    handler.ID,
+		"checked":  checked,
+		"onChange": handler.ID,
 	}}
 }
 
-// Switch renders a labeled toggle switch.
-func Switch(label string, checked bool, handler Handler) Node {
+// Switch renders a toggle switch.
+// Chain .Text("label") to add a visible label.
+func Switch(checked bool, handler Handler) Node {
 	return Node{Type: "vo-switch", Props: map[string]any{
-		"textContent": label,
-		"checked":     checked,
-		"onChange":    handler.ID,
+		"checked":  checked,
+		"onChange": handler.ID,
 	}}
 }
 
-// Radio renders a radio button.
-func Radio(label string, value string, selected string, handler Handler) Node {
-	return Node{Type: "vo-radio", Props: map[string]any{
-		"textContent": label,
-		"value":       value,
-		"selected":    selected,
-		"onChange":    handler.ID,
-	}}
+// ============ RadioGroup ============
+
+// RadioGroupProps configures a RadioGroup.
+type RadioGroupProps struct {
+	Value    string
+	OnChange Handler
+}
+
+// RadioGroup renders a group of radio buttons.
+// Children should be RadioOption nodes.
+func RadioGroup(props RadioGroupProps, children ...Node) Node {
+	p := map[string]any{"selected": props.Value}
+	if props.OnChange.IsSet() {
+		p["onChange"] = props.OnChange.ID
+	}
+	return Node{Type: "vo-radio-group", Props: p, Children: children}
+}
+
+// RadioOption renders a single radio option within a RadioGroup.
+// Chain .Text("label") to add a visible label.
+func RadioOption(value string) Node {
+	return Node{Type: "vo-radio", Props: map[string]any{"value": value}}
 }
 
 // SelectOption represents an option in a select dropdown.
@@ -181,5 +196,5 @@ func (n Node) InputType(t string) Node {
 
 // Rows sets the number of rows for a textarea.
 func (n Node) Rows(r int) Node {
-	return n.setProp("rows", fmt.Sprint(r))
+	return n.setProp("rows", r)
 }
