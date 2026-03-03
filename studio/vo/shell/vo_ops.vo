@@ -1,0 +1,255 @@
+package main
+
+import (
+	"libs/vox"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+func handleVoOp(id, workspace, cwd, kind string, op any) error {
+	switch kind {
+	case "vo.version":
+		writeOk(id, map[string]any{"version": "0.1.0"})
+		return nil
+	case "vo.run":
+		return handleVoRun(id, workspace, cwd, op)
+	case "vo.check":
+		return handleVoCheck(id, workspace, cwd, op)
+	case "vo.build", "vo.compile":
+		return handleVoBuild(id, workspace, cwd, op)
+	case "vo.dump":
+		return handleVoDump(id, workspace, cwd, op)
+	case "vo.init":
+		return handleVoInit(id, workspace, cwd)
+	case "vo.clean":
+		return handleVoClean(id, workspace, cwd)
+	case "vo.get":
+		return handleVoGet(id, workspace, cwd, op)
+	case "vo.test":
+		return handleVoTest(id, workspace, cwd, op)
+	case "vo.bench":
+		return handleVoBench(id, workspace, cwd, op)
+	}
+	writeError(id, "ERR_NOT_SUPPORTED", "unknown vo op: "+kind)
+	return nil
+}
+
+// vo.run — run a Vo file/dir via d.py, capture output (avoids nested VM).
+func handleVoRun(id, workspace, cwd string, op any) error {
+	var path string
+	path = op~>path?
+
+	abs, err := resolveAndSandbox(workspace, cwd, path)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	modeAny, _ := op~>mode
+	mode, _ := modeAny.(string)
+	args := []string{"./d.py", "run", abs}
+	if mode == "jit" {
+		args = append(args, "--mode=jit")
+	}
+
+	cmd := exec.Command(args[0], args[1:])
+	cmd.Dir = workspace
+	out, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		writeError(id, "ERR_VO_RUNTIME", strings.TrimSpace(string(out))+": "+runErr.Error())
+		return nil
+	}
+	writeOk(id, map[string]any{"stdout": strings.TrimSpace(string(out))})
+	return nil
+}
+
+// vo.check — compile-check a file using vox.CompileCheck (no VM execution, safe).
+func handleVoCheck(id, workspace, cwd string, op any) error {
+	var path string
+	path = op~>path?
+
+	abs, err := resolveAndSandbox(workspace, cwd, path)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		writeError(id, "ERR_NOT_FOUND", err.Error())
+		return nil
+	}
+
+	errMsg, err := vox.CompileCheck(string(data))
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+
+	if errMsg != "" {
+		writeOk(id, map[string]any{"ok": false, "errors": []string{errMsg}})
+	} else {
+		writeOk(id, map[string]any{"ok": true, "errors": []string{}})
+	}
+	return nil
+}
+
+// vo.build / vo.compile — compile to .vob bytecode binary.
+func handleVoBuild(id, workspace, cwd string, op any) error {
+	var path string
+	path = op~>path?
+
+	abs, err := resolveAndSandbox(workspace, cwd, path)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	// Try directory first, then single file.
+	m, err := vox.CompileDir(abs)
+	if err != nil {
+		m, err = vox.CompileFile(abs)
+		if err != nil {
+			writeError(id, "ERR_VO_COMPILE", err.Error())
+			return nil
+		}
+	}
+	defer vox.Free(m)
+
+	outputAny, _ := op~>output
+	outputPath, _ := outputAny.(string)
+	if outputPath == "" {
+		outputPath = abs + ".vob"
+	} else if !filepath.IsAbs(outputPath) {
+		outputPath = filepath.Join([]string{cwd, outputPath})
+	}
+
+	err = vox.SaveBytecodeBinary(m, outputPath)
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+
+	writeOk(id, map[string]any{"output": outputPath})
+	return nil
+}
+
+// vo.dump — compile and return bytecode text representation.
+func handleVoDump(id, workspace, cwd string, op any) error {
+	var path string
+	path = op~>path?
+
+	abs, err := resolveAndSandbox(workspace, cwd, path)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	m, err := vox.CompileFile(abs)
+	if err != nil {
+		m, err = vox.CompileDir(abs)
+		if err != nil {
+			writeError(id, "ERR_VO_COMPILE", err.Error())
+			return nil
+		}
+	}
+	defer vox.Free(m)
+
+	formatted := vox.FormatBytecode(m)
+	writeOk(id, map[string]any{"bytecode": formatted})
+	return nil
+}
+
+// vo.init — create a main.vo scaffold in cwd if it doesn't already exist.
+func handleVoInit(id, workspace, cwd string) error {
+	dir := cwd
+	if dir == "" {
+		dir = workspace
+	}
+	mainFile := dir + "/main.vo"
+	_, err := os.Stat(mainFile)
+	if err != nil {
+		src := "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"Hello, Vo!\")\n}\n"
+		err = os.WriteFile(mainFile, []byte(src), 0644)
+		if err != nil {
+			writeError(id, "ERR_INTERNAL", err.Error())
+			return nil
+		}
+	}
+	writeOk(id, map[string]any{"path": dir})
+	return nil
+}
+
+// vo.clean — remove build artifacts from cwd.
+func handleVoClean(id, workspace, cwd string) error {
+	targets := []string{cwd + "/target", cwd + "/.vob_cache"}
+	for _, t := range targets {
+		os.RemoveAll(t)
+	}
+	writeOk(id, nil)
+	return nil
+}
+
+// vo.get — download a Vo module (one-shot, uses d.py).
+func handleVoGet(id, workspace, cwd string, op any) error {
+	var module string
+	module = op~>module?
+
+	cmd := exec.Command("./d.py", []string{"vo", "get", module})
+	cmd.Dir = workspace
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", strings.TrimSpace(string(out))+": "+err.Error())
+		return nil
+	}
+	writeOk(id, map[string]any{"stdout": strings.TrimSpace(string(out))})
+	return nil
+}
+
+// vo.test — streaming: run test suite via d.py.
+func handleVoTest(id, workspace, cwd string, op any) error {
+	targetAny, _ := op~>target
+	target, _ := targetAny.(string)
+	if target == "" {
+		target = "both"
+	}
+	pathAny, _ := op~>path
+	path, _ := pathAny.(string)
+
+	args := []string{"./d.py", "test", target}
+	if path != "" {
+		if !filepath.IsAbs(path) {
+			path = filepath.Join([]string{cwd, path})
+		}
+		args = append(args, path)
+	}
+
+	writeStream(id, newJobId(), map[string]any{
+		"program":  "./d.py",
+		"args":     args,
+		"dir":      workspace,
+		"env":      nil,
+		"combined": true,
+	})
+	return nil
+}
+
+// vo.bench — streaming: run benchmark suite via d.py.
+func handleVoBench(id, workspace, cwd string, op any) error {
+	suiteAny, _ := op~>suite
+	suite, _ := suiteAny.(string)
+	if suite == "" {
+		suite = "all"
+	}
+
+	writeStream(id, newJobId(), map[string]any{
+		"program":  "./d.py",
+		"args":     []string{"./d.py", "bench", suite},
+		"dir":      workspace,
+		"env":      nil,
+		"combined": true,
+	})
+	return nil
+}

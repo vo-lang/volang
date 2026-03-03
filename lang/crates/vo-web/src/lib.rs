@@ -385,6 +385,39 @@ pub fn run(bytecode: &[u8]) -> RunResult {
     }
 }
 
+/// Run bytecode with explicit os.Args injected as a JS string array.
+/// `args` must be a JS `Array<string>`. The args are visible to the program as `os.Args`.
+#[wasm_bindgen(js_name = "runWithArgs")]
+pub fn run_with_args(bytecode: &[u8], args: js_sys::Array) -> RunResult {
+    let args_vec: Vec<String> = args
+        .iter()
+        .filter_map(|v| v.as_string())
+        .collect();
+
+    vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
+        *cell.borrow_mut() = Some(args_vec);
+    });
+
+    let result = match create_vm(bytecode, |_, _| {}) {
+        Ok(_) => RunResult {
+            status: "ok".to_string(),
+            stdout: vo_runtime::output::take_output(),
+            stderr: String::new(),
+        },
+        Err(msg) => RunResult {
+            status: "error".to_string(),
+            stdout: vo_runtime::output::take_output(),
+            stderr: msg,
+        },
+    };
+
+    vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+
+    result
+}
+
 /// Compile and run in one step. Returns a Promise<{status,stdout,stderr}> to support async ops.
 #[cfg(feature = "compiler")]
 #[wasm_bindgen(js_name = "compileAndRun")]
@@ -428,6 +461,7 @@ async fn run_vm_async(bytecode: &[u8]) -> (String, String, String) {
     let exts = &module.externs;
     vo_stdlib::register_externs(reg, exts);
     vo_web_runtime_wasm::os::register_externs(reg, exts);
+    vo_web_runtime_wasm::exec::register_externs(reg, exts);
     vo_web_runtime_wasm::time::register_externs(reg, exts);
     vo_web_runtime_wasm::filepath::register_externs(reg, exts);
     vo_web_runtime_wasm::net_http::register_externs(reg, exts);
@@ -568,6 +602,7 @@ pub fn create_vm_from_module(module: Module, register_externs: ExternRegistrar) 
     
     // wasm platform
     vo_web_runtime_wasm::os::register_externs(reg, exts);
+    vo_web_runtime_wasm::exec::register_externs(reg, exts);
     vo_web_runtime_wasm::time::register_externs(reg, exts);
     vo_web_runtime_wasm::filepath::register_externs(reg, exts);
     vo_web_runtime_wasm::net_http::register_externs(reg, exts);
@@ -633,6 +668,7 @@ pub async fn run_bytecode_async_with_externs(
     let exts = &module.externs;
     vo_stdlib::register_externs(reg, exts);
     vo_web_runtime_wasm::os::register_externs(reg, exts);
+    vo_web_runtime_wasm::exec::register_externs(reg, exts);
     vo_web_runtime_wasm::time::register_externs(reg, exts);
     vo_web_runtime_wasm::filepath::register_externs(reg, exts);
     vo_web_runtime_wasm::net_http::register_externs(reg, exts);

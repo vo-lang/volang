@@ -1,0 +1,40 @@
+package main
+
+// handleProc handles proc.spawn — always a streaming operation.
+// The Rust VoRunner will start the subprocess and emit line events.
+func handleProc(id, workspace, cwd string, op any) error {
+	var program string
+	program = op~>program?
+
+	argsAny, _ := op~>args
+	args := anyToStringSlice(argsAny)
+
+	// Resolve cwd for the spawned process
+	dirAny, _ := op~>cwd
+	spawnDir, _ := dirAny.(string)
+	if spawnDir == "" {
+		spawnDir = cwd
+	} else if spawnDir != "" {
+		abs, err := resolveAndSandbox(workspace, cwd, spawnDir)
+		if err != nil {
+			writeError(id, "ERR_ACCESS_DENIED", err.Error())
+			return nil
+		}
+		spawnDir = abs
+	}
+
+	combinedAny, _ := op~>combined
+	combined, _ := combinedAny.(bool)
+
+	// Full argv: [program, ...args]
+	fullArgs := append([]string{program}, args...)
+
+	writeStream(id, newJobId(), map[string]any{
+		"program":  program,
+		"args":     fullArgs,
+		"dir":      spawnDir,
+		"env":      nil,
+		"combined": combined,
+	})
+	return nil
+}

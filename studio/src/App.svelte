@@ -6,13 +6,15 @@
   import Home from './components/Home.svelte';
   import Editor from './components/Editor.svelte';
   import Console from './components/Console.svelte';
+  import Terminal from './components/Terminal.svelte';
   import PreviewPanel from './components/PreviewPanel.svelte';
   import ContextMenu from './components/ContextMenu.svelte';
   import { ide } from './stores/ide';
   import { editTargetLabel } from './stores/ide';
   import { explorer } from './stores/explorer';
-  import { initBridge } from './lib/bridge';
+  import { initBridge, bridge } from './lib/bridge';
   import { actions } from './lib/actions';
+  import { termInit } from './stores/terminal';
 
   let bridgeReady = false;
   let bridgeError = '';
@@ -21,6 +23,7 @@
     try {
       await initBridge();
       await actions.initWorkspace();
+      termInit(bridge().workspaceRoot);
       bridgeReady = true;
     } catch (e: any) {
       bridgeError = String(e);
@@ -29,13 +32,13 @@
 
   $: isGuiApp = $ide.isGuiApp && $ide.guestRender !== null && $ide.guestRender.length > 0;
   $: appMode  = $explorer.appMode;
+  $: if (isGuiApp && appMode !== 'run') {
+    explorer.update(e => ({ ...e, appMode: 'run' }));
+  }
   $: fileName = $ide.activeFilePath ? $ide.activeFilePath.split('/').pop() ?? '' : '';
   $: ctxLabel = $ide.editTarget ? editTargetLabel($ide.editTarget) : '';
   $: ctxMode  = $ide.projectMode === 'multi' ? 'Multi File' : 'Single File';
 
-  function switchToDevelop() {
-    explorer.update(e => ({ ...e, appMode: 'develop' }));
-  }
 </script>
 
 {#if bridgeError}
@@ -46,59 +49,6 @@
   <div class="splash">
     <span class="loading-text">Loading…</span>
   </div>
-{:else if appMode === 'run'}
-  <!-- ================================================================== -->
-  <!-- RUN MODE: Immersive, no sidebar, no IDE chrome                     -->
-  <!-- ================================================================== -->
-  <div class="run-root">
-    {#if isGuiApp}
-      <!-- GUI app: full-screen preview -->
-      <div class="run-gui-fullscreen">
-        <PreviewPanel guestRender={$ide.guestRender} chromeless />
-      </div>
-    {:else}
-      <!-- Console app: centered terminal card -->
-      <div class="run-terminal-wrapper">
-        <div class="run-terminal-card">
-          <div class="run-terminal-header">
-            <div class="run-terminal-dots">
-              <span class="dot dot-red"></span>
-              <span class="dot dot-yellow"></span>
-              <span class="dot dot-green"></span>
-            </div>
-            <span class="run-terminal-title">{fileName || 'Untitled'}</span>
-            <div class="run-terminal-actions">
-              <button
-                class="run-action-btn"
-                disabled={$ide.isRunning || !$ide.activeFilePath}
-                on:click={() => actions.runCode()}
-                title="Run"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-              </button>
-              <button
-                class="run-action-btn stop"
-                disabled={!$ide.isRunning}
-                on:click={() => actions.stopCode()}
-                title="Stop"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
-              </button>
-            </div>
-          </div>
-          <Console mode="fullscreen" />
-        </div>
-      </div>
-    {/if}
-
-    <!-- Floating "back to IDE" button -->
-    <button class="fab-editor" on:click={switchToDevelop} title="Open Editor">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
-      </svg>
-    </button>
-  </div>
-
 {:else}
   <!-- ================================================================== -->
   <!-- HOME + DEVELOP: Normal IDE with sidebar                            -->
@@ -106,8 +56,55 @@
   <div class="app-root">
     <Sidebar />
 
-    {#if appMode === 'manage'}
+    {#if appMode === 'run'}
+      <!-- ============================================================== -->
+      <!-- RUN MODE: shares sidebar, full content area                    -->
+      <!-- ============================================================== -->
+      <div class="run-panel">
+        {#if isGuiApp}
+          <PreviewPanel guestRender={$ide.guestRender} chromeless />
+        {:else}
+          <div class="run-terminal-wrapper">
+            <div class="run-terminal-card">
+              <div class="run-terminal-header">
+                <div class="run-terminal-dots">
+                  <span class="dot dot-red"></span>
+                  <span class="dot dot-yellow"></span>
+                  <span class="dot dot-green"></span>
+                </div>
+                <span class="run-terminal-title">{fileName || 'Untitled'}</span>
+                <div class="run-terminal-actions">
+                  <button
+                    class="run-action-btn"
+                    disabled={$ide.isRunning || !$ide.activeFilePath}
+                    on:click={() => actions.runCode()}
+                    title="Run"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                  </button>
+                  <button
+                    class="run-action-btn stop"
+                    disabled={!$ide.isRunning}
+                    on:click={() => actions.stopCode()}
+                    title="Stop"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+                  </button>
+                </div>
+              </div>
+              <Console mode="fullscreen" />
+            </div>
+          </div>
+        {/if}
+      </div>
+
+    {:else if appMode === 'manage'}
       <Home />
+
+    {:else if appMode === 'terminal'}
+      <div class="terminal-tab">
+        <Terminal mode="full" />
+      </div>
 
     {:else if appMode === 'develop'}
       <div class="develop-panel">
@@ -215,22 +212,28 @@
   }
 
   /* ================================================================ */
-  /* Run mode — immersive                                             */
+  /* Terminal tab                                                     */
   /* ================================================================ */
-  .run-root {
-    width: 100vw;
-    height: 100vh;
-    background: #08080e;
-    position: relative;
-    overflow: hidden;
-  }
-
-  /* GUI full-screen */
-  .run-gui-fullscreen {
-    width: 100%;
-    height: 100%;
+  .terminal-tab {
+    flex: 1;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  /* ================================================================ */
+  /* Run mode — lives inside app-root beside the sidebar             */
+  /* ================================================================ */
+  .run-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: #08080e;
+    overflow: hidden;
+    min-width: 0;
+    min-height: 0;
   }
 
   /* Console terminal card */
@@ -313,29 +316,4 @@
   .run-action-btn:disabled { opacity: 0.3; cursor: not-allowed; }
   .run-action-btn.stop:hover:not(:disabled) { color: #f87171; border-color: #3b1a1a; background: #1a0f0f; }
 
-  /* Floating editor button */
-  .fab-editor {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    width: 44px;
-    height: 44px;
-    border-radius: 12px;
-    background: rgba(20, 20, 35, 0.75);
-    backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    color: #6a6a8a;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.2s;
-    z-index: 9999;
-  }
-  .fab-editor:hover {
-    background: rgba(30, 30, 55, 0.9);
-    color: #89b4fa;
-    border-color: rgba(137, 180, 250, 0.2);
-    transform: scale(1.05);
-  }
 </style>

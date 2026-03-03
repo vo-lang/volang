@@ -3,6 +3,9 @@
 //! The IDE UI is a Svelte app; this backend provides:
 //! - Filesystem commands (scoped to a workspace root)
 //! - Compile & run user Vo code via vo-engine / vox
+//! - Unified shell API via ShellRouter (shell/mod.rs)
+
+mod shell;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
@@ -16,7 +19,7 @@ use vo_runtime::output;
 // =============================================================================
 
 pub struct AppState {
-    workspace_root: PathBuf,
+    pub workspace_root: PathBuf,
     guest: Mutex<Option<GuestHandle>>,
 }
 
@@ -257,6 +260,8 @@ pub fn run() {
             cmd_run_gui,
             cmd_send_gui_event,
             cmd_stop_gui,
+            shell::cmd_shell_init,
+            shell::cmd_shell_exec,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Vibe Studio");

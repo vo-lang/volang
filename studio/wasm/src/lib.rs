@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsValue;
 use vo_common::vfs::MemoryFs;
 
 fn ensure_panic_hook() {
@@ -19,6 +20,9 @@ fn ensure_panic_hook() {
 
 // Embed all top-level vogui .vo files for user code that imports "vogui".
 include!(concat!(env!("OUT_DIR"), "/vogui_embedded.rs"));
+
+// Embed shell handler + 3rdparty sources for runShellHandler.
+include!(concat!(env!("OUT_DIR"), "/shell_embedded.rs"));
 
 // =============================================================================
 // Guest state (for a running vogui app)
@@ -201,4 +205,105 @@ pub fn stop_gui() {
     GUEST.with(|g| *g.borrow_mut() = None);
     vogui::clear_pending_render();
     vogui::clear_event_state();
+}
+
+// =============================================================================
+// Shell handler runner
+// =============================================================================
+
+// Cache the compiled shell handler bytecode — compilation is expensive inside
+// WASM (~2-5s), so we compile once and reuse across all runShellHandler calls.
+thread_local! {
+    static SHELL_HANDLER_BYTECODE: std::cell::RefCell<Option<Vec<u8>>> =
+        std::cell::RefCell::new(None);
+}
+
+fn build_shell_handler_bytecode() -> Result<Vec<u8>, String> {
+    let mut std_fs = build_user_std_fs();
+    let mut local_fs = MemoryFs::new();
+
+    for (vfs_path, bytes) in SHELL_HANDLER_FILES {
+        let Ok(content) = std::str::from_utf8(bytes) else { continue };
+        let p = std::path::PathBuf::from(*vfs_path);
+        // Files under "studio/vo/shell/" go into local_fs (package root).
+        // 3rdparty/* and libs/* go into std_fs (available as stdlib-style imports).
+        if vfs_path.starts_with("studio/vo/shell/") {
+            local_fs.add_file(p, content.to_string());
+        } else {
+            std_fs.add_file(p, content.to_string());
+        }
+    }
+
+    vo_web::compile_entry_with_std_fs(
+        "studio/vo/shell/main.vo",
+        local_fs,
+        std_fs,
+    ).map_err(|e| format!("error:{}", e))
+}
+
+fn get_shell_handler_bytecode() -> Result<Vec<u8>, String> {
+    SHELL_HANDLER_BYTECODE.with(|cell| {
+        let cached = cell.borrow();
+        if let Some(bc) = cached.as_ref() {
+            return Ok(bc.clone());
+        }
+        drop(cached);
+
+        let bc = build_shell_handler_bytecode()?;
+        *cell.borrow_mut() = Some(bc.clone());
+        Ok(bc)
+    })
+}
+
+/// Pre-warm the shell handler bytecode cache during bridge initialization.
+/// Call this once after WASM module load so the first shell op is fast.
+#[wasm_bindgen(js_name = "initShellHandler")]
+pub fn init_shell_handler() -> Option<String> {
+    ensure_panic_hook();
+    match get_shell_handler_bytecode() {
+        Ok(_) => None,
+        Err(e) => Some(e),
+    }
+}
+
+/// Compile and run the embedded shell handler with the given os.Args.
+///
+/// `args` is a JS `Array<string>` that becomes `os.Args` inside the Vo program.
+/// Conventionally args = ["wasm", <req_json>, <workspace>].
+/// Returns stdout from the Vo program (a JSON-encoded ShellResponse).
+/// Returns an error string (prefixed with "error:") on compile/runtime failure.
+#[wasm_bindgen(js_name = "runShellHandler")]
+pub fn run_shell_handler(args: js_sys::Array) -> String {
+    ensure_panic_hook();
+
+    let bytecode = match get_shell_handler_bytecode() {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+
+    let args_vec: Vec<String> = args.iter().filter_map(|v: JsValue| v.as_string()).collect();
+
+    vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
+        *cell.borrow_mut() = Some(args_vec);
+    });
+
+    vo_runtime::output::clear_output();
+    let run_result = vo_web::create_vm(&bytecode, |_, _| {});
+
+    vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+
+    let stdout = vo_web::take_output();
+
+    match run_result {
+        Ok(_) => stdout,
+        Err(e) => {
+            if stdout.trim().is_empty() {
+                format!("error:{}", e)
+            } else {
+                stdout
+            }
+        }
+    }
 }

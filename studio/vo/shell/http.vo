@@ -1,0 +1,71 @@
+package main
+
+import (
+	"io"
+	"net/http"
+	"strings"
+)
+
+func handleHttp(id, cwd string, kind string, op any) error {
+	var url string
+	url = op~>url?
+
+	method := strings.ToUpper(strings.TrimPrefix(kind, "http."))
+
+	var bodyReader io.Reader
+	bodyStr, bodyErr := op~>body
+	if bodyErr == nil {
+		if s, ok := bodyStr.(string); ok && s != "" {
+			bodyReader = strings.NewReader(s)
+		}
+	}
+
+	req, err := http.NewRequest(method, url, bodyReader)
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+
+	headersRaw, headersErr := op~>headers
+	if headersErr == nil && headersRaw != nil {
+		if hmap, ok := headersRaw.(map[string]any); ok {
+			for k, v := range hmap {
+				if vs, ok := v.(string); ok {
+					req.Header.Set(k, vs)
+				}
+			}
+		}
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var headerLines []string
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			headerLines = append(headerLines, k+": "+v)
+		}
+	}
+
+	var bodyText string
+	if method != "HEAD" {
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			writeError(id, "ERR_INTERNAL", "read body: "+err.Error())
+			return nil
+		}
+		bodyText = string(bodyBytes)
+	}
+
+	writeOk(id, map[string]any{
+		"statusCode": resp.StatusCode,
+		"status":     resp.Status,
+		"headers":    headerLines,
+		"body":       bodyText,
+	})
+	return nil
+}

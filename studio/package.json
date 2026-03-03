@@ -8,7 +8,8 @@
     "build": "vite build",
     "build:pages": "VITE_BASE=/vs/ vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^3.0.0",
@@ -16,7 +17,8 @@
     "svelte": "^4.2.0",
     "typescript": "^5.3.0",
     "vite": "^5.0.0",
-    "vite-plugin-monaco-editor": "^1.1.0"
+    "vite-plugin-monaco-editor": "^1.1.0",
+    "vitest": "^4.0.18"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

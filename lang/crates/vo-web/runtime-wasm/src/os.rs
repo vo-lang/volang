@@ -11,6 +11,12 @@ use crate::vfs;
 
 const ERR_NOT_SUPPORTED: &str = "operation not supported on wasm";
 
+// Thread-local args injected by run_with_args() before running the VM.
+thread_local! {
+    pub static WASM_PROG_ARGS: std::cell::RefCell<Option<Vec<String>>> =
+        std::cell::RefCell::new(None);
+}
+
 fn write_not_supported_error(call: &mut ExternCallContext, slot: u16) {
     write_error_to(call, slot, ERR_NOT_SUPPORTED);
 }
@@ -582,9 +588,20 @@ fn native_exit(_call: &mut ExternCallContext) -> ExternResult {
 fn native_get_args(call: &mut ExternCallContext) -> ExternResult {
     let gc = call.gc();
     let elem_meta = ValueMeta::new(0, ValueKind::String);
-    let arr = array::create(gc, elem_meta, 8, 1);
-    let arg0 = string::from_rust_str(gc, "wasm");
-    array::set(arr, 0, arg0 as u64, 8);
+
+    // Use injected args if present (set by run_with_args), else ["wasm"]
+    let args: Vec<String> = WASM_PROG_ARGS.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| vec!["wasm".to_string()])
+    });
+
+    let arr = array::create(gc, elem_meta, 8, args.len());
+    for (i, arg) in args.iter().enumerate() {
+        let s = string::from_rust_str(gc, arg);
+        array::set(arr, i, s as u64, 8);
+    }
     let slice_ref = slice::from_array(gc, arr);
     call.ret_ref(0, slice_ref);
     ExternResult::Ok

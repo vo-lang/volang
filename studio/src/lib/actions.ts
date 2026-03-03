@@ -430,36 +430,37 @@ export const actions = {
     }
 
     if (project.localPath) {
-      const idx = project.localPath.lastIndexOf('/');
-      const parent = idx >= 0 ? project.localPath.slice(0, idx) : '';
+      const localPath = project.localPath;
+      const idx = localPath.lastIndexOf('/');
+      const parent = idx >= 0 ? localPath.slice(0, idx) : '';
       const newLocalPath = project.type === 'single'
         ? `${parent}/${trimmed}.vo`
         : `${parent}/${trimmed}`;
-      await bridge().fsRename(project.localPath, newLocalPath);
+      await bridge().fsRename(localPath, newLocalPath);
       renamed = { ...renamed, localPath: newLocalPath };
 
       ide.update(s => {
         let activeFilePath = s.activeFilePath;
-        if (activeFilePath === project.localPath) {
+        if (activeFilePath === localPath) {
           activeFilePath = newLocalPath;
-        } else if (project.type === 'multi' && activeFilePath.startsWith(project.localPath + '/')) {
-          activeFilePath = newLocalPath + activeFilePath.slice(project.localPath.length);
+        } else if (project.type === 'multi' && activeFilePath.startsWith(localPath + '/')) {
+          activeFilePath = newLocalPath + activeFilePath.slice(localPath.length);
         }
 
-        const workspaceRoot = s.workspaceRoot === project.localPath
+        const workspaceRoot = s.workspaceRoot === localPath
           ? newLocalPath
           : s.workspaceRoot;
-        const editTarget = s.editTarget && s.editTarget.workspaceRoot === project.localPath
+        const editTarget = s.editTarget && s.editTarget.workspaceRoot === localPath
           ? { ...s.editTarget, workspaceRoot: newLocalPath }
           : s.editTarget;
 
         const dirCache: Record<string, FsEntry[]> = {};
         for (const [k, v] of Object.entries(s.dirCache)) {
-          if (k === project.localPath || k.startsWith(project.localPath + '/')) continue;
+          if (k === localPath || k.startsWith(localPath + '/')) continue;
           dirCache[k] = v;
         }
         const expandedDirs = s.expandedDirs.filter(
-          d => d !== project.localPath && !d.startsWith(project.localPath + '/'),
+          d => d !== localPath && !d.startsWith(localPath + '/'),
         );
 
         return {
@@ -565,9 +566,9 @@ export const actions = {
         }));
       } else {
         ide.update(s => ({ ...s, runStatus: 'running' }));
-        const output = await bridge().compileRun(entryPath);
+        const stdout = await bridge().compileRun(entryPath);
         const elapsed = Date.now() - startTime;
-        consolePushLines('stdout', output);
+        consolePushLines('stdout', stdout);
         consolePush('success', `✓ Process exited`);
         ide.update(s => ({
           ...s,

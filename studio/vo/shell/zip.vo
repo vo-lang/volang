@@ -1,0 +1,129 @@
+package main
+
+import (
+	"3rdparty/zip"
+	"os"
+)
+
+// handleZip handles zip.pack, zip.unpack, zip.list.
+// Uses 3rdparty/zip which has a zip.wasm extension — works on both Tauri and WASM.
+func handleZip(id, workspace, cwd string, op any) error {
+	var kind string
+	kind = op~>kind?
+
+	switch kind {
+	case "zip.pack":
+		return handleZipPack(id, workspace, cwd, op)
+	case "zip.unpack":
+		return handleZipUnpack(id, workspace, cwd, op)
+	case "zip.list":
+		return handleZipList(id, workspace, cwd, op)
+	}
+	writeError(id, "ERR_NOT_SUPPORTED", "unknown zip op: "+kind)
+	return nil
+}
+
+// zip.pack — collect named inputs from disk, write archive to outputPath.
+func handleZipPack(id, workspace, cwd string, op any) error {
+	var outputPath string
+	outputPath = op~>output?
+
+	absOut, err := resolveAndSandbox(workspace, cwd, outputPath)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	inputsAny, _ := op~>inputs
+	inputs := anyToStringSlice(inputsAny)
+
+	var entries []zip.Entry
+	for _, input := range inputs {
+		absIn, err := resolveAndSandbox(workspace, cwd, input)
+		if err != nil {
+			writeError(id, "ERR_ACCESS_DENIED", err.Error())
+			return nil
+		}
+		data, err := os.ReadFile(absIn)
+		if err != nil {
+			writeError(id, "ERR_NOT_FOUND", err.Error())
+			return nil
+		}
+		entries = append(entries, zip.Entry{Name: input, Data: data})
+	}
+
+	archive, err := zip.Pack(entries)
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+	err = os.WriteFile(absOut, archive, 0644)
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+	writeOk(id, map[string]any{"output": absOut})
+	return nil
+}
+
+// zip.unpack — extract archive to outputDir.
+func handleZipUnpack(id, workspace, cwd string, op any) error {
+	var archivePath, outputDir string
+	archivePath = op~>archive?
+	outputDir = op~>outputDir?
+
+	absArchive, err := resolveAndSandbox(workspace, cwd, archivePath)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+	absOut, err := resolveAndSandbox(workspace, cwd, outputDir)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	err = zip.UnpackToDir(absArchive, absOut)
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+	writeOk(id, map[string]any{"outputDir": absOut})
+	return nil
+}
+
+// zip.list — list entries in archive without extracting.
+func handleZipList(id, workspace, cwd string, op any) error {
+	var archivePath string
+	archivePath = op~>archive?
+
+	absArchive, err := resolveAndSandbox(workspace, cwd, archivePath)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	data, err := os.ReadFile(absArchive)
+	if err != nil {
+		writeError(id, "ERR_NOT_FOUND", err.Error())
+		return nil
+	}
+
+	entries, err := zip.ListEntries(data)
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+
+	result := make([]map[string]any, 0, len(entries))
+	for _, e := range entries {
+		result = append(result, map[string]any{
+			"name":           e.Name,
+			"size":           e.Size,
+			"compressedSize": e.CompressedSize,
+			"isDir":          e.IsDir,
+		})
+	}
+	writeOk(id, result)
+	return nil
+}

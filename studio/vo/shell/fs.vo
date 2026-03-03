@@ -1,0 +1,254 @@
+package main
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func handleFs(id, workspace, cwd, kind string, op any) error {
+	switch kind {
+	case "fs.list":
+		return handleFsList(id, workspace, cwd, op)
+	case "fs.stat":
+		return handleFsStat(id, workspace, cwd, op)
+	case "fs.read":
+		return handleFsRead(id, workspace, cwd, op)
+	case "fs.write":
+		return handleFsWrite(id, workspace, cwd, op)
+	case "fs.mkdir":
+		return handleFsMkdir(id, workspace, cwd, op)
+	case "fs.remove":
+		return handleFsRemove(id, workspace, cwd, op)
+	case "fs.rename":
+		return handleFsRename(id, workspace, cwd, op)
+	case "fs.copy":
+		return handleFsCopy(id, workspace, cwd, op)
+	default:
+		writeError(id, "ERR_NOT_SUPPORTED", "unknown fs op: "+kind)
+		return nil
+	}
+}
+
+// resolveAndSandbox resolves path to absolute, then verifies it is within workspace.
+func resolveAndSandbox(workspace, cwd, path string) (string, error) {
+	var abs string
+	if filepath.IsAbs(path) {
+		abs = filepath.Clean(path)
+	} else {
+		abs = filepath.Join([]string{cwd, path})
+	}
+	if !strings.HasPrefix(abs, workspace) {
+		return "", errors.New("path outside workspace: " + abs)
+	}
+	return abs, nil
+}
+
+func handleFsList(id, workspace, cwd string, op any) error {
+	var path string
+	path = op~>path?
+
+	abs, err := resolveAndSandbox(workspace, cwd, path)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		writeError(id, fsErrCode(err), err.Error())
+		return nil
+	}
+
+	result := make([]map[string]any, 0, len(entries))
+	for _, e := range entries {
+		result = append(result, map[string]any{
+			"name":  e.Name(),
+			"path":  abs + "/" + e.Name(),
+			"isDir": e.IsDir(),
+		})
+	}
+	writeOk(id, result)
+	return nil
+}
+
+func handleFsStat(id, workspace, cwd string, op any) error {
+	var path string
+	path = op~>path?
+
+	abs, err := resolveAndSandbox(workspace, cwd, path)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		writeError(id, fsErrCode(err), err.Error())
+		return nil
+	}
+
+	writeOk(id, map[string]any{
+		"name":  info.Name(),
+		"path":  abs,
+		"isDir": info.IsDir(),
+		"size":  info.Size(),
+	})
+	return nil
+}
+
+func handleFsRead(id, workspace, cwd string, op any) error {
+	var path string
+	path = op~>path?
+
+	abs, err := resolveAndSandbox(workspace, cwd, path)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		writeError(id, fsErrCode(err), err.Error())
+		return nil
+	}
+
+	writeOk(id, string(data))
+	return nil
+}
+
+func handleFsWrite(id, workspace, cwd string, op any) error {
+	var path, content string
+	path = op~>path?
+	content = op~>content?
+
+	abs, err := resolveAndSandbox(workspace, cwd, path)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	err = os.WriteFile(abs, []byte(content), 0644)
+	if err != nil {
+		writeError(id, fsErrCode(err), err.Error())
+		return nil
+	}
+	writeOk(id, nil)
+	return nil
+}
+
+func handleFsMkdir(id, workspace, cwd string, op any) error {
+	var path string
+	path = op~>path?
+
+	abs, err := resolveAndSandbox(workspace, cwd, path)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	err = os.MkdirAll(abs, 0755)
+	if err != nil {
+		writeError(id, fsErrCode(err), err.Error())
+		return nil
+	}
+	writeOk(id, nil)
+	return nil
+}
+
+func handleFsRemove(id, workspace, cwd string, op any) error {
+	var path string
+	path = op~>path?
+
+	recursiveAny, _ := op~>recursive
+	recursive, _ := recursiveAny.(bool)
+
+	abs, err := resolveAndSandbox(workspace, cwd, path)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	if recursive {
+		err = os.RemoveAll(abs)
+	} else {
+		err = os.Remove(abs)
+	}
+	if err != nil {
+		writeError(id, fsErrCode(err), err.Error())
+		return nil
+	}
+	writeOk(id, nil)
+	return nil
+}
+
+func handleFsRename(id, workspace, cwd string, op any) error {
+	var oldPath, newPath string
+	oldPath = op~>oldPath?
+	newPath = op~>newPath?
+
+	absOld, err := resolveAndSandbox(workspace, cwd, oldPath)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+	absNew, err := resolveAndSandbox(workspace, cwd, newPath)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	err = os.Rename(absOld, absNew)
+	if err != nil {
+		writeError(id, fsErrCode(err), err.Error())
+		return nil
+	}
+	writeOk(id, nil)
+	return nil
+}
+
+func handleFsCopy(id, workspace, cwd string, op any) error {
+	var src, dst string
+	src = op~>src?
+	dst = op~>dst?
+
+	absSrc, err := resolveAndSandbox(workspace, cwd, src)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+	absDst, err := resolveAndSandbox(workspace, cwd, dst)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	data, err := os.ReadFile(absSrc)
+	if err != nil {
+		writeError(id, fsErrCode(err), err.Error())
+		return nil
+	}
+	err = os.WriteFile(absDst, data, 0644)
+	if err != nil {
+		writeError(id, fsErrCode(err), err.Error())
+		return nil
+	}
+	writeOk(id, nil)
+	return nil
+}
+
+// fsErrCode maps an error string to a ShellErrorCode.
+func fsErrCode(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "no such file") || strings.Contains(msg, "not exist"):
+		return "ERR_NOT_FOUND"
+	case strings.Contains(msg, "permission denied"):
+		return "ERR_ACCESS_DENIED"
+	case strings.Contains(msg, "already exists") || strings.Contains(msg, "file exists"):
+		return "ERR_ALREADY_EXISTS"
+	default:
+		return "ERR_INTERNAL"
+	}
+}

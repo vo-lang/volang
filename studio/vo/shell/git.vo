@@ -1,0 +1,270 @@
+package main
+
+import (
+	"3rdparty/git2"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+func handleGit(id, workspace, cwd, kind string, op any) error {
+	switch kind {
+	// ── Read ops via libgit2 (no CLI, structured data, WASM graceful error) ───
+
+	case "git.status":
+		return handleGitStatus(id, cwd)
+
+	case "git.log":
+		limitAny, _ := op~>limit
+		limit := 20
+		if lf, ok := limitAny.(float64); ok && lf > 0 {
+			limit = int(lf)
+		}
+		return handleGitLog(id, cwd, limit)
+
+	case "git.branch":
+		createAny, _ := op~>create
+		deleteAny, _ := op~>delete
+		createBranch, _ := createAny.(string)
+		deleteBranch, _ := deleteAny.(string)
+		if createBranch != "" {
+			return gitOneShot(id, cwd, []string{"git", "branch", createBranch})
+		}
+		if deleteBranch != "" {
+			return gitOneShot(id, cwd, []string{"git", "branch", "-d", deleteBranch})
+		}
+		return handleGitBranches(id, cwd)
+
+	case "git.diff":
+		stagedAny, _ := op~>staged
+		staged, _ := stagedAny.(bool)
+		args := []string{"git", "diff"}
+		if staged {
+			args = append(args, "--cached")
+		}
+		return gitOneShot(id, cwd, args)
+
+	// ── Write ops via git CLI ─────────────────────────────────────────────────
+
+	case "git.init":
+		return gitOneShot(id, cwd, []string{"git", "init"})
+
+	case "git.add":
+		pathsAny, _ := op~>paths
+		paths := anyToStringSlice(pathsAny)
+		args := append([]string{"git", "add"}, paths...)
+		return gitOneShot(id, cwd, args)
+
+	case "git.commit":
+		var msg string
+		msg = op~>message?
+		amendAny, _ := op~>amend
+		amend, _ := amendAny.(bool)
+		args := []string{"git", "commit", "-m", msg}
+		if amend {
+			args = append(args, "--amend")
+		}
+		return gitOneShot(id, cwd, args)
+
+	case "git.checkout":
+		var branch string
+		branch = op~>branch?
+		createAny, _ := op~>create
+		create, _ := createAny.(bool)
+		args := []string{"git", "checkout"}
+		if create {
+			args = append(args, "-b")
+		}
+		args = append(args, branch)
+		return gitOneShot(id, cwd, args)
+
+	// ── Streaming ops ─────────────────────────────────────────────────────────
+
+	case "git.clone":
+		var url, destPath string
+		url = op~>url?
+		destPath = op~>destPath?
+		if !filepath.IsAbs(destPath) {
+			destPath = workspace + "/" + destPath
+		}
+		writeStream(id, newJobId(), map[string]any{
+			"program":  "git",
+			"args":     []string{"git", "clone", "--progress", url, destPath},
+			"dir":      workspace,
+			"env":      nil,
+			"combined": true,
+		})
+		return nil
+
+	case "git.push":
+		remoteAny, _ := op~>remote
+		branchAny, _ := op~>branch
+		forceAny, _ := op~>force
+		remote, _ := remoteAny.(string)
+		branch, _ := branchAny.(string)
+		force, _ := forceAny.(bool)
+		if remote == "" {
+			remote = "origin"
+		}
+		args := []string{"git", "push", remote}
+		if branch != "" {
+			args = append(args, branch)
+		}
+		if force {
+			args = append(args, "--force")
+		}
+		writeStream(id, newJobId(), map[string]any{
+			"program":  "git",
+			"args":     args,
+			"dir":      cwd,
+			"env":      nil,
+			"combined": true,
+		})
+		return nil
+
+	case "git.pull":
+		remoteAny, _ := op~>remote
+		branchAny, _ := op~>branch
+		remote, _ := remoteAny.(string)
+		branch, _ := branchAny.(string)
+		if remote == "" {
+			remote = "origin"
+		}
+		args := []string{"git", "pull", remote}
+		if branch != "" {
+			args = append(args, branch)
+		}
+		writeStream(id, newJobId(), map[string]any{
+			"program":  "git",
+			"args":     args,
+			"dir":      cwd,
+			"env":      nil,
+			"combined": true,
+		})
+		return nil
+	}
+
+	writeError(id, "ERR_NOT_SUPPORTED", "unknown git op: "+kind)
+	return nil
+}
+
+// ── libgit2-backed read handlers ─────────────────────────────────────────────
+
+func handleGitStatus(id, cwd string) error {
+	repo, err := git2.Open(cwd)
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+	defer repo.Close()
+
+	items, err := repo.Status()
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]any{
+			"path":   item.Path,
+			"status": item.Status,
+		})
+	}
+	writeOk(id, result)
+	return nil
+}
+
+func handleGitLog(id, cwd string, limit int) error {
+	repo, err := git2.Open(cwd)
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+	defer repo.Close()
+
+	commits, err := repo.Log(limit)
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+
+	result := make([]map[string]any, 0, len(commits))
+	for _, c := range commits {
+		result = append(result, map[string]any{
+			"id":          c.ID,
+			"summary":     c.Summary,
+			"authorName":  c.AuthorName,
+			"authorEmail": c.AuthorEmail,
+			"timeUnix":    c.TimeUnix,
+		})
+	}
+	writeOk(id, result)
+	return nil
+}
+
+func handleGitBranches(id, cwd string) error {
+	repo, err := git2.Open(cwd)
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+	defer repo.Close()
+
+	branches, err := repo.Branches()
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+
+	result := make([]map[string]any, 0, len(branches))
+	for _, b := range branches {
+		result = append(result, map[string]any{
+			"name":   b.Name,
+			"isHead": b.IsHead,
+		})
+	}
+	writeOk(id, result)
+	return nil
+}
+
+// ── CLI helpers ───────────────────────────────────────────────────────────────
+
+// gitOneShot runs a git CLI command, captures combined output.
+// On WASM, exec.Command returns ERR_NOT_SUPPORTED from the exec stub.
+func gitOneShot(id, dir string, args []string) error {
+	cmd := exec.Command(args[0], args[1:])
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", strings.TrimSpace(string(out))+": "+err.Error())
+		return nil
+	}
+	writeOk(id, strings.TrimSpace(string(out)))
+	return nil
+}
+
+// anyToStringSlice converts a dynamic JSON array (any) to []string.
+func anyToStringSlice(v any) []string {
+	if v == nil {
+		return nil
+	}
+	result := []string{}
+	for i := 0; ; i++ {
+		elemAny, err := v~>[i]
+		if err != nil {
+			break
+		}
+		if s, ok := elemAny.(string); ok {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// newJobId generates a unique job ID for streaming operations.
+func newJobId() string {
+	return "j-" + strconv.FormatInt(int(time.Now().UnixNano()), 10)
+}

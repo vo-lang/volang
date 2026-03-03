@@ -1,3 +1,7 @@
+import { ShellClient } from './shell/client';
+import { TauriTransport, WasmTransport } from './shell/transport';
+import { WasmShellRouter } from './shell/wasm/router';
+
 // =============================================================================
 // FsEntry — returned by fsListDir
 // =============================================================================
@@ -33,6 +37,9 @@ export interface Bridge {
 
   // Workspace root (for display)
   workspaceRoot: string;
+
+  // Unified shell API (filesystem + Vo toolchain + tools + processes)
+  shell: ShellClient;
 }
 
 let _bridge: Bridge | null = null;
@@ -55,8 +62,13 @@ async function initTauriBridge(): Promise<void> {
 
   const workspaceRoot: string = await invoke('cmd_get_workspace_root');
 
+  const shellTransport = new TauriTransport();
+  const shellClient    = new ShellClient(shellTransport);
+  await shellClient.initialize();
+
   _bridge = {
     workspaceRoot,
+    shell: shellClient,
 
     fsListDir:    (dirPath)          => invoke('cmd_fs_list_dir', { dirPath }),
     fsReadFile:   (path)             => invoke('cmd_fs_read_file', { path }),
@@ -286,19 +298,24 @@ async function initWasmBridge(): Promise<void> {
   (window as any).voguiToast = () => {};
 
   // 5) Build bridge — FS ops go through JS VFS directly
+  const wasmRouter  = new WasmShellRouter(vfs, wasmMod, WASM_WORKSPACE);
+  const shellClient = new ShellClient(new WasmTransport(wasmRouter));
+  await shellClient.initialize();
+
   _bridge = {
     workspaceRoot: WASM_WORKSPACE,
+    shell: shellClient,
 
     async fsListDir(dirPath: string): Promise<FsEntry[]> {
       const [entries, err] = vfs.readDir(dirPath);
       if (err) throw new Error(err);
-      return entries
+      return (entries as [string, boolean][])
         .map(([name, isDir]) => ({
           name,
           path: dirPath === '/' ? '/' + name : dirPath + '/' + name,
           isDir,
-        }))
-        .sort((a, b) => {
+        } as FsEntry))
+        .sort((a: FsEntry, b: FsEntry) => {
           if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
           return a.name.localeCompare(b.name);
         });

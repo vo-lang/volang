@@ -3,9 +3,10 @@
   import type { AppMode } from '../stores/explorer';
 
   const modes: { id: AppMode; icon: string; label: string; title: string }[] = [
-    { id: 'manage',  icon: '⌂', label: 'Home',   title: 'Home'            },
-    { id: 'develop', icon: '⌨', label: 'Code',   title: 'Development'     },
-    { id: 'run',     icon: '▶', label: 'Run',    title: 'Run / Preview'   },
+    { id: 'manage',   icon: '⌂',  label: 'Home',    title: 'Home'            },
+    { id: 'develop',  icon: '⌨',  label: 'Code',    title: 'Development'     },
+    { id: 'terminal', icon: '$_', label: 'Shell',   title: 'Shell Terminal'  },
+    { id: 'run',      icon: '▶',  label: 'Run',     title: 'Run / Preview'   },
   ];
 
   function setMode(mode: AppMode) {
