@@ -296,43 +296,105 @@ pub fn compile_and_run_with_modules(source: &str) -> js_sys::Promise {
     })
 }
 
-/// Fetch module source + optional WASM binaries from GitHub.
-/// Public so playground can call it for GUI-with-modules flows.
+/// Load the pre-built WASM extension binary for a module if one exists on GitHub.
+///
+/// A missing binary (HTTP 404) is silently skipped — it just means the module
+/// is pure Vo with no native extension.  Other errors are logged as warnings.
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
+async fn load_ext_if_present(
+    module: &str,
+    version: &str,
+    files: &[(PathBuf, String)],
+) {
+    use vo_module::fetch;
+    let wasm_bytes = match fetch::fetch_wasm_binary(module, version).await {
+        Ok(Some(b)) => b,
+        Ok(None)    => return,
+        Err(e) => {
+            web_sys::console::warn_1(
+                &format!("[vo-web] ext wasm fetch failed for {}: {}", module, e).into(),
+            );
+            return;
+        }
+    };
+    let js_glue_url = if fetch::is_bindgen_ext(module, files) {
+        fetch::fetch_wasm_js_glue_url(module, version)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    if let Err(e) = ext_bridge::load_wasm_ext_module(module, &wasm_bytes, &js_glue_url).await {
+        web_sys::console::warn_1(
+            &format!("[vo-web] ext module {} load failed: {}", module, e).into(),
+        );
+    }
+}
+
+/// Fetch module source files from GitHub and add them to a `MemoryFs` for compilation.
+///
+/// Used by the playground: detects all `import "github.com/..."` in `source`,
+/// fetches each one, loads any WASM extensions, and returns the populated `MemoryFs`
+/// along with the version-stripped source ready for compilation.
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub async fn prepare_github_modules(source: &str) -> Result<(MemoryFs, String), String> {
     use vo_module::fetch;
     let imports = fetch::detect_github_imports(source)?;
     let mut mod_fs = MemoryFs::new();
     for imp in &imports {
-        let module_files = fetch::fetch_module_files(&imp.module, &imp.version).await
+        let files = fetch::fetch_module_files(&imp.module, &imp.version)
+            .await
             .map_err(|e| format!("Failed to fetch {}: {}", imp.module, e))?;
-        let is_bindgen = fetch::is_bindgen_ext(&imp.module, &module_files);
-        for (vfs_path, content) in module_files {
-            mod_fs.add_file(vfs_path, content);
+        for (vfs_path, content) in &files {
+            mod_fs.add_file(vfs_path.clone(), content.clone());
         }
-        match fetch::fetch_wasm_binary(&imp.module, &imp.version).await {
-            Ok(Some(bytes)) => {
-                web_sys::console::log_1(&format!("[vo-web] fetched {}.wasm ({} bytes), is_bindgen={}", &imp.module, bytes.len(), is_bindgen).into());
-                let js_glue_url = if is_bindgen {
-                    fetch::fetch_wasm_js_glue_url(&imp.module, &imp.version)
-                        .await
-                        .unwrap_or(None)
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                web_sys::console::log_1(&format!("[vo-web] loading ext module {}, js_glue_url='{}'", &imp.module, &js_glue_url).into());
-                ext_bridge::load_wasm_ext_module(&imp.module, &bytes, &js_glue_url).await?;
-                web_sys::console::log_1(&format!("[vo-web] ext module {} loaded OK", &imp.module).into());
+        load_ext_if_present(&imp.module, &imp.version, &files).await;
+    }
+    Ok((mod_fs, fetch::strip_module_versions(source)))
+}
+
+/// Install a Vo module from GitHub into the JS VirtualFS and load its WASM extension (if any).
+///
+/// `spec` must be `"<module>@<version>"`, e.g. `"github.com/vo-lang/zip@v0.1.0"`.
+///
+/// 1. Fetches source files (.vo, vo.mod, vo.ext.toml) from the GitHub Contents API.
+/// 2. Writes each file into the JS VFS (`vo_web_runtime_wasm::vfs`).
+/// 3. Loads the pre-built `.wasm` extension into the ext-bridge (if present).
+///
+/// Returns the VFS install path (`"/<module>"`) on success.
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
+pub async fn install_module_to_vfs(spec: &str) -> Result<String, String> {
+    use vo_module::fetch;
+
+    let (module, version) = spec
+        .rsplit_once('@')
+        .filter(|(m, v)| !m.is_empty() && !v.is_empty())
+        .map(|(m, v)| (m.to_string(), v.to_string()))
+        .ok_or_else(|| format!("invalid spec {:?}: expected module@version", spec))?;
+
+    let files = fetch::fetch_module_files(&module, &version)
+        .await
+        .map_err(|e| format!("fetch module {}: {}", module, e))?;
+
+    for (vfs_path, content) in &files {
+        let full = format!("/{}", vfs_path.display());
+        if let Some(parent) = std::path::Path::new(&full).parent() {
+            let p = parent.to_string_lossy();
+            if p != "/" && !p.is_empty() {
+                if let Some(e) = vo_web_runtime_wasm::vfs::mkdir_all(&p, 0o755) {
+                    return Err(format!("mkdir {}: {}", p, e));
+                }
             }
-            Ok(None) => {
-                web_sys::console::log_1(&format!("[vo-web] no .wasm found for {} (skipped)", &imp.module).into());
-            }
-            Err(e) => return Err(format!("Failed to fetch {}.wasm: {}", imp.module, e)),
+        }
+        if let Some(e) = vo_web_runtime_wasm::vfs::write_file(&full, content.as_bytes(), 0o644) {
+            return Err(format!("write {}: {}", full, e));
         }
     }
-    let clean_source = fetch::strip_module_versions(source);
-    Ok((mod_fs, clean_source))
+
+    load_ext_if_present(&module, &version, &files).await;
+    Ok(format!("/{}", module))
 }
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]

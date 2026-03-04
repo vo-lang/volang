@@ -5,22 +5,24 @@ import type { ShellRequest, ShellResponse, ShellEvent, ShellErrorCode } from '..
 // that the Tauri backend uses, but via the studio WASM module.
 //
 // The studio WASM module exposes runShellHandler(args: string[]) which:
-//   1. Compiles studio/vo/shell/ from embedded sources (including 3rdparty/git2,
-//      3rdparty/zip, libs/vox — all embedded at build time via build.rs).
+//   1. Compiles studio/vo/shell/ from embedded sources (3rdparty/zip, libs/vox,
+//      and the shell .vo files — all embedded at build time via build.rs).
 //   2. Injects args as os.Args in the Vo program.
 //   3. Returns stdout, which is a JSON-encoded shell response.
 //
 // On WASM:
-//   - fs ops use the JS VirtualFS (same as before via os package)
-//   - git read ops use 3rdparty/git2 (WASM: no native lib → graceful error)
-//   - git write/streaming ops use os/exec (WASM stub → ERR_NOT_SUPPORTED)
-//   - zip ops use 3rdparty/zip with zip.wasm (WASM-capable)
-//   - vo toolchain ops use libs/vox (WASM: no native compiler → graceful error)
-//   - proc ops use os/exec (WASM stub → ERR_NOT_SUPPORTED)
+//   - fs ops  : JS VirtualFS (vo_web_runtime_wasm::vfs)
+//   - git ops : ERR_NOT_SUPPORTED — blocked in main.vo before any git2 extern is called
+//   - zip ops : zip.wasm loaded on demand (WASM-capable)
+//   - vo ops  : libs/vox WASM FFI (vox_wasm_ffi.rs)
+//   - vo get  : Rust preloadModule() (module_fetch.rs) → TypeScript just awaits the Promise
+//   - proc    : ERR_NOT_SUPPORTED (os/exec unavailable in browser)
 // =============================================================================
 
 export interface WasmShellModLike {
   runShellHandler(args: string[]): string;
+  // All module-fetch logic (GitHub API, VFS write, ext WASM load) lives in
+  // Rust (studio/wasm/src/module_fetch.rs).  TypeScript only awaits the Promise.
   preloadModule(spec: string): Promise<string>;
 }
 

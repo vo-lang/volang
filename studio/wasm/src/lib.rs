@@ -264,66 +264,17 @@ fn get_shell_handler_bytecode() -> Result<Vec<u8>, String> {
 /// `spec` is `"<module>@<version>"`, e.g. `"github.com/vo-lang/zip@v0.1.0"`.
 /// Returns the VFS install path (`"/<module>"`) on success.
 /// On error the Promise is rejected with a plain string describing the failure.
+///
+/// All GitHub fetch + VFS write + ext-WASM load logic lives in `vo_web::install_module_to_vfs`.
+/// TypeScript is a thin bridge that just awaits this Promise.
 #[wasm_bindgen(js_name = "preloadModule")]
 pub fn preload_module(spec: &str) -> js_sys::Promise {
     let spec = spec.to_string();
     wasm_bindgen_futures::future_to_promise(async move {
-        let err = |msg: String| Err(wasm_bindgen::JsValue::from_str(&msg));
-
-        let (module, version) = match spec.rsplit_once('@') {
-            Some((m, v)) if !m.is_empty() && !v.is_empty() => (m.to_string(), v.to_string()),
-            _ => return err(format!("invalid spec {:?}: expected module@version", spec)),
-        };
-
-        let files = vo_module::fetch::fetch_module_files(&module, &version)
+        let path = vo_web::install_module_to_vfs(&spec)
             .await
             .map_err(|e| wasm_bindgen::JsValue::from_str(&e))?;
-
-        for (vfs_path, content) in &files {
-            let full = format!("/{}", vfs_path.display());
-            if let Some(parent) = std::path::Path::new(&full).parent() {
-                let p = parent.to_string_lossy();
-                if p != "/" && !p.is_empty() {
-                    if let Some(e) = vo_web_runtime_wasm::vfs::mkdir_all(&p, 0o755) {
-                        return err(format!("mkdir {}: {}", p, e));
-                    }
-                }
-            }
-            if let Some(e) = vo_web_runtime_wasm::vfs::write_file(&full, content.as_bytes(), 0o644) {
-                return err(format!("write {}: {}", full, e));
-            }
-        }
-
-        match vo_module::fetch::fetch_wasm_binary(&module, &version).await {
-            Ok(Some(wasm_bytes)) => {
-                let is_bindgen = vo_module::fetch::is_bindgen_ext(&module, &files);
-                let js_glue_url = if is_bindgen {
-                    vo_module::fetch::fetch_wasm_js_glue_url(&module, &version)
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                if let Err(e) =
-                    vo_web::ext_bridge::load_wasm_ext_module(&module, &wasm_bytes, &js_glue_url)
-                        .await
-                {
-                    web_sys::console::warn_1(
-                        &format!("[vo get] ext module load failed: {}", e).into(),
-                    );
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                web_sys::console::warn_1(
-                    &format!("[vo get] wasm binary fetch failed: {}", e).into(),
-                );
-            }
-        }
-
-        Ok(wasm_bindgen::JsValue::from_str(&format!("/{}", module)))
+        Ok(wasm_bindgen::JsValue::from_str(&path))
     })
 }
 
@@ -361,7 +312,6 @@ pub fn run_shell_handler(args: js_sys::Array) -> String {
 
     vo_runtime::output::clear_output();
     let run_result = vo_web::create_vm(&bytecode, |reg, exts| {
-        vo_git2::wasm_stubs::register_externs(reg, exts);
         vox_wasm_ffi::register_externs(reg, exts);
     });
 
