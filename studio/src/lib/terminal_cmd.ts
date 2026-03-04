@@ -1,5 +1,5 @@
 import type { ShellClient } from './shell/client';
-import type { ShellEvent, ShellOp } from './shell/protocol';
+import type { ShellEvent, ShellOp, VoCheckDiag, FsGrepMatch } from './shell/protocol';
 import { ShellError } from './shell/protocol';
 import {
   termPush, termClear, termSetBusy, termPushHistory,
@@ -243,23 +243,14 @@ async function findFiles(
   }
 }
 
-function grepLines(
-  content: string,
-  pattern: RegExp,
-  filePath: string,
-  showFile: boolean,
-): string[] {
-  const lines = content.split('\n');
+function formatGrepMatches(matches: FsGrepMatch[], showFile: boolean): string[] {
   const out: string[] = [];
-  lines.forEach((line, i) => {
-    if (!pattern.test(line)) return;
-    // highlight match
-    const highlighted = line.replace(pattern, m => `${C.match}${m}${C.reset}`);
+  for (const m of matches) {
     const prefix = showFile
-      ? `${C.src}${filePath}${C.reset}${C.dim}:${C.reset}${C.lnum}${i + 1}${C.reset}${C.dim}:${C.reset} `
-      : `${C.lnum}${String(i + 1).padStart(4)}${C.reset}  `;
-    out.push(prefix + highlighted);
-  });
+      ? `${C.src}${m.path}${C.reset}${C.dim}:${C.reset}${C.lnum}${m.line}${C.reset}${C.dim}:${C.reset} `
+      : `${C.lnum}${String(m.line).padStart(4)}${C.reset}  `;
+    out.push(prefix + m.text);
+  }
   return out;
 }
 
@@ -352,52 +343,6 @@ export async function executeCommand(
       const words = content.split(/\s+/).filter(Boolean).length;
       const chars = content.length;
       termPush('output', `${C.size}${String(lines).padStart(7)} ${String(words).padStart(7)} ${String(chars).padStart(7)}${C.reset}  ${tokens[1]}`);
-    } catch (e) { termPush('error', String(e)); }
-    finally { termSetBusy(false); }
-    return {};
-  }
-
-  if (cmd === 'grep') {
-    let caseInsensitive = false;
-    let recursive      = false;
-    let rawPat: string | undefined;
-    const pathArgs: string[] = [];
-    for (let i = 1; i < tokens.length; i++) {
-      if (tokens[i] === '-i') { caseInsensitive = true; }
-      else if (tokens[i] === '-r' || tokens[i] === '-R') { recursive = true; }
-      else if (tokens[i] === '-ri' || tokens[i] === '-ir') { recursive = caseInsensitive = true; }
-      else if (!rawPat) rawPat = tokens[i];
-      else pathArgs.push(tokens[i]);
-    }
-    if (!rawPat) { termPush('error', 'usage: grep [-i] [-r] <pattern> <path...>'); return {}; }
-    const flags   = caseInsensitive ? 'gi' : 'g';
-    const pattern = new RegExp(rawPat.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
-    const targets = pathArgs.length ? pathArgs.map(p => resolvePath(shell.cwd, p, workspaceRoot)) : [shell.cwd];
-    termSetBusy(true);
-    let total = 0;
-    try {
-      for (const target of targets) {
-        let filePaths: string[] = [];
-        try {
-          const stat = (await shell.exec({ kind: 'fs.stat', path: target })) as { isDir: boolean };
-          if (stat.isDir && recursive) {
-            await findFiles(shell, target, null, 'f', filePaths, 0, 6);
-          } else if (!stat.isDir) {
-            filePaths = [target];
-          } else {
-            termPush('error', `grep: ${target}: is a directory (use -r)`);
-          }
-        } catch { filePaths = [target]; }
-        for (const fp of filePaths) {
-          try {
-            const content = (await shell.exec({ kind: 'fs.read', path: fp })) as string;
-            const hits = grepLines(content, pattern, fp, filePaths.length > 1);
-            hits.forEach(l => termPush('output', l));
-            total += hits.length;
-          } catch { /* skip unreadable files */ }
-        }
-      }
-      if (total === 0) termPush('system', 'no matches');
     } catch (e) { termPush('error', String(e)); }
     finally { termSetBusy(false); }
     return {};
@@ -633,6 +578,26 @@ function buildOp(
       if (!tokens[1] || !tokens[2]) throw new Error('usage: cp <src> <dst>');
       return [{ kind: 'fs.copy', src: res(tokens[1]), dst: res(tokens[2]) }, false];
 
+    case 'grep': {
+      let caseInsensitive = false;
+      let recursive       = false;
+      let fixedString     = false;
+      let rawPat: string | undefined;
+      const pathArgs: string[] = [];
+      for (let i = 1; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (t === '-i') { caseInsensitive = true; }
+        else if (t === '-r' || t === '-R') { recursive = true; }
+        else if (t === '-F') { fixedString = true; }
+        else if (t === '-ri' || t === '-ir') { recursive = caseInsensitive = true; }
+        else if (!rawPat) rawPat = t;
+        else pathArgs.push(t);
+      }
+      if (!rawPat) throw new Error('usage: grep [-i] [-r] [-F] <pattern> <path...>');
+      const target = pathArgs.length ? res(pathArgs[0]) : cwd;
+      return [{ kind: 'fs.grep', path: target, pattern: rawPat, recursive, caseInsensitive, fixedString }, false];
+    }
+
     // ── git ─────────────────────────────────────────────────────────────────
     case 'git': {
       const sub = tokens[1]?.toLowerCase();
@@ -775,6 +740,30 @@ function renderResult(
       termPush('output', String(data));
       break;
 
+    case 'fs.readMany': {
+      const entries = data as Array<{ path: string; content?: string; error?: string }>;
+      for (const e of entries) {
+        if ('error' in e) {
+          termPush('error', `${e.path}: ${e.error}`);
+        } else {
+          termPush('output', `${C.dim}==> ${e.path} <==${C.reset}`);
+          termPush('output', e.content ?? '');
+        }
+      }
+      break;
+    }
+
+    case 'fs.grep': {
+      const matches = data as FsGrepMatch[];
+      if (!matches || matches.length === 0) {
+        termPush('system', 'no matches');
+      } else {
+        const paths = new Set(matches.map(m => m.path));
+        for (const line of formatGrepMatches(matches, paths.size > 1)) termPush('output', line);
+      }
+      break;
+    }
+
     case 'fs.write':
     case 'fs.mkdir':
     case 'fs.remove':
@@ -823,12 +812,14 @@ function renderResult(
     }
 
     case 'vo.check': {
-      const s = data as { ok?: boolean; errors?: Array<string | { message: string }> };
-      if (!s?.errors || s.errors.length === 0) {
+      const s = data as { ok?: boolean; diags?: VoCheckDiag[] };
+      if (!s?.diags || s.diags.length === 0) {
         termPush('system', 'no errors');
       } else {
-        for (const e of s.errors) {
-          termPush('error', typeof e === 'string' ? e : e.message);
+        for (const d of s.diags) {
+          const loc = d.file ? `${C.src}${d.file}${C.reset}${C.dim}:${C.reset}${C.lnum}${d.line}${C.reset}${C.dim}:${C.reset}${C.lnum}${d.col}${C.reset}${C.dim}:${C.reset} ` : '';
+          const kind = d.severity === 'warning' ? 'warn' as const : 'error' as const;
+          termPush(kind, loc + d.message);
         }
       }
       break;

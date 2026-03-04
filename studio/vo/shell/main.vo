@@ -50,6 +50,7 @@ func dispatch(reqJSON, workspace string) error {
 
 	switch {
 	case kind == "fs.list" || kind == "fs.stat" || kind == "fs.read" ||
+		kind == "fs.readMany" || kind == "fs.grep" ||
 		kind == "fs.write" || kind == "fs.mkdir" || kind == "fs.remove" ||
 		kind == "fs.rename" || kind == "fs.copy":
 		return handleFs(id, workspace, cwd, kind, opRaw)

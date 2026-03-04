@@ -280,6 +280,7 @@
       case 'input':      return 'tl-input';
       case 'output':     return 'tl-output';
       case 'error':      return 'tl-error';
+      case 'warn':       return 'tl-warn';
       case 'stream-out': return 'tl-stream-out';
       case 'stream-err': return 'tl-stream-err';
       case 'system':     return 'tl-system';
@@ -416,6 +417,7 @@
   .tl-input       { color: #89dceb; }
   .tl-output      { color: #cdd6f4; }
   .tl-error       { color: #f38ba8; }
+  .tl-warn        { color: #f9e2af; }
   .tl-stream-out  { color: #a6e3a1; }
   .tl-stream-err  { color: #fab387; }
   .tl-system      { color: #585b70; font-style: italic; }

@@ -3,8 +3,8 @@ package main
 import (
 	"libs/vox"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -36,7 +36,7 @@ func handleVoOp(id, workspace, cwd, kind string, op any) error {
 	return nil
 }
 
-// vo.run — run a Vo file/dir via d.py, capture output (avoids nested VM).
+// vo.run — compile and run a Vo file or directory, capturing output.
 func handleVoRun(id, workspace, cwd string, op any) error {
 	var path string
 	path = op~>path?
@@ -49,23 +49,40 @@ func handleVoRun(id, workspace, cwd string, op any) error {
 
 	modeAny, _ := op~>mode
 	mode, _ := modeAny.(string)
-	args := []string{"./d.py", "run", abs}
-	if mode == "jit" {
-		args = append(args, "--mode=jit")
-	}
 
-	cmd := exec.Command(args[0], args[1:])
-	cmd.Dir = workspace
-	out, runErr := cmd.CombinedOutput()
-	if runErr != nil {
-		writeError(id, "ERR_VO_RUNTIME", strings.TrimSpace(string(out))+": "+runErr.Error())
+	info, err := os.Stat(abs)
+	if err != nil {
+		writeError(id, "ERR_NOT_FOUND", err.Error())
 		return nil
 	}
-	writeOk(id, map[string]any{"stdout": strings.TrimSpace(string(out))})
+
+	var m vox.Module
+	if info.IsDir() {
+		m, err = vox.CompileDir(abs)
+	} else {
+		m, err = vox.CompileFile(abs)
+	}
+	if err != nil {
+		writeError(id, "ERR_VO_COMPILE", err.Error())
+		return nil
+	}
+	defer vox.Free(m)
+
+	var out string
+	if mode == "jit" {
+		out, err = vox.RunJitCapture(m)
+	} else {
+		out, err = vox.RunCapture(m)
+	}
+	if err != nil {
+		writeError(id, "ERR_VO_RUNTIME", err.Error())
+		return nil
+	}
+	writeOk(id, map[string]any{"stdout": strings.TrimSpace(out)})
 	return nil
 }
 
-// vo.check — compile-check a file using vox.CompileCheck (no VM execution, safe).
+// vo.check — compile-check a file or directory; returns structured diagnostics.
 func handleVoCheck(id, workspace, cwd string, op any) error {
 	var path string
 	path = op~>path?
@@ -76,24 +93,106 @@ func handleVoCheck(id, workspace, cwd string, op any) error {
 		return nil
 	}
 
-	data, err := os.ReadFile(abs)
+	info, err := os.Stat(abs)
 	if err != nil {
 		writeError(id, "ERR_NOT_FOUND", err.Error())
 		return nil
 	}
 
-	errMsg, err := vox.CompileCheck(string(data))
-	if err != nil {
-		writeError(id, "ERR_INTERNAL", err.Error())
+	var compileErr error
+	if info.IsDir() {
+		_, compileErr = vox.CompileDir(abs)
+	} else {
+		_, compileErr = vox.CompileFile(abs)
+	}
+
+	if compileErr == nil {
+		writeOk(id, map[string]any{"ok": true, "diags": []map[string]any{}})
 		return nil
 	}
 
-	if errMsg != "" {
-		writeOk(id, map[string]any{"ok": false, "errors": []string{errMsg}})
-	} else {
-		writeOk(id, map[string]any{"ok": true, "errors": []string{}})
-	}
+	diags := parseVoCheckDiags(compileErr.Error(), workspace)
+	writeOk(id, map[string]any{"ok": false, "diags": diags})
 	return nil
+}
+
+// parseVoCheckDiags parses compiler error output into structured diagnostics.
+// Expected line format: "<file>:<line>:<col>: <message>" or "<file>:<line>: <message>".
+func parseVoCheckDiags(errMsg, workspace string) []map[string]any {
+	diags := []map[string]any{}
+	lines := strings.Split(errMsg, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		diags = append(diags, parseDiagLine(line, workspace))
+	}
+	return diags
+}
+
+func parseDiagLine(line, workspace string) map[string]any {
+	diag := map[string]any{"file": "", "line": 0, "col": 0, "message": line, "severity": "error"}
+
+	colon1 := strings.Index(line, ":")
+	if colon1 <= 0 {
+		return diag
+	}
+	file := line[:colon1]
+	rest := line[colon1+1:]
+
+	colon2 := strings.Index(rest, ":")
+	if colon2 < 0 {
+		diag["file"] = normalizeFile(file, workspace)
+		diag["message"] = strings.TrimSpace(rest)
+		return diag
+	}
+	lineNum, err := strconv.Atoi(strings.TrimSpace(rest[:colon2]))
+	if err != nil {
+		diag["file"] = normalizeFile(file, workspace)
+		diag["message"] = strings.TrimSpace(rest)
+		return diag
+	}
+	rest2 := rest[colon2+1:]
+
+	colon3 := strings.Index(rest2, ":")
+	if colon3 < 0 {
+		diag["file"] = normalizeFile(file, workspace)
+		diag["line"] = lineNum
+		diag["message"] = strings.TrimSpace(rest2)
+		return diag
+	}
+	colNum, err := strconv.Atoi(strings.TrimSpace(rest2[:colon3]))
+	if err != nil {
+		diag["file"] = normalizeFile(file, workspace)
+		diag["line"] = lineNum
+		diag["message"] = strings.TrimSpace(rest2)
+		return diag
+	}
+	msg := strings.TrimSpace(rest2[colon3+1:])
+
+	severity := "error"
+	if strings.HasPrefix(msg, "warning:") {
+		severity = "warning"
+		msg = strings.TrimSpace(msg[len("warning:"):])
+	} else if strings.HasPrefix(msg, "error:") {
+		msg = strings.TrimSpace(msg[len("error:"):])
+	}
+
+	diag["file"] = normalizeFile(file, workspace)
+	diag["line"] = lineNum
+	diag["col"] = colNum
+	diag["message"] = msg
+	diag["severity"] = severity
+	return diag
+}
+
+func normalizeFile(file, workspace string) string {
+	prefix := workspace + "/"
+	if strings.HasPrefix(file, prefix) {
+		return file[len(prefix):]
+	}
+	return file
 }
 
 // vo.build / vo.compile — compile to .vob bytecode binary.
@@ -192,64 +291,20 @@ func handleVoClean(id, workspace, cwd string) error {
 	return nil
 }
 
-// vo.get — download a Vo module (one-shot, uses d.py).
+// vo.get — not supported via Studio; use the vo CLI directly.
 func handleVoGet(id, workspace, cwd string, op any) error {
-	var module string
-	module = op~>module?
-
-	cmd := exec.Command("./d.py", []string{"vo", "get", module})
-	cmd.Dir = workspace
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		writeError(id, "ERR_INTERNAL", strings.TrimSpace(string(out))+": "+err.Error())
-		return nil
-	}
-	writeOk(id, map[string]any{"stdout": strings.TrimSpace(string(out))})
+	writeError(id, "ERR_NOT_SUPPORTED", "vo.get is not available in Studio — use the CLI: vo get <module>")
 	return nil
 }
 
-// vo.test — streaming: run test suite via d.py.
+// vo.test — not supported via Studio; use the CLI or system terminal.
 func handleVoTest(id, workspace, cwd string, op any) error {
-	targetAny, _ := op~>target
-	target, _ := targetAny.(string)
-	if target == "" {
-		target = "both"
-	}
-	pathAny, _ := op~>path
-	path, _ := pathAny.(string)
-
-	args := []string{"./d.py", "test", target}
-	if path != "" {
-		if !filepath.IsAbs(path) {
-			path = filepath.Join([]string{cwd, path})
-		}
-		args = append(args, path)
-	}
-
-	writeStream(id, newJobId(), map[string]any{
-		"program":  "./d.py",
-		"args":     args,
-		"dir":      workspace,
-		"env":      nil,
-		"combined": true,
-	})
+	writeError(id, "ERR_NOT_SUPPORTED", "vo.test is not available in Studio — use the CLI: ./d.py test <target> [path]")
 	return nil
 }
 
-// vo.bench — streaming: run benchmark suite via d.py.
+// vo.bench — not supported via Studio; use the CLI or system terminal.
 func handleVoBench(id, workspace, cwd string, op any) error {
-	suiteAny, _ := op~>suite
-	suite, _ := suiteAny.(string)
-	if suite == "" {
-		suite = "all"
-	}
-
-	writeStream(id, newJobId(), map[string]any{
-		"program":  "./d.py",
-		"args":     []string{"./d.py", "bench", suite},
-		"dir":      workspace,
-		"env":      nil,
-		"combined": true,
-	})
+	writeError(id, "ERR_NOT_SUPPORTED", "vo.bench is not available in Studio — use the CLI: ./d.py bench <suite>")
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -15,6 +16,10 @@ func handleFs(id, workspace, cwd, kind string, op any) error {
 		return handleFsStat(id, workspace, cwd, op)
 	case "fs.read":
 		return handleFsRead(id, workspace, cwd, op)
+	case "fs.readMany":
+		return handleFsReadMany(id, workspace, cwd, op)
+	case "fs.grep":
+		return handleFsGrep(id, workspace, cwd, op)
 	case "fs.write":
 		return handleFsWrite(id, workspace, cwd, op)
 	case "fs.mkdir":
@@ -251,4 +256,120 @@ func fsErrCode(err error) string {
 	default:
 		return "ERR_INTERNAL"
 	}
+}
+
+func handleFsReadMany(id, workspace, cwd string, op any) error {
+	var paths []string
+	paths = op~>paths?
+
+	results := make([]map[string]any, 0, len(paths))
+	for _, p := range paths {
+		abs, err := resolveAndSandbox(workspace, cwd, p)
+		if err != nil {
+			results = append(results, map[string]any{"path": p, "error": err.Error()})
+			continue
+		}
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			results = append(results, map[string]any{"path": p, "error": err.Error()})
+			continue
+		}
+		results = append(results, map[string]any{"path": p, "content": string(data)})
+	}
+	writeOk(id, results)
+	return nil
+}
+
+func handleFsGrep(id, workspace, cwd string, op any) error {
+	var path, pattern string
+	path = op~>path?
+	pattern = op~>pattern?
+
+	recursiveAny, _ := op~>recursive
+	recursive, _ := recursiveAny.(bool)
+
+	caseAny, _ := op~>caseInsensitive
+	caseInsensitive, _ := caseAny.(bool)
+
+	fixedAny, _ := op~>fixedString
+	fixedString, _ := fixedAny.(bool)
+
+	abs, err := resolveAndSandbox(workspace, cwd, path)
+	if err != nil {
+		writeError(id, "ERR_ACCESS_DENIED", err.Error())
+		return nil
+	}
+
+	pat := pattern
+	if fixedString {
+		pat = regexp.QuoteMeta(pat)
+	}
+	if caseInsensitive {
+		pat = "(?i)" + pat
+	}
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		writeError(id, fsErrCode(err), err.Error())
+		return nil
+	}
+
+	var matches []map[string]any
+	if info.IsDir() {
+		if !recursive {
+			writeError(id, "ERR_INTERNAL", "path is a directory — use recursive: true")
+			return nil
+		}
+		matches, err = grepDir(pat, abs)
+	} else {
+		matches, err = grepFile(pat, abs)
+	}
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+	writeOk(id, matches)
+	return nil
+}
+
+func grepDir(pattern, dirPath string) ([]map[string]any, error) {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return nil, err
+	}
+	results := []map[string]any{}
+	for _, e := range entries {
+		p := dirPath + "/" + e.Name()
+		if e.IsDir() {
+			sub, _ := grepDir(pattern, p)
+			results = append(results, sub...)
+		} else {
+			sub, _ := grepFile(pattern, p)
+			results = append(results, sub...)
+		}
+	}
+	return results, nil
+}
+
+func grepFile(pattern, filePath string) ([]map[string]any, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(data), "\n")
+	results := []map[string]any{}
+	for i, line := range lines {
+		matched, matchErr := regexp.MatchString(pattern, line)
+		if matchErr != nil {
+			return nil, matchErr
+		}
+		if matched {
+			results = append(results, map[string]any{
+				"path": filePath,
+				"line": i + 1,
+				"text": line,
+			})
+		}
+	}
+	return results, nil
 }

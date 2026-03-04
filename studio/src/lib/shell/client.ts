@@ -2,6 +2,7 @@ import {
   type ShellOp,
   type ShellEvent,
   type Capability,
+  type OpResultMap,
   ShellError,
   capabilityForOp,
 } from './protocol';
@@ -46,6 +47,8 @@ export class ShellClient {
 
   // ── One-shot execution ───────────────────────────────────────────────────
 
+  exec<K extends keyof OpResultMap>(op: Extract<ShellOp, { kind: K }>): Promise<OpResultMap[K]>;
+  exec(op: ShellOp): Promise<unknown>;
   async exec(op: ShellOp): Promise<unknown> {
     this.guardCapability(op);
     const resp = await this.transport.send(this.buildRequest(op));

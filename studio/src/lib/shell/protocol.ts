@@ -9,17 +9,19 @@ export type VoRunMode    = 'vm' | 'jit';
 export type VoTestTarget = 'both' | 'vm' | 'jit' | 'gc' | 'nostd' | 'wasm';
 
 export type FsOp =
-  | { kind: 'fs.list';   path: string }
-  | { kind: 'fs.stat';   path: string }
-  | { kind: 'fs.read';   path: string }
-  | { kind: 'fs.write';  path: string; content: string }
-  | { kind: 'fs.mkdir';  path: string; recursive?: boolean }
-  | { kind: 'fs.remove'; path: string; recursive?: boolean }
-  | { kind: 'fs.rename'; oldPath: string; newPath: string }
-  | { kind: 'fs.copy';   src: string; dst: string };
+  | { kind: 'fs.list';     path: string }
+  | { kind: 'fs.stat';     path: string }
+  | { kind: 'fs.read';     path: string }
+  | { kind: 'fs.readMany'; paths: string[] }
+  | { kind: 'fs.grep';     path: string; pattern: string; recursive?: boolean; caseInsensitive?: boolean; fixedString?: boolean }
+  | { kind: 'fs.write';    path: string; content: string }
+  | { kind: 'fs.mkdir';    path: string; recursive?: boolean }
+  | { kind: 'fs.remove';   path: string; recursive?: boolean }
+  | { kind: 'fs.rename';   oldPath: string; newPath: string }
+  | { kind: 'fs.copy';     src: string; dst: string };
 
 export type VoOp =
-  | { kind: 'vo.run';     path: string; mode?: VoRunMode; args?: string[] }
+  | { kind: 'vo.run';     path: string; mode?: VoRunMode; args?: string[]; stdin?: string }
   | { kind: 'vo.check';   path: string }
   | { kind: 'vo.build';   path: string; output?: string }
   | { kind: 'vo.test';    path?: string; target?: VoTestTarget; release?: boolean; verbose?: boolean; direct?: boolean }
@@ -107,6 +109,7 @@ export type Capability =
 
 // ── Result types for specific ops ─────────────────────────────────────────────
 
+// fs
 export interface FsStatResult {
   name:        string;
   path:        string;
@@ -114,8 +117,97 @@ export interface FsStatResult {
   size?:       number;
   modifiedMs?: number;
 }
+export type FsListResult     = FsStatResult[];
+export type FsReadManyEntry  = { path: string; content: string } | { path: string; error: string };
+export type FsReadManyResult = FsReadManyEntry[];
+export interface FsGrepMatch {
+  path: string;
+  line: number;    // 1-indexed
+  text: string;    // full line content
+}
+export type FsGrepResult = FsGrepMatch[];
 
-export type FsListResult = FsStatResult[];
+// vo
+export interface VoCheckDiag {
+  file:     string;    // workspace-relative path
+  line:     number;    // 1-indexed
+  col:      number;    // 1-indexed
+  message:  string;
+  severity: 'error' | 'warning';
+}
+export interface VoCheckResult { ok: boolean; diags: VoCheckDiag[] }
+export interface VoRunResult   { stdout: string }
+export interface VoBuildResult { output: string }
+export interface VoDumpResult  { bytecode: string }
+export interface VoInitResult  { path: string }
+
+// git
+export interface GitLogEntry    { id: string; summary: string; authorName: string; timeUnix: number }
+export interface GitStatusEntry { path: string; status: string }
+export interface GitBranchEntry { name: string; isHead: boolean }
+
+// zip
+export interface ZipListEntry {
+  name:           string;
+  size:           number;
+  compressedSize: number;
+  isDir:          boolean;
+}
+
+// http
+export interface HttpResult {
+  statusCode: number;
+  status:     string;
+  headers:    string[];
+  body:       string;
+}
+
+// ── Op → result type map (used by typed exec() overloads) ────────────────────
+
+export interface OpResultMap {
+  'fs.list':     FsListResult;
+  'fs.stat':     FsStatResult;
+  'fs.read':     string;
+  'fs.readMany': FsReadManyResult;
+  'fs.grep':     FsGrepResult;
+  'fs.write':    null;
+  'fs.mkdir':    null;
+  'fs.remove':   null;
+  'fs.rename':   null;
+  'fs.copy':     null;
+  'vo.run':      VoRunResult;
+  'vo.check':    VoCheckResult;
+  'vo.build':    VoBuildResult;
+  'vo.compile':  VoBuildResult;
+  'vo.dump':     VoDumpResult;
+  'vo.init':     VoInitResult;
+  'vo.clean':    null;
+  'vo.version':  string;
+  'vo.get':      VoRunResult;
+  'vo.test':     null;
+  'vo.bench':    null;
+  'git.status':  GitStatusEntry[];
+  'git.log':     GitLogEntry[];
+  'git.branch':  GitBranchEntry[] | string;
+  'git.add':     string;
+  'git.commit':  string;
+  'git.diff':    string;
+  'git.checkout': string;
+  'git.init':    string;
+  'git.push':    null;
+  'git.pull':    null;
+  'git.clone':   null;
+  'zip.list':    ZipListEntry[];
+  'zip.pack':    null;
+  'zip.unpack':  null;
+  'proc.spawn':  null;
+  'http.get':    HttpResult;
+  'http.head':   HttpResult;
+  'http.post':   HttpResult;
+  'http.put':    HttpResult;
+  'http.patch':  HttpResult;
+  'http.delete': HttpResult;
+}
 
 // ── Error class ───────────────────────────────────────────────────────────────
 

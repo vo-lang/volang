@@ -1,4 +1,4 @@
-import { type VoOp, ShellError } from '../protocol';
+import { type VoOp, type VoCheckResult, type VoCheckDiag, ShellError } from '../protocol';
 import type { VfsLike } from './fs_handler';
 
 // =============================================================================
@@ -53,15 +53,15 @@ export class WasmVoHandler {
     return { stdout };
   }
 
-  private check(path: string, cwd: string): { ok: boolean; errors: string[] } {
+  private check(path: string, cwd: string): VoCheckResult {
     const abs = resolvePath(this.workspaceRoot, cwd, path);
     try {
       const result = this.wasmMod.compileRunEntry(abs);
       if (result instanceof Error) throw result;
-      return { ok: true, errors: [] };
+      return { ok: true, diags: [] };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      return { ok: false, errors: [msg] };
+      return { ok: false, diags: parseWasmCheckError(msg, this.workspaceRoot) };
     }
   }
 
@@ -101,6 +101,52 @@ export class WasmVoHandler {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// Parse compiler error string (may contain multiple newline-separated lines)
+// into structured VoCheckDiag[]. Format: "<file>:<line>:<col>: <message>"
+function parseWasmCheckError(errMsg: string, workspaceRoot: string): VoCheckDiag[] {
+  const diags: VoCheckDiag[] = [];
+  for (const raw of errMsg.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    diags.push(parseDiagLine(line, workspaceRoot));
+  }
+  return diags;
+}
+
+function parseDiagLine(line: string, workspaceRoot: string): VoCheckDiag {
+  const base: VoCheckDiag = { file: '', line: 0, col: 0, message: line, severity: 'error' };
+
+  const c1 = line.indexOf(':');
+  if (c1 <= 0) return base;
+  const file = line.slice(0, c1);
+  const rest1 = line.slice(c1 + 1);
+
+  const c2 = rest1.indexOf(':');
+  if (c2 < 0) return { ...base, file: normalizeFilePath(file, workspaceRoot), message: rest1.trim() };
+
+  const lineNum = parseInt(rest1.slice(0, c2), 10);
+  if (isNaN(lineNum)) return { ...base, file: normalizeFilePath(file, workspaceRoot), message: rest1.trim() };
+  const rest2 = rest1.slice(c2 + 1);
+
+  const c3 = rest2.indexOf(':');
+  if (c3 < 0) return { ...base, file: normalizeFilePath(file, workspaceRoot), line: lineNum, message: rest2.trim() };
+
+  const colNum = parseInt(rest2.slice(0, c3), 10);
+  if (isNaN(colNum)) return { ...base, file: normalizeFilePath(file, workspaceRoot), line: lineNum, message: rest2.trim() };
+  let msg = rest2.slice(c3 + 1).trim();
+
+  let severity: 'error' | 'warning' = 'error';
+  if (msg.startsWith('warning:')) { severity = 'warning'; msg = msg.slice('warning:'.length).trim(); }
+  else if (msg.startsWith('error:'))  { msg = msg.slice('error:'.length).trim(); }
+
+  return { file: normalizeFilePath(file, workspaceRoot), line: lineNum, col: colNum, message: msg, severity };
+}
+
+function normalizeFilePath(file: string, workspaceRoot: string): string {
+  const prefix = workspaceRoot.endsWith('/') ? workspaceRoot : workspaceRoot + '/';
+  return file.startsWith(prefix) ? file.slice(prefix.length) : file;
+}
 
 function resolvePath(workspaceRoot: string, cwd: string, path: string): string {
   if (path.startsWith('/')) return path;

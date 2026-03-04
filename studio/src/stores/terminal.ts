@@ -4,6 +4,7 @@ export type TermLineKind =
   | 'input'       // $ command line the user typed
   | 'output'      // normal stdout
   | 'error'       // stderr / error message
+  | 'warn'        // compiler warning
   | 'stream-out'  // live stdout from streaming op
   | 'stream-err'  // live stderr from streaming op
   | 'system';     // status messages

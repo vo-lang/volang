@@ -353,16 +353,19 @@ describe('vo run', () => {
 describe('vo check', () => {
   it('shows "no errors" on clean file', async () => {
     const shell = makeMockShell({
-      'vo.check': () => ({ ok: true, errors: [] }),
+      'vo.check': () => ({ ok: true, diags: [] }),
     });
     await run(shell, 'vo check main.vo');
     const sys = get(terminal).lines.filter(l => l.kind === 'system').map(l => l.text);
     expect(sys.some(t => t.includes('no errors'))).toBe(true);
   });
 
-  it('BUG: shows errors when errors is string[] (not {message}[])', async () => {
+  it('shows errors when diags has entries', async () => {
     const shell = makeMockShell({
-      'vo.check': () => ({ ok: false, errors: ['type mismatch on line 3'] }),
+      'vo.check': () => ({
+        ok: false,
+        diags: [{ file: 'main.vo', line: 3, col: 5, message: 'type mismatch', severity: 'error' }],
+      }),
     });
     await run(shell, 'vo check main.vo');
     const errs = getErrorLines();
