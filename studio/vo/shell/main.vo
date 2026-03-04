@@ -14,16 +14,17 @@ func main() {
 		writeError("", "ERR_INTERNAL", "usage: handler <request-json> <workspace-root>")
 		return
 	}
+	platform := args[0] // "wasm" when running inside the browser sandbox
 	reqJSON := args[1]
 	workspace := args[2]
 
-	err := dispatch(reqJSON, workspace)
+	err := dispatch(reqJSON, workspace, platform)
 	if err != nil {
 		writeError("", "ERR_INTERNAL", err.Error())
 	}
 }
 
-func dispatch(reqJSON, workspace string) error {
+func dispatch(reqJSON, workspace, platform string) error {
 	raw, err := json.Decode([]byte(reqJSON))
 	if err != nil {
 		return err
@@ -48,30 +49,38 @@ func dispatch(reqJSON, workspace string) error {
 	var kind string
 	kind = opRaw~>kind?
 
+	isWasm := platform == "wasm"
+
 	switch {
-	case kind == "fs.list" || kind == "fs.stat" || kind == "fs.read" ||
-		kind == "fs.readMany" || kind == "fs.grep" ||
-		kind == "fs.write" || kind == "fs.mkdir" || kind == "fs.remove" ||
-		kind == "fs.rename" || kind == "fs.copy":
+	case strings.HasPrefix(kind, "fs."):
 		return handleFs(id, workspace, cwd, kind, opRaw)
 
-	case kind == "git.init" || kind == "git.status" || kind == "git.add" ||
-		kind == "git.commit" || kind == "git.push" || kind == "git.pull" ||
-		kind == "git.clone" || kind == "git.log" || kind == "git.diff" ||
-		kind == "git.checkout" || kind == "git.branch":
+	case strings.HasPrefix(kind, "git."):
+		if isWasm {
+			writeError(id, "ERR_NOT_SUPPORTED", "git ops are not available in the WASM sandbox")
+			return nil
+		}
 		return handleGit(id, workspace, cwd, kind, opRaw)
 
 	case kind == "proc.spawn":
+		if isWasm {
+			writeError(id, "ERR_NOT_SUPPORTED", "proc.spawn is not available in the WASM sandbox")
+			return nil
+		}
 		return handleProc(id, workspace, cwd, opRaw)
 
 	case strings.HasPrefix(kind, "vo."):
 		return handleVoOp(id, workspace, cwd, kind, opRaw)
 
-	case kind == "zip.pack" || kind == "zip.unpack" || kind == "zip.list":
+	case strings.HasPrefix(kind, "zip."):
+		if isWasm {
+			writeError(id, "ERR_NOT_SUPPORTED", "zip ops are not available in the WASM sandbox")
+			return nil
+		}
 		return handleZip(id, workspace, cwd, opRaw)
 
 	case strings.HasPrefix(kind, "http."):
-		return handleHttp(id, cwd, kind, opRaw)
+		return handleHttp(id, workspace, cwd, kind, opRaw)
 
 	default:
 		writeError(id, "ERR_NOT_SUPPORTED", "unknown op kind: "+kind)

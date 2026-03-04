@@ -20,10 +20,10 @@ export interface Bridge {
   // Filesystem
   fsListDir(dirPath: string): Promise<FsEntry[]>;
   fsReadFile(path: string): Promise<string>;
-  fsWriteFile(path: string, content: string): Promise<void>;
-  fsMkdir(path: string): Promise<void>;
-  fsRename(oldPath: string, newPath: string): Promise<void>;
-  fsRemove(path: string, recursive: boolean): Promise<void>;
+  fsWriteFile(path: string, content: string): Promise<void | null>;
+  fsMkdir(path: string): Promise<void | null>;
+  fsRename(oldPath: string, newPath: string): Promise<void | null>;
+  fsRemove(path: string, recursive: boolean): Promise<void | null>;
 
   // Execution (entry path relative to workspace root)
   compileRun(entryPath: string): Promise<string>;
@@ -70,12 +70,18 @@ async function initTauriBridge(): Promise<void> {
     workspaceRoot,
     shell: shellClient,
 
-    fsListDir:    (dirPath)          => invoke('cmd_fs_list_dir', { dirPath }),
-    fsReadFile:   (path)             => invoke('cmd_fs_read_file', { path }),
-    fsWriteFile:  (path, content)    => invoke('cmd_fs_write_file', { path, content }),
-    fsMkdir:      (path)             => invoke('cmd_fs_mkdir', { path }),
-    fsRename:     (oldPath, newPath) => invoke('cmd_fs_rename', { oldPath, newPath }),
-    fsRemove:     (path, recursive)  => invoke('cmd_fs_remove', { path, recursive }),
+    async fsListDir(dirPath: string): Promise<FsEntry[]> {
+      const entries = await shellClient.exec({ kind: 'fs.list', path: dirPath });
+      return entries.sort((a, b) => {
+        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+    },
+    fsReadFile:  (path: string)                     => shellClient.exec({ kind: 'fs.read',   path }),
+    fsWriteFile: (path: string, content: string)    => shellClient.exec({ kind: 'fs.write',  path, content }),
+    fsMkdir:     (path: string)                     => shellClient.exec({ kind: 'fs.mkdir',  path }),
+    fsRename:    (oldPath: string, newPath: string)  => shellClient.exec({ kind: 'fs.rename', oldPath, newPath }),
+    fsRemove:    (path: string, recursive: boolean)  => shellClient.exec({ kind: 'fs.remove', path, recursive }),
 
     compileRun:   (entryPath)            => invoke('cmd_compile_run', { entryPath }),
     runGui:       async (entryPath) => new Uint8Array(await invoke<number[]>('cmd_run_gui', { entryPath })),
@@ -297,8 +303,8 @@ async function initWasmBridge(): Promise<void> {
   (window as any).voguiSetMeta = () => {};
   (window as any).voguiToast = () => {};
 
-  // 5) Build bridge — FS ops go through JS VFS directly
-  const wasmRouter  = new WasmShellRouter(vfs, wasmMod, WASM_WORKSPACE);
+  // 5) Build bridge — all FS ops route through ShellClient → Vo shell handler
+  const wasmRouter  = new WasmShellRouter(wasmMod, WASM_WORKSPACE);
   const shellClient = new ShellClient(new WasmTransport(wasmRouter));
   await shellClient.initialize();
 
@@ -307,46 +313,17 @@ async function initWasmBridge(): Promise<void> {
     shell: shellClient,
 
     async fsListDir(dirPath: string): Promise<FsEntry[]> {
-      const [entries, err] = vfs.readDir(dirPath);
-      if (err) throw new Error(err);
-      return (entries as [string, boolean][])
-        .map(([name, isDir]) => ({
-          name,
-          path: dirPath === '/' ? '/' + name : dirPath + '/' + name,
-          isDir,
-        } as FsEntry))
-        .sort((a: FsEntry, b: FsEntry) => {
-          if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-          return a.name.localeCompare(b.name);
-        });
+      const entries = await shellClient.exec({ kind: 'fs.list', path: dirPath });
+      return entries.sort((a, b) => {
+        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
     },
-
-    async fsReadFile(path: string): Promise<string> {
-      const [data, err] = vfs.readFile(path);
-      if (err || !data) throw new Error(err ?? 'file not found');
-      return new TextDecoder().decode(data);
-    },
-
-    async fsWriteFile(path: string, content: string): Promise<void> {
-      const enc = new TextEncoder();
-      const err = vfs.writeFile(path, enc.encode(content), 0o644);
-      if (err) throw new Error(err);
-    },
-
-    async fsMkdir(path: string): Promise<void> {
-      const err = vfs.mkdirAll(path, 0o755);
-      if (err) throw new Error(err);
-    },
-
-    async fsRename(oldPath: string, newPath: string): Promise<void> {
-      const err = vfs.rename(oldPath, newPath);
-      if (err) throw new Error(err);
-    },
-
-    async fsRemove(path: string, recursive: boolean): Promise<void> {
-      const err = recursive ? vfs.removeAll(path) : vfs.remove(path);
-      if (err) throw new Error(err);
-    },
+    fsReadFile:  (path: string)                    => shellClient.exec({ kind: 'fs.read',   path }),
+    fsWriteFile: (path: string, content: string)   => shellClient.exec({ kind: 'fs.write',  path, content }),
+    fsMkdir:     (path: string)                    => shellClient.exec({ kind: 'fs.mkdir',  path }),
+    fsRename:    (oldPath: string, newPath: string) => shellClient.exec({ kind: 'fs.rename', oldPath, newPath }),
+    fsRemove:    (path: string, recursive: boolean) => shellClient.exec({ kind: 'fs.remove', path, recursive }),
 
     async compileRun(entryPath: string): Promise<string> {
       const result = wasmMod.compileRunEntry(entryPath);

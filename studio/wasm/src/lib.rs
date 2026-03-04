@@ -6,6 +6,8 @@
 //! The IDE UI is Svelte; this module compiles and runs user Vo code.
 //! Source files are read from the JS VirtualFS (via vo_web_runtime_wasm::vfs).
 
+mod vox_wasm_ffi;
+
 use std::cell::RefCell;
 use std::path::PathBuf;
 use wasm_bindgen::prelude::*;
@@ -24,6 +26,7 @@ include!(concat!(env!("OUT_DIR"), "/vogui_embedded.rs"));
 // Embed shell handler + 3rdparty sources for runShellHandler.
 include!(concat!(env!("OUT_DIR"), "/shell_embedded.rs"));
 
+
 // =============================================================================
 // Guest state (for a running vogui app)
 // =============================================================================
@@ -41,7 +44,7 @@ thread_local! {
 // =============================================================================
 
 /// Build a stdlib FS that also includes the embedded vogui package.
-fn build_user_std_fs() -> MemoryFs {
+pub(crate) fn build_user_std_fs() -> MemoryFs {
     let mut fs = vo_web::build_stdlib_fs();
     for (vfs_path, bytes) in VOGUI_FILES {
         if let Ok(content) = std::str::from_utf8(bytes) {
@@ -288,7 +291,10 @@ pub fn run_shell_handler(args: js_sys::Array) -> String {
     });
 
     vo_runtime::output::clear_output();
-    let run_result = vo_web::create_vm(&bytecode, |_, _| {});
+    let run_result = vo_web::create_vm(&bytecode, |reg, exts| {
+        vo_git2::wasm_stubs::register_externs(reg, exts);
+        vox_wasm_ffi::register_externs(reg, exts);
+    });
 
     vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
         *cell.borrow_mut() = None;

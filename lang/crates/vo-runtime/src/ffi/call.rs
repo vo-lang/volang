@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 
 use crate::gc::Gc;
 use crate::itab::ItabCache;
+use crate::output::OutputSink;
 use vo_common_core::bytecode::Module;
 #[cfg(feature = "std")]
 use crate::io::{IoRuntime, IoToken};
@@ -58,6 +59,9 @@ pub struct ExternWorld<'env> {
     pub vm_opaque: *mut core::ffi::c_void,
 
     pub program_args: &'env [String],
+
+    /// Output sink for fmt.Print / println.
+    pub output: &'env dyn OutputSink,
     pub sentinel_errors: &'env mut SentinelErrorCache,
 
     #[cfg(feature = "std")]

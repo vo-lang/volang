@@ -1,5 +1,5 @@
 import { writable, get } from 'svelte/store';
-import { github, loadManifest, saveManifest, fetchGistMetadata, fetchRepoMetadata } from './github';
+import { github, saveManifest, fetchGistMetadata, fetchRepoMetadata } from './github';
 import type { Manifest, ManifestProject, RemoteSource, RemoteMetadata } from './github';
 import { bridge } from '../lib/bridge';
 import type { FsEntry } from '../lib/bridge';
@@ -235,61 +235,6 @@ function hashRemoteFiles(files: Record<string, string>): string {
   const keys = Object.keys(files);
   if (keys.length === 1) return hashContent(files[keys[0]]);
   return hashFiles(files);
-}
-
-// ── Load all projects ─────────────────────────────────────────────────────────
-
-export async function loadProjects(root: string): Promise<void> {
-  projects.update(s => ({ ...s, isLoading: true, error: '' }));
-
-  try {
-    const localProjects = await discoverLocalProjects(root);
-
-    const { token } = get(github);
-    if (token) {
-      const { gistId, manifest } = await loadManifest(token);
-
-      // Fetch remote metadata for all manifest projects (in parallel)
-      const remoteMetaMap = new Map<string, RemoteMetadata>();
-      const fetches = manifest.projects.map(async (mp) => {
-        const key = mp.name + ':' + mp.type;
-        try {
-          let meta: RemoteMetadata;
-          if (mp.remote.kind === 'gist' && mp.remote.gistId) {
-            meta = await fetchGistMetadata(token, mp.remote.gistId);
-          } else if (mp.remote.kind === 'repo' && mp.remote.owner && mp.remote.repo) {
-            meta = await fetchRepoMetadata(token, mp.remote.owner, mp.remote.repo);
-          } else {
-            return;
-          }
-          remoteMetaMap.set(key, meta);
-        } catch {
-          // Network error for this project — skip remote metadata
-        }
-      });
-      await Promise.all(fetches);
-
-      const merged = mergeProjects(localProjects, manifest.projects, remoteMetaMap);
-      projects.update(s => ({
-        ...s,
-        manifestGistId: gistId,
-        manifestLoaded: true,
-        projects: merged,
-        isLoading: false,
-      }));
-    } else {
-      // No GitHub connection — local-only projects
-      projects.update(s => ({
-        ...s,
-        manifestGistId: null,
-        manifestLoaded: false,
-        projects: localProjects,
-        isLoading: false,
-      }));
-    }
-  } catch (e: any) {
-    projects.update(s => ({ ...s, isLoading: false, error: String(e.message ?? e) }));
-  }
 }
 
 // ── Manifest sync helpers ─────────────────────────────────────────────────────

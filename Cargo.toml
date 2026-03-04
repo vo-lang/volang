@@ -12,6 +12,7 @@ members = [
   "cmd/vo-test/rust",
 ]
 exclude = [
+  "3rdparty/git2/rust",
   "3rdparty/resvg/rust",
   "3rdparty/wgpu/rust",
   "studio/src-tauri",
@@ -48,3 +49,11 @@ lto = false
 [profile.release-nolto]
 inherits = "release"
 lto = false
+
+# Redirect 3rdparty crates that reference vo-lang crates via git URL to local paths.
+# This prevents duplicate crate instances and type incompatibilities when a 3rdparty
+# crate (e.g. vo-git2 with wasm-stubs feature) is used as a workspace path dependency.
+[patch."https://github.com/vo-lang/volang"]
+vo-runtime  = { path = "lang/crates/vo-runtime" }
+vo-ext      = { path = "lang/crates/vo-ext" }
+vo-ffi-macro = { path = "lang/crates/vo-ffi-macro" }

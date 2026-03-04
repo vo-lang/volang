@@ -850,7 +850,7 @@ fn sscanf_impl_scan(
 #[vostd_fn("fmt", "nativeWrite")]
 fn native_write(call: &mut ExternCallContext) -> ExternResult {
     let s = call.arg_str(slots::ARG_S);
-    vo_runtime::output::write(s);
+    call.write_output(s);
     ExternResult::Ok
 }
 

@@ -24,7 +24,7 @@ pub fn ensure_linked() {
 
 // Re-export vo-engine
 pub use vo_engine::{compile, compile_with_cache, compile_string, CompileError, CompileOutput};
-pub use vo_engine::{run, RunMode, RunError, RuntimeError, RuntimeErrorKind};
+pub use vo_engine::{run, run_with_output, RunMode, RunError, RuntimeError, RuntimeErrorKind};
 pub use vo_engine::Module;
 
 pub use printer::AstPrinter;

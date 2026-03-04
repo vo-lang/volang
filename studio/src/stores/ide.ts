@@ -28,7 +28,7 @@ export interface IdeState {
   projectMode: ProjectMode;
   editTarget: EditTarget | null;
   dirCache: Record<string, FsEntry[]>;
-  expandedDirs: string[];
+  expandedDirs: Set<string>;
   activeFilePath: string;
   code: string;
   dirty: boolean;
@@ -50,7 +50,7 @@ export const ide = writable<IdeState>({
   projectMode: 'single',
   editTarget: null,
   dirCache: {},
-  expandedDirs: [],
+  expandedDirs: new Set<string>(),
   activeFilePath: '',
   code: '',
   dirty: false,

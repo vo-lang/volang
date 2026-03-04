@@ -599,6 +599,9 @@ pub extern "C" fn jit_call_extern(
     let program_args = unsafe { &*ctx_ref.program_args };
     let sentinel_errors = unsafe { &mut *ctx_ref.sentinel_errors };
     let io = unsafe { &mut *ctx_ref.io };
+    // SAFETY: output pointer was set from Arc<dyn OutputSink> in build_jit_context;
+    // the Arc keeps it alive for the VM's lifetime.
+    let output: &dyn vo_runtime::output::OutputSink = unsafe { &*ctx_ref.output };
     
     // Get resume_io_token from fiber (for replay-at-PC semantics)
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
@@ -621,6 +624,7 @@ pub extern "C" fn jit_call_extern(
         itab_cache,
         vm_opaque: ctx_ref.vm,
         program_args,
+        output,
         sentinel_errors,
         io,
     };

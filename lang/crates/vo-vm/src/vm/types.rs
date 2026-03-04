@@ -4,8 +4,11 @@
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
 
 use vo_runtime::gc::{Gc, GcRef};
+use vo_runtime::output::{OutputSink, default_sink};
 use vo_runtime::SentinelErrorCache;
 
 use vo_runtime::ffi::ExternRegistry;
@@ -133,6 +136,9 @@ pub struct VmState {
     pub itab_cache: ItabCache,
     pub extern_registry: ExternRegistry,
     pub program_args: Vec<String>,
+    /// Output sink for fmt.Print / println. Defaults to StdoutSink (std) or
+    /// GlobalBufferSink (WASM). Replace with CaptureSink to capture output.
+    pub output: Arc<dyn OutputSink>,
     #[cfg(feature = "std")]
     pub io: vo_runtime::io::IoRuntime,
     /// Per-VM sentinel error cache (reset on each module load).
@@ -161,6 +167,7 @@ impl VmState {
             itab_cache: ItabCache::new(),
             extern_registry: ExternRegistry::new(),
             program_args: Vec::new(),
+            output: default_sink(),
             #[cfg(feature = "std")]
             io: vo_runtime::io::IoRuntime::new()
                 .unwrap_or_else(|e| panic!("IoRuntime::new failed: {}", e)),

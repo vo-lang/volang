@@ -38,13 +38,13 @@ fn format_args(call: &ExternCallContext, start_slot: u16) -> String {
 
 /// vo_print - print values without newline (Go builtin print semantics)
 fn builtin_print(call: &mut ExternCallContext) -> ExternResult {
-    crate::output::write(&format_args(call, 0));
+    call.write_output(&format_args(call, 0));
     ExternResult::Ok
 }
 
 /// vo_println - print values with newline (Go builtin println semantics)
 fn builtin_println(call: &mut ExternCallContext) -> ExternResult {
-    crate::output::writeln(&format_args(call, 0));
+    call.writeln_output(&format_args(call, 0));
     ExternResult::Ok
 }
 

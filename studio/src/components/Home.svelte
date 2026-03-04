@@ -1,25 +1,24 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { explorer } from '../stores/explorer';
-  import { github, loginWithToken, logout, loadSavedToken } from '../stores/github';
-  import { projects, loadProjects, syncState, syncStateLabel } from '../stores/projects';
+  import { github, logout, loadSavedToken } from '../stores/github';
+  import { projects, syncState, syncStateLabel } from '../stores/projects';
   import type { ProjectEntry, SyncState } from '../stores/projects';
   import { actions } from '../lib/actions';
   import { bridge } from '../lib/bridge';
   import SyncDetailModal from './SyncDetailModal.svelte';
+  import GitHubAuthModal from './GitHubAuthModal.svelte';
+  import ProjectContextMenu from './ProjectContextMenu.svelte';
+  import RenameProjectModal from './RenameProjectModal.svelte';
 
   // ── Auth ───────────────────────────────────────────────────────────────────
-  let tokenInput = '';
-  let isConnecting = false;
-  let connectError = '';
   let showAuthModal = false;
 
   onMount(() => {
     loadSavedToken();
-    // Load projects once bridge is ready
     const root = get(explorer).localRoot;
-    if (root) loadProjects(root);
+    if (root) actions.loadProjects(root);
   });
 
   // Reload projects when GitHub auth state changes
@@ -29,24 +28,8 @@
     if (tok !== prevToken) {
       prevToken = tok;
       const root = $explorer.localRoot;
-      if (root) loadProjects(root);
+      if (root) actions.loadProjects(root);
     }
-  }
-
-  async function connect() {
-    const t = tokenInput.trim();
-    if (!t) return;
-    isConnecting = true; connectError = '';
-    try {
-      await loginWithToken(t);
-      tokenInput = ''; showAuthModal = false;
-    } catch (e: any) {
-      connectError = String(e.message ?? e);
-    } finally { isConnecting = false; }
-  }
-
-  function handleLogout() {
-    logout();
   }
 
   // ── Project actions ────────────────────────────────────────────────────────
@@ -112,7 +95,7 @@ func main() {
 \tfmt.Println("Hello, Vo!")
 }
 `);
-    await loadProjects(root);
+    await actions.loadProjects(root);
     // Open the new file
     const ps = get(projects);
     const created = ps.projects.find(p => p.name === name.replace(/\.vo$/, '') && p.type === 'single');
@@ -140,7 +123,7 @@ func main() {
 \tfmt.Println("Hello, Vo!")
 }
 `);
-    await loadProjects(root);
+    await actions.loadProjects(root);
     const ps = get(projects);
     const created = ps.projects.find(p => p.name === dirName && p.type === 'multi');
     if (created) await openProject(created);
@@ -148,7 +131,7 @@ func main() {
 
   async function refresh() {
     const root = $explorer.localRoot;
-    if (root) await loadProjects(root);
+    if (root) await actions.loadProjects(root);
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
@@ -202,8 +185,7 @@ func main() {
 
   // ── Context menu ──────────────────────────────────────────────────────────
   let ctxMenu: { x: number; y: number; project: ProjectEntry; state: SyncState } | null = null;
-  let renameModal: { project: ProjectEntry; value: string; saving: boolean; error: string } | null = null;
-  let renameInputEl: HTMLInputElement | null = null;
+  let renameTarget: ProjectEntry | null = null;
 
   function onCardContext(e: MouseEvent, p: ProjectEntry, state: SyncState) {
     const menuW = 220, menuH = 290;
@@ -212,37 +194,16 @@ func main() {
     ctxMenu = { x: Math.max(0, x), y: Math.max(0, y), project: p, state };
   }
 
-  async function openRenameModal(p: ProjectEntry) {
-    ctxMenu = null;
-    renameModal = {
-      project: p,
-      value: p.name,
-      saving: false,
-      error: '',
-    };
-    await tick();
-    renameInputEl?.focus();
-    renameInputEl?.select();
-  }
-
-  async function confirmRename() {
-    const m = renameModal;
-    if (!m) return;
+  async function handleRenameConfirm(e: CustomEvent<{ project: ProjectEntry; newName: string }>) {
+    const { project: p, newName } = e.detail;
     const root = $explorer.localRoot;
-    if (!root) {
-      renameModal = { ...m, error: 'Workspace is not ready.' };
-      return;
-    }
-    renameModal = { ...m, saving: true, error: '' };
+    if (!root) return;
     try {
-      await actions.renameProject(m.project, m.value, root);
-      renameModal = null;
+      await actions.renameProject(p, newName, root);
     } catch (e: any) {
-      renameModal = {
-        ...m,
-        saving: false,
-        error: `Rename failed: ${e.message ?? e}`,
-      };
+      actionError = `Rename failed: ${e.message ?? e}`;
+    } finally {
+      renameTarget = null;
     }
   }
 
@@ -259,8 +220,8 @@ func main() {
     if (e.key === 'Escape') {
       if (syncDetailProject) { syncDetailProject = null; }
       else if (ctxMenu) { ctxMenu = null; }
-      else if (renameModal) { renameModal = null; }
-      else if (showAuthModal) { showAuthModal = false; connectError = ''; }
+      else if (renameTarget) { renameTarget = null; }
+      else if (showAuthModal) { showAuthModal = false; }
     }
   }
 </script>
@@ -276,7 +237,7 @@ func main() {
     {#if $github.user}
       <img class="avatar" src={$github.user.avatar_url} alt={$github.user.login} width="24" height="24" />
       <span class="gh-login">@{$github.user.login}</span>
-      <button class="link-btn" on:click={handleLogout}>Sign out</button>
+      <button class="link-btn" on:click={logout}>Sign out</button>
     {:else if $github.isLoading}
       <span class="gh-hint">Connecting…</span>
       {:else}
@@ -286,85 +247,8 @@ func main() {
       </button>
     {/if}
   </div>
-  <!-- ── GitHub auth modal ── -->
   {#if showAuthModal}
-    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-    <div class="auth-backdrop" on:click={() => { showAuthModal = false; connectError = ''; }}>
-      <div class="auth-modal" on:click|stopPropagation={() => {}} role="dialog" aria-modal="true" aria-labelledby="auth-title">
-        <!-- GitHub logo -->
-        <div class="auth-logo-wrap">
-          <svg class="auth-gh-icon" viewBox="0 0 24 24" width="36" height="36" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-        </div>
-        <h2 class="auth-title" id="auth-title">Connect to GitHub</h2>
-        <p class="auth-desc">Link your account to push and pull projects between local and GitHub.</p>
-
-        <div class="auth-steps">
-          <div class="auth-step">
-            <span class="step-num">1</span>
-            <div class="step-body">
-              <span class="step-label">Create a Personal Access Token</span>
-              <a
-                class="step-link"
-                href="https://github.com/settings/tokens/new?description=Vibe+Studio&scopes=gist,public_repo"
-                target="_blank"
-                rel="noopener noreferrer"
-              >Open GitHub Settings ↗</a>
-            </div>
-          </div>
-          <div class="auth-step">
-            <span class="step-num">2</span>
-            <div class="step-body">
-              <span class="step-label">Enable these scopes</span>
-              <div class="scope-chips">
-                <code class="scope">gist</code>
-                <code class="scope">public_repo</code>
-                <span class="scope-note">(or <code class="scope">repo</code> for private)</span>
-              </div>
-            </div>
-          </div>
-          <div class="auth-step">
-            <span class="step-num">3</span>
-            <div class="step-body">
-              <span class="step-label">Paste it below</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="auth-input-wrap">
-          <input
-            class="auth-token-input"
-            type="password"
-            placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-            bind:value={tokenInput}
-            on:keydown={(e) => e.key === 'Enter' && connect()}
-            autocomplete="off"
-            spellcheck="false"
-          />
-        </div>
-
-        {#if connectError}
-          <div class="auth-error">{connectError}</div>
-        {/if}
-
-        <div class="auth-btns">
-          <button
-            class="auth-connect-btn"
-            disabled={!tokenInput.trim() || isConnecting}
-            on:click={connect}
-          >
-            {#if isConnecting}
-              <svg class="auth-spin" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-              Connecting…
-            {:else}
-              Connect
-            {/if}
-          </button>
-          <button class="auth-cancel-btn" on:click={() => { showAuthModal = false; connectError = ''; }}>
-            Cancel
-          </button>
-        </div>
-      </div>
-    </div>
+    <GitHubAuthModal on:close={() => (showAuthModal = false)} />
   {/if}
 
   <!-- ── Toolbar ── -->
@@ -496,85 +380,29 @@ func main() {
     {/if}
   </div>
 
-  <!-- ── Context menu ── -->
   {#if ctxMenu}
-    {@const p = ctxMenu.project}
-    {@const s = ctxMenu.state}
-    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-    <div class="ctx-backdrop" on:click={() => (ctxMenu = null)}>
-      <div class="ctx-menu" style="left:{ctxMenu.x}px;top:{ctxMenu.y}px" on:click|stopPropagation={() => {}}>
-        <button class="ctx-item" on:click={() => { ctxMenu = null; openProject(p); }}>
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>
-          Open
-        </button>
-        <button class="ctx-item" on:click={() => openRenameModal(p)}>
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 113 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
-          Rename
-        </button>
-        {#if p.localPath && p.remote}
-          <button class="ctx-item" on:click={() => { ctxMenu = null; openSyncDetail(p, s); }}>
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10M18 20V4M6 20v-4"/></svg>
-            View Diff
-          </button>
-        {/if}
-        {#if (s === 'local-only' && $github.token) || s === 'in-sync' || s === 'local-ahead' || s === 'diverged'}
-          <button class="ctx-item" on:click={() => { ctxMenu = null; pushProject(p); }}>
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
-            Push to GitHub
-          </button>
-        {/if}
-        {#if s === 'remote-only' || s === 'in-sync' || s === 'remote-ahead' || s === 'diverged'}
-          <button class="ctx-item" on:click={() => { ctxMenu = null; pullProject(p); }}>
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
-            Pull from GitHub
-          </button>
-        {/if}
-        {#if p.remote}
-          <button class="ctx-item" on:click={() => { ctxMenu = null; viewOnGitHub(p); }}>
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-            View on GitHub
-          </button>
-        {/if}
-        <div class="ctx-sep"></div>
-        <button class="ctx-item danger" on:click={() => { ctxMenu = null; deleteProject(p); }}>
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-          Delete
-        </button>
-      </div>
-    </div>
+    <ProjectContextMenu
+      x={ctxMenu.x}
+      y={ctxMenu.y}
+      project={ctxMenu.project}
+      state={ctxMenu.state}
+      on:close={() => (ctxMenu = null)}
+      on:open={(e) => openProject(e.detail)}
+      on:rename={(e) => { renameTarget = e.detail; }}
+      on:viewDiff={(e) => openSyncDetail(e.detail.project, e.detail.state)}
+      on:push={(e) => pushProject(e.detail)}
+      on:pull={(e) => pullProject(e.detail)}
+      on:viewOnGitHub={(e) => viewOnGitHub(e.detail)}
+      on:delete={(e) => deleteProject(e.detail)}
+    />
   {/if}
 
-  {#if renameModal}
-    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-    <div class="auth-backdrop" on:click={() => !renameModal?.saving && (renameModal = null)}>
-      <div class="rename-modal" role="dialog" aria-modal="true" aria-labelledby="rename-title" on:click|stopPropagation={() => {}}>
-        <h3 class="rename-title" id="rename-title">Rename Project</h3>
-        <p class="rename-desc">Rename local project and GitHub reference together.</p>
-
-        <input
-          class="rename-input"
-          bind:this={renameInputEl}
-          bind:value={renameModal.value}
-          disabled={renameModal.saving}
-          on:keydown={(e) => e.key === 'Enter' && !renameModal?.saving && confirmRename()}
-        />
-
-        {#if renameModal.error}
-          <div class="rename-error">{renameModal.error}</div>
-        {/if}
-
-        <div class="rename-actions">
-          <button
-            class="rename-confirm"
-            on:click={confirmRename}
-            disabled={!renameModal.value.trim() || renameModal.saving}
-          >
-            {renameModal.saving ? 'Renaming…' : 'Rename'}
-          </button>
-          <button class="rename-cancel" on:click={() => (renameModal = null)} disabled={renameModal.saving}>Cancel</button>
-        </div>
-      </div>
-    </div>
+  {#if renameTarget}
+    <RenameProjectModal
+      project={renameTarget}
+      on:close={() => (renameTarget = null)}
+      on:confirm={handleRenameConfirm}
+    />
   {/if}
 
   {#if syncDetailProject}
@@ -628,210 +456,6 @@ func main() {
     transition: color 0.1s;
   }
   .link-btn:hover { color: #a6adc8; }
-
-  /* ── Auth modal ── */
-  .auth-backdrop {
-    position: fixed; inset: 0; z-index: 100;
-    background: rgba(0, 0, 0, 0.65);
-    backdrop-filter: blur(4px);
-    display: flex; align-items: center; justify-content: center;
-    padding: 24px;
-    animation: fade-in 0.15s ease;
-  }
-  @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-
-  .auth-modal {
-    background: #1e1e2e;
-    border: 1px solid #313244;
-    border-radius: 14px;
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
-    width: 100%;
-    max-width: 400px;
-    padding: 32px 28px 24px;
-    display: flex; flex-direction: column; align-items: stretch; gap: 0;
-    animation: slide-up 0.18s ease;
-  }
-  @keyframes slide-up { from { transform: translateY(12px); opacity: 0; } to { transform: none; opacity: 1; } }
-
-  .auth-logo-wrap {
-    display: flex; justify-content: center; margin-bottom: 16px;
-  }
-  .auth-gh-icon {
-    color: #585b70;
-    filter: drop-shadow(0 0 16px rgba(137,180,250,0.2));
-  }
-
-  .auth-title {
-    font-size: 17px; font-weight: 700; color: #cdd6f4;
-    text-align: center; margin: 0 0 8px;
-  }
-  .auth-desc {
-    font-size: 13px; color: #585b70; text-align: center;
-    line-height: 1.6; margin: 0 0 24px;
-  }
-
-  .auth-steps {
-    display: flex; flex-direction: column; gap: 14px;
-    margin-bottom: 20px;
-    padding: 16px;
-    background: #181825;
-    border: 1px solid #252535;
-    border-radius: 10px;
-  }
-  .auth-step {
-    display: flex; align-items: flex-start; gap: 12px;
-  }
-  .step-num {
-    width: 22px; height: 22px; border-radius: 50%;
-    background: rgba(137,180,250,0.12); border: 1px solid rgba(137,180,250,0.25);
-    color: #89b4fa; font-size: 11px; font-weight: 700;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0; margin-top: 1px;
-  }
-  .step-body {
-    display: flex; flex-direction: column; gap: 5px; min-width: 0;
-  }
-  .step-label {
-    font-size: 13px; color: #cdd6f4; font-weight: 500; line-height: 1.3;
-  }
-  .step-link {
-    font-size: 12px; color: #89b4fa; text-decoration: none; width: fit-content;
-    transition: opacity 0.1s;
-  }
-  .step-link:hover { opacity: 0.8; text-decoration: underline; }
-  .scope-chips {
-    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  }
-  .scope {
-    font-family: 'JetBrains Mono', monospace; font-size: 11px;
-    background: #252535; color: #f9e2af;
-    padding: 2px 6px; border-radius: 4px; border: 1px solid #313244;
-  }
-  .scope-note {
-    font-size: 11px; color: #45475a;
-  }
-  .scope-note .scope { color: #a6adc8; }
-
-  .auth-input-wrap {
-    margin-bottom: 12px;
-  }
-  .auth-token-input {
-    width: 100%; background: #11111b; border: 1px solid #313244;
-    border-radius: 8px; color: #cdd6f4; font-size: 13px;
-    padding: 10px 14px; outline: none;
-    font-family: 'JetBrains Mono', monospace; letter-spacing: 0.04em;
-    transition: border-color 0.15s;
-  }
-  .auth-token-input:focus { border-color: #89b4fa; box-shadow: 0 0 0 3px rgba(137,180,250,0.1); }
-  .auth-token-input::placeholder { color: #313244; letter-spacing: normal; }
-
-  .auth-error {
-    font-size: 12px; color: #f38ba8; margin-bottom: 12px;
-    padding: 8px 12px; background: rgba(243,139,168,0.08);
-    border: 1px solid rgba(243,139,168,0.2); border-radius: 7px; line-height: 1.4;
-  }
-
-  .auth-btns {
-    display: flex; gap: 8px;
-  }
-  .auth-connect-btn {
-    flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px;
-    border: none; background: #89b4fa; color: #11111b;
-    font-size: 13px; font-weight: 700; padding: 10px 20px;
-    border-radius: 8px; cursor: pointer; font-family: inherit;
-    transition: opacity 0.12s;
-  }
-  .auth-connect-btn:hover:not(:disabled) { opacity: 0.88; }
-  .auth-connect-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-  .auth-cancel-btn {
-    border: 1px solid #313244; background: none; color: #585b70;
-    font-size: 13px; padding: 10px 16px; border-radius: 8px;
-    cursor: pointer; font-family: inherit; transition: all 0.1s;
-  }
-  .auth-cancel-btn:hover { color: #a6adc8; background: #252535; border-color: #45475a; }
-
-  .auth-spin {
-    animation: spin 0.8s linear infinite;
-  }
-
-  .rename-modal {
-    width: min(420px, 100%);
-    background: #1e1e2e;
-    border: 1px solid #313244;
-    border-radius: 12px;
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
-    padding: 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    animation: slide-up 0.18s ease;
-  }
-  .rename-title {
-    margin: 0;
-    font-size: 16px;
-    font-weight: 700;
-    color: #cdd6f4;
-  }
-  .rename-desc {
-    margin: 0;
-    font-size: 12px;
-    color: #7f849c;
-  }
-  .rename-input {
-    width: 100%;
-    border: 1px solid #313244;
-    background: #11111b;
-    color: #cdd6f4;
-    border-radius: 8px;
-    font-size: 13px;
-    padding: 9px 12px;
-    outline: none;
-    font-family: inherit;
-  }
-  .rename-input:focus {
-    border-color: #89b4fa;
-    box-shadow: 0 0 0 3px rgba(137,180,250,0.1);
-  }
-  .rename-input:disabled {
-    opacity: 0.6;
-  }
-  .rename-error {
-    font-size: 12px;
-    color: #f38ba8;
-    background: rgba(243,139,168,0.08);
-    border: 1px solid rgba(243,139,168,0.2);
-    border-radius: 7px;
-    padding: 8px 10px;
-  }
-  .rename-actions {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-end;
-  }
-  .rename-confirm,
-  .rename-cancel {
-    border-radius: 8px;
-    padding: 8px 12px;
-    font-size: 12px;
-    font-weight: 600;
-    font-family: inherit;
-    cursor: pointer;
-    transition: all 0.12s;
-  }
-  .rename-confirm {
-    border: none;
-    background: #89b4fa;
-    color: #11111b;
-  }
-  .rename-confirm:hover:not(:disabled) { opacity: 0.9; }
-  .rename-confirm:disabled { opacity: 0.35; cursor: not-allowed; }
-  .rename-cancel {
-    border: 1px solid #313244;
-    background: none;
-    color: #a6adc8;
-  }
-  .rename-cancel:hover:not(:disabled) { background: #252535; }
-  .rename-cancel:disabled { opacity: 0.35; cursor: not-allowed; }
 
   /* ── Toolbar bar ── */
   .toolbar-bar {
@@ -1028,36 +652,4 @@ func main() {
   .del-btn:hover:not(:disabled) { color: #f38ba8; background: rgba(243,139,168,0.1); border-color: rgba(243,139,168,0.25); opacity: 1; }
   .del-btn:disabled { opacity: 0; cursor: not-allowed; }
 
-  /* ── Context menu ── */
-  .ctx-backdrop {
-    position: fixed; inset: 0; z-index: 200;
-  }
-  .ctx-menu {
-    position: fixed;
-    min-width: 184px;
-    background: #1e1e2e;
-    border: 1px solid #313244;
-    border-radius: 8px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,0,0,0.1);
-    padding: 4px;
-    animation: fade-in 0.08s ease;
-  }
-  .ctx-item {
-    display: flex; align-items: center; gap: 10px;
-    width: 100%; padding: 7px 12px;
-    border: none; background: none;
-    color: #cdd6f4; font-size: 12px; font-weight: 500;
-    font-family: inherit; cursor: pointer;
-    border-radius: 5px; text-align: left;
-    transition: background 0.08s;
-  }
-  .ctx-item:hover { background: #252535; }
-  .ctx-item svg { flex-shrink: 0; color: #585b70; }
-  .ctx-item:hover svg { color: #a6adc8; }
-  .ctx-item.danger { color: #585b70; }
-  .ctx-item.danger:hover { color: #f38ba8; background: rgba(243,139,168,0.08); }
-  .ctx-item.danger:hover svg { color: #f38ba8; }
-  .ctx-sep {
-    height: 1px; background: #252535; margin: 4px 8px;
-  }
 </style>

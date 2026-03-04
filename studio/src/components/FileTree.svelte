@@ -33,7 +33,7 @@
 
   function computeFlatList(
     cache: Record<string, FsEntry[]>,
-    expandedDirs: string[],
+    expandedDirs: Set<string>,
     inlineInput: { mode: string; targetPath?: string; dirPath: string } | null,
     dirPath: string,
     depth: number,
@@ -44,7 +44,7 @@
         rows.push({ kind: 'input', depth, dirPath: entry.path.substring(0, entry.path.lastIndexOf('/')) });
       } else {
         rows.push({ kind: 'entry', entry, depth });
-        if (entry.isDir && expandedDirs.includes(entry.path)) {
+        if (entry.isDir && expandedDirs.has(entry.path)) {
           rows.push(...computeFlatList(cache, expandedDirs, inlineInput, entry.path, depth + 1));
         }
       }
@@ -205,7 +205,7 @@
           >
             {#if row.entry.isDir}
               <span class="file-icon dir-icon">
-                {$ide.expandedDirs.includes(row.entry.path) ? '▾' : '▸'}
+                {$ide.expandedDirs.has(row.entry.path) ? '▾' : '▸'}
               </span>
             {:else}
               <span class="file-icon {fileIconClass(row.entry.name)}"></span>

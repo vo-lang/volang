@@ -21,11 +21,6 @@ export default defineConfig({
       allow: [resolve(__dirname, '..')],
     },
   },
-  css: {
-    // Use vogui's own postcss.config.js (which has tailwindcss + autoprefixer)
-    // so that vogui.css?inline is processed with Tailwind scanning the right sources.
-    postcss: resolve(__dirname, '../libs/vogui/js'),
-  },
   build: {
     outDir: 'dist',
     target: ['es2020', 'chrome105'],

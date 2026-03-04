@@ -14,7 +14,7 @@ use std::{env, fs, path::{Path, PathBuf}};
 // but the function must exist for the compiler.
 const HTTP_STUB_SOURCE: &str = r#"package main
 
-func handleHttp(id, cwd, kind string, op any) error {
+func handleHttp(id, workspace, cwd, kind string, op any) error {
 	writeError(id, "ERR_NOT_SUPPORTED", "http ops require native mode")
 	return nil
 }

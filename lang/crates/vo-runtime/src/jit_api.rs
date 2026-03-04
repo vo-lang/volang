@@ -280,6 +280,10 @@ pub struct JitContext {
     /// Pointer to sentinel error cache.
     pub sentinel_errors: *mut crate::ffi::SentinelErrorCache,
     
+    /// Pointer to the VM's output sink (trait object data+vtable).
+    /// Avoids dereferencing `vm` (which would alias `gc`) just to read output.
+    pub output: *const dyn crate::output::OutputSink,
+    
     /// Pointer to shared IoRuntime for async I/O operations.
     /// JIT extern calls use this instead of creating per-call IoRuntime.
     #[cfg(feature = "std")]

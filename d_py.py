@@ -259,6 +259,16 @@ def studio_wasm_needs_build() -> bool:
     if get_newest_mtime(vogui_vo, pattern='*.vo') > wasm_mtime:
         return True
 
+    # studio/vo/shell/*.vo — embedded as shell handler sources
+    shell_vo = PROJECT_ROOT / 'studio' / 'vo' / 'shell'
+    if get_newest_mtime(shell_vo, pattern='*.vo') > wasm_mtime:
+        return True
+
+    # libs/vox/vox.vo — embedded as shell handler dependency
+    vox_vo = PROJECT_ROOT / 'libs' / 'vox' / 'vox.vo'
+    if vox_vo.exists() and vox_vo.stat().st_mtime > wasm_mtime:
+        return True
+
     # lang/crates/* dependencies
     for crate in STUDIO_WASM_SOURCE_CRATES:
         crate_src = PROJECT_ROOT / 'lang' / 'crates' / crate / 'src'

@@ -3,49 +3,46 @@ import {
   type ShellResponse,
   type ShellEvent,
   type Capability,
-  type VoOp,
-  ShellError,
 } from '../protocol';
-import type { VfsLike } from './fs_handler';
-import { WasmVoHandler, type WasmModLike } from './vo_handler';
 import { WasmVoRunner, type WasmShellModLike } from './vo_runner';
 
 // =============================================================================
 // WasmShellRouter — top-level dispatcher for all shell ops in WASM env.
 //
 // Architecture:
-//   - vo.*  → WasmVoHandler: uses compileRunEntry / the studio WASM module
-//             directly for Vo toolchain ops (compile, run, check from VFS).
-//   - fs.*, git.*, zip.*, proc.* → WasmVoRunner: executes the same Vo handler
-//             programs used on Tauri (studio/vo/shell/) via runShellHandler.
-//             This gives a unified Vo layer across both platforms.
-//             On WASM: fs ops use the JS VirtualFS, git reads use 3rdparty/git2
-//             (graceful error if unavailable), zip uses 3rdparty/zip (zip.wasm),
-//             exec-dependent ops (git write, proc) return ERR_NOT_SUPPORTED.
+//   - ALL ops (fs.*, git.*, vo.*, zip.*, proc.*, http.*) → WasmVoRunner:
+//     executes the same Vo handler programs used on Tauri (studio/vo/shell/)
+//     via runShellHandler. This gives a unified Vo layer across both platforms.
+//     libs/vox FFI is exposed to the WASM runtime so vo_ops.vo runs natively.
+//
+// WASM limitations:
+//   - fs.*      : fully supported (JS VirtualFS)
+//   - git.*     : ERR_NOT_SUPPORTED — libgit2 is a native C library; all
+//                 nativeXxx externs are registered as graceful stubs in
+//                 studio/wasm/src/lib.rs. Git sync in WASM uses the GitHub
+//                 REST API integration (Home screen), not terminal git.
+//   - zip.*     : ERR_NOT_SUPPORTED (no zip.wasm loaded in shell context)
+//   - proc.spawn: ERR_NOT_SUPPORTED (os/exec unavailable in browser)
+//   - http.*    : fully supported
+//   - vo.*      : fully supported via libs/vox WASM FFI (vox_wasm_ffi.rs)
 // =============================================================================
 
 export class WasmShellRouter {
-  private readonly vo:     WasmVoHandler;
   private readonly runner: WasmVoRunner;
 
   readonly workspaceRoot: string;
 
   constructor(
-    _vfs: VfsLike,
-    wasmMod: WasmModLike & WasmShellModLike,
+    wasmMod: WasmShellModLike,
     workspaceRoot: string,
   ) {
     this.workspaceRoot = workspaceRoot;
-    this.vo            = new WasmVoHandler(wasmMod, workspaceRoot, _vfs);
     this.runner        = new WasmVoRunner(wasmMod, workspaceRoot);
   }
 
   capabilities(): Set<Capability> {
     return new Set<Capability>([
       'fs',
-      'git',
-      'zip',
-      'proc.spawn',
       'vo.run',
       'vo.check',
       'vo.build',
@@ -57,18 +54,7 @@ export class WasmShellRouter {
     ]);
   }
 
-  async handle(req: ShellRequest, emit: (ev: ShellEvent) => void): Promise<ShellResponse> {
-    try {
-      if (req.op.kind.startsWith('vo.')) {
-        const data = await this.vo.handle(req.op as VoOp, req.cwd);
-        return { id: req.id, kind: 'ok', data };
-      }
-      return this.runner.handle(req, emit);
-    } catch (e) {
-      if (e instanceof ShellError) {
-        return { id: req.id, kind: 'error', code: e.code, message: e.message };
-      }
-      return { id: req.id, kind: 'error', code: 'ERR_INTERNAL', message: String(e) };
-    }
+  handle(req: ShellRequest, emit: (ev: ShellEvent) => void): Promise<ShellResponse> {
+    return this.runner.handle(req, emit);
   }
 }

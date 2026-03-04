@@ -4,9 +4,11 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
 
+use vo_vox::CompileOutput;
+
 use serde_json::{json, Value};
-use vo_vox::{compile, run as run_vox, RunMode};
-use vo_runtime::output;
+use vo_vox::{compile, run_with_output as run_vox, RunMode};
+use vo_runtime::output::CaptureSink;
 
 use super::{ShellRequest, ShellResponse, ShellError};
 
@@ -16,13 +18,6 @@ fn emit(app: &tauri::AppHandle, payload: Value) {
 }
 
 // =============================================================================
-// Global serialization lock — output::start_capture / stop_capture are global
-// state, so concurrent Vo executions must be serialized.
-// =============================================================================
-
-static VO_EXEC_LOCK: Mutex<()> = Mutex::new(());
-
-// =============================================================================
 // VoRunner — compiles the Vo shell handler and runs it per request
 // =============================================================================
 
@@ -30,6 +25,8 @@ pub struct VoRunner {
     /// Absolute path to studio/vo/shell/ directory containing the Vo handler.
     handler_dir:    PathBuf,
     workspace_root: PathBuf,
+    /// Cached compiled shell handler bytecode — recompiled only on first use.
+    cached:         Mutex<Option<CompileOutput>>,
 }
 
 impl VoRunner {
@@ -38,7 +35,7 @@ impl VoRunner {
         // studio/vo/shell/ lives two levels above the src-tauri/ directory.
         // At runtime the workspace_root is the project root (where d.py lives).
         let handler_dir = workspace_root.join("studio").join("vo").join("shell");
-        Self { handler_dir, workspace_root }
+        Self { handler_dir, workspace_root, cached: Mutex::new(None) }
     }
 
     pub fn handle(&self, req: ShellRequest, app: &tauri::AppHandle) -> ShellResponse {
@@ -65,18 +62,21 @@ impl VoRunner {
 
         let workspace_str = self.workspace_root.to_string_lossy().to_string();
 
-        // Compile the handler directory on every request.
-        // The Vo compiler is fast for small programs; caching can be added later.
-        let compiled = compile(&handler_path)
-            .map_err(|e| ShellError::internal(&format!("shell handler compile error: {e}")))?;
+        let compiled = {
+            let mut guard = self.cached.lock().unwrap();
+            if let Some(cached) = &*guard {
+                cached.clone()
+            } else {
+                let fresh = compile(&handler_path)
+                    .map_err(|e| ShellError::internal(&format!("shell handler compile error: {e}")))?;
+                *guard = Some(fresh.clone());
+                fresh
+            }
+        };
 
-        // Serialize Vo execution — output capture is process-global state.
-        let _guard = VO_EXEC_LOCK.lock().unwrap();
-
-        output::start_capture();
-        let run_result = run_vox(compiled, RunMode::Vm, vec![req_json, workspace_str]);
-        let captured = output::stop_capture();
-        drop(_guard);
+        let sink = CaptureSink::new();
+        let run_result = run_vox(compiled, RunMode::Vm, vec![req_json, workspace_str], sink.clone());
+        let captured = sink.take();
 
         if let Err(e) = run_result {
             // If the handler panicked but produced partial output, use it;
@@ -161,11 +161,7 @@ impl VoRunner {
         let mut cmd = Command::new(&program);
         cmd.args(&spawn_args).current_dir(&work_dir);
 
-        if combined {
-            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        } else {
-            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         // Optional env overrides
         if let Some(env_obj) = cmd_val["env"].as_object() {
@@ -187,6 +183,8 @@ impl VoRunner {
         let app_out = app.clone();
         let app_err = app.clone();
         let app_fin = app.clone();
+        // When combined=true, stderr events are emitted as "stdout" (merged stream).
+        let stderr_kind = if combined { "stdout" } else { "stderr" };
 
         let out_thread = thread::spawn(move || {
             if let Some(out) = stdout {
@@ -199,7 +197,7 @@ impl VoRunner {
         let err_thread = thread::spawn(move || {
             if let Some(err) = stderr {
                 for line in BufReader::new(err).lines().map_while(Result::ok) {
-                    emit(&app_err, json!({ "jobId": jid_err, "kind": "stderr", "line": line }));
+                    emit(&app_err, json!({ "jobId": jid_err, "kind": stderr_kind, "line": line }));
                 }
             }
         });

@@ -2,9 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod vo_runner;
-pub mod router;
 
-pub use router::ShellRouter;
+pub use vo_runner::VoRunner;
 
 // =============================================================================
 // Wire types — mirroring protocol.ts on the Rust side
@@ -108,9 +107,6 @@ pub fn local_capabilities() -> Vec<String> {
         "vo.compile".into(),
         "vo.init".into(),
         "vo.clean".into(),
-        "vo.get".into(),
-        "vo.test".into(),
-        "vo.bench".into(),
         "vo.version".into(),
         "git".into(),
         "zip".into(),
@@ -137,6 +133,5 @@ pub fn cmd_shell_exec(
     state: tauri::State<'_, crate::AppState>,
     app:   tauri::AppHandle,
 ) -> Result<ShellResponse, String> {
-    let router = ShellRouter::new(state.workspace_root.clone());
-    Ok(router.handle(req, &app))
+    Ok(state.shell_runner.handle(req, &app))
 }

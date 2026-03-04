@@ -14,6 +14,7 @@ export interface TermLine {
   kind: TermLineKind;
   text: string;
   ts:   number;
+  cwd?: string;  // working directory at the time this line was pushed
 }
 
 export interface TerminalState {
@@ -39,14 +40,15 @@ export const terminal = writable<TerminalState>(makeState());
 let _lineId = 0;
 
 export function termPush(kind: TermLineKind, text: string): void {
-  const ts = Date.now();
+  const ts  = Date.now();
+  const cwd = get(terminal).cwd;
   const lines = text.split('\n');
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   terminal.update(s => ({
     ...s,
     lines: [
       ...s.lines,
-      ...lines.map(l => ({ id: ++_lineId, kind, text: l, ts })),
+      ...lines.map(l => ({ id: ++_lineId, kind, text: l, ts, cwd })),
     ],
   }));
 }

@@ -30,6 +30,8 @@ use alloc::vec::Vec;
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
+use crate::output::OutputSink;
+
 // Structured call types (ExternInvoke, ExternWorld, ExternFiberInputs)
 pub mod call;
 pub use call::{ExternInvoke, ExternWorld, ExternFiberInputs};
@@ -277,6 +279,8 @@ pub struct ExternCallContext<'a> {
     fiber: *mut core::ffi::c_void,
     /// Program arguments.
     program_args: &'a [String],
+    /// Output sink for fmt.Print / println.
+    output: &'a dyn OutputSink,
     /// Sentinel error cache.
     sentinel_errors: &'a mut SentinelErrorCache,
     /// Runtime I/O (std only).
@@ -328,6 +332,7 @@ impl<'a> ExternCallContext<'a> {
             vm: world.vm_opaque,
             fiber: fiber_inputs.fiber_opaque,
             program_args: world.program_args,
+            output: world.output,
             sentinel_errors: world.sentinel_errors,
             #[cfg(feature = "std")]
             io: world.io,
@@ -342,6 +347,20 @@ impl<'a> ExternCallContext<'a> {
             ext_wait_io_token: None,
             ext_call_closure: None,
         }
+    }
+
+    // ==================== Output ====================
+
+    /// Write a string to the VM's output sink (no newline).
+    #[inline]
+    pub fn write_output(&self, s: &str) {
+        self.output.write(s);
+    }
+
+    /// Write a string followed by a newline to the VM's output sink.
+    #[inline]
+    pub fn writeln_output(&self, s: &str) {
+        self.output.writeln(s);
     }
 
     // ==================== Raw Slot Access ====================

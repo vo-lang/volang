@@ -1,18 +1,18 @@
 //! Tauri commands for Vibe Studio (Svelte-native frontend).
 //!
 //! The IDE UI is a Svelte app; this backend provides:
-//! - Filesystem commands (scoped to a workspace root)
 //! - Compile & run user Vo code via vo-engine / vox
 //! - Unified shell API via ShellRouter (shell/mod.rs)
+//!
+//! All filesystem operations are routed through `cmd_shell_exec` → Vo shell handler.
 
 mod shell;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
-use serde::Serialize;
 use vo_vox::gui::GuestHandle;
-use vo_vox::{compile, run as run_vox, RunMode};
-use vo_runtime::output;
+use vo_vox::{compile, run_with_output as run_vox, RunMode};
+use vo_runtime::output::CaptureSink;
 
 // =============================================================================
 // AppState
@@ -20,7 +20,8 @@ use vo_runtime::output;
 
 pub struct AppState {
     pub workspace_root: PathBuf,
-    guest: Mutex<Option<GuestHandle>>,
+    guest:        Mutex<Option<GuestHandle>>,
+    shell_runner: shell::VoRunner,
 }
 
 fn default_workspace() -> PathBuf {
@@ -31,89 +32,12 @@ fn default_workspace() -> PathBuf {
 }
 
 // =============================================================================
-// FS types
-// =============================================================================
-
-#[derive(Serialize)]
-struct FsEntry {
-    name: String,
-    path: String,
-    #[serde(rename = "isDir")]
-    is_dir: bool,
-}
-
-// =============================================================================
-// FS commands
+// Workspace root command
 // =============================================================================
 
 #[tauri::command]
 fn cmd_get_workspace_root(state: tauri::State<'_, AppState>) -> String {
     state.workspace_root.to_string_lossy().to_string()
-}
-
-#[tauri::command]
-fn cmd_fs_list_dir(dir_path: String, state: tauri::State<'_, AppState>) -> Result<Vec<FsEntry>, String> {
-    let abs = resolve_path(&state.workspace_root, &dir_path)?;
-    let rd = std::fs::read_dir(&abs).map_err(|e| format!("{}: {}", abs.display(), e))?;
-
-    let mut entries: Vec<FsEntry> = Vec::new();
-    for item in rd.flatten() {
-        let name = item.file_name().to_string_lossy().to_string();
-        let is_dir = item.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let child_path = Path::new(&dir_path).join(&name);
-        entries.push(FsEntry {
-            name,
-            path: child_path.to_string_lossy().to_string(),
-            is_dir,
-        });
-    }
-    entries.sort_by(|a, b| {
-        if a.is_dir != b.is_dir {
-            return if a.is_dir { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
-        }
-        a.name.cmp(&b.name)
-    });
-    Ok(entries)
-}
-
-#[tauri::command]
-fn cmd_fs_read_file(path: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let abs = resolve_path(&state.workspace_root, &path)?;
-    std::fs::read_to_string(&abs).map_err(|e| format!("{}: {}", abs.display(), e))
-}
-
-#[tauri::command]
-fn cmd_fs_write_file(path: String, content: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let abs = resolve_path(&state.workspace_root, &path)?;
-    if let Some(parent) = abs.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(&abs, &content).map_err(|e| format!("{}: {}", abs.display(), e))
-}
-
-#[tauri::command]
-fn cmd_fs_mkdir(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let abs = resolve_path(&state.workspace_root, &path)?;
-    std::fs::create_dir_all(&abs).map_err(|e| format!("{}: {}", abs.display(), e))
-}
-
-#[tauri::command]
-fn cmd_fs_rename(old_path: String, new_path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let abs_old = resolve_path(&state.workspace_root, &old_path)?;
-    let abs_new = resolve_path(&state.workspace_root, &new_path)?;
-    std::fs::rename(&abs_old, &abs_new).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn cmd_fs_remove(path: String, recursive: bool, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let abs = resolve_path(&state.workspace_root, &path)?;
-    if recursive {
-        std::fs::remove_dir_all(&abs).map_err(|e| e.to_string())
-    } else if abs.is_dir() {
-        std::fs::remove_dir(&abs).map_err(|e| e.to_string())
-    } else {
-        std::fs::remove_file(&abs).map_err(|e| e.to_string())
-    }
 }
 
 /// Resolve a path to an absolute path within the workspace, preventing escape.
@@ -178,9 +102,9 @@ fn cmd_compile_run(entry_path: String, state: tauri::State<'_, AppState>) -> Res
     let abs_str = abs.to_string_lossy().to_string();
 
     let compile_output = compile(&abs_str).map_err(|e| e.to_string())?;
-    output::start_capture();
-    let result = run_vox(compile_output, RunMode::Vm, Vec::new());
-    let captured = output::stop_capture();
+    let sink = CaptureSink::new();
+    let result = run_vox(compile_output, RunMode::Vm, Vec::new(), sink.clone());
+    let captured = sink.take();
     match result {
         Ok(()) => Ok(captured),
         Err(e) => {
@@ -245,17 +169,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(AppState {
+            shell_runner:  shell::VoRunner::new(workspace.clone()),
             workspace_root: workspace,
-            guest: Mutex::new(None),
+            guest:         Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             cmd_get_workspace_root,
-            cmd_fs_list_dir,
-            cmd_fs_read_file,
-            cmd_fs_write_file,
-            cmd_fs_mkdir,
-            cmd_fs_rename,
-            cmd_fs_remove,
             cmd_compile_run,
             cmd_run_gui,
             cmd_send_gui_event,

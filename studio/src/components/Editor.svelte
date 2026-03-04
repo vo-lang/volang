@@ -2,8 +2,24 @@
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
   import * as monaco from 'monaco-editor';
   import { actions } from '../lib/actions';
+  import { registerVoLanguage } from '../lib/monaco_vo';
+
+  registerVoLanguage();
+
+  function langForFile(path: string): string {
+    const ext = path.split('.').pop()?.toLowerCase() ?? '';
+    if (ext === 'vo') return 'vo';
+    if (ext === 'ts' || ext === 'tsx') return 'typescript';
+    if (ext === 'js' || ext === 'jsx') return 'javascript';
+    if (ext === 'json') return 'json';
+    if (ext === 'rs') return 'rust';
+    if (ext === 'toml') return 'ini';
+    if (ext === 'md') return 'markdown';
+    return 'go';
+  }
 
   export let value: string = '';
+  export let filePath: string = '';
 
   const dispatch = createEventDispatcher<{ change: string }>();
 
@@ -14,7 +30,7 @@
   onMount(() => {
     editor = monaco.editor.create(container, {
       value,
-      language: 'go',
+      language: langForFile(filePath),
       theme: 'vs-dark',
       fontSize: 13,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace",
@@ -56,6 +72,11 @@
       editor.setValue(value);
       suppressUpdate = false;
     }
+  }
+
+  $: if (editor && filePath) {
+    const model = editor.getModel();
+    if (model) monaco.editor.setModelLanguage(model, langForFile(filePath));
   }
 
   onDestroy(() => editor?.dispose());

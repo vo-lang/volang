@@ -5,9 +5,9 @@
 use std::sync::Mutex;
 use vo_ext::prelude::*;
 use vo_vm::bytecode::Module;
-use crate::{compile, compile_string, CompileOutput, run, RunMode};
+use crate::{compile, compile_string, CompileOutput, run, run_with_output, RunMode};
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
-use vo_runtime::output;
+use vo_runtime::output::CaptureSink;
 use vo_common::symbol::SymbolInterner;
 use vo_syntax::parser;
 use vo_syntax::ast::File;
@@ -178,9 +178,9 @@ fn runner_run_capture(ctx: &mut ExternCallContext) -> ExternResult {
             return ExternResult::Ok;
         }
     };
-    output::start_capture();
-    let run_result = run(stored.into(), RunMode::Vm, Vec::new());
-    let captured = output::stop_capture();
+    let sink = CaptureSink::new();
+    let run_result = run_with_output(stored.into(), RunMode::Vm, Vec::new(), sink.clone());
+    let captured = sink.take();
     ctx.ret_str(slots::RET_0, &captured);
     match run_result {
         Ok(()) => ctx.ret_nil_error(slots::RET_1),
@@ -200,9 +200,9 @@ fn runner_run_jit_capture(ctx: &mut ExternCallContext) -> ExternResult {
             return ExternResult::Ok;
         }
     };
-    output::start_capture();
-    let run_result = run(stored.into(), RunMode::Jit, Vec::new());
-    let captured = output::stop_capture();
+    let sink = CaptureSink::new();
+    let run_result = run_with_output(stored.into(), RunMode::Jit, Vec::new(), sink.clone());
+    let captured = sink.take();
     ctx.ret_str(slots::RET_0, &captured);
     match run_result {
         Ok(()) => ctx.ret_nil_error(slots::RET_1),

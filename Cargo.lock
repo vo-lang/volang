@@ -1737,6 +1737,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-git2"
+version = "0.1.0"
+dependencies = [
+ "lazy_static",
+ "serde",
+ "serde_json",
+ "vo-runtime",
+]
+
+[[package]]
 name = "vo-jit"
 version = "0.1.0"
 dependencies = [
@@ -1834,6 +1844,7 @@ dependencies = [
  "console_error_panic_hook",
  "js-sys",
  "vo-common",
+ "vo-git2",
  "vo-runtime",
  "vo-web",
  "vo-web-runtime-wasm",

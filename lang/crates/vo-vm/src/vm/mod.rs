@@ -1139,6 +1139,7 @@ impl Vm {
                         itab_cache: &mut self.state.itab_cache,
                         vm_opaque: vm_ptr,
                         program_args: &self.state.program_args,
+                        output: &*self.state.output,
                         sentinel_errors: &mut self.state.sentinel_errors,
                         #[cfg(feature = "std")]
                         io: &mut self.state.io,

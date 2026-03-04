@@ -32,8 +32,8 @@
 
   $: isGuiApp = $ide.isGuiApp && $ide.guestRender !== null && $ide.guestRender.length > 0;
   $: appMode  = $explorer.appMode;
-  $: if (isGuiApp && appMode !== 'run') {
-    explorer.update(e => ({ ...e, appMode: 'run' }));
+  $: if (isGuiApp) {
+    explorer.update(e => e.appMode === 'run' ? e : { ...e, appMode: 'run' });
   }
   $: fileName = $ide.activeFilePath ? $ide.activeFilePath.split('/').pop() ?? '' : '';
   $: ctxLabel = $ide.editTarget ? editTargetLabel($ide.editTarget) : '';
@@ -124,6 +124,7 @@
           <div class="editor-console">
             <Editor
               value={$ide.code}
+              filePath={$ide.activeFilePath}
               on:change={(e) => actions.onEditorChange(e.detail)}
             />
             <Console mode="panel" />

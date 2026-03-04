@@ -1,10 +1,12 @@
 //! Execution functions for Vo modules.
 
 use std::fmt;
+use std::sync::Arc;
 use vo_common_core::debug_info::SourceLoc;
 use vo_vm::bytecode::Module;
 use vo_vm::vm::{RuntimeTrapKind, SchedulingOutcome, Vm, VmError};
 use vo_runtime::ext_loader::{ExtensionLoader, ExtensionManifest};
+use vo_runtime::output::{OutputSink, StdoutSink};
 
 use crate::compile::{CompileOutput, CompileError};
 
@@ -93,10 +95,23 @@ impl From<CompileError> for RunError {
     }
 }
 
-/// Run a compiled module.
-pub fn run(output: CompileOutput, mode: RunMode, args: Vec<String>) -> Result<(), RunError> {
-    let module = output.module;
-    let extensions = &output.extensions;
+/// Run a compiled module with output to stdout.
+pub fn run(compiled: CompileOutput, mode: RunMode, args: Vec<String>) -> Result<(), RunError> {
+    run_with_output(compiled, mode, args, Arc::new(StdoutSink))
+}
+
+/// Run a compiled module with a custom output sink.
+///
+/// The sink receives all output from `fmt.Print`, `println`, etc.
+/// Use `CaptureSink` to collect output, or `StdoutSink` for normal behavior.
+pub fn run_with_output(
+    compiled: CompileOutput,
+    mode: RunMode,
+    args: Vec<String>,
+    sink: Arc<dyn OutputSink>,
+) -> Result<(), RunError> {
+    let module = compiled.module;
+    let extensions = &compiled.extensions;
     let ext_loader = load_extensions(extensions)?;
     
     #[cfg(feature = "jit")]
@@ -130,6 +145,7 @@ pub fn run(output: CompileOutput, mode: RunMode, args: Vec<String>) -> Result<()
         Vm::new()
     };
     
+    vm.state.output = sink;
     vm.set_program_args(args);
     vm.load_with_extensions(module, ext_loader.as_ref());
 
