@@ -47,6 +47,9 @@ jobs:
         working-directory: lang/crates/vo-web
         run: wasm-pack build --target web
 
+      - name: Checkout 3rdparty repos
+        run: git clone --depth 1 https://github.com/vo-lang/git2 3rdparty/git2
+
       - name: Build studio WASM
         run: wasm-pack build studio/wasm --target web --release
 
