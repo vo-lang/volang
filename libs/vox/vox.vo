@@ -97,3 +97,21 @@ func StopGui(m Module)
 // CompileCheck compiles source code and returns compile errors as a newline-separated string.
 // Returns ("", nil) on success.
 func CompileCheck(code string) (string, error)
+
+// ============ Project Scaffold ============
+
+// InitProject creates a project scaffold (main.vo + vo.mod) in dir.
+// modName is used as the module name in vo.mod.
+// dir is created if it does not exist.
+// Returns a newline-separated list of files that were created (empty if all already existed).
+func InitProject(dir, modName string) (string, error)
+
+// InitFile creates a single .vo source file at path with a minimal package scaffold.
+// Returns an error if the file already exists.
+func InitFile(path string) error
+
+// ============ Module Management ============
+
+// Get downloads a module dependency to ~/.vo/mod/ and returns the install path.
+// spec is "<module>@<version>", e.g. "github.com/vo-lang/resvg@v0.1.0".
+func Get(spec string) (string, error)

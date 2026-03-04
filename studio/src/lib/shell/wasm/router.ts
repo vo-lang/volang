@@ -49,6 +49,7 @@ export class WasmShellRouter {
       'vo.dump',
       'vo.compile',
       'vo.init',
+      'vo.get',
       'vo.clean',
       'vo.version',
     ]);

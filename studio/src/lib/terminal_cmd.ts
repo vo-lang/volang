@@ -560,11 +560,15 @@ function buildOp(
           return [{ kind: 'vo.build', path: res(tokens[2]) }, false];
         }
         case 'init':
-          return [{ kind: 'vo.init' }, false];
+          return [{ kind: 'vo.init', ...(tokens[2] ? { name: tokens[2] } : {}) }, false];
+        case 'get': {
+          if (!tokens[2]) throw new Error('usage: vo get <module@version>');
+          return [{ kind: 'vo.get', module: tokens[2] }, false];
+        }
         case 'version':
           return [{ kind: 'vo.version' }, false];
         default:
-          throw new Error(`unknown vo subcommand: ${sub ?? '(none)'}. Try: run, check, build, init, version`);
+          throw new Error(`unknown vo subcommand: ${sub ?? '(none)'}. Try: run, check, build, init, get, version`);
       }
     }
 
@@ -706,9 +710,31 @@ function renderResult(
     }
 
     case 'vo.build':
-    case 'vo.init':
       termPush('system', 'done');
       break;
+
+    case 'vo.get': {
+      const s = data as { module?: string; path?: string };
+      if (s?.path) {
+        termPush('output', `${C.ok}installed${C.reset}  ${C.dim}${s.module}${C.reset}`);
+        termPush('output', `  ${C.dim}→${C.reset} ${s.path}`);
+      }
+      break;
+    }
+
+    case 'vo.init': {
+      const s = data as { path?: string; kind?: string; created?: string[] };
+      if (s?.kind === 'file') {
+        termPush('output', `${C.ok}created${C.reset}  ${C.src}${s.path}${C.reset}`);
+      } else if (s?.kind === 'project') {
+        termPush('output', `${C.ok}initialized${C.reset}  ${C.dir}${s.path}${C.reset}`);
+        for (const f of (s.created ?? [])) termPush('output', `  ${C.dim}+${C.reset} ${f}`);
+        if ((s.created ?? []).length === 0) termPush('system', 'already initialized (no files created)');
+      } else {
+        termPush('system', 'done');
+      }
+      break;
+    }
 
     case 'vo.version': {
       // Tauri returns {version: string}; WASM WasmVoHandler returns raw string
@@ -853,7 +879,8 @@ function printHelp(): void {
     `  ${S}vo run${R} <path>           compile & run`,
     `  ${S}vo check${R} <path>         type-check`,
     `  ${S}vo build${R} <path>         build binary`,
-    `  ${S}vo init${R}                 init project`,
+    `  ${S}vo init${R} [name]          init project  ${D}(name.vo = file, name = folder)${R}`,
+    `  ${S}vo get${R} <module@ver>      download dependency  ${D}(native only)${R}`,
     `  ${S}vo version${R}              show version`,
     '',
     `${B}Archive:${R}`,

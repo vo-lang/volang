@@ -30,7 +30,7 @@ export type VoOp =
   | { kind: 'vo.get';     module: string }
   | { kind: 'vo.dump';    path: string }
   | { kind: 'vo.compile'; path: string; output?: string }
-  | { kind: 'vo.init' }
+  | { kind: 'vo.init'; name?: string }
   | { kind: 'vo.version' };
 
 export type GitOp =

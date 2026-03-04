@@ -32,9 +32,6 @@
 
   $: isGuiApp = $ide.isGuiApp && $ide.guestRender !== null && $ide.guestRender.length > 0;
   $: appMode  = $explorer.appMode;
-  $: if (isGuiApp) {
-    explorer.update(e => e.appMode === 'run' ? e : { ...e, appMode: 'run' });
-  }
   $: fileName = $ide.activeFilePath ? $ide.activeFilePath.split('/').pop() ?? '' : '';
   $: ctxLabel = $ide.editTarget ? editTargetLabel($ide.editTarget) : '';
   $: ctxMode  = $ide.projectMode === 'multi' ? 'Multi File' : 'Single File';

@@ -573,4 +573,115 @@ fn runner_compile_check(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+// ============ Project Scaffold Functions ============
+
+#[vo_fn("libs/vox", "InitProject")]
+fn runner_init_project(ctx: &mut ExternCallContext) -> ExternResult {
+    let dir      = ctx.arg_str(slots::ARG_DIR).to_string();
+    let mod_name = ctx.arg_str(slots::ARG_MOD_NAME).to_string();
+
+    let dir_path = std::path::Path::new(&dir);
+    if !dir_path.exists() {
+        if let Err(e) = std::fs::create_dir_all(dir_path) {
+            ctx.ret_str(slots::RET_0, "");
+            write_error_to(ctx, slots::RET_1, &e.to_string());
+            return ExternResult::Ok;
+        }
+    }
+
+    let mut created: Vec<&str> = Vec::new();
+
+    let main_file = dir_path.join("main.vo");
+    if !main_file.exists() {
+        let src = "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"Hello, Vo!\")\n}\n";
+        if let Err(e) = std::fs::write(&main_file, src) {
+            ctx.ret_str(slots::RET_0, "");
+            write_error_to(ctx, slots::RET_1, &e.to_string());
+            return ExternResult::Ok;
+        }
+        created.push("main.vo");
+    }
+
+    let mod_file = dir_path.join("vo.mod");
+    if !mod_file.exists() {
+        let mod_src = format!("module {}\n\nvo 0.1\n", mod_name);
+        if let Err(e) = std::fs::write(&mod_file, mod_src) {
+            ctx.ret_str(slots::RET_0, "");
+            write_error_to(ctx, slots::RET_1, &e.to_string());
+            return ExternResult::Ok;
+        }
+        created.push("vo.mod");
+    }
+
+    ctx.ret_str(slots::RET_0, &created.join("\n"));
+    ctx.ret_nil_error(slots::RET_1);
+    ExternResult::Ok
+}
+
+#[vo_fn("libs/vox", "InitFile")]
+fn runner_init_file(ctx: &mut ExternCallContext) -> ExternResult {
+    let path = ctx.arg_str(slots::ARG_PATH).to_string();
+    let file_path = std::path::Path::new(&path);
+
+    if file_path.exists() {
+        write_error_to(ctx, slots::RET_0, &format!("file already exists: {}", path));
+        return ExternResult::Ok;
+    }
+
+    let pkg = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("main");
+
+    let src = format!(
+        "package {}\n\nimport \"fmt\"\n\nfunc main() {{\n\tfmt.Println(\"Hello, Vo!\")\n}}\n",
+        pkg
+    );
+
+    match std::fs::write(file_path, src) {
+        Ok(()) => ctx.ret_nil_error(slots::RET_0),
+        Err(e) => write_error_to(ctx, slots::RET_0, &e.to_string()),
+    }
+    ExternResult::Ok
+}
+
+// ============ Module Management Functions ============
+
+#[cfg(not(target_arch = "wasm32"))]
+#[vo_fn("libs/vox", "Get")]
+fn runner_get(ctx: &mut ExternCallContext) -> ExternResult {
+    let spec = ctx.arg_str(slots::ARG_SPEC).to_string();
+
+    let (module, version) = match spec.rsplit_once('@') {
+        Some((m, v)) if !m.is_empty() && !v.is_empty() => (m.to_string(), v.to_string()),
+        _ => {
+            ctx.ret_str(slots::RET_0, "");
+            write_error_to(ctx, slots::RET_1, &format!(
+                "invalid spec {:?}: expected <module>@<version>, e.g. github.com/foo/bar@v0.1.0", spec
+            ));
+            return ExternResult::Ok;
+        }
+    };
+
+    match vo_module::fetch::install_module(&module, &version) {
+        Ok(target_dir) => {
+            ctx.ret_str(slots::RET_0, &target_dir.to_string_lossy());
+            ctx.ret_nil_error(slots::RET_1);
+        }
+        Err(e) => {
+            ctx.ret_str(slots::RET_0, "");
+            write_error_to(ctx, slots::RET_1, &e);
+        }
+    }
+    ExternResult::Ok
+}
+
+#[cfg(target_arch = "wasm32")]
+#[vo_fn("libs/vox", "Get")]
+fn runner_get_wasm(ctx: &mut ExternCallContext) -> ExternResult {
+    ctx.ret_str(slots::RET_0, "");
+    write_error_to(ctx, slots::RET_1, "vo get is not available in web mode — use the native app or CLI");
+    ExternResult::Ok
+}
+
 vo_ext::export_extensions!();

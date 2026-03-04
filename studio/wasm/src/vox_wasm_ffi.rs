@@ -354,6 +354,107 @@ fn ffi_compile_check(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+// Returns true when `path` exists in the JS VFS (stat returns no error).
+#[inline]
+fn vfs_exists(path: &str) -> bool {
+    let (.., err) = vo_web_runtime_wasm::vfs::stat(path);
+    err.is_none()
+}
+
+// InitProject(dir, modName string) (string, error)
+// args: dir@0[1], modName@1[1]  rets: string@0[1], error@1[2]
+fn ffi_init_project(ctx: &mut ExternCallContext) -> ExternResult {
+    let dir      = ctx.arg_str(0).to_string();
+    let mod_name = ctx.arg_str(1).to_string();
+
+    if let Some(e) = vo_web_runtime_wasm::vfs::mkdir_all(&dir, 0o755) {
+        ctx.ret_str(0, "");
+        write_error_to(ctx, 1, &e);
+        return ExternResult::Ok;
+    }
+
+    let mut created: Vec<&'static str> = Vec::new();
+
+    let main_path = format!("{}/main.vo", dir);
+    if !vfs_exists(&main_path) {
+        let src = "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"Hello, Vo!\")\n}\n";
+        if let Some(e) = vo_web_runtime_wasm::vfs::write_file(&main_path, src.as_bytes(), 0o644) {
+            ctx.ret_str(0, "");
+            write_error_to(ctx, 1, &e);
+            return ExternResult::Ok;
+        }
+        created.push("main.vo");
+    }
+
+    let mod_path = format!("{}/vo.mod", dir);
+    if !vfs_exists(&mod_path) {
+        let mod_src = format!("module {}\n\nvo 0.1\n", mod_name);
+        if let Some(e) = vo_web_runtime_wasm::vfs::write_file(&mod_path, mod_src.as_bytes(), 0o644) {
+            ctx.ret_str(0, "");
+            write_error_to(ctx, 1, &e);
+            return ExternResult::Ok;
+        }
+        created.push("vo.mod");
+    }
+
+    ctx.ret_str(0, &created.join("\n"));
+    ctx.ret_nil_error(1);
+    ExternResult::Ok
+}
+
+// InitFile(path string) error
+// args: path@0[1]  rets: error@0[2]
+fn ffi_init_file(ctx: &mut ExternCallContext) -> ExternResult {
+    let path = ctx.arg_str(0).to_string();
+
+    if vfs_exists(&path) {
+        write_error_to(ctx, 0, &format!("file already exists: {}", path));
+        return ExternResult::Ok;
+    }
+
+    let pkg = std::path::Path::new(&path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("main");
+
+    let src = format!(
+        "package {}\n\nimport \"fmt\"\n\nfunc main() {{\n\tfmt.Println(\"Hello, Vo!\")\n}}\n",
+        pkg
+    );
+
+    match vo_web_runtime_wasm::vfs::write_file(&path, src.as_bytes(), 0o644) {
+        None    => ctx.ret_nil_error(0),
+        Some(e) => write_error_to(ctx, 0, &e),
+    }
+    ExternResult::Ok
+}
+
+// Get(spec string) (string, error)
+// args: spec@0[1]  rets: string@0[1], error@1[2]
+//
+// In the Studio shell flow TypeScript intercepts `vo.get` in WasmVoRunner and
+// calls preloadModule() directly — runShellHandler is never reached, so this
+// function is only called when user Vo code invokes vox.Get() as a library
+// function.  By the time that happens the caller must have arranged for the
+// files to already be in VFS; we just echo back the canonical VFS root path.
+fn ffi_get(ctx: &mut ExternCallContext) -> ExternResult {
+    let spec = ctx.arg_str(0).to_string();
+    let module = match spec.rsplit_once('@') {
+        Some((m, _)) if !m.is_empty() => m.to_string(),
+        _ => {
+            ctx.ret_str(0, "");
+            write_error_to(ctx, 1, &format!(
+                "invalid spec {:?}: expected <module>@<version>", spec
+            ));
+            return ExternResult::Ok;
+        }
+    };
+    let path = format!("/{}", module);
+    ctx.ret_str(0, &path);
+    ctx.ret_nil_error(1);
+    ExternResult::Ok
+}
+
 // FreeAst(node AstNode) — no-op (AST not supported in WASM shell handler)
 fn ffi_noop(_ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
@@ -421,6 +522,9 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
             "RunGui"             => registry.register(id as u32, ffi_run_gui_stub),
             "SendGuiEvent"       => registry.register(id as u32, ffi_send_gui_event_stub),
             "StopGui"            => registry.register(id as u32, ffi_noop),
+            "InitProject"        => registry.register(id as u32, ffi_init_project),
+            "InitFile"           => registry.register(id as u32, ffi_init_file),
+            "Get"                => registry.register(id as u32, ffi_get),
             _ => {}
         }
     }

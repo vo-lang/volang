@@ -22,7 +22,7 @@ func handleVoOp(id, workspace, cwd, kind string, op any) error {
 	case "vo.dump":
 		return handleVoDump(id, workspace, cwd, op)
 	case "vo.init":
-		return handleVoInit(id, workspace, cwd)
+		return handleVoInit(id, workspace, cwd, op)
 	case "vo.clean":
 		return handleVoClean(id, workspace, cwd)
 	case "vo.get":
@@ -261,23 +261,51 @@ func handleVoDump(id, workspace, cwd string, op any) error {
 	return nil
 }
 
-// vo.init — create a main.vo scaffold in cwd if it doesn't already exist.
-func handleVoInit(id, workspace, cwd string) error {
-	dir := cwd
-	if dir == "" {
-		dir = workspace
+// vo.init — scaffold a file or project:
+//   vo init              → project in cwd  (main.vo + vo.mod)
+//   vo init <name>.vo   → single file <name>.vo
+//   vo init <dirname>   → new folder project (dirname/main.vo + dirname/vo.mod)
+func handleVoInit(id, workspace, cwd string, op any) error {
+	if cwd == "" {
+		cwd = workspace
 	}
-	mainFile := dir + "/main.vo"
-	_, err := os.Stat(mainFile)
-	if err != nil {
-		src := "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"Hello, Vo!\")\n}\n"
-		err = os.WriteFile(mainFile, []byte(src), 0644)
+
+	nameAny, _ := op~>name
+	name, _ := nameAny.(string)
+
+	if strings.HasSuffix(name, ".vo") {
+		filePath := cwd + "/" + name
+		err := vox.InitFile(filePath)
 		if err != nil {
-			writeError(id, "ERR_INTERNAL", err.Error())
+			writeError(id, "ERR_ALREADY_EXISTS", err.Error())
 			return nil
 		}
+		writeOk(id, map[string]any{"path": filePath, "kind": "file"})
+		return nil
 	}
-	writeOk(id, map[string]any{"path": dir})
+
+	var dir string
+	var modName string
+	if name != "" {
+		dir = cwd + "/" + name
+		modName = name
+	} else {
+		dir = cwd
+		parts := strings.Split(strings.TrimRight(cwd, "/"), "/")
+		modName = parts[len(parts)-1]
+	}
+
+	result, err := vox.InitProject(dir, modName)
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+
+	var created []string
+	if result != "" {
+		created = strings.Split(result, "\n")
+	}
+	writeOk(id, map[string]any{"path": dir, "kind": "project", "created": created})
 	return nil
 }
 
@@ -291,9 +319,17 @@ func handleVoClean(id, workspace, cwd string) error {
 	return nil
 }
 
-// vo.get — not supported via Studio; use the vo CLI directly.
+// vo.get — download a module dependency to ~/.vo/mod/.
 func handleVoGet(id, workspace, cwd string, op any) error {
-	writeError(id, "ERR_NOT_SUPPORTED", "vo.get is not available in Studio — use the CLI: vo get <module>")
+	var spec string
+	spec = op~>module?
+
+	installPath, err := vox.Get(spec)
+	if err != nil {
+		writeError(id, "ERR_INTERNAL", err.Error())
+		return nil
+	}
+	writeOk(id, map[string]any{"module": spec, "path": installPath})
 	return nil
 }
 

@@ -23,5 +23,6 @@ vo-ext = { path = "../../../lang/crates/vo-ext" }
 vo-ffi-macro = { path = "../../../lang/crates/vo-ffi-macro" }
 vo-common = { path = "../../../lang/crates/vo-common" }
 vo-syntax = { path = "../../../lang/crates/vo-syntax" }
+vo-module = { path = "../../../lang/crates/vo-module" }
 vogui = { path = "../../vogui/rust", default-features = false }
 linkme = "0.3"

@@ -1845,11 +1845,13 @@ dependencies = [
  "js-sys",
  "vo-common",
  "vo-git2",
+ "vo-module",
  "vo-runtime",
  "vo-web",
  "vo-web-runtime-wasm",
  "vogui",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 
@@ -1897,6 +1899,7 @@ dependencies = [
  "vo-engine",
  "vo-ext",
  "vo-ffi-macro",
+ "vo-module",
  "vo-runtime",
  "vo-stdlib",
  "vo-syntax",

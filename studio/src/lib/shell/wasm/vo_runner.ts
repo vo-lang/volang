@@ -21,6 +21,7 @@ import type { ShellRequest, ShellResponse, ShellEvent, ShellErrorCode } from '..
 
 export interface WasmShellModLike {
   runShellHandler(args: string[]): string;
+  preloadModule(spec: string): Promise<string>;
 }
 
 export class WasmVoRunner {
@@ -30,6 +31,10 @@ export class WasmVoRunner {
   ) {}
 
   async handle(req: ShellRequest, emit: (ev: ShellEvent) => void): Promise<ShellResponse> {
+    if (req.op.kind === 'vo.get') {
+      return this.handleVoGet(req);
+    }
+
     const reqJson = JSON.stringify({
       id:  req.id,
       cwd: req.cwd,
@@ -100,5 +105,28 @@ export class WasmVoRunner {
       code:    'ERR_INTERNAL' as ShellErrorCode,
       message: `unexpected handler response kind: ${kind}`,
     };
+  }
+
+  private async handleVoGet(req: ShellRequest): Promise<ShellResponse> {
+    const spec = (req.op as { kind: string; module?: string }).module ?? '';
+    if (!spec) {
+      return {
+        id:      req.id,
+        kind:    'error',
+        code:    'ERR_INTERNAL' as ShellErrorCode,
+        message: 'vo get: missing module spec',
+      };
+    }
+    try {
+      const path = await this.wasmMod.preloadModule(spec);
+      return { id: req.id, kind: 'ok', data: { module: spec, path } };
+    } catch (e) {
+      return {
+        id:      req.id,
+        kind:    'error',
+        code:    'ERR_INTERNAL' as ShellErrorCode,
+        message: String(e),
+      };
+    }
   }
 }
