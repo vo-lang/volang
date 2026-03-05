@@ -79,13 +79,13 @@ pub fn init_gui_app(source: &str, filename: Option<String>) -> WasmGuiResult {
     };
     
     // Run
-    run_gui_bytecode(&bytecode, vogui::register_externs)
+    run_gui_bytecode(&bytecode, vo_web::ext_bridge::register_wasm_ext_bridges)
 }
 
 /// Initialize a GUI app from pre-compiled bytecode.
 #[wasm_bindgen(js_name = "initGuiAppBytecode")]
 pub fn init_gui_app_bytecode(bytecode: &[u8]) -> WasmGuiResult {
-    run_gui_bytecode(bytecode, vogui::register_externs)
+    run_gui_bytecode(bytecode, vo_web::ext_bridge::register_wasm_ext_bridges)
 }
 
 /// Handle a GUI event.
@@ -102,12 +102,9 @@ fn run_gui_bytecode(
     bytecode: &[u8],
     registrar: fn(&mut vo_web::ExternRegistry, &[vo_web::ExternDef]),
 ) -> WasmGuiResult {
-    #[cfg(target_arch = "wasm32")]
-    vogui::set_platform(Box::new(vogui::WasmPlatform));
-
     GUI_STATE.with(|s| unsafe { *s.get() = None });
-    vogui::clear_event_state();
-    vogui::clear_pending_render();
+    vo_runtime::gui_host::clear_event_state();
+    vo_runtime::gui_host::clear_pending_render();
 
     let vm = match vo_web::create_vm(bytecode, registrar) {
         Ok(vm) => vm,
@@ -125,7 +122,7 @@ fn run_gui_bytecode(
     }
 
     // Read render bytes from dedicated channel (not stdout)
-    let render_bytes = match vogui::take_pending_render_bytes() {
+    let render_bytes = match vo_runtime::gui_host::take_pending_render_bytes() {
         Some(b) if !b.is_empty() => b,
         _ => return WasmGuiResult::err("No render output. emitRenderBinary was not called."),
     };
@@ -146,11 +143,11 @@ fn handle_event(handler_id: i32, payload: &str) -> WasmGuiResult {
             None => return WasmGuiResult::err("GUI app not initialized"),
         };
 
-        vogui::clear_pending_render();
+        vo_runtime::gui_host::clear_pending_render();
         vo_runtime::output::clear_output();
 
         // Store event data and wake the blocked main fiber
-        let token = match vogui::send_event(handler_id, payload.to_string()) {
+        let token = match vo_runtime::gui_host::send_event(handler_id, payload.to_string()) {
             Some(t) => t,
             None => return WasmGuiResult::err("Main fiber not waiting for events"),
         };
@@ -171,7 +168,7 @@ fn handle_event(handler_id: i32, payload: &str) -> WasmGuiResult {
         }
 
         // Read render bytes from dedicated channel
-        let render_bytes = vogui::take_pending_render_bytes().unwrap_or_default();
+        let render_bytes = vo_runtime::gui_host::take_pending_render_bytes().unwrap_or_default();
         WasmGuiResult::ok(render_bytes)
     })
 }
@@ -224,7 +221,6 @@ async fn init_gui_with_modules_inner(source: &str) -> WasmGuiResult {
 }
 
 fn register_gui_and_ext_bridges(reg: &mut vo_web::ExternRegistry, externs: &[vo_web::ExternDef]) {
-    vogui::register_externs(reg, externs);
     vo_web::ext_bridge::register_wasm_ext_bridges(reg, externs);
 }
 

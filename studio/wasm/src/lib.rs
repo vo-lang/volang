@@ -148,19 +148,16 @@ pub fn compile_run_entry(entry_path: &str) -> Result<String, JsValue> {
 pub fn run_gui_entry(entry_path: &str) -> Result<Vec<u8>, JsValue> {
     ensure_panic_hook();
     GUEST.with(|g| *g.borrow_mut() = None);
-    vogui::clear_pending_render();
-    vogui::clear_event_state();
+    vo_runtime::gui_host::clear_pending_render();
+    vo_runtime::gui_host::clear_event_state();
 
     let bytecode = compile_from_vfs(entry_path).map_err(|e| JsValue::from_str(&e))?;
 
-    #[cfg(target_arch = "wasm32")]
-    vogui::set_platform(Box::new(vogui::WasmPlatform));
-
     let vm = vo_web::create_vm(&bytecode, |reg, exts| {
-        vogui::register_externs(reg, exts);
+        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
     }).map_err(|e| JsValue::from_str(&e))?;
 
-    let render_bytes = vogui::take_pending_render_bytes()
+    let render_bytes = vo_runtime::gui_host::take_pending_render_bytes()
         .ok_or_else(|| JsValue::from_str("guest app did not emit a render"))?;
 
     GUEST.with(|g| *g.borrow_mut() = Some(GuestState { vm }));
@@ -177,11 +174,11 @@ pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<Vec<u8>, JsValue
     let mut guest = GUEST.with(|g| g.borrow_mut().take())
         .ok_or_else(|| JsValue::from_str("No guest app running"))?;
 
-    vogui::clear_pending_render();
+    vo_runtime::gui_host::clear_pending_render();
     vo_runtime::output::clear_output();
 
     // Store event data and get the token to wake the blocked fiber
-    let token = vogui::send_event(handler_id, payload.to_string())
+    let token = vo_runtime::gui_host::send_event(handler_id, payload.to_string())
         .ok_or_else(|| JsValue::from_str("Main fiber not waiting for events"))?;
 
     // Wake the fiber and run until it blocks on waitForEvent again
@@ -198,7 +195,7 @@ pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<Vec<u8>, JsValue
         web_sys::console::log_1(&format!("[guest] {}", stdout.trim_end()).into());
     }
 
-    let render_bytes = vogui::take_pending_render_bytes().unwrap_or_default();
+    let render_bytes = vo_runtime::gui_host::take_pending_render_bytes().unwrap_or_default();
     Ok(render_bytes)
 }
 
@@ -206,8 +203,8 @@ pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<Vec<u8>, JsValue
 #[wasm_bindgen(js_name = "stopGui")]
 pub fn stop_gui() {
     GUEST.with(|g| *g.borrow_mut() = None);
-    vogui::clear_pending_render();
-    vogui::clear_event_state();
+    vo_runtime::gui_host::clear_pending_render();
+    vo_runtime::gui_host::clear_event_state();
 }
 
 // =============================================================================

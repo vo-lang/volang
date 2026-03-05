@@ -13,11 +13,10 @@ debug = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-vogui = { path = "../../libs/vogui/rust" }
 vo-web = { path = "../../lang/crates/vo-web" }
 vo-web-runtime-wasm = { path = "../../lang/crates/vo-web/runtime-wasm" }
 vo-common = { path = "../../lang/crates/vo-common" }
-vo-runtime = { path = "../../lang/crates/vo-runtime", default-features = false }
+vo-runtime = { path = "../../lang/crates/vo-runtime", default-features = false, features = ["gui-host"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

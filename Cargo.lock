@@ -1777,7 +1777,6 @@ dependencies = [
  "vo-module",
  "vo-runtime",
  "vo-web",
- "vogui",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -1837,7 +1836,6 @@ dependencies = [
  "vo-runtime",
  "vo-web",
  "vo-web-runtime-wasm",
- "vogui",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -1862,7 +1860,6 @@ name = "vo-test"
 version = "0.1.0"
 dependencies = [
  "vo-engine",
- "vo-vox",
 ]
 
 [[package]]
@@ -1876,23 +1873,6 @@ dependencies = [
  "vo-jit",
  "vo-runtime",
  "vo-stdlib",
-]
-
-[[package]]
-name = "vo-vox"
-version = "0.1.0"
-dependencies = [
- "linkme",
- "vo-common",
- "vo-engine",
- "vo-ext",
- "vo-ffi-macro",
- "vo-module",
- "vo-runtime",
- "vo-stdlib",
- "vo-syntax",
- "vo-vm",
- "vogui",
 ]
 
 [[package]]
@@ -1925,18 +1905,6 @@ dependencies = [
  "vo-runtime",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "vogui"
-version = "0.2.0"
-dependencies = [
- "linkme",
- "vo-ext",
- "vo-runtime",
- "vo-vm",
- "wasm-bindgen",
  "web-sys",
 ]
 
