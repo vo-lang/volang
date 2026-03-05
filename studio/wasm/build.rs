@@ -107,10 +107,10 @@ fn main() {
     );
     println!("cargo:rerun-if-changed={}", repo_root.join("3rdparty/zip/zip.vo").display());
 
-    // libs/vox/vox.vo
+    // libs/vox/vox.vo — embedded at "libs/vox/vox.vo" to match `import "libs/vox"` in shell handler
     embed_single_file(
         &repo_root.join("libs/vox/vox.vo"),
-        "github.com/vo-lang/vox/vox.vo",
+        "libs/vox/vox.vo",
         &mut shell_entries,
     );
     println!("cargo:rerun-if-changed={}", repo_root.join("libs/vox/vox.vo").display());
