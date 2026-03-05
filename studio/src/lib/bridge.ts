@@ -1,3 +1,4 @@
+import { STUDIO_SYNC_EXAMPLES } from '../generated/examples.generated';
 import { ShellClient } from './shell/client';
 import { TauriTransport, WasmTransport } from './shell/transport';
 import { WasmShellRouter } from './shell/wasm/router';
@@ -114,7 +115,17 @@ async function initWasmBridge(): Promise<void> {
   const { initVFS, vfs } = await import('@vo-web/index');
   await initVFS();
 
-  // 2) Load studio WASM module
+  // 2) Seed examples into VFS as root-level single-file projects (skip if already exist)
+  const enc = new TextEncoder();
+  for (const ex of STUDIO_SYNC_EXAMPLES) {
+    const fullPath = WASM_WORKSPACE + '/' + ex.path;
+    const statErr = vfs.stat(fullPath)[5];
+    if (statErr) {
+      vfs.writeFile(fullPath, enc.encode(ex.content), 0o644);
+    }
+  }
+
+  // 3) Load studio WASM module
   const v = Date.now();
   const wasmEntryUrl = new URL(`../../wasm/pkg/vo_studio_wasm.js?v=${v}`, import.meta.url).href;
   const wasmBinaryUrl = new URL(`../../wasm/pkg/vo_studio_wasm_bg.wasm?v=${v}`, import.meta.url).href;
@@ -130,11 +141,10 @@ async function initWasmBridge(): Promise<void> {
   }
   await wasmMod.default(wasmBinaryUrl);
 
-  // 3) Seed default workspace if empty
-  const [rootEntries, rootErr] = vfs.readDir(WASM_WORKSPACE);
-  if (rootErr || rootEntries.length === 0) {
+  // 4) Seed default workspace main project if it doesn't exist
+  const mainStatErr = vfs.stat(WASM_WORKSPACE + '/main')[5];
+  if (mainStatErr) {
     vfs.mkdirAll(WASM_WORKSPACE + '/main', 0o755);
-    const enc = new TextEncoder();
     vfs.writeFile(
       WASM_WORKSPACE + '/main/main.vo',
       enc.encode(DEFAULT_MAIN_VO),
@@ -142,7 +152,7 @@ async function initWasmBridge(): Promise<void> {
     );
   }
 
-  // 4) Set up WasmPlatform globals — called by WASM at runtime (resolved at call time, not import time)
+  // 5) Set up WasmPlatform globals — called by WASM at runtime (resolved at call time, not import time)
   let guiRenderCallback: ((bytes: Uint8Array) => void) | null = null;
   const activeTimers = new Map<number, number>();
   const activeTimeouts = new Map<number, number>();
