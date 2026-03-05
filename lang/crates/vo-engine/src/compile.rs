@@ -132,7 +132,7 @@ pub fn compile_with_cache(path: &str) -> Result<CompileOutput, CompileError> {
 ///
 /// All packages must be laid out in `fs` as the resolver expects:
 /// - Root-level `.vo` files are the package being compiled.
-/// - Local dependencies are subdirectories: `"vogui/app.vo"`, `"vox/vox.vo"`, etc.
+/// - Local dependencies are subdirectories: `"github.com/vo-lang/vogui/app.vo"`, `"github.com/vo-lang/vox/vox.vo"`, etc.
 ///
 /// `root` is only used as the reported `source_root` in the output; it does not
 /// need to exist on the real filesystem.

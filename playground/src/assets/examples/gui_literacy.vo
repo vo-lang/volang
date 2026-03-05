@@ -4,7 +4,7 @@
 
 package main
 
-import "vogui"
+import "github.com/vo-lang/vogui"
 import "fmt"
 
 // ============ Theme Colors ============

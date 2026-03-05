@@ -361,6 +361,18 @@ fn unified_fn_impl(
 ) -> syn::Result<TokenStream2> {
     let (pkg_path, func_name, is_std_only) = parse_unified_args(&args)?;
 
+    // Preserve the raw (pre-resolution) package name for deriving stable Rust symbol names.
+    // Rust symbol names use the short name (e.g. "vogui") so they don't change if the
+    // module path changes. The VM lookup name string uses the full resolved path.
+    let raw_pkg = pkg_path.clone();
+
+    // Resolve short package name → full module path via Cargo.toml metadata.
+    // e.g. "vogui" → "github.com/vo-lang/vogui" when Cargo.toml has
+    //   [package.metadata.vo]
+    //   vomod = "../vo.mod"
+    // Falls back to pkg_path unchanged for stdlib packages ("fmt", etc.).
+    let pkg_path = resolve::resolve_full_pkg_path(&pkg_path);
+
     // std-only flag is only valid for Stdlib flavor
     if is_std_only {
         if let RegistrationFlavor::Extension = flavor {
@@ -375,14 +387,15 @@ fn unified_fn_impl(
     let mode = detect_fn_mode(&func)?;
 
     match mode {
-        FnMode::Manual => unified_manual_impl(&func, &pkg_path, &func_name, is_std_only, &flavor),
-        FnMode::Result(_) | FnMode::Simple => unified_auto_impl(&func, &pkg_path, &func_name, is_std_only, &flavor, &mode),
+        FnMode::Manual => unified_manual_impl(&func, &raw_pkg, &pkg_path, &func_name, is_std_only, &flavor),
+        FnMode::Result(_) | FnMode::Simple => unified_auto_impl(&func, &raw_pkg, &pkg_path, &func_name, is_std_only, &flavor, &mode),
     }
 }
 
 /// Manual mode: function gets ExternCallContext directly. Inject slots mod + register.
 fn unified_manual_impl(
     func: &ItemFn,
+    raw_pkg: &str,
     pkg_path: &str,
     func_name: &str,
     is_std_only: bool,
@@ -404,13 +417,14 @@ fn unified_manual_impl(
     };
 
     Ok(registration::emit_fn_registration(
-        fn_tokens, fn_name, pkg_path, func_name, is_std_only, flavor,
+        fn_tokens, fn_name, raw_pkg, pkg_path, func_name, is_std_only, flavor,
     ))
 }
 
 /// Result/Simple mode: generate wrapper and register.
 fn unified_auto_impl(
     func: &ItemFn,
+    raw_pkg: &str,
     pkg_path: &str,
     func_name: &str,
     is_std_only: bool,
@@ -432,7 +446,7 @@ fn unified_auto_impl(
     };
 
     Ok(registration::emit_fn_registration(
-        fn_tokens, &wrapper_name, pkg_path, func_name, is_std_only, flavor,
+        fn_tokens, &wrapper_name, raw_pkg, pkg_path, func_name, is_std_only, flavor,
     ))
 }
 
@@ -557,7 +571,6 @@ fn errors_impl(parsed: VoErrorsInput) -> syn::Result<TokenStream2> {
     let helper_fn = format_ident!("{}_sentinel_error", pkg_lower);
     let getter_vo_name = format!("get{}Errors", to_pascal_case(pkg_name));
     let lookup_name = format!("{}_{}", pkg_lower, getter_vo_name);
-    let stdlib_const_name = format_ident!("__STDLIB_{}_{}", pkg_lower, getter_vo_name);
 
     let error_count = parsed.errors.len();
     let pkg_str = pkg_lower.as_str();
@@ -626,7 +639,8 @@ fn errors_impl(parsed: VoErrorsInput) -> syn::Result<TokenStream2> {
         }
     };
 
-    let registration = registration::emit_registration(&parsed.flavor, &lookup_name, &getter_fn, &stdlib_const_name);
+    let const_name = format_ident!("__STDLIB_{}", lookup_name);
+    let registration = registration::emit_registration(&parsed.flavor, &lookup_name, &getter_fn, &const_name);
 
     Ok(quote! { #common #registration })
 }
@@ -697,7 +711,6 @@ fn vo_consts_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
     let getter_fn = format_ident!("get_{}_consts", pkg_lower);
     let getter_vo_name = format!("get{}Consts", to_pascal_case(pkg_name));
     let lookup_name = format!("{}_{}", pkg_lower, getter_vo_name);
-    let stdlib_const_name = format_ident!("__STDLIB_{}_{}", pkg_lower, getter_vo_name);
 
     let mut const_defs = Vec::new();
     let mut ret_stmts = Vec::new();
@@ -721,7 +734,8 @@ fn vo_consts_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
         }
     };
 
-    let registration = registration::emit_registration(&parsed.flavor, &lookup_name, &getter_fn, &stdlib_const_name);
+    let const_name = format_ident!("__STDLIB_{}", lookup_name);
+    let registration = registration::emit_registration(&parsed.flavor, &lookup_name, &getter_fn, &const_name);
 
     Ok(quote! { #getter_body #registration })
 }

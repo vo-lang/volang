@@ -1,6 +1,6 @@
 package main
 
-import "vogui"
+import "github.com/vo-lang/vogui"
 import "github.com/vo-lang/resvg@main"
 import "encoding/base64"
 

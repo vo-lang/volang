@@ -81,7 +81,7 @@ pub const ABI_VERSION: u32 = 2;
 /// # WASM Platform
 /// Call with list of StdlibEntry constants. Generates `vo_ext_register` function.
 /// ```ignore
-/// vo_ext::export_extensions!(__STDLIB_gui_emitRender, __STDLIB_gui_navigate);
+/// vo_ext::export_extensions!(__EXT_gui_emitRender, __EXT_gui_navigate);
 /// ```
 #[macro_export]
 macro_rules! export_extensions {

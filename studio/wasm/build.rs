@@ -1,11 +1,11 @@
 //! Build script: embed .vo source files for WASM compilation.
 //!
 //! Embeds:
-//! - libs/vogui/ top-level .vo files   → "vogui/<name>"
+//! - libs/vogui/ top-level .vo files   → "github.com/vo-lang/vogui/<name>"
 //! - studio/vo/shell/ .vo files         → "studio/vo/shell/<name>"
 //! - 3rdparty/git2/git2.vo              → "3rdparty/git2/git2.vo"
 //! - 3rdparty/zip/zip.vo                → "3rdparty/zip/zip.vo"
-//! - libs/vox/vox.vo                    → "libs/vox/vox.vo"
+//! - libs/vox/vox.vo                    → "github.com/vo-lang/vox/vox.vo"
 
 use std::{env, fs, path::{Path, PathBuf}};
 
@@ -76,7 +76,7 @@ fn main() {
     // ── vogui ─────────────────────────────────────────────────────────────────
     let vogui_dir = repo_root.join("libs/vogui");
     let mut vogui_entries = String::new();
-    collect_vo_files(&vogui_dir, "vogui", &mut vogui_entries, &out_dir);
+    collect_vo_files(&vogui_dir, "github.com/vo-lang/vogui", &mut vogui_entries, &out_dir);
     fs::write(
         Path::new(&out_dir).join("vogui_embedded.rs"),
         format!("pub static VOGUI_FILES: &[(&str, &[u8])] = &[\n{}];\n", vogui_entries),
@@ -110,7 +110,7 @@ fn main() {
     // libs/vox/vox.vo
     embed_single_file(
         &repo_root.join("libs/vox/vox.vo"),
-        "libs/vox/vox.vo",
+        "github.com/vo-lang/vox/vox.vo",
         &mut shell_entries,
     );
     println!("cargo:rerun-if-changed={}", repo_root.join("libs/vox/vox.vo").display());

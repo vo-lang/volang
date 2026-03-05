@@ -1,0 +1,1028 @@
+// Portfolio – Investment portfolio tracker for stocks, crypto, and cash.
+// Uses rusqlite for local persistence; falls back to in-memory demo data on WASM.
+package main
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"github.com/vo-lang/vogui"
+	"github.com/vo-lang/rusqlite"
+)
+
+const (
+	TypeStock  = "stock"
+	TypeCrypto = "crypto"
+	TypeCash   = "cash"
+
+	TabOverview     = "overview"
+	TabHoldings     = "holdings"
+	TabTransactions = "transactions"
+	TabSettings     = "settings"
+)
+
+// ============ Data Types ============
+
+type Holding struct {
+	ID        int
+	Symbol    string
+	Name      string
+	AssetType string
+	Quantity  float64
+	AvgCost   float64
+	Price     float64
+}
+
+func (h Holding) TotalCost() float64 { return h.Quantity * h.AvgCost }
+func (h Holding) TotalValue() float64 {
+	if h.Price == 0 {
+		return h.TotalCost()
+	}
+	return h.Quantity * h.Price
+}
+func (h Holding) GainLoss() float64 { return h.TotalValue() - h.TotalCost() }
+func (h Holding) GainLossPct() float64 {
+	cost := h.TotalCost()
+	if cost == 0 {
+		return 0
+	}
+	return h.GainLoss() / cost * 100
+}
+
+type Transaction struct {
+	ID        int
+	HoldingID int
+	Symbol    string
+	TxType    string
+	Quantity  float64
+	Price     float64
+	Date      string
+	Notes     string
+}
+
+func (t Transaction) Total() float64 { return t.Quantity * t.Price }
+
+// ============ State ============
+
+type State struct {
+	ActiveTab    string
+	DarkMode     bool
+	Holdings     []Holding
+	Transactions []Transaction
+	DB           rusqlite.DB
+	DBEnabled    bool
+	DBNote       string
+	LastFetched  string
+
+	ShowAddDialog   bool
+	EditID          int
+	FormSymbol      string
+	FormName        string
+	FormType        string
+	FormQty         string
+	FormCost        string
+	FormNotes       string
+	FormDate        string
+	FormError       string
+	ConfirmDeleteID int
+	HoldingsFilter  string
+	TxFilter        string
+}
+
+// Stub prices for demonstration. TODO: replace with real API calls.
+var knownPrices = map[string]float64{
+	"AAPL": 189.30, "MSFT": 415.20, "GOOGL": 175.10, "AMZN": 186.90,
+	"TSLA": 175.30, "NVDA": 875.00, "META": 505.00,
+	"BTC": 67420.00, "ETH": 3820.00, "SOL": 185.00,
+	"BNB": 590.00, "ADA": 0.58, "XRP": 0.52,
+	"USD": 1.0, "USDT": 1.0, "USDC": 1.0,
+}
+
+// ============ Storage ============
+
+func tryOpenDB() (rusqlite.DB, bool) {
+	var db rusqlite.DB
+	var ok bool
+	func() {
+		defer func() { recover() }()
+		var err error
+		db, err = rusqlite.Open("portfolio.db")
+		if err != nil {
+			db, err = rusqlite.OpenInMemory()
+		}
+		if err == nil {
+			ok = true
+		}
+	}()
+	return db, ok
+}
+
+func createSchema(db rusqlite.DB) error {
+	err := db.Exec(`CREATE TABLE IF NOT EXISTS holdings (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		symbol TEXT NOT NULL, name TEXT NOT NULL,
+		asset_type TEXT NOT NULL DEFAULT 'stock',
+		quantity REAL NOT NULL DEFAULT 0,
+		avg_cost REAL NOT NULL DEFAULT 0,
+		price REAL NOT NULL DEFAULT 0)`)
+	if err != nil {
+		return err
+	}
+	return db.Exec(`CREATE TABLE IF NOT EXISTS transactions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		holding_id INTEGER NOT NULL DEFAULT 0,
+		symbol TEXT NOT NULL, tx_type TEXT NOT NULL,
+		quantity REAL NOT NULL, price REAL NOT NULL,
+		date TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '')`)
+}
+
+func loadFromDB(s *State) {
+	rows, err := s.DB.Query(
+		"SELECT id, symbol, name, asset_type, quantity, avg_cost, price FROM holdings ORDER BY asset_type, symbol")
+	if err != nil {
+		return
+	}
+	s.Holdings = make([]Holding, 0, len(rows))
+	for _, r := range rows {
+		s.Holdings = append(s.Holdings, Holding{
+			ID: rowInt(r, "id"), Symbol: rowStr(r, "symbol"), Name: rowStr(r, "name"),
+			AssetType: rowStr(r, "asset_type"), Quantity: rowFloat(r, "quantity"),
+			AvgCost: rowFloat(r, "avg_cost"), Price: rowFloat(r, "price"),
+		})
+	}
+	txRows, err := s.DB.Query(
+		"SELECT id, holding_id, symbol, tx_type, quantity, price, date, notes FROM transactions ORDER BY date DESC")
+	if err != nil {
+		return
+	}
+	s.Transactions = make([]Transaction, 0, len(txRows))
+	for _, r := range txRows {
+		s.Transactions = append(s.Transactions, Transaction{
+			ID: rowInt(r, "id"), HoldingID: rowInt(r, "holding_id"),
+			Symbol: rowStr(r, "symbol"), TxType: rowStr(r, "tx_type"),
+			Quantity: rowFloat(r, "quantity"), Price: rowFloat(r, "price"),
+			Date: rowStr(r, "date"), Notes: rowStr(r, "notes"),
+		})
+	}
+}
+
+func dbInsertHolding(s *State, h Holding) int {
+	q := fmt.Sprintf(
+		"INSERT INTO holdings (symbol,name,asset_type,quantity,avg_cost,price) VALUES (%s,%s,%s,%g,%g,%g)",
+		sqlStr(h.Symbol), sqlStr(h.Name), sqlStr(h.AssetType), h.Quantity, h.AvgCost, h.Price)
+	_, err := s.DB.Execute(q)
+	if err != nil {
+		return 0
+	}
+	id, err := s.DB.LastInsertRowID()
+	if err != nil {
+		return 0
+	}
+	return int(id)
+}
+
+func dbUpdateHolding(s *State, h Holding) {
+	q := fmt.Sprintf(
+		"UPDATE holdings SET symbol=%s,name=%s,asset_type=%s,quantity=%g,avg_cost=%g,price=%g WHERE id=%d",
+		sqlStr(h.Symbol), sqlStr(h.Name), sqlStr(h.AssetType), h.Quantity, h.AvgCost, h.Price, h.ID)
+	s.DB.Execute(q)
+}
+
+func dbDeleteHolding(s *State, id int) {
+	s.DB.Execute(fmt.Sprintf("DELETE FROM holdings WHERE id=%d", id))
+	s.DB.Execute(fmt.Sprintf("DELETE FROM transactions WHERE holding_id=%d", id))
+}
+
+func dbInsertTransaction(s *State, t Transaction) {
+	q := fmt.Sprintf(
+		"INSERT INTO transactions (holding_id,symbol,tx_type,quantity,price,date,notes) VALUES (%d,%s,%s,%g,%g,%s,%s)",
+		t.HoldingID, sqlStr(t.Symbol), sqlStr(t.TxType), t.Quantity, t.Price, sqlStr(t.Date), sqlStr(t.Notes))
+	s.DB.Execute(q)
+}
+
+func dbUpdatePrice(s *State, id int, price float64) {
+	s.DB.Execute(fmt.Sprintf("UPDATE holdings SET price=%g WHERE id=%d", price, id))
+}
+
+func seedDemoData(s *State) {
+	demos := []Holding{
+		{Symbol: "AAPL", Name: "Apple Inc.", AssetType: TypeStock, Quantity: 50, AvgCost: 150.00, Price: 189.30},
+		{Symbol: "MSFT", Name: "Microsoft Corp.", AssetType: TypeStock, Quantity: 30, AvgCost: 300.00, Price: 415.20},
+		{Symbol: "BTC", Name: "Bitcoin", AssetType: TypeCrypto, Quantity: 0.5, AvgCost: 40000.00, Price: 67420.00},
+		{Symbol: "ETH", Name: "Ethereum", AssetType: TypeCrypto, Quantity: 5, AvgCost: 2000.00, Price: 3820.00},
+		{Symbol: "USD", Name: "US Dollar Cash", AssetType: TypeCash, Quantity: 5000, AvgCost: 1.0, Price: 1.0},
+	}
+	dates := []string{"2024-01-15", "2024-03-10", "2023-11-20", "2024-02-05", "2024-04-01"}
+	for i, h := range demos {
+		id := dbInsertHolding(s, h)
+		if id > 0 {
+			dbInsertTransaction(s, Transaction{
+				HoldingID: id, Symbol: h.Symbol, TxType: "buy",
+				Quantity: h.Quantity, Price: h.AvgCost, Date: dates[i], Notes: "Initial position"})
+		}
+	}
+	loadFromDB(s)
+}
+
+func loadDemoData(s *State) {
+	s.Holdings = []Holding{
+		{ID: 1, Symbol: "AAPL", Name: "Apple Inc.", AssetType: TypeStock, Quantity: 50, AvgCost: 150.00, Price: 189.30},
+		{ID: 2, Symbol: "MSFT", Name: "Microsoft Corp.", AssetType: TypeStock, Quantity: 30, AvgCost: 300.00, Price: 415.20},
+		{ID: 3, Symbol: "BTC", Name: "Bitcoin", AssetType: TypeCrypto, Quantity: 0.5, AvgCost: 40000.00, Price: 67420.00},
+		{ID: 4, Symbol: "ETH", Name: "Ethereum", AssetType: TypeCrypto, Quantity: 5, AvgCost: 2000.00, Price: 3820.00},
+		{ID: 5, Symbol: "USD", Name: "US Dollar Cash", AssetType: TypeCash, Quantity: 5000, AvgCost: 1.0, Price: 1.0},
+	}
+	s.Transactions = []Transaction{
+		{ID: 1, HoldingID: 1, Symbol: "AAPL", TxType: "buy", Quantity: 50, Price: 150.00, Date: "2024-01-15", Notes: "Initial position"},
+		{ID: 2, HoldingID: 2, Symbol: "MSFT", TxType: "buy", Quantity: 30, Price: 300.00, Date: "2024-03-10", Notes: "Initial position"},
+		{ID: 3, HoldingID: 3, Symbol: "BTC", TxType: "buy", Quantity: 0.5, Price: 40000.00, Date: "2023-11-20", Notes: "Initial position"},
+		{ID: 4, HoldingID: 4, Symbol: "ETH", TxType: "buy", Quantity: 5, Price: 2000.00, Date: "2024-02-05", Notes: "Initial position"},
+		{ID: 5, HoldingID: 5, Symbol: "USD", TxType: "buy", Quantity: 5000, Price: 1.0, Date: "2024-04-01", Notes: "Cash deposit"},
+	}
+}
+
+func initStorage(s *State) {
+	db, ok := tryOpenDB()
+	if !ok {
+		s.DBNote = "Demo mode (rusqlite unavailable)"
+		loadDemoData(s)
+		return
+	}
+	s.DB = db
+	s.DBEnabled = true
+	err := createSchema(db)
+	if err != nil {
+		s.DBEnabled = false
+		s.DBNote = "Demo mode (schema error)"
+		loadDemoData(s)
+		return
+	}
+	s.DBNote = "SQLite (portfolio.db)"
+	loadFromDB(s)
+	if len(s.Holdings) == 0 {
+		seedDemoData(s)
+	}
+}
+
+// fetchPrices refreshes prices using stub data. TODO: replace with real API.
+func fetchPrices(s *State) {
+	for i, h := range s.Holdings {
+		if h.AssetType == TypeCash {
+			s.Holdings[i].Price = 1.0
+		} else if p, ok := knownPrices[strings.ToUpper(h.Symbol)]; ok {
+			s.Holdings[i].Price = p
+		}
+		if s.DBEnabled {
+			dbUpdatePrice(s, s.Holdings[i].ID, s.Holdings[i].Price)
+		}
+	}
+	s.LastFetched = "Just now (demo prices)"
+}
+
+func initState() any {
+	s := &State{ActiveTab: TabOverview, FormType: TypeStock, FormDate: "2024-01-01"}
+	initStorage(s)
+	return s
+}
+
+// ============ Root View ============
+
+func view(state any) vogui.Node {
+	s := state.(*State)
+	return vogui.Row(
+		sidebar(s),
+		vogui.Column(mainContent(s)).Flex(1).Overflow("auto"),
+		addEditDialog(s),
+		deleteConfirmDialog(s),
+	).H("100vh").Overflow("hidden")
+}
+
+func sidebar(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.Row(
+			vogui.Icon("trending-up").Fg("var(--vo-primary)"),
+			vogui.H3("Portfolio").Ml(8),
+		).Class("items-center").P(20),
+		vogui.Divider(),
+		vogui.Column(
+			sidebarLink(s, TabOverview, "layout-dashboard", "Overview"),
+			sidebarLink(s, TabHoldings, "chart-bar", "Holdings"),
+			sidebarLink(s, TabTransactions, "arrows-right-left", "Transactions"),
+		).P(12).Gap(4).Flex(1),
+		vogui.Divider(),
+		sidebarLink(s, TabSettings, "settings", "Settings").Mx(12).My(12),
+	).W(220).Bg("var(--vo-surface)").Style("borderRight", "1px solid var(--vo-border)")
+}
+
+func sidebarLink(s *State, tab string, icon string, label string) vogui.Node {
+	active := s.ActiveTab == tab
+	n := vogui.Row(
+		vogui.Icon(icon),
+		vogui.Text(label).Ml(10),
+	).Class("items-center").P(10).Rounded(6).Cursor("pointer").
+		On("click", vogui.OnClick(func(s *State) { s.ActiveTab = tab }))
+	if active {
+		n = n.Bg("var(--vo-muted)").Fg("var(--vo-primary)")
+	}
+	return n
+}
+
+func mainContent(s *State) vogui.Node {
+	switch s.ActiveTab {
+	case TabOverview:
+		return overviewPage(s)
+	case TabHoldings:
+		return holdingsPage(s)
+	case TabTransactions:
+		return transactionsPage(s)
+	case TabSettings:
+		return settingsPage(s)
+	}
+	return vogui.Empty()
+}
+
+// ============ Overview Page ============
+
+func overviewPage(s *State) vogui.Node {
+	totalVal := portfolioTotalValue(s)
+	totalCost := portfolioTotalCost(s)
+	totalGL := totalVal - totalCost
+	glPct := 0.0
+	if totalCost > 0 {
+		glPct = totalGL / totalCost * 100
+	}
+	return vogui.Column(
+		vogui.Row(
+			vogui.H2("Portfolio Overview"),
+			vogui.Spacer(),
+			vogui.If(s.LastFetched != "",
+				vogui.Text("Updated: "+s.LastFetched).Fg("var(--vo-text-muted)").Font(13)),
+			vogui.Button("Refresh Prices", vogui.OnClick(func(s *State) { fetchPrices(s) })).
+				Variant(vogui.VariantOutline).Ml(12),
+		).Class("items-center").Mb(24),
+		vogui.Grid(4,
+			statCard("Total Value", formatUSD(totalVal), "var(--vo-primary)"),
+			statCard("Total Cost", formatUSD(totalCost), "var(--vo-text-muted)"),
+			statCard("Gain / Loss", formatUSD(totalGL)+" ("+formatPct(glPct)+")", pnlColor(totalGL)),
+			statCard("Holdings", fmt.Sprint(len(s.Holdings)), "var(--vo-text)"),
+		).Gap(16).Mb(24),
+		allocationSection(s, totalVal),
+		vogui.If(len(s.Transactions) > 0, recentTransactions(s)),
+	).P(28)
+}
+
+func statCard(title string, value string, color string) vogui.Node {
+	return vogui.Card(vogui.CardBody(
+		vogui.Text(title).Fg("var(--vo-text-muted)").Font(13).Mb(6),
+		vogui.Text(value).Font(24).FontWeight("600").Fg(color),
+	).P(20))
+}
+
+func allocationSection(s *State, totalVal float64) vogui.Node {
+	type group struct {
+		label     string
+		assetType string
+		value     float64
+		color     string
+	}
+	groups := []group{
+		{"Stocks", TypeStock, 0, "#3b82f6"},
+		{"Crypto", TypeCrypto, 0, "#f59e0b"},
+		{"Cash", TypeCash, 0, "#10b981"},
+	}
+	for _, h := range s.Holdings {
+		for i := range groups {
+			if h.AssetType == groups[i].assetType {
+				groups[i].value += h.TotalValue()
+			}
+		}
+	}
+	bars := make([]vogui.Node, 0, 3)
+	rows := make([]vogui.Node, 0, 3)
+	for _, g := range groups {
+		pct := 0.0
+		if totalVal > 0 {
+			pct = g.value / totalVal * 100
+		}
+		if pct > 0 {
+			bars = append(bars, vogui.Div().Bg(g.color).W(fmt.Sprintf("%.1f%%", pct)).H("100%"))
+		}
+		rows = append(rows, vogui.Row(
+			vogui.Div().W(12).H(12).Rounded(2).Bg(g.color),
+			vogui.Column(
+				vogui.Text(g.label).Font(14).FontWeight("500"),
+				vogui.Text(formatUSD(g.value)).Font(13).Fg("var(--vo-text-muted)"),
+			).Ml(8).Gap(2).Flex(1),
+			vogui.Text(formatPct(pct)).Font(14).FontWeight("600"),
+		).Class("items-center"))
+	}
+	return vogui.Card(
+		vogui.CardHeader(vogui.Text("Asset Allocation").Font(16).FontWeight("600")).P(16).Pb(0),
+		vogui.CardBody(
+			vogui.Row(bars...).H(12).Rounded(6).Overflow("hidden").Bg("var(--vo-muted)").Mb(20),
+			vogui.Column(rows...).Gap(12),
+		).P(16),
+	).Mb(24)
+}
+
+func recentTransactions(s *State) vogui.Node {
+	count := 5
+	if len(s.Transactions) < count {
+		count = len(s.Transactions)
+	}
+	tRows := make([]vogui.Node, count)
+	for i := 0; i < count; i++ {
+		t := s.Transactions[i]
+		tRows[i] = vogui.TableRow(
+			vogui.TableCell(vogui.Text(t.Date).Font(13)),
+			vogui.TableCell(vogui.Text(t.Symbol).FontWeight("600")),
+			vogui.TableCell(txTypeBadge(t.TxType)),
+			vogui.TableCell(vogui.Text(formatQty(t.Quantity)).Font(13)),
+			vogui.TableCell(vogui.Text(formatUSD(t.Total())).Font(13)),
+		)
+	}
+	return vogui.Card(
+		vogui.CardHeader(vogui.Text("Recent Transactions").Font(16).FontWeight("600")).P(16).Pb(0),
+		vogui.CardBody(vogui.Table(
+			vogui.TableHead(vogui.TableRow(
+				thCell("Date"), thCell("Symbol"), thCell("Type"), thCell("Qty"), thCell("Total"),
+			)),
+			vogui.TableBody(tRows...),
+		)).P(16),
+	)
+}
+
+// ============ Holdings Page ============
+
+func holdingsPage(s *State) vogui.Node {
+	holdings := filteredHoldings(s)
+	rows := make([]vogui.Node, len(holdings))
+	for i, h := range holdings {
+		rows[i] = holdingRow(s, h)
+	}
+	return vogui.Column(
+		vogui.Row(
+			vogui.H2("Holdings"),
+			vogui.Spacer(),
+			vogui.SearchInput(s.HoldingsFilter, vogui.OnValue(func(s *State, v string) {
+				s.HoldingsFilter = v
+			})).Placeholder("Search symbol or name...").W(240),
+			vogui.Button("+ Add Holding", vogui.OnClick(func(s *State) {
+				openAddForm(s)
+			})).Variant(vogui.VariantPrimary).Ml(12),
+		).Class("items-center").Mb(24),
+		vogui.If(len(holdings) > 0, vogui.Card(vogui.Table(
+			vogui.TableHead(vogui.TableRow(
+				thCell("Symbol"), thCell("Name"), thCell("Type"),
+				thCell("Qty"), thCell("Avg Cost"), thCell("Price"),
+				thCell("Value"), thCell("Gain/Loss"), thCell("G/L %"), thCell(""),
+			)),
+			vogui.TableBody(rows...),
+		).W("100%"))),
+		vogui.If(len(holdings) == 0, vogui.Center(vogui.Column(
+			vogui.Icon("inbox").Font(48).Fg("var(--vo-text-muted)"),
+			vogui.Text("No holdings found").Fg("var(--vo-text-muted)").Mt(8),
+		).Class("items-center")).H(200)),
+	).P(28)
+}
+
+func holdingRow(s *State, h Holding) vogui.Node {
+	gl := h.GainLoss()
+	color := pnlColor(gl)
+	priceNode := vogui.Text("—").Fg("var(--vo-text-muted)")
+	if h.Price > 0 {
+		priceNode = vogui.Text(formatUSD(h.Price)).Font(13)
+	}
+	return vogui.TableRow(
+		vogui.TableCell(vogui.Text(h.Symbol).FontWeight("600")),
+		vogui.TableCell(vogui.Text(h.Name).Font(13).Fg("var(--vo-text-muted)")),
+		vogui.TableCell(typeBadge(h.AssetType)),
+		vogui.TableCell(vogui.Text(formatQty(h.Quantity)).Font(13)),
+		vogui.TableCell(vogui.Text(formatUSD(h.AvgCost)).Font(13)),
+		vogui.TableCell(priceNode),
+		vogui.TableCell(vogui.Text(formatUSD(h.TotalValue())).FontWeight("500")),
+		vogui.TableCell(vogui.Text(formatUSD(gl)).Fg(color).FontWeight("500")),
+		vogui.TableCell(vogui.Text(formatPct(h.GainLossPct())).Fg(color).Font(13)),
+		vogui.TableCell(vogui.Row(
+			vogui.IconButton("edit", vogui.OnClick(func(s *State) { openEditForm(s, h) })),
+			vogui.IconButton("trash", vogui.OnClick(func(s *State) { s.ConfirmDeleteID = h.ID })),
+		).Gap(4)),
+	).Key(fmt.Sprint(h.ID))
+}
+
+// ============ Transactions Page ============
+
+func transactionsPage(s *State) vogui.Node {
+	txs := filteredTransactions(s)
+	rows := make([]vogui.Node, len(txs))
+	for i, t := range txs {
+		rows[i] = vogui.TableRow(
+			vogui.TableCell(vogui.Text(t.Date).Font(13)),
+			vogui.TableCell(vogui.Text(t.Symbol).FontWeight("600")),
+			vogui.TableCell(txTypeBadge(t.TxType)),
+			vogui.TableCell(vogui.Text(formatQty(t.Quantity)).Font(13)),
+			vogui.TableCell(vogui.Text(formatUSD(t.Price)).Font(13)),
+			vogui.TableCell(vogui.Text(formatUSD(t.Total())).FontWeight("500")),
+			vogui.TableCell(vogui.Text(t.Notes).Font(13).Fg("var(--vo-text-muted)")),
+		).Key(fmt.Sprint(t.ID))
+	}
+	return vogui.Column(
+		vogui.Row(
+			vogui.H2("Transactions"),
+			vogui.Spacer(),
+			vogui.SearchInput(s.TxFilter, vogui.OnValue(func(s *State, v string) {
+				s.TxFilter = v
+			})).Placeholder("Filter by symbol...").W(240),
+		).Class("items-center").Mb(24),
+		vogui.If(len(txs) > 0, vogui.Card(vogui.Table(
+			vogui.TableHead(vogui.TableRow(
+				thCell("Date"), thCell("Symbol"), thCell("Type"),
+				thCell("Qty"), thCell("Price"), thCell("Total"), thCell("Notes"),
+			)),
+			vogui.TableBody(rows...),
+		).W("100%"))),
+		vogui.If(len(txs) == 0, vogui.Center(vogui.Column(
+			vogui.Icon("inbox").Font(48).Fg("var(--vo-text-muted)"),
+			vogui.Text("No transactions found").Fg("var(--vo-text-muted)").Mt(8),
+		).Class("items-center")).H(200)),
+	).P(28)
+}
+
+// ============ Settings Page ============
+
+func settingsPage(s *State) vogui.Node {
+	return vogui.Column(
+		vogui.H2("Settings").Mb(24),
+		vogui.Card(
+			vogui.CardHeader(vogui.Text("Appearance").Font(16).FontWeight("600")).P(16).Pb(0),
+			vogui.CardBody(vogui.Row(
+				vogui.Column(
+					vogui.Text("Dark Mode").FontWeight("500"),
+					vogui.Text("Toggle between light and dark theme").Font(13).Fg("var(--vo-text-muted)"),
+				).Gap(2).Flex(1),
+				vogui.Switch(s.DarkMode, vogui.OnChecked(func(s *State, checked bool) {
+					s.DarkMode = checked
+					if checked {
+						vogui.SetTheme(vogui.DarkTheme())
+					} else {
+						vogui.SetTheme(vogui.DefaultTheme())
+					}
+				})),
+			).Class("items-center")).P(16),
+		).Mb(16),
+		vogui.Card(
+			vogui.CardHeader(vogui.Text("Storage").Font(16).FontWeight("600")).P(16).Pb(0),
+			vogui.CardBody(vogui.Column(
+				infoRow("Mode", s.DBNote),
+				infoRow("Holdings", fmt.Sprintf("%d items", len(s.Holdings))),
+				infoRow("Transactions", fmt.Sprintf("%d items", len(s.Transactions))),
+			).Gap(10)).P(16),
+		).Mb(16),
+		vogui.Card(
+			vogui.CardHeader(vogui.Text("Market Data").Font(16).FontWeight("600")).P(16).Pb(0),
+			vogui.CardBody(vogui.Column(
+				vogui.Text("Price fetching uses stub data. Replace fetchPrices() with real API calls.").
+					Font(13).Fg("var(--vo-text-muted)").Mb(12),
+				vogui.Row(
+					vogui.Button("Refresh Prices", vogui.OnClick(func(s *State) { fetchPrices(s) })).
+						Variant(vogui.VariantPrimary),
+					vogui.If(s.LastFetched != "",
+						vogui.Text("Last: "+s.LastFetched).Font(13).Fg("var(--vo-text-muted)").Ml(12)),
+				).Class("items-center"),
+			)).P(16),
+		).Mb(16),
+		vogui.Card(
+			vogui.CardHeader(
+				vogui.Text("Danger Zone").Font(16).FontWeight("600").Fg("var(--vo-danger)"),
+			).P(16).Pb(0),
+			vogui.CardBody(vogui.Row(
+				vogui.Column(
+					vogui.Text("Clear All Data").FontWeight("500"),
+					vogui.Text("Permanently removes all holdings and transactions.").
+						Font(13).Fg("var(--vo-text-muted)"),
+				).Gap(2).Flex(1),
+				vogui.Button("Clear All", vogui.OnClick(func(s *State) {
+					if s.DBEnabled {
+						s.DB.Execute("DELETE FROM transactions")
+						s.DB.Execute("DELETE FROM holdings")
+					}
+					s.Holdings = nil
+					s.Transactions = nil
+				})).Variant(vogui.VariantDanger),
+			).Class("items-center")).P(16),
+		),
+	).P(28)
+}
+
+// ============ Dialogs ============
+
+func addEditDialog(s *State) vogui.Node {
+	isCash := s.FormType == TypeCash
+	title := "Add Holding"
+	if s.EditID > 0 {
+		title = "Edit Holding"
+	}
+	qtyLabel := "Quantity"
+	if isCash {
+		qtyLabel = "Amount (USD)"
+	}
+	return vogui.Dialog(
+		vogui.DialogProps{
+			Title: title,
+			Open:  s.ShowAddDialog,
+			OnClose: vogui.OnClick(func(s *State) {
+				s.ShowAddDialog = false
+				s.FormError = ""
+			}),
+		},
+		vogui.DialogContent(vogui.Column(
+			vogui.If(s.FormError != "",
+				vogui.Alert(s.FormError).Variant(vogui.VariantDanger).Mb(12)),
+			formRow("Asset Type",
+				vogui.Select(s.FormType, []vogui.SelectOption{
+					{Label: "Stock", Value: TypeStock},
+					{Label: "Cryptocurrency", Value: TypeCrypto},
+					{Label: "Cash", Value: TypeCash},
+				}, vogui.OnSelect(func(s *State, v string) { s.FormType = v }))),
+			formRow("Symbol",
+				vogui.Input(s.FormSymbol, vogui.OnValue(func(s *State, v string) {
+					s.FormSymbol = strings.ToUpper(v)
+				})).Placeholder("e.g. AAPL, BTC, USD")),
+			formRow("Name",
+				vogui.Input(s.FormName, vogui.OnValue(func(s *State, v string) {
+					s.FormName = v
+				})).Placeholder("e.g. Apple Inc.")),
+			formRow(qtyLabel,
+				vogui.Input(s.FormQty, vogui.OnValue(func(s *State, v string) {
+					s.FormQty = v
+				})).Placeholder("0")),
+			vogui.If(!isCash,
+				formRow("Avg Cost (USD)",
+					vogui.Input(s.FormCost, vogui.OnValue(func(s *State, v string) {
+						s.FormCost = v
+					})).Placeholder("0.00"))),
+			formRow("Date",
+				vogui.DateInput(s.FormDate, vogui.OnValue(func(s *State, v string) {
+					s.FormDate = v
+				}))),
+			formRow("Notes",
+				vogui.Input(s.FormNotes, vogui.OnValue(func(s *State, v string) {
+					s.FormNotes = v
+				})).Placeholder("Optional")),
+		).Gap(12)),
+		vogui.DialogActions(
+			vogui.Button("Cancel", vogui.OnClick(func(s *State) {
+				s.ShowAddDialog = false
+				s.FormError = ""
+			})).Variant(vogui.VariantOutline),
+			vogui.Button("Save", vogui.OnClick(submitForm)).Variant(vogui.VariantPrimary),
+		),
+	)
+}
+
+func deleteConfirmDialog(s *State) vogui.Node {
+	symbol := ""
+	for _, h := range s.Holdings {
+		if h.ID == s.ConfirmDeleteID {
+			symbol = h.Symbol
+			break
+		}
+	}
+	return vogui.Dialog(
+		vogui.DialogProps{
+			Title:   "Confirm Delete",
+			Open:    s.ConfirmDeleteID > 0,
+			OnClose: vogui.OnClick(func(s *State) { s.ConfirmDeleteID = 0 }),
+		},
+		vogui.DialogContent(
+			vogui.Text(fmt.Sprintf("Delete %s and all its transactions? This cannot be undone.", symbol)),
+		),
+		vogui.DialogActions(
+			vogui.Button("Cancel", vogui.OnClick(func(s *State) {
+				s.ConfirmDeleteID = 0
+			})).Variant(vogui.VariantOutline),
+			vogui.Button("Delete", vogui.OnClick(func(s *State) {
+				doDelete(s, s.ConfirmDeleteID)
+				s.ConfirmDeleteID = 0
+			})).Variant(vogui.VariantDanger),
+		),
+	)
+}
+
+// ============ Form Actions ============
+
+func openAddForm(s *State) {
+	s.ShowAddDialog = true
+	s.EditID = 0
+	s.FormSymbol = ""
+	s.FormName = ""
+	s.FormType = TypeStock
+	s.FormQty = ""
+	s.FormCost = ""
+	s.FormDate = "2024-01-01"
+	s.FormNotes = ""
+	s.FormError = ""
+}
+
+func openEditForm(s *State, h Holding) {
+	s.ShowAddDialog = true
+	s.EditID = h.ID
+	s.FormSymbol = h.Symbol
+	s.FormName = h.Name
+	s.FormType = h.AssetType
+	s.FormQty = fmt.Sprintf("%g", h.Quantity)
+	s.FormCost = fmt.Sprintf("%g", h.AvgCost)
+	s.FormDate = ""
+	s.FormNotes = ""
+	s.FormError = ""
+}
+
+func submitForm(s *State) {
+	if s.FormSymbol == "" {
+		s.FormError = "Symbol is required"
+		return
+	}
+	qty, qtyOk := strconv.ParseFloat(s.FormQty, 64)
+	if !qtyOk || qty <= 0 {
+		s.FormError = "Quantity must be a positive number"
+		return
+	}
+	cost := 1.0
+	if s.FormType != TypeCash {
+		var costOk bool
+		cost, costOk = strconv.ParseFloat(s.FormCost, 64)
+		if !costOk || cost < 0 {
+			s.FormError = "Average cost must be a non-negative number"
+			return
+		}
+	}
+	price := 0.0
+	if p, ok := knownPrices[s.FormSymbol]; ok {
+		price = p
+	}
+	h := Holding{
+		ID: s.EditID, Symbol: s.FormSymbol, Name: s.FormName,
+		AssetType: s.FormType, Quantity: qty, AvgCost: cost, Price: price,
+	}
+	if h.Name == "" {
+		h.Name = h.Symbol
+	}
+
+	if s.EditID > 0 {
+		if s.DBEnabled {
+			dbUpdateHolding(s, h)
+			loadFromDB(s)
+		} else {
+			for i, existing := range s.Holdings {
+				if existing.ID == s.EditID {
+					s.Holdings[i] = h
+					break
+				}
+			}
+		}
+	} else {
+		if s.DBEnabled {
+			newID := dbInsertHolding(s, h)
+			if s.FormDate != "" {
+				dbInsertTransaction(s, Transaction{
+					HoldingID: newID, Symbol: h.Symbol, TxType: "buy",
+					Quantity: qty, Price: cost, Date: s.FormDate, Notes: s.FormNotes})
+			}
+			loadFromDB(s)
+		} else {
+			maxID := 0
+			for _, existing := range s.Holdings {
+				if existing.ID > maxID {
+					maxID = existing.ID
+				}
+			}
+			h.ID = maxID + 1
+			s.Holdings = append(s.Holdings, h)
+			if s.FormDate != "" {
+				s.Transactions = append([]Transaction{{
+					ID: len(s.Transactions) + 1, HoldingID: h.ID, Symbol: h.Symbol, TxType: "buy",
+					Quantity: qty, Price: cost, Date: s.FormDate, Notes: s.FormNotes,
+				}}, s.Transactions...)
+			}
+		}
+	}
+	s.ShowAddDialog = false
+	s.FormError = ""
+}
+
+func doDelete(s *State, id int) {
+	if s.DBEnabled {
+		dbDeleteHolding(s, id)
+		loadFromDB(s)
+	} else {
+		newH := make([]Holding, 0, len(s.Holdings))
+		for _, h := range s.Holdings {
+			if h.ID != id {
+				newH = append(newH, h)
+			}
+		}
+		s.Holdings = newH
+		newT := make([]Transaction, 0, len(s.Transactions))
+		for _, t := range s.Transactions {
+			if t.HoldingID != id {
+				newT = append(newT, t)
+			}
+		}
+		s.Transactions = newT
+	}
+}
+
+// ============ Helper Components ============
+
+func formRow(label string, input vogui.Node) vogui.Node {
+	return vogui.Row(
+		vogui.Text(label).Fg("var(--vo-text-muted)").Font(13).W(130).Shrink(0),
+		input.Flex(1),
+	).Class("items-center").Gap(12)
+}
+
+func infoRow(label string, value string) vogui.Node {
+	return vogui.Row(
+		vogui.Text(label+":").Fg("var(--vo-text-muted)").W(120),
+		vogui.Text(value).FontWeight("500"),
+	)
+}
+
+func thCell(label string) vogui.Node {
+	return vogui.TableHeaderCell(vogui.Text(label).Font(12).Fg("var(--vo-text-muted)"))
+}
+
+func typeBadge(assetType string) vogui.Node {
+	switch assetType {
+	case TypeStock:
+		return vogui.Badge("Stock").Variant(vogui.VariantInfo)
+	case TypeCrypto:
+		return vogui.Badge("Crypto").Variant(vogui.VariantWarning)
+	case TypeCash:
+		return vogui.Badge("Cash").Variant(vogui.VariantSuccess)
+	}
+	return vogui.Badge(assetType).Variant(vogui.VariantSecondary)
+}
+
+func txTypeBadge(txType string) vogui.Node {
+	if txType == "sell" {
+		return vogui.Badge("Sell").Variant(vogui.VariantDanger)
+	}
+	return vogui.Badge("Buy").Variant(vogui.VariantSuccess)
+}
+
+// ============ Helper Functions ============
+
+func formatUSD(v float64) string {
+	if v < 0 {
+		return "-$" + formatNumber(-v)
+	}
+	return "$" + formatNumber(v)
+}
+
+func formatNumber(v float64) string {
+	if v >= 1000000 {
+		return fmt.Sprintf("%.2fM", v/1000000)
+	}
+	if v >= 1000 {
+		return addCommas(fmt.Sprintf("%.2f", v))
+	}
+	return fmt.Sprintf("%.2f", v)
+}
+
+func addCommas(s string) string {
+	parts := strings.Split(s, ".")
+	intPart := parts[0]
+	n := len(intPart)
+	if n <= 3 {
+		return s
+	}
+	result := ""
+	for i, c := range intPart {
+		if i > 0 && (n-i)%3 == 0 {
+			result += ","
+		}
+		result += string(c)
+	}
+	if len(parts) > 1 {
+		return result + "." + parts[1]
+	}
+	return result
+}
+
+func formatPct(v float64) string {
+	sign := ""
+	if v > 0 {
+		sign = "+"
+	}
+	return sign + fmt.Sprintf("%.2f%%", v)
+}
+
+func formatQty(v float64) string {
+	if v == float64(int(v)) {
+		return fmt.Sprintf("%.0f", v)
+	}
+	return fmt.Sprintf("%g", v)
+}
+
+func pnlColor(v float64) string {
+	if v > 0 {
+		return "var(--vo-success)"
+	}
+	if v < 0 {
+		return "var(--vo-danger)"
+	}
+	return "var(--vo-text-muted)"
+}
+
+func portfolioTotalValue(s *State) float64 {
+	total := 0.0
+	for _, h := range s.Holdings {
+		total += h.TotalValue()
+	}
+	return total
+}
+
+func portfolioTotalCost(s *State) float64 {
+	total := 0.0
+	for _, h := range s.Holdings {
+		total += h.TotalCost()
+	}
+	return total
+}
+
+func filteredHoldings(s *State) []Holding {
+	if s.HoldingsFilter == "" {
+		return s.Holdings
+	}
+	q := strings.ToLower(s.HoldingsFilter)
+	result := make([]Holding, 0)
+	for _, h := range s.Holdings {
+		if strings.Contains(strings.ToLower(h.Symbol), q) ||
+			strings.Contains(strings.ToLower(h.Name), q) {
+			result = append(result, h)
+		}
+	}
+	return result
+}
+
+func filteredTransactions(s *State) []Transaction {
+	if s.TxFilter == "" {
+		return s.Transactions
+	}
+	q := strings.ToLower(s.TxFilter)
+	result := make([]Transaction, 0)
+	for _, t := range s.Transactions {
+		if strings.Contains(strings.ToLower(t.Symbol), q) {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+func sqlStr(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+func rowInt(r rusqlite.Row, key string) int {
+	v, ok := r[key]
+	if !ok {
+		return 0
+	}
+	if f, ok := v.(float64); ok {
+		return int(f)
+	}
+	return 0
+}
+
+func rowFloat(r rusqlite.Row, key string) float64 {
+	v, ok := r[key]
+	if !ok {
+		return 0
+	}
+	if f, ok := v.(float64); ok {
+		return f
+	}
+	return 0
+}
+
+func rowStr(r rusqlite.Row, key string) string {
+	v, ok := r[key]
+	if !ok {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+// ============ Main ============
+
+func main() {
+	vogui.SetTheme(vogui.DefaultTheme())
+	vogui.Run(vogui.App{
+		Init: initState,
+		View: view,
+	})
+}

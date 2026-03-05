@@ -251,7 +251,7 @@ mod tests {
             if path.extension().and_then(|e| e.to_str()) == Some("vo") {
                 let name = path.file_name().unwrap().to_str().unwrap().to_string();
                 let content = std::fs::read_to_string(&path).unwrap();
-                std_fs.add_file(PathBuf::from(format!("vogui/{}", name)), content);
+                std_fs.add_file(PathBuf::from(format!("github.com/vo-lang/vogui/{}", name)), content);
             }
         }
 
@@ -259,7 +259,7 @@ mod tests {
         let vox_file = repo_root.join("libs/vox/vox.vo");
         if vox_file.exists() {
             let content = std::fs::read_to_string(&vox_file).unwrap();
-            std_fs.add_file(PathBuf::from("vox/vox.vo"), content);
+            std_fs.add_file(PathBuf::from("github.com/vo-lang/vox/vox.vo"), content);
         }
 
         // Add studio app files at studio/ prefix

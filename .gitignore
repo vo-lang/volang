@@ -69,9 +69,9 @@ playground/node_modules/
 playground/dist/
 playground/src/wasm/pkg/
 
-# VoGUI JS
-libs/vogui/js/node_modules/
-libs/vogui/js/dist/
+# Independent sub-repos (own git repos, not tracked by main)
+libs/vogui/
+libs/vox/
 cmd/vo-test/.vo-cache/
 lang/crates/vo-web/node_modules/
 lang/crates/vo-web/pkg/

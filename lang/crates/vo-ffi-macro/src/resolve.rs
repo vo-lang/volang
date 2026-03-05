@@ -189,6 +189,13 @@ fn count_return_values(ret: &ReturnType) -> usize {
 
 /// Find package directory for slot constant generation.
 pub fn find_pkg_dir_for_slots(pkg_path: &str) -> Option<PathBuf> {
+    // Walk up from CARGO_MANIFEST_DIR looking for a vo.mod whose module
+    // declaration matches pkg_path.  This is the universal mechanism that
+    // works for any independent Vo library with a Rust extension crate.
+    if let Some(dir) = find_pkg_dir_by_vomod(pkg_path) {
+        return Some(dir);
+    }
+
     // Also try with underscore-to-hyphen conversion (detra_renderer -> detra-renderer)
     let pkg_path_hyphen = pkg_path.replace('_', "-");
     let paths_to_try = [pkg_path, pkg_path_hyphen.as_str()];
@@ -230,6 +237,95 @@ pub fn find_pkg_dir_for_slots(pkg_path: &str) -> Option<PathBuf> {
         }
     }
 
+    None
+}
+
+/// Resolve a short package name to its full module path by reading this crate's
+/// `Cargo.toml` `[package.metadata.vo]` section.
+///
+/// If `Cargo.toml` contains `vomod = "../vo.mod"`, that file is read and its
+/// `module` declaration is returned when its last path component matches `pkg_name`.
+///
+/// This allows `#[vo_fn("vogui", ...)]` to automatically generate the correct
+/// runtime lookup name (e.g. `github_com_vo_lang_vogui_waitForEvent`) without
+/// the library's Rust source knowing its hosting URL.
+///
+/// Returns `pkg_name` unchanged when no metadata is found (stdlib packages, etc.).
+pub fn resolve_full_pkg_path(pkg_name: &str) -> String {
+    try_resolve_via_cargo_metadata(pkg_name)
+        .unwrap_or_else(|| pkg_name.to_string())
+}
+
+fn try_resolve_via_cargo_metadata(pkg_name: &str) -> Option<String> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let cargo_toml = PathBuf::from(&manifest_dir).join("Cargo.toml");
+    let cargo_content = std::fs::read_to_string(cargo_toml).ok()?;
+    let vomod_rel = parse_cargo_vomod_field(&cargo_content)?;
+    let vomod_path = PathBuf::from(&manifest_dir).join(vomod_rel);
+    let vomod_content = std::fs::read_to_string(vomod_path).ok()?;
+    let module_path = parse_vomod_module(&vomod_content)?;
+    // Validate: pkg_name must equal the last path component of the module path.
+    let last = module_path.rsplit('/').next().unwrap_or(&module_path);
+    if last == pkg_name || module_path == pkg_name {
+        Some(module_path)
+    } else {
+        None
+    }
+}
+
+/// Extract `vomod = "..."` from the `[package.metadata.vo]` section of a Cargo.toml.
+fn parse_cargo_vomod_field(content: &str) -> Option<String> {
+    let mut in_section = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_section = trimmed == "[package.metadata.vo]";
+            continue;
+        }
+        if in_section {
+            if let Some(rest) = trimmed.strip_prefix("vomod") {
+                if let Some(val) = rest.trim().strip_prefix('=') {
+                    return Some(val.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse the `module` declaration from a vo.mod file.
+/// Returns the module path, e.g. `"github.com/vo-lang/vogui"`.
+fn parse_vomod_module(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("module ") {
+            let m = rest.trim();
+            if !m.is_empty() {
+                return Some(m.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Walk up from CARGO_MANIFEST_DIR looking for a `vo.mod` whose `module`
+/// declaration matches `full_module_path`. Used as a fallback in
+/// `find_pkg_dir_for_slots` when the primary Cargo.toml metadata path resolves
+/// the full path but we still need the directory containing the `.vo` files.
+fn find_pkg_dir_by_vomod(full_module_path: &str) -> Option<PathBuf> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let mut dir = PathBuf::from(manifest_dir);
+    for _ in 0..10 {
+        let vomod = dir.join("vo.mod");
+        if vomod.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&vomod) {
+                if parse_vomod_module(&content).as_deref() == Some(full_module_path) {
+                    return Some(dir);
+                }
+            }
+        }
+        if !dir.pop() { break; }
+    }
     None
 }
 

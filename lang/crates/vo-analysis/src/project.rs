@@ -515,14 +515,23 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
             }
         }
         
-        // Create package and type check
-        // Use import_path (e.g., "encoding/hex") as path for find_package_by_path
-        // But set name to short name (e.g., "hex") for local reference
+        // Create package and type check.
+        // Use vfs_pkg.path (canonical module path, possibly from vo.mod) so that the
+        // typechecker Package.path() always holds the authoritative module path.
+        // This guarantees extern lookup names in bytecode match what the Rust macro
+        // registers, regardless of whether the import used a relative or full path.
         let pkg_key = {
             let mut state = self.state.borrow_mut();
-            let pkg = state.tc_objs.new_package(import_path.to_string());
+            let pkg = state.tc_objs.new_package(vfs_pkg.path.clone());
             // Set short name for package (used when referencing: hex.Encode)
             state.tc_objs.pkgs[pkg].set_name(vfs_pkg.name.clone());
+            // If the raw import_path differs from the canonical module path (e.g.
+            // "../../libs/vox" vs "github.com/vo-lang/vox"), register the import_path
+            // as an alias so checker's find_package_by_path() can locate the package
+            // regardless of which form was used in the source.
+            if import_path.as_str() != vfs_pkg.path.as_str() {
+                state.tc_objs.alias_package_path(import_path.to_string(), pkg);
+            }
             pkg
         };
         

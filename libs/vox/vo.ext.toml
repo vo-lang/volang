@@ -1,3 +1,0 @@
-[extension]
-name = "vox"
-path = "../../target/{profile}/libvo_vox"

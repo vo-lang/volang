@@ -4,7 +4,7 @@ package main
 
 import (
 	"fmt"
-	"vogui"
+	"github.com/vo-lang/vogui"
 )
 
 type State struct {

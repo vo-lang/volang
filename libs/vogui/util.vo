@@ -1,8 +1,0 @@
-// Internal utility functions.
-package vogui
-
-import "fmt"
-
-func toString(v any) string {
-	return fmt.Sprint(v)
-}

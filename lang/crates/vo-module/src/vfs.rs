@@ -184,19 +184,44 @@ fn resolve_package<F: FileSystem>(fs: &F, fs_path: &str, import_path: &str) -> O
     }
     
     let files = load_vo_files(fs, pkg_path)?;
-    let name = fs_path.rsplit('/').next().unwrap_or(fs_path).to_string();
+
+    // If the package directory contains a vo.mod file, use the declared module path
+    // as the canonical package path. This ensures that relative imports like
+    // `"../../libs/vox"` produce the same extern lookup names as the full module
+    // path `"github.com/vo-lang/vox"` — both resolve to the same VfsPackage.path.
+    let canonical_path = try_read_module_path(fs, pkg_path)
+        .unwrap_or_else(|| import_path.to_string());
+
+    let name = canonical_path.rsplit('/').next().unwrap_or(&canonical_path).to_string();
     
-    let fs_path = match fs.root() {
+    let fs_path_abs = match fs.root() {
         Some(root) => root.join(pkg_path),
         None => pkg_path.to_path_buf(),
     };
 
     Some(VfsPackage {
         name,
-        path: import_path.to_string(),
-        fs_path,
+        path: canonical_path,
+        fs_path: fs_path_abs,
         files,
     })
+}
+
+/// Try to read the `module` declaration from a `vo.mod` file in `pkg_dir`.
+/// Returns the module path (e.g. `"github.com/vo-lang/vox"`) or `None` if the
+/// file does not exist or contains no `module` line.
+fn try_read_module_path<F: FileSystem>(fs: &F, pkg_dir: &Path) -> Option<String> {
+    let vomod = pkg_dir.join("vo.mod");
+    let content = fs.read_file(&vomod).ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.trim().strip_prefix("module ") {
+            let m = rest.trim();
+            if !m.is_empty() {
+                return Some(m.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Helper to load all .vo files from a directory.

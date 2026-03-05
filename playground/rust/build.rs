@@ -11,7 +11,7 @@ fn main() {
 
     // Collect only .vo files, skip js/ and rust/ directories
     let mut entries: Vec<(String, String)> = Vec::new();
-    collect_vo_files(&vogui_root, &vogui_root, "vogui", &mut entries);
+    collect_vo_files(&vogui_root, &vogui_root, "github.com/vo-lang/vogui", &mut entries);
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Watch the directory for added/deleted files
