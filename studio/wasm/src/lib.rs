@@ -33,6 +33,7 @@ include!(concat!(env!("OUT_DIR"), "/shell_embedded.rs"));
 
 struct GuestState {
     vm: vo_web::Vm,
+    event_wait_token: Option<u64>,
 }
 
 thread_local! {
@@ -148,19 +149,22 @@ pub fn compile_run_entry(entry_path: &str) -> Result<String, JsValue> {
 pub fn run_gui_entry(entry_path: &str) -> Result<Vec<u8>, JsValue> {
     ensure_panic_hook();
     GUEST.with(|g| *g.borrow_mut() = None);
-    vo_runtime::gui_host::clear_pending_render();
-    vo_runtime::gui_host::clear_event_state();
 
     let bytecode = compile_from_vfs(entry_path).map_err(|e| JsValue::from_str(&e))?;
 
-    let vm = vo_web::create_vm(&bytecode, |reg, exts| {
+    let mut vm = vo_web::create_vm(&bytecode, |reg, exts| {
         vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
     }).map_err(|e| JsValue::from_str(&e))?;
 
-    let render_bytes = vo_runtime::gui_host::take_pending_render_bytes()
+    let render_bytes = vm.take_host_output()
         .ok_or_else(|| JsValue::from_str("guest app did not emit a render"))?;
 
-    GUEST.with(|g| *g.borrow_mut() = Some(GuestState { vm }));
+    let event_wait_token = vm.scheduler.take_pending_host_events()
+        .iter()
+        .find(|e| e.replay)
+        .map(|e| e.token);
+
+    GUEST.with(|g| *g.borrow_mut() = Some(GuestState { vm, event_wait_token }));
     Ok(render_bytes)
 }
 
@@ -174,16 +178,25 @@ pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<Vec<u8>, JsValue
     let mut guest = GUEST.with(|g| g.borrow_mut().take())
         .ok_or_else(|| JsValue::from_str("No guest app running"))?;
 
-    vo_runtime::gui_host::clear_pending_render();
+    guest.vm.clear_host_output();
     vo_runtime::output::clear_output();
 
-    // Store event data and get the token to wake the blocked fiber
-    let token = vo_runtime::gui_host::send_event(handler_id, payload.to_string())
+    // Encode event data: [i32 handler_id LE][UTF-8 payload]
+    let token = guest.event_wait_token
         .ok_or_else(|| JsValue::from_str("Main fiber not waiting for events"))?;
+    let mut event_data = Vec::with_capacity(4 + payload.len());
+    event_data.extend_from_slice(&handler_id.to_le_bytes());
+    event_data.extend_from_slice(payload.as_bytes());
 
     // Wake the fiber and run until it blocks on waitForEvent again
-    guest.vm.scheduler.wake_host_event(token);
+    guest.vm.wake_host_event_with_data(token, event_data);
     let run_result = guest.vm.run_scheduled();
+
+    // Update event_wait_token (waitForEvent re-suspends with a new token)
+    guest.event_wait_token = guest.vm.scheduler.take_pending_host_events()
+        .iter()
+        .find(|e| e.replay)
+        .map(|e| e.token);
 
     // Put state back before checking result
     GUEST.with(|g| *g.borrow_mut() = Some(guest));
@@ -195,7 +208,11 @@ pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<Vec<u8>, JsValue
         web_sys::console::log_1(&format!("[guest] {}", stdout.trim_end()).into());
     }
 
-    let render_bytes = vo_runtime::gui_host::take_pending_render_bytes().unwrap_or_default();
+    // Read render bytes from VM host output channel
+    // Note: take from guest state since we put it back above
+    let render_bytes = GUEST.with(|g| {
+        g.borrow_mut().as_mut().and_then(|s| s.vm.take_host_output()).unwrap_or_default()
+    });
     Ok(render_bytes)
 }
 
@@ -203,8 +220,6 @@ pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<Vec<u8>, JsValue
 #[wasm_bindgen(js_name = "stopGui")]
 pub fn stop_gui() {
     GUEST.with(|g| *g.borrow_mut() = None);
-    vo_runtime::gui_host::clear_pending_render();
-    vo_runtime::gui_host::clear_event_state();
 }
 
 // =============================================================================

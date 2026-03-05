@@ -109,6 +109,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         program_args: &vm.state.program_args as *const Vec<String>,
         sentinel_errors: &mut vm.state.sentinel_errors as *mut _,
         output: &*vm.state.output as *const dyn vo_runtime::output::OutputSink,
+        host_output: &mut vm.state.host_output as *mut _,
         #[cfg(feature = "std")]
         io: &mut vm.state.io as *mut _,
         call_func_id: 0,

@@ -284,6 +284,9 @@ pub struct JitContext {
     /// Avoids dereferencing `vm` (which would alias `gc`) just to read output.
     pub output: *const dyn crate::output::OutputSink,
     
+    /// Pointer to host output channel (FFI → Host byte output).
+    pub host_output: *mut Option<Vec<u8>>,
+
     /// Pointer to shared IoRuntime for async I/O operations.
     /// JIT extern calls use this instead of creating per-call IoRuntime.
     #[cfg(feature = "std")]

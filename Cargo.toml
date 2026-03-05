@@ -54,6 +54,6 @@ lto = false
 # This prevents duplicate crate instances and type incompatibilities when a 3rdparty
 # crate (e.g. vo-git2 with wasm-stubs feature) is used as a workspace path dependency.
 [patch."https://github.com/vo-lang/volang"]
-vo-runtime  = { path = "lang/crates/vo-runtime" }
-vo-ext      = { path = "lang/crates/vo-ext" }
+vo-runtime   = { path = "lang/crates/vo-runtime" }
+vo-ext       = { path = "lang/crates/vo-ext" }
 vo-ffi-macro = { path = "lang/crates/vo-ffi-macro" }

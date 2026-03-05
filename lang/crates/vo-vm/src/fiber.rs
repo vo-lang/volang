@@ -368,6 +368,9 @@ pub struct Fiber {
     /// Host event token set when fiber wakes via `HostEventWaitAndReplay`.
     /// Read by extern on re-invocation via `take_resume_host_event_token()`.
     pub resume_host_event_token: Option<u64>,
+    /// Opaque data attached by host via `wake_host_event_with_data`.
+    /// Read by extern on re-invocation via `take_resume_host_event_data()`.
+    pub resume_host_event_data: Option<Vec<u8>>,
     /// JIT resume stack for suspended call chains.
     /// When JIT returns Call/WaitIo, resume points are pushed here.
     /// On resume, they are popped and converted to VM frames.
@@ -413,6 +416,7 @@ impl Fiber {
             #[cfg(feature = "std")]
             resume_io_token: None,
             resume_host_event_token: None,
+            resume_host_event_data: None,
             #[cfg(feature = "jit")]
             resume_stack: Vec::new(),  // Lazy: only allocates on first push (Call/WaitIo)
             #[cfg(feature = "jit")]
@@ -447,6 +451,7 @@ impl Fiber {
             self.resume_io_token = None;
         }
         self.resume_host_event_token = None;
+        self.resume_host_event_data = None;
         #[cfg(feature = "jit")]
         self.resume_stack.clear();
         #[cfg(feature = "jit")]

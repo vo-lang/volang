@@ -7,8 +7,7 @@ description = "Vo language runtime - shared data structures for VM and JIT (no_s
 
 [features]
 default = ["std"]
-std = ["gui-host", "vo-common-core/std", "linkme", "regex", "libloading", "lazy_static", "dirs", "hostname", "libc", "vo-module"]
-gui-host = ["vo-common-core/std"]  # WASM-safe: enables gui_host (render/event state). No native-only deps.
+std = ["vo-common-core/std", "linkme", "regex", "libloading", "lazy_static", "dirs", "hostname", "libc", "vo-module"]
 gc-debug = ["std"]  # GC 验证模式，需要 std
 
 [dependencies]

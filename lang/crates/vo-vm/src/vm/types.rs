@@ -141,6 +141,9 @@ pub struct VmState {
     pub output: Arc<dyn OutputSink>,
     #[cfg(feature = "std")]
     pub io: vo_runtime::io::IoRuntime,
+    /// Generic byte output channel (FFI → Host). Written by extern functions
+    /// via `ctx.set_host_output()`; read by host via `Vm::take_host_output()`.
+    pub host_output: Option<Vec<u8>>,
     /// Per-VM sentinel error cache (reset on each module load).
     pub sentinel_errors: SentinelErrorCache,
     /// Next island ID to assign
@@ -171,6 +174,7 @@ impl VmState {
             #[cfg(feature = "std")]
             io: vo_runtime::io::IoRuntime::new()
                 .unwrap_or_else(|e| panic!("IoRuntime::new failed: {}", e)),
+            host_output: None,
             sentinel_errors: SentinelErrorCache::new(),
             next_island_id: 1, // 0 is main island
             #[cfg(feature = "std")]

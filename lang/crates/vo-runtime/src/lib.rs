@@ -1,4 +1,4 @@
-#![cfg_attr(not(any(feature = "std", feature = "gui-host")), no_std)]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
@@ -24,8 +24,6 @@ pub mod ffi;
 pub mod builtins;
 
 // Std-only modules
-#[cfg(any(feature = "std", feature = "gui-host"))]
-pub mod gui_host;
 #[cfg(feature = "std")]
 pub mod jit_api;
 #[cfg(feature = "gc-debug")]

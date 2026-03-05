@@ -64,6 +64,10 @@ pub struct ExternWorld<'env> {
     pub output: &'env dyn OutputSink,
     pub sentinel_errors: &'env mut SentinelErrorCache,
 
+    /// Generic byte output channel (FFI → Host).
+    /// FFI functions write here; the host reads after `run_scheduled()` returns.
+    pub host_output: &'env mut Option<Vec<u8>>,
+
     #[cfg(feature = "std")]
     pub io: &'env mut IoRuntime,
 }
@@ -88,6 +92,10 @@ pub struct ExternFiberInputs {
     /// Host event token that woke this fiber. Present only on the PC re-execution
     /// path (second execution of the same `CallExtern`) after `HostEventWaitAndReplay`.
     pub resume_host_event_token: Option<u64>,
+
+    /// Opaque data attached by the host when waking via `wake_host_event_with_data`.
+    /// FFI function reads on replay via `take_resume_host_event_data()`.
+    pub resume_host_event_data: Option<Vec<u8>>,
 
     /// Cached closure results from previous `CallClosure` round-trips.
     /// Consumed in order via `ExternCallContext.replay_index`.

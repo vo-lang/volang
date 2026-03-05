@@ -618,6 +618,7 @@ pub extern "C" fn jit_call_extern(
         ret_start: 0, // returns overwrite args in same buffer
         ret_slots: ret_slots as u16,
     };
+    let host_output = unsafe { &mut *ctx_ref.host_output };
     let world = ExternWorld {
         gc,
         module,
@@ -626,12 +627,14 @@ pub extern "C" fn jit_call_extern(
         program_args,
         output,
         sentinel_errors,
+        host_output,
         io,
     };
     let fiber_inputs = ExternFiberInputs {
         fiber_opaque: ctx_ref.fiber,
         resume_io_token,
         resume_host_event_token: fiber.resume_host_event_token.take(),
+        resume_host_event_data: fiber.resume_host_event_data.take(),
         replay_results: closure_replay_results,
         replay_panicked: closure_replay_panicked,
     };

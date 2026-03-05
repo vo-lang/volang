@@ -30,7 +30,10 @@ use alloc::vec::Vec;
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
+use core::sync::atomic::{AtomicU64, Ordering};
 use crate::output::OutputSink;
+
+static HOST_EVENT_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // Structured call types (ExternInvoke, ExternWorld, ExternFiberInputs)
 pub mod call;
@@ -290,9 +293,13 @@ pub struct ExternCallContext<'a> {
     /// consume the completion for this token instead of submitting a new op.
     #[cfg(feature = "std")]
     resume_io_token: Option<IoToken>,
+    /// Generic byte output channel (FFI → Host).
+    host_output: &'a mut Option<Vec<u8>>,
     /// Host event token that woke this fiber. Present on the PC re-execution path
     /// after `HostEventWaitAndReplay`. Extern must consume via `take_resume_host_event_token()`.
     resume_host_event_token: Option<u64>,
+    /// Opaque data attached by host when waking via `wake_host_event_with_data`.
+    resume_host_event_data: Option<Vec<u8>>,
     /// Cached closure results from previous CallClosure suspends.
     /// Consumed in order via replay_index.
     replay_results: Vec<Vec<u64>>,
@@ -334,11 +341,13 @@ impl<'a> ExternCallContext<'a> {
             program_args: world.program_args,
             output: world.output,
             sentinel_errors: world.sentinel_errors,
+            host_output: world.host_output,
             #[cfg(feature = "std")]
             io: world.io,
             #[cfg(feature = "std")]
             resume_io_token: fiber_inputs.resume_io_token,
             resume_host_event_token: fiber_inputs.resume_host_event_token,
+            resume_host_event_data: fiber_inputs.resume_host_event_data,
             replay_results: fiber_inputs.replay_results,
             replay_index: 0,
             replay_panicked: fiber_inputs.replay_panicked,
@@ -554,6 +563,26 @@ impl<'a> ExternCallContext<'a> {
     #[inline]
     pub fn take_resume_host_event_token(&mut self) -> Option<u64> {
         self.resume_host_event_token.take()
+    }
+
+    /// Take the opaque data attached by the host when waking via `wake_host_event_with_data`.
+    /// Returns `Some(data)` on replay if data was provided, `None` otherwise.
+    #[inline]
+    pub fn take_resume_host_event_data(&mut self) -> Option<Vec<u8>> {
+        self.resume_host_event_data.take()
+    }
+
+    /// Write bytes to the generic host output channel (FFI → Host).
+    /// The host reads this after `run_scheduled()` returns via `Vm::take_host_output()`.
+    #[inline]
+    pub fn set_host_output(&mut self, bytes: Vec<u8>) {
+        *self.host_output = Some(bytes);
+    }
+
+    /// Generate a unique host event token for `HostEventWaitAndReplay`.
+    #[inline]
+    pub fn next_host_event_token(&self) -> u64 {
+        HOST_EVENT_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Peek at the resume I/O token without consuming it.

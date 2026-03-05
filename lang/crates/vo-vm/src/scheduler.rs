@@ -273,6 +273,20 @@ impl Scheduler {
         }
     }
 
+    /// Wake the fiber waiting for the given host event token, attaching opaque data.
+    /// The FFI function reads the data on replay via `ctx.take_resume_host_event_data()`.
+    pub fn wake_host_event_with_data(&mut self, token: u64, data: Vec<u8>) {
+        if let Some(pos) = self.host_event_waiters.iter().position(|w| w.token == token) {
+            let waiter = self.host_event_waiters.remove(pos);
+            let fiber = &mut self.fibers[waiter.fiber_id.0 as usize];
+            if waiter.replay {
+                fiber.resume_host_event_token = Some(token);
+            }
+            fiber.resume_host_event_data = Some(data);
+            self.wake_fiber(waiter.fiber_id);
+        }
+    }
+
     /// Return all pending host event waiters for the async run loop.
     /// Entries remain in the list until individually consumed by `wake_host_event`.
     pub fn take_pending_host_events(&mut self) -> Vec<PendingHostEvent> {

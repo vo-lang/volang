@@ -448,6 +448,23 @@ impl Vm {
         self.scheduler.wake_host_event(token);
     }
 
+    /// Wake a fiber blocked on a host-side event, attaching opaque data.
+    /// The FFI function reads the data on replay via `ctx.take_resume_host_event_data()`.
+    pub fn wake_host_event_with_data(&mut self, token: u64, data: Vec<u8>) {
+        self.scheduler.wake_host_event_with_data(token, data);
+    }
+
+    /// Take the host output bytes written by an FFI function via `ctx.set_host_output()`.
+    /// Returns `None` if no output was written since the last take.
+    pub fn take_host_output(&mut self) -> Option<Vec<u8>> {
+        self.state.host_output.take()
+    }
+
+    /// Clear any pending host output without reading it.
+    pub fn clear_host_output(&mut self) {
+        self.state.host_output = None;
+    }
+
     /// Handle a fiber execution result. Returns:
     /// - `None`: continue scheduling loop
     /// - `Some(Ok(outcome))`: return this outcome
@@ -1124,6 +1141,7 @@ impl Vm {
                     #[cfg(feature = "std")]
                     let resume_io_token = fiber.resume_io_token.take();
                     let resume_host_event_token = fiber.resume_host_event_token.take();
+                    let resume_host_event_data = fiber.resume_host_event_data.take();
                     let (closure_replay_results, closure_replay_panicked) = fiber.closure_replay.take_for_extern();
                     let invoke = ExternInvoke {
                         extern_id,
@@ -1141,6 +1159,7 @@ impl Vm {
                         program_args: &self.state.program_args,
                         output: &*self.state.output,
                         sentinel_errors: &mut self.state.sentinel_errors,
+                        host_output: &mut self.state.host_output,
                         #[cfg(feature = "std")]
                         io: &mut self.state.io,
                     };
@@ -1149,6 +1168,7 @@ impl Vm {
                         #[cfg(feature = "std")]
                         resume_io_token,
                         resume_host_event_token,
+                        resume_host_event_data,
                         replay_results: closure_replay_results,
                         replay_panicked: closure_replay_panicked,
                     };

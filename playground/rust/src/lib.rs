@@ -16,6 +16,8 @@ include!(concat!(env!("OUT_DIR"), "/vogui_files.rs"));
 
 struct GuiAppState {
     vm: Vm,
+    /// Token of the main fiber's `waitForEvent` suspension (replay-style host event).
+    event_wait_token: Option<u64>,
 }
 
 thread_local! {
@@ -103,10 +105,8 @@ fn run_gui_bytecode(
     registrar: fn(&mut vo_web::ExternRegistry, &[vo_web::ExternDef]),
 ) -> WasmGuiResult {
     GUI_STATE.with(|s| unsafe { *s.get() = None });
-    vo_runtime::gui_host::clear_event_state();
-    vo_runtime::gui_host::clear_pending_render();
 
-    let vm = match vo_web::create_vm(bytecode, registrar) {
+    let mut vm = match vo_web::create_vm(bytecode, registrar) {
         Ok(vm) => vm,
         Err(e) => return WasmGuiResult::err(e),
     };
@@ -121,14 +121,20 @@ fn run_gui_bytecode(
         }
     }
 
-    // Read render bytes from dedicated channel (not stdout)
-    let render_bytes = match vo_runtime::gui_host::take_pending_render_bytes() {
+    // Read render bytes from VM host output channel
+    let render_bytes = match vm.take_host_output() {
         Some(b) if !b.is_empty() => b,
         _ => return WasmGuiResult::err("No render output. emitRenderBinary was not called."),
     };
 
+    // Find the replay-style host event token (waitForEvent suspension)
+    let event_wait_token = vm.scheduler.take_pending_host_events()
+        .iter()
+        .find(|e| e.replay)
+        .map(|e| e.token);
+
     GUI_STATE.with(|s| unsafe {
-        *s.get() = Some(GuiAppState { vm });
+        *s.get() = Some(GuiAppState { vm, event_wait_token });
     });
 
     WasmGuiResult::ok(render_bytes)
@@ -143,16 +149,19 @@ fn handle_event(handler_id: i32, payload: &str) -> WasmGuiResult {
             None => return WasmGuiResult::err("GUI app not initialized"),
         };
 
-        vo_runtime::gui_host::clear_pending_render();
+        state.vm.clear_host_output();
         vo_runtime::output::clear_output();
 
-        // Store event data and wake the blocked main fiber
-        let token = match vo_runtime::gui_host::send_event(handler_id, payload.to_string()) {
+        // Encode event data: [i32 handler_id LE][UTF-8 payload]
+        let token = match state.event_wait_token {
             Some(t) => t,
             None => return WasmGuiResult::err("Main fiber not waiting for events"),
         };
+        let mut event_data = Vec::with_capacity(4 + payload.len());
+        event_data.extend_from_slice(&handler_id.to_le_bytes());
+        event_data.extend_from_slice(payload.as_bytes());
 
-        state.vm.scheduler.wake_host_event(token);
+        state.vm.wake_host_event_with_data(token, event_data);
         if let Err(e) = state.vm.run_scheduled() {
             return WasmGuiResult::err(format!("{:?}", e));
         }
@@ -167,8 +176,14 @@ fn handle_event(handler_id: i32, payload: &str) -> WasmGuiResult {
             }
         }
 
-        // Read render bytes from dedicated channel
-        let render_bytes = vo_runtime::gui_host::take_pending_render_bytes().unwrap_or_default();
+        // Update event_wait_token (waitForEvent re-suspends with a new token)
+        state.event_wait_token = state.vm.scheduler.take_pending_host_events()
+            .iter()
+            .find(|e| e.replay)
+            .map(|e| e.token);
+
+        // Read render bytes from VM host output channel
+        let render_bytes = state.vm.take_host_output().unwrap_or_default();
         WasmGuiResult::ok(render_bytes)
     })
 }
