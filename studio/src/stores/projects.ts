@@ -85,6 +85,7 @@ export interface ProjectsState {
   manifestLoaded: boolean;
   projects: ProjectEntry[];
   isLoading: boolean;
+  isRemoteLoading: boolean;
   error: string;
 }
 
@@ -93,6 +94,7 @@ export const projects = writable<ProjectsState>({
   manifestLoaded: false,
   projects: [],
   isLoading: false,
+  isRemoteLoading: false,
   error: '',
 });
 

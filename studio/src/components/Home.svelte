@@ -268,6 +268,12 @@ func main() {
     <button class="icon-btn" title="Refresh" on:click={refresh}>
       <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
     </button>
+    {#if $projects.isRemoteLoading}
+      <span class="remote-sync-hint">
+        <span class="mini-spinner"></span>
+        Syncing…
+      </span>
+    {/if}
   </div>
 
   {#if actionError}
@@ -498,6 +504,17 @@ func main() {
     transition: all 0.1s;
   }
   .icon-btn:hover { color: #a6adc8; background: #252535; }
+
+  .remote-sync-hint {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 11px; color: #45475a; white-space: nowrap;
+    padding: 0 4px;
+  }
+  .mini-spinner {
+    width: 10px; height: 10px; border: 1.5px solid #313244;
+    border-top-color: #6c7086; border-radius: 50%;
+    animation: spin 0.7s linear infinite; flex-shrink: 0;
+  }
 
   /* ── Error bar ── */
   .error-bar {

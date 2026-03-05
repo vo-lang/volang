@@ -315,52 +315,71 @@ export async function renameProject(project: ProjectEntry, newName: string, root
 }
 
 export async function loadProjects(root: string): Promise<void> {
+  // Phase 1: local discovery — fast, no network, show projects immediately
   projects.update(s => ({ ...s, isLoading: true, error: '' }));
 
+  let localProjects: ProjectEntry[];
   try {
-    const localProjects = await discoverLocalProjects(root);
-
-    const { token } = get(github);
-    if (token) {
-      const { gistId, manifest } = await loadManifest(token);
-
-      const remoteMetaMap = new Map<string, RemoteMetadata>();
-      const fetches = manifest.projects.map(async (mp) => {
-        const key = mp.name + ':' + mp.type;
-        try {
-          let meta: RemoteMetadata;
-          if (mp.remote.kind === 'gist' && mp.remote.gistId) {
-            meta = await fetchGistMetadata(token, mp.remote.gistId);
-          } else if (mp.remote.kind === 'repo' && mp.remote.owner && mp.remote.repo) {
-            meta = await fetchRepoMetadata(token, mp.remote.owner, mp.remote.repo);
-          } else {
-            return;
-          }
-          remoteMetaMap.set(key, meta);
-        } catch {
-          // Network error for this project — skip remote metadata
-        }
-      });
-      await Promise.all(fetches);
-
-      const merged = mergeProjects(localProjects, manifest.projects, remoteMetaMap);
-      projects.update(s => ({
-        ...s,
-        manifestGistId: gistId,
-        manifestLoaded: true,
-        projects: merged,
-        isLoading: false,
-      }));
-    } else {
-      projects.update(s => ({
-        ...s,
-        manifestGistId: null,
-        manifestLoaded: false,
-        projects: localProjects,
-        isLoading: false,
-      }));
-    }
+    localProjects = await discoverLocalProjects(root);
   } catch (e: any) {
     projects.update(s => ({ ...s, isLoading: false, error: String(e.message ?? e) }));
+    return;
+  }
+
+  const { token } = get(github);
+  if (!token) {
+    projects.update(s => ({
+      ...s,
+      manifestGistId: null,
+      manifestLoaded: false,
+      projects: localProjects,
+      isLoading: false,
+      isRemoteLoading: false,
+    }));
+    return;
+  }
+
+  // Show local projects immediately, start GitHub sync in background
+  projects.update(s => ({
+    ...s,
+    projects: localProjects,
+    isLoading: false,
+    isRemoteLoading: true,
+  }));
+
+  // Phase 2: GitHub sync — background, non-blocking
+  try {
+    const { gistId, manifest } = await loadManifest(token);
+
+    const remoteMetaMap = new Map<string, RemoteMetadata>();
+    const fetches = manifest.projects.map(async (mp) => {
+      const key = mp.name + ':' + mp.type;
+      try {
+        let meta: RemoteMetadata;
+        if (mp.remote.kind === 'gist' && mp.remote.gistId) {
+          meta = await fetchGistMetadata(token, mp.remote.gistId);
+        } else if (mp.remote.kind === 'repo' && mp.remote.owner && mp.remote.repo) {
+          meta = await fetchRepoMetadata(token, mp.remote.owner, mp.remote.repo);
+        } else {
+          return;
+        }
+        remoteMetaMap.set(key, meta);
+      } catch {
+        // Network error for this project — skip remote metadata
+      }
+    });
+    await Promise.all(fetches);
+
+    const merged = mergeProjects(localProjects, manifest.projects, remoteMetaMap);
+    projects.update(s => ({
+      ...s,
+      manifestGistId: gistId,
+      manifestLoaded: true,
+      projects: merged,
+      isRemoteLoading: false,
+    }));
+  } catch (e: any) {
+    // GitHub fetch failed — local projects already visible, just clear remote loading flag
+    projects.update(s => ({ ...s, isRemoteLoading: false }));
   }
 }

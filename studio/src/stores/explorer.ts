@@ -34,7 +34,7 @@ export interface ExplorerState {
 }
 
 export const explorer = writable<ExplorerState>({
-  appMode: 'develop',
+  appMode: 'manage',
   localRoot: '',
   explorerCwd: '',
   explorerHistoryBack: [],
