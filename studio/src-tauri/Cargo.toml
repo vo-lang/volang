@@ -19,6 +19,26 @@ tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-vo-vox = { path = "../../libs/vox/rust" }
-vo-runtime = { path = "../../lang/crates/vo-runtime" }
+vo-vox = { git = "https://github.com/vo-lang/vox" }
+vo-runtime = { git = "https://github.com/vo-lang/volang" }
 dirs = "5"
+
+[workspace]
+
+# Redirect git deps to local sibling repos for development
+[patch."https://github.com/vo-lang/volang"]
+vo-common    = { path = "../../lang/crates/vo-common" }
+vo-engine    = { path = "../../lang/crates/vo-engine" }
+vo-ext       = { path = "../../lang/crates/vo-ext" }
+vo-ffi-macro = { path = "../../lang/crates/vo-ffi-macro" }
+vo-module    = { path = "../../lang/crates/vo-module" }
+vo-runtime   = { path = "../../lang/crates/vo-runtime" }
+vo-stdlib    = { path = "../../lang/crates/vo-stdlib" }
+vo-syntax    = { path = "../../lang/crates/vo-syntax" }
+vo-vm        = { path = "../../lang/crates/vo-vm" }
+
+[patch."https://github.com/vo-lang/vox"]
+vo-vox = { path = "../../../vox/rust" }
+
+[patch."https://github.com/vo-lang/vogui"]
+vogui = { path = "../../../vogui/rust" }

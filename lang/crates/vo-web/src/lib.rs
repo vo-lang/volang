@@ -321,7 +321,7 @@ mod tests {
         // Add vogui package files from disk
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../../");
-        let vogui_dir = repo_root.join("libs/vogui");
+        let vogui_dir = repo_root.join("../vogui");
         let mut local_fs = MemoryFs::new();
 
         for entry in std::fs::read_dir(&vogui_dir).expect("vogui dir") {
@@ -335,7 +335,7 @@ mod tests {
         }
 
         // Add vox package
-        let vox_file = repo_root.join("libs/vox/vox.vo");
+        let vox_file = repo_root.join("../vox/vox.vo");
         if vox_file.exists() {
             let content = std::fs::read_to_string(&vox_file).unwrap();
             std_fs.add_file(PathBuf::from("github.com/vo-lang/vox/vox.vo"), content);

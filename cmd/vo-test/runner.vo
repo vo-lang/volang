@@ -2,7 +2,7 @@
 package main
 
 import (
-	"../../libs/vox"
+	"../../../vox"
 	"errors"
 	"fmt"
 	"os"

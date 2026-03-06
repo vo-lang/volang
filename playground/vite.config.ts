@@ -11,9 +11,9 @@ export default defineConfig({
     alias: {
       '@vo-playground': path.resolve(__dirname, 'rust/pkg'),
       '@vo-web': path.resolve(__dirname, '../lang/crates/vo-web/js'),
-      'react': path.resolve(__dirname, '../libs/vogui/js/node_modules/preact/compat'),
-      'react-dom': path.resolve(__dirname, '../libs/vogui/js/node_modules/preact/compat'),
-      'react/jsx-runtime': path.resolve(__dirname, '../libs/vogui/js/node_modules/preact/jsx-runtime'),
+      'react': path.resolve(__dirname, '../../vogui/js/node_modules/preact/compat'),
+      'react-dom': path.resolve(__dirname, '../../vogui/js/node_modules/preact/compat'),
+      'react/jsx-runtime': path.resolve(__dirname, '../../vogui/js/node_modules/preact/jsx-runtime'),
     },
   },
   server: {
@@ -25,7 +25,7 @@ export default defineConfig({
     },
   },
   css: {
-    postcss: path.resolve(__dirname, '../libs/vogui/js'),
+    postcss: path.resolve(__dirname, '../../vogui/js'),
   },
   optimizeDeps: {
     exclude: ['monaco-editor'],

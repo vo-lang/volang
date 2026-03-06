@@ -12,7 +12,7 @@ import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 
 const _dir   = dirname(fileURLToPath(import.meta.url));
-const vogui  = resolve(_dir, '../libs/vogui/js');
+const vogui  = resolve(_dir, '../../vogui/js');
 const req    = createRequire(import.meta.url);
 
 const tailwindcss  = req(resolve(vogui, 'node_modules/tailwindcss'));

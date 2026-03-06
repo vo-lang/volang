@@ -32,13 +32,13 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@vogui': resolve(__dirname, '../libs/vogui/js/src'),
+      '@vogui': resolve(__dirname, '../../vogui/js/src'),
       '@vo-web': resolve(__dirname, '../lang/crates/vo-web/js'),
       // Preact aliases for vogui's Radix UI dependencies
-      'react': resolve(__dirname, '../libs/vogui/js/node_modules/preact/compat'),
-      'react-dom': resolve(__dirname, '../libs/vogui/js/node_modules/preact/compat'),
-      'react/jsx-runtime': resolve(__dirname, '../libs/vogui/js/node_modules/preact/jsx-runtime'),
-      'preact': resolve(__dirname, '../libs/vogui/js/node_modules/preact'),
+      'react': resolve(__dirname, '../../vogui/js/node_modules/preact/compat'),
+      'react-dom': resolve(__dirname, '../../vogui/js/node_modules/preact/compat'),
+      'react/jsx-runtime': resolve(__dirname, '../../vogui/js/node_modules/preact/jsx-runtime'),
+      'preact': resolve(__dirname, '../../vogui/js/node_modules/preact'),
     },
   },
 });

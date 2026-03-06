@@ -7,7 +7,6 @@ on:
       - "playground/**"
       - "studio/**"
       - "lang/crates/vo-web/**"
-      - "libs/vogui/**"
   workflow_dispatch:
 
 permissions:
@@ -23,8 +22,20 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout volang
         uses: actions/checkout@v4
+
+      - name: Checkout vogui
+        uses: actions/checkout@v4
+        with:
+          repository: vo-lang/vogui
+          path: ../vogui
+
+      - name: Checkout vox
+        uses: actions/checkout@v4
+        with:
+          repository: vo-lang/vox
+          path: ../vox
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -51,7 +62,7 @@ jobs:
         run: wasm-pack build studio/wasm --target web --release
 
       - name: Build VoGUI JS
-        working-directory: libs/vogui/js
+        working-directory: ../vogui/js
         run: npm ci && npm run build
 
       - name: Install Playground Dependencies

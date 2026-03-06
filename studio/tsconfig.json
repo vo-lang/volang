@@ -16,12 +16,12 @@
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": {
-      "@vogui/*": ["../libs/vogui/js/src/*"],
-      "preact": ["../libs/vogui/js/node_modules/preact"],
-      "preact/*": ["../libs/vogui/js/node_modules/preact/*"],
-      "react": ["../libs/vogui/js/node_modules/preact/compat"],
-      "react-dom": ["../libs/vogui/js/node_modules/preact/compat"],
-      "react/jsx-runtime": ["../libs/vogui/js/node_modules/preact/jsx-runtime"]
+      "@vogui/*": ["../../vogui/js/src/*"],
+      "preact": ["../../vogui/js/node_modules/preact"],
+      "preact/*": ["../../vogui/js/node_modules/preact/*"],
+      "react": ["../../vogui/js/node_modules/preact/compat"],
+      "react-dom": ["../../vogui/js/node_modules/preact/compat"],
+      "react/jsx-runtime": ["../../vogui/js/node_modules/preact/jsx-runtime"]
     }
   },
   "include": ["src"],

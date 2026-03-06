@@ -70,7 +70,7 @@ RESULTS_DIR = BENCHMARK_DIR / 'results'
 
 # Cache directories
 CLI_CACHE_DIR = PROJECT_ROOT / 'cmd' / 'vo' / '.vo-cache'
-VOX_EXT_DIR = PROJECT_ROOT / 'libs' / 'vox'
+VOX_EXT_DIR = PROJECT_ROOT.parent / 'vox'
 VOX_EXT_RUST_DIR = VOX_EXT_DIR / 'rust' / 'src'
 
 
@@ -109,7 +109,7 @@ def invalidate_cli_cache_if_needed():
     
     # Check vo-vox extension binary mtime (catches runtime changes)
     # This is what CLI actually uses to compile/run code
-    vox_lib = PROJECT_ROOT / 'target' / 'debug' / 'libvo_vox.so'
+    vox_lib = VOX_EXT_DIR / 'rust' / 'target' / 'debug' / 'libvo_vox.dylib'
     vox_lib_mtime = vox_lib.stat().st_mtime if vox_lib.exists() else 0.0
     
     # Check if any source or binary is newer than cache
@@ -251,13 +251,13 @@ def studio_wasm_needs_build() -> bool:
     if get_newest_mtime(studio_build / 'build.rs', studio_build / 'Cargo.toml') > wasm_mtime:
         return True
 
-    # libs/vogui/rust/src/
-    vogui_src = PROJECT_ROOT / 'libs' / 'vogui' / 'rust' / 'src'
+    # vogui/rust/src/
+    vogui_src = PROJECT_ROOT.parent / 'vogui' / 'rust' / 'src'
     if get_newest_mtime(vogui_src, pattern='*.rs') > wasm_mtime:
         return True
 
-    # libs/vogui/*.vo — embedded into studio WASM for user imports
-    vogui_vo = PROJECT_ROOT / 'libs' / 'vogui'
+    # vogui/*.vo — embedded into studio WASM for user imports
+    vogui_vo = PROJECT_ROOT.parent / 'vogui'
     if get_newest_mtime(vogui_vo, pattern='*.vo') > wasm_mtime:
         return True
 
@@ -266,8 +266,8 @@ def studio_wasm_needs_build() -> bool:
     if get_newest_mtime(shell_vo, pattern='*.vo') > wasm_mtime:
         return True
 
-    # libs/vox/vox.vo — embedded as shell handler dependency
-    vox_vo = PROJECT_ROOT / 'libs' / 'vox' / 'vox.vo'
+    # vox/vox.vo — embedded as shell handler dependency
+    vox_vo = VOX_EXT_DIR / 'vox.vo'
     if vox_vo.exists() and vox_vo.stat().st_mtime > wasm_mtime:
         return True
 
@@ -374,10 +374,11 @@ def ensure_vox_extension_built(arch: str = '64', release: bool = False, native: 
     else:
         profile = 'release' if release else 'debug'
     
+    vox_target_dir = VOX_EXT_DIR / 'rust' / 'target'
     if arch == '32':
-        lib_path = PROJECT_ROOT / 'target' / TARGET_32 / profile / 'libvo_vox.so'
+        lib_path = vox_target_dir / TARGET_32 / profile / 'libvo_vox.dylib'
     else:
-        lib_path = PROJECT_ROOT / 'target' / profile / 'libvo_vox.so'
+        lib_path = vox_target_dir / profile / 'libvo_vox.dylib'
     
     # Check if library exists and is up-to-date
     if lib_path.exists():
@@ -392,7 +393,7 @@ def ensure_vox_extension_built(arch: str = '64', release: bool = False, native: 
             return  # Up-to-date
     
     print(f"{Colors.DIM}Building vo-vox extension ({profile})...{Colors.NC}")
-    build_cmd = ['cargo', 'build', '-q', '-p', 'vo-vox', '--features', 'ffi']
+    build_cmd = ['cargo', 'build', '-q', '--features', 'ffi']
     if native:
         build_cmd.extend(['--profile', 'release-native'])
     elif release:
@@ -400,7 +401,7 @@ def ensure_vox_extension_built(arch: str = '64', release: bool = False, native: 
     if arch == '32':
         build_cmd.extend(['--target', TARGET_32])
     
-    code, _, stderr = run_cmd(build_cmd)
+    code, _, stderr = run_cmd(build_cmd, cwd=VOX_EXT_DIR / 'rust')
     if code != 0:
         print(f"{Colors.RED}Extension build failed:{Colors.NC}\n{stderr}")
         sys.exit(1)
@@ -567,7 +568,7 @@ class TestRunner:
             cli_src_mtime = get_newest_mtime(CLI_DIR, pattern='*.vo')
             cli_needs_update = cli_src_mtime > marker_time
         
-        # Check if libs/vox needs update (separate from CLI)
+        # Check if vox needs update (separate from CLI)
         libs_marker = libs_32 / 'vox' / '.libs_ready'
         libs_needs_update = not libs_marker.exists()
         if not libs_needs_update:
@@ -595,7 +596,7 @@ class TestRunner:
                 shutil.rmtree(vo_cache)
             cli_marker.touch()
         
-        # Update libs/vox if needed
+        # Update vox cache if needed
         if libs_needs_update:
             dst_dir = libs_32 / 'vox'
             dst_dir.mkdir(parents=True, exist_ok=True)
@@ -605,15 +606,11 @@ class TestRunner:
             
             toml_src = VOX_EXT_DIR / 'vo.ext.toml'
             if toml_src.exists():
-                with open(toml_src) as f:
-                    content = f.read()
-                # Original path: ../../target/debug/libvo_vox.so (from libs/vox)
-                # 32-bit cache is at: target/<arch>/libs/vox
-                # Need path to: target/<arch>/debug/libvo_vox.so
-                # Relative: ../../../<arch>/debug/libvo_vox.so
-                content = content.replace('../../target/debug', f'../../../{TARGET_32}/debug')
+                # Write vo.ext.toml with absolute path to the 32-bit library
+                # to avoid fragile relative path calculations across repos.
+                vox_lib_abs = (VOX_EXT_DIR / 'rust' / 'target' / TARGET_32 / 'debug' / 'libvo_vox').resolve()
                 with open(dst_dir / 'vo.ext.toml', 'w') as f:
-                    f.write(content)
+                    f.write(f'[extension]\nname = "vox"\npath = "{vox_lib_abs}"\n')
             
             libs_marker.touch()
 

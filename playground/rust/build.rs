@@ -3,7 +3,7 @@ use std::path::Path;
 
 fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let vogui_root = Path::new(&manifest).join("../../libs/vogui");
+    let vogui_root = Path::new(&manifest).join("../../../vogui");
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let out_path = Path::new(&out_dir).join("vogui_files.rs");

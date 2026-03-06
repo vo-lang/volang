@@ -69,9 +69,7 @@ playground/node_modules/
 playground/dist/
 playground/src/wasm/pkg/
 
-# Independent sub-repos (own git repos, not tracked by main)
-libs/vogui/
-libs/vox/
+# Sibling repos (vox, vogui) are separate git repos at ../vox, ../vogui
 cmd/vo-test/.vo-cache/
 lang/crates/vo-web/node_modules/
 lang/crates/vo-web/pkg/

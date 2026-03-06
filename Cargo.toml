@@ -14,7 +14,6 @@ exclude = [
   "3rdparty/resvg/rust",
   "3rdparty/wgpu/rust",
   "studio/src-tauri",
-  "libs/vogui",
 ]
 
 [workspace.package]
@@ -49,10 +48,19 @@ lto = false
 inherits = "release"
 lto = false
 
-# Redirect 3rdparty crates that reference vo-lang crates via git URL to local paths.
-# This prevents duplicate crate instances and type incompatibilities when a 3rdparty
-# crate (e.g. vo-git2 with wasm-stubs feature) is used as a workspace path dependency.
+# Redirect crates that reference vo-lang repos via git URL to local paths.
+# This prevents duplicate crate instances and type incompatibilities when
+# sibling repos (vox, vogui) or 3rdparty crates are used alongside the workspace.
 [patch."https://github.com/vo-lang/volang"]
-vo-runtime   = { path = "lang/crates/vo-runtime" }
+vo-common    = { path = "lang/crates/vo-common" }
+vo-engine    = { path = "lang/crates/vo-engine" }
 vo-ext       = { path = "lang/crates/vo-ext" }
 vo-ffi-macro = { path = "lang/crates/vo-ffi-macro" }
+vo-module    = { path = "lang/crates/vo-module" }
+vo-runtime   = { path = "lang/crates/vo-runtime" }
+vo-stdlib    = { path = "lang/crates/vo-stdlib" }
+vo-syntax    = { path = "lang/crates/vo-syntax" }
+vo-vm        = { path = "lang/crates/vo-vm" }
+
+[patch."https://github.com/vo-lang/vogui"]
+vogui = { path = "../vogui/rust" }

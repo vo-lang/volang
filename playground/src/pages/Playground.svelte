@@ -4,7 +4,7 @@
   import FileExplorer from '../components/FileExplorer.svelte';
   import GuiPreview from '../components/GuiPreview.svelte';
   import { runCode, runCodeWithModules, initGuiApp, initGuiAppWithModules, handleGuiEvent, setRenderCallback, type RunStatus } from '../wasm/vo.ts';
-  import { type RenderMessage, decodeBinaryRender } from '../../../libs/vogui/js/src/index';
+  import { type RenderMessage, decodeBinaryRender } from '../../../../vogui/js/src/index';
   import guiTetris from '../assets/examples/gui_tetris.vo?raw';
   import resvgDemo from '../assets/examples/resvg_demo.vo?raw';
 
