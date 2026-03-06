@@ -1833,6 +1833,7 @@ dependencies = [
  "console_error_panic_hook",
  "js-sys",
  "vo-common",
+ "vo-module",
  "vo-runtime",
  "vo-web",
  "vo-web-runtime-wasm",

@@ -457,6 +457,10 @@ pub async fn ensure_vfs_deps(vo_mod_content: &str) -> Result<(), String> {
         // Check if module directory already exists in VFS.
         let mod_dir = std::path::Path::new(&req.module);
         if vfs.exists(mod_dir) {
+            // Source files already in VFS (persisted via OPFS).
+            // Ext WASM state (LOADED_PREFIXES) is in-memory only — re-load
+            // the .wasm binary so externs are registered for this session.
+            load_ext_if_present(&req.module, &req.version, &[]).await;
             continue;
         }
         let spec = format!("{}@{}", req.module, req.version);

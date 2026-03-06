@@ -121,8 +121,9 @@ pub fn compile_run_entry(entry_path: &str) -> Result<String, JsValue> {
     let bytecode = compile_from_vfs(entry_path).map_err(|e| JsValue::from_str(&e))?;
     vo_web::take_output();
 
-    let _vm = vo_web::create_vm(&bytecode, |_reg, _exts| {})
-        .map_err(|e| JsValue::from_str(&e))?;
+    let _vm = vo_web::create_vm(&bytecode, |reg, exts| {
+        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
+    }).map_err(|e| JsValue::from_str(&e))?;
 
     let output = vo_web::take_output();
     Ok(output)
@@ -249,6 +250,29 @@ fn get_shell_handler_bytecode() -> Result<Vec<u8>, String> {
         *cell.borrow_mut() = Some(bc.clone());
         Ok(bc)
     })
+}
+
+/// Return the module paths declared in the shell handler's embedded `vo.mod`.
+///
+/// Used by the JS bridge to derive the VFS purge list dynamically rather than
+/// hardcoding module paths.  Returns a JS `Array<string>`.
+#[wasm_bindgen(js_name = "getShellDepModules")]
+pub fn get_shell_dep_modules() -> js_sys::Array {
+    let arr = js_sys::Array::new();
+    let vo_mod_bytes = SHELL_HANDLER_FILES
+        .iter()
+        .find(|(path, _)| *path == "studio/vo/shell/vo.mod")
+        .map(|(_, bytes)| *bytes);
+    if let Some(bytes) = vo_mod_bytes {
+        if let Ok(content) = std::str::from_utf8(bytes) {
+            if let Ok(mod_file) = vo_module::ModFile::parse(content, std::path::Path::new("vo.mod")) {
+                for req in &mod_file.requires {
+                    arr.push(&JsValue::from_str(&req.module));
+                }
+            }
+        }
+    }
+    arr
 }
 
 /// Install all dependencies declared in the shell handler's embedded `vo.mod`.
@@ -395,21 +419,25 @@ pub fn vo_host_compile_check(code: &str) -> String {
 #[wasm_bindgen(js_name = "voHostRunBytecode")]
 pub fn vo_host_run_bytecode(bytecode: &[u8]) -> Result<(), JsValue> {
     vo_runtime::output::clear_output();
-    vo_web::create_vm(bytecode, |reg, exts| {
+    let saved = vo_web::ext_bridge::save_extern_state();
+    let result = vo_web::create_vm(bytecode, |reg, exts| {
         vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
     })
-    .map(|_| ())
-    .map_err(|e| JsValue::from_str(&e))
+    .map(|_| ());
+    vo_web::ext_bridge::restore_extern_state(saved);
+    result.map_err(|e| JsValue::from_str(&e))
 }
 
 /// Run bytecode and capture stdout. Returns captured output.
 #[wasm_bindgen(js_name = "voHostRunBytecodeCapture")]
 pub fn vo_host_run_bytecode_capture(bytecode: &[u8]) -> Result<String, JsValue> {
     vo_runtime::output::clear_output();
+    let saved = vo_web::ext_bridge::save_extern_state();
     let result = vo_web::create_vm(bytecode, |reg, exts| {
         vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
     });
     let captured = vo_web::take_output();
+    vo_web::ext_bridge::restore_extern_state(saved);
     match result {
         Ok(_) => Ok(captured),
         Err(e) => {

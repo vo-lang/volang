@@ -591,11 +591,14 @@ mod wasm {
         Some(files)
     }
 
-    /// Fetch a GitHub module's .vo source files using the GitHub Contents API.
+    /// Fetch a GitHub module's source files from raw.githubusercontent.com.
     ///
     /// Checks `window._voGetLocalModule(module, version)` first, allowing the host
     /// page to serve pre-bundled module sources without a network fetch.
-    /// Falls back to `https://api.github.com/repos/{owner}/{repo}/contents?ref={version}`.
+    ///
+    /// Otherwise fetches `vo.mod` first to read the `files (...)` block which
+    /// declares all distributable files.  Each listed file is then fetched
+    /// directly via raw.githubusercontent.com — no GitHub API involved.
     pub async fn fetch_module_files(
         module: &str,
         version: &str,
@@ -611,24 +614,46 @@ mod wasm {
         }
         let (owner, repo) = (parts[1], parts[2]);
 
-        // GitHub Contents API supports CORS from browsers
-        let api_url = format!(
-            "https://api.github.com/repos/{}/{}/contents?ref={}",
+        let raw_base = format!(
+            "https://raw.githubusercontent.com/{}/{}/{}",
             owner, repo, version
         );
-        let json_bytes = fetch_bytes(&api_url).await
-            .map_err(|e| format!("GitHub API error for {}: {}", module, e))?;
-        let json_str = String::from_utf8(json_bytes).map_err(|e| e.to_string())?;
+
+        // Fetch vo.mod to get the file list.
+        let vomod_bytes = fetch_bytes(&format!("{}/vo.mod", raw_base)).await
+            .map_err(|e| format!("failed to fetch vo.mod for {}: {}", module, e))?;
+        let vomod_content = String::from_utf8(vomod_bytes)
+            .map_err(|e| format!("vo.mod for {} is not valid UTF-8: {}", module, e))?;
+
+        let mod_file = crate::ModFile::parse(&vomod_content, std::path::Path::new("vo.mod"))
+            .map_err(|e| format!("vo.mod parse error for {}: {}", module, e))?;
+
+        if mod_file.files.is_empty() {
+            return Err(format!(
+                "vo.mod for {} has no files block — add a `files (...)` section listing all distributable files",
+                module
+            ));
+        }
 
         let mut result = Vec::new();
-        for entry in github_contents_entries(&json_str) {
-            // Fetch .vo sources, vo.mod, and vo.ext.toml (for bindgen detection)
-            if entry.name.ends_with(".vo") || entry.name == "vo.mod" || entry.name == "vo.ext.toml" {
-                let content_bytes = fetch_bytes(&entry.download_url).await
-                    .map_err(|e| format!("Failed to fetch {}: {}", entry.name, e))?;
-                let content = String::from_utf8(content_bytes).map_err(|e| e.to_string())?;
-                result.push((PathBuf::from(format!("{}/{}", module, entry.name)), content));
+        // Always include vo.mod itself.
+        result.push((PathBuf::from(format!("{}/vo.mod", module)), vomod_content));
+
+        for name in &mod_file.files {
+            if name == "vo.mod" {
+                continue; // already included
             }
+            // Binary extensions (.wasm) are fetched separately by fetch_wasm_binary;
+            // this path only handles text source files (.vo, .toml, etc.).
+            if name.ends_with(".wasm") {
+                continue;
+            }
+            let url = format!("{}/{}", raw_base, name);
+            let bytes = fetch_bytes(&url).await
+                .map_err(|e| format!("failed to fetch {}/{}: {}", module, name, e))?;
+            let content = String::from_utf8(bytes)
+                .map_err(|e| format!("{}/{} is not valid UTF-8: {}", module, name, e))?;
+            result.push((PathBuf::from(format!("{}/{}", module, name)), content));
         }
         Ok(result)
     }

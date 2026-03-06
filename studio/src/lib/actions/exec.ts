@@ -8,7 +8,7 @@ import { saveFile } from './fs';
 // =============================================================================
 
 function isGuiCode(code: string): boolean {
-  return code.includes('"vogui"');
+  return code.includes('vogui');
 }
 
 export async function runCode(): Promise<void> {

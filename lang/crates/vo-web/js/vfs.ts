@@ -537,10 +537,10 @@ export class VirtualFS {
     let node = parent.children!.get(fileName);
     if (node) {
       if (node.kind === 'directory') return ERR_IS_DIR;
-      node.data = data;
+      node.data = new Uint8Array(data);
       node.modTime = Date.now();
     } else {
-      parent.children!.set(fileName, this.createFile(mode, data));
+      parent.children!.set(fileName, this.createFile(mode, new Uint8Array(data)));
     }
     this.schedulePersist();
     return null;

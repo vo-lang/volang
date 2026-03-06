@@ -4,13 +4,24 @@
 //! ```text
 //! module <module-path>
 //!
+//! vo <version>
+//!
 //! require <module-path> <version>              -- alias derived from last path component
 //! require <alias> <module-path> <version>      -- explicit alias
+//!
+//! files (
+//!     foo.vo
+//!     bar.vo
+//!     vo.ext.toml
+//! )
 //! ```
 //!
 //! The alias is used in source code with `@"alias"` syntax for external imports.
 //! When the alias equals the last component of the module path it is omitted in
 //! serialized output so that `parse → serialize` is a no-op for user-written files.
+//!
+//! The `files (...)` block declares the distributable file list.  The WASM module
+//! fetcher reads this to know which files to download from raw.githubusercontent.com.
 
 use std::fmt;
 use std::fs;
@@ -26,6 +37,10 @@ pub struct ModFile {
 
     /// Direct dependencies.
     pub requires: Vec<Require>,
+
+    /// Distributable file list declared in `files (...)` block.
+    /// Used by WASM module fetcher to know which files to download.
+    pub files: Vec<String>,
 }
 
 /// A single require directive.
@@ -59,13 +74,17 @@ impl ModFile {
     pub fn parse(content: &str, file_path: &Path) -> ModuleResult<Self> {
         let mut module: Option<String> = None;
         let mut requires: Vec<Require> = Vec::new();
+        let mut files: Vec<String> = Vec::new();
 
-        for (line_num, line) in content.lines().enumerate() {
-            let line_num = line_num + 1; // 1-indexed
-            let line = line.trim();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut i = 0;
+        while i < lines.len() {
+            let line_num = i + 1; // 1-indexed
+            let line = lines[i].trim();
 
             // Skip empty lines and comments
             if line.is_empty() || line.starts_with("//") {
+                i += 1;
                 continue;
             }
 
@@ -85,11 +104,30 @@ impl ModFile {
                 }
 
                 module = Some(module_path.to_string());
+                i += 1;
                 continue;
             }
 
             // Skip language version declaration (e.g. "vo 0.1")
             if line.starts_with("vo ") {
+                i += 1;
+                continue;
+            }
+
+            // Parse files block: files ( ... ) — multi-line form only.
+            if line == "files (" {
+                i += 1;
+                while i < lines.len() {
+                    let fline = lines[i].trim();
+                    i += 1;
+                    if fline == ")" {
+                        break;
+                    }
+                    if fline.is_empty() || fline.starts_with("//") {
+                        continue;
+                    }
+                    files.push(fline.to_string());
+                }
                 continue;
             }
 
@@ -149,6 +187,7 @@ impl ModFile {
                     module: req_module.to_string(),
                     version: req_version.to_string(),
                 });
+                i += 1;
                 continue;
             }
 
@@ -162,7 +201,7 @@ impl ModFile {
 
         let module = module.ok_or_else(|| ModuleError::MissingModuleDecl(file_path.to_path_buf()))?;
 
-        Ok(ModFile { module, requires })
+        Ok(ModFile { module, requires, files })
     }
 
     /// Creates a new empty ModFile with the given module path.
@@ -170,6 +209,7 @@ impl ModFile {
         ModFile {
             module,
             requires: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -212,6 +252,14 @@ impl fmt::Display for ModFile {
                     writeln!(f, "require {} {} {}", req.alias, req.module, req.version)?;
                 }
             }
+        }
+        if !self.files.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "files (")?;
+            for name in &self.files {
+                writeln!(f, "    {}", name)?;
+            }
+            writeln!(f, ")")?;
         }
         Ok(())
     }
@@ -410,6 +458,7 @@ require bar github.com/foo/bar 1.2.3
                     version: "v1.2.3".to_string(),
                 },
             ],
+            files: Vec::new(),
         };
         // alias "bar" == last component of "github.com/foo/bar" → 2-field form
         let expected = "module github.com/myuser/myproject\n\nrequire github.com/foo/bar v1.2.3\n";
@@ -427,6 +476,7 @@ require bar github.com/foo/bar 1.2.3
                     version: "v1.9.0".to_string(),
                 },
             ],
+            files: Vec::new(),
         };
         // alias "myhttplib" != last component "gin" → 3-field form
         let expected = "module myproject\n\nrequire myhttplib github.com/gin-gonic/gin v1.9.0\n";
@@ -457,6 +507,7 @@ require bar github.com/foo/bar 1.2.3
                     version: "v1.9.0".to_string(),
                 },
             ],
+            files: Vec::new(),
         };
 
         assert!(mod_file.find_by_alias("gin").is_some());
@@ -583,6 +634,7 @@ require jwt github.com/golang-jwt/jwt v5.0.0
                     version: "v2.0.0-beta.1".to_string(),
                 },
             ],
+            files: Vec::new(),
         };
         
         let serialized = original.to_string();

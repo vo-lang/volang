@@ -159,7 +159,7 @@ fn reverse_lookup(addr: &str) -> Result<Vec<String>, String> {
             match ip {
                 IpAddr::V4(v4) => {
                     let mut sa: sockaddr_in = zeroed();
-                    sa.sin_family = AF_INET as u16;
+                    sa.sin_family = AF_INET as libc::sa_family_t;
                     sa.sin_addr.s_addr = u32::from_ne_bytes(v4.octets());
                     getnameinfo(
                         &sa as *const sockaddr_in as *const _,
@@ -173,7 +173,7 @@ fn reverse_lookup(addr: &str) -> Result<Vec<String>, String> {
                 }
                 IpAddr::V6(v6) => {
                     let mut sa: sockaddr_in6 = zeroed();
-                    sa.sin6_family = AF_INET6 as u16;
+                    sa.sin6_family = AF_INET6 as libc::sa_family_t;
                     sa.sin6_addr.s6_addr = v6.octets();
                     getnameinfo(
                         &sa as *const sockaddr_in6 as *const _,

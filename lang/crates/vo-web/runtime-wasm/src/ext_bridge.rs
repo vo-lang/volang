@@ -51,6 +51,12 @@ pub const TAG_VALUE:      u8 = 0xE2;
 pub const TAG_BYTES:      u8 = 0xE3;
 pub const TAG_NIL_REF:    u8 = 0xE4;
 
+// Control tags (< 0xE0) returned by voCallExt for VM-level operations.
+// These are distinct from output tags and interpreted by wasm_ext_bridge
+// to produce non-Ok ExternResult variants.
+pub const TAG_SUSPEND:     u8 = 0x01; // HostEventWaitAndReplay
+pub const TAG_HOST_OUTPUT: u8 = 0x02; // set_host_output with payload
+
 // ── JS bindings ───────────────────────────────────────────────────────────────
 
 #[wasm_bindgen]
@@ -60,6 +66,9 @@ extern "C" {
 
     #[wasm_bindgen(js_namespace = window, js_name = "voCallExt")]
     fn js_call_ext(extern_name: &str, input: &[u8]) -> Vec<u8>;
+
+    #[wasm_bindgen(js_namespace = window, js_name = "voCallExtReplay")]
+    fn js_call_ext_replay(extern_name: &str, resume_data: &[u8]) -> Vec<u8>;
 }
 
 // ── Thread-local state ────────────────────────────────────────────────────────
@@ -107,6 +116,28 @@ pub fn register_wasm_ext_bridges(reg: &mut ExternRegistry, externs: &[ExternDef]
 pub fn clear_wasm_ext_state() {
     LOADED_PREFIXES.with(|p| p.borrow_mut().clear());
     EXTERN_ID_TO_INFO.with(|m| m.borrow_mut().clear());
+}
+
+/// Saved extern state for reentrant VM calls.
+pub struct SavedExternState {
+    id_to_info: HashMap<u32, (String, Vec<ExtSlotKind>)>,
+    loaded_prefixes: Vec<String>,
+}
+
+/// Save the current extern state (ID mapping + loaded prefixes) for later restore.
+/// Used before reentrant VM calls (e.g. vox host bridge creating an inner VM)
+/// to prevent register_wasm_ext_bridges from clobbering the outer VM's state.
+pub fn save_extern_state() -> SavedExternState {
+    SavedExternState {
+        id_to_info: EXTERN_ID_TO_INFO.with(|m| m.borrow().clone()),
+        loaded_prefixes: LOADED_PREFIXES.with(|p| p.borrow().clone()),
+    }
+}
+
+/// Restore a previously saved extern state.
+pub fn restore_extern_state(state: SavedExternState) {
+    EXTERN_ID_TO_INFO.with(|m| *m.borrow_mut() = state.id_to_info);
+    LOADED_PREFIXES.with(|p| *p.borrow_mut() = state.loaded_prefixes);
 }
 
 // ── Internal ──────────────────────────────────────────────────────────────────
@@ -195,45 +226,54 @@ fn decode_ext_output(call: &mut ExternCallContext, output: &[u8]) {
 
 /// Generic ExternFn that dispatches any ext module call via `window.voCallExt`.
 ///
-/// V2 (param_kinds non-empty): tagged binary input + tagged output decoder.
-/// V1 legacy (param_kinds empty): arg_str(0) as raw input + Convention A/B output.
+/// All externs routed here are from v2 standalone WASM modules.
+/// Input is encoded as tagged binary (or empty for zero-arg functions).
+/// Output is decoded as tagged binary, with two control tags:
+///   TAG_SUSPEND (0x01)     → return HostEventWaitAndReplay
+///   TAG_HOST_OUTPUT (0x02) → call set_host_output with trailing bytes
+///
+/// On the replay path (after HostEventWaitAndReplay wakes the fiber),
+/// delegates to `voCallExtReplay` so JS can decode resume data into
+/// tagged output.
 fn wasm_ext_bridge(call: &mut ExternCallContext) -> ExternResult {
     let id = call.extern_id();
     let (name, param_kinds) = EXTERN_ID_TO_INFO.with(|m| {
         m.borrow().get(&id).cloned()
     }).unwrap_or_else(|| panic!("wasm_ext_bridge: extern_id {} not registered", id));
 
-    let use_tagged = !param_kinds.is_empty();
+    // Replay path: fiber was suspended by TAG_SUSPEND, now resumed with event data.
+    if let Some(_token) = call.take_resume_host_event_token() {
+        let resume_data = call.take_resume_host_event_data().unwrap_or_default();
+        let output = js_call_ext_replay(&name, &resume_data);
+        decode_ext_output(call, &output);
+        return ExternResult::Ok;
+    }
 
-    let input = if use_tagged {
-        encode_ext_input(call, &param_kinds)
+    // All externs routed through wasm_ext_bridge are v2 standalone modules.
+    // Encode input using tagged binary protocol; zero-arg functions get empty input.
+    let input = if param_kinds.is_empty() {
+        Vec::new()
     } else {
-        // Legacy: pass first arg as raw bytes (old protocol for pre-v2 modules)
-        call.arg_str(0).as_bytes().to_vec()
+        encode_ext_input(call, &param_kinds)
     };
 
     let output = js_call_ext(&name, &input);
 
-    if use_tagged {
-        decode_ext_output(call, &output);
-    } else {
-        // Legacy Convention A/B based on ret_slots
-        if call.ret_slots() == 2 {
-            if output.is_empty() {
-                write_nil_error(call, 0);
-            } else {
-                write_error_to(call, 0, &String::from_utf8_lossy(&output));
+    // Check control tags (first byte < 0xE0) for VM-level operations.
+    if !output.is_empty() && output[0] < 0xE0 {
+        return match output[0] {
+            TAG_SUSPEND => {
+                let token = call.next_host_event_token();
+                ExternResult::HostEventWaitAndReplay { token }
             }
-        } else {
-            if output.is_empty() {
-                call.ret_nil(0);
-                write_error_to(call, 1, &format!("ext call failed: {}", name));
-            } else {
-                let slice_ref = call.alloc_bytes(&output);
-                call.ret_ref(0, slice_ref);
-                write_nil_error(call, 1);
+            TAG_HOST_OUTPUT => {
+                call.set_host_output(output[1..].to_vec());
+                ExternResult::Ok
             }
-        }
+            _ => ExternResult::Ok,
+        };
     }
+
+    decode_ext_output(call, &output);
     ExternResult::Ok
 }

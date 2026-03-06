@@ -202,6 +202,46 @@ def build_test_data_zip():
     print(f"{Colors.GREEN}✓ test_data.zip:{Colors.NC} {count} files, {size_kb:.1f} KB")
 
 
+def ensure_vo_web_wasm_built():
+    """Build lang/crates/vo-web WASM pkg if missing or stale."""
+    pkg_dir = PROJECT_ROOT / 'lang' / 'crates' / 'vo-web' / 'pkg'
+    wasm_file = pkg_dir / 'vo_web_bg.wasm'
+    js_file = pkg_dir / 'vo_web.js'
+
+    needs_build = not (wasm_file.exists() and js_file.exists())
+    if not needs_build:
+        wasm_mtime = wasm_file.stat().st_mtime
+
+        vo_web_src = PROJECT_ROOT / 'lang' / 'crates' / 'vo-web' / 'src'
+        if get_newest_mtime(vo_web_src, pattern='*.rs') > wasm_mtime:
+            needs_build = True
+
+        if not needs_build:
+            stdlib_dir = PROJECT_ROOT / 'lang' / 'stdlib'
+            if get_newest_mtime(stdlib_dir, pattern='*.vo') > wasm_mtime:
+                needs_build = True
+
+        if not needs_build:
+            for crate in [
+                'vo-codegen', 'vo-analysis', 'vo-runtime', 'vo-vm', 'vo-common-core',
+                'vo-stdlib', 'vo-web/runtime-wasm', 'vo-ffi-macro',
+            ]:
+                crate_dir = PROJECT_ROOT / 'lang' / 'crates' / crate / 'src'
+                if get_newest_mtime(crate_dir, pattern='*.rs') > wasm_mtime:
+                    needs_build = True
+                    break
+
+    if needs_build:
+        print(f"{Colors.DIM}Building vo-web WASM...{Colors.NC}")
+        code, _, _ = run_cmd(
+            ['wasm-pack', 'build', 'lang/crates/vo-web', '--target', 'web', '--features', 'compiler'],
+            capture=False,
+        )
+        if code != 0:
+            print(f"{Colors.RED}wasm-pack build failed{Colors.NC}")
+            sys.exit(1)
+
+
 def run_playground(build_only: bool = False):
     """Build WASM and optionally start the playground dev server."""
     build_test_data_zip()
@@ -215,11 +255,12 @@ def run_playground(build_only: bool = False):
         print(f"{Colors.RED}Playground directory not found: {playground_dir}{Colors.NC}")
         sys.exit(1)
     
-    print(f"\n{Colors.BOLD}Starting playground...{Colors.NC}")
+    print(f"\n{Colors.BOLD}Starting Playground...{Colors.NC}")
     print(f"{Colors.DIM}Press Ctrl+C to stop{Colors.NC}\n")
     
     try:
-        subprocess.run(['npm', 'run', 'dev'], cwd=playground_dir, check=True)
+        ensure_vo_web_wasm_built()
+        subprocess.run(['zsh', '-lc', 'npm run dev'], cwd=playground_dir, check=True)
     except KeyboardInterrupt:
         print(f"\n{Colors.GREEN}Playground stopped{Colors.NC}")
 
@@ -263,7 +304,7 @@ def studio_wasm_needs_build() -> bool:
 
     # studio/vo/shell/*.vo — embedded as shell handler sources
     shell_vo = PROJECT_ROOT / 'studio' / 'vo' / 'shell'
-    if get_newest_mtime(shell_vo, pattern='*.vo') > wasm_mtime:
+    if get_newest_mtime(shell_vo, shell_vo / 'vo.mod', pattern='*.vo') > wasm_mtime:
         return True
 
     # vox/vox.vo — embedded as shell handler dependency
@@ -362,7 +403,8 @@ def run_studio(build_wasm: bool = False, build_only: bool = False):
     print(f"{Colors.DIM}Press Ctrl+C to stop{Colors.NC}\n")
 
     try:
-        subprocess.run(['npm', 'run', 'dev'], cwd=studio_dir, check=True)
+        ensure_vo_web_wasm_built()
+        subprocess.run(['zsh', '-lc', 'npm run dev'], cwd=studio_dir, check=True)
     except KeyboardInterrupt:
         print(f"\n{Colors.GREEN}Studio stopped{Colors.NC}")
 
