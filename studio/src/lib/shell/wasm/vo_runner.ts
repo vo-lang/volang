@@ -5,8 +5,8 @@ import type { ShellRequest, ShellResponse, ShellEvent, ShellErrorCode } from '..
 // that the Tauri backend uses, but via the studio WASM module.
 //
 // The studio WASM module exposes runShellHandler(args: string[]) which:
-//   1. Compiles studio/vo/shell/ from embedded sources (3rdparty/zip, libs/vox,
-//      and the shell .vo files — all embedded at build time via build.rs).
+//   1. Compiles studio/vo/shell/ from embedded .vo sources + third-party deps
+//      resolved from the JS VFS via WasmVfs (installed by preloadShellDeps).
 //   2. Injects args as os.Args in the Vo program.
 //   3. Returns stdout, which is a JSON-encoded shell response.
 //

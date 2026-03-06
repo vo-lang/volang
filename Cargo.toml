@@ -15,7 +15,6 @@ exclude = [
   "3rdparty/wgpu/rust",
   "studio/src-tauri",
   "libs/vogui",
-  "libs/vox",
 ]
 
 [workspace.package]

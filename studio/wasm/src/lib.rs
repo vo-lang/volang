@@ -6,8 +6,6 @@
 //! The IDE UI is Svelte; this module compiles and runs user Vo code.
 //! Source files are read from the JS VirtualFS (via vo_web_runtime_wasm::vfs).
 
-mod vox_wasm_ffi;
-
 use std::cell::RefCell;
 use std::path::PathBuf;
 use wasm_bindgen::prelude::*;
@@ -20,10 +18,7 @@ fn ensure_panic_hook() {
     INIT.call_once(|| console_error_panic_hook::set_once());
 }
 
-// Embed all top-level vogui .vo files for user code that imports "vogui".
-include!(concat!(env!("OUT_DIR"), "/vogui_embedded.rs"));
-
-// Embed shell handler + 3rdparty sources for runShellHandler.
+// Embed shell handler source files for runShellHandler.
 include!(concat!(env!("OUT_DIR"), "/shell_embedded.rs"));
 
 
@@ -44,16 +39,10 @@ thread_local! {
 // FS helpers
 // =============================================================================
 
-/// Build a stdlib FS that also includes the embedded vogui package.
-pub(crate) fn build_user_std_fs() -> MemoryFs {
-    let mut fs = vo_web::build_stdlib_fs();
-    for (vfs_path, bytes) in VOGUI_FILES {
-        if let Ok(content) = std::str::from_utf8(bytes) {
-            fs.add_file(PathBuf::from(*vfs_path), content.to_string());
-        }
-    }
-    fs
-}
+/// VFS root for third-party modules.
+/// Modules are installed at `/<module_path>/...` in the JS VFS
+/// (e.g. `/github.com/vo-lang/vox/vox.vo`), so the root is empty.
+const VFS_MOD_ROOT: &str = "";
 
 /// Read all .vo files from a JS VFS directory (recursively) into a MemoryFs.
 fn read_vfs_package(pkg_dir: &str, local_fs: &mut MemoryFs) -> Result<(), String> {
@@ -90,8 +79,6 @@ fn read_vfs_package(pkg_dir: &str, local_fs: &mut MemoryFs) -> Result<(), String
 /// so other .vo files in the same directory don't cause "duplicate main" errors.
 /// Multi-file mode (vo.mod present): all .vo files in the package directory are read.
 fn compile_from_vfs(entry_path: &str) -> Result<Vec<u8>, String> {
-    let std_fs = build_user_std_fs();
-
     let entry_clean = entry_path.trim_start_matches('/');
     let pkg_dir = std::path::Path::new(entry_path)
         .parent()
@@ -119,7 +106,7 @@ fn compile_from_vfs(entry_path: &str) -> Result<Vec<u8>, String> {
         local_fs.add_file(PathBuf::from(entry_clean), content);
     }
 
-    vo_web::compile_entry_with_std_fs(entry_clean, local_fs, std_fs)
+    vo_web::compile_entry_with_vfs(entry_clean, local_fs, VFS_MOD_ROOT)
         .map_err(|e| format!("compile error: {}", e))
 }
 
@@ -234,25 +221,19 @@ thread_local! {
 }
 
 fn build_shell_handler_bytecode() -> Result<Vec<u8>, String> {
-    let mut std_fs = build_user_std_fs();
     let mut local_fs = MemoryFs::new();
 
+    // Only the shell handler's own source files are embedded at build time.
+    // Third-party deps (vox, git2, zip) are resolved from JS VFS via WasmVfs.
     for (vfs_path, bytes) in SHELL_HANDLER_FILES {
         let Ok(content) = std::str::from_utf8(bytes) else { continue };
-        let p = std::path::PathBuf::from(*vfs_path);
-        // Files under "studio/vo/shell/" go into local_fs (package root).
-        // 3rdparty/* and libs/* go into std_fs (available as stdlib-style imports).
-        if vfs_path.starts_with("studio/vo/shell/") {
-            local_fs.add_file(p, content.to_string());
-        } else {
-            std_fs.add_file(p, content.to_string());
-        }
+        local_fs.add_file(std::path::PathBuf::from(*vfs_path), content.to_string());
     }
 
-    vo_web::compile_entry_with_std_fs(
+    vo_web::compile_entry_with_vfs(
         "studio/vo/shell/main.vo",
         local_fs,
-        std_fs,
+        VFS_MOD_ROOT,
     ).map_err(|e| format!("error:{}", e))
 }
 
@@ -267,6 +248,33 @@ fn get_shell_handler_bytecode() -> Result<Vec<u8>, String> {
         let bc = build_shell_handler_bytecode()?;
         *cell.borrow_mut() = Some(bc.clone());
         Ok(bc)
+    })
+}
+
+/// Install all dependencies declared in the shell handler's embedded `vo.mod`.
+///
+/// Extracts the `vo.mod` that was embedded at build time and delegates to
+/// `vo_web::ensure_vfs_deps` — the module system handles parsing, checking
+/// whether each module is already in VFS, and fetching missing ones.
+///
+/// Adding a new shell dependency is a one-line change to `studio/vo/shell/vo.mod`.
+#[wasm_bindgen(js_name = "preloadShellDeps")]
+pub fn preload_shell_deps() -> js_sys::Promise {
+    wasm_bindgen_futures::future_to_promise(async move {
+        let vo_mod_bytes = SHELL_HANDLER_FILES
+            .iter()
+            .find(|(path, _)| *path == "studio/vo/shell/vo.mod")
+            .map(|(_, bytes)| *bytes)
+            .ok_or_else(|| JsValue::from_str("no embedded vo.mod found"))?;
+
+        let content = std::str::from_utf8(vo_mod_bytes)
+            .map_err(|e| JsValue::from_str(&format!("vo.mod utf8: {}", e)))?;
+
+        vo_web::ensure_vfs_deps(content)
+            .await
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        Ok(JsValue::from_str("ok"))
     })
 }
 
@@ -324,7 +332,7 @@ pub fn run_shell_handler(args: js_sys::Array) -> String {
 
     vo_runtime::output::clear_output();
     let run_result = vo_web::create_vm(&bytecode, |reg, exts| {
-        vox_wasm_ffi::register_externs(reg, exts);
+        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
     });
 
     vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
@@ -340,6 +348,75 @@ pub fn run_shell_handler(args: js_sys::Array) -> String {
                 format!("error:{}", e)
             } else {
                 stdout
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Host bridge exports for vox standalone WASM module
+//
+// The vox.wasm module (WasmHostBackend) calls window.voHost* JS globals which
+// delegate to these functions.  This lets vox reuse the host's compiler and VM
+// instead of bundling its own.
+// =============================================================================
+
+/// Compile a single .vo file (or directory with vo.mod) from VFS.
+/// Returns serialised bytecode on success.
+#[wasm_bindgen(js_name = "voHostCompileFile")]
+pub fn vo_host_compile_file(path: &str) -> Result<Vec<u8>, JsValue> {
+    compile_from_vfs(path).map_err(|e| JsValue::from_str(&e))
+}
+
+/// Compile a directory (entry = dir/main.vo) from VFS.
+/// Returns serialised bytecode on success.
+#[wasm_bindgen(js_name = "voHostCompileDir")]
+pub fn vo_host_compile_dir(path: &str) -> Result<Vec<u8>, JsValue> {
+    compile_from_vfs(path).map_err(|e| JsValue::from_str(&e))
+}
+
+/// Compile source code string. Returns serialised bytecode.
+#[wasm_bindgen(js_name = "voHostCompileString")]
+pub fn vo_host_compile_string(code: &str) -> Result<Vec<u8>, JsValue> {
+    vo_web::compile_source_with_vfs(code, "main.vo", VFS_MOD_ROOT)
+        .map_err(|e| JsValue::from_str(&format!("compile error: {}", e)))
+}
+
+/// Type-check source code. Returns empty string on success, error message on failure.
+#[wasm_bindgen(js_name = "voHostCompileCheck")]
+pub fn vo_host_compile_check(code: &str) -> String {
+    match vo_web::compile_source_with_vfs(code, "main.vo", VFS_MOD_ROOT) {
+        Ok(_) => String::new(),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// Run bytecode (VM mode).
+#[wasm_bindgen(js_name = "voHostRunBytecode")]
+pub fn vo_host_run_bytecode(bytecode: &[u8]) -> Result<(), JsValue> {
+    vo_runtime::output::clear_output();
+    vo_web::create_vm(bytecode, |reg, exts| {
+        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
+    })
+    .map(|_| ())
+    .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Run bytecode and capture stdout. Returns captured output.
+#[wasm_bindgen(js_name = "voHostRunBytecodeCapture")]
+pub fn vo_host_run_bytecode_capture(bytecode: &[u8]) -> Result<String, JsValue> {
+    vo_runtime::output::clear_output();
+    let result = vo_web::create_vm(bytecode, |reg, exts| {
+        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
+    });
+    let captured = vo_web::take_output();
+    match result {
+        Ok(_) => Ok(captured),
+        Err(e) => {
+            if captured.trim().is_empty() {
+                Err(JsValue::from_str(&e))
+            } else {
+                Err(JsValue::from_str(&format!("{}\nRuntime error: {}", captured.trim_end(), e)))
             }
         }
     }

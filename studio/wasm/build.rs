@@ -1,11 +1,8 @@
-//! Build script: embed .vo source files for WASM compilation.
+//! Build script: embed shell handler .vo source files for WASM compilation.
 //!
-//! Embeds:
-//! - libs/vogui/ top-level .vo files   → "github.com/vo-lang/vogui/<name>"
-//! - studio/vo/shell/ .vo files         → "studio/vo/shell/<name>"
-//! - 3rdparty/git2/git2.vo              → "3rdparty/git2/git2.vo"
-//! - 3rdparty/zip/zip.vo                → "3rdparty/zip/zip.vo"
-//! - libs/vox/vox.vo                    → "github.com/vo-lang/vox/vox.vo"
+//! Only the shell handler's own source files are embedded. Third-party
+//! dependencies (vogui, vox, git2, zip) are installed into the JS VFS at
+//! runtime via `install_module_to_vfs` and resolved through `WasmVfs`.
 
 use std::{env, fs, path::{Path, PathBuf}};
 
@@ -57,63 +54,28 @@ fn collect_vo_files(dir: &Path, prefix: &str, entries: &mut String, out_dir: &st
     }
 }
 
-fn embed_single_file(path: &Path, vfs_path: &str, entries: &mut String) {
-    if path.is_file() {
-        entries.push_str(&format!(
-            "    ({:?}, include_bytes!({:?})),\n",
-            vfs_path,
-            path.display()
-        ));
-    }
-}
-
 fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     // studio/wasm -> studio -> repo root
     let repo_root = manifest_dir.join("../..").canonicalize().unwrap();
 
-    // ── vogui ─────────────────────────────────────────────────────────────────
-    let vogui_dir = repo_root.join("libs/vogui");
-    let mut vogui_entries = String::new();
-    collect_vo_files(&vogui_dir, "github.com/vo-lang/vogui", &mut vogui_entries, &out_dir);
-    fs::write(
-        Path::new(&out_dir).join("vogui_embedded.rs"),
-        format!("pub static VOGUI_FILES: &[(&str, &[u8])] = &[\n{}];\n", vogui_entries),
-    ).unwrap();
-    println!("cargo:rerun-if-changed={}", vogui_dir.display());
-
-    // ── shell handler + 3rdparty sources ─────────────────────────────────────
+    // ── shell handler source files + vo.mod ─────────────────────────────────
     let mut shell_entries = String::new();
-
-    // studio/vo/shell/*.vo
     let shell_dir = repo_root.join("studio/vo/shell");
     collect_vo_files(&shell_dir, "studio/vo/shell", &mut shell_entries, &out_dir);
+
+    // Embed vo.mod so Rust can parse it at runtime to auto-install deps.
+    let vo_mod_path = shell_dir.join("vo.mod");
+    if vo_mod_path.is_file() {
+        shell_entries.push_str(&format!(
+            "    ({:?}, include_bytes!({:?})),\n",
+            "studio/vo/shell/vo.mod",
+            vo_mod_path.display()
+        ));
+    }
+
     println!("cargo:rerun-if-changed={}", shell_dir.display());
-
-    // 3rdparty/git2/git2.vo
-    embed_single_file(
-        &repo_root.join("3rdparty/git2/git2.vo"),
-        "3rdparty/git2/git2.vo",
-        &mut shell_entries,
-    );
-    println!("cargo:rerun-if-changed={}", repo_root.join("3rdparty/git2/git2.vo").display());
-
-    // 3rdparty/zip/zip.vo
-    embed_single_file(
-        &repo_root.join("3rdparty/zip/zip.vo"),
-        "3rdparty/zip/zip.vo",
-        &mut shell_entries,
-    );
-    println!("cargo:rerun-if-changed={}", repo_root.join("3rdparty/zip/zip.vo").display());
-
-    // libs/vox/vox.vo — embedded at "libs/vox/vox.vo" to match `import "libs/vox"` in shell handler
-    embed_single_file(
-        &repo_root.join("libs/vox/vox.vo"),
-        "libs/vox/vox.vo",
-        &mut shell_entries,
-    );
-    println!("cargo:rerun-if-changed={}", repo_root.join("libs/vox/vox.vo").display());
 
     fs::write(
         Path::new(&out_dir).join("shell_embedded.rs"),

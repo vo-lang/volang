@@ -1,7 +1,7 @@
 package main
 
 import (
-	"libs/vox"
+	"github.com/vo-lang/vox"
 	"os"
 	"path/filepath"
 	"strconv"

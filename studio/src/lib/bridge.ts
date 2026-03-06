@@ -141,7 +141,15 @@ async function initWasmBridge(): Promise<void> {
   }
   await wasmMod.default(wasmBinaryUrl);
 
-  // 4) Seed default workspace main project if it doesn't exist
+  // 4) Install shell handler dependencies declared in vo.mod into the JS VFS.
+  //    Rust parses the embedded vo.mod and fetches each require from GitHub.
+  try {
+    await wasmMod.preloadShellDeps();
+  } catch (e) {
+    console.warn('[studio] Failed to install shell deps:', e);
+  }
+
+  // 5) Seed default workspace main project if it doesn't exist
   const mainStatErr = vfs.stat(WASM_WORKSPACE + '/main')[5];
   if (mainStatErr) {
     vfs.mkdirAll(WASM_WORKSPACE + '/main', 0o755);
@@ -312,6 +320,19 @@ async function initWasmBridge(): Promise<void> {
   (window as any).voguiSetTitle = () => {};
   (window as any).voguiSetMeta = () => {};
   (window as any).voguiToast = () => {};
+
+  // Host bridge for vox standalone WASM module — compile/run delegate to studio WASM,
+  // VFS ops delegate to the JS VFS layer directly.
+  (window as any).voHostCompileFile = (path: string) => wasmMod.voHostCompileFile(path);
+  (window as any).voHostCompileDir = (path: string) => wasmMod.voHostCompileDir(path);
+  (window as any).voHostCompileString = (code: string) => wasmMod.voHostCompileString(code);
+  (window as any).voHostCompileCheck = (code: string) => wasmMod.voHostCompileCheck(code);
+  (window as any).voHostRunBytecode = (bytecode: Uint8Array) => wasmMod.voHostRunBytecode(bytecode);
+  (window as any).voHostRunBytecodeCapture = (bytecode: Uint8Array) => wasmMod.voHostRunBytecodeCapture(bytecode);
+  (window as any).voHostVfsRead = (path: string) => vfs.readFile(path);
+  (window as any).voHostVfsWrite = (path: string, data: Uint8Array) => vfs.writeFile(path, data, 0o644);
+  (window as any).voHostVfsMkdirAll = (path: string) => vfs.mkdirAll(path, 0o755);
+  (window as any).voHostVfsExists = (path: string) => !vfs.stat(path)[5];
 
   // 5) Build bridge — all FS ops route through ShellClient → Vo shell handler
   const wasmRouter  = new WasmShellRouter(wasmMod, WASM_WORKSPACE);

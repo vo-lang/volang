@@ -18,6 +18,11 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "compiler")]
 use vo_common::vfs::{FileSet, MemoryFs};
 
+#[cfg(feature = "compiler")]
+mod wasm_vfs;
+#[cfg(feature = "compiler")]
+pub use wasm_vfs::WasmVfs;
+
 /// Initialize panic hook for better error messages in console.
 #[cfg(feature = "compiler")]
 #[wasm_bindgen(start)]
@@ -201,9 +206,23 @@ pub fn compile_source_with_mod_fs(
 ///
 /// `entry` is the path to the package entry file inside `local_fs`
 /// (e.g. `"studio/main.vo"`). `local_fs` must contain all package source files.
-/// `std_fs` must contain stdlib + any extra packages (vogui, vox, etc.).
+/// `std_fs` must contain stdlib packages only.
+/// Third-party modules (imports containing `.`) are not resolved by this variant;
+/// use `compile_entry_with_mod_fs` if the package has external module dependencies.
 #[cfg(feature = "compiler")]
 pub fn compile_entry_with_std_fs(entry: &str, local_fs: MemoryFs, std_fs: MemoryFs) -> Result<Vec<u8>, String> {
+    compile_entry_with_mod_fs(entry, local_fs, std_fs, MemoryFs::new())
+}
+
+/// Compile a multi-file Vo package with separate stdlib and module filesystems.
+///
+/// `entry` is the path to the package entry file inside `local_fs`.
+/// `std_fs` contains stdlib packages (fmt, strings, etc.).
+/// `mod_fs` contains third-party module dependencies at their canonical paths
+/// (e.g. `github.com/vo-lang/vogui/app.vo`). Imports containing `.` are
+/// resolved from `mod_fs`.
+#[cfg(feature = "compiler")]
+pub fn compile_entry_with_mod_fs(entry: &str, local_fs: MemoryFs, std_fs: MemoryFs, mod_fs: MemoryFs) -> Result<Vec<u8>, String> {
     use vo_analysis::analyze_project;
     use vo_codegen::compile_project;
     use vo_module::vfs::{PackageResolver, StdSource, LocalSource, ModSource};
@@ -215,7 +234,67 @@ pub fn compile_entry_with_std_fs(entry: &str, local_fs: MemoryFs, std_fs: Memory
     let resolver = PackageResolver {
         std: StdSource::with_fs(std_fs),
         local: LocalSource::with_fs(local_fs),
-        r#mod: ModSource::with_fs(MemoryFs::new()),
+        r#mod: ModSource::with_fs(mod_fs),
+    };
+
+    let project = analyze_project(file_set, &resolver)
+        .map_err(|e| format!("{}", e))?;
+
+    let module = compile_project(&project)
+        .map_err(|e| format!("{:?}", e))?;
+
+    Ok(module.serialize())
+}
+
+/// Compile a multi-file Vo package, resolving third-party modules from the JS VFS.
+///
+/// This is the preferred WASM compilation path: stdlib is embedded, local files
+/// come from `local_fs`, and third-party modules (imports containing `.`) are
+/// resolved from the JS VirtualFS at `vfs_mod_root` (e.g. `"/.vo/mod"`).
+///
+/// Modules must be installed into the VFS beforehand (via `install_module_to_vfs`).
+#[cfg(feature = "compiler")]
+pub fn compile_entry_with_vfs(entry: &str, local_fs: MemoryFs, vfs_mod_root: &str) -> Result<Vec<u8>, String> {
+    use vo_analysis::analyze_project;
+    use vo_codegen::compile_project;
+    use vo_module::vfs::{PackageResolverMixed, StdSource, LocalSource, ModSource};
+
+    let pkg_dir = Path::new(entry).parent().unwrap_or(Path::new("."));
+    let file_set = FileSet::collect(&local_fs, pkg_dir, PathBuf::from("."))
+        .map_err(|e| format!("Failed to collect package files: {}", e))?;
+
+    let resolver = PackageResolverMixed {
+        std: StdSource::with_fs(build_stdlib_fs()),
+        local: LocalSource::with_fs(local_fs),
+        r#mod: ModSource::with_fs(WasmVfs::new(vfs_mod_root)),
+    };
+
+    let project = analyze_project(file_set, &resolver)
+        .map_err(|e| format!("{}", e))?;
+
+    let module = compile_project(&project)
+        .map_err(|e| format!("{:?}", e))?;
+
+    Ok(module.serialize())
+}
+
+/// Compile a single-file Vo source, resolving third-party modules from the JS VFS.
+#[cfg(feature = "compiler")]
+pub fn compile_source_with_vfs(source: &str, filename: &str, vfs_mod_root: &str) -> Result<Vec<u8>, String> {
+    use vo_analysis::analyze_project;
+    use vo_codegen::compile_project;
+    use vo_module::vfs::{PackageResolverMixed, StdSource, LocalSource, ModSource};
+
+    let mut fs = MemoryFs::new();
+    fs.add_file(PathBuf::from(filename), source.to_string());
+
+    let file_set = FileSet::from_file(&fs, Path::new(filename), PathBuf::from("."))
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+    let resolver = PackageResolverMixed {
+        std: StdSource::with_fs(build_stdlib_fs()),
+        local: LocalSource::with_fs(fs),
+        r#mod: ModSource::with_fs(WasmVfs::new(vfs_mod_root)),
     };
 
     let project = analyze_project(file_set, &resolver)
@@ -353,6 +432,61 @@ pub async fn prepare_github_modules(source: &str) -> Result<(MemoryFs, String), 
         load_ext_if_present(&imp.module, &imp.version, &files).await;
     }
     Ok((mod_fs, fetch::strip_module_versions(source)))
+}
+
+/// Ensure all dependencies declared in a `vo.mod` are installed in the JS VFS.
+///
+/// This is the WASM equivalent of native `compile_with_auto_install`'s
+/// `ensure_module_ready` loop.  Parses the `vo.mod` content, checks whether
+/// each `require` is already present in the VFS, and installs missing ones
+/// via `install_module_to_vfs`.
+///
+/// Callers pass the raw `vo.mod` text — it can come from a file on disk,
+/// an embedded resource, or a `MemoryFs`.  The function is intentionally
+/// decoupled from *where* the manifest lives so it works for any project
+/// (shell handler, user code, playground, etc.).
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
+pub async fn ensure_vfs_deps(vo_mod_content: &str) -> Result<(), String> {
+    use vo_common::vfs::FileSystem;
+
+    let mod_file = vo_module::ModFile::parse(vo_mod_content, std::path::Path::new("vo.mod"))
+        .map_err(|e| format!("vo.mod parse error: {}", e))?;
+
+    let vfs = WasmVfs::new("");
+    for req in &mod_file.requires {
+        // Check if module directory already exists in VFS.
+        let mod_dir = std::path::Path::new(&req.module);
+        if vfs.exists(mod_dir) {
+            continue;
+        }
+        let spec = format!("{}@{}", req.module, req.version);
+        install_module_to_vfs(&spec).await?;
+    }
+    Ok(())
+}
+
+/// Ensure all dependencies declared in a `vo.mod` inside a `MemoryFs` are
+/// installed in the JS VFS.
+///
+/// Looks for a file named `vo.mod` (or `<dir>/vo.mod`) in the given `MemoryFs`.
+/// If found, delegates to [`ensure_vfs_deps`].  If no `vo.mod` exists, this is
+/// a no-op (single-file programs without dependencies).
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
+pub async fn ensure_vfs_deps_from_fs(local_fs: &MemoryFs, entry: &str) -> Result<(), String> {
+    use vo_common::vfs::FileSystem;
+
+    // Try <entry_dir>/vo.mod, then top-level vo.mod
+    let entry_dir = std::path::Path::new(entry).parent().unwrap_or(std::path::Path::new("."));
+    let candidates = [
+        entry_dir.join("vo.mod"),
+        std::path::PathBuf::from("vo.mod"),
+    ];
+    for candidate in &candidates {
+        if let Ok(content) = local_fs.read_file(candidate) {
+            return ensure_vfs_deps(&content).await;
+        }
+    }
+    Ok(())
 }
 
 /// Install a Vo module from GitHub into the JS VirtualFS and load its WASM extension (if any).
