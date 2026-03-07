@@ -7,7 +7,9 @@ use alloc::vec::Vec;
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 
-use vo_runtime::gc::{Gc, GcRef};
+use vo_runtime::gc::Gc;
+#[cfg(feature = "std")]
+use vo_runtime::gc::GcRef;
 use vo_runtime::output::{OutputSink, default_sink};
 use vo_runtime::SentinelErrorCache;
 

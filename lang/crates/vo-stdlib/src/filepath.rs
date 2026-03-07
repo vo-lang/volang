@@ -5,7 +5,9 @@ use std::path::PathBuf;
 #[cfg(feature = "std")]
 use std::fs;
 
+#[cfg(feature = "std")]
 use vo_ffi_macro::vostd_fn;
+#[cfg(feature = "std")]
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 #[cfg(feature = "std")]
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};

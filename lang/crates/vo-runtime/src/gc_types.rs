@@ -1,8 +1,5 @@
 //! GC object scanning by type.
 
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-
 use crate::gc::{scan_slots_by_types, Gc, GcRef};
 use crate::objects::{array, channel, closure, interface, map, port, queue_state, slice};
 use crate::slot::{byte_offset_for_slots, slot_to_ptr, Slot, SLOT_BYTES};

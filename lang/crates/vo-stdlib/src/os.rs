@@ -19,6 +19,7 @@ use std::sync::Mutex;
 #[cfg(feature = "std")]
 use vo_common_core::types::ValueKind;
 use vo_ffi_macro::{vostd_fn, vostd_errors, vo_consts};
+#[cfg(feature = "std")]
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 #[cfg(feature = "std")]
 use vo_runtime::gc::{Gc, GcRef};

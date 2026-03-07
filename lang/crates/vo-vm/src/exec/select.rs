@@ -5,8 +5,6 @@
 //! becomes ready, the select completes and cancels waiters on other channels.
 
 #[cfg(not(feature = "std"))]
-use alloc::boxed::Box;
-#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use vo_runtime::gc::GcRef;

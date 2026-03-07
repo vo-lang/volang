@@ -4,7 +4,9 @@
 use alloc::{format, string::String};
 
 use vo_runtime::gc::{Gc, GcRef};
-use vo_runtime::objects::port::{self, RecvResult, SendResult, WaiterInfo};
+use vo_runtime::objects::port::{self, WaiterInfo};
+#[cfg(feature = "std")]
+use vo_runtime::objects::port::{RecvResult, SendResult};
 #[cfg(feature = "std")]
 use vo_runtime::objects::queue_state;
 #[cfg(feature = "std")]

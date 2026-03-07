@@ -38,14 +38,17 @@ use crate::fiber::{CallFrame, Fiber};
 /// Result of wait_for_work() — what the scheduling loop should do next.
 enum WaitResult {
     /// Work became available, retry the loop.
+    #[cfg(feature = "std")]
     Retry,
     /// All fibers completed normally.
     Done,
     /// All fibers blocked (potential deadlock).
+    #[cfg(feature = "std")]
     Blocked,
     /// Some fibers waiting for host-side events; async loop must handle them.
     SuspendedForHostEvents,
     /// Island VM should return to its command loop.
+    #[cfg(feature = "std")]
     Break,
 }
 
@@ -81,6 +84,7 @@ pub struct Vm {
     pub state: VmState,
 }
 
+#[cfg(feature = "std")]
 fn validate_externs_registered(registry: &vo_runtime::ExternRegistry, externs: &[vo_runtime::bytecode::ExternDef]) {
     let mut missing: Vec<(usize, &str)> = Vec::new();
     for (id, def) in externs.iter().enumerate() {
@@ -342,10 +346,13 @@ impl Vm {
             
             if !self.scheduler.has_work() {
                 match self.wait_for_work() {
+                    #[cfg(feature = "std")]
                     WaitResult::Retry => continue,
                     WaitResult::Done => return Ok(SchedulingOutcome::Completed),
+                    #[cfg(feature = "std")]
                     WaitResult::Blocked => return Ok(SchedulingOutcome::Blocked),
                     WaitResult::SuspendedForHostEvents => return Ok(SchedulingOutcome::SuspendedForHostEvents),
+                    #[cfg(feature = "std")]
                     WaitResult::Break => break,
                 }
             }

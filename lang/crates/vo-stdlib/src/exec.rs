@@ -13,7 +13,9 @@ use std::os::fd::{FromRawFd, IntoRawFd};
 #[cfg(all(feature = "std", unix))]
 use std::fs::File;
 
+#[cfg(feature = "std")]
 use vo_ffi_macro::vostd_fn;
+#[cfg(feature = "std")]
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 #[cfg(feature = "std")]
 use vo_runtime::gc::{Gc, GcRef};
