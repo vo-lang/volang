@@ -97,36 +97,42 @@ fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
 
 /// Compile and run user code from an entry path, returning captured stdout.
 #[tauri::command]
-fn cmd_compile_run(entry_path: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let abs = resolve_path(&state.workspace_root, &entry_path)?;
+fn cmd_compile_run(entry_path: String, state: tauri::State<'_, AppState>) -> Result<String, shell::StudioError> {
+    let abs = resolve_path(&state.workspace_root, &entry_path)
+        .map_err(|e| shell::StudioError::access_denied(&e))?;
     let abs_str = abs.to_string_lossy().to_string();
 
-    let compile_output = compile(&abs_str).map_err(|e| e.to_string())?;
+    let compile_output = compile(&abs_str)
+        .map_err(|e| shell::StudioError::vo_compile(&e.to_string()))?;
     let sink = CaptureSink::new();
     let result = run_vox(compile_output, RunMode::Vm, Vec::new(), sink.clone());
     let captured = sink.take();
     match result {
         Ok(()) => Ok(captured),
         Err(e) => {
-            if captured.is_empty() {
-                Err(e.to_string())
+            let msg = if captured.is_empty() {
+                e.to_string()
             } else {
-                Err(format!("{}\nRuntime error: {}", captured.trim_end(), e))
-            }
+                format!("{}\nRuntime error: {}", captured.trim_end(), e)
+            };
+            Err(shell::StudioError::vo_runtime(&msg))
         }
     }
 }
 
 /// Compile user GUI code from entry path, start a guest VM thread, return initial render bytes.
 #[tauri::command]
-fn cmd_run_gui(entry_path: String, state: tauri::State<'_, AppState>) -> Result<Vec<u8>, String> {
-    let abs = resolve_path(&state.workspace_root, &entry_path)?;
+fn cmd_run_gui(entry_path: String, state: tauri::State<'_, AppState>) -> Result<Vec<u8>, shell::StudioError> {
+    let abs = resolve_path(&state.workspace_root, &entry_path)
+        .map_err(|e| shell::StudioError::access_denied(&e))?;
     let abs_str = abs.to_string_lossy().to_string();
 
     let _ = state.guest.lock().unwrap().take();
 
-    let compile_output = compile(&abs_str).map_err(|e| e.to_string())?;
-    let (initial_bytes, handle) = vo_vox::gui::run_gui(compile_output)?;
+    let compile_output = compile(&abs_str)
+        .map_err(|e| shell::StudioError::vo_compile(&e.to_string()))?;
+    let (initial_bytes, handle) = vo_vox::gui::run_gui(compile_output)
+        .map_err(|e| shell::StudioError::vo_runtime(&e))?;
     *state.guest.lock().unwrap() = Some(handle);
     Ok(initial_bytes)
 }
@@ -137,15 +143,17 @@ fn cmd_send_gui_event(
     handler_id: i32,
     payload: String,
     state: tauri::State<'_, AppState>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, shell::StudioError> {
     let mut guard = state.guest.lock().unwrap();
-    let handle = guard.as_mut().ok_or_else(|| "No guest VM running".to_string())?;
+    let handle = guard.as_mut()
+        .ok_or_else(|| shell::StudioError::vo_runtime("No guest VM running"))?;
     vo_vox::gui::send_gui_event(handle, handler_id, &payload)
+        .map_err(|e| shell::StudioError::vo_runtime(&e))
 }
 
 /// Stop the running guest VM.
 #[tauri::command]
-fn cmd_stop_gui(state: tauri::State<'_, AppState>) -> Result<(), String> {
+fn cmd_stop_gui(state: tauri::State<'_, AppState>) -> Result<(), shell::StudioError> {
     let _ = state.guest.lock().unwrap().take();
     Ok(())
 }

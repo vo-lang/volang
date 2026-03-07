@@ -55,6 +55,42 @@ pub struct ShellError {
     pub message: String,
 }
 
+// =============================================================================
+// StudioError — Serialize-able error type for Tauri GUI commands.
+// Sent to the JS frontend as { code, message } so ShellError can be
+// constructed on the TypeScript side without string-matching heuristics.
+// =============================================================================
+
+#[derive(Serialize, Clone, Debug)]
+pub struct StudioError {
+    pub code:    String,
+    pub message: String,
+}
+
+impl std::fmt::Display for StudioError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.code, self.message)
+    }
+}
+
+impl StudioError {
+    pub fn vo_compile(msg: &str) -> Self {
+        Self { code: "ERR_VO_COMPILE".into(), message: msg.to_string() }
+    }
+    pub fn vo_runtime(msg: &str) -> Self {
+        Self { code: "ERR_VO_RUNTIME".into(), message: msg.to_string() }
+    }
+    pub fn not_found(msg: &str) -> Self {
+        Self { code: "ERR_NOT_FOUND".into(), message: msg.to_string() }
+    }
+    pub fn access_denied(msg: &str) -> Self {
+        Self { code: "ERR_ACCESS_DENIED".into(), message: msg.to_string() }
+    }
+    pub fn internal(msg: &str) -> Self {
+        Self { code: "ERR_INTERNAL".into(), message: msg.to_string() }
+    }
+}
+
 impl ShellError {
     pub fn not_supported(op: &str) -> Self {
         Self { code: "ERR_NOT_SUPPORTED".into(), message: format!("op '{}' is not supported in local backend", op) }
@@ -112,6 +148,7 @@ pub fn local_capabilities() -> Vec<String> {
         "zip".into(),
         "proc.spawn".into(),
         "http".into(),
+        "gui".into(),
     ]
 }
 

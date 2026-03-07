@@ -52,6 +52,7 @@ export class WasmShellRouter {
       'vo.get',
       'vo.clean',
       'vo.version',
+      'gui',
     ]);
   }
 

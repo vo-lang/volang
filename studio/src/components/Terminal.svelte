@@ -150,7 +150,8 @@
 
     if (result.guiPath) {
       try {
-        const bytes = await bridge().runGui(result.guiPath);
+        const res = await bridge().shell.exec({ kind: 'gui.run', path: result.guiPath });
+        const bytes = (res as { renderBytes: Uint8Array }).renderBytes;
         ide.update(s => ({ ...s, isRunning: true, isGuiApp: true, guestRender: bytes, runStatus: 'running', runDurationMs: null }));
         explorer.update(e => ({ ...e, appMode: 'run' }));
       } catch (e) {

@@ -1,4 +1,4 @@
-import type { ShellRequest, ShellResponse, ShellEvent, Capability } from './protocol';
+import type { ShellRequest, ShellResponse, ShellEvent, ShellErrorCode, Capability } from './protocol';
 import type { WasmShellRouter } from './wasm/router';
 
 // =============================================================================
@@ -17,7 +17,47 @@ export interface ShellTransport {
 }
 
 // =============================================================================
+// WasmGuiBackend — injected by bridge.ts so the transport can handle gui.* ops
+// without owning WASM module references or timer state.
+// =============================================================================
+
+export interface WasmGuiBackend {
+  compileRun(entryPath: string): string;
+  runGui(entryPath: string): Uint8Array;
+  sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array>;
+  stopGui(): void;
+}
+
+// =============================================================================
+// Helpers — classify a raw error into a structured { code, message }
+// =============================================================================
+
+function studioErrorFromCatch(e: unknown): { code: ShellErrorCode; message: string } {
+  // Tauri backend returns StudioError objects: { code, message }
+  if (typeof e === 'object' && e !== null && 'code' in e && 'message' in e) {
+    return { code: (e as any).code as ShellErrorCode, message: (e as any).message };
+  }
+  // WASM errors are plain strings — classify by content
+  const msg = String(e);
+  if (msg.includes('compile error'))  return { code: 'ERR_VO_COMPILE',  message: msg };
+  if (msg.includes('No guest'))       return { code: 'ERR_VO_RUNTIME',  message: msg };
+  if (msg.includes('not waiting'))    return { code: 'ERR_VO_RUNTIME',  message: msg };
+  if (msg.includes('Runtime error'))  return { code: 'ERR_VO_RUNTIME',  message: msg };
+  if (msg.includes('path escapes'))   return { code: 'ERR_ACCESS_DENIED', message: msg };
+  return { code: 'ERR_INTERNAL', message: msg };
+}
+
+function errResp(id: string, e: unknown): ShellResponse {
+  const { code, message } = studioErrorFromCatch(e);
+  return { id, kind: 'error', code, message };
+}
+
+// =============================================================================
 // TauriTransport — delegates to Rust via Tauri IPC
+//
+// gui.* ops are intercepted and routed to the dedicated Tauri commands
+// (cmd_compile_run, cmd_run_gui, cmd_send_gui_event, cmd_stop_gui).
+// All other ops go through cmd_shell_exec → Vo shell handler.
 // =============================================================================
 
 export class TauriTransport implements ShellTransport {
@@ -32,7 +72,42 @@ export class TauriTransport implements ShellTransport {
     return this._invoke('cmd_shell_init') as Promise<TransportInfo>;
   }
 
-  send(req: ShellRequest): Promise<ShellResponse> {
+  async send(req: ShellRequest): Promise<ShellResponse> {
+    const kind = req.op.kind;
+
+    // ── gui.* ops → dedicated Tauri commands ────────────────────────────
+    if (kind === 'gui.compileRun') {
+      try {
+        const op = req.op as { kind: string; path: string };
+        const stdout = await this._invoke('cmd_compile_run', { entryPath: op.path }) as string;
+        return { id: req.id, kind: 'ok', data: { stdout } };
+      } catch (e) { return errResp(req.id, e); }
+    }
+
+    if (kind === 'gui.run') {
+      try {
+        const op = req.op as { kind: string; path: string };
+        const raw = await this._invoke('cmd_run_gui', { entryPath: op.path }) as number[];
+        return { id: req.id, kind: 'ok', data: { renderBytes: new Uint8Array(raw) } };
+      } catch (e) { return errResp(req.id, e); }
+    }
+
+    if (kind === 'gui.event') {
+      try {
+        const op = req.op as { kind: string; handlerId: number; payload: string };
+        const raw = await this._invoke('cmd_send_gui_event', { handlerId: op.handlerId, payload: op.payload }) as number[];
+        return { id: req.id, kind: 'ok', data: { renderBytes: new Uint8Array(raw) } };
+      } catch (e) { return errResp(req.id, e); }
+    }
+
+    if (kind === 'gui.stop') {
+      try {
+        await this._invoke('cmd_stop_gui');
+        return { id: req.id, kind: 'ok', data: null };
+      } catch (e) { return errResp(req.id, e); }
+    }
+
+    // ── All other ops → Vo shell handler ────────────────────────────────
     return this._invoke('cmd_shell_exec', { req }) as Promise<ShellResponse>;
   }
 
@@ -46,13 +121,17 @@ export class TauriTransport implements ShellTransport {
 }
 
 // =============================================================================
-// WasmTransport — delegates to TypeScript WasmShellRouter directly
+// WasmTransport — delegates to WasmShellRouter for shell ops, WasmGuiBackend
+// for gui.* ops.
 // =============================================================================
 
 export class WasmTransport implements ShellTransport {
   private eventHandlers = new Set<(ev: ShellEvent) => void>();
 
-  constructor(private readonly router: WasmShellRouter) {}
+  constructor(
+    private readonly router:     WasmShellRouter,
+    private readonly guiBackend: WasmGuiBackend,
+  ) {}
 
   async initialize(): Promise<TransportInfo> {
     return {
@@ -61,7 +140,42 @@ export class WasmTransport implements ShellTransport {
     };
   }
 
-  send(req: ShellRequest): Promise<ShellResponse> {
+  async send(req: ShellRequest): Promise<ShellResponse> {
+    const kind = req.op.kind;
+
+    // ── gui.* ops → WasmGuiBackend ──────────────────────────────────────
+    if (kind === 'gui.compileRun') {
+      try {
+        const op = req.op as { kind: string; path: string };
+        const stdout = this.guiBackend.compileRun(op.path);
+        return { id: req.id, kind: 'ok', data: { stdout } };
+      } catch (e) { return errResp(req.id, e); }
+    }
+
+    if (kind === 'gui.run') {
+      try {
+        const op = req.op as { kind: string; path: string };
+        const renderBytes = this.guiBackend.runGui(op.path);
+        return { id: req.id, kind: 'ok', data: { renderBytes } };
+      } catch (e) { return errResp(req.id, e); }
+    }
+
+    if (kind === 'gui.event') {
+      try {
+        const op = req.op as { kind: string; handlerId: number; payload: string };
+        const renderBytes = await this.guiBackend.sendGuiEvent(op.handlerId, op.payload);
+        return { id: req.id, kind: 'ok', data: { renderBytes } };
+      } catch (e) { return errResp(req.id, e); }
+    }
+
+    if (kind === 'gui.stop') {
+      try {
+        this.guiBackend.stopGui();
+        return { id: req.id, kind: 'ok', data: null };
+      } catch (e) { return errResp(req.id, e); }
+    }
+
+    // ── All other ops → Vo shell handler ────────────────────────────────
     return this.router.handle(req, (ev) => this.emit(ev));
   }
 

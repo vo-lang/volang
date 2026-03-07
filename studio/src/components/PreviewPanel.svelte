@@ -41,8 +41,9 @@
 
   async function onEvent(handlerId: number, payload: string): Promise<void> {
     try {
-      const newBytes = await bridge().sendGuiEvent(handlerId, payload);
-      if (newBytes.length > 0) ide.update(s => ({ ...s, guestRender: newBytes }));
+      const result = await bridge().shell.exec({ kind: 'gui.event', handlerId, payload });
+      const bytes = (result as { renderBytes: Uint8Array }).renderBytes;
+      if (bytes && bytes.length > 0) ide.update(s => ({ ...s, guestRender: bytes }));
     } catch (e: any) {
       const { consolePushLines } = await import('../stores/ide');
       consolePushLines('stderr', String(e));

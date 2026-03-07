@@ -62,7 +62,13 @@ export type HttpOp =
   | { kind: 'http.patch';  url: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }
   | { kind: 'http.delete'; url: string; headers?: Record<string, string>; body?: string; timeoutMs?: number };
 
-export type ShellOp = FsOp | VoOp | GitOp | ZipOp | ProcOp | HttpOp;
+export type GuiOp =
+  | { kind: 'gui.compileRun'; path: string }
+  | { kind: 'gui.run';        path: string }
+  | { kind: 'gui.event';      handlerId: number; payload: string }
+  | { kind: 'gui.stop' };
+
+export type ShellOp = FsOp | VoOp | GitOp | ZipOp | ProcOp | HttpOp | GuiOp;
 
 // ── Request ───────────────────────────────────────────────────────────────────
 
@@ -105,7 +111,8 @@ export type Capability =
   | 'fs'
   | 'vo.run' | 'vo.check' | 'vo.build' | 'vo.test' | 'vo.bench'
   | 'vo.clean' | 'vo.get' | 'vo.dump' | 'vo.compile' | 'vo.init' | 'vo.version'
-  | 'git' | 'zip' | 'proc.spawn' | 'http';
+  | 'git' | 'zip' | 'proc.spawn' | 'http'
+  | 'gui';
 
 // ── Result types for specific ops ─────────────────────────────────────────────
 
@@ -162,6 +169,11 @@ export interface HttpResult {
   body:       string;
 }
 
+// gui
+export interface GuiCompileRunResult { stdout: string }
+export interface GuiRunResult        { renderBytes: Uint8Array }
+export interface GuiEventResult      { renderBytes: Uint8Array }
+
 // ── Op → result type map (used by typed exec() overloads) ────────────────────
 
 export interface OpResultMap {
@@ -207,6 +219,10 @@ export interface OpResultMap {
   'http.put':    HttpResult;
   'http.patch':  HttpResult;
   'http.delete': HttpResult;
+  'gui.compileRun': GuiCompileRunResult;
+  'gui.run':        GuiRunResult;
+  'gui.event':      GuiEventResult;
+  'gui.stop':       null;
 }
 
 // ── Error class ───────────────────────────────────────────────────────────────
@@ -229,6 +245,7 @@ export function capabilityForOp(op: ShellOp): Capability {
   if (kind.startsWith('git.'))  return 'git';
   if (kind.startsWith('zip.'))  return 'zip';
   if (kind.startsWith('http.')) return 'http';
+  if (kind.startsWith('gui.'))  return 'gui';
   if (kind === 'proc.spawn')    return 'proc.spawn';
   return kind as Capability;
 }

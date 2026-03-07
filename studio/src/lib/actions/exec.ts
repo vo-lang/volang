@@ -2,6 +2,7 @@ import { get } from 'svelte/store';
 import { ide, consolePush, consolePushLines, consoleClear } from '../../stores/ide';
 import { bridge } from '../bridge';
 import { saveFile } from './fs';
+import type { GuiCompileRunResult, GuiRunResult } from '../shell/protocol';
 
 // =============================================================================
 // Execution actions
@@ -49,22 +50,22 @@ export async function runCode(): Promise<void> {
 
   try {
     if (isGuiCode(codeToCheck)) {
-      const bytes = await bridge().runGui(entryPath);
+      const result = await bridge().shell.exec({ kind: 'gui.run', path: entryPath }) as GuiRunResult;
       const elapsed = Date.now() - startTime;
       consolePush('system', 'GUI app started');
       ide.update(s => ({
         ...s,
         isRunning: true,
         isGuiApp: true,
-        guestRender: bytes,
+        guestRender: result.renderBytes,
         runStatus: 'running',
         runDurationMs: elapsed,
       }));
     } else {
       ide.update(s => ({ ...s, runStatus: 'running' }));
-      const stdout = await bridge().compileRun(entryPath);
+      const result = await bridge().shell.exec({ kind: 'gui.compileRun', path: entryPath }) as GuiCompileRunResult;
       const elapsed = Date.now() - startTime;
-      consolePushLines('stdout', stdout);
+      consolePushLines('stdout', result.stdout);
       consolePush('success', `✓ Process exited`);
       ide.update(s => ({
         ...s,
@@ -90,7 +91,7 @@ export async function runCode(): Promise<void> {
 
 export async function stopCode(): Promise<void> {
   try {
-    await bridge().stopGui();
+    await bridge().shell.exec({ kind: 'gui.stop' });
   } catch {
     // ignore errors on stop
   }

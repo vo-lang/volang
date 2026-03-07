@@ -16,10 +16,14 @@ export interface FsEntry {
 
 // =============================================================================
 // Bridge — cross-platform abstraction (Tauri IPC / WASM VFS)
+//
+// All structured ops (fs, vo, git, gui, …) go through `shell.exec()`.
+// The transport layer routes gui.* ops to the platform-specific GUI backend
+// (Tauri IPC commands / WASM module calls) transparently.
 // =============================================================================
 
 export interface Bridge {
-  // Filesystem
+  // Filesystem convenience methods (delegate to shell.exec)
   fsListDir(dirPath: string): Promise<FsEntry[]>;
   fsReadFile(path: string): Promise<string>;
   fsWriteFile(path: string, content: string): Promise<void | null>;
@@ -27,20 +31,16 @@ export interface Bridge {
   fsRename(oldPath: string, newPath: string): Promise<void | null>;
   fsRemove(path: string, recursive: boolean): Promise<void | null>;
 
-  // Execution (entry path relative to workspace root)
-  compileRun(entryPath: string): Promise<string>;
-  runGui(entryPath: string): Promise<Uint8Array>;
-  sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array>;
-  stopGui(): Promise<void>;
-
-  // GUI render callback — called by JS timer/timeout callbacks with fresh render bytes
+  // GUI render callback — push-based, for JS timer/timeout driven re-renders.
+  // On Tauri these are no-ops (timers handled natively); on WASM they pipe
+  // timer-triggered render bytes to the PreviewPanel.
   setGuiRenderCallback(cb: (bytes: Uint8Array) => void): void;
   clearGuiRenderCallback(): void;
 
   // Workspace root (for display)
   workspaceRoot: string;
 
-  // Unified shell API (filesystem + Vo toolchain + tools + processes)
+  // Unified shell API (filesystem + Vo toolchain + GUI + tools + processes)
   shell: ShellClient;
 }
 
@@ -84,11 +84,6 @@ async function initTauriBridge(): Promise<void> {
     fsMkdir:     (path: string)                     => shellClient.exec({ kind: 'fs.mkdir',  path }),
     fsRename:    (oldPath: string, newPath: string)  => shellClient.exec({ kind: 'fs.rename', oldPath, newPath }),
     fsRemove:    (path: string, recursive: boolean)  => shellClient.exec({ kind: 'fs.remove', path, recursive }),
-
-    compileRun:   (entryPath)            => invoke('cmd_compile_run', { entryPath }),
-    runGui:       async (entryPath) => new Uint8Array(await invoke<number[]>('cmd_run_gui', { entryPath })),
-    sendGuiEvent: async (handlerId, payload) => new Uint8Array(await invoke<number[]>('cmd_send_gui_event', { handlerId, payload })),
-    stopGui:      ()                     => invoke('cmd_stop_gui'),
 
     // Tauri handles timers natively in its own process; no JS-side render callback needed
     setGuiRenderCallback(_cb: (bytes: Uint8Array) => void) {},
@@ -349,9 +344,33 @@ async function initWasmBridge(): Promise<void> {
   (window as any).voHostVfsMkdirAll = (path: string) => vfs.mkdirAll(path, 0o755);
   (window as any).voHostVfsExists = (path: string) => !vfs.stat(path)[5];
 
-  // 5) Build bridge — all FS ops route through ShellClient → Vo shell handler
+  // 6) Build WasmGuiBackend — wraps WASM module calls + timer lifecycle.
+  //    Passed to WasmTransport so gui.* ops are handled without the transport
+  //    owning WASM module references or timer state.
+  const guiBackend: import('./shell/transport').WasmGuiBackend = {
+    compileRun(entryPath: string): string {
+      const result = wasmMod.compileRunEntry(entryPath);
+      if (result instanceof Error) throw result;
+      return result as string;
+    },
+    runGui(entryPath: string): Uint8Array {
+      clearAllGuiTimers();
+      const result = wasmMod.runGuiEntry(entryPath);
+      if (result instanceof Error) throw result;
+      return result as Uint8Array;
+    },
+    sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
+      return queueGuiEvent(handlerId, payload, false);
+    },
+    stopGui(): void {
+      clearAllGuiTimers();
+      wasmMod.stopGui();
+    },
+  };
+
+  // 7) Build bridge — all ops route through ShellClient → WasmTransport
   const wasmRouter  = new WasmShellRouter(wasmMod, WASM_WORKSPACE);
-  const shellClient = new ShellClient(new WasmTransport(wasmRouter));
+  const shellClient = new ShellClient(new WasmTransport(wasmRouter, guiBackend));
   await shellClient.initialize();
 
   _bridge = {
@@ -370,28 +389,6 @@ async function initWasmBridge(): Promise<void> {
     fsMkdir:     (path: string)                    => shellClient.exec({ kind: 'fs.mkdir',  path }),
     fsRename:    (oldPath: string, newPath: string) => shellClient.exec({ kind: 'fs.rename', oldPath, newPath }),
     fsRemove:    (path: string, recursive: boolean) => shellClient.exec({ kind: 'fs.remove', path, recursive }),
-
-    async compileRun(entryPath: string): Promise<string> {
-      const result = wasmMod.compileRunEntry(entryPath);
-      if (result instanceof Error) throw result;
-      return result as string;
-    },
-
-    async runGui(entryPath: string): Promise<Uint8Array> {
-      clearAllGuiTimers();  // clear any leftover timers from a previous run
-      const result = wasmMod.runGuiEntry(entryPath);
-      if (result instanceof Error) throw result;
-      return result as Uint8Array;
-    },
-
-    async sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
-      return queueGuiEvent(handlerId, payload, false);
-    },
-
-    async stopGui(): Promise<void> {
-      clearAllGuiTimers();
-      wasmMod.stopGui();
-    },
 
     setGuiRenderCallback(cb: (bytes: Uint8Array) => void) {
       guiRenderCallback = cb;

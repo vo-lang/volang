@@ -179,7 +179,7 @@ def run_other_command(command, args):
         print(f"Error: {d_py} not found", file=sys.stderr)
         sys.exit(1)
     
-    cmd = [str(d_py), command] + args
+    cmd = [sys.executable, str(d_py), command] + args
     return run_repeated(cmd, repeat=1, label=command)
 
 
@@ -196,7 +196,7 @@ def main():
 
         # wasm tests use d_py.py (node-based test runner)
         if rest_args and rest_args[0] == 'wasm':
-            cmd = [str(PROJECT_ROOT / 'd_py.py'), command] + rest_args
+            cmd = [sys.executable, str(PROJECT_ROOT / 'd_py.py'), command] + rest_args
             sys.exit(run_repeated(cmd, repeat=repeat, label='test'))
         else:
             # 'embed' is alias for 'nostd'
