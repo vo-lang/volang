@@ -121,9 +121,12 @@ pub fn compile_run_entry(entry_path: &str) -> Result<String, JsValue> {
     let bytecode = compile_from_vfs(entry_path).map_err(|e| JsValue::from_str(&e))?;
     vo_web::take_output();
 
-    let _vm = vo_web::create_vm(&bytecode, |reg, exts| {
+    let saved = vo_web::ext_bridge::save_extern_state();
+    let run_result = vo_web::create_vm(&bytecode, |reg, exts| {
         vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
-    }).map_err(|e| JsValue::from_str(&e))?;
+    });
+    vo_web::ext_bridge::restore_extern_state(saved);
+    run_result.map_err(|e| JsValue::from_str(&e))?;
 
     let output = vo_web::take_output();
     Ok(output)
@@ -357,9 +360,13 @@ pub fn run_shell_handler(args: js_sys::Array) -> String {
     });
 
     vo_runtime::output::clear_output();
+    // Save and restore ext state so the shell handler doesn't clobber
+    // EXTERN_ID_TO_INFO while a guest GUI VM (e.g. game loop) is live.
+    let saved = vo_web::ext_bridge::save_extern_state();
     let run_result = vo_web::create_vm(&bytecode, |reg, exts| {
         vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
     });
+    vo_web::ext_bridge::restore_extern_state(saved);
 
     vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
         *cell.borrow_mut() = None;
