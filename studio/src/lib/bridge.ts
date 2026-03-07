@@ -68,6 +68,16 @@ async function initTauriBridge(): Promise<void> {
   const shellClient    = new ShellClient(shellTransport);
   await shellClient.initialize();
 
+  // Seed examples into workspace as single-file projects (skip if already exist)
+  for (const ex of STUDIO_SYNC_EXAMPLES) {
+    const fullPath = workspaceRoot + '/' + ex.path;
+    try {
+      await shellClient.exec({ kind: 'fs.read', path: fullPath });
+    } catch {
+      await shellClient.exec({ kind: 'fs.write', path: fullPath, content: ex.content });
+    }
+  }
+
   _bridge = {
     workspaceRoot,
     shell: shellClient,

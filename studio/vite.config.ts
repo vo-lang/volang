@@ -32,6 +32,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      '@examples': resolve(__dirname, '../examples'),
       '@vogui': resolve(__dirname, '../../vogui/js/src'),
       '@vo-web': resolve(__dirname, '../lang/crates/vo-web/js'),
       // Preact aliases for vogui's Radix UI dependencies
