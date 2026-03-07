@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 pub mod time;
 pub mod vfs;
 pub mod os;

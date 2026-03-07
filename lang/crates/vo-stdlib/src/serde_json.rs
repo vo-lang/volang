@@ -28,11 +28,6 @@ impl JsonWriter {
             escape_html: false,
         }
     }
-    
-    pub fn with_escape_html(mut self, escape: bool) -> Self {
-        self.escape_html = escape;
-        self
-    }
 }
 
 impl FormatWriter for JsonWriter {

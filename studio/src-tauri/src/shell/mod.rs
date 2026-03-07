@@ -13,8 +13,6 @@ pub use vo_runner::VoRunner;
 pub struct ShellRequest {
     pub id:  String,
     pub cwd: String,
-    #[serde(default)]
-    pub env: std::collections::HashMap<String, String>,
     pub op:  Value,  // op is a JSON object with a "kind" discriminant field
 }
 
@@ -80,52 +78,17 @@ impl StudioError {
     pub fn vo_runtime(msg: &str) -> Self {
         Self { code: "ERR_VO_RUNTIME".into(), message: msg.to_string() }
     }
-    pub fn not_found(msg: &str) -> Self {
-        Self { code: "ERR_NOT_FOUND".into(), message: msg.to_string() }
-    }
     pub fn access_denied(msg: &str) -> Self {
         Self { code: "ERR_ACCESS_DENIED".into(), message: msg.to_string() }
-    }
-    pub fn internal(msg: &str) -> Self {
-        Self { code: "ERR_INTERNAL".into(), message: msg.to_string() }
     }
 }
 
 impl ShellError {
-    pub fn not_supported(op: &str) -> Self {
-        Self { code: "ERR_NOT_SUPPORTED".into(), message: format!("op '{}' is not supported in local backend", op) }
-    }
-    pub fn not_found(msg: &str) -> Self {
-        Self { code: "ERR_NOT_FOUND".into(), message: msg.to_string() }
-    }
-    pub fn access_denied(msg: &str) -> Self {
-        Self { code: "ERR_ACCESS_DENIED".into(), message: msg.to_string() }
-    }
-    pub fn already_exists(msg: &str) -> Self {
-        Self { code: "ERR_ALREADY_EXISTS".into(), message: msg.to_string() }
-    }
-    pub fn vo_compile(msg: &str) -> Self {
-        Self { code: "ERR_VO_COMPILE".into(), message: msg.to_string() }
-    }
-    pub fn vo_runtime(msg: &str) -> Self {
-        Self { code: "ERR_VO_RUNTIME".into(), message: msg.to_string() }
-    }
     pub fn tool_missing(msg: &str) -> Self {
         Self { code: "ERR_TOOL_MISSING".into(), message: msg.to_string() }
     }
     pub fn internal(msg: &str) -> Self {
         Self { code: "ERR_INTERNAL".into(), message: msg.to_string() }
-    }
-
-    pub fn fs(err: std::io::Error, path: impl AsRef<std::path::Path>) -> Self {
-        use std::io::ErrorKind;
-        let msg = format!("{}: {}", path.as_ref().display(), err);
-        match err.kind() {
-            ErrorKind::NotFound         => Self::not_found(&msg),
-            ErrorKind::PermissionDenied => Self::access_denied(&msg),
-            ErrorKind::AlreadyExists    => Self::already_exists(&msg),
-            _                           => Self::internal(&msg),
-        }
     }
 }
 

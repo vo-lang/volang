@@ -631,6 +631,7 @@ pub fn create_vm(bytecode: &[u8], register_externs: ExternRegistrar) -> Result<V
 
 /// Write hook: flush each Vo println line to browser console immediately.
 /// This ensures diagnostic output is visible even if a WASM trap occurs.
+#[cfg(target_arch = "wasm32")]
 fn wasm_write_hook(s: &str) {
     web_sys::console::log_1(&format!("[Vo] {}", s).into());
 }

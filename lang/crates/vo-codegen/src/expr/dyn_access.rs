@@ -1,6 +1,6 @@
 //! Dynamic access expression compilation (a~>field, a~>[key], a~>(args), a~>method(args))
 
-use vo_runtime::{RuntimeType, SlotType, ValueKind};
+use vo_runtime::{SlotType, ValueKind};
 use vo_syntax::ast::{DynAccessOp, Expr};
 use vo_vm::instruction::Opcode;
 

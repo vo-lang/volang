@@ -22,12 +22,12 @@ fn next_fetch_token() -> u64 {
     FETCH_TOKEN.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Pending fetch Promises: (token, Promise). Consumed by run_vm_async.
+// Pending fetch Promises: (token, Promise). Consumed by run_vm_async.
 thread_local! {
     static PENDING_FETCH_PROMISES: RefCell<Vec<(u64, js_sys::Promise)>> = RefCell::new(Vec::new());
 }
 
-/// Fetch results stored after Promise resolves. Consumed by extern re-invocation.
+// Fetch results stored after Promise resolves. Consumed by extern re-invocation.
 thread_local! {
     static FETCH_RESULTS: RefCell<Vec<(u64, FetchResult)>> = RefCell::new(Vec::new());
 }

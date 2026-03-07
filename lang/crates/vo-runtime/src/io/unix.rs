@@ -187,7 +187,7 @@ impl UnixDriver {
         {
             // Use kqueue EVFILT_TIMER
             let ms = (duration_ns / 1_000_000).max(1) as isize;
-            let mut ev = libc::kevent {
+            let ev = libc::kevent {
                 ident: token as usize,
                 filter: libc::EVFILT_TIMER,
                 flags: libc::EV_ADD | libc::EV_ONESHOT,

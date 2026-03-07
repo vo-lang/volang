@@ -15,9 +15,7 @@ use crate::translator::IrEmitter;
 
 // JitResult constants for readability
 pub const JIT_RESULT_OK: i32 = 0;
-pub const JIT_RESULT_PANIC: i32 = 1;
 pub const JIT_RESULT_CALL: i32 = 2;
-pub const JIT_RESULT_WAIT_IO: i32 = 3;
 
 /// Maximum callee local_slots for IC native stack fast path.
 /// Callees with more locals fall through to prepare callback.
@@ -219,7 +217,6 @@ fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
 
 /// Parameters for the shared IC miss path (update IC entry + dispatch).
 struct IcMissParams {
-    ctx: Value,
     ic_entry: Value,
     ret_ptr: Value,
     out_slot: cranelift_codegen::ir::StackSlot,
@@ -233,7 +230,6 @@ struct IcMissParams {
     resume_pc_val: Value,
     ret_reg_val: Value,
     ret_slots_val: Value,
-    arg_count_val: Value,
     merge_block: cranelift_codegen::ir::Block,
     /// IC key value to store (func_id for closure, packed itab_id|method_idx for iface).
     ic_key_val: Value,
@@ -281,15 +277,14 @@ fn emit_ic_miss_update_and_dispatch<'a, E: IrEmitter<'a>>(
     // Load PreparedCall fields and dispatch
     let jit_func_ptr = emitter.builder().ins().stack_load(types::I64, p.out_slot, PreparedCall::OFFSET_JIT_FUNC_PTR);
     let callee_args_ptr = emitter.builder().ins().stack_load(types::I64, p.out_slot, PreparedCall::OFFSET_CALLEE_ARGS_PTR);
-    let callee_local_slots = emitter.builder().ins().stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_CALLEE_LOCAL_SLOTS);
     let func_id = emitter.builder().ins().stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_FUNC_ID);
     
     emit_prepared_call(emitter, PreparedCallParams {
         jit_func_ptr, callee_args_ptr, func_id, ret_ptr: p.ret_ptr,
-        callee_local_slots, caller_bp: p.caller_bp, old_fiber_sp: p.old_fiber_sp,
+        caller_bp: p.caller_bp, old_fiber_sp: p.old_fiber_sp,
         arg_start: p.arg_start, ret_slots: p.ret_slots, ret_slot: p.ret_slot,
         resume_pc_val: p.resume_pc_val, ret_reg_val: p.ret_reg_val,
-        ret_slots_val: p.ret_slots_val, arg_count_val: p.arg_count_val,
+        ret_slots_val: p.ret_slots_val,
         merge_block: Some(p.merge_block),
     });
 }
@@ -507,9 +502,9 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     let ic_key_val = emitter.builder().ins().stack_load(types::I32, out_slot, PreparedCall::OFFSET_FUNC_ID);
     
     emit_ic_miss_update_and_dispatch(emitter, IcMissParams {
-        ctx, ic_entry, ret_ptr, out_slot, ret_slot, caller_bp, old_fiber_sp,
+        ic_entry, ret_ptr, out_slot, ret_slot, caller_bp, old_fiber_sp,
         arg_start, ret_slots, resume_pc_val, ret_reg_val,
-        ret_slots_val, arg_count_val, merge_block, ic_key_val,
+        ret_slots_val, merge_block, ic_key_val,
     });
     
     // =====================================================================
@@ -683,9 +678,9 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     );
     
     emit_ic_miss_update_and_dispatch(emitter, IcMissParams {
-        ctx, ic_entry, ret_ptr, out_slot, ret_slot, caller_bp, old_fiber_sp,
+        ic_entry, ret_ptr, out_slot, ret_slot, caller_bp, old_fiber_sp,
         arg_start, ret_slots, resume_pc_val, ret_reg_val,
-        ret_slots_val, arg_count_val, merge_block, ic_key_val,
+        ret_slots_val, merge_block, ic_key_val,
     });
     
     // =====================================================================
@@ -704,7 +699,6 @@ struct PreparedCallParams {
     callee_args_ptr: Value,
     func_id: Value,
     ret_ptr: Value,
-    callee_local_slots: Value,
     /// Caller's bp, saved BEFORE the prepare callback (which changes ctx.jit_bp via push_frame).
     caller_bp: Value,
     /// Caller's fiber_sp, saved BEFORE the prepare callback.
@@ -715,7 +709,6 @@ struct PreparedCallParams {
     resume_pc_val: Value,
     ret_reg_val: Value,
     ret_slots_val: Value,
-    arg_count_val: Value,
     /// If Some, jump to this block on OK instead of creating a new merge block.
     /// The block will be switched to and sealed by this function.
     merge_block: Option<cranelift_codegen::ir::Block>,

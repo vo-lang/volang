@@ -23,10 +23,13 @@ use crate::fiber::Fiber;
 /// All pointers must be valid. Called from JIT-generated code.
 pub extern "C" fn jit_push_frame(
     ctx: *mut JitContext,
-    func_id: u32,
+    // ABI-required: JIT codegen emits all 6 args per import_push_frame_sig.
+    // func_id, ret_reg, ret_slots are passed by the caller but only used by
+    // jit_push_resume_point on the slow path; this fast-path callback ignores them.
+    _func_id: u32,
     local_slots: u32,
-    ret_reg: u32,
-    ret_slots: u32,
+    _ret_reg: u32,
+    _ret_slots: u32,
     caller_resume_pc: u32,
 ) -> *mut u64 {
     let ctx_ref = unsafe { &mut *ctx };
