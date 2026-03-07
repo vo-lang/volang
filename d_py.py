@@ -409,6 +409,29 @@ def run_studio(build_wasm: bool = False, build_only: bool = False):
         print(f"\n{Colors.GREEN}Studio stopped{Colors.NC}")
 
 
+def run_studio_native(build_wasm: bool = False):
+    """Build studio WASM when stale, then launch the native Tauri app (tauri dev)."""
+    sync_studio_examples_file()
+
+    if build_wasm or studio_wasm_needs_build():
+        build_studio_wasm()
+    else:
+        print(f"{Colors.DIM}studio WASM up-to-date{Colors.NC}")
+
+    studio_dir = PROJECT_ROOT / 'studio'
+    if not studio_dir.exists():
+        print(f"{Colors.RED}Studio directory not found: {studio_dir}{Colors.NC}")
+        sys.exit(1)
+
+    print(f"\n{Colors.BOLD}Starting Vibe Studio (native)...{Colors.NC}")
+    print(f"{Colors.DIM}Press Ctrl+C to stop{Colors.NC}\n")
+
+    try:
+        subprocess.run(['zsh', '-lc', 'npm run tauri dev'], cwd=studio_dir, check=True)
+    except KeyboardInterrupt:
+        print(f"\n{Colors.GREEN}Studio (native) stopped{Colors.NC}")
+
+
 def ensure_vox_extension_built(arch: str = '64', release: bool = False, native: bool = False):
     """Build vo-vox extension if needed."""
     if native:
@@ -1717,6 +1740,11 @@ def main():
     studio_parser.add_argument('--build-only', action='store_true',
                                help='Only build studio WASM, do not start dev server')
 
+    # studio-native
+    studio_native_parser = subparsers.add_parser('studio-native', help='Launch Vibe Studio as native Tauri app')
+    studio_native_parser.add_argument('--build-wasm', action='store_true',
+                                      help='Force rebuild studio WASM before launching')
+
     # run
     run_parser = subparsers.add_parser('run', help='Run a .vo file')
     run_parser.add_argument('file', help='.vo file to run')
@@ -1765,6 +1793,9 @@ def main():
 
     elif args.command == 'studio':
         run_studio(build_wasm=args.build_wasm, build_only=args.build_only)
+
+    elif args.command == 'studio-native':
+        run_studio_native(build_wasm=args.build_wasm)
 
     elif args.command == 'run':
         run_vo_file(args.file, mode=args.mode, codegen=args.codegen)

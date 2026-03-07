@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use vo_common::vfs::{FileSet, FileSystem, MemoryFs, RealFs, ZipFs};
 use vo_analysis::analyze_project;
 use vo_codegen::compile_project;
-use vo_module::{PackageResolverMixed, StdSource, LocalSource, ModSource};
+use vo_module::{PackageResolverMixed, ReplacingResolver, StdSource, LocalSource, ModSource};
 use vo_runtime::ext_loader::ExtensionManifest;
 use vo_vm::bytecode::Module;
 use vo_stdlib::EmbeddedStdlib;
@@ -350,7 +350,9 @@ fn compile_with_fs<F: FileSystem>(fs: F, root: &Path, single_file: Option<&std::
         )));
     }
     
-    let resolver = create_resolver(&root, fs);
+    let replaces = read_replaces(&fs, root);
+    let base = create_resolver(&root, fs);
+    let resolver = ReplacingResolver::new(base, replaces);
     
     let project = analyze_project(file_set, &resolver)
         .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
@@ -363,6 +365,29 @@ fn compile_with_fs<F: FileSystem>(fs: F, root: &Path, single_file: Option<&std::
         source_root: root.to_path_buf(),
         extensions: project.extensions,
     })
+}
+
+/// Read `replace` directives from the project's `vo.mod` (if present).
+///
+/// Returns a map of module path → absolute local directory.  Relative paths
+/// in the `vo.mod` are resolved against `root` (the directory containing `vo.mod`).
+fn read_replaces<F: FileSystem>(fs: &F, root: &Path) -> std::collections::HashMap<String, PathBuf> {
+    let mut map = std::collections::HashMap::new();
+    let vomod_path = Path::new("vo.mod");
+    let Ok(content) = fs.read_file(vomod_path) else { return map };
+    let Ok(modfile) = vo_module::ModFile::parse(&content, vomod_path) else { return map };
+    for rep in &modfile.replaces {
+        let local = Path::new(&rep.local_path);
+        let abs = if local.is_absolute() {
+            local.to_path_buf()
+        } else {
+            root.join(local)
+        };
+        // Canonicalize to resolve ../ components; fall back to joined path.
+        let abs = abs.canonicalize().unwrap_or(abs);
+        map.insert(rep.module.clone(), abs);
+    }
+    map
 }
 
 fn create_resolver<F: FileSystem>(local_root: &Path, local_fs: F) -> PackageResolverMixed<EmbeddedStdlib, F, RealFs> {

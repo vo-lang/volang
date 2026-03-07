@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/vo-lang/git2"
+	"github.com/vo-lang/gix"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -11,7 +11,7 @@ import (
 
 func handleGit(id, workspace, cwd, kind string, op any) error {
 	switch kind {
-	// ── Read ops via libgit2 (no CLI, structured data, WASM graceful error) ───
+	// ── Read ops via gix (no CLI, structured data, WASM graceful error) ────────
 
 	case "git.status":
 		return handleGitStatus(id, cwd)
@@ -150,10 +150,10 @@ func handleGit(id, workspace, cwd, kind string, op any) error {
 	return nil
 }
 
-// ── libgit2-backed read handlers ─────────────────────────────────────────────
+// ── gix-backed read handlers ─────────────────────────────────────────────────
 
 func handleGitStatus(id, cwd string) error {
-	repo, err := git2.Open(cwd)
+	repo, err := gix.Open(cwd)
 	if err != nil {
 		writeError(id, "ERR_INTERNAL", err.Error())
 		return nil
@@ -178,7 +178,7 @@ func handleGitStatus(id, cwd string) error {
 }
 
 func handleGitLog(id, cwd string, limit int) error {
-	repo, err := git2.Open(cwd)
+	repo, err := gix.Open(cwd)
 	if err != nil {
 		writeError(id, "ERR_INTERNAL", err.Error())
 		return nil
@@ -206,7 +206,7 @@ func handleGitLog(id, cwd string, limit int) error {
 }
 
 func handleGitBranches(id, cwd string) error {
-	repo, err := git2.Open(cwd)
+	repo, err := gix.Open(cwd)
 	if err != nil {
 		writeError(id, "ERR_INTERNAL", err.Error())
 		return nil

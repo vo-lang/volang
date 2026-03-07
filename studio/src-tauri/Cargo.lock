@@ -4641,6 +4641,7 @@ dependencies = [
  "tauri-plugin-shell",
  "vo-runtime",
  "vo-vox",
+ "vogui",
 ]
 
 [[package]]
@@ -4836,6 +4837,7 @@ dependencies = [
  "vo-engine",
  "vo-ext",
  "vo-ffi-macro",
+ "vo-module",
  "vo-runtime",
  "vo-stdlib",
  "vo-syntax",
@@ -4851,8 +4853,6 @@ dependencies = [
  "vo-ext",
  "vo-runtime",
  "vo-vm",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]

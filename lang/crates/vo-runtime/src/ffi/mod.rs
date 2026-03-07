@@ -157,6 +157,8 @@ pub mod ext_abi {
     pub const RESULT_WAIT_IO: u32 = 3;
     pub const RESULT_PANIC: u32 = 4;
     pub const RESULT_CALL_CLOSURE: u32 = 5;
+    pub const RESULT_HOST_EVENT_WAIT: u32 = 6;
+    pub const RESULT_HOST_EVENT_WAIT_REPLAY: u32 = 7;
 }
 
 /// Extension function pointer type (C calling convention).
@@ -314,6 +316,8 @@ pub struct ExternCallContext<'a> {
     ext_wait_io_token: Option<IoToken>,
     /// Extension result payload: closure call request (set by trampoline, read by runtime).
     ext_call_closure: Option<(GcRef, Vec<u64>)>,
+    /// Extension result payload: host event wait token + delay_ms (set by trampoline, read by runtime).
+    ext_host_event_wait: Option<(u64, u32)>,
 }
 
 impl<'a> ExternCallContext<'a> {
@@ -355,6 +359,7 @@ impl<'a> ExternCallContext<'a> {
             #[cfg(feature = "std")]
             ext_wait_io_token: None,
             ext_call_closure: None,
+            ext_host_event_wait: None,
         }
     }
 
@@ -1339,6 +1344,12 @@ impl<'a> ExternCallContext<'a> {
         self.ext_call_closure = Some((closure_ref, args));
     }
 
+    /// Set host event wait payload for extension result (called by trampoline).
+    #[inline]
+    pub fn set_ext_host_event_wait(&mut self, token: u64, delay_ms: u32) {
+        self.ext_host_event_wait = Some((token, delay_ms));
+    }
+
     /// Decode extension result code into ExternResult, consuming stored payloads.
     /// Called by ExternRegistry after dispatching to an extension function.
     pub fn decode_ext_result(&mut self, code: u32) -> ExternResult {
@@ -1361,6 +1372,16 @@ impl<'a> ExternCallContext<'a> {
                 let (closure_ref, args) = self.ext_call_closure.take()
                     .expect("ext_abi::RESULT_CALL_CLOSURE without set_ext_call_closure");
                 ExternResult::CallClosure { closure_ref, args }
+            }
+            ext_abi::RESULT_HOST_EVENT_WAIT => {
+                let (token, delay_ms) = self.ext_host_event_wait.take()
+                    .expect("ext_abi::RESULT_HOST_EVENT_WAIT without set_ext_host_event_wait");
+                ExternResult::HostEventWait { token, delay_ms }
+            }
+            ext_abi::RESULT_HOST_EVENT_WAIT_REPLAY => {
+                let (token, _delay_ms) = self.ext_host_event_wait.take()
+                    .expect("ext_abi::RESULT_HOST_EVENT_WAIT_REPLAY without set_ext_host_event_wait");
+                ExternResult::HostEventWaitAndReplay { token }
             }
             _ => ExternResult::Panic(format!("invalid extension result code: {}", code)),
         }

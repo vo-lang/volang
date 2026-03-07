@@ -9,8 +9,8 @@
 mod shell;
 
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
-use vo_vox::gui::GuestHandle;
+use std::sync::{Arc, Mutex};
+use vo_vox::gui::{GuestHandle, PushReceiver};
 use vo_vox::{compile, run_with_output as run_vox, RunMode};
 use vo_runtime::output::CaptureSink;
 
@@ -21,6 +21,9 @@ use vo_runtime::output::CaptureSink;
 pub struct AppState {
     pub workspace_root: PathBuf,
     guest:        Mutex<Option<GuestHandle>>,
+    /// Platform-driven render receiver — stored separately so polling
+    /// doesn't contend with the guest handle lock.
+    push_rx:      Mutex<Option<Arc<PushReceiver>>>,
     shell_runner: shell::VoRunner,
 }
 
@@ -127,13 +130,17 @@ fn cmd_run_gui(entry_path: String, state: tauri::State<'_, AppState>) -> Result<
         .map_err(|e| shell::StudioError::access_denied(&e))?;
     let abs_str = abs.to_string_lossy().to_string();
 
+    // Drop previous guest (sends Shutdown, cleans up timers).
     let _ = state.guest.lock().unwrap().take();
+    let _ = state.push_rx.lock().unwrap().take();
 
     let compile_output = compile(&abs_str)
         .map_err(|e| shell::StudioError::vo_compile(&e.to_string()))?;
-    let (initial_bytes, handle) = vo_vox::gui::run_gui(compile_output)
+    let (initial_bytes, handle, push) = vo_vox::gui::run_gui(compile_output)
         .map_err(|e| shell::StudioError::vo_runtime(&e))?;
+
     *state.guest.lock().unwrap() = Some(handle);
+    *state.push_rx.lock().unwrap() = Some(push);
     Ok(initial_bytes)
 }
 
@@ -144,17 +151,29 @@ fn cmd_send_gui_event(
     payload: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<u8>, shell::StudioError> {
-    let mut guard = state.guest.lock().unwrap();
-    let handle = guard.as_mut()
+    let guard = state.guest.lock().unwrap();
+    let handle = guard.as_ref()
         .ok_or_else(|| shell::StudioError::vo_runtime("No guest VM running"))?;
-    vo_vox::gui::send_gui_event(handle, handler_id, &payload)
+    handle.send_event(handler_id, &payload)
         .map_err(|e| shell::StudioError::vo_runtime(&e))
+}
+
+/// Poll for platform-driven render updates (game loop, timers, anim frames).
+/// Returns the latest render bytes if available, or empty vec if none.
+#[tauri::command]
+fn cmd_poll_gui_render(state: tauri::State<'_, AppState>) -> Vec<u8> {
+    let guard = state.push_rx.lock().unwrap();
+    match guard.as_ref() {
+        Some(push) => push.poll().unwrap_or_default(),
+        None => Vec::new(),
+    }
 }
 
 /// Stop the running guest VM.
 #[tauri::command]
 fn cmd_stop_gui(state: tauri::State<'_, AppState>) -> Result<(), shell::StudioError> {
     let _ = state.guest.lock().unwrap().take();
+    let _ = state.push_rx.lock().unwrap().take();
     Ok(())
 }
 
@@ -163,6 +182,9 @@ fn cmd_stop_gui(state: tauri::State<'_, AppState>) -> Result<(), shell::StudioEr
 // =============================================================================
 
 pub fn run() {
+    // Force linker to include vogui extern registrations (linkme distributed slices).
+    vogui::ensure_linked();
+
     let workspace = default_workspace();
     std::fs::create_dir_all(&workspace).ok();
 
@@ -180,12 +202,14 @@ pub fn run() {
             shell_runner:  shell::VoRunner::new(workspace.clone()),
             workspace_root: workspace,
             guest:         Mutex::new(None),
+            push_rx:       Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             cmd_get_workspace_root,
             cmd_compile_run,
             cmd_run_gui,
             cmd_send_gui_event,
+            cmd_poll_gui_render,
             cmd_stop_gui,
             shell::cmd_shell_init,
             shell::cmd_shell_exec,

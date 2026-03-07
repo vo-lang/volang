@@ -190,10 +190,13 @@ fn generate_ext_trampoline(
                     ctx_ref.set_ext_wait_io(token);
                     vo_runtime::ffi::ext_abi::RESULT_WAIT_IO
                 }
-                Ok(vo_runtime::ffi::ExternResult::HostEventWait { .. }) |
-                Ok(vo_runtime::ffi::ExternResult::HostEventWaitAndReplay { .. }) => {
-                    ctx_ref.set_ext_panic(std::string::String::from("HostEventWait not supported in extension trampoline"));
-                    vo_runtime::ffi::ext_abi::RESULT_PANIC
+                Ok(vo_runtime::ffi::ExternResult::HostEventWait { token, delay_ms }) => {
+                    ctx_ref.set_ext_host_event_wait(token, delay_ms);
+                    vo_runtime::ffi::ext_abi::RESULT_HOST_EVENT_WAIT
+                }
+                Ok(vo_runtime::ffi::ExternResult::HostEventWaitAndReplay { token }) => {
+                    ctx_ref.set_ext_host_event_wait(token, 0);
+                    vo_runtime::ffi::ext_abi::RESULT_HOST_EVENT_WAIT_REPLAY
                 }
                 Err(panic_payload) => {
                     let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {

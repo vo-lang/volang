@@ -38,6 +38,10 @@ pub struct ModFile {
     /// Direct dependencies.
     pub requires: Vec<Require>,
 
+    /// Module path replacements (like Go's `replace` directive).
+    /// Maps a module path to a local filesystem path.
+    pub replaces: Vec<Replace>,
+
     /// Distributable file list declared in `files (...)` block.
     /// Used by WASM module fetcher to know which files to download.
     pub files: Vec<String>,
@@ -54,6 +58,21 @@ pub struct Require {
 
     /// The exact version (e.g., "v1.2.3").
     pub version: String,
+}
+
+/// A single replace directive.
+///
+/// Syntax in vo.mod:  `replace <module> => <local-path>`
+///
+/// The local path is stored as-is; callers resolve it relative to the vo.mod
+/// directory before use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replace {
+    /// The module path being replaced (e.g., "github.com/vo-lang/vox").
+    pub module: String,
+
+    /// The local filesystem path (may be relative to the vo.mod file).
+    pub local_path: String,
 }
 
 impl ModFile {
@@ -74,6 +93,7 @@ impl ModFile {
     pub fn parse(content: &str, file_path: &Path) -> ModuleResult<Self> {
         let mut module: Option<String> = None;
         let mut requires: Vec<Require> = Vec::new();
+        let mut replaces: Vec<Replace> = Vec::new();
         let mut files: Vec<String> = Vec::new();
 
         let lines: Vec<&str> = content.lines().collect();
@@ -191,6 +211,36 @@ impl ModFile {
                 continue;
             }
 
+            // Parse replace directive: replace <module> => <local-path>
+            if line.starts_with("replace ") {
+                let rest = line.strip_prefix("replace ").unwrap().trim();
+                let Some((lhs, rhs)) = rest.split_once("=>") else {
+                    return Err(ModuleError::ParseError {
+                        file: file_path.to_path_buf(),
+                        line: line_num,
+                        message: format!(
+                            "invalid replace syntax, expected: replace <module> => <path>, got: {}",
+                            line
+                        ),
+                    });
+                };
+                let lhs = lhs.trim();
+                let rhs = rhs.trim();
+                if lhs.is_empty() || rhs.is_empty() {
+                    return Err(ModuleError::ParseError {
+                        file: file_path.to_path_buf(),
+                        line: line_num,
+                        message: format!("replace directive has empty module or path: {}", line),
+                    });
+                }
+                replaces.push(Replace {
+                    module: lhs.to_string(),
+                    local_path: rhs.to_string(),
+                });
+                i += 1;
+                continue;
+            }
+
             // Unknown directive
             return Err(ModuleError::ParseError {
                 file: file_path.to_path_buf(),
@@ -201,7 +251,7 @@ impl ModFile {
 
         let module = module.ok_or_else(|| ModuleError::MissingModuleDecl(file_path.to_path_buf()))?;
 
-        Ok(ModFile { module, requires, files })
+        Ok(ModFile { module, requires, replaces, files })
     }
 
     /// Creates a new empty ModFile with the given module path.
@@ -209,6 +259,7 @@ impl ModFile {
         ModFile {
             module,
             requires: Vec::new(),
+            replaces: Vec::new(),
             files: Vec::new(),
         }
     }
@@ -251,6 +302,12 @@ impl fmt::Display for ModFile {
                 } else {
                     writeln!(f, "require {} {} {}", req.alias, req.module, req.version)?;
                 }
+            }
+        }
+        if !self.replaces.is_empty() {
+            writeln!(f)?;
+            for rep in &self.replaces {
+                writeln!(f, "replace {} => {}", rep.module, rep.local_path)?;
             }
         }
         if !self.files.is_empty() {
@@ -458,6 +515,7 @@ require bar github.com/foo/bar 1.2.3
                     version: "v1.2.3".to_string(),
                 },
             ],
+            replaces: Vec::new(),
             files: Vec::new(),
         };
         // alias "bar" == last component of "github.com/foo/bar" → 2-field form
@@ -476,6 +534,7 @@ require bar github.com/foo/bar 1.2.3
                     version: "v1.9.0".to_string(),
                 },
             ],
+            replaces: Vec::new(),
             files: Vec::new(),
         };
         // alias "myhttplib" != last component "gin" → 3-field form
@@ -507,6 +566,7 @@ require bar github.com/foo/bar 1.2.3
                     version: "v1.9.0".to_string(),
                 },
             ],
+            replaces: Vec::new(),
             files: Vec::new(),
         };
 
@@ -634,6 +694,7 @@ require jwt github.com/golang-jwt/jwt v5.0.0
                     version: "v2.0.0-beta.1".to_string(),
                 },
             ],
+            replaces: Vec::new(),
             files: Vec::new(),
         };
         

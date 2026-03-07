@@ -5,6 +5,7 @@
 //! - LocalSource: Local packages (relative paths)
 //! - ModSource: External module dependencies
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use vo_common::vfs::{FileSystem, RealFs};
@@ -244,6 +245,53 @@ fn load_vo_files<F: FileSystem>(fs: &F, dir: &Path) -> Option<Vec<VfsFile>> {
         None
     } else {
         Some(files)
+    }
+}
+
+/// Decorator resolver that applies `replace` directives before delegating.
+///
+/// When an import path matches a replaced module (exact or sub-package),
+/// the package is resolved from the replacement's local filesystem path
+/// instead of the module cache.
+pub struct ReplacingResolver<R> {
+    inner: R,
+    /// module path → absolute local directory
+    replaces: HashMap<String, PathBuf>,
+}
+
+impl<R> ReplacingResolver<R> {
+    pub fn new(inner: R, replaces: HashMap<String, PathBuf>) -> Self {
+        Self { inner, replaces }
+    }
+}
+
+impl<R: Resolver> Resolver for ReplacingResolver<R> {
+    fn resolve(&self, import_path: &str, importer_dir: &str) -> Option<VfsPackage> {
+        // Check if any replace directive matches this import.
+        // Matches exact module path or sub-packages (module + "/").
+        for (module, local_dir) in &self.replaces {
+            let (matched, sub) = if import_path == module.as_str() {
+                (true, "")
+            } else if import_path.starts_with(module.as_str())
+                && import_path.as_bytes().get(module.len()) == Some(&b'/')
+            {
+                (true, &import_path[module.len() + 1..])
+            } else {
+                (false, "")
+            };
+
+            if matched {
+                let resolve_dir = if sub.is_empty() {
+                    local_dir.clone()
+                } else {
+                    local_dir.join(sub)
+                };
+                let fs = RealFs::new(&resolve_dir);
+                return resolve_package(&fs, ".", import_path);
+            }
+        }
+
+        self.inner.resolve(import_path, importer_dir)
     }
 }
 

@@ -85,9 +85,30 @@ async function initTauriBridge(): Promise<void> {
     fsRename:    (oldPath: string, newPath: string)  => shellClient.exec({ kind: 'fs.rename', oldPath, newPath }),
     fsRemove:    (path: string, recursive: boolean)  => shellClient.exec({ kind: 'fs.remove', path, recursive }),
 
-    // Tauri handles timers natively in its own process; no JS-side render callback needed
-    setGuiRenderCallback(_cb: (bytes: Uint8Array) => void) {},
-    clearGuiRenderCallback() {},
+    // Poll for platform-driven renders (game loop, timers) via RAF loop.
+    // Uses the `invoke` captured from initTauriBridge scope.
+    setGuiRenderCallback(cb: (bytes: Uint8Array) => void) {
+      let active = true;
+      const poll = async () => {
+        if (!active) return;
+        try {
+          const raw = await invoke('cmd_poll_gui_render') as number[];
+          if (raw && raw.length > 0) {
+            cb(new Uint8Array(raw));
+          }
+        } catch { /* guest stopped */ }
+        if (active) requestAnimationFrame(poll);
+      };
+      requestAnimationFrame(poll);
+      (this as any).__guiPollStop = () => { active = false; };
+    },
+    clearGuiRenderCallback() {
+      const stop = (this as any).__guiPollStop;
+      if (typeof stop === 'function') {
+        stop();
+        (this as any).__guiPollStop = null;
+      }
+    },
   };
 }
 

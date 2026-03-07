@@ -69,7 +69,11 @@ export class TauriTransport implements ShellTransport {
     const { listen } = await import('@tauri-apps/api/event');
     this._invoke = tauri.invoke as typeof this._invoke;
     this._listen = listen as typeof this._listen;
-    return this._invoke('cmd_shell_init') as Promise<TransportInfo>;
+    const raw = await this._invoke('cmd_shell_init') as { workspaceRoot: string; capabilities: string[] };
+    return {
+      workspaceRoot: raw.workspaceRoot,
+      capabilities:  new Set(raw.capabilities) as Set<Capability>,
+    };
   }
 
   async send(req: ShellRequest): Promise<ShellResponse> {

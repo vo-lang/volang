@@ -31,11 +31,44 @@ pub struct VoRunner {
 
 impl VoRunner {
     pub fn new(workspace_root: PathBuf) -> Self {
-        // Derive handler path relative to the executable's workspace root.
-        // studio/vo/shell/ lives two levels above the src-tauri/ directory.
-        // At runtime the workspace_root is the project root (where d.py lives).
-        let handler_dir = workspace_root.join("studio").join("vo").join("shell");
+        let handler_dir = Self::find_handler_dir();
         Self { handler_dir, workspace_root, cached: Mutex::new(None) }
+    }
+
+    /// Locate the studio/vo/shell/ handler directory at runtime.
+    ///
+    /// Strategy (tried in order):
+    /// 1. `VIBE_STUDIO_HANDLER_DIR` env var — explicit override.
+    /// 2. Relative to the running executable:
+    ///    dev layout:  `studio/src-tauri/target/debug/vibe-studio`
+    ///                  → exe/../../../..  ==  `studio/`
+    ///                  → `studio/vo/shell/`
+    /// 3. Relative to the current working directory (`cwd/vo/shell`).
+    fn find_handler_dir() -> PathBuf {
+        if let Ok(val) = std::env::var("VIBE_STUDIO_HANDLER_DIR") {
+            return PathBuf::from(val);
+        }
+
+        if let Ok(exe) = std::env::current_exe() {
+            // exe  →  debug/  →  target/  →  src-tauri/  →  studio/
+            let candidate = exe
+                .parent()                     // debug/
+                .and_then(|p| p.parent())     // target/
+                .and_then(|p| p.parent())     // src-tauri/
+                .and_then(|p| p.parent())     // studio/
+                .map(|studio| studio.join("vo").join("shell"));
+
+            if let Some(dir) = candidate {
+                if dir.exists() {
+                    return dir;
+                }
+            }
+        }
+
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join("vo")
+            .join("shell")
     }
 
     pub fn handle(&self, req: ShellRequest, app: &tauri::AppHandle) -> ShellResponse {
@@ -75,7 +108,7 @@ impl VoRunner {
         };
 
         let sink = CaptureSink::new();
-        let run_result = run_vox(compiled, RunMode::Vm, vec![req_json, workspace_str], sink.clone());
+        let run_result = run_vox(compiled, RunMode::Vm, vec!["native".into(), req_json, workspace_str], sink.clone());
         let captured = sink.take();
 
         if let Err(e) = run_result {

@@ -9,6 +9,7 @@ Usage:
     ./d.py clean [all|vo|rust]
     ./d.py play [--build-only]
     ./d.py studio [--build-wasm] [--build-only]
+    ./d.py studio-native [--build-wasm]
     ./d.py run <file.vo> [--mode=vm|jit] [--codegen]
     ./d.py vo <args...>
 """
@@ -214,7 +215,7 @@ def main():
         sys.exit(run_vo_cli(['run'] + rest_args, jit_mode=jit_mode))
     elif command == 'vo':
         sys.exit(run_vo_cli(rest_args))
-    elif command in ('bench', 'loc', 'clean', 'play', 'studio'):
+    elif command in ('bench', 'loc', 'clean', 'play', 'studio', 'studio-native'):
         sys.exit(run_other_command(command, rest_args))
     elif command in ('-h', '--help', 'help'):
         print(__doc__)

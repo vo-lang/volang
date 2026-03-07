@@ -29,8 +29,8 @@ pub mod vfs;
 mod ext_manifest;
 pub mod fetch;
 
-pub use modfile::{ModFile, Require};
+pub use modfile::{ModFile, Require, Replace};
 pub use resolver::{ModuleResolver, ModuleClosure, ResolvedPackage};
 pub use error::{ModuleError, ModuleResult};
-pub use vfs::{PackageResolver, PackageResolverMixed, Resolver, VfsPackage, VfsFile, StdSource, LocalSource, ModSource};
+pub use vfs::{PackageResolver, PackageResolverMixed, ReplacingResolver, Resolver, VfsPackage, VfsFile, StdSource, LocalSource, ModSource};
 pub use ext_manifest::{ExtensionManifest, ExtManifestError, discover_extensions, is_bindgen_ext_content};
