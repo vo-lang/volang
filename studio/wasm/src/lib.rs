@@ -252,6 +252,20 @@ fn get_shell_handler_bytecode() -> Result<Vec<u8>, String> {
     })
 }
 
+/// Read the shell handler's embedded `vo.mod` content.
+///
+/// Returns `Err` if the file is missing or not valid UTF-8.
+fn shell_vo_mod_content() -> Result<String, String> {
+    let bytes = SHELL_HANDLER_FILES
+        .iter()
+        .find(|(path, _)| *path == "studio/vo/shell/vo.mod")
+        .map(|(_, bytes)| *bytes)
+        .ok_or_else(|| "no embedded vo.mod found".to_string())?;
+    std::str::from_utf8(bytes)
+        .map(|s| s.to_string())
+        .map_err(|e| format!("vo.mod utf8: {}", e))
+}
+
 /// Return the module paths declared in the shell handler's embedded `vo.mod`.
 ///
 /// Used by the JS bridge to derive the VFS purge list dynamically rather than
@@ -259,16 +273,10 @@ fn get_shell_handler_bytecode() -> Result<Vec<u8>, String> {
 #[wasm_bindgen(js_name = "getShellDepModules")]
 pub fn get_shell_dep_modules() -> js_sys::Array {
     let arr = js_sys::Array::new();
-    let vo_mod_bytes = SHELL_HANDLER_FILES
-        .iter()
-        .find(|(path, _)| *path == "studio/vo/shell/vo.mod")
-        .map(|(_, bytes)| *bytes);
-    if let Some(bytes) = vo_mod_bytes {
-        if let Ok(content) = std::str::from_utf8(bytes) {
-            if let Ok(mod_file) = vo_module::ModFile::parse(content, std::path::Path::new("vo.mod")) {
-                for req in &mod_file.requires {
-                    arr.push(&JsValue::from_str(&req.module));
-                }
+    if let Ok(content) = shell_vo_mod_content() {
+        if let Ok(mod_file) = vo_module::ModFile::parse(&content, std::path::Path::new("vo.mod")) {
+            for req in &mod_file.requires {
+                arr.push(&JsValue::from_str(&req.module));
             }
         }
     }
@@ -285,16 +293,10 @@ pub fn get_shell_dep_modules() -> js_sys::Array {
 #[wasm_bindgen(js_name = "preloadShellDeps")]
 pub fn preload_shell_deps() -> js_sys::Promise {
     wasm_bindgen_futures::future_to_promise(async move {
-        let vo_mod_bytes = SHELL_HANDLER_FILES
-            .iter()
-            .find(|(path, _)| *path == "studio/vo/shell/vo.mod")
-            .map(|(_, bytes)| *bytes)
-            .ok_or_else(|| JsValue::from_str("no embedded vo.mod found"))?;
+        let content = shell_vo_mod_content()
+            .map_err(|e| JsValue::from_str(&e))?;
 
-        let content = std::str::from_utf8(vo_mod_bytes)
-            .map_err(|e| JsValue::from_str(&format!("vo.mod utf8: {}", e)))?;
-
-        vo_web::ensure_vfs_deps(content)
+        vo_web::ensure_vfs_deps(&content)
             .await
             .map_err(|e| JsValue::from_str(&e))?;
 

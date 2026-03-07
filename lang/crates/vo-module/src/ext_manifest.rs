@@ -158,6 +158,31 @@ fn extract_toml_string(line: &str) -> Option<String> {
     }
 }
 
+/// Check if a `vo.ext.toml` content string declares `type = "wasm-bindgen"`.
+///
+/// This is used to determine whether a WASM extension module needs a JS glue
+/// file (wasm-bindgen style) or uses the standalone C-ABI convention.
+///
+/// Works on the raw content of `vo.ext.toml` — callers can source it from
+/// fetched files, a VFS, or disk.
+pub fn is_bindgen_ext_content(vo_ext_toml_content: &str) -> bool {
+    extract_toml_string_from_content(vo_ext_toml_content, "type")
+        .as_deref() == Some("wasm-bindgen")
+}
+
+/// Extract a string value for a given key from TOML content.
+fn extract_toml_string_from_content(content: &str, key: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with(key) {
+            if let Some(val) = extract_toml_string(line) {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +192,21 @@ mod tests {
         assert_eq!(extract_toml_string(r#"name = "test""#), Some("test".to_string()));
         assert_eq!(extract_toml_string(r#"path = "native/lib.so""#), Some("native/lib.so".to_string()));
         assert_eq!(extract_toml_string("invalid"), None);
+    }
+
+    #[test]
+    fn test_is_bindgen_ext_content() {
+        assert!(is_bindgen_ext_content(r#"
+[extension]
+name = "vogui"
+type = "wasm-bindgen"
+"#));
+        assert!(!is_bindgen_ext_content(r#"
+[extension]
+name = "zip"
+type = "standalone"
+"#));
+        assert!(!is_bindgen_ext_content(""));
+        assert!(!is_bindgen_ext_content(r#"name = "zip""#));
     }
 }

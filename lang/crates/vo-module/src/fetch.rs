@@ -664,78 +664,8 @@ mod wasm {
         let ext_toml_path = PathBuf::from(format!("{}/vo.ext.toml", module));
         files.iter()
             .find(|(p, _)| *p == ext_toml_path)
-            .map(|(_, content)| {
-                content.lines().any(|line| {
-                    let line = line.trim();
-                    line == r#"type = "wasm-bindgen""#
-                })
-            })
+            .map(|(_, content)| crate::is_bindgen_ext_content(content))
             .unwrap_or(false)
-    }
-
-    struct GitHubFileEntry {
-        name: String,
-        download_url: String,
-    }
-
-    /// Parse a GitHub Contents API JSON response and return file entries.
-    fn github_contents_entries(json: &str) -> Vec<GitHubFileEntry> {
-        let mut entries = Vec::new();
-        let mut pos = 0;
-        while pos < json.len() {
-            let start = match json[pos..].find('{') {
-                Some(i) => pos + i,
-                None => break,
-            };
-            let mut depth = 0i32;
-            let mut end = start;
-            for (i, c) in json[start..].char_indices() {
-                match c {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = start + i + 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if end > start {
-                let obj = &json[start..end];
-                if json_str_field(obj, "type").as_deref() == Some("file") {
-                    if let (Some(name), Some(dl)) = (
-                        json_str_field(obj, "name"),
-                        json_str_field(obj, "download_url"),
-                    ) {
-                        entries.push(GitHubFileEntry { name, download_url: dl });
-                    }
-                }
-            }
-            pos = if end > start { end } else { pos + 1 };
-        }
-        entries
-    }
-
-    /// Extract the string value of a JSON field: `"key": "value"` or `"key":"value"`.
-    fn json_str_field(json: &str, key: &str) -> Option<String> {
-        let pat = format!("\"{}\":", key);
-        let after_colon = json.find(pat.as_str())? + pat.len();
-        // Skip whitespace after colon (GitHub API returns `"key": "value"`)
-        let trimmed = json[after_colon..].trim_start_matches([' ', '\t', '\n', '\r']);
-        if !trimmed.starts_with('"') {
-            return None; // value is not a string (e.g. null, number)
-        }
-        let mut v = String::new();
-        let mut esc = false;
-        for c in trimmed[1..].chars() {
-            if esc { v.push(c); esc = false; }
-            else if c == '\\' { esc = true; }
-            else if c == '"' { return Some(v); }
-            else { v.push(c); }
-        }
-        None
     }
 
     /// Check if a wasm-bindgen JS glue file exists for this module.
