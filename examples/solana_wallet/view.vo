@@ -1,0 +1,129 @@
+package main
+
+import (
+	"fmt"
+	"github.com/vo-lang/vogui"
+)
+
+func view(state any) vogui.Node {
+	s := state.(*State)
+	return vogui.Column(
+		headerSection(),
+		walletInputCard(s),
+		vogui.If(s.Error != "", vogui.Alert(s.Error).Variant("danger")),
+		vogui.If(s.Loaded, overviewSection(s)),
+		vogui.If(s.Loaded, positionsSection(s)),
+		vogui.If(!s.Loaded && s.Error == "", emptyState()),
+	).P(24).Gap(16).MaxW("980px").Mx("auto")
+}
+
+func headerSection() vogui.Node {
+	return vogui.Column(
+		vogui.H1("Solana Wallet Portfolio"),
+		vogui.Text("Start with wallet fungible assets only: balance inventory, token pricing, and portfolio assembly.").
+			Fg("var(--vo-text-muted)").Font(14),
+	).Gap(6)
+}
+
+func walletInputCard(s *State) vogui.Node {
+	return vogui.Card(
+		vogui.Column(
+			vogui.FormField("Wallet Address",
+				vogui.Input(s.WalletInput, vogui.OnValue(func(s *State, v string) { s.WalletInput = v })).
+					Placeholder("Paste a Solana wallet address"),
+			),
+			vogui.Row(
+				vogui.Button("Load Mock Assets", vogui.OnClick(connectWallet)).Variant("primary"),
+				vogui.Text("Next step: replace mock data with Helius wallet assets + Jupiter price.").
+					Fg("var(--vo-text-muted)").Font(13),
+			).Class("items-center gap-3"),
+		).Gap(12).P(16),
+	)
+}
+
+func overviewSection(s *State) vogui.Node {
+	return vogui.Grid(3,
+		metricCard("Wallet", shortenWallet(s.Snapshot.Wallet)),
+		metricCard("Total Value", formatUSD(s.Snapshot.TotalValueUSD)),
+		metricCard("Source", s.Snapshot.SourceLabel),
+	).Gap(16)
+}
+
+func metricCard(label string, value string) vogui.Node {
+	return vogui.Card(
+		vogui.Text(label).Fg("var(--vo-text-muted)").Font(13),
+		vogui.Text(value).Font(22).Bold(),
+	).Gap(8).P(16)
+}
+
+func positionsSection(s *State) vogui.Node {
+	rows := make([]vogui.Node, len(s.Snapshot.Assets))
+	for i, asset := range s.Snapshot.Assets {
+		rows[i] = positionRow(asset)
+	}
+	return vogui.Card(
+		vogui.Column(
+			vogui.Row(
+				vogui.H3("Positions"),
+				vogui.Spacer(),
+				vogui.Badge(fmt.Sprint(len(s.Snapshot.Assets)) + " assets").Variant("secondary"),
+			).Class("items-center"),
+			vogui.Divider(),
+			vogui.Column(rows...).Gap(0),
+		).Gap(12).P(16),
+	)
+}
+
+func positionRow(asset WalletAsset) vogui.Node {
+	return vogui.Row(
+		vogui.Row(
+			vogui.Center(vogui.Text(asset.LogoEmoji).Font(18)).W(36).H(36).Rounded(18).Bg("var(--vo-surface)"),
+			vogui.Column(
+				vogui.Text(asset.Symbol).Bold(),
+				vogui.Text(asset.Name).Fg("var(--vo-text-muted)").Font(12),
+			).Gap(2),
+		).Gap(10).Class("items-center").Flex(3),
+		vogui.Column(
+			vogui.Text(formatAmount(asset.Amount)).Bold(),
+			vogui.Text(formatUSD(asset.PriceUSD) + " each").Fg("var(--vo-text-muted)").Font(12),
+		).Gap(2).Class("items-end").Flex(2),
+		vogui.Column(
+			vogui.Text(formatUSD(asset.ValueUSD())).Bold(),
+			vogui.Text(asset.Mint).Fg("var(--vo-text-muted)").Font(11),
+		).Gap(2).Class("items-end").Flex(3),
+	).Class("items-center py-3 border-b")
+}
+
+func emptyState() vogui.Node {
+	return vogui.Center(
+		vogui.Column(
+			vogui.Text("No wallet loaded yet").Font(18).Bold(),
+			vogui.Text("Use the sample wallet above to bootstrap the portfolio assembly flow.").
+				Fg("var(--vo-text-muted)"),
+		).Gap(6).Class("items-center"),
+	).H(240)
+}
+
+func formatUSD(v float64) string {
+	if v >= 1000 {
+		return fmt.Sprintf("$%.2f", v)
+	}
+	return fmt.Sprintf("$%.4f", v)
+}
+
+func formatAmount(v float64) string {
+	if v >= 1000000 {
+		return fmt.Sprintf("%.2fM", v/1000000.0)
+	}
+	if v == float64(int(v)) {
+		return fmt.Sprintf("%.0f", v)
+	}
+	return fmt.Sprintf("%.4f", v)
+}
+
+func shortenWallet(wallet string) string {
+	if len(wallet) <= 10 {
+		return wallet
+	}
+	return wallet[:4] + "..." + wallet[len(wallet)-4:]
+}

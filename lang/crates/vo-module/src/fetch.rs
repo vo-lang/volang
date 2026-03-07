@@ -422,8 +422,9 @@ mod native {
         // vo-runtime ABI matches the currently running vo binary exactly.
         if let Some(repo_root) = detect_volang_repo_root() {
             let crates = [
-                "vo-runtime", "vo-ext", "vo-ffi-macro",
+                "vo-vm", "vo-runtime", "vo-ext", "vo-ffi-macro",
                 "vo-common", "vo-common-core", "vo-syntax", "vo-module",
+                "vo-stdlib",
             ];
             for krate in crates {
                 let local_path = repo_root.join("lang").join("crates").join(krate);
@@ -492,18 +493,25 @@ mod native {
 
     /// Detect the local volang repo root from the currently running executable.
     ///
-    /// The `vo` binary lives at `<repo>/target/{debug,release}/vo`, so walking
-    /// three levels up from the executable gives the repo root.  We confirm
-    /// identity by checking for `Cargo.toml` + `lang/` at that path.
+    /// Walks up from the executable directory looking for a directory that
+    /// contains both `Cargo.toml` and `lang/`.  Works for both the `vo` CLI
+    /// (`<repo>/target/{profile}/vo`) and `vibe-studio`
+    /// (`<repo>/studio/src-tauri/target/{profile}/vibe-studio`).
     pub fn detect_volang_repo_root() -> Option<PathBuf> {
         let exe = std::env::current_exe().ok()?;
-        // exe -> profile dir -> target -> repo root
-        let root = exe.parent()?.parent()?.parent()?;
-        if root.join("Cargo.toml").exists() && root.join("lang").exists() {
-            Some(root.to_path_buf())
-        } else {
-            None
+        // Walk up from the executable looking for a directory that contains
+        // both `Cargo.toml` and `lang/`.  This works for:
+        //   - vo CLI:       <repo>/target/{profile}/vo          (3 levels)
+        //   - vibe-studio:  <repo>/studio/src-tauri/target/{profile}/vibe-studio (5 levels)
+        let mut candidate = exe.parent();
+        for _ in 0..8 {
+            let dir = candidate?;
+            if dir.join("Cargo.toml").exists() && dir.join("lang").exists() {
+                return Some(dir.to_path_buf());
+            }
+            candidate = dir.parent();
         }
+        None
     }
 }
 

@@ -11,7 +11,7 @@ mod shell;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use vo_vox::gui::{GuestHandle, PushReceiver};
-use vo_vox::{compile, run_with_output as run_vox, RunMode};
+use vo_vox::{compile_with_auto_install, run_with_output as run_vox, RunMode};
 use vo_runtime::output::CaptureSink;
 
 // =============================================================================
@@ -98,14 +98,29 @@ fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
 // Execution commands
 // =============================================================================
 
+/// For multi-file projects (vo.mod present in parent dir), return the directory
+/// path so the compiler reads all .vo files and resolves module dependencies.
+/// For single-file entries, return the file path as-is.
+fn resolve_compile_path(entry: &Path) -> PathBuf {
+    if entry.is_file() {
+        if let Some(parent) = entry.parent() {
+            if parent.join("vo.mod").exists() {
+                return parent.to_path_buf();
+            }
+        }
+    }
+    entry.to_path_buf()
+}
+
 /// Compile and run user code from an entry path, returning captured stdout.
 #[tauri::command]
 fn cmd_compile_run(entry_path: String, state: tauri::State<'_, AppState>) -> Result<String, shell::StudioError> {
     let abs = resolve_path(&state.workspace_root, &entry_path)
         .map_err(|e| shell::StudioError::access_denied(&e))?;
-    let abs_str = abs.to_string_lossy().to_string();
+    let compile_path = resolve_compile_path(&abs);
+    let compile_str = compile_path.to_string_lossy().to_string();
 
-    let compile_output = compile(&abs_str)
+    let compile_output = compile_with_auto_install(&compile_str)
         .map_err(|e| shell::StudioError::vo_compile(&e.to_string()))?;
     let sink = CaptureSink::new();
     let result = run_vox(compile_output, RunMode::Vm, Vec::new(), sink.clone());
@@ -128,13 +143,15 @@ fn cmd_compile_run(entry_path: String, state: tauri::State<'_, AppState>) -> Res
 fn cmd_run_gui(entry_path: String, state: tauri::State<'_, AppState>) -> Result<Vec<u8>, shell::StudioError> {
     let abs = resolve_path(&state.workspace_root, &entry_path)
         .map_err(|e| shell::StudioError::access_denied(&e))?;
-    let abs_str = abs.to_string_lossy().to_string();
 
     // Drop previous guest (sends Shutdown, cleans up timers).
     let _ = state.guest.lock().unwrap().take();
     let _ = state.push_rx.lock().unwrap().take();
 
-    let compile_output = compile(&abs_str)
+    let compile_path = resolve_compile_path(&abs);
+    let compile_str = compile_path.to_string_lossy().to_string();
+
+    let compile_output = compile_with_auto_install(&compile_str)
         .map_err(|e| shell::StudioError::vo_compile(&e.to_string()))?;
     let (initial_bytes, handle, push) = vo_vox::gui::run_gui(compile_output)
         .map_err(|e| shell::StudioError::vo_runtime(&e))?;

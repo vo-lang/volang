@@ -1,0 +1,53 @@
+package main
+
+type WalletAsset struct {
+	Mint      string
+	Symbol    string
+	Name      string
+	Amount    float64
+	PriceUSD  float64
+	LogoEmoji string
+}
+
+func (a WalletAsset) ValueUSD() float64 {
+	return a.Amount * a.PriceUSD
+}
+
+type PortfolioSnapshot struct {
+	Wallet        string
+	Assets        []WalletAsset
+	TotalValueUSD float64
+	SourceLabel   string
+}
+
+type State struct {
+	WalletInput  string
+	ActiveWallet string
+	Loading      bool
+	Loaded       bool
+	Error        string
+	Snapshot     PortfolioSnapshot
+}
+
+func initState() any {
+	return &State{
+		WalletInput: "7vfCXTUXx5W3xG8xY2nTQeMgsQUK91t3s1K9wYqLh6f7",
+	}
+}
+
+func rebuildSnapshot(s *State, wallet string, assets []WalletAsset, source string) {
+	total := 0.0
+	for _, asset := range assets {
+		total += asset.ValueUSD()
+	}
+	s.ActiveWallet = wallet
+	s.Loaded = true
+	s.Loading = false
+	s.Error = ""
+	s.Snapshot = PortfolioSnapshot{
+		Wallet:        wallet,
+		Assets:        assets,
+		TotalValueUSD: total,
+		SourceLabel:   source,
+	}
+}

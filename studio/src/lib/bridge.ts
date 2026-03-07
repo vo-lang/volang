@@ -126,6 +126,12 @@ function isTauriRuntime(): boolean {
   return Boolean(w.__TAURI__ || w.__TAURI_INTERNALS__);
 }
 
+function parentDir(path: string): string {
+  const idx = path.lastIndexOf('/');
+  if (idx <= 0) return '/';
+  return path.slice(0, idx);
+}
+
 // =============================================================================
 // Tauri bridge
 // =============================================================================
@@ -140,14 +146,11 @@ async function initTauriBridge(onProgress: (step: string) => void): Promise<void
   const shellClient    = new ShellClient(shellTransport);
   await shellClient.initialize();
 
-  // Seed examples into workspace as single-file projects (skip if already exist)
+  // Seed built-in examples into workspace (always overwrite so updates propagate)
   for (const ex of STUDIO_SYNC_EXAMPLES) {
     const fullPath = workspaceRoot + '/' + ex.path;
-    try {
-      await shellClient.exec({ kind: 'fs.read', path: fullPath });
-    } catch {
-      await shellClient.exec({ kind: 'fs.write', path: fullPath, content: ex.content });
-    }
+    await shellClient.exec({ kind: 'fs.mkdir', path: parentDir(fullPath), recursive: true });
+    await shellClient.exec({ kind: 'fs.write', path: fullPath, content: ex.content });
   }
 
   _bridge = {
@@ -215,14 +218,12 @@ async function initWasmBridge(onProgress: (step: string) => void): Promise<void>
   const { initVFS, vfs } = await import('@vo-web/index');
   await initVFS();
 
-  // 2) Seed examples into VFS as root-level single-file projects (skip if already exist)
+  // 2) Seed built-in examples into VFS (always overwrite so updates propagate)
   const enc = new TextEncoder();
   for (const ex of STUDIO_SYNC_EXAMPLES) {
     const fullPath = WASM_WORKSPACE + '/' + ex.path;
-    const statErr = vfs.stat(fullPath)[5];
-    if (statErr) {
-      vfs.writeFile(fullPath, enc.encode(ex.content), 0o644);
-    }
+    vfs.mkdirAll(parentDir(fullPath), 0o755);
+    vfs.writeFile(fullPath, enc.encode(ex.content), 0o644);
   }
 
   // 3) Load studio WASM module

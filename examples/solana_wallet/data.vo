@@ -1,0 +1,42 @@
+package main
+
+import "strings"
+
+func loadWalletAssets(wallet string) ([]WalletAsset, string) {
+	normalized := strings.TrimSpace(wallet)
+	if normalized == "" {
+		return nil, ""
+	}
+	lower := strings.ToLower(normalized)
+	if strings.Contains(lower, "jup") || strings.Contains(lower, "portfolio") {
+		return []WalletAsset{
+			{Mint: "So11111111111111111111111111111111111111112", Symbol: "SOL", Name: "Solana", Amount: 42.18, PriceUSD: 143.52, LogoEmoji: "◎"},
+			{Mint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", Symbol: "JUP", Name: "Jupiter", Amount: 1820.0, PriceUSD: 0.84, LogoEmoji: "🪐"},
+			{Mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", Symbol: "USDC", Name: "USD Coin", Amount: 950.0, PriceUSD: 1.0, LogoEmoji: "$"},
+			{Mint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", Symbol: "BONK", Name: "Bonk", Amount: 8500000.0, PriceUSD: 0.000018, LogoEmoji: "🐶"},
+		}, "Mock portfolio · Jupiter-style wallet"
+	}
+	return []WalletAsset{
+		{Mint: "So11111111111111111111111111111111111111112", Symbol: "SOL", Name: "Solana", Amount: 8.42, PriceUSD: 143.52, LogoEmoji: "◎"},
+		{Mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", Symbol: "USDC", Name: "USD Coin", Amount: 1260.45, PriceUSD: 1.0, LogoEmoji: "$"},
+		{Mint: "bSo13r4TkiE4Qy9MZ7m5t3Yk1QX2jG6N8s9Dqf1v2a3", Symbol: "bSOL", Name: "BlazeStake Staked SOL", Amount: 3.1, PriceUSD: 159.41, LogoEmoji: "🔥"},
+		{Mint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", Symbol: "JUP", Name: "Jupiter", Amount: 640.0, PriceUSD: 0.84, LogoEmoji: "🪐"},
+	}, "Mock portfolio · Fungible wallet assets"
+}
+
+func connectWallet(s *State) {
+	wallet := strings.TrimSpace(s.WalletInput)
+	if wallet == "" {
+		s.Error = "Wallet address is required"
+		s.Loaded = false
+		return
+	}
+	assets, source := loadWalletAssets(wallet)
+	if len(assets) == 0 {
+		s.Error = "No fungible assets found"
+		s.Loading = false
+		s.Loaded = false
+		return
+	}
+	rebuildSnapshot(s, wallet, assets, source)
+}

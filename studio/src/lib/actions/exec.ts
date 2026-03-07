@@ -35,11 +35,8 @@ export async function runCode(): Promise<void> {
     }
   }
 
-  const fileName = entryPath.split('/').pop() ?? entryPath;
   consoleClear();
-  consolePush('system', `Compiling ${fileName}…`);
   const startTime = Date.now();
-
   ide.update(s => ({
     ...s,
     isRunning: true,
@@ -50,6 +47,9 @@ export async function runCode(): Promise<void> {
   }));
 
   try {
+    const fileName = entryPath.split('/').pop() ?? entryPath;
+    consolePush('system', `Compiling ${fileName}…`);
+
     if (isGuiCode(codeToCheck)) {
       const result = await bridge().shell.exec({ kind: 'gui.run', path: entryPath }) as GuiRunResult;
       const elapsed = Date.now() - startTime;

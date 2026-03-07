@@ -6,7 +6,10 @@ export interface StudioSyncExample {
   content: string;
 }
 
-const rawModules: Record<string, string> = import.meta.glob('@examples/*.vo', {
+const rawModules: Record<string, string> = import.meta.glob([
+  '@examples/**/*.vo',
+  '@examples/**/vo.mod',
+], {
   query: '?raw',
   import: 'default',
   eager: true,
@@ -14,7 +17,7 @@ const rawModules: Record<string, string> = import.meta.glob('@examples/*.vo', {
 
 export const STUDIO_SYNC_EXAMPLES: StudioSyncExample[] = Object.entries(rawModules)
   .map(([filePath, content]) => ({
-    path: filePath.replace(/^.*\//, ''),
+    path: filePath.replace(/^.*\/examples\//, ''),
     content,
   }))
   .sort((a, b) => a.path.localeCompare(b.path));
