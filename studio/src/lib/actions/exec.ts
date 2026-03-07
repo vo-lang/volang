@@ -1,5 +1,6 @@
 import { get } from 'svelte/store';
 import { ide, consolePush, consolePushLines, consoleClear } from '../../stores/ide';
+import { explorer } from '../../stores/explorer';
 import { bridge } from '../bridge';
 import { saveFile } from './fs';
 import type { GuiCompileRunResult, GuiRunResult } from '../shell/protocol';
@@ -87,6 +88,12 @@ export async function runCode(): Promise<void> {
       runDurationMs: elapsed,
     }));
   }
+}
+
+export async function launchApp(): Promise<void> {
+  explorer.update(e => ({ ...e, appMode: 'develop' }));
+  ide.update(s => ({ ...s, outputExpanded: true }));
+  await runCode();
 }
 
 export async function stopCode(): Promise<void> {

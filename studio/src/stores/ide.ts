@@ -40,6 +40,8 @@ export interface IdeState {
   isRunning: boolean;
   isGuiApp: boolean;
   guestRender: Uint8Array | null;
+  // Runtime display
+  outputExpanded: boolean;
   // Console UI preferences
   consoleShowTimestamps: boolean;
   consoleWordWrap: boolean;
@@ -60,6 +62,7 @@ export const ide = writable<IdeState>({
   isRunning: false,
   isGuiApp: false,
   guestRender: null,
+  outputExpanded: false,
   consoleShowTimestamps: true,
   consoleWordWrap: true,
 });

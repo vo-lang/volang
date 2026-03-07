@@ -1,6 +1,5 @@
 <script lang="ts">
   import { ide } from '../stores/ide';
-  import { explorer } from '../stores/explorer';
   import { actions } from '../lib/actions';
 
   $: fileName = $ide.activeFilePath
@@ -8,10 +7,6 @@
     : '';
   $: isRunning = $ide.isRunning;
   $: dirty = $ide.dirty;
-
-  function launchRunMode() {
-    explorer.update(e => ({ ...e, appMode: 'run' }));
-  }
 </script>
 
 <div class="toolbar">
@@ -20,7 +15,14 @@
     on:click={() => actions.runCode()}
     disabled={isRunning}
   >
-    {isRunning ? '⏳ Running…' : '▶ Run'}
+    {isRunning ? '▶ Running…' : '▶ Run'}
+  </button>
+  <button
+    class="btn btn-launch"
+    on:click={() => actions.launchApp()}
+    disabled={isRunning}
+  >
+    ▶ Run Fullscreen
   </button>
   <button
     class="btn btn-stop"
@@ -29,67 +31,71 @@
   >
     ■ Stop
   </button>
-  <span class="filename">{fileName}{dirty ? ' *' : ''}</span>
-  <span class="spacer"></span>
-  <button class="btn btn-launch" on:click={launchRunMode} title="Launch app in full-screen run mode">
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-      <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
-    </svg>
-    Launch
-  </button>
-  <span class="title">Vibe Studio</span>
+
+  <span class="sep"></span>
+
+  <span class="filename">{fileName || 'Untitled'}{dirty ? ' ·' : ''}</span>
 </div>
 
 <style>
   .toolbar {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 12px;
+    gap: 6px;
+    height: 36px;
+    padding: 0 10px;
     background: #181825;
-    border-bottom: 1px solid #313244;
+    border-bottom: 1px solid #1e1e2e;
     flex-shrink: 0;
-    height: 40px;
   }
 
   .btn {
     border: none;
     border-radius: 4px;
-    padding: 4px 14px;
+    padding: 4px 10px;
     cursor: pointer;
     font-weight: 600;
-    font-size: 13px;
-    transition: opacity 0.15s;
+    font-size: 12px;
+    font-family: inherit;
+    transition: opacity 0.12s;
   }
 
   .btn:disabled {
-    opacity: 0.4;
+    opacity: 0.35;
     cursor: not-allowed;
   }
 
-  .btn-run   { background: #22c55e; color: #fff; }
-  .btn-stop  { background: #ef4444; color: #fff; }
-  .btn-launch {
-    background: none;
-    border: 1px solid #313244;
-    color: #7f849c;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
+  .btn-run {
+    color: #fff;
+    background: #22c55e;
   }
-  .btn-launch:hover:not(:disabled) { background: #252535; color: #cdd6f4; border-color: #45475a; }
+  .btn-run:hover:not(:disabled) { background: #16a34a; }
+
+  .btn-launch {
+    color: #fff;
+    background: #3b82f6;
+  }
+  .btn-launch:hover:not(:disabled) { background: #2563eb; }
+
+  .btn-stop {
+    color: #fff;
+    background: #ef4444;
+  }
+  .btn-stop:hover:not(:disabled) { background: #dc2626; }
+
+  .sep {
+    width: 1px;
+    height: 16px;
+    background: #313244;
+    margin: 0 4px;
+  }
 
   .filename {
-    color: #888;
-    font-size: 13px;
-  }
-
-  .spacer { flex: 1; }
-
-  .title {
-    color: #cdd6f4;
-    font-weight: 700;
-    font-size: 14px;
-    letter-spacing: 0.02em;
+    color: #6c7086;
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
 </style>

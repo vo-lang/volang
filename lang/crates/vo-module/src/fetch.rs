@@ -689,7 +689,6 @@ mod wasm {
         let window = web_sys::window().ok_or("no window object")?;
         let opts = web_sys::RequestInit::new();
         opts.set_method("HEAD");
-        let _ = js_sys::Reflect::set(&opts, &wasm_bindgen::JsValue::from_str("cache"), &wasm_bindgen::JsValue::from_str("no-store"));
         let request = web_sys::Request::new_with_str_and_init(&url, &opts)
             .map_err(|e| e.as_string().unwrap_or_else(|| "request error".into()))?;
         let resp_value = JsFuture::from(window.fetch_with_request(&request))
@@ -751,28 +750,12 @@ mod wasm {
                 owner, repo, version, module_name
             )
         };
-        let window = web_sys::window().ok_or("no window object")?;
-        let opts = web_sys::RequestInit::new();
-        opts.set_method("GET");
-        let _ = js_sys::Reflect::set(&opts, &wasm_bindgen::JsValue::from_str("cache"), &wasm_bindgen::JsValue::from_str("no-store"));
-        let request = web_sys::Request::new_with_str_and_init(&url, &opts)
-            .map_err(|e| e.as_string().unwrap_or_else(|| "request error".into()))?;
-        let resp_value = JsFuture::from(window.fetch_with_request(&request))
-            .await
-            .map_err(|e| e.as_string().unwrap_or_else(|| "fetch error".into()))?;
-        let resp: web_sys::Response = resp_value
-            .dyn_into()
-            .map_err(|_| "response cast error".to_string())?;
-        if resp.status() == 404 {
-            return Ok(None);
+        let bytes = fetch_bytes(&url).await;
+        match bytes {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.contains("HTTP 404") => Ok(None),
+            Err(e) => Err(e),
         }
-        if !resp.ok() {
-            return Err(format!("HTTP {} fetching {}", resp.status(), url));
-        }
-        let ab = JsFuture::from(
-            resp.array_buffer().map_err(|e| e.as_string().unwrap_or_else(|| "ab error".into()))?
-        ).await.map_err(|e| e.as_string().unwrap_or_else(|| "ab await error".into()))?;
-        Ok(Some(js_sys::Uint8Array::new(&ab).to_vec()))
     }
 }
 

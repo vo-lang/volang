@@ -202,7 +202,7 @@ export function registerExtModuleGlobals(): void {
 
   w.voSetupExtModule = async (key: string, bytes: Uint8Array, jsGlueUrl?: string): Promise<void> => {
     if (jsGlueUrl) {
-      const resp = await fetch(jsGlueUrl, { cache: 'no-store' });
+      const resp = await fetch(jsGlueUrl);
       if (!resp.ok) throw new Error(`Failed to fetch JS glue: HTTP ${resp.status}`);
       const jsText = await resp.text();
       const blob = new Blob([jsText], { type: 'application/javascript' });

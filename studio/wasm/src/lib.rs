@@ -327,6 +327,53 @@ pub fn preload_module(spec: &str) -> js_sys::Promise {
     })
 }
 
+/// Return a content hash of all embedded shell handler source files.
+///
+/// The JS bridge uses this as an IndexedDB cache key so it can skip
+/// recompilation when the sources haven't changed between page loads.
+#[wasm_bindgen(js_name = "shellHandlerSourceHash")]
+pub fn shell_handler_source_hash() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    for (path, bytes) in SHELL_HANDLER_FILES {
+        path.hash(&mut hasher);
+        bytes.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+/// Accept pre-compiled shell handler bytecode from the JS-side IndexedDB cache.
+///
+/// If the bytecode is valid, it's stored in the thread-local cache so
+/// `runShellHandler` never needs to recompile.  Returns `true` on success.
+#[wasm_bindgen(js_name = "loadCachedShellHandler")]
+pub fn load_cached_shell_handler(bytes: &[u8]) -> bool {
+    ensure_panic_hook();
+    if bytes.is_empty() {
+        return false;
+    }
+    SHELL_HANDLER_BYTECODE.with(|cell| {
+        *cell.borrow_mut() = Some(bytes.to_vec());
+    });
+    true
+}
+
+/// Compile the shell handler and return the bytecode for JS-side caching.
+///
+/// Returns the compiled bytecode on success, or an error string.
+/// The JS bridge stores this in IndexedDB keyed by `shellHandlerSourceHash()`.
+#[wasm_bindgen(js_name = "buildShellHandler")]
+pub fn build_shell_handler_export() -> Result<Vec<u8>, JsValue> {
+    ensure_panic_hook();
+    let bc = build_shell_handler_bytecode()
+        .map_err(|e| JsValue::from_str(&e))?;
+    SHELL_HANDLER_BYTECODE.with(|cell| {
+        *cell.borrow_mut() = Some(bc.clone());
+    });
+    Ok(bc)
+}
+
 /// Pre-warm the shell handler bytecode cache during bridge initialization.
 /// Call this once after WASM module load so the first shell op is fast.
 #[wasm_bindgen(js_name = "initShellHandler")]

@@ -7,7 +7,7 @@ import {
 import {
   initWorkspace, openSingleFile, openProject, convertToMultiProject,
 } from './workspace';
-import { runCode, stopCode } from './exec';
+import { runCode, launchApp, stopCode } from './exec';
 import {
   pushProject, pullProject, openProjectEntry,
   deleteProject, renameProject, loadProjects,
@@ -43,6 +43,7 @@ export const actions = {
 
   // exec
   runCode,
+  launchApp,
   stopCode,
 
   // project

@@ -122,53 +122,53 @@
   {/if}
 
   <div class="console-header">
-    <div class="header-left">
-      <span class="console-title">Console</span>
-      {#if runStatus !== 'idle'}
-        <span class="status-badge status-{runStatus}">
-          <span class="status-icon">{statusIcon(runStatus)}</span>
-          <span class="status-text">
-            {runStatus === 'compiling' ? 'Compiling' :
-             runStatus === 'running' ? 'Running' :
-             runStatus === 'done' ? 'Done' : 'Error'}
+      <div class="header-left">
+        <span class="console-title">Console</span>
+        {#if runStatus !== 'idle'}
+          <span class="status-badge status-{runStatus}">
+            <span class="status-icon">{statusIcon(runStatus)}</span>
+            <span class="status-text">
+              {runStatus === 'compiling' ? 'Compiling' :
+               runStatus === 'running' ? 'Running' :
+               runStatus === 'done' ? 'Done' : 'Error'}
+            </span>
+            {#if durationMs !== null && (runStatus === 'done' || runStatus === 'error')}
+              <span class="status-duration">{formatDuration(durationMs)}</span>
+            {/if}
           </span>
-          {#if durationMs !== null && (runStatus === 'done' || runStatus === 'error')}
-            <span class="status-duration">{formatDuration(durationMs)}</span>
-          {/if}
-        </span>
-      {/if}
-    </div>
-    <div class="header-actions">
-      <button
-        class="action-btn"
-        class:active={showTs}
-        title="Toggle timestamps"
-        on:click={toggleTimestamps}
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-        </svg>
-      </button>
-      <button
-        class="action-btn"
-        class:active={wordWrap}
-        title="Toggle word wrap"
-        on:click={toggleWordWrap}
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 6h18"/><path d="M3 12h15a3 3 0 1 1 0 6h-4"/><polyline points="16 16 14 18 16 20"/><path d="M3 18h7"/>
-        </svg>
-      </button>
-      <button class="action-btn" title="Copy all" on:click={copyAll}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-        </svg>
-      </button>
-      <button class="action-btn" title="Clear console" on:click={consoleClear}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
-        </svg>
-      </button>
+        {/if}
+      </div>
+      <div class="header-actions">
+        <button
+          class="action-btn"
+          class:active={showTs}
+          title="Toggle timestamps"
+          on:click={toggleTimestamps}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+          </svg>
+        </button>
+        <button
+          class="action-btn"
+          class:active={wordWrap}
+          title="Toggle word wrap"
+          on:click={toggleWordWrap}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 6h18"/><path d="M3 12h15a3 3 0 1 1 0 6h-4"/><polyline points="16 16 14 18 16 20"/><path d="M3 18h7"/>
+          </svg>
+        </button>
+        <button class="action-btn" title="Copy all" on:click={copyAll}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+        </button>
+        <button class="action-btn" title="Clear console" on:click={consoleClear}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
+          </svg>
+        </button>
     </div>
   </div>
 
@@ -211,7 +211,6 @@
 
   .console-root.fullscreen {
     flex: 1;
-    border-radius: 0 0 12px 12px;
   }
 
   /* Drag handle */

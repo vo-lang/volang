@@ -17,7 +17,7 @@ export interface InlineInput {
   initialValue: string;
 }
 
-export type AppMode = 'manage' | 'develop' | 'terminal' | 'run';
+export type AppMode = 'manage' | 'develop' | 'terminal';
 
 export interface ExplorerState {
   appMode: AppMode;

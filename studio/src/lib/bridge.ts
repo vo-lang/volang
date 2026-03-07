@@ -5,6 +5,77 @@ import { TauriTransport, WasmTransport } from './shell/transport';
 import { WasmShellRouter } from './shell/wasm/router';
 
 // =============================================================================
+// IndexedDB cache for shell handler bytecode
+//
+// Compilation inside WASM takes 2-5 seconds.  We cache the result keyed by a
+// content hash of the embedded source files so reloads skip recompilation.
+// =============================================================================
+
+const IDB_NAME = 'vo-studio-cache';
+const IDB_STORE = 'shell-handler';
+
+function openCacheDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbGet(db: IDBDatabase, key: string): Promise<Uint8Array | undefined> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const store = tx.objectStore(IDB_STORE);
+    const req = store.get(key);
+    req.onsuccess = () => resolve(req.result as Uint8Array | undefined);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbPut(db: IDBDatabase, key: string, value: Uint8Array): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    const store = tx.objectStore(IDB_STORE);
+    const req = store.put(value, key);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/** Try to load shell handler bytecode from IndexedDB.  Returns null on miss. */
+async function tryLoadCachedShellHandler(wasmMod: any): Promise<boolean> {
+  const hash: string = wasmMod.shellHandlerSourceHash();
+  const db = await openCacheDB();
+  const cached = await idbGet(db, hash);
+  if (cached && cached.byteLength > 0 && wasmMod.loadCachedShellHandler(cached)) {
+    return true;
+  }
+  return false;
+}
+
+/** Compile shell handler and store in IndexedDB for next load. */
+async function compileAndCacheShellHandler(wasmMod: any): Promise<void> {
+  try {
+    const db = await openCacheDB();
+    const hash: string = wasmMod.shellHandlerSourceHash();
+    const bytecode: Uint8Array = wasmMod.buildShellHandler();
+    await idbPut(db, hash, bytecode).catch(() => {});
+  } catch {
+    // IndexedDB unavailable — fall back to synchronous compile
+    const err = wasmMod.initShellHandler();
+    if (err) {
+      throw new Error(`[studio] Shell handler compilation failed: ${err}`);
+    }
+  }
+}
+
+// =============================================================================
 // FsEntry — returned by fsListDir
 // =============================================================================
 
@@ -59,7 +130,8 @@ function isTauriRuntime(): boolean {
 // Tauri bridge
 // =============================================================================
 
-async function initTauriBridge(): Promise<void> {
+async function initTauriBridge(onProgress: (step: string) => void): Promise<void> {
+  onProgress('Connecting to backend…');
   const { invoke } = await import('@tauri-apps/api/core');
 
   const workspaceRoot: string = await invoke('cmd_get_workspace_root');
@@ -137,8 +209,9 @@ func main() {
 }
 `;
 
-async function initWasmBridge(): Promise<void> {
+async function initWasmBridge(onProgress: (step: string) => void): Promise<void> {
   // 1) Initialize JS VFS (OPFS + window._vfs* bindings) BEFORE loading WASM
+  onProgress('Initializing file system…');
   const { initVFS, vfs } = await import('@vo-web/index');
   await initVFS();
 
@@ -153,9 +226,9 @@ async function initWasmBridge(): Promise<void> {
   }
 
   // 3) Load studio WASM module
-  const v = Date.now();
-  const wasmEntryUrl = new URL(`../../wasm/pkg/vo_studio_wasm.js?v=${v}`, import.meta.url).href;
-  const wasmBinaryUrl = new URL(`../../wasm/pkg/vo_studio_wasm_bg.wasm?v=${v}`, import.meta.url).href;
+  onProgress('Loading compiler…');
+  const wasmEntryUrl = new URL('../../wasm/pkg/vo_studio_wasm.js', import.meta.url).href;
+  const wasmBinaryUrl = new URL('../../wasm/pkg/vo_studio_wasm_bg.wasm', import.meta.url).href;
   let wasmMod: any;
   try {
     wasmMod = await import(/* @vite-ignore */ wasmEntryUrl);
@@ -172,22 +245,24 @@ async function initWasmBridge(): Promise<void> {
   //     (e.g. zip.wasm).  Must be on window before preloadShellDeps runs.
   registerExtModuleGlobals();
 
-  // 4) Install shell handler dependencies declared in vo.mod into the JS VFS.
-  //    Purge existing module dirs first — previous runs may have persisted corrupted data
-  //    to OPFS because writeFile was storing a temporary WASM memory view rather than a copy.
-  for (const depMod of wasmMod.getShellDepModules()) {
-    vfs.removeAll('/' + depMod);
-  }
-  try {
-    await wasmMod.preloadShellDeps();
-  } catch (e) {
-    throw new Error(`[studio] Failed to install shell deps: ${String(e)}`);
+  // 4) Install shell handler deps + try loading cached bytecode in parallel.
+  onProgress('Installing modules…');
+  //    The IndexedDB cache check is fast; if it hits we skip the 2-5s compile.
+  //    If it misses, we wait for deps then compile (deps are needed for compilation).
+  const [depsResult, cacheHit] = await Promise.allSettled([
+    wasmMod.preloadShellDeps(),
+    tryLoadCachedShellHandler(wasmMod).catch(() => false),
+  ]);
+
+  if (depsResult.status === 'rejected') {
+    throw new Error(`[studio] Failed to install shell deps: ${String(depsResult.reason)}`);
   }
 
-  // Pre-warm shell handler compilation (so errors surface here, not on first shell op)
-  const shellErr = wasmMod.initShellHandler();
-  if (shellErr) {
-    throw new Error(`[studio] Shell handler compilation failed: ${shellErr}`);
+  const shellCacheHit = cacheHit.status === 'fulfilled' && cacheHit.value === true;
+  if (!shellCacheHit) {
+    // Cache miss — compile (needs deps loaded) and store for next time
+    onProgress('Compiling shell handler…');
+    await compileAndCacheShellHandler(wasmMod);
   }
 
   // 5) Seed default workspace main project if it doesn't exist
@@ -435,10 +510,11 @@ async function initWasmBridge(): Promise<void> {
 // Init
 // =============================================================================
 
-export async function initBridge(): Promise<void> {
+export async function initBridge(onProgress?: (step: string) => void): Promise<void> {
+  const report = onProgress ?? (() => {});
   if (isTauriRuntime()) {
-    await initTauriBridge();
+    await initTauriBridge(report);
   } else {
-    await initWasmBridge();
+    await initWasmBridge(report);
   }
 }

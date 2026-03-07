@@ -7,6 +7,8 @@
 
   export let guestRender: Uint8Array | null = null;
   export let chromeless: boolean = false;
+  export let showFullscreenAction: boolean = false;
+  export let onFullscreenAction: (() => void) | null = null;
 
   let root: HTMLDivElement;
   let stylesInjected = false;
@@ -114,8 +116,13 @@
       <div class="resize-bar"></div>
     </div>
     <div class="panel-header">
-      <span class="label">Preview</span>
-      <span class="badge gui-badge">GUI</span>
+      <div class="panel-title">
+        <span class="label">Preview</span>
+        <span class="badge gui-badge">GUI</span>
+      </div>
+      {#if showFullscreenAction && onFullscreenAction}
+        <button class="header-action" on:click={onFullscreenAction}>Fullscreen</button>
+      {/if}
     </div>
   {/if}
   <div bind:this={root} class="preview-root"></div>
@@ -172,11 +179,18 @@
   .panel-header {
     display: flex;
     align-items: center;
-    gap: 8px;
+    justify-content: space-between;
     padding: 8px 12px;
     background: #181825;
     border-bottom: 1px solid #313244;
     flex-shrink: 0;
+  }
+
+  .panel-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
   }
 
   .label {
@@ -197,6 +211,24 @@
   }
 
   .gui-badge { background: #1e3a5f80; color: #89b4fa; }
+
+  .header-action {
+    border: none;
+    border-radius: 4px;
+    padding: 4px 10px;
+    background: #313244;
+    color: #cdd6f4;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.12s;
+    flex-shrink: 0;
+  }
+
+  .header-action:hover {
+    background: #45475a;
+  }
 
   .preview-root {
     flex: 1;

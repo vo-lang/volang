@@ -152,8 +152,8 @@
       try {
         const res = await bridge().shell.exec({ kind: 'gui.run', path: result.guiPath });
         const bytes = (res as { renderBytes: Uint8Array }).renderBytes;
-        ide.update(s => ({ ...s, isRunning: true, isGuiApp: true, guestRender: bytes, runStatus: 'running', runDurationMs: null }));
-        explorer.update(e => ({ ...e, appMode: 'run' }));
+        ide.update(s => ({ ...s, isRunning: true, isGuiApp: true, guestRender: bytes, runStatus: 'running', runDurationMs: null, outputExpanded: true }));
+        explorer.update(e => ({ ...e, appMode: 'develop' }));
       } catch (e) {
         termPush('error', `GUI launch failed: ${String(e)}`);
       }

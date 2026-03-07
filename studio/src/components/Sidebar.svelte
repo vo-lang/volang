@@ -1,19 +1,24 @@
 <script lang="ts">
   import { explorer } from '../stores/explorer';
   import type { AppMode } from '../stores/explorer';
+  import { ide } from '../stores/ide';
 
   const modes: { id: AppMode; icon: string; label: string; title: string }[] = [
     { id: 'manage',   icon: '⌂',  label: 'Home',    title: 'Home'            },
-    { id: 'develop',  icon: '⌨',  label: 'Code',    title: 'Development'     },
+    { id: 'develop',  icon: '⌨',  label: 'Dev',     title: 'Development'     },
     { id: 'terminal', icon: '$_', label: 'Shell',   title: 'Shell Terminal'  },
-    { id: 'run',      icon: '▶',  label: 'Run',     title: 'Run / Preview'   },
   ];
+
+  $: projectPath = $ide.editTarget?.workspaceRoot ?? $ide.workspaceRoot ?? '';
+  $: projectName = projectPath ? (projectPath.split('/').pop() || '') : '';
+  $: expanded = $ide.outputExpanded;
 
   function setMode(mode: AppMode) {
     explorer.update(e => ({ ...e, appMode: mode }));
   }
 </script>
 
+{#if !expanded}
 <div class="sidebar">
   {#each modes as m}
     <button
@@ -26,7 +31,12 @@
       <span class="label">{m.label}</span>
     </button>
   {/each}
+  <div class="spacer"></div>
+  {#if projectName}
+    <div class="project-name" title={projectPath}>{projectName}</div>
+  {/if}
 </div>
+{/if}
 
 <style>
   .sidebar {
@@ -36,9 +46,24 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 10px 0;
+    padding: 10px 0 10px;
     gap: 2px;
     flex-shrink: 0;
+  }
+
+  .spacer { flex: 1; }
+
+  .project-name {
+    width: 44px;
+    color: #45475a;
+    font-size: 9px;
+    font-weight: 600;
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 0 2px;
+    cursor: default;
   }
 
   .mode-btn {
