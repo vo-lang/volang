@@ -24,6 +24,9 @@ func main() {
 	testContacts()
 	testAudio()
 	testDrawEncoding()
+	testScene3D()
+	testMath3D()
+	testDraw3DEncoding()
 	fmt.Println("All voplay tests passed.")
 }
 
@@ -509,6 +512,152 @@ func testAudio() {
 
 func testDrawEncoding() {
 	fmt.Println("  draw encoding: ok")
+}
+
+func testScene3D() {
+	s := voplay.NewScene3D()
+
+	// Default camera
+	assert(s.Camera.Fov == 60, "Scene3D default camera fov")
+	assert(s.Camera.Near == 0.1, "Scene3D default camera near")
+	assert(s.Camera.Far == 1000, "Scene3D default camera far")
+
+	// Spawn
+	n1 := s.Spawn(voplay.Node3D{Tag: "cube", Model: 1})
+	assert(n1.Visible, "Node3D visible after spawn")
+	assert(n1.Scale.X == 1 && n1.Scale.Y == 1 && n1.Scale.Z == 1, "Node3D default scale")
+	assert(n1.Rotation.W == 1, "Node3D default rotation is identity")
+	assert(s.NodeCount() == 1, "Scene3D has 1 node")
+
+	n2 := s.Spawn(voplay.Node3D{Tag: "sphere", Model: 2})
+	assert(s.NodeCount() == 2, "Scene3D has 2 nodes")
+
+	// FindByTag
+	cubes := s.FindByTag("cube")
+	assert(len(cubes) == 1, "FindByTag cube")
+	assert(cubes[0] == n1, "FindByTag returns correct node")
+	none := s.FindByTag("missing")
+	assert(len(none) == 0, "FindByTag returns empty for missing")
+
+	// ForEach
+	count := 0
+	s.ForEach(func(n *voplay.Node3D) { count++ })
+	assert(count == 2, "ForEach visits all nodes")
+
+	// AddLight / ClearLights
+	assert(len(s.Lights) == 0, "No lights initially")
+	s.AddLight(voplay.Light{
+		Type:      voplay.DirectionalLight,
+		Direction: voplay.Vec3{0, -1, 0},
+		Color:     voplay.White,
+		Intensity: 1,
+	})
+	assert(len(s.Lights) == 1, "1 light after AddLight")
+	s.ClearLights()
+	assert(len(s.Lights) == 0, "0 lights after ClearLights")
+
+	// Destroy
+	s.Destroy(n1)
+	assert(s.NodeCount() == 1, "1 node after destroy")
+
+	// Clear
+	s.Clear()
+	assert(s.NodeCount() == 0, "0 nodes after clear")
+
+	// Spawn after clear
+	s.Spawn(voplay.Node3D{Tag: "new"})
+	assert(s.NodeCount() == 1, "1 node after re-spawn")
+
+	_ = n2
+	fmt.Println("  scene3d: ok")
+}
+
+func testMath3D() {
+	// Vec3.Negate
+	v := voplay.Vec3{1, 2, 3}
+	n := v.Negate()
+	assert(n.X == -1 && n.Y == -2 && n.Z == -3, "Vec3.Negate")
+
+	// QuatIdentity
+	q := voplay.QuatIdentity()
+	assert(q.W == 1 && q.X == 0 && q.Y == 0 && q.Z == 0, "QuatIdentity")
+
+	// Quat.Inverse
+	qi := q.Inverse()
+	assert(qi.W == 1 && qi.X == 0, "QuatIdentity.Inverse")
+
+	// QuatFromAxisAngle + RotateVec3
+	// 90 degrees around Y axis should rotate (1,0,0) to approximately (0,0,-1)
+	rot := voplay.QuatFromAxisAngle(voplay.Vec3{0, 1, 0}, 1.5707963267948966) // PI/2
+	rotated := rot.RotateVec3(voplay.Vec3{1, 0, 0})
+	assert(rotated.X < 0.001 && rotated.X > -0.001, "RotateVec3 x near 0")
+	assert(rotated.Z < -0.999, "RotateVec3 z near -1")
+
+	// QuatFromEuler + ToAxisAngle round-trip
+	qe := voplay.QuatFromEuler(0.5, 0.3, 0.1)
+	axis, angle := qe.ToAxisAngle()
+	assert(angle > 0, "ToAxisAngle angle > 0")
+	assert(axis.Length() > 0.99, "ToAxisAngle axis is unit")
+
+	// Slerp at t=0 and t=1
+	qa := voplay.QuatIdentity()
+	qb := voplay.QuatFromAxisAngle(voplay.Vec3{0, 0, 1}, 1.0)
+	s0 := qa.Slerp(qb, 0)
+	assert(s0.W > 0.999, "Slerp t=0 returns start")
+	s1 := qa.Slerp(qb, 1)
+	assert(s1.W-qb.W < 0.001 && s1.W-qb.W > -0.001, "Slerp t=1 returns end")
+
+	fmt.Println("  math3d: ok")
+}
+
+func testDraw3DEncoding() {
+	d := voplay.NewDrawCtx()
+
+	// SetCamera3D encoding
+	cam := voplay.Camera3D{
+		Position: voplay.Vec3{0, 5, 10},
+		Target:   voplay.Vec3{0, 0, 0},
+		Up:       voplay.Vec3{0, 1, 0},
+		Fov:      60,
+		Near:     0.1,
+		Far:      1000,
+	}
+	d.SetCamera3D(&cam)
+	assert(len(d.Bytes()) > 0, "SetCamera3D encodes bytes")
+
+	// SetLights3D encoding
+	lights := []voplay.Light{
+		{
+			Type:      voplay.DirectionalLight,
+			Direction: voplay.Vec3{0, -1, 0},
+			Color:     voplay.White,
+			Intensity: 1,
+		},
+	}
+	d.SetLights3D(voplay.Color{R: 0.2, G: 0.2, B: 0.2, A: 1}, lights)
+
+	// DrawModel encoding
+	d.DrawModel(1, voplay.Vec3{0, 0, 0}, voplay.QuatIdentity(), voplay.Vec3{1, 1, 1})
+
+	buf := d.Bytes()
+	// First byte should be opSetCamera3D (0x03)
+	assert(buf[0] == 0x03, "first opcode is SetCamera3D")
+	assert(len(buf) > 100, "3D draw stream has substantial data")
+
+	// DrawScene3D should work without panic
+	s := voplay.NewScene3D()
+	s.Spawn(voplay.Node3D{Model: 1, Position: voplay.Vec3{0, 0, 0}})
+	s.AddLight(voplay.Light{
+		Type:      voplay.DirectionalLight,
+		Direction: voplay.Vec3{0, -1, 0},
+		Color:     voplay.White,
+		Intensity: 1,
+	})
+	d2 := voplay.NewDrawCtx()
+	d2.DrawScene3D(s)
+	assert(len(d2.Bytes()) > 0, "DrawScene3D encodes data")
+
+	fmt.Println("  draw3d encoding: ok")
 }
 
 func assert(cond bool, msg string) {
