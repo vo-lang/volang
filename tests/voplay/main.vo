@@ -14,6 +14,7 @@ func main() {
 	testAnimation()
 	testCamera2D()
 	testSceneQueries()
+	testTilemap()
 	testDrawScene2D()
 	testDrawEncoding()
 	fmt.Println("All voplay tests passed.")
@@ -245,6 +246,57 @@ func testSceneQueries() {
 	assert(found == c, "FindByTag returns next enemy after destroy")
 
 	fmt.Println("  scene queries: ok")
+}
+
+func testTilemap() {
+	ts := &voplay.TileSet{Texture: 1, TileW: 32, TileH: 32, Columns: 4}
+	tm := voplay.NewTilemap(ts, 10, 10)
+
+	// Default: all tiles are -1 (empty)
+	assert(tm.GetTile(0, 0, 0) == -1, "tilemap default empty")
+	assert(tm.GetTile(0, 5, 5) == -1, "tilemap default empty mid")
+
+	// SetTile / GetTile
+	tm.SetTile(0, 3, 4, 7)
+	assert(tm.GetTile(0, 3, 4) == 7, "SetTile/GetTile")
+
+	// Out-of-bounds returns -1
+	assert(tm.GetTile(0, -1, 0) == -1, "GetTile OOB neg")
+	assert(tm.GetTile(0, 100, 0) == -1, "GetTile OOB large")
+	assert(tm.GetTile(5, 0, 0) == -1, "GetTile bad layer")
+
+	// Fill
+	tm.Fill(0, 2)
+	assert(tm.GetTile(0, 0, 0) == 2, "Fill")
+	assert(tm.GetTile(0, 9, 9) == 2, "Fill corner")
+
+	// FillRect
+	tm.FillRect(0, 2, 2, 3, 3, 5)
+	assert(tm.GetTile(0, 2, 2) == 5, "FillRect start")
+	assert(tm.GetTile(0, 4, 4) == 5, "FillRect end")
+	assert(tm.GetTile(0, 1, 1) == 2, "FillRect outside")
+
+	// AddLayer
+	layer1 := tm.AddLayer()
+	assert(layer1 == 1, "AddLayer returns index")
+	assert(tm.GetTile(1, 0, 0) == -1, "new layer is empty")
+
+	// WorldToTile / TileToWorld
+	col, row := tm.WorldToTile(65, 97)
+	assert(col == 2 && row == 3, "WorldToTile")
+	wx, wy := tm.TileToWorld(2, 3)
+	assert(wx == 64 && wy == 96, "TileToWorld")
+
+	// PixelWidth / PixelHeight
+	assert(tm.PixelWidth() == 320, "PixelWidth")
+	assert(tm.PixelHeight() == 320, "PixelHeight")
+
+	// DrawTilemap produces output
+	var d voplay.DrawCtx
+	d.DrawTilemap(tm, 0, 0, 0, 320, 320)
+	assert(len(d.Bytes()) > 0, "DrawTilemap produces output")
+
+	fmt.Println("  tilemap: ok")
 }
 
 func testDrawScene2D() {
