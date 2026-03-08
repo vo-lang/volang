@@ -12,6 +12,9 @@ func main() {
 	testSceneBasics()
 	testSprite()
 	testAnimation()
+	testCamera2D()
+	testSceneQueries()
+	testDrawScene2D()
 	testDrawEncoding()
 	fmt.Println("All voplay tests passed.")
 }
@@ -169,15 +172,103 @@ func testAnimation() {
 	fmt.Println("  animation: ok")
 }
 
+func testCamera2D() {
+	c := voplay.Camera2D{Zoom: 1.0}
+
+	// Follow
+	c.Follow(100, 200)
+	assert(c.X == 100 && c.Y == 200, "Camera2D.Follow")
+
+	// LerpFollow
+	c.LerpFollow(200, 400, 0.5)
+	assert(c.X == 150 && c.Y == 300, "Camera2D.LerpFollow")
+
+	// ScreenToWorld — camera at origin, zoom=1
+	c2 := voplay.Camera2D{Zoom: 1.0}
+	wx, wy := c2.ScreenToWorld(400, 300, 800, 600)
+	assert(wx == 0 && wy == 0, "ScreenToWorld center")
+
+	wx, wy = c2.ScreenToWorld(0, 0, 800, 600)
+	assert(wx == -400 && wy == -300, "ScreenToWorld top-left")
+
+	// WorldToScreen
+	sx, sy := c2.WorldToScreen(0, 0, 800, 600)
+	assert(sx == 400 && sy == 300, "WorldToScreen origin")
+
+	// ViewRect
+	vr := c2.ViewRect(800, 600)
+	assert(vr.W == 800 && vr.H == 600, "ViewRect size at zoom 1")
+	assert(vr.X == -400 && vr.Y == -300, "ViewRect position at origin")
+
+	// ViewRect with zoom
+	c3 := voplay.Camera2D{Zoom: 2.0}
+	vr2 := c3.ViewRect(800, 600)
+	assert(vr2.W == 400 && vr2.H == 300, "ViewRect size at zoom 2")
+
+	fmt.Println("  camera2d: ok")
+}
+
+func testSceneQueries() {
+	s := voplay.Scene2D{Camera: voplay.Camera2D{Zoom: 1.0}}
+
+	a := s.Spawn(voplay.Entity2D{X: 10, Y: 10, W: 32, H: 32, Tag: "player"})
+	b := s.Spawn(voplay.Entity2D{X: 50, Y: 50, W: 16, H: 16, Tag: "enemy"})
+	c := s.Spawn(voplay.Entity2D{X: 90, Y: 90, W: 16, H: 16, Tag: "enemy"})
+	_ = c
+
+	// FindByTag
+	found := s.FindByTag("player")
+	assert(found == a, "FindByTag player")
+	found = s.FindByTag("enemy")
+	assert(found == b, "FindByTag enemy returns first")
+	found = s.FindByTag("nonexistent")
+	assert(found == nil, "FindByTag nonexistent")
+
+	// EntityCount
+	assert(s.EntityCount() == 3, "EntityCount")
+
+	// ForEach
+	count := 0
+	s.ForEach(func(e *voplay.Entity2D) {
+		count++
+	})
+	assert(count == 3, "ForEach count")
+
+	// Entities
+	all := s.Entities()
+	assert(len(all) == 3, "Entities len")
+
+	// After destroy
+	s.Destroy(b)
+	assert(s.EntityCount() == 2, "EntityCount after destroy")
+	found = s.FindByTag("enemy")
+	assert(found == c, "FindByTag returns next enemy after destroy")
+
+	fmt.Println("  scene queries: ok")
+}
+
+func testDrawScene2D() {
+	s := voplay.Scene2D{Camera: voplay.Camera2D{Zoom: 1.0}}
+
+	spr := voplay.NewSprite(1, 32, 32)
+
+	// Spawn entities with different ZOrders
+	s.Spawn(voplay.Entity2D{X: 100, Y: 100, W: 32, H: 32, Sprite: spr, ZOrder: 2})
+	s.Spawn(voplay.Entity2D{X: 200, Y: 200, W: 32, H: 32, Sprite: spr, ZOrder: 0})
+	s.Spawn(voplay.Entity2D{X: 300, Y: 300, W: 32, H: 32, ZOrder: 1}) // no sprite — should be skipped
+	s.Spawn(voplay.Entity2D{X: 400, Y: 400, W: 32, H: 32, Sprite: spr, ZOrder: 1})
+
+	// DrawScene2D should not panic
+	var d voplay.DrawCtx
+	d.DrawScene2D(&s)
+
+	// Verify it produced bytes (camera + sprite commands)
+	assert(len(d.Bytes()) > 0, "DrawScene2D produces output")
+
+	fmt.Println("  draw scene2d: ok")
+}
+
 func testDrawEncoding() {
-	// Verify DrawSprite produces non-empty command buffer
-	g := voplay.Game{Width: 800, Height: 600, Title: "test"}
-	_ = g
-
-	// Test that DrawCtx methods don't panic and produce bytes
-	// (We can't test exact binary output without reading internals,
-	//  but we can verify the buffer grows correctly.)
-
 	fmt.Println("  draw encoding: ok")
 }
 
