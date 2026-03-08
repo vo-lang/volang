@@ -420,6 +420,16 @@ func testEntityHelpers() {
 	far := s.Spawn(voplay.Entity2D{X: 1000, Y: 1000, W: 10, H: 10})
 	assert(!a.Overlaps(far), "Entity2D.Overlaps (non-overlapping)")
 
+	// SetPosition (non-physics entity, direct)
+	a.SetPosition(100, 200)
+	assert(a.Center().X == 100 && a.Center().Y == 200, "Entity2D.SetPosition")
+
+	// FindInRadius
+	nearby := s.FindInRadius(10, 20, 50)
+	assert(len(nearby) >= 1, "FindInRadius finds nearby entity")
+	farAway := s.FindInRadius(-9999, -9999, 1)
+	assert(len(farAway) == 0, "FindInRadius returns empty for distant point")
+
 	fmt.Println("  entity helpers: ok")
 }
 
