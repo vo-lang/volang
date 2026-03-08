@@ -77,7 +77,7 @@ func testColliders() {
 
 func testSceneBasics() {
 	// Scene2D spawn + destroy
-	s := voplay.Scene2D{}
+	s := voplay.NewScene2D()
 	e := s.Spawn(voplay.Entity2D{
 		X: 10, Y: 20,
 		W: 32, H: 32,
@@ -212,7 +212,7 @@ func testCamera2D() {
 }
 
 func testSceneQueries() {
-	s := voplay.Scene2D{Camera: voplay.Camera2D{Zoom: 1.0}}
+	s := voplay.NewScene2D()
 
 	a := s.Spawn(voplay.Entity2D{X: 10, Y: 10, W: 32, H: 32, Tag: "player"})
 	b := s.Spawn(voplay.Entity2D{X: 50, Y: 50, W: 16, H: 16, Tag: "enemy"})
@@ -302,7 +302,7 @@ func testTilemap() {
 }
 
 func testDrawScene2D() {
-	s := voplay.Scene2D{Camera: voplay.Camera2D{Zoom: 1.0}}
+	s := voplay.NewScene2D()
 
 	spr := voplay.NewSprite(1, 32, 32)
 
@@ -314,7 +314,7 @@ func testDrawScene2D() {
 
 	// DrawScene2D should not panic
 	var d voplay.DrawCtx
-	d.DrawScene2D(&s)
+	d.DrawScene2D(s)
 
 	// Verify it produced bytes (camera + sprite commands)
 	assert(len(d.Bytes()) > 0, "DrawScene2D produces output")
@@ -347,7 +347,8 @@ func testDrawOutlines() {
 
 func testPhysics() {
 	// Create a scene with gravity
-	s := voplay.Scene2D{Camera: voplay.Camera2D{Zoom: 1.0}, Gravity: voplay.Vec2{0, 98.0}}
+	s := voplay.NewScene2D()
+	s.Gravity = voplay.Vec2{0, 98.0}
 
 	// Spawn a dynamic body at y=0 with a box collider
 	ball := s.Spawn(voplay.Entity2D{
