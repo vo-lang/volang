@@ -17,6 +17,7 @@ func main() {
 	testTilemap()
 	testDrawScene2D()
 	testDrawOutlines()
+	testPhysics()
 	testDrawEncoding()
 	fmt.Println("All voplay tests passed.")
 }
@@ -342,6 +343,51 @@ func testDrawOutlines() {
 	assert(w2 == 0, "MeasureText empty string")
 
 	fmt.Println("  outlines + measure: ok")
+}
+
+func testPhysics() {
+	// Create a scene with gravity
+	s := voplay.Scene2D{Camera: voplay.Camera2D{Zoom: 1.0}, Gravity: voplay.Vec2{0, 98.0}}
+
+	// Spawn a dynamic body at y=0 with a box collider
+	ball := s.Spawn(voplay.Entity2D{
+		X: 100, Y: 0, W: 20, H: 20,
+		Physics: &voplay.Physics2D{
+			Type:     voplay.Dynamic,
+			Collider: voplay.Box(10, 10),
+			Density:  1.0,
+			Friction: 0.3,
+		},
+	})
+	assert(ball.Physics != nil, "ball has physics")
+
+	// Spawn a static ground
+	ground := s.Spawn(voplay.Entity2D{
+		X: 100, Y: 500, W: 400, H: 20,
+		Physics: &voplay.Physics2D{
+			Type:     voplay.Static,
+			Collider: voplay.Box(200, 10),
+		},
+	})
+	_ = ground
+
+	// Step physics several times (simulate 0.5 seconds)
+	for i := 0; i < 30; i++ {
+		s.StepAndSyncPhysics(1.0 / 60.0)
+	}
+
+	// Ball should have fallen (Y increased due to gravity)
+	assert(ball.Y > 0, "ball fell due to gravity")
+
+	// Ball should have velocity
+	v := ball.Velocity()
+	assert(v.Y > 0, "ball has downward velocity")
+
+	// Destroy the ball
+	s.Destroy(ball)
+	assert(s.EntityCount() == 1, "entity removed after destroy")
+
+	fmt.Println("  physics: ok")
 }
 
 func testDrawEncoding() {
