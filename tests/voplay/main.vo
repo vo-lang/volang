@@ -18,6 +18,7 @@ func main() {
 	testDrawScene2D()
 	testDrawOutlines()
 	testPhysics()
+	testAudio()
 	testDrawEncoding()
 	fmt.Println("All voplay tests passed.")
 }
@@ -389,6 +390,26 @@ func testPhysics() {
 	assert(s.EntityCount() == 1, "entity removed after destroy")
 
 	fmt.Println("  physics: ok")
+}
+
+func testAudio() {
+	// LoadAudio with nonexistent file should return an error
+	_, err := voplay.LoadAudio("/nonexistent/audio.wav")
+	assert(err != nil, "LoadAudio nonexistent file returns error")
+
+	// Volume control calls should not crash
+	voplay.SetSFXVolume(0.5)
+	voplay.SetMusicVolume(0.8)
+
+	// Stop/pause/resume with no music playing should not crash
+	voplay.StopMusic()
+	voplay.PauseMusic()
+	voplay.ResumeMusic()
+
+	// Free on invalid clip should not crash
+	voplay.AudioClip(0).Free()
+
+	fmt.Println("  audio: ok")
 }
 
 func testDrawEncoding() {
