@@ -511,6 +511,52 @@ func testAudio() {
 }
 
 func testDrawEncoding() {
+	d := voplay.NewDrawCtx()
+
+	// SetLayer encoding: opcode 0x05, then 2 bytes (u16 little-endian)
+	d.SetLayer(42)
+	buf := d.Bytes()
+	assert(buf[0] == 0x05, "SetLayer opcode is 0x05")
+	assert(buf[1] == 42, "SetLayer z low byte")
+	assert(buf[2] == 0, "SetLayer z high byte")
+
+	// Clear encoding: opcode 0x01, then 4 x f64 (32 bytes)
+	d2 := voplay.NewDrawCtx()
+	d2.Clear(1, 0, 0, 1)
+	buf2 := d2.Bytes()
+	assert(buf2[0] == 0x01, "Clear opcode is 0x01")
+	assert(len(buf2) == 1+4*8, "Clear is 1 opcode + 4 f64")
+
+	// DrawRect encoding: opcode 0x11, then 8 x f64 (64 bytes)
+	d3 := voplay.NewDrawCtx()
+	d3.DrawRect(10, 20, 100, 50, voplay.Red)
+	buf3 := d3.Bytes()
+	assert(buf3[0] == 0x11, "DrawRect opcode is 0x11")
+	assert(len(buf3) == 1+8*8, "DrawRect is 1 opcode + 8 f64")
+
+	// SetLayer with a larger value (layer 300 = 0x012C)
+	d4 := voplay.NewDrawCtx()
+	d4.SetLayer(300)
+	buf4 := d4.Bytes()
+	assert(buf4[0] == 0x05, "SetLayer opcode")
+	assert(buf4[1] == 0x2C, "SetLayer 300 low byte")
+	assert(buf4[2] == 0x01, "SetLayer 300 high byte")
+
+	// Multiple SetLayer + draw interleaving produces correct stream
+	d5 := voplay.NewDrawCtx()
+	d5.SetLayer(0)
+	d5.DrawRect(0, 0, 10, 10, voplay.Red)
+	d5.SetLayer(5)
+	d5.DrawRect(0, 0, 20, 20, voplay.Blue)
+	buf5 := d5.Bytes()
+	// Structure: SetLayer(0) + DrawRect + SetLayer(5) + DrawRect
+	assert(buf5[0] == 0x05, "first opcode is SetLayer")
+	setLayerSize := 1 + 2 // opcode + u16
+	drawRectSize := 1 + 8*8 // opcode + 8 f64
+	secondSetLayerStart := setLayerSize + drawRectSize
+	assert(buf5[secondSetLayerStart] == 0x05, "second SetLayer opcode at correct offset")
+	assert(buf5[secondSetLayerStart+1] == 5, "second SetLayer z=5")
+
 	fmt.Println("  draw encoding: ok")
 }
 
