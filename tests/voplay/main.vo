@@ -27,6 +27,16 @@ func main() {
 	testScene3D()
 	testMath3D()
 	testDraw3DEncoding()
+	testCamera3DMethods()
+	testScene3DAmbient()
+	testScene3DPhysicsConfig()
+	testPointerDelta()
+	test25DDrawScene()
+	testScene3DContacts()
+	testRayCastHitTypes()
+	testDrawBillboard()
+	testScene3DRayCast()
+	testScene2DRayCastQueryRect()
 	fmt.Println("All voplay tests passed.")
 }
 
@@ -704,6 +714,244 @@ func testDraw3DEncoding() {
 	assert(len(d2.Bytes()) > 0, "DrawScene3D encodes data")
 
 	fmt.Println("  draw3d encoding: ok")
+}
+
+func testCamera3DMethods() {
+	cam := voplay.Camera3D{
+		Position: voplay.Vec3{0, 5, 10},
+		Target:   voplay.Vec3{0, 0, 0},
+		Up:       voplay.Vec3{0, 1, 0},
+		Fov:      60,
+		Near:     0.1,
+		Far:      1000,
+	}
+
+	// LookAt
+	cam.LookAt(voplay.Vec3{1, 2, 3}, voplay.Vec3{4, 5, 6})
+	assert(cam.Position.X == 1 && cam.Position.Y == 2 && cam.Position.Z == 3, "Camera3D.LookAt position")
+	assert(cam.Target.X == 4 && cam.Target.Y == 5 && cam.Target.Z == 6, "Camera3D.LookAt target")
+
+	// Orbit
+	cam.Up = voplay.Vec3{0, 1, 0}
+	cam.Orbit(voplay.Vec3{0, 0, 0}, 10, 0, 0)
+	// At yaw=0, pitch=0: position should be (10, 0, 0) approximately
+	assert(cam.Target.X == 0 && cam.Target.Y == 0 && cam.Target.Z == 0, "Camera3D.Orbit target stays at center")
+	// Position should be at distance 10 from origin
+	dist := cam.Position.Length()
+	assert(dist > 9.9 && dist < 10.1, "Camera3D.Orbit distance preserved")
+
+	// ScreenToRay
+	cam.LookAt(voplay.Vec3{0, 0, 5}, voplay.Vec3{0, 0, 0})
+	cam.Up = voplay.Vec3{0, 1, 0}
+	cam.Fov = 60
+	origin, dir := cam.ScreenToRay(400, 300, 800, 600)
+	assert(origin.X == 0 && origin.Y == 0 && origin.Z == 5, "ScreenToRay origin is camera position")
+	// Center of screen should give a ray roughly pointing forward (negative Z)
+	assert(dir.Z < 0, "ScreenToRay center ray points forward")
+
+	fmt.Println("  camera3d methods: ok")
+}
+
+func testScene3DAmbient() {
+	s := voplay.NewScene3D()
+	// Default ambient should be (0.1, 0.1, 0.1, 1)
+	assert(s.Ambient.R == 0.1, "Scene3D default ambient R")
+	assert(s.Ambient.A == 1, "Scene3D default ambient A")
+
+	// Set custom ambient
+	s.Ambient = voplay.Color{0.3, 0.3, 0.5, 1}
+	assert(s.Ambient.B == 0.5, "Scene3D custom ambient B")
+
+	// DrawScene3D should use the scene's ambient (not hardcoded)
+	s.Spawn(voplay.Node3D{Model: 1, Position: voplay.Vec3{0, 0, 0}})
+	s.AddLight(voplay.Light{
+		Type:      voplay.DirectionalLight,
+		Direction: voplay.Vec3{0, -1, 0},
+		Color:     voplay.White,
+		Intensity: 1,
+	})
+	d := voplay.NewDrawCtx()
+	d.DrawScene3D(s)
+	buf := d.Bytes()
+	assert(len(buf) > 0, "DrawScene3D with custom ambient encodes data")
+
+	fmt.Println("  scene3d ambient: ok")
+}
+
+func testScene3DPhysicsConfig() {
+	s := voplay.NewScene3D()
+
+	// Spawn nodes WITHOUT physics (no extern calls needed)
+	node := s.Spawn(voplay.Node3D{
+		Position: voplay.Vec3{0, 10, 0},
+		Model:    1,
+	})
+	assert(node.Position.Y == 10, "Node3D spawned at correct position")
+	assert(s.NodeCount() == 1, "Scene3D has 1 node after spawn")
+
+	ground := s.Spawn(voplay.Node3D{
+		Position: voplay.Vec3{0, 0, 0},
+		Model:    2,
+	})
+	assert(s.NodeCount() == 2, "Scene3D has 2 nodes")
+
+	ball := s.Spawn(voplay.Node3D{
+		Position: voplay.Vec3{5, 5, 0},
+	})
+	assert(s.NodeCount() == 3, "Scene3D has 3 nodes")
+
+	// SetPosition on non-physics node updates directly
+	node.SetPosition(voplay.Vec3{0, 20, 0})
+	assert(node.Position.Y == 20, "SetPosition updates Position immediately")
+
+	// Velocity is zero on non-physics nodes
+	vel := ball.Velocity()
+	assert(vel.X == 0 && vel.Y == 0 && vel.Z == 0, "Velocity is zero on non-physics node")
+
+	// Force methods should not panic on non-physics nodes
+	node.ApplyForce(voplay.Vec3{0, 100, 0})
+	node.ApplyImpulse(voplay.Vec3{10, 0, 0})
+	node.SetVelocity(voplay.Vec3{1, 2, 3})
+
+	// Destroy
+	s.Destroy(ground)
+	assert(s.NodeCount() == 2, "Scene3D has 2 nodes after destroy")
+
+	// Clear
+	s.Clear()
+	assert(s.NodeCount() == 0, "Scene3D empty after clear")
+
+	// Test 3D collider constructors (pure Vo, no externs)
+	box := voplay.Box3D(1, 2, 3)
+	_ = box
+	sphere := voplay.Sphere(0.5)
+	_ = sphere
+	capsule := voplay.Capsule(1.0, 0.3)
+	_ = capsule
+
+	// Test Physics3D struct construction (no Spawn, so no extern)
+	p := &voplay.Physics3D{
+		Type:        voplay.Dynamic,
+		Collider:    voplay.Box3D(1, 1, 1),
+		Density:     2.0,
+		Friction:    0.5,
+		Restitution: 0.3,
+	}
+	assert(p.Density == 2.0, "Physics3D density")
+	assert(p.Friction == 0.5, "Physics3D friction")
+
+	fmt.Println("  scene3d physics config: ok")
+}
+
+func testPointerDelta() {
+	// PointerDelta should return (0, 0) initially
+	inp := voplay.NewInputState()
+	dx, dy := inp.PointerDelta()
+	assert(dx == 0 && dy == 0, "PointerDelta initial zero")
+
+	fmt.Println("  pointer delta: ok")
+}
+
+func test25DDrawScene() {
+	s := voplay.NewScene2D()
+	s.ViewAngle = 60
+
+	// Spawn an entity with a Model (2.5D)
+	s.Spawn(voplay.Entity2D{
+		X: 100, Y: 200, W: 32, H: 32,
+		Model:  1,
+		ScaleX: 1, ScaleY: 1,
+	})
+
+	// Spawn a normal sprite entity
+	spr := &voplay.Sprite{Texture: 1, SrcW: 32, SrcH: 32}
+	s.Spawn(voplay.Entity2D{
+		X: 50, Y: 50, W: 32, H: 32,
+		Sprite: spr,
+		ScaleX: 1, ScaleY: 1,
+	})
+
+	d := voplay.NewDrawCtx()
+	d.DrawScene2D(s)
+	buf := d.Bytes()
+	assert(len(buf) > 0, "DrawScene2D with 2.5D entities encodes data")
+
+	fmt.Println("  2.5d draw scene: ok")
+}
+
+func testScene3DContacts() {
+	// Contacts on empty scene should return nil/empty
+	s := voplay.NewScene3D()
+	contacts := s.Contacts()
+	assert(len(contacts) == 0, "Contacts empty on new scene")
+
+	fmt.Println("  scene3d contacts: ok")
+}
+
+func testRayCastHitTypes() {
+	// Test RayCastHit2D struct construction
+	hit2d := voplay.RayCastHit2D{
+		Point:    voplay.Vec2{10, 20},
+		Normal:   voplay.Vec2{0, -1},
+		Distance: 5.5,
+	}
+	assert(hit2d.Point.X == 10, "RayCastHit2D point")
+	assert(hit2d.Normal.Y == -1, "RayCastHit2D normal")
+	assert(hit2d.Distance == 5.5, "RayCastHit2D distance")
+
+	// Test RayCastHit3D struct construction
+	hit3d := voplay.RayCastHit3D{
+		Point:    voplay.Vec3{1, 2, 3},
+		Normal:   voplay.Vec3{0, 1, 0},
+		Distance: 10.0,
+	}
+	assert(hit3d.Point.Z == 3, "RayCastHit3D point")
+	assert(hit3d.Normal.Y == 1, "RayCastHit3D normal")
+	assert(hit3d.Distance == 10.0, "RayCastHit3D distance")
+
+	fmt.Println("  raycast hit types: ok")
+}
+
+func testDrawBillboard() {
+	d := voplay.NewDrawCtx()
+	spr := &voplay.Sprite{Texture: 1, SrcW: 32, SrcH: 32}
+
+	// Set up a 3D camera first
+	cam := voplay.Camera3D{
+		Position: voplay.Vec3{0, 5, 10},
+		Target:   voplay.Vec3{0, 0, 0},
+		Up:       voplay.Vec3{0, 1, 0},
+		Fov:      60, Near: 0.1, Far: 1000,
+	}
+	d.SetCamera3D(&cam)
+
+	// DrawBillboard should encode without panic
+	d.DrawBillboard(spr, voplay.Vec3{0, 2, 0}, 1.0, 0.5)
+	buf := d.Bytes()
+	assert(len(buf) > 0, "DrawBillboard encodes data")
+
+	fmt.Println("  draw billboard: ok")
+}
+
+func testScene3DRayCast() {
+	// RayCast on empty scene (no physics) should return nil
+	s := voplay.NewScene3D()
+	hit := s.RayCast(voplay.Vec3{0, 10, 0}, voplay.Vec3{0, -1, 0}, 100)
+	assert(hit == nil, "RayCast nil on empty scene")
+
+	fmt.Println("  scene3d raycast: ok")
+}
+
+func testScene2DRayCastQueryRect() {
+	// RayCast and QueryRect on scene without physics should return nil
+	s := voplay.NewScene2D()
+	hit := s.RayCast(voplay.Vec2{0, 0}, voplay.Vec2{1, 0}, 100)
+	assert(hit == nil, "RayCast nil on non-physics scene")
+
+	result := s.QueryRect(voplay.Rect{0, 0, 100, 100})
+	assert(result == nil, "QueryRect nil on non-physics scene")
+
+	fmt.Println("  scene2d raycast/queryrect: ok")
 }
 
 func assert(cond bool, msg string) {

@@ -264,10 +264,14 @@ fn try_resolve_via_cargo_metadata(pkg_name: &str) -> Option<String> {
     let vomod_path = PathBuf::from(&manifest_dir).join(vomod_rel);
     let vomod_content = std::fs::read_to_string(vomod_path).ok()?;
     let module_path = parse_vomod_module(&vomod_content)?;
-    // Validate: pkg_name must equal the last path component of the module path.
+    // Validate: pkg_name must equal the last path component of the module path,
+    // or be a sub-package of it (e.g. "voplay/scene2d" when module is "github.com/vo-lang/voplay").
     let last = module_path.rsplit('/').next().unwrap_or(&module_path);
     if last == pkg_name || module_path == pkg_name {
         Some(module_path)
+    } else if let Some(sub) = pkg_name.strip_prefix(&format!("{}/", last)) {
+        // Sub-package: "voplay/scene2d" → "github.com/vo-lang/voplay/scene2d"
+        Some(format!("{}/{}", module_path, sub))
     } else {
         None
     }
@@ -319,8 +323,17 @@ fn find_pkg_dir_by_vomod(full_module_path: &str) -> Option<PathBuf> {
         let vomod = dir.join("vo.mod");
         if vomod.is_file() {
             if let Ok(content) = std::fs::read_to_string(&vomod) {
-                if parse_vomod_module(&content).as_deref() == Some(full_module_path) {
-                    return Some(dir);
+                if let Some(module_path) = parse_vomod_module(&content) {
+                    if module_path == full_module_path {
+                        return Some(dir);
+                    }
+                    // Sub-package: full_module_path starts with module_path + "/"
+                    if let Some(sub) = full_module_path.strip_prefix(&format!("{}/", module_path)) {
+                        let sub_dir = dir.join(sub);
+                        if sub_dir.exists() {
+                            return Some(sub_dir);
+                        }
+                    }
                 }
             }
         }
@@ -444,6 +457,23 @@ fn resolve_pkg_path(project_root: &Path, pkg_path: &str) -> Option<(PathBuf, boo
     for candidate in &stdlib_candidates {
         if candidate.exists() {
             return Some((candidate.clone(), true));
+        }
+    }
+
+    // Check if pkg_path is a full module path for the current project (including sub-packages).
+    // e.g. "github.com/vo-lang/voplay/scene2d" with module "github.com/vo-lang/voplay"
+    //    → resolve to project_root.join("scene2d")
+    let vomod = project_root.join("vo.mod");
+    if vomod.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&vomod) {
+            if let Some(module_path) = parse_vomod_module(&content) {
+                if let Some(sub) = pkg_path.strip_prefix(&format!("{}/", module_path)) {
+                    let pkg_dir = project_root.join(sub);
+                    if pkg_dir.exists() {
+                        return Some((pkg_dir, false));
+                    }
+                }
+            }
         }
     }
 

@@ -67,6 +67,11 @@ func FMA(x, y, z float64) float64
 func Inf(sign int) float64
 func NaN() float64
 
+func Float64bits(x float64) int
+func Float64frombits(b int) float64
+func Float32bits(x float32) int
+func Float32frombits(b int) float32
+
 // Vo-implemented functions
 
 // Abs returns the absolute value of x.

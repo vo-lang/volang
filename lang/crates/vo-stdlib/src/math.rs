@@ -214,6 +214,28 @@ fn nan() -> f64 {
     f64::NAN
 }
 
+// ==================== Bit conversion ====================
+
+#[vostd_fn("math", "Float64bits")]
+fn float64bits(x: f64) -> i64 {
+    x.to_bits() as i64
+}
+
+#[vostd_fn("math", "Float64frombits")]
+fn float64frombits(b: i64) -> f64 {
+    f64::from_bits(b as u64)
+}
+
+#[vostd_fn("math", "Float32bits")]
+fn float32bits(x: f32) -> i64 {
+    x.to_bits() as i64
+}
+
+#[vostd_fn("math", "Float32frombits")]
+fn float32frombits(b: i64) -> f32 {
+    f32::from_bits(b as u32)
+}
+
 // Register all math extern functions using the stdlib_register! macro.
 // The macro registers all listed functions via __STDLIB_* consts.
 vo_runtime::stdlib_register!(math:
@@ -227,4 +249,6 @@ vo_runtime::stdlib_register!(math:
     Asinh, Acosh, Atanh,
     Mod, Modf, Frexp, Ldexp,
     FMA, Inf, NaN,
+    Float64bits, Float64frombits,
+    Float32bits, Float32frombits,
 );
