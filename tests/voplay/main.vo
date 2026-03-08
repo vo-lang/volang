@@ -18,6 +18,10 @@ func main() {
 	testDrawScene2D()
 	testDrawOutlines()
 	testPhysics()
+	testEntityHelpers()
+	testColorHelpers()
+	testSceneClear()
+	testContacts()
 	testAudio()
 	testDrawEncoding()
 	fmt.Println("All voplay tests passed.")
@@ -390,6 +394,87 @@ func testPhysics() {
 	assert(s.EntityCount() == 1, "entity removed after destroy")
 
 	fmt.Println("  physics: ok")
+}
+
+func testEntityHelpers() {
+	s := voplay.NewScene2D()
+	a := s.Spawn(voplay.Entity2D{X: 10, Y: 20, W: 30, H: 40})
+	b := s.Spawn(voplay.Entity2D{X: 15, Y: 25, W: 30, H: 40})
+
+	// Center
+	c := a.Center()
+	assert(c.X == 10 && c.Y == 20, "Entity2D.Center")
+
+	// Bounds
+	r := a.Bounds()
+	assert(r.X == -5 && r.Y == 0 && r.W == 30 && r.H == 40, "Entity2D.Bounds")
+
+	// Overlaps (nearby entities with large size should overlap)
+	assert(a.Overlaps(b), "Entity2D.Overlaps (overlapping)")
+
+	// DistanceTo
+	dist := a.DistanceTo(b)
+	assert(dist > 0, "Entity2D.DistanceTo > 0")
+
+	// Non-overlapping
+	far := s.Spawn(voplay.Entity2D{X: 1000, Y: 1000, W: 10, H: 10})
+	assert(!a.Overlaps(far), "Entity2D.Overlaps (non-overlapping)")
+
+	fmt.Println("  entity helpers: ok")
+}
+
+func testColorHelpers() {
+	c := voplay.Red
+
+	// WithAlpha
+	c2 := c.WithAlpha(0.5)
+	assert(c2.R == 1 && c2.G == 0 && c2.B == 0 && c2.A == 0.5, "Color.WithAlpha")
+
+	// Lerp
+	c3 := voplay.Black.Lerp(voplay.White, 0.5)
+	assert(c3.R == 0.5 && c3.G == 0.5 && c3.B == 0.5, "Color.Lerp midpoint")
+
+	// Lerp at 0 and 1
+	c4 := voplay.Red.Lerp(voplay.Blue, 0)
+	assert(c4.R == 1 && c4.B == 0, "Color.Lerp at 0")
+	c5 := voplay.Red.Lerp(voplay.Blue, 1)
+	assert(c5.R == 0 && c5.B == 1, "Color.Lerp at 1")
+
+	fmt.Println("  color helpers: ok")
+}
+
+func testSceneClear() {
+	s := voplay.NewScene2D()
+	s.Spawn(voplay.Entity2D{Tag: "a", W: 10, H: 10})
+	s.Spawn(voplay.Entity2D{Tag: "b", W: 10, H: 10})
+	s.Spawn(voplay.Entity2D{Tag: "a", W: 10, H: 10})
+
+	// FindAllByTag
+	all := s.FindAllByTag("a")
+	assert(len(all) == 2, "FindAllByTag returns 2")
+	none := s.FindAllByTag("x")
+	assert(len(none) == 0, "FindAllByTag returns 0 for missing")
+
+	// Clear
+	assert(s.EntityCount() == 3, "3 entities before clear")
+	s.Clear()
+	assert(s.EntityCount() == 0, "0 entities after clear")
+
+	// Spawn after clear should still work
+	s.Spawn(voplay.Entity2D{Tag: "c", W: 5, H: 5})
+	assert(s.EntityCount() == 1, "1 entity after re-spawn")
+
+	fmt.Println("  scene clear: ok")
+}
+
+func testContacts() {
+	// Contacts on a scene without physics should return nil
+	s := voplay.NewScene2D()
+	s.Spawn(voplay.Entity2D{W: 10, H: 10})
+	c := s.Contacts()
+	assert(c == nil, "Contacts nil without physics")
+
+	fmt.Println("  contacts: ok")
 }
 
 func testAudio() {
