@@ -16,6 +16,7 @@ func main() {
 	testSceneQueries()
 	testTilemap()
 	testDrawScene2D()
+	testDrawOutlines()
 	testDrawEncoding()
 	fmt.Println("All voplay tests passed.")
 }
@@ -318,6 +319,29 @@ func testDrawScene2D() {
 	assert(len(d.Bytes()) > 0, "DrawScene2D produces output")
 
 	fmt.Println("  draw scene2d: ok")
+}
+
+func testDrawOutlines() {
+	var d voplay.DrawCtx
+
+	// DrawRectOutline emits 4 lines
+	d.DrawRectOutline(10, 10, 100, 50, 2, voplay.White)
+	assert(len(d.Bytes()) > 0, "DrawRectOutline produces output")
+
+	// DrawCircleOutline
+	var d2 voplay.DrawCtx
+	d2.DrawCircleOutline(100, 100, 50, 1, 16, voplay.Red)
+	assert(len(d2.Bytes()) > 0, "DrawCircleOutline produces output")
+
+	// MeasureText
+	w, h := voplay.MeasureText("Hello", 16)
+	assert(w == 80, "MeasureText width 5 chars * 16px")
+	assert(h == 16, "MeasureText height")
+
+	w2, _ := voplay.MeasureText("", 24)
+	assert(w2 == 0, "MeasureText empty string")
+
+	fmt.Println("  outlines + measure: ok")
 }
 
 func testDrawEncoding() {
