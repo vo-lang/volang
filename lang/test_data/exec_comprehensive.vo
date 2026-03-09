@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -122,7 +123,7 @@ func testCommandDir() {
 	cmd.Dir = "/tmp"
 	output, err := cmd.Output()
 	assert(err == nil, "pwd in /tmp")
-	assert(strings.TrimSpace(string(output)) == "/tmp", "pwd output is /tmp")
+	assertPathEquivalent(strings.TrimSpace(string(output)), "/tmp", "pwd output matches /tmp after symlink resolution")
 	
 	// Different directory
 	cmd = exec.Command("pwd", nil)
@@ -282,3 +283,11 @@ func assert(cond bool, msg string) {
 		panic("Assertion failed: " + msg)
 	}
 }
+
+func assertPathEquivalent(actual string, expected string, msg string) {
+	actualResolved, err := filepath.EvalSymlinks(actual)
+	assert(err == nil, "resolve actual path")
+	expectedResolved, err := filepath.EvalSymlinks(expected)
+	assert(err == nil, "resolve expected path")
+	assert(actualResolved == expectedResolved, msg + ": actual=" + actualResolved + " expected=" + expectedResolved)
+	}

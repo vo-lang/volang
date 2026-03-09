@@ -87,22 +87,19 @@ pub fn typed_write_barrier_by_meta(
 pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_capture_slot_types: &[&[SlotType]]) {
     let gc_header = Gc::header(obj);
     
-    
+    // Large arrays use GcHeader.slots == 0 and store the real size in ArrayHeader.
+    // Any other ValueKind::Array object with slots < HEADER_SLOTS is a codegen bug.
     match gc_header.kind() {
         ValueKind::Array => {
-            // Real arrays are created by array::create with [ArrayHeader(2)][elements] layout.
-            // PtrNew heap-boxed array variables have kind=Struct (fixed by get_boxing_meta).
-            // Defer args have kind=Void (fixed by exec_defer_push).
-            // Any ValueKind::Array object with slots < HEADER_SLOTS is a codegen bug.
             debug_assert!(
-                gc_header.slots >= array::HEADER_SLOTS as u16,
-                "scan_object: Array object {:p} has slots={} < HEADER_SLOTS={} — codegen bug (PtrNew box should use Struct)",
+                gc_header.slots == 0 || gc_header.slots >= array::HEADER_SLOTS as u16,
+                "scan_object: Array object {:p} has invalid slots={} (expected 0 for large array or >= HEADER_SLOTS={}) — codegen bug (PtrNew box should use Struct)",
                 obj, gc_header.slots, array::HEADER_SLOTS
             );
-            if gc_header.slots >= array::HEADER_SLOTS as u16 {
+            if gc_header.slots == 0 || gc_header.slots >= array::HEADER_SLOTS as u16 {
                 scan_array(gc, obj, struct_metas);
             }
-            // slots < HEADER_SLOTS: skip scanning (should not happen; debug_assert catches it)
+            // Other slots < HEADER_SLOTS: skip scanning (should not happen; debug_assert catches it)
         }
         ValueKind::String => {
             let arr = slice::array_ref(obj);

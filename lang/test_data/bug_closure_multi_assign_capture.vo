@@ -1,0 +1,36 @@
+// Bug: closure capture analysis must include outer vars written via multi-value assignment
+package main
+
+import "fmt"
+
+type Store struct {}
+
+type Tx struct {}
+
+func (s *Store) View(fn func(tx *Tx) error) error {
+    return fn(&Tx{})
+}
+
+func (tx *Tx) Get(key string) (string, bool, error) {
+    return key + "!", true, nil
+}
+
+func (s *Store) Get(key string) (string, bool, error) {
+    var value string
+    var found bool
+    err := s.View(func(tx *Tx) error {
+        var getErr error
+        value, found, getErr = tx.Get(key)
+        return getErr
+    })
+    return value, found, err
+}
+
+func main() {
+    s := &Store{}
+    value, found, err := s.Get("hello")
+    assert(err == nil, "Get should succeed")
+    assert(found, "found should be true")
+    assert(value == "hello!", "value should be captured and assigned")
+    fmt.Println("bug_closure_multi_assign_capture: PASSED")
+}

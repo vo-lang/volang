@@ -1,0 +1,31 @@
+package main
+
+import "fmt"
+
+func main() {
+	// Large []int backing array:
+	// len=65536, elem_bytes=8 => data_slots=65536, total_slots=65538 > u16::MAX.
+	// Runtime stores GcHeader.slots = 0 for this legal large-array case.
+	big := make([]int, 65536)
+	assert(len(big) == 65536, "big len")
+	assert(cap(big) == 65536, "big cap")
+
+	for i := 0; i < 16; i++ {
+		big[i*4096] = i + 1
+	}
+
+	// Trigger additional allocations so GC scans the live slice + backing array.
+	garbage := make([][]int, 0, 256)
+	for i := 0; i < 256; i++ {
+		tmp := make([]int, 32)
+		tmp[0] = i
+		garbage = append(garbage, tmp)
+	}
+
+	for i := 0; i < 16; i++ {
+		assert(big[i*4096] == i+1, "big value survives gc")
+	}
+	assert(len(garbage) == 256, "garbage len")
+
+	fmt.Println("gc_large_array_slots_zero: ok")
+}

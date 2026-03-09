@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -43,7 +44,7 @@ func main() {
 	cmd.Dir = "/tmp"
 	output, err = cmd.Output()
 	assert(err == nil, "pwd failed: " + errStr(err))
-	assert(strings.TrimSpace(string(output)) == "/tmp", "pwd should be /tmp")
+	assertPathEquivalent(strings.TrimSpace(string(output)), "/tmp", "pwd should match /tmp after symlink resolution")
 	fmt.Println("pwd in /tmp:", strings.TrimSpace(string(output)))
 	
 	// Test LookPath not found
@@ -59,6 +60,14 @@ func assert(cond bool, msg string) {
 		panic("Assertion failed: " + msg)
 	}
 }
+
+func assertPathEquivalent(actual string, expected string, msg string) {
+	actualResolved, err := filepath.EvalSymlinks(actual)
+	assert(err == nil, "resolve actual path: " + errStr(err))
+	expectedResolved, err := filepath.EvalSymlinks(expected)
+	assert(err == nil, "resolve expected path: " + errStr(err))
+	assert(actualResolved == expectedResolved, msg + ": actual=" + actualResolved + " expected=" + expectedResolved)
+	}
 
 func errStr(err error) string {
 	if err == nil {

@@ -239,11 +239,15 @@ impl<'a> EscapeAnalyzer<'a> {
             }
             StmtKind::Expr(expr) => self.visit_expr(expr),
             StmtKind::Assign(assign) => {
+                for l in &assign.lhs {
+                    self.visit_expr(l);
+                }
+                for r in &assign.rhs {
+                    self.visit_expr(r);
+                }
+
                 // Check interface assignment
                 for (l, r) in assign.lhs.iter().zip(assign.rhs.iter()) {
-                    self.visit_expr(l);
-                    self.visit_expr(r);
-                    
                     // If LHS is interface type and RHS is struct/array, RHS escapes
                     // But if RHS is also interface, it doesn't escape (interface-to-interface copy)
                     if assign.op == AssignOp::Assign {

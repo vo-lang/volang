@@ -192,7 +192,15 @@ fn store_recv_ident(
         return Ok(());
     }
 
-    Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)))
+    let ident_name = info.project.interner.resolve(ident.symbol).unwrap_or("?");
+    let obj = &info.project.tc_objs.lobjs[obj_key];
+    Err(CodegenError::VariableNotFound(format!(
+        "select recv ident name='{}' symbol={:?} obj_key={:?} entity={:?}",
+        ident_name,
+        ident.symbol,
+        obj_key,
+        obj.entity_type(),
+    )))
 }
 
 /// Bind variables for a recv case (either define new or assign to existing)
