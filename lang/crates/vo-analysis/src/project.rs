@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use vo_common::diagnostics::DiagnosticSink;
+use vo_common::diagnostics::{DiagnosticEmitter, DiagnosticSink};
 use vo_common::source::SourceMap;
 use vo_common::symbol::SymbolInterner;
 use vo_common::vfs::FileSet;
@@ -536,7 +536,7 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
         };
         
         // Type check the package (imports already preloaded, tc_objs can be swapped)
-        let (check_result, pkg_type_info) = {
+        let (check_result, pkg_type_info, check_diagnostics) = {
             let mut state_ref = self.state.borrow_mut();
             let mut checker = Checker::new(pkg_key, state_ref.interner.clone());
             std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
@@ -546,8 +546,14 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
             let result = checker.check(&parsed_files);
             
             let mut state_ref = self.state.borrow_mut();
+            let diagnostics = if result.is_err() && checker.diagnostics.borrow().has_errors() {
+                let emitter = DiagnosticEmitter::new(&state_ref.source_map);
+                Some(emitter.emit_all_to_string(&checker.diagnostics.borrow()))
+            } else {
+                None
+            };
             std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
-            (result, checker.result)
+            (result, checker.result, diagnostics)
         };
         
         // Remove from in progress
@@ -566,6 +572,12 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
                     state.imported_type_infos.insert(import_path.to_string(), pkg_type_info);
                 }
                 Err(_) => {
+                    if let Some(diag) = check_diagnostics {
+                        let diag = diag.trim();
+                        if !diag.is_empty() {
+                            return ImportResult::Err(format!("type check failed for {}:\n{}", import_path, diag));
+                        }
+                    }
                     return ImportResult::Err(format!("type check failed for {}", import_path));
                 }
             }

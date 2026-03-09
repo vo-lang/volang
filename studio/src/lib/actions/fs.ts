@@ -38,15 +38,18 @@ export async function toggleDir(dirPath: string): Promise<void> {
   }
 }
 
-export async function openFile(filePath: string): Promise<void> {
+export async function openFile(filePath: string, options: { preserveRunEntry?: boolean } = {}): Promise<void> {
   const s = get(ide);
   if (s.dirty && s.activeFilePath) {
     await saveFile();
   }
   const content = await bridge().fsReadFile(filePath);
-  ide.update(s => ({
-    ...s,
+  ide.update(st => ({
+    ...st,
     activeFilePath: filePath,
+    runEntryPath: !options.preserveRunEntry && st.projectMode === 'single'
+      ? filePath
+      : st.runEntryPath,
     code: content,
     dirty: false,
     guestRender: null,
@@ -95,8 +98,16 @@ export async function deleteEntry(path: string, isDir: boolean): Promise<void> {
   await loadDir(parentPath);
 
   const s = get(ide);
-  if (s.activeFilePath === path || s.activeFilePath.startsWith(path + '/')) {
-    ide.update(s => ({ ...s, activeFilePath: '', code: '', dirty: false }));
+  const activeDeleted = s.activeFilePath === path || s.activeFilePath.startsWith(path + '/');
+  const runEntryDeleted = s.runEntryPath === path || s.runEntryPath.startsWith(path + '/');
+  if (activeDeleted || runEntryDeleted) {
+    ide.update(st => ({
+      ...st,
+      activeFilePath: activeDeleted ? '' : st.activeFilePath,
+      runEntryPath: runEntryDeleted ? '' : st.runEntryPath,
+      code: activeDeleted ? '' : st.code,
+      dirty: activeDeleted ? false : st.dirty,
+    }));
   }
   explorer.update(e => ({ ...e, contextMenu: null }));
 }
@@ -118,6 +129,11 @@ export async function renameEntry(oldPath: string, newName: string): Promise<voi
   await loadDir(dir);
 
   const s = get(ide);
+  if (s.runEntryPath === oldPath) {
+    ide.update(st => ({ ...st, runEntryPath: newPath }));
+  } else if (s.runEntryPath.startsWith(oldPath + '/')) {
+    ide.update(st => ({ ...st, runEntryPath: newPath + st.runEntryPath.slice(oldPath.length) }));
+  }
   if (s.activeFilePath === oldPath) {
     await openFile(newPath);
   } else if (s.activeFilePath.startsWith(oldPath + '/')) {

@@ -77,12 +77,15 @@ impl<F: FileSystem> LocalSource<F> {
     /// 
     /// Go semantics: `../foo` from `pkg/sub/` resolves to `pkg/foo/`
     pub fn resolve(&self, import_path: &str, importer_dir: &str) -> Option<VfsPackage> {
-        // Combine importer_dir with the relative import path
-        let full_path = if importer_dir.is_empty() || importer_dir == "." {
-            import_path.trim_start_matches("./").to_string()
+        // Combine importer_dir with the relative import path, then normalize
+        // so that "../" sequences are resolved before hitting the filesystem.
+        // This is critical for MemoryFs which stores keys verbatim.
+        let raw = if importer_dir.is_empty() || importer_dir == "." {
+            import_path.to_string()
         } else {
-            format!("{}/{}", importer_dir, import_path.trim_start_matches("./"))
+            format!("{}/{}", importer_dir, import_path)
         };
+        let full_path = normalize_path(&raw);
         resolve_package(&self.fs, &full_path, import_path)
     }
     
@@ -174,6 +177,27 @@ impl<S: FileSystem + Send + Sync, L: FileSystem + Send + Sync, M: FileSystem + S
         }
         
         self.local.resolve(import_path, importer_dir)
+    }
+}
+
+/// Normalize a forward-slash path string by resolving `.` and `..` components.
+///
+/// This is needed for `MemoryFs` which stores keys verbatim and cannot resolve
+/// `"pkg/sub/../foo"` the way the OS would.  RealFs is also normalized as a
+/// minor cleanliness win.
+fn normalize_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => { parts.pop(); }
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
     }
 }
 
@@ -295,9 +319,61 @@ impl<R: Resolver> Resolver for ReplacingResolver<R> {
     }
 }
 
+/// Decorator resolver that resolves imports from the current project module
+/// directly from the local filesystem before delegating.
+///
+/// This lets a project import its own absolute module path and sub-packages
+/// (for example `github.com/vo-lang/voplay/codec`) without requiring explicit
+/// `replace` directives or nested `vo.mod` files.
+pub struct CurrentModuleResolver<R, F> {
+    inner: R,
+    local_fs: F,
+    current_module: Option<String>,
+}
+
+impl<R, F> CurrentModuleResolver<R, F> {
+    pub fn new(inner: R, local_fs: F, current_module: Option<String>) -> Self {
+        Self {
+            inner,
+            local_fs,
+            current_module,
+        }
+    }
+}
+
+impl<R: Resolver, F: FileSystem> Resolver for CurrentModuleResolver<R, F> {
+    fn resolve(&self, import_path: &str, importer_dir: &str) -> Option<VfsPackage> {
+        if let Some(module) = &self.current_module {
+            let sub_path = if import_path == module {
+                Some("")
+            } else if import_path.starts_with(module.as_str())
+                && import_path.as_bytes().get(module.len()) == Some(&b'/')
+            {
+                Some(&import_path[module.len() + 1..])
+            } else {
+                None
+            };
+
+            if let Some(sub_path) = sub_path {
+                let local_path = if sub_path.is_empty() {
+                    "."
+                } else {
+                    sub_path
+                };
+                if let Some(pkg) = resolve_package(&self.local_fs, local_path, import_path) {
+                    return Some(pkg);
+                }
+            }
+        }
+
+        self.inner.resolve(import_path, importer_dir)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vo_common::vfs::MemoryFs;
     
     #[test]
     fn test_can_handle() {
@@ -319,5 +395,56 @@ mod tests {
         assert!(mod_vfs.can_handle("github.com/user/pkg"));
         assert!(!mod_vfs.can_handle("fmt"));
         assert!(!mod_vfs.can_handle("./mylib"));
+    }
+
+    #[test]
+    fn test_normalize_path() {
+        assert_eq!(normalize_path("./foo"), "foo");
+        assert_eq!(normalize_path("pkg/sub/../foo"), "pkg/foo");
+        assert_eq!(normalize_path("a/b/../../c"), "c");
+        assert_eq!(normalize_path("a/./b"), "a/b");
+        assert_eq!(normalize_path(".."), ".");
+        assert_eq!(normalize_path("a/b/c"), "a/b/c");
+    }
+
+    #[test]
+    fn test_local_source_resolves_parent_relative_path_with_memory_fs() {
+        let mut fs = MemoryFs::new();
+        fs.add_file("shared/utils.vo", "package utils\n");
+
+        let source = LocalSource::with_fs(fs);
+        // Importer is in "pkg/sub", import path is "../../shared"
+        // Raw: "pkg/sub/../../shared" → normalized: "shared"
+        let pkg = source.resolve("../../shared", "pkg/sub")
+            .expect("../../shared from pkg/sub should resolve to shared/");
+        assert_eq!(pkg.name, "shared");
+        assert_eq!(pkg.files.len(), 1);
+    }
+
+    #[test]
+    fn test_current_module_resolves_root_and_subpackage_from_local_fs() {
+        let mut fs = MemoryFs::new();
+        fs.add_file("vo.mod", "module github.com/acme/game\n");
+        fs.add_file("main.vo", "package main\n");
+        fs.add_file("codec/codec.vo", "package codec\n");
+
+        let base = PackageResolver::with_fs(fs.clone());
+        let resolver = CurrentModuleResolver::new(
+            base,
+            fs,
+            Some("github.com/acme/game".to_string()),
+        );
+
+        let root = resolver.resolve("github.com/acme/game", ".")
+            .expect("root package should resolve");
+        assert_eq!(root.path, "github.com/acme/game");
+        assert_eq!(root.name, "game");
+        assert_eq!(root.files.len(), 1);
+
+        let sub = resolver.resolve("github.com/acme/game/codec", ".")
+            .expect("subpackage should resolve");
+        assert_eq!(sub.path, "github.com/acme/game/codec");
+        assert_eq!(sub.name, "codec");
+        assert_eq!(sub.files.len(), 1);
     }
 }

@@ -469,7 +469,7 @@ impl<'a> FunctionCompiler<'a> {
         // Note: Panic instruction uses inst.a for the register (not inst.b)
         let msg_slot0 = self.load_local(inst.a);
         let msg_slot1 = self.load_local(inst.a + 1);
-        self.builder.ins().call(panic_func, &[ctx, msg_slot0, msg_slot1]);
+        crate::translator::emit_funcref_call(self, panic_func, &[ctx, msg_slot0, msg_slot1]);
         let panic_val = self.builder.ins().iconst(types::I32, 1);
         self.builder.ins().return_(&[panic_val]);
     }
@@ -584,7 +584,7 @@ impl<'a> FunctionCompiler<'a> {
         
         // Call callee with args on native stack (FAST PATH)
         let result = if let Some(func_ref) = self.self_func_ref {
-            let call = self.builder.ins().call(func_ref, &[ctx, args_ptr, ret_ptr]);
+            let call = crate::translator::emit_funcref_call(self, func_ref, &[ctx, args_ptr, ret_ptr]);
             self.builder.inst_results(call)[0]
         } else {
             let jit_func_table = self.builder.ins().load(types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_FUNC_TABLE);

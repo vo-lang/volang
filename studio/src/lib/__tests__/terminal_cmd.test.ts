@@ -13,8 +13,7 @@ import type { ShellClient } from '../shell/client';
 import type { ShellOp, ShellEvent } from '../shell/protocol';
 
 // ── Polyfill crypto.randomUUID ─────────────────────────────────────────────
-import { randomUUID } from 'crypto';
-(globalThis as any).crypto ??= { randomUUID };
+(globalThis as any).crypto ??= { randomUUID: () => '00000000-0000-4000-8000-000000000000' };
 
 // =============================================================================
 // Mock ShellClient factory

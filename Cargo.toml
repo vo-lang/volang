@@ -28,6 +28,14 @@ lto = true
 strip = true
 debug = false
 
+[profile.release.package.vo-studio-wasm]
+debug = true
+strip = false
+
+[profile.release.package.vo-test]
+opt-level = 3
+codegen-units = 1
+
 # Native-optimized release (speed)
 [profile.release-native]
 inherits = "release"
@@ -61,6 +69,3 @@ vo-runtime   = { path = "lang/crates/vo-runtime" }
 vo-stdlib    = { path = "lang/crates/vo-stdlib" }
 vo-syntax    = { path = "lang/crates/vo-syntax" }
 vo-vm        = { path = "lang/crates/vo-vm" }
-
-[patch."https://github.com/vo-lang/vogui"]
-vogui = { path = "../vogui/rust" }

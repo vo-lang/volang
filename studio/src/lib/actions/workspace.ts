@@ -2,7 +2,10 @@ import { get } from 'svelte/store';
 import { ide } from '../../stores/ide';
 import type { EditTarget, ProjectMode } from '../../stores/ide';
 import { explorer } from '../../stores/explorer';
+import { termSetCwd } from '../../stores/terminal';
 import { bridge } from '../bridge';
+import { dirname } from '../path_utils';
+import { resolveWorkspaceOpenTarget } from '../workspace_target';
 import { loadDir, openFile } from './fs';
 
 // =============================================================================
@@ -26,6 +29,53 @@ function findFirstVoFile(
     }
   }
   return null;
+}
+
+function findRunEntryFile(
+  entries: { name: string; path: string; isDir: boolean }[],
+  dirCache: Record<string, { name: string; path: string; isDir: boolean }[]>,
+): string | null {
+  const mainFile = entries.find(e => !e.isDir && e.name === 'main.vo');
+  if (mainFile) return mainFile.path;
+  return findFirstVoFile(entries, dirCache);
+}
+
+async function expandParentDirs(projectRoot: string, filePath: string): Promise<Set<string>> {
+  const expandedDirs = new Set<string>();
+  if (!filePath.startsWith(projectRoot + '/')) return expandedDirs;
+
+  const relPath = filePath.slice(projectRoot.length + 1);
+  const segments = relPath.split('/');
+  let cur = projectRoot;
+  for (let i = 0; i < segments.length - 1; i++) {
+    cur += '/' + segments[i];
+    await loadDir(cur);
+    expandedDirs.add(cur);
+  }
+  return expandedDirs;
+}
+
+async function tryStat(path: string): Promise<{ name: string; path: string; isDir: boolean } | null> {
+  try {
+    return await bridge().fsStat(path);
+  } catch {
+    return null;
+  }
+}
+
+export async function openWorkspaceTarget(targetPath: string, entryPath?: string): Promise<void> {
+  const target = await resolveWorkspaceOpenTarget(targetPath, entryPath, {
+    listDir: loadDir,
+    stat: (path: string) => bridge().fsStat(path),
+    tryStat,
+  });
+
+  if (target.kind === 'project') {
+    await openProject(target.voModPath, target.entryPath);
+    return;
+  }
+
+  await openSingleFile(target.filePath);
 }
 
 export async function initWorkspace(): Promise<void> {
@@ -54,23 +104,29 @@ export async function initWorkspace(): Promise<void> {
 
   const s = get(ide);
   const firstFile = findFirstVoFile(rootEntries, s.dirCache);
+  const runEntryPath = mode === 'multi'
+    ? findRunEntryFile(rootEntries, s.dirCache)
+    : firstFile;
+  ide.update(st => ({ ...st, runEntryPath: runEntryPath ?? '' }));
   if (firstFile) {
     await openFile(firstFile);
   }
 }
 
 export async function openSingleFile(path: string): Promise<void> {
-  const workspaceRoot = path.substring(0, path.lastIndexOf('/'));
+  const workspaceRoot = dirname(path);
   const editTarget: EditTarget = { mode: 'single', workspaceRoot };
-  ide.update(s => ({ ...s, workspaceRoot, projectMode: 'single', editTarget }));
+  ide.update(s => ({ ...s, workspaceRoot, projectMode: 'single', editTarget, runEntryPath: path }));
+  termSetCwd(workspaceRoot);
   await openFile(path);
-  explorer.update(e => ({ ...e, appMode: 'develop' }));
+  explorer.update(e => ({ ...e, explorerCwd: workspaceRoot, appMode: 'develop' }));
 }
 
-export async function openProject(voModPath: string): Promise<void> {
-  const projectRoot = voModPath.substring(0, voModPath.lastIndexOf('/'));
+export async function openProject(voModPath: string, entryPath?: string): Promise<void> {
+  const projectRoot = dirname(voModPath);
   const editTarget: EditTarget = { mode: 'multi', workspaceRoot: projectRoot };
   ide.update(s => ({ ...s, workspaceRoot: projectRoot, editTarget }));
+  termSetCwd(projectRoot);
   explorer.update(e => ({ ...e, explorerCwd: projectRoot }));
   const rootEntries = await loadDir(projectRoot);
 
@@ -83,12 +139,19 @@ export async function openProject(voModPath: string): Promise<void> {
   }
 
   const s = get(ide);
-  const firstFile = findFirstVoFile(rootEntries, s.dirCache);
-  if (firstFile) {
-    await openFile(firstFile);
+  const resolvedEntryPath = entryPath ?? findRunEntryFile(rootEntries, s.dirCache);
+  if (resolvedEntryPath) {
+    const parentDirs = await expandParentDirs(projectRoot, resolvedEntryPath);
+    for (const dir of parentDirs) expandedDirs.add(dir);
+    await openFile(resolvedEntryPath, { preserveRunEntry: true });
   }
 
-  ide.update(s => ({ ...s, projectMode: 'multi', expandedDirs }));
+  ide.update(st => ({
+    ...st,
+    projectMode: 'multi',
+    expandedDirs,
+    runEntryPath: resolvedEntryPath ?? '',
+  }));
   explorer.update(e => ({ ...e, appMode: 'develop' }));
 }
 
@@ -107,5 +170,11 @@ export async function convertToMultiProject(): Promise<void> {
   const newTarget: EditTarget | null = editTarget
     ? { ...editTarget, mode: 'multi' }
     : null;
-  ide.update(s => ({ ...s, projectMode: 'multi', expandedDirs, editTarget: newTarget }));
+  ide.update(s => ({
+    ...s,
+    projectMode: 'multi',
+    expandedDirs,
+    editTarget: newTarget,
+    runEntryPath: s.activeFilePath || s.runEntryPath || workspaceRoot + '/main.vo',
+  }));
 }

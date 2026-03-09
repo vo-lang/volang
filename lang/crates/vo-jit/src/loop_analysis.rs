@@ -108,16 +108,25 @@ pub fn analyze_loops_from_code(code: &[Instruction]) -> Vec<LoopInfo> {
 /// This is a fallback when end_offset is not encoded in HINT_LOOP.
 fn find_back_edge_jump(code: &[Instruction], loop_start: usize) -> usize {
     for (pc, inst) in code.iter().enumerate().skip(loop_start) {
-        if inst.opcode() == Opcode::Jump {
-            let offset = inst.imm32();
-            if offset < 0 {
-                // VM executes: frame.pc += 1; target_pc = frame.pc + offset - 1
-                // So actual target = pc + offset (the +1 and -1 cancel out)
-                let target = (pc as i64 + offset as i64) as usize;
+        match inst.opcode() {
+            Opcode::Jump => {
+                let offset = inst.imm32();
+                if offset < 0 {
+                    // VM executes: frame.pc += 1; target_pc = frame.pc + offset - 1
+                    // So actual target = pc + offset (the +1 and -1 cancel out)
+                    let target = (pc as i64 + offset as i64) as usize;
+                    if target == loop_start {
+                        return pc;
+                    }
+                }
+            }
+            Opcode::ForLoop => {
+                let target = inst.forloop_target(pc);
                 if target == loop_start {
                     return pc;
                 }
             }
+            _ => {}
         }
     }
     // No back-edge found - this is a codegen bug

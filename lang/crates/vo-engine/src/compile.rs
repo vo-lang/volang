@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use vo_common::vfs::{FileSet, FileSystem, MemoryFs, RealFs, ZipFs};
 use vo_analysis::analyze_project;
 use vo_codegen::compile_project;
-use vo_module::{PackageResolverMixed, ReplacingResolver, StdSource, LocalSource, ModSource};
+use vo_module::{CurrentModuleResolver, PackageResolverMixed, ReplacingResolver, StdSource, LocalSource, ModSource};
 use vo_runtime::ext_loader::ExtensionManifest;
 use vo_vm::bytecode::Module;
 use vo_stdlib::EmbeddedStdlib;
@@ -81,7 +81,11 @@ fn compile_zip(zip_path: &Path, internal_root: Option<&str>) -> Result<CompileOu
         )));
     }
     
-    let resolver = create_resolver(&abs_root, zip_fs);
+    let current_module = read_current_module(&zip_fs);
+    let replaces = read_replaces(&zip_fs, &abs_root);
+    let base = create_resolver(&abs_root, zip_fs.clone());
+    let replaced = ReplacingResolver::new(base, replaces);
+    let resolver = CurrentModuleResolver::new(replaced, zip_fs, current_module);
     
     let project = analyze_project(file_set, &resolver)
         .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
@@ -336,7 +340,7 @@ fn load_bytecode(path: &Path) -> Result<CompileOutput, CompileError> {
     })
 }
 
-fn compile_with_fs<F: FileSystem>(fs: F, root: &Path, single_file: Option<&std::ffi::OsStr>) -> Result<CompileOutput, CompileError> {
+fn compile_with_fs<F: FileSystem + Clone>(fs: F, root: &Path, single_file: Option<&std::ffi::OsStr>) -> Result<CompileOutput, CompileError> {
     let file_set = if let Some(file_name) = single_file {
         FileSet::from_file(&fs, Path::new(file_name), root.to_path_buf())?
     } else {
@@ -350,9 +354,11 @@ fn compile_with_fs<F: FileSystem>(fs: F, root: &Path, single_file: Option<&std::
         )));
     }
     
+    let current_module = read_current_module(&fs);
     let replaces = read_replaces(&fs, root);
-    let base = create_resolver(&root, fs);
-    let resolver = ReplacingResolver::new(base, replaces);
+    let base = create_resolver(root, fs.clone());
+    let replaced = ReplacingResolver::new(base, replaces);
+    let resolver = CurrentModuleResolver::new(replaced, fs, current_module);
     
     let project = analyze_project(file_set, &resolver)
         .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
@@ -388,6 +394,17 @@ fn read_replaces<F: FileSystem>(fs: &F, root: &Path) -> std::collections::HashMa
         map.insert(rep.module.clone(), abs);
     }
     map
+}
+
+fn read_current_module<F: FileSystem>(fs: &F) -> Option<String> {
+    let vomod_path = Path::new("vo.mod");
+    let content = fs.read_file(vomod_path).ok()?;
+    let modfile = vo_module::ModFile::parse(&content, vomod_path).ok()?;
+    if modfile.module.is_empty() {
+        None
+    } else {
+        Some(modfile.module)
+    }
 }
 
 fn create_resolver<F: FileSystem>(local_root: &Path, local_fs: F) -> PackageResolverMixed<EmbeddedStdlib, F, RealFs> {

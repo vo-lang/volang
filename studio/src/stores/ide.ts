@@ -30,6 +30,7 @@ export interface IdeState {
   dirCache: Record<string, FsEntry[]>;
   expandedDirs: Set<string>;
   activeFilePath: string;
+  runEntryPath: string;
   code: string;
   dirty: boolean;
   // Console
@@ -54,6 +55,7 @@ export const ide = writable<IdeState>({
   dirCache: {},
   expandedDirs: new Set<string>(),
   activeFilePath: '',
+  runEntryPath: '',
   code: '',
   dirty: false,
   consoleLines: [],

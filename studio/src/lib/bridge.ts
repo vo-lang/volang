@@ -1,5 +1,6 @@
 import { STUDIO_SYNC_EXAMPLES } from '../generated/examples.generated';
 import { registerExtModuleGlobals } from './ext-modules';
+import { isPathWithinRoot } from './path_utils';
 import { ShellClient } from './shell/client';
 import { TauriTransport, WasmTransport } from './shell/transport';
 import { WasmShellRouter } from './shell/wasm/router';
@@ -96,11 +97,13 @@ export interface FsEntry {
 export interface Bridge {
   // Filesystem convenience methods (delegate to shell.exec)
   fsListDir(dirPath: string): Promise<FsEntry[]>;
+  fsStat(path: string): Promise<FsEntry & { size?: number; modifiedMs?: number }>;
   fsReadFile(path: string): Promise<string>;
   fsWriteFile(path: string, content: string): Promise<void | null>;
   fsMkdir(path: string): Promise<void | null>;
   fsRename(oldPath: string, newPath: string): Promise<void | null>;
   fsRemove(path: string, recursive: boolean): Promise<void | null>;
+  materializeLocalLaunchTarget(path: string): Promise<string>;
 
   // GUI render callback — push-based, for JS timer/timeout driven re-renders.
   // On Tauri these are no-ops (timers handled natively); on WASM they pipe
@@ -164,11 +167,13 @@ async function initTauriBridge(onProgress: (step: string) => void): Promise<void
         return a.name.localeCompare(b.name);
       });
     },
+    fsStat:      (path: string)                     => shellClient.exec({ kind: 'fs.stat',   path }),
     fsReadFile:  (path: string)                     => shellClient.exec({ kind: 'fs.read',   path }),
     fsWriteFile: (path: string, content: string)    => shellClient.exec({ kind: 'fs.write',  path, content }),
     fsMkdir:     (path: string)                     => shellClient.exec({ kind: 'fs.mkdir',  path }),
     fsRename:    (oldPath: string, newPath: string)  => shellClient.exec({ kind: 'fs.rename', oldPath, newPath }),
     fsRemove:    (path: string, recursive: boolean)  => shellClient.exec({ kind: 'fs.remove', path, recursive }),
+    materializeLocalLaunchTarget: (path: string)     => invoke<string>('cmd_materialize_local_launch_target', { targetPath: path }),
 
     // Poll for platform-driven renders (game loop, timers) via RAF loop.
     // Uses the `invoke` captured from initTauriBridge scope.
@@ -491,11 +496,16 @@ async function initWasmBridge(onProgress: (step: string) => void): Promise<void>
         return a.name.localeCompare(b.name);
       });
     },
+    fsStat:      (path: string)                     => shellClient.exec({ kind: 'fs.stat',   path }),
     fsReadFile:  (path: string)                    => shellClient.exec({ kind: 'fs.read',   path }),
     fsWriteFile: (path: string, content: string)   => shellClient.exec({ kind: 'fs.write',  path, content }),
     fsMkdir:     (path: string)                    => shellClient.exec({ kind: 'fs.mkdir',  path }),
     fsRename:    (oldPath: string, newPath: string) => shellClient.exec({ kind: 'fs.rename', oldPath, newPath }),
     fsRemove:    (path: string, recursive: boolean) => shellClient.exec({ kind: 'fs.remove', path, recursive }),
+    async materializeLocalLaunchTarget(path: string): Promise<string> {
+      if (isPathWithinRoot(path, WASM_WORKSPACE)) return path;
+      throw new Error(`Local launch target is outside the browser workspace: ${path}`);
+    },
 
     setGuiRenderCallback(cb: (bytes: Uint8Array) => void) {
       guiRenderCallback = cb;

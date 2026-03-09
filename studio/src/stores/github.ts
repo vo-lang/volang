@@ -26,19 +26,22 @@ export const github = writable<GitHubState>({
 });
 
 export async function githubFetch(
-  token: string,
+  token: string | null,
   path: string,
   options: RequestInit = {},
 ): Promise<any> {
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string> | undefined ?? {}),
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
   const res = await fetch(`https://api.github.com${path}`, {
     ...options,
-    headers: {
-      Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${token}`,
-      'X-GitHub-Api-Version': '2022-11-28',
-      'Content-Type': 'application/json',
-      ...(options.headers ?? {}),
-    },
+    headers,
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -395,18 +398,21 @@ export async function gitPushFiles(
 }
 
 export async function gitPullFiles(
-  token: string,
+  token: string | null,
   owner: string,
   repo: string,
+  ref?: string,
 ): Promise<Record<string, string>> {
   const repoPath = `/repos/${owner}/${repo}`;
 
   // Get tree recursively from default branch
-  let branch = 'main';
-  try {
-    const repoInfo = await githubFetch(token, repoPath);
-    branch = repoInfo.default_branch || 'main';
-  } catch { /* use main */ }
+  let branch = ref || 'main';
+  if (!ref) {
+    try {
+      const repoInfo = await githubFetch(token, repoPath);
+      branch = repoInfo.default_branch || 'main';
+    } catch { /* use main */ }
+  }
 
   const { tree, truncated } = await githubFetch(
     token, `${repoPath}/git/trees/${branch}?recursive=1`,

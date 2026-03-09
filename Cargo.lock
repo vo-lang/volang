@@ -2476,7 +2476,3 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
-
-[[patch.unused]]
-name = "vogui"
-version = "0.2.0"

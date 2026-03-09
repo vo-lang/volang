@@ -6,7 +6,7 @@ use cranelift_codegen::ir::condcodes::{IntCC, FloatCC};
 use vo_runtime::bytecode::Constant;
 use vo_runtime::instruction::{Instruction, Opcode};
 
-use crate::translator::{IrEmitter, TranslateResult};
+use crate::translator::{emit_funcref_call, IrEmitter, TranslateResult};
 use crate::JitError;
 
 /// Translate a single instruction.
@@ -665,7 +665,7 @@ fn ptr_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         if let Some(wb_ref) = e.helpers().write_barrier {
             let gc = e.gc_ptr();
             let offset_val = e.builder().ins().iconst(types::I32, inst.b as i64);
-            e.builder().ins().call(wb_ref, &[gc, ptr, offset_val, v]);
+            emit_funcref_call(e, wb_ref, &[gc, ptr, offset_val, v]);
         }
     }
 }
@@ -934,7 +934,7 @@ fn slice_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
     
     // Call checked helper: (gc, meta, elem_bytes, len, cap, out) -> error_code
-    let call = e.builder().ins().call(func, &[gc_ptr, meta_i32, elem_bytes_val, len, cap, out_ptr]);
+    let call = emit_funcref_call(e, func, &[gc_ptr, meta_i32, elem_bytes_val, len, cap, out_ptr]);
     let error_code = e.builder().inst_results(call)[0];
     
     // Panic if error_code != 0
@@ -1058,21 +1058,21 @@ fn slice_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         let max = e.read_var(inst.c + 2);
         if is_array {
             let func = e.helpers().slice_from_array3.expect("slice_from_array3 helper not registered");
-            let call = e.builder().ins().call(func, &[gc_ptr, src, lo, hi, max]);
+            let call = emit_funcref_call(e, func, &[gc_ptr, src, lo, hi, max]);
             e.builder().inst_results(call)[0]
         } else {
             let func = e.helpers().slice_slice3.expect("slice_slice3 helper not registered");
-            let call = e.builder().ins().call(func, &[gc_ptr, src, lo, hi, max]);
+            let call = emit_funcref_call(e, func, &[gc_ptr, src, lo, hi, max]);
             e.builder().inst_results(call)[0]
         }
     } else {
         if is_array {
             let func = e.helpers().slice_from_array.expect("slice_from_array helper not registered");
-            let call = e.builder().ins().call(func, &[gc_ptr, src, lo, hi]);
+            let call = emit_funcref_call(e, func, &[gc_ptr, src, lo, hi]);
             e.builder().inst_results(call)[0]
         } else {
             let func = e.helpers().slice_slice.expect("slice_slice helper not registered");
-            let call = e.builder().ins().call(func, &[gc_ptr, src, lo, hi]);
+            let call = emit_funcref_call(e, func, &[gc_ptr, src, lo, hi]);
             e.builder().inst_results(call)[0]
         }
     };
@@ -1107,7 +1107,7 @@ fn slice_append<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let val_ptr = e.var_addr(elem_slot);
     
     // vo_slice_append(gc, elem_meta: u32, elem_bytes: u32, s: u64, val_ptr: *const u64) -> u64
-    let call = e.builder().ins().call(slice_append_func, &[gc_ptr, elem_meta, elem_bytes, s, val_ptr]);
+    let call = emit_funcref_call(e, slice_append_func, &[gc_ptr, elem_meta, elem_bytes, s, val_ptr]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1136,7 +1136,7 @@ fn array_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
     let elem_slots_i32 = emit_elem_slots_i32(e, inst.flags, inst.c + 1);
     let len = e.read_var(inst.c);
-    let call = e.builder().ins().call(array_new_func, &[gc_ptr, meta_i32, elem_slots_i32, len]);
+    let call = emit_funcref_call(e, array_new_func, &[gc_ptr, meta_i32, elem_slots_i32, len]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1228,7 +1228,7 @@ fn emit_array_write_barrier<'a>(e: &mut impl IrEmitter<'a>, arr: Value, val: Val
     if let Some(wb_ref) = e.helpers().write_barrier {
         let gc = e.gc_ptr();
         let zero_offset = e.builder().ins().iconst(types::I32, 0);
-        e.builder().ins().call(wb_ref, &[gc, arr, zero_offset, val]);
+        emit_funcref_call(e, wb_ref, &[gc, arr, zero_offset, val]);
     }
     e.builder().ins().jump(continue_block, &[]);
     
@@ -1257,7 +1257,7 @@ fn emit_array_write_barrier_multi<'a>(e: &mut impl IrEmitter<'a>, arr: Value, sr
         // when the parent-child color check fails (which it will for non-pointer values).
         for i in 0..elem_slots {
             let v = e.read_var(src_start + i as u16);
-            e.builder().ins().call(wb_ref, &[gc, arr, zero_offset, v]);
+            emit_funcref_call(e, wb_ref, &[gc, arr, zero_offset, v]);
         }
     }
     e.builder().ins().jump(continue_block, &[]);
@@ -1297,7 +1297,7 @@ fn str_index<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let len = emit_nil_guarded_load(e, s, SLICE_FIELD_LEN);
     let out_of_bounds = e.builder().ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
     emit_panic_if(e, out_of_bounds);
-    let call = e.builder().ins().call(str_index_func, &[s, idx]);
+    let call = emit_funcref_call(e, str_index_func, &[s, idx]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1307,7 +1307,7 @@ fn str_concat<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let gc_ptr = e.gc_ptr();
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
-    let call = e.builder().ins().call(func, &[gc_ptr, a, b]);
+    let call = emit_funcref_call(e, func, &[gc_ptr, a, b]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1318,7 +1318,7 @@ fn str_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let s = e.read_var(inst.b);
     let lo = e.read_var(inst.c);
     let hi = e.read_var(inst.c + 1);
-    let call = e.builder().ins().call(func, &[gc_ptr, s, lo, hi]);
+    let call = emit_funcref_call(e, func, &[gc_ptr, s, lo, hi]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1327,7 +1327,7 @@ fn str_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().str_eq.expect("str_eq helper not registered");
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
-    let call = e.builder().ins().call(func, &[a, b]);
+    let call = emit_funcref_call(e, func, &[a, b]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1336,7 +1336,7 @@ fn str_ne<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().str_eq.expect("str_eq helper not registered");
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
-    let call = e.builder().ins().call(func, &[a, b]);
+    let call = emit_funcref_call(e, func, &[a, b]);
     let eq_result = e.builder().inst_results(call)[0];
     let zero = e.builder().ins().iconst(types::I64, 0);
     let cmp = e.builder().ins().icmp(IntCC::Equal, eq_result, zero);
@@ -1348,7 +1348,7 @@ fn str_cmp<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: IntCC) {
     let func = e.helpers().str_cmp.expect("str_cmp helper not registered");
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
-    let call = e.builder().ins().call(func, &[a, b]);
+    let call = emit_funcref_call(e, func, &[a, b]);
     let cmp_result = e.builder().inst_results(call)[0]; // i32
     let zero = e.builder().ins().iconst(types::I32, 0);
     let cmp = e.builder().ins().icmp(cc, cmp_result, zero);
@@ -1360,7 +1360,7 @@ fn str_decode_rune<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().str_decode_rune.expect("str_decode_rune helper not registered");
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    let call = e.builder().ins().call(func, &[s, idx]);
+    let call = emit_funcref_call(e, func, &[s, idx]);
     let packed = e.builder().inst_results(call)[0];
     // Unpack: packed = (rune << 32) | width
     let rune = e.builder().ins().ushr_imm(packed, 32);
@@ -1385,7 +1385,7 @@ fn map_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let key_slots = e.builder().ins().iconst(types::I32, (inst.c >> 8) as i64);
     let val_slots = e.builder().ins().iconst(types::I32, (inst.c & 0xFF) as i64);
     let key_rttid_i32 = e.builder().ins().ireduce(types::I32, key_rttid);
-    let call = e.builder().ins().call(func, &[gc_ptr, key_meta_i32, val_meta_i32, key_slots, val_slots, key_rttid_i32]);
+    let call = emit_funcref_call(e, func, &[gc_ptr, key_meta_i32, val_meta_i32, key_slots, val_slots, key_rttid_i32]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1393,7 +1393,7 @@ fn map_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 fn map_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().map_len.expect("map_len helper not registered");
     let m = e.read_var(inst.b);
-    let call = e.builder().ins().call(func, &[m]);
+    let call = emit_funcref_call(e, func, &[m]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1432,7 +1432,7 @@ fn map_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let val_slots_i32 = e.builder().ins().iconst(types::I32, val_slots as i64);
     
     let ctx = e.ctx_param();
-    let call = e.builder().ins().call(func, &[ctx, m, key_ptr, key_slots_i32, val_ptr, val_slots_i32]);
+    let call = emit_funcref_call(e, func, &[ctx, m, key_ptr, key_slots_i32, val_ptr, val_slots_i32]);
     let found = e.builder().inst_results(call)[0];
     
     // Load results to dst registers
@@ -1464,7 +1464,7 @@ fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let (_, val_ptr, val_slots_i32) = store_to_stack(e, inst.c, val_slots);
     
     let ctx = e.ctx_param();
-    let call = e.builder().ins().call(func, &[ctx, m, key_ptr, key_slots_i32, val_ptr, val_slots_i32]);
+    let call = emit_funcref_call(e, func, &[ctx, m, key_ptr, key_slots_i32, val_ptr, val_slots_i32]);
     let result = e.builder().inst_results(call)[0];
     
     // Check if vo_map_set returned panic (unhashable interface key)
@@ -1481,7 +1481,7 @@ fn map_delete<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b + 1, key_slots);
     
     let ctx = e.ctx_param();
-    e.builder().ins().call(func, &[ctx, m, key_ptr, key_slots_i32]);
+    emit_funcref_call(e, func, &[ctx, m, key_ptr, key_slots_i32]);
 }
 
 const MAP_ITER_SLOTS: usize = vo_runtime::objects::map::MAP_ITER_SLOTS;
@@ -1493,7 +1493,7 @@ fn map_iter_init<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let iter_slot = e.builder().create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
         cranelift_codegen::ir::StackSlotKind::ExplicitSlot, MAP_ITER_BYTES, 8));
     let iter_ptr = e.builder().ins().stack_addr(types::I64, iter_slot, 0);
-    e.builder().ins().call(func, &[m, iter_ptr]);
+    emit_funcref_call(e, func, &[m, iter_ptr]);
     for i in 0..MAP_ITER_SLOTS {
         let val = e.builder().ins().stack_load(types::I64, iter_slot, (i * 8) as i32);
         e.write_var(inst.a + i as u16, val);
@@ -1523,7 +1523,7 @@ fn map_iter_next<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let key_slots_i32 = e.builder().ins().iconst(types::I32, key_slots as i64);
     let val_slots_i32 = e.builder().ins().iconst(types::I32, val_slots as i64);
     
-    let call = e.builder().ins().call(func, &[iter_ptr, key_ptr, key_slots_i32, val_ptr, val_slots_i32]);
+    let call = emit_funcref_call(e, func, &[iter_ptr, key_ptr, key_slots_i32, val_ptr, val_slots_i32]);
     let ok = e.builder().inst_results(call)[0];
     
     for i in 0..MAP_ITER_SLOTS {
@@ -1556,7 +1556,7 @@ fn closure_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let capture_count = inst.c as u32;
     let func_id_i32 = e.builder().ins().iconst(types::I32, func_id as i64);
     let capture_count_i32 = e.builder().ins().iconst(types::I32, capture_count as i64);
-    let call = e.builder().ins().call(func, &[gc_ptr, func_id_i32, capture_count_i32]);
+    let call = emit_funcref_call(e, func, &[gc_ptr, func_id_i32, capture_count_i32]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1580,7 +1580,7 @@ fn ptr_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
     let slots_i32 = e.builder().ins().iconst(types::I32, inst.flags as i64);
-    let call = e.builder().ins().call(func, &[gc_ptr, meta_i32, slots_i32]);
+    let call = emit_funcref_call(e, func, &[gc_ptr, meta_i32, slots_i32]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1598,7 +1598,7 @@ fn chan_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
     
     // Call checked helper: (gc, meta, slots, cap, out) -> error_code
-    let call = e.builder().ins().call(func, &[gc_ptr, elem_meta_i32, elem_slots_i32, cap, out_ptr]);
+    let call = emit_funcref_call(e, func, &[gc_ptr, elem_meta_i32, elem_slots_i32, cap, out_ptr]);
     let error_code = e.builder().inst_results(call)[0];
     
     // Panic if error_code != 0
@@ -1614,7 +1614,7 @@ fn chan_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 fn chan_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().chan_len.expect("chan_len helper not registered");
     let ch = e.read_var(inst.b);
-    let call = e.builder().ins().call(func, &[ch]);
+    let call = emit_funcref_call(e, func, &[ch]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1622,7 +1622,7 @@ fn chan_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 fn chan_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().chan_cap.expect("chan_cap helper not registered");
     let ch = e.read_var(inst.b);
-    let call = e.builder().ins().call(func, &[ch]);
+    let call = emit_funcref_call(e, func, &[ch]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1640,7 +1640,7 @@ fn port_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
     
     // Call checked helper: (gc, meta, slots, cap, out) -> error_code
-    let call = e.builder().ins().call(func, &[gc_ptr, elem_meta_i32, elem_slots_i32, cap, out_ptr]);
+    let call = emit_funcref_call(e, func, &[gc_ptr, elem_meta_i32, elem_slots_i32, cap, out_ptr]);
     let error_code = e.builder().inst_results(call)[0];
     
     // Panic if error_code != 0
@@ -1656,7 +1656,7 @@ fn port_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 fn port_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().port_len.expect("port_len helper not registered");
     let p = e.read_var(inst.b);
-    let call = e.builder().ins().call(func, &[p]);
+    let call = emit_funcref_call(e, func, &[p]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1664,7 +1664,7 @@ fn port_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 fn port_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().port_cap.expect("port_cap helper not registered");
     let p = e.read_var(inst.b);
-    let call = e.builder().ins().call(func, &[p]);
+    let call = emit_funcref_call(e, func, &[p]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1698,7 +1698,7 @@ fn str_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         }
         let data_ptr = e.builder().ins().stack_addr(types::I64, stack_slot, 0);
         let len_val = e.builder().ins().iconst(types::I64, len as i64);
-        let call = e.builder().ins().call(func, &[gc_ptr, data_ptr, len_val]);
+        let call = emit_funcref_call(e, func, &[gc_ptr, data_ptr, len_val]);
         let result = e.builder().inst_results(call)[0];
         e.write_var(inst.a, result);
     }
@@ -1733,7 +1733,7 @@ fn iface_assign<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             if let Some(iface_to_iface_func) = e.helpers().iface_to_iface {
                 let ctx = e.ctx_param();
                 let iface_meta_id_val = e.builder().ins().iconst(types::I32, iface_meta_id as i64);
-                let call = e.builder().ins().call(iface_to_iface_func, &[ctx, src_slot0, iface_meta_id_val]);
+                let call = emit_funcref_call(e, iface_to_iface_func, &[ctx, src_slot0, iface_meta_id_val]);
                 let new_slot0 = e.builder().inst_results(call)[0];
                 (new_slot0, src_slot1)
             } else {
@@ -1759,7 +1759,7 @@ fn iface_assign<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             // Struct or Array: ptr_clone the GcRef
             if let Some(ptr_clone_func) = e.helpers().ptr_clone {
                 let gc_ptr = e.gc_ptr();
-                let call = e.builder().ins().call(ptr_clone_func, &[gc_ptr, src]);
+                let call = emit_funcref_call(e, ptr_clone_func, &[gc_ptr, src]);
                 e.builder().inst_results(call)[0]
             } else { src }
         } else { src };
@@ -1784,7 +1784,7 @@ fn iface_assert<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let result_slot = e.builder().create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
         cranelift_codegen::ir::StackSlotKind::ExplicitSlot, (result_slots * 8) as u32, 8));
     let dst_ptr = e.builder().ins().stack_addr(types::I64, result_slot, 0);
-    let call = e.builder().ins().call(func, &[ctx, slot0, slot1, target_id_i32, flags_i16, dst_ptr]);
+    let call = emit_funcref_call(e, func, &[ctx, slot0, slot1, target_id_i32, flags_i16, dst_ptr]);
     let result = e.builder().inst_results(call)[0];
     if !has_ok {
         let zero = e.builder().ins().iconst(types::I64, 0);
@@ -1813,7 +1813,7 @@ fn iface_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Returns: 0=false, 1=true, 2=panic (uncomparable type)
     let iface_eq_func = e.helpers().iface_eq.expect("iface_eq helper must be available");
     let ctx = e.ctx_param();
-    let call = e.builder().ins().call(iface_eq_func, &[ctx, b0, b1, c0, c1]);
+    let call = emit_funcref_call(e, iface_eq_func, &[ctx, b0, b1, c0, c1]);
     let result = e.builder().inst_results(call)[0];
     
     // Check if result == 2 (panic for uncomparable type)
@@ -1878,7 +1878,7 @@ fn island_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let island_new_func = e.helpers().island_new.expect("island_new helper not registered");
     let ctx = e.ctx_param();
     
-    let call = e.builder().ins().call(island_new_func, &[ctx]);
+    let call = emit_funcref_call(e, island_new_func, &[ctx]);
     let handle = e.builder().inst_results(call)[0];
     
     e.write_var(inst.a, handle);
@@ -1908,7 +1908,7 @@ fn emit_close_with_panic_check<'a>(
     let ctx = e.ctx_param();
     let obj = e.read_var(obj_slot);
     
-    let call = e.builder().ins().call(close_func, &[ctx, obj]);
+    let call = emit_funcref_call(e, close_func, &[ctx, obj]);
     let result = e.builder().inst_results(call)[0];
     
     // Check for Panic
@@ -1957,7 +1957,7 @@ fn emit_queue_send<'a>(
     let val_ptr = e.var_addr(inst.b);
     let val_slots_val = e.builder().ins().iconst(types::I32, val_slots as i64);
     
-    let call = e.builder().ins().call(send_func, &[ctx, queue, val_ptr, val_slots_val]);
+    let call = emit_funcref_call(e, send_func, &[ctx, queue, val_ptr, val_slots_val]);
     let result = e.builder().inst_results(call)[0];
     
     // Branch on result
@@ -2005,7 +2005,7 @@ fn emit_queue_recv<'a>(
     let elem_slots_val = e.builder().ins().iconst(types::I32, elem_slots as i64);
     let has_ok_val = e.builder().ins().iconst(types::I32, has_ok as i64);
     
-    let call = e.builder().ins().call(recv_func, &[ctx, queue, dst_ptr, elem_slots_val, has_ok_val]);
+    let call = emit_funcref_call(e, recv_func, &[ctx, queue, dst_ptr, elem_slots_val, has_ok_val]);
     let result = e.builder().inst_results(call)[0];
     
     // Branch on result
@@ -2085,7 +2085,7 @@ fn go_start<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let args_ptr = e.var_addr(inst.b);
     let arg_slots = e.builder().ins().iconst(types::I32, inst.c as i64);
     
-    e.builder().ins().call(go_start_func, &[ctx, func_id, is_closure_val, closure_ref, args_ptr, arg_slots]);
+    emit_funcref_call(e, go_start_func, &[ctx, func_id, is_closure_val, closure_ref, args_ptr, arg_slots]);
 }
 
 /// GoIsland: Spawn goroutine on specific island.
@@ -2102,7 +2102,7 @@ fn go_island<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let args_ptr = e.var_addr(inst.c);
     let arg_slots = e.builder().ins().iconst(types::I32, inst.flags as i64);
     
-    e.builder().ins().call(go_island_func, &[ctx, island, closure, args_ptr, arg_slots]);
+    emit_funcref_call(e, go_island_func, &[ctx, island, closure, args_ptr, arg_slots]);
 }
 
 // =============================================================================
@@ -2135,7 +2135,8 @@ fn defer_push<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, is_errdefer: b
     let arg_count = e.builder().ins().iconst(types::I32, inst.c as i64);
     let is_errdefer_val = e.builder().ins().iconst(types::I32, if is_errdefer { 1 } else { 0 });
     
-    e.builder().ins().call(
+    emit_funcref_call(
+        e,
         func,
         &[ctx, func_id_val, is_closure_val, closure_ref_val, args_ptr, arg_count, is_errdefer_val],
     );
@@ -2156,7 +2157,7 @@ fn recover<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     ));
     let result_ptr = e.builder().ins().stack_addr(types::I64, result_slot, 0);
     
-    e.builder().ins().call(func, &[ctx, result_ptr]);
+    emit_funcref_call(e, func, &[ctx, result_ptr]);
     let slot0 = e.builder().ins().stack_load(types::I64, result_slot, 0);
     let slot1 = e.builder().ins().stack_load(types::I64, result_slot, 8);
     
@@ -2179,7 +2180,7 @@ fn select_begin<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let has_default = e.builder().ins().iconst(types::I32, (inst.flags & 1) as i64);
     
     // Result is always Ok for select_begin
-    e.builder().ins().call(func, &[ctx, case_count, has_default]);
+    emit_funcref_call(e, func, &[ctx, case_count, has_default]);
 }
 
 /// SelectSend: Add a send case to the current select.
@@ -2197,7 +2198,7 @@ fn select_send<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let case_idx = e.builder().ins().iconst(types::I32, inst.c as i64);
     
     // Result is always Ok for select_send
-    e.builder().ins().call(func, &[ctx, chan_reg, val_reg, elem_slots, case_idx]);
+    emit_funcref_call(e, func, &[ctx, chan_reg, val_reg, elem_slots, case_idx]);
 }
 
 /// SelectRecv: Add a recv case to the current select.
@@ -2216,7 +2217,7 @@ fn select_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let case_idx = e.builder().ins().iconst(types::I32, inst.c as i64);
     
     // Result is always Ok for select_recv
-    e.builder().ins().call(func, &[ctx, dst_reg, chan_reg, elem_slots, has_ok, case_idx]);
+    emit_funcref_call(e, func, &[ctx, dst_reg, chan_reg, elem_slots, has_ok, case_idx]);
 }
 
 /// SelectExec: Execute the select statement.
@@ -2236,7 +2237,7 @@ fn select_exec<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(),
     
     let result_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
     
-    let call = e.builder().ins().call(func, &[ctx, result_reg]);
+    let call = emit_funcref_call(e, func, &[ctx, result_reg]);
     let result = e.builder().inst_results(call)[0];
     
     // Branch on result

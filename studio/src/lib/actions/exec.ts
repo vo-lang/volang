@@ -1,5 +1,6 @@
 import { get } from 'svelte/store';
 import { ide, consolePush, consolePushLines, consoleClear } from '../../stores/ide';
+import type { IdeState } from '../../stores/ide';
 import { explorer } from '../../stores/explorer';
 import { bridge } from '../bridge';
 import { saveFile } from './fs';
@@ -13,6 +14,11 @@ function isGuiCode(code: string): boolean {
   return code.includes('vogui');
 }
 
+export function resolveRunEntryPath(state: Pick<IdeState, 'projectMode' | 'activeFilePath' | 'runEntryPath'>): string {
+  if (state.projectMode === 'single') return state.activeFilePath;
+  return state.runEntryPath || state.activeFilePath;
+}
+
 export async function runCode(): Promise<void> {
   const s = get(ide);
 
@@ -20,14 +26,12 @@ export async function runCode(): Promise<void> {
     await saveFile();
   }
 
-  const entryPath = s.projectMode === 'multi'
-    ? s.workspaceRoot + '/main.vo'
-    : s.activeFilePath;
+  const entryPath = resolveRunEntryPath(s);
 
   if (!entryPath) return;
 
   let codeToCheck = s.code;
-  if (s.projectMode === 'multi' && s.activeFilePath !== entryPath) {
+  if (s.activeFilePath !== entryPath) {
     try {
       codeToCheck = await bridge().fsReadFile(entryPath);
     } catch {

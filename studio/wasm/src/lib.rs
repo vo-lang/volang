@@ -44,6 +44,91 @@ thread_local! {
 /// (e.g. `/github.com/vo-lang/vox/vox.vo`), so the root is empty.
 const VFS_MOD_ROOT: &str = "";
 
+struct ResolvedVfsCompileTarget {
+    entry_path: String,
+    project_root: Option<String>,
+}
+
+fn normalize_vfs_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        "/".to_string()
+    } else {
+        let normalized = trimmed.trim_end_matches('/');
+        if normalized.is_empty() {
+            "/".to_string()
+        } else {
+            normalized.to_string()
+        }
+    }
+}
+
+fn vfs_parent_dir(path: &str) -> Option<String> {
+    std::path::Path::new(path)
+        .parent()
+        .map(|p| {
+            let value = p.to_string_lossy().to_string();
+            if value.is_empty() { "/".to_string() } else { value }
+        })
+}
+
+fn join_vfs_path(base: &str, child: &str) -> String {
+    let normalized_base = normalize_vfs_path(base);
+    if normalized_base == "/" {
+        format!("/{}", child)
+    } else {
+        format!("{}/{}", normalized_base, child)
+    }
+}
+
+fn is_vfs_dir(path: &str) -> bool {
+    let normalized = normalize_vfs_path(path);
+    let (_, err) = vo_web_runtime_wasm::vfs::read_dir(&normalized);
+    err.is_none()
+}
+
+fn find_vfs_project_root(entry_path: &str) -> Option<String> {
+    let normalized = normalize_vfs_path(entry_path);
+    let mut current = if is_vfs_dir(&normalized) {
+        normalized
+    } else {
+        vfs_parent_dir(&normalized).unwrap_or_else(|| "/".to_string())
+    };
+
+    loop {
+        let vo_mod_path = join_vfs_path(&current, "vo.mod");
+        let (_, vo_mod_err) = vo_web_runtime_wasm::vfs::read_file(&vo_mod_path);
+        if vo_mod_err.is_none() {
+            return Some(current);
+        }
+
+        let parent = vfs_parent_dir(&current)?;
+        if parent == current {
+            return None;
+        }
+        current = parent;
+    }
+}
+
+fn resolve_vfs_compile_target(entry_path: &str) -> Result<ResolvedVfsCompileTarget, String> {
+    let normalized = normalize_vfs_path(entry_path);
+    let resolved_entry_path = if is_vfs_dir(&normalized) {
+        let main_path = join_vfs_path(&normalized, "main.vo");
+        let (_, err) = vo_web_runtime_wasm::vfs::read_file(&main_path);
+        if let Some(e) = err {
+            return Err(format!("read file '{}': {}", main_path, e));
+        }
+        main_path
+    } else {
+        normalized
+    };
+
+    Ok(ResolvedVfsCompileTarget {
+        project_root: find_vfs_project_root(&resolved_entry_path),
+        entry_path: resolved_entry_path,
+    })
+}
+
 /// Read all .vo files from a JS VFS directory (recursively) into a MemoryFs.
 fn read_vfs_package(pkg_dir: &str, local_fs: &mut MemoryFs) -> Result<(), String> {
     let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(pkg_dir);
@@ -79,30 +164,20 @@ fn read_vfs_package(pkg_dir: &str, local_fs: &mut MemoryFs) -> Result<(), String
 /// so other .vo files in the same directory don't cause "duplicate main" errors.
 /// Multi-file mode (vo.mod present): all .vo files in the package directory are read.
 fn compile_from_vfs(entry_path: &str) -> Result<Vec<u8>, String> {
-    let entry_clean = entry_path.trim_start_matches('/');
-    let pkg_dir = std::path::Path::new(entry_path)
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "/".to_string());
+    let target = resolve_vfs_compile_target(entry_path)?;
+    let entry_clean = target.entry_path.trim_start_matches('/');
 
     let mut local_fs = MemoryFs::new();
 
-    // Detect multi-file project by the presence of vo.mod in the package directory.
-    let vo_mod_path = format!("{}/vo.mod", pkg_dir);
-    let (_, vo_mod_err) = vo_web_runtime_wasm::vfs::read_file(&vo_mod_path);
-    let is_multi_file = vo_mod_err.is_none();
-
-    if is_multi_file {
-        // Multi-file project: compile all .vo files in the package directory.
-        read_vfs_package(&pkg_dir, &mut local_fs)?;
+    if let Some(project_root) = target.project_root {
+        read_vfs_package(&project_root, &mut local_fs)?;
     } else {
-        // Single-file mode: compile only the entry file (like `go run file.go`).
-        let (data, err) = vo_web_runtime_wasm::vfs::read_file(entry_path);
+        let (data, err) = vo_web_runtime_wasm::vfs::read_file(&target.entry_path);
         if let Some(e) = err {
-            return Err(format!("read file '{}': {}", entry_path, e));
+            return Err(format!("read file '{}': {}", target.entry_path, e));
         }
         let content = String::from_utf8(data)
-            .map_err(|e| format!("utf8 '{}': {}", entry_path, e))?;
+            .map_err(|e| format!("utf8 '{}': {}", target.entry_path, e))?;
         local_fs.add_file(PathBuf::from(entry_clean), content);
     }
 

@@ -81,6 +81,12 @@ impl StudioError {
     pub fn access_denied(msg: &str) -> Self {
         Self { code: "ERR_ACCESS_DENIED".into(), message: msg.to_string() }
     }
+    pub fn not_found(msg: &str) -> Self {
+        Self { code: "ERR_NOT_FOUND".into(), message: msg.to_string() }
+    }
+    pub fn internal(msg: &str) -> Self {
+        Self { code: "ERR_INTERNAL".into(), message: msg.to_string() }
+    }
 }
 
 impl ShellError {

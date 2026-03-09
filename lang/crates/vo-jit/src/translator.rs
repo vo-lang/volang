@@ -1,6 +1,6 @@
 //! IrEmitter trait - shared IR generation interface.
 
-use cranelift_codegen::ir::{types, FuncRef, Value};
+use cranelift_codegen::ir::{types, FuncRef, Inst, InstBuilder, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use vo_runtime::bytecode::Module as VoModule;
 use vo_runtime::instruction::{Instruction, Opcode};
@@ -78,6 +78,16 @@ pub struct HelperFuncs {
     pub select_send: Option<FuncRef>,
     pub select_recv: Option<FuncRef>,
     pub select_exec: Option<FuncRef>,
+}
+
+pub fn emit_funcref_call<'a>(emitter: &mut impl IrEmitter<'a>, func_ref: FuncRef, args: &[Value]) -> Inst {
+    if cfg!(target_arch = "aarch64") {
+        let sig = emitter.builder().func.dfg.ext_funcs[func_ref].signature;
+        let func_addr = emitter.builder().ins().func_addr(types::I64, func_ref);
+        emitter.builder().ins().call_indirect(sig, func_addr, args)
+    } else {
+        emitter.builder().ins().call(func_ref, args)
+    }
 }
 
 /// IR emitter trait - implemented by FunctionCompiler and LoopCompiler

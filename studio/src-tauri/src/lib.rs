@@ -20,6 +20,7 @@ use vo_runtime::output::CaptureSink;
 
 pub struct AppState {
     pub workspace_root: PathBuf,
+    launch_url:   Option<String>,
     guest:        Mutex<Option<GuestHandle>>,
     /// Platform-driven render receiver — stored separately so polling
     /// doesn't contend with the guest handle lock.
@@ -41,6 +42,154 @@ fn default_workspace() -> PathBuf {
 #[tauri::command]
 fn cmd_get_workspace_root(state: tauri::State<'_, AppState>) -> String {
     state.workspace_root.to_string_lossy().to_string()
+}
+
+#[tauri::command]
+fn cmd_get_launch_url(state: tauri::State<'_, AppState>) -> Option<String> {
+    state.launch_url.clone()
+}
+
+fn detect_launch_url() -> Option<String> {
+    if let Ok(value) = std::env::var("VIBE_STUDIO_LAUNCH_URL") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    for arg in std::env::args().skip(1) {
+        let trimmed = arg.trim();
+        if trimmed.contains("://") {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+fn sanitize_path_component(component: &str) -> String {
+    let mut out = String::with_capacity(component.len());
+    for ch in component.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    out
+}
+
+fn find_project_root(path: &Path) -> Option<PathBuf> {
+    let mut current = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+
+    loop {
+        if current.join("vo.mod").is_file() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn copy_path_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    let metadata = std::fs::metadata(src)
+        .map_err(|e| format!("{}: {}", src.display(), e))?;
+
+    if metadata.is_dir() {
+        std::fs::create_dir_all(dst)
+            .map_err(|e| format!("{}: {}", dst.display(), e))?;
+        for entry in std::fs::read_dir(src)
+            .map_err(|e| format!("{}: {}", src.display(), e))?
+        {
+            let entry = entry.map_err(|e| format!("{}: {}", src.display(), e))?;
+            let dst_path = dst.join(entry.file_name());
+            copy_path_recursive(&entry.path(), &dst_path)?;
+        }
+    } else {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("{}: {}", parent.display(), e))?;
+        }
+        std::fs::copy(src, dst)
+            .map_err(|e| format!("{} -> {}: {}", src.display(), dst.display(), e))?;
+    }
+
+    Ok(())
+}
+
+fn remove_existing_path(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("{}: {}", path.display(), e))?;
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(path)
+            .map_err(|e| format!("{}: {}", path.display(), e))?;
+    } else {
+        std::fs::remove_file(path)
+            .map_err(|e| format!("{}: {}", path.display(), e))?;
+    }
+
+    Ok(())
+}
+
+fn imported_local_root(workspace_root: &Path, source_root: &Path) -> PathBuf {
+    let mut dst = workspace_root.join(".studio").join("local");
+    for component in source_root.components() {
+        if let Component::Normal(seg) = component {
+            dst.push(sanitize_path_component(&seg.to_string_lossy()));
+        }
+    }
+    dst
+}
+
+fn materialize_source_root(target_path: &Path) -> PathBuf {
+    if let Some(project_root) = find_project_root(target_path) {
+        return project_root;
+    }
+    if target_path.is_file() {
+        return target_path.parent().unwrap_or(target_path).to_path_buf();
+    }
+    target_path.to_path_buf()
+}
+
+fn materialize_local_target(workspace_root: &Path, target_path: &Path) -> Result<PathBuf, shell::StudioError> {
+    if !target_path.exists() {
+        return Err(shell::StudioError::not_found(&format!("launch target not found: {}", target_path.display())));
+    }
+
+    let canonical_workspace = workspace_root
+        .canonicalize()
+        .map_err(|e| shell::StudioError::internal(&format!("{}: {}", workspace_root.display(), e)))?;
+    let canonical_target = target_path
+        .canonicalize()
+        .map_err(|e| shell::StudioError::internal(&format!("{}: {}", target_path.display(), e)))?;
+
+    if canonical_target.starts_with(&canonical_workspace) {
+        return Ok(canonical_target);
+    }
+
+    let source_root = materialize_source_root(&canonical_target);
+    let import_root = imported_local_root(&canonical_workspace, &source_root);
+
+    remove_existing_path(&import_root)
+        .map_err(|e| shell::StudioError::internal(&e))?;
+    copy_path_recursive(&source_root, &import_root)
+        .map_err(|e| shell::StudioError::internal(&e))?;
+
+    if canonical_target == source_root {
+        Ok(import_root)
+    } else {
+        let rel = canonical_target
+            .strip_prefix(&source_root)
+            .map_err(|e| shell::StudioError::internal(&e.to_string()))?;
+        Ok(import_root.join(rel))
+    }
 }
 
 /// Resolve a path to an absolute path within the workspace, preventing escape.
@@ -98,16 +247,21 @@ fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
 // Execution commands
 // =============================================================================
 
+#[tauri::command]
+fn cmd_materialize_local_launch_target(
+    target_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, shell::StudioError> {
+    let materialized = materialize_local_target(&state.workspace_root, Path::new(&target_path))?;
+    Ok(materialized.to_string_lossy().to_string())
+}
+
 /// For multi-file projects (vo.mod present in parent dir), return the directory
 /// path so the compiler reads all .vo files and resolves module dependencies.
 /// For single-file entries, return the file path as-is.
 fn resolve_compile_path(entry: &Path) -> PathBuf {
-    if entry.is_file() {
-        if let Some(parent) = entry.parent() {
-            if parent.join("vo.mod").exists() {
-                return parent.to_path_buf();
-            }
-        }
+    if let Some(project_root) = find_project_root(entry) {
+        return project_root;
     }
     entry.to_path_buf()
 }
@@ -203,6 +357,7 @@ pub fn run() {
     vogui::ensure_linked();
 
     let workspace = default_workspace();
+    let launch_url = detect_launch_url();
     std::fs::create_dir_all(&workspace).ok();
 
     // Seed a default main.vo if workspace is empty
@@ -218,11 +373,14 @@ pub fn run() {
         .manage(AppState {
             shell_runner:  shell::VoRunner::new(workspace.clone()),
             workspace_root: workspace,
+            launch_url,
             guest:         Mutex::new(None),
             push_rx:       Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             cmd_get_workspace_root,
+            cmd_get_launch_url,
+            cmd_materialize_local_launch_target,
             cmd_compile_run,
             cmd_run_gui,
             cmd_send_gui_event,
@@ -233,4 +391,57 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Vibe Studio");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{materialize_local_target, materialize_source_root};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("vibe-studio-{name}-{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn materialize_source_root_uses_parent_dir_for_single_file_without_project() {
+        let root = make_temp_dir("single-file-root");
+        let app_dir = root.join("demo");
+        fs::create_dir_all(&app_dir).unwrap();
+        let main_file = app_dir.join("main.vo");
+        fs::write(&main_file, "package main\n").unwrap();
+
+        assert_eq!(materialize_source_root(&main_file), app_dir);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn materialize_local_target_copies_parent_dir_for_single_file_launch() {
+        let workspace_root = make_temp_dir("workspace");
+        let source_root = make_temp_dir("external-source");
+        let app_dir = source_root.join("demo");
+        let codec_dir = app_dir.join("codec");
+        fs::create_dir_all(&codec_dir).unwrap();
+        let main_file = app_dir.join("main.vo");
+        fs::write(&main_file, "package main\nimport \"./codec\"\n").unwrap();
+        fs::write(codec_dir.join("codec.vo"), "package codec\n").unwrap();
+
+        let materialized = materialize_local_target(&workspace_root, &main_file).unwrap();
+        let materialized_root = materialized.parent().unwrap();
+
+        assert_eq!(materialized.file_name(), Some(std::ffi::OsStr::new("main.vo")));
+        assert!(materialized_root.join("codec/codec.vo").is_file());
+        assert!(Path::new(&materialized).is_file());
+
+        fs::remove_dir_all(&workspace_root).unwrap();
+        fs::remove_dir_all(&source_root).unwrap();
+    }
 }

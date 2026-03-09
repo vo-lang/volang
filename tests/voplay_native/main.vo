@@ -7,29 +7,28 @@ import (
 	"github.com/vo-lang/voplay"
 )
 
+type shapesState struct {
+	t float64
+}
+
 func main() {
 	voplay.Run(voplay.Game{
-		Width:  800,
-		Height: 600,
-		Title:  "VoPlay Native Shapes",
-		Init:   shapesInit,
-		Update: shapesUpdate,
-		Draw:   shapesDraw,
+		Width:        800,
+		Height:       600,
+		Title:        "VoPlay Native Shapes",
+		InitialState: &shapesState{},
 	})
 }
 
-func shapesInit(g *voplay.GameCtx) {
-	g.Data = 0.0
+func (s *shapesState) Enter(g *voplay.GameCtx) {
 	fmt.Println("Native shapes demo initialized")
 }
 
-func shapesUpdate(g *voplay.GameCtx, dt float64) {
-	t := g.Data.(float64)
-	t += dt
-	g.Data = t
+func (s *shapesState) Update(g *voplay.GameCtx, dt float64) {
+	s.t += dt
 }
 
-func shapesDraw(g *voplay.GameCtx) {
+func (s *shapesState) Draw(g *voplay.GameCtx) {
 	// Clear to dark blue
 	g.Draw.Clear(0.1, 0.1, 0.3, 1.0)
 

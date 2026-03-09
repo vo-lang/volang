@@ -374,9 +374,8 @@ impl Default for JitCompiler {
 ///
 /// Only leaf functions (no calls) are safe for JIT-to-JIT direct dispatch from
 /// prepare callbacks. They always return Ok or Panic, never Call.
-///
 /// This is used to populate the direct_call_table, which prepare callbacks consult
 /// to decide if a JIT-to-JIT direct call is safe.
 pub fn can_direct_jit_call(func: &vo_runtime::bytecode::FunctionDef) -> bool {
-    !func.has_calls
+    !func.has_calls && !func.has_call_extern
 }

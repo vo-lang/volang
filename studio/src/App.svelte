@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { ComponentType } from 'svelte';
   import { onMount } from 'svelte';
   import Sidebar from './components/Sidebar.svelte';
   import Toolbar from './components/Toolbar.svelte';
@@ -7,17 +8,30 @@
   import Editor from './components/Editor.svelte';
   import Console from './components/Console.svelte';
   import Terminal from './components/Terminal.svelte';
-  import PreviewPanel from './components/PreviewPanel.svelte';
   import ContextMenu from './components/ContextMenu.svelte';
   import { ide } from './stores/ide';
   import { explorer } from './stores/explorer';
   import { initBridge, bridge } from './lib/bridge';
   import { actions } from './lib/actions';
   import { termInit } from './stores/terminal';
+  import { executeStudioLaunch } from './lib/launch';
+  import { resolveInitialStudioLaunchUrl } from './lib/launch_protocol';
 
   let bridgeReady = false;
   let bridgeError = '';
   let loadingStep = 'Loading…';
+  let PreviewPanelComponent: ComponentType | null = null;
+  let previewPanelLoading: Promise<void> | null = null;
+
+  async function ensurePreviewPanelLoaded(): Promise<void> {
+    if (PreviewPanelComponent) return;
+    if (!previewPanelLoading) {
+      previewPanelLoading = import('./components/PreviewPanel.svelte').then(mod => {
+        PreviewPanelComponent = mod.default;
+      });
+    }
+    await previewPanelLoading;
+  }
 
   onMount(async () => {
     try {
@@ -25,6 +39,11 @@
       loadingStep = 'Preparing workspace…';
       await actions.initWorkspace();
       termInit(bridge().workspaceRoot);
+      const launchUrl = await resolveInitialStudioLaunchUrl();
+      if (launchUrl) {
+        loadingStep = 'Opening launch target…';
+        await executeStudioLaunch(launchUrl);
+      }
       bridgeReady = true;
     } catch (e: any) {
       bridgeError = String(e);
@@ -34,6 +53,9 @@
   $: isGuiApp = $ide.isGuiApp && $ide.guestRender !== null && $ide.guestRender.length > 0;
   $: appMode  = $explorer.appMode;
   $: expanded = $ide.outputExpanded;
+  $: if (isGuiApp && !PreviewPanelComponent) {
+    void ensurePreviewPanelLoaded();
+  }
 
 </script>
 
@@ -67,7 +89,9 @@
           >×</button>
           <div class="expanded-surface">
             {#if isGuiApp}
-              <PreviewPanel guestRender={$ide.guestRender} chromeless />
+              {#if PreviewPanelComponent}
+                <svelte:component this={PreviewPanelComponent} guestRender={$ide.guestRender} chromeless />
+              {/if}
             {:else}
               <Console mode="fullscreen" />
             {/if}
@@ -87,11 +111,14 @@
               <Console mode="panel" />
             </div>
             {#if isGuiApp}
-              <PreviewPanel
-                guestRender={$ide.guestRender}
-                showFullscreenAction
-                onFullscreenAction={() => ide.update(s => ({ ...s, outputExpanded: true }))}
-              />
+              {#if PreviewPanelComponent}
+                <svelte:component
+                  this={PreviewPanelComponent}
+                  guestRender={$ide.guestRender}
+                  showFullscreenAction
+                  onFullscreenAction={() => ide.update(s => ({ ...s, outputExpanded: true }))}
+                />
+              {/if}
             {/if}
           </div>
         {/if}

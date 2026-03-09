@@ -6,9 +6,6 @@ edition = "2021"
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
 
-[profile.release]
-debug = true
-
 [lib]
 crate-type = ["cdylib", "rlib"]
 

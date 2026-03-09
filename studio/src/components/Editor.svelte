@@ -1,10 +1,7 @@
 <script lang="ts">
-  import { onMount, onDestroy, createEventDispatcher } from 'svelte';
-  import * as monaco from 'monaco-editor';
+  import { onMount, createEventDispatcher } from 'svelte';
   import { actions } from '../lib/actions';
   import { registerVoLanguage } from '../lib/monaco_vo';
-
-  registerVoLanguage();
 
   function langForFile(path: string): string {
     const ext = path.split('.').pop()?.toLowerCase() ?? '';
@@ -24,45 +21,68 @@
   const dispatch = createEventDispatcher<{ change: string }>();
 
   let container: HTMLDivElement;
-  let editor: monaco.editor.IStandaloneCodeEditor;
+  let monaco: typeof import('monaco-editor') | null = null;
+  let editor: import('monaco-editor').editor.IStandaloneCodeEditor | null = null;
   let suppressUpdate = false;
 
   onMount(() => {
-    editor = monaco.editor.create(container, {
-      value,
-      language: langForFile(filePath),
-      theme: 'vs-dark',
-      fontSize: 13,
-      fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace",
-      fontLigatures: true,
-      minimap: { enabled: false },
-      scrollBeyondLastLine: false,
-      renderWhitespace: 'selection',
-      tabSize: 4,
-      insertSpaces: false,
-      automaticLayout: true,
-      lineNumbers: 'on',
-      folding: true,
-      bracketPairColorization: { enabled: true },
-      smoothScrolling: true,
-      cursorBlinking: 'smooth',
-      renderLineHighlight: 'line',
-      scrollbar: {
-        verticalScrollbarSize: 8,
-        horizontalScrollbarSize: 8,
-      },
-    });
+    let disposed = false;
 
-    editor.onDidChangeModelContent(() => {
-      if (!suppressUpdate) {
-        dispatch('change', editor.getValue());
+    void (async () => {
+      const monacoModule = await import('monaco-editor');
+      if (disposed) return;
+
+      monaco = monacoModule;
+      registerVoLanguage(monacoModule);
+
+      const instance = monacoModule.editor.create(container, {
+        value,
+        language: langForFile(filePath),
+        theme: 'vs-dark',
+        fontSize: 13,
+        fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace",
+        fontLigatures: true,
+        minimap: { enabled: false },
+        scrollBeyondLastLine: false,
+        renderWhitespace: 'selection',
+        tabSize: 4,
+        insertSpaces: false,
+        automaticLayout: true,
+        lineNumbers: 'on',
+        folding: true,
+        bracketPairColorization: { enabled: true },
+        smoothScrolling: true,
+        cursorBlinking: 'smooth',
+        renderLineHighlight: 'line',
+        scrollbar: {
+          verticalScrollbarSize: 8,
+          horizontalScrollbarSize: 8,
+        },
+      });
+      if (disposed) {
+        instance.dispose();
+        return;
       }
-    });
 
-    // Ctrl+S / Cmd+S to save
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      actions.saveFile();
-    });
+      editor = instance;
+
+      instance.onDidChangeModelContent(() => {
+        if (!suppressUpdate) {
+          dispatch('change', instance.getValue());
+        }
+      });
+
+      instance.addCommand(monacoModule.KeyMod.CtrlCmd | monacoModule.KeyCode.KeyS, () => {
+        actions.saveFile();
+      });
+    })();
+
+    return () => {
+      disposed = true;
+      editor?.dispose();
+      editor = null;
+      monaco = null;
+    };
   });
 
   $: if (editor) {
@@ -74,12 +94,10 @@
     }
   }
 
-  $: if (editor && filePath) {
+  $: if (editor && monaco && filePath) {
     const model = editor.getModel();
     if (model) monaco.editor.setModelLanguage(model, langForFile(filePath));
   }
-
-  onDestroy(() => editor?.dispose());
 </script>
 
 <div bind:this={container} class="editor-container"></div>

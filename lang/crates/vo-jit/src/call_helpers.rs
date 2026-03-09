@@ -772,7 +772,7 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     // PREPARED doesn't need arg_start — args are already copied by the prepare callback.
     // The PREPARED handler uses this as the resume_pc for materialize_jit_frames so the
     // innermost caller frame gets the correct pc in nested call scenarios.
-    emitter.builder().ins().call(set_call_request_func, &[ctx, p.func_id, p.resume_pc_val, callee_bp_val, p.ret_slots_val, p.ret_reg_val, prepared_kind]);
+    crate::translator::emit_funcref_call(emitter, set_call_request_func, &[ctx, p.func_id, p.resume_pc_val, callee_bp_val, p.ret_slots_val, p.ret_reg_val, prepared_kind]);
     
     let call_result = emitter.builder().ins().iconst(types::I32, JIT_RESULT_CALL as i64);
     emitter.builder().ins().return_(&[call_result]);
@@ -908,7 +908,7 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
     let resume_pc_val = emitter.builder().ins().iconst(types::I32, config.current_pc as i64);
     emitter.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
     
-    let call = emitter.builder().ins().call(call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr, ret_slots_val]);
+    let call = crate::translator::emit_funcref_call(emitter, call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr, ret_slots_val]);
     let result = emitter.builder().inst_results(call)[0];
     
     // Non-OK results (Panic, WaitIo, Replay, Call) exit JIT.
@@ -952,7 +952,7 @@ pub fn emit_call_via_vm<'a, E: IrEmitter<'a>>(
     
     let ret_reg_val = emitter.builder().ins().iconst(types::I32, config.ret_reg as i64);
     let call_kind_val = emitter.builder().ins().iconst(types::I32, JitContext::CALL_KIND_REGULAR as i64);
-    emitter.builder().ins().call(set_call_request_func, &[ctx, func_id_val, arg_start_val, resume_pc_val, ret_slots_val, ret_reg_val, call_kind_val]);
+    crate::translator::emit_funcref_call(emitter, set_call_request_func, &[ctx, func_id_val, arg_start_val, resume_pc_val, ret_slots_val, ret_reg_val, call_kind_val]);
     
     // Return JitResult::Call
     let call_result = emitter.builder().ins().iconst(types::I32, JIT_RESULT_CALL as i64);
@@ -1054,7 +1054,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     // Call callee - direct or indirect based on whether we have a FuncRef
     let jit_result = if let Some(func_ref) = config.callee_func_ref {
         // Direct call (fast path - no null check needed)
-        let call = emitter.builder().ins().call(func_ref, &[ctx, args_ptr, ret_ptr]);
+        let call = crate::translator::emit_funcref_call(emitter, func_ref, &[ctx, args_ptr, ret_ptr]);
         emitter.builder().inst_results(call)[0]
     } else {
         // Indirect call with null check and VM fallback
@@ -1127,7 +1127,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         let set_call_request_func = emitter.helpers().set_call_request.expect("set_call_request");
         let arg_start_val = emitter.builder().ins().iconst(types::I32, config.arg_start as i64);
         let call_kind_val = emitter.builder().ins().iconst(types::I32, JitContext::CALL_KIND_REGULAR as i64);
-        emitter.builder().ins().call(set_call_request_func, &[ctx, func_id_val, arg_start_val, caller_resume_pc_val, ret_slots_val, ret_reg_val, call_kind_val]);
+        crate::translator::emit_funcref_call(emitter, set_call_request_func, &[ctx, func_id_val, arg_start_val, caller_resume_pc_val, ret_slots_val, ret_reg_val, call_kind_val]);
         
         let call_result = emitter.builder().ins().iconst(types::I32, JIT_RESULT_CALL as i64);
         emitter.builder().ins().return_(&[call_result]);

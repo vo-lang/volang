@@ -275,6 +275,11 @@ export async function renameProject(project: ProjectEntry, newName: string, root
       : s.activeFilePath === project.localPath
         ? newLocalPath
         : s.activeFilePath;
+    const runEntryPath = s.runEntryPath.startsWith(project.localPath + '/')
+      ? newLocalPath + s.runEntryPath.slice(project.localPath.length)
+      : s.runEntryPath === project.localPath
+        ? newLocalPath
+        : s.runEntryPath;
     const workspaceRoot = s.workspaceRoot === project.localPath
       ? newLocalPath
       : s.workspaceRoot;
@@ -294,6 +299,7 @@ export async function renameProject(project: ProjectEntry, newName: string, root
     ide.update(() => ({
       ...s,
       activeFilePath,
+      runEntryPath,
       workspaceRoot,
       editTarget,
       dirCache,

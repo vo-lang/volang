@@ -28,6 +28,22 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, 'index.html'),
       },
+      output: {
+        manualChunks(id) {
+          const monacoPrefix = 'monaco-editor/esm/vs/';
+          const monacoIndex = id.indexOf(monacoPrefix);
+          if (monacoIndex >= 0) {
+            const rel = id.slice(monacoIndex + monacoPrefix.length);
+            const parts = rel.split('/');
+            const scope = parts[0] || 'root';
+            const bucket = parts[1] || 'root';
+            const detail = parts[2] || 'root';
+            return `monaco-${scope}-${bucket}-${detail}`;
+          }
+          if (id.includes('@tauri-apps/api')) return 'tauri';
+          return undefined;
+        },
+      },
     },
   },
   resolve: {

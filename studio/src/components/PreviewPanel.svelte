@@ -3,7 +3,7 @@
   import { render, injectStyles, decodeBinaryRender } from '@vogui/index';
   import type { RendererConfig } from '@vogui/types';
   import { bridge } from '../lib/bridge';
-  import { ide } from '../stores/ide';
+  import { consolePushLines, ide } from '../stores/ide';
 
   export let guestRender: Uint8Array | null = null;
   export let chromeless: boolean = false;
@@ -47,7 +47,6 @@
       const bytes = (result as { renderBytes: Uint8Array }).renderBytes;
       if (bytes && bytes.length > 0) ide.update(s => ({ ...s, guestRender: bytes }));
     } catch (e: any) {
-      const { consolePushLines } = await import('../stores/ide');
       consolePushLines('stderr', String(e));
       ide.update(s => ({
         ...s,

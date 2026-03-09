@@ -375,7 +375,7 @@ impl<'a> LoopCompiler<'a> {
             // Note: Panic instruction uses inst.a for the register (not inst.b)
             let msg_slot0 = self.read_var(inst.a);
             let msg_slot1 = self.read_var(inst.a + 1);
-            self.builder.ins().call(panic_func, &[ctx, msg_slot0, msg_slot1]);
+            crate::translator::emit_funcref_call(self, panic_func, &[ctx, msg_slot0, msg_slot1]);
         }
         let panic_val = self.builder.ins().iconst(types::I32, JitResult::Panic as i64);
         self.builder.ins().return_(&[panic_val]);

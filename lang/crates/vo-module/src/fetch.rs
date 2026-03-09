@@ -532,6 +532,7 @@ mod wasm {
 
         let opts = web_sys::RequestInit::new();
         opts.set_method("GET");
+        opts.set_cache(web_sys::RequestCache::NoStore);
         let request = web_sys::Request::new_with_str_and_init(url, &opts)
             .map_err(|e| e.as_string().unwrap_or_else(|| "request error".to_string()))?;
 
@@ -697,6 +698,7 @@ mod wasm {
         let window = web_sys::window().ok_or("no window object")?;
         let opts = web_sys::RequestInit::new();
         opts.set_method("HEAD");
+        opts.set_cache(web_sys::RequestCache::NoStore);
         let request = web_sys::Request::new_with_str_and_init(&url, &opts)
             .map_err(|e| e.as_string().unwrap_or_else(|| "request error".into()))?;
         let resp_value = JsFuture::from(window.fetch_with_request(&request))

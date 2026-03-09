@@ -1,5 +1,3 @@
-import * as monaco from 'monaco-editor';
-
 // =============================================================================
 // Vo language definition for Monaco editor.
 // Based on Go syntax, extended for Vo-specific constructs:
@@ -11,7 +9,7 @@ import * as monaco from 'monaco-editor';
 
 const LANG_ID = 'vo';
 
-export function registerVoLanguage(): void {
+export function registerVoLanguage(monaco: typeof import('monaco-editor')): void {
   // Guard: only register once
   const langs = monaco.languages.getLanguages();
   if (langs.some(l => l.id === LANG_ID)) return;
@@ -138,7 +136,7 @@ export function registerVoLanguage(): void {
         [/\/\/.*$/,    'comment'],
       ],
     },
-  } as monaco.languages.IMonarchLanguage);
+  } as import('monaco-editor').languages.IMonarchLanguage);
 
   monaco.languages.setLanguageConfiguration(LANG_ID, {
     comments: {
