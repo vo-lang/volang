@@ -188,8 +188,16 @@ pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileErr
     if p.extension().map(|e| e == "vo").unwrap_or(false) {
         let source = fs::read_to_string(p)?;
 
+        let source_dir = p.parent().unwrap_or(Path::new("."));
+        let source_dir_abs = source_dir.canonicalize().unwrap_or_else(|_| source_dir.to_path_buf());
+        let workspace = vo_module::find_workspace_replaces(&source_dir_abs);
+
         let imports = vo_module::fetch::detect_versioned_imports(&source);
         for imp in &imports {
+            // Skip modules provided by the workspace (vo.work).
+            if workspace.contains_key(&imp.module) {
+                continue;
+            }
             ensure_module_ready(&imp.module, &imp.version, &mod_root)?;
         }
 
@@ -198,7 +206,6 @@ pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileErr
         }
 
         let stripped = vo_module::fetch::strip_module_versions(&source);
-        let source_dir = p.parent().unwrap_or(Path::new("."));
         return compile_source_at(&stripped, source_dir);
     }
 
@@ -210,8 +217,13 @@ pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileErr
         if vomod_path.exists() {
             match vo_module::ModFile::parse_file(&vomod_path) {
                 Ok(modfile) => {
+                    let workspace = vo_module::find_workspace_replaces(&project_root);
                     for req in &modfile.requires {
                         if req.module.starts_with("github.com/") {
+                            // Skip modules provided by the workspace (vo.work).
+                            if workspace.contains_key(&req.module) {
+                                continue;
+                            }
                             ensure_module_ready(&req.module, &req.version, &mod_root)?;
                         }
                     }
@@ -355,7 +367,7 @@ fn compile_with_fs<F: FileSystem + Clone>(fs: F, root: &Path, single_file: Optio
     }
     
     let current_module = read_current_module(&fs);
-    let replaces = read_replaces(&fs, root);
+    let replaces = read_all_replaces(&fs, root);
     let base = create_resolver(root, fs.clone());
     let replaced = ReplacingResolver::new(base, replaces);
     let resolver = CurrentModuleResolver::new(replaced, fs, current_module);
@@ -373,10 +385,40 @@ fn compile_with_fs<F: FileSystem + Clone>(fs: F, root: &Path, single_file: Optio
     })
 }
 
-/// Read `replace` directives from the project's `vo.mod` (if present).
+/// Build the full replace map by merging workspace (`vo.work`) and project
+/// (`vo.mod`) `replace` directives.
 ///
-/// Returns a map of module path → absolute local directory.  Relative paths
-/// in the `vo.mod` are resolved against `root` (the directory containing `vo.mod`).
+/// Resolution order (highest priority first):
+/// 1. `vo.mod` `replace` directives — explicit project-level overrides.
+/// 2. `vo.work` workspace entries — discovered by walking up from `root`.
+///
+/// Relative paths in `vo.mod` are resolved against `root`.  Relative paths
+/// in `vo.work` are resolved against the directory that contains `vo.work`.
+fn read_all_replaces<F: FileSystem>(fs: &F, root: &Path) -> std::collections::HashMap<String, PathBuf> {
+    // Start with workspace-level replaces (lower priority).
+    let mut map = vo_module::find_workspace_replaces(root);
+
+    // Overlay vo.mod replaces (higher priority).
+    let vomod_path = Path::new("vo.mod");
+    let Ok(content) = fs.read_file(vomod_path) else { return map };
+    let Ok(modfile) = vo_module::ModFile::parse(&content, vomod_path) else { return map };
+    for rep in &modfile.replaces {
+        let local = Path::new(&rep.local_path);
+        let abs = if local.is_absolute() {
+            local.to_path_buf()
+        } else {
+            root.join(local)
+        };
+        let abs = abs.canonicalize().unwrap_or(abs);
+        map.insert(rep.module.clone(), abs);
+    }
+    map
+}
+
+/// Read only `replace` directives from a filesystem's `vo.mod`.
+///
+/// Used by `compile_zip` where there is no real filesystem to walk for
+/// `vo.work`; workspace support does not apply to zip archives.
 fn read_replaces<F: FileSystem>(fs: &F, root: &Path) -> std::collections::HashMap<String, PathBuf> {
     let mut map = std::collections::HashMap::new();
     let vomod_path = Path::new("vo.mod");
@@ -389,7 +431,6 @@ fn read_replaces<F: FileSystem>(fs: &F, root: &Path) -> std::collections::HashMa
         } else {
             root.join(local)
         };
-        // Canonicalize to resolve ../ components; fall back to joined path.
         let abs = abs.canonicalize().unwrap_or(abs);
         map.insert(rep.module.clone(), abs);
     }

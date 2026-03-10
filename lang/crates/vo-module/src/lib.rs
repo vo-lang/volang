@@ -28,8 +28,10 @@ mod error;
 pub mod vfs;
 mod ext_manifest;
 pub mod fetch;
+mod workfile;
 
 pub use modfile::{ModFile, Require, Replace};
+pub use workfile::{WorkFile, find_work_file, find_workspace_replaces};
 pub use resolver::{ModuleResolver, ModuleClosure, ResolvedPackage};
 pub use error::{ModuleError, ModuleResult};
 pub use vfs::{CurrentModuleResolver, PackageResolver, PackageResolverMixed, ReplacingResolver, Resolver, VfsPackage, VfsFile, StdSource, LocalSource, ModSource};

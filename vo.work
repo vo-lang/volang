@@ -1,0 +1,11 @@
+vo 0.1
+
+use ../gix
+use ../image
+use ../notify
+use ../resvg
+use ../vogui
+use ../vopack
+use ../voplay
+use ../vox
+use ../zip
