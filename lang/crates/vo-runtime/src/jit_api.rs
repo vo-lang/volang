@@ -606,9 +606,19 @@ pub extern "C" fn vo_gc_alloc(gc: *mut Gc, meta: u32, slots: u32) -> u64 {
 /// - `gc` must be a valid pointer to a Gc instance
 /// - `obj` must be a valid GcRef (parent object being written to)
 /// - `val` must be a valid GcRef or 0 (child value being written)
+///
+/// Note: JIT multi-slot array writes conservatively call write_barrier for every slot,
+/// including non-GcRef integer/float slots. Misaligned values are not valid GcRefs
+/// (GcRefs are always at least 4-byte aligned for GcHeader access), so they are
+/// skipped here rather than crashing in Gc::write_barrier during GC propagation.
 #[no_mangle]
 pub extern "C" fn vo_gc_write_barrier(gc: *mut Gc, obj: u64, _offset: u32, val: u64) {
     if gc.is_null() || obj == 0 {
+        return;
+    }
+    // Non-GcRef values (integers, floats, booleans) may be misaligned.
+    // GcRefs are always at least 4-byte aligned since GcHeader contains i32 fields.
+    if val == 0 || (val & 3) != 0 {
         return;
     }
     let gc = unsafe { &mut *gc };
@@ -1191,9 +1201,13 @@ pub extern "C" fn vo_slice_set(s: u64, idx: u64, val: u64, elem_bytes: u64) {
 
 /// Create a sub-slice (two-index: s[lo:hi]).
 /// Returns u64::MAX on bounds error.
+/// Go semantics: nil[0:0] == nil (null input returns null when lo==0 and hi==0).
 #[no_mangle]
 pub extern "C" fn vo_slice_slice(gc: *mut Gc, s: u64, lo: u64, hi: u64) -> u64 {
     use crate::objects::slice;
+    if s == 0 {
+        return 0;
+    }
     unsafe {
         let gc = &mut *gc;
         match slice::slice_of(gc, s as crate::gc::GcRef, lo as usize, hi as usize) {
@@ -1205,9 +1219,13 @@ pub extern "C" fn vo_slice_slice(gc: *mut Gc, s: u64, lo: u64, hi: u64) -> u64 {
 
 /// Create a sub-slice with cap (three-index: s[lo:hi:max]).
 /// Returns u64::MAX on bounds error.
+/// Go semantics: nil[0:0:0] == nil (null input returns null when all indices are 0).
 #[no_mangle]
 pub extern "C" fn vo_slice_slice3(gc: *mut Gc, s: u64, lo: u64, hi: u64, max: u64) -> u64 {
     use crate::objects::slice;
+    if s == 0 {
+        return 0;
+    }
     unsafe {
         let gc = &mut *gc;
         match slice::slice_of_with_cap(gc, s as crate::gc::GcRef, lo as usize, hi as usize, max as usize) {

@@ -37,7 +37,7 @@ pub struct LoopCompiler<'a> {
     entry_block: Block,
     exit_block: Block,
     current_pc: usize,
-    locals_ptr: Value,
+    locals_ptr_var: Option<Variable>,
     ctx_ptr: Value,
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
@@ -75,7 +75,7 @@ impl<'a> LoopCompiler<'a> {
             entry_block,
             exit_block,
             current_pc: 0,
-            locals_ptr: Value::from_u32(0),
+            locals_ptr_var: None,
             ctx_ptr: Value::from_u32(0),
             helpers,
             reg_consts: HashMap::new(),
@@ -199,13 +199,20 @@ impl<'a> LoopCompiler<'a> {
         
         let params = self.builder.block_params(self.entry_block);
         self.ctx_ptr = params[0];
-        self.locals_ptr = params[1];
+        let locals_ptr_init = params[1];
+        
+        // Wrap locals_ptr in a Variable so refresh_stack_base_after_reallocation can redefine
+        // it after any call that may have triggered fiber.stack reallocation.
+        let locals_ptr_var = Variable::from_u32((self.vars.len() + 1000) as u32);
+        self.builder.declare_var(locals_ptr_var, types::I64);
+        self.builder.def_var(locals_ptr_var, locals_ptr_init);
+        self.locals_ptr_var = Some(locals_ptr_var);
         
         // Normal entry: load all variables from memory
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
             let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
-            let val = self.builder.ins().load(ty, MemFlags::trusted(), self.locals_ptr, offset);
+            let val = self.builder.ins().load(ty, MemFlags::trusted(), locals_ptr_init, offset);
             self.builder.def_var(self.vars[i], val);
         }
     }
@@ -214,16 +221,18 @@ impl<'a> LoopCompiler<'a> {
         // Spill SSA-only slots (< memory_only_start) to locals_ptr.
         // Memory-aliased slots (>= memory_only_start) are already up-to-date in memory.
         let spill_count = (self.memory_only_start as usize).min(self.vars.len());
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
         for i in 0..spill_count {
             let offset = (i * 8) as i32;
             let val = self.builder.use_var(self.vars[i]);
-            self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
+            self.builder.ins().store(MemFlags::trusted(), val, locals_ptr, offset);
         }
     }
 
     fn load_var_from_memory(&mut self, slot: u16) -> Value {
         let offset = (slot as i32) * 8;
-        self.builder.ins().load(types::I64, MemFlags::trusted(), self.locals_ptr, offset)
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+        self.builder.ins().load(types::I64, MemFlags::trusted(), locals_ptr, offset)
     }
 
     fn translate_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
@@ -456,7 +465,8 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         }
         if slot >= self.memory_only_start {
             let offset = (slot as i32) * 8;
-            self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
+            let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+            self.builder.ins().store(MemFlags::trusted(), val, locals_ptr, offset);
         }
         self.checked_non_nil.remove(&slot);
     }
@@ -475,7 +485,8 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     fn panic_return_value(&self) -> i32 { JitResult::Panic as i32 }
     fn var_addr(&mut self, slot: u16) -> Value {
         let offset = (slot as i64) * 8;
-        self.builder.ins().iadd_imm(self.locals_ptr, offset)
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+        self.builder.ins().iadd_imm(locals_ptr, offset)
     }
     fn spill_all_vars(&mut self) {
         self.emit_variable_spill();
@@ -499,7 +510,8 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
             }
         } else {
             let offset = (slot as i32) * 8;
-            self.builder.ins().load(types::F64, MemFlags::trusted(), self.locals_ptr, offset)
+            let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+            self.builder.ins().load(types::F64, MemFlags::trusted(), locals_ptr, offset)
         }
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
@@ -511,15 +523,17 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         }
         if slot >= self.memory_only_start {
             let offset = (slot as i32) * 8;
-            self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
+            let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+            self.builder.ins().store(MemFlags::trusted(), val, locals_ptr, offset);
         }
         self.checked_non_nil.remove(&slot);
     }
     fn reload_all_vars_from_memory(&mut self) {
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
             let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
-            let val = self.builder.ins().load(ty, MemFlags::trusted(), self.locals_ptr, offset);
+            let val = self.builder.ins().load(ty, MemFlags::trusted(), locals_ptr, offset);
             self.builder.def_var(self.vars[i], val);
         }
     }
@@ -528,5 +542,17 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     }
     fn mark_checked_non_nil(&mut self, slot: u16) {
         self.checked_non_nil.insert(slot);
+    }
+    fn refresh_stack_base_after_reallocation(&mut self) {
+        let stack_ptr = self.builder.ins().load(
+            types::I64, MemFlags::trusted(), self.ctx_ptr, JitContext::OFFSET_STACK_PTR
+        );
+        let jit_bp_i32 = self.builder.ins().load(
+            types::I32, MemFlags::trusted(), self.ctx_ptr, JitContext::OFFSET_JIT_BP
+        );
+        let jit_bp_i64 = self.builder.ins().uextend(types::I64, jit_bp_i32);
+        let bp_offset = self.builder.ins().imul_imm(jit_bp_i64, 8);
+        let refreshed = self.builder.ins().iadd(stack_ptr, bp_offset);
+        self.builder.def_var(self.locals_ptr_var.unwrap(), refreshed);
     }
 }

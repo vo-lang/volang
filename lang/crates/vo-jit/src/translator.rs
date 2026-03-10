@@ -167,6 +167,12 @@ pub trait IrEmitter<'a> {
     
     /// Prologue-saved ctx.fiber_sp (i32). Reused by call sites to avoid redundant loads.
     fn prologue_fiber_sp(&self) -> Option<Value> { None }
+
+    /// Refresh the cached fiber.stack base pointer after a call that may have triggered
+    /// fiber.stack reallocation (via jit_push_frame inside prepare_closure_call, etc.).
+    /// Implementations use def_var on their args_ptr/locals_ptr Variable so Cranelift
+    /// inserts phi nodes correctly at join points.
+    fn refresh_stack_base_after_reallocation(&mut self) {}
 }
 
 /// Scan instructions to find the minimum base register accessed via memory pointers.

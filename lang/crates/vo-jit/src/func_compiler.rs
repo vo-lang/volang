@@ -33,9 +33,11 @@ pub struct FunctionCompiler<'a> {
     callee_func_refs: &'a [Option<FuncRef>],
     /// Saved jit_bp from function entry, used to recompute fiber.stack address after reallocation
     saved_jit_bp: Option<Variable>,
-    /// The args_ptr parameter passed to this function (points to fiber.stack[jit_bp]).
-    /// Used for all local variable access.
-    args_ptr_val: Option<Value>,
+    /// Variable wrapping the args_ptr for this function (points to fiber.stack[jit_bp]).
+    /// Declared as a Cranelift Variable so def_var/use_var handle phi insertion at join points,
+    /// allowing refresh_stack_base_after_reallocation to redefine it after any call that may
+    /// have triggered fiber.stack reallocation via jit_push_frame.
+    args_ptr_var: Option<Variable>,
     /// Slots that have been verified non-nil in the current basic block.
     /// Cleared on block transitions (jump targets).
     checked_non_nil: HashSet<u16>,
@@ -77,7 +79,7 @@ impl<'a> FunctionCompiler<'a> {
             self_func_ref,
             callee_func_refs,
             saved_jit_bp: None,
-            args_ptr_val: None,
+            args_ptr_var: None,
             checked_non_nil: HashSet::new(),
             memory_only_start: u16::MAX,
             saved_caller_bp: None,
@@ -162,7 +164,7 @@ impl<'a> FunctionCompiler<'a> {
     /// so we recompute the destination from ctx.stack_ptr + saved_jit_bp.
     fn emit_variable_spill(&mut self) {
         let dst_ptr = self.fiber_stack_args_ptr();
-        let args_ptr = self.args_ptr_val.unwrap();
+        let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
         let num_slots = self.vars.len();
         let mem_start = (self.memory_only_start as usize).min(num_slots);
         
@@ -206,8 +208,12 @@ impl<'a> FunctionCompiler<'a> {
         let args_ptr = params[1];  // Points to fiber.stack[jit_bp]
         let _ret = params[2];
         
-        // Save args_ptr for local variable access
-        self.args_ptr_val = Some(args_ptr);
+        // Wrap args_ptr in a Variable so refresh_stack_base_after_reallocation can redefine
+        // it after any call that may have triggered fiber.stack reallocation.
+        let args_ptr_var = Variable::from_u32((self.vars.len() + 1001) as u32);
+        self.builder.declare_var(args_ptr_var, types::I64);
+        self.builder.def_var(args_ptr_var, args_ptr);
+        self.args_ptr_var = Some(args_ptr_var);
         
         // Save jit_bp from ctx at function entry.
         // This is needed to compute fiber.stack address for spilling.
@@ -318,7 +324,7 @@ impl<'a> FunctionCompiler<'a> {
                 val
             }
         } else {
-            let args_ptr = self.args_ptr_val.unwrap();
+            let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
             self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
         }
     }
@@ -334,7 +340,7 @@ impl<'a> FunctionCompiler<'a> {
             self.builder.def_var(self.vars[slot as usize], val);
         }
         if slot >= self.memory_only_start {
-            let args_ptr = self.args_ptr_val.unwrap();
+            let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
             self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
         }
         // Clear non-nil status when slot is written
@@ -405,7 +411,7 @@ impl<'a> FunctionCompiler<'a> {
                 // Spill GcRef slots to args_ptr so VM can read them from fiber.stack.
                 // SSA-only slots (< memory_only_start) aren't written to memory by store_local.
                 let gcref_count = inst.b as usize;
-                let args_ptr = self.args_ptr_val.unwrap();
+                let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
                 for i in 0..gcref_count {
                     let slot = (inst.a as usize + i) as u16;
                     if slot < self.memory_only_start {
@@ -657,7 +663,7 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     fn get_reg_const(&self, reg: u16) -> Option<i64> { self.reg_consts.get(&reg).copied() }
     fn panic_return_value(&self) -> i32 { 1 }
     fn var_addr(&mut self, slot: u16) -> Value {
-        let args_ptr = self.args_ptr_val.unwrap();
+        let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
         self.builder.ins().iadd_imm(args_ptr, (slot as i64) * 8)
     }
     fn spill_all_vars(&mut self) {
@@ -681,7 +687,7 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
                 self.builder.ins().bitcast(types::F64, MemFlags::new(), val)
             }
         } else {
-            let args_ptr = self.args_ptr_val.unwrap();
+            let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
             self.builder.ins().load(types::F64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
         }
     }
@@ -693,13 +699,13 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
             self.builder.def_var(self.vars[slot as usize], i64_val);
         }
         if slot >= self.memory_only_start {
-            let args_ptr = self.args_ptr_val.unwrap();
+            let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
             self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
         }
         self.checked_non_nil.remove(&slot);
     }
     fn reload_all_vars_from_memory(&mut self) {
-        let args_ptr = self.args_ptr_val.unwrap();
+        let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
             let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
@@ -718,5 +724,9 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     }
     fn prologue_fiber_sp(&self) -> Option<Value> {
         self.saved_fiber_sp
+    }
+    fn refresh_stack_base_after_reallocation(&mut self) {
+        let refreshed = self.fiber_stack_args_ptr();
+        self.builder.def_var(self.args_ptr_var.unwrap(), refreshed);
     }
 }

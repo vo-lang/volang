@@ -511,6 +511,9 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     // Merge: copy return values to SSA vars (shared by IC hit OK + prepared OK)
     // =====================================================================
     // merge_block is already switched to and sealed by emit_prepared_call
+    // prepare_closure_call calls jit_push_frame which may reallocate fiber.stack.
+    // Refresh the cached base pointer before reading/writing any local vars.
+    emitter.refresh_stack_base_after_reallocation();
     // Return values live at arg_start + arg_slots (new call buffer layout).
     for i in 0..ret_slots {
         let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
@@ -686,6 +689,9 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     // =====================================================================
     // Merge: copy return values
     // =====================================================================
+    // prepare_iface_call calls jit_push_frame which may reallocate fiber.stack.
+    // Refresh the cached base pointer before reading/writing any local vars.
+    emitter.refresh_stack_base_after_reallocation();
     // Return values live at arg_start + arg_slots (new call buffer layout).
     for i in 0..ret_slots {
         let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
@@ -1108,6 +1114,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         emitter.builder().seal_block(jit_ok_block);
         emitter.builder().ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
         emitter.builder().ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
+        emitter.refresh_stack_base_after_reallocation();
         emitter.builder().ins().jump(merge_block, &[]);
         
         // VM call block: return JitResult::Call to let main scheduler handle it
@@ -1170,6 +1177,9 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emitter.builder().seal_block(jit_ok_block);
     emitter.builder().ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
     emitter.builder().ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
+    // Callee (or its sub-callees) may have triggered fiber.stack reallocation via
+    // jit_push_frame (e.g., inside prepare_closure_call). Refresh the cached base pointer.
+    emitter.refresh_stack_base_after_reallocation();
     
     // Return values live at config.ret_reg (= arg_start + arg_slots).
     for i in 0..config.call_ret_slots {
