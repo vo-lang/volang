@@ -62,13 +62,16 @@ export type HttpOp =
   | { kind: 'http.patch';  url: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }
   | { kind: 'http.delete'; url: string; headers?: Record<string, string>; body?: string; timeoutMs?: number };
 
+export type AppOp =
+  | { kind: 'app.prepare';    path: string }
+  | { kind: 'app.compileRun'; path: string }
+
 export type GuiOp =
-  | { kind: 'gui.compileRun'; path: string }
   | { kind: 'gui.run';        path: string }
   | { kind: 'gui.event';      handlerId: number; payload: string }
   | { kind: 'gui.stop' };
 
-export type ShellOp = FsOp | VoOp | GitOp | ZipOp | ProcOp | HttpOp | GuiOp;
+export type ShellOp = FsOp | VoOp | GitOp | ZipOp | ProcOp | HttpOp | AppOp | GuiOp;
 
 // ── Request ───────────────────────────────────────────────────────────────────
 
@@ -111,7 +114,7 @@ export type Capability =
   | 'fs'
   | 'vo.run' | 'vo.check' | 'vo.build' | 'vo.test' | 'vo.bench'
   | 'vo.clean' | 'vo.get' | 'vo.dump' | 'vo.compile' | 'vo.init' | 'vo.version'
-  | 'git' | 'zip' | 'proc.spawn' | 'http'
+  | 'git' | 'zip' | 'proc.spawn' | 'http' | 'app'
   | 'gui';
 
 // ── Result types for specific ops ─────────────────────────────────────────────
@@ -169,8 +172,11 @@ export interface HttpResult {
   body:       string;
 }
 
+// app
+export type AppPrepareResult    = null;
+export interface AppCompileRunResult { stdout: string }
+
 // gui
-export interface GuiCompileRunResult { stdout: string }
 export interface GuiRunResult        { renderBytes: Uint8Array }
 export interface GuiEventResult      { renderBytes: Uint8Array }
 
@@ -219,7 +225,8 @@ export interface OpResultMap {
   'http.put':    HttpResult;
   'http.patch':  HttpResult;
   'http.delete': HttpResult;
-  'gui.compileRun': GuiCompileRunResult;
+  'app.prepare':    AppPrepareResult;
+  'app.compileRun': AppCompileRunResult;
   'gui.run':        GuiRunResult;
   'gui.event':      GuiEventResult;
   'gui.stop':       null;
@@ -245,6 +252,7 @@ export function capabilityForOp(op: ShellOp): Capability {
   if (kind.startsWith('git.'))  return 'git';
   if (kind.startsWith('zip.'))  return 'zip';
   if (kind.startsWith('http.')) return 'http';
+  if (kind.startsWith('app.'))  return 'app';
   if (kind.startsWith('gui.'))  return 'gui';
   if (kind === 'proc.spawn')    return 'proc.spawn';
   return kind as Capability;

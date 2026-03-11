@@ -1,6 +1,7 @@
 //! Compilation functions for Vo source code.
 
 use std::fs;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -177,7 +178,7 @@ pub fn compile_string(code: &str) -> Result<CompileOutput, CompileError> {
 /// then delegates to `compile(path)`.
 ///
 /// This is the recommended entry point for `vo run`, `vo check`, and `vo build`.
-pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileError> {
+pub fn prepare_with_auto_install(path: &str) -> Result<(), CompileError> {
     let p = Path::new(path);
 
     let mod_root = dirs::home_dir()
@@ -192,21 +193,12 @@ pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileErr
         let source_dir_abs = source_dir.canonicalize().unwrap_or_else(|_| source_dir.to_path_buf());
         let workspace = vo_module::find_workspace_replaces(&source_dir_abs);
 
-        let imports = vo_module::fetch::detect_versioned_imports(&source);
-        for imp in &imports {
-            // Skip modules provided by the workspace (vo.work).
-            if workspace.contains_key(&imp.module) {
-                continue;
-            }
-            ensure_module_ready(&imp.module, &imp.version, &mod_root)?;
-        }
-
-        if imports.is_empty() {
-            return compile(path);
-        }
-
-        let stripped = vo_module::fetch::strip_module_versions(&source);
-        return compile_source_at(&stripped, source_dir);
+        let imports: Vec<(String, String)> = vo_module::fetch::detect_versioned_imports(&source)
+            .into_iter()
+            .filter(|imp| !workspace.contains_key(&imp.module))
+            .map(|imp| (imp.module, imp.version))
+            .collect();
+        return prepare_module_closure(imports, &mod_root);
     }
 
     // ── Directory project ──────────────────────────────────────────────────────
@@ -218,15 +210,12 @@ pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileErr
             match vo_module::ModFile::parse_file(&vomod_path) {
                 Ok(modfile) => {
                     let workspace = vo_module::find_workspace_replaces(&project_root);
-                    for req in &modfile.requires {
-                        if req.module.starts_with("github.com/") {
-                            // Skip modules provided by the workspace (vo.work).
-                            if workspace.contains_key(&req.module) {
-                                continue;
-                            }
-                            ensure_module_ready(&req.module, &req.version, &mod_root)?;
-                        }
-                    }
+                    let requires: Vec<(String, String)> = modfile.requires
+                        .iter()
+                        .filter(|req| req.module.starts_with("github.com/") && !workspace.contains_key(&req.module))
+                        .map(|req| (req.module.clone(), req.version.clone()))
+                        .collect();
+                    return prepare_module_closure(requires, &mod_root);
                 }
                 Err(e) => {
                     return Err(CompileError::Analysis(format!("vo.mod parse error: {}", e)));
@@ -235,7 +224,58 @@ pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileErr
         }
     }
 
+    Ok(())
+}
+
+pub fn compile_prepared(path: &str) -> Result<CompileOutput, CompileError> {
+    let p = Path::new(path);
+
+    if p.extension().map(|e| e == "vo").unwrap_or(false) {
+        let source = fs::read_to_string(p)?;
+        let imports = vo_module::fetch::detect_versioned_imports(&source);
+        if imports.is_empty() {
+            return compile(path);
+        }
+        let source_dir = p.parent().unwrap_or(Path::new("."));
+        let stripped = vo_module::fetch::strip_module_versions(&source);
+        return compile_source_at(&stripped, source_dir);
+    }
+
     compile(path)
+}
+
+pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileError> {
+    prepare_with_auto_install(path)?;
+    compile_prepared(path)
+}
+
+fn prepare_module_closure(initial: Vec<(String, String)>, mod_root: &Path) -> Result<(), CompileError> {
+    let mut visited = HashSet::new();
+    let mut stack = initial;
+
+    while let Some((module, version)) = stack.pop() {
+        let visit_key = format!("{}@{}", module, version);
+        if !visited.insert(visit_key) {
+            continue;
+        }
+
+        ensure_module_ready(&module, &version, mod_root)?;
+
+        let dep_vo_mod_path = mod_root.join(&module).join("vo.mod");
+        if !dep_vo_mod_path.exists() {
+            continue;
+        }
+
+        let dep_mod_file = vo_module::ModFile::parse_file(&dep_vo_mod_path)
+            .map_err(|e| CompileError::Analysis(format!("vo.mod parse error: {}", e)))?;
+        for req in &dep_mod_file.requires {
+            if req.module.starts_with("github.com/") {
+                stack.push((req.module.clone(), req.version.clone()));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -105,6 +105,7 @@ impl ShellError {
 pub fn local_capabilities() -> Vec<String> {
     vec![
         "fs".into(),
+        "app".into(),
         "vo.run".into(),
         "vo.check".into(),
         "vo.build".into(),

@@ -21,7 +21,7 @@ export interface ConsoleLine {
   ts: number; // Date.now()
 }
 
-export type RunStatus = 'idle' | 'compiling' | 'running' | 'done' | 'error';
+export type RunStatus = 'idle' | 'preparing' | 'compiling' | 'running' | 'done' | 'error';
 
 export interface IdeState {
   workspaceRoot: string;

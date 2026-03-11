@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
-use vo_common::vfs::MemoryFs;
+use vo_common::vfs::{FileSystem, MemoryFs};
 
 fn ensure_panic_hook() {
     use std::sync::Once;
@@ -164,13 +164,21 @@ fn read_vfs_package(pkg_dir: &str, local_fs: &mut MemoryFs) -> Result<(), String
 /// so other .vo files in the same directory don't cause "duplicate main" errors.
 /// Multi-file mode (vo.mod present): all .vo files in the package directory are read.
 fn compile_from_vfs(entry_path: &str) -> Result<Vec<u8>, String> {
+    let (target, local_fs) = prepare_from_vfs(entry_path)?;
+    let entry_clean = target.entry_path.trim_start_matches('/');
+
+    vo_web::compile_entry_with_vfs(entry_clean, local_fs, VFS_MOD_ROOT)
+        .map_err(|e| format!("compile error: {}", e))
+}
+
+fn prepare_from_vfs(entry_path: &str) -> Result<(ResolvedVfsCompileTarget, MemoryFs), String> {
     let target = resolve_vfs_compile_target(entry_path)?;
     let entry_clean = target.entry_path.trim_start_matches('/');
 
     let mut local_fs = MemoryFs::new();
 
-    if let Some(project_root) = target.project_root {
-        read_vfs_package(&project_root, &mut local_fs)?;
+    if let Some(project_root) = &target.project_root {
+        read_vfs_package(project_root, &mut local_fs)?;
     } else {
         let (data, err) = vo_web_runtime_wasm::vfs::read_file(&target.entry_path);
         if let Some(e) = err {
@@ -181,13 +189,37 @@ fn compile_from_vfs(entry_path: &str) -> Result<Vec<u8>, String> {
         local_fs.add_file(PathBuf::from(entry_clean), content);
     }
 
-    vo_web::compile_entry_with_vfs(entry_clean, local_fs, VFS_MOD_ROOT)
-        .map_err(|e| format!("compile error: {}", e))
+    Ok((target, local_fs))
 }
 
 // =============================================================================
 // WASM exports
 // =============================================================================
+
+#[wasm_bindgen(js_name = "prepareEntry")]
+pub fn prepare_entry(entry_path: &str) -> js_sys::Promise {
+    ensure_panic_hook();
+    let entry_path = entry_path.to_string();
+    wasm_bindgen_futures::future_to_promise(async move {
+        let (target, local_fs) = prepare_from_vfs(&entry_path)
+            .map_err(|e| JsValue::from_str(&e))?;
+        let entry_clean = target.entry_path.trim_start_matches('/').to_string();
+
+        if target.project_root.is_some() {
+            vo_web::ensure_vfs_deps_from_fs(&local_fs, &entry_clean)
+                .await
+                .map_err(|e| JsValue::from_str(&e))?;
+        } else {
+            let content = local_fs.read_file(std::path::Path::new(&entry_clean))
+                .map_err(|e| JsValue::from_str(&format!("read file '{}': {}", target.entry_path, e)))?;
+            vo_web::ensure_vfs_versioned_imports(&content)
+                .await
+                .map_err(|e| JsValue::from_str(&e))?;
+        }
+
+        Ok(JsValue::NULL)
+    })
+}
 
 /// Compile and run user Vo code (console app) from VFS entry path, returning captured stdout.
 #[wasm_bindgen(js_name = "compileRunEntry")]

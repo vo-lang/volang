@@ -27,7 +27,7 @@ pub use wasm_vfs::WasmVfs;
 mod module_install;
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use module_install::{
-    ensure_vfs_deps, ensure_vfs_deps_from_fs, install_module_to_vfs, prepare_github_modules,
+    ensure_vfs_deps, ensure_vfs_deps_from_fs, ensure_vfs_versioned_imports, install_module_to_vfs, prepare_github_modules,
 };
 
 /// Initialize panic hook for better error messages in console.

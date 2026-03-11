@@ -150,11 +150,15 @@
 
     if (result.guiPath) {
       try {
+        ide.update(s => ({ ...s, isRunning: true, isGuiApp: false, guestRender: null, runStatus: 'preparing', runDurationMs: null, outputExpanded: true }));
+        await bridge().shell.exec({ kind: 'app.prepare', path: result.guiPath });
+        ide.update(s => ({ ...s, runStatus: 'compiling' }));
         const res = await bridge().shell.exec({ kind: 'gui.run', path: result.guiPath });
         const bytes = (res as { renderBytes: Uint8Array }).renderBytes;
         ide.update(s => ({ ...s, isRunning: true, isGuiApp: true, guestRender: bytes, runStatus: 'running', runDurationMs: null, outputExpanded: true }));
         explorer.update(e => ({ ...e, appMode: 'develop' }));
       } catch (e) {
+        ide.update(s => ({ ...s, isRunning: false, isGuiApp: false, guestRender: null, runStatus: 'error' }));
         termPush('error', `GUI launch failed: ${String(e)}`);
       }
     }

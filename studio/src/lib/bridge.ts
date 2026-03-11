@@ -2,6 +2,7 @@ import { STUDIO_SYNC_EXAMPLES } from '../generated/examples.generated';
 import { registerExtModuleGlobals } from './ext-modules';
 import { isPathWithinRoot } from './path_utils';
 import { ShellClient } from './shell/client';
+import { DEFAULT_MAIN_VO } from './starter_templates';
 import { TauriTransport, WasmTransport } from './shell/transport';
 import { WasmShellRouter } from './shell/wasm/router';
 
@@ -207,15 +208,6 @@ async function initTauriBridge(onProgress: (step: string) => void): Promise<void
 // =============================================================================
 
 const WASM_WORKSPACE = '/workspace';
-
-const DEFAULT_MAIN_VO = `package main
-
-import "fmt"
-
-func main() {
-\tfmt.Println("Hello, Vo!")
-}
-`;
 
 async function initWasmBridge(onProgress: (step: string) => void): Promise<void> {
   // 1) Initialize JS VFS (OPFS + window._vfs* bindings) BEFORE loading WASM
@@ -456,10 +448,13 @@ async function initWasmBridge(onProgress: (step: string) => void): Promise<void>
   (window as any).voHostVfsMkdirAll = (path: string) => vfs.mkdirAll(path, 0o755);
   (window as any).voHostVfsExists = (path: string) => !vfs.stat(path)[5];
 
-  // 6) Build WasmGuiBackend — wraps WASM module calls + timer lifecycle.
-  //    Passed to WasmTransport so gui.* ops are handled without the transport
+  // 6) Build WasmExecBackend — wraps WASM module calls + timer lifecycle.
+  //    Passed to WasmTransport so app.* and gui.* ops are handled without the transport
   //    owning WASM module references or timer state.
-  const guiBackend: import('./shell/transport').WasmGuiBackend = {
+  const execBackend: import('./shell/transport').WasmExecBackend = {
+    async prepare(entryPath: string): Promise<void> {
+      await wasmMod.prepareEntry(entryPath);
+    },
     compileRun(entryPath: string): string {
       const result = wasmMod.compileRunEntry(entryPath);
       if (result instanceof Error) throw result;
@@ -482,7 +477,7 @@ async function initWasmBridge(onProgress: (step: string) => void): Promise<void>
 
   // 7) Build bridge — all ops route through ShellClient → WasmTransport
   const wasmRouter  = new WasmShellRouter(wasmMod, WASM_WORKSPACE);
-  const shellClient = new ShellClient(new WasmTransport(wasmRouter, guiBackend));
+  const shellClient = new ShellClient(new WasmTransport(wasmRouter, execBackend));
   await shellClient.initialize();
 
   _bridge = {

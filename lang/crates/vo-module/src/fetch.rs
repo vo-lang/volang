@@ -389,10 +389,58 @@ mod native {
         Ok(target_dir)
     }
 
+    /// Check whether any Rust source file, `Cargo.toml`, or the module's
+    /// `vo.ext.toml` is newer than the given library path.
+    fn is_rust_source_newer(lib: &Path, rust_dir: &Path) -> bool {
+        let lib_mtime = match fs::metadata(lib).and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => return true, // can't stat lib → treat as stale
+        };
+
+        // Also check vo.ext.toml in the module root (one level above rust/).
+        if let Some(module_dir) = rust_dir.parent() {
+            let ext_toml = module_dir.join("vo.ext.toml");
+            if let Ok(m) = fs::metadata(&ext_toml) {
+                if let Ok(t) = m.modified() {
+                    if t > lib_mtime {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        fn walk_newer(dir: &Path, threshold: std::time::SystemTime) -> bool {
+            let entries = match fs::read_dir(dir) {
+                Ok(e) => e,
+                Err(_) => return false,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.file_name().map_or(false, |n| n == "target") {
+                    continue; // skip cargo build artifacts
+                }
+                if path.is_dir() {
+                    if walk_newer(&path, threshold) {
+                        return true;
+                    }
+                } else if let Ok(m) = fs::metadata(&path) {
+                    if let Ok(t) = m.modified() {
+                        if t > threshold {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+
+        walk_newer(rust_dir, lib_mtime)
+    }
+
     /// Ensure the native extension for an already-installed module is compiled.
     ///
     /// - If no `rust/Cargo.toml` exists the module has no native extension; returns `Ok`.
-    /// - If `vo.ext.toml` is present and the resolved `.so` already exists; returns `Ok`.
+    /// - If the resolved `.so` exists and is newer than all Rust sources; returns `Ok`.
     /// - Otherwise runs `cargo build` (with local volang patches when available).
     pub fn ensure_native_extension_built(module_dir: &Path) -> Result<(), String> {
         let rust_manifest = module_dir.join("rust").join("Cargo.toml");
@@ -400,13 +448,15 @@ mod native {
             return Ok(());
         }
 
-        // Skip build if the .so already exists (as declared in vo.ext.toml).
-        let already_built = crate::discover_extensions(module_dir)
+        // Skip build if the library exists AND is newer than all Rust sources.
+        let lib_path = crate::discover_extensions(module_dir)
             .ok()
             .and_then(|manifests| manifests.into_iter().next())
-            .map(|m| m.native_path.exists())
-            .unwrap_or(false);
-        if already_built {
+            .map(|m| m.native_path);
+        let up_to_date = lib_path.as_ref().map_or(false, |lib| {
+            lib.exists() && !is_rust_source_newer(lib, &module_dir.join("rust"))
+        });
+        if up_to_date {
             return Ok(());
         }
 

@@ -1697,14 +1697,18 @@ def main():
                                help='Build studio WASM before starting')
     studio_parser.add_argument('--build-only', action='store_true',
                                help='Only build studio WASM, do not start dev server')
-    studio_parser.add_argument('launch_url', nargs='?',
+    studio_parser.add_argument('--launch-url', dest='launch_url',
+                               help='Optional launch URL to auto-open or run in Studio')
+    studio_parser.add_argument('launch_url_arg', nargs='?',
                                help='Optional launch URL to auto-open or run in Studio')
 
     # studio-native
     studio_native_parser = subparsers.add_parser('studio-native', help='Launch Vibe Studio as native Tauri app')
     studio_native_parser.add_argument('--build-wasm', action='store_true',
                                       help='Force rebuild studio WASM before launching')
-    studio_native_parser.add_argument('launch_url', nargs='?',
+    studio_native_parser.add_argument('--launch-url', dest='launch_url',
+                                      help='Optional launch URL to auto-open or run in Studio')
+    studio_native_parser.add_argument('launch_url_arg', nargs='?',
                                       help='Optional launch URL to auto-open or run in Studio')
 
     # run
@@ -1754,10 +1758,12 @@ def main():
         run_playground(build_only=args.build_only)
 
     elif args.command == 'studio':
-        run_studio(build_wasm=args.build_wasm, build_only=args.build_only, launch_url=args.launch_url)
+        launch_url = args.launch_url or args.launch_url_arg
+        run_studio(build_wasm=args.build_wasm, build_only=args.build_only, launch_url=launch_url)
 
     elif args.command == 'studio-native':
-        run_studio_native(build_wasm=args.build_wasm, launch_url=args.launch_url)
+        launch_url = args.launch_url or args.launch_url_arg
+        run_studio_native(build_wasm=args.build_wasm, launch_url=launch_url)
 
     elif args.command == 'run':
         run_vo_file(args.file, mode=args.mode, codegen=args.codegen)

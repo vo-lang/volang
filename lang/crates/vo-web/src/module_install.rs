@@ -10,10 +10,49 @@
 //! - **`load_ext_if_present`** — load pre-built WASM extension for a module
 
 use std::path::PathBuf;
+use std::collections::HashSet;
 use vo_common::vfs::MemoryFs;
 
 use crate::WasmVfs;
 use vo_web_runtime_wasm::ext_bridge;
+
+async fn ensure_vfs_module_closure(initial: Vec<(String, String)>) -> Result<(), String> {
+    use vo_common::vfs::FileSystem;
+
+    let vfs = WasmVfs::new("");
+    let mut visited = HashSet::new();
+    let mut stack = initial;
+
+    while let Some((module, version)) = stack.pop() {
+        let visit_key = format!("{}@{}", module, version);
+        if !visited.insert(visit_key) {
+            continue;
+        }
+
+        let mod_dir = std::path::Path::new(&module);
+        if vfs.exists(mod_dir) {
+            load_ext_if_present(&module, &version).await;
+        } else {
+            let spec = format!("{}@{}", module, version);
+            install_module_to_vfs(&spec).await?;
+        }
+
+        let vo_mod_path = format!("/{}/vo.mod", module);
+        let (data, err) = vo_web_runtime_wasm::vfs::read_file(&vo_mod_path);
+        if err.is_some() {
+            continue;
+        }
+        let dep_vo_mod = String::from_utf8(data)
+            .map_err(|e| format!("read {}: {}", vo_mod_path, e))?;
+        let dep_mod_file = vo_module::ModFile::parse(&dep_vo_mod, std::path::Path::new("vo.mod"))
+            .map_err(|e| format!("vo.mod parse error: {}", e))?;
+        for req in &dep_mod_file.requires {
+            stack.push((req.module.clone(), req.version.clone()));
+        }
+    }
+
+    Ok(())
+}
 
 /// Load the pre-built WASM extension binary for a module if one exists on GitHub.
 ///
@@ -86,6 +125,15 @@ pub async fn prepare_github_modules(source: &str) -> Result<(MemoryFs, String), 
     Ok((mod_fs, fetch::strip_module_versions(source)))
 }
 
+pub async fn ensure_vfs_versioned_imports(source: &str) -> Result<(), String> {
+    let imports = vo_module::fetch::detect_versioned_imports(source);
+    let initial: Vec<(String, String)> = imports
+        .into_iter()
+        .map(|imp| (imp.module, imp.version))
+        .collect();
+    ensure_vfs_module_closure(initial).await
+}
+
 /// Ensure all dependencies declared in a `vo.mod` are installed in the JS VFS.
 ///
 /// This is the WASM equivalent of native `compile_with_auto_install`'s
@@ -98,26 +146,15 @@ pub async fn prepare_github_modules(source: &str) -> Result<(MemoryFs, String), 
 /// decoupled from *where* the manifest lives so it works for any project
 /// (shell handler, user code, playground, etc.).
 pub async fn ensure_vfs_deps(vo_mod_content: &str) -> Result<(), String> {
-    use vo_common::vfs::FileSystem;
-
     let mod_file = vo_module::ModFile::parse(vo_mod_content, std::path::Path::new("vo.mod"))
         .map_err(|e| format!("vo.mod parse error: {}", e))?;
 
-    let vfs = WasmVfs::new("");
-    for req in &mod_file.requires {
-        // Check if module directory already exists in VFS.
-        let mod_dir = std::path::Path::new(&req.module);
-        if vfs.exists(mod_dir) {
-            // Source files already in VFS (persisted via OPFS).
-            // Ext WASM state (LOADED_PREFIXES) is in-memory only — re-load
-            // the .wasm binary so externs are registered for this session.
-            load_ext_if_present(&req.module, &req.version).await;
-            continue;
-        }
-        let spec = format!("{}@{}", req.module, req.version);
-        install_module_to_vfs(&spec).await?;
-    }
-    Ok(())
+    let initial: Vec<(String, String)> = mod_file
+        .requires
+        .iter()
+        .map(|req| (req.module.clone(), req.version.clone()))
+        .collect();
+    ensure_vfs_module_closure(initial).await
 }
 
 /// Ensure all dependencies declared in a `vo.mod` inside a `MemoryFs` are

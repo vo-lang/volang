@@ -43,6 +43,7 @@ export class WasmShellRouter {
   capabilities(): Set<Capability> {
     return new Set<Capability>([
       'fs',
+      'app',
       'vo.run',
       'vo.check',
       'vo.build',

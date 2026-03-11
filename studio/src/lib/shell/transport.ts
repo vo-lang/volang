@@ -17,11 +17,12 @@ export interface ShellTransport {
 }
 
 // =============================================================================
-// WasmGuiBackend — injected by bridge.ts so the transport can handle gui.* ops
-// without owning WASM module references or timer state.
+// WasmExecBackend — injected by bridge.ts so the transport can handle app.* and
+// gui.* ops without owning WASM module references or timer state.
 // =============================================================================
 
-export interface WasmGuiBackend {
+export interface WasmExecBackend {
+  prepare(entryPath: string): Promise<void>;
   compileRun(entryPath: string): string;
   runGui(entryPath: string): Uint8Array;
   sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array>;
@@ -55,8 +56,8 @@ function errResp(id: string, e: unknown): ShellResponse {
 // =============================================================================
 // TauriTransport — delegates to Rust via Tauri IPC
 //
-// gui.* ops are intercepted and routed to the dedicated Tauri commands
-// (cmd_compile_run, cmd_run_gui, cmd_send_gui_event, cmd_stop_gui).
+// app.* and gui.* ops are intercepted and routed to the dedicated Tauri commands
+// (cmd_prepare_app, cmd_compile_run_app, cmd_run_gui, cmd_send_gui_event, cmd_stop_gui).
 // All other ops go through cmd_shell_exec → Vo shell handler.
 // =============================================================================
 
@@ -79,14 +80,24 @@ export class TauriTransport implements ShellTransport {
   async send(req: ShellRequest): Promise<ShellResponse> {
     const kind = req.op.kind;
 
-    // ── gui.* ops → dedicated Tauri commands ────────────────────────────
-    if (kind === 'gui.compileRun') {
+    // ── app.* ops → dedicated Tauri commands ────────────────────────────
+    if (kind === 'app.prepare') {
       try {
         const op = req.op as { kind: string; path: string };
-        const stdout = await this._invoke('cmd_compile_run', { entryPath: op.path }) as string;
+        await this._invoke('cmd_prepare_app', { entryPath: op.path });
+        return { id: req.id, kind: 'ok', data: null };
+      } catch (e) { return errResp(req.id, e); }
+    }
+
+    if (kind === 'app.compileRun') {
+      try {
+        const op = req.op as { kind: string; path: string };
+        const stdout = await this._invoke('cmd_compile_run_app', { entryPath: op.path }) as string;
         return { id: req.id, kind: 'ok', data: { stdout } };
       } catch (e) { return errResp(req.id, e); }
     }
+
+    // ── gui.* ops → dedicated Tauri commands ────────────────────────────
 
     if (kind === 'gui.run') {
       try {
@@ -125,8 +136,8 @@ export class TauriTransport implements ShellTransport {
 }
 
 // =============================================================================
-// WasmTransport — delegates to WasmShellRouter for shell ops, WasmGuiBackend
-// for gui.* ops.
+// WasmTransport — delegates to WasmShellRouter for shell ops, WasmExecBackend
+// for app.* and gui.* ops.
 // =============================================================================
 
 export class WasmTransport implements ShellTransport {
@@ -134,7 +145,7 @@ export class WasmTransport implements ShellTransport {
 
   constructor(
     private readonly router:     WasmShellRouter,
-    private readonly guiBackend: WasmGuiBackend,
+    private readonly execBackend: WasmExecBackend,
   ) {}
 
   async initialize(): Promise<TransportInfo> {
@@ -147,19 +158,29 @@ export class WasmTransport implements ShellTransport {
   async send(req: ShellRequest): Promise<ShellResponse> {
     const kind = req.op.kind;
 
-    // ── gui.* ops → WasmGuiBackend ──────────────────────────────────────
-    if (kind === 'gui.compileRun') {
+    // ── app.* ops → WasmExecBackend ──────────────────────────────────────
+    if (kind === 'app.prepare') {
       try {
         const op = req.op as { kind: string; path: string };
-        const stdout = this.guiBackend.compileRun(op.path);
+        await this.execBackend.prepare(op.path);
+        return { id: req.id, kind: 'ok', data: null };
+      } catch (e) { return errResp(req.id, e); }
+    }
+
+    if (kind === 'app.compileRun') {
+      try {
+        const op = req.op as { kind: string; path: string };
+        const stdout = this.execBackend.compileRun(op.path);
         return { id: req.id, kind: 'ok', data: { stdout } };
       } catch (e) { return errResp(req.id, e); }
     }
 
+    // ── gui.* ops → WasmExecBackend ──────────────────────────────────────
+
     if (kind === 'gui.run') {
       try {
         const op = req.op as { kind: string; path: string };
-        const renderBytes = this.guiBackend.runGui(op.path);
+        const renderBytes = this.execBackend.runGui(op.path);
         return { id: req.id, kind: 'ok', data: { renderBytes } };
       } catch (e) { return errResp(req.id, e); }
     }
@@ -167,14 +188,14 @@ export class WasmTransport implements ShellTransport {
     if (kind === 'gui.event') {
       try {
         const op = req.op as { kind: string; handlerId: number; payload: string };
-        const renderBytes = await this.guiBackend.sendGuiEvent(op.handlerId, op.payload);
+        const renderBytes = await this.execBackend.sendGuiEvent(op.handlerId, op.payload);
         return { id: req.id, kind: 'ok', data: { renderBytes } };
       } catch (e) { return errResp(req.id, e); }
     }
 
     if (kind === 'gui.stop') {
       try {
-        this.guiBackend.stopGui();
+        this.execBackend.stopGui();
         return { id: req.id, kind: 'ok', data: null };
       } catch (e) { return errResp(req.id, e); }
     }

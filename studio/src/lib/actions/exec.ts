@@ -4,7 +4,7 @@ import type { IdeState } from '../../stores/ide';
 import { explorer } from '../../stores/explorer';
 import { bridge } from '../bridge';
 import { saveFile } from './fs';
-import type { GuiCompileRunResult, GuiRunResult } from '../shell/protocol';
+import type { AppCompileRunResult, GuiRunResult } from '../shell/protocol';
 
 // =============================================================================
 // Execution actions
@@ -44,7 +44,7 @@ export async function runCode(): Promise<void> {
   ide.update(s => ({
     ...s,
     isRunning: true,
-    runStatus: 'compiling',
+    runStatus: 'preparing',
     runDurationMs: null,
     guestRender: null,
     isGuiApp: false,
@@ -52,9 +52,12 @@ export async function runCode(): Promise<void> {
 
   try {
     const fileName = entryPath.split('/').pop() ?? entryPath;
-    consolePush('system', `Compiling ${fileName}…`);
+    consolePush('system', `Preparing ${fileName}…`);
+    await bridge().shell.exec({ kind: 'app.prepare', path: entryPath });
 
     if (isGuiCode(codeToCheck)) {
+      ide.update(s => ({ ...s, runStatus: 'compiling' }));
+      consolePush('system', `Starting ${fileName}…`);
       const result = await bridge().shell.exec({ kind: 'gui.run', path: entryPath }) as GuiRunResult;
       const elapsed = Date.now() - startTime;
       consolePush('system', 'GUI app started');
@@ -67,8 +70,9 @@ export async function runCode(): Promise<void> {
         runDurationMs: elapsed,
       }));
     } else {
-      ide.update(s => ({ ...s, runStatus: 'running' }));
-      const result = await bridge().shell.exec({ kind: 'gui.compileRun', path: entryPath }) as GuiCompileRunResult;
+      ide.update(s => ({ ...s, runStatus: 'compiling' }));
+      consolePush('system', `Compiling ${fileName}…`);
+      const result = await bridge().shell.exec({ kind: 'app.compileRun', path: entryPath }) as AppCompileRunResult;
       const elapsed = Date.now() - startTime;
       consolePushLines('stdout', result.stdout);
       consolePush('success', `✓ Process exited`);

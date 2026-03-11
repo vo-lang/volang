@@ -7,6 +7,7 @@
   import type { ProjectEntry, SyncState } from '../stores/projects';
   import { actions } from '../lib/actions';
   import { bridge } from '../lib/bridge';
+  import { DEFAULT_MAIN_VO, DEFAULT_PROJECT_VO_MOD } from '../lib/starter_templates';
   import SyncDetailModal from './SyncDetailModal.svelte';
   import GitHubAuthModal from './GitHubAuthModal.svelte';
   import ProjectContextMenu from './ProjectContextMenu.svelte';
@@ -87,14 +88,7 @@
       idx++;
       name = `main${idx}.vo`;
     }
-    await b.fsWriteFile(root + '/' + name, `package main
-
-import "fmt"
-
-func main() {
-\tfmt.Println("Hello, Vo!")
-}
-`);
+    await b.fsWriteFile(root + '/' + name, DEFAULT_MAIN_VO);
     await actions.loadProjects(root);
     // Open the new file
     const ps = get(projects);
@@ -114,15 +108,8 @@ func main() {
     }
     const dir = root + '/' + dirName;
     await b.fsMkdir(dir);
-    await b.fsWriteFile(dir + '/vo.mod', `module main\n\nvo 0.1\n`);
-    await b.fsWriteFile(dir + '/main.vo', `package main
-
-import "fmt"
-
-func main() {
-\tfmt.Println("Hello, Vo!")
-}
-`);
+    await b.fsWriteFile(dir + '/vo.mod', DEFAULT_PROJECT_VO_MOD);
+    await b.fsWriteFile(dir + '/main.vo', DEFAULT_MAIN_VO);
     await actions.loadProjects(root);
     const ps = get(projects);
     const created = ps.projects.find(p => p.name === dirName && p.type === 'multi');

@@ -64,6 +64,7 @@
 
   function statusIcon(status: RunStatus): string {
     switch (status) {
+      case 'preparing': return '◌';
       case 'compiling': return '◌';
       case 'running': return '●';
       case 'done': return '✓';
@@ -128,7 +129,8 @@
           <span class="status-badge status-{runStatus}">
             <span class="status-icon">{statusIcon(runStatus)}</span>
             <span class="status-text">
-              {runStatus === 'compiling' ? 'Compiling' :
+              {runStatus === 'preparing' ? 'Preparing' :
+               runStatus === 'compiling' ? 'Compiling' :
                runStatus === 'running' ? 'Running' :
                runStatus === 'done' ? 'Done' : 'Error'}
             </span>
@@ -277,8 +279,14 @@
     background: #1e293b;
   }
 
+  .status-preparing .status-icon,
   .status-compiling .status-icon {
     animation: spin 1.2s linear infinite;
+  }
+
+  .status-preparing {
+    color: #cbd5e1;
+    background: #0f172a;
   }
 
   .status-running {
