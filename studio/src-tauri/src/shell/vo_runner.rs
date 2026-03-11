@@ -4,10 +4,8 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
 
-use vo_vox::CompileOutput;
-
 use serde_json::{json, Value};
-use vo_vox::{compile, run_with_output as run_vox, RunMode};
+use vo_vox::{compile_prepared, prepare_with_auto_install, run_with_output as run_vox, CompileOutput, RunMode};
 use vo_runtime::output::CaptureSink;
 
 use super::{ShellRequest, ShellResponse, ShellError};
@@ -24,15 +22,14 @@ fn emit(app: &tauri::AppHandle, payload: Value) {
 pub struct VoRunner {
     /// Absolute path to studio/vo/shell/ directory containing the Vo handler.
     handler_dir:    PathBuf,
-    workspace_root: PathBuf,
     /// Cached compiled shell handler bytecode — recompiled only on first use.
     cached:         Mutex<Option<CompileOutput>>,
 }
 
 impl VoRunner {
-    pub fn new(workspace_root: PathBuf) -> Self {
+    pub fn new() -> Self {
         let handler_dir = Self::find_handler_dir();
-        Self { handler_dir, workspace_root, cached: Mutex::new(None) }
+        Self { handler_dir, cached: Mutex::new(None) }
     }
 
     /// Locate the studio/vo/shell/ handler directory at runtime.
@@ -71,9 +68,9 @@ impl VoRunner {
             .join("shell")
     }
 
-    pub fn handle(&self, req: ShellRequest, app: &tauri::AppHandle) -> ShellResponse {
-        match self.run_handler(&req) {
-            Ok(resp_val) => self.interpret(resp_val, app),
+    pub fn handle(&self, req: ShellRequest, app: &tauri::AppHandle, workspace_root: &Path) -> ShellResponse {
+        match self.run_handler(&req, workspace_root) {
+            Ok(resp_val) => self.interpret(resp_val, app, workspace_root),
             Err(e)       => ShellResponse::Error {
                 id:      req.id,
                 code:    e.code,
@@ -84,7 +81,7 @@ impl VoRunner {
 
     // ── Execute the Vo handler, return raw JSON value ─────────────────────────
 
-    fn run_handler(&self, req: &ShellRequest) -> Result<Value, ShellError> {
+    fn run_handler(&self, req: &ShellRequest, workspace_root: &Path) -> Result<Value, ShellError> {
         let handler_path = self.handler_dir.to_string_lossy().to_string();
 
         let req_json = serde_json::to_string(&json!({
@@ -93,14 +90,16 @@ impl VoRunner {
             "op":  req.op,
         })).map_err(|e| ShellError::internal(&e.to_string()))?;
 
-        let workspace_str = self.workspace_root.to_string_lossy().to_string();
+        let workspace_str = workspace_root.to_string_lossy().to_string();
 
         let compiled = {
             let mut guard = self.cached.lock().unwrap();
             if let Some(cached) = &*guard {
                 cached.clone()
             } else {
-                let fresh = compile(&handler_path)
+                prepare_with_auto_install(&handler_path)
+                    .map_err(|e| ShellError::internal(&format!("shell handler prepare error: {e}")))?;
+                let fresh = compile_prepared(&handler_path)
                     .map_err(|e| ShellError::internal(&format!("shell handler compile error: {e}")))?;
                 *guard = Some(fresh.clone());
                 fresh
@@ -125,7 +124,7 @@ impl VoRunner {
 
     // ── Interpret the JSON response from the Vo handler ───────────────────────
 
-    fn interpret(&self, val: Value, app: &tauri::AppHandle) -> ShellResponse {
+    fn interpret(&self, val: Value, app: &tauri::AppHandle, workspace_root: &Path) -> ShellResponse {
         let id   = val["id"].as_str().unwrap_or("").to_string();
         let kind = val["kind"].as_str().unwrap_or("error");
 
@@ -137,7 +136,7 @@ impl VoRunner {
 
             "stream" => {
                 let job_id = val["jobId"].as_str().unwrap_or("").to_string();
-                match self.start_stream(job_id.clone(), &val["streamCmd"], app) {
+                match self.start_stream(job_id.clone(), &val["streamCmd"], app, workspace_root) {
                     Ok(()) => ShellResponse::Stream { id, job_id },
                     Err(e) => ShellResponse::Error  { id, code: e.code, message: e.message },
                 }
@@ -162,7 +161,7 @@ impl VoRunner {
     // streamCmd shape (produced by the Vo handler):
     //   { program, args: [string], dir, env: null | {k:v}, combined: bool }
 
-    fn start_stream(&self, job_id: String, cmd_val: &Value, app: &tauri::AppHandle) -> Result<(), ShellError> {
+    fn start_stream(&self, job_id: String, cmd_val: &Value, app: &tauri::AppHandle, workspace_root: &Path) -> Result<(), ShellError> {
         let program = cmd_val["program"].as_str()
             .ok_or_else(|| ShellError::internal("streamCmd missing program"))?
             .to_string();
@@ -184,11 +183,11 @@ impl VoRunner {
         let combined = cmd_val["combined"].as_bool().unwrap_or(false);
 
         let work_dir: PathBuf = if dir.is_empty() {
-            self.workspace_root.clone()
+            workspace_root.to_path_buf()
         } else if Path::new(&dir).is_absolute() {
             PathBuf::from(&dir)
         } else {
-            self.workspace_root.join(&dir)
+            workspace_root.join(&dir)
         };
 
         let mut cmd = Command::new(&program);

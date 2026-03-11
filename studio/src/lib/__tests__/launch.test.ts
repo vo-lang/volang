@@ -46,6 +46,7 @@ describe('parseStudioLaunchUrl', () => {
       kind: 'local',
       targetPath: '/workspace/examples/solana_wallet',
       entryPath: 'main.vo',
+      launchMode: 'normal',
     });
   });
 
@@ -61,6 +62,22 @@ describe('parseStudioLaunchUrl', () => {
       kind: 'local',
       targetPath: '/tmp/demo/counter.vo',
       entryPath: undefined,
+      launchMode: 'normal',
+    });
+  });
+
+  it('parses local dev-mode launch targets', () => {
+    const result = parseStudioLaunchUrl(
+      'http://localhost/?run=file:///tmp/demo/main.vo&mode=dev',
+      '/workspace',
+    );
+
+    expect(result).not.toBeNull();
+    expect(result?.target).toEqual({
+      kind: 'local',
+      targetPath: '/tmp/demo/main.vo',
+      entryPath: undefined,
+      launchMode: 'dev',
     });
   });
 

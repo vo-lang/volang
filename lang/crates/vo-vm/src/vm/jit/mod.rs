@@ -608,7 +608,7 @@ pub extern "C" fn jit_call_extern(
     let resume_io_token = fiber.resume_io_token.take();
     
     // Take closure replay state from fiber (populated by VM suspend/replay on re-entry)
-    let (closure_replay_results, closure_replay_panicked) = fiber.closure_replay.take_for_extern();
+    let (closure_replay_results, closure_replay_panic_message) = fiber.closure_replay.take_for_extern();
     
     let invoke = ExternInvoke {
         extern_id,
@@ -636,7 +636,7 @@ pub extern "C" fn jit_call_extern(
         resume_host_event_token: fiber.resume_host_event_token.take(),
         resume_host_event_data: fiber.resume_host_event_data.take(),
         replay_results: closure_replay_results,
-        replay_panicked: closure_replay_panicked,
+        replay_panic_message: closure_replay_panic_message,
     };
     let result = registry.call(buffer, invoke, world, fiber_inputs);
     

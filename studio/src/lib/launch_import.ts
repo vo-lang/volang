@@ -39,7 +39,9 @@ function githubImportRoot(workspaceRoot: string, target: GitHubLaunchTarget): st
 async function importGitHubTarget(target: GitHubLaunchTarget): Promise<LocalLaunchTarget> {
   const token = get(github).token;
   const files = await gitPullFiles(token, target.owner, target.repo, target.ref);
-  const importRoot = githubImportRoot(bridge().workspaceRoot, target);
+  const importRoot = githubImportRoot(bridge().appWorkspaceRoot, target);
+
+  await bridge().resetLaunchMode();
 
   await tryRemove(importRoot);
   await ensureDir(importRoot);
@@ -55,11 +57,14 @@ async function importGitHubTarget(target: GitHubLaunchTarget): Promise<LocalLaun
     kind: 'local',
     targetPath: target.subpath ? joinPath(importRoot, target.subpath) : importRoot,
     entryPath: target.entryPath,
+    launchMode: 'normal',
   };
 }
 
-async function importLocalTarget(target: LocalLaunchTarget): Promise<LocalLaunchTarget> {
-  const workspaceRoot = bridge().workspaceRoot;
+async function importLocalNormalTarget(target: LocalLaunchTarget): Promise<LocalLaunchTarget> {
+  const workspaceRoot = bridge().appWorkspaceRoot;
+  await bridge().resetLaunchMode();
+
   const targetPath = isPathWithinRoot(target.targetPath, workspaceRoot)
     ? target.targetPath
     : await bridge().materializeLocalLaunchTarget(target.targetPath);
@@ -68,10 +73,25 @@ async function importLocalTarget(target: LocalLaunchTarget): Promise<LocalLaunch
     kind: 'local',
     targetPath,
     entryPath: target.entryPath,
+    launchMode: 'normal',
+  };
+}
+
+async function importLocalDevTarget(target: LocalLaunchTarget): Promise<LocalLaunchTarget> {
+  const targetPath = await bridge().activateLocalDevMode(target.targetPath);
+
+  return {
+    kind: 'local',
+    targetPath,
+    entryPath: target.entryPath,
+    launchMode: 'dev',
   };
 }
 
 export async function importStudioLaunchTarget(target: StudioLaunchTarget): Promise<LocalLaunchTarget> {
-  if (target.kind === 'local') return importLocalTarget(target);
+  if (target.kind === 'local') {
+    if (target.launchMode === 'dev') return importLocalDevTarget(target);
+    return importLocalNormalTarget(target);
+  }
   return importGitHubTarget(target);
 }

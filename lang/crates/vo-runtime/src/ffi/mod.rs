@@ -307,8 +307,9 @@ pub struct ExternCallContext<'a> {
     replay_results: Vec<Vec<u64>>,
     /// Current consumption index into replay_results.
     replay_index: usize,
-    /// Whether a closure-for-replay panicked.
-    replay_panicked: bool,
+    /// Original panic message captured when the replayed closure unwound.
+    /// `is_some()` also serves as the "panicked" flag.
+    replay_panic_message: Option<String>,
     /// Extension result payload: panic message (set by trampoline, read by runtime).
     ext_panic_msg: Option<String>,
     /// Extension result payload: I/O token (set by trampoline, read by runtime).
@@ -354,7 +355,7 @@ impl<'a> ExternCallContext<'a> {
             resume_host_event_data: fiber_inputs.resume_host_event_data,
             replay_results: fiber_inputs.replay_results,
             replay_index: 0,
-            replay_panicked: fiber_inputs.replay_panicked,
+            replay_panic_message: fiber_inputs.replay_panic_message,
             ext_panic_msg: None,
             #[cfg(feature = "std")]
             ext_wait_io_token: None,
@@ -1287,7 +1288,12 @@ impl<'a> ExternCallContext<'a> {
     /// If true, the extern function should return an error.
     #[inline]
     pub fn is_replay_panicked(&self) -> bool {
-        self.replay_panicked
+        self.replay_panic_message.is_some()
+    }
+
+    #[inline]
+    pub fn replay_panic_message(&self) -> Option<&str> {
+        self.replay_panic_message.as_deref()
     }
 
     /// Get the return slot count.

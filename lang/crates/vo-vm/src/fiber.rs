@@ -256,9 +256,10 @@ pub struct ClosureReplayState {
     /// appended to `results` and the extern is replayed.
     /// 0 = no pending closure replay.
     pub depth: usize,
-    /// Set when a closure-for-replay panicked. The extern function should
-    /// check this and return an error instead of using the cached result.
-    pub panicked: bool,
+    /// Original panic message captured when the replayed closure unwound.
+    /// Preserved so the replayed extern can report the true root cause.
+    /// `is_some()` also serves as the "panicked" flag.
+    pub panic_message: Option<String>,
     /// Stack of saved `depth` values for nested replay cycles.
     pub depth_stack: Vec<usize>,
 }
@@ -269,7 +270,7 @@ impl ClosureReplayState {
             results: Vec::new(),
             index: 0,
             depth: 0,
-            panicked: false,
+            panic_message: None,
             depth_stack: Vec::new(),
         }
     }
@@ -278,20 +279,19 @@ impl ClosureReplayState {
         self.results.clear();
         self.index = 0;
         self.depth = 0;
-        self.panicked = false;
+        self.panic_message = None;
         self.depth_stack.clear();
     }
 
     /// Prepare for a new CallExtern execution: take results, reset index.
-    /// Returns (results, panicked) for passing to the extern call.
+    /// Returns (results, panic_message) for passing to the extern call.
     /// The results are stripped of slot_types (only needed for GC scanning while cached).
-    pub fn take_for_extern(&mut self) -> (Vec<Vec<u64>>, bool) {
+    pub fn take_for_extern(&mut self) -> (Vec<Vec<u64>>, Option<String>) {
         let typed_results = core::mem::take(&mut self.results);
         let results: Vec<Vec<u64>> = typed_results.into_iter().map(|(vals, _)| vals).collect();
-        let panicked = self.panicked;
-        self.panicked = false;
+        let panic_message = self.panic_message.take();
         self.index = 0;
-        (results, panicked)
+        (results, panic_message)
     }
 
     /// Push a closure frame: save current depth, set new depth.

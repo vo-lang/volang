@@ -185,6 +185,19 @@ pub fn prepare_with_auto_install(path: &str) -> Result<(), CompileError> {
         .map(|h| h.join(".vo/mod"))
         .unwrap_or_else(|| PathBuf::from(".vo/mod"));
 
+    let ensure_local_replacements_ready = |workspace: &std::collections::HashMap<String, PathBuf>| -> Result<(), CompileError> {
+        for local_dir in workspace.values() {
+            vo_module::fetch::ensure_local_native_extension_built(local_dir).map_err(|e| {
+                CompileError::Analysis(format!(
+                    "failed to build local native extension for {}: {}",
+                    local_dir.display(),
+                    e
+                ))
+            })?;
+        }
+        Ok(())
+    };
+
     // ── Single .vo file ────────────────────────────────────────────────────────
     if p.extension().map(|e| e == "vo").unwrap_or(false) {
         let source = fs::read_to_string(p)?;
@@ -192,6 +205,7 @@ pub fn prepare_with_auto_install(path: &str) -> Result<(), CompileError> {
         let source_dir = p.parent().unwrap_or(Path::new("."));
         let source_dir_abs = source_dir.canonicalize().unwrap_or_else(|_| source_dir.to_path_buf());
         let workspace = vo_module::find_workspace_replaces(&source_dir_abs);
+        ensure_local_replacements_ready(&workspace)?;
 
         let imports: Vec<(String, String)> = vo_module::fetch::detect_versioned_imports(&source)
             .into_iter()
@@ -210,6 +224,7 @@ pub fn prepare_with_auto_install(path: &str) -> Result<(), CompileError> {
             match vo_module::ModFile::parse_file(&vomod_path) {
                 Ok(modfile) => {
                     let workspace = vo_module::find_workspace_replaces(&project_root);
+                    ensure_local_replacements_ready(&workspace)?;
                     let requires: Vec<(String, String)> = modfile.requires
                         .iter()
                         .filter(|req| req.module.starts_with("github.com/") && !workspace.contains_key(&req.module))
@@ -247,6 +262,11 @@ pub fn compile_prepared(path: &str) -> Result<CompileOutput, CompileError> {
 pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileError> {
     prepare_with_auto_install(path)?;
     compile_prepared(path)
+}
+
+fn module_install_is_complete(module_dir: &Path, version: &str) -> bool {
+    module_dir.join("vo.mod").is_file()
+        && vo_module::fetch::installed_module_version(module_dir).as_deref() == Some(version)
 }
 
 fn prepare_module_closure(initial: Vec<(String, String)>, mod_root: &Path) -> Result<(), CompileError> {
@@ -342,6 +362,93 @@ mod tests {
         assert!(stripped.contains("\"github.com/b/libbar\""));
         assert!(!stripped.contains('@'));
     }
+
+    #[test]
+    fn test_module_install_is_complete_requires_vo_mod() {
+        let dir = std::env::temp_dir().join(format!(
+            "vo_module_install_complete_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        assert!(!module_install_is_complete(&dir, "v0.1.0"));
+
+        fs::write(dir.join("vo.mod"), "module github.com/example/demo\n\nvo 0.1\n").unwrap();
+        assert!(!module_install_is_complete(&dir, "v0.1.0"));
+
+        fs::write(dir.join(".vo-version"), "v0.1.0\n").unwrap();
+        assert!(module_install_is_complete(&dir, "v0.1.0"));
+        assert!(!module_install_is_complete(&dir, "v0.1.1"));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_compile_prefers_local_replace_extension_manifest_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "vo_compile_local_ext_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let app_root = root.join("app");
+        let local_voplay = root.join("voplay");
+
+        fs::create_dir_all(&app_root).unwrap();
+        fs::create_dir_all(local_voplay.join("rust").join("src")).unwrap();
+
+        fs::write(
+            app_root.join("vo.mod"),
+            "module example.com/app\n\nvo 0.1\n\nrequire github.com/vo-lang/voplay v0.1.0\n",
+        )
+        .unwrap();
+        fs::write(app_root.join("vo.work"), "use ../voplay\n").unwrap();
+        fs::write(
+            app_root.join("main.vo"),
+            "package main\nimport \"github.com/vo-lang/voplay\"\nfunc main(){voplay.Hello()}\n",
+        )
+        .unwrap();
+
+        fs::write(
+            local_voplay.join("vo.mod"),
+            "module github.com/vo-lang/voplay\n\nvo 0.1\n",
+        )
+        .unwrap();
+        fs::write(
+            local_voplay.join("vo.ext.toml"),
+            "[extension]\nname = \"voplay\"\npath = \"rust/target/{profile}/libvo_voplay\"\n",
+        )
+        .unwrap();
+        fs::write(
+            local_voplay.join("hello.vo"),
+            "package voplay\nfunc Hello(){}\n",
+        )
+        .unwrap();
+        fs::write(
+            local_voplay.join("rust").join("Cargo.toml"),
+            "[package]\nname = \"vo_voplay\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let output = compile(app_root.to_str().unwrap()).unwrap();
+        let local_voplay = local_voplay.canonicalize().unwrap();
+        assert!(
+            output.extensions.iter().any(|manifest| {
+                manifest.name == "voplay"
+                    && manifest.native_path.starts_with(local_voplay.join("rust").join("target"))
+            }),
+            "extensions = {:?}",
+            output.extensions
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
 }
 
 /// Ensure a GitHub module is installed and its native extension is compiled.
@@ -351,7 +458,10 @@ mod tests {
 ///   was missing (e.g. the module was manually placed or cargo clean was run).
 fn ensure_module_ready(module: &str, version: &str, mod_root: &Path) -> Result<(), CompileError> {
     let module_dir = mod_root.join(module);
-    if !module_dir.exists() {
+    if !module_install_is_complete(&module_dir, version) {
+        if module_dir.exists() {
+            fs::remove_dir_all(&module_dir).map_err(CompileError::Io)?;
+        }
         eprintln!("fetching {} {}...", module, version);
         vo_module::fetch::install_module(module, version)
             .map_err(|e| CompileError::Analysis(

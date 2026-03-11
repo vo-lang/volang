@@ -37,6 +37,13 @@ export class ShellClient {
     this._cwd = path.startsWith('/') ? path : this._cwd + '/' + path;
   }
 
+  setWorkspaceRoot(root: string, resetCwd: boolean = true): void {
+    this._workspaceRoot = root;
+    if (resetCwd) {
+      this._cwd = root;
+    }
+  }
+
   setEnv(key: string, value: string): void {
     this._env = { ...this._env, [key]: value };
   }

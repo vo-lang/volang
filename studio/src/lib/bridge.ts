@@ -105,6 +105,8 @@ export interface Bridge {
   fsRename(oldPath: string, newPath: string): Promise<void | null>;
   fsRemove(path: string, recursive: boolean): Promise<void | null>;
   materializeLocalLaunchTarget(path: string): Promise<string>;
+  activateLocalDevMode(path: string): Promise<string>;
+  resetLaunchMode(): Promise<void>;
 
   // GUI render callback — push-based, for JS timer/timeout driven re-renders.
   // On Tauri these are no-ops (timers handled natively); on WASM they pipe
@@ -112,7 +114,10 @@ export interface Bridge {
   setGuiRenderCallback(cb: (bytes: Uint8Array) => void): void;
   clearGuiRenderCallback(): void;
 
-  // Workspace root (for display)
+  // Stable app workspace root used for imported/cached assets.
+  appWorkspaceRoot: string;
+
+  // Current session workspace root used by shell/file operations.
   workspaceRoot: string;
 
   // Unified shell API (filesystem + Vo toolchain + GUI + tools + processes)
@@ -144,7 +149,7 @@ async function initTauriBridge(onProgress: (step: string) => void): Promise<void
   onProgress('Connecting to backend…');
   const { invoke } = await import('@tauri-apps/api/core');
 
-  const workspaceRoot: string = await invoke('cmd_get_workspace_root');
+  const appWorkspaceRoot: string = await invoke('cmd_get_workspace_root');
 
   const shellTransport = new TauriTransport();
   const shellClient    = new ShellClient(shellTransport);
@@ -152,13 +157,14 @@ async function initTauriBridge(onProgress: (step: string) => void): Promise<void
 
   // Seed built-in examples into workspace (always overwrite so updates propagate)
   for (const ex of STUDIO_SYNC_EXAMPLES) {
-    const fullPath = workspaceRoot + '/' + ex.path;
+    const fullPath = appWorkspaceRoot + '/' + ex.path;
     await shellClient.exec({ kind: 'fs.mkdir', path: parentDir(fullPath), recursive: true });
     await shellClient.exec({ kind: 'fs.write', path: fullPath, content: ex.content });
   }
 
   _bridge = {
-    workspaceRoot,
+    appWorkspaceRoot,
+    get workspaceRoot(): string { return shellClient.workspaceRoot; },
     shell: shellClient,
 
     async fsListDir(dirPath: string): Promise<FsEntry[]> {
@@ -175,6 +181,15 @@ async function initTauriBridge(onProgress: (step: string) => void): Promise<void
     fsRename:    (oldPath: string, newPath: string)  => shellClient.exec({ kind: 'fs.rename', oldPath, newPath }),
     fsRemove:    (path: string, recursive: boolean)  => shellClient.exec({ kind: 'fs.remove', path, recursive }),
     materializeLocalLaunchTarget: (path: string)     => invoke<string>('cmd_materialize_local_launch_target', { targetPath: path }),
+    async activateLocalDevMode(path: string): Promise<string> {
+      const resolved = await invoke<{ targetPath: string; sessionRoot: string }>('cmd_activate_local_dev_mode', { targetPath: path });
+      shellClient.setWorkspaceRoot(resolved.sessionRoot);
+      return resolved.targetPath;
+    },
+    async resetLaunchMode(): Promise<void> {
+      await invoke('cmd_reset_launch_mode');
+      shellClient.setWorkspaceRoot(appWorkspaceRoot);
+    },
 
     // Poll for platform-driven renders (game loop, timers) via RAF loop.
     // Uses the `invoke` captured from initTauriBridge scope.
@@ -481,7 +496,8 @@ async function initWasmBridge(onProgress: (step: string) => void): Promise<void>
   await shellClient.initialize();
 
   _bridge = {
-    workspaceRoot: WASM_WORKSPACE,
+    appWorkspaceRoot: WASM_WORKSPACE,
+    get workspaceRoot(): string { return shellClient.workspaceRoot; },
     shell: shellClient,
 
     async fsListDir(dirPath: string): Promise<FsEntry[]> {
@@ -500,6 +516,16 @@ async function initWasmBridge(onProgress: (step: string) => void): Promise<void>
     async materializeLocalLaunchTarget(path: string): Promise<string> {
       if (isPathWithinRoot(path, WASM_WORKSPACE)) return path;
       throw new Error(`Local launch target is outside the browser workspace: ${path}`);
+    },
+    async activateLocalDevMode(path: string): Promise<string> {
+      if (!isPathWithinRoot(path, WASM_WORKSPACE)) {
+        throw new Error(`Local dev mode is outside the browser workspace: ${path}`);
+      }
+      shellClient.setWorkspaceRoot(WASM_WORKSPACE);
+      return path;
+    },
+    async resetLaunchMode(): Promise<void> {
+      shellClient.setWorkspaceRoot(WASM_WORKSPACE);
     },
 
     setGuiRenderCallback(cb: (bytes: Uint8Array) => void) {

@@ -1,11 +1,13 @@
 import { joinPath, normalizePath } from './path_utils';
 
 export type LaunchAction = 'open' | 'run';
+export type LocalLaunchMode = 'normal' | 'dev';
 
 export interface LocalLaunchTarget {
   kind: 'local';
   targetPath: string;
   entryPath?: string;
+  launchMode: LocalLaunchMode;
 }
 
 export interface GitHubLaunchTarget {
@@ -66,6 +68,18 @@ export function normalizeLocalLaunchPath(raw: string, workspaceRoot: string): st
   if (trimmed.startsWith('file://')) return normalizeFileUrlTarget(trimmed);
   if (trimmed.startsWith('/')) return normalizePath(trimmed);
   return joinPath(workspaceRoot, trimmed);
+}
+
+function parseLocalLaunchMode(url: URL): LocalLaunchMode {
+  const mode = firstNonEmpty(url.searchParams.get('mode'));
+  if (mode === 'dev') return 'dev';
+
+  const devFlag = firstNonEmpty(url.searchParams.get('dev'));
+  if (devFlag === '1' || devFlag === 'true' || devFlag === 'yes' || devFlag === 'on') {
+    return 'dev';
+  }
+
+  return 'normal';
 }
 
 function parseGitHubLaunchTarget(
@@ -129,6 +143,7 @@ export function parseStudioLaunchUrl(launchUrl: string, workspaceRoot: string): 
         kind: 'local',
         targetPath: normalizeLocalLaunchPath(rawTarget, workspaceRoot),
         entryPath,
+        launchMode: parseLocalLaunchMode(parsed),
       };
 
   return {

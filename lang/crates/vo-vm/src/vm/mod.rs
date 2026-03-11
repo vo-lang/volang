@@ -79,6 +79,8 @@ pub struct Vm {
     /// JIT code memory must remain valid while scheduler/fibers are being dropped.
     #[cfg(feature = "jit")]
     pub jit_mgr: Option<JitManager>,
+    #[cfg(feature = "std")]
+    extension_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
     pub module: Option<Module>,
     pub scheduler: Scheduler,
     pub state: VmState,
@@ -109,6 +111,8 @@ impl Vm {
         Self {
             #[cfg(feature = "jit")]
             jit_mgr: None,
+            #[cfg(feature = "std")]
+            extension_loader: None,
             module: None,
             scheduler: Scheduler::new(),
             state: VmState::new(),
@@ -202,7 +206,7 @@ impl Vm {
     pub fn load_with_extensions(
         &mut self,
         module: Module,
-        ext_loader: Option<&vo_runtime::ext_loader::ExtensionLoader>,
+        ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
     ) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -213,11 +217,13 @@ impl Vm {
         self.state.extern_registry.register_from_linkme(&module.externs);
 
         // Register extern functions from extension loader (if provided)
-        if let Some(loader) = ext_loader {
+        if let Some(loader) = ext_loader.as_ref() {
             self.state.extern_registry.register_from_extension_loader(loader, &module.externs);
         }
 
         validate_externs_registered(&self.state.extern_registry, &module.externs);
+        
+        self.extension_loader = ext_loader;
         
         self.finish_load(module);
     }
@@ -1149,7 +1155,7 @@ impl Vm {
                     let resume_io_token = fiber.resume_io_token.take();
                     let resume_host_event_token = fiber.resume_host_event_token.take();
                     let resume_host_event_data = fiber.resume_host_event_data.take();
-                    let (closure_replay_results, closure_replay_panicked) = fiber.closure_replay.take_for_extern();
+                    let (closure_replay_results, closure_replay_panic_message) = fiber.closure_replay.take_for_extern();
                     let invoke = ExternInvoke {
                         extern_id,
                         bp: bp as u32,
@@ -1177,7 +1183,7 @@ impl Vm {
                         resume_host_event_token,
                         resume_host_event_data,
                         replay_results: closure_replay_results,
-                        replay_panicked: closure_replay_panicked,
+                        replay_panic_message: closure_replay_panic_message,
                     };
                     let extern_result = self.state.extern_registry.call(
                         &mut fiber.stack, invoke, world, fiber_inputs,

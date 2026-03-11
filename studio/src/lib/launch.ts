@@ -5,7 +5,7 @@ import { importStudioLaunchTarget } from './launch_import';
 import { parseStudioLaunchUrl } from './launch_protocol';
 
 export async function executeStudioLaunch(launchUrl: string): Promise<boolean> {
-  const request = parseStudioLaunchUrl(launchUrl, bridge().workspaceRoot);
+  const request = parseStudioLaunchUrl(launchUrl, bridge().appWorkspaceRoot);
   if (!request) return false;
 
   const localTarget = await importStudioLaunchTarget(request.target);

@@ -147,7 +147,7 @@ pub fn run_with_output(
     
     vm.state.output = sink;
     vm.set_program_args(args);
-    vm.load_with_extensions(module, ext_loader.as_ref());
+    vm.load_with_extensions(module, ext_loader);
 
     let outcome = vm.run().map_err(|e| vm_err_to_run_err(&vm, &e))?;
     if outcome == SchedulingOutcome::Blocked {

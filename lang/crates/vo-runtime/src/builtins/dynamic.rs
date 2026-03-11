@@ -17,6 +17,13 @@ use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
+use core::borrow::Borrow;
+
+#[cfg(not(feature = "std"))]
+use alloc::borrow::Cow;
+#[cfg(feature = "std")]
+use std::borrow::Cow;
+
 use vo_common_core::types::ValueKind;
 use vo_ffi_macro::vo_errors;
 
@@ -83,13 +90,13 @@ type DynResult<T> = Result<T, (DynErr, &'static str)>;
 /// Error type that can carry either a DynErr or a CallClosure suspend request.
 /// Used by helpers that need to call closures via the replay pattern.
 enum DynOrSuspend {
-    Dyn(DynErr, &'static str),
+    Dyn(DynErr, Cow<'static, str>),
     Suspend(ExternResult),
 }
 
 impl From<(DynErr, &'static str)> for DynOrSuspend {
     fn from((e, m): (DynErr, &'static str)) -> Self {
-        DynOrSuspend::Dyn(e, m)
+        DynOrSuspend::Dyn(e, Cow::Borrowed(m))
     }
 }
 
@@ -144,6 +151,15 @@ fn protocol_func_id(
         .ok_or((err, "protocol has no methods"))
 }
 
+/// Build a Cow message from the replay panic context.
+/// Returns Cow::Owned only when a real panic message is available; Cow::Borrowed otherwise.
+fn replay_panic_cow(call: &ExternCallContext) -> Cow<'static, str> {
+    match call.replay_panic_message() {
+        Some(m) => Cow::Owned(format!("closure panicked: {}", m)),
+        None => Cow::Borrowed("closure panicked"),
+    }
+}
+
 /// Call a protocol method and check for error in return value.
 /// Uses suspend/replay pattern: returns Suspend on first call, cached result on replay.
 fn call_protocol<const N: usize>(
@@ -153,7 +169,8 @@ fn call_protocol<const N: usize>(
     err: DynErr,
 ) -> DynSuspendResult<[u64; N]> {
     if call.is_replay_panicked() {
-        return Err(DynOrSuspend::Dyn(DynErr::BadCall, "closure panicked"));
+        let msg = replay_panic_cow(call);
+        return Err(DynOrSuspend::Dyn(DynErr::BadCall, msg));
     }
     let ret_vec = match call.resume_closure_result() {
         Some(cached) => cached,
@@ -174,7 +191,7 @@ fn call_protocol<const N: usize>(
     // Error is always in last 2 slots
     let err_start = N.saturating_sub(2);
     if ret[err_start] != 0 || ret.get(err_start + 1).copied().unwrap_or(0) != 0 {
-        return Err(DynOrSuspend::Dyn(err, "protocol returned error"));
+        return Err(DynOrSuspend::Dyn(err, Cow::Borrowed("protocol returned error")));
     }
     Ok(ret)
 }
@@ -350,7 +367,7 @@ fn get_reflection(
     }
 }
 
-/// Set via reflection
+/// Set a value by field name or index.
 fn set_reflection(
     call: &mut ExternCallContext,
     _base_slot0: u64,
@@ -1066,7 +1083,8 @@ fn do_call(
     error_offset: u16,
 ) -> ExternResult {
     if call.is_replay_panicked() {
-        return call_return_error(call, error_offset, DynErr::BadCall, "closure panicked");
+        let msg = replay_panic_cow(call);
+        return call_return_error(call, error_offset, DynErr::BadCall, &msg);
     }
     if closure_ref.is_null() {
         return call_return_error(call, error_offset, DynErr::BadCall, "closure is null");
@@ -1141,7 +1159,7 @@ fn do_method(
     let closure = if let Some(iface_id) = check_protocol(call, rttid, vk, call.well_known().attr_object_iface_id) {
         match get_method_via_protocol(call, base_slot1, rttid, vk, iface_id, method_name) {
             Ok(c) => Some(c),
-            Err(DynOrSuspend::Dyn(e, m)) => return call_return_error(call, error_offset, e, m),
+            Err(DynOrSuspend::Dyn(e, m)) => return call_return_error(call, error_offset, e, m.borrow()),
             Err(DynOrSuspend::Suspend(r)) => return r,
         }
     } else {
@@ -1388,7 +1406,7 @@ fn dyn_field(call: &mut ExternCallContext) -> ExternResult {
     
     match get_value(call, base_slot0, base_slot1, DynKey::Field(field_name)) {
         Ok((v0, v1)) => write_get_result(call, v0, v1, expected_rttid, expected_vk),
-        Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m.borrow()),
         Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
@@ -1407,7 +1425,7 @@ fn dyn_index(call: &mut ExternCallContext) -> ExternResult {
     
     match get_value(call, base_slot0, base_slot1, DynKey::Index(key_slot0, key_slot1)) {
         Ok((v0, v1)) => write_get_result(call, v0, v1, expected_rttid, expected_vk),
-        Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m.borrow()),
         Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
@@ -1435,7 +1453,7 @@ fn dyn_set_field(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(1);
             ExternResult::Ok
         }
-        Err(DynOrSuspend::Dyn(e, m)) => write_set_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_set_error(call, e, m.borrow()),
         Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
@@ -1458,7 +1476,7 @@ fn dyn_set_index_unified(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(1);
             ExternResult::Ok
         }
-        Err(DynOrSuspend::Dyn(e, m)) => write_set_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_set_error(call, e, m.borrow()),
         Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
@@ -1533,7 +1551,8 @@ fn do_call_via_protocol(
     };
     
     if call.is_replay_panicked() {
-        return call_return_error(call, error_offset, DynErr::BadCall, "closure panicked");
+        let msg = replay_panic_cow(call);
+        return call_return_error(call, error_offset, DynErr::BadCall, &msg);
     }
     
     let closure_ref = closure::create(call.gc(), func_id, 0);
@@ -1677,7 +1696,7 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(3);
             ExternResult::Ok
         }
-        Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m.borrow()),
         Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
@@ -1700,7 +1719,7 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(3);
             ExternResult::Ok
         }
-        Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m.borrow()),
         Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
@@ -1728,7 +1747,7 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(1);
             ExternResult::Ok
         }
-        Err(DynOrSuspend::Dyn(e, m)) => write_set_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_set_error(call, e, m.borrow()),
         Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
@@ -1751,7 +1770,7 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(1);
             ExternResult::Ok
         }
-        Err(DynOrSuspend::Dyn(e, m)) => write_set_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_set_error(call, e, m.borrow()),
         Err(DynOrSuspend::Suspend(r)) => r,
     }
 }

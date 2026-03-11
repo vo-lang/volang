@@ -24,6 +24,12 @@ pub enum ExtError {
     LoadFailed(String),
     /// Missing entry point function.
     MissingEntryPoint,
+    /// Failed to lookup an exported symbol from a loaded extension library.
+    SymbolLookupFailed {
+        extension: String,
+        symbol: String,
+        message: String,
+    },
     /// ABI version mismatch.
     VersionMismatch { expected: u32, found: u32 },
     /// Manifest parse error.
@@ -37,6 +43,9 @@ impl std::fmt::Display for ExtError {
         match self {
             ExtError::LoadFailed(msg) => write!(f, "failed to load extension: {}", msg),
             ExtError::MissingEntryPoint => write!(f, "extension missing vo_ext_get_entries"),
+            ExtError::SymbolLookupFailed { extension, symbol, message } => {
+                write!(f, "failed to lookup symbol '{}' from extension '{}': {}", symbol, extension, message)
+            }
             ExtError::VersionMismatch { expected, found } => {
                 write!(f, "ABI version mismatch: expected {}, found {}", expected, found)
             }
@@ -151,6 +160,33 @@ impl ExtensionLoader {
     /// Get list of loaded extension names.
     pub fn loaded_extensions(&self) -> Vec<&str> {
         self.loaded.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    /// Get a loaded extension library by manifest name.
+    pub fn library(&self, name: &str) -> Option<&Library> {
+        self.loaded
+            .iter()
+            .find(|ext| ext.name == name)
+            .map(|ext| &ext._lib)
+    }
+
+    /// Lookup an arbitrary exported symbol from a loaded extension library.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `T` matches the actual symbol type exported by the library.
+    pub unsafe fn symbol<T>(&self, extension: &str, symbol: &[u8]) -> Result<Option<Symbol<'_, T>>, ExtError> {
+        let Some(lib) = self.library(extension) else {
+            return Ok(None);
+        };
+        match lib.get::<T>(symbol) {
+            Ok(sym) => Ok(Some(sym)),
+            Err(err) => Err(ExtError::SymbolLookupFailed {
+                extension: extension.to_string(),
+                symbol: String::from_utf8_lossy(symbol).trim_end_matches('\0').to_string(),
+                message: err.to_string(),
+            }),
+        }
     }
 }
 

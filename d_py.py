@@ -67,6 +67,7 @@ TEST_DIR = PROJECT_ROOT / 'lang' / 'test_data'
 TEST_CONFIG = TEST_DIR / '_config.toml'
 BENCHMARK_DIR = PROJECT_ROOT / 'benchmarks'
 RESULTS_DIR = BENCHMARK_DIR / 'results'
+STUDIO_NATIVE_DEBUG_LOG = PROJECT_ROOT / '.tmp' / 'studio-native-debug.log'
 
 # Cache directories
 CLI_CACHE_DIR = PROJECT_ROOT / 'cmd' / 'vo' / '.vo-cache'
@@ -383,8 +384,12 @@ def run_studio_native(build_wasm: bool = False, launch_url: Optional[str] = None
 
     try:
         env = os.environ.copy()
+        STUDIO_NATIVE_DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
+        STUDIO_NATIVE_DEBUG_LOG.write_text('')
+        env['VIBE_STUDIO_DEBUG_LOG'] = str(STUDIO_NATIVE_DEBUG_LOG)
         if launch_url:
             env['VIBE_STUDIO_LAUNCH_URL'] = launch_url
+        print(f"{Colors.DIM}Native debug log: {STUDIO_NATIVE_DEBUG_LOG}{Colors.NC}")
         subprocess.run(['zsh', '-lc', 'npm run tauri dev'], cwd=studio_dir, check=True, env=env)
     except KeyboardInterrupt:
         print(f"\n{Colors.GREEN}Studio (native) stopped{Colors.NC}")

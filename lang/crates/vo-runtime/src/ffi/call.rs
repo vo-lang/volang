@@ -101,6 +101,7 @@ pub struct ExternFiberInputs {
     /// Consumed in order via `ExternCallContext.replay_index`.
     pub replay_results: Vec<Vec<u64>>,
 
-    /// Whether a closure-for-replay panicked.
-    pub replay_panicked: bool,
+    /// Original panic message captured when the replayed closure unwound.
+    /// `is_some()` also serves as the "panicked" flag.
+    pub replay_panic_message: Option<String>,
 }

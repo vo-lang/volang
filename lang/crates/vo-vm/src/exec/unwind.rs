@@ -504,7 +504,7 @@ fn start_panic_unwind(
         if fiber.closure_replay.should_intercept_panic(fiber.frames.len()) {
             let target_depth = fiber.closure_replay.depth - 1; // caller's frame depth
             fiber.closure_replay.pop_depth();
-            fiber.closure_replay.panicked = true;
+            fiber.closure_replay.panic_message = fiber.panic_state.as_ref().map(|state| state.message());
             // Consume the panic — it will be reported as an error by the extern function
             fiber.panic_state = None;
             fiber.panic_trap_kind = None;

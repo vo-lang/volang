@@ -5,15 +5,17 @@
 //! - Unified shell API via ShellRouter (shell/mod.rs)
 //!
 //! All filesystem operations are routed through `cmd_shell_exec` → Vo shell handler.
-
 mod shell;
 
+use std::env;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use vo_module::find_work_file;
+use tauri::Manager;
 use vo_vox::gui::{GuestHandle, PushReceiver};
 use vo_vox::{compile_prepared, prepare_with_auto_install, run_with_output as run_vox, RunMode};
 use vo_runtime::output::CaptureSink;
+
+static VOWORK_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 // =============================================================================
 // AppState
@@ -22,6 +24,7 @@ use vo_runtime::output::CaptureSink;
 pub struct AppState {
     pub workspace_root: PathBuf,
     launch_url:   Option<String>,
+    session_root: Mutex<PathBuf>,
     guest:        Mutex<Option<GuestHandle>>,
     /// Platform-driven render receiver — stored separately so polling
     /// doesn't contend with the guest handle lock.
@@ -159,16 +162,6 @@ fn materialize_source_root(target_path: &Path) -> PathBuf {
     target_path.to_path_buf()
 }
 
-fn reject_work_file_mode(path: &Path) -> Result<(), shell::StudioError> {
-    if let Some((work_dir, _)) = find_work_file(path) {
-        return Err(shell::StudioError::vo_compile(&format!(
-            "Studio does not support vo.work workspaces. Remove '{}' and publish dependencies to GitHub before using Studio.",
-            work_dir.join("vo.work").display()
-        )));
-    }
-    Ok(())
-}
-
 fn materialize_local_target(workspace_root: &Path, target_path: &Path) -> Result<PathBuf, shell::StudioError> {
     if !target_path.exists() {
         return Err(shell::StudioError::not_found(&format!("launch target not found: {}", target_path.display())));
@@ -186,7 +179,6 @@ fn materialize_local_target(workspace_root: &Path, target_path: &Path) -> Result
     }
 
     let source_root = materialize_source_root(&canonical_target);
-    reject_work_file_mode(&source_root)?;
     let import_root = imported_local_root(&canonical_workspace, &source_root);
 
     remove_existing_path(&import_root)
@@ -268,6 +260,66 @@ fn cmd_materialize_local_launch_target(
     Ok(materialized.to_string_lossy().to_string())
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalDevLaunchTarget {
+    target_path: String,
+    session_root: String,
+}
+
+fn resolve_local_dev_target(target_path: &Path) -> Result<LocalDevLaunchTarget, shell::StudioError> {
+    if !target_path.exists() {
+        return Err(shell::StudioError::not_found(&format!(
+            "launch target not found: {}",
+            target_path.display()
+        )));
+    }
+
+    let canonical_target = target_path
+        .canonicalize()
+        .map_err(|e| shell::StudioError::internal(&format!("{}: {}", target_path.display(), e)))?;
+    let session_root = materialize_source_root(&canonical_target)
+        .canonicalize()
+        .map_err(|e| shell::StudioError::internal(&format!("{}: {}", canonical_target.display(), e)))?;
+
+    Ok(LocalDevLaunchTarget {
+        target_path: canonical_target.to_string_lossy().to_string(),
+        session_root: session_root.to_string_lossy().to_string(),
+    })
+}
+
+pub(crate) fn current_session_root(state: &AppState) -> PathBuf {
+    state.session_root.lock().unwrap().clone()
+}
+
+fn reset_session_root(state: &AppState) {
+    *state.session_root.lock().unwrap() = state.workspace_root.clone();
+}
+
+fn set_session_root(state: &AppState, session_root: PathBuf) {
+    *state.session_root.lock().unwrap() = session_root;
+}
+
+fn session_uses_workspace_mode(state: &AppState) -> bool {
+    current_session_root(state) != state.workspace_root
+}
+
+fn with_session_workspace_mode<T>(state: &AppState, f: impl FnOnce() -> T) -> T {
+    let _guard = VOWORK_ENV_LOCK.lock().unwrap();
+    let previous = env::var_os("VOWORK");
+    if session_uses_workspace_mode(state) {
+        env::remove_var("VOWORK");
+    } else {
+        env::set_var("VOWORK", "off");
+    }
+    let result = f();
+    match previous {
+        Some(value) => env::set_var("VOWORK", value),
+        None => env::remove_var("VOWORK"),
+    }
+    result
+}
+
 /// For multi-file projects (vo.mod present in parent dir), return the directory
 /// path so the compiler reads all .vo files and resolves module dependencies.
 /// For single-file entries, return the file path as-is.
@@ -285,7 +337,6 @@ fn resolve_compile_target(
     let abs = resolve_path(workspace_root, entry_path)
         .map_err(|e| shell::StudioError::access_denied(&e))?;
     let compile_path = resolve_compile_path(&abs);
-    reject_work_file_mode(&compile_path)?;
     Ok(compile_path.to_string_lossy().to_string())
 }
 
@@ -296,9 +347,10 @@ fn clear_guest_runtime(state: &AppState) {
 
 #[tauri::command]
 fn cmd_prepare_app(entry_path: String, state: tauri::State<'_, AppState>) -> Result<(), shell::StudioError> {
-    let compile_str = resolve_compile_target(&state.workspace_root, &entry_path)?;
+    let session_root = current_session_root(&state);
+    let compile_str = resolve_compile_target(&session_root, &entry_path)?;
 
-    prepare_with_auto_install(&compile_str)
+    with_session_workspace_mode(&state, || prepare_with_auto_install(&compile_str))
         .map_err(|e| shell::StudioError::vo_compile(&e.to_string()))?;
     Ok(())
 }
@@ -306,9 +358,10 @@ fn cmd_prepare_app(entry_path: String, state: tauri::State<'_, AppState>) -> Res
 /// Compile and run a prepared non-GUI app from an entry path, returning captured stdout.
 #[tauri::command]
 fn cmd_compile_run_app(entry_path: String, state: tauri::State<'_, AppState>) -> Result<String, shell::StudioError> {
-    let compile_str = resolve_compile_target(&state.workspace_root, &entry_path)?;
+    let session_root = current_session_root(&state);
+    let compile_str = resolve_compile_target(&session_root, &entry_path)?;
 
-    let compile_output = compile_prepared(&compile_str)
+    let compile_output = with_session_workspace_mode(&state, || compile_prepared(&compile_str))
         .map_err(|e| shell::StudioError::vo_compile(&e.to_string()))?;
     let sink = CaptureSink::new();
     let result = run_vox(compile_output, RunMode::Vm, Vec::new(), sink.clone());
@@ -332,9 +385,10 @@ fn cmd_run_gui(entry_path: String, state: tauri::State<'_, AppState>) -> Result<
     // Drop previous guest (sends Shutdown, cleans up timers).
     clear_guest_runtime(&state);
 
-    let compile_str = resolve_compile_target(&state.workspace_root, &entry_path)?;
+    let session_root = current_session_root(&state);
+    let compile_str = resolve_compile_target(&session_root, &entry_path)?;
 
-    let compile_output = compile_prepared(&compile_str)
+    let compile_output = with_session_workspace_mode(&state, || compile_prepared(&compile_str))
         .map_err(|e| shell::StudioError::vo_compile(&e.to_string()))?;
     let (initial_bytes, handle, push) = vo_vox::gui::run_gui(compile_output)
         .map_err(|e| shell::StudioError::vo_runtime(&e))?;
@@ -344,36 +398,51 @@ fn cmd_run_gui(entry_path: String, state: tauri::State<'_, AppState>) -> Result<
     Ok(initial_bytes)
 }
 
-/// Send an event to the running guest VM and return the new render bytes.
 #[tauri::command]
 fn cmd_send_gui_event(
     handler_id: i32,
     payload: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<u8>, shell::StudioError> {
-    let guard = state.guest.lock().unwrap();
-    let handle = guard.as_ref()
-        .ok_or_else(|| shell::StudioError::vo_runtime("No guest VM running"))?;
-    handle.send_event(handler_id, &payload)
+    let guest = state.guest.lock().unwrap();
+    let handle = guest
+        .as_ref()
+        .ok_or_else(|| shell::StudioError::vo_runtime("guest VM not running"))?;
+    handle
+        .send_event(handler_id, &payload)
         .map_err(|e| shell::StudioError::vo_runtime(&e))
 }
 
-/// Poll for platform-driven render updates (game loop, timers, anim frames).
-/// Returns the latest render bytes if available, or empty vec if none.
 #[tauri::command]
 fn cmd_poll_gui_render(state: tauri::State<'_, AppState>) -> Vec<u8> {
-    let guard = state.push_rx.lock().unwrap();
-    match guard.as_ref() {
-        Some(push) => push.poll().unwrap_or_default(),
-        None => Vec::new(),
-    }
+    state
+        .push_rx
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|rx| rx.poll())
+        .unwrap_or_default()
 }
 
-/// Stop the running guest VM.
 #[tauri::command]
 fn cmd_stop_gui(state: tauri::State<'_, AppState>) -> Result<(), shell::StudioError> {
     clear_guest_runtime(&state);
     Ok(())
+}
+
+#[tauri::command]
+fn cmd_activate_local_dev_mode(
+    target_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<LocalDevLaunchTarget, shell::StudioError> {
+    let resolved = resolve_local_dev_target(Path::new(&target_path))?;
+    set_session_root(&state, PathBuf::from(&resolved.session_root));
+    Ok(resolved)
+}
+
+#[tauri::command]
+fn cmd_reset_launch_mode(state: tauri::State<'_, AppState>) {
+    reset_session_root(&state);
 }
 
 // =============================================================================
@@ -399,9 +468,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(AppState {
-            shell_runner:  shell::VoRunner::new(workspace.clone()),
+            shell_runner:  shell::VoRunner::new(),
             workspace_root: workspace,
             launch_url,
+            session_root:  Mutex::new(default_workspace()),
             guest:         Mutex::new(None),
             push_rx:       Mutex::new(None),
         })
@@ -409,6 +479,8 @@ pub fn run() {
             cmd_get_workspace_root,
             cmd_get_launch_url,
             cmd_materialize_local_launch_target,
+            cmd_activate_local_dev_mode,
+            cmd_reset_launch_mode,
             cmd_prepare_app,
             cmd_compile_run_app,
             cmd_run_gui,
@@ -424,7 +496,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{materialize_local_target, materialize_source_root, resolve_compile_target};
+    use crate::{materialize_local_target, materialize_source_root, resolve_compile_target, resolve_local_dev_target};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -475,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn materialize_local_target_rejects_vo_work_projects() {
+    fn materialize_local_target_allows_vo_work_projects() {
         let workspace_root = make_temp_dir("workspace-with-work");
         let source_root = make_temp_dir("external-work-project");
         let game_root = source_root.join("MarbleRush");
@@ -485,16 +557,39 @@ mod tests {
         fs::write(game_root.join("vo.mod"), "module marblerush\n\nvo 0.1\n").unwrap();
         fs::write(game_root.join("main.vo"), "package main\n").unwrap();
 
-        let err = materialize_local_target(&workspace_root, &game_root).unwrap_err();
-        assert!(err.message.contains("Studio does not support vo.work workspaces"));
-        assert!(err.message.contains("vo.work"));
+        let materialized = materialize_local_target(&workspace_root, &game_root).unwrap();
+        assert!(materialized.join("main.vo").is_file());
+        assert!(materialized.join("vo.work").is_file());
 
         fs::remove_dir_all(&workspace_root).unwrap();
         fs::remove_dir_all(&source_root).unwrap();
     }
 
     #[test]
-    fn resolve_compile_target_rejects_vo_work_projects_inside_workspace() {
+    fn resolve_local_dev_target_preserves_external_vo_work_project_root() {
+        let source_root = make_temp_dir("external-dev-work-project");
+        let game_root = source_root.join("MarbleRush");
+        fs::create_dir_all(game_root.join("src")).unwrap();
+
+        fs::write(game_root.join("vo.work"), "vo 0.1\n\nuse ../voplay\n").unwrap();
+        fs::write(game_root.join("vo.mod"), "module marblerush\n\nvo 0.1\n").unwrap();
+        fs::write(game_root.join("src/main.vo"), "package main\n").unwrap();
+
+        let resolved = resolve_local_dev_target(&game_root.join("src/main.vo")).unwrap();
+        assert_eq!(
+            PathBuf::from(&resolved.target_path).canonicalize().unwrap(),
+            game_root.join("src/main.vo").canonicalize().unwrap()
+        );
+        assert_eq!(
+            PathBuf::from(&resolved.session_root).canonicalize().unwrap(),
+            game_root.canonicalize().unwrap()
+        );
+
+        fs::remove_dir_all(&source_root).unwrap();
+    }
+
+    #[test]
+    fn resolve_compile_target_allows_vo_work_projects_inside_workspace() {
         let workspace_root = make_temp_dir("workspace-compile-work");
         let project_root = workspace_root.join("demo");
         fs::create_dir_all(&project_root).unwrap();
@@ -503,9 +598,11 @@ mod tests {
         fs::write(project_root.join("vo.mod"), "module demo\n\nvo 0.1\n").unwrap();
         fs::write(project_root.join("main.vo"), "package main\n").unwrap();
 
-        let err = resolve_compile_target(&workspace_root, "demo/main.vo").unwrap_err();
-        assert!(err.message.contains("Studio does not support vo.work workspaces"));
-        assert!(err.message.contains("vo.work"));
+        let compile_target = resolve_compile_target(&workspace_root, "demo/main.vo").unwrap();
+        assert_eq!(
+            PathBuf::from(&compile_target).canonicalize().unwrap(),
+            project_root.canonicalize().unwrap()
+        );
 
         fs::remove_dir_all(&workspace_root).unwrap();
     }

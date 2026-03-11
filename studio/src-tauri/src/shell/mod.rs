@@ -140,5 +140,6 @@ pub fn cmd_shell_exec(
     state: tauri::State<'_, crate::AppState>,
     app:   tauri::AppHandle,
 ) -> Result<ShellResponse, String> {
-    Ok(state.shell_runner.handle(req, &app))
+    let session_root = crate::current_session_root(&state);
+    Ok(state.shell_runner.handle(req, &app, &session_root))
 }

@@ -19,9 +19,28 @@
 
   let bridgeReady = false;
   let bridgeError = '';
+  let bridgeErrorTitle = 'Failed to initialize Vibe Studio bridge';
   let loadingStep = 'Loading…';
   let PreviewPanelComponent: ComponentType | null = null;
   let previewPanelLoading: Promise<void> | null = null;
+
+  function formatStartupError(err: unknown): string {
+    if (typeof err === 'string') return err;
+    if (err instanceof Error) return err.message;
+    if (typeof err === 'object' && err !== null) {
+      const message = (err as any).message;
+      const code = (err as any).code;
+      if (typeof message === 'string' && typeof code === 'string') {
+        return `[${code}] ${message}`;
+      }
+      if (typeof message === 'string') return message;
+      try {
+        return JSON.stringify(err, null, 2);
+      } catch {
+      }
+    }
+    return String(err);
+  }
 
   async function ensurePreviewPanelLoaded(): Promise<void> {
     if (PreviewPanelComponent) return;
@@ -39,14 +58,20 @@
       loadingStep = 'Preparing workspace…';
       await actions.initWorkspace();
       termInit(bridge().workspaceRoot);
+      bridgeReady = true;
       const launchUrl = await resolveInitialStudioLaunchUrl();
       if (launchUrl) {
         loadingStep = 'Opening launch target…';
-        await executeStudioLaunch(launchUrl);
+        try {
+          await executeStudioLaunch(launchUrl);
+        } catch (e: unknown) {
+          bridgeErrorTitle = 'Failed to open Studio launch target';
+          bridgeError = formatStartupError(e);
+        }
       }
-      bridgeReady = true;
-    } catch (e: any) {
-      bridgeError = String(e);
+    } catch (e: unknown) {
+      bridgeErrorTitle = 'Failed to initialize Vibe Studio bridge';
+      bridgeError = formatStartupError(e);
     }
   });
 
@@ -61,7 +86,7 @@
 
 {#if bridgeError}
   <div class="splash">
-    <pre class="error-text">Failed to initialize Vibe Studio bridge:{'\n'}{bridgeError}</pre>
+    <pre class="error-text">{bridgeErrorTitle}:{'\n'}{bridgeError}</pre>
   </div>
 {:else if !bridgeReady}
   <div class="splash">
