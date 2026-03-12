@@ -17,19 +17,98 @@ use vo_runtime::ffi::ExternRegistry;
 use vo_runtime::itab::ItabCache;
 
 #[cfg(feature = "std")]
-use std::sync::mpsc::{Sender, Receiver};
-#[cfg(feature = "std")]
 use std::thread::JoinHandle;
 #[cfg(feature = "std")]
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 #[cfg(feature = "std")]
-use vo_runtime::island::IslandCommand;
-
-/// Shared registry of island command senders.
+use vo_runtime::island::{IslandCommand, ChanRequestKind, ChanResponseKind};
 #[cfg(feature = "std")]
-pub type IslandRegistry = Arc<Mutex<HashMap<u32, Sender<IslandCommand>>>>;
+use vo_runtime::island_transport::{IslandSender, IslandTransport, TransportError};
+
+/// Shared registry of island senders.
+/// Island VMs use this shared map as their command-routing source.
+#[cfg(feature = "std")]
+pub type IslandRegistry = Arc<Mutex<HashMap<u32, Arc<dyn IslandSender>>>>;
+
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub enum IslandRouteError {
+    MissingSender { island_id: u32 },
+    RegistryPoisoned { island_id: u32 },
+    Transport { island_id: u32, error: TransportError },
+}
+
+// =============================================================================
+// EndpointRegistry
+// =============================================================================
+
+/// Entry in the endpoint registry.
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub enum EndpointEntry {
+    /// Channel is live — GcRef to the channel object.
+    Live(GcRef),
+    /// Channel was closed/collected — stale messages get idempotent closed responses.
+    Tombstone,
+}
+
+/// Registry mapping endpoint IDs to local channel GcRefs.
+/// Used on both home islands (LOCAL channels) and remote islands (REMOTE proxies)
+/// to route incoming ChanRequest/ChanResponse commands.
+#[cfg(feature = "std")]
+pub struct EndpointRegistry {
+    pub entries: HashMap<u64, EndpointEntry>,
+}
+
+#[cfg(feature = "std")]
+impl EndpointRegistry {
+    pub fn new() -> Self {
+        Self { entries: HashMap::new() }
+    }
+
+    /// Register or update a live channel for an endpoint.
+    pub fn register_live(&mut self, endpoint_id: u64, ch: GcRef) {
+        self.entries.insert(endpoint_id, EndpointEntry::Live(ch));
+    }
+
+    /// Ensure endpoint is registered as live (idempotent).
+    pub fn ensure_live(&mut self, endpoint_id: u64, ch: GcRef) {
+        self.entries.entry(endpoint_id).or_insert(EndpointEntry::Live(ch));
+    }
+
+    /// Get a live channel by endpoint ID. Returns None for tombstones and missing.
+    pub fn get_live(&self, endpoint_id: u64) -> Option<GcRef> {
+        match self.entries.get(&endpoint_id) {
+            Some(EndpointEntry::Live(ch)) => Some(*ch),
+            _ => None,
+        }
+    }
+
+    /// Mark an endpoint as tombstoned (channel closed or collected).
+    pub fn mark_tombstone(&mut self, endpoint_id: u64) {
+        self.entries.insert(endpoint_id, EndpointEntry::Tombstone);
+    }
+
+    /// Check if an endpoint is tombstoned.
+    pub fn is_tombstone(&self, endpoint_id: u64) -> bool {
+        matches!(self.entries.get(&endpoint_id), Some(EndpointEntry::Tombstone))
+    }
+
+    /// Clear all tombstones (called periodically or on shutdown).
+    pub fn clear_tombstones(&mut self) {
+        self.entries.retain(|_, v| matches!(v, EndpointEntry::Live(_)));
+    }
+
+    /// Iterate all live GcRefs for GC root scanning.
+    pub fn live_channels(&self) -> impl Iterator<Item = GcRef> + '_ {
+        self.entries.values().filter_map(|e| match e {
+            EndpointEntry::Live(ch) => Some(*ch),
+            EndpointEntry::Tombstone => None,
+        })
+    }
+}
 
 /// Time slice: number of instructions before forced yield check.
 /// VM executes at most TIME_SLICE instructions per fiber before yielding to scheduler.
@@ -81,8 +160,6 @@ pub struct ErrorLocation {
      SliceBoundsOutOfRange,
      MakeSlice,
      MakeChan,
-     MakePort,
-     PortNotSupported,
      SendOnClosedChannel,
      SendOnNilChannel,
      RecvOnNilChannel,
@@ -126,8 +203,7 @@ pub enum VmError {
 /// Active island thread info.
 #[cfg(feature = "std")]
 pub struct IslandThread {
-    pub handle: GcRef,
-    pub command_tx: Sender<IslandCommand>,
+    pub island_id: u32,
     pub join_handle: Option<JoinHandle<()>>,
 }
 
@@ -153,15 +229,23 @@ pub struct VmState {
     /// Active island threads (index = island_id - 1, since main island is 0)
     #[cfg(feature = "std")]
     pub island_threads: Vec<IslandThread>,
-    /// Shared registry for cross-island wake (used by island VMs)
+    /// Shared registry used by island VMs for in-thread command routing.
     #[cfg(feature = "std")]
     pub island_registry: Option<IslandRegistry>,
     /// Current island ID (0 for main island)
-    #[cfg(feature = "std")]
     pub current_island_id: u32,
-    /// Main island's command receiver (for wake commands from other islands)
+    /// Main island's command receiver.
     #[cfg(feature = "std")]
-    pub main_cmd_rx: Option<Receiver<IslandCommand>>,
+    pub main_transport: Option<Box<dyn IslandTransport>>,
+    /// Per-island sender map. Key = island_id, Value = sender trait object.
+    /// Single-owner per island thread — no Mutex wrapper needed.
+    #[cfg(feature = "std")]
+    pub island_senders: HashMap<u32, Arc<dyn IslandSender>>,
+    /// Next endpoint ID counter for this island.
+    pub next_endpoint_id: u64,
+    /// Endpoint registry — maps endpoint IDs to local channel GcRefs.
+    #[cfg(feature = "std")]
+    pub endpoint_registry: EndpointRegistry,
 }
 
 impl VmState {
@@ -183,41 +267,114 @@ impl VmState {
             island_threads: Vec::new(),
             #[cfg(feature = "std")]
             island_registry: None,
-            #[cfg(feature = "std")]
             current_island_id: 0,
             #[cfg(feature = "std")]
-            main_cmd_rx: None,
+            main_transport: None,
+            #[cfg(feature = "std")]
+            island_senders: HashMap::new(),
+            next_endpoint_id: 1, // 0 is reserved
+            #[cfg(feature = "std")]
+            endpoint_registry: EndpointRegistry::new(),
         }
     }
     
-    /// Send wake command to an island via shared registry.
+    /// Send wake command to an island.
+    /// Delegates to send_to_island so both main VM and island threads work.
     #[cfg(feature = "std")]
-    pub fn send_wake_to_island(&self, island_id: u32, fiber_id: u32) -> bool {
+    pub fn send_wake_to_island(&self, island_id: u32, fiber_id: u32) {
+        self.send_to_island(island_id, IslandCommand::WakeFiber { fiber_id })
+    }
+
+    /// Send any command to an island.
+    /// Main VM uses `island_senders`; island VMs use the shared in-thread registry.
+    #[cfg(feature = "std")]
+    pub fn try_send_to_island(&self, island_id: u32, cmd: IslandCommand) -> Result<(), IslandRouteError> {
+        if let Some(sender) = self.island_senders.get(&island_id) {
+            return sender
+                .send_command(cmd)
+                .map_err(|error| IslandRouteError::Transport { island_id, error });
+        }
         if let Some(ref registry) = self.island_registry {
-            if let Ok(guard) = registry.lock() {
-                if let Some(tx) = guard.get(&island_id) {
-                    return tx.send(IslandCommand::WakeFiber { fiber_id }).is_ok();
-                }
+            let guard = registry
+                .lock()
+                .map_err(|_| IslandRouteError::RegistryPoisoned { island_id })?;
+            if let Some(sender) = guard.get(&island_id) {
+                return sender
+                    .send_command(cmd)
+                    .map_err(|error| IslandRouteError::Transport { island_id, error });
             }
         }
-        false
+        Err(IslandRouteError::MissingSender { island_id })
+    }
+
+    /// Send any command to an island.
+    /// Operational paths are fail-fast; teardown paths should use try_send_to_island.
+    #[cfg(feature = "std")]
+    pub fn send_to_island(&self, island_id: u32, cmd: IslandCommand) {
+        self.try_send_to_island(island_id, cmd).unwrap_or_else(|error| {
+            panic!("send_to_island failed for island {}: {:?}", island_id, error)
+        });
+    }
+
+    #[cfg(feature = "std")]
+    pub fn send_spawn_fiber_to_island(&self, island_id: u32, closure_data: vo_runtime::pack::PackedValue) {
+        self.send_to_island(island_id, IslandCommand::SpawnFiber { closure_data });
+    }
+
+    #[cfg(feature = "std")]
+    pub fn send_chan_request(
+        &self,
+        island_id: u32,
+        endpoint_id: u64,
+        kind: ChanRequestKind,
+        from_island: u32,
+        fiber_id: u64,
+    ) {
+        self.send_to_island(island_id, IslandCommand::ChanRequest {
+            endpoint_id,
+            kind,
+            from_island,
+            fiber_id,
+        });
+    }
+
+    #[cfg(feature = "std")]
+    pub fn send_chan_response(
+        &self,
+        island_id: u32,
+        endpoint_id: u64,
+        kind: ChanResponseKind,
+        fiber_id: u64,
+    ) {
+        self.send_to_island(island_id, IslandCommand::ChanResponse {
+            endpoint_id,
+            kind,
+            fiber_id,
+        });
+    }
+
+    /// Allocate a new endpoint ID for this island.
+    /// Format: high 32 bits = island_id, low 32 bits = counter.
+    pub fn allocate_endpoint_id(&mut self) -> u64 {
+        let id = ((self.current_island_id as u64) << 32) | self.next_endpoint_id;
+        self.next_endpoint_id += 1;
+        id
     }
 
     /// Check if waiter is on current island.
-    #[cfg(feature = "std")]
     #[inline]
-    pub fn is_local_waiter(&self, waiter: &vo_runtime::objects::port::WaiterInfo) -> bool {
+    pub fn is_local_waiter(&self, waiter: &vo_runtime::objects::queue_state::QueueWaiter) -> bool {
         waiter.island_id == self.current_island_id
     }
 
     /// Wake a waiter (local or remote). No PC modification - blocker sets resume PC.
-    #[cfg(feature = "std")]
-    pub fn wake_waiter(&self, waiter: &vo_runtime::objects::port::WaiterInfo, scheduler: &mut crate::scheduler::Scheduler) {
+    pub fn wake_waiter(&self, waiter: &vo_runtime::objects::queue_state::QueueWaiter, scheduler: &mut crate::scheduler::Scheduler) {
         if waiter.island_id == self.current_island_id {
-            let fiber_id = crate::scheduler::FiberId::from_raw(waiter.fiber_id as u32);
-            scheduler.wake_fiber(fiber_id);
+            scheduler.wake_queue_waiter(waiter);
         } else {
-            self.send_wake_to_island(waiter.island_id, waiter.fiber_id as u32);
+            #[cfg(feature = "std")]
+            { self.send_wake_to_island(waiter.island_id, waiter.fiber_id as u32); }
+            // no_std: remote wakes are delivered by the host through transport commands
         }
     }
 }
@@ -231,13 +388,10 @@ impl Default for VmState {
 #[cfg(feature = "std")]
 impl Drop for VmState {
     fn drop(&mut self) {
-        // Shutdown all island threads and wait for them to complete
-        for island in &mut self.island_threads {
-            // Send shutdown command
-            let _ = island.command_tx.send(IslandCommand::Shutdown);
+        for island in &self.island_threads {
+            let _ = self.try_send_to_island(island.island_id, IslandCommand::Shutdown);
         }
-        
-        // Wait for all threads to finish
+
         for island in &mut self.island_threads {
             if let Some(handle) = island.join_handle.take() {
                 let _ = handle.join();

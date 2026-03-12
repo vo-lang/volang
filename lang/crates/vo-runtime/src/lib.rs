@@ -16,6 +16,7 @@ pub mod itab;
 pub mod pack;
 pub mod island;
 pub mod island_msg;
+pub mod island_transport;
 
 // FFI core types (no_std compatible), registration requires std
 pub mod ffi;

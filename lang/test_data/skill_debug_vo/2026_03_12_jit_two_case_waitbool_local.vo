@@ -1,0 +1,37 @@
+package main
+
+import "time"
+
+func waitBool(ch chan bool, label string) bool {
+	done := false
+	value := false
+	for i := 0; i < 100 && !done; i += 1 {
+		select {
+		case value = <-ch:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, label)
+	return value
+}
+
+func main() {
+	{
+		ch := make(chan bool, 1)
+		go func(out chan bool) {
+			time.Sleep(10 * time.Millisecond)
+			out <- true
+		}(ch)
+		assert(waitBool(ch, "case1") == true, "case1 true")
+	}
+	{
+		ch := make(chan bool, 1)
+		go func(out chan bool) {
+			time.Sleep(10 * time.Millisecond)
+			out <- true
+		}(ch)
+		assert(waitBool(ch, "case2") == true, "case2 true")
+	}
+}

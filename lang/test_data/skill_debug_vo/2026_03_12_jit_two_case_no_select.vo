@@ -1,0 +1,34 @@
+package main
+
+type Pair struct {
+	Left chan int
+	Right chan int
+}
+
+func main() {
+	{
+		i := make(island)
+		outer := make(chan Pair, 1)
+		inner := make(chan int, 1)
+		eq := make(chan bool, 1)
+		go @(i) func(ch chan Pair, out chan bool) {
+			pair := <-ch
+			out <- (pair.Left == pair.Right)
+		}(outer, eq)
+		outer <- Pair{Left: inner, Right: inner}
+		assert(<-eq, "struct alias")
+	}
+
+	{
+		i := make(island)
+		outer := make(chan []chan int, 1)
+		inner := make(chan int, 1)
+		eq := make(chan bool, 1)
+		go @(i) func(ch chan []chan int, out chan bool) {
+			items := <-ch
+			out <- (items[0] == items[1])
+		}(outer, eq)
+		outer <- []chan int{inner, inner}
+		assert(<-eq, "slice alias")
+	}
+}

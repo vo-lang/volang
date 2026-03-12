@@ -12,6 +12,7 @@ mod decl;
 pub mod errors;
 pub(crate) mod escape;
 mod expr;
+pub(crate) mod go_island;
 pub(crate) mod format;
 mod initorder;
 mod interface;

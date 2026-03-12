@@ -291,26 +291,6 @@ pub enum Opcode {
     /// a = dst
     IslandNew,
 
-    // === PORT: Cross-island channel operations ===
-    /// Create a new port
-    /// a = dst, b = elem_meta (const idx), c = capacity, flags = elem_slots
-    PortNew,
-    /// Send value through port (blocks until sent)
-    /// a = port, b = src, flags = elem_slots
-    PortSend,
-    /// Receive value from port (blocks until received)
-    /// a = dst, b = port, flags = (elem_slots << 1) | has_ok
-    PortRecv,
-    /// Close port
-    /// a = port
-    PortClose,
-    /// Get port buffer length
-    /// a = dst, b = port
-    PortLen,
-    /// Get port capacity
-    /// a = dst, b = port
-    PortCap,
-
     /// Start goroutine on specific island
     /// a = island, b = closure, flags = capture_slots
     GoIsland,

@@ -1383,6 +1383,11 @@ skip = ["wasm"]
 reason = "island/goroutine not supported in wasm"
 
 [[tests]]
+file = "island_nested_channel_transfer.vo"
+skip = ["wasm"]
+reason = "island/goroutine not supported in wasm"
+
+[[tests]]
 file = "skill_debug_vo/2026_01_28_1340_port_recv_ok.vo"
 skip = ["wasm"]
 reason = "port requires goroutine"
@@ -1513,5 +1518,15 @@ reason = "net_dial requires native externs"
 file = "lang/test/tcp_read_test.vo"
 skip = ["wasm"]
 reason = "net_dial requires native externs"
+
+[[tests]]
+file = "typechecker/go_island_sendability.vo"
+should_fail = true
+reason = "go @(island) target type and capture/arg sendability checks"
+
+[[tests]]
+file = "island_channel_alias_and_select.vo"
+skip = ["wasm"]
+reason = "island requires goroutine"
 
 

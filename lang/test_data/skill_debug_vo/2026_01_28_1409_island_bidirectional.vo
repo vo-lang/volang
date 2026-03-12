@@ -5,11 +5,11 @@ import "time"
 
 func main() {
 	i := make(island)
-	reqPort := make(port int, 0)
-	respPort := make(port int, 0)
+	reqPort := make(chan int, 0)
+	respPort := make(chan int, 0)
 	
 	// Island receives request, sends response
-	go @(i) func(req port int, resp port int) {
+	go @(i) func(req chan int, resp chan int) {
 		for j := 0; j < 3; j++ {
 			v := <-req
 			println("island received:", v)

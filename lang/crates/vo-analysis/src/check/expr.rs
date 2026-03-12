@@ -1353,11 +1353,6 @@ impl Checker {
                     x.mode = OperandMode::CommaOk;
                     x.typ = Some(chan.elem());
                     self.octx.has_call_or_recv = true;
-                } else if let Some(port) = underlying.try_as_port() {
-                    // Port receive: <-p
-                    x.mode = OperandMode::CommaOk;
-                    x.typ = Some(port.elem());
-                    self.octx.has_call_or_recv = true;
                 } else {
                     self.invalid_op(recv.span, "cannot receive from non-channel");
                     x.mode = OperandMode::Invalid;

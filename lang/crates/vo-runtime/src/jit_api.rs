@@ -365,10 +365,6 @@ pub struct JitContext {
     /// Returns JitResult (Ok or Panic).
     pub chan_close_fn: Option<extern "C" fn(*mut JitContext, chan: u64) -> JitResult>,
     
-    /// Callback to close a port.
-    /// Returns JitResult (Ok or Panic).
-    pub port_close_fn: Option<extern "C" fn(*mut JitContext, port: u64) -> JitResult>,
-    
     /// Callback to send on a channel.
     /// Returns JitResult (Ok, Panic, or WaitIo).
     pub chan_send_fn: Option<extern "C" fn(*mut JitContext, chan: u64, val_ptr: *const u64, val_slots: u32) -> JitResult>,
@@ -376,14 +372,6 @@ pub struct JitContext {
     /// Callback to receive from a channel.
     /// Returns JitResult (Ok, Panic, or WaitIo).
     pub chan_recv_fn: Option<extern "C" fn(*mut JitContext, chan: u64, dst_ptr: *mut u64, elem_slots: u32, has_ok: u32) -> JitResult>,
-    
-    /// Callback to send on a port.
-    /// Returns JitResult (Ok, Panic, or WaitIo).
-    pub port_send_fn: Option<extern "C" fn(*mut JitContext, port: u64, val_ptr: *const u64, val_slots: u32) -> JitResult>,
-    
-    /// Callback to receive from a port.
-    /// Returns JitResult (Ok, Panic, or WaitIo).
-    pub port_recv_fn: Option<extern "C" fn(*mut JitContext, port: u64, dst_ptr: *mut u64, elem_slots: u32, has_ok: u32) -> JitResult>,
     
     /// Callback to spawn a new goroutine.
     /// func_id: function to run, is_closure: 1 if closure, closure_ref: closure GcRef (or 0), 
@@ -509,11 +497,8 @@ impl JitContext {
     // VM callback offsets
     pub const OFFSET_CREATE_ISLAND_FN: i32 = std::mem::offset_of!(JitContext, create_island_fn) as i32;
     pub const OFFSET_CHAN_CLOSE_FN: i32 = std::mem::offset_of!(JitContext, chan_close_fn) as i32;
-    pub const OFFSET_PORT_CLOSE_FN: i32 = std::mem::offset_of!(JitContext, port_close_fn) as i32;
     pub const OFFSET_CHAN_SEND_FN: i32 = std::mem::offset_of!(JitContext, chan_send_fn) as i32;
     pub const OFFSET_CHAN_RECV_FN: i32 = std::mem::offset_of!(JitContext, chan_recv_fn) as i32;
-    pub const OFFSET_PORT_SEND_FN: i32 = std::mem::offset_of!(JitContext, port_send_fn) as i32;
-    pub const OFFSET_PORT_RECV_FN: i32 = std::mem::offset_of!(JitContext, port_recv_fn) as i32;
     pub const OFFSET_GO_START_FN: i32 = std::mem::offset_of!(JitContext, go_start_fn) as i32;
     pub const OFFSET_GO_ISLAND_FN: i32 = std::mem::offset_of!(JitContext, go_island_fn) as i32;
     
@@ -554,7 +539,7 @@ pub enum JitResult {
     /// The IoToken is stored in JitContext.wait_io_token.
     /// After I/O completes, VM resumes execution in interpreter at call_resume_pc.
     WaitIo = 3,
-    /// JIT requests VM to block on queue operation (channel/port send/recv).
+    /// JIT requests VM to block on queue operation (channel send/recv).
     /// Unlike WaitIo, no token is needed - fiber is woken via ChannelWaiter.
     /// After being woken, VM resumes execution in interpreter at call_resume_pc.
     WaitQueue = 4,
@@ -1061,42 +1046,6 @@ pub extern "C" fn vo_chan_cap(ch: u64) -> u64 {
 }
 
 // =============================================================================
-// Port Helpers
-// =============================================================================
-
-/// Create a new port with validation (unified logic for VM and JIT).
-#[no_mangle]
-pub extern "C" fn vo_port_new_checked(gc: *mut Gc, elem_meta: u32, elem_slots: u32, cap: i64, out: *mut u64) -> i32 {
-    use crate::objects::port;
-    use crate::ValueMeta;
-    unsafe {
-        match port::create_checked(&mut *gc, ValueMeta::from_raw(elem_meta), elem_slots as u16, cap) {
-            Ok(result) => { *out = result as u64; 0 }
-            Err(code) => code,
-        }
-    }
-}
-
-
-/// Get port length (number of elements in buffer).
-#[no_mangle]
-pub extern "C" fn vo_port_len(p: u64) -> u64 {
-    use crate::objects::port;
-    use crate::gc::GcRef;
-    let p = p as GcRef;
-    if p.is_null() { 0 } else { port::len(p) as u64 }
-}
-
-/// Get port capacity.
-#[no_mangle]
-pub extern "C" fn vo_port_cap(p: u64) -> u64 {
-    use crate::objects::queue_state;
-    use crate::gc::GcRef;
-    let p = p as GcRef;
-    if p.is_null() { 0 } else { queue_state::capacity(p) as u64 }
-}
-
-// =============================================================================
 // Array Helpers
 // =============================================================================
 
@@ -1573,14 +1522,10 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_map_iter_init", vo_map_iter_init as *const u8),
         ("vo_map_iter_next", vo_map_iter_next as *const u8),
         ("vo_copy", vo_copy as *const u8),
-        ("vo_port_new_checked", vo_port_new_checked as *const u8),
         ("vo_island_new", vo_island_new as *const u8),
         ("vo_chan_close", vo_chan_close as *const u8),
-        ("vo_port_close", vo_port_close as *const u8),
         ("vo_chan_send", vo_chan_send as *const u8),
         ("vo_chan_recv", vo_chan_recv as *const u8),
-        ("vo_port_send", vo_port_send as *const u8),
-        ("vo_port_recv", vo_port_recv as *const u8),
         ("vo_go_start", vo_go_start as *const u8),
         ("vo_go_island", vo_go_island as *const u8),
         ("vo_select_begin", vo_select_begin as *const u8),
@@ -1591,7 +1536,7 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
 }
 
 // =============================================================================
-// Island/Channel/Port JIT Helpers
+// Island/Channel JIT Helpers
 // =============================================================================
 
 /// Create a new island.
@@ -1611,15 +1556,6 @@ pub extern "C" fn vo_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
     let ctx = unsafe { &mut *ctx };
     let close_fn = ctx.chan_close_fn.expect("chan_close_fn not set");
     close_fn(ctx, chan)
-}
-
-/// Close a port.
-/// Returns JitResult::Ok on success, JitResult::Panic on nil/closed port.
-#[no_mangle]
-pub extern "C" fn vo_port_close(ctx: *mut JitContext, port: u64) -> JitResult {
-    let ctx = unsafe { &mut *ctx };
-    let close_fn = ctx.port_close_fn.expect("port_close_fn not set");
-    close_fn(ctx, port)
 }
 
 // =============================================================================
@@ -1644,30 +1580,6 @@ pub extern "C" fn vo_chan_recv(ctx: *mut JitContext, chan: u64, dst_ptr: *mut u6
     let ctx = unsafe { &mut *ctx };
     let recv_fn = ctx.chan_recv_fn.expect("chan_recv_fn not set");
     recv_fn(ctx, chan, dst_ptr, elem_slots, has_ok)
-}
-
-// =============================================================================
-// Port Send/Recv
-// =============================================================================
-
-/// Send on a port.
-/// Returns JitResult::Ok on success, JitResult::Panic on closed port,
-/// or JitResult::WaitIo if the send would block.
-#[no_mangle]
-pub extern "C" fn vo_port_send(ctx: *mut JitContext, port: u64, val_ptr: *const u64, val_slots: u32) -> JitResult {
-    let ctx = unsafe { &mut *ctx };
-    let send_fn = ctx.port_send_fn.expect("port_send_fn not set");
-    send_fn(ctx, port, val_ptr, val_slots)
-}
-
-/// Receive from a port.
-/// Returns JitResult::Ok on success (including closed port),
-/// or JitResult::WaitIo if would block.
-#[no_mangle]
-pub extern "C" fn vo_port_recv(ctx: *mut JitContext, port: u64, dst_ptr: *mut u64, elem_slots: u32, has_ok: u32) -> JitResult {
-    let ctx = unsafe { &mut *ctx };
-    let recv_fn = ctx.port_recv_fn.expect("port_recv_fn not set");
-    recv_fn(ctx, port, dst_ptr, elem_slots, has_ok)
 }
 
 // =============================================================================

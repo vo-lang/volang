@@ -1,0 +1,24 @@
+// Test: go @(island) sendability checks
+// This file should FAIL type checking
+
+package main
+
+func main() {
+	i := make(island)
+
+	// Error 1: target must be island type
+	x := 42
+	go @(x) func() {}()
+
+	// Error 2: closure cannot be sent across island boundary
+	f := func() {}
+	go @(i) func(fn func()) {
+		fn()
+	}(f)
+
+	// Error 3: captured closure is not sendable
+	callback := func() int { return 1 }
+	go @(i) func() {
+		_ = callback()
+	}()
+}

@@ -881,7 +881,7 @@ impl CodegenContext {
     }
     
     /// Get ValueMeta for boxing a variable.
-    /// For reference types (port, channel, slice, etc.), returns ref box meta (Struct)
+    /// For reference types (channel, slice, etc.), returns ref box meta (Struct)
     /// to avoid creating invalid GC objects with wrong ValueKind.
     /// For value types, returns the actual type's ValueMeta.
     pub fn get_boxing_meta(

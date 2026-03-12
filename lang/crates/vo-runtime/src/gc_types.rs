@@ -1,7 +1,7 @@
 //! GC object scanning by type.
 
 use crate::gc::{scan_slots_by_types, Gc, GcRef};
-use crate::objects::{array, channel, closure, interface, map, port, queue_state, slice};
+use crate::objects::{array, channel, closure, interface, map, queue_state, slice};
 use crate::slot::{byte_offset_for_slots, slot_to_ptr, Slot, SLOT_BYTES};
 use vo_common_core::bytecode::StructMeta;
 use vo_common_core::types::{SlotType, ValueKind, ValueMeta};
@@ -53,7 +53,7 @@ pub fn typed_write_barrier_by_meta(
     match vk {
         // Single-slot reference types: the entire value is a GcRef
         ValueKind::String | ValueKind::Slice | ValueKind::Map | ValueKind::Closure |
-        ValueKind::Channel | ValueKind::Pointer | ValueKind::Port | ValueKind::Island => {
+        ValueKind::Channel | ValueKind::Pointer | ValueKind::Island => {
             if !vals.is_empty() && vals[0] != 0 {
                 gc.write_barrier(parent, vals[0] as GcRef);
             }
@@ -144,8 +144,8 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_ca
             }
         }
 
-        // Port: state is Arc<Mutex<>> on Rust heap, not a GC object.
-        // Elements live in QueueState's Vecs, also Rust heap. No GC refs to scan.
+        // Remote channel proxy: state lives on home island, not locally.
+        // LOCAL channels are scanned via scan_channel. No GC refs to scan here.
         // Island: id only, no GC refs.
         // Void: used for defer args storage — scanned precisely by scan_defer_entry.
         // Primitives: no GC refs.
@@ -269,6 +269,9 @@ fn scan_array_struct_elem(gc: &mut Gc, obj: GcRef, idx: usize, elem_bytes: usize
 }
 
 fn scan_channel(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
+    // REMOTE channels have no local state — elements live on the home island
+    if channel::is_remote(obj) { return; }
+
     let elem_meta = queue_state::elem_meta(obj);
     let elem_kind = elem_meta.value_kind();
     if !elem_kind.may_contain_gc_refs() { return; }
@@ -391,11 +394,6 @@ pub fn finalize_object(obj: GcRef) {
         ValueKind::Map => {
             if header.slots == map::DATA_SLOTS {
                 unsafe { map::drop_inner(obj); }
-            }
-        }
-        ValueKind::Port => {
-            if header.slots == queue_state::DATA_SLOTS {
-                unsafe { port::drop_inner(obj); }
             }
         }
         // Island has no native resources to finalize (channels managed by VM)

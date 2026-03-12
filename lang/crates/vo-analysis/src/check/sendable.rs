@@ -1,7 +1,7 @@
 //! Sendability checking for cross-island communication.
 //!
 //! This module determines whether a type can be safely sent across island boundaries.
-//! Sendable types are deep-copied when sent via `port[T]` or captured by `go(island)`.
+//! Sendable types are deep-copied when sent via channels or captured by `go(island)`.
 
 use crate::objects::{TCObjects, TypeKey};
 use crate::typ::{deep_underlying_type, Type};
@@ -49,13 +49,12 @@ impl Sendability {
 /// - struct where all fields are sendable
 /// - *T where T is sendable (pointed object is deep-copied)
 /// - map[K]V where K and V are sendable
+/// - chan T - handle transfer (endpoint_id + home_island); queue stays on home island
 ///
 /// Runtime-checked (needs_runtime_check = true):
 /// - any/interface{} - allowed at compile time, verified at runtime
 ///
 /// Not sendable:
-/// - chan[T] - bound to island scheduler
-/// - port[T] - bound to island scheduler  
 /// - island - represents VM instance
 /// - func/closures - may capture island-local state
 pub fn check_sendable(type_key: TypeKey, objs: &TCObjects) -> Sendability {
@@ -116,8 +115,7 @@ fn check_sendable_impl(
             key_result.merge(elem_result)
         }
 
-        Type::Chan(_) => Sendability::NotSendable("chan is bound to island scheduler".into()),
-        Type::Port(_) => Sendability::NotSendable("port is bound to island scheduler".into()),
+        Type::Chan(_) => Sendability::Static, // channel handle (endpoint_id + home_island) is transferred, not queue data
         Type::Island => Sendability::NotSendable("island represents a VM instance".into()),
         Type::Interface(_) => Sendability::RuntimeCheck,
         Type::Signature(_) => Sendability::NotSendable("func may capture island-local state".into()),

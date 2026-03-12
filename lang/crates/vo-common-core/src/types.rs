@@ -97,8 +97,8 @@ impl ValueRttid {
 ///
 /// Layout:
 /// - Primitives (0-14): 1 slot, no GC
-/// - Compound value types (16, 21, 23): multi-slot, may contain GC refs
-/// - Reference types (15, 17-20, 22): 1 slot GcRef, heap allocated
+/// - Compound value types (16, 21): multi-slot, may contain GC refs
+/// - Reference types (15, 17-20, 22, 24): 1 slot GcRef, heap allocated
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, TryFromPrimitive)]
 #[repr(u8)]
 pub enum ValueKind {
@@ -130,7 +130,6 @@ pub enum ValueKind {
     Channel = 20,
     Closure = 21,
     Pointer = 22,
-    Port = 23,
     Island = 24,
 }
 

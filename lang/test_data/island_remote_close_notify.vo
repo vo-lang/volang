@@ -1,0 +1,107 @@
+// Test: Remote close of a home channel must notify all peer islands.
+//
+// Scenario:
+//   1. Main island creates a channel and spawns goroutines on two islands.
+//   2. Both island goroutines hold proxies to the same home channel.
+//   3. One island closes the channel via remote close.
+//   4. The other island tries to recv — must see closed (zero value, ok=false).
+//   5. Main island also tries to recv — must see closed.
+//
+// This exercises:
+//   - Remote close sending ChanRequestKind::Close to home
+//   - Home island broadcasting ChanResponseKind::Closed to all peers
+//   - Remote proxy marking closed on broadcast receipt
+
+package main
+
+import "time"
+
+func waitBool(ch chan bool, label string) bool {
+	done := false
+	value := false
+	for i := 0; i < 200 && !done; i += 1 {
+		select {
+		case value = <-ch:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, label)
+	return value
+}
+
+func main() {
+	testRemoteCloseSeenByOtherIsland()
+	testRemoteCloseSeenByMainIsland()
+	testRemoteSendOnClosedPanics()
+}
+
+// Island A closes the channel, Island B recv sees closed.
+func testRemoteCloseSeenByOtherIsland() {
+	islandA := make(island)
+	islandB := make(island)
+	ch := make(chan int, 1)
+	closeDone := make(chan bool, 1)
+	recvResult := make(chan bool, 1)
+
+	// Island A: close the channel after a short delay
+	go @(islandA) func(data chan int, done chan bool) {
+		time.Sleep(30 * time.Millisecond)
+		close(data)
+		done <- true
+	}(ch, closeDone)
+
+	// Island B: try to recv — should eventually see closed
+	go @(islandB) func(data chan int, out chan bool) {
+		v, ok := <-data
+		out <- (v == 0 && ok == false)
+	}(ch, recvResult)
+
+	waitBool(closeDone, "testRemoteCloseSeenByOtherIsland: close timed out")
+	result := waitBool(recvResult, "testRemoteCloseSeenByOtherIsland: recv timed out")
+	assert(result, "remote close must be seen by other island as zero-value + ok=false")
+}
+
+// Island A closes the channel, main island recv sees closed.
+func testRemoteCloseSeenByMainIsland() {
+	islandA := make(island)
+	ch := make(chan int, 1)
+	closeDone := make(chan bool, 1)
+
+	go @(islandA) func(data chan int, done chan bool) {
+		time.Sleep(20 * time.Millisecond)
+		close(data)
+		done <- true
+	}(ch, closeDone)
+
+	waitBool(closeDone, "testRemoteCloseSeenByMainIsland: close timed out")
+	// Give time for close broadcast to propagate
+	time.Sleep(30 * time.Millisecond)
+
+	v, ok := <-ch
+	assert(v == 0, "main island recv after remote close must get zero value")
+	assert(ok == false, "main island recv after remote close must get ok=false")
+}
+
+// Remote send on a closed channel must panic (recovered).
+func testRemoteSendOnClosedPanics() {
+	islandA := make(island)
+	ch := make(chan int, 1)
+	result := make(chan bool, 1)
+
+	close(ch) // close on main
+
+	go @(islandA) func(data chan int, out chan bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				out <- true
+			}
+		}()
+		data <- 999
+		out <- false // should not reach
+	}(ch, result)
+
+	panicked := waitBool(result, "testRemoteSendOnClosedPanics: timed out")
+	assert(panicked, "remote send on closed channel must panic")
+}

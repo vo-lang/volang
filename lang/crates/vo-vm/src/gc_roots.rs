@@ -99,11 +99,19 @@ impl Vm {
             .map(|f| f.capture_slot_types.as_slice())
             .collect();
 
+        #[cfg(feature = "std")]
+        let endpoint_registry = &self.state.endpoint_registry;
+
         unsafe { &mut *gc_ptr }.step(
             |gc| {
                 scan_globals(gc, globals, &module_ref.globals);
                 scan_fibers(gc, fibers, &module_ref.functions);
                 scan_sentinel_errors(gc, sentinel_errors);
+                // V6: endpoint registry channels are GC roots
+                #[cfg(feature = "std")]
+                for ch in endpoint_registry.live_channels() {
+                    gc.mark_gray(ch);
+                }
             },
             |gc, obj| {
                 vo_runtime::gc_types::scan_object(gc, obj, &module_ref.struct_metas, &func_capture_slot_types);

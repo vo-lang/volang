@@ -37,9 +37,6 @@ pub struct HelperFuncs {
     pub chan_new_checked: Option<FuncRef>,
     pub chan_len: Option<FuncRef>,
     pub chan_cap: Option<FuncRef>,
-    pub port_new_checked: Option<FuncRef>,
-    pub port_len: Option<FuncRef>,
-    pub port_cap: Option<FuncRef>,
     pub array_new: Option<FuncRef>,
     pub array_len: Option<FuncRef>,
     pub slice_new_checked: Option<FuncRef>,
@@ -63,11 +60,8 @@ pub struct HelperFuncs {
     pub set_call_request: Option<FuncRef>,
     pub island_new: Option<FuncRef>,
     pub chan_close: Option<FuncRef>,
-    pub port_close: Option<FuncRef>,
     pub chan_send: Option<FuncRef>,
     pub chan_recv: Option<FuncRef>,
-    pub port_send: Option<FuncRef>,
-    pub port_recv: Option<FuncRef>,
     pub go_start: Option<FuncRef>,
     pub go_island: Option<FuncRef>,
     // Defer/Recover
@@ -186,7 +180,7 @@ pub fn compute_memory_only_start(code: &[Instruction]) -> u16 {
             Opcode::SlotSet | Opcode::SlotSetN => { min_base = min_base.min(inst.a); }
             Opcode::SlotGet | Opcode::SlotGetN => { min_base = min_base.min(inst.b); }
             // Callbacks that read from var_addr pointers
-            Opcode::ChanSend | Opcode::PortSend => { min_base = min_base.min(inst.b); }
+            Opcode::ChanSend => { min_base = min_base.min(inst.b); }
             Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => { min_base = min_base.min(inst.b); }
             Opcode::GoIsland => { min_base = min_base.min(inst.c); }
             Opcode::SliceAppend => {

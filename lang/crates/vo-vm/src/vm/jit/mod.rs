@@ -694,7 +694,7 @@ pub enum OsrResult {
     /// Loop blocks on I/O (token stored in fiber.resume_io_token).
     #[cfg(feature = "std")]
     WaitIo,
-    /// Loop blocks on channel/port.
+    /// Loop blocks on channel.
     WaitQueue,
     /// Panic occurred during loop execution.
     Panic,

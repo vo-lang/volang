@@ -1,0 +1,117 @@
+// Test: DirectSend to a remote waiter must NOT leave a phantom entry in the buffer.
+//
+// Scenario:
+//   1. Remote island fiber blocks on recv of a LOCAL (home) unbuffered channel.
+//   2. Main island sends a value — triggers DirectSend to the remote waiter.
+//   3. Remote island receives the value.
+//   4. Main island sends a SECOND value — a new remote recv should get exactly
+//      that second value, not a phantom copy of the first.
+//   5. We verify both values are correct and that no extra values leak.
+//
+// Before the fix, send_or_block pushed the value into the buffer for local-wake
+// semantics but never popped it for remote receivers, so the second recv would
+// get the phantom first value instead of the real second value.
+
+package main
+
+import "time"
+
+func waitInt(ch chan int, label string) int {
+	done := false
+	value := 0
+	for i := 0; i < 200 && !done; i += 1 {
+		select {
+		case value = <-ch:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, label)
+	return value
+}
+
+func main() {
+	testDirectSendNoPhantomUnbuffered()
+	testDirectSendNoPhantomBuffered()
+	testDirectSendMultipleRoundTrips()
+}
+
+// Unbuffered channel: remote recv blocks, main sends, remote gets value.
+// Then repeat — second value must be the real second value.
+func testDirectSendNoPhantomUnbuffered() {
+	i := make(island)
+	ch := make(chan int) // unbuffered
+	result := make(chan int, 2)
+
+	go @(i) func(data chan int, out chan int) {
+		v1 := <-data
+		out <- v1
+		v2 := <-data
+		out <- v2
+	}(ch, result)
+
+	// Small delay to let remote fiber block on first recv
+	time.Sleep(20 * time.Millisecond)
+
+	ch <- 100
+	ch <- 200
+
+	r1 := waitInt(result, "unbuffered: timed out waiting for first value")
+	r2 := waitInt(result, "unbuffered: timed out waiting for second value")
+	assert(r1 == 100, "unbuffered: first value must be 100")
+	assert(r2 == 200, "unbuffered: second value must be 200, not phantom 100")
+}
+
+// Buffered channel (cap=1): remote recv blocks when buffer is empty,
+// main sends two values sequentially.
+func testDirectSendNoPhantomBuffered() {
+	i := make(island)
+	ch := make(chan int, 1) // cap 1
+	result := make(chan int, 3)
+
+	go @(i) func(data chan int, out chan int) {
+		v1 := <-data
+		out <- v1
+		v2 := <-data
+		out <- v2
+		v3 := <-data
+		out <- v3
+	}(ch, result)
+
+	// Let remote fiber start and block on first recv
+	time.Sleep(20 * time.Millisecond)
+
+	ch <- 10
+	ch <- 20
+	ch <- 30
+
+	r1 := waitInt(result, "buffered: timed out waiting for first value")
+	r2 := waitInt(result, "buffered: timed out waiting for second value")
+	r3 := waitInt(result, "buffered: timed out waiting for third value")
+	assert(r1 == 10, "buffered: first value must be 10")
+	assert(r2 == 20, "buffered: second value must be 20")
+	assert(r3 == 30, "buffered: third value must be 30")
+}
+
+// Multiple round-trips: remote sends back each value doubled.
+// Exercises DirectSend in both directions repeatedly.
+func testDirectSendMultipleRoundTrips() {
+	i := make(island)
+	req := make(chan int)  // unbuffered request channel
+	resp := make(chan int) // unbuffered response channel
+
+	go @(i) func(input chan int, output chan int) {
+		for j := 0; j < 5; j += 1 {
+			v := <-input
+			output <- v * 2
+		}
+	}(req, resp)
+
+	for j := 0; j < 5; j += 1 {
+		req <- (j + 1) * 10
+		r := waitInt(resp, "roundtrip: timed out waiting for response")
+		expected := (j + 1) * 10 * 2
+		assert(r == expected, "roundtrip: unexpected response value")
+	}
+}

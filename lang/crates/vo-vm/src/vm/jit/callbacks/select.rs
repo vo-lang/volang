@@ -119,7 +119,7 @@ pub extern "C" fn jit_select_exec(
     let (vm, fiber) = unsafe { extract_context(ctx) };
     
     let stack = fiber.stack.as_mut_ptr() as *mut Slot;
-    let bp = fiber.current_frame().map(|f| f.bp).unwrap_or(0);
+    let bp = unsafe { (*ctx).jit_bp as usize };
     
     // Build instruction for exec_select_exec
     let inst = Instruction {
@@ -130,14 +130,24 @@ pub extern "C" fn jit_select_exec(
         op: 0,
     };
     
-    match exec::exec_select_exec(stack, bp, fiber.id, &mut fiber.select_state, &inst) {
+    match exec::exec_select_exec(
+        stack,
+        bp,
+        vm.state.current_island_id,
+        fiber.id,
+        &mut fiber.select_state,
+        &inst,
+    ) {
         SelectResult::Continue => JitResult::Ok,
         SelectResult::Block => JitResult::WaitQueue,
         SelectResult::SendOnClosed => {
             set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED)
         }
+        SelectResult::UnsupportedRemote => {
+            set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SELECT_REMOTE_UNSUPPORTED)
+        }
         SelectResult::Wake(waiter) => {
-            vm.scheduler.wake_channel_waiter(&waiter);
+            vm.state.wake_waiter(&waiter, &mut vm.scheduler);
             JitResult::Ok
         }
     }

@@ -225,24 +225,14 @@ fn compile_stmt_inner(
             defer_go::compile_go(go_stmt.target_island.as_ref(), &go_stmt.call, ctx, func, info)?;
         }
 
-        // === Send (channel or port send) ===
+        // === Send (channel send) ===
         StmtKind::Send(send_stmt) => {
             let target_reg = crate::expr::compile_expr(&send_stmt.chan, ctx, func, info)?;
             let target_type = info.expr_type(send_stmt.chan.id);
-            
-            if info.is_port(target_type) {
-                // Port send: p <- v
-                let elem_type = info.port_elem_type(target_type);
-                let elem_slots = info.port_elem_slots(target_type) as u8;
-                let val_reg = crate::expr::compile_expr_to_type(&send_stmt.value, elem_type, ctx, func, info)?;
-                func.emit_with_flags(Opcode::PortSend, elem_slots, target_reg, val_reg, 0);
-            } else {
-                // Channel send: ch <- v
-                let elem_type = info.chan_elem_type(target_type);
-                let elem_slots = info.chan_elem_slots(target_type) as u8;
-                let val_reg = crate::expr::compile_expr_to_type(&send_stmt.value, elem_type, ctx, func, info)?;
-                func.emit_with_flags(Opcode::ChanSend, elem_slots, target_reg, val_reg, 0);
-            }
+            let elem_type = info.chan_elem_type(target_type);
+            let elem_slots = info.chan_elem_slots(target_type) as u8;
+            let val_reg = crate::expr::compile_expr_to_type(&send_stmt.value, elem_type, ctx, func, info)?;
+            func.emit_with_flags(Opcode::ChanSend, elem_slots, target_reg, val_reg, 0);
         }
 
         // === Select ===

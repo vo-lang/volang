@@ -10,11 +10,11 @@ type Data struct {
 
 func main() {
 	i := make(island)
-	p := make(port int, 1)
+	p := make(chan int, 1)
 	
 	d := &Data{X: 100, Y: 200}
 	
-	go @(i) func(ch port int, ptr *Data) {
+	go @(i) func(ch chan int, ptr *Data) {
 		assert(ptr != nil, "pointer should not be nil")
 		assert(ptr.X == 100, "X mismatch")
 		assert(ptr.Y == 200, "Y mismatch")

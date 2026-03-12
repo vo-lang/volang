@@ -1,6 +1,6 @@
 //! Heap object operations.
 
-/// Error codes for allocation operations (shared by slice/chan/port).
+/// Error codes for allocation operations (shared by slice/chan).
 pub mod alloc_error {
     pub const OK: i32 = 0;
     pub const NEGATIVE_LEN: i32 = 1;
@@ -36,7 +36,6 @@ pub mod closure;
 pub mod compare;
 pub mod interface;
 pub mod map;
-pub mod port;
 pub mod slice;
 pub mod string;
 pub mod struct_ops;

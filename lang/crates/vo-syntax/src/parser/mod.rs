@@ -1094,18 +1094,6 @@ mod tests {
     }
 
     #[test]
-    fn test_type_port() {
-        let file = parse_ok("var x port int");
-        match &file.decls[0] {
-            Decl::Var(v) => match &v.specs[0].ty.as_ref().unwrap().kind {
-                TypeExprKind::Port(_) => {}
-                _ => panic!("expected port type"),
-            },
-            _ => panic!("expected var decl"),
-        }
-    }
-
-    #[test]
     fn test_type_island() {
         let file = parse_ok("var x island");
         match &file.decls[0] {
@@ -1115,13 +1103,6 @@ mod tests {
             },
             _ => panic!("expected var decl"),
         }
-    }
-
-    #[test]
-    fn test_make_port() {
-        // This should parse: make(port int, 10) where first arg is type
-        let file = parse_ok("func main() { p := make(port int, 10) }");
-        assert_eq!(file.decls.len(), 1);
     }
 
     #[test]

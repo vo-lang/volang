@@ -199,10 +199,6 @@ pub fn fmt_type_expr(ty: &TypeExpr, f: &mut fmt::Formatter<'_>, interner: &Symbo
             }
             fmt_type_expr(&c.elem, f, interner)
         }
-        TypeExprKind::Port(elem) => {
-            f.write_str("port ")?;
-            fmt_type_expr(elem, f, interner)
-        }
         TypeExprKind::Island => {
             f.write_str("island")
         }

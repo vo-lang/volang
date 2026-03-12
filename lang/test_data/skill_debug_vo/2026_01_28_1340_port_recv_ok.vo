@@ -5,7 +5,7 @@ import "time"
 
 func main() {
 	// Test 1: recv with ok flag from open port
-	p := make(port int, 1)
+	p := make(chan int, 1)
 	p <- 42
 	v, ok := <-p
 	assert(ok, "should be ok=true for open port")
@@ -13,10 +13,10 @@ func main() {
 	println("test1 passed: recv with ok from open port")
 	
 	// Test 2: recv with ok flag from closed port
-	p2 := make(port int, 0)
+	p2 := make(chan int, 0)
 	i := make(island)
 	
-	go @(i) func(ch port int) {
+	go @(i) func(ch chan int) {
 		time.Sleep(10 * time.Millisecond)
 		close(ch)
 	}(p2)
@@ -27,7 +27,7 @@ func main() {
 	println("test2 passed: recv with ok from closed port")
 	
 	// Test 3: multiple recv after close
-	p3 := make(port int, 2)
+	p3 := make(chan int, 2)
 	p3 <- 10
 	p3 <- 20
 	close(p3)

@@ -1,0 +1,77 @@
+package main
+
+import "time"
+
+type Pair struct {
+	Left chan int
+	Right chan int
+}
+
+func main() {
+	testStruct()
+	testSlice()
+}
+
+func waitBool(ch chan bool, label string) bool {
+	done := false
+	value := false
+	for i := 0; i < 100 && !done; i += 1 {
+		select {
+		case value = <-ch:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, label)
+	return value
+}
+
+func waitInt(ch chan int, label string) int {
+	done := false
+	value := 0
+	for i := 0; i < 100 && !done; i += 1 {
+		select {
+		case value = <-ch:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, label)
+	return value
+}
+
+func testStruct() {
+	i := make(island)
+	outer := make(chan Pair, 1)
+	inner := make(chan int, 1)
+	eq := make(chan bool, 1)
+
+	go @(i) func(ch chan Pair, out chan bool) {
+		pair := <-ch
+		out <- (pair.Left == pair.Right)
+		pair.Left <- 101
+	}(outer, eq)
+
+	outer <- Pair{Left: inner, Right: inner}
+	assert(waitBool(eq, "timed out waiting for struct nested channel alias result"), "struct nested channel aliases must preserve identity")
+	assert(waitInt(inner, "timed out waiting for struct nested channel send") == 101, "struct nested channel send must work")
+}
+
+func testSlice() {
+	i := make(island)
+	outer := make(chan []chan int, 1)
+	inner := make(chan int, 1)
+	eq := make(chan bool, 1)
+
+	go @(i) func(ch chan []chan int, out chan bool) {
+		items := <-ch
+		out <- (items[0] == items[1])
+		items[1] <- 202
+	}(outer, eq)
+
+	outer <- []chan int{inner, inner}
+	assert(<-eq, "slice nested channel aliases must preserve identity")
+	assert(waitInt(inner, "timed out waiting for slice nested channel send") == 202, "slice nested channel send must work")
+}

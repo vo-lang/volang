@@ -344,8 +344,6 @@ pub enum TypeExprKind {
     Map(Box<MapType>),
     /// A channel type: `chan T`, `chan<- T`, `<-chan T`
     Chan(Box<ChanType>),
-    /// A port type: `port T` (cross-island channel)
-    Port(Box<TypeExpr>),
     /// The island type: `island`
     Island,
     /// A function type: `func(T) R`
@@ -1373,7 +1371,6 @@ pub fn walk_type_expr<V: Visitor>(visitor: &mut V, ty: &TypeExpr) {
             visitor.visit_type_expr(&m.value);
         }
         TypeExprKind::Chan(c) => visitor.visit_type_expr(&c.elem),
-        TypeExprKind::Port(p) => visitor.visit_type_expr(p),
         TypeExprKind::Island => {}
         TypeExprKind::Func(f) => {
             for p in &f.params {

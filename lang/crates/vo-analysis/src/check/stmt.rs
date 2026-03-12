@@ -488,10 +488,6 @@ impl Checker {
                         let elem_ty = Some(chan.elem());
                         self.assignment(x, elem_ty, "send");
                     }
-                } else if let Some(port) = underlying.try_as_port() {
-                    // Port send: p <- v
-                    let elem_ty = Some(port.elem());
-                    self.assignment(x, elem_ty, "send");
                 } else {
                     self.error_code(TypeError::SendToNonChan, ss.chan.span);
                 }
@@ -599,8 +595,20 @@ impl Checker {
                 if let Some(island) = &gs.target_island {
                     let x = &mut Operand::new();
                     self.expr(x, island);
-                    // TODO (1.4): type check that island is of type `island`
-                    // TODO (1.4): sendability check for captured variables
+                    // Check that the island expression is of type `island`
+                    if !x.invalid() {
+                        let underlying = typ::underlying_type(x.typ.unwrap(), self.objs());
+                        if !self.otype(underlying).is_island() {
+                            self.error_code_msg(
+                                TypeError::GoIslandTargetNotIsland,
+                                island.span,
+                                format!("go @(island) target has type {}, want island",
+                                    self.type_str(x.typ.unwrap())),
+                            );
+                        }
+                    }
+                    // Capture/arg sendability is checked in the go_island post-pass
+                    // (after escape analysis populates closure_captures)
                 }
                 self.suspended_call("go", &gs.call);
             }

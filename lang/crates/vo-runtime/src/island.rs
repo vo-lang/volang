@@ -3,9 +3,12 @@
 //! An Island represents an independent VM instance with:
 //! - Its own GC/heap
 //! - Its own fiber scheduler
-//! - Communication via ports (cross-island channels)
+//! - Communication via channels (cross-island)
 //!
 //! Each island runs on a dedicated OS thread.
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use crate::gc::{Gc, GcRef};
 use crate::objects::impl_gc_object;
@@ -36,12 +39,48 @@ pub enum IslandCommand {
     /// Spawn a new fiber with packed closure data
     SpawnFiber {
         closure_data: PackedValue,
-        capture_slots: u16,
     },
     /// Wake a blocked fiber (no PC modification - blocker sets resume PC)
     WakeFiber { fiber_id: u32 },
     /// Request island shutdown
     Shutdown,
+    /// Request from a remote island to the home island (where ChannelState lives).
+    ChanRequest {
+        endpoint_id: u64,
+        kind: ChanRequestKind,
+        from_island: u32,
+        fiber_id: u64,
+    },
+    /// Response from the home island back to the requesting remote island.
+    ChanResponse {
+        endpoint_id: u64,
+        kind: ChanResponseKind,
+        fiber_id: u64,
+    },
+}
+
+/// Kind of channel request (remote → home).
+#[derive(Debug)]
+pub enum ChanRequestKind {
+    /// Send data to the channel.
+    Send { data: Vec<u8> },
+    /// Receive data from the channel.
+    Recv,
+    /// Close the channel.
+    Close,
+    /// Notify home that a new peer island has received a proxy.
+    Transfer { new_peer: u32 },
+}
+
+/// Kind of channel response (home → remote).
+#[derive(Debug)]
+pub enum ChanResponseKind {
+    /// Acknowledgment of a send operation.
+    SendAck { closed: bool },
+    /// Data delivered to a receiver (or closed indication).
+    RecvData { data: Vec<u8>, closed: bool },
+    /// Broadcast: channel was closed by someone else.
+    Closed,
 }
 
 /// Create a new island handle.

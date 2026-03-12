@@ -198,12 +198,6 @@ impl Checker {
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
-            TypeExprKind::Port(elem) => {
-                let elem_type = self.indirect_type(elem);
-                let t = self.new_t_port(elem_type);
-                set_underlying(Some(t), &mut self.tc_objs);
-                Some(t)
-            }
             TypeExprKind::Island => {
                 let t = self.new_t_island();
                 set_underlying(Some(t), &mut self.tc_objs);

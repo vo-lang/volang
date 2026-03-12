@@ -508,22 +508,11 @@ fn compile_receive(
 ) -> Result<(), CodegenError> {
     let target_reg = compile_expr(target_expr, ctx, func, info)?;
     let target_type = info.expr_type(target_expr.id);
-    
-    if info.is_port(target_type) {
-        // Port receive: <-p
-        let elem_slots = info.port_elem_slots(target_type);
-        let result_slots = info.expr_slots(expr.id);
-        let has_ok = result_slots > elem_slots;
-        let flags = ((elem_slots as u8) << 1) | (if has_ok { 1 } else { 0 });
-        func.emit_with_flags(Opcode::PortRecv, flags, dst, target_reg, 0);
-    } else {
-        // Channel receive: <-ch
-        let elem_slots = info.chan_elem_slots(target_type);
-        let result_slots = info.expr_slots(expr.id);
-        let has_ok = result_slots > elem_slots;
-        let flags = ((elem_slots as u8) << 1) | (if has_ok { 1 } else { 0 });
-        func.emit_with_flags(Opcode::ChanRecv, flags, dst, target_reg, 0);
-    }
+    let elem_slots = info.chan_elem_slots(target_type);
+    let result_slots = info.expr_slots(expr.id);
+    let has_ok = result_slots > elem_slots;
+    let flags = ((elem_slots as u8) << 1) | (if has_ok { 1 } else { 0 });
+    func.emit_with_flags(Opcode::ChanRecv, flags, dst, target_reg, 0);
     Ok(())
 }
 

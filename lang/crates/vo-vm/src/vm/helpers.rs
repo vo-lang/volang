@@ -5,10 +5,10 @@ use alloc::string::String;
 
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::InterfaceSlot;
-use vo_runtime::objects::{slice, string};
+use vo_runtime::objects::{closure, slice, string};
 use vo_runtime::slot::{Slot, slot_to_ptr, slot_to_usize};
 
-use crate::bytecode::Module;
+use crate::bytecode::{FunctionDef, Module};
 use crate::fiber::Fiber;
 use crate::exec;
 use super::types::ExecResult;
@@ -88,6 +88,8 @@ pub const ERR_SEND_ON_NIL: &str = "runtime error: send on nil channel";
 pub const ERR_RECV_ON_NIL: &str = "runtime error: receive on nil channel";
 pub const ERR_CLOSE_NIL_CHANNEL: &str = "runtime error: close of nil channel";
 pub const ERR_CLOSE_CLOSED_CHANNEL: &str = "runtime error: close of closed channel";
+pub const ERR_SELECT_REMOTE_UNSUPPORTED: &str =
+    "runtime error: select on cross-island channel is not supported";
 
 #[inline]
 pub fn runtime_trap_message(kind: RuntimeTrapKind) -> &'static str {
@@ -104,8 +106,6 @@ pub fn runtime_trap_message(kind: RuntimeTrapKind) -> &'static str {
         RuntimeTrapKind::SliceBoundsOutOfRange => "runtime error: slice bounds out of range",
         RuntimeTrapKind::MakeSlice => "runtime error: makeslice",
         RuntimeTrapKind::MakeChan => "runtime error: makechan",
-        RuntimeTrapKind::MakePort => "runtime error: makeport",
-        RuntimeTrapKind::PortNotSupported => "Port not supported in no_std",
         RuntimeTrapKind::SendOnClosedChannel => ERR_SEND_ON_CLOSED,
         RuntimeTrapKind::SendOnNilChannel => ERR_SEND_ON_NIL,
         RuntimeTrapKind::RecvOnNilChannel => ERR_RECV_ON_NIL,
@@ -192,6 +192,37 @@ use alloc::vec::Vec;
 // Re-export from vo-runtime for convenience
 pub use vo_runtime::objects::closure::{ClosureCallLayout, call_layout as closure_call_layout};
 
+pub unsafe fn build_closure_fiber_from_args_ptr(
+    functions: &[FunctionDef],
+    next_fiber_id: u32,
+    closure_ref: u64,
+    args: *const u64,
+    arg_count: u32,
+) -> Fiber {
+    let closure_gcref = closure_ref as GcRef;
+    let func_id = closure::func_id(closure_gcref);
+    let func_def = &functions[func_id as usize];
+
+    let mut fiber = Fiber::new(next_fiber_id);
+    fiber.push_frame(func_id, func_def.local_slots, 0, 0);
+
+    let layout = closure_call_layout(
+        closure_ref,
+        closure_gcref,
+        func_def.recv_slots as usize,
+        func_def.is_closure,
+    );
+    let stack = fiber.stack_ptr();
+    if let Some(slot0) = layout.slot0 {
+        *stack = slot0;
+    }
+    for i in 0..arg_count as usize {
+        *stack.add(layout.arg_offset + i) = *args.add(i);
+    }
+
+    fiber
+}
+
 /// Build full args for closure call (prepends slot0 if needed).
 pub fn build_closure_args(
     closure_ref: u64,
@@ -213,4 +244,102 @@ pub fn build_closure_args(
         full_args.push(unsafe { *args.add(i as usize) });
     }
     full_args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_closure_fiber_from_args_ptr;
+    use crate::bytecode::FunctionDef;
+    use vo_runtime::gc::Gc;
+    use vo_runtime::objects::closure;
+
+    fn make_func(local_slots: u16, recv_slots: u16, is_closure: bool) -> FunctionDef {
+        FunctionDef {
+            name: String::new(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots,
+            ret_slots: 0,
+            recv_slots,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure,
+            error_ret_slot: -1,
+            has_defer: false,
+            has_calls: false,
+            has_call_extern: false,
+            code: Vec::new(),
+            slot_types: Vec::new(),
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn build_closure_fiber_named_wrapper_starts_args_at_zero() {
+        let mut gc = Gc::new();
+        let closure_ref = closure::create(&mut gc, 0, 0);
+        let functions = vec![make_func(4, 0, false)];
+        let args = [11_u64, 22_u64];
+
+        let fiber = unsafe {
+            build_closure_fiber_from_args_ptr(
+                &functions,
+                7,
+                closure_ref as u64,
+                args.as_ptr(),
+                args.len() as u32,
+            )
+        };
+
+        assert_eq!(fiber.current_frame().expect("frame").func_id, 0);
+        assert_eq!(fiber.stack[0], 11);
+        assert_eq!(fiber.stack[1], 22);
+    }
+
+    #[test]
+    fn build_closure_fiber_closure_value_puts_closure_in_slot_zero() {
+        let mut gc = Gc::new();
+        let closure_ref = closure::create(&mut gc, 0, 1);
+        closure::set_capture(closure_ref, 0, 999);
+        let functions = vec![make_func(4, 0, true)];
+        let args = [33_u64];
+
+        let fiber = unsafe {
+            build_closure_fiber_from_args_ptr(
+                &functions,
+                3,
+                closure_ref as u64,
+                args.as_ptr(),
+                args.len() as u32,
+            )
+        };
+
+        assert_eq!(fiber.stack[0], closure_ref as u64);
+        assert_eq!(fiber.stack[1], 33);
+    }
+
+    #[test]
+    fn build_closure_fiber_method_value_uses_captured_receiver() {
+        let mut gc = Gc::new();
+        let closure_ref = closure::create(&mut gc, 0, 1);
+        closure::set_capture(closure_ref, 0, 444);
+        let functions = vec![make_func(4, 1, false)];
+        let args = [55_u64];
+
+        let fiber = unsafe {
+            build_closure_fiber_from_args_ptr(
+                &functions,
+                1,
+                closure_ref as u64,
+                args.as_ptr(),
+                args.len() as u32,
+            )
+        };
+
+        assert_eq!(fiber.stack[0], 444);
+        assert_eq!(fiber.stack[1], 55);
+    }
 }

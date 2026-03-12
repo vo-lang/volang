@@ -337,7 +337,7 @@ impl Checker {
                     })
                 }
             }
-            Type::Slice(_) | Type::Chan(_) | Type::Port(_) => OperandMode::Value,
+            Type::Slice(_) | Type::Chan(_) => OperandMode::Value,
             Type::Map(_) => {
                 if id == Builtin::Len {
                     OperandMode::Value
@@ -369,11 +369,6 @@ impl Checker {
                     self.error_code(TypeError::CloseRecvOnly, x.pos());
                     return false;
                 }
-                x.mode = OperandMode::NoValue;
-                true
-            }
-            Type::Port(_) => {
-                // Ports can also be closed
                 x.mode = OperandMode::NoValue;
                 true
             }
@@ -485,7 +480,7 @@ impl Checker {
 
         let min = match self.otype(arg0t).underlying_val(self.objs()) {
             Type::Slice(_) => 2,
-            Type::Map(_) | Type::Chan(_) | Type::Port(_) => 1,
+            Type::Map(_) | Type::Chan(_) => 1,
             Type::Island => 0,  // make(island) takes no extra args
             _ => {
                 self.error_code(TypeError::MakeInvalidType, call.args[0].span);

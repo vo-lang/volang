@@ -5,7 +5,7 @@ use vo_runtime::gc::GcRef;
 use vo_runtime::objects::closure;
 
 use crate::fiber::Fiber;
-use crate::vm::Vm;
+use crate::vm::{helpers, Vm};
 
 /// Create a new fiber from a closure and spawn it on the scheduler.
 ///
@@ -17,29 +17,13 @@ unsafe fn spawn_closure_fiber(
     args_ptr: *const u64,
     arg_slots: u32,
 ) {
-    let closure_gcref = closure_ref as GcRef;
-    let func_id = closure::func_id(closure_gcref);
-    let func = &module.functions[func_id as usize];
-
-    let next_id = vm.scheduler.fibers.len() as u32;
-    let mut new_fiber = Fiber::new(next_id);
-    new_fiber.push_frame(func_id, func.local_slots, 0, 0);
-
-    let layout = closure::call_layout(
+    let new_fiber = helpers::build_closure_fiber_from_args_ptr(
+        &module.functions,
+        vm.scheduler.fibers.len() as u32,
         closure_ref,
-        closure_gcref,
-        func.recv_slots as usize,
-        func.is_closure,
+        args_ptr,
+        arg_slots,
     );
-
-    let new_stack = new_fiber.stack_ptr();
-    if let Some(slot0_val) = layout.slot0 {
-        *new_stack = slot0_val;
-    }
-    for i in 0..arg_slots as usize {
-        *new_stack.add(layout.arg_offset + i) = *args_ptr.add(i);
-    }
-
     vm.scheduler.spawn(new_fiber);
 }
 
@@ -115,28 +99,25 @@ pub extern "C" fn jit_go_island(
             island: island_handle,
             func_id,
             capture_data,
-            capture_slots: capture_count as u16,
             arg_data,
-            arg_slots: arg_slots as u16,
         };
         
+        crate::exec::prepare_chans_for_transfer(
+            &result,
+            island_id,
+            &func_def.capture_types,
+            &func_def.param_types,
+            &module.struct_metas,
+            &module.runtime_types,
+            &mut vm.state,
+        );
         let data = crate::exec::pack_closure_for_island(
             &vm.state.gc, &result, &func_def.capture_types, &func_def.param_types,
             &module.struct_metas, &module.runtime_types,
         );
         let closure_data = vo_runtime::pack::PackedValue::from_data(data);
-        let cmd = vo_runtime::island::IslandCommand::SpawnFiber { 
-            closure_data, 
-            capture_slots: capture_count as u16 
-        };
-        
-        if let Some(ref registry) = vm.state.island_registry {
-            if let Ok(guard) = registry.lock() {
-                if let Some(tx) = guard.get(&island_id) { 
-                    let _ = tx.send(cmd); 
-                }
-            }
-        }
+        let cmd = vo_runtime::island::IslandCommand::SpawnFiber { closure_data };
+        vm.state.send_to_island(island_id, cmd);
     }
 }
 

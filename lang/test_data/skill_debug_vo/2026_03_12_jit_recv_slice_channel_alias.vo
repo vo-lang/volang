@@ -1,0 +1,9 @@
+package main
+
+func main() {
+	outer := make(chan []chan int, 1)
+	inner := make(chan int, 1)
+	outer <- []chan int{inner, inner}
+	items := <-outer
+	assert(items[0] == items[1], "local recv slice channel aliases must preserve identity")
+}

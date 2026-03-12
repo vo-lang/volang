@@ -324,10 +324,6 @@ fn type_key_to_runtime_type(
                 .collect();
             (RuntimeType::Tuple(elems), ValueKind::Void)
         }
-        Type::Port(port) => {
-            let elem_value_rttid = intern_type_key(interner, port.elem(), tc_objs, str_interner, ctx);
-            (RuntimeType::Port(elem_value_rttid), ValueKind::Port)
-        }
         Type::Island => {
             (RuntimeType::Island, ValueKind::Island)
         }

@@ -7,8 +7,11 @@
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
+#[cfg(feature = "std")]
+use std::collections::HashMap;
+
 use crate::gc::{Gc, GcRef};
-use crate::objects::{array, map, slice, string};
+use crate::objects::{array, channel, map, slice, string};
 use crate::slot::SLOT_BYTES;
 use vo_common_core::bytecode::StructMeta;
 use vo_common_core::types::{ValueKind, ValueMeta};
@@ -44,6 +47,21 @@ impl Default for PackedValue {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[cfg(feature = "std")]
+type UnpackChanCache = HashMap<u64, GcRef>;
+#[cfg(not(feature = "std"))]
+type UnpackChanCache = ();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChanHandleInfo {
+    pub endpoint_id: u64,
+    pub home_island: u32,
+    pub cap: u64,
+    pub elem_meta: ValueMeta,
+    pub elem_slots: u16,
+    pub closed: bool,
 }
 
 /// Pack slots into a PackedValue.
@@ -84,8 +102,62 @@ pub fn unpack_slots(
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
 ) {
+    unpack_slots_with_chan_resolver(
+        gc,
+        packed,
+        dst,
+        struct_metas,
+        runtime_types,
+        default_unpack_chan_handle,
+    );
+}
+
+pub fn unpack_slots_with_chan_resolver<F>(
+    gc: &mut Gc,
+    packed: &PackedValue,
+    dst: &mut [u64],
+    struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
+    mut resolve_chan: F,
+) where
+    F: FnMut(&mut Gc, ChanHandleInfo) -> GcRef,
+{
     let mut cursor = 0;
-    unpack_value(gc, &packed.data, &mut cursor, dst, struct_metas, runtime_types);
+    let mut chan_cache = UnpackChanCache::default();
+    unpack_slots_with_chan_resolver_and_cache(
+        gc,
+        &packed.data,
+        &mut cursor,
+        dst,
+        struct_metas,
+        runtime_types,
+        &mut chan_cache,
+        &mut resolve_chan,
+    );
+}
+
+pub(crate) fn unpack_slots_with_chan_resolver_and_cache<F>(
+    gc: &mut Gc,
+    data: &[u8],
+    cursor: &mut usize,
+    dst: &mut [u64],
+    struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
+    chan_cache: &mut UnpackChanCache,
+    resolve_chan: &mut F,
+) where
+    F: FnMut(&mut Gc, ChanHandleInfo) -> GcRef,
+{
+    unpack_value(
+        gc,
+        data,
+        cursor,
+        dst,
+        struct_metas,
+        runtime_types,
+        chan_cache,
+        resolve_chan,
+    );
 }
 
 // =============================================================================
@@ -176,10 +248,13 @@ fn pack_value(
             pack_map(packed, gc, map_ref, struct_metas, runtime_types);
         }
 
-        // Not sendable - these should be caught at compile time
-        ValueKind::Channel
-        | ValueKind::Port
-        | ValueKind::Island
+        ValueKind::Channel => {
+            let chan_ref = src[0] as GcRef;
+            pack_chan_handle(packed, chan_ref);
+        }
+
+        // Not sendable - caught at compile time or runtime-checked
+        ValueKind::Island
         | ValueKind::Closure
         | ValueKind::Interface => {
             panic!("Cannot pack non-sendable type: {:?}", vk);
@@ -404,14 +479,18 @@ fn pack_map(
 // Internal Unpack Implementation
 // =============================================================================
 
-fn unpack_value(
+fn unpack_value<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
     dst: &mut [u64],
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
-) {
+    chan_cache: &mut UnpackChanCache,
+    resolve_chan: &mut F,
+) where
+    F: FnMut(&mut Gc, ChanHandleInfo) -> GcRef,
+{
     let vk = ValueKind::from_u8(data[*cursor]);
     *cursor += 1;
 
@@ -438,23 +517,27 @@ fn unpack_value(
         }
 
         ValueKind::Slice => {
-            dst[0] = unpack_slice(gc, data, cursor, struct_metas, runtime_types) as u64;
+            dst[0] = unpack_slice(gc, data, cursor, struct_metas, runtime_types, chan_cache, resolve_chan) as u64;
         }
 
         ValueKind::Array => {
-            dst[0] = unpack_array(gc, data, cursor, struct_metas, runtime_types) as u64;
+            dst[0] = unpack_array(gc, data, cursor, struct_metas, runtime_types, chan_cache, resolve_chan) as u64;
         }
 
         ValueKind::Struct => {
-            unpack_struct_inline(gc, data, cursor, dst, struct_metas, runtime_types);
+            unpack_struct_inline(gc, data, cursor, dst, struct_metas, runtime_types, chan_cache, resolve_chan);
         }
 
         ValueKind::Pointer => {
-            dst[0] = unpack_pointer(gc, data, cursor, struct_metas, runtime_types) as u64;
+            dst[0] = unpack_pointer(gc, data, cursor, struct_metas, runtime_types, chan_cache, resolve_chan) as u64;
         }
 
         ValueKind::Map => {
-            dst[0] = unpack_map(gc, data, cursor, struct_metas, runtime_types) as u64;
+            dst[0] = unpack_map(gc, data, cursor, struct_metas, runtime_types, chan_cache, resolve_chan) as u64;
+        }
+
+        ValueKind::Channel => {
+            dst[0] = unpack_chan_handle(gc, data, cursor, chan_cache, resolve_chan) as u64;
         }
 
         _ => panic!("Cannot unpack non-sendable type: {:?}", vk),
@@ -468,13 +551,18 @@ fn unpack_string(gc: &mut Gc, data: &[u8], cursor: &mut usize) -> GcRef {
     string::create(gc, bytes)
 }
 
-fn unpack_slice(
+fn unpack_slice<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
-) -> GcRef {
+    chan_cache: &mut UnpackChanCache,
+    resolve_chan: &mut F,
+) -> GcRef
+where
+    F: FnMut(&mut Gc, ChanHandleInfo) -> GcRef,
+{
     // Read explicit null marker
     let is_non_null = data[*cursor];
     *cursor += 1;
@@ -509,20 +597,34 @@ fn unpack_slice(
     let mut elem_buf = vec![0u64; elem_slots];
 
     for i in 0..length {
-        unpack_value(gc, data, cursor, &mut elem_buf, struct_metas, runtime_types);
+        unpack_value(
+            gc,
+            data,
+            cursor,
+            &mut elem_buf,
+            struct_metas,
+            runtime_types,
+            chan_cache,
+            resolve_chan,
+        );
         write_element(data_ptr, i, elem_bytes, &elem_buf);
     }
 
     new_slice
 }
 
-fn unpack_array(
+fn unpack_array<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
-) -> GcRef {
+    chan_cache: &mut UnpackChanCache,
+    resolve_chan: &mut F,
+) -> GcRef
+where
+    F: FnMut(&mut Gc, ChanHandleInfo) -> GcRef,
+{
     // Read explicit null marker
     let is_non_null = data[*cursor];
     *cursor += 1;
@@ -556,21 +658,34 @@ fn unpack_array(
     let mut elem_buf = vec![0u64; elem_slots];
 
     for i in 0..length {
-        unpack_value(gc, data, cursor, &mut elem_buf, struct_metas, runtime_types);
+        unpack_value(
+            gc,
+            data,
+            cursor,
+            &mut elem_buf,
+            struct_metas,
+            runtime_types,
+            chan_cache,
+            resolve_chan,
+        );
         write_element(data_ptr, i, elem_bytes, &elem_buf);
     }
 
     new_arr
 }
 
-fn unpack_struct_inline(
+fn unpack_struct_inline<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
     dst: &mut [u64],
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
-) {
+    chan_cache: &mut UnpackChanCache,
+    resolve_chan: &mut F,
+) where
+    F: FnMut(&mut Gc, ChanHandleInfo) -> GcRef,
+{
     let meta_id = read_u32(data, cursor) as usize;
     let _slot_count = read_u32(data, cursor) as usize;
 
@@ -585,17 +700,22 @@ fn unpack_struct_inline(
         let field_slots = field.slot_count as usize;
         let slot_idx = field.offset as usize;
         let field_dst = &mut dst[slot_idx..slot_idx + field_slots];
-        unpack_value(gc, data, cursor, field_dst, struct_metas, runtime_types);
+        unpack_value(gc, data, cursor, field_dst, struct_metas, runtime_types, chan_cache, resolve_chan);
     }
 }
 
-fn unpack_pointer(
+fn unpack_pointer<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
-) -> GcRef {
+    chan_cache: &mut UnpackChanCache,
+    resolve_chan: &mut F,
+) -> GcRef
+where
+    F: FnMut(&mut Gc, ChanHandleInfo) -> GcRef,
+{
     let is_non_null = data[*cursor];
     *cursor += 1;
 
@@ -610,7 +730,7 @@ fn unpack_pointer(
     let new_obj = gc.alloc(obj_meta, slots as u16);
     let mut obj_slots = vec![0u64; slots];
     
-    unpack_value(gc, data, cursor, &mut obj_slots, struct_metas, runtime_types);
+    unpack_value(gc, data, cursor, &mut obj_slots, struct_metas, runtime_types, chan_cache, resolve_chan);
     
     // Write slots to new object
     for (i, &val) in obj_slots.iter().enumerate() {
@@ -620,13 +740,18 @@ fn unpack_pointer(
     new_obj
 }
 
-fn unpack_map(
+fn unpack_map<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
-) -> GcRef {
+    chan_cache: &mut UnpackChanCache,
+    resolve_chan: &mut F,
+) -> GcRef
+where
+    F: FnMut(&mut Gc, ChanHandleInfo) -> GcRef,
+{
     // Read explicit null marker
     let is_non_null = data[*cursor];
     *cursor += 1;
@@ -648,12 +773,124 @@ fn unpack_map(
     let mut val_buf = vec![0u64; val_slots as usize];
 
     for _ in 0..length {
-        unpack_value(gc, data, cursor, &mut key_buf, struct_metas, runtime_types);
-        unpack_value(gc, data, cursor, &mut val_buf, struct_metas, runtime_types);
+        unpack_value(gc, data, cursor, &mut key_buf, struct_metas, runtime_types, chan_cache, resolve_chan);
+        unpack_value(gc, data, cursor, &mut val_buf, struct_metas, runtime_types, chan_cache, resolve_chan);
         map::set(new_map, &key_buf, &val_buf, None);
     }
 
     new_map
+}
+
+// =============================================================================
+// Channel Handle Pack/Unpack
+// =============================================================================
+
+/// Pack a channel handle for cross-island transfer.
+/// Serializes: endpoint_id(8) + home_island(4) + cap(8) + meta_raw(4) + elem_slots(2) + closed(1)
+/// LOCAL channels MUST have HomeInfo installed before packing (call prepare_chans first).
+fn pack_chan_handle(packed: &mut PackedValue, chan_ref: GcRef) {
+    if chan_ref.is_null() {
+        packed.data.push(0); // null marker
+        return;
+    }
+    packed.data.push(1); // non-null marker
+    pack_chan_handle_inner(packed, chan_ref);
+}
+
+#[cfg(feature = "std")]
+fn pack_chan_handle_inner(packed: &mut PackedValue, chan_ref: GcRef) {
+    let (cap, elem_meta, elem_slots) = channel::get_metadata(chan_ref);
+
+    let (endpoint_id, home_island, closed) = if channel::is_remote(chan_ref) {
+        let proxy = channel::remote_proxy(chan_ref);
+        (proxy.endpoint_id, proxy.home_island, proxy.closed)
+    } else {
+        match channel::home_info(chan_ref) {
+            Some(info) => (info.endpoint_id, info.home_island, channel::is_closed(chan_ref)),
+            None => panic!("pack_chan_handle: LOCAL channel without HomeInfo — call prepare_value_chans_for_transfer first"),
+        }
+    };
+
+    packed.data.extend_from_slice(&endpoint_id.to_le_bytes());
+    packed.data.extend_from_slice(&home_island.to_le_bytes());
+    packed.data.extend_from_slice(&cap.to_le_bytes());
+    packed.data.extend_from_slice(&elem_meta.to_raw().to_le_bytes());
+    packed.data.extend_from_slice(&elem_slots.to_le_bytes());
+    packed.data.push(closed as u8);
+}
+
+#[cfg(not(feature = "std"))]
+fn pack_chan_handle_inner(_packed: &mut PackedValue, _chan_ref: GcRef) {
+    panic!("Cannot pack channel handle in no_std (cross-island transfer requires std)");
+}
+
+/// Unpack a channel handle — creates a REMOTE proxy on the destination island.
+#[cfg(feature = "std")]
+fn default_unpack_chan_handle(gc: &mut Gc, handle: ChanHandleInfo) -> GcRef {
+    channel::create_remote_proxy_with_closed(
+        gc,
+        handle.endpoint_id,
+        handle.home_island,
+        handle.cap,
+        handle.elem_meta,
+        handle.elem_slots,
+        handle.closed,
+    )
+}
+
+#[cfg(not(feature = "std"))]
+fn default_unpack_chan_handle(_gc: &mut Gc, _handle: ChanHandleInfo) -> GcRef {
+    panic!("Cannot unpack channel handle in no_std (cross-island transfer requires std)");
+}
+
+fn unpack_chan_handle<F>(
+    gc: &mut Gc,
+    data: &[u8],
+    cursor: &mut usize,
+    chan_cache: &mut UnpackChanCache,
+    resolve_chan: &mut F,
+) -> GcRef
+where
+    F: FnMut(&mut Gc, ChanHandleInfo) -> GcRef,
+{
+    let is_non_null = data[*cursor];
+    *cursor += 1;
+    if is_non_null == 0 {
+        return core::ptr::null_mut();
+    }
+
+    let endpoint_id = read_u64(data, cursor);
+    let home_island = read_u32(data, cursor);
+    let cap = read_u64(data, cursor);
+    let meta_raw = read_u32(data, cursor);
+    let elem_slots = read_u16(data, cursor);
+    let closed = data[*cursor] != 0;
+    *cursor += 1;
+
+    let handle = ChanHandleInfo {
+        endpoint_id,
+        home_island,
+        cap,
+        elem_meta: ValueMeta::from_raw(meta_raw),
+        elem_slots,
+        closed,
+    };
+
+    #[cfg(feature = "std")]
+    {
+        if let Some(&existing) = chan_cache.get(&handle.endpoint_id) {
+            return existing;
+        }
+        let chan_ref = resolve_chan(gc, handle);
+        chan_cache.insert(handle.endpoint_id, chan_ref);
+        chan_ref
+    }
+
+    #[cfg(not(feature = "std"))]
+    {
+        let _ = chan_cache;
+        resolve_chan(gc, handle)
+    }
 }
 
 // =============================================================================

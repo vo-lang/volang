@@ -630,10 +630,6 @@ impl<'a> TypeInfoWrapper<'a> {
         type_layout::is_chan(type_key, self.tc_objs())
     }
 
-    pub fn is_port(&self, type_key: TypeKey) -> bool {
-        typ::is_port(type_key, self.tc_objs())
-    }
-
     pub fn is_island(&self, type_key: TypeKey) -> bool {
         typ::is_island(type_key, self.tc_objs())
     }
@@ -642,7 +638,7 @@ impl<'a> TypeInfoWrapper<'a> {
         type_layout::is_value_type(type_key, self.tc_objs())
     }
 
-    /// Reference types (pointer, slice, map, channel, closure, string, port, island) are already GcRefs.
+    /// Reference types (pointer, slice, map, channel, closure, string, island) are already GcRefs.
     /// They only need boxing when captured by closure (to share storage location).
     /// Other escape reasons (e.g. assigned to interface) don't require boxing.
     pub fn is_reference_type(&self, type_key: TypeKey) -> bool {
@@ -655,7 +651,6 @@ impl<'a> TypeInfoWrapper<'a> {
             | ValueKind::Channel 
             | ValueKind::Closure 
             | ValueKind::String
-            | ValueKind::Port
             | ValueKind::Island)
     }
 
@@ -855,22 +850,6 @@ impl<'a> TypeInfoWrapper<'a> {
         } else {
             panic!("chan_elem_type: not a channel type")
         }
-    }
-
-    /// Get port element type
-    pub fn port_elem_type(&self, type_key: TypeKey) -> TypeKey {
-        let underlying = typ::underlying_type(type_key, self.tc_objs());
-        if let Type::Port(p) = &self.tc_objs().types[underlying] {
-            p.elem()
-        } else {
-            panic!("port_elem_type: not a port type")
-        }
-    }
-
-    /// Get port element slots
-    pub fn port_elem_slots(&self, type_key: TypeKey) -> u16 {
-        let elem = self.port_elem_type(type_key);
-        self.type_slot_count(elem)
     }
 
     /// Get channel direction

@@ -119,19 +119,11 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         ChanNew => { chan_new(e, inst); Ok(Completed) }
         ChanLen => { chan_len(e, inst); Ok(Completed) }
         ChanCap => { chan_cap(e, inst); Ok(Completed) }
-        PortNew => { port_new(e, inst); Ok(Completed) }
-        PortLen => { port_len(e, inst); Ok(Completed) }
-        PortCap => { port_cap(e, inst); Ok(Completed) }
-        // Island/Channel/Port
+        // Island/Channel
         IslandNew => { island_new(e, inst); Ok(Completed) }
         ChanClose => { chan_close(e, inst)?; Ok(Completed) }
-        PortClose => { port_close(e, inst)?; Ok(Completed) }
-        // Channel Send/Recv
         ChanSend => { chan_send(e, inst)?; Ok(Completed) }
         ChanRecv => { chan_recv(e, inst)?; Ok(Completed) }
-        // Port Send/Recv
-        PortSend => { port_send(e, inst)?; Ok(Completed) }
-        PortRecv => { port_recv(e, inst)?; Ok(Completed) }
         // Goroutine Start
         GoStart => { go_start(e, inst); Ok(Completed) }
         GoIsland => { go_island(e, inst); Ok(Completed) }
@@ -1627,48 +1619,6 @@ fn chan_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, result);
 }
 
-fn port_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().port_new_checked.expect("port_new_checked helper not registered");
-    let gc_ptr = e.gc_ptr();
-    let elem_meta = e.read_var(inst.b);
-    let elem_meta_i32 = e.builder().ins().ireduce(types::I32, elem_meta);
-    let elem_slots_i32 = e.builder().ins().iconst(types::I32, inst.flags as i64);
-    let cap = e.read_var(inst.c);
-    
-    // Create stack slot for output
-    let out_slot = e.builder().create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
-    let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
-    
-    // Call checked helper: (gc, meta, slots, cap, out) -> error_code
-    let call = emit_funcref_call(e, func, &[gc_ptr, elem_meta_i32, elem_slots_i32, cap, out_ptr]);
-    let error_code = e.builder().inst_results(call)[0];
-    
-    // Panic if error_code != 0
-    let zero = e.builder().ins().iconst(types::I32, 0);
-    let has_error = e.builder().ins().icmp(IntCC::NotEqual, error_code, zero);
-    emit_panic_if(e, has_error);
-    
-    // Load result from output slot
-    let result = e.builder().ins().stack_load(types::I64, out_slot, 0);
-    e.write_var(inst.a, result);
-}
-
-fn port_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().port_len.expect("port_len helper not registered");
-    let p = e.read_var(inst.b);
-    let call = emit_funcref_call(e, func, &[p]);
-    let result = e.builder().inst_results(call)[0];
-    e.write_var(inst.a, result);
-}
-
-fn port_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().port_cap.expect("port_cap helper not registered");
-    let p = e.read_var(inst.b);
-    let call = emit_funcref_call(e, func, &[p]);
-    let result = e.builder().inst_results(call)[0];
-    e.write_var(inst.a, result);
-}
-
 // =============================================================================
 // Interface operations
 // =============================================================================
@@ -1870,7 +1820,7 @@ pub fn emit_forloop_step(
 }
 
 // =============================================================================
-// Island/Channel/Port operations
+// Island/Channel operations
 // =============================================================================
 
 /// IslandNew: a = island_new()
@@ -1889,13 +1839,6 @@ fn island_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 fn chan_close<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
     let chan_close_func = e.helpers().chan_close.expect("chan_close helper not registered");
     emit_close_with_panic_check(e, chan_close_func, inst.a)
-}
-
-/// PortClose: close(port[a])
-/// Returns Panic on nil port.
-fn port_close<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
-    let port_close_func = e.helpers().port_close.expect("port_close helper not registered");
-    emit_close_with_panic_check(e, port_close_func, inst.a)
 }
 
 /// Emit close operation: call helper(ctx, obj), check for Panic result.
@@ -1932,10 +1875,10 @@ fn emit_close_with_panic_check<'a>(
 }
 
 // =============================================================================
-// Channel/Port Send/Recv
+// Channel Send/Recv
 // =============================================================================
 
-/// Emit queue send operation (used by ChanSend and PortSend).
+/// Emit queue send operation (used by ChanSend).
 /// queue[a] <- val[b:b+flags]
 fn emit_queue_send<'a>(
     e: &mut impl IrEmitter<'a>,
@@ -1979,7 +1922,7 @@ fn emit_queue_send<'a>(
     Ok(())
 }
 
-/// Emit queue recv operation (used by ChanRecv and PortRecv).
+/// Emit queue recv operation (used by ChanRecv).
 /// val[a:a+elem_slots], ok[a+elem_slots] <- queue[b]
 /// flags: bit0 = has_ok, bits 1-7 = elem_slots
 fn emit_queue_recv<'a>(
@@ -2041,14 +1984,6 @@ fn chan_send<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), J
 
 fn chan_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
     emit_queue_recv(e, inst, e.helpers().chan_recv.expect("chan_recv not registered"))
-}
-
-fn port_send<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
-    emit_queue_send(e, inst, e.helpers().port_send.expect("port_send not registered"))
-}
-
-fn port_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
-    emit_queue_recv(e, inst, e.helpers().port_recv.expect("port_recv not registered"))
 }
 
 // =============================================================================
@@ -2236,6 +2171,7 @@ fn select_exec<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(),
     e.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
     
     let result_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
+    e.spill_all_vars();
     
     let call = emit_funcref_call(e, func, &[ctx, result_reg]);
     let result = e.builder().inst_results(call)[0];
@@ -2260,6 +2196,7 @@ fn select_exec<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(),
     // The select callback writes result_reg AND recv dst slots directly to fiber.stack.
     // Reload all SSA variables from memory to resync.
     // (For FunctionCompiler this is a no-op since args_ptr != fiber.stack.)
+    e.refresh_stack_base_after_reallocation();
     e.reload_all_vars_from_memory();
     
     Ok(())

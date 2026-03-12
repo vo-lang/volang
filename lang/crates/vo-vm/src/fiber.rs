@@ -13,6 +13,13 @@ use vo_runtime::gc::GcRef;
 
 use crate::vm::RuntimeTrapKind;
 
+#[cfg(feature = "std")]
+#[derive(Debug, Clone)]
+pub struct RemoteRecvResponse {
+    pub data: Vec<u8>,
+    pub closed: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct CallFrame {
     pub func_id: u32,
@@ -191,7 +198,7 @@ impl FiberState {
 /// Reason why a fiber is blocked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockReason {
-    /// Waiting for channel/port send/recv (queue-like primitives).
+    /// Waiting for channel send/recv (queue-like primitives).
     Queue,
     /// Waiting for I/O completion.
     #[cfg(feature = "std")]
@@ -395,6 +402,16 @@ pub struct Fiber {
     /// JIT panic message — the interface{} value passed to panic().
     #[cfg(feature = "jit")]
     pub jit_panic_msg: InterfaceSlot,
+    /// Pending remote recv response data from home island.
+    /// Set by handle_chan_response_command before waking fiber.
+    /// Consumed by ChanRecv handler on retry.
+    #[cfg(feature = "std")]
+    pub remote_recv_response: Option<RemoteRecvResponse>,
+    /// Flag indicating REMOTE send was on a closed channel.
+    /// Set by handle_chan_response_command(SendAck{closed:true}) before waking fiber.
+    /// Consumed by ChanSend handler on retry.
+    #[cfg(feature = "std")]
+    pub remote_send_closed: bool,
 }
 
 impl Fiber {
@@ -430,6 +447,10 @@ impl Fiber {
             jit_safepoint_flag: false,
             #[cfg(feature = "jit")]
             jit_panic_msg: InterfaceSlot::default(),
+            #[cfg(feature = "std")]
+            remote_recv_response: None,
+            #[cfg(feature = "std")]
+            remote_send_closed: false,
         }
     }
     
@@ -466,7 +487,13 @@ impl Fiber {
         {
             self.jit_panic_flag = false;
             self.jit_is_user_panic = false;
+            self.jit_safepoint_flag = false;
             self.jit_panic_msg = InterfaceSlot::default();
+        }
+        #[cfg(feature = "std")]
+        {
+            self.remote_recv_response = None;
+            self.remote_send_closed = false;
         }
     }
     

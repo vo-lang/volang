@@ -29,6 +29,8 @@ pub use helpers::{stack_get, stack_set};
 pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE, SchedulingOutcome, RuntimeTrapKind};
 #[cfg(feature = "std")]
 pub use types::IslandThread;
+#[cfg(feature = "std")]
+pub use types::EndpointRegistry;
 
 use helpers::{slice_data_ptr, slice_len, slice_cap, string_len, string_index, runtime_panic, runtime_panic_msg, runtime_trap, user_panic};
 
@@ -52,14 +54,6 @@ enum WaitResult {
     Break,
 }
 
-/// Processed port operation outcome.
-#[cfg(feature = "std")]
-enum PortAction {
-    Continue,
-    Block,
-    Trap(RuntimeTrapKind),
-    Wake(Vec<vo_runtime::objects::port::WaiterInfo>),
-}
 use crate::instruction::{Instruction, Opcode};
 use crate::scheduler::Scheduler;
 use vo_runtime::itab::ItabCache;
@@ -250,26 +244,34 @@ impl Vm {
     /// Returns the island handle (GcRef).
     #[cfg(feature = "std")]
     pub fn create_island(&mut self) -> GcRef {
+        use vo_runtime::island_transport::{InThreadTransport, IslandSender};
+
         let module = self.module.as_ref().expect("module required for create_island");
         let next_id = self.state.next_island_id;
         self.state.next_island_id += 1;
         
-        // Create island channel and handle
-        let (tx, rx) = std::sync::mpsc::channel::<vo_runtime::island::IslandCommand>();
+        // Create transport pair for the new island
+        let (island_sender, island_transport) = InThreadTransport::new();
+        let island_sender: std::sync::Arc<dyn IslandSender> = std::sync::Arc::new(island_sender);
         let handle = vo_runtime::island::create(&mut self.state.gc, next_id);
         
-        // Initialize registry and main_cmd_rx if first island
+        // Initialize registry and main transport if first island
         if self.state.island_registry.is_none() {
-            let (main_tx, main_rx) = std::sync::mpsc::channel::<vo_runtime::island::IslandCommand>();
+            let (main_sender, main_transport) = InThreadTransport::new();
+            let main_sender: std::sync::Arc<dyn IslandSender> = std::sync::Arc::new(main_sender);
             let mut registry = std::collections::HashMap::new();
-            registry.insert(0u32, main_tx);
+            registry.insert(0u32, main_sender.clone());
             self.state.island_registry = Some(std::sync::Arc::new(std::sync::Mutex::new(registry)));
-            self.state.main_cmd_rx = Some(main_rx);
+            self.state.main_transport = Some(Box::new(main_transport));
+            // Also register main island in island_senders
+            self.state.island_senders.insert(0, main_sender);
         }
         
-        // Register this island
+        // Register this island's sender in the shared registry
         let registry = self.state.island_registry.as_ref().unwrap().clone();
-        { let mut guard = registry.lock().unwrap(); guard.insert(next_id, tx.clone()); }
+        { let mut guard = registry.lock().unwrap(); guard.insert(next_id, island_sender.clone()); }
+        // Also register in island_senders
+        self.state.island_senders.insert(next_id, island_sender.clone());
         
         // Spawn island thread with JIT config from main VM
         let module_arc = std::sync::Arc::new(module.clone());
@@ -278,14 +280,15 @@ impl Vm {
         let jit_config = self.jit_mgr.as_ref().map(|mgr| mgr.config().clone());
         let join_handle = std::thread::spawn(move || {
             #[cfg(feature = "jit")]
-            island_thread::run_island_thread(next_id, module_arc, rx, registry_clone, jit_config);
+            island_thread::run_island_thread(next_id, module_arc, island_transport, registry_clone, jit_config);
             #[cfg(not(feature = "jit"))]
-            island_thread::run_island_thread(next_id, module_arc, rx, registry_clone);
+            island_thread::run_island_thread(next_id, module_arc, island_transport, registry_clone);
         });
         
         // Save thread handle
         self.state.island_threads.push(IslandThread {
-            handle, command_tx: tx, join_handle: Some(join_handle),
+            island_id: next_id,
+            join_handle: Some(join_handle),
         });
         
         handle
@@ -382,15 +385,46 @@ impl Vm {
         Ok(SchedulingOutcome::Completed)
     }
     
-    /// Process wake commands from other island threads (non-blocking).
+    /// Process commands from other island threads (non-blocking).
     #[inline]
     fn process_island_commands(&mut self) {
         #[cfg(feature = "std")]
-        if let Some(ref rx) = self.state.main_cmd_rx {
-            while let Ok(cmd) = rx.try_recv() {
-                if let vo_runtime::island::IslandCommand::WakeFiber { fiber_id } = cmd {
-                    self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
+        {
+            // Collect commands first to avoid borrow conflict
+            let mut cmds = Vec::new();
+            if let Some(ref transport) = self.state.main_transport {
+                while let Ok(Some(cmd)) = transport.try_recv() {
+                    cmds.push(cmd);
                 }
+            }
+            for cmd in cmds {
+                self.dispatch_island_command(cmd);
+            }
+        }
+    }
+
+    /// Dispatch a single island command on the main island.
+    #[cfg(feature = "std")]
+    fn dispatch_island_command(&mut self, cmd: vo_runtime::island::IslandCommand) {
+        use vo_runtime::island::IslandCommand;
+        match cmd {
+            IslandCommand::WakeFiber { fiber_id } => {
+                self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
+            }
+            IslandCommand::ChanRequest { endpoint_id, kind, from_island, fiber_id } => {
+                // Home island handles the request on its ChannelState
+                crate::vm::island_thread::handle_chan_request_command(
+                    self, endpoint_id, kind, from_island, fiber_id,
+                );
+            }
+            IslandCommand::ChanResponse { endpoint_id, kind, fiber_id } => {
+                // Main island received a response for a REMOTE channel
+                crate::vm::island_thread::handle_chan_response_command(
+                    self, endpoint_id, kind, fiber_id,
+                );
+            }
+            IslandCommand::SpawnFiber { .. } | IslandCommand::Shutdown => {
+                // SpawnFiber/Shutdown are not expected on main island transport
             }
         }
     }
@@ -408,19 +442,18 @@ impl Vm {
         
         // Try waiting for island commands
         #[cfg(feature = "std")]
-        if self.scheduler.has_blocked() && self.state.main_cmd_rx.is_some() {
-            if let Some(ref rx) = self.state.main_cmd_rx {
-                match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                    Ok(vo_runtime::island::IslandCommand::WakeFiber { fiber_id }) => {
-                        self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
+        if self.scheduler.has_blocked() && self.state.main_transport.is_some() {
+            if let Some(ref transport) = self.state.main_transport {
+                match transport.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok(cmd) => {
+                        self.dispatch_island_command(cmd);
                         return WaitResult::Retry;
                     }
-                    Ok(_) => return WaitResult::Retry,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    Err(vo_runtime::island_transport::TransportError::Timeout) => {
                         self.scheduler.poll_io(&mut self.state.io);
                         return WaitResult::Retry;
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    Err(vo_runtime::island_transport::TransportError::Disconnected) => {
                         return WaitResult::Break;
                     }
                 }
@@ -438,7 +471,7 @@ impl Vm {
                 return WaitResult::Break;
             }
             // No I/O waiters and no island communication => true deadlock
-            if !self.scheduler.has_io_waiters() && self.state.main_cmd_rx.is_none() {
+            if !self.scheduler.has_io_waiters() && self.state.main_transport.is_none() {
                 return WaitResult::Blocked;
             }
             // Keep polling
@@ -569,62 +602,6 @@ impl Vm {
         }
     }
 
-    /// Handle channel operation result.
-    /// 
-    /// **Blocker sets resume PC:** Only recv decrements PC (to re-execute and fetch data).
-    fn handle_chan_result(
-        result: exec::ChanResult,
-        gc: &mut vo_runtime::gc::Gc,
-        fiber: &mut Fiber,
-        stack: *mut vo_runtime::slot::Slot,
-        module: &Module,
-        scheduler: &mut Scheduler,
-        is_recv: bool,
-    ) -> ExecResult {
-        match result {
-            exec::ChanResult::Continue => ExecResult::FrameChanged,
-            exec::ChanResult::Yield => {
-                if is_recv { fiber.current_frame_mut().unwrap().pc -= 1; }
-                ExecResult::Block(crate::fiber::BlockReason::Queue)
-            }
-            exec::ChanResult::Wake(waiter) => {
-                scheduler.wake_channel_waiter(&waiter);
-                ExecResult::TimesliceExpired
-            }
-            exec::ChanResult::WakeMultiple(waiters) => {
-                for waiter in &waiters {
-                    scheduler.wake_channel_waiter(waiter);
-                }
-                ExecResult::TimesliceExpired
-            }
-            exec::ChanResult::Trap(kind) => runtime_trap(gc, fiber, stack, module, kind),
-        }
-    }
-
-    /// Process port operation result into a PortAction.
-    /// Handles PC adjustment for recv blocking. Does not touch gc or scheduler.
-    #[cfg(feature = "std")]
-    fn process_port_result(
-        result: exec::PortResult,
-        fiber: &mut Fiber,
-        is_recv: bool,
-    ) -> PortAction {
-        match result {
-            exec::PortResult::Continue => PortAction::Continue,
-            exec::PortResult::Yield => {
-                if is_recv {
-                    fiber.current_frame_mut().unwrap().pc -= 1;
-                }
-                PortAction::Block
-            }
-            exec::PortResult::WakeRemote(waiter) => PortAction::Wake(vec![waiter]),
-            exec::PortResult::SendOnClosed => PortAction::Trap(RuntimeTrapKind::SendOnClosedChannel),
-            exec::PortResult::CloseNil => PortAction::Trap(RuntimeTrapKind::CloseNilChannel),
-            exec::PortResult::Closed(waiters) => PortAction::Wake(waiters),
-        }
-    }
-
-
     /// Run a fiber for up to TIME_SLICE instructions.
     /// Uses FiberId for type-safe fiber access.
     fn run_fiber(&mut self, fiber_id: crate::scheduler::FiberId) -> ExecResult {
@@ -723,16 +700,81 @@ impl Vm {
             }};
         }
 
-        // Macro to handle PortAction result - used by PortSend, PortRecv, PortClose
-        #[cfg(feature = "std")]
-        macro_rules! handle_port_action {
+        macro_rules! handle_queue_action {
             ($action:expr) => {
                 match $action {
-                    PortAction::Continue => { refetch!(); }
-                    PortAction::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
-                    PortAction::Trap(kind) => { handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, kind)); }
-                    PortAction::Wake(waiters) => {
-                        for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
+                    exec::QueueAction::Continue => { refetch!(); }
+                    exec::QueueAction::Block => {
+                        return ExecResult::Block(crate::fiber::BlockReason::Queue);
+                    }
+                    exec::QueueAction::ReplayThenBlock => {
+                        fiber.current_frame_mut().unwrap().pc -= 1;
+                        return ExecResult::Block(crate::fiber::BlockReason::Queue);
+                    }
+                    exec::QueueAction::Trap(kind) => {
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, kind));
+                    }
+                    exec::QueueAction::Wake(waiter) => {
+                        self.state.wake_waiter(&waiter, &mut self.scheduler);
+                        return ExecResult::TimesliceExpired;
+                    }
+                    exec::QueueAction::Close { waiters, endpoint_id } => {
+                        for waiter in &waiters {
+                            self.state.wake_waiter(waiter, &mut self.scheduler);
+                        }
+                        #[cfg(feature = "std")]
+                        if let Some(endpoint_id) = endpoint_id {
+                            crate::vm::island_thread::finalize_closed_home_endpoint(self, endpoint_id, None);
+                        }
+                        return ExecResult::TimesliceExpired;
+                    }
+                    #[cfg(feature = "std")]
+                    exec::QueueAction::RemoteSend { endpoint_id, home_island, data } => {
+                        use vo_runtime::island::ChanRequestKind;
+                        self.state.send_chan_request(
+                            home_island,
+                            endpoint_id,
+                            ChanRequestKind::Send { data },
+                            self.state.current_island_id,
+                            fiber_id.to_raw() as u64,
+                        );
+                        return ExecResult::Block(crate::fiber::BlockReason::Queue);
+                    }
+                    #[cfg(feature = "std")]
+                    exec::QueueAction::RemoteRecv { endpoint_id, home_island } => {
+                        use vo_runtime::island::ChanRequestKind;
+                        fiber.current_frame_mut().unwrap().pc -= 1;
+                        self.state.send_chan_request(
+                            home_island,
+                            endpoint_id,
+                            ChanRequestKind::Recv,
+                            self.state.current_island_id,
+                            fiber_id.to_raw() as u64,
+                        );
+                        return ExecResult::Block(crate::fiber::BlockReason::Queue);
+                    }
+                    #[cfg(feature = "std")]
+                    exec::QueueAction::RemoteRecvData { endpoint_id, target_island, fiber_id, data } => {
+                        use vo_runtime::island::ChanResponseKind;
+                        self.state.send_chan_response(
+                            target_island,
+                            endpoint_id,
+                            ChanResponseKind::RecvData { data, closed: false },
+                            fiber_id,
+                        );
+                        return ExecResult::TimesliceExpired;
+                    }
+                    #[cfg(feature = "std")]
+                    exec::QueueAction::RemoteClose { endpoint_id, home_island } => {
+                        use vo_runtime::island::ChanRequestKind;
+                        self.state.send_chan_request(
+                            home_island,
+                            endpoint_id,
+                            ChanRequestKind::Close,
+                            self.state.current_island_id,
+                            0,
+                        );
+                        self.state.endpoint_registry.mark_tombstone(endpoint_id);
                         refetch!();
                     }
                 }
@@ -1648,25 +1690,81 @@ impl Vm {
                     }
                 }
                 Opcode::ChanSend => {
-                    let result = Self::handle_chan_result(
-                        exec::exec_chan_send(stack, bp, fiber_id.to_raw(), &inst, &mut self.state.gc, Some(module)),
-                        &mut self.state.gc, fiber, stack, module, &mut self.scheduler, false);
-                    if matches!(result, ExecResult::FrameChanged) { refetch!(); } else { return result; }
+                    #[cfg(feature = "std")]
+                    if fiber.remote_send_closed {
+                        fiber.remote_send_closed = false;
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel));
+                    }
+                    #[cfg(feature = "std")]
+                    {
+                        let ch = helpers::stack_get(stack, bp + inst.a as usize) as GcRef;
+                        let elem_slots = inst.flags as usize;
+                        let src_start = bp + inst.b as usize;
+                        let src: Vec<u64> = (0..elem_slots).map(|i| helpers::stack_get(stack, src_start + i)).collect();
+                        exec::prepare_remote_send_value_if_needed(
+                            ch,
+                            &src,
+                            &module.struct_metas,
+                            &module.runtime_types,
+                            &mut self.state,
+                        );
+                    }
+                    handle_queue_action!(exec::exec_chan_send(
+                        stack,
+                        bp,
+                        self.state.current_island_id,
+                        fiber_id.to_raw(),
+                        &inst,
+                        &mut self.state,
+                        &module.struct_metas,
+                        &module.runtime_types,
+                        Some(module),
+                    ));
                 }
                 Opcode::ChanRecv => {
-                    let result = Self::handle_chan_result(
-                        exec::exec_chan_recv(stack, bp, fiber_id.to_raw(), &inst),
-                        &mut self.state.gc, fiber, stack, module, &mut self.scheduler, true);
-                    if matches!(result, ExecResult::FrameChanged) { refetch!(); } else { return result; }
+                    #[cfg(feature = "std")]
+                    if let Some(recv_response) = fiber.remote_recv_response.take() {
+                        let elem_slots = ((inst.flags >> 1) & 0x7F) as usize;
+                        let has_ok = (inst.flags & 1) != 0;
+                        let dst_start = bp + inst.a as usize;
+                        if let Some(dst) = exec::decode_remote_recv_response(
+                            &mut self.state.gc,
+                            recv_response,
+                            elem_slots,
+                            &module.struct_metas,
+                            &module.runtime_types,
+                            &mut self.state.endpoint_registry,
+                        ) {
+                            for (i, &value) in dst.iter().enumerate().take(elem_slots) {
+                                helpers::stack_set(stack, dst_start + i, value);
+                            }
+                            if has_ok {
+                                helpers::stack_set(stack, dst_start + elem_slots, 1);
+                            }
+                        } else {
+                            for i in 0..elem_slots {
+                                helpers::stack_set(stack, dst_start + i, 0);
+                            }
+                            if has_ok {
+                                helpers::stack_set(stack, dst_start + elem_slots, 0);
+                            }
+                        }
+                        refetch!();
+                        continue;
+                    }
+                    handle_queue_action!(exec::exec_chan_recv(
+                        stack,
+                        bp,
+                        self.state.current_island_id,
+                        fiber_id.to_raw(),
+                        &inst,
+                    ));
                 }
                 Opcode::ChanClose => {
-                    let result = Self::handle_chan_result(
-                        exec::exec_chan_close(stack, bp, &inst),
-                        &mut self.state.gc, fiber, stack, module, &mut self.scheduler, false);
-                    if matches!(result, ExecResult::FrameChanged) { refetch!(); } else { return result; }
+                    handle_queue_action!(exec::exec_chan_close(stack, bp, &inst));
                 }
                 Opcode::ChanLen => {
-                    exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::channel::len);
+                    exec::exec_queue_get(stack, bp, &inst, exec::channel_len);
                 }
                 Opcode::ChanCap => {
                     exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::queue_state::capacity);
@@ -1684,7 +1782,14 @@ impl Vm {
                 }
                 Opcode::SelectExec => {
                     let fiber_id = fiber.id;
-                    match exec::exec_select_exec(stack, bp, fiber_id, &mut fiber.select_state, &inst) {
+                    match exec::exec_select_exec(
+                        stack,
+                        bp,
+                        self.state.current_island_id,
+                        fiber_id,
+                        &mut fiber.select_state,
+                        &inst,
+                    ) {
                         exec::SelectResult::Continue => {}
                         exec::SelectResult::Block => {
                             // Waiters have been registered on all channels by exec_select_exec.
@@ -1695,8 +1800,17 @@ impl Vm {
                         exec::SelectResult::SendOnClosed => {
                             handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel));
                         }
+                        exec::SelectResult::UnsupportedRemote => {
+                            handle_panic_result!(runtime_panic_msg(
+                                &mut self.state.gc,
+                                fiber,
+                                stack,
+                                module,
+                                crate::vm::helpers::ERR_SELECT_REMOTE_UNSUPPORTED.to_string(),
+                            ));
+                        }
                         exec::SelectResult::Wake(waiter) => {
-                            self.scheduler.wake_channel_waiter(&waiter);
+                            self.state.wake_waiter(&waiter, &mut self.scheduler);
                             return ExecResult::TimesliceExpired;
                         }
                     }
@@ -1794,7 +1908,7 @@ impl Vm {
                     }
                 }
 
-                // === ISLAND/PORT: Cross-island operations ===
+                // === ISLAND/CHANNEL: Cross-island operations ===
                 #[cfg(feature = "std")]
                 Opcode::IslandNew => {
                     let handle = self.create_island();
@@ -1804,60 +1918,6 @@ impl Vm {
                 Opcode::IslandNew => {
                     let _ = exec::exec_island_new(stack, bp, &inst, &mut self.state.gc, 0);
                 }
-                Opcode::PortNew => {
-                    if let Err(msg) = exec::exec_port_new(stack, bp, &inst, &mut self.state.gc) {
-                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakePort, msg));
-                    }
-                }
-                #[cfg(feature = "std")]
-                Opcode::PortSend => {
-                    let island_id = self.state.current_island_id;
-                    let fid = fiber_id.to_raw() as u64;
-                    let result = exec::exec_port_send(stack, bp, island_id, fid, &inst, &self.state.gc, &module.struct_metas, &module.runtime_types);
-                    let action = Self::process_port_result(result, fiber, false);
-                    handle_port_action!(action);
-                }
-                #[cfg(not(feature = "std"))]
-                Opcode::PortSend => {
-                    handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::PortNotSupported));
-                }
-                #[cfg(feature = "std")]
-                Opcode::PortRecv => {
-                    let island_id = self.state.current_island_id;
-                    let fid = fiber_id.to_raw() as u64;
-                    let result = exec::exec_port_recv(stack, bp, island_id, fid, &inst, &mut self.state.gc, &module.struct_metas, &module.runtime_types);
-                    let action = Self::process_port_result(result, fiber, true);
-                    handle_port_action!(action);
-                }
-                #[cfg(not(feature = "std"))]
-                Opcode::PortRecv => {
-                    handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::PortNotSupported));
-                }
-                #[cfg(feature = "std")]
-                Opcode::PortClose => {
-                    let result = exec::exec_port_close(stack, bp, &inst);
-                    let action = Self::process_port_result(result, fiber, false);
-                    handle_port_action!(action);
-                }
-                #[cfg(not(feature = "std"))]
-                Opcode::PortClose => {
-                    match exec::exec_port_close(stack, bp, &inst) {
-                        exec::PortResult::Continue => {}
-                        exec::PortResult::CloseNil => {
-                            handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::CloseNilChannel));
-                        }
-                        exec::PortResult::NotSupported => {
-                            handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::PortNotSupported));
-                        }
-                        _ => {}
-                    }
-                }
-                Opcode::PortLen => {
-                    exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::port::len);
-                }
-                Opcode::PortCap => {
-                    exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::queue_state::capacity);
-                }
                 #[cfg(feature = "std")]
                 Opcode::GoIsland => {
                     let result = exec::exec_go_island(stack, bp, &inst);
@@ -1865,36 +1925,48 @@ impl Vm {
                     
                     if island_id == 0 {
                         let closure_ref = stack_get(stack, bp + inst.b as usize) as vo_runtime::gc::GcRef;
-                        let func_id = vo_runtime::objects::closure::func_id(closure_ref);
-                        let local_slots = module.functions[func_id as usize].local_slots;
-                        let mut new_fiber = crate::fiber::Fiber::new(0);
-                        new_fiber.push_frame(func_id, local_slots, 0, 0);
-                        new_fiber.stack[0] = closure_ref as u64;
+                        let new_fiber = unsafe {
+                            helpers::build_closure_fiber_from_args_ptr(
+                                &module.functions,
+                                self.scheduler.fibers.len() as u32,
+                                closure_ref as u64,
+                                stack.add(bp + inst.c as usize),
+                                inst.flags as u32,
+                            )
+                        };
                         self.scheduler.spawn(new_fiber);
                     } else {
-                        let capture_count = result.capture_data.len() as u16;
                         let func_def = &module.functions[result.func_id as usize];
+                        exec::prepare_chans_for_transfer(
+                            &result,
+                            island_id,
+                            &func_def.capture_types,
+                            &func_def.param_types,
+                            &module.struct_metas,
+                            &module.runtime_types,
+                            &mut self.state,
+                        );
                         let data = exec::pack_closure_for_island(
                             &self.state.gc, &result, &func_def.capture_types, &func_def.param_types,
                             &module.struct_metas, &module.runtime_types,
                         );
                         let closure_data = vo_runtime::pack::PackedValue::from_data(data);
-                        let cmd = vo_runtime::island::IslandCommand::SpawnFiber { closure_data, capture_slots: capture_count };
-                        if let Some(ref registry) = self.state.island_registry {
-                            if let Ok(guard) = registry.lock() {
-                                if let Some(tx) = guard.get(&island_id) { let _ = tx.send(cmd); }
-                            }
-                        }
+                        let cmd = vo_runtime::island::IslandCommand::SpawnFiber { closure_data };
+                        self.state.send_to_island(island_id, cmd);
                     }
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::GoIsland => {
                     let closure_ref = helpers::stack_get(stack, bp + inst.b as usize) as vo_runtime::gc::GcRef;
-                    let func_id = vo_runtime::objects::closure::func_id(closure_ref);
-                    let local_slots = module.functions[func_id as usize].local_slots;
-                    let mut new_fiber = crate::fiber::Fiber::new(0);
-                    new_fiber.push_frame(func_id, local_slots, 0, 0);
-                    new_fiber.stack[0] = closure_ref as u64;
+                    let new_fiber = unsafe {
+                        helpers::build_closure_fiber_from_args_ptr(
+                            &module.functions,
+                            self.scheduler.fibers.len() as u32,
+                            closure_ref as u64,
+                            stack.add(bp + inst.c as usize),
+                            inst.flags as u32,
+                        )
+                    };
                     self.scheduler.spawn(new_fiber);
                 }
 

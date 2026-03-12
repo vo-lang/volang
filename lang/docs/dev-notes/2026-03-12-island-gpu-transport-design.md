@@ -206,10 +206,9 @@ pub enum IslandCommand {
     SpawnFiber { closure_data: PackedValue, capture_slots: u16 },
     WakeFiber { fiber_id: u32 },
     Shutdown,
-    // New: port data transfer
-    PortSend { port_id: u32, data: Vec<u8> },
-    PortRecv { port_id: u32 },          // request
-    PortData { port_id: u32, data: Vec<u8> }, // response
+    // Port data transfer (either direction)
+    PortData { port_id: u32, data: Vec<u8> },
+    PortClosed { port_id: u32 },
 }
 ```
 
@@ -617,8 +616,8 @@ pub enum IslandCommand {
     SpawnFiber { closure_data: PackedValue, capture_slots: u16 },
     WakeFiber { fiber_id: u32 },
     Shutdown,
-    PortSend { port_id: u32, data: Vec<u8> },
     PortData { port_id: u32, data: Vec<u8> },
+    PortClosed { port_id: u32 },
 }
 ```
 

@@ -1,0 +1,39 @@
+package main
+
+import "time"
+
+func waitBool(ch chan bool, label string) bool {
+	done := false
+	value := false
+	for i := 0; i < 200 && !done; i += 1 {
+		select {
+		case value = <-ch:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, label)
+	return value
+}
+
+func main() {
+	testRemoteRecvEmptyStruct()
+}
+
+func testRemoteRecvEmptyStruct() {
+	i := make(island)
+	signal := make(chan struct{}, 1)
+	result := make(chan bool, 1)
+
+	go @(i) func(in chan struct{}, out chan bool) {
+		_, ok := <-in
+		out <- ok
+	}(signal, result)
+
+	time.Sleep(20 * time.Millisecond)
+	signal <- struct{}{}
+
+	ok := waitBool(result, "remote empty struct recv timed out")
+	assert(ok, "remote recv of struct{} must not be treated as closed")
+}

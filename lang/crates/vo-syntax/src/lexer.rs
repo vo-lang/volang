@@ -1201,10 +1201,8 @@ mod tests {
     }
 
     #[test]
-    fn test_port_island_keywords() {
-        assert_eq!(lex("port"), vec![TokenKind::Port, TokenKind::Eof]);
+    fn test_island_keyword() {
         assert_eq!(lex("island"), vec![TokenKind::Island, TokenKind::Eof]);
-        assert_eq!(lex("port int"), vec![TokenKind::Port, TokenKind::Ident, TokenKind::Eof]);
     }
 
     #[test]

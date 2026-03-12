@@ -8,7 +8,7 @@ func main() {
 	println("island created:", i)
 	
 	// Test basic port creation
-	p := make(port int, 10)
+	p := make(chan int, 10)
 	println("port created:", p)
 	
 	// Test port send/recv on main island

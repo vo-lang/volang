@@ -1,0 +1,133 @@
+package main
+
+import "time"
+
+type NestedAliasBox struct {
+	Inner chan int
+}
+
+func main() {
+	testTransferredChannelAliasIdentity()
+	testTransferredNestedChannelAliasAcrossCaptureAndArg()
+	testClosedTransferredChannelStaysClosed()
+	testRemoteSelectFailsFast()
+}
+
+func testTransferredChannelAliasIdentity() {
+	i := make(island)
+	ch := make(chan int, 1)
+	eq := make(chan bool, 1)
+
+	go @(i) func(a chan int, b chan int, out chan bool) {
+		out <- (a == b)
+	}(ch, ch, eq)
+
+	done := false
+	same := false
+	for i := 0; i < 100 && !done; i += 1 {
+		select {
+		case same = <-eq:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, "timed out waiting for transferred channel alias result")
+	assert(same, "transferred channel aliases must preserve identity")
+}
+
+func testTransferredNestedChannelAliasAcrossCaptureAndArg() {
+	i := make(island)
+	inner := make(chan int, 1)
+	out := make(chan bool, 1)
+	captured := NestedAliasBox{Inner: inner}
+
+	go @(i) func(arg NestedAliasBox, result chan bool) {
+		result <- (captured.Inner == arg.Inner)
+		arg.Inner <- 505
+	}(captured, out)
+
+	done := false
+	same := false
+	for i := 0; i < 100 && !done; i += 1 {
+		select {
+		case same = <-out:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, "timed out waiting for nested transferred channel alias result")
+	assert(same, "nested transferred channel aliases across capture and arg must preserve identity")
+
+	recvDone := false
+	value := 0
+	for i := 0; i < 100 && !recvDone; i += 1 {
+		select {
+		case value = <-inner:
+			recvDone = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(recvDone, "timed out waiting for nested transferred channel send")
+	assert(value == 505, "nested transferred channel send across capture and arg must work")
+}
+
+func testRemoteSelectFailsFast() {
+	i := make(island)
+	ch := make(chan int, 1)
+	out := make(chan bool, 1)
+
+	go @(i) func(remote chan int, result chan bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				result <- true
+			}
+		}()
+		select {
+		case <-remote:
+			result <- false
+		default:
+			result <- false
+		}
+	}(ch, out)
+
+	done := false
+	recovered := false
+	for i := 0; i < 100 && !done; i += 1 {
+		select {
+		case recovered = <-out:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, "timed out waiting for remote select result")
+	assert(recovered, "remote select should panic and be recovered")
+}
+
+func testClosedTransferredChannelStaysClosed() {
+	i := make(island)
+	ch := make(chan int)
+	out := make(chan bool, 1)
+	close(ch)
+
+	go @(i) func(remote chan int, result chan bool) {
+		v, ok := <-remote
+		result <- (v == 0 && ok == false)
+	}(ch, out)
+
+	done := false
+	closedOk := false
+	for i := 0; i < 100 && !done; i += 1 {
+		select {
+		case closedOk = <-out:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, "timed out waiting for closed transferred channel result")
+	assert(closedOk, "closed transferred channel must stay closed")
+}

@@ -16,10 +16,10 @@ func main() {
 
 func testStringCapture() {
 	i := make(island)
-	p := make(port string, 1)
+	p := make(chan string, 1)
 	
 	msg := "hello from main"
-	go @(i) func(ch port string) {
+	go @(i) func(ch chan string) {
 		// msg is captured and should be deep-copied
 		ch <- msg
 	}(p)
@@ -32,10 +32,10 @@ func testStringCapture() {
 
 func testSliceCapture() {
 	i := make(island)
-	p := make(port int, 1)
+	p := make(chan int, 1)
 	
 	nums := []int{1, 2, 3, 4, 5}
-	go @(i) func(ch port int) {
+	go @(i) func(ch chan int) {
 		// nums is captured and should be deep-copied
 		sum := 0
 		for _, n := range nums {
@@ -57,10 +57,10 @@ type Point struct {
 
 func testStructArg() {
 	i := make(island)
-	p := make(port int, 1)
+	p := make(chan int, 1)
 	
 	pt := Point{X: 10, Y: 20}
-	go @(i) func(ch port int, point Point) {
+	go @(i) func(ch chan int, point Point) {
 		// point is passed as argument and should be deep-copied
 		ch <- point.X + point.Y
 	}(p, pt)
@@ -73,13 +73,13 @@ func testStructArg() {
 
 func testMixedCaptures() {
 	i := make(island)
-	p := make(port string, 1)
+	p := make(chan string, 1)
 	
 	prefix := "result: "
 	value := 42
 	suffix := " done"
 	
-	go @(i) func(ch port string) {
+	go @(i) func(ch chan string) {
 		// Multiple captures of different types
 		ch <- prefix + fmt.Sprint(value) + suffix
 	}(p)

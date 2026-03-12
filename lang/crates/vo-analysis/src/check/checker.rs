@@ -357,6 +357,12 @@ impl Checker {
         self.result.closure_captures = escape_result.closure_captures;
         self.result.loop_defined_vars = escape_result.loop_defined_vars;
         
+        // go @(island) sendability post-pass (needs closure_captures from escape analysis)
+        let go_island_diags = super::go_island::check_go_island_sendability(files, &self.result, &self.tc_objs);
+        for diag in go_island_diags {
+            self.error_code_msg(diag.code, diag.span, diag.message);
+        }
+        
         if self.has_errors() {
             Err(())
         } else {
@@ -383,6 +389,12 @@ impl Checker {
         self.result.escaped_vars = escape_result.escaped;
         self.result.closure_captures = escape_result.closure_captures;
         self.result.loop_defined_vars = escape_result.loop_defined_vars;
+        
+        // go @(island) sendability post-pass (needs closure_captures from escape analysis)
+        let go_island_diags = super::go_island::check_go_island_sendability(files, &self.result, &self.tc_objs);
+        for diag in go_island_diags {
+            self.error_code_msg(diag.code, diag.span, diag.message);
+        }
         
         if self.has_errors() {
             Err(())

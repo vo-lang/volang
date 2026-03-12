@@ -117,8 +117,6 @@ fn compile_builtin_call_impl(
                 func.emit_op(Opcode::MapLen, dst, arg_reg, 0);
             } else if info.is_chan(arg_type) {
                 func.emit_op(Opcode::ChanLen, dst, arg_reg, 0);
-            } else if info.is_port(arg_type) {
-                func.emit_op(Opcode::PortLen, dst, arg_reg, 0);
             } else if info.is_slice(arg_type) {
                 func.emit_op(Opcode::SliceLen, dst, arg_reg, 0);
             } else {
@@ -135,8 +133,6 @@ fn compile_builtin_call_impl(
             
             if info.is_chan(arg_type) {
                 func.emit_op(Opcode::ChanCap, dst, arg_reg, 0);
-            } else if info.is_port(arg_type) {
-                func.emit_op(Opcode::PortCap, dst, arg_reg, 0);
             } else {
                 func.emit_op(Opcode::SliceCap, dst, arg_reg, 0);
             }
@@ -235,24 +231,6 @@ fn compile_builtin_call_impl(
                         tmp
                     };
                     func.emit_with_flags(Opcode::ChanNew, elem_slots as u8, dst, elem_meta_reg, cap_reg);
-            } else if info.is_port(type_key) {
-                    // make(port T) or make(port T, cap)
-                    // PortNew: a=dst, b=elem_meta, c=cap, flags=elem_slots
-                    let elem_type_key = info.port_elem_type(type_key);
-                    let elem_slots = info.type_slot_count(elem_type_key);
-                    let elem_meta_idx = ctx.get_or_create_value_meta(elem_type_key, info);
-                    
-                    let elem_meta_reg = func.alloc_slots(&[SlotType::Value]);
-                    func.emit_op(Opcode::LoadConst, elem_meta_reg, elem_meta_idx, 0);
-                    
-                    let cap_reg = if call.args.len() > 1 {
-                        compile_expr(&call.args[1], ctx, func, info)?
-                    } else {
-                        let tmp = func.alloc_slots(&[SlotType::Value]);
-                        func.emit_op(Opcode::LoadInt, tmp, 0, 0);
-                        tmp
-                    };
-                    func.emit_with_flags(Opcode::PortNew, elem_slots as u8, dst, elem_meta_reg, cap_reg);
             } else if info.is_island(type_key) {
                     // make(island)
                     // IslandNew: a=dst
@@ -366,17 +344,11 @@ fn compile_builtin_call_impl(
             func.emit_op(Opcode::MapDelete, map_reg, meta_and_key_reg, 0);
         }
         "close" => {
-            // close(chan) or close(port)
             if call.args.len() != 1 {
-                return Err(CodegenError::Internal("close requires 1 arg".to_string()));
+                return Err(CodegenError::Internal("close expects 1 argument".to_string()));
             }
-            let arg_type = info.expr_type(call.args[0].id);
             let arg_reg = compile_expr(&call.args[0], ctx, func, info)?;
-            if info.is_port(arg_type) {
-                func.emit_op(Opcode::PortClose, arg_reg, 0, 0);
-            } else {
-                func.emit_op(Opcode::ChanClose, arg_reg, 0, 0);
-            }
+            func.emit_op(Opcode::ChanClose, arg_reg, 0, 0);
         }
         "recover" => {
             // recover() - returns interface{}

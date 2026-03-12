@@ -409,14 +409,8 @@ fn format_instruction(instr: &Instruction) -> String {
 
         Opcode::IndexCheck => format!("IndexCheck    r{}, r{}", a, b),
 
-        // Island/Port operations
+        // Island operations
         Opcode::IslandNew => format!("IslandNew     r{}", a),
-        Opcode::PortNew => format!("PortNew       r{}, meta={}, cap={}, elem_slots={}", a, b, c, flags),
-        Opcode::PortSend => format!("PortSend      r{}, r{}, elem_slots={}", a, b, flags),
-        Opcode::PortRecv => format!("PortRecv      r{}, r{}, elem_slots={}, has_ok={}", a, b, flags >> 1, flags & 1),
-        Opcode::PortClose => format!("PortClose     r{}", a),
-        Opcode::PortLen => format!("PortLen       r{}, r{}", a, b),
-        Opcode::PortCap => format!("PortCap       r{}, r{}", a, b),
         Opcode::GoIsland => format!("GoIsland      r{}, r{}, capture_slots={}", a, b, flags),
         Opcode::ForLoop => format!("ForLoop       r{}, r{}, offset={}, flags={}", a, b, c as i16, flags),
 

@@ -38,36 +38,28 @@ pub fn exec_go_start(
         (func_id, None)
     };
 
-    let func = &functions[func_id as usize];
-    let mut new_fiber = Fiber::new(next_fiber_id);
-    new_fiber.push_frame(func_id, func.local_slots, 0, 0);
-
     let arg_count = arg_slots as usize;
     let src_start = bp + args_start as usize;
-    let new_stack = new_fiber.stack_ptr();
-    
-    if let Some(closure_gcref) = closure_ref {
-        // Use call_layout for consistent argument placement
-        let layout = closure::call_layout(
-            closure_gcref as u64,
-            closure_gcref,
-            func.recv_slots as usize,
-            func.is_closure,
-        );
-        
-        if let Some(slot0_val) = layout.slot0 {
-            unsafe { *new_stack = slot0_val };
-        }
-        
-        for i in 0..arg_count {
-            unsafe { *new_stack.add(layout.arg_offset + i) = stack_get(stack, src_start + i) };
+    let new_fiber = if let Some(closure_gcref) = closure_ref {
+        unsafe {
+            crate::vm::helpers::build_closure_fiber_from_args_ptr(
+                functions,
+                next_fiber_id,
+                closure_gcref as u64,
+                stack.add(src_start),
+                arg_slots as u32,
+            )
         }
     } else {
-        // Regular function: args start at reg[0]
+        let func = &functions[func_id as usize];
+        let mut new_fiber = Fiber::new(next_fiber_id);
+        new_fiber.push_frame(func_id, func.local_slots, 0, 0);
+        let new_stack = new_fiber.stack_ptr();
         for i in 0..arg_count {
             unsafe { *new_stack.add(i) = stack_get(stack, src_start + i) };
         }
-    }
+        new_fiber
+    };
 
     GoResult { new_fiber }
 }

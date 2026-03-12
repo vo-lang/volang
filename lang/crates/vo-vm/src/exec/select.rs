@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::{channel, queue_state};
 use vo_runtime::objects::channel::{RecvResult, SendResult};
-use vo_runtime::objects::queue_state::{ChannelMessage, ChannelWaiter, SelectWaiter};
+use vo_runtime::objects::queue_state::{ChannelMessage, QueueWaiter};
 use vo_runtime::slot::Slot;
 
 use crate::fiber::{Fiber, SelectCase, SelectCaseKind, SelectState};
@@ -29,8 +29,9 @@ pub enum SelectResult {
     Block,
     /// Send on closed channel - triggers panic.
     SendOnClosed,
+    UnsupportedRemote,
     /// A waiter was woken by an immediate send or recv case.
-    Wake(ChannelWaiter),
+    Wake(QueueWaiter),
 }
 
 /// Initialize a new select statement.
@@ -85,6 +86,7 @@ pub fn exec_select_recv(select_state: &mut Option<SelectState>, inst: &Instructi
 pub fn exec_select_exec(
     stack: *mut Slot,
     bp: usize,
+    island_id: u32,
     fiber_id: u32,
     select_state: &mut Option<SelectState>,
     inst: &Instruction,
@@ -120,10 +122,14 @@ pub fn exec_select_exec(
             *select_state = None;
             SelectResult::Continue
         }
+        ReadyCase::UnsupportedRemote => {
+            *select_state = None;
+            SelectResult::UnsupportedRemote
+        }
         ReadyCase::None => {
             // Path 3: No case ready - register waiters and block
             let state = select_state.as_mut().expect("no active select");
-            register_select_waiters(stack, bp, fiber_id, state);
+            register_select_waiters(stack, bp, island_id, fiber_id, state);
             SelectResult::Block
         }
     }
@@ -136,6 +142,7 @@ pub fn exec_select_exec(
 enum ReadyCase {
     None,
     Default,
+    UnsupportedRemote,
     Send { idx: usize, ch: GcRef, elem_slots: usize, val_reg: u16 },
     Recv { idx: usize, ch: GcRef, elem_slots: usize, val_reg: u16, has_ok: bool },
 }
@@ -148,6 +155,10 @@ fn find_ready_case(stack: *const Slot, bp: usize, state: &SelectState) -> ReadyC
         let ch = stack_get(stack, bp + case.chan_reg as usize) as GcRef;
         if ch.is_null() {
             continue;
+        }
+        #[cfg(feature = "std")]
+        if channel::is_remote(ch) {
+            return ReadyCase::UnsupportedRemote;
         }
 
         let cap = queue_state::capacity(ch);
@@ -359,7 +370,7 @@ fn execute_recv_case(
 // =============================================================================
 
 /// Register this fiber as a waiter on all channels in the select.
-fn register_select_waiters(stack: *const Slot, bp: usize, fiber_id: u32, state: &mut SelectState) {
+fn register_select_waiters(stack: *const Slot, bp: usize, island_id: u32, fiber_id: u32, state: &mut SelectState) {
     let select_id = state.select_id;
 
     for (idx, case) in state.cases.iter().enumerate() {
@@ -367,12 +378,11 @@ fn register_select_waiters(stack: *const Slot, bp: usize, fiber_id: u32, state: 
         if ch.is_null() {
             continue;
         }
-
-        let waiter = SelectWaiter {
-            fiber_id: fiber_id as u64,
-            case_index: idx as u16,
-            select_id,
-        };
+        #[cfg(feature = "std")]
+        assert!(
+            !channel::is_remote(ch),
+            "remote channel must be rejected before select waiter registration"
+        );
 
         let chan_state = channel::get_state(ch);
         match case.kind {
@@ -380,10 +390,15 @@ fn register_select_waiters(stack: *const Slot, bp: usize, fiber_id: u32, state: 
                 let val_start = bp + case.val_reg as usize;
                 let elem_slots = case.elem_slots as usize;
                 let value: ChannelMessage = (0..elem_slots).map(|i| stack_get(stack, val_start + i)).collect();
-                chan_state.register_sender(ChannelWaiter::Select(waiter), value);
+                chan_state.register_sender(
+                    QueueWaiter::selecting(island_id, fiber_id as u64, idx as u16, select_id),
+                    value,
+                );
             }
             SelectCaseKind::Recv => {
-                chan_state.register_receiver(ChannelWaiter::Select(waiter));
+                chan_state.register_receiver(
+                    QueueWaiter::selecting(island_id, fiber_id as u64, idx as u16, select_id),
+                );
             }
         }
 

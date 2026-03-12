@@ -6,10 +6,10 @@ import "time"
 func main() {
 	// Create island and port
 	i := make(island)
-	p := make(port int, 0) // unbuffered port
+	p := make(chan int, 0) // unbuffered port
 	
 	// Spawn goroutine on island that sends value back
-	go @(i) func(ch port int) {
+	go @(i) func(ch chan int) {
 		println("island: sending 42")
 		ch <- 42
 		println("island: sent 42")
@@ -22,9 +22,9 @@ func main() {
 	assert(v == 42, "expected 42")
 	
 	// Test buffered port with multiple values
-	p2 := make(port int, 5)
+	p2 := make(chan int, 5)
 	
-	go @(i) func(ch port int) {
+	go @(i) func(ch chan int) {
 		for x := 0; x < 5; x++ {
 			ch <- x * 10
 			println("island: sent", x*10)

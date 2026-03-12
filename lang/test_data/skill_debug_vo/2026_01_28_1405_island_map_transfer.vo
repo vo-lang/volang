@@ -5,7 +5,7 @@ import "time"
 
 func main() {
 	i := make(island)
-	p := make(port int, 1)
+	p := make(chan int, 1)
 	
 	m := map[string]int{
 		"one":   1,
@@ -13,7 +13,7 @@ func main() {
 		"three": 3,
 	}
 	
-	go @(i) func(ch port int, data map[string]int) {
+	go @(i) func(ch chan int, data map[string]int) {
 		sum := 0
 		for _, v := range data {
 			sum += v

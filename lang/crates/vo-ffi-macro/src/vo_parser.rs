@@ -54,7 +54,6 @@ pub enum VoType {
     Array(usize, Box<VoType>),
     Map(Box<VoType>, Box<VoType>),
     Chan(ChanDir, Box<VoType>),
-    Port(Box<VoType>),
     Island,
     Func(Vec<VoType>, Vec<VoType>),
     /// Variadic parameter: ...T (e.g., ...interface{})
@@ -127,7 +126,6 @@ impl std::fmt::Display for VoType {
             }
             VoType::Variadic(inner) => write!(f, "...{}", inner),
             VoType::Struct(fields) => write!(f, "struct{{{} fields}}", fields.len()),
-            VoType::Port(elem) => write!(f, "port {}", elem),
             VoType::Island => write!(f, "island"),
         }
     }
@@ -147,7 +145,7 @@ impl VoType {
             
             // Reference types: 1 slot (GcRef)
             VoType::Pointer(_) | VoType::Slice(_) | VoType::Map(_, _) | 
-            VoType::Chan(_, _) | VoType::Port(_) | VoType::Island | VoType::Func(_, _) => 1,
+            VoType::Chan(_, _) | VoType::Island | VoType::Func(_, _) => 1,
             
             // Array: elem_slots * length
             VoType::Array(len, elem) => {
@@ -193,7 +191,7 @@ impl VoType {
             VoType::Slice(inner) if matches!(inner.as_ref(), VoType::Uint8) => Some(SlotType::Bytes),
             VoType::Any => Some(SlotType::Any),
             VoType::Pointer(_) | VoType::Slice(_) | VoType::Array(_, _) |
-            VoType::Map(_, _) | VoType::Chan(_, _) | VoType::Port(_) |
+            VoType::Map(_, _) | VoType::Chan(_, _) |
             VoType::Island | VoType::Func(_, _) | VoType::Named(_) => Some(SlotType::GcRef),
             VoType::Variadic(_) | VoType::Struct(_) => None,
         }
@@ -343,7 +341,6 @@ fn type_expr_to_vo_type(type_expr: &ast::TypeExpr, interner: &SymbolInterner) ->
             VoType::Pointer(Box::new(inner_type))
         }
         TypeExprKind::Interface(_) => VoType::Any, // interface is 2 slots like any
-        TypeExprKind::Port(elem) => VoType::Port(Box::new(type_expr_to_vo_type(elem, interner))),
         TypeExprKind::Island => VoType::Island,
     }
 }
