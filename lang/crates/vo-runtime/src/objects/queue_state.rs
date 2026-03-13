@@ -17,10 +17,23 @@ use crate::gc::GcRef;
 use crate::slot::{slot_to_usize, Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 
-/// Channel backing kind discriminant.
-/// Stored in QueueData::backing field.
-pub const BACKING_LOCAL: u16 = 0;
-pub const BACKING_REMOTE: u16 = 1;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum QueueBacking {
+    Local = 0,
+    Remote = 1,
+}
+
+impl QueueBacking {
+    #[inline]
+    pub fn from_raw(raw: u16) -> Self {
+        match raw {
+            0 => Self::Local,
+            1 => Self::Remote,
+            other => panic!("QueueBacking::from_raw: invalid queue backing {}", other),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -33,8 +46,9 @@ impl QueueKind {
     #[inline]
     pub fn from_raw(raw: u16) -> Self {
         match raw {
+            0 => Self::Chan,
             1 => Self::Port,
-            _ => Self::Chan,
+            other => panic!("QueueKind::from_raw: invalid queue kind {}", other),
         }
     }
 
@@ -112,6 +126,11 @@ pub fn elem_rttid(q: GcRef) -> ValueRttid {
 #[inline]
 pub fn kind(q: GcRef) -> QueueKind {
     QueueKind::from_raw(QueueData::as_ref(q).kind)
+}
+
+#[inline]
+pub fn backing(q: GcRef) -> QueueBacking {
+    QueueBacking::from_raw(QueueData::as_ref(q).backing)
 }
 
 #[inline]
@@ -381,9 +400,22 @@ impl<M> QueueState<QueueWaiter, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     // Simple waiter type for unit tests (avoids depending on QueueWaiter).
     type TestQueue = QueueState<u32, Vec<u64>>;
+
+    #[test]
+    fn queue_kind_from_raw_rejects_invalid_value() {
+        let result = catch_unwind(AssertUnwindSafe(|| QueueKind::from_raw(2)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn queue_backing_from_raw_rejects_invalid_value() {
+        let result = catch_unwind(AssertUnwindSafe(|| QueueBacking::from_raw(2)));
+        assert!(result.is_err());
+    }
 
     #[test]
     fn is_send_ready_matches_queue_state() {

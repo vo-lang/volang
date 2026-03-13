@@ -353,22 +353,19 @@ fn prepare_single_queue_handle(
     notified_remote_endpoints: &mut HashSet<u64>,
 ) {
     use vo_runtime::objects::queue;
-    use vo_runtime::objects::queue_state::{BACKING_LOCAL, BACKING_REMOTE};
+    use vo_runtime::objects::queue_state::QueueBacking;
     use vo_runtime::island::{EndpointRequestKind, IslandCommand};
 
-    let backing = vo_runtime::objects::queue_state::QueueData::as_ref(chan_ref).backing;
-    match backing {
-        BACKING_LOCAL => {
+    match vo_runtime::objects::queue_state::backing(chan_ref) {
+        QueueBacking::Local => {
             if queue::home_info(chan_ref).is_none() {
                 let eid = state.allocate_endpoint_id();
                 queue::install_home_info(chan_ref, eid, state.current_island_id);
             }
-            if let Some(info) = queue::home_info_mut(chan_ref) {
-                info.peers.insert(target_island);
-                state.endpoint_registry.ensure_live(info.endpoint_id, chan_ref);
-            }
+            let endpoint_id = queue::add_home_peer(chan_ref, target_island);
+            state.endpoint_registry.ensure_live(endpoint_id, chan_ref);
         }
-        BACKING_REMOTE => {
+        QueueBacking::Remote => {
             let proxy = queue::remote_proxy(chan_ref);
             if notified_remote_endpoints.insert(proxy.endpoint_id) {
                 state.send_to_island(proxy.home_island, IslandCommand::EndpointRequest {
@@ -379,7 +376,6 @@ fn prepare_single_queue_handle(
                 });
             }
         }
-        _ => {}
     }
 }
 

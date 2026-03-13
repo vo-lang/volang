@@ -18,8 +18,8 @@ use crate::gc::{Gc, GcRef};
 use crate::slot::{ptr_to_slot, slot_to_ptr, Slot};
 use vo_common_core::types::{ValueMeta, ValueRttid};
 
-use super::queue_state::{LocalQueueState, QueueData, DATA_SLOTS, BACKING_LOCAL,
-    QueueKind, QueueWaiter, QueueMessage, BACKING_REMOTE, HomeInfo, RemoteProxy};
+use super::queue_state::{LocalQueueState, QueueBacking, QueueData, DATA_SLOTS,
+    QueueKind, QueueWaiter, QueueMessage, HomeInfo, RemoteProxy};
 
 pub use super::queue_state::{SendResult, RecvResult};
 
@@ -51,7 +51,7 @@ pub fn create(
     data.kind = kind as u16;
     data.reserved = 0;
     data.elem_rttid = elem_rttid.to_raw();
-    data.backing = BACKING_LOCAL;
+    data.backing = QueueBacking::Local as u16;
     data.endpoint_ptr = 0;
     chan
 }
@@ -99,7 +99,7 @@ pub fn create_remote_proxy_with_closed(
     data.kind = kind as u16;
     data.reserved = 0;
     data.elem_rttid = elem_rttid.to_raw();
-    data.backing = BACKING_REMOTE;
+    data.backing = QueueBacking::Remote as u16;
     data.endpoint_ptr = ptr_to_slot(Box::into_raw(proxy) as *mut u8);
     chan
 }
@@ -125,15 +125,17 @@ pub fn create_checked(
 
 #[inline]
 pub fn local_state(chan: GcRef) -> &'static mut LocalQueueState {
-    debug_assert!(QueueData::as_ref(chan).backing == BACKING_LOCAL,
-        "get_state called on REMOTE channel");
+    debug_assert!(
+        super::queue_state::backing(chan) == QueueBacking::Local,
+        "get_state called on non-LOCAL queue"
+    );
     unsafe { &mut *slot_to_ptr(QueueData::as_ref(chan).state) }
 }
 
 /// Check if this channel is a REMOTE proxy.
 #[inline]
 pub fn is_remote(chan: GcRef) -> bool {
-    QueueData::as_ref(chan).backing == BACKING_REMOTE
+    super::queue_state::backing(chan) == QueueBacking::Remote
 }
 
 #[inline]
@@ -164,21 +166,34 @@ pub fn remote_proxy_mut(chan: GcRef) -> &'static mut RemoteProxy {
 /// Returns None if never transferred (endpoint_ptr == 0).
 pub fn home_info(chan: GcRef) -> Option<&'static HomeInfo> {
     let data = QueueData::as_ref(chan);
-    if data.backing != BACKING_LOCAL || data.endpoint_ptr == 0 { return None; }
+    if super::queue_state::backing(chan) != QueueBacking::Local || data.endpoint_ptr == 0 {
+        return None;
+    }
     Some(unsafe { &*(data.endpoint_ptr as *const HomeInfo) })
 }
 
 /// Get mutable HomeInfo for a LOCAL channel.
 pub fn home_info_mut(chan: GcRef) -> Option<&'static mut HomeInfo> {
     let data = QueueData::as_ref(chan);
-    if data.backing != BACKING_LOCAL || data.endpoint_ptr == 0 { return None; }
+    if super::queue_state::backing(chan) != QueueBacking::Local || data.endpoint_ptr == 0 {
+        return None;
+    }
     Some(unsafe { &mut *(data.endpoint_ptr as *mut HomeInfo) })
+}
+
+pub fn add_home_peer(chan: GcRef, peer_island: u32) -> u64 {
+    let info = home_info_mut(chan).expect("add_home_peer: LOCAL port endpoint must have HomeInfo");
+    info.peers.insert(peer_island);
+    info.endpoint_id
 }
 
 /// Install HomeInfo on a LOCAL channel for first-time cross-island transfer.
 pub fn install_home_info(chan: GcRef, endpoint_id: u64, home_island: u32) {
     let data = QueueData::as_mut(chan);
-    debug_assert!(data.backing == BACKING_LOCAL, "install_home_info on non-LOCAL channel");
+    debug_assert!(
+        super::queue_state::backing(chan) == QueueBacking::Local,
+        "install_home_info on non-LOCAL channel"
+    );
     debug_assert!(data.endpoint_ptr == 0, "HomeInfo already installed");
     assert!(kind(chan) == QueueKind::Port, "install_home_info: chan cannot cross islands");
     let info = Box::new(HomeInfo {
@@ -290,8 +305,8 @@ pub fn take_waiting_senders(chan: GcRef) -> Vec<(QueueWaiter, QueueMessage)> {
 /// chan must be a valid Channel GcRef.
 pub unsafe fn drop_inner(chan: GcRef) {
     let data = QueueData::as_mut(chan);
-    match data.backing {
-        BACKING_LOCAL => {
+    match QueueBacking::from_raw(data.backing) {
+        QueueBacking::Local => {
             if data.state != 0 {
                 drop(Box::from_raw(slot_to_ptr::<LocalQueueState>(data.state)));
                 data.state = 0;
@@ -301,14 +316,13 @@ pub unsafe fn drop_inner(chan: GcRef) {
                 data.endpoint_ptr = 0;
             }
         }
-        BACKING_REMOTE => {
+        QueueBacking::Remote => {
             // REMOTE channels have no ChannelState (state == 0)
             if data.endpoint_ptr != 0 {
                 drop(Box::from_raw(data.endpoint_ptr as *mut RemoteProxy));
                 data.endpoint_ptr = 0;
             }
         }
-        _ => {}
     }
 }
 

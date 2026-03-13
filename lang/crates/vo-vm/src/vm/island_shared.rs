@@ -7,7 +7,7 @@ use vo_runtime::gc::GcRef;
 use vo_runtime::island::{EndpointRequestKind, EndpointResponseKind};
 use vo_runtime::island_msg;
 use vo_runtime::objects::queue;
-use vo_runtime::objects::queue_state::{HomeInfo, QueueData, QueueWaiter, BACKING_LOCAL};
+use vo_runtime::objects::queue_state::{QueueBacking, QueueWaiter};
 
 use crate::bytecode::Module;
 
@@ -88,11 +88,7 @@ pub(crate) fn handle_endpoint_request_command(
 
     if let EndpointRequestKind::Transfer { new_peer } = &kind {
         if let Some(ch) = vm.state.endpoint_registry.get_live(endpoint_id) {
-            let data = QueueData::as_ref(ch);
-            if data.endpoint_ptr != 0 {
-                let info = unsafe { &mut *(data.endpoint_ptr as *mut HomeInfo) };
-                info.peers.insert(*new_peer);
-            }
+            queue::add_home_peer(ch, *new_peer);
         }
         return;
     }
@@ -100,12 +96,14 @@ pub(crate) fn handle_endpoint_request_command(
     match vm.state.endpoint_registry.entries.get(&endpoint_id) {
         Some(EndpointEntry::Live(ch_ref)) => {
             let ch = *ch_ref;
-            let data = QueueData::as_ref(ch);
-            debug_assert!(data.backing == BACKING_LOCAL, "EndpointRequest arrived at non-LOCAL channel");
+            debug_assert!(
+                vo_runtime::objects::queue_state::backing(ch) == QueueBacking::Local,
+                "EndpointRequest arrived at non-LOCAL channel"
+            );
 
-            let cap = data.cap as usize;
-            let elem_meta = data.elem_meta;
-            let elem_slots = data.elem_slots as usize;
+            let cap = vo_runtime::objects::queue_state::capacity(ch);
+            let elem_meta = vo_runtime::objects::queue_state::elem_meta(ch);
+            let elem_slots = vo_runtime::objects::queue_state::elem_slots(ch) as usize;
             let home_island = vm.state.current_island_id;
             let module = vm.module.as_ref().expect("module loaded");
 
