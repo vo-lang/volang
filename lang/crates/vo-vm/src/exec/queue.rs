@@ -13,7 +13,7 @@ use vo_common_core::bytecode::StructMeta;
 use vo_common_core::RuntimeType;
 use vo_runtime::{ValueMeta, ValueRttid};
 use vo_runtime::gc::{Gc, GcRef};
-use vo_runtime::objects::queue::{self, RecvResult, SendResult};
+use vo_runtime::objects::queue::{self, RecvResult};
 use vo_runtime::objects::queue_state::{self, QueueKind, QueueWaiter};
 use vo_runtime::slot::Slot;
 
@@ -177,44 +177,39 @@ pub fn queue_send_core(
     }
 
     let waiter = QueueWaiter::simple(island_id, fiber_id);
-    match queue::send_or_block(ch, value, waiter) {
-        SendResult::DirectSend(receiver) => {
-            if receiver.island_id == island_id {
-                QueueExecResult::Wake(receiver)
-            } else {
-                let value = queue::take_direct_send_payload(ch);
-                if em.value_kind().may_contain_gc_refs() {
-                    super::prepare_value_queue_handles_for_transfer(
-                        value.as_ref(),
-                        em,
-                        receiver.island_id,
-                        struct_metas,
-                        runtime_types,
-                        state,
-                    );
-                }
-                let endpoint_id = queue::home_info(ch)
-                    .expect("DirectSend to remote waiter requires HomeInfo")
-                    .endpoint_id;
-                let data = super::transport::pack_transport_message(
-                    &state.gc,
+    match queue::send_or_block_resolved(ch, value, waiter, island_id) {
+        queue::ResolvedSendResult::Wake(receiver) => QueueExecResult::Wake(receiver),
+        queue::ResolvedSendResult::RemoteDirect { receiver, payload: value } => {
+            if em.value_kind().may_contain_gc_refs() {
+                super::prepare_value_queue_handles_for_transfer(
                     value.as_ref(),
                     em,
+                    receiver.island_id,
                     struct_metas,
                     runtime_types,
+                    state,
                 );
-                QueueExecResult::RemoteRecvData {
-                    endpoint_id,
-                    target_island: receiver.island_id,
-                    fiber_id: receiver.fiber_id,
-                    data,
-                }
+            }
+            let endpoint_id = queue::home_info(ch)
+                .expect("DirectSend to remote waiter requires HomeInfo")
+                .endpoint_id;
+            let data = super::transport::pack_transport_message(
+                &state.gc,
+                value.as_ref(),
+                em,
+                struct_metas,
+                runtime_types,
+            );
+            QueueExecResult::RemoteRecvData {
+                endpoint_id,
+                target_island: receiver.island_id,
+                fiber_id: receiver.fiber_id,
+                data,
             }
         }
-        SendResult::Buffered => QueueExecResult::Continue,
-        SendResult::Blocked => QueueExecResult::Block,
-        SendResult::WouldBlock(_) => unreachable!("send_or_block never returns WouldBlock"),
-        SendResult::Closed => QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel),
+        queue::ResolvedSendResult::Buffered => QueueExecResult::Continue,
+        queue::ResolvedSendResult::Blocked => QueueExecResult::Block,
+        queue::ResolvedSendResult::Closed => QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel),
     }
 }
 

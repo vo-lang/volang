@@ -21,7 +21,7 @@ use vo_common_core::types::{ValueMeta, ValueRttid};
 use super::queue_state::{LocalQueueState, QueueBacking, QueueData, DATA_SLOTS,
     QueueKind, QueueWaiter, QueueMessage, HomeInfo, RemoteProxy};
 
-pub use super::queue_state::{SendResult, RecvResult};
+pub use super::queue_state::{ResolvedSendResult, SendResult, RecvResult};
 
 impl LocalQueueState {
     pub fn iter_buffer(&self) -> impl Iterator<Item = &[u64]> {
@@ -284,6 +284,17 @@ pub fn cancel_select_waiters(chan: GcRef, select_id: u64) {
 pub fn send_or_block(chan: GcRef, value: QueueMessage, waiter: QueueWaiter) -> SendResult<QueueWaiter, QueueMessage> {
     let cap = super::queue_state::capacity(chan);
     with_local_state(chan, |s| s.send_or_block(value, cap, waiter))
+}
+
+#[inline]
+pub fn send_or_block_resolved(
+    chan: GcRef,
+    value: QueueMessage,
+    waiter: QueueWaiter,
+    local_island: u32,
+) -> ResolvedSendResult<QueueWaiter, QueueMessage> {
+    let cap = super::queue_state::capacity(chan);
+    with_local_state(chan, |s| s.send_or_block_resolved(value, cap, waiter, local_island))
 }
 
 /// Atomic recv: try to receive, if would block, register waiter in same operation.

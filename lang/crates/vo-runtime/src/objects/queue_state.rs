@@ -232,6 +232,15 @@ pub enum SendResult<W, M> {
     Closed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedSendResult<W, M> {
+    Wake(W),
+    RemoteDirect { receiver: W, payload: M },
+    Buffered,
+    Blocked,
+    Closed,
+}
+
 /// Result of a receive operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecvResult<W> {
@@ -388,6 +397,31 @@ impl<W, M> QueueState<W, M> {
 // =============================================================================
 
 impl<M> QueueState<QueueWaiter, M> {
+    pub fn send_or_block_resolved(
+        &mut self,
+        value: M,
+        cap: usize,
+        waiter: QueueWaiter,
+        local_island: u32,
+    ) -> ResolvedSendResult<QueueWaiter, M> {
+        match self.send_impl(value, cap, Some(waiter)) {
+            SendResult::DirectSend(receiver) => {
+                if receiver.island_id == local_island {
+                    ResolvedSendResult::Wake(receiver)
+                } else {
+                    ResolvedSendResult::RemoteDirect {
+                        receiver,
+                        payload: self.take_direct_send_payload(),
+                    }
+                }
+            }
+            SendResult::Buffered => ResolvedSendResult::Buffered,
+            SendResult::Blocked => ResolvedSendResult::Blocked,
+            SendResult::WouldBlock(_) => unreachable!("send_or_block never returns WouldBlock"),
+            SendResult::Closed => ResolvedSendResult::Closed,
+        }
+    }
+
     /// Cancel all select waiters with the given select_id.
     /// Called when a select completes (one case became ready) to remove
     /// this fiber from all other channels it was waiting on.
@@ -566,6 +600,27 @@ mod tests {
                 assert_eq!(q.buffer[0], vec![77u64]);
             }
             other => panic!("expected Buffered, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolved_direct_send_to_remote_waiter_extracts_payload() {
+        let mut q = LocalQueueState::new(0);
+        q.register_receiver(QueueWaiter::simple(9, 99));
+
+        match q.send_or_block_resolved(
+            vec![42u64].into_boxed_slice(),
+            0,
+            QueueWaiter::simple(7, 1),
+            7,
+        ) {
+            ResolvedSendResult::RemoteDirect { receiver, payload } => {
+                assert_eq!(receiver.island_id, 9);
+                assert_eq!(receiver.fiber_id, 99);
+                assert_eq!(payload.as_ref(), &[42u64]);
+                assert_eq!(q.buffer.len(), 0);
+            }
+            other => panic!("expected RemoteDirect, got {:?}", other),
         }
     }
 }

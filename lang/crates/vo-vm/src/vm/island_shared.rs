@@ -196,15 +196,9 @@ fn handle_endpoint_request_inner(
                     ctx.module,
                 );
             }
-            match state.send_or_block(value, ctx.cap, from) {
-                vo_runtime::objects::queue_state::SendResult::DirectSend(receiver) => {
-                    if vm_state.is_local_waiter(&receiver) {
-                        local_wakes.push(receiver);
-                    } else {
-                        let value = state.take_direct_send_payload();
-                        let recv_kind = pack_recv_data_for_waiter(ctx, &receiver, &value, vm_state);
-                        dispatch_response(receiver, home_island, recv_kind, responses, local_wakes);
-                    }
+            match state.send_or_block_resolved(value, ctx.cap, from, home_island) {
+                vo_runtime::objects::queue_state::ResolvedSendResult::Wake(receiver) => {
+                    local_wakes.push(receiver);
                     dispatch_response(
                         requester,
                         home_island,
@@ -213,7 +207,9 @@ fn handle_endpoint_request_inner(
                         local_wakes,
                     );
                 }
-                vo_runtime::objects::queue_state::SendResult::Buffered => {
+                vo_runtime::objects::queue_state::ResolvedSendResult::RemoteDirect { receiver, payload: value } => {
+                    let recv_kind = pack_recv_data_for_waiter(ctx, &receiver, &value, vm_state);
+                    dispatch_response(receiver, home_island, recv_kind, responses, local_wakes);
                     dispatch_response(
                         requester,
                         home_island,
@@ -222,11 +218,17 @@ fn handle_endpoint_request_inner(
                         local_wakes,
                     );
                 }
-                vo_runtime::objects::queue_state::SendResult::Blocked => {}
-                vo_runtime::objects::queue_state::SendResult::WouldBlock(_) => {
-                    unreachable!("send_or_block never returns WouldBlock")
+                vo_runtime::objects::queue_state::ResolvedSendResult::Buffered => {
+                    dispatch_response(
+                        requester,
+                        home_island,
+                        endpoint_send_ack(false),
+                        responses,
+                        local_wakes,
+                    );
                 }
-                vo_runtime::objects::queue_state::SendResult::Closed => {
+                vo_runtime::objects::queue_state::ResolvedSendResult::Blocked => {}
+                vo_runtime::objects::queue_state::ResolvedSendResult::Closed => {
                     dispatch_response(
                         requester,
                         home_island,
