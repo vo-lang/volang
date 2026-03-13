@@ -15,8 +15,8 @@ func main() {
 // Test 1: Basic cross-island port communication
 func test1_island_basic() {
 	i := make(island)
-	p := make(port int, 0)
-	done := make(port int, 0)
+	p := make(port int, 1)
+	done := make(port int, 1)
 	
 	// Run on separate island
 	go @(i) func(p port int, done port int) {
@@ -35,7 +35,7 @@ func test1_island_basic() {
 // Test 2: Cross-island port in loop
 func test2_island_loop() {
 	i := make(island)
-	p := make(port int, 0)
+	p := make(port int, 1)
 	
 	// Island with loop sending values
 	go @(i) func(p port int) {
@@ -64,8 +64,8 @@ func test2_island_loop() {
 // Island has loop with send then recv - this triggers OSR compilation
 func test3_island_ping_pong_osr() {
 	i := make(island)
-	reqPort := make(port int, 0)
-	respPort := make(port int, 0)
+	reqPort := make(port int, 1)
+	respPort := make(port int, 1)
 	
 	// Island runs OSR loop: send request, recv response
 	go @(i) func(req port int, resp port int) {

@@ -6,7 +6,7 @@ import "time"
 func main() {
 	// Create island and port
 	i := make(island)
-	p := make(port int, 0) // unbuffered port
+	p := make(port int, 1)
 	
 	// Spawn goroutine on island that sends value back
 	go @(i) func(ch port int) {

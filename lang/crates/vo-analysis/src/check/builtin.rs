@@ -337,7 +337,14 @@ impl Checker {
                     })
                 }
             }
-            Type::Slice(_) | Type::Chan(_) | Type::Port(_) => OperandMode::Value,
+            Type::Slice(_) | Type::Chan(_) => OperandMode::Value,
+            Type::Port(detail) => {
+                if detail.dir() == typ::ChanDir::SendOnly {
+                    OperandMode::Invalid
+                } else {
+                    OperandMode::Value
+                }
+            }
             Type::Map(_) => {
                 if id == Builtin::Len {
                     OperandMode::Value
@@ -511,6 +518,18 @@ impl Checker {
         for i in 1..nargs {
             if let Err(_) = self.index(&call.args[i], None) {
                 // Error already reported by index
+            }
+        }
+
+        if matches!(self.otype(arg0t).underlying_val(self.objs()), Type::Port(_)) {
+            let mut cap_op = Operand::new();
+            self.expr(&mut cap_op, &call.args[1]);
+            if let OperandMode::Constant(cap_val) = &cap_op.mode {
+                let (cap, cap_exact) = cap_val.int_as_i64();
+                if cap_exact && cap <= 0 {
+                    self.error_code_msg(TypeError::InvalidOp, call.args[1].span, "port capacity must be positive");
+                    return false;
+                }
             }
         }
 

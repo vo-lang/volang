@@ -1,0 +1,12 @@
+// Test: port spec enforcement for send-only len/cap and positive capacity
+// This file should FAIL type checking
+
+package main
+
+func main() {
+	var sendOnly port<- int
+	_ = len(sendOnly)
+	_ = cap(sendOnly)
+	_ = make(port int, 0)
+	_ = make(port int, -1)
+}

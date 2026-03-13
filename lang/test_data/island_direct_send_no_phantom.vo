@@ -41,7 +41,7 @@ func main() {
 // Then repeat — second value must be the real second value.
 func testDirectSendNoPhantomUnbuffered() {
 	i := make(island)
-	ch := make(port int, 0) // unbuffered
+	ch := make(port int, 1)
 	result := make(port int, 2)
 
 	go @(i) func(data port int, out port int) {
@@ -98,8 +98,8 @@ func testDirectSendNoPhantomBuffered() {
 // Exercises DirectSend in both directions repeatedly.
 func testDirectSendMultipleRoundTrips() {
 	i := make(island)
-	req := make(port int, 0)  // unbuffered request channel
-	resp := make(port int, 0) // unbuffered response channel
+	req := make(port int, 1)
+	resp := make(port int, 1)
 
 	go @(i) func(input port int, output port int) {
 		for j := 0; j < 5; j += 1 {

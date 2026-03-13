@@ -109,7 +109,7 @@ func testRemoteSelectFailsFast() {
 
 func testClosedTransferredChannelStaysClosed() {
 	i := make(island)
-	ch := make(port int, 0)
+	ch := make(port int, 1)
 	out := make(port bool, 1)
 	close(ch)
 

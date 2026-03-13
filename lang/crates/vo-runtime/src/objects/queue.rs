@@ -120,6 +120,7 @@ pub fn create_checked(
 ) -> Result<GcRef, i32> {
     use super::alloc_error;
     if cap < 0 { return Err(alloc_error::NEGATIVE_CAP); }
+    if kind == QueueKind::Port && cap == 0 { return Err(alloc_error::NEGATIVE_CAP); }
     Ok(create(gc, kind, elem_meta, elem_rttid, elem_slots, cap as usize))
 }
 
@@ -381,5 +382,19 @@ mod tests {
         assert!(remote_proxy(port).closed);
         assert_eq!(remote_proxy(port).endpoint_id, 7);
         assert_eq!(remote_proxy(port).home_island, 9);
+    }
+
+    #[test]
+    fn create_checked_rejects_zero_capacity_port() {
+        let mut gc = Gc::new();
+        let result = create_checked(
+            &mut gc,
+            QueueKind::Port,
+            ValueMeta::new(0, ValueKind::Int64),
+            ValueRttid::new(0, ValueKind::Int64),
+            1,
+            0,
+        );
+        assert_eq!(result, Err(crate::objects::alloc_error::NEGATIVE_CAP));
     }
 }

@@ -215,7 +215,7 @@ pub fn queue_send_core(
     module: Option<&vo_runtime::bytecode::Module>,
 ) -> QueueExecResult {
     if ch.is_null() {
-        return QueueExecResult::Trap(RuntimeTrapKind::SendOnNilChannel);
+        return QueueExecResult::Block;
     }
 
     // REMOTE channel — send via message passing
@@ -285,7 +285,7 @@ pub fn queue_send_core(
 
 pub fn queue_recv_core(ch: GcRef, island_id: u32, fiber_id: u64) -> QueueRecvCoreResult {
     if ch.is_null() {
-        return QueueRecvCoreResult::Trap(RuntimeTrapKind::RecvOnNilChannel);
+        return QueueRecvCoreResult::WouldBlock;
     }
 
     // REMOTE channel — recv via message passing
@@ -392,4 +392,32 @@ pub fn queue_close_core(ch: GcRef) -> QueueExecResult {
 pub fn exec_queue_close(stack: *const Slot, bp: usize, inst: &Instruction) -> QueueExecResult {
     let ch = stack_get(stack, bp + inst.a as usize) as GcRef;
     queue_close_core(ch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::VmState;
+
+    #[test]
+    fn nil_queue_send_blocks() {
+        let mut state = VmState::new();
+        let result = queue_send_core(
+            core::ptr::null_mut(),
+            &[123],
+            0,
+            1,
+            &mut state,
+            &[],
+            &[],
+            None,
+        );
+        assert!(matches!(result, QueueExecResult::Block));
+    }
+
+    #[test]
+    fn nil_queue_recv_blocks() {
+        let result = queue_recv_core(core::ptr::null_mut(), 0, 1);
+        assert!(matches!(result, QueueRecvCoreResult::WouldBlock));
+    }
 }

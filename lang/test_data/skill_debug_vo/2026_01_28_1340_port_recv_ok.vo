@@ -13,7 +13,7 @@ func main() {
 	println("test1 passed: recv with ok from open port")
 	
 	// Test 2: recv with ok flag from closed port
-	p2 := make(port int, 0)
+	p2 := make(port int, 1)
 	i := make(island)
 	
 	go @(i) func(ch port int) {

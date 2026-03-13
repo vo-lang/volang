@@ -378,6 +378,11 @@ should_fail = true
 reason = "concrete type without protocol method should fail"
 
 [[tests]]
+file = "typechecker/port_spec_rules.vo"
+should_fail = true
+reason = "send-only ports cannot use len/cap; port capacity must be positive"
+
+[[tests]]
 file = "array_slice_get_set.vo"
 
 [[tests]]
