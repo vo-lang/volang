@@ -425,6 +425,7 @@ impl Vm {
         for cmd in cmds {
             self.dispatch_island_command(cmd);
         }
+        self.state.clear_endpoint_tombstones_if_quiescent();
     }
 
     /// Dispatch a single island command on the main island.
@@ -469,6 +470,7 @@ impl Vm {
                 match transport.recv_timeout(std::time::Duration::from_millis(100)) {
                     Ok(cmd) => {
                         self.dispatch_island_command(cmd);
+                        self.state.clear_endpoint_tombstones_if_quiescent();
                         return WaitResult::Retry;
                     }
                     Err(vo_runtime::island_transport::TransportError::Timeout) => {
@@ -476,6 +478,7 @@ impl Vm {
                         return WaitResult::Retry;
                     }
                     Err(vo_runtime::island_transport::TransportError::Disconnected) => {
+                        self.state.clear_endpoint_tombstones_if_quiescent();
                         return WaitResult::Break;
                     }
                 }
@@ -484,6 +487,7 @@ impl Vm {
 
         // If the only blocked fibers are host event waiters, signal the async loop.
         if self.scheduler.has_host_event_waiters() {
+            self.state.clear_endpoint_tombstones_if_quiescent();
             return WaitResult::SuspendedForHostEvents;
         }
 
@@ -498,9 +502,11 @@ impl Vm {
                 if self.scheduler.has_io_waiters() {
                     self.scheduler.poll_io(&mut self.state.io);
                 }
+                self.state.clear_endpoint_tombstones_if_quiescent();
                 return WaitResult::Break;
             }
             if !self.scheduler.has_io_waiters() && self.state.main_transport.is_none() {
+                self.state.clear_endpoint_tombstones_if_quiescent();
                 return WaitResult::Blocked;
             }
             self.scheduler.poll_io(&mut self.state.io);
@@ -510,9 +516,11 @@ impl Vm {
 
         #[cfg(not(feature = "std"))]
         if self.scheduler.has_blocked() {
+            self.state.clear_endpoint_tombstones_if_quiescent();
             return WaitResult::Blocked;
         }
 
+        self.state.clear_endpoint_tombstones_if_quiescent();
         WaitResult::Done
     }
 

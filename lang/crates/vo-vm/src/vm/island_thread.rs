@@ -61,10 +61,12 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) {
                 Err(_) => return,
             }
         }
+        vm.state.clear_endpoint_tombstones_if_quiescent();
         
         // 2. Run scheduler if there's work
         if vm.scheduler.has_work() {
             let _ = vm.run_scheduled();
+            vm.state.clear_endpoint_tombstones_if_quiescent();
             continue; // Check for new commands after running
         }
         
@@ -76,6 +78,7 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) {
             match transport.recv_timeout(std::time::Duration::from_millis(10)) {
                 Ok(cmd) => {
                     if handle_command(vm, cmd) { return; }
+                    vm.state.clear_endpoint_tombstones_if_quiescent();
                 }
                 Err(vo_runtime::island_transport::TransportError::Timeout) => {
                     // Poll I/O to check for completions
@@ -88,6 +91,7 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) {
             match transport.recv() {
                 Ok(cmd) => {
                     if handle_command(vm, cmd) { return; }
+                    vm.state.clear_endpoint_tombstones_if_quiescent();
                 }
                 Err(_) => return,
             }

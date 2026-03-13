@@ -32,6 +32,29 @@ fn read_u32(data: &[u8], offset: usize) -> u32 {
 
 pub const HEADER_SIZE: usize = 8;
 
+/// Determine the GC allocation meta for a boxed capture value.
+/// Reference-like value kinds (arrays, maps, queues, slices, strings, closures, islands)
+/// are allocated as opaque Struct so the GC does not misinterpret the inner layout.
+#[inline]
+fn capture_box_meta(value_meta: ValueMeta) -> ValueMeta {
+    let vk = value_meta.value_kind();
+    if vk.is_queue()
+        || matches!(
+            vk,
+            ValueKind::Array
+                | ValueKind::Map
+                | ValueKind::Slice
+                | ValueKind::String
+                | ValueKind::Closure
+                | ValueKind::Island
+        )
+    {
+        ValueMeta::new(0, ValueKind::Struct)
+    } else {
+        value_meta
+    }
+}
+
 /// Encode spawn fiber payload with proper type-aware serialization.
 ///
 pub fn encode_spawn_payload(
@@ -161,17 +184,7 @@ where
         );
         offset += len;
 
-        let box_vk = value_meta.value_kind();
-        let box_meta = if box_vk == ValueKind::Array || box_vk == ValueKind::Map
-            || box_vk == ValueKind::Channel || box_vk == ValueKind::Port || box_vk == ValueKind::Slice
-            || box_vk == ValueKind::String || box_vk == ValueKind::Closure
-            || box_vk == ValueKind::Island
-        {
-            ValueMeta::new(0, ValueKind::Struct)
-        } else {
-            value_meta
-        };
-        let box_ref = gc.alloc(box_meta, transfer_type.slots);
+        let box_ref = gc.alloc(capture_box_meta(value_meta), transfer_type.slots);
         for j in 0..transfer_type.slots as usize {
             unsafe { Gc::write_slot(box_ref, j, value_slots[j]); }
         }

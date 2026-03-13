@@ -59,16 +59,25 @@ pub enum EndpointEntry {
 /// to route incoming ChanRequest/ChanResponse commands.
 pub struct EndpointRegistry {
     pub entries: HbHashMap<u64, EndpointEntry>,
+    tombstone_count: usize,
 }
 
 impl EndpointRegistry {
     pub fn new() -> Self {
-        Self { entries: HbHashMap::new() }
+        Self {
+            entries: HbHashMap::new(),
+            tombstone_count: 0,
+        }
     }
 
     /// Register or update a live channel for an endpoint.
     pub fn register_live(&mut self, endpoint_id: u64, ch: GcRef) {
-        self.entries.insert(endpoint_id, EndpointEntry::Live(ch));
+        if matches!(
+            self.entries.insert(endpoint_id, EndpointEntry::Live(ch)),
+            Some(EndpointEntry::Tombstone)
+        ) {
+            self.tombstone_count -= 1;
+        }
     }
 
     /// Ensure endpoint is registered as live (idempotent).
@@ -86,7 +95,12 @@ impl EndpointRegistry {
 
     /// Mark an endpoint as tombstoned (channel closed or collected).
     pub fn mark_tombstone(&mut self, endpoint_id: u64) {
-        self.entries.insert(endpoint_id, EndpointEntry::Tombstone);
+        if !matches!(
+            self.entries.insert(endpoint_id, EndpointEntry::Tombstone),
+            Some(EndpointEntry::Tombstone)
+        ) {
+            self.tombstone_count += 1;
+        }
     }
 
     /// Check if an endpoint is tombstoned.
@@ -96,7 +110,15 @@ impl EndpointRegistry {
 
     /// Clear all tombstones (called periodically or on shutdown).
     pub fn clear_tombstones(&mut self) {
+        if self.tombstone_count == 0 {
+            return;
+        }
         self.entries.retain(|_, v| matches!(v, EndpointEntry::Live(_)));
+        self.tombstone_count = 0;
+    }
+
+    pub fn has_tombstones(&self) -> bool {
+        self.tombstone_count != 0
     }
 
     /// Iterate all live GcRefs for GC root scanning.
@@ -412,6 +434,14 @@ impl VmState {
         );
     }
 
+    /// Clear endpoint tombstones when no island responses are in flight.
+    /// Safe to call at scheduling maintenance boundaries.
+    pub fn clear_endpoint_tombstones_if_quiescent(&mut self) {
+        if self.pending_island_responses == 0 && self.endpoint_registry.has_tombstones() {
+            self.endpoint_registry.clear_tombstones();
+        }
+    }
+
     /// Allocate a new endpoint ID for this island.
     /// Format: high 32 bits = island_id, low 32 bits = counter.
     pub fn allocate_endpoint_id(&mut self) -> u64 {
@@ -454,5 +484,56 @@ impl Drop for VmState {
                 let _ = handle.join();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EndpointRegistry;
+    use vo_runtime::gc::GcRef;
+
+    #[test]
+    fn endpoint_registry_tombstone_count_tracks_correctly() {
+        let mut reg = EndpointRegistry::new();
+        let ch = 1usize as GcRef;
+
+        reg.register_live(7, ch);
+        reg.mark_tombstone(7);
+        // Double tombstone on same id should not double-count.
+        reg.mark_tombstone(7);
+
+        assert!(reg.has_tombstones());
+        assert!(reg.is_tombstone(7));
+
+        reg.clear_tombstones();
+
+        assert!(!reg.has_tombstones());
+        assert!(!reg.is_tombstone(7));
+        assert_eq!(reg.get_live(7), None);
+    }
+
+    #[test]
+    fn register_live_over_tombstone_decrements_count() {
+        let mut reg = EndpointRegistry::new();
+        let ch = 1usize as GcRef;
+
+        reg.mark_tombstone(9);
+        assert!(reg.has_tombstones());
+
+        reg.register_live(9, ch);
+
+        assert!(!reg.has_tombstones());
+        assert_eq!(reg.get_live(9), Some(ch));
+    }
+
+    #[test]
+    fn clear_tombstones_noop_when_empty() {
+        let mut reg = EndpointRegistry::new();
+        let ch = 1usize as GcRef;
+        reg.register_live(1, ch);
+        // No tombstones — clear should be a no-op.
+        reg.clear_tombstones();
+        assert_eq!(reg.get_live(1), Some(ch));
+        assert!(!reg.has_tombstones());
     }
 }

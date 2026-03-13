@@ -118,7 +118,7 @@ pub(crate) fn handle_endpoint_request_command(
                 elem_slots,
                 struct_metas: &module.struct_metas,
                 runtime_types: &module.runtime_types,
-                module: Some(module),
+                module,
             };
             queue::with_local_state(ch, |state| {
                 handle_endpoint_request_inner(
@@ -163,7 +163,7 @@ struct EndpointRequestCtx<'a> {
     elem_slots: usize,
     struct_metas: &'a [vo_common_core::bytecode::StructMeta],
     runtime_types: &'a [vo_common_core::RuntimeType],
-    module: Option<&'a Module>,
+    module: &'a Module,
 }
 
 fn handle_endpoint_request_inner(
@@ -193,7 +193,7 @@ fn handle_endpoint_request_inner(
                     ctx.ch,
                     &value,
                     ctx.elem_meta,
-                    ctx.module,
+                    Some(ctx.module),
                 );
             }
             match state.send_or_block_resolved(value, ctx.cap, from, home_island) {
