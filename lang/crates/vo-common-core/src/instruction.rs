@@ -15,6 +15,7 @@ pub const LOOP_FLAG_HAS_DEFER: u8 = 0x01;
 pub const LOOP_FLAG_HAS_LABELED_BREAK: u8 = 0x02;
 /// Loop flag: has labeled continue to outer loop
 pub const LOOP_FLAG_HAS_LABELED_CONTINUE: u8 = 0x04;
+pub const QUEUE_KIND_PORT_FLAG: u8 = 0x80;
 
 // =============================================================================
 // Instruction format
@@ -233,25 +234,18 @@ pub enum Opcode {
     /// Sets zero flag if iterator exhausted
     MapIterNext,
 
-    // === CHAN: Channel operations ===
-    ChanNew,
-    PortNew,
-    ChanSend,
-    PortSend,
-    ChanRecv,
-    PortRecv,
-    ChanClose,
-    PortClose,
-    ChanLen,
-    PortLen,
-    ChanCap,
-    PortCap,
+    // === QUEUE: Channel/Port operations ===
+    QueueNew,
+    QueueSend,
+    QueueRecv,
+    QueueClose,
+    QueueLen,
+    QueueCap,
 
     // === SELECT: Select statement ===
     SelectBegin,
     SelectSend,
     SelectRecv,
-    PortSelectRecv,
     SelectExec,
 
 

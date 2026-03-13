@@ -414,7 +414,7 @@ pub struct JitContext {
     pub select_send_fn: Option<extern "C" fn(ctx: *mut JitContext, queue_reg: u32, val_reg: u32, elem_slots: u32, case_idx: u32) -> JitResult>,
     
     /// Callback to add a recv case to select.
-    pub select_recv_fn: Option<extern "C" fn(ctx: *mut JitContext, dst_reg: u32, queue_reg: u32, elem_slots: u32, has_ok: u32, queue_kind: u32, case_idx: u32) -> JitResult>,
+    pub select_recv_fn: Option<extern "C" fn(ctx: *mut JitContext, dst_reg: u32, queue_reg: u32, elem_slots: u32, has_ok: u32, case_idx: u32) -> JitResult>,
     
     /// Callback to execute select statement.
     /// Returns JitResult::Ok (with result in result_reg), WaitIo (blocked), or Panic.
@@ -1013,15 +1013,17 @@ pub extern "C" fn vo_closure_new(gc: *mut Gc, func_id: u32, capture_count: u32) 
 // Channel Helpers
 // =============================================================================
 
-/// Create a new channel with validation (unified logic for VM and JIT).
+/// Create a new queue with validation (unified logic for VM and JIT).
 #[no_mangle]
-pub extern "C" fn vo_chan_new_checked(gc: *mut Gc, elem_type: u64, elem_slots: u32, cap: i64, out: *mut u64) -> i32 {
-    unsafe { queue_new_checked(gc, crate::objects::queue_state::QueueKind::Chan, elem_type, elem_slots, cap, out) }
-}
-
-#[no_mangle]
-pub extern "C" fn vo_port_new_checked(gc: *mut Gc, elem_type: u64, elem_slots: u32, cap: i64, out: *mut u64) -> i32 {
-    unsafe { queue_new_checked(gc, crate::objects::queue_state::QueueKind::Port, elem_type, elem_slots, cap, out) }
+pub extern "C" fn vo_queue_new_checked(
+    gc: *mut Gc,
+    kind: u32,
+    elem_type: u64,
+    elem_slots: u32,
+    cap: i64,
+    out: *mut u64,
+) -> i32 {
+    unsafe { queue_new_checked(gc, crate::objects::queue_state::QueueKind::from_raw(kind as u16), elem_type, elem_slots, cap, out) }
 }
 
 unsafe fn queue_new_checked(
@@ -1510,8 +1512,7 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_str_cmp", vo_str_cmp as *const u8),
         ("vo_str_decode_rune", vo_str_decode_rune as *const u8),
         ("vo_closure_new", vo_closure_new as *const u8),
-        ("vo_chan_new_checked", vo_chan_new_checked as *const u8),
-        ("vo_port_new_checked", vo_port_new_checked as *const u8),
+        ("vo_queue_new_checked", vo_queue_new_checked as *const u8),
         ("vo_chan_len", vo_chan_len as *const u8),
         ("vo_chan_cap", vo_chan_cap as *const u8),
         ("vo_array_new", vo_array_new as *const u8),
@@ -1670,12 +1671,11 @@ pub extern "C" fn vo_select_recv(
     queue_reg: u32,
     elem_slots: u32,
     has_ok: u32,
-    queue_kind: u32,
     case_idx: u32,
 ) -> JitResult {
     let ctx = unsafe { &mut *ctx };
     let recv_fn = ctx.select_recv_fn.expect("select_recv_fn not set");
-    recv_fn(ctx, dst_reg, queue_reg, elem_slots, has_ok, queue_kind, case_idx)
+    recv_fn(ctx, dst_reg, queue_reg, elem_slots, has_ok, case_idx)
 }
 
 /// Execute the select statement.

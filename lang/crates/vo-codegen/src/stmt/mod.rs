@@ -232,13 +232,7 @@ fn compile_stmt_inner(
             let elem_type = info.queue_elem_type(target_type);
             let elem_slots = info.queue_elem_slots(target_type) as u8;
             let val_reg = crate::expr::compile_expr_to_type(&send_stmt.value, elem_type, ctx, func, info)?;
-            func.emit_with_flags(
-                info.queue_send_opcode(target_type),
-                elem_slots,
-                target_reg,
-                val_reg,
-                0,
-            );
+            func.emit_with_flags(Opcode::QueueSend, elem_slots, target_reg, val_reg, 0);
         }
 
         // === Select ===

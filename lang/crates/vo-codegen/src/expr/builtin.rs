@@ -116,7 +116,7 @@ fn compile_builtin_call_impl(
             } else if info.is_map(arg_type) {
                 func.emit_op(Opcode::MapLen, dst, arg_reg, 0);
             } else if info.is_queue(arg_type) {
-                func.emit_op(info.queue_len_opcode(arg_type), dst, arg_reg, 0);
+                func.emit_op(Opcode::QueueLen, dst, arg_reg, 0);
             } else if info.is_slice(arg_type) {
                 func.emit_op(Opcode::SliceLen, dst, arg_reg, 0);
             } else {
@@ -132,7 +132,7 @@ fn compile_builtin_call_impl(
             let arg_type = info.expr_type(call.args[0].id);
             
             if info.is_queue(arg_type) {
-                func.emit_op(info.queue_cap_opcode(arg_type), dst, arg_reg, 0);
+                func.emit_op(Opcode::QueueCap, dst, arg_reg, 0);
             } else {
                 func.emit_op(Opcode::SliceCap, dst, arg_reg, 0);
             }
@@ -215,7 +215,6 @@ fn compile_builtin_call_impl(
                     func.emit_op(Opcode::MapNew, dst, packed_reg, slots_arg);
                 } else if info.is_queue(type_key) {
                     let elem_type_key = info.queue_elem_type(type_key);
-                    let elem_slots = info.queue_elem_slots(type_key);
                     let elem_meta_raw = ctx.compute_value_meta_raw(elem_type_key, info);
                     let elem_rttid_raw = vo_runtime::ValueRttid::new(
                         ctx.intern_type_key(elem_type_key, info),
@@ -233,13 +232,7 @@ fn compile_builtin_call_impl(
                         func.emit_op(Opcode::LoadInt, tmp, 0, 0);
                         tmp
                     };
-                    func.emit_with_flags(
-                        info.queue_new_opcode(type_key),
-                        elem_slots as u8,
-                        dst,
-                        packed_type_reg,
-                        cap_reg,
-                    );
+                    func.emit_with_flags(Opcode::QueueNew, info.queue_new_flags(type_key), dst, packed_type_reg, cap_reg);
             } else if info.is_island(type_key) {
                     // make(island)
                     // IslandNew: a=dst
@@ -357,8 +350,7 @@ fn compile_builtin_call_impl(
                 return Err(CodegenError::Internal("close expects 1 argument".to_string()));
             }
             let arg_reg = compile_expr(&call.args[0], ctx, func, info)?;
-            let arg_type = info.expr_type(call.args[0].id);
-            func.emit_op(info.queue_close_opcode(arg_type), arg_reg, 0, 0);
+            func.emit_op(Opcode::QueueClose, arg_reg, 0, 0);
         }
         "recover" => {
             // recover() - returns interface{}

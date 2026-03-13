@@ -121,7 +121,7 @@ pub extern "C" fn jit_queue_recv(
     elem_slots: u32,
     has_ok: u32,
 ) -> JitResult {
-    use crate::exec::{QueueRecvCoreResult, queue_recv_core};
+    use crate::exec::{QueueRecvCoreResult, complete_queue_recv, queue_recv_core};
 
     let module = unsafe { &*((*ctx).module as *const vo_runtime::bytecode::Module) };
     let (vm, fiber) = unsafe { extract_context(ctx) };
@@ -140,30 +140,28 @@ pub extern "C" fn jit_queue_recv(
         );
         return JitResult::Ok;
     }
-    match queue_recv_core(ch, vm.state.current_island_id, fiber.id as u64) {
-        QueueRecvCoreResult::Success { data, wake_sender } => {
-            crate::exec::write_recv_result(Some(data.as_ref()), elem_slots as usize, has_ok, |i, value| unsafe {
-                *dst_ptr.add(i) = value
-            });
-            if let Some(sender) = wake_sender {
-                vm.state.wake_waiter(&sender, &mut vm.scheduler);
-            }
+    match complete_queue_recv(
+        queue_recv_core(ch, vm.state.current_island_id, fiber.id as u64),
+        elem_slots as usize,
+        has_ok,
+        |i, value| unsafe { *dst_ptr.add(i) = value },
+    ) {
+        Ok(Some(sender)) => {
+            vm.state.wake_waiter(&sender, &mut vm.scheduler);
             JitResult::Ok
         }
-        QueueRecvCoreResult::WouldBlock => JitResult::WaitQueue,
-        QueueRecvCoreResult::Remote { endpoint_id, home_island } => {
+        Ok(None) => JitResult::Ok,
+        Err(QueueRecvCoreResult::WouldBlock) => JitResult::WaitQueue,
+        Err(QueueRecvCoreResult::Remote { endpoint_id, home_island }) => {
             vm.state.send_endpoint_recv_request(home_island, endpoint_id, fiber.id as u64);
             JitResult::WaitQueue
         }
-        QueueRecvCoreResult::Closed => {
-            crate::exec::write_recv_result(None, elem_slots as usize, has_ok, |i, value| unsafe {
-                *dst_ptr.add(i) = value
-            });
-            JitResult::Ok
-        }
-        QueueRecvCoreResult::Trap(RuntimeTrapKind::RecvOnNilChannel) => {
+        Err(QueueRecvCoreResult::Trap(RuntimeTrapKind::RecvOnNilChannel)) => {
             set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_RECV_ON_NIL)
         }
-        QueueRecvCoreResult::Trap(_) => JitResult::Panic,
+        Err(QueueRecvCoreResult::Trap(_)) => JitResult::Panic,
+        Err(QueueRecvCoreResult::Success { .. } | QueueRecvCoreResult::Closed) => {
+            unreachable!("complete_queue_recv returned terminal recv result as Err")
+        }
     }
 }

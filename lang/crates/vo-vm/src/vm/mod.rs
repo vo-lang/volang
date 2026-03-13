@@ -1692,24 +1692,34 @@ impl Vm {
                 }
 
                 // Channel operations
-                Opcode::ChanNew => {
-                    if let Err(msg) = exec::exec_chan_new(stack, bp, &inst, &mut self.state.gc) {
-                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakeChan, msg));
+                Opcode::QueueNew => {
+                    if let Err(msg) = exec::exec_queue_new(stack, bp, &inst, &mut self.state.gc) {
+                        handle_panic_result!(runtime_panic(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            exec::queue_new_trap_kind(inst.flags),
+                            msg
+                        ));
                     }
                 }
-                Opcode::PortNew => {
-                    if let Err(msg) = exec::exec_port_new(stack, bp, &inst, &mut self.state.gc) {
-                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakePort, msg));
-                    }
-                }
-                Opcode::ChanSend => {
+                Opcode::QueueSend => {
                     if fiber.consume_remote_send_closed() {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::SendOnClosedChannel
+                        ));
                     }
                     let ch = helpers::stack_get(stack, bp + inst.a as usize) as GcRef;
                     let elem_slots = inst.flags as usize;
                     let src_start = bp + inst.b as usize;
-                    let src: Vec<u64> = (0..elem_slots).map(|i| helpers::stack_get(stack, src_start + i)).collect();
+                    let src: Vec<u64> = (0..elem_slots)
+                        .map(|i| helpers::stack_get(stack, src_start + i))
+                        .collect();
                     exec::prepare_remote_send_value_if_needed(
                         ch,
                         &src,
@@ -1729,34 +1739,7 @@ impl Vm {
                         Some(module),
                     ));
                 }
-                Opcode::PortSend => {
-                    if fiber.consume_remote_send_closed() {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel));
-                    }
-                    let ch = helpers::stack_get(stack, bp + inst.a as usize) as GcRef;
-                    let elem_slots = inst.flags as usize;
-                    let src_start = bp + inst.b as usize;
-                    let src: Vec<u64> = (0..elem_slots).map(|i| helpers::stack_get(stack, src_start + i)).collect();
-                    exec::prepare_remote_send_value_if_needed(
-                        ch,
-                        &src,
-                        &module.struct_metas,
-                        &module.runtime_types,
-                        &mut self.state,
-                    );
-                    handle_queue_action!(exec::exec_queue_send(
-                        stack,
-                        bp,
-                        self.state.current_island_id,
-                        fiber_id.to_raw(),
-                        &inst,
-                        &mut self.state,
-                        &module.struct_metas,
-                        &module.runtime_types,
-                        Some(module),
-                    ));
-                }
-                Opcode::ChanRecv => {
+                Opcode::QueueRecv => {
                     if let Some(recv_response) = fiber.take_remote_recv_response() {
                         let elem_slots = ((inst.flags >> 1) & 0x7F) as usize;
                         let has_ok = (inst.flags & 1) != 0;
@@ -1782,48 +1765,13 @@ impl Vm {
                         &inst,
                     ));
                 }
-                Opcode::PortRecv => {
-                    if let Some(recv_response) = fiber.take_remote_recv_response() {
-                        let elem_slots = ((inst.flags >> 1) & 0x7F) as usize;
-                        let has_ok = (inst.flags & 1) != 0;
-                        let dst_start = bp + inst.a as usize;
-                        exec::replay_remote_queue_recv_response(
-                            &mut self.state.gc,
-                            recv_response,
-                            elem_slots,
-                            has_ok,
-                            &module.struct_metas,
-                            &module.runtime_types,
-                            &mut self.state.endpoint_registry,
-                            |i, value| helpers::stack_set(stack, dst_start + i, value),
-                        );
-                        refetch!();
-                        continue;
-                    }
-                    handle_queue_action!(exec::exec_queue_recv(
-                        stack,
-                        bp,
-                        self.state.current_island_id,
-                        fiber_id.to_raw(),
-                        &inst,
-                    ));
-                }
-                Opcode::ChanClose => {
+                Opcode::QueueClose => {
                     handle_queue_action!(exec::exec_queue_close(stack, bp, &inst));
                 }
-                Opcode::PortClose => {
-                    handle_queue_action!(exec::exec_queue_close(stack, bp, &inst));
-                }
-                Opcode::ChanLen => {
+                Opcode::QueueLen => {
                     exec::exec_queue_get(stack, bp, &inst, exec::queue_len);
                 }
-                Opcode::PortLen => {
-                    exec::exec_queue_get(stack, bp, &inst, exec::queue_len);
-                }
-                Opcode::ChanCap => {
-                    exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::queue_state::capacity);
-                }
-                Opcode::PortCap => {
+                Opcode::QueueCap => {
                     exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::queue_state::capacity);
                 }
 
@@ -1837,17 +1785,6 @@ impl Vm {
                 Opcode::SelectRecv => {
                     exec::exec_select_recv(
                         &mut fiber.select_state,
-                        vo_runtime::objects::queue_state::QueueKind::Chan,
-                        inst.a,
-                        inst.b,
-                        (inst.flags >> 1) & 0x7F,
-                        (inst.flags & 1) != 0,
-                    );
-                }
-                Opcode::PortSelectRecv => {
-                    exec::exec_select_recv(
-                        &mut fiber.select_state,
-                        vo_runtime::objects::queue_state::QueueKind::Port,
                         inst.a,
                         inst.b,
                         (inst.flags >> 1) & 0x7F,

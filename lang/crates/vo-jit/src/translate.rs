@@ -4,8 +4,7 @@ use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlot, StackSlotDa
 use cranelift_codegen::ir::condcodes::{IntCC, FloatCC};
 
 use vo_runtime::bytecode::Constant;
-use vo_runtime::instruction::{Instruction, Opcode};
-use vo_runtime::objects::queue_state::QueueKind;
+use vo_runtime::instruction::{Instruction, Opcode, QUEUE_KIND_PORT_FLAG};
 
 use crate::translator::{emit_funcref_call, IrEmitter, TranslateResult};
 use crate::JitError;
@@ -117,15 +116,14 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         ClosureGet => { closure_get(e, inst); Ok(Completed) }
         // Allocation
         PtrNew => { ptr_new(e, inst); Ok(Completed) }
-        ChanNew => { chan_new(e, inst); Ok(Completed) }
-        PortNew => { port_new(e, inst); Ok(Completed) }
-        ChanLen | PortLen => { queue_len(e, inst); Ok(Completed) }
-        ChanCap | PortCap => { queue_cap(e, inst); Ok(Completed) }
+        QueueNew => { queue_new(e, inst); Ok(Completed) }
+        QueueLen => { queue_len(e, inst); Ok(Completed) }
+        QueueCap => { queue_cap(e, inst); Ok(Completed) }
         // Island/Channel
         IslandNew => { island_new(e, inst); Ok(Completed) }
-        ChanClose | PortClose => { queue_close(e, inst)?; Ok(Completed) }
-        ChanSend | PortSend => { queue_send(e, inst)?; Ok(Completed) }
-        ChanRecv | PortRecv => { queue_recv(e, inst)?; Ok(Completed) }
+        QueueClose => { queue_close(e, inst)?; Ok(Completed) }
+        QueueSend => { queue_send(e, inst)?; Ok(Completed) }
+        QueueRecv => { queue_recv(e, inst)?; Ok(Completed) }
         // Goroutine Start
         GoStart => { go_start(e, inst); Ok(Completed) }
         GoIsland => { go_island(e, inst); Ok(Completed) }
@@ -136,8 +134,7 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         // Select Statement
         SelectBegin => { select_begin(e, inst); Ok(Completed) }
         SelectSend => { select_send(e, inst); Ok(Completed) }
-        SelectRecv => { select_recv(e, inst, QueueKind::Chan); Ok(Completed) }
-        PortSelectRecv => { select_recv(e, inst, QueueKind::Port); Ok(Completed) }
+        SelectRecv => { select_recv(e, inst); Ok(Completed) }
         SelectExec => { select_exec(e, inst)?; Ok(Completed) }
         // Interface
         IfaceAssert => { iface_assert(e, inst); Ok(Completed) }
@@ -1580,27 +1577,22 @@ fn ptr_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, result);
 }
 
-fn chan_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().queue_chan_new_checked.expect("queue_chan_new_checked helper not registered");
-    queue_new(e, inst, func);
-}
-
-fn port_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().queue_port_new_checked.expect("queue_port_new_checked helper not registered");
-    queue_new(e, inst, func);
-}
-
-fn queue_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, func: cranelift_codegen::ir::FuncRef) {
+fn queue_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = e.helpers().queue_new_checked.expect("queue_new_checked helper not registered");
     let gc_ptr = e.gc_ptr();
+    let queue_kind = e.builder().ins().iconst(
+        types::I32,
+        if (inst.flags & QUEUE_KIND_PORT_FLAG) != 0 { 1 } else { 0 },
+    );
     let elem_type = e.read_var(inst.b);
-    let elem_slots_i32 = e.builder().ins().iconst(types::I32, inst.flags as i64);
+    let elem_slots_i32 = e.builder().ins().iconst(types::I32, (inst.flags & !QUEUE_KIND_PORT_FLAG) as i64);
     let cap = e.read_var(inst.c);
     
     // Create stack slot for output
     let out_slot = e.builder().create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
     let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
     
-    let call = emit_funcref_call(e, func, &[gc_ptr, elem_type, elem_slots_i32, cap, out_ptr]);
+    let call = emit_funcref_call(e, func, &[gc_ptr, queue_kind, elem_type, elem_slots_i32, cap, out_ptr]);
     let error_code = e.builder().inst_results(call)[0];
     
     // Panic if error_code != 0
@@ -2151,7 +2143,7 @@ fn select_send<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 /// - b: chan_reg
 /// - c: case_idx
 /// - flags: (elem_slots << 1) | has_ok
-fn select_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, queue_kind: QueueKind) {
+fn select_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().select_recv.expect("select_recv not registered");
     let ctx = e.ctx_param();
     
@@ -2159,11 +2151,10 @@ fn select_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, queue_kind: Q
     let queue_reg = e.builder().ins().iconst(types::I32, inst.b as i64);
     let elem_slots = e.builder().ins().iconst(types::I32, ((inst.flags >> 1) & 0x7F) as i64);
     let has_ok = e.builder().ins().iconst(types::I32, (inst.flags & 1) as i64);
-    let queue_kind = e.builder().ins().iconst(types::I32, queue_kind as i64);
     let case_idx = e.builder().ins().iconst(types::I32, inst.c as i64);
     
     // Result is always Ok for select_recv
-    emit_funcref_call(e, func, &[ctx, dst_reg, queue_reg, elem_slots, has_ok, queue_kind, case_idx]);
+    emit_funcref_call(e, func, &[ctx, dst_reg, queue_reg, elem_slots, has_ok, case_idx]);
 }
 
 /// SelectExec: Execute the select statement.

@@ -67,13 +67,7 @@ pub(crate) fn compile_select(
                 let dst_reg = func.alloc_slots(&recv_types);
                 
                 let flags = ((elem_slots as u8) << 1) | (has_ok as u8);
-                func.emit_with_flags(
-                    info.queue_select_recv_opcode(queue_type),
-                    flags,
-                    dst_reg,
-                    queue_reg,
-                    case_idx as u16,
-                );
+                func.emit_with_flags(Opcode::SelectRecv, flags, dst_reg, queue_reg, case_idx as u16);
                 recv_infos.push(Some(RecvCaseInfo { dst_reg, elem_slots, has_ok, queue_type }));
             }
         }

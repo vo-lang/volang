@@ -512,13 +512,7 @@ fn compile_receive(
     let result_slots = info.expr_slots(expr.id);
     let has_ok = result_slots > elem_slots;
     let flags = ((elem_slots as u8) << 1) | (if has_ok { 1 } else { 0 });
-    func.emit_with_flags(
-        info.queue_recv_opcode(target_type),
-        flags,
-        dst,
-        target_reg,
-        0,
-    );
+    func.emit_with_flags(Opcode::QueueRecv, flags, dst, target_reg, 0);
     Ok(())
 }
 

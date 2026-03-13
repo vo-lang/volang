@@ -4,7 +4,6 @@
 //! They delegate to exec/select.rs to avoid code duplication.
 
 use vo_runtime::jit_api::{JitContext, JitResult};
-use vo_runtime::objects::queue_state::QueueKind;
 use vo_runtime::slot::Slot;
 
 use crate::exec::{self, SelectResult};
@@ -71,14 +70,12 @@ pub extern "C" fn jit_select_recv(
     queue_reg: u32,
     elem_slots: u32,
     has_ok: u32,
-    queue_kind: u32,
     _case_idx: u32,
 ) -> JitResult {
     let (_, fiber) = unsafe { extract_context(ctx) };
 
     exec::exec_select_recv(
         &mut fiber.select_state,
-        QueueKind::from_raw(queue_kind as u16),
         dst_reg as u16,
         queue_reg as u16,
         elem_slots as u8,

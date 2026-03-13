@@ -32,17 +32,6 @@ fn sig_unary_i64_ret_i64(module: &JITModule) -> Signature {
     sig
 }
 
-fn sig_queue_new_checked(module: &JITModule, ptr: cranelift_codegen::ir::Type) -> Signature {
-    let mut sig = helper_sig(module);
-    sig.params.push(AbiParam::new(ptr));
-    sig.params.push(AbiParam::new(types::I64));
-    sig.params.push(AbiParam::new(types::I32));
-    sig.params.push(AbiParam::new(types::I64));
-    sig.params.push(AbiParam::new(ptr));
-    sig.returns.push(AbiParam::new(types::I32));
-    sig
-}
-
 // =============================================================================
 // HelperFuncIds - Cranelift FuncId for each runtime helper
 // =============================================================================
@@ -63,8 +52,7 @@ pub struct HelperFuncIds {
     pub str_decode_rune: cranelift_module::FuncId,
     pub ptr_clone: cranelift_module::FuncId,
     pub closure_new: cranelift_module::FuncId,
-    pub queue_chan_new_checked: cranelift_module::FuncId,
-    pub queue_port_new_checked: cranelift_module::FuncId,
+    pub queue_new_checked: cranelift_module::FuncId,
     pub queue_len: cranelift_module::FuncId,
     pub queue_cap: cranelift_module::FuncId,
     pub array_new: cranelift_module::FuncId,
@@ -238,8 +226,17 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let queue_chan_new_checked = declare_import(module, "vo_chan_new_checked", sig_queue_new_checked(module, ptr))?;
-    let queue_port_new_checked = declare_import(module, "vo_port_new_checked", sig_queue_new_checked(module, ptr))?;
+    let queue_new_checked = module.declare_function("vo_queue_new_checked", Import, &{
+        let mut sig = helper_sig(module);
+        sig.params.push(AbiParam::new(ptr));
+        sig.params.push(AbiParam::new(types::I32));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I32));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(ptr));
+        sig.returns.push(AbiParam::new(types::I32));
+        sig
+    })?;
     let queue_len = declare_import(module, "vo_chan_len", sig_unary_i64_ret_i64(module))?;
     let queue_cap = declare_import(module, "vo_chan_cap", sig_unary_i64_ret_i64(module))?;
     
@@ -539,7 +536,6 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig.params.push(AbiParam::new(types::I32)); // chan_reg
         sig.params.push(AbiParam::new(types::I32)); // elem_slots
         sig.params.push(AbiParam::new(types::I32)); // has_ok
-        sig.params.push(AbiParam::new(types::I32)); // queue_kind
         sig.params.push(AbiParam::new(types::I32)); // case_idx
         sig.returns.push(AbiParam::new(types::I32)); // JitResult
         sig
@@ -558,7 +554,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         panic, call_extern,
         str_new, str_len, str_index, str_concat, str_slice, str_eq, str_cmp, str_decode_rune,
         ptr_clone, closure_new, 
-        queue_chan_new_checked, queue_port_new_checked, queue_len, queue_cap, 
+        queue_new_checked, queue_len, queue_cap, 
         array_new, array_len, 
         slice_new_checked, slice_len, slice_cap, slice_append, slice_slice, slice_slice3,
         slice_from_array, slice_from_array3,
@@ -598,8 +594,7 @@ pub fn get_helper_refs(
         str_decode_rune: declare_ref(ids.str_decode_rune),
         ptr_clone: declare_ref(ids.ptr_clone),
         closure_new: declare_ref(ids.closure_new),
-        queue_chan_new_checked: declare_ref(ids.queue_chan_new_checked),
-        queue_port_new_checked: declare_ref(ids.queue_port_new_checked),
+        queue_new_checked: declare_ref(ids.queue_new_checked),
         queue_len: declare_ref(ids.queue_len),
         queue_cap: declare_ref(ids.queue_cap),
         array_new: declare_ref(ids.array_new),

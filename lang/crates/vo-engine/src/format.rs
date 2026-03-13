@@ -323,25 +323,25 @@ fn format_instruction(instr: &Instruction) -> String {
             format!("MapIterNext   r{}, iter=r{}, ok=r{}, key_slots={}, val_slots={}", a, b, c, key_slots, val_slots)
         }
 
-        // CHAN
-        Opcode::ChanNew => format!("ChanNew       r{}, type=r{}, cap=r{}, slots={}", a, b, c, flags),
-        Opcode::PortNew => format!("PortNew       r{}, type=r{}, cap=r{}, slots={}", a, b, c, flags),
-        Opcode::ChanSend => format!("ChanSend      r{}, r{}, slots={}", a, b, flags),
-        Opcode::PortSend => format!("PortSend      r{}, r{}, slots={}", a, b, flags),
-        Opcode::ChanRecv => format!("ChanRecv      r{}, r{}, slots={}", a, b, (flags >> 1) & 0x7F),
-        Opcode::PortRecv => format!("PortRecv      r{}, r{}, slots={}", a, b, (flags >> 1) & 0x7F),
-        Opcode::ChanClose => format!("ChanClose     r{}", a),
-        Opcode::PortClose => format!("PortClose     r{}", a),
-        Opcode::ChanLen => format!("ChanLen       r{}, r{}", a, b),
-        Opcode::PortLen => format!("PortLen       r{}, r{}", a, b),
-        Opcode::ChanCap => format!("ChanCap       r{}, r{}", a, b),
-        Opcode::PortCap => format!("PortCap       r{}, r{}", a, b),
+        // QUEUE
+        Opcode::QueueNew => format!(
+            "QueueNew      r{}, type=r{}, cap=r{}, kind={}, slots={}",
+            a,
+            b,
+            c,
+            if (flags & vo_runtime::instruction::QUEUE_KIND_PORT_FLAG) != 0 { "port" } else { "chan" },
+            flags & !vo_runtime::instruction::QUEUE_KIND_PORT_FLAG,
+        ),
+        Opcode::QueueSend => format!("QueueSend     r{}, r{}, slots={}", a, b, flags),
+        Opcode::QueueRecv => format!("QueueRecv     r{}, r{}, slots={}", a, b, (flags >> 1) & 0x7F),
+        Opcode::QueueClose => format!("QueueClose    r{}", a),
+        Opcode::QueueLen => format!("QueueLen      r{}, r{}", a, b),
+        Opcode::QueueCap => format!("QueueCap      r{}, r{}", a, b),
 
         // SELECT
         Opcode::SelectBegin => format!("SelectBegin   r{}, cases={}", a, b),
         Opcode::SelectSend => format!("SelectSend    r{}, r{}", a, b),
         Opcode::SelectRecv => format!("SelectRecv    r{}, r{}", a, b),
-        Opcode::PortSelectRecv => format!("PortSelectRecv r{}, r{}", a, b),
         Opcode::SelectExec => format!("SelectExec    r{}", a),
 
         // CLOSURE

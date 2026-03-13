@@ -441,13 +441,7 @@ pub(crate) fn compile_for_range(
         // ChanRecv: a=val_slot, b=chan_reg, c=ok_slot
         // flags format: (elem_slots << 1) | has_ok
         let recv_flags = ((elem_slots as u8) << 1) | 1;
-        sc.func.emit_with_flags(
-            sc.info.queue_recv_opcode(range_type),
-            recv_flags,
-            val_info.slot,
-            queue_reg,
-            ok_slot,
-        );
+        sc.func.emit_with_flags(Opcode::QueueRecv, recv_flags, val_info.slot, queue_reg, ok_slot);
         
         // if !ok { goto end }
         let end_jump = sc.func.emit_jump(Opcode::JumpIfNot, ok_slot);

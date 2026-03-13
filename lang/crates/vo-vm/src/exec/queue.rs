@@ -1,4 +1,4 @@
-//! Unified channel instructions: ChanNew, ChanSend, ChanRecv, ChanClose
+//! Unified queue instructions: QueueNew, QueueSend, QueueRecv, QueueClose
 //!
 //! All queue objects (local and remote) use ValueKind::Channel.
 //! Remote (cross-island) channels are dispatched via channel::is_remote().
@@ -10,6 +10,7 @@ use alloc::{boxed::Box, string::String, vec::Vec, format};
 use std::{boxed::Box, vec::Vec};
 
 use vo_common_core::bytecode::StructMeta;
+use vo_common_core::instruction::QUEUE_KIND_PORT_FLAG;
 use vo_common_core::RuntimeType;
 use vo_runtime::{ValueMeta, ValueRttid};
 use vo_runtime::gc::{Gc, GcRef};
@@ -60,6 +61,28 @@ pub enum QueueRecvCoreResult {
     Closed,
     Remote { endpoint_id: u64, home_island: u32 },
     Trap(RuntimeTrapKind),
+}
+
+pub fn complete_queue_recv<F>(
+    result: QueueRecvCoreResult,
+    elem_slots: usize,
+    has_ok: bool,
+    write_slot: F,
+) -> Result<Option<QueueWaiter>, QueueRecvCoreResult>
+where
+    F: FnMut(usize, u64),
+{
+    match result {
+        QueueRecvCoreResult::Success { data, wake_sender } => {
+            write_recv_result(Some(data.as_ref()), elem_slots, has_ok, write_slot);
+            Ok(wake_sender)
+        }
+        QueueRecvCoreResult::Closed => {
+            write_recv_result(None, elem_slots, has_ok, write_slot);
+            Ok(None)
+        }
+        other => Err(other),
+    }
 }
 
 pub fn decode_remote_queue_recv_response(
@@ -135,33 +158,42 @@ pub fn replay_remote_queue_recv_response<F>(
     write_recv_result(decoded.as_deref(), elem_slots, has_ok, write_slot);
 }
 
-/// Result of exec_chan_new: Ok(()) on success, Err(msg) on invalid parameters
+#[inline]
+pub fn queue_new_kind_from_flags(flags: u8) -> QueueKind {
+    if (flags & QUEUE_KIND_PORT_FLAG) != 0 {
+        QueueKind::Port
+    } else {
+        QueueKind::Chan
+    }
+}
+
+#[inline]
+pub fn queue_new_trap_kind(flags: u8) -> RuntimeTrapKind {
+    match queue_new_kind_from_flags(flags) {
+        QueueKind::Chan => RuntimeTrapKind::MakeChan,
+        QueueKind::Port => RuntimeTrapKind::MakePort,
+    }
+}
+
 pub type QueueNewResult = Result<(), String>;
 
 #[inline]
-pub fn exec_chan_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) -> QueueNewResult {
-    exec_queue_new(stack, bp, inst, gc, QueueKind::Chan, "makechan")
-}
-
-#[inline]
-pub fn exec_port_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) -> QueueNewResult {
-    exec_queue_new(stack, bp, inst, gc, QueueKind::Port, "makeport")
-}
-
-#[inline]
-fn exec_queue_new(
+pub fn exec_queue_new(
     stack: *mut Slot,
     bp: usize,
     inst: &Instruction,
     gc: &mut Gc,
-    kind: QueueKind,
-    err_name: &str,
 ) -> QueueNewResult {
+    let kind = queue_new_kind_from_flags(inst.flags);
+    let err_name = match kind {
+        QueueKind::Chan => "makechan",
+        QueueKind::Port => "makeport",
+    };
     let packed_type = stack_get(stack, bp + inst.b as usize);
     let elem_meta = ValueMeta::from_raw(packed_type as u32);
     let elem_rttid = ValueRttid::from_raw((packed_type >> 32) as u32);
     let cap = stack_get(stack, bp + inst.c as usize) as i64;
-    let elem_slots = inst.flags as u16;
+    let elem_slots = (inst.flags & !QUEUE_KIND_PORT_FLAG) as u16;
 
     match queue::create_checked(gc, kind, elem_meta, elem_rttid, elem_slots, cap) {
         Ok(ch) => {
@@ -308,27 +340,22 @@ pub fn exec_queue_recv(stack: *mut Slot, bp: usize, island_id: u32, fiber_id: u3
     let has_ok = (inst.flags & 1) != 0;
     let dst_start = bp + inst.a as usize;
 
-    match queue_recv_core(ch, island_id, fiber_id as u64) {
-        QueueRecvCoreResult::Success { data, wake_sender } => {
-            write_recv_result(Some(data.as_ref()), elem_slots, has_ok, |i, value| {
-                stack_set(stack, dst_start + i, value);
-            });
-            match wake_sender {
-                Some(sender) => QueueExecResult::Wake(sender),
-                None => QueueExecResult::Continue,
-            }
-        }
-        QueueRecvCoreResult::WouldBlock => QueueExecResult::ReplayThenBlock,
-        QueueRecvCoreResult::Closed => {
-            write_recv_result(None, elem_slots, has_ok, |i, value| {
-                stack_set(stack, dst_start + i, value);
-            });
-            QueueExecResult::Continue
-        }
-        QueueRecvCoreResult::Remote { endpoint_id, home_island } => {
+    match complete_queue_recv(
+        queue_recv_core(ch, island_id, fiber_id as u64),
+        elem_slots,
+        has_ok,
+        |i, value| stack_set(stack, dst_start + i, value),
+    ) {
+        Ok(Some(sender)) => QueueExecResult::Wake(sender),
+        Ok(None) => QueueExecResult::Continue,
+        Err(QueueRecvCoreResult::WouldBlock) => QueueExecResult::ReplayThenBlock,
+        Err(QueueRecvCoreResult::Remote { endpoint_id, home_island }) => {
             QueueExecResult::RemoteRecv { endpoint_id, home_island }
         }
-        QueueRecvCoreResult::Trap(kind) => QueueExecResult::Trap(kind),
+        Err(QueueRecvCoreResult::Trap(kind)) => QueueExecResult::Trap(kind),
+        Err(QueueRecvCoreResult::Success { .. } | QueueRecvCoreResult::Closed) => {
+            unreachable!("complete_queue_recv returned terminal recv result as Err")
+        }
     }
 }
 

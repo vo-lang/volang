@@ -417,7 +417,7 @@ mod tests {
         let func = make_func(
             vec![
                 Instruction::with_flags(Opcode::SelectBegin, 0, 1, 0, 0),
-                Instruction::with_flags(Opcode::PortSelectRecv, 2, 0, 0, 0),
+                Instruction::with_flags(Opcode::SelectRecv, 2, 0, 0, 0),
                 Instruction::new(Opcode::SelectExec, 0, 0, 0),
                 Instruction::new(Opcode::Return, 0, 0, 0),
             ],
@@ -429,19 +429,19 @@ mod tests {
         let mut jit = JitCompiler::new().expect("create jit compiler");
         let result = jit.compile(0, &module.functions[0], &module, &[]);
 
-        assert!(result.is_ok(), "PortSelectRecv should compile in JIT: {:?}", result);
+        assert!(result.is_ok(), "SelectRecv should compile in JIT: {:?}", result);
     }
 
     #[test]
     fn compile_supports_port_queue_opcodes() {
         let func = make_func(
             vec![
-                Instruction::with_flags(Opcode::PortNew, 1, 0, 1, 2),
-                Instruction::new(Opcode::PortLen, 3, 0, 0),
-                Instruction::new(Opcode::PortCap, 4, 0, 0),
-                Instruction::with_flags(Opcode::PortSend, 1, 0, 1, 0),
-                Instruction::with_flags(Opcode::PortRecv, 3, 1, 0, 0),
-                Instruction::new(Opcode::PortClose, 0, 0, 0),
+                Instruction::with_flags(Opcode::QueueNew, vo_runtime::instruction::QUEUE_KIND_PORT_FLAG | 1, 0, 1, 2),
+                Instruction::new(Opcode::QueueLen, 3, 0, 0),
+                Instruction::new(Opcode::QueueCap, 4, 0, 0),
+                Instruction::with_flags(Opcode::QueueSend, 1, 0, 1, 0),
+                Instruction::with_flags(Opcode::QueueRecv, 3, 1, 0, 0),
+                Instruction::new(Opcode::QueueClose, 0, 0, 0),
                 Instruction::new(Opcode::Return, 0, 0, 0),
             ],
             5,
@@ -452,6 +452,6 @@ mod tests {
         let mut jit = JitCompiler::new().expect("create jit compiler");
         let result = jit.compile(0, &module.functions[0], &module, &[]);
 
-        assert!(result.is_ok(), "Port queue opcodes should compile in JIT: {:?}", result);
+        assert!(result.is_ok(), "Queue opcodes should compile in JIT: {:?}", result);
     }
 }

@@ -8,7 +8,6 @@ use alloc::vec::Vec;
 use vo_runtime::objects::interface::InterfaceSlot;
 #[cfg(feature = "std")]
 use vo_runtime::io::IoToken;
-use vo_runtime::objects::queue_state::QueueKind;
 
 use vo_runtime::gc::GcRef;
 
@@ -142,7 +141,6 @@ pub enum SelectCaseKind {
 #[derive(Debug, Clone)]
 pub struct SelectCase {
     pub kind: SelectCaseKind,
-    pub queue_kind: QueueKind,
     pub queue_reg: u16,
     pub val_reg: u16,
     pub elem_slots: u8,

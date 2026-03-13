@@ -9,7 +9,7 @@ use vo_analysis::Project;
 use vo_analysis::check::type_info as type_layout;
 use vo_syntax::ast::Ident;
 use vo_syntax::ast::ExprId;
-use vo_runtime::instruction::Opcode;
+use vo_runtime::instruction::QUEUE_KIND_PORT_FLAG;
 use vo_runtime::SlotType;
 
 /// Describes how call arguments should be compiled.
@@ -912,10 +912,21 @@ impl<'a> TypeInfoWrapper<'a> {
         }
     }
 
-    fn queue_opcode(&self, type_key: TypeKey, chan: Opcode, port: Opcode) -> Opcode {
+    pub fn queue_abi_elem_slots(&self, type_key: TypeKey) -> u8 {
+        let slots = self.queue_elem_slots(type_key);
+        assert!(
+            slots <= 0x7F,
+            "queue ABI supports at most 127 element slots, got {}",
+            slots
+        );
+        slots as u8
+    }
+
+    pub fn queue_new_flags(&self, type_key: TypeKey) -> u8 {
+        let elem_slots = self.queue_abi_elem_slots(type_key);
         match self.queue_flavor(type_key) {
-            QueueFlavor::Chan => chan,
-            QueueFlavor::Port => port,
+            QueueFlavor::Chan => elem_slots,
+            QueueFlavor::Port => elem_slots | QUEUE_KIND_PORT_FLAG,
         }
     }
 
@@ -1095,34 +1106,6 @@ impl<'a> TypeInfoWrapper<'a> {
             QueueFlavor::Chan => self.chan_elem_slots(type_key),
             QueueFlavor::Port => self.port_elem_slots(type_key),
         }
-    }
-
-    pub fn queue_new_opcode(&self, type_key: TypeKey) -> Opcode {
-        self.queue_opcode(type_key, Opcode::ChanNew, Opcode::PortNew)
-    }
-
-    pub fn queue_len_opcode(&self, type_key: TypeKey) -> Opcode {
-        self.queue_opcode(type_key, Opcode::ChanLen, Opcode::PortLen)
-    }
-
-    pub fn queue_cap_opcode(&self, type_key: TypeKey) -> Opcode {
-        self.queue_opcode(type_key, Opcode::ChanCap, Opcode::PortCap)
-    }
-
-    pub fn queue_send_opcode(&self, type_key: TypeKey) -> Opcode {
-        self.queue_opcode(type_key, Opcode::ChanSend, Opcode::PortSend)
-    }
-
-    pub fn queue_recv_opcode(&self, type_key: TypeKey) -> Opcode {
-        self.queue_opcode(type_key, Opcode::ChanRecv, Opcode::PortRecv)
-    }
-
-    pub fn queue_select_recv_opcode(&self, type_key: TypeKey) -> Opcode {
-        self.queue_opcode(type_key, Opcode::SelectRecv, Opcode::PortSelectRecv)
-    }
-
-    pub fn queue_close_opcode(&self, type_key: TypeKey) -> Opcode {
-        self.queue_opcode(type_key, Opcode::ChanClose, Opcode::PortClose)
     }
 
     /// Get signature details for a function type
