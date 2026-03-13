@@ -248,88 +248,81 @@ impl<W, M> QueueState<W, M> {
         }
     }
 
-    /// Try to send a value. Returns the value back if would block.
-    pub fn try_send(&mut self, value: M, cap: usize) -> SendResult<W, M> {
+    pub fn is_send_ready(&self, cap: usize) -> bool {
+        self.closed || !self.waiting_receivers.is_empty() || self.buffer.len() < cap
+    }
+
+    pub fn is_recv_ready(&self) -> bool {
+        !self.buffer.is_empty() || !self.waiting_senders.is_empty() || self.closed
+    }
+
+    fn send_impl(&mut self, value: M, cap: usize, waiter: Option<W>) -> SendResult<W, M> {
         if self.closed {
             return SendResult::Closed;
         }
-        // If there's a waiting receiver, buffer the value and wake receiver
         if let Some(receiver) = self.waiting_receivers.pop_front() {
             self.buffer.push_back(value);
             return SendResult::DirectSend(receiver);
         }
-        // Buffer if capacity allows
         if self.buffer.len() < cap {
             self.buffer.push_back(value);
             return SendResult::Buffered;
         }
-        SendResult::WouldBlock(value)
+        match waiter {
+            Some(waiter) => {
+                self.waiting_senders.push_back((waiter, value));
+                SendResult::Blocked
+            }
+            None => SendResult::WouldBlock(value),
+        }
+    }
+
+    fn recv_impl(&mut self, waiter: Option<W>) -> (RecvResult<W>, Option<M>) {
+        if let Some(value) = self.buffer.pop_front() {
+            let woke_sender = if let Some((sender, sender_value)) = self.waiting_senders.pop_front() {
+                self.buffer.push_back(sender_value);
+                Some(sender)
+            } else {
+                None
+            };
+            return (RecvResult::Success(woke_sender), Some(value));
+        }
+        if let Some((sender, value)) = self.waiting_senders.pop_front() {
+            return (RecvResult::Success(Some(sender)), Some(value));
+        }
+        if self.closed {
+            (RecvResult::Closed, None)
+        } else {
+            match waiter {
+                Some(waiter) => {
+                    self.waiting_receivers.push_back(waiter);
+                    (RecvResult::Blocked, None)
+                }
+                None => (RecvResult::WouldBlock, None),
+            }
+        }
+    }
+
+    /// Try to send a value. Returns the value back if would block.
+    pub fn try_send(&mut self, value: M, cap: usize) -> SendResult<W, M> {
+        self.send_impl(value, cap, None)
     }
 
     /// Atomic send: try to send, if would block, register waiter in same operation.
     /// This avoids TOCTOU race between try_send and register_sender.
     pub fn send_or_block(&mut self, value: M, cap: usize, waiter: W) -> SendResult<W, M> {
-        if self.closed {
-            return SendResult::Closed;
-        }
-        // If there's a waiting receiver, buffer the value and wake receiver
-        if let Some(receiver) = self.waiting_receivers.pop_front() {
-            self.buffer.push_back(value);
-            return SendResult::DirectSend(receiver);
-        }
-        // Buffer if capacity allows
-        if self.buffer.len() < cap {
-            self.buffer.push_back(value);
-            return SendResult::Buffered;
-        }
-        // Would block - register waiter atomically
-        self.waiting_senders.push_back((waiter, value));
-        SendResult::Blocked
+        self.send_impl(value, cap, Some(waiter))
     }
 
     /// Try to receive a value.
     pub fn try_recv(&mut self) -> (RecvResult<W>, Option<M>) {
-        if let Some(value) = self.buffer.pop_front() {
-            let woke_sender = if let Some((sender, sender_value)) = self.waiting_senders.pop_front() {
-                self.buffer.push_back(sender_value);
-                Some(sender)
-            } else {
-                None
-            };
-            return (RecvResult::Success(woke_sender), Some(value));
-        }
-        if let Some((sender, value)) = self.waiting_senders.pop_front() {
-            return (RecvResult::Success(Some(sender)), Some(value));
-        }
-        if self.closed {
-            (RecvResult::Closed, None)
-        } else {
-            (RecvResult::WouldBlock, None)
-        }
+        self.recv_impl(None)
     }
 
     /// Atomic recv: try to receive, if would block, register waiter in same operation.
     /// This avoids TOCTOU race between try_recv and register_receiver.
     pub fn recv_or_block(&mut self, waiter: W) -> (RecvResult<W>, Option<M>) {
-        if let Some(value) = self.buffer.pop_front() {
-            let woke_sender = if let Some((sender, sender_value)) = self.waiting_senders.pop_front() {
-                self.buffer.push_back(sender_value);
-                Some(sender)
-            } else {
-                None
-            };
-            return (RecvResult::Success(woke_sender), Some(value));
-        }
-        if let Some((sender, value)) = self.waiting_senders.pop_front() {
-            return (RecvResult::Success(Some(sender)), Some(value));
-        }
-        if self.closed {
-            (RecvResult::Closed, None)
-        } else {
-            // Would block - register waiter atomically
-            self.waiting_receivers.push_back(waiter);
-            (RecvResult::Blocked, None)
-        }
+        self.recv_impl(Some(waiter))
     }
 
     pub fn register_sender(&mut self, waiter: W, value: M) {
@@ -354,6 +347,12 @@ impl<W, M> QueueState<W, M> {
 
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
+    }
+
+    pub fn take_direct_send_payload(&mut self) -> M {
+        self.buffer
+            .pop_back()
+            .expect("take_direct_send_payload: missing direct-send payload")
     }
 
     pub fn take_waiting_receivers(&mut self) -> Vec<W> {
@@ -387,6 +386,48 @@ mod tests {
     type TestQueue = QueueState<u32, Vec<u64>>;
 
     #[test]
+    fn is_send_ready_matches_queue_state() {
+        let q = TestQueue::new(1);
+        assert!(q.is_send_ready(1));
+
+        let mut q = TestQueue::new(1);
+        match q.try_send(vec![1u64], 1) {
+            SendResult::Buffered => {}
+            other => panic!("expected Buffered, got {:?}", other),
+        }
+        assert!(!q.is_send_ready(1));
+
+        q.register_receiver(7);
+        assert!(q.is_send_ready(1));
+
+        let mut q = TestQueue::new(0);
+        assert!(!q.is_send_ready(0));
+        q.close();
+        assert!(q.is_send_ready(0));
+    }
+
+    #[test]
+    fn is_recv_ready_matches_queue_state() {
+        let q = TestQueue::new(0);
+        assert!(!q.is_recv_ready());
+
+        let mut q = TestQueue::new(0);
+        q.register_sender(3, vec![9u64]);
+        assert!(q.is_recv_ready());
+
+        let mut q = TestQueue::new(1);
+        match q.try_send(vec![1u64], 1) {
+            SendResult::Buffered => {}
+            other => panic!("expected Buffered, got {:?}", other),
+        }
+        assert!(q.is_recv_ready());
+
+        let mut q = TestQueue::new(0);
+        q.close();
+        assert!(q.is_recv_ready());
+    }
+
+    #[test]
     fn direct_send_pop_back_removes_phantom_entry() {
         // Simulates the BUG-1 scenario:
         //   1. A remote receiver is waiting.
@@ -404,7 +445,7 @@ mod tests {
                 assert_eq!(q.buffer.len(), 1);
                 assert_eq!(q.buffer[0], vec![42u64]);
                 // Pop it back — this is what the fix does
-                q.buffer.pop_back();
+                assert_eq!(q.take_direct_send_payload(), vec![42u64]);
                 assert_eq!(q.buffer.len(), 0);
             }
             other => panic!("expected DirectSend, got {:?}", other),
@@ -460,7 +501,7 @@ mod tests {
                 assert_eq!(receiver, 99);
                 // Buffer: [10, 20] — 10 was pre-existing, 20 is the DirectSend phantom
                 assert_eq!(q.buffer.len(), 2);
-                q.buffer.pop_back(); // remove the phantom 20
+                assert_eq!(q.take_direct_send_payload(), vec![20u64]);
                 assert_eq!(q.buffer.len(), 1);
                 assert_eq!(q.buffer[0], vec![10u64]); // pre-existing value intact
             }

@@ -182,10 +182,10 @@ pub fn queue_send_core(
             if receiver.island_id == island_id {
                 QueueExecResult::Wake(receiver)
             } else {
-                queue::pop_back_buffer(ch);
+                let value = queue::take_direct_send_payload(ch);
                 if em.value_kind().may_contain_gc_refs() {
                     super::prepare_value_queue_handles_for_transfer(
-                        src,
+                        value.as_ref(),
                         em,
                         receiver.island_id,
                         struct_metas,
@@ -198,7 +198,7 @@ pub fn queue_send_core(
                     .endpoint_id;
                 let data = super::transport::pack_transport_message(
                     &state.gc,
-                    src,
+                    value.as_ref(),
                     em,
                     struct_metas,
                     runtime_types,

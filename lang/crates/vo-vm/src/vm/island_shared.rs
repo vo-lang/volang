@@ -203,10 +203,7 @@ fn handle_endpoint_request_inner(
                     if vm_state.is_local_waiter(&receiver) {
                         local_wakes.push(receiver);
                     } else {
-                        let value = state
-                            .buffer
-                            .pop_back()
-                            .expect("remote direct send must leave payload in buffer");
+                        let value = state.take_direct_send_payload();
                         let recv_kind = pack_recv_data_for_waiter(ctx, &receiver, &value, vm_state);
                         dispatch_response(receiver, home_island, recv_kind, responses, local_wakes);
                     }

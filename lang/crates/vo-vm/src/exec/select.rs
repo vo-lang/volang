@@ -8,7 +8,7 @@
 use alloc::vec::Vec;
 
 use vo_runtime::gc::GcRef;
-use vo_runtime::objects::{queue, queue_state};
+use vo_runtime::objects::queue;
 use vo_runtime::objects::queue::{RecvResult, SendResult};
 use vo_runtime::objects::queue_state::{QueueMessage, QueueKind, QueueWaiter};
 use vo_runtime::slot::Slot;
@@ -165,19 +165,9 @@ fn find_ready_case(stack: *const Slot, bp: usize, state: &SelectState) -> ReadyC
             }
         }
 
-        let cap = queue_state::capacity(ch);
-        let chan_state = queue::local_state(ch);
-
         let is_ready = match case.kind {
-            SelectCaseKind::Send => {
-                // Closed channel is always "ready" — execute_send_case will return SendOnClosed.
-                chan_state.closed
-                    || !chan_state.waiting_receivers.is_empty()
-                    || chan_state.buffer.len() < cap
-            }
-            SelectCaseKind::Recv => {
-                !chan_state.buffer.is_empty() || !chan_state.waiting_senders.is_empty() || chan_state.closed
-            }
+            SelectCaseKind::Send => queue::send_ready(ch),
+            SelectCaseKind::Recv => queue::recv_ready(ch),
         };
 
         if is_ready {
@@ -235,8 +225,7 @@ fn complete_woken_case(
             let val_reg = case.val_reg;
             let elem_slots = case.elem_slots as usize;
             let has_ok = case.has_ok;
-            let chan_state = queue::local_state(ch);
-            let (result, value) = chan_state.try_recv();
+            let (result, value) = queue::try_recv(ch);
             let dst_start = bp + val_reg as usize;
             super::write_recv_result(value.as_deref(), elem_slots, has_ok, |i, written| {
                 stack_set(stack, dst_start + i, written);
@@ -276,15 +265,12 @@ fn execute_send_case(
     val_reg: u16,
     select_state: &mut Option<SelectState>,
 ) -> SelectResult {
-    let cap = queue_state::capacity(ch);
-    let chan_state = queue::local_state(ch);
-
     let val_start = bp + val_reg as usize;
     let value: QueueMessage = (0..elem_slots).map(|i| stack_get(stack, val_start + i)).collect();
 
     // Use try_send so that waiting receivers are properly woken.
     // Direct buffer push would leave waiting receivers blocked forever.
-    match chan_state.try_send(value, cap) {
+    match queue::try_send(ch, value) {
         SendResult::DirectSend(receiver) => {
             stack_set(stack, bp + result_reg as usize, idx as u64);
             *select_state = None;
@@ -316,12 +302,11 @@ fn execute_recv_case(
     has_ok: bool,
     select_state: &mut Option<SelectState>,
 ) -> SelectResult {
-    let chan_state = queue::local_state(ch);
     let dst_start = bp + val_reg as usize;
 
     // Use try_recv so that waiting senders are properly woken when the buffer
     // has space freed, or when consuming directly from waiting_senders.
-    let (result, value) = chan_state.try_recv();
+    let (result, value) = queue::try_recv(ch);
     super::write_recv_result(value.as_deref(), elem_slots, has_ok, |i, written| {
         stack_set(stack, dst_start + i, written);
     });
@@ -356,19 +341,20 @@ fn register_select_waiters(stack: *const Slot, bp: usize, island_id: u32, fiber_
             "remote channel must be rejected before select waiter registration"
         );
 
-        let chan_state = queue::local_state(ch);
         match case.kind {
             SelectCaseKind::Send => {
                 let val_start = bp + case.val_reg as usize;
                 let elem_slots = case.elem_slots as usize;
                 let value: QueueMessage = (0..elem_slots).map(|i| stack_get(stack, val_start + i)).collect();
-                chan_state.register_sender(
+                queue::register_sender(
+                    ch,
                     QueueWaiter::selecting(island_id, fiber_id as u64, idx as u16, select_id),
                     value,
                 );
             }
             SelectCaseKind::Recv => {
-                chan_state.register_receiver(
+                queue::register_receiver(
+                    ch,
                     QueueWaiter::selecting(island_id, fiber_id as u64, idx as u16, select_id),
                 );
             }
@@ -383,7 +369,7 @@ fn cancel_select_waiters(state: &mut SelectState) {
     let select_id = state.select_id;
     for &ch in &state.registered_queues {
         if !ch.is_null() {
-            queue::local_state(ch).cancel_select_waiters(select_id);
+            queue::cancel_select_waiters(ch, select_id);
         }
     }
     state.registered_queues.clear();

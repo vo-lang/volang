@@ -223,6 +223,43 @@ pub fn close(chan: GcRef) {
     local_state(chan).close();
 }
 
+#[inline]
+pub fn send_ready(chan: GcRef) -> bool {
+    let cap = super::queue_state::capacity(chan);
+    with_local_state(chan, |s| s.is_send_ready(cap))
+}
+
+#[inline]
+pub fn recv_ready(chan: GcRef) -> bool {
+    with_local_state(chan, |s| s.is_recv_ready())
+}
+
+#[inline]
+pub fn try_send(chan: GcRef, value: QueueMessage) -> SendResult<QueueWaiter, QueueMessage> {
+    let cap = super::queue_state::capacity(chan);
+    with_local_state(chan, |s| s.try_send(value, cap))
+}
+
+#[inline]
+pub fn try_recv(chan: GcRef) -> (RecvResult<QueueWaiter>, Option<QueueMessage>) {
+    with_local_state(chan, |s| s.try_recv())
+}
+
+#[inline]
+pub fn register_sender(chan: GcRef, waiter: QueueWaiter, value: QueueMessage) {
+    with_local_state(chan, |s| s.register_sender(waiter, value))
+}
+
+#[inline]
+pub fn register_receiver(chan: GcRef, waiter: QueueWaiter) {
+    with_local_state(chan, |s| s.register_receiver(waiter))
+}
+
+#[inline]
+pub fn cancel_select_waiters(chan: GcRef, select_id: u64) {
+    with_local_state(chan, |s| s.cancel_select_waiters(select_id))
+}
+
 /// Atomic send: try to send, if would block, register waiter in same operation.
 pub fn send_or_block(chan: GcRef, value: QueueMessage, waiter: QueueWaiter) -> SendResult<QueueWaiter, QueueMessage> {
     let cap = super::queue_state::capacity(chan);
@@ -235,8 +272,8 @@ pub fn recv_or_block(chan: GcRef, waiter: QueueWaiter) -> (RecvResult<QueueWaite
 }
 
 /// Pop the last value from the buffer (undo a DirectSend push for remote receivers).
-pub fn pop_back_buffer(chan: GcRef) {
-    with_local_state(chan, |s| { s.buffer.pop_back(); });
+pub fn take_direct_send_payload(chan: GcRef) -> QueueMessage {
+    with_local_state(chan, |s| s.take_direct_send_payload())
 }
 
 /// Take all waiting receivers (for close notification).
@@ -279,6 +316,7 @@ pub unsafe fn drop_inner(chan: GcRef) {
 mod tests {
     use super::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    use vo_common_core::ValueKind;
 
     #[test]
     fn create_remote_proxy_rejects_chan() {
