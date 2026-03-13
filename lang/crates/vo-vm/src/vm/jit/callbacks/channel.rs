@@ -33,13 +33,7 @@ pub extern "C" fn jit_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
         QueueAction::RemoteClose { endpoint_id, home_island } => {
             #[cfg(feature = "std")]
             {
-                use vo_runtime::island::{IslandCommand, ChanRequestKind};
-                vm.state.send_to_island(home_island, IslandCommand::ChanRequest {
-                    endpoint_id,
-                    kind: ChanRequestKind::Close,
-                    from_island: vm.state.current_island_id,
-                    fiber_id: 0,
-                });
+                vm.state.send_chan_close_request(home_island, endpoint_id);
                 vm.state.endpoint_registry.mark_tombstone(endpoint_id);
             }
             JitResult::Ok
@@ -70,8 +64,7 @@ pub extern "C" fn jit_chan_send(
     let module = unsafe { &*((*ctx).module as *const vo_runtime::bytecode::Module) };
     let (vm, fiber) = unsafe { extract_context(ctx) };
     #[cfg(feature = "std")]
-    if fiber.remote_send_closed {
-        fiber.remote_send_closed = false;
+    if fiber.consume_remote_send_closed() {
         return set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED);
     }
     let ch = chan as GcRef;
@@ -108,13 +101,7 @@ pub extern "C" fn jit_chan_send(
         QueueAction::RemoteSend { endpoint_id, home_island, data } => {
             #[cfg(feature = "std")]
             {
-                use vo_runtime::island::{IslandCommand, ChanRequestKind};
-                vm.state.send_to_island(home_island, IslandCommand::ChanRequest {
-                    endpoint_id,
-                    kind: ChanRequestKind::Send { data },
-                    from_island: vm.state.current_island_id,
-                    fiber_id: fiber.id as u64,
-                });
+                vm.state.send_chan_send_request(home_island, endpoint_id, data, fiber.id as u64);
             }
             JitResult::WaitQueue
         }
@@ -127,12 +114,7 @@ pub extern "C" fn jit_chan_send(
         QueueAction::Trap(_) => JitResult::Panic,
         #[cfg(feature = "std")]
         QueueAction::RemoteRecvData { endpoint_id, target_island, fiber_id, data } => {
-            use vo_runtime::island::{IslandCommand, ChanResponseKind};
-            vm.state.send_to_island(target_island, IslandCommand::ChanResponse {
-                endpoint_id,
-                kind: ChanResponseKind::RecvData { data, closed: false },
-                fiber_id,
-            });
+            vm.state.send_chan_recv_data_response(target_island, endpoint_id, data, fiber_id);
             JitResult::Ok
         }
         // channel_send_core never produces these variants
@@ -158,39 +140,24 @@ pub extern "C" fn jit_chan_recv(
     let ch = chan as GcRef;
     let has_ok = has_ok != 0;
     #[cfg(feature = "std")]
-    if let Some(recv_response) = fiber.remote_recv_response.take() {
-        if let Some(dst) = crate::exec::decode_remote_recv_response(
+    if let Some(recv_response) = fiber.take_remote_recv_response() {
+        crate::exec::replay_remote_recv_response(
             &mut vm.state.gc,
             recv_response,
             elem_slots as usize,
+            has_ok,
             &module.struct_metas,
             &module.runtime_types,
             &mut vm.state.endpoint_registry,
-        ) {
-            for (i, &value) in dst.iter().enumerate().take(elem_slots as usize) {
-                unsafe { *dst_ptr.add(i) = value; }
-            }
-            if has_ok {
-                unsafe { *dst_ptr.add(elem_slots as usize) = 1; }
-            }
-        } else {
-            for i in 0..elem_slots as usize {
-                unsafe { *dst_ptr.add(i) = 0; }
-            }
-            if has_ok {
-                unsafe { *dst_ptr.add(elem_slots as usize) = 0; }
-            }
-        }
+            |i, value| unsafe { *dst_ptr.add(i) = value },
+        );
         return JitResult::Ok;
     }
     match channel_recv_core(ch, vm.state.current_island_id, fiber.id as u64) {
         ChannelRecvCoreResult::Success { data, wake_sender } => {
-            for (i, &v) in data.iter().enumerate().take(elem_slots as usize) {
-                unsafe { *dst_ptr.add(i) = v; }
-            }
-            if has_ok {
-                unsafe { *dst_ptr.add(elem_slots as usize) = 1; }
-            }
+            crate::exec::write_recv_result(Some(data.as_ref()), elem_slots as usize, has_ok, |i, value| unsafe {
+                *dst_ptr.add(i) = value
+            });
             if let Some(sender) = wake_sender {
                 vm.state.wake_waiter(&sender, &mut vm.scheduler);
             }
@@ -200,23 +167,14 @@ pub extern "C" fn jit_chan_recv(
         ChannelRecvCoreResult::Remote { endpoint_id, home_island } => {
             #[cfg(feature = "std")]
             {
-                use vo_runtime::island::{IslandCommand, ChanRequestKind};
-                vm.state.send_to_island(home_island, IslandCommand::ChanRequest {
-                    endpoint_id,
-                    kind: ChanRequestKind::Recv,
-                    from_island: vm.state.current_island_id,
-                    fiber_id: fiber.id as u64,
-                });
+                vm.state.send_chan_recv_request(home_island, endpoint_id, fiber.id as u64);
             }
             JitResult::WaitQueue
         }
         ChannelRecvCoreResult::Closed => {
-            for i in 0..elem_slots as usize {
-                unsafe { *dst_ptr.add(i) = 0; }
-            }
-            if has_ok {
-                unsafe { *dst_ptr.add(elem_slots as usize) = 0; }
-            }
+            crate::exec::write_recv_result(None, elem_slots as usize, has_ok, |i, value| unsafe {
+                *dst_ptr.add(i) = value
+            });
             JitResult::Ok
         }
         ChannelRecvCoreResult::Trap(RuntimeTrapKind::RecvOnNilChannel) => {

@@ -339,6 +339,45 @@ impl VmState {
     }
 
     #[cfg(feature = "std")]
+    pub fn send_chan_send_request(
+        &self,
+        island_id: u32,
+        endpoint_id: u64,
+        data: Vec<u8>,
+        fiber_id: u64,
+    ) {
+        self.send_chan_request(
+            island_id,
+            endpoint_id,
+            ChanRequestKind::Send { data },
+            self.current_island_id,
+            fiber_id,
+        );
+    }
+
+    #[cfg(feature = "std")]
+    pub fn send_chan_recv_request(&self, island_id: u32, endpoint_id: u64, fiber_id: u64) {
+        self.send_chan_request(
+            island_id,
+            endpoint_id,
+            ChanRequestKind::Recv,
+            self.current_island_id,
+            fiber_id,
+        );
+    }
+
+    #[cfg(feature = "std")]
+    pub fn send_chan_close_request(&self, island_id: u32, endpoint_id: u64) {
+        self.send_chan_request(
+            island_id,
+            endpoint_id,
+            ChanRequestKind::Close,
+            self.current_island_id,
+            0,
+        );
+    }
+
+    #[cfg(feature = "std")]
     pub fn send_chan_response(
         &self,
         island_id: u32,
@@ -351,6 +390,22 @@ impl VmState {
             kind,
             fiber_id,
         });
+    }
+
+    #[cfg(feature = "std")]
+    pub fn send_chan_recv_data_response(
+        &self,
+        island_id: u32,
+        endpoint_id: u64,
+        data: Vec<u8>,
+        fiber_id: u64,
+    ) {
+        self.send_chan_response(
+            island_id,
+            endpoint_id,
+            ChanResponseKind::RecvData { data, closed: false },
+            fiber_id,
+        );
     }
 
     /// Allocate a new endpoint ID for this island.

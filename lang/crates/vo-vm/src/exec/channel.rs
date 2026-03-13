@@ -53,6 +53,58 @@ pub fn decode_remote_recv_response(
     }
 }
 
+pub fn write_recv_result<F>(
+    data: Option<&[u64]>,
+    elem_slots: usize,
+    has_ok: bool,
+    mut write_slot: F,
+) where
+    F: FnMut(usize, u64),
+{
+    match data {
+        Some(data) => {
+            for (i, &value) in data.iter().enumerate().take(elem_slots) {
+                write_slot(i, value);
+            }
+            if has_ok {
+                write_slot(elem_slots, 1);
+            }
+        }
+        None => {
+            for i in 0..elem_slots {
+                write_slot(i, 0);
+            }
+            if has_ok {
+                write_slot(elem_slots, 0);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+pub fn replay_remote_recv_response<F>(
+    gc: &mut Gc,
+    response: crate::fiber::RemoteRecvResponse,
+    elem_slots: usize,
+    has_ok: bool,
+    struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
+    endpoint_registry: &mut crate::vm::EndpointRegistry,
+    write_slot: F,
+) where
+    F: FnMut(usize, u64),
+{
+    let decoded = decode_remote_recv_response(
+        gc,
+        response,
+        elem_slots,
+        struct_metas,
+        runtime_types,
+        endpoint_registry,
+    );
+    write_recv_result(decoded.as_deref(), elem_slots, has_ok, write_slot);
+}
+
 /// Result of exec_chan_new: Ok(()) on success, Err(msg) on invalid parameters
 pub type ChanNewResult = Result<(), String>;
 
@@ -234,12 +286,9 @@ pub fn exec_chan_recv(stack: *mut Slot, bp: usize, island_id: u32, fiber_id: u32
 
     match channel_recv_core(ch, island_id, fiber_id as u64) {
         ChannelRecvCoreResult::Success { data, wake_sender } => {
-            for (i, &v) in data.iter().enumerate().take(elem_slots) {
-                stack_set(stack, dst_start + i, v);
-            }
-            if has_ok {
-                stack_set(stack, dst_start + elem_slots, 1);
-            }
+            write_recv_result(Some(data.as_ref()), elem_slots, has_ok, |i, value| {
+                stack_set(stack, dst_start + i, value);
+            });
             match wake_sender {
                 Some(sender) => ChanResult::Wake(sender),
                 None => ChanResult::Continue,
@@ -247,12 +296,9 @@ pub fn exec_chan_recv(stack: *mut Slot, bp: usize, island_id: u32, fiber_id: u32
         }
         ChannelRecvCoreResult::WouldBlock => ChanResult::ReplayThenBlock,
         ChannelRecvCoreResult::Closed => {
-            for i in 0..elem_slots {
-                stack_set(stack, dst_start + i, 0);
-            }
-            if has_ok {
-                stack_set(stack, dst_start + elem_slots, 0);
-            }
+            write_recv_result(None, elem_slots, has_ok, |i, value| {
+                stack_set(stack, dst_start + i, value);
+            });
             ChanResult::Continue
         }
         #[cfg(feature = "std")]

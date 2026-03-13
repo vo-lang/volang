@@ -453,6 +453,39 @@ impl Fiber {
             remote_send_closed: false,
         }
     }
+
+    #[cfg(feature = "std")]
+    pub fn take_remote_recv_response(&mut self) -> Option<RemoteRecvResponse> {
+        self.remote_recv_response.take()
+    }
+
+    #[cfg(feature = "std")]
+    pub fn consume_remote_send_closed(&mut self) -> bool {
+        let closed = self.remote_send_closed;
+        self.remote_send_closed = false;
+        closed
+    }
+
+    #[cfg(feature = "std")]
+    pub fn apply_chan_response(&mut self, kind: &vo_runtime::island::ChanResponseKind) {
+        match kind {
+            vo_runtime::island::ChanResponseKind::SendAck { closed } => {
+                if *closed {
+                    self.remote_send_closed = true;
+                    if let Some(frame) = self.current_frame_mut() {
+                        frame.pc -= 1;
+                    }
+                }
+            }
+            vo_runtime::island::ChanResponseKind::RecvData { data, closed } => {
+                self.remote_recv_response = Some(RemoteRecvResponse {
+                    data: data.clone(),
+                    closed: *closed,
+                });
+            }
+            vo_runtime::island::ChanResponseKind::Closed => {}
+        }
+    }
     
     /// Reset fiber for reuse.
     pub fn reset(&mut self) {

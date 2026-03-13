@@ -730,50 +730,37 @@ impl Vm {
                     }
                     #[cfg(feature = "std")]
                     exec::QueueAction::RemoteSend { endpoint_id, home_island, data } => {
-                        use vo_runtime::island::ChanRequestKind;
-                        self.state.send_chan_request(
+                        self.state.send_chan_send_request(
                             home_island,
                             endpoint_id,
-                            ChanRequestKind::Send { data },
-                            self.state.current_island_id,
+                            data,
                             fiber_id.to_raw() as u64,
                         );
                         return ExecResult::Block(crate::fiber::BlockReason::Queue);
                     }
                     #[cfg(feature = "std")]
                     exec::QueueAction::RemoteRecv { endpoint_id, home_island } => {
-                        use vo_runtime::island::ChanRequestKind;
                         fiber.current_frame_mut().unwrap().pc -= 1;
-                        self.state.send_chan_request(
+                        self.state.send_chan_recv_request(
                             home_island,
                             endpoint_id,
-                            ChanRequestKind::Recv,
-                            self.state.current_island_id,
                             fiber_id.to_raw() as u64,
                         );
                         return ExecResult::Block(crate::fiber::BlockReason::Queue);
                     }
                     #[cfg(feature = "std")]
                     exec::QueueAction::RemoteRecvData { endpoint_id, target_island, fiber_id, data } => {
-                        use vo_runtime::island::ChanResponseKind;
-                        self.state.send_chan_response(
+                        self.state.send_chan_recv_data_response(
                             target_island,
                             endpoint_id,
-                            ChanResponseKind::RecvData { data, closed: false },
+                            data,
                             fiber_id,
                         );
                         return ExecResult::TimesliceExpired;
                     }
                     #[cfg(feature = "std")]
                     exec::QueueAction::RemoteClose { endpoint_id, home_island } => {
-                        use vo_runtime::island::ChanRequestKind;
-                        self.state.send_chan_request(
-                            home_island,
-                            endpoint_id,
-                            ChanRequestKind::Close,
-                            self.state.current_island_id,
-                            0,
-                        );
+                        self.state.send_chan_close_request(home_island, endpoint_id);
                         self.state.endpoint_registry.mark_tombstone(endpoint_id);
                         refetch!();
                     }
@@ -1691,8 +1678,7 @@ impl Vm {
                 }
                 Opcode::ChanSend => {
                     #[cfg(feature = "std")]
-                    if fiber.remote_send_closed {
-                        fiber.remote_send_closed = false;
+                    if fiber.consume_remote_send_closed() {
                         handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel));
                     }
                     #[cfg(feature = "std")]
@@ -1723,32 +1709,20 @@ impl Vm {
                 }
                 Opcode::ChanRecv => {
                     #[cfg(feature = "std")]
-                    if let Some(recv_response) = fiber.remote_recv_response.take() {
+                    if let Some(recv_response) = fiber.take_remote_recv_response() {
                         let elem_slots = ((inst.flags >> 1) & 0x7F) as usize;
                         let has_ok = (inst.flags & 1) != 0;
                         let dst_start = bp + inst.a as usize;
-                        if let Some(dst) = exec::decode_remote_recv_response(
+                        exec::replay_remote_recv_response(
                             &mut self.state.gc,
                             recv_response,
                             elem_slots,
+                            has_ok,
                             &module.struct_metas,
                             &module.runtime_types,
                             &mut self.state.endpoint_registry,
-                        ) {
-                            for (i, &value) in dst.iter().enumerate().take(elem_slots) {
-                                helpers::stack_set(stack, dst_start + i, value);
-                            }
-                            if has_ok {
-                                helpers::stack_set(stack, dst_start + elem_slots, 1);
-                            }
-                        } else {
-                            for i in 0..elem_slots {
-                                helpers::stack_set(stack, dst_start + i, 0);
-                            }
-                            if has_ok {
-                                helpers::stack_set(stack, dst_start + elem_slots, 0);
-                            }
-                        }
+                            |i, value| helpers::stack_set(stack, dst_start + i, value),
+                        );
                         refetch!();
                         continue;
                     }

@@ -177,6 +177,21 @@ fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) {
 
 use vo_runtime::island::{ChanRequestKind, ChanResponseKind};
 
+fn chan_send_ack(closed: bool) -> ChanResponseKind {
+    ChanResponseKind::SendAck { closed }
+}
+
+fn chan_recv_closed() -> ChanResponseKind {
+    ChanResponseKind::RecvData {
+        data: Vec::new(),
+        closed: true,
+    }
+}
+
+fn chan_recv_data(data: Vec<u8>) -> ChanResponseKind {
+    ChanResponseKind::RecvData { data, closed: false }
+}
+
 /// Handle incoming ChanRequest on the home island.
 /// This is where the channel's ChannelState lives — all queue operations happen here.
 pub fn handle_chan_request_command(
@@ -254,10 +269,8 @@ pub fn handle_chan_request_command(
         Some(EndpointEntry::Tombstone) | None => {
             // Stale request — respond with closed
             let resp = match kind {
-                ChanRequestKind::Send { .. } =>
-                    ChanResponseKind::SendAck { closed: true },
-                ChanRequestKind::Recv =>
-                    ChanResponseKind::RecvData { data: vec![], closed: true },
+                ChanRequestKind::Send { .. } => chan_send_ack(true),
+                ChanRequestKind::Recv => chan_recv_closed(),
                 ChanRequestKind::Close | ChanRequestKind::Transfer { .. } => return,
             };
             vm.state.send_chan_response(from_island, endpoint_id, resp, fiber_id);
@@ -318,7 +331,7 @@ fn handle_chan_request_inner(
                     dispatch_response(
                         requester,
                         home_island,
-                        ChanResponseKind::SendAck { closed: false },
+                        chan_send_ack(false),
                         responses,
                         local_wakes,
                     );
@@ -327,7 +340,7 @@ fn handle_chan_request_inner(
                     dispatch_response(
                         requester,
                         home_island,
-                        ChanResponseKind::SendAck { closed: false },
+                        chan_send_ack(false),
                         responses,
                         local_wakes,
                     );
@@ -340,7 +353,7 @@ fn handle_chan_request_inner(
                     dispatch_response(
                         requester,
                         home_island,
-                        ChanResponseKind::SendAck { closed: true },
+                        chan_send_ack(true),
                         responses,
                         local_wakes,
                     );
@@ -360,7 +373,7 @@ fn handle_chan_request_inner(
                         dispatch_response(
                             sender,
                             home_island,
-                            ChanResponseKind::SendAck { closed: false },
+                            chan_send_ack(false),
                             responses,
                             local_wakes,
                         );
@@ -374,7 +387,7 @@ fn handle_chan_request_inner(
                     dispatch_response(
                         requester,
                         home_island,
-                        ChanResponseKind::RecvData { data: vec![], closed: true },
+                        chan_recv_closed(),
                         responses,
                         local_wakes,
                     );
@@ -386,12 +399,12 @@ fn handle_chan_request_inner(
             state.close();
             for receiver in state.take_waiting_receivers() {
                 dispatch_response(receiver, home_island,
-                    ChanResponseKind::RecvData { data: vec![], closed: true },
+                    chan_recv_closed(),
                     responses, local_wakes);
             }
             for (sender, _) in state.take_waiting_senders() {
                 dispatch_response(sender, home_island,
-                    ChanResponseKind::SendAck { closed: true },
+                    chan_send_ack(true),
                     responses, local_wakes);
             }
         }
@@ -425,7 +438,7 @@ fn pack_recv_data_for_waiter(
         ctx.struct_metas,
         ctx.runtime_types,
     );
-    ChanResponseKind::RecvData { data, closed: false }
+    chan_recv_data(data)
 }
 
 /// Route a response to the correct target (remote message or local wake).
@@ -440,33 +453,6 @@ fn dispatch_response(
         local_wakes.push(target);
     } else {
         responses.push((target.island_id, kind, target.fiber_id));
-    }
-}
-
-/// Apply a channel response to a local fiber before waking it.
-/// Writes data to fiber fields so the ChanRecv/ChanSend handler can consume it on retry.
-fn apply_local_response(vm: &mut Vm, fiber_id: u64, kind: &ChanResponseKind) {
-    let fid = crate::scheduler::FiberId::from_raw(fiber_id as u32);
-    let fiber = vm.scheduler.get_fiber_mut(fid);
-    match kind {
-        ChanResponseKind::SendAck { closed } => {
-            if *closed {
-                fiber.remote_send_closed = true;
-                if let Some(frame) = fiber.current_frame_mut() {
-                    frame.pc -= 1; // Roll back to ChanSend instruction
-                }
-            }
-            // Non-closed: fiber resumes at next instruction (no action needed)
-        }
-        ChanResponseKind::RecvData { data, .. } => {
-            fiber.remote_recv_response = Some(crate::fiber::RemoteRecvResponse {
-                data: data.clone(),
-                closed: matches!(kind, ChanResponseKind::RecvData { closed: true, .. }),
-            });
-        }
-        ChanResponseKind::Closed => {
-            // Broadcast close — no fiber to wake (fiber_id=0)
-        }
     }
 }
 
@@ -506,9 +492,8 @@ pub fn handle_chan_response_command(
             vm.state.endpoint_registry.mark_tombstone(endpoint_id);
         }
         _ => {
-            // SendAck or RecvData — write to fiber fields, wake, and run
-            apply_local_response(vm, fiber_id, &kind);
             let fid = crate::scheduler::FiberId::from_raw(fiber_id as u32);
+            vm.scheduler.get_fiber_mut(fid).apply_chan_response(&kind);
             vm.scheduler.wake_fiber(fid);
             let _ = vm.run_scheduled();
         }

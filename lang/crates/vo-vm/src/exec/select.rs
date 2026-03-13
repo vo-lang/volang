@@ -234,24 +234,9 @@ fn complete_woken_case(
             let chan_state = channel::get_state(ch);
             let (result, value) = chan_state.try_recv();
             let dst_start = bp + val_reg as usize;
-            match value {
-                Some(val) => {
-                    for (i, &v) in val.iter().enumerate().take(elem_slots) {
-                        stack_set(stack, dst_start + i, v);
-                    }
-                    if has_ok {
-                        stack_set(stack, dst_start + elem_slots, 1);
-                    }
-                }
-                None => {
-                    for i in 0..elem_slots {
-                        stack_set(stack, dst_start + i, 0);
-                    }
-                    if has_ok {
-                        stack_set(stack, dst_start + elem_slots, 0);
-                    }
-                }
-            }
+            super::write_recv_result(value.as_deref(), elem_slots, has_ok, |i, written| {
+                stack_set(stack, dst_start + i, written);
+            });
             match result {
                 RecvResult::Success(Some(sender)) => Some(sender),
                 RecvResult::Success(None) | RecvResult::Closed => None,
@@ -333,25 +318,9 @@ fn execute_recv_case(
     // Use try_recv so that waiting senders are properly woken when the buffer
     // has space freed, or when consuming directly from waiting_senders.
     let (result, value) = chan_state.try_recv();
-
-    match value {
-        Some(val) => {
-            for (i, &v) in val.iter().enumerate().take(elem_slots) {
-                stack_set(stack, dst_start + i, v);
-            }
-            if has_ok {
-                stack_set(stack, dst_start + elem_slots, 1);
-            }
-        }
-        None => {
-            for i in 0..elem_slots {
-                stack_set(stack, dst_start + i, 0);
-            }
-            if has_ok {
-                stack_set(stack, dst_start + elem_slots, 0);
-            }
-        }
-    }
+    super::write_recv_result(value.as_deref(), elem_slots, has_ok, |i, written| {
+        stack_set(stack, dst_start + i, written);
+    });
 
     stack_set(stack, bp + result_reg as usize, idx as u64);
     *select_state = None;
