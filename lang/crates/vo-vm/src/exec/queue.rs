@@ -222,6 +222,13 @@ pub fn queue_send_core(
     if queue::is_remote(ch) {
         let proxy = queue::remote_proxy(ch);
         if proxy.closed { return QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel); }
+        super::prepare_remote_send_value_if_needed(
+            ch,
+            src,
+            struct_metas,
+            runtime_types,
+            state,
+        );
         let elem_meta = queue_state::elem_meta(ch);
         return QueueExecResult::RemoteSend {
             endpoint_id: proxy.endpoint_id,
@@ -274,33 +281,6 @@ pub fn queue_send_core(
         queue::ResolvedSendResult::Blocked => QueueExecResult::Block,
         queue::ResolvedSendResult::Closed => QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel),
     }
-}
-
-pub fn exec_queue_send(
-    stack: *const Slot,
-    bp: usize,
-    island_id: u32,
-    fiber_id: u32,
-    inst: &Instruction,
-    state: &mut crate::vm::VmState,
-    struct_metas: &[StructMeta],
-    runtime_types: &[RuntimeType],
-    module: Option<&vo_runtime::bytecode::Module>,
-) -> QueueExecResult {
-    let ch = stack_get(stack, bp + inst.a as usize) as GcRef;
-    let elem_slots = inst.flags as usize;
-    let src_start = bp + inst.b as usize;
-    let src: Vec<u64> = (0..elem_slots).map(|i| stack_get(stack, src_start + i)).collect();
-    queue_send_core(
-        ch,
-        &src,
-        island_id,
-        fiber_id as u64,
-        state,
-        struct_metas,
-        runtime_types,
-        module,
-    )
 }
 
 pub fn queue_recv_core(ch: GcRef, island_id: u32, fiber_id: u64) -> QueueRecvCoreResult {

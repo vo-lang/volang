@@ -1720,19 +1720,11 @@ impl Vm {
                     let src: Vec<u64> = (0..elem_slots)
                         .map(|i| helpers::stack_get(stack, src_start + i))
                         .collect();
-                    exec::prepare_remote_send_value_if_needed(
+                    handle_queue_action!(exec::queue_send_core(
                         ch,
                         &src,
-                        &module.struct_metas,
-                        &module.runtime_types,
-                        &mut self.state,
-                    );
-                    handle_queue_action!(exec::exec_queue_send(
-                        stack,
-                        bp,
                         self.state.current_island_id,
-                        fiber_id.to_raw(),
-                        &inst,
+                        fiber_id.to_raw() as u64,
                         &mut self.state,
                         &module.struct_metas,
                         &module.runtime_types,

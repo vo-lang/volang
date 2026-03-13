@@ -429,8 +429,10 @@ pub(crate) fn compile_for_range(
         let var_expr = value.as_ref().or(key.as_ref());
         let val_info = range_var_info(&mut sc, var_expr, elem_type, define)?;
         
-        // ok slot
-        let ok_slot = sc.func.alloc_slots(&[SlotType::Value]);
+        let mut recv_types = sc.info.type_slot_types(elem_type);
+        recv_types.push(SlotType::Value);
+        let recv_slot = sc.func.alloc_slots(&recv_types);
+        let ok_slot = recv_slot + elem_slots;
         
         // Emit HINT_LOOP outside the loop
         sc.func.enter_loop(0, label);
@@ -441,7 +443,7 @@ pub(crate) fn compile_for_range(
         // ChanRecv: a=val_slot, b=chan_reg, c=ok_slot
         // flags format: (elem_slots << 1) | has_ok
         let recv_flags = ((elem_slots as u8) << 1) | 1;
-        sc.func.emit_with_flags(Opcode::QueueRecv, recv_flags, val_info.slot, queue_reg, ok_slot);
+        sc.func.emit_with_flags(Opcode::QueueRecv, recv_flags, recv_slot, queue_reg, 0);
         
         // if !ok { goto end }
         let end_jump = sc.func.emit_jump(Opcode::JumpIfNot, ok_slot);
@@ -451,6 +453,13 @@ pub(crate) fn compile_for_range(
         
         // Store to escaped variable if needed
         if var_expr.is_some() {
+            if val_info.slot != recv_slot {
+                if elem_slots == 1 {
+                    sc.func.emit_op(Opcode::Copy, val_info.slot, recv_slot, 0);
+                } else {
+                    sc.func.emit_with_flags(Opcode::CopyN, elem_slots as u8, val_info.slot, recv_slot, elem_slots);
+                }
+            }
             emit_range_var_store(sc.ctx, sc.func, sc.info, &val_info)?;
         }
         

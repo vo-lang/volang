@@ -66,15 +66,6 @@ pub extern "C" fn jit_queue_send(
         .map(|i| unsafe { *val_ptr.add(i) })
         .collect();
 
-    // Prepare nested channels in the send value for cross-island transfer.
-    crate::exec::prepare_remote_send_value_if_needed(
-        ch,
-        &src,
-        &module.struct_metas,
-        &module.runtime_types,
-        &mut vm.state,
-    );
-
     match queue_send_core(
         ch,
         &src,
