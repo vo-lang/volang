@@ -162,6 +162,11 @@ pub fn remote_proxy_mut(chan: GcRef) -> &'static mut RemoteProxy {
     unsafe { &mut *(QueueData::as_ref(chan).endpoint_ptr as *mut RemoteProxy) }
 }
 
+#[inline]
+pub fn mark_remote_closed(chan: GcRef) {
+    remote_proxy_mut(chan).closed = true;
+}
+
 /// Get HomeInfo for a LOCAL channel that has been transferred cross-island.
 /// Returns None if never transferred (endpoint_ptr == 0).
 pub fn home_info(chan: GcRef) -> Option<&'static HomeInfo> {

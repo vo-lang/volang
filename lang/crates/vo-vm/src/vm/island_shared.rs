@@ -345,6 +345,21 @@ pub(crate) fn finalize_closed_home_endpoint(vm: &mut Vm, endpoint_id: u64, exclu
     vm.state.endpoint_registry.mark_tombstone(endpoint_id);
 }
 
+fn mark_remote_endpoint_closed(vm: &mut Vm, endpoint_id: u64) {
+    if let Some(ch) = vm.state.endpoint_registry.get_live(endpoint_id) {
+        if queue::is_remote(ch) {
+            queue::mark_remote_closed(ch);
+        }
+    }
+}
+
+fn resume_endpoint_response(vm: &mut Vm, fiber_id: u64, kind: &EndpointResponseKind) {
+    vm.state.pending_island_responses = vm.state.pending_island_responses.saturating_sub(1);
+    let fid = crate::scheduler::FiberId::from_raw(fiber_id as u32);
+    vm.scheduler.get_fiber_mut(fid).apply_endpoint_response(kind);
+    vm.scheduler.wake_fiber(fid);
+}
+
 pub(crate) fn handle_endpoint_response_command(
     vm: &mut Vm,
     endpoint_id: u64,
@@ -353,38 +368,20 @@ pub(crate) fn handle_endpoint_response_command(
 ) {
     match &kind {
         EndpointResponseKind::Closed => {
-            if let Some(ch) = vm.state.endpoint_registry.get_live(endpoint_id) {
-                if queue::is_remote(ch) {
-                    queue::remote_proxy_mut(ch).closed = true;
-                }
-            }
+            mark_remote_endpoint_closed(vm, endpoint_id);
             vm.state.endpoint_registry.mark_tombstone(endpoint_id);
         }
         EndpointResponseKind::SendAck { closed } => {
             if *closed {
-                if let Some(ch) = vm.state.endpoint_registry.get_live(endpoint_id) {
-                    if queue::is_remote(ch) {
-                        queue::remote_proxy_mut(ch).closed = true;
-                    }
-                }
+                mark_remote_endpoint_closed(vm, endpoint_id);
             }
-            vm.state.pending_island_responses = vm.state.pending_island_responses.saturating_sub(1);
-            let fid = crate::scheduler::FiberId::from_raw(fiber_id as u32);
-            vm.scheduler.get_fiber_mut(fid).apply_endpoint_response(&kind);
-            vm.scheduler.wake_fiber(fid);
+            resume_endpoint_response(vm, fiber_id, &kind);
         }
         EndpointResponseKind::RecvData { closed, .. } => {
             if *closed {
-                if let Some(ch) = vm.state.endpoint_registry.get_live(endpoint_id) {
-                    if queue::is_remote(ch) {
-                        queue::remote_proxy_mut(ch).closed = true;
-                    }
-                }
+                mark_remote_endpoint_closed(vm, endpoint_id);
             }
-            vm.state.pending_island_responses = vm.state.pending_island_responses.saturating_sub(1);
-            let fid = crate::scheduler::FiberId::from_raw(fiber_id as u32);
-            vm.scheduler.get_fiber_mut(fid).apply_endpoint_response(&kind);
-            vm.scheduler.wake_fiber(fid);
+            resume_endpoint_response(vm, fiber_id, &kind);
         }
     }
 }

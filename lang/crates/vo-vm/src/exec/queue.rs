@@ -333,7 +333,7 @@ pub fn queue_close_core(ch: GcRef) -> QueueExecResult {
         if proxy.closed { return QueueExecResult::Continue; }
         let endpoint_id = proxy.endpoint_id;
         let home_island = proxy.home_island;
-        queue::remote_proxy_mut(ch).closed = true;
+        queue::mark_remote_closed(ch);
         return QueueExecResult::RemoteClose { endpoint_id, home_island };
     }
 
