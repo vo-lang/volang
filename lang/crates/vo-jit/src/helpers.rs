@@ -12,6 +12,37 @@ use cranelift_module::Module;
 use crate::translator::HelperFuncs;
 use crate::JitError;
 
+fn helper_sig(module: &JITModule) -> Signature {
+    Signature::new(module.target_config().default_call_conv)
+}
+
+fn declare_import(
+    module: &mut JITModule,
+    name: &str,
+    sig: Signature,
+) -> Result<cranelift_module::FuncId, cranelift_module::ModuleError> {
+    use cranelift_module::Linkage::Import;
+    module.declare_function(name, Import, &sig)
+}
+
+fn sig_unary_i64_ret_i64(module: &JITModule) -> Signature {
+    let mut sig = helper_sig(module);
+    sig.params.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I64));
+    sig
+}
+
+fn sig_queue_new_checked(module: &JITModule, ptr: cranelift_codegen::ir::Type) -> Signature {
+    let mut sig = helper_sig(module);
+    sig.params.push(AbiParam::new(ptr));
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I32));
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(ptr));
+    sig.returns.push(AbiParam::new(types::I32));
+    sig
+}
+
 // =============================================================================
 // HelperFuncIds - Cranelift FuncId for each runtime helper
 // =============================================================================
@@ -32,9 +63,10 @@ pub struct HelperFuncIds {
     pub str_decode_rune: cranelift_module::FuncId,
     pub ptr_clone: cranelift_module::FuncId,
     pub closure_new: cranelift_module::FuncId,
-    pub chan_new_checked: cranelift_module::FuncId,
-    pub chan_len: cranelift_module::FuncId,
-    pub chan_cap: cranelift_module::FuncId,
+    pub queue_chan_new_checked: cranelift_module::FuncId,
+    pub queue_port_new_checked: cranelift_module::FuncId,
+    pub queue_len: cranelift_module::FuncId,
+    pub queue_cap: cranelift_module::FuncId,
     pub array_new: cranelift_module::FuncId,
     pub array_len: cranelift_module::FuncId,
     pub slice_new_checked: cranelift_module::FuncId,
@@ -57,9 +89,9 @@ pub struct HelperFuncIds {
     pub iface_eq: cranelift_module::FuncId,
     pub set_call_request: cranelift_module::FuncId,
     pub island_new: cranelift_module::FuncId,
-    pub chan_close: cranelift_module::FuncId,
-    pub chan_send: cranelift_module::FuncId,
-    pub chan_recv: cranelift_module::FuncId,
+    pub queue_close: cranelift_module::FuncId,
+    pub queue_send: cranelift_module::FuncId,
+    pub queue_recv: cranelift_module::FuncId,
     pub go_start: cranelift_module::FuncId,
     pub go_island: cranelift_module::FuncId,
     // Defer/Recover
@@ -77,58 +109,9 @@ pub struct HelperFuncIds {
 // =============================================================================
 
 pub fn register_symbols(builder: &mut JITBuilder) {
-    builder.symbol("vo_gc_alloc", vo_runtime::jit_api::vo_gc_alloc as *const u8);
-    builder.symbol("vo_gc_write_barrier", vo_runtime::jit_api::vo_gc_write_barrier as *const u8);
-    builder.symbol("vo_str_new", vo_runtime::jit_api::vo_str_new as *const u8);
-    builder.symbol("vo_str_len", vo_runtime::jit_api::vo_str_len as *const u8);
-    builder.symbol("vo_str_index", vo_runtime::jit_api::vo_str_index as *const u8);
-    builder.symbol("vo_str_concat", vo_runtime::jit_api::vo_str_concat as *const u8);
-    builder.symbol("vo_str_slice", vo_runtime::jit_api::vo_str_slice as *const u8);
-    builder.symbol("vo_str_eq", vo_runtime::jit_api::vo_str_eq as *const u8);
-    builder.symbol("vo_str_cmp", vo_runtime::jit_api::vo_str_cmp as *const u8);
-    builder.symbol("vo_str_decode_rune", vo_runtime::jit_api::vo_str_decode_rune as *const u8);
-    builder.symbol("vo_map_new", vo_runtime::jit_api::vo_map_new as *const u8);
-    builder.symbol("vo_map_len", vo_runtime::jit_api::vo_map_len as *const u8);
-    builder.symbol("vo_map_get", vo_runtime::jit_api::vo_map_get as *const u8);
-    builder.symbol("vo_map_set", vo_runtime::jit_api::vo_map_set as *const u8);
-    builder.symbol("vo_map_delete", vo_runtime::jit_api::vo_map_delete as *const u8);
-    builder.symbol("vo_ptr_clone", vo_runtime::jit_api::vo_ptr_clone as *const u8);
-    builder.symbol("vo_panic", vo_runtime::jit_api::vo_panic as *const u8);
-    builder.symbol("vo_call_extern", vo_runtime::jit_api::vo_call_extern as *const u8);
-    builder.symbol("vo_closure_new", vo_runtime::jit_api::vo_closure_new as *const u8);
-    builder.symbol("vo_chan_new_checked", vo_runtime::jit_api::vo_chan_new_checked as *const u8);
-    builder.symbol("vo_chan_len", vo_runtime::jit_api::vo_chan_len as *const u8);
-    builder.symbol("vo_chan_cap", vo_runtime::jit_api::vo_chan_cap as *const u8);
-    builder.symbol("vo_array_new", vo_runtime::jit_api::vo_array_new as *const u8);
-    builder.symbol("vo_array_len", vo_runtime::jit_api::vo_array_len as *const u8);
-    builder.symbol("vo_slice_new_checked", vo_runtime::jit_api::vo_slice_new_checked as *const u8);
-    builder.symbol("vo_slice_len", vo_runtime::jit_api::vo_slice_len as *const u8);
-    builder.symbol("vo_slice_cap", vo_runtime::jit_api::vo_slice_cap as *const u8);
-    builder.symbol("vo_slice_append", vo_runtime::jit_api::vo_slice_append as *const u8);
-    builder.symbol("vo_slice_slice", vo_runtime::jit_api::vo_slice_slice as *const u8);
-    builder.symbol("vo_slice_slice3", vo_runtime::jit_api::vo_slice_slice3 as *const u8);
-    builder.symbol("vo_slice_from_array", vo_runtime::jit_api::vo_slice_from_array as *const u8);
-    builder.symbol("vo_slice_from_array3", vo_runtime::jit_api::vo_slice_from_array3 as *const u8);
-    builder.symbol("vo_map_iter_init", vo_runtime::jit_api::vo_map_iter_init as *const u8);
-    builder.symbol("vo_map_iter_next", vo_runtime::jit_api::vo_map_iter_next as *const u8);
-    builder.symbol("vo_iface_assert", vo_runtime::jit_api::vo_iface_assert as *const u8);
-    builder.symbol("vo_iface_to_iface", vo_runtime::jit_api::vo_iface_to_iface as *const u8);
-    builder.symbol("vo_iface_eq", vo_runtime::jit_api::vo_iface_eq as *const u8);
-    builder.symbol("vo_set_call_request", vo_runtime::jit_api::vo_set_call_request as *const u8);
-    builder.symbol("vo_island_new", vo_runtime::jit_api::vo_island_new as *const u8);
-    builder.symbol("vo_chan_close", vo_runtime::jit_api::vo_chan_close as *const u8);
-    builder.symbol("vo_chan_send", vo_runtime::jit_api::vo_chan_send as *const u8);
-    builder.symbol("vo_chan_recv", vo_runtime::jit_api::vo_chan_recv as *const u8);
-    builder.symbol("vo_go_start", vo_runtime::jit_api::vo_go_start as *const u8);
-    builder.symbol("vo_go_island", vo_runtime::jit_api::vo_go_island as *const u8);
-    // Defer/Recover
-    builder.symbol("vo_defer_push", vo_runtime::jit_api::vo_defer_push as *const u8);
-    builder.symbol("vo_recover", vo_runtime::jit_api::vo_recover as *const u8);
-    // Select Statement
-    builder.symbol("vo_select_begin", vo_runtime::jit_api::vo_select_begin as *const u8);
-    builder.symbol("vo_select_send", vo_runtime::jit_api::vo_select_send as *const u8);
-    builder.symbol("vo_select_recv", vo_runtime::jit_api::vo_select_recv as *const u8);
-    builder.symbol("vo_select_exec", vo_runtime::jit_api::vo_select_exec as *const u8);
+    for &(name, addr) in vo_runtime::jit_api::get_runtime_symbols() {
+        builder.symbol(name, addr);
+    }
 }
 
 // =============================================================================
@@ -137,8 +120,8 @@ pub fn register_symbols(builder: &mut JITBuilder) {
 
 pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type) -> Result<HelperFuncIds, JitError> {
     use cranelift_module::Linkage::Import;
-    
-    let gc_alloc = module.declare_function("vo_gc_alloc", Import, &{
+
+    let gc_alloc = declare_import(module, "vo_gc_alloc", {
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));
         sig.params.push(AbiParam::new(types::I32));
@@ -147,7 +130,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let write_barrier = module.declare_function("vo_gc_write_barrier", Import, &{
+    let write_barrier = declare_import(module, "vo_gc_write_barrier", {
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));
         sig.params.push(AbiParam::new(types::I64));
@@ -156,7 +139,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let panic = module.declare_function("vo_panic", Import, &{
+    let panic = declare_import(module, "vo_panic", {
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));
         sig.params.push(AbiParam::new(types::I64));
@@ -164,7 +147,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let call_extern = module.declare_function("vo_call_extern", Import, &{
+    let call_extern = declare_import(module, "vo_call_extern", {
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));
         sig.params.push(AbiParam::new(types::I32));
@@ -176,7 +159,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let str_new = module.declare_function("vo_str_new", Import, &{
+    let str_new = declare_import(module, "vo_str_new", {
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));
         sig.params.push(AbiParam::new(ptr));
@@ -185,14 +168,9 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let str_len = module.declare_function("vo_str_len", Import, &{
-        let mut sig = Signature::new(module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        sig
-    })?;
+    let str_len = declare_import(module, "vo_str_len", sig_unary_i64_ret_i64(module))?;
     
-    let str_index = module.declare_function("vo_str_index", Import, &{
+    let str_index = declare_import(module, "vo_str_index", {
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I64));
@@ -200,7 +178,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let str_concat = module.declare_function("vo_str_concat", Import, &{
+    let str_concat = declare_import(module, "vo_str_concat", {
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));
         sig.params.push(AbiParam::new(types::I64));
@@ -209,7 +187,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let str_slice = module.declare_function("vo_str_slice", Import, &{
+    let str_slice = declare_import(module, "vo_str_slice", {
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));
         sig.params.push(AbiParam::new(types::I64));
@@ -219,7 +197,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let str_eq = module.declare_function("vo_str_eq", Import, &{
+    let str_eq = declare_import(module, "vo_str_eq", {
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I64));
@@ -227,7 +205,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let str_cmp = module.declare_function("vo_str_cmp", Import, &{
+    let str_cmp = declare_import(module, "vo_str_cmp", {
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I64));
@@ -235,7 +213,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let str_decode_rune = module.declare_function("vo_str_decode_rune", Import, &{
+    let str_decode_rune = declare_import(module, "vo_str_decode_rune", {
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I64));
@@ -243,7 +221,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let ptr_clone = module.declare_function("vo_ptr_clone", Import, &{
+    let ptr_clone = declare_import(module, "vo_ptr_clone", {
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));
         sig.params.push(AbiParam::new(types::I64));
@@ -251,7 +229,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let closure_new = module.declare_function("vo_closure_new", Import, &{
+    let closure_new = declare_import(module, "vo_closure_new", {
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));
         sig.params.push(AbiParam::new(types::I32));
@@ -260,31 +238,10 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    // vo_chan_new_checked(gc, elem_meta, elem_slots, cap, out) -> error_code
-    let chan_new_checked = module.declare_function("vo_chan_new_checked", Import, &{
-        let mut sig = Signature::new(module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(ptr));   // gc
-        sig.params.push(AbiParam::new(types::I32)); // elem_meta
-        sig.params.push(AbiParam::new(types::I32)); // elem_slots
-        sig.params.push(AbiParam::new(types::I64)); // cap (i64 for signed check)
-        sig.params.push(AbiParam::new(ptr));   // out
-        sig.returns.push(AbiParam::new(types::I32)); // error code
-        sig
-    })?;
-    
-    let chan_len = module.declare_function("vo_chan_len", Import, &{
-        let mut sig = Signature::new(module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        sig
-    })?;
-    
-    let chan_cap = module.declare_function("vo_chan_cap", Import, &{
-        let mut sig = Signature::new(module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        sig
-    })?;
+    let queue_chan_new_checked = declare_import(module, "vo_chan_new_checked", sig_queue_new_checked(module, ptr))?;
+    let queue_port_new_checked = declare_import(module, "vo_port_new_checked", sig_queue_new_checked(module, ptr))?;
+    let queue_len = declare_import(module, "vo_chan_len", sig_unary_i64_ret_i64(module))?;
+    let queue_cap = declare_import(module, "vo_chan_cap", sig_unary_i64_ret_i64(module))?;
     
     let array_new = module.declare_function("vo_array_new", Import, &{
         let mut sig = Signature::new(module.target_config().default_call_conv);
@@ -296,12 +253,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let array_len = module.declare_function("vo_array_len", Import, &{
-        let mut sig = Signature::new(module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        sig
-    })?;
+    let array_len = declare_import(module, "vo_array_len", sig_unary_i64_ret_i64(module))?;
     
     // vo_slice_new_checked(gc, elem_meta, elem_bytes, len, cap, out) -> error_code
     let slice_new_checked = module.declare_function("vo_slice_new_checked", Import, &{
@@ -316,19 +268,9 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let slice_len = module.declare_function("vo_slice_len", Import, &{
-        let mut sig = Signature::new(module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        sig
-    })?;
+    let slice_len = declare_import(module, "vo_slice_len", sig_unary_i64_ret_i64(module))?;
     
-    let slice_cap = module.declare_function("vo_slice_cap", Import, &{
-        let mut sig = Signature::new(module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        sig
-    })?;
+    let slice_cap = declare_import(module, "vo_slice_cap", sig_unary_i64_ret_i64(module))?;
     
     let slice_append = module.declare_function("vo_slice_append", Import, &{
         let mut sig = Signature::new(module.target_config().default_call_conv);
@@ -395,12 +337,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let map_len = module.declare_function("vo_map_len", Import, &{
-        let mut sig = Signature::new(module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        sig
-    })?;
+    let map_len = declare_import(module, "vo_map_len", sig_unary_i64_ret_i64(module))?;
     
     let map_get = module.declare_function("vo_map_get", Import, &{
         let mut sig = Signature::new(module.target_config().default_call_conv);
@@ -504,7 +441,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let chan_close = module.declare_function("vo_chan_close", Import, &{
+    let queue_close = module.declare_function("vo_chan_close", Import, &{
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));
         sig.params.push(AbiParam::new(types::I64));
@@ -512,7 +449,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let chan_send = module.declare_function("vo_chan_send", Import, &{
+    let queue_send = module.declare_function("vo_chan_send", Import, &{
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));        // ctx
         sig.params.push(AbiParam::new(types::I64)); // chan
@@ -522,7 +459,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    let chan_recv = module.declare_function("vo_chan_recv", Import, &{
+    let queue_recv = module.declare_function("vo_chan_recv", Import, &{
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));        // ctx
         sig.params.push(AbiParam::new(types::I64)); // chan
@@ -602,6 +539,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig.params.push(AbiParam::new(types::I32)); // chan_reg
         sig.params.push(AbiParam::new(types::I32)); // elem_slots
         sig.params.push(AbiParam::new(types::I32)); // has_ok
+        sig.params.push(AbiParam::new(types::I32)); // queue_kind
         sig.params.push(AbiParam::new(types::I32)); // case_idx
         sig.returns.push(AbiParam::new(types::I32)); // JitResult
         sig
@@ -620,14 +558,14 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         panic, call_extern,
         str_new, str_len, str_index, str_concat, str_slice, str_eq, str_cmp, str_decode_rune,
         ptr_clone, closure_new, 
-        chan_new_checked, chan_len, chan_cap, 
+        queue_chan_new_checked, queue_port_new_checked, queue_len, queue_cap, 
         array_new, array_len, 
         slice_new_checked, slice_len, slice_cap, slice_append, slice_slice, slice_slice3,
         slice_from_array, slice_from_array3,
         map_new, map_len, map_get, map_set, map_delete, map_iter_init, map_iter_next,
         iface_assert, iface_to_iface, iface_eq, set_call_request,
-        island_new, chan_close,
-        chan_send, chan_recv,
+        island_new, queue_close,
+        queue_send, queue_recv,
         go_start, go_island,
         defer_push, recover,
         select_begin, select_send, select_recv, select_exec,
@@ -643,56 +581,59 @@ pub fn get_helper_refs(
     func: &mut cranelift_codegen::ir::Function,
     ids: &HelperFuncIds,
 ) -> HelperFuncs {
+    let mut declare_ref = |id| Some(module.declare_func_in_func(id, func));
+
     HelperFuncs {
-        gc_alloc: Some(module.declare_func_in_func(ids.gc_alloc, func)),
-        write_barrier: Some(module.declare_func_in_func(ids.write_barrier, func)),
-        panic: Some(module.declare_func_in_func(ids.panic, func)),
-        call_extern: Some(module.declare_func_in_func(ids.call_extern, func)),
-        str_new: Some(module.declare_func_in_func(ids.str_new, func)),
-        str_len: Some(module.declare_func_in_func(ids.str_len, func)),
-        str_index: Some(module.declare_func_in_func(ids.str_index, func)),
-        str_concat: Some(module.declare_func_in_func(ids.str_concat, func)),
-        str_slice: Some(module.declare_func_in_func(ids.str_slice, func)),
-        str_eq: Some(module.declare_func_in_func(ids.str_eq, func)),
-        str_cmp: Some(module.declare_func_in_func(ids.str_cmp, func)),
-        str_decode_rune: Some(module.declare_func_in_func(ids.str_decode_rune, func)),
-        ptr_clone: Some(module.declare_func_in_func(ids.ptr_clone, func)),
-        closure_new: Some(module.declare_func_in_func(ids.closure_new, func)),
-        chan_new_checked: Some(module.declare_func_in_func(ids.chan_new_checked, func)),
-        chan_len: Some(module.declare_func_in_func(ids.chan_len, func)),
-        chan_cap: Some(module.declare_func_in_func(ids.chan_cap, func)),
-        array_new: Some(module.declare_func_in_func(ids.array_new, func)),
-        array_len: Some(module.declare_func_in_func(ids.array_len, func)),
-        slice_new_checked: Some(module.declare_func_in_func(ids.slice_new_checked, func)),
-        slice_len: Some(module.declare_func_in_func(ids.slice_len, func)),
-        slice_cap: Some(module.declare_func_in_func(ids.slice_cap, func)),
-        slice_append: Some(module.declare_func_in_func(ids.slice_append, func)),
-        slice_slice: Some(module.declare_func_in_func(ids.slice_slice, func)),
-        slice_slice3: Some(module.declare_func_in_func(ids.slice_slice3, func)),
-        slice_from_array: Some(module.declare_func_in_func(ids.slice_from_array, func)),
-        slice_from_array3: Some(module.declare_func_in_func(ids.slice_from_array3, func)),
-        map_new: Some(module.declare_func_in_func(ids.map_new, func)),
-        map_len: Some(module.declare_func_in_func(ids.map_len, func)),
-        map_get: Some(module.declare_func_in_func(ids.map_get, func)),
-        map_set: Some(module.declare_func_in_func(ids.map_set, func)),
-        map_delete: Some(module.declare_func_in_func(ids.map_delete, func)),
-        map_iter_init: Some(module.declare_func_in_func(ids.map_iter_init, func)),
-        map_iter_next: Some(module.declare_func_in_func(ids.map_iter_next, func)),
-        iface_assert: Some(module.declare_func_in_func(ids.iface_assert, func)),
-        iface_to_iface: Some(module.declare_func_in_func(ids.iface_to_iface, func)),
-        iface_eq: Some(module.declare_func_in_func(ids.iface_eq, func)),
-        set_call_request: Some(module.declare_func_in_func(ids.set_call_request, func)),
-        island_new: Some(module.declare_func_in_func(ids.island_new, func)),
-        chan_close: Some(module.declare_func_in_func(ids.chan_close, func)),
-        chan_send: Some(module.declare_func_in_func(ids.chan_send, func)),
-        chan_recv: Some(module.declare_func_in_func(ids.chan_recv, func)),
-        go_start: Some(module.declare_func_in_func(ids.go_start, func)),
-        go_island: Some(module.declare_func_in_func(ids.go_island, func)),
-        defer_push: Some(module.declare_func_in_func(ids.defer_push, func)),
-        recover: Some(module.declare_func_in_func(ids.recover, func)),
-        select_begin: Some(module.declare_func_in_func(ids.select_begin, func)),
-        select_send: Some(module.declare_func_in_func(ids.select_send, func)),
-        select_recv: Some(module.declare_func_in_func(ids.select_recv, func)),
-        select_exec: Some(module.declare_func_in_func(ids.select_exec, func)),
+        gc_alloc: declare_ref(ids.gc_alloc),
+        write_barrier: declare_ref(ids.write_barrier),
+        panic: declare_ref(ids.panic),
+        call_extern: declare_ref(ids.call_extern),
+        str_new: declare_ref(ids.str_new),
+        str_len: declare_ref(ids.str_len),
+        str_index: declare_ref(ids.str_index),
+        str_concat: declare_ref(ids.str_concat),
+        str_slice: declare_ref(ids.str_slice),
+        str_eq: declare_ref(ids.str_eq),
+        str_cmp: declare_ref(ids.str_cmp),
+        str_decode_rune: declare_ref(ids.str_decode_rune),
+        ptr_clone: declare_ref(ids.ptr_clone),
+        closure_new: declare_ref(ids.closure_new),
+        queue_chan_new_checked: declare_ref(ids.queue_chan_new_checked),
+        queue_port_new_checked: declare_ref(ids.queue_port_new_checked),
+        queue_len: declare_ref(ids.queue_len),
+        queue_cap: declare_ref(ids.queue_cap),
+        array_new: declare_ref(ids.array_new),
+        array_len: declare_ref(ids.array_len),
+        slice_new_checked: declare_ref(ids.slice_new_checked),
+        slice_len: declare_ref(ids.slice_len),
+        slice_cap: declare_ref(ids.slice_cap),
+        slice_append: declare_ref(ids.slice_append),
+        slice_slice: declare_ref(ids.slice_slice),
+        slice_slice3: declare_ref(ids.slice_slice3),
+        slice_from_array: declare_ref(ids.slice_from_array),
+        slice_from_array3: declare_ref(ids.slice_from_array3),
+        map_new: declare_ref(ids.map_new),
+        map_len: declare_ref(ids.map_len),
+        map_get: declare_ref(ids.map_get),
+        map_set: declare_ref(ids.map_set),
+        map_delete: declare_ref(ids.map_delete),
+        map_iter_init: declare_ref(ids.map_iter_init),
+        map_iter_next: declare_ref(ids.map_iter_next),
+        iface_assert: declare_ref(ids.iface_assert),
+        iface_to_iface: declare_ref(ids.iface_to_iface),
+        iface_eq: declare_ref(ids.iface_eq),
+        set_call_request: declare_ref(ids.set_call_request),
+        island_new: declare_ref(ids.island_new),
+        queue_close: declare_ref(ids.queue_close),
+        queue_send: declare_ref(ids.queue_send),
+        queue_recv: declare_ref(ids.queue_recv),
+        go_start: declare_ref(ids.go_start),
+        go_island: declare_ref(ids.go_island),
+        defer_push: declare_ref(ids.defer_push),
+        recover: declare_ref(ids.recover),
+        select_begin: declare_ref(ids.select_begin),
+        select_send: declare_ref(ids.select_send),
+        select_recv: declare_ref(ids.select_recv),
+        select_exec: declare_ref(ids.select_exec),
     }
 }

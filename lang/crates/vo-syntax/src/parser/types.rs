@@ -57,7 +57,6 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Chan => {
                 self.advance();
-                // Check for send-only: chan<-
                 let dir = if self.eat(TokenKind::Arrow) {
                     ChanDir::Send
                 } else {
@@ -66,16 +65,35 @@ impl<'a> Parser<'a> {
                 let elem = self.parse_type()?;
                 TypeExprKind::Chan(Box::new(ChanType { dir, elem }))
             }
+            TokenKind::Port => {
+                self.advance();
+                let dir = if self.eat(TokenKind::Arrow) {
+                    ChanDir::Send
+                } else {
+                    ChanDir::Both
+                };
+                let elem = self.parse_type()?;
+                TypeExprKind::Port(Box::new(PortType { dir, elem }))
+            }
             TokenKind::Island => {
                 self.advance();
                 TypeExprKind::Island
             }
             TokenKind::Arrow => {
-                // Receive-only channel: <-chan
                 self.advance();
-                self.expect(TokenKind::Chan)?;
+                let is_port = if self.at(TokenKind::Port) {
+                    self.advance();
+                    true
+                } else {
+                    self.expect(TokenKind::Chan)?;
+                    false
+                };
                 let elem = self.parse_type()?;
-                TypeExprKind::Chan(Box::new(ChanType { dir: ChanDir::Recv, elem }))
+                if is_port {
+                    TypeExprKind::Port(Box::new(PortType { dir: ChanDir::Recv, elem }))
+                } else {
+                    TypeExprKind::Chan(Box::new(ChanType { dir: ChanDir::Recv, elem }))
+                }
             }
             TokenKind::Func => {
                 self.advance();
@@ -293,6 +311,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::LBracket
                 | TokenKind::Map
                 | TokenKind::Chan
+                | TokenKind::Port
                 | TokenKind::Island
                 | TokenKind::Arrow
                 | TokenKind::Func
@@ -309,6 +328,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::LBracket
                 | TokenKind::Map
                 | TokenKind::Chan
+                | TokenKind::Port
                 | TokenKind::Island
                 | TokenKind::Arrow
                 | TokenKind::Func

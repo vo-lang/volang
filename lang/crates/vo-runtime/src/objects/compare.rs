@@ -347,7 +347,7 @@ pub fn deep_eq_array(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
         Some(RuntimeType::Named { id, .. }) => {
             module.named_type_metas.get(*id as usize)
                 .and_then(|meta| {
-                    let underlying_rttid = meta.underlying_meta.meta_id();
+                    let underlying_rttid = meta.underlying_rttid.rttid();
                     match module.runtime_types.get(underlying_rttid as usize) {
                         Some(RuntimeType::Array { elem, .. }) => Some(elem.rttid()),
                         _ => None,

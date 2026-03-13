@@ -446,7 +446,7 @@ impl Checker {
                     None
                 }
             }
-            Type::Pointer(_) | Type::Signature(_) | Type::Slice(_) | Type::Map(_) | Type::Chan(_) => {
+            Type::Pointer(_) | Type::Signature(_) | Type::Slice(_) | Type::Map(_) | Type::Chan(_) | Type::Port(_) => {
                 if x.is_nil(self.objs()) {
                     Some(self.basic_type(BasicType::UntypedNil))
                 } else {
@@ -1344,19 +1344,23 @@ impl Checker {
                     return;
                 }
                 let underlying = self.otype(x.typ.unwrap()).underlying_val(self.objs());
-                if let Some(chan) = underlying.try_as_chan() {
-                    if chan.dir() == typ::ChanDir::SendOnly {
-                        self.invalid_op(recv.span, "cannot receive from send-only channel");
-                        x.mode = OperandMode::Invalid;
-                        return;
-                    }
-                    x.mode = OperandMode::CommaOk;
-                    x.typ = Some(chan.elem());
-                    self.octx.has_call_or_recv = true;
-                } else {
-                    self.invalid_op(recv.span, "cannot receive from non-channel");
+                let Some((dir, elem)) = underlying.queue_dir_elem() else {
+                    self.invalid_op(recv.span, "cannot receive from non-channel-or-port");
                     x.mode = OperandMode::Invalid;
+                    return;
+                };
+                if dir == typ::ChanDir::SendOnly {
+                    if underlying.is_port() {
+                        self.invalid_op(recv.span, "cannot receive from send-only port");
+                    } else {
+                        self.invalid_op(recv.span, "cannot receive from send-only channel");
+                    }
+                    x.mode = OperandMode::Invalid;
+                    return;
                 }
+                x.mode = OperandMode::CommaOk;
+                x.typ = Some(elem);
+                self.octx.has_call_or_recv = true;
             }
             ExprKind::TypeAsExpr(ty) => {
                 let t = self.type_expr(ty);

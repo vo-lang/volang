@@ -1,17 +1,17 @@
 package main
 
 type Pair struct {
-	Left chan int
-	Right chan int
+	Left port int
+	Right port int
 }
 
 func main() {
 	{
 		i := make(island)
-		outer := make(chan Pair, 1)
-		inner := make(chan int, 1)
-		eq := make(chan bool, 1)
-		go @(i) func(ch chan Pair, out chan bool) {
+		outer := make(port Pair, 1)
+		inner := make(port int, 1)
+		eq := make(port bool, 1)
+		go @(i) func(ch port Pair, out port bool) {
 			pair := <-ch
 			out <- (pair.Left == pair.Right)
 		}(outer, eq)
@@ -21,14 +21,14 @@ func main() {
 
 	{
 		i := make(island)
-		outer := make(chan []chan int, 1)
-		inner := make(chan int, 1)
-		eq := make(chan bool, 1)
-		go @(i) func(ch chan []chan int, out chan bool) {
+		outer := make(port []port int, 1)
+		inner := make(port int, 1)
+		eq := make(port bool, 1)
+		go @(i) func(ch port []port int, out port bool) {
 			items := <-ch
 			out <- (items[0] == items[1])
 		}(outer, eq)
-		outer <- []chan int{inner, inner}
+		outer <- []port int{inner, inner}
 		assert(<-eq, "slice alias")
 	}
 }

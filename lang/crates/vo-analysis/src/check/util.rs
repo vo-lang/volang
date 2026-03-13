@@ -7,7 +7,7 @@
 use std::cmp::Ordering;
 
 use vo_common::span::Span;
-use vo_syntax::ast::{Expr, ExprKind};
+use vo_syntax::ast::{self, Expr, ExprKind};
 
 use crate::obj::LangObj;
 use crate::objects::{ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
@@ -429,6 +429,20 @@ impl Checker {
     #[inline]
     pub(crate) fn new_t_chan(&mut self, dir: typ::ChanDir, elem: TypeKey) -> TypeKey {
         self.tc_objs.new_t_chan(dir, elem)
+    }
+
+    #[inline]
+    pub(crate) fn new_t_port(&mut self, dir: typ::ChanDir, elem: TypeKey) -> TypeKey {
+        self.tc_objs.new_t_port(dir, elem)
+    }
+
+    #[inline]
+    pub(crate) fn ast_chan_dir(&self, dir: ast::ChanDir) -> typ::ChanDir {
+        match dir {
+            ast::ChanDir::Both => typ::ChanDir::SendRecv,
+            ast::ChanDir::Send => typ::ChanDir::SendOnly,
+            ast::ChanDir::Recv => typ::ChanDir::RecvOnly,
+        }
     }
     
     #[inline]

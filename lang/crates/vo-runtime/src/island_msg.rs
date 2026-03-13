@@ -10,12 +10,13 @@ use alloc::vec;
 
 use crate::gc::{Gc, GcRef};
 use crate::pack::{
-    pack_slots, unpack_slots_with_chan_resolver_and_cache, ChanHandleInfo, PackedValue,
+    pack_slots, unpack_slots_with_queue_handle_resolver_and_cache, PackedValue, QueueHandleInfo,
 };
 use crate::slot::Slot;
 use crate::ValueMeta;
 use crate::ValueKind;
 use vo_common_core::bytecode::StructMeta;
+use vo_common_core::TransferType;
 use vo_common_core::RuntimeType;
 
 /// Read little-endian integers from byte slice at offset.
@@ -37,9 +38,9 @@ pub fn encode_spawn_payload(
     gc: &Gc,
     func_id: u32,
     captures: &[Slot],
-    capture_types: &[(u32, u16)], // (ValueMeta raw, slots) from FunctionDef
+    capture_types: &[TransferType],
     args: &[Slot],
-    param_types: &[(u32, u16)], // (ValueMeta raw, slots) from FunctionDef
+    param_types: &[TransferType],
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
 ) -> Vec<u8> {
@@ -50,7 +51,7 @@ pub fn encode_spawn_payload(
     buf.extend_from_slice(&(param_types.len() as u16).to_le_bytes());
 
     for (i, &slot) in captures.iter().enumerate() {
-        let Some(&(meta_raw, slots)) = capture_types.get(i) else {
+        let Some(transfer_type) = capture_types.get(i) else {
             buf.extend_from_slice(&0u32.to_le_bytes());
             continue;
         };
@@ -58,10 +59,10 @@ pub fn encode_spawn_payload(
             buf.extend_from_slice(&0u32.to_le_bytes());
             continue;
         }
-        let value_meta = ValueMeta::from_raw(meta_raw);
+        let value_meta = ValueMeta::from_raw(transfer_type.meta_raw);
         let gcref = slot as GcRef;
-        let mut value_slots = vec![0u64; slots as usize];
-        for j in 0..slots as usize {
+        let mut value_slots = vec![0u64; transfer_type.slots as usize];
+        for j in 0..transfer_type.slots as usize {
             value_slots[j] = unsafe { Gc::read_slot(gcref, j) };
         }
         let packed = pack_slots(gc, &value_slots, value_meta, struct_metas, runtime_types);
@@ -71,10 +72,10 @@ pub fn encode_spawn_payload(
     }
 
     let mut arg_offset = 0usize;
-    for &(meta_raw, slots) in param_types {
-        let slots_usize = slots as usize;
+    for transfer_type in param_types {
+        let slots_usize = transfer_type.slots as usize;
         if arg_offset + slots_usize <= args.len() {
-            let value_meta = ValueMeta::from_raw(meta_raw);
+            let value_meta = ValueMeta::from_raw(transfer_type.meta_raw);
             let value_slots = &args[arg_offset..arg_offset + slots_usize];
             let packed = pack_slots(gc, value_slots, value_meta, struct_metas, runtime_types);
             let packed_data = packed.data();
@@ -116,19 +117,19 @@ pub fn unpack_spawn_payload<F>(
     gc: &mut Gc,
     data: &[u8],
     payload: &SpawnPayload,
-    capture_types: &[(u32, u16)],
-    param_types: &[(u32, u16)],
+    capture_types: &[TransferType],
+    param_types: &[TransferType],
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
-    mut resolve_chan: F,
+    mut resolve_queue_handle: F,
 ) -> (Vec<GcRef>, Vec<u64>)
 where
-    F: FnMut(&mut Gc, ChanHandleInfo) -> GcRef,
+    F: FnMut(&mut Gc, QueueHandleInfo) -> GcRef,
 {
     let mut captures = Vec::with_capacity(payload.num_captures as usize);
     let mut args = Vec::new();
     let mut offset = payload.data_offset;
-    let mut chan_cache = Default::default();
+    let mut queue_handle_cache = Default::default();
 
     for i in 0..payload.num_captures as usize {
         let len = read_u32(data, offset) as usize;
@@ -139,26 +140,30 @@ where
             continue;
         }
 
-        let (meta_raw, slots) = capture_types.get(i).copied().unwrap_or((0, 1));
-        let value_meta = ValueMeta::from_raw(meta_raw);
+        let transfer_type = capture_types.get(i).copied().unwrap_or(TransferType {
+            meta_raw: 0,
+            rttid_raw: 0,
+            slots: 1,
+        });
+        let value_meta = ValueMeta::from_raw(transfer_type.meta_raw);
         let packed = PackedValue::from_data(data[offset..offset + len].to_vec());
-        let mut value_slots = vec![0u64; slots as usize];
+        let mut value_slots = vec![0u64; transfer_type.slots as usize];
         let mut cursor = 0;
-        unpack_slots_with_chan_resolver_and_cache(
+        unpack_slots_with_queue_handle_resolver_and_cache(
             gc,
             packed.data(),
             &mut cursor,
             &mut value_slots,
             struct_metas,
             runtime_types,
-            &mut chan_cache,
-            &mut resolve_chan,
+            &mut queue_handle_cache,
+            &mut resolve_queue_handle,
         );
         offset += len;
 
         let box_vk = value_meta.value_kind();
         let box_meta = if box_vk == ValueKind::Array || box_vk == ValueKind::Map
-            || box_vk == ValueKind::Channel || box_vk == ValueKind::Slice
+            || box_vk == ValueKind::Channel || box_vk == ValueKind::Port || box_vk == ValueKind::Slice
             || box_vk == ValueKind::String || box_vk == ValueKind::Closure
             || box_vk == ValueKind::Island
         {
@@ -166,8 +171,8 @@ where
         } else {
             value_meta
         };
-        let box_ref = gc.alloc(box_meta, slots);
-        for j in 0..slots as usize {
+        let box_ref = gc.alloc(box_meta, transfer_type.slots);
+        for j in 0..transfer_type.slots as usize {
             unsafe { Gc::write_slot(box_ref, j, value_slots[j]); }
         }
         captures.push(box_ref);
@@ -177,25 +182,29 @@ where
         let len = read_u32(data, offset) as usize;
         offset += 4;
 
-        let (_, slots) = param_types.get(i).copied().unwrap_or((0, 1));
+        let transfer_type = param_types.get(i).copied().unwrap_or(TransferType {
+            meta_raw: 0,
+            rttid_raw: 0,
+            slots: 1,
+        });
 
         if len == 0 {
-            args.resize(args.len() + slots as usize, 0);
+            args.resize(args.len() + transfer_type.slots as usize, 0);
             continue;
         }
 
         let packed = PackedValue::from_data(data[offset..offset + len].to_vec());
-        let mut value_slots = vec![0u64; slots as usize];
+        let mut value_slots = vec![0u64; transfer_type.slots as usize];
         let mut cursor = 0;
-        unpack_slots_with_chan_resolver_and_cache(
+        unpack_slots_with_queue_handle_resolver_and_cache(
             gc,
             packed.data(),
             &mut cursor,
             &mut value_slots,
             struct_metas,
             runtime_types,
-            &mut chan_cache,
-            &mut resolve_chan,
+            &mut queue_handle_cache,
+            &mut resolve_queue_handle,
         );
         offset += len;
 

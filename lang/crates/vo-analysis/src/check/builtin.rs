@@ -337,7 +337,7 @@ impl Checker {
                     })
                 }
             }
-            Type::Slice(_) | Type::Chan(_) => OperandMode::Value,
+            Type::Slice(_) | Type::Chan(_) | Type::Port(_) => OperandMode::Value,
             Type::Map(_) => {
                 if id == Builtin::Len {
                     OperandMode::Value
@@ -372,8 +372,16 @@ impl Checker {
                 x.mode = OperandMode::NoValue;
                 true
             }
+            Type::Port(detail) => {
+                if detail.dir() != typ::ChanDir::SendRecv {
+                    self.error_code_msg(TypeError::InvalidOp, x.pos(), "cannot close non-owner port");
+                    return false;
+                }
+                x.mode = OperandMode::NoValue;
+                true
+            }
             _ => {
-                self.error_code(TypeError::CloseNotChan, x.pos());
+                self.error_code_msg(TypeError::CloseNotChan, x.pos(), "argument to close must be channel or port");
                 false
             }
         }
@@ -478,18 +486,24 @@ impl Checker {
             return false;
         }
 
-        let min = match self.otype(arg0t).underlying_val(self.objs()) {
-            Type::Slice(_) => 2,
-            Type::Map(_) | Type::Chan(_) => 1,
-            Type::Island => 0,  // make(island) takes no extra args
+        let (min, max) = match self.otype(arg0t).underlying_val(self.objs()) {
+            Type::Slice(_) => (2, 3),
+            Type::Map(_) | Type::Chan(_) => (1, 2),
+            Type::Port(_) => (2, 2),
+            Type::Island => (1, 1),
             _ => {
                 self.error_code(TypeError::MakeInvalidType, call.args[0].span);
                 return false;
             }
         };
 
-        if nargs < min || min + 1 < nargs {
-            self.error_code_msg(TypeError::MakeArgCount, call_span, format!("make expects {} or {} arguments; found {}", min, min + 1, nargs));
+        if nargs < min || nargs > max {
+            let msg = if min == max {
+                format!("make expects {} arguments; found {}", min, nargs)
+            } else {
+                format!("make expects {} or {} arguments; found {}", min, max, nargs)
+            };
+            self.error_code_msg(TypeError::MakeArgCount, call_span, msg);
             return false;
         }
 

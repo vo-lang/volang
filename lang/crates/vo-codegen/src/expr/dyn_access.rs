@@ -125,8 +125,16 @@ fn compile_dyn_call_unified(
             call_result_types.push(SlotType::Value);
             call_result_types.push(SlotType::GcRef);
         } else if slots == 1 {
-            if matches!(vk, ValueKind::Pointer | ValueKind::Slice | ValueKind::Map | 
-                       ValueKind::String | ValueKind::Closure | ValueKind::Channel) {
+            if matches!(
+                vk,
+                ValueKind::Pointer
+                    | ValueKind::Slice
+                    | ValueKind::Map
+                    | ValueKind::String
+                    | ValueKind::Closure
+                    | ValueKind::Channel
+                    | ValueKind::Port
+            ) {
                 call_result_types.push(SlotType::GcRef);
             } else {
                 call_result_types.push(SlotType::Value);
@@ -550,8 +558,16 @@ fn compile_dyn_method_unified(
             call_result_types.push(SlotType::Value);
             call_result_types.push(SlotType::GcRef);
         } else if slots == 1 {
-            if matches!(vk, ValueKind::Pointer | ValueKind::Slice | ValueKind::Map | 
-                       ValueKind::String | ValueKind::Closure | ValueKind::Channel) {
+            if matches!(
+                vk,
+                ValueKind::Pointer
+                    | ValueKind::Slice
+                    | ValueKind::Map
+                    | ValueKind::String
+                    | ValueKind::Closure
+                    | ValueKind::Channel
+                    | ValueKind::Port
+            ) {
                 call_result_types.push(SlotType::GcRef);
             } else {
                 call_result_types.push(SlotType::Value);

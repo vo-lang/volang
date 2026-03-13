@@ -5,7 +5,7 @@ import "time"
 
 func main() {
 	i := make(island)
-	p := make(chan int, 1)
+	p := make(port int, 1)
 	
 	// Port is captured, not passed as argument
 	go @(i) func() {

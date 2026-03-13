@@ -3,7 +3,7 @@ package main
 import "time"
 
 type NestedAliasBox struct {
-	Inner chan int
+	Inner port int
 }
 
 func main() {
@@ -15,10 +15,10 @@ func main() {
 
 func testTransferredChannelAliasIdentity() {
 	i := make(island)
-	ch := make(chan int, 1)
-	eq := make(chan bool, 1)
+	ch := make(port int, 1)
+	eq := make(port bool, 1)
 
-	go @(i) func(a chan int, b chan int, out chan bool) {
+	go @(i) func(a port int, b port int, out port bool) {
 		out <- (a == b)
 	}(ch, ch, eq)
 
@@ -38,11 +38,11 @@ func testTransferredChannelAliasIdentity() {
 
 func testTransferredNestedChannelAliasAcrossCaptureAndArg() {
 	i := make(island)
-	inner := make(chan int, 1)
-	out := make(chan bool, 1)
+	inner := make(port int, 1)
+	out := make(port bool, 1)
 	captured := NestedAliasBox{Inner: inner}
 
-	go @(i) func(arg NestedAliasBox, result chan bool) {
+	go @(i) func(arg NestedAliasBox, result port bool) {
 		result <- (captured.Inner == arg.Inner)
 		arg.Inner <- 505
 	}(captured, out)
@@ -76,10 +76,10 @@ func testTransferredNestedChannelAliasAcrossCaptureAndArg() {
 
 func testRemoteSelectFailsFast() {
 	i := make(island)
-	ch := make(chan int, 1)
-	out := make(chan bool, 1)
+	ch := make(port int, 1)
+	out := make(port bool, 1)
 
-	go @(i) func(remote chan int, result chan bool) {
+	go @(i) func(remote port int, result port bool) {
 		defer func() {
 			if r := recover(); r != nil {
 				result <- true
@@ -109,11 +109,11 @@ func testRemoteSelectFailsFast() {
 
 func testClosedTransferredChannelStaysClosed() {
 	i := make(island)
-	ch := make(chan int)
-	out := make(chan bool, 1)
+	ch := make(port int, 0)
+	out := make(port bool, 1)
 	close(ch)
 
-	go @(i) func(remote chan int, result chan bool) {
+	go @(i) func(remote port int, result port bool) {
 		v, ok := <-remote
 		result <- (v == 0 && ok == false)
 	}(ch, out)

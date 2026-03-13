@@ -324,6 +324,10 @@ impl TCObjects {
         self.types.insert(Type::Chan(crate::typ::ChanDetail::new(dir, elem)))
     }
 
+    pub fn new_t_port(&mut self, dir: crate::typ::ChanDir, elem: TypeKey) -> TypeKey {
+        self.types.insert(Type::Port(crate::typ::PortDetail::new(dir, elem)))
+    }
+
     pub fn new_t_island(&mut self) -> TypeKey {
         self.types.insert(Type::Island)
     }

@@ -324,17 +324,24 @@ fn format_instruction(instr: &Instruction) -> String {
         }
 
         // CHAN
-        Opcode::ChanNew => format!("ChanNew       r{}, meta=r{}, cap=r{}, slots={}", a, b, c, flags),
+        Opcode::ChanNew => format!("ChanNew       r{}, type=r{}, cap=r{}, slots={}", a, b, c, flags),
+        Opcode::PortNew => format!("PortNew       r{}, type=r{}, cap=r{}, slots={}", a, b, c, flags),
         Opcode::ChanSend => format!("ChanSend      r{}, r{}, slots={}", a, b, flags),
+        Opcode::PortSend => format!("PortSend      r{}, r{}, slots={}", a, b, flags),
         Opcode::ChanRecv => format!("ChanRecv      r{}, r{}, slots={}", a, b, (flags >> 1) & 0x7F),
+        Opcode::PortRecv => format!("PortRecv      r{}, r{}, slots={}", a, b, (flags >> 1) & 0x7F),
         Opcode::ChanClose => format!("ChanClose     r{}", a),
+        Opcode::PortClose => format!("PortClose     r{}", a),
         Opcode::ChanLen => format!("ChanLen       r{}, r{}", a, b),
+        Opcode::PortLen => format!("PortLen       r{}, r{}", a, b),
         Opcode::ChanCap => format!("ChanCap       r{}, r{}", a, b),
+        Opcode::PortCap => format!("PortCap       r{}, r{}", a, b),
 
         // SELECT
         Opcode::SelectBegin => format!("SelectBegin   r{}, cases={}", a, b),
         Opcode::SelectSend => format!("SelectSend    r{}, r{}", a, b),
         Opcode::SelectRecv => format!("SelectRecv    r{}, r{}", a, b),
+        Opcode::PortSelectRecv => format!("PortSelectRecv r{}, r{}", a, b),
         Opcode::SelectExec => format!("SelectExec    r{}", a),
 
         // CLOSURE

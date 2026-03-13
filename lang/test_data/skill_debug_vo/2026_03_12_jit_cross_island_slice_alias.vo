@@ -2,7 +2,7 @@ package main
 
 import "time"
 
-func waitBool(ch chan bool, label string) bool {
+func waitBool(ch port bool, label string) bool {
 	done := false
 	value := false
 	for i := 0; i < 100 && !done; i += 1 {
@@ -19,15 +19,15 @@ func waitBool(ch chan bool, label string) bool {
 
 func main() {
 	i := make(island)
-	outer := make(chan []chan int, 1)
-	inner := make(chan int, 1)
-	eq := make(chan bool, 1)
+	outer := make(port []port int, 1)
+	inner := make(port int, 1)
+	eq := make(port bool, 1)
 
-	go @(i) func(ch chan []chan int, out chan bool) {
+	go @(i) func(ch port []port int, out port bool) {
 		items := <-ch
 		out <- (items[0] == items[1])
 	}(outer, eq)
 
-	outer <- []chan int{inner, inner}
+	outer <- []port int{inner, inner}
 	assert(waitBool(eq, "timed out waiting for slice nested channel alias result"), "slice nested channel aliases must preserve identity")
 }

@@ -304,7 +304,8 @@ impl Operand {
                 | typ::Type::Signature(_)
                 | typ::Type::Slice(_)
                 | typ::Type::Map(_)
-                | typ::Type::Chan(_) => return self.is_nil(objs),
+                | typ::Type::Chan(_)
+                | typ::Type::Port(_) => return self.is_nil(objs),
                 _ => {}
             }
         }
@@ -337,6 +338,16 @@ impl Operand {
             if cr.dir() == typ::ChanDir::SendRecv {
                 if let Some(cl) = ut_left.try_as_chan() {
                     if typ::identical(cr.elem(), cl.elem(), objs) {
+                        return !t_right.is_named() || !t_left.is_named();
+                    }
+                }
+            }
+        }
+
+        if let Some(pr) = ut_right.try_as_port() {
+            if pr.dir() == typ::ChanDir::SendRecv {
+                if let Some(pl) = ut_left.try_as_port() {
+                    if typ::identical(pr.elem(), pl.elem(), objs) {
                         return !t_right.is_named() || !t_left.is_named();
                     }
                 }

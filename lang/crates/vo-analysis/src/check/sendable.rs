@@ -115,7 +115,14 @@ fn check_sendable_impl(
             key_result.merge(elem_result)
         }
 
-        Type::Chan(_) => Sendability::Static, // channel handle (endpoint_id + home_island) is transferred, not queue data
+        Type::Chan(_) => Sendability::NotSendable("chan is island-local".into()),
+        Type::Port(port) => {
+            let elem_result = check_sendable_impl(port.elem(), objs, visited);
+            if let Sendability::NotSendable(reason) = &elem_result {
+                return Sendability::NotSendable(format!("port element: {}", reason));
+            }
+            elem_result
+        }
         Type::Island => Sendability::NotSendable("island represents a VM instance".into()),
         Type::Interface(_) => Sendability::RuntimeCheck,
         Type::Signature(_) => Sendability::NotSendable("func may capture island-local state".into()),

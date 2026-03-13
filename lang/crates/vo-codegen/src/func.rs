@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use vo_common::symbol::Symbol;
+use vo_common_core::TransferType;
 use vo_common_core::instruction::{
     HINT_LOOP,
     LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
@@ -153,12 +154,12 @@ pub struct FuncBuilder {
     error_ret_slot: i16,
     // Capture types for cross-island transfer (closures only).
     // Each entry: (ValueMeta raw, slot_count) for the captured variable's inner type.
-    capture_types: Vec<(u32, u16)>,
+    capture_types: Vec<TransferType>,
     // SlotTypes for closure captures, used by GC to scan closure objects.
     capture_slot_types: Vec<SlotType>,
     // Parameter types for cross-island transfer.
     // Each entry: (ValueMeta raw, slot_count) for one parameter.
-    param_types: Vec<(u32, u16)>,
+    param_types: Vec<TransferType>,
     // Temporary slot reuse: checkpoint stack for nested temp regions.
     // Each statement/expression can save next_slot and restore it when done,
     // allowing subsequent statements to reuse the same temp slots.
@@ -1184,8 +1185,8 @@ impl FuncBuilder {
     }
     
     /// Add a capture type for cross-island serialization.
-    pub fn add_capture_type(&mut self, meta_raw: u32, slots: u16) {
-        self.capture_types.push((meta_raw, slots));
+    pub fn add_capture_type(&mut self, meta_raw: u32, rttid_raw: u32, slots: u16) {
+        self.capture_types.push(TransferType { meta_raw, rttid_raw, slots });
     }
     
     /// Add capture SlotTypes for GC scanning.
@@ -1194,8 +1195,8 @@ impl FuncBuilder {
     }
     
     /// Add a parameter type for cross-island serialization.
-    pub fn add_param_type(&mut self, meta_raw: u32, slots: u16) {
-        self.param_types.push((meta_raw, slots));
+    pub fn add_param_type(&mut self, meta_raw: u32, rttid_raw: u32, slots: u16) {
+        self.param_types.push(TransferType { meta_raw, rttid_raw, slots });
     }
     
     /// Set error return slot offset. Called after set_return_types with type info.

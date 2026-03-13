@@ -49,6 +49,7 @@ fn value_kind_to_type_name(vk: ValueKind) -> String {
         ValueKind::Slice => "[]...".to_string(),
         ValueKind::Map => "map[...]...".to_string(),
         ValueKind::Channel => "chan ...".to_string(),
+        ValueKind::Port => "port ...".to_string(),
         ValueKind::Closure => "func(...)".to_string(),
         ValueKind::Pointer => "*...".to_string(),
         ValueKind::Array => "[...]...".to_string(),

@@ -54,6 +54,7 @@ pub enum VoType {
     Array(usize, Box<VoType>),
     Map(Box<VoType>, Box<VoType>),
     Chan(ChanDir, Box<VoType>),
+    Port(ChanDir, Box<VoType>),
     Island,
     Func(Vec<VoType>, Vec<VoType>),
     /// Variadic parameter: ...T (e.g., ...interface{})
@@ -103,6 +104,13 @@ impl std::fmt::Display for VoType {
                     ChanDir::Recv => write!(f, "<-chan {}", inner),
                 }
             }
+            VoType::Port(dir, inner) => {
+                match dir {
+                    ChanDir::Both => write!(f, "port {}", inner),
+                    ChanDir::Send => write!(f, "port<- {}", inner),
+                    ChanDir::Recv => write!(f, "<-port {}", inner),
+                }
+            }
             VoType::Func(params, results) => {
                 write!(f, "func(")?;
                 for (i, p) in params.iter().enumerate() {
@@ -145,7 +153,7 @@ impl VoType {
             
             // Reference types: 1 slot (GcRef)
             VoType::Pointer(_) | VoType::Slice(_) | VoType::Map(_, _) | 
-            VoType::Chan(_, _) | VoType::Island | VoType::Func(_, _) => 1,
+            VoType::Chan(_, _) | VoType::Port(_, _) | VoType::Island | VoType::Func(_, _) => 1,
             
             // Array: elem_slots * length
             VoType::Array(len, elem) => {
@@ -191,7 +199,7 @@ impl VoType {
             VoType::Slice(inner) if matches!(inner.as_ref(), VoType::Uint8) => Some(SlotType::Bytes),
             VoType::Any => Some(SlotType::Any),
             VoType::Pointer(_) | VoType::Slice(_) | VoType::Array(_, _) |
-            VoType::Map(_, _) | VoType::Chan(_, _) |
+            VoType::Map(_, _) | VoType::Chan(_, _) | VoType::Port(_, _) |
             VoType::Island | VoType::Func(_, _) | VoType::Named(_) => Some(SlotType::GcRef),
             VoType::Variadic(_) | VoType::Struct(_) => None,
         }
@@ -310,6 +318,15 @@ fn type_expr_to_vo_type(type_expr: &ast::TypeExpr, interner: &SymbolInterner) ->
                 ast::ChanDir::Recv => ChanDir::Recv,
             };
             VoType::Chan(dir, Box::new(elem))
+        }
+        TypeExprKind::Port(port) => {
+            let elem = type_expr_to_vo_type(&port.elem, interner);
+            let dir = match port.dir {
+                ast::ChanDir::Both => ChanDir::Both,
+                ast::ChanDir::Send => ChanDir::Send,
+                ast::ChanDir::Recv => ChanDir::Recv,
+            };
+            VoType::Port(dir, Box::new(elem))
         }
         TypeExprKind::Func(func) => {
             let params: Vec<VoType> = func.params.iter()

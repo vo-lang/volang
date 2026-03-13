@@ -89,7 +89,7 @@ pub const ERR_RECV_ON_NIL: &str = "runtime error: receive on nil channel";
 pub const ERR_CLOSE_NIL_CHANNEL: &str = "runtime error: close of nil channel";
 pub const ERR_CLOSE_CLOSED_CHANNEL: &str = "runtime error: close of closed channel";
 pub const ERR_SELECT_REMOTE_UNSUPPORTED: &str =
-    "runtime error: select on cross-island channel is not supported";
+    "runtime error: select on cross-island port is not supported";
 
 #[inline]
 pub fn runtime_trap_message(kind: RuntimeTrapKind) -> &'static str {
@@ -106,6 +106,7 @@ pub fn runtime_trap_message(kind: RuntimeTrapKind) -> &'static str {
         RuntimeTrapKind::SliceBoundsOutOfRange => "runtime error: slice bounds out of range",
         RuntimeTrapKind::MakeSlice => "runtime error: makeslice",
         RuntimeTrapKind::MakeChan => "runtime error: makechan",
+        RuntimeTrapKind::MakePort => "runtime error: makeport",
         RuntimeTrapKind::SendOnClosedChannel => ERR_SEND_ON_CLOSED,
         RuntimeTrapKind::SendOnNilChannel => ERR_SEND_ON_NIL,
         RuntimeTrapKind::RecvOnNilChannel => ERR_RECV_ON_NIL,

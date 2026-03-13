@@ -24,7 +24,7 @@ use crate::types::{SlotType, ValueMeta, ValueRttid};
 use crate::RuntimeType;
 use crate::bytecode::{
     Constant, ExtSlotKind, ExternDef, FieldMeta, FunctionDef, GlobalDef, InterfaceMeta,
-    InterfaceMethodMeta, Itab, MethodInfo, Module, NamedTypeMeta, StructMeta, WellKnownTypes,
+    InterfaceMethodMeta, Itab, MethodInfo, Module, NamedTypeMeta, StructMeta, TransferType, WellKnownTypes,
 };
 use crate::instruction::Instruction;
 
@@ -122,6 +122,7 @@ const RT_ARRAY: u8 = 3;
 const RT_SLICE: u8 = 4;
 const RT_MAP: u8 = 5;
 const RT_CHAN: u8 = 6;
+const RT_PORT: u8 = 11;
 const RT_FUNC: u8 = 7;
 const RT_STRUCT: u8 = 8;
 const RT_INTERFACE: u8 = 9;
@@ -163,6 +164,11 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
         }
         RuntimeType::Chan { dir, elem } => {
             w.write_u8(RT_CHAN);
+            w.write_u8(*dir as u8);
+            w.write_u32(elem.to_raw());
+        }
+        RuntimeType::Port { dir, elem } => {
+            w.write_u8(RT_PORT);
             w.write_u8(*dir as u8);
             w.write_u32(elem.to_raw());
         }
@@ -256,6 +262,16 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
                 _ => ChanDir::Both,
             };
             Ok(RuntimeType::Chan { dir, elem })
+        }
+        RT_PORT => {
+            let dir = r.read_u8()?;
+            let elem = ValueRttid::from_raw(r.read_u32()?);
+            let dir = match dir {
+                1 => ChanDir::Send,
+                2 => ChanDir::Recv,
+                _ => ChanDir::Both,
+            };
+            Ok(RuntimeType::Port { dir, elem })
         }
         RT_FUNC => {
             let variadic = r.read_u8()? != 0;
@@ -450,6 +466,7 @@ impl Module {
         w.write_vec(&self.named_type_metas, |w, m| {
             w.write_string(&m.name);
             w.write_u32(m.underlying_meta.to_raw());
+            w.write_u32(m.underlying_rttid.to_raw());
             w.write_u32(m.methods.len() as u32);
             for (name, info) in &m.methods {
                 w.write_string(name);
@@ -539,17 +556,19 @@ impl Module {
                 w.write_u16(inst.c);
             }
             // Cross-island transfer types
-            w.write_vec(&f.capture_types, |w, (meta, slots)| {
-                w.write_u32(*meta);
-                w.write_u16(*slots);
+            w.write_vec(&f.capture_types, |w, typ| {
+                w.write_u32(typ.meta_raw);
+                w.write_u32(typ.rttid_raw);
+                w.write_u16(typ.slots);
             });
             // GC capture slot types
             w.write_vec(&f.capture_slot_types, |w, st| {
                 w.write_u8(*st as u8);
             });
-            w.write_vec(&f.param_types, |w, (meta, slots)| {
-                w.write_u32(*meta);
-                w.write_u16(*slots);
+            w.write_vec(&f.param_types, |w, typ| {
+                w.write_u32(typ.meta_raw);
+                w.write_u32(typ.rttid_raw);
+                w.write_u16(typ.slots);
             });
         });
 
@@ -629,6 +648,7 @@ impl Module {
         let named_type_metas = r.read_vec(|r| {
             let name = r.read_string()?;
             let underlying_meta = ValueMeta::from_raw(r.read_u32()?);
+            let underlying_rttid = ValueRttid::from_raw(r.read_u32()?);
             let method_count = r.read_u32()? as usize;
             let mut methods = HashMap::new();
             for _ in 0..method_count {
@@ -641,6 +661,7 @@ impl Module {
             Ok(NamedTypeMeta {
                 name,
                 underlying_meta,
+                underlying_rttid,
                 methods,
             })
         })?;
@@ -726,17 +747,21 @@ impl Module {
             let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
             // Cross-island transfer types
             let capture_types = r.read_vec(|r| {
-                let meta = r.read_u32()?;
-                let slots = r.read_u16()?;
-                Ok((meta, slots))
+                Ok(TransferType {
+                    meta_raw: r.read_u32()?,
+                    rttid_raw: r.read_u32()?,
+                    slots: r.read_u16()?,
+                })
             })?;
             let capture_slot_types = r.read_vec(|r| {
                 Ok(SlotType::from_u8(r.read_u8()?))
             })?;
             let param_types = r.read_vec(|r| {
-                let meta = r.read_u32()?;
-                let slots = r.read_u16()?;
-                Ok((meta, slots))
+                Ok(TransferType {
+                    meta_raw: r.read_u32()?,
+                    rttid_raw: r.read_u32()?,
+                    slots: r.read_u16()?,
+                })
             })?;
             Ok(FunctionDef {
                 name,

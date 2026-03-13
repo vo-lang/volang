@@ -508,11 +508,17 @@ fn compile_receive(
 ) -> Result<(), CodegenError> {
     let target_reg = compile_expr(target_expr, ctx, func, info)?;
     let target_type = info.expr_type(target_expr.id);
-    let elem_slots = info.chan_elem_slots(target_type);
+    let elem_slots = info.queue_elem_slots(target_type);
     let result_slots = info.expr_slots(expr.id);
     let has_ok = result_slots > elem_slots;
     let flags = ((elem_slots as u8) << 1) | (if has_ok { 1 } else { 0 });
-    func.emit_with_flags(Opcode::ChanRecv, flags, dst, target_reg, 0);
+    func.emit_with_flags(
+        info.queue_recv_opcode(target_type),
+        flags,
+        dst,
+        target_reg,
+        0,
+    );
     Ok(())
 }
 

@@ -33,6 +33,6 @@ pub use symbol::Symbol;
 pub use symbol::SymbolInterner;
 pub use runtime_type::{RuntimeType, ChanDir, StructField, InterfaceMethod};
 pub use instruction::{Instruction, Opcode};
-pub use bytecode::{Module, FunctionDef, Constant, ExternDef, GlobalDef, StructMeta, InterfaceMeta, Itab};
+pub use bytecode::{Module, FunctionDef, Constant, ExternDef, GlobalDef, StructMeta, InterfaceMeta, Itab, TransferType};
 pub use debug_info::{DebugInfo, DebugLoc, FuncDebugInfo, SourceLoc};
 pub use source_provider::{SourceProvider, NoSource};

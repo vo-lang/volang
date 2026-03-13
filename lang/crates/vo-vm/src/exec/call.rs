@@ -6,7 +6,7 @@ use vo_runtime::gc::GcRef;
 use vo_runtime::objects::closure;
 
 use crate::bytecode::Module;
-use crate::fiber::{CallFrame, Fiber};
+use crate::fiber::Fiber;
 use crate::instruction::Instruction;
 use crate::vm::ExecResult;
 use crate::vm::helpers::{stack_get, stack_set};
@@ -29,12 +29,10 @@ pub fn exec_call(
     
     // New frame's bp is current stack top
     let new_bp = fiber.sp;
-    let new_sp = new_bp + func.local_slots as usize;
-    
-    fiber.ensure_capacity(new_sp);
+    fiber.reserve_slots_at(new_bp, func.local_slots as usize);
     // Zero frame slots: stale integer values in GcRef-typed slots cause GC segfault.
     // Args are copied on top of the zeroed region immediately after.
-    fiber.stack[new_bp..new_sp].fill(0);
+    fiber.zero_slots_at(new_bp, func.local_slots as usize);
     let stack = fiber.stack_ptr();
     
     // Copy args from caller's frame to new frame
@@ -42,11 +40,9 @@ pub fn exec_call(
         stack_set(stack, new_bp + i, stack_get(stack, caller_bp + arg_start + i));
     }
     
-    // Update sp and push frame
-    fiber.sp = new_sp;
     // ret_reg points past arg slots: return values are written to args_start + arg_slots
     // in the caller's frame (call buffer layout: [Value×arg_slots | ret_slot_types]).
-    fiber.frames.push(CallFrame::new(func_id, new_bp, inst.b + arg_slots as u16, ret_slots as u16));
+    fiber.push_call_frame(func_id, new_bp, inst.b + arg_slots as u16, ret_slots as u16);
 
     ExecResult::FrameChanged
 }
@@ -68,11 +64,9 @@ pub fn exec_call_closure(
 
     // New frame's bp is current stack top
     let new_bp = fiber.sp;
-    let new_sp = new_bp + func.local_slots as usize;
-    
-    fiber.ensure_capacity(new_sp);
+    fiber.reserve_slots_at(new_bp, func.local_slots as usize);
     // Zero frame slots: stale integer values in GcRef-typed slots cause GC segfault.
-    fiber.stack[new_bp..new_sp].fill(0);
+    fiber.zero_slots_at(new_bp, func.local_slots as usize);
     let stack = fiber.stack_ptr();
     
     // Use common closure call layout logic
@@ -92,10 +86,8 @@ pub fn exec_call_closure(
         stack_set(stack, new_bp + layout.arg_offset + i, stack_get(stack, caller_bp + arg_start + i));
     }
     
-    // Update sp and push frame
-    fiber.sp = new_sp;
     // ret_reg points past arg slots: return values are written to args_start + arg_slots.
-    fiber.frames.push(CallFrame::new(func_id, new_bp, inst.b + arg_slots as u16, ret_slots));
+    fiber.push_call_frame(func_id, new_bp, inst.b + arg_slots as u16, ret_slots);
 
     ExecResult::FrameChanged
 }
@@ -123,11 +115,9 @@ pub fn exec_call_iface(
 
     // New frame's bp is current stack top
     let new_bp = fiber.sp;
-    let new_sp = new_bp + func.local_slots as usize;
-    
-    fiber.ensure_capacity(new_sp);
+    fiber.reserve_slots_at(new_bp, func.local_slots as usize);
     // Zero frame slots: stale integer values in GcRef-typed slots cause GC segfault.
-    fiber.stack[new_bp..new_sp].fill(0);
+    fiber.zero_slots_at(new_bp, func.local_slots as usize);
     let stack = fiber.stack_ptr();
     
     // Pass slot1 directly as receiver (1 slot: GcRef or primitive)
@@ -138,10 +128,8 @@ pub fn exec_call_iface(
         stack_set(stack, new_bp + recv_slots + i, stack_get(stack, caller_bp + inst.b as usize + i));
     }
     
-    // Update sp and push frame
-    fiber.sp = new_sp;
     // ret_reg points past arg slots: return values are written to args_start + arg_slots.
-    fiber.frames.push(CallFrame::new(func_id, new_bp, inst.b + arg_slots as u16, ret_slots as u16));
+    fiber.push_call_frame(func_id, new_bp, inst.b + arg_slots as u16, ret_slots as u16);
 
     ExecResult::FrameChanged
 }

@@ -131,9 +131,9 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         push_resume_point_fn: Some(jit_push_resume_point),
         // Callbacks
         create_island_fn: Some(callbacks::jit_create_island),
-        chan_close_fn: Some(callbacks::jit_chan_close),
-        chan_send_fn: Some(callbacks::jit_chan_send),
-        chan_recv_fn: Some(callbacks::jit_chan_recv),
+        queue_close_fn: Some(callbacks::jit_queue_close),
+        queue_send_fn: Some(callbacks::jit_queue_send),
+        queue_recv_fn: Some(callbacks::jit_queue_recv),
         go_start_fn: Some(callbacks::jit_go_start),
         go_island_fn: Some(callbacks::jit_go_island),
         defer_push_fn: Some(callbacks::jit_defer_push),

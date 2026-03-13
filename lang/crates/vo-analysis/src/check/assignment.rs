@@ -714,7 +714,7 @@ impl Checker {
                     // untyped nil or empty interface
                     return x.is_nil(self.objs()) || detail.is_empty();
                 }
-                Type::Pointer(_) | Type::Signature(_) | Type::Slice(_) | Type::Map(_) | Type::Chan(_) => {
+                Type::Pointer(_) | Type::Signature(_) | Type::Slice(_) | Type::Map(_) | Type::Chan(_) | Type::Port(_) => {
                     return x.is_nil(self.objs());
                 }
                 _ => {}
@@ -740,18 +740,29 @@ impl Checker {
             return false;
         }
 
+        let bidirectional_queue_assignable = |xdir, xelem, telem| {
+            if xdir != typ::ChanDir::SendRecv {
+                return false;
+            }
+            if !typ::identical(xelem, telem, self.objs()) {
+                return false;
+            }
+            let x_is_named = !typ::identical(xt, xu, self.objs());
+            let t_is_named = !typ::identical(t, tu, self.objs());
+            !x_is_named || !t_is_named
+        };
+
         // x is a bidirectional channel value, T is a channel type,
         // they have identical element types, and at least one is not a named type
         if let (Type::Chan(xc), Type::Chan(tc)) = (ut_x, ut_t) {
-            use crate::typ::ChanDir;
-            if xc.dir() == ChanDir::SendRecv {
-                if typ::identical(xc.elem(), tc.elem(), self.objs()) {
-                    let x_is_named = !typ::identical(xt, xu, self.objs());
-                    let t_is_named = !typ::identical(t, tu, self.objs());
-                    if !x_is_named || !t_is_named {
-                        return true;
-                    }
-                }
+            if bidirectional_queue_assignable(xc.dir(), xc.elem(), tc.elem()) {
+                return true;
+            }
+        }
+
+        if let (Type::Port(xp), Type::Port(tp)) = (ut_x, ut_t) {
+            if bidirectional_queue_assignable(xp.dir(), xp.elem(), tp.elem()) {
+                return true;
             }
         }
 

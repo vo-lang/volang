@@ -363,15 +363,15 @@ pub struct JitContext {
     
     /// Callback to close a channel.
     /// Returns JitResult (Ok or Panic).
-    pub chan_close_fn: Option<extern "C" fn(*mut JitContext, chan: u64) -> JitResult>,
+    pub queue_close_fn: Option<extern "C" fn(*mut JitContext, chan: u64) -> JitResult>,
     
     /// Callback to send on a channel.
     /// Returns JitResult (Ok, Panic, or WaitIo).
-    pub chan_send_fn: Option<extern "C" fn(*mut JitContext, chan: u64, val_ptr: *const u64, val_slots: u32) -> JitResult>,
+    pub queue_send_fn: Option<extern "C" fn(*mut JitContext, chan: u64, val_ptr: *const u64, val_slots: u32) -> JitResult>,
     
     /// Callback to receive from a channel.
     /// Returns JitResult (Ok, Panic, or WaitIo).
-    pub chan_recv_fn: Option<extern "C" fn(*mut JitContext, chan: u64, dst_ptr: *mut u64, elem_slots: u32, has_ok: u32) -> JitResult>,
+    pub queue_recv_fn: Option<extern "C" fn(*mut JitContext, chan: u64, dst_ptr: *mut u64, elem_slots: u32, has_ok: u32) -> JitResult>,
     
     /// Callback to spawn a new goroutine.
     /// func_id: function to run, is_closure: 1 if closure, closure_ref: closure GcRef (or 0), 
@@ -411,10 +411,10 @@ pub struct JitContext {
     pub select_begin_fn: Option<extern "C" fn(ctx: *mut JitContext, case_count: u32, has_default: u32) -> JitResult>,
     
     /// Callback to add a send case to select.
-    pub select_send_fn: Option<extern "C" fn(ctx: *mut JitContext, chan_reg: u32, val_reg: u32, elem_slots: u32, case_idx: u32) -> JitResult>,
+    pub select_send_fn: Option<extern "C" fn(ctx: *mut JitContext, queue_reg: u32, val_reg: u32, elem_slots: u32, case_idx: u32) -> JitResult>,
     
     /// Callback to add a recv case to select.
-    pub select_recv_fn: Option<extern "C" fn(ctx: *mut JitContext, dst_reg: u32, chan_reg: u32, elem_slots: u32, has_ok: u32, case_idx: u32) -> JitResult>,
+    pub select_recv_fn: Option<extern "C" fn(ctx: *mut JitContext, dst_reg: u32, queue_reg: u32, elem_slots: u32, has_ok: u32, queue_kind: u32, case_idx: u32) -> JitResult>,
     
     /// Callback to execute select statement.
     /// Returns JitResult::Ok (with result in result_reg), WaitIo (blocked), or Panic.
@@ -496,9 +496,9 @@ impl JitContext {
     
     // VM callback offsets
     pub const OFFSET_CREATE_ISLAND_FN: i32 = std::mem::offset_of!(JitContext, create_island_fn) as i32;
-    pub const OFFSET_CHAN_CLOSE_FN: i32 = std::mem::offset_of!(JitContext, chan_close_fn) as i32;
-    pub const OFFSET_CHAN_SEND_FN: i32 = std::mem::offset_of!(JitContext, chan_send_fn) as i32;
-    pub const OFFSET_CHAN_RECV_FN: i32 = std::mem::offset_of!(JitContext, chan_recv_fn) as i32;
+    pub const OFFSET_QUEUE_CLOSE_FN: i32 = std::mem::offset_of!(JitContext, queue_close_fn) as i32;
+    pub const OFFSET_QUEUE_SEND_FN: i32 = std::mem::offset_of!(JitContext, queue_send_fn) as i32;
+    pub const OFFSET_QUEUE_RECV_FN: i32 = std::mem::offset_of!(JitContext, queue_recv_fn) as i32;
     pub const OFFSET_GO_START_FN: i32 = std::mem::offset_of!(JitContext, go_start_fn) as i32;
     pub const OFFSET_GO_ISLAND_FN: i32 = std::mem::offset_of!(JitContext, go_island_fn) as i32;
     
@@ -1015,14 +1015,30 @@ pub extern "C" fn vo_closure_new(gc: *mut Gc, func_id: u32, capture_count: u32) 
 
 /// Create a new channel with validation (unified logic for VM and JIT).
 #[no_mangle]
-pub extern "C" fn vo_chan_new_checked(gc: *mut Gc, elem_meta: u32, elem_slots: u32, cap: i64, out: *mut u64) -> i32 {
-    use crate::objects::channel;
-    use crate::ValueMeta;
-    unsafe {
-        match channel::create_checked(&mut *gc, ValueMeta::from_raw(elem_meta), elem_slots as u16, cap) {
-            Ok(result) => { *out = result as u64; 0 }
-            Err(code) => code,
-        }
+pub extern "C" fn vo_chan_new_checked(gc: *mut Gc, elem_type: u64, elem_slots: u32, cap: i64, out: *mut u64) -> i32 {
+    unsafe { queue_new_checked(gc, crate::objects::queue_state::QueueKind::Chan, elem_type, elem_slots, cap, out) }
+}
+
+#[no_mangle]
+pub extern "C" fn vo_port_new_checked(gc: *mut Gc, elem_type: u64, elem_slots: u32, cap: i64, out: *mut u64) -> i32 {
+    unsafe { queue_new_checked(gc, crate::objects::queue_state::QueueKind::Port, elem_type, elem_slots, cap, out) }
+}
+
+unsafe fn queue_new_checked(
+    gc: *mut Gc,
+    kind: crate::objects::queue_state::QueueKind,
+    elem_type: u64,
+    elem_slots: u32,
+    cap: i64,
+    out: *mut u64,
+) -> i32 {
+    use crate::objects::queue;
+    use crate::{ValueMeta, ValueRttid};
+    let elem_meta = ValueMeta::from_raw(elem_type as u32);
+    let elem_rttid = ValueRttid::from_raw((elem_type >> 32) as u32);
+    match queue::create_checked(&mut *gc, kind, elem_meta, elem_rttid, elem_slots as u16, cap) {
+        Ok(result) => { *out = result as u64; 0 }
+        Err(code) => code,
     }
 }
 
@@ -1030,10 +1046,10 @@ pub extern "C" fn vo_chan_new_checked(gc: *mut Gc, elem_meta: u32, elem_slots: u
 /// Get channel length (number of elements in buffer).
 #[no_mangle]
 pub extern "C" fn vo_chan_len(ch: u64) -> u64 {
-    use crate::objects::channel;
+    use crate::objects::queue;
     use crate::gc::GcRef;
     let ch = ch as GcRef;
-    if ch.is_null() { 0 } else { channel::len(ch) as u64 }
+    if ch.is_null() { 0 } else { queue::len(ch) as u64 }
 }
 
 /// Get channel capacity.
@@ -1495,6 +1511,9 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_str_decode_rune", vo_str_decode_rune as *const u8),
         ("vo_closure_new", vo_closure_new as *const u8),
         ("vo_chan_new_checked", vo_chan_new_checked as *const u8),
+        ("vo_port_new_checked", vo_port_new_checked as *const u8),
+        ("vo_chan_len", vo_chan_len as *const u8),
+        ("vo_chan_cap", vo_chan_cap as *const u8),
         ("vo_array_new", vo_array_new as *const u8),
         ("vo_array_get", vo_array_get as *const u8),
         ("vo_array_set", vo_array_set as *const u8),
@@ -1554,7 +1573,7 @@ pub extern "C" fn vo_island_new(ctx: *mut JitContext) -> u64 {
 #[no_mangle]
 pub extern "C" fn vo_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
     let ctx = unsafe { &mut *ctx };
-    let close_fn = ctx.chan_close_fn.expect("chan_close_fn not set");
+    let close_fn = ctx.queue_close_fn.expect("queue_close_fn not set");
     close_fn(ctx, chan)
 }
 
@@ -1568,7 +1587,7 @@ pub extern "C" fn vo_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
 #[no_mangle]
 pub extern "C" fn vo_chan_send(ctx: *mut JitContext, chan: u64, val_ptr: *const u64, val_slots: u32) -> JitResult {
     let ctx = unsafe { &mut *ctx };
-    let send_fn = ctx.chan_send_fn.expect("chan_send_fn not set");
+    let send_fn = ctx.queue_send_fn.expect("queue_send_fn not set");
     send_fn(ctx, chan, val_ptr, val_slots)
 }
 
@@ -1578,7 +1597,7 @@ pub extern "C" fn vo_chan_send(ctx: *mut JitContext, chan: u64, val_ptr: *const 
 #[no_mangle]
 pub extern "C" fn vo_chan_recv(ctx: *mut JitContext, chan: u64, dst_ptr: *mut u64, elem_slots: u32, has_ok: u32) -> JitResult {
     let ctx = unsafe { &mut *ctx };
-    let recv_fn = ctx.chan_recv_fn.expect("chan_recv_fn not set");
+    let recv_fn = ctx.queue_recv_fn.expect("queue_recv_fn not set");
     recv_fn(ctx, chan, dst_ptr, elem_slots, has_ok)
 }
 
@@ -1633,14 +1652,14 @@ pub extern "C" fn vo_select_begin(ctx: *mut JitContext, case_count: u32, has_def
 #[no_mangle]
 pub extern "C" fn vo_select_send(
     ctx: *mut JitContext,
-    chan_reg: u32,
+    queue_reg: u32,
     val_reg: u32,
     elem_slots: u32,
     case_idx: u32,
 ) -> JitResult {
     let ctx = unsafe { &mut *ctx };
     let send_fn = ctx.select_send_fn.expect("select_send_fn not set");
-    send_fn(ctx, chan_reg, val_reg, elem_slots, case_idx)
+    send_fn(ctx, queue_reg, val_reg, elem_slots, case_idx)
 }
 
 /// Add a recv case to the current select.
@@ -1648,14 +1667,15 @@ pub extern "C" fn vo_select_send(
 pub extern "C" fn vo_select_recv(
     ctx: *mut JitContext,
     dst_reg: u32,
-    chan_reg: u32,
+    queue_reg: u32,
     elem_slots: u32,
     has_ok: u32,
+    queue_kind: u32,
     case_idx: u32,
 ) -> JitResult {
     let ctx = unsafe { &mut *ctx };
     let recv_fn = ctx.select_recv_fn.expect("select_recv_fn not set");
-    recv_fn(ctx, dst_reg, chan_reg, elem_slots, has_ok, case_idx)
+    recv_fn(ctx, dst_reg, queue_reg, elem_slots, has_ok, queue_kind, case_idx)
 }
 
 /// Execute the select statement.

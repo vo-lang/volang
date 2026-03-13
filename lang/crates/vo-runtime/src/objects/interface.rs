@@ -170,7 +170,7 @@ impl InterfaceSlot {
     pub fn is_ref_type(&self) -> bool {
         matches!(self.value_kind(), 
             ValueKind::Slice | ValueKind::Map | ValueKind::Pointer |
-            ValueKind::Struct | ValueKind::Array | ValueKind::Channel |
+            ValueKind::Struct | ValueKind::Array | ValueKind::Channel | ValueKind::Port |
             ValueKind::Closure | ValueKind::String)
     }
     

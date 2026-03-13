@@ -4,10 +4,10 @@
 //! They delegate to exec/select.rs to avoid code duplication.
 
 use vo_runtime::jit_api::{JitContext, JitResult};
+use vo_runtime::objects::queue_state::QueueKind;
 use vo_runtime::slot::Slot;
 
 use crate::exec::{self, SelectResult};
-use crate::instruction::Instruction;
 use crate::vm::helpers;
 
 use super::helpers::{extract_context, set_jit_panic};
@@ -27,17 +27,8 @@ pub extern "C" fn jit_select_begin(
     has_default: u32,
 ) -> JitResult {
     let (_, fiber) = unsafe { extract_context(ctx) };
-    
-    // Build instruction for exec_select_begin
-    let inst = Instruction {
-        a: case_count as u16,
-        b: 0,
-        c: 0,
-        flags: has_default as u8,
-        op: 0,
-    };
-    
-    exec::exec_select_begin(fiber, &inst);
+
+    exec::exec_select_begin(fiber, case_count as usize, has_default != 0);
     JitResult::Ok
 }
 
@@ -50,23 +41,19 @@ pub extern "C" fn jit_select_begin(
 /// - case_idx: index of this case
 pub extern "C" fn jit_select_send(
     ctx: *mut JitContext,
-    chan_reg: u32,
+    queue_reg: u32,
     val_reg: u32,
     elem_slots: u32,
     _case_idx: u32,
 ) -> JitResult {
     let (_, fiber) = unsafe { extract_context(ctx) };
-    
-    // Build instruction for exec_select_send
-    let inst = Instruction {
-        a: chan_reg as u16,
-        b: val_reg as u16,
-        c: 0,
-        flags: elem_slots as u8,
-        op: 0,
-    };
-    
-    exec::exec_select_send(&mut fiber.select_state, &inst);
+
+    exec::exec_select_send(
+        &mut fiber.select_state,
+        queue_reg as u16,
+        val_reg as u16,
+        elem_slots as u8,
+    );
     JitResult::Ok
 }
 
@@ -81,25 +68,22 @@ pub extern "C" fn jit_select_send(
 pub extern "C" fn jit_select_recv(
     ctx: *mut JitContext,
     dst_reg: u32,
-    chan_reg: u32,
+    queue_reg: u32,
     elem_slots: u32,
     has_ok: u32,
+    queue_kind: u32,
     _case_idx: u32,
 ) -> JitResult {
     let (_, fiber) = unsafe { extract_context(ctx) };
-    
-    // Build instruction for exec_select_recv
-    // flags = (elem_slots << 1) | has_ok
-    let flags = ((elem_slots as u8) << 1) | (has_ok as u8);
-    let inst = Instruction {
-        a: dst_reg as u16,
-        b: chan_reg as u16,
-        c: 0,
-        flags,
-        op: 0,
-    };
-    
-    exec::exec_select_recv(&mut fiber.select_state, &inst);
+
+    exec::exec_select_recv(
+        &mut fiber.select_state,
+        QueueKind::from_raw(queue_kind as u16),
+        dst_reg as u16,
+        queue_reg as u16,
+        elem_slots as u8,
+        has_ok != 0,
+    );
     JitResult::Ok
 }
 
@@ -121,29 +105,20 @@ pub extern "C" fn jit_select_exec(
     let stack = fiber.stack.as_mut_ptr() as *mut Slot;
     let bp = unsafe { (*ctx).jit_bp as usize };
     
-    // Build instruction for exec_select_exec
-    let inst = Instruction {
-        a: result_reg as u16,
-        b: 0,
-        c: 0,
-        flags: 0,
-        op: 0,
-    };
-    
     match exec::exec_select_exec(
         stack,
         bp,
         vm.state.current_island_id,
         fiber.id,
         &mut fiber.select_state,
-        &inst,
+        result_reg as u16,
     ) {
         SelectResult::Continue => JitResult::Ok,
         SelectResult::Block => JitResult::WaitQueue,
         SelectResult::SendOnClosed => {
             set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED)
         }
-        SelectResult::UnsupportedRemote => {
+        SelectResult::UnsupportedRemotePort => {
             set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SELECT_REMOTE_UNSUPPORTED)
         }
         SelectResult::Wake(waiter) => {

@@ -1111,7 +1111,7 @@ impl<'a> ExternCallContext<'a> {
             }
             RuntimeType::Named { id, .. } => {
                 let meta = &self.module.named_type_metas[*id as usize];
-                let underlying_rttid = meta.underlying_meta.meta_id();
+                let underlying_rttid = meta.underlying_rttid.rttid();
                 self.get_elem_value_rttid_from_base(underlying_rttid)
             }
             _ => panic!("get_elem_value_rttid_from_base: unexpected type {:?}", rt),
@@ -1130,7 +1130,7 @@ impl<'a> ExternCallContext<'a> {
             RuntimeType::Array { len, .. } => *len as usize,
             RuntimeType::Named { id, .. } => {
                 let meta = &self.module.named_type_metas[*id as usize];
-                let underlying_rttid = meta.underlying_meta.meta_id();
+                let underlying_rttid = meta.underlying_rttid.rttid();
                 self.get_array_len_from_rttid(underlying_rttid)
             }
             _ => panic!("get_array_len_from_rttid: expected Array type, got {:?}", rt),
@@ -1256,7 +1256,7 @@ impl<'a> ExternCallContext<'a> {
     /// without requiring callers to access `module.named_type_metas` directly.
     #[inline]
     pub fn named_type_underlying_rttid(&self, named_id: u32) -> u32 {
-        self.module.named_type_metas[named_id as usize].underlying_meta.meta_id()
+        self.module.named_type_metas[named_id as usize].underlying_rttid.rttid()
     }
 
     /// Allocate a new string slice ([]string).

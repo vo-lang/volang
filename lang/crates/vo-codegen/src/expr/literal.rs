@@ -433,7 +433,8 @@ pub fn compile_func_lit(
         let slots = info.type_slot_count(type_key);
         // Compute raw ValueMeta directly (not constant pool index)
         let meta_raw = ctx.compute_value_meta_raw(type_key, info);
-        closure_builder.add_capture_type(meta_raw, slots);
+        let rttid_raw = ctx.intern_type_key(type_key, info);
+        closure_builder.add_capture_type(meta_raw, rttid_raw, slots);
         // All regular closure captures are GcRef (pointers to heap-boxed escaped vars)
         closure_builder.add_capture_slot_types(&[SlotType::GcRef]);
     }
@@ -449,12 +450,13 @@ pub fn compile_func_lit(
         let param_type_key = info.type_expr_type(param.ty.id);
         // Compute raw ValueMeta directly (not constant pool index)
         let meta_raw = ctx.compute_value_meta_raw(param_type_key, info);
+        let rttid_raw = ctx.intern_type_key(param_type_key, info);
         for name in &param.names {
             let obj_key = info.get_def(name);
             let type_key = info.obj_type(obj_key, "param must have type");
             closure_builder.define_param(Some(name.symbol), slots, &slot_types);
             // Add param type for each named parameter
-            closure_builder.add_param_type(meta_raw, slots);
+            closure_builder.add_param_type(meta_raw, rttid_raw, slots);
             if info.needs_boxing(obj_key, type_key) {
                 escaped_params.push((name.symbol, type_key, slots, slot_types.clone()));
             }

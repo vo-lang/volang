@@ -16,7 +16,7 @@ package main
 
 import "time"
 
-func waitBool(ch chan bool, label string) bool {
+func waitBool(ch port bool, label string) bool {
 	done := false
 	value := false
 	for i := 0; i < 200 && !done; i += 1 {
@@ -41,19 +41,19 @@ func main() {
 func testRemoteCloseSeenByOtherIsland() {
 	islandA := make(island)
 	islandB := make(island)
-	ch := make(chan int, 1)
-	closeDone := make(chan bool, 1)
-	recvResult := make(chan bool, 1)
+	ch := make(port int, 1)
+	closeDone := make(port bool, 1)
+	recvResult := make(port bool, 1)
 
 	// Island A: close the channel after a short delay
-	go @(islandA) func(data chan int, done chan bool) {
+	go @(islandA) func(data port int, done port bool) {
 		time.Sleep(30 * time.Millisecond)
 		close(data)
 		done <- true
 	}(ch, closeDone)
 
 	// Island B: try to recv — should eventually see closed
-	go @(islandB) func(data chan int, out chan bool) {
+	go @(islandB) func(data port int, out port bool) {
 		v, ok := <-data
 		out <- (v == 0 && ok == false)
 	}(ch, recvResult)
@@ -66,10 +66,10 @@ func testRemoteCloseSeenByOtherIsland() {
 // Island A closes the channel, main island recv sees closed.
 func testRemoteCloseSeenByMainIsland() {
 	islandA := make(island)
-	ch := make(chan int, 1)
-	closeDone := make(chan bool, 1)
+	ch := make(port int, 1)
+	closeDone := make(port bool, 1)
 
-	go @(islandA) func(data chan int, done chan bool) {
+	go @(islandA) func(data port int, done port bool) {
 		time.Sleep(20 * time.Millisecond)
 		close(data)
 		done <- true
@@ -87,12 +87,12 @@ func testRemoteCloseSeenByMainIsland() {
 // Remote send on a closed channel must panic (recovered).
 func testRemoteSendOnClosedPanics() {
 	islandA := make(island)
-	ch := make(chan int, 1)
-	result := make(chan bool, 1)
+	ch := make(port int, 1)
+	result := make(port bool, 1)
 
 	close(ch) // close on main
 
-	go @(islandA) func(data chan int, out chan bool) {
+	go @(islandA) func(data port int, out port bool) {
 		defer func() {
 			if r := recover(); r != nil {
 				out <- true

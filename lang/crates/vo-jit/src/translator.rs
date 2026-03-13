@@ -34,9 +34,10 @@ pub struct HelperFuncs {
     pub str_decode_rune: Option<FuncRef>,
     pub ptr_clone: Option<FuncRef>,
     pub closure_new: Option<FuncRef>,
-    pub chan_new_checked: Option<FuncRef>,
-    pub chan_len: Option<FuncRef>,
-    pub chan_cap: Option<FuncRef>,
+    pub queue_chan_new_checked: Option<FuncRef>,
+    pub queue_port_new_checked: Option<FuncRef>,
+    pub queue_len: Option<FuncRef>,
+    pub queue_cap: Option<FuncRef>,
     pub array_new: Option<FuncRef>,
     pub array_len: Option<FuncRef>,
     pub slice_new_checked: Option<FuncRef>,
@@ -59,9 +60,9 @@ pub struct HelperFuncs {
     pub iface_eq: Option<FuncRef>,
     pub set_call_request: Option<FuncRef>,
     pub island_new: Option<FuncRef>,
-    pub chan_close: Option<FuncRef>,
-    pub chan_send: Option<FuncRef>,
-    pub chan_recv: Option<FuncRef>,
+    pub queue_close: Option<FuncRef>,
+    pub queue_send: Option<FuncRef>,
+    pub queue_recv: Option<FuncRef>,
     pub go_start: Option<FuncRef>,
     pub go_island: Option<FuncRef>,
     // Defer/Recover
@@ -180,7 +181,7 @@ pub fn compute_memory_only_start(code: &[Instruction]) -> u16 {
             Opcode::SlotSet | Opcode::SlotSetN => { min_base = min_base.min(inst.a); }
             Opcode::SlotGet | Opcode::SlotGetN => { min_base = min_base.min(inst.b); }
             // Callbacks that read from var_addr pointers
-            Opcode::ChanSend => { min_base = min_base.min(inst.b); }
+            Opcode::ChanSend | Opcode::PortSend => { min_base = min_base.min(inst.b); }
             Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => { min_base = min_base.min(inst.b); }
             Opcode::GoIsland => { min_base = min_base.min(inst.c); }
             Opcode::SliceAppend => {
@@ -189,7 +190,7 @@ pub fn compute_memory_only_start(code: &[Instruction]) -> u16 {
             }
             // Select callbacks read/write fiber.stack directly via register numbers —
             // all slots must be memory-synced
-            Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => { return 0; }
+            Opcode::SelectSend | Opcode::SelectRecv | Opcode::PortSelectRecv | Opcode::SelectExec => { return 0; }
             _ => {}
         }
     }

@@ -8,13 +8,12 @@
 use alloc::vec::Vec;
 
 use vo_runtime::gc::GcRef;
-use vo_runtime::objects::{channel, queue_state};
-use vo_runtime::objects::channel::{RecvResult, SendResult};
-use vo_runtime::objects::queue_state::{ChannelMessage, QueueWaiter};
+use vo_runtime::objects::{queue, queue_state};
+use vo_runtime::objects::queue::{RecvResult, SendResult};
+use vo_runtime::objects::queue_state::{QueueMessage, QueueKind, QueueWaiter};
 use vo_runtime::slot::Slot;
 
 use crate::fiber::{Fiber, SelectCase, SelectCaseKind, SelectState};
-use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
 
 // =============================================================================
@@ -29,16 +28,14 @@ pub enum SelectResult {
     Block,
     /// Send on closed channel - triggers panic.
     SendOnClosed,
-    UnsupportedRemote,
+    UnsupportedRemotePort,
     /// A waiter was woken by an immediate send or recv case.
     Wake(QueueWaiter),
 }
 
 /// Initialize a new select statement.
 #[inline]
-pub fn exec_select_begin(fiber: &mut Fiber, inst: &Instruction) {
-    let case_count = inst.a as usize;
-    let has_default = (inst.flags & 1) != 0;
+pub fn exec_select_begin(fiber: &mut Fiber, case_count: usize, has_default: bool) {
     let select_id = fiber.next_select_id;
     fiber.next_select_id += 1;
     fiber.select_state = Some(SelectState {
@@ -46,33 +43,40 @@ pub fn exec_select_begin(fiber: &mut Fiber, inst: &Instruction) {
         has_default,
         woken_index: None,
         select_id,
-        registered_channels: Vec::new(),
+        registered_queues: Vec::new(),
     });
 }
 
 /// Add a send case to the current select.
 #[inline]
-pub fn exec_select_send(select_state: &mut Option<SelectState>, inst: &Instruction) {
+pub fn exec_select_send(select_state: &mut Option<SelectState>, queue_reg: u16, val_reg: u16, elem_slots: u8) {
     let state = select_state.as_mut().expect("no active select");
     state.cases.push(SelectCase {
         kind: SelectCaseKind::Send,
-        chan_reg: inst.a,
-        val_reg: inst.b,
-        elem_slots: if inst.flags == 0 { 1 } else { inst.flags },
+        queue_kind: QueueKind::Chan,
+        queue_reg,
+        val_reg,
+        elem_slots: if elem_slots == 0 { 1 } else { elem_slots },
         has_ok: false,
     });
 }
 
 /// Add a recv case to the current select.
 #[inline]
-pub fn exec_select_recv(select_state: &mut Option<SelectState>, inst: &Instruction) {
+pub fn exec_select_recv(
+    select_state: &mut Option<SelectState>,
+    queue_kind: QueueKind,
+    dst_reg: u16,
+    queue_reg: u16,
+    elem_slots: u8,
+    has_ok: bool,
+) {
     let state = select_state.as_mut().expect("no active select");
-    let elem_slots = (inst.flags >> 1) & 0x7F;
-    let has_ok = (inst.flags & 1) != 0;
     state.cases.push(SelectCase {
         kind: SelectCaseKind::Recv,
-        chan_reg: inst.b,
-        val_reg: inst.a,
+        queue_kind,
+        queue_reg,
+        val_reg: dst_reg,
         elem_slots: if elem_slots == 0 { 1 } else { elem_slots },
         has_ok,
     });
@@ -89,10 +93,8 @@ pub fn exec_select_exec(
     island_id: u32,
     fiber_id: u32,
     select_state: &mut Option<SelectState>,
-    inst: &Instruction,
+    result_reg: u16,
 ) -> SelectResult {
-    let result_reg = inst.a;
-
     // Path 1: Woken by another goroutine - complete the woken case
     // Check and take woken_index first to avoid borrow conflicts
     let woken_idx = select_state.as_mut()
@@ -122,9 +124,9 @@ pub fn exec_select_exec(
             *select_state = None;
             SelectResult::Continue
         }
-        ReadyCase::UnsupportedRemote => {
+        ReadyCase::UnsupportedRemotePort => {
             *select_state = None;
-            SelectResult::UnsupportedRemote
+            SelectResult::UnsupportedRemotePort
         }
         ReadyCase::None => {
             // Path 3: No case ready - register waiters and block
@@ -142,7 +144,7 @@ pub fn exec_select_exec(
 enum ReadyCase {
     None,
     Default,
-    UnsupportedRemote,
+    UnsupportedRemotePort,
     Send { idx: usize, ch: GcRef, elem_slots: usize, val_reg: u16 },
     Recv { idx: usize, ch: GcRef, elem_slots: usize, val_reg: u16, has_ok: bool },
 }
@@ -152,17 +154,19 @@ fn find_ready_case(stack: *const Slot, bp: usize, state: &SelectState) -> ReadyC
     let mut ready_cases: Vec<ReadyCase> = Vec::new();
 
     for (idx, case) in state.cases.iter().enumerate() {
-        let ch = stack_get(stack, bp + case.chan_reg as usize) as GcRef;
+        let ch = stack_get(stack, bp + case.queue_reg as usize) as GcRef;
         if ch.is_null() {
             continue;
         }
-        #[cfg(feature = "std")]
-        if channel::is_remote(ch) {
-            return ReadyCase::UnsupportedRemote;
+        if queue::is_remote(ch) {
+            match case.queue_kind {
+                QueueKind::Port => return ReadyCase::UnsupportedRemotePort,
+                QueueKind::Chan => unreachable!("remote channel cannot participate in select"),
+            }
         }
 
         let cap = queue_state::capacity(ch);
-        let chan_state = channel::get_state(ch);
+        let chan_state = queue::local_state(ch);
 
         let is_ready = match case.kind {
             SelectCaseKind::Send => {
@@ -226,12 +230,12 @@ fn complete_woken_case(
     // For recv cases, read data from channel buffer
     let case = &state.cases[idx];
     let wake = if case.kind == SelectCaseKind::Recv {
-        let ch = stack_get(stack, bp + case.chan_reg as usize) as GcRef;
+        let ch = stack_get(stack, bp + case.queue_reg as usize) as GcRef;
         if !ch.is_null() {
             let val_reg = case.val_reg;
             let elem_slots = case.elem_slots as usize;
             let has_ok = case.has_ok;
-            let chan_state = channel::get_state(ch);
+            let chan_state = queue::local_state(ch);
             let (result, value) = chan_state.try_recv();
             let dst_start = bp + val_reg as usize;
             super::write_recv_result(value.as_deref(), elem_slots, has_ok, |i, written| {
@@ -273,10 +277,10 @@ fn execute_send_case(
     select_state: &mut Option<SelectState>,
 ) -> SelectResult {
     let cap = queue_state::capacity(ch);
-    let chan_state = channel::get_state(ch);
+    let chan_state = queue::local_state(ch);
 
     let val_start = bp + val_reg as usize;
-    let value: ChannelMessage = (0..elem_slots).map(|i| stack_get(stack, val_start + i)).collect();
+    let value: QueueMessage = (0..elem_slots).map(|i| stack_get(stack, val_start + i)).collect();
 
     // Use try_send so that waiting receivers are properly woken.
     // Direct buffer push would leave waiting receivers blocked forever.
@@ -312,7 +316,7 @@ fn execute_recv_case(
     has_ok: bool,
     select_state: &mut Option<SelectState>,
 ) -> SelectResult {
-    let chan_state = channel::get_state(ch);
+    let chan_state = queue::local_state(ch);
     let dst_start = bp + val_reg as usize;
 
     // Use try_recv so that waiting senders are properly woken when the buffer
@@ -343,22 +347,21 @@ fn register_select_waiters(stack: *const Slot, bp: usize, island_id: u32, fiber_
     let select_id = state.select_id;
 
     for (idx, case) in state.cases.iter().enumerate() {
-        let ch = stack_get(stack, bp + case.chan_reg as usize) as GcRef;
+        let ch = stack_get(stack, bp + case.queue_reg as usize) as GcRef;
         if ch.is_null() {
             continue;
         }
-        #[cfg(feature = "std")]
         assert!(
-            !channel::is_remote(ch),
+            !queue::is_remote(ch),
             "remote channel must be rejected before select waiter registration"
         );
 
-        let chan_state = channel::get_state(ch);
+        let chan_state = queue::local_state(ch);
         match case.kind {
             SelectCaseKind::Send => {
                 let val_start = bp + case.val_reg as usize;
                 let elem_slots = case.elem_slots as usize;
-                let value: ChannelMessage = (0..elem_slots).map(|i| stack_get(stack, val_start + i)).collect();
+                let value: QueueMessage = (0..elem_slots).map(|i| stack_get(stack, val_start + i)).collect();
                 chan_state.register_sender(
                     QueueWaiter::selecting(island_id, fiber_id as u64, idx as u16, select_id),
                     value,
@@ -371,17 +374,17 @@ fn register_select_waiters(stack: *const Slot, bp: usize, island_id: u32, fiber_
             }
         }
 
-        state.registered_channels.push(ch);
+        state.registered_queues.push(ch);
     }
 }
 
 /// Cancel waiters on all registered channels.
 fn cancel_select_waiters(state: &mut SelectState) {
     let select_id = state.select_id;
-    for &ch in &state.registered_channels {
+    for &ch in &state.registered_queues {
         if !ch.is_null() {
-            channel::get_state(ch).cancel_select_waiters(select_id);
+            queue::local_state(ch).cancel_select_waiters(select_id);
         }
     }
-    state.registered_channels.clear();
+    state.registered_queues.clear();
 }

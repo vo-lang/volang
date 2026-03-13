@@ -66,6 +66,11 @@ pub enum RuntimeType {
         dir: ChanDir,
         elem: ValueRttid,
     },
+
+    Port {
+        dir: ChanDir,
+        elem: ValueRttid,
+    },
     
     /// Function type: func(params) results
     Func {
@@ -167,7 +172,7 @@ impl RuntimeType {
             _ => None,
         }
     }
-    
+
     /// Returns true if this is a basic type.
     #[inline]
     pub fn is_basic(&self) -> bool {
@@ -201,6 +206,7 @@ impl PartialEq for RuntimeType {
             (Self::Slice(a), Self::Slice(b)) => a == b,
             (Self::Map { key: k1, val: v1 }, Self::Map { key: k2, val: v2 }) => k1 == k2 && v1 == v2,
             (Self::Chan { dir: d1, elem: e1 }, Self::Chan { dir: d2, elem: e2 }) => d1 == d2 && e1 == e2,
+            (Self::Port { dir: d1, elem: e1 }, Self::Port { dir: d2, elem: e2 }) => d1 == d2 && e1 == e2,
             (Self::Func { params: p1, results: r1, variadic: v1 }, Self::Func { params: p2, results: r2, variadic: v2 }) => {
                 p1 == p2 && r1 == r2 && v1 == v2
             }
@@ -245,6 +251,7 @@ impl core::hash::Hash for RuntimeType {
             Self::Slice(elem) => elem.hash(state),
             Self::Map { key, val } => { key.hash(state); val.hash(state); }
             Self::Chan { dir, elem } => { dir.hash(state); elem.hash(state); }
+            Self::Port { dir, elem } => { dir.hash(state); elem.hash(state); }
             Self::Func { params, results, variadic } => {
                 params.hash(state); results.hash(state); variadic.hash(state);
             }

@@ -248,6 +248,7 @@ pub fn type_slot_count(type_key: TypeKey, tc_objs: &TCObjects) -> u16 {
         Type::Slice(_) => 1,
         Type::Map(_) => 1,
         Type::Chan(_) => 1,
+        Type::Port(_) => 1,
         Type::Signature(_) => 1, // closure is GcRef
         Type::Interface(_) => 2,
         Type::Struct(s) => {
@@ -296,6 +297,7 @@ pub fn type_slot_types(type_key: TypeKey, tc_objs: &TCObjects) -> Vec<SlotType> 
         Type::Slice(_) => vec![SlotType::GcRef],
         Type::Map(_) => vec![SlotType::GcRef],
         Type::Chan(_) => vec![SlotType::GcRef],
+        Type::Port(_) => vec![SlotType::GcRef],
         Type::Signature(_) => vec![SlotType::GcRef],
         Type::Interface(_) => vec![SlotType::Interface0, SlotType::Interface1],
         Type::Struct(s) => {
@@ -400,6 +402,7 @@ pub fn type_value_kind(type_key: TypeKey, tc_objs: &TCObjects) -> ValueKind {
         Type::Struct(_) => ValueKind::Struct,
         Type::Interface(_) => ValueKind::Interface,
         Type::Chan(_) => ValueKind::Channel,
+        Type::Port(_) => ValueKind::Port,
         Type::Island => ValueKind::Island,
         Type::Signature(_) => ValueKind::Closure,
         Type::Named(n) => type_value_kind(n.underlying(), tc_objs),
@@ -449,6 +452,11 @@ pub fn is_map(type_key: TypeKey, tc_objs: &TCObjects) -> bool {
 pub fn is_chan(type_key: TypeKey, tc_objs: &TCObjects) -> bool {
     let underlying = typ::underlying_type(type_key, tc_objs);
     tc_objs.types[underlying].try_as_chan().is_some()
+}
+
+pub fn is_port(type_key: TypeKey, tc_objs: &TCObjects) -> bool {
+    let underlying = typ::underlying_type(type_key, tc_objs);
+    tc_objs.types[underlying].try_as_port().is_some()
 }
 
 /// Check if type has value semantics (struct or array).

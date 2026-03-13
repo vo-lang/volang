@@ -25,6 +25,13 @@ pub enum Constant {
     String(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferType {
+    pub meta_raw: u32,
+    pub rttid_raw: u32,
+    pub slots: u16,
+}
+
 #[derive(Debug, Clone)]
 pub struct FunctionDef {
     pub name: String,
@@ -66,7 +73,7 @@ pub struct FunctionDef {
     /// Capture types for cross-island transfer (closures only).
     /// Each entry: (ValueMeta raw, slot_count) for the captured variable's inner type.
     /// Empty for non-closure functions.
-    pub capture_types: Vec<(u32, u16)>,
+    pub capture_types: Vec<TransferType>,
     /// SlotTypes for closure captures, used by GC to scan closure objects.
     /// Length = total slots across all captures (e.g., 2 for an interface capture).
     /// For regular closures, all entries are GcRef (escape boxes).
@@ -76,7 +83,7 @@ pub struct FunctionDef {
     /// Parameter types for cross-island transfer.
     /// Each entry: (ValueMeta raw, slot_count) for one parameter.
     /// Empty if function has no parameters or types not needed.
-    pub param_types: Vec<(u32, u16)>,
+    pub param_types: Vec<TransferType>,
 }
 
 impl FunctionDef {
@@ -173,6 +180,7 @@ pub struct MethodInfo {
 pub struct NamedTypeMeta {
     pub name: String,
     pub underlying_meta: ValueMeta,
+    pub underlying_rttid: ValueRttid,
     pub methods: HashMap<String, MethodInfo>,
 }
 

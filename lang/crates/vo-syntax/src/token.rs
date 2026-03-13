@@ -110,6 +110,7 @@ pub enum TokenKind {
     Interface,
     /// `map`
     Map,
+    Port,
     /// `island`
     Island,
     /// `package`
@@ -264,6 +265,7 @@ impl TokenKind {
                 | TokenKind::Import
                 | TokenKind::Interface
                 | TokenKind::Map
+                | TokenKind::Port
                 | TokenKind::Island
                 | TokenKind::Package
                 | TokenKind::Range
@@ -390,6 +392,7 @@ impl TokenKind {
             "import" => Some(TokenKind::Import),
             "interface" => Some(TokenKind::Interface),
             "map" => Some(TokenKind::Map),
+            "port" => Some(TokenKind::Port),
             "island" => Some(TokenKind::Island),
             "package" => Some(TokenKind::Package),
             "range" => Some(TokenKind::Range),
@@ -435,6 +438,7 @@ impl TokenKind {
             TokenKind::Import => "import",
             TokenKind::Interface => "interface",
             TokenKind::Map => "map",
+            TokenKind::Port => "port",
             TokenKind::Island => "island",
             TokenKind::Package => "package",
             TokenKind::Range => "range",
@@ -578,7 +582,7 @@ mod tests {
         let keywords = [
             "break", "case", "chan", "const", "continue", "default", "defer",
             "else", "fallthrough", "for", "func", "go", "goto", "if", "import",
-            "interface", "map", "package", "range", "return", "select",
+            "interface", "map", "port", "package", "range", "return", "select",
             "struct", "switch", "type", "var",
         ];
         

@@ -1,7 +1,7 @@
 //! GC object scanning by type.
 
 use crate::gc::{scan_slots_by_types, Gc, GcRef};
-use crate::objects::{array, channel, closure, interface, map, queue_state, slice};
+use crate::objects::{array, closure, interface, map, queue, queue_state, slice};
 use crate::slot::{byte_offset_for_slots, slot_to_ptr, Slot, SLOT_BYTES};
 use vo_common_core::bytecode::StructMeta;
 use vo_common_core::types::{SlotType, ValueKind, ValueMeta};
@@ -53,7 +53,7 @@ pub fn typed_write_barrier_by_meta(
     match vk {
         // Single-slot reference types: the entire value is a GcRef
         ValueKind::String | ValueKind::Slice | ValueKind::Map | ValueKind::Closure |
-        ValueKind::Channel | ValueKind::Pointer | ValueKind::Island => {
+        ValueKind::Channel | ValueKind::Port | ValueKind::Pointer | ValueKind::Island => {
             if !vals.is_empty() && vals[0] != 0 {
                 gc.write_barrier(parent, vals[0] as GcRef);
             }
@@ -133,14 +133,14 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_ca
             }
         }
 
-        ValueKind::Channel => {
+        kind if kind.is_queue() => {
             debug_assert!(
                 gc_header.slots == queue_state::DATA_SLOTS,
-                "scan_object: Channel object {:p} has slots={} != DATA_SLOTS={} — codegen bug",
+                "scan_object: Queue object {:p} has slots={} != DATA_SLOTS={} — codegen bug",
                 obj, gc_header.slots, queue_state::DATA_SLOTS
             );
             if gc_header.slots == queue_state::DATA_SLOTS {
-                scan_channel(gc, obj, struct_metas);
+                scan_queue(gc, obj, struct_metas);
             }
         }
 
@@ -268,9 +268,9 @@ fn scan_array_struct_elem(gc: &mut Gc, obj: GcRef, idx: usize, elem_bytes: usize
     }
 }
 
-fn scan_channel(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
+fn scan_queue(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
     // REMOTE channels have no local state — elements live on the home island
-    if channel::is_remote(obj) { return; }
+    if queue::is_remote(obj) { return; }
 
     let elem_meta = queue_state::elem_meta(obj);
     let elem_kind = elem_meta.value_kind();
@@ -279,7 +279,7 @@ fn scan_channel(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
     let elem_scan = resolve_elem_scan(elem_kind, elem_meta, true, struct_metas);
     if matches!(elem_scan, ElemScan::Skip) { return; }
     
-    let state = channel::get_state(obj);
+    let state = queue::local_state(obj);
     for elem in state.iter_buffer() {
         scan_elem(gc, elem, &elem_scan);
     }
@@ -384,11 +384,11 @@ fn scan_struct(gc: &mut Gc, obj: GcRef, meta_id: usize, struct_metas: &[StructMe
 pub fn finalize_object(obj: GcRef) {
     let header = Gc::header(obj);
     match header.kind() {
-        ValueKind::Channel => {
+        kind if kind.is_queue() => {
             // Only finalize real channel objects (DATA_SLOTS=3), not heap-boxed
             // pointer-to-channel (1 slot) created by PtrNew.
             if header.slots == queue_state::DATA_SLOTS {
-                unsafe { channel::drop_inner(obj); }
+                unsafe { queue::drop_inner(obj); }
             }
         }
         ValueKind::Map => {

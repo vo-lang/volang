@@ -25,6 +25,7 @@ pub enum Type {
     Interface(InterfaceDetail),
     Map(MapDetail),
     Chan(ChanDetail),
+    Port(PortDetail),
     Island,
     Named(NamedDetail),
 }
@@ -135,8 +136,34 @@ impl Type {
         }
     }
 
+    pub fn try_as_port(&self) -> Option<&PortDetail> {
+        match self {
+            Type::Port(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn try_as_port_mut(&mut self) -> Option<&mut PortDetail> {
+        match self {
+            Type::Port(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn queue_dir_elem(&self) -> Option<(ChanDir, TypeKey)> {
+        match self {
+            Type::Chan(chan) => Some((chan.dir(), chan.elem())),
+            Type::Port(port) => Some((port.dir(), port.elem())),
+            _ => None,
+        }
+    }
+
     pub fn is_chan(&self) -> bool {
         matches!(self, Type::Chan(_))
+    }
+
+    pub fn is_port(&self) -> bool {
+        matches!(self, Type::Port(_))
     }
 
     pub fn is_island(&self) -> bool {
@@ -267,6 +294,7 @@ impl Type {
                 | Type::Interface(_)
                 | Type::Map(_)
                 | Type::Chan(_)
+                | Type::Port(_)
                 | Type::Island
         )
     }
@@ -275,7 +303,7 @@ impl Type {
     pub fn comparable(&self, objs: &TCObjects) -> bool {
         match self.underlying_val(objs) {
             Type::Basic(b) => b.typ() != BasicType::UntypedNil,
-            Type::Pointer(_) | Type::Interface(_) | Type::Chan(_) 
+            Type::Pointer(_) | Type::Interface(_) | Type::Chan(_) | Type::Port(_)
                 | Type::Island => true,
             Type::Struct(s) => s
                 .fields()
@@ -762,6 +790,26 @@ impl ChanDetail {
     }
 }
 
+#[derive(Debug)]
+pub struct PortDetail {
+    dir: ChanDir,
+    elem: TypeKey,
+}
+
+impl PortDetail {
+    pub fn new(dir: ChanDir, elem: TypeKey) -> PortDetail {
+        PortDetail { dir, elem }
+    }
+
+    pub fn dir(&self) -> ChanDir {
+        self.dir
+    }
+
+    pub fn elem(&self) -> TypeKey {
+        self.elem
+    }
+}
+
 /// A NamedDetail represents a named (defined) type.
 #[derive(Debug)]
 pub struct NamedDetail {
@@ -1025,6 +1073,9 @@ fn identical_impl(
         (Type::Chan(cx), Type::Chan(cy)) => {
             cx.dir() == cy.dir() && identical_impl(cx.elem(), cy.elem(), cmp_tags, dup, objs)
         }
+        (Type::Port(px), Type::Port(py)) => {
+            px.dir() == py.dir() && identical_impl(px.elem(), py.elem(), cmp_tags, dup, objs)
+        }
         (Type::Island, Type::Island) => true,
         (Type::Named(nx), Type::Named(ny)) => nx.obj() == ny.obj(),
         _ => false,
@@ -1155,6 +1206,28 @@ fn fmt_type_impl(
                 }),
                 ChanDir::SendOnly => ("chan<- ", false),
                 ChanDir::RecvOnly => ("<-chan ", false),
+            };
+            f.write_str(s)?;
+            if paren {
+                f.write_char('(')?;
+            }
+            fmt_type_impl(Some(detail.elem()), f, visited, objs)?;
+            if paren {
+                f.write_char(')')?;
+            }
+        }
+        Type::Port(detail) => {
+            let (s, paren) = match detail.dir() {
+                ChanDir::SendRecv => ("port ", {
+                    let elm = &objs.types[detail.elem()];
+                    if let Some(p) = elm.try_as_port() {
+                        p.dir() == ChanDir::RecvOnly
+                    } else {
+                        false
+                    }
+                }),
+                ChanDir::SendOnly => ("port<- ", false),
+                ChanDir::RecvOnly => ("<-port ", false),
             };
             f.write_str(s)?;
             if paren {

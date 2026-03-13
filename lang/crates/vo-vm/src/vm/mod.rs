@@ -1,6 +1,8 @@
 //! Virtual machine main structure.
 
 #[cfg(not(feature = "std"))]
+use alloc::collections::VecDeque;
+#[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -9,6 +11,8 @@ use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
+#[cfg(feature = "std")]
+use std::collections::VecDeque;
 #[cfg(feature = "std")]
 use std::string::String;
 
@@ -20,6 +24,7 @@ use vo_runtime::objects::{array, string};
 
 pub mod helpers;
 mod types;
+mod island_shared;
 #[cfg(feature = "std")]
 pub mod island_thread;
 #[cfg(feature = "jit")]
@@ -29,24 +34,23 @@ pub use helpers::{stack_get, stack_set};
 pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE, SchedulingOutcome, RuntimeTrapKind};
 #[cfg(feature = "std")]
 pub use types::IslandThread;
-#[cfg(feature = "std")]
 pub use types::EndpointRegistry;
 
 use helpers::{slice_data_ptr, slice_len, slice_cap, string_len, string_index, runtime_panic, runtime_panic_msg, runtime_trap, user_panic};
 
 use crate::bytecode::Module;
 use crate::exec;
-use crate::fiber::{CallFrame, Fiber};
+use crate::fiber::Fiber;
 /// Result of wait_for_work() — what the scheduling loop should do next.
 enum WaitResult {
     /// Work became available, retry the loop.
-    #[cfg(feature = "std")]
     Retry,
     /// All fibers completed normally.
     Done,
     /// All fibers blocked (potential deadlock).
-    #[cfg(feature = "std")]
     Blocked,
+    /// Fibers are blocked waiting for host-routed island commands/responses.
+    Suspended,
     /// Some fibers waiting for host-side events; async loop must handle them.
     SuspendedForHostEvents,
     /// Island VM should return to its command loop.
@@ -329,6 +333,27 @@ impl Vm {
         self.run_scheduling_loop(None)
     }
 
+    pub fn push_island_command(&mut self, cmd: vo_runtime::island::IslandCommand) {
+        self.state.command_queue.push_back(cmd);
+    }
+
+    pub fn take_outbound_commands(
+        &mut self,
+    ) -> VecDeque<(u32, vo_runtime::island::IslandCommand)> {
+        core::mem::take(&mut self.state.outbound_commands)
+    }
+
+    pub fn current_island_id(&self) -> u32 {
+        self.state.current_island_id
+    }
+
+    pub fn set_island_id(&mut self, id: u32) {
+        self.state.current_island_id = id;
+        if self.state.next_island_id <= id {
+            self.state.next_island_id = id + 1;
+        }
+    }
+
     /// Build a `VmError::Deadlock` with current fiber diagnostics.
     ///
     /// Call this when `run()` / `run_scheduled()` returns `Ok(SchedulingOutcome::Blocked)` and
@@ -355,11 +380,10 @@ impl Vm {
             
             if !self.scheduler.has_work() {
                 match self.wait_for_work() {
-                    #[cfg(feature = "std")]
                     WaitResult::Retry => continue,
                     WaitResult::Done => return Ok(SchedulingOutcome::Completed),
-                    #[cfg(feature = "std")]
                     WaitResult::Blocked => return Ok(SchedulingOutcome::Blocked),
+                    WaitResult::Suspended => return Ok(SchedulingOutcome::Suspended),
                     WaitResult::SuspendedForHostEvents => return Ok(SchedulingOutcome::SuspendedForHostEvents),
                     #[cfg(feature = "std")]
                     WaitResult::Break => break,
@@ -388,44 +412,38 @@ impl Vm {
     /// Process commands from other island threads (non-blocking).
     #[inline]
     fn process_island_commands(&mut self) {
+        let mut cmds = Vec::new();
         #[cfg(feature = "std")]
-        {
-            // Collect commands first to avoid borrow conflict
-            let mut cmds = Vec::new();
-            if let Some(ref transport) = self.state.main_transport {
-                while let Ok(Some(cmd)) = transport.try_recv() {
-                    cmds.push(cmd);
-                }
+        if let Some(ref transport) = self.state.main_transport {
+            while let Ok(Some(cmd)) = transport.try_recv() {
+                cmds.push(cmd);
             }
-            for cmd in cmds {
-                self.dispatch_island_command(cmd);
-            }
+        }
+        while let Some(cmd) = self.state.command_queue.pop_front() {
+            cmds.push(cmd);
+        }
+        for cmd in cmds {
+            self.dispatch_island_command(cmd);
         }
     }
 
     /// Dispatch a single island command on the main island.
-    #[cfg(feature = "std")]
     fn dispatch_island_command(&mut self, cmd: vo_runtime::island::IslandCommand) {
         use vo_runtime::island::IslandCommand;
         match cmd {
+            IslandCommand::SpawnFiber { closure_data } => {
+                island_shared::handle_spawn_fiber(self, closure_data.data());
+            }
             IslandCommand::WakeFiber { fiber_id } => {
                 self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
             }
-            IslandCommand::ChanRequest { endpoint_id, kind, from_island, fiber_id } => {
-                // Home island handles the request on its ChannelState
-                crate::vm::island_thread::handle_chan_request_command(
-                    self, endpoint_id, kind, from_island, fiber_id,
-                );
+            IslandCommand::EndpointRequest { endpoint_id, kind, from_island, fiber_id } => {
+                island_shared::handle_endpoint_request_command(self, endpoint_id, kind, from_island, fiber_id);
             }
-            IslandCommand::ChanResponse { endpoint_id, kind, fiber_id } => {
-                // Main island received a response for a REMOTE channel
-                crate::vm::island_thread::handle_chan_response_command(
-                    self, endpoint_id, kind, fiber_id,
-                );
+            IslandCommand::EndpointResponse { endpoint_id, kind, fiber_id } => {
+                island_shared::handle_endpoint_response_command(self, endpoint_id, kind, fiber_id);
             }
-            IslandCommand::SpawnFiber { .. } | IslandCommand::Shutdown => {
-                // SpawnFiber/Shutdown are not expected on main island transport
-            }
+            IslandCommand::Shutdown => {}
         }
     }
     
@@ -438,6 +456,10 @@ impl Vm {
             if self.scheduler.poll_io(&mut self.state.io) > 0 {
                 return WaitResult::Retry;
             }
+        }
+
+        if !self.state.command_queue.is_empty() {
+            return WaitResult::Retry;
         }
         
         // Try waiting for island commands
@@ -459,30 +481,36 @@ impl Vm {
                 }
             }
         }
-        
+
+        // If the only blocked fibers are host event waiters, signal the async loop.
+        if self.scheduler.has_host_event_waiters() {
+            return WaitResult::SuspendedForHostEvents;
+        }
+
+        if !self.state.outbound_commands.is_empty() || self.state.pending_island_responses > 0 {
+            return WaitResult::Suspended;
+        }
+
         // Check if there are waiters that might still make progress
         #[cfg(feature = "std")]
         if self.scheduler.has_io_waiters() || self.scheduler.has_blocked() {
-            // Island VMs return to let run_island_thread handle commands
             if self.state.current_island_id != 0 {
                 if self.scheduler.has_io_waiters() {
                     self.scheduler.poll_io(&mut self.state.io);
                 }
                 return WaitResult::Break;
             }
-            // No I/O waiters and no island communication => true deadlock
             if !self.scheduler.has_io_waiters() && self.state.main_transport.is_none() {
                 return WaitResult::Blocked;
             }
-            // Keep polling
             self.scheduler.poll_io(&mut self.state.io);
             std::thread::sleep(std::time::Duration::from_millis(10));
             return WaitResult::Retry;
         }
-        
-        // If the only blocked fibers are host event waiters, signal the async loop.
-        if self.scheduler.has_host_event_waiters() {
-            return WaitResult::SuspendedForHostEvents;
+
+        #[cfg(not(feature = "std"))]
+        if self.scheduler.has_blocked() {
+            return WaitResult::Blocked;
         }
 
         WaitResult::Done
@@ -722,15 +750,13 @@ impl Vm {
                         for waiter in &waiters {
                             self.state.wake_waiter(waiter, &mut self.scheduler);
                         }
-                        #[cfg(feature = "std")]
                         if let Some(endpoint_id) = endpoint_id {
-                            crate::vm::island_thread::finalize_closed_home_endpoint(self, endpoint_id, None);
+                            island_shared::finalize_closed_home_endpoint(self, endpoint_id, None);
                         }
                         return ExecResult::TimesliceExpired;
                     }
-                    #[cfg(feature = "std")]
                     exec::QueueAction::RemoteSend { endpoint_id, home_island, data } => {
-                        self.state.send_chan_send_request(
+                        self.state.send_endpoint_send_request(
                             home_island,
                             endpoint_id,
                             data,
@@ -738,19 +764,17 @@ impl Vm {
                         );
                         return ExecResult::Block(crate::fiber::BlockReason::Queue);
                     }
-                    #[cfg(feature = "std")]
                     exec::QueueAction::RemoteRecv { endpoint_id, home_island } => {
                         fiber.current_frame_mut().unwrap().pc -= 1;
-                        self.state.send_chan_recv_request(
+                        self.state.send_endpoint_recv_request(
                             home_island,
                             endpoint_id,
                             fiber_id.to_raw() as u64,
                         );
                         return ExecResult::Block(crate::fiber::BlockReason::Queue);
                     }
-                    #[cfg(feature = "std")]
                     exec::QueueAction::RemoteRecvData { endpoint_id, target_island, fiber_id, data } => {
-                        self.state.send_chan_recv_data_response(
+                        self.state.send_endpoint_recv_data_response(
                             target_island,
                             endpoint_id,
                             data,
@@ -758,9 +782,8 @@ impl Vm {
                         );
                         return ExecResult::TimesliceExpired;
                     }
-                    #[cfg(feature = "std")]
                     exec::QueueAction::RemoteClose { endpoint_id, home_island } => {
-                        self.state.send_chan_close_request(home_island, endpoint_id);
+                        self.state.send_endpoint_close_request(home_island, endpoint_id);
                         self.state.endpoint_registry.mark_tombstone(endpoint_id);
                         refetch!();
                     }
@@ -1252,10 +1275,9 @@ impl Vm {
                             
                             let new_bp = fiber.sp;
                             let local_slots = func_def.local_slots as usize;
-                            let new_sp = new_bp + local_slots;
-                            fiber.ensure_capacity(new_sp);
+                            fiber.reserve_slots_at(new_bp, local_slots);
                             // Zero frame slots: stale values in GcRef-typed slots cause GC segfault.
-                            fiber.stack[new_bp..new_sp].fill(0);
+                            fiber.zero_slots_at(new_bp, local_slots);
                             
                             // Use call_layout for correct slot placement (matches exec_call_closure)
                             let layout = vo_runtime::objects::closure::call_layout(
@@ -1275,13 +1297,12 @@ impl Vm {
                                 helpers::stack_set(fstack, new_bp + layout.arg_offset + i, arg);
                             }
                             
-                            fiber.sp = new_sp;
-                            fiber.frames.push(crate::fiber::CallFrame::new(
+                            fiber.push_call_frame(
                                 closure_func_id,
                                 new_bp,
                                 0, // ret_reg=0 (return values go via replay cache, not caller stack)
                                 func_def.ret_slots,
-                            ));
+                            );
                             
                             // Mark replay depth so return path knows to cache results.
                             // Push previous depth so nested CallExterns don't clobber it.
@@ -1676,26 +1697,54 @@ impl Vm {
                         handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakeChan, msg));
                     }
                 }
+                Opcode::PortNew => {
+                    if let Err(msg) = exec::exec_port_new(stack, bp, &inst, &mut self.state.gc) {
+                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakePort, msg));
+                    }
+                }
                 Opcode::ChanSend => {
-                    #[cfg(feature = "std")]
                     if fiber.consume_remote_send_closed() {
                         handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel));
                     }
-                    #[cfg(feature = "std")]
-                    {
-                        let ch = helpers::stack_get(stack, bp + inst.a as usize) as GcRef;
-                        let elem_slots = inst.flags as usize;
-                        let src_start = bp + inst.b as usize;
-                        let src: Vec<u64> = (0..elem_slots).map(|i| helpers::stack_get(stack, src_start + i)).collect();
-                        exec::prepare_remote_send_value_if_needed(
-                            ch,
-                            &src,
-                            &module.struct_metas,
-                            &module.runtime_types,
-                            &mut self.state,
-                        );
+                    let ch = helpers::stack_get(stack, bp + inst.a as usize) as GcRef;
+                    let elem_slots = inst.flags as usize;
+                    let src_start = bp + inst.b as usize;
+                    let src: Vec<u64> = (0..elem_slots).map(|i| helpers::stack_get(stack, src_start + i)).collect();
+                    exec::prepare_remote_send_value_if_needed(
+                        ch,
+                        &src,
+                        &module.struct_metas,
+                        &module.runtime_types,
+                        &mut self.state,
+                    );
+                    handle_queue_action!(exec::exec_queue_send(
+                        stack,
+                        bp,
+                        self.state.current_island_id,
+                        fiber_id.to_raw(),
+                        &inst,
+                        &mut self.state,
+                        &module.struct_metas,
+                        &module.runtime_types,
+                        Some(module),
+                    ));
+                }
+                Opcode::PortSend => {
+                    if fiber.consume_remote_send_closed() {
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel));
                     }
-                    handle_queue_action!(exec::exec_chan_send(
+                    let ch = helpers::stack_get(stack, bp + inst.a as usize) as GcRef;
+                    let elem_slots = inst.flags as usize;
+                    let src_start = bp + inst.b as usize;
+                    let src: Vec<u64> = (0..elem_slots).map(|i| helpers::stack_get(stack, src_start + i)).collect();
+                    exec::prepare_remote_send_value_if_needed(
+                        ch,
+                        &src,
+                        &module.struct_metas,
+                        &module.runtime_types,
+                        &mut self.state,
+                    );
+                    handle_queue_action!(exec::exec_queue_send(
                         stack,
                         bp,
                         self.state.current_island_id,
@@ -1708,12 +1757,11 @@ impl Vm {
                     ));
                 }
                 Opcode::ChanRecv => {
-                    #[cfg(feature = "std")]
                     if let Some(recv_response) = fiber.take_remote_recv_response() {
                         let elem_slots = ((inst.flags >> 1) & 0x7F) as usize;
                         let has_ok = (inst.flags & 1) != 0;
                         let dst_start = bp + inst.a as usize;
-                        exec::replay_remote_recv_response(
+                        exec::replay_remote_queue_recv_response(
                             &mut self.state.gc,
                             recv_response,
                             elem_slots,
@@ -1726,7 +1774,33 @@ impl Vm {
                         refetch!();
                         continue;
                     }
-                    handle_queue_action!(exec::exec_chan_recv(
+                    handle_queue_action!(exec::exec_queue_recv(
+                        stack,
+                        bp,
+                        self.state.current_island_id,
+                        fiber_id.to_raw(),
+                        &inst,
+                    ));
+                }
+                Opcode::PortRecv => {
+                    if let Some(recv_response) = fiber.take_remote_recv_response() {
+                        let elem_slots = ((inst.flags >> 1) & 0x7F) as usize;
+                        let has_ok = (inst.flags & 1) != 0;
+                        let dst_start = bp + inst.a as usize;
+                        exec::replay_remote_queue_recv_response(
+                            &mut self.state.gc,
+                            recv_response,
+                            elem_slots,
+                            has_ok,
+                            &module.struct_metas,
+                            &module.runtime_types,
+                            &mut self.state.endpoint_registry,
+                            |i, value| helpers::stack_set(stack, dst_start + i, value),
+                        );
+                        refetch!();
+                        continue;
+                    }
+                    handle_queue_action!(exec::exec_queue_recv(
                         stack,
                         bp,
                         self.state.current_island_id,
@@ -1735,24 +1809,50 @@ impl Vm {
                     ));
                 }
                 Opcode::ChanClose => {
-                    handle_queue_action!(exec::exec_chan_close(stack, bp, &inst));
+                    handle_queue_action!(exec::exec_queue_close(stack, bp, &inst));
+                }
+                Opcode::PortClose => {
+                    handle_queue_action!(exec::exec_queue_close(stack, bp, &inst));
                 }
                 Opcode::ChanLen => {
-                    exec::exec_queue_get(stack, bp, &inst, exec::channel_len);
+                    exec::exec_queue_get(stack, bp, &inst, exec::queue_len);
+                }
+                Opcode::PortLen => {
+                    exec::exec_queue_get(stack, bp, &inst, exec::queue_len);
                 }
                 Opcode::ChanCap => {
+                    exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::queue_state::capacity);
+                }
+                Opcode::PortCap => {
                     exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::queue_state::capacity);
                 }
 
                 // Select operations
                 Opcode::SelectBegin => {
-                    exec::exec_select_begin(fiber, &inst);
+                    exec::exec_select_begin(fiber, inst.a as usize, (inst.flags & 1) != 0);
                 }
                 Opcode::SelectSend => {
-                    exec::exec_select_send(&mut fiber.select_state, &inst);
+                    exec::exec_select_send(&mut fiber.select_state, inst.a, inst.b, inst.flags);
                 }
                 Opcode::SelectRecv => {
-                    exec::exec_select_recv(&mut fiber.select_state, &inst);
+                    exec::exec_select_recv(
+                        &mut fiber.select_state,
+                        vo_runtime::objects::queue_state::QueueKind::Chan,
+                        inst.a,
+                        inst.b,
+                        (inst.flags >> 1) & 0x7F,
+                        (inst.flags & 1) != 0,
+                    );
+                }
+                Opcode::PortSelectRecv => {
+                    exec::exec_select_recv(
+                        &mut fiber.select_state,
+                        vo_runtime::objects::queue_state::QueueKind::Port,
+                        inst.a,
+                        inst.b,
+                        (inst.flags >> 1) & 0x7F,
+                        (inst.flags & 1) != 0,
+                    );
                 }
                 Opcode::SelectExec => {
                     let fiber_id = fiber.id;
@@ -1762,7 +1862,7 @@ impl Vm {
                         self.state.current_island_id,
                         fiber_id,
                         &mut fiber.select_state,
-                        &inst,
+                        inst.a,
                     ) {
                         exec::SelectResult::Continue => {}
                         exec::SelectResult::Block => {
@@ -1774,7 +1874,7 @@ impl Vm {
                         exec::SelectResult::SendOnClosed => {
                             handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel));
                         }
-                        exec::SelectResult::UnsupportedRemote => {
+                        exec::SelectResult::UnsupportedRemotePort => {
                             handle_panic_result!(runtime_panic_msg(
                                 &mut self.state.gc,
                                 fiber,
@@ -1890,14 +1990,15 @@ impl Vm {
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::IslandNew => {
-                    let _ = exec::exec_island_new(stack, bp, &inst, &mut self.state.gc, 0);
+                    let island_id = self.state.next_island_id;
+                    self.state.next_island_id += 1;
+                    let _ = exec::exec_island_new(stack, bp, &inst, &mut self.state.gc, island_id);
                 }
-                #[cfg(feature = "std")]
                 Opcode::GoIsland => {
                     let result = exec::exec_go_island(stack, bp, &inst);
                     let island_id = vo_runtime::island::id(result.island);
-                    
-                    if island_id == 0 {
+
+                    if island_id == self.state.current_island_id {
                         let closure_ref = stack_get(stack, bp + inst.b as usize) as vo_runtime::gc::GcRef;
                         let new_fiber = unsafe {
                             helpers::build_closure_fiber_from_args_ptr(
@@ -1911,7 +2012,7 @@ impl Vm {
                         self.scheduler.spawn(new_fiber);
                     } else {
                         let func_def = &module.functions[result.func_id as usize];
-                        exec::prepare_chans_for_transfer(
+                        exec::prepare_queue_handles_for_transfer(
                             &result,
                             island_id,
                             &func_def.capture_types,
@@ -1921,27 +2022,16 @@ impl Vm {
                             &mut self.state,
                         );
                         let data = exec::pack_closure_for_island(
-                            &self.state.gc, &result, &func_def.capture_types, &func_def.param_types,
-                            &module.struct_metas, &module.runtime_types,
+                            &self.state.gc,
+                            &result,
+                            &func_def.capture_types,
+                            &func_def.param_types,
+                            &module.struct_metas,
+                            &module.runtime_types,
                         );
                         let closure_data = vo_runtime::pack::PackedValue::from_data(data);
-                        let cmd = vo_runtime::island::IslandCommand::SpawnFiber { closure_data };
-                        self.state.send_to_island(island_id, cmd);
+                        self.state.send_spawn_fiber_to_island(island_id, closure_data);
                     }
-                }
-                #[cfg(not(feature = "std"))]
-                Opcode::GoIsland => {
-                    let closure_ref = helpers::stack_get(stack, bp + inst.b as usize) as vo_runtime::gc::GcRef;
-                    let new_fiber = unsafe {
-                        helpers::build_closure_fiber_from_args_ptr(
-                            &module.functions,
-                            self.scheduler.fibers.len() as u32,
-                            closure_ref as u64,
-                            stack.add(bp + inst.c as usize),
-                            inst.flags as u32,
-                        )
-                    };
-                    self.scheduler.spawn(new_fiber);
                 }
 
                 Opcode::Invalid => {
@@ -1965,16 +2055,14 @@ impl Vm {
 
         let bp = fiber.sp;
         let local_slots = func_def.local_slots as usize;
-        let new_sp = bp + local_slots;
-        fiber.ensure_capacity(new_sp);
+        fiber.reserve_slots_at(bp, local_slots);
 
         // Zero locals, then copy args
-        unsafe { core::ptr::write_bytes(fiber.stack.as_mut_ptr().add(bp), 0, local_slots) };
+        fiber.zero_slots_at(bp, local_slots);
         let n = (func_def.param_slots as usize).min(args.len());
         fiber.stack[bp..bp + n].copy_from_slice(&args[..n]);
 
-        fiber.sp = new_sp;
-        fiber.frames.push(CallFrame::new(func_id, bp, 0, func_def.ret_slots));
+        fiber.push_call_frame(func_id, bp, 0, func_def.ret_slots);
     }
 }
 
@@ -1982,5 +2070,57 @@ impl Vm {
 impl Default for Vm {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fiber::Fiber;
+    use vo_runtime::island::{EndpointResponseKind, IslandCommand};
+
+    #[test]
+    fn run_scheduled_returns_suspended_when_waiting_for_island_response() {
+        let mut vm = Vm::new();
+
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        vm.scheduler.schedule_next().unwrap();
+        vm.scheduler.block_for_queue();
+        vm.state.pending_island_responses = 1;
+
+        let outcome = vm.run_scheduled().unwrap();
+
+        assert_eq!(fid.to_raw(), 0);
+        assert_eq!(outcome, SchedulingOutcome::Suspended);
+    }
+
+    #[test]
+    fn command_queue_endpoint_response_wakes_blocked_fiber() {
+        let mut vm = Vm::new();
+
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        {
+            let fiber = vm.scheduler.get_fiber_mut(fid);
+            fiber.push_frame(0, 0, 0, 0);
+            fiber.current_frame_mut().unwrap().pc = 1;
+        }
+
+        vm.scheduler.schedule_next().unwrap();
+        vm.scheduler.block_for_queue();
+        vm.state.pending_island_responses = 1;
+
+        vm.push_island_command(IslandCommand::EndpointResponse {
+            endpoint_id: 42,
+            kind: EndpointResponseKind::SendAck { closed: true },
+            fiber_id: fid.to_raw() as u64,
+        });
+
+        vm.process_island_commands();
+
+        let fiber = vm.scheduler.get_fiber_mut(fid);
+        assert!(fiber.consume_remote_send_closed());
+        assert_eq!(fiber.current_frame().unwrap().pc, 0);
+        assert_eq!(vm.state.pending_island_responses, 0);
+        assert_eq!(vm.scheduler.get_fiber(fid).state, crate::fiber::FiberState::Runnable);
     }
 }

@@ -115,8 +115,8 @@ fn compile_builtin_call_impl(
                 func.emit_op(Opcode::StrLen, dst, arg_reg, 0);
             } else if info.is_map(arg_type) {
                 func.emit_op(Opcode::MapLen, dst, arg_reg, 0);
-            } else if info.is_chan(arg_type) {
-                func.emit_op(Opcode::ChanLen, dst, arg_reg, 0);
+            } else if info.is_queue(arg_type) {
+                func.emit_op(info.queue_len_opcode(arg_type), dst, arg_reg, 0);
             } else if info.is_slice(arg_type) {
                 func.emit_op(Opcode::SliceLen, dst, arg_reg, 0);
             } else {
@@ -131,8 +131,8 @@ fn compile_builtin_call_impl(
             let arg_reg = compile_expr(&call.args[0], ctx, func, info)?;
             let arg_type = info.expr_type(call.args[0].id);
             
-            if info.is_chan(arg_type) {
-                func.emit_op(Opcode::ChanCap, dst, arg_reg, 0);
+            if info.is_queue(arg_type) {
+                func.emit_op(info.queue_cap_opcode(arg_type), dst, arg_reg, 0);
             } else {
                 func.emit_op(Opcode::SliceCap, dst, arg_reg, 0);
             }
@@ -213,16 +213,19 @@ fn compile_builtin_call_impl(
                     
                     let slots_arg = crate::type_info::encode_map_new_slots(key_slots, val_slots);
                     func.emit_op(Opcode::MapNew, dst, packed_reg, slots_arg);
-                } else if info.is_chan(type_key) {
-                    // make(chan T) or make(chan T, cap)
-                    // ChanNew: a=dst, b=elem_meta, c=cap, flags=elem_slots
-                    let elem_type_key = info.chan_elem_type(type_key);
-                    let elem_slots = info.type_slot_count(elem_type_key);
-                    let elem_meta_idx = ctx.get_or_create_value_meta(elem_type_key, info);
-                    
-                    let elem_meta_reg = func.alloc_slots(&[SlotType::Value]);
-                    func.emit_op(Opcode::LoadConst, elem_meta_reg, elem_meta_idx, 0);
-                    
+                } else if info.is_queue(type_key) {
+                    let elem_type_key = info.queue_elem_type(type_key);
+                    let elem_slots = info.queue_elem_slots(type_key);
+                    let elem_meta_raw = ctx.compute_value_meta_raw(elem_type_key, info);
+                    let elem_rttid_raw = vo_runtime::ValueRttid::new(
+                        ctx.intern_type_key(elem_type_key, info),
+                        info.type_value_kind(elem_type_key),
+                    ).to_raw();
+                    let packed_type = ((elem_rttid_raw as u64) << 32) | (elem_meta_raw as u64);
+                    let packed_type_idx = ctx.const_int(packed_type as i64);
+                    let packed_type_reg = func.alloc_slots(&[SlotType::Value]);
+                    func.emit_op(Opcode::LoadConst, packed_type_reg, packed_type_idx, 0);
+
                     let cap_reg = if call.args.len() > 1 {
                         compile_expr(&call.args[1], ctx, func, info)?
                     } else {
@@ -230,7 +233,13 @@ fn compile_builtin_call_impl(
                         func.emit_op(Opcode::LoadInt, tmp, 0, 0);
                         tmp
                     };
-                    func.emit_with_flags(Opcode::ChanNew, elem_slots as u8, dst, elem_meta_reg, cap_reg);
+                    func.emit_with_flags(
+                        info.queue_new_opcode(type_key),
+                        elem_slots as u8,
+                        dst,
+                        packed_type_reg,
+                        cap_reg,
+                    );
             } else if info.is_island(type_key) {
                     // make(island)
                     // IslandNew: a=dst
@@ -348,7 +357,8 @@ fn compile_builtin_call_impl(
                 return Err(CodegenError::Internal("close expects 1 argument".to_string()));
             }
             let arg_reg = compile_expr(&call.args[0], ctx, func, info)?;
-            func.emit_op(Opcode::ChanClose, arg_reg, 0, 0);
+            let arg_type = info.expr_type(call.args[0].id);
+            func.emit_op(info.queue_close_opcode(arg_type), arg_reg, 0, 0);
         }
         "recover" => {
             // recover() - returns interface{}

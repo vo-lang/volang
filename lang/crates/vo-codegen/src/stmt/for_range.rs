@@ -420,10 +420,10 @@ pub(crate) fn compile_for_range(
         for pc in exit_info.break_patches { sc.func.patch_jump(pc, exit_pc); }
         for pc in exit_info.continue_patches { sc.func.patch_jump(pc, post_pc); }
         
-    } else if sc.info.is_chan(range_type) {
-        let chan_reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
-        let elem_type = sc.info.chan_elem_type(range_type);
-        let elem_slots = sc.info.chan_elem_slots(range_type);
+    } else if sc.info.is_queue(range_type) {
+        let queue_reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
+        let elem_type = sc.info.queue_elem_type(range_type);
+        let elem_slots = sc.info.queue_elem_slots(range_type);
         
         // Channel: use value or key (Go semantics: single var is value)
         let var_expr = value.as_ref().or(key.as_ref());
@@ -441,7 +441,13 @@ pub(crate) fn compile_for_range(
         // ChanRecv: a=val_slot, b=chan_reg, c=ok_slot
         // flags format: (elem_slots << 1) | has_ok
         let recv_flags = ((elem_slots as u8) << 1) | 1;
-        sc.func.emit_with_flags(Opcode::ChanRecv, recv_flags, val_info.slot, chan_reg, ok_slot);
+        sc.func.emit_with_flags(
+            sc.info.queue_recv_opcode(range_type),
+            recv_flags,
+            val_info.slot,
+            queue_reg,
+            ok_slot,
+        );
         
         // if !ok { goto end }
         let end_jump = sc.func.emit_jump(Opcode::JumpIfNot, ok_slot);

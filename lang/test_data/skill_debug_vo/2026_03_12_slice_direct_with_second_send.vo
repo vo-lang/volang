@@ -2,17 +2,17 @@ package main
 
 func main() {
 	i := make(island)
-	outer := make(chan []chan int, 1)
-	inner := make(chan int, 1)
-	eq := make(chan bool, 1)
+	outer := make(port []port int, 1)
+	inner := make(port int, 1)
+	eq := make(port bool, 1)
 
-	go @(i) func(ch chan []chan int, out chan bool) {
+	go @(i) func(ch port []port int, out port bool) {
 		items := <-ch
 		out <- (items[0] == items[1])
 		items[1] <- 202
 	}(outer, eq)
 
-	outer <- []chan int{inner, inner}
+	outer <- []port int{inner, inner}
 	assert(<-eq, "slice eq")
 	assert(<-inner == 202, "slice inner")
 }

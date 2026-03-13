@@ -379,3 +379,79 @@ impl Default for JitCompiler {
 pub fn can_direct_jit_call(func: &vo_runtime::bytecode::FunctionDef) -> bool {
     !func.has_calls && !func.has_call_extern
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
+    use vo_runtime::instruction::{Instruction, Opcode};
+    use vo_runtime::SlotType;
+
+    fn make_func(code: Vec<Instruction>, local_slots: u16) -> FunctionDef {
+        let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
+        FunctionDef {
+            name: "test".into(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots,
+            ret_slots: 0,
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer: false,
+            has_calls,
+            has_call_extern,
+            code,
+            slot_types: vec![SlotType::Value; local_slots as usize],
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn compile_supports_port_select_recv_opcode() {
+        let func = make_func(
+            vec![
+                Instruction::with_flags(Opcode::SelectBegin, 0, 1, 0, 0),
+                Instruction::with_flags(Opcode::PortSelectRecv, 2, 0, 0, 0),
+                Instruction::new(Opcode::SelectExec, 0, 0, 0),
+                Instruction::new(Opcode::Return, 0, 0, 0),
+            ],
+            1,
+        );
+        let mut module = VoModule::new("test".into());
+        module.functions.push(func);
+
+        let mut jit = JitCompiler::new().expect("create jit compiler");
+        let result = jit.compile(0, &module.functions[0], &module, &[]);
+
+        assert!(result.is_ok(), "PortSelectRecv should compile in JIT: {:?}", result);
+    }
+
+    #[test]
+    fn compile_supports_port_queue_opcodes() {
+        let func = make_func(
+            vec![
+                Instruction::with_flags(Opcode::PortNew, 1, 0, 1, 2),
+                Instruction::new(Opcode::PortLen, 3, 0, 0),
+                Instruction::new(Opcode::PortCap, 4, 0, 0),
+                Instruction::with_flags(Opcode::PortSend, 1, 0, 1, 0),
+                Instruction::with_flags(Opcode::PortRecv, 3, 1, 0, 0),
+                Instruction::new(Opcode::PortClose, 0, 0, 0),
+                Instruction::new(Opcode::Return, 0, 0, 0),
+            ],
+            5,
+        );
+        let mut module = VoModule::new("test".into());
+        module.functions.push(func);
+
+        let mut jit = JitCompiler::new().expect("create jit compiler");
+        let result = jit.compile(0, &module.functions[0], &module, &[]);
+
+        assert!(result.is_ok(), "Port queue opcodes should compile in JIT: {:?}", result);
+    }
+}

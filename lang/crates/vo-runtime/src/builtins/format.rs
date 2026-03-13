@@ -48,6 +48,7 @@ pub fn format_value(val: u64, kind: ValueKind) -> String {
         ValueKind::Pointer => format!("0x{:x}", val),
         ValueKind::Interface => "<interface>".to_string(),
         ValueKind::Channel => "<chan>".to_string(),
+        ValueKind::Port => "<port>".to_string(),
         ValueKind::Closure => "<func>".to_string(),
         ValueKind::Island => "<island>".to_string(),
     }
@@ -98,6 +99,7 @@ pub fn format_interface_with_ctx(slot0: u64, slot1: u64, call: Option<&ExternCal
         ValueKind::Slice => format_slice_value(slot1 as GcRef),
         ValueKind::Map => format!("map[...]"),
         ValueKind::Channel => format!("0x{:x}", slot1),
+        ValueKind::Port => format!("0x{:x}", slot1),
         ValueKind::Closure => format!("0x{:x}", slot1),
         ValueKind::Array => format!("[...]"),
         ValueKind::Struct => format!("{{...}}"),

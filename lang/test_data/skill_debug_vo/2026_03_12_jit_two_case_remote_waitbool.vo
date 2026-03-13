@@ -2,7 +2,7 @@ package main
 
 import "time"
 
-func waitBool(ch chan bool, label string) bool {
+func waitBool(ch port bool, label string) bool {
 	done := false
 	value := false
 	for i := 0; i < 100 && !done; i += 1 {
@@ -20,16 +20,16 @@ func waitBool(ch chan bool, label string) bool {
 func main() {
 	{
 		i := make(island)
-		eq := make(chan bool, 1)
-		go @(i) func(out chan bool) {
+		eq := make(port bool, 1)
+		go @(i) func(out port bool) {
 			out <- true
 		}(eq)
 		assert(waitBool(eq, "case1") == true, "case1 true")
 	}
 	{
 		i := make(island)
-		eq := make(chan bool, 1)
-		go @(i) func(out chan bool) {
+		eq := make(port bool, 1)
+		go @(i) func(out port bool) {
 			out <- true
 		}(eq)
 		assert(waitBool(eq, "case2") == true, "case2 true")

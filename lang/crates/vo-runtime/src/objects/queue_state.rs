@@ -11,14 +11,50 @@ use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 #[cfg(feature = "std")]
 use std::{collections::VecDeque, vec::Vec, boxed::Box};
 
+use hashbrown::HashSet;
+
 use crate::gc::GcRef;
 use crate::slot::{slot_to_usize, Slot, SLOT_BYTES};
-use vo_common_core::types::{ValueKind, ValueMeta};
+use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 
 /// Channel backing kind discriminant.
 /// Stored in QueueData::backing field.
 pub const BACKING_LOCAL: u16 = 0;
 pub const BACKING_REMOTE: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum QueueKind {
+    Chan = 0,
+    Port = 1,
+}
+
+impl QueueKind {
+    #[inline]
+    pub fn from_raw(raw: u16) -> Self {
+        match raw {
+            1 => Self::Port,
+            _ => Self::Chan,
+        }
+    }
+
+    #[inline]
+    pub fn value_kind(self) -> ValueKind {
+        match self {
+            Self::Chan => ValueKind::Channel,
+            Self::Port => ValueKind::Port,
+        }
+    }
+
+    #[inline]
+    pub fn from_value_kind(kind: ValueKind) -> Self {
+        match kind {
+            ValueKind::Channel => Self::Chan,
+            ValueKind::Port => Self::Port,
+            other => panic!("QueueKind::from_value_kind: expected channel/port kind, got {:?}", other),
+        }
+    }
+}
 
 /// Unified data structure for all channel objects.
 /// Layout: GcHeader + QueueData
@@ -30,12 +66,15 @@ pub struct QueueData {
     pub elem_slots: u16,       // 2 bytes
     /// Channel backing kind: BACKING_LOCAL (0) or BACKING_REMOTE (1).
     pub backing: u16,          // 2 bytes
+    pub kind: u16,
+    pub reserved: u16,
+    pub elem_rttid: u32,
     /// Pointer to HomeInfo (LOCAL) or RemoteProxy (REMOTE).
     /// 0 if unused (LOCAL channel that has never been transferred cross-island).
     pub endpoint_ptr: Slot,
 }
 
-pub const DATA_SLOTS: u16 = 4;
+pub const DATA_SLOTS: u16 = 5;
 const _: () = assert!(core::mem::size_of::<QueueData>() == DATA_SLOTS as usize * SLOT_BYTES);
 
 impl_gc_object!(QueueData);
@@ -65,11 +104,26 @@ pub fn elem_slots(q: GcRef) -> u16 {
     QueueData::as_ref(q).elem_slots
 }
 
+#[inline]
+pub fn elem_rttid(q: GcRef) -> ValueRttid {
+    ValueRttid::from_raw(QueueData::as_ref(q).elem_rttid)
+}
+
+#[inline]
+pub fn kind(q: GcRef) -> QueueKind {
+    QueueKind::from_raw(QueueData::as_ref(q).kind)
+}
+
+#[inline]
+pub fn is_port(q: GcRef) -> bool {
+    kind(q) == QueueKind::Port
+}
+
 // =============================================================================
 // Type aliases for channel states
 // =============================================================================
 
-pub type ChannelMessage = Box<[u64]>;
+pub type QueueMessage = Box<[u64]>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectInfo {
@@ -114,7 +168,7 @@ impl QueueWaiter {
     }
 }
 
-pub type ChannelState = QueueState<QueueWaiter, ChannelMessage>;
+pub type LocalQueueState = QueueState<QueueWaiter, QueueMessage>;
 
 pub use crate::pack::PackedValue;
 
@@ -124,19 +178,17 @@ pub use crate::pack::PackedValue;
 
 /// Metadata for a BACKING_LOCAL channel that has been transferred cross-island.
 /// Stored as Box<HomeInfo> behind endpoint_ptr on the home island.
-#[cfg(feature = "std")]
 pub struct HomeInfo {
     /// Unique endpoint ID for this channel (allocated by home island).
     pub endpoint_id: u64,
     /// Island ID of the home island (where ChannelState lives).
     pub home_island: u32,
     /// Set of island IDs that hold remote proxies to this channel.
-    pub peers: std::collections::HashSet<u32>,
+    pub peers: HashSet<u32>,
 }
 
 /// Metadata for a BACKING_REMOTE proxy channel.
 /// Stored as Box<RemoteProxy> behind endpoint_ptr on the remote island.
-#[cfg(feature = "std")]
 pub struct RemoteProxy {
     /// Endpoint ID matching the HomeInfo on the home island.
     pub endpoint_id: u64,

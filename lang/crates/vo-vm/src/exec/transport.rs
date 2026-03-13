@@ -4,11 +4,10 @@
 use alloc::{vec, vec::Vec};
 
 use vo_runtime::gc::Gc;
-#[cfg(feature = "std")]
 use vo_runtime::gc::GcRef;
-use vo_runtime::objects::queue_state::ChannelMessage;
+use vo_runtime::objects::queue_state::QueueMessage;
 use vo_runtime::pack::{
-    pack_slots, unpack_slots, unpack_slots_with_chan_resolver, ChanHandleInfo, PackedValue,
+    pack_slots, unpack_slots_with_queue_handle_resolver, PackedValue, QueueHandleInfo,
 };
 use vo_runtime::ValueMeta;
 use vo_common_core::bytecode::StructMeta;
@@ -24,26 +23,27 @@ pub fn pack_transport_message(
     pack_slots(gc, src, elem_meta, struct_metas, runtime_types).into_data()
 }
 
-#[cfg(feature = "std")]
-pub fn resolve_unpacked_chan_handle(
+pub fn resolve_unpacked_queue_handle(
     gc: &mut Gc,
-    handle: ChanHandleInfo,
+    handle: QueueHandleInfo,
     endpoint_registry: &mut crate::vm::EndpointRegistry,
 ) -> GcRef {
     if let Some(existing) = endpoint_registry.get_live(handle.endpoint_id) {
         return existing;
     }
-    let chan = vo_runtime::objects::channel::create_remote_proxy_with_closed(
+    let queue_ref = vo_runtime::objects::queue::create_remote_proxy_with_closed(
         gc,
+        handle.kind,
         handle.endpoint_id,
         handle.home_island,
         handle.cap,
         handle.elem_meta,
+        handle.elem_rttid,
         handle.elem_slots,
         handle.closed,
     );
-    endpoint_registry.register_live(handle.endpoint_id, chan);
-    chan
+    endpoint_registry.register_live(handle.endpoint_id, queue_ref);
+    queue_ref
 }
 
 pub fn unpack_transport_message(
@@ -52,25 +52,20 @@ pub fn unpack_transport_message(
     elem_slots: usize,
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
-    #[cfg(feature = "std")] endpoint_registry: Option<&mut crate::vm::EndpointRegistry>,
-) -> ChannelMessage {
+    endpoint_registry: &mut crate::vm::EndpointRegistry,
+) -> QueueMessage {
     if elem_slots == 0 {
         return Vec::new().into_boxed_slice();
     }
     let packed = PackedValue::from_data(data.to_vec());
     let mut dst: Vec<u64> = vec![0; elem_slots];
-    #[cfg(feature = "std")]
-    if let Some(endpoint_registry) = endpoint_registry {
-        unpack_slots_with_chan_resolver(
-            gc,
-            &packed,
-            &mut dst,
-            struct_metas,
-            runtime_types,
-            |gc, handle| resolve_unpacked_chan_handle(gc, handle, endpoint_registry),
-        );
-        return dst.into_boxed_slice();
-    }
-    unpack_slots(gc, &packed, &mut dst, struct_metas, runtime_types);
+    unpack_slots_with_queue_handle_resolver(
+        gc,
+        &packed,
+        &mut dst,
+        struct_metas,
+        runtime_types,
+        |gc, handle| resolve_unpacked_queue_handle(gc, handle, endpoint_registry),
+    );
     dst.into_boxed_slice()
 }

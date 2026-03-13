@@ -8,12 +8,12 @@ use alloc::vec::Vec;
 use vo_runtime::objects::interface::InterfaceSlot;
 #[cfg(feature = "std")]
 use vo_runtime::io::IoToken;
+use vo_runtime::objects::queue_state::QueueKind;
 
 use vo_runtime::gc::GcRef;
 
 use crate::vm::RuntimeTrapKind;
 
-#[cfg(feature = "std")]
 #[derive(Debug, Clone)]
 pub struct RemoteRecvResponse {
     pub data: Vec<u8>,
@@ -142,7 +142,8 @@ pub enum SelectCaseKind {
 #[derive(Debug, Clone)]
 pub struct SelectCase {
     pub kind: SelectCaseKind,
-    pub chan_reg: u16,
+    pub queue_kind: QueueKind,
+    pub queue_reg: u16,
     pub val_reg: u16,
     pub elem_slots: u8,
     pub has_ok: bool,
@@ -157,7 +158,7 @@ pub struct SelectState {
     /// When one case becomes ready, we cancel waiters on other channels using this ID.
     pub select_id: u64,
     /// Channels we've registered waiters on (for cancellation when woken).
-    pub registered_channels: Vec<vo_runtime::gc::GcRef>,
+    pub registered_queues: Vec<vo_runtime::gc::GcRef>,
 }
 
 /// Fiber lifecycle state - single source of truth.
@@ -405,12 +406,10 @@ pub struct Fiber {
     /// Pending remote recv response data from home island.
     /// Set by handle_chan_response_command before waking fiber.
     /// Consumed by ChanRecv handler on retry.
-    #[cfg(feature = "std")]
     pub remote_recv_response: Option<RemoteRecvResponse>,
     /// Flag indicating REMOTE send was on a closed channel.
     /// Set by handle_chan_response_command(SendAck{closed:true}) before waking fiber.
     /// Consumed by ChanSend handler on retry.
-    #[cfg(feature = "std")]
     pub remote_send_closed: bool,
 }
 
@@ -447,29 +446,24 @@ impl Fiber {
             jit_safepoint_flag: false,
             #[cfg(feature = "jit")]
             jit_panic_msg: InterfaceSlot::default(),
-            #[cfg(feature = "std")]
             remote_recv_response: None,
-            #[cfg(feature = "std")]
             remote_send_closed: false,
         }
     }
 
-    #[cfg(feature = "std")]
     pub fn take_remote_recv_response(&mut self) -> Option<RemoteRecvResponse> {
         self.remote_recv_response.take()
     }
 
-    #[cfg(feature = "std")]
     pub fn consume_remote_send_closed(&mut self) -> bool {
         let closed = self.remote_send_closed;
         self.remote_send_closed = false;
         closed
     }
 
-    #[cfg(feature = "std")]
-    pub fn apply_chan_response(&mut self, kind: &vo_runtime::island::ChanResponseKind) {
+    pub fn apply_endpoint_response(&mut self, kind: &vo_runtime::island::EndpointResponseKind) {
         match kind {
-            vo_runtime::island::ChanResponseKind::SendAck { closed } => {
+            vo_runtime::island::EndpointResponseKind::SendAck { closed } => {
                 if *closed {
                     self.remote_send_closed = true;
                     if let Some(frame) = self.current_frame_mut() {
@@ -477,13 +471,13 @@ impl Fiber {
                     }
                 }
             }
-            vo_runtime::island::ChanResponseKind::RecvData { data, closed } => {
+            vo_runtime::island::EndpointResponseKind::RecvData { data, closed } => {
                 self.remote_recv_response = Some(RemoteRecvResponse {
                     data: data.clone(),
                     closed: *closed,
                 });
             }
-            vo_runtime::island::ChanResponseKind::Closed => {}
+            vo_runtime::island::EndpointResponseKind::Closed => {}
         }
     }
     
@@ -523,11 +517,8 @@ impl Fiber {
             self.jit_safepoint_flag = false;
             self.jit_panic_msg = InterfaceSlot::default();
         }
-        #[cfg(feature = "std")]
-        {
-            self.remote_recv_response = None;
-            self.remote_send_closed = false;
-        }
+        self.remote_recv_response = None;
+        self.remote_send_closed = false;
     }
     
     /// Ensure IC table is allocated (lazy allocation on first JIT dispatch).
@@ -646,19 +637,36 @@ impl Fiber {
         }
     }
 
-    pub fn push_frame(&mut self, func_id: u32, local_slots: u16, ret_reg: u16, ret_count: u16) {
-        let bp = self.sp;
-        let new_sp = bp + local_slots as usize;
+    #[inline]
+    pub fn reserve_slots_at(&mut self, bp: usize, slot_count: usize) -> usize {
+        let new_sp = bp + slot_count;
         self.ensure_capacity(new_sp);
+        self.sp = new_sp;
+        new_sp
+    }
+
+    #[inline]
+    pub fn zero_slots_at(&mut self, bp: usize, slot_count: usize) {
+        self.stack[bp..bp + slot_count].fill(0);
+    }
+
+    #[inline]
+    pub fn push_call_frame(&mut self, func_id: u32, bp: usize, ret_reg: u16, ret_count: u16) {
+        self.frames.push(CallFrame::new(func_id, bp, ret_reg, ret_count));
+    }
+
+    pub fn push_frame(&mut self, func_id: u32, local_slots: u16, ret_reg: u16, ret_count: u16) -> usize {
+        let bp = self.sp;
+        self.reserve_slots_at(bp, local_slots as usize);
         // Zero the new frame's slots. ensure_capacity zeros newly-allocated memory, but
         // previously-used slots (from prior calls that shared this stack region) contain
         // stale values. GC root scanning uses slot_types to determine which slots hold
         // GcRefs — a stale integer in a GcRef-typed slot causes mark_gray to segfault.
         // This zero-fill is the canonical fix (same approach as JVM/CLR).
         // Safety: ensure_capacity guarantees stack[bp..new_sp] is valid.
-        for s in &mut self.stack[bp..new_sp] { *s = 0; }
-        self.sp = new_sp;
-        self.frames.push(CallFrame::new(func_id, bp, ret_reg, ret_count));
+        self.zero_slots_at(bp, local_slots as usize);
+        self.push_call_frame(func_id, bp, ret_reg, ret_count);
+        bp
     }
 
     pub fn pop_frame(&mut self) -> Option<CallFrame> {

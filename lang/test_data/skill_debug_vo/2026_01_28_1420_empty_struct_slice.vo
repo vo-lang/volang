@@ -5,12 +5,12 @@ import "time"
 
 func main() {
 	i := make(island)
-	p := make(chan int, 1)
+	p := make(port int, 1)
 	
 	// Non-nil slice of empty struct
 	s := make([]struct{}, 5)
 	
-	go @(i) func(ch chan int, data []struct{}) {
+	go @(i) func(ch port int, data []struct{}) {
 		assert(data != nil, "slice should NOT be nil")
 		assert(len(data) == 5, "len should be 5")
 		ch <- 1

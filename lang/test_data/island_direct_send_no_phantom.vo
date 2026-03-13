@@ -16,7 +16,7 @@ package main
 
 import "time"
 
-func waitInt(ch chan int, label string) int {
+func waitInt(ch port int, label string) int {
 	done := false
 	value := 0
 	for i := 0; i < 200 && !done; i += 1 {
@@ -41,10 +41,10 @@ func main() {
 // Then repeat — second value must be the real second value.
 func testDirectSendNoPhantomUnbuffered() {
 	i := make(island)
-	ch := make(chan int) // unbuffered
-	result := make(chan int, 2)
+	ch := make(port int, 0) // unbuffered
+	result := make(port int, 2)
 
-	go @(i) func(data chan int, out chan int) {
+	go @(i) func(data port int, out port int) {
 		v1 := <-data
 		out <- v1
 		v2 := <-data
@@ -67,10 +67,10 @@ func testDirectSendNoPhantomUnbuffered() {
 // main sends two values sequentially.
 func testDirectSendNoPhantomBuffered() {
 	i := make(island)
-	ch := make(chan int, 1) // cap 1
-	result := make(chan int, 3)
+	ch := make(port int, 1) // cap 1
+	result := make(port int, 3)
 
-	go @(i) func(data chan int, out chan int) {
+	go @(i) func(data port int, out port int) {
 		v1 := <-data
 		out <- v1
 		v2 := <-data
@@ -98,10 +98,10 @@ func testDirectSendNoPhantomBuffered() {
 // Exercises DirectSend in both directions repeatedly.
 func testDirectSendMultipleRoundTrips() {
 	i := make(island)
-	req := make(chan int)  // unbuffered request channel
-	resp := make(chan int) // unbuffered response channel
+	req := make(port int, 0)  // unbuffered request channel
+	resp := make(port int, 0) // unbuffered response channel
 
-	go @(i) func(input chan int, output chan int) {
+	go @(i) func(input port int, output port int) {
 		for j := 0; j < 5; j += 1 {
 			v := <-input
 			output <- v * 2

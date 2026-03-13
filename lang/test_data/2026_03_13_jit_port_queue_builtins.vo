@@ -1,0 +1,30 @@
+package main
+
+func main() {
+	p := make(port int, 2)
+	assert(cap(p) == 2, "cap should be 2")
+	assert(len(p) == 0, "len should start at 0")
+
+	p <- 10
+	assert(len(p) == 1, "len should be 1 after first send")
+
+	p <- 20
+	assert(len(p) == 2, "len should be 2 after second send")
+
+	v1, ok1 := <-p
+	assert(ok1, "first recv should succeed")
+	assert(v1 == 10, "first recv should get 10")
+	assert(len(p) == 1, "len should be 1 after first recv")
+
+	close(p)
+
+	v2, ok2 := <-p
+	assert(ok2, "buffered recv after close should succeed")
+	assert(v2 == 20, "buffered recv after close should get 20")
+	assert(len(p) == 0, "len should be 0 after draining buffer")
+
+	v3, ok3 := <-p
+	assert(!ok3, "recv on drained closed port should report closed")
+	assert(v3 == 0, "recv on drained closed port should return zero")
+	println("PASS")
+}

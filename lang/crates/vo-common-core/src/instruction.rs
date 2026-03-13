@@ -235,16 +235,23 @@ pub enum Opcode {
 
     // === CHAN: Channel operations ===
     ChanNew,
+    PortNew,
     ChanSend,
+    PortSend,
     ChanRecv,
+    PortRecv,
     ChanClose,
+    PortClose,
     ChanLen,
+    PortLen,
     ChanCap,
+    PortCap,
 
     // === SELECT: Select statement ===
     SelectBegin,
     SelectSend,
     SelectRecv,
+    PortSelectRecv,
     SelectExec,
 
 

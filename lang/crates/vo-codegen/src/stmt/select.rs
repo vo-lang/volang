@@ -14,7 +14,7 @@ struct RecvCaseInfo {
     dst_reg: u16,
     elem_slots: u16,
     has_ok: bool,
-    chan_type: TypeKey,
+    queue_type: TypeKey,
 }
 
 /// Compile select statement
@@ -45,21 +45,21 @@ pub(crate) fn compile_select(
                 recv_infos.push(None);
             }
             Some(CommClause::Send(send)) => {
-                let chan_reg = crate::expr::compile_expr(&send.chan, ctx, func, info)?;
+                let queue_reg = crate::expr::compile_expr(&send.chan, ctx, func, info)?;
                 let val_reg = crate::expr::compile_expr(&send.value, ctx, func, info)?;
-                let chan_type = info.expr_type(send.chan.id);
-                let elem_slots = info.chan_elem_slots(chan_type) as u8;
-                func.emit_with_flags(Opcode::SelectSend, elem_slots, chan_reg, val_reg, case_idx as u16);
+                let queue_type = info.expr_type(send.chan.id);
+                let elem_slots = info.queue_elem_slots(queue_type) as u8;
+                func.emit_with_flags(Opcode::SelectSend, elem_slots, queue_reg, val_reg, case_idx as u16);
                 recv_infos.push(None);
             }
             Some(CommClause::Recv(recv)) => {
-                let chan_reg = crate::expr::compile_expr(&recv.expr, ctx, func, info)?;
-                let chan_type = info.expr_type(recv.expr.id);
-                let elem_slots = info.chan_elem_slots(chan_type);
+                let queue_reg = crate::expr::compile_expr(&recv.expr, ctx, func, info)?;
+                let queue_type = info.expr_type(recv.expr.id);
+                let elem_slots = info.queue_elem_slots(queue_type);
                 let has_ok = recv.lhs.len() > 1;
                 
                 // Allocate destination with correct slot types for GC scanning
-                let elem_type = info.chan_elem_type(chan_type);
+                let elem_type = info.queue_elem_type(queue_type);
                 let mut recv_types = info.type_slot_types(elem_type);
                 if has_ok {
                     recv_types.push(SlotType::Value); // ok bool
@@ -67,8 +67,14 @@ pub(crate) fn compile_select(
                 let dst_reg = func.alloc_slots(&recv_types);
                 
                 let flags = ((elem_slots as u8) << 1) | (has_ok as u8);
-                func.emit_with_flags(Opcode::SelectRecv, flags, dst_reg, chan_reg, case_idx as u16);
-                recv_infos.push(Some(RecvCaseInfo { dst_reg, elem_slots, has_ok, chan_type }));
+                func.emit_with_flags(
+                    info.queue_select_recv_opcode(queue_type),
+                    flags,
+                    dst_reg,
+                    queue_reg,
+                    case_idx as u16,
+                );
+                recv_infos.push(Some(RecvCaseInfo { dst_reg, elem_slots, has_ok, queue_type }));
             }
         }
     }
@@ -215,7 +221,7 @@ fn bind_recv_variables(
         return Ok(());
     }
     
-    let elem_type = info.chan_elem_type(recv_info.chan_type);
+    let elem_type = info.queue_elem_type(recv_info.queue_type);
     
     // First variable: received value
     let first = &recv.lhs[0];

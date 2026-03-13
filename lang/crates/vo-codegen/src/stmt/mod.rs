@@ -229,10 +229,16 @@ fn compile_stmt_inner(
         StmtKind::Send(send_stmt) => {
             let target_reg = crate::expr::compile_expr(&send_stmt.chan, ctx, func, info)?;
             let target_type = info.expr_type(send_stmt.chan.id);
-            let elem_type = info.chan_elem_type(target_type);
-            let elem_slots = info.chan_elem_slots(target_type) as u8;
+            let elem_type = info.queue_elem_type(target_type);
+            let elem_slots = info.queue_elem_slots(target_type) as u8;
             let val_reg = crate::expr::compile_expr_to_type(&send_stmt.value, elem_type, ctx, func, info)?;
-            func.emit_with_flags(Opcode::ChanSend, elem_slots, target_reg, val_reg, 0);
+            func.emit_with_flags(
+                info.queue_send_opcode(target_type),
+                elem_slots,
+                target_reg,
+                val_reg,
+                0,
+            );
         }
 
         // === Select ===

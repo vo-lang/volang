@@ -541,6 +541,39 @@ async fn await_fetch(
     vm.run_scheduled()
 }
 
+fn validate_sync_outcome(vm: &vo_vm::vm::Vm, outcome: SchedulingOutcome) -> Result<(), String> {
+    match outcome {
+        SchedulingOutcome::Completed
+        | SchedulingOutcome::Suspended
+        | SchedulingOutcome::SuspendedForHostEvents => Ok(()),
+        SchedulingOutcome::Blocked => Err(format!("{:?}", vm.deadlock_err())),
+        SchedulingOutcome::Panicked => Err(String::from("unexpected bounded panic outcome")),
+    }
+}
+
+fn finish_async_outcome(vm: &vo_vm::vm::Vm, outcome: SchedulingOutcome) -> (String, String, String) {
+    let stdout = vo_runtime::output::take_output();
+    match outcome {
+        SchedulingOutcome::Completed => ("ok".into(), stdout, String::new()),
+        SchedulingOutcome::Suspended => (
+            "suspended".into(),
+            stdout,
+            String::from("vm suspended waiting for host-routed island commands/responses"),
+        ),
+        SchedulingOutcome::SuspendedForHostEvents => (
+            "suspended".into(),
+            stdout,
+            String::from("vm suspended waiting for host events, but the async runner had no event to drive"),
+        ),
+        SchedulingOutcome::Blocked => ("error".into(), stdout, format!("{:?}", vm.deadlock_err())),
+        SchedulingOutcome::Panicked => (
+            "error".into(),
+            stdout,
+            String::from("unexpected bounded panic outcome"),
+        ),
+    }
+}
+
 /// Best-effort monotonic clock in milliseconds for WASM host environments.
 ///
 /// Prefers globalThis.performance.now() when available (browser + Node),
@@ -660,7 +693,8 @@ pub fn create_vm_from_module(module: Module, register_externs: ExternRegistrar) 
     register_externs(reg, exts);
     
     vm.load(module);
-    vm.run().map_err(|e| format!("{:?}", e))?;
+    let outcome = vm.run().map_err(|e| format!("{:?}", e))?;
+    validate_sync_outcome(&vm, outcome)?;
     Ok(vm)
 }
 
@@ -682,7 +716,8 @@ pub fn call_closure(vm: &mut Vm, closure: GcRef, args: &[u64]) -> Result<(), Str
     );
     
     vm.spawn_call(func_id, &full_args);
-    vm.run_scheduled().map_err(|e| format!("{:?}", e))?;
+    let outcome = vm.run_scheduled().map_err(|e| format!("{:?}", e))?;
+    validate_sync_outcome(vm, outcome)?;
     
     Ok(())
 }
@@ -778,5 +813,5 @@ async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, String, String) 
         }
     }
 
-    ("ok".into(), vo_runtime::output::take_output(), String::new())
+    finish_async_outcome(vm, outcome)
 }

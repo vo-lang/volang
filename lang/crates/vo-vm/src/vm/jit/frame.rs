@@ -46,17 +46,11 @@ pub extern "C" fn jit_push_frame(
     // In JIT non-OK propagation blocks, ctx.fiber_sp is correctly restored
     // to the caller's sp, but fiber.sp may still reflect a deeper call's sp.
     let new_bp = ctx_ref.fiber_sp as usize;
-    let new_sp = new_bp + local_slots as usize;
-    
-    // Ensure capacity (may reallocate fiber.stack)
-    fiber.ensure_capacity(new_sp);
+    let new_sp = fiber.reserve_slots_at(new_bp, local_slots as usize);
     
     // NOTE: No zeroing here! With mixed stack, callee initializes its own
     // locals_slot in prologue. fiber.stack is only used for parameter passing
     // and spilling on slow path.
-    
-    // Update fiber.sp
-    fiber.sp = new_sp;
     
     // NOTE: No resume_stack.push here! This is the fast path.
     // Resume points are pushed lazily via jit_push_resume_point only when

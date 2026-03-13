@@ -1,419 +1,365 @@
-# Unified Channel: Merge Port into Channel
+# Local Channel + Remote Port Plan
 
 **Date**: 2026-03-12  
 **Status**: Plan  
 **Spec**: `docs/spec/channel.md`  
-**Scope**: vo-syntax, vo-analysis, vo-codegen, vo-common-core, vo-runtime, vo-vm
+**Scope**: vo-syntax, vo-analysis, vo-codegen, vo-common-core, vo-runtime, vo-vm, JIT, docs
+
+This document **supersedes** the earlier "merge port into channel" direction.
+The new design keeps two primitives with a hard semantic boundary:
+
+- `chan T` = island-local synchronization
+- `port T` = cross-island mailbox with transferable send capability
 
 ---
 
-## 1. Motivation
+## 1. Why the Earlier Direction Is Wrong
 
-The current codebase has two nearly identical communication primitives:
+Treating remote communication as "just a channel with a remote proxy" creates the wrong trade-off:
 
-- **`chan T`** — island-local, zero-copy, supports direction and select
-- **`port T`** — cross-island capable, serialized deep-copy, no direction, no select
+- it looks simple to the user
+- it becomes complex in the runtime
+- it leaves sharp edges around `select`, `close`, fairness, and distributed ownership
 
-They share the same `QueueData` GC layout and the same generic `QueueState<W, M>` state machine,
-but diverge on waiter type (`ChannelWaiter` vs `WaiterInfo`), message type (`Box<[u64]>` vs
-`PackedValue`), opcode set, codegen paths, type checker paths, and VM dispatch.
+In particular, transparent remote channels force one of two bad outcomes:
 
-This duplication is unnecessary. The distinction between "local" and "remote" is a **runtime
-instance property** (determined by whether the channel has been transferred cross-island), not a
-**type property**. Unifying them:
+- a distributed `select` protocol with register/ready/commit/cancel races, or
+- a misleading abstraction where some channel operations look local but are not semantically local
 
-- Reduces language surface area (one concept instead of two)
-- Enables select on cross-island channels
-- Enables direction constraints on cross-island channels
-- Eliminates redundant pack/unpack on same-island port operations
-- Halves the opcode count, exec code, codegen branches, and type checker branches
+That is the wrong center of gravity for Vo.
 
----
+The correct boundary is:
 
-## 2. Design Decisions
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Language type | `chan T` only, `port` keyword removed | One concept to learn |
-| Direction | `chan<- T`, `<-chan T` apply to all channels | Useful for cross-island too |
-| Element constraint | Unconstrained at creation; sendable required at `go(island)` capture | `chan func()` valid island-locally |
-| Close semantics | End-state: panic on double-close. Phase 1 preserves current `port` behavior; semantic switch happens with language unification / compatibility removal | Keeps Phase 1 non-breaking while still converging on one rule |
-| Local message type | `Box<[u64]>` (zero-copy slots) | Eliminates unnecessary pack/unpack |
-| Remote message type | Pack at transport boundary only | Serialize on cross-island send, deserialize on cross-island recv response |
-| Waiter type | Unified `QueueWaiter` with island routing + select support | One state machine for all |
-| Wake routing | `QueueWaiter` is woken through VM state, not `Scheduler` alone | Remote waiters need island routing; select wake metadata still needs local scheduler integration |
-| GC ValueKind | Keep both `ValueKind::Channel` and `ValueKind::Port` internally through Phase 1-2; defer GC-kind merge to cleanup | Decouples language/runtime unification from a large GC/serialization churn |
-| Select | All channels support select; remote select deferred to Phase 3 | Incremental delivery |
+- **local synchronization stays local**
+- **cross-island communication is explicit messaging**
 
 ---
 
-## 3. Architecture: Before and After
+## 2. Final Design Decisions
 
-### Before
-
-```
-Language:  chan T ──────────────── port T
-              │                       │
-Types:    ChanDetail              PortDetail
-              │                       │
-Opcodes:  ChanNew/Send/Recv/Close PortNew/Send/Recv/Close
-              │                       │
-Exec:     exec/channel.rs         exec/port.rs
-              │                       │
-Runtime:  ChannelState             PortState
-          ChannelWaiter            WaiterInfo
-          Box<[u64]>               PackedValue
-              │                       │
-VM loop:  ChanResult handler      PortResult + PortAction handler
-              │                       │
-Select:   select.rs (chan only)    —
-```
-
-### After
-
-```
-Language:  chan T  (with direction: chan<- T, <-chan T)
-              │
-Types:     ChanDetail  (direction + elem)
-              │
-Opcodes:   ChanNew / ChanSend / ChanRecv / ChanClose
-              │
-Exec:      exec/channel.rs  (unified, LOCAL + REMOTE paths)
-              │
-Runtime:   QueueState<QueueWaiter, Box<[u64]>>  (one state machine)
-           QueueWaiter  (island_id + fiber_id + optional select info)
-           BACKING_LOCAL / BACKING_REMOTE on QueueData
-              │
-VM loop:   ChanResult handler  (LOCAL: direct, REMOTE: island command)
-              │
-Select:    select.rs  (works for all channels; remote deferred)
-```
+| Topic | Decision | Rationale |
+|------|----------|-----------|
+| Local synchronization | Keep `chan T` | Best model for same-island rendezvous and buffered local coordination |
+| Cross-island messaging | Keep `port T` | Makes island boundary explicit |
+| Channel transfer | Forbidden | Prevents transparent remote synchronization |
+| Port transfer | Only `port<- T` is sendable | Receive side must stay local |
+| Port buffering | Always buffered, positive capacity | Mailbox semantics are simpler and avoid remote rendezvous |
+| Select | Local-only primitive | No distributed arbitration |
+| Port in select | Receive cases only | Keeps select tied to local wait queues |
+| Delivery failure | Distinct from `close` | Cross-island failure must not masquerade as local closure |
+| Runtime architecture | Reuse remote routing for ports, not channels | Keeps correctness while leveraging existing island transport work |
 
 ---
 
-## 4. Phases
+## 3. User-Facing Model
 
-### Phase 1: Runtime Unification (no language change, no user impact)
+### 3.1 Channels
 
-All existing tests continue to pass. Port and channel opcodes both exist but share the same
-internal path.
+`chan T` is for goroutines on the **same island**.
 
-#### Step 1.1: Unified waiter type
+- unbuffered or buffered
+- full local send / recv / close / select support
+- not sendable across islands
 
-**Files**: `vo-runtime/src/objects/queue_state.rs`
+### 3.2 Ports
 
-Replace `ChannelWaiter` and `WaiterInfo` with a single `QueueWaiter`:
+`port T` is for **cross-island delivery**.
 
-```rust
-pub struct QueueWaiter {
-    pub island_id: u32,
-    pub fiber_id: u64,
-    pub select: Option<SelectInfo>,
-}
+- receive side remains on one home island
+- only send capability may be transferred
+- `select` may wait on local port receives
+- no transparent remote select exists because local receive ports already cover the intended use case
 
-pub struct SelectInfo {
-    pub case_index: u16,
-    pub select_id: u64,
-}
-```
+### 3.3 What the User Learns
 
-- `ChannelWaiter::Simple(id)` → `QueueWaiter { island_id: current, fiber_id: id, select: None }`
-- `ChannelWaiter::Select(sw)` → `QueueWaiter { island_id: current, fiber_id: sw.fiber_id, select: Some(...) }`
-- `WaiterInfo { island_id, fiber_id }` → `QueueWaiter { island_id, fiber_id, select: None }`
+The model is intentionally small:
 
-Move `cancel_select_waiters` from `impl ChannelState` to `impl<M> QueueState<QueueWaiter, M>`.
+- use `chan` for local coordination
+- use `port` for crossing an island boundary
+- if you want to wait on remote activity, wait on a **local receive port**
 
-Update all consumers:
-- `vo-vm/src/exec/channel.rs` — use `QueueWaiter` instead of `ChannelWaiter`
-- `vo-vm/src/exec/port.rs` — use `QueueWaiter` instead of `WaiterInfo`
-- `vo-vm/src/exec/select.rs` — use `QueueWaiter`
-- `vo-vm/src/scheduler.rs` — local wake helper handles select bookkeeping only
-- `vo-vm/src/vm/types.rs` — `wake_waiter` takes `QueueWaiter` and owns local-vs-remote routing
-- `vo-vm/src/vm/island_thread.rs` — `WaiterInfo` → `QueueWaiter`
-- `vo-vm/src/vm/jit/callbacks/port.rs` — `WaiterInfo` → `QueueWaiter`
-- `vo-runtime/src/objects/port/std_impl.rs` — types change
-- `vo-runtime/src/objects/port/nostd_stub.rs` — types change
-
-Important constraint: **do not** make `Scheduler` responsible for remote wake routing. `Scheduler`
-only knows local fibers. The unified waiter must be consumed by a VM-level wake path that can either:
-
-- wake a local fiber directly and set select metadata, or
-- send `IslandCommand::WakeFiber` to another island.
-
-**Validation**: `./d.py test both --release` — all tests pass.
-
-#### Step 1.2: Unified message type — LOCAL port uses `Box<[u64]>`
-
-**Files**: `vo-runtime/src/objects/queue_state.rs`, `vo-runtime/src/objects/port/std_impl.rs`,
-`vo-vm/src/exec/port.rs`, `vo-vm/src/vm/island_thread.rs`, `vo-vm/src/vm/jit/callbacks/port.rs`
-
-Change `PortState` from `QueueState<QueueWaiter, PackedValue>` to
-`QueueState<QueueWaiter, Box<[u64]>>` — same as `ChannelState`.
-
-This means:
-- `port_send_core` LOCAL path: no longer calls `pack_slots`. Collects `Box<[u64]>` directly.
-  Add typed write barrier (same as `exec_chan_send`).
-- `port_send_core` REMOTE path: still packs at the transport boundary (pack from src slots, not
-  from buffer).
-- `port_recv_core` LOCAL path: no longer calls `unpack_slots`. Reads `Box<[u64]>` directly.
-- `port_recv_core` REMOTE path: unchanged (unpack from response bytes).
-- `handle_port_request_inner` on home island: incoming remote send → unpack bytes → `Box<[u64]>`
-  → enqueue. Outgoing remote recv response → dequeue `Box<[u64]>` → pack → send bytes.
-
-Implementation note: the current `port_send_core` takes `&Gc`, which is insufficient for the
-typed write barrier. Step 1.2 must either:
-
-- change `port_send_core` / `exec_port_send` / JIT callback signatures to accept `&mut Gc`, or
-- move the barrier into the caller before invoking the shared send path.
-
-After this step, `ChannelState` and `PortState` are the **same type**:
-`QueueState<QueueWaiter, Box<[u64]>>`.
-
-**Validation**: `./d.py test both --release` — all tests pass.
-
-#### Step 1.3: Introduce a shared queue action/result substrate
-
-**Files**: `vo-vm/src/exec/channel.rs`, `vo-vm/src/exec/port.rs`, `vo-vm/src/vm/mod.rs`
-
-The end-state is one queue operation result model, but the implementation should not force an
-all-at-once enum collapse if that obscures control-flow details like PC rollback or pending remote
-response state. The safe incremental target is:
-
-- introduce a shared wake/action representation over `QueueWaiter`
-- make VM/JIT dispatch share the same wake/block/remote-send/remote-recv/remote-close handling
-- keep thin per-op wrappers temporarily if that makes the transition mechanically safer
-
-An eventual unified shape can look like:
-
-```rust
-pub enum ChanResult {
-    Continue,
-    Yield,
-    Wake(QueueWaiter),
-    WakeMultiple(Vec<QueueWaiter>),
-    Trap(RuntimeTrapKind),
-    // Remote-only variants (for channels with BACKING_REMOTE)
-    RemoteSend { endpoint_id: u64, home_island: u32, data: Vec<u8> },
-    RemoteRecv { endpoint_id: u64, home_island: u32 },
-    RemoteClose { endpoint_id: u64, home_island: u32 },
-    Closed { waiters: Vec<QueueWaiter>, endpoint_id: Option<u64> },
-}
-```
-
-Merge the VM main loop's queue dispatch handling so channel and port operations go through the same
-wake/block/remote command path. Keep PC rollback behavior explicit:
-
-- local/remote recv that blocks must replay the opcode
-- remote send remains a "resume at next instruction" operation
-- remote recv response staging (`fiber.port_recv_response`, `fiber.port_send_closed`) must stay
-  coherent until opcode-level replay is removed or generalized
-
-Remove `PortResult`, `PortRecvCoreResult`, and `PortAction`.
-
-**Validation**: `./d.py test both --release` — all tests pass.
-
-#### Step 1.4: Unify exec functions behind shared queue core
-
-**Files**: `vo-vm/src/exec/channel.rs`, `vo-vm/src/exec/port.rs`
-
-Port opcodes now call into shared queue helpers with a `backing` check:
-
-- `exec_port_send` / `exec_chan_send` share the same queue send core
-- `exec_port_recv` / `exec_chan_recv` share the same queue recv core
-- `exec_port_close` / `exec_chan_close` share the same close/wake collection core where possible
-
-After this, `exec/port.rs` becomes a thin delegation layer (or is removed entirely, with port
-opcodes directly calling channel functions in the VM loop).
-
-Phase 1 keeps current `port`-visible close semantics for compatibility. The semantic switch to
-"double close panics" should happen together with the language-level removal of `port` (or with an
-explicit compatibility break), not inside the "no user impact" phase.
-
-**Validation**: `./d.py test both --release` — all tests pass.
+This is simpler than a single primitive with mode-dependent behavior.
 
 ---
 
-### Phase 2: Language Unification (breaking change for `port` users)
+## 4. Semantic Rules
 
-#### Step 2.1: Remove `port` from syntax
+### 4.1 Sendability
 
-**Files**: `vo-syntax/src/token.rs`, `vo-syntax/src/lexer.rs`, `vo-syntax/src/ast.rs`,
-`vo-syntax/src/parser/mod.rs`, `vo-syntax/src/parser/types.rs`,
-`vo-syntax/src/parser/decl.rs`, `vo-syntax/src/display.rs`
+- `chan T` is **not sendable**
+- `port T` is **not sendable**
+- `<-port T` is **not sendable**
+- `port<- T` is sendable if `T` is sendable
 
-- Remove `TokenKind::Port`
-- Remove `TypeExprKind::Port`
-- Remove keyword mapping `"port" => Port`
-- `port T` now parses as `chan T` — or becomes a parse error with a helpful migration message
+### 4.2 Ownership
 
-#### Step 2.2: Remove `port` from type system
+- channel queue state and waiters are local to the creating island
+- port receive state and waiters are local to the home island
+- remote code can hold send capability only
 
-**Files**: `vo-analysis/src/typ.rs`, `vo-analysis/src/check/checker.rs`,
-`vo-analysis/src/check/typexpr.rs`, `vo-analysis/src/check/expr.rs`,
-`vo-analysis/src/check/stmt.rs`, `vo-analysis/src/check/builtin.rs`,
-`vo-analysis/src/check/util.rs`, `vo-analysis/src/check/interface.rs`,
-`vo-analysis/src/check/sendable.rs`, `vo-analysis/src/check/conversion.rs`
+### 4.3 Select
 
-- Remove `Type::Port` and `PortDetail`
-- Merge all `is_port()` branches into `is_chan()` branches
-- `port_elem_type` / `port_elem_slots` → `chan_elem_type` / `chan_elem_slots`
-- **DONE**: `Type::Chan(_)` → `Sendability::Static` in `sendable.rs`. Channel handle
-  pack/unpack implemented in `pack.rs`. `prepare_value_chans_for_transfer` in `exec/island.rs`
-  recursively prepares nested channels. `go_island.rs` post-pass checks capture/arg sendability.
-  `stmt.rs` checks `go @(island)` target is `island` type.
+`select` is a local waiting construct.
 
-#### Step 2.3: Remove port opcodes from codegen
+Allowed:
 
-**Files**: `vo-codegen/src/stmt/mod.rs`, `vo-codegen/src/expr/mod.rs`,
-`vo-codegen/src/expr/builtin.rs`, `vo-codegen/src/type_info.rs`
+- receive from `chan`
+- send to `chan`
+- receive from `port`
 
-- Remove all `is_port` branches — everything emits `ChanSend` / `ChanRecv` / `ChanClose` /
-  `ChanNew`
-- The runtime distinguishes LOCAL/REMOTE by `QueueData::backing`, not by opcode
+Rejected:
 
-#### Step 2.4: Remove port opcodes from bytecode
+- send to `port` inside `select`
+- any form of distributed remote channel select
 
-**Files**: `vo-common-core/src/bytecode.rs` (or wherever opcodes are defined)
+### 4.4 Failure Semantics
 
-Remove `PortNew`, `PortSend`, `PortRecv`, `PortClose`, `PortLen`, `PortCap`.
-
-The VM interpreter's port opcode handlers become dead code. Remove them.
-
-Channel opcodes now handle REMOTE backing internally — the VM checks `backing` after the
-channel GcRef is loaded and routes to the appropriate path.
-
-#### Step 2.5: Update island_msg.rs
-
-**Files**: `vo-runtime/src/island_msg.rs`
-
-Keep the current wire protocol shape for the first migration step. Renaming `PortWire` is optional;
-the important part is semantic:
-
-- syntax/type checker may expose only `chan`
-- cross-island transfer still serializes transferred queue handles via the existing wire descriptor
-- the runtime may continue to instantiate a `ValueKind::Port` object internally for transferred
-  handles until a later cleanup phase
-
-In other words, **language unification does not require immediate GC-kind unification**.
-
-#### Step 2.6: Update select codegen
-
-**Files**: `vo-codegen/src/stmt/select.rs`
-
-Select already only supports `chan`. After Phase 2, this is the only channel type, so no change
-is needed beyond removing any port-exclusion checks if they existed.
-
-#### Step 2.7: Update all Vo test files and user code
-
-All `port T` → `chan T`, `make(port T, cap)` → `make(chan T, cap)`.
-
-**Validation**: `./d.py test both --release` — all tests pass.
+- `close(port)` means the owner endpoint intentionally closed the mailbox
+- transport loss / island death / routing failure is a distinct runtime failure path
+- failure must not be silently converted into `ok == false`
 
 ---
 
-### Phase 3: Select on Cross-Island Channels (future)
+## 5. Runtime Architecture
 
-#### Step 3.1: Select readiness for LOCAL channels
+### 5.1 Channels Become Strictly Local
 
-Already works after Phase 1 (unified waiter + unified state). No additional work.
+The runtime must stop treating channels as potentially remote language objects.
 
-#### Step 3.2: Select readiness for REMOTE channels
+Implications:
 
-Requires new `IslandCommand` variants:
+- no language-level remote proxy channel semantics
+- no channel-handle transfer across islands
+- no "unsupported remote select" path for channels because channels are never remote
 
-```rust
-IslandCommand::SelectRegister {
-    endpoint_id: u64,
-    kind: SelectRegisterKind, // Send or Recv
-    from_island: u32,
-    fiber_id: u64,
-    select_id: u64,
-    case_index: u16,
-    data: Option<Vec<u8>>,    // for send cases
-}
+The existing local channel queue implementation remains valuable and should stay.
 
-IslandCommand::SelectCancel {
-    endpoint_id: u64,
-    from_island: u32,
-    select_id: u64,
-}
-```
+### 5.2 Ports Become the Only Cross-Island Queue Primitive
 
-The home island registers a `QueueWaiter` with `select: Some(...)` on the `PortState`. When
-ready, it sends a `PortResponse` back. The remote island's `handle_port_response_command` sets
-`fiber.select_state.woken_index` and wakes the fiber, same as local select.
+Ports carry the remote routing responsibility.
 
-Cancel: when one case wins, the remote island sends `SelectCancel` to all other home islands.
-Race condition: a cancel may arrive after a wake is already in flight. The remote island must
-handle duplicate wakes gracefully (ignore if select already completed).
+Conceptual structure:
 
-This is significant complexity. Deferring to Phase 3 is appropriate.
+- **home endpoint**: owns the mailbox buffer, closed state, receive waiters
+- **sender capability**: lightweight reference to the home endpoint, transferable across islands
 
-#### Step 3.3: Compile-time restriction (interim)
+The no_std island routing work already done for remote queue operations should be reused here:
 
-Until Phase 3 is implemented, the compiler emits an error if a select case references a channel
-that may be remote. In practice this is hard to determine statically (any `chan T` could
-theoretically become remote). Options:
+- host-injected command queue
+- outbound command queue
+- `SchedulingOutcome::Suspended`
+- endpoint registry and response replay machinery
 
-- **(A)** Runtime panic if select encounters a REMOTE channel
-- **(B)** No restriction — REMOTE select just blocks forever (unsound)
+### 5.3 Port Waiting Is Local
 
-Option A is correct. The `exec_select_exec` function checks `QueueData::backing` and panics with
-"select on remote channel is not yet supported".
+Receive waiters are registered only on the home island.
+
+This is the key simplification:
+
+- local scheduler handles wake-up
+- local `select` works normally
+- no distributed select coordination is required
 
 ---
 
-## 5. File Impact Summary
+## 6. Implementation Plan
 
-| File | Phase | Change |
-|------|-------|--------|
-| `vo-runtime/src/objects/queue_state.rs` | 1.1, 1.2 | Unified waiter, unified state type |
-| `vo-runtime/src/objects/port/std_impl.rs` | 1.1, 1.2 | `Box<[u64]>` message type, new waiter |
-| `vo-runtime/src/objects/port/nostd_stub.rs` | 1.1, 1.2 | Same changes for no_std |
-| `vo-runtime/src/objects/channel.rs` | 1.1 | New waiter type |
-| `vo-runtime/src/island_msg.rs` | 2.5 | Rename PortWire (optional) |
-| `vo-runtime/src/island.rs` | — | No change in Phase 1-2 (`IslandCommand` changes only for remote select) |
-| `vo-runtime/src/island_transport.rs` | — | No change |
-| `vo-vm/src/exec/channel.rs` | 1.1, 1.3, 1.4 | Unified result type, REMOTE support |
-| `vo-vm/src/exec/port.rs` | 1.1, 1.2, 1.3, 1.4 | Thin wrapper → removed |
-| `vo-vm/src/exec/select.rs` | 1.1, 3.3 | New waiter type, runtime REMOTE check |
-| `vo-vm/src/vm/mod.rs` | 1.3, 1.4 | Merged dispatch, remove PortAction macro |
-| `vo-vm/src/vm/island_thread.rs` | 1.1, 1.2 | New waiter/message types |
-| `vo-vm/src/vm/jit/callbacks/port.rs` | 1.1, 1.2, 1.4 | New waiter, delegates to unified exec |
-| `vo-vm/src/vm/types.rs` | 1.1 | `wake_waiter` becomes `QueueWaiter`-aware and owns remote routing |
-| `vo-vm/src/scheduler.rs` | 1.1 | Local queue waiter wake helper replaces channel-specific wake helper |
-| `vo-vm/src/fiber.rs` | 1.1 | SelectState uses `QueueWaiter` |
-| `vo-syntax/src/**` | 2.1 | Remove `port` keyword and AST node |
-| `vo-analysis/src/**` | 2.2 | Remove `Type::Port`, merge branches |
-| `vo-codegen/src/**` | 2.3 | Remove `is_port` branches |
-| `vo-common-core/src/**` | 2.4 | Remove port opcodes |
-| Vo test files | 2.7 | `port T` → `chan T` |
+### Phase 0: Decision Freeze and Spec Alignment
+
+**Goal**: eliminate contradictory docs before code churn starts.
+
+Tasks:
+
+- update `docs/spec/channel.md` to describe `chan` local-only and `port` explicit remote messaging
+- mark this document as the authoritative plan
+- stop describing transparent remote channels as intended language behavior
+
+Validation:
+
+- docs reviewed for internal consistency
+
+### Phase 1: Type System and Syntax
+
+**Goal**: make the language enforce the new boundary.
+
+Files:
+
+- `vo-syntax/src/**`
+- `vo-analysis/src/**`
+
+Tasks:
+
+- keep both `chan` and `port` in syntax
+- add or formalize port direction types:
+  - `port T`
+  - `port<- T`
+  - `<-port T`
+- make `chan` non-sendable
+- make `port<- T` conditionally sendable on `T`
+- make `port T` and `<-port T` non-sendable
+- reject channel capture in `go(island)`
+- reject receive-port capture in `go(island)`
+- reject port send cases in `select`
+- allow port receive cases in `select`
+- improve diagnostics so the error explains the design rule, not just "type mismatch"
+
+Validation:
+
+- checker unit tests for sendability
+- parser/type round-trip tests
+- targeted diagnostics tests
+
+### Phase 2: Runtime Split
+
+**Goal**: remove channel-from-remote semantics and center remote routing on ports.
+
+Files:
+
+- `vo-runtime/src/objects/channel.rs`
+- `vo-runtime/src/objects/port/**`
+- `vo-runtime/src/objects/queue_state.rs`
+- `vo-runtime/src/island.rs`
+- `vo-runtime/src/island_msg.rs`
+- `vo-vm/src/exec/channel.rs`
+- `vo-vm/src/exec/port.rs`
+- `vo-vm/src/exec/island.rs`
+- `vo-vm/src/exec/transport.rs`
+- `vo-vm/src/vm/**`
+- `vo-vm/src/gc_roots.rs`
+
+Tasks:
+
+- stop preparing channel handles for cross-island transfer
+- remove language-path creation of remote channel proxies
+- keep local channel runtime fast and unchanged where possible
+- model port home endpoint + sender capability explicitly
+- route remote sends only through port machinery
+- keep port receive state on the home island
+- preserve `close` vs delivery failure distinction
+- keep current host-routed no_std plumbing as the transport substrate for ports
+
+Important rule:
+
+- reuse queue infrastructure internally where it helps
+- do **not** reuse a single language semantic model for channel and port
+
+Validation:
+
+- `cargo check -p vo-runtime`
+- `cargo check -p vo-vm`
+- `cargo check -p vo-vm --no-default-features`
+- targeted VM tests for remote port send / local port recv / close / failure
+
+### Phase 3: Codegen, Bytecode, and JIT
+
+**Goal**: make generated code reflect the split directly.
+
+Files:
+
+- `vo-codegen/src/**`
+- `vo-common-core/src/**`
+- `vo-vm/src/vm/jit/callbacks/**`
+
+Tasks:
+
+- ensure channel opcodes are emitted only for local channels
+- ensure port opcodes are emitted for port operations
+- teach codegen that select legality differs for channels and ports
+- remove JIT paths that assume remote channel operations are language-visible
+- preserve or refine low-level helper sharing only where semantics still match
+
+Validation:
+
+- `cargo check -p vo-vm --features jit`
+- targeted JIT tests for port send / recv / select-recv
+
+### Phase 4: Migration of Tests and User Code
+
+**Goal**: update all examples and tests to the explicit model.
+
+Tasks:
+
+- replace cross-island channel examples with port-based request/reply or publish/subscribe patterns
+- update docs and tests that currently rely on channel transfer
+- add examples that demonstrate:
+  - local worker pool with channels
+  - cross-island request/reply with ports
+  - local select over port receives
+
+Validation:
+
+- `./d.py test both --release`
+
+### Phase 5: Cleanup
+
+**Goal**: remove stale compatibility paths and misleading wording.
+
+Tasks:
+
+- remove dead remote-channel code paths
+- rename command / helper internals if they still use channel terminology for remote port traffic
+- simplify docs that still describe "remote channel"
+- review GC scanning and endpoint lifetime after the split
+
+Validation:
+
+- `./d.py test both --release`
+- targeted no_std / JIT / vo-web checks as needed
 
 ---
 
-## 6. Risk Assessment
+## 7. File Impact Summary
+
+| Area | Main Impact |
+|------|-------------|
+| `docs/spec/channel.md` | Normative semantics flip: channels local-only, ports explicit |
+| `vo-syntax` | Port direction syntax and select legality |
+| `vo-analysis` | Sendability, `go(island)` capture checks, port select checks |
+| `vo-codegen` | Distinct codegen paths for channel vs port semantics |
+| `vo-common-core` | Opcode semantics reviewed; keep split explicit |
+| `vo-runtime` | Channel/port object split hardened; remote queue path becomes port-focused |
+| `vo-vm` | Remote queue dispatch becomes port-only; channel exec becomes local-only |
+| `vo-vm` JIT | Remove remote-channel-visible assumptions |
+| Tests and docs | Replace transparent remote channel examples with port patterns |
+
+---
+
+## 8. Risks
 
 | Risk | Mitigation |
 |------|------------|
-| LOCAL port pack/unpack removal breaks GC | Add typed write barrier to port send (same as channel). Step 1.2 explicitly handles this. |
-| GC root scanning misses port buffer values | After Step 1.2, port buffer contains `Box<[u64]>` with GC refs → same scanning as channel buffer. Verify in `gc_roots.rs`. |
-| Phase 1 accidentally becomes user-visible | Do not change `port` close semantics in Phase 1. Keep compatibility until language removal / explicit break. |
-| Remote select race conditions | Deferred to Phase 3. Phase 1-2 uses runtime panic for REMOTE select. |
-| Breaking change for `port` users | Phase 2 is opt-in. Phase 1 is invisible. Migration is mechanical (`port` → `chan`). |
-| Sendability flip for `chan` lands before transfer support | **DONE** — `Type::Chan` → `Sendability::Static` in `sendable.rs`, `pack.rs` Channel pack/unpack implemented, `prepare_value_chans_for_transfer` recursive preparation wired into VM loop ChanSend, JIT callback, and `handle_chan_request_command`. |
-| Sendability check for `go(island)` captures | **DONE** — `go_island.rs` post-pass checks capture/arg sendability after escape analysis. `stmt.rs` checks target is `island` type. Error codes: `GoIslandTargetNotIsland` (2524), `GoIslandNotSendable` (2525). |
-| Interface (`any`) cross-island transfer | `any` is `RuntimeCheck` sendable at compile time. Runtime `pack.rs` currently panics on `ValueKind::Interface`. Future work: pack interface inner value recursively based on dynamic type. |
-| `ValueKind::Port` removal cascades | Keep `ValueKind::Port` internally through the migration; treat GC-kind merge as later cleanup. |
+| Existing code depends on channel transfer | Provide strong diagnostics and mechanical migration examples |
+| Current runtime internals use channel names for remote queue operations | Allow temporary internal naming mismatch during migration; fix in cleanup |
+| Port direction syntax touches parser and checker broadly | Land syntax/checker before deep runtime churn |
+| no_std routing regressions while repurposing remote machinery | Reuse the already-validated command queue / outbound queue substrate |
+| Interface / `any` sendability remains partially dynamic | Keep runtime checks explicit and tested |
 
 ---
 
-## 7. Estimated Effort
+## 9. Estimated Effort
 
 | Phase | Days | Risk |
-|-------|------|------|
-| Phase 1 (runtime unification) | 4–5 | Medium — VM/JIT wake routing and remote replay semantics must stay coherent |
-| Phase 2 (language removal) | 2–3 | Low — mechanical, compiler-guided |
-| Phase 3 (remote select) | 3–5 | Medium — distributed cancel protocol |
-| **Total** | **8–12** | |
+|------|------|------|
+| Phase 0 | 1 | Low |
+| Phase 1 | 2–3 | Medium |
+| Phase 2 | 4–6 | Medium |
+| Phase 3 | 2–3 | Medium |
+| Phase 4 | 1–2 | Low |
+| Phase 5 | 1–2 | Low |
+| **Total** | **11–17** | |
 
-Phase 1 and Phase 2 can be shipped independently. Phase 3 is future work.
+The cost is meaningful, but it is still lower-risk than implementing and maintaining a correct
+distributed remote-channel semantic model.
+
+---
+
+## 10. Success Criteria
+
+The migration is successful when all of the following are true:
+
+- the spec no longer promises transparent remote channels
+- the compiler rejects cross-island channel transfer
+- remote communication is expressed through ports only
+- local `select` covers local channels and local receive ports
+- no runtime path still depends on "remote channel in select"
+- std, no_std, and JIT builds pass with the new split

@@ -45,23 +45,23 @@ pub enum IslandCommand {
     /// Request island shutdown
     Shutdown,
     /// Request from a remote island to the home island (where ChannelState lives).
-    ChanRequest {
+    EndpointRequest {
         endpoint_id: u64,
-        kind: ChanRequestKind,
+        kind: EndpointRequestKind,
         from_island: u32,
         fiber_id: u64,
     },
     /// Response from the home island back to the requesting remote island.
-    ChanResponse {
+    EndpointResponse {
         endpoint_id: u64,
-        kind: ChanResponseKind,
+        kind: EndpointResponseKind,
         fiber_id: u64,
     },
 }
 
 /// Kind of channel request (remote → home).
 #[derive(Debug)]
-pub enum ChanRequestKind {
+pub enum EndpointRequestKind {
     /// Send data to the channel.
     Send { data: Vec<u8> },
     /// Receive data from the channel.
@@ -74,7 +74,7 @@ pub enum ChanRequestKind {
 
 /// Kind of channel response (home → remote).
 #[derive(Debug)]
-pub enum ChanResponseKind {
+pub enum EndpointResponseKind {
     /// Acknowledgment of a send operation.
     SendAck { closed: bool },
     /// Data delivered to a receiver (or closed indication).

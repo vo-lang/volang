@@ -195,6 +195,27 @@ fn analyze_loop_liveness(
     (live_in, live_out)
 }
 
+fn push_slot_range(regs: &mut Vec<u16>, start: u16, slots: u16) {
+    for i in 0..slots {
+        regs.push(start + i);
+    }
+}
+
+fn recv_layout(flags: u8, normalize_zero_elem_slots: bool) -> (u16, bool) {
+    let mut elem_slots = ((flags >> 1) & 0x7F) as u16;
+    if normalize_zero_elem_slots && elem_slots == 0 {
+        elem_slots = 1;
+    }
+    (elem_slots, (flags & 1) != 0)
+}
+
+fn push_recv_result_slots(regs: &mut Vec<u16>, dst_start: u16, elem_slots: u16, has_ok: bool) {
+    push_slot_range(regs, dst_start, elem_slots);
+    if has_ok {
+        regs.push(dst_start + elem_slots);
+    }
+}
+
 /// Get registers read by an instruction.
 fn get_read_regs(inst: &Instruction) -> Vec<u16> {
     let mut regs = Vec::new();
@@ -216,6 +237,23 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
         // Conditional jumps read the condition register
         Opcode::JumpIf | Opcode::JumpIfNot => {
             regs.push(inst.a);
+        }
+        Opcode::ChanNew | Opcode::PortNew => {
+            regs.push(inst.b);
+            regs.push(inst.c);
+        }
+        Opcode::ChanLen | Opcode::PortLen | Opcode::ChanCap | Opcode::PortCap => {
+            regs.push(inst.b);
+        }
+        Opcode::ChanClose | Opcode::PortClose => {
+            regs.push(inst.a);
+        }
+        Opcode::ChanSend | Opcode::PortSend => {
+            regs.push(inst.a);
+            push_slot_range(&mut regs, inst.b, inst.flags as u16);
+        }
+        Opcode::ChanRecv | Opcode::PortRecv => {
+            regs.push(inst.b);
         }
         // ForLoop reads idx and limit
         Opcode::ForLoop => {
@@ -324,6 +362,14 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
                 regs.push(arg_start + i);
             }
         }
+        Opcode::SelectSend => {
+            regs.push(inst.a);
+            let elem_slots = if inst.flags == 0 { 1 } else { inst.flags as u16 };
+            push_slot_range(&mut regs, inst.b, elem_slots);
+        }
+        Opcode::SelectRecv | Opcode::PortSelectRecv => {
+            regs.push(inst.b);
+        }
         // Many other instructions - add as needed
         _ => {}
     }
@@ -344,6 +390,9 @@ fn get_write_reg(inst: &Instruction) -> Option<u16> {
         Opcode::EqF | Opcode::NeF | Opcode::LtF | Opcode::LeF | Opcode::GtF | Opcode::GeF |
         Opcode::LoadInt | Opcode::LoadConst |
         Opcode::PtrGet | Opcode::PtrNew | Opcode::SliceGet | Opcode::SliceNew |
+        Opcode::ChanNew | Opcode::PortNew |
+        Opcode::ChanLen | Opcode::PortLen | Opcode::ChanCap | Opcode::PortCap |
+        Opcode::IslandNew | Opcode::SelectExec |
         Opcode::ForLoop => {  // ForLoop writes idx (a)
             Some(inst.a)
         }
@@ -416,6 +465,14 @@ fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
             for i in 0..elem_slots {
                 regs.push(inst.a + i as u16);
             }
+        }
+        Opcode::ChanRecv | Opcode::PortRecv => {
+            let (elem_slots, has_ok) = recv_layout(inst.flags, false);
+            push_recv_result_slots(&mut regs, inst.a, elem_slots, has_ok);
+        }
+        Opcode::SelectRecv | Opcode::PortSelectRecv => {
+            let (elem_slots, has_ok) = recv_layout(inst.flags, true);
+            push_recv_result_slots(&mut regs, inst.a, elem_slots, has_ok);
         }
         _ => {}
     }
@@ -611,6 +668,48 @@ mod tests {
         Instruction { op: Opcode::CallIface as u8, flags: method_idx, a: iface_slot, b: arg_start, c }
     }
 
+    fn chan_new(dst: u16, elem_type: u16, cap: u16, elem_slots: u8) -> Instruction {
+        Instruction { op: Opcode::ChanNew as u8, flags: elem_slots, a: dst, b: elem_type, c: cap }
+    }
+
+    fn port_len(dst: u16, ch: u16) -> Instruction {
+        Instruction { op: Opcode::PortLen as u8, flags: 0, a: dst, b: ch, c: 0 }
+    }
+
+    fn port_cap(dst: u16, ch: u16) -> Instruction {
+        Instruction { op: Opcode::PortCap as u8, flags: 0, a: dst, b: ch, c: 0 }
+    }
+
+    fn port_close(ch: u16) -> Instruction {
+        Instruction { op: Opcode::PortClose as u8, flags: 0, a: ch, b: 0, c: 0 }
+    }
+
+    fn port_send(ch: u16, val_start: u16, elem_slots: u8) -> Instruction {
+        Instruction { op: Opcode::PortSend as u8, flags: elem_slots, a: ch, b: val_start, c: 0 }
+    }
+
+    fn port_recv(dst: u16, ch: u16, elem_slots: u8, has_ok: bool) -> Instruction {
+        let flags = (elem_slots << 1) | if has_ok { 1 } else { 0 };
+        Instruction { op: Opcode::PortRecv as u8, flags, a: dst, b: ch, c: 0 }
+    }
+
+    fn select_send_inst(ch: u16, val_start: u16, elem_slots: u8) -> Instruction {
+        Instruction { op: Opcode::SelectSend as u8, flags: elem_slots, a: ch, b: val_start, c: 0 }
+    }
+
+    fn port_select_recv(dst: u16, ch: u16, elem_slots: u8, has_ok: bool) -> Instruction {
+        let flags = (elem_slots << 1) | if has_ok { 1 } else { 0 };
+        Instruction { op: Opcode::PortSelectRecv as u8, flags, a: dst, b: ch, c: 0 }
+    }
+
+    fn select_begin(case_count: u16, has_default: bool) -> Instruction {
+        Instruction { op: Opcode::SelectBegin as u8, flags: if has_default { 1 } else { 0 }, a: case_count, b: 0, c: 0 }
+    }
+
+    fn select_exec(result: u16) -> Instruction {
+        Instruction { op: Opcode::SelectExec as u8, flags: 0, a: result, b: 0, c: 0 }
+    }
+
     #[test]
     fn test_get_read_regs_slice_set() {
         // SliceSet: a=slice, b=idx, c=val_start, flags=elem_bytes
@@ -702,5 +801,66 @@ mod tests {
         let inst = call_iface(5, 10, 2, 3, 0);
         let regs = get_write_regs_multi(&inst);
         assert_eq!(regs, vec![10, 11, 12], "CallIface should write ret_slots to arg_start");
+    }
+
+    #[test]
+    fn test_get_read_regs_queue_and_select_ops() {
+        assert_eq!(get_read_regs(&chan_new(1, 2, 3, 1)), vec![2, 3]);
+        assert_eq!(get_read_regs(&port_len(4, 5)), vec![5]);
+        assert_eq!(get_read_regs(&port_close(6)), vec![6]);
+        assert_eq!(get_read_regs(&port_send(7, 8, 2)), vec![7, 8, 9]);
+        assert_eq!(get_read_regs(&port_recv(10, 11, 2, true)), vec![11]);
+        assert_eq!(get_read_regs(&select_send_inst(12, 13, 0)), vec![12, 13]);
+        assert_eq!(get_read_regs(&port_select_recv(14, 15, 0, true)), vec![15]);
+    }
+
+    #[test]
+    fn test_get_write_reg_queue_and_select_ops() {
+        assert_eq!(get_write_reg(&chan_new(1, 2, 3, 1)), Some(1));
+        assert_eq!(get_write_reg(&port_len(4, 5)), Some(4));
+        assert_eq!(get_write_reg(&port_cap(6, 7)), Some(6));
+        assert_eq!(get_write_reg(&select_exec(8)), Some(8));
+        assert_eq!(get_write_reg(&port_close(9)), None);
+    }
+
+    #[test]
+    fn test_get_write_regs_multi_queue_and_select_ops() {
+        assert_eq!(get_write_regs_multi(&port_recv(10, 5, 2, true)), vec![10, 11, 12]);
+        assert_eq!(get_write_regs_multi(&port_recv(20, 6, 2, false)), vec![20, 21]);
+        assert_eq!(get_write_regs_multi(&port_select_recv(30, 7, 0, true)), vec![30, 31]);
+    }
+
+    #[test]
+    fn test_analyze_loop_liveness_port_queue_ops() {
+        let func = make_func(vec![
+            hint_loop(0, 3, 4),
+            port_send(0, 1, 2),
+            port_recv(3, 0, 2, true),
+            jump(-2),
+            ret(),
+        ]);
+
+        let loops = analyze_loops(&func);
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].live_in, vec![0, 1, 2]);
+        assert_eq!(loops[0].live_out, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn test_analyze_loop_liveness_select_ops() {
+        let func = make_func(vec![
+            hint_loop(0, 5, 6),
+            select_begin(2, false),
+            select_send_inst(0, 1, 2),
+            port_select_recv(10, 4, 2, true),
+            select_exec(13),
+            jump(-4),
+            ret(),
+        ]);
+
+        let loops = analyze_loops(&func);
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].live_in, vec![0, 1, 2, 4]);
+        assert_eq!(loops[0].live_out, vec![10, 11, 12, 13]);
     }
 }

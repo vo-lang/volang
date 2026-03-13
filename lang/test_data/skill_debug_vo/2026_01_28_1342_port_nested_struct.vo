@@ -16,7 +16,7 @@ type Outer struct {
 
 func main() {
 	i := make(island)
-	p := make(chan int, 1)
+	p := make(port int, 1)
 	
 	outer := Outer{
 		A: Inner{Value: 100, Name: "inner"},
@@ -24,7 +24,7 @@ func main() {
 		C: "outer",
 	}
 	
-	go @(i) func(ch chan int, data Outer) {
+	go @(i) func(ch port int, data Outer) {
 		sum := data.A.Value
 		for _, v := range data.B {
 			sum += v

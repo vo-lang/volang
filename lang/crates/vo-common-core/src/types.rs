@@ -98,7 +98,7 @@ impl ValueRttid {
 /// Layout:
 /// - Primitives (0-14): 1 slot, no GC
 /// - Compound value types (16, 21): multi-slot, may contain GC refs
-/// - Reference types (15, 17-20, 22, 24): 1 slot GcRef, heap allocated
+/// - Reference types (17-20, 22-24): 1 slot GcRef, heap allocated
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, TryFromPrimitive)]
 #[repr(u8)]
 pub enum ValueKind {
@@ -130,6 +130,7 @@ pub enum ValueKind {
     Channel = 20,
     Closure = 21,
     Pointer = 22,
+    Port = 23,
     Island = 24,
 }
 
@@ -150,6 +151,11 @@ impl ValueKind {
     #[inline]
     pub fn may_contain_gc_refs(&self) -> bool {
         (*self as u8) >= Self::Array as u8
+    }
+
+    #[inline]
+    pub fn is_queue(&self) -> bool {
+        matches!(self, Self::Channel | Self::Port)
     }
 
     pub fn fixed_slot_count(&self) -> u16 {

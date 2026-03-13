@@ -6,13 +6,13 @@ import "time"
 func main() {
 	i1 := make(island)
 	i2 := make(island)
-	p := make(chan int, 2)
+	p := make(port int, 2)
 	
-	go @(i1) func(ch chan int) {
+	go @(i1) func(ch port int) {
 		ch <- 100
 	}(p)
 	
-	go @(i2) func(ch chan int) {
+	go @(i2) func(ch port int) {
 		ch <- 200
 	}(p)
 	

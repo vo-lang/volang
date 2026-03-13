@@ -286,6 +286,51 @@ impl Checker {
         }
     }
 
+    fn send_queue_elem_type(
+        &mut self,
+        queue_type: TypeKey,
+        span: Span,
+        in_select: bool,
+    ) -> Option<TypeKey> {
+        let under = typ::underlying_type(queue_type, self.objs());
+        let queue = self.otype(under);
+        let Some((dir, elem)) = queue.queue_dir_elem() else {
+            self.error_code_msg(TypeError::SendToNonChan, span, "cannot send to non-channel-or-port type");
+            return None;
+        };
+        if in_select && queue.is_port() {
+            self.error_code_msg(TypeError::InvalidOp, span, "select does not support send on port");
+            return None;
+        }
+        if dir == ChanDir::RecvOnly {
+            if queue.is_port() {
+                self.error_code_msg(TypeError::InvalidOp, span, "cannot send to receive-only port");
+            } else {
+                self.error_code(TypeError::SendToRecvOnly, span);
+            }
+            return None;
+        }
+        Some(elem)
+    }
+
+    fn recv_queue_elem_type(&mut self, queue_type: TypeKey, span: Span) -> Option<TypeKey> {
+        let under = typ::underlying_type(queue_type, self.objs());
+        let queue = self.otype(under);
+        let Some((dir, elem)) = queue.queue_dir_elem() else {
+            self.error_code_msg(TypeError::RecvFromNonChan, span, "cannot receive from non-channel-or-port");
+            return None;
+        };
+        if dir == ChanDir::SendOnly {
+            if queue.is_port() {
+                self.error_code_msg(TypeError::InvalidOp, span, "cannot receive from send-only port");
+            } else {
+                self.error_code(TypeError::RecvFromSendOnly, span);
+            }
+            return None;
+        }
+        Some(elem)
+    }
+
     /// Checks case values in an expression switch.
     fn case_values(
         &mut self,
@@ -479,17 +524,8 @@ impl Checker {
                     return;
                 }
                 let chtype = ch.typ.unwrap();
-                let under_chtype = typ::underlying_type(chtype, self.objs());
-                let underlying = self.otype(under_chtype);
-                if let Some(chan) = underlying.try_as_chan() {
-                    if chan.dir() == ChanDir::RecvOnly {
-                        self.error_code(TypeError::SendToRecvOnly, ss.chan.span);
-                    } else {
-                        let elem_ty = Some(chan.elem());
-                        self.assignment(x, elem_ty, "send");
-                    }
-                } else {
-                    self.error_code(TypeError::SendToNonChan, ss.chan.span);
+                if let Some(elem_ty) = self.send_queue_elem_type(chtype, ss.chan.span, false) {
+                    self.assignment(x, Some(elem_ty), "send");
                 }
             }
 
@@ -889,15 +925,10 @@ impl Checker {
                                 // Check channel type for send
                                 if !ch.invalid() {
                                     let chtype = ch.typ.unwrap();
-                                    let under = typ::underlying_type(chtype, self.objs());
-                                    if let Some(chan) = self.otype(under).try_as_chan() {
-                                        if chan.dir() == ChanDir::RecvOnly {
-                                            self.error_code(TypeError::SendToRecvOnly, send.chan.span);
-                                        } else if !val.invalid() {
-                                            self.assignment(val, Some(chan.elem()), "send");
+                                    if let Some(elem_ty) = self.send_queue_elem_type(chtype, send.chan.span, true) {
+                                        if !val.invalid() {
+                                            self.assignment(val, Some(elem_ty), "send");
                                         }
-                                    } else {
-                                        self.error_code(TypeError::SendToNonChan, send.chan.span);
                                     }
                                 }
                             }
@@ -907,16 +938,7 @@ impl Checker {
                                 // Check receive expression is a channel receive
                                 let elem_type = if !x.invalid() {
                                     let xtype = x.typ.unwrap();
-                                    let under = typ::underlying_type(xtype, self.objs());
-                                    if let Some(chan) = self.otype(under).try_as_chan() {
-                                        if chan.dir() == ChanDir::SendOnly {
-                                            self.error_code(TypeError::RecvFromSendOnly, recv.expr.span);
-                                        }
-                                        Some(chan.elem())
-                                    } else {
-                                        self.error_code(TypeError::RecvFromNonChan, recv.expr.span);
-                                        None
-                                    }
+                                    self.recv_queue_elem_type(xtype, recv.expr.span)
                                 } else {
                                     None
                                 };

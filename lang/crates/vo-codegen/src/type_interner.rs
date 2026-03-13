@@ -142,6 +142,7 @@ fn type_key_to_runtime_type(
                     ctx.named_type_metas.push(vo_common_core::bytecode::NamedTypeMeta {
                         name: String::new(),
                         underlying_meta: vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Void),
+                        underlying_rttid: vo_runtime::ValueRttid::new(0, vo_runtime::ValueKind::Void),
                         methods: std::collections::HashMap::new(),
                     });
                     id
@@ -178,6 +179,15 @@ fn type_key_to_runtime_type(
                 vo_analysis::typ::ChanDir::RecvOnly => ChanDir::Recv,
             };
             (RuntimeType::Chan { dir, elem: elem_value_rttid }, ValueKind::Channel)
+        }
+        Type::Port(port) => {
+            let elem_value_rttid = intern_type_key(interner, port.elem(), tc_objs, str_interner, ctx);
+            let dir = match port.dir() {
+                vo_analysis::typ::ChanDir::SendRecv => ChanDir::Both,
+                vo_analysis::typ::ChanDir::SendOnly => ChanDir::Send,
+                vo_analysis::typ::ChanDir::RecvOnly => ChanDir::Recv,
+            };
+            (RuntimeType::Port { dir, elem: elem_value_rttid }, ValueKind::Port)
         }
         Type::Signature(sig) => {
             let params_tuple = &tc_objs.types[sig.params()];

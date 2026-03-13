@@ -99,7 +99,6 @@ impl Vm {
             .map(|f| f.capture_slot_types.as_slice())
             .collect();
 
-        #[cfg(feature = "std")]
         let endpoint_registry = &self.state.endpoint_registry;
 
         unsafe { &mut *gc_ptr }.step(
@@ -108,8 +107,7 @@ impl Vm {
                 scan_fibers(gc, fibers, &module_ref.functions);
                 scan_sentinel_errors(gc, sentinel_errors);
                 // V6: endpoint registry channels are GC roots
-                #[cfg(feature = "std")]
-                for ch in endpoint_registry.live_channels() {
+                for ch in endpoint_registry.live_handles() {
                     gc.mark_gray(ch);
                 }
             },
@@ -198,7 +196,7 @@ fn scan_fibers(gc: &mut Gc, fibers: &[Box<Fiber>], functions: &[FunctionDef]) {
 
         // Scan select state — registered_channels holds channel GcRefs while blocked in select.
         if let Some(ref ss) = fiber.select_state {
-            for &ch in &ss.registered_channels {
+            for &ch in &ss.registered_queues {
                 if !ch.is_null() { gc.mark_gray(ch); }
             }
         }

@@ -108,25 +108,20 @@ pub fn dispatch_jit_call(
     
     // Allocate JIT frame directly in fiber.stack (not a separate Vec)
     let jit_bp = fiber.sp;
-    fiber.ensure_capacity(jit_bp + local_slots);
+    fiber.reserve_slots_at(jit_bp, local_slots);
     
     // Zero the frame region first
-    let stack_ptr = fiber.stack_ptr();
-    unsafe {
-        core::ptr::write_bytes(stack_ptr.add(jit_bp), 0, local_slots);
-    }
+    fiber.zero_slots_at(jit_bp, local_slots);
     
     // Copy caller args directly to fiber.stack[jit_bp..]
     for i in 0..arg_slots {
         fiber.stack[jit_bp + i] = fiber.stack[caller_bp + arg_start + i];
     }
     
-    fiber.sp = jit_bp + local_slots;
-    
     // Push frame so panic_unwind has correct frame info.
     // ret_reg = arg_start + arg_slots: return values live after the arg slots
     // in the call buffer (layout: [Value×arg_slots | ret_slot_types]).
-    fiber.frames.push(CallFrame::new(func_id, jit_bp, (arg_start + arg_slots) as u16, ret_slots as u16));
+    fiber.push_call_frame(func_id, jit_bp, (arg_start + arg_slots) as u16, ret_slots as u16);
 
     invoke_jit_and_handle(vm, fiber, module, jit_func, jit_bp, ret_slots, caller_bp, arg_start + arg_slots)
 }
@@ -377,7 +372,6 @@ fn setup_prepared_call(
     let callee_func_def = &module.functions[callee_func_id as usize];
     let param_slots = callee_func_def.param_slots as usize;
     let local_slots = callee_func_def.local_slots as usize;
-    let new_sp = callee_bp + local_slots;
     
     // Materialize any intermediate JIT frames from non-OK propagation
     if !fiber.resume_stack.is_empty() {
@@ -389,24 +383,18 @@ fn setup_prepared_call(
         }
     }
     
+    fiber.reserve_slots_at(callee_bp, local_slots);
     // Zero non-arg local slots for VM interpreter
     if local_slots > param_slots {
-        let stack = fiber.stack_ptr();
-        unsafe {
-            core::ptr::write_bytes(
-                stack.add(callee_bp + param_slots), 0,
-                local_slots - param_slots
-            );
-        };
+        fiber.zero_slots_at(callee_bp + param_slots, local_slots - param_slots);
     }
     
-    fiber.sp = new_sp;
-    fiber.frames.push(CallFrame::new(
+    fiber.push_call_frame(
         callee_func_id,
         callee_bp,
         call_ret_reg,
         callee_ret_slots,
-    ));
+    );
 }
 
 /// Set up a regular call frame (JIT requests VM to execute a non-JIT function).
@@ -436,13 +424,11 @@ fn setup_regular_call(
     let callee_func_def = &module.functions[callee_func_id as usize];
     let callee_bp = fiber.sp;
     let callee_local_slots = callee_func_def.local_slots as usize;
-    let new_sp = callee_bp + callee_local_slots;
     
-    fiber.ensure_capacity(new_sp);
+    fiber.reserve_slots_at(callee_bp, callee_local_slots);
     
     // Zero callee's local slots
-    let stack = fiber.stack_ptr();
-    unsafe { core::ptr::write_bytes(stack.add(callee_bp), 0, callee_local_slots) };
+    fiber.zero_slots_at(callee_bp, callee_local_slots);
     
     // Copy args from caller's locals area
     let arg_slots = callee_func_def.param_slots as usize;
@@ -450,13 +436,12 @@ fn setup_regular_call(
         fiber.stack[callee_bp + i] = fiber.stack[actual_caller_bp + call_arg_start + i];
     }
     
-    fiber.sp = new_sp;
-    fiber.frames.push(CallFrame::new(
+    fiber.push_call_frame(
         callee_func_id,
         callee_bp,
         call_ret_reg,
         callee_ret_slots,
-    ));
+    );
     
     (callee_bp, actual_caller_bp)
 }

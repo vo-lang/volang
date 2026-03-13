@@ -723,12 +723,10 @@ fn call_defer_entry(
     // Ensure stack has enough space for both local_slots and arg_offset+args
     let arg_space = layout.arg_offset + arg_slots;
     let total_slots = (func.local_slots as usize).max(arg_space);
-    let new_sp = args_start + total_slots;
-    fiber.ensure_capacity(new_sp);
+    fiber.reserve_slots_at(args_start, total_slots);
     // Zero frame slots: stale values in GcRef-typed slots cause GC segfault.
     // Args are copied on top of the zeroed region immediately after.
-    fiber.stack[args_start..new_sp].fill(0);
-    fiber.sp = new_sp;
+    fiber.zero_slots_at(args_start, total_slots);
     let stack = fiber.stack_ptr();
 
     // Set slot 0 if needed
@@ -743,7 +741,7 @@ fn call_defer_entry(
         }
     }
 
-    fiber.frames.push(CallFrame::new(func_id, args_start, 0, 0));
+    fiber.push_call_frame(func_id, args_start, 0, 0);
 
     ExecResult::FrameChanged
 }

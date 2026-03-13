@@ -9,6 +9,7 @@ use vo_analysis::Project;
 use vo_analysis::check::type_info as type_layout;
 use vo_syntax::ast::Ident;
 use vo_syntax::ast::ExprId;
+use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 
 /// Describes how call arguments should be compiled.
@@ -19,6 +20,12 @@ pub struct CallArgInfo {
     /// If Some, the single AST argument is a tuple and should be expanded.
     /// The value is the tuple type to expand.
     pub tuple_expand: Option<TypeKey>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QueueFlavor {
+    Chan,
+    Port,
 }
 
 /// Wrapper around Project for codegen queries.
@@ -188,44 +195,56 @@ impl<'a> TypeInfoWrapper<'a> {
             return self.type_to_runtime_type(named.underlying(), ctx);
         }
         
-        match self.type_value_kind(type_key) {
-            vk @ (ValueKind::Int | ValueKind::Int8 | ValueKind::Int16 | ValueKind::Int32 | ValueKind::Int64 |
-                  ValueKind::Uint | ValueKind::Uint8 | ValueKind::Uint16 | ValueKind::Uint32 | ValueKind::Uint64 |
-                  ValueKind::Float32 | ValueKind::Float64 | ValueKind::Bool | ValueKind::String) => {
-                RuntimeType::Basic(vk)
+        let value_kind = self.type_value_kind(type_key);
+        if value_kind.is_queue() {
+            let underlying = typ::underlying_type(type_key, tc_objs);
+            match &tc_objs.types[underlying] {
+                Type::Chan(_) => RuntimeType::Chan {
+                    dir: self.queue_dir(type_key),
+                    elem: self.intern_value_rttid(self.queue_elem_type(type_key), ctx),
+                },
+                Type::Port(_) => RuntimeType::Port {
+                    dir: self.queue_dir(type_key),
+                    elem: self.intern_value_rttid(self.queue_elem_type(type_key), ctx),
+                },
+                _ => panic!("type_to_runtime_type: channel value kind without chan/port underlying"),
             }
-            ValueKind::Struct | ValueKind::Array | ValueKind::Interface => {
-                let rttid = ctx.intern_type_key(type_key, self);
-                ctx.runtime_type(rttid).clone()
-            }
-            ValueKind::Pointer => RuntimeType::Pointer(self.intern_value_rttid(self.pointer_elem(type_key), ctx)),
-            ValueKind::Slice => RuntimeType::Slice(self.intern_value_rttid(self.slice_elem_type(type_key), ctx)),
-            ValueKind::Map => {
-                let (key_type, val_type) = self.map_key_val_types(type_key);
-                RuntimeType::Map {
-                    key: self.intern_value_rttid(key_type, ctx),
-                    val: self.intern_value_rttid(val_type, ctx),
+        } else {
+            match value_kind {
+                vk @ (ValueKind::Int | ValueKind::Int8 | ValueKind::Int16 | ValueKind::Int32 | ValueKind::Int64 |
+                      ValueKind::Uint | ValueKind::Uint8 | ValueKind::Uint16 | ValueKind::Uint32 | ValueKind::Uint64 |
+                      ValueKind::Float32 | ValueKind::Float64 | ValueKind::Bool | ValueKind::String) => {
+                    RuntimeType::Basic(vk)
                 }
-            }
-            ValueKind::Channel => {
-                RuntimeType::Chan {
-                    dir: self.chan_dir(type_key),
-                    elem: self.intern_value_rttid(self.chan_elem_type(type_key), ctx),
+                ValueKind::Struct | ValueKind::Array | ValueKind::Interface => {
+                    let rttid = ctx.intern_type_key(type_key, self);
+                    ctx.runtime_type(rttid).clone()
                 }
-            }
-            ValueKind::Closure => {
-                let underlying = typ::underlying_type(type_key, tc_objs);
-                if let Type::Signature(sig) = &tc_objs.types[underlying] {
-                    RuntimeType::Func {
-                        params: self.tuple_to_value_rttids(sig.params(), ctx),
-                        results: self.tuple_to_value_rttids(sig.results(), ctx),
-                        variadic: sig.variadic(),
+                ValueKind::Pointer => RuntimeType::Pointer(self.intern_value_rttid(self.pointer_elem(type_key), ctx)),
+                ValueKind::Slice => RuntimeType::Slice(self.intern_value_rttid(self.slice_elem_type(type_key), ctx)),
+                ValueKind::Map => {
+                    let (key_type, val_type) = self.map_key_val_types(type_key);
+                    RuntimeType::Map {
+                        key: self.intern_value_rttid(key_type, ctx),
+                        val: self.intern_value_rttid(val_type, ctx),
                     }
-                } else {
-                    RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false }
                 }
+                ValueKind::Closure => {
+                    let underlying = typ::underlying_type(type_key, tc_objs);
+                    if let Type::Signature(sig) = &tc_objs.types[underlying] {
+                        RuntimeType::Func {
+                            params: self.tuple_to_value_rttids(sig.params(), ctx),
+                            results: self.tuple_to_value_rttids(sig.results(), ctx),
+                            variadic: sig.variadic(),
+                        }
+                    } else {
+                        RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false }
+                    }
+                }
+                ValueKind::Island => RuntimeType::Island,
+                ValueKind::Void => RuntimeType::Basic(ValueKind::Void),
+                ValueKind::Channel | ValueKind::Port => unreachable!("queue kinds handled above"),
             }
-            _ => RuntimeType::Basic(ValueKind::Void),
         }
     }
     
@@ -630,6 +649,14 @@ impl<'a> TypeInfoWrapper<'a> {
         type_layout::is_chan(type_key, self.tc_objs())
     }
 
+    pub fn is_port(&self, type_key: TypeKey) -> bool {
+        type_layout::is_port(type_key, self.tc_objs())
+    }
+
+    pub fn is_queue(&self, type_key: TypeKey) -> bool {
+        self.is_chan(type_key) || self.is_port(type_key)
+    }
+
     pub fn is_island(&self, type_key: TypeKey) -> bool {
         typ::is_island(type_key, self.tc_objs())
     }
@@ -644,14 +671,16 @@ impl<'a> TypeInfoWrapper<'a> {
     pub fn is_reference_type(&self, type_key: TypeKey) -> bool {
         use vo_runtime::ValueKind;
         let vk = self.type_value_kind(type_key);
-        matches!(vk, 
-            ValueKind::Pointer 
-            | ValueKind::Slice 
-            | ValueKind::Map 
-            | ValueKind::Channel 
-            | ValueKind::Closure 
-            | ValueKind::String
-            | ValueKind::Island)
+        vk.is_queue()
+            || matches!(
+                vk,
+                ValueKind::Pointer
+                    | ValueKind::Slice
+                    | ValueKind::Map
+                    | ValueKind::Closure
+                    | ValueKind::String
+                    | ValueKind::Island
+            )
     }
 
     pub fn is_named_type(&self, type_key: TypeKey) -> bool {
@@ -866,6 +895,57 @@ impl<'a> TypeInfoWrapper<'a> {
         }
     }
 
+    pub fn port_elem_type(&self, type_key: TypeKey) -> TypeKey {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        if let Type::Port(p) = &self.tc_objs().types[underlying] {
+            p.elem()
+        } else {
+            panic!("port_elem_type: not a port type")
+        }
+    }
+
+    fn queue_flavor(&self, type_key: TypeKey) -> QueueFlavor {
+        match self.type_value_kind(type_key) {
+            vo_runtime::ValueKind::Channel => QueueFlavor::Chan,
+            vo_runtime::ValueKind::Port => QueueFlavor::Port,
+            _ => panic!("queue_flavor: not a queue type"),
+        }
+    }
+
+    fn queue_opcode(&self, type_key: TypeKey, chan: Opcode, port: Opcode) -> Opcode {
+        match self.queue_flavor(type_key) {
+            QueueFlavor::Chan => chan,
+            QueueFlavor::Port => port,
+        }
+    }
+
+    pub fn queue_elem_type(&self, type_key: TypeKey) -> TypeKey {
+        match self.queue_flavor(type_key) {
+            QueueFlavor::Chan => self.chan_elem_type(type_key),
+            QueueFlavor::Port => self.port_elem_type(type_key),
+        }
+    }
+
+    pub fn queue_dir(&self, type_key: TypeKey) -> vo_runtime::ChanDir {
+        match self.queue_flavor(type_key) {
+            QueueFlavor::Chan => self.chan_dir(type_key),
+            QueueFlavor::Port => self.port_dir(type_key),
+        }
+    }
+
+    pub fn port_dir(&self, type_key: TypeKey) -> vo_runtime::ChanDir {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        if let Type::Port(p) = &self.tc_objs().types[underlying] {
+            match p.dir() {
+                vo_analysis::typ::ChanDir::SendRecv => vo_runtime::ChanDir::Both,
+                vo_analysis::typ::ChanDir::SendOnly => vo_runtime::ChanDir::Send,
+                vo_analysis::typ::ChanDir::RecvOnly => vo_runtime::ChanDir::Recv,
+            }
+        } else {
+            panic!("port_dir: not a port type")
+        }
+    }
+
     /// Get array length
     pub fn array_len(&self, type_key: TypeKey) -> u64 {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
@@ -999,6 +1079,50 @@ impl<'a> TypeInfoWrapper<'a> {
         } else {
             panic!("chan_elem_slots: not a channel type")
         }
+    }
+
+    pub fn port_elem_slots(&self, type_key: TypeKey) -> u16 {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        if let Type::Port(p) = &self.tc_objs().types[underlying] {
+            self.type_slot_count(p.elem())
+        } else {
+            panic!("port_elem_slots: not a port type")
+        }
+    }
+
+    pub fn queue_elem_slots(&self, type_key: TypeKey) -> u16 {
+        match self.queue_flavor(type_key) {
+            QueueFlavor::Chan => self.chan_elem_slots(type_key),
+            QueueFlavor::Port => self.port_elem_slots(type_key),
+        }
+    }
+
+    pub fn queue_new_opcode(&self, type_key: TypeKey) -> Opcode {
+        self.queue_opcode(type_key, Opcode::ChanNew, Opcode::PortNew)
+    }
+
+    pub fn queue_len_opcode(&self, type_key: TypeKey) -> Opcode {
+        self.queue_opcode(type_key, Opcode::ChanLen, Opcode::PortLen)
+    }
+
+    pub fn queue_cap_opcode(&self, type_key: TypeKey) -> Opcode {
+        self.queue_opcode(type_key, Opcode::ChanCap, Opcode::PortCap)
+    }
+
+    pub fn queue_send_opcode(&self, type_key: TypeKey) -> Opcode {
+        self.queue_opcode(type_key, Opcode::ChanSend, Opcode::PortSend)
+    }
+
+    pub fn queue_recv_opcode(&self, type_key: TypeKey) -> Opcode {
+        self.queue_opcode(type_key, Opcode::ChanRecv, Opcode::PortRecv)
+    }
+
+    pub fn queue_select_recv_opcode(&self, type_key: TypeKey) -> Opcode {
+        self.queue_opcode(type_key, Opcode::SelectRecv, Opcode::PortSelectRecv)
+    }
+
+    pub fn queue_close_opcode(&self, type_key: TypeKey) -> Opcode {
+        self.queue_opcode(type_key, Opcode::ChanClose, Opcode::PortClose)
     }
 
     /// Get signature details for a function type

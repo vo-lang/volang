@@ -239,11 +239,16 @@ fn register_types(
                     ValueMeta::new(underlying_rttid, underlying_vk)
                 }
             };
+            let underlying_rttid = vo_runtime::ValueRttid::new(
+                ctx.intern_type_key(underlying_key, info),
+                info.type_value_kind(underlying_key),
+            );
 
             // All named types get NamedTypeMeta (keyed by ObjKey, the true identity)
             let named_type_meta = NamedTypeMeta {
                 name: qualified_type_name.to_string(),
                 underlying_meta,
+                underlying_rttid,
                 methods: HashMap::new(),
             };
             ctx.register_named_type_meta(obj_key, named_type_meta);

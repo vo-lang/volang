@@ -59,7 +59,6 @@ pub extern "C" fn jit_go_start(
 
 /// JIT callback to spawn a goroutine on a specific island.
 /// If island_id == 0, spawns locally. Otherwise sends to remote island via command channel.
-#[cfg(feature = "std")]
 pub extern "C" fn jit_go_island(
     ctx: *mut JitContext,
     island: u64,
@@ -75,20 +74,17 @@ pub extern "C" fn jit_go_island(
     let closure = closure_ref as GcRef;
     let island_id = vo_runtime::island::id(island_handle);
     
-    if island_id == 0 {
+    if island_id == vm.state.current_island_id {
         unsafe { spawn_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) };
     } else {
-        // Remote spawn - pack closure and send to island
         let func_id = closure::func_id(closure);
         let capture_count = closure::capture_count(closure);
         
-        // Read capture data from closure
         let mut capture_data = Vec::with_capacity(capture_count);
         for i in 0..capture_count {
             capture_data.push(closure::get_capture(closure, i));
         }
         
-        // Read arg data from args_ptr
         let mut arg_data = Vec::with_capacity(arg_slots as usize);
         for i in 0..arg_slots as usize {
             arg_data.push(unsafe { *args_ptr.add(i) });
@@ -102,7 +98,7 @@ pub extern "C" fn jit_go_island(
             arg_data,
         };
         
-        crate::exec::prepare_chans_for_transfer(
+        crate::exec::prepare_queue_handles_for_transfer(
             &result,
             island_id,
             &func_def.capture_types,
@@ -113,27 +109,11 @@ pub extern "C" fn jit_go_island(
         );
         let data = crate::exec::pack_closure_for_island(
             &vm.state.gc, &result, &func_def.capture_types, &func_def.param_types,
-            &module.struct_metas, &module.runtime_types,
+            &module.struct_metas,
+            &module.runtime_types,
         );
         let closure_data = vo_runtime::pack::PackedValue::from_data(data);
-        let cmd = vo_runtime::island::IslandCommand::SpawnFiber { closure_data };
-        vm.state.send_to_island(island_id, cmd);
+        vm.state.send_spawn_fiber_to_island(island_id, closure_data);
     }
 }
 
-#[cfg(not(feature = "std"))]
-pub extern "C" fn jit_go_island(
-    ctx: *mut JitContext,
-    island: u64,
-    closure_ref: u64,
-    args_ptr: *const u64,
-    arg_slots: u32,
-) {
-    // In no_std mode, always spawn locally - match VM behavior
-    let ctx = unsafe { &mut *ctx };
-    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
-    let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
-    
-    unsafe { spawn_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) };
-    let _ = island; // suppress unused warning
-}

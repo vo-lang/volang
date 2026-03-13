@@ -199,6 +199,15 @@ pub fn fmt_type_expr(ty: &TypeExpr, f: &mut fmt::Formatter<'_>, interner: &Symbo
             }
             fmt_type_expr(&c.elem, f, interner)
         }
+        TypeExprKind::Port(p) => {
+            use crate::ast::ChanDir;
+            match p.dir {
+                ChanDir::Send => f.write_str("port<- ")?,
+                ChanDir::Recv => f.write_str("<-port ")?,
+                ChanDir::Both => f.write_str("port ")?,
+            }
+            fmt_type_expr(&p.elem, f, interner)
+        }
         TypeExprKind::Island => {
             f.write_str("island")
         }

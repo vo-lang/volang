@@ -38,6 +38,18 @@ impl Checker {
         t
     }
 
+    fn queue_type_expr(
+        &mut self,
+        dir: ast::ChanDir,
+        elem: &TypeExpr,
+        ctor: fn(&mut Checker, ChanDir, TypeKey) -> TypeKey,
+    ) -> Option<TypeKey> {
+        let dir = self.ast_chan_dir(dir);
+        let elem = self.indirect_type(elem);
+        let t = ctor(self, dir, elem);
+        Some(t)
+    }
+
     /// Like type_expr but breaks infinite size of recursive types.
     /// Used for pointer base types, slice/map element types, function params, etc.
     pub fn indirect_type(&mut self, ty: &TypeExpr) -> TypeKey {
@@ -146,15 +158,14 @@ impl Checker {
                 Some(t)
             }
             TypeExprKind::Chan(chan) => {
-                let dir = match chan.dir {
-                    ast::ChanDir::Both => ChanDir::SendRecv,
-                    ast::ChanDir::Send => ChanDir::SendOnly,
-                    ast::ChanDir::Recv => ChanDir::RecvOnly,
-                };
-                let elem = self.indirect_type(&chan.elem);
-                let t = self.new_t_chan(dir, elem);
-                set_underlying(Some(t), &mut self.tc_objs);
-                Some(t)
+                let t = self.queue_type_expr(chan.dir, &chan.elem, Self::new_t_chan);
+                set_underlying(t, &mut self.tc_objs);
+                t
+            }
+            TypeExprKind::Port(port) => {
+                let t = self.queue_type_expr(port.dir, &port.elem, Self::new_t_port);
+                set_underlying(t, &mut self.tc_objs);
+                t
             }
             TypeExprKind::Func(func) => {
                 let t = self.func_type_ast(func);
