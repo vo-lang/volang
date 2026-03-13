@@ -21,7 +21,38 @@ use crate::instruction::Instruction;
 use crate::vm::RuntimeTrapKind;
 use crate::vm::helpers::{stack_get, stack_set};
 
-pub type QueueExecResult = super::QueueAction;
+pub enum QueueAction {
+    Continue,
+    Block,
+    ReplayThenBlock,
+    Wake(QueueWaiter),
+    Trap(RuntimeTrapKind),
+    Close {
+        waiters: Vec<QueueWaiter>,
+        endpoint_id: Option<u64>,
+    },
+    RemoteSend {
+        endpoint_id: u64,
+        home_island: u32,
+        data: Vec<u8>,
+    },
+    RemoteRecv {
+        endpoint_id: u64,
+        home_island: u32,
+    },
+    RemoteRecvData {
+        endpoint_id: u64,
+        target_island: u32,
+        fiber_id: u64,
+        data: Vec<u8>,
+    },
+    RemoteClose {
+        endpoint_id: u64,
+        home_island: u32,
+    },
+}
+
+pub type QueueExecResult = QueueAction;
 
 pub enum QueueRecvCoreResult {
     Success { data: Box<[u64]>, wake_sender: Option<QueueWaiter> },

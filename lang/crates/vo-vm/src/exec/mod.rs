@@ -16,7 +16,6 @@ mod defer;
 mod select;
 mod goroutine;
 mod unwind;
-mod queue_action;
 mod transport;
 mod island;
 
@@ -36,6 +35,5 @@ pub use defer::*;
 pub use select::*;
 pub use goroutine::*;
 pub use unwind::*;
-pub use queue_action::*;
 pub use transport::*;
 pub use island::*;
