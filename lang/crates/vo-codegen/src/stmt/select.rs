@@ -46,8 +46,9 @@ pub(crate) fn compile_select(
             }
             Some(CommClause::Send(send)) => {
                 let queue_reg = crate::expr::compile_expr(&send.chan, ctx, func, info)?;
-                let val_reg = crate::expr::compile_expr(&send.value, ctx, func, info)?;
                 let queue_type = info.expr_type(send.chan.id);
+                let elem_type = info.queue_elem_type(queue_type);
+                let val_reg = crate::expr::compile_expr_to_type(&send.value, elem_type, ctx, func, info)?;
                 let elem_slots = info.queue_elem_slots(queue_type) as u8;
                 func.emit_with_flags(Opcode::SelectSend, elem_slots, queue_reg, val_reg, case_idx as u16);
                 recv_infos.push(None);

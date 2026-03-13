@@ -55,7 +55,7 @@ pub fn exec_select_send(select_state: &mut Option<SelectState>, queue_reg: u16, 
         kind: SelectCaseKind::Send,
         queue_reg,
         val_reg,
-        elem_slots: if elem_slots == 0 { 1 } else { elem_slots },
+        elem_slots,
         has_ok: false,
     });
 }
@@ -74,7 +74,7 @@ pub fn exec_select_recv(
         kind: SelectCaseKind::Recv,
         queue_reg,
         val_reg: dst_reg,
-        elem_slots: if elem_slots == 0 { 1 } else { elem_slots },
+        elem_slots,
         has_ok,
     });
 }

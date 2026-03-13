@@ -42,6 +42,16 @@ func main() {
     
     assert(gotSignal, "should receive from ch1")
     assert(gotValue == 100, "should receive 100 from ch2")
+
+    ch3 := make(chan struct{}, 1)
+    sentSignal := false
+    select {
+    case ch3 <- struct{}{}:
+        sentSignal = true
+    default:
+    }
+    assert(sentSignal, "select send on empty struct channel should succeed")
+    <-ch3
     
     // Test 4: Empty struct in map (set pattern)
     set := make(map[string]struct{})

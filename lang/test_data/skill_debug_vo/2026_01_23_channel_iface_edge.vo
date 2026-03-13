@@ -26,6 +26,14 @@ func main() {
 	default:
 		panic("test2: should not reach default")
 	}
+
+	select {
+	case ch2 <- "world":
+	default:
+		panic("test2b: select send any should not reach default")
+	}
+	vAny := <-ch2
+	assert(vAny.(string) == "world", "test2b: select send any")
 	
 	// Test 3: Send interface to channel
 	type Counter struct {
