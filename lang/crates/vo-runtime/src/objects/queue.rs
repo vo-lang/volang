@@ -302,11 +302,6 @@ pub fn recv_or_block(chan: GcRef, waiter: QueueWaiter) -> (RecvResult<QueueWaite
     with_local_state(chan, |s| s.recv_or_block(waiter))
 }
 
-/// Pop the last value from the buffer (undo a DirectSend push for remote receivers).
-pub fn take_direct_send_payload(chan: GcRef) -> QueueMessage {
-    with_local_state(chan, |s| s.take_direct_send_payload())
-}
-
 /// Take all waiting receivers (for close notification).
 pub fn take_waiting_receivers(chan: GcRef) -> Vec<QueueWaiter> {
     with_local_state(chan, |s| s.take_waiting_receivers())

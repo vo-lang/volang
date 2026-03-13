@@ -377,7 +377,7 @@ impl<W, M> QueueState<W, M> {
         self.buffer.is_empty()
     }
 
-    pub fn take_direct_send_payload(&mut self) -> M {
+    fn take_direct_send_payload(&mut self) -> M {
         self.buffer
             .pop_back()
             .expect("take_direct_send_payload: missing direct-send payload")
