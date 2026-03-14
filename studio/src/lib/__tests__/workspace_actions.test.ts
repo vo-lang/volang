@@ -60,6 +60,8 @@ beforeEach(() => {
     isRunning: false,
     isGuiApp: false,
     guestRender: null,
+    guestModuleBytes: null,
+    guestEntryPath: null,
     outputExpanded: false,
     consoleShowTimestamps: true,
     consoleWordWrap: true,

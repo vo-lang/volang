@@ -361,17 +361,9 @@ fn unified_fn_impl(
 ) -> syn::Result<TokenStream2> {
     let (pkg_path, func_name, is_std_only) = parse_unified_args(&args)?;
 
-    // Preserve the raw (pre-resolution) package name for deriving stable Rust symbol names.
-    // Rust symbol names use the short name (e.g. "vogui") so they don't change if the
-    // module path changes. The VM lookup name string uses the full resolved path.
+    // Preserve the raw package name for deriving stable Rust symbol names.
     let raw_pkg = pkg_path.clone();
-
-    // Resolve short package name → full module path via Cargo.toml metadata.
-    // e.g. "vogui" → "github.com/vo-lang/vogui" when Cargo.toml has
-    //   [package.metadata.vo]
-    //   vomod = "../vo.mod"
-    // Falls back to pkg_path unchanged for stdlib packages ("fmt", etc.).
-    let pkg_path = resolve::resolve_full_pkg_path(&pkg_path);
+    let source_pkg_path = resolve::resolve_full_pkg_path(&pkg_path);
 
     // std-only flag is only valid for Stdlib flavor
     if is_std_only {
@@ -387,8 +379,25 @@ fn unified_fn_impl(
     let mode = detect_fn_mode(&func)?;
 
     match mode {
-        FnMode::Manual => unified_manual_impl(&func, &raw_pkg, &pkg_path, &func_name, is_std_only, &flavor),
-        FnMode::Result(_) | FnMode::Simple => unified_auto_impl(&func, &raw_pkg, &pkg_path, &func_name, is_std_only, &flavor, &mode),
+        FnMode::Manual => unified_manual_impl(
+            &func,
+            &raw_pkg,
+            &pkg_path,
+            &source_pkg_path,
+            &func_name,
+            is_std_only,
+            &flavor,
+        ),
+        FnMode::Result(_) | FnMode::Simple => unified_auto_impl(
+            &func,
+            &raw_pkg,
+            &pkg_path,
+            &source_pkg_path,
+            &func_name,
+            is_std_only,
+            &flavor,
+            &mode,
+        ),
     }
 }
 
@@ -396,7 +405,8 @@ fn unified_fn_impl(
 fn unified_manual_impl(
     func: &ItemFn,
     raw_pkg: &str,
-    pkg_path: &str,
+    abi_pkg_path: &str,
+    source_pkg_path: &str,
     func_name: &str,
     is_std_only: bool,
     flavor: &RegistrationFlavor,
@@ -406,7 +416,7 @@ fn unified_manual_impl(
     let fn_sig = &func.sig;
     let fn_attrs = &func.attrs;
     let fn_body = &func.block;
-    let slot_mod = slot_mod::generate_inline_slot_mod(pkg_path, func_name);
+    let slot_mod = slot_mod::generate_inline_slot_mod(source_pkg_path, func_name);
 
     let fn_tokens = quote! {
         #(#fn_attrs)*
@@ -417,7 +427,7 @@ fn unified_manual_impl(
     };
 
     Ok(registration::emit_fn_registration(
-        fn_tokens, fn_name, raw_pkg, pkg_path, func_name, is_std_only, flavor,
+        fn_tokens, fn_name, raw_pkg, abi_pkg_path, func_name, is_std_only, flavor,
     ))
 }
 
@@ -425,7 +435,8 @@ fn unified_manual_impl(
 fn unified_auto_impl(
     func: &ItemFn,
     raw_pkg: &str,
-    pkg_path: &str,
+    abi_pkg_path: &str,
+    source_pkg_path: &str,
     func_name: &str,
     is_std_only: bool,
     flavor: &RegistrationFlavor,
@@ -433,12 +444,12 @@ fn unified_auto_impl(
 ) -> syn::Result<TokenStream2> {
     // Simple mode validates against Vo signature; Result mode skips validation
     if matches!(*mode, FnMode::Simple) {
-        let (vo_sig, _is_std) = resolve::find_vo_signature(pkg_path, func_name, func)?;
+        let (vo_sig, _is_std) = resolve::find_vo_signature(source_pkg_path, func_name, func)?;
         resolve::validate_signature(func, &vo_sig)?;
     }
 
-    let wrapper = generate_wrapper(func, pkg_path, func_name, mode)?;
-    let wrapper_name = registration::make_wrapper_ident(pkg_path, func_name);
+    let wrapper = generate_wrapper(func, abi_pkg_path, func_name, mode)?;
+    let wrapper_name = registration::make_wrapper_ident(abi_pkg_path, func_name);
 
     let fn_tokens = quote! {
         #func
@@ -446,7 +457,7 @@ fn unified_auto_impl(
     };
 
     Ok(registration::emit_fn_registration(
-        fn_tokens, &wrapper_name, raw_pkg, pkg_path, func_name, is_std_only, flavor,
+        fn_tokens, &wrapper_name, raw_pkg, abi_pkg_path, func_name, is_std_only, flavor,
     ))
 }
 

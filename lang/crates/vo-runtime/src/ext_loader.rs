@@ -84,6 +84,7 @@ pub struct ExtensionLoader {
     loaded: Vec<LoadedExtension>,
     /// Cache: function name -> (ext_idx, entry_idx).
     cache: HashMap<String, (usize, usize)>,
+    manifests: Vec<ExtensionManifest>,
 }
 
 impl ExtensionLoader {
@@ -92,7 +93,16 @@ impl ExtensionLoader {
         Self {
             loaded: Vec::new(),
             cache: HashMap::new(),
+            manifests: Vec::new(),
         }
+    }
+
+    pub fn from_manifests(manifests: &[ExtensionManifest]) -> Result<Self, ExtError> {
+        let mut loader = Self::new();
+        for manifest in manifests {
+            loader.load(&manifest.native_path, &manifest.name)?;
+        }
+        Ok(loader)
     }
 
     /// Load an extension from a dynamic library path.
@@ -147,6 +157,10 @@ impl ExtensionLoader {
             name: name.to_string(),
             entries,
         });
+        self.manifests.push(ExtensionManifest {
+            name: name.to_string(),
+            native_path: canonical_path,
+        });
 
         Ok(())
     }
@@ -160,6 +174,10 @@ impl ExtensionLoader {
     /// Get list of loaded extension names.
     pub fn loaded_extensions(&self) -> Vec<&str> {
         self.loaded.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    pub fn manifests(&self) -> &[ExtensionManifest] {
+        &self.manifests
     }
 
     /// Get a loaded extension library by manifest name.

@@ -41,6 +41,8 @@ export interface IdeState {
   isRunning: boolean;
   isGuiApp: boolean;
   guestRender: Uint8Array | null;
+  guestModuleBytes: Uint8Array | null;
+  guestEntryPath: string | null;
   // Runtime display
   outputExpanded: boolean;
   // Console UI preferences
@@ -64,6 +66,8 @@ export const ide = writable<IdeState>({
   isRunning: false,
   isGuiApp: false,
   guestRender: null,
+  guestModuleBytes: null,
+  guestEntryPath: null,
   outputExpanded: false,
   consoleShowTimestamps: true,
   consoleWordWrap: true,

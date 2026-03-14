@@ -128,6 +128,7 @@ pub fn local_capabilities() -> Vec<String> {
 
 #[tauri::command]
 pub fn cmd_shell_init(state: tauri::State<'_, crate::AppState>) -> Result<ShellInitResponse, String> {
+    crate::debug_log("[studio-native] cmd_shell_init");
     Ok(ShellInitResponse {
         workspace_root: state.workspace_root.to_string_lossy().to_string(),
         capabilities:   local_capabilities(),
@@ -140,6 +141,23 @@ pub fn cmd_shell_exec(
     state: tauri::State<'_, crate::AppState>,
     app:   tauri::AppHandle,
 ) -> Result<ShellResponse, String> {
+    let kind = req.op.get("kind").and_then(Value::as_str).unwrap_or("<unknown>").to_string();
+    crate::debug_log(&format!(
+        "[studio-native] cmd_shell_exec start kind={} cwd={}",
+        kind,
+        req.cwd
+    ));
     let session_root = crate::current_session_root(&state);
-    Ok(state.shell_runner.handle(req, &app, &session_root))
+    let response = state.shell_runner.handle(req, &app, &session_root);
+    let response_kind = match &response {
+        ShellResponse::Ok { .. } => "ok",
+        ShellResponse::Stream { .. } => "stream",
+        ShellResponse::Error { .. } => "error",
+    };
+    crate::debug_log(&format!(
+        "[studio-native] cmd_shell_exec done kind={} response={}",
+        kind,
+        response_kind
+    ));
+    Ok(response)
 }

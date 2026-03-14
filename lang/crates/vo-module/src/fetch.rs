@@ -330,6 +330,7 @@ pub use native::*;
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::{extract_tarball_files, github_tarball_url};
+    use std::collections::BTreeSet;
     use std::io::Read;
     use std::path::{Path, PathBuf};
     use std::fs;
@@ -481,6 +482,148 @@ mod native {
         Ok(target_dir)
     }
 
+    const PATCHED_VOLANG_CRATES: &[&str] = &[
+        "vo-analysis",
+        "vo-codegen",
+        "vo-common",
+        "vo-common-core",
+        "vo-engine",
+        "vo-ext",
+        "vo-ffi-macro",
+        "vo-jit",
+        "vo-module",
+        "vo-runtime",
+        "vo-stdlib",
+        "vo-syntax",
+        "vo-vm",
+    ];
+
+    fn path_tree_has_newer_files(path: &Path, threshold: std::time::SystemTime) -> bool {
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(_) => return false,
+        };
+
+        if metadata.is_file() {
+            return metadata
+                .modified()
+                .map(|mtime| mtime > threshold)
+                .unwrap_or(false);
+        }
+
+        fn walk_newer(dir: &Path, threshold: std::time::SystemTime) -> bool {
+            let entries = match fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(_) => return false,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.file_name().map_or(false, |name| name == "target" || name == ".git") {
+                    continue;
+                }
+                if path.is_dir() {
+                    if walk_newer(&path, threshold) {
+                        return true;
+                    }
+                } else if let Ok(metadata) = fs::metadata(&path) {
+                    if let Ok(mtime) = metadata.modified() {
+                        if mtime > threshold {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+
+        walk_newer(path, threshold)
+    }
+
+    fn extract_inline_table_path(line: &str) -> Option<String> {
+        let path_pos = line.find("path")?;
+        let rest = &line[path_pos + "path".len()..];
+        let eq_pos = rest.find('=')?;
+        let value = rest[eq_pos + 1..].trim_start();
+        if !value.starts_with('"') {
+            return None;
+        }
+        let value = &value[1..];
+        let end = value.find('"')?;
+        Some(value[..end].to_string())
+    }
+
+    pub(super) fn local_patch_source_paths(rust_manifest: &Path) -> Vec<PathBuf> {
+        let content = match fs::read_to_string(rust_manifest) {
+            Ok(content) => content,
+            Err(_) => return Vec::new(),
+        };
+        let manifest_dir = match rust_manifest.parent() {
+            Some(dir) => dir,
+            None => return Vec::new(),
+        };
+
+        let mut in_patch_section = false;
+        let mut paths = BTreeSet::new();
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            let is_section = trimmed.starts_with('[') && trimmed.ends_with(']');
+            if is_section {
+                in_patch_section = trimmed.starts_with("[patch.");
+                continue;
+            }
+            if !in_patch_section {
+                continue;
+            }
+            if let Some(raw_path) = extract_inline_table_path(trimmed) {
+                let path = Path::new(&raw_path);
+                let abs = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    manifest_dir.join(path)
+                };
+                let abs = abs.canonicalize().unwrap_or(abs);
+                paths.insert(abs);
+            }
+        }
+
+        paths.into_iter().collect()
+    }
+
+    fn injected_patch_source_paths() -> Vec<PathBuf> {
+        let mut paths = BTreeSet::new();
+
+        if let Some(repo_root) = detect_volang_repo_root() {
+            for krate in PATCHED_VOLANG_CRATES {
+                let local_path = repo_root.join("lang").join("crates").join(krate);
+                if local_path.exists() {
+                    paths.insert(local_path);
+                }
+            }
+        }
+
+        paths.into_iter().collect()
+    }
+
+    pub(super) fn patch_sources_newer_than(lib: &Path, rust_manifest: &Path) -> bool {
+        let lib_mtime = match fs::metadata(lib).and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => return true,
+        };
+
+        let mut paths = BTreeSet::new();
+        for path in local_patch_source_paths(rust_manifest) {
+            paths.insert(path);
+        }
+        for path in injected_patch_source_paths() {
+            paths.insert(path);
+        }
+
+        paths
+            .into_iter()
+            .any(|path| path_tree_has_newer_files(&path, lib_mtime))
+    }
+
     /// Check whether any Rust source file, `Cargo.toml`, or the module's
     /// `vo.ext.toml` is newer than the given library path.
     fn is_rust_source_newer(lib: &Path, rust_dir: &Path) -> bool {
@@ -501,32 +644,7 @@ mod native {
             }
         }
 
-        fn walk_newer(dir: &Path, threshold: std::time::SystemTime) -> bool {
-            let entries = match fs::read_dir(dir) {
-                Ok(e) => e,
-                Err(_) => return false,
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.file_name().map_or(false, |n| n == "target") {
-                    continue; // skip cargo build artifacts
-                }
-                if path.is_dir() {
-                    if walk_newer(&path, threshold) {
-                        return true;
-                    }
-                } else if let Ok(m) = fs::metadata(&path) {
-                    if let Ok(t) = m.modified() {
-                        if t > threshold {
-                            return true;
-                        }
-                    }
-                }
-            }
-            false
-        }
-
-        walk_newer(rust_dir, lib_mtime)
+        path_tree_has_newer_files(rust_dir, lib_mtime)
     }
 
     /// Ensure the native extension for an already-installed module is compiled.
@@ -558,7 +676,9 @@ mod native {
             .and_then(|manifests| manifests.into_iter().next())
             .map(|m| m.native_path);
         let up_to_date = lib_path.as_ref().map_or(false, |lib| {
-            lib.exists() && !is_rust_source_newer(lib, &module_dir.join("rust"))
+            lib.exists()
+                && !is_rust_source_newer(lib, &module_dir.join("rust"))
+                && !patch_sources_newer_than(lib, &rust_manifest)
         });
         if up_to_date {
             return Ok(());
@@ -575,13 +695,7 @@ mod native {
         // Patch git deps to use the local volang repo so the extension's
         // vo-runtime ABI matches the currently running vo binary exactly.
         if let Some(repo_root) = detect_volang_repo_root() {
-            let crates = [
-                "vo-analysis", "vo-codegen", "vo-common", "vo-common-core",
-                "vo-engine", "vo-ext", "vo-ffi-macro", "vo-jit",
-                "vo-module", "vo-runtime", "vo-stdlib", "vo-syntax",
-                "vo-vm",
-            ];
-            for krate in crates {
+            for krate in PATCHED_VOLANG_CRATES {
                 let local_path = repo_root.join("lang").join("crates").join(krate);
                 if local_path.exists() {
                     // Use dotted-key TOML syntax; cargo --config does not
@@ -1253,5 +1367,78 @@ default = []
         assert!(!stripped.contains("[patch.\"https://github.com/vo-lang/vogui\"]"));
         assert!(!stripped.contains("../../volang/lang/crates/vo-runtime"));
         assert!(!stripped.contains("../../vogui/rust"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_local_patch_source_paths_extracts_relative_patch_dirs() {
+        let root = std::env::temp_dir().join(format!(
+            "vo_fetch_patch_paths_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let rust_dir = root.join("module").join("rust");
+        let dep_a = root.join("deps").join("dep-a");
+        let dep_b = root.join("deps").join("dep-b");
+        std::fs::create_dir_all(&rust_dir).unwrap();
+        std::fs::create_dir_all(&dep_a).unwrap();
+        std::fs::create_dir_all(&dep_b).unwrap();
+        std::fs::write(
+            rust_dir.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+
+[patch."https://example.com/a"]
+foo = { path = "../../deps/dep-a" }
+
+[patch."https://example.com/b"]
+bar = { path = "../../deps/dep-b" }
+"#,
+        ).unwrap();
+
+        let paths = super::native::local_patch_source_paths(&rust_dir.join("Cargo.toml"));
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&dep_a.canonicalize().unwrap()));
+        assert!(paths.contains(&dep_b.canonicalize().unwrap()));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_patch_sources_newer_than_detects_newer_patch_file() {
+        let root = std::env::temp_dir().join(format!(
+            "vo_fetch_patch_stale_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let rust_dir = root.join("module").join("rust");
+        let dep_dir = root.join("deps").join("dep");
+        let lib_path = root.join("module").join("rust").join("target").join("debug").join("libdemo.dylib");
+        std::fs::create_dir_all(&rust_dir).unwrap();
+        std::fs::create_dir_all(&dep_dir).unwrap();
+        std::fs::create_dir_all(lib_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            rust_dir.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+
+[patch."https://example.com/a"]
+foo = { path = "../../deps/dep" }
+"#,
+        ).unwrap();
+        std::fs::write(&lib_path, b"old").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dep_dir.join("lib.rs"), b"new").unwrap();
+
+        assert!(super::native::patch_sources_newer_than(&lib_path, &rust_dir.join("Cargo.toml")));
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

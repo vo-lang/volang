@@ -5,17 +5,14 @@
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, format_ident};
+use vo_common::abi::abi_lookup_name;
 
 use crate::RegistrationFlavor;
 
 /// Normalize a package path for use in identifiers: replace `/`, `.`, and `-` with `_`.
 /// Must match `normalize_pkg_path` in vo-codegen/src/expr/call.rs.
 pub fn make_lookup_name(pkg_path: &str, func_name: &str) -> String {
-    format!(
-        "{}_{}",
-        pkg_path.replace('/', "_").replace('.', "_").replace('-', "_"),
-        func_name
-    )
+    abi_lookup_name(pkg_path, func_name)
 }
 
 /// Create the wrapper function identifier: `__vo_{pkg}_{func}`.

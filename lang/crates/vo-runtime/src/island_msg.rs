@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use alloc::vec;
 
 use crate::gc::{Gc, GcRef};
+use crate::island::{EndpointRequestKind, EndpointResponseKind, IslandCommand};
 use crate::pack::{
     pack_slots, unpack_slots_with_queue_handle_resolver_and_cache, PackedValue, QueueHandleInfo,
 };
@@ -28,6 +29,66 @@ fn read_u16(data: &[u8], offset: usize) -> u16 {
 #[inline]
 fn read_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+}
+
+#[inline]
+fn read_u64(data: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IslandCommandDecodeError {
+    UnexpectedEof,
+    InvalidTag,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IslandTransportFrameDecodeError {
+    UnexpectedEof,
+    InvalidCommand(IslandCommandDecodeError),
+}
+
+fn read_byte(data: &[u8], offset: &mut usize) -> Result<u8, IslandCommandDecodeError> {
+    let Some(value) = data.get(*offset).copied() else {
+        return Err(IslandCommandDecodeError::UnexpectedEof);
+    };
+    *offset += 1;
+    Ok(value)
+}
+
+fn read_bool(data: &[u8], offset: &mut usize) -> Result<bool, IslandCommandDecodeError> {
+    match read_byte(data, offset)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(IslandCommandDecodeError::InvalidTag),
+    }
+}
+
+fn read_u32_checked(data: &[u8], offset: &mut usize) -> Result<u32, IslandCommandDecodeError> {
+    if data.len() < *offset + 4 {
+        return Err(IslandCommandDecodeError::UnexpectedEof);
+    }
+    let value = read_u32(data, *offset);
+    *offset += 4;
+    Ok(value)
+}
+
+fn read_u64_checked(data: &[u8], offset: &mut usize) -> Result<u64, IslandCommandDecodeError> {
+    if data.len() < *offset + 8 {
+        return Err(IslandCommandDecodeError::UnexpectedEof);
+    }
+    let value = read_u64(data, *offset);
+    *offset += 8;
+    Ok(value)
+}
+
+fn read_bytes(data: &[u8], offset: &mut usize, len: usize) -> Result<Vec<u8>, IslandCommandDecodeError> {
+    if data.len() < *offset + len {
+        return Err(IslandCommandDecodeError::UnexpectedEof);
+    }
+    let out = data[*offset..*offset + len].to_vec();
+    *offset += len;
+    Ok(out)
 }
 
 pub const HEADER_SIZE: usize = 8;
@@ -225,4 +286,346 @@ where
     }
 
     (captures, args)
+}
+
+pub fn encode_island_command(cmd: &IslandCommand) -> Vec<u8> {
+    let mut buf = Vec::new();
+    match cmd {
+        IslandCommand::SpawnFiber { closure_data } => {
+            buf.push(0);
+            let data = closure_data.data();
+            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(data);
+        }
+        IslandCommand::WakeFiber { fiber_id } => {
+            buf.push(1);
+            buf.extend_from_slice(&fiber_id.to_le_bytes());
+        }
+        IslandCommand::Shutdown => {
+            buf.push(2);
+        }
+        IslandCommand::EndpointRequest { endpoint_id, kind, from_island, fiber_id } => {
+            buf.push(3);
+            buf.extend_from_slice(&endpoint_id.to_le_bytes());
+            encode_endpoint_request_kind(&mut buf, kind);
+            buf.extend_from_slice(&from_island.to_le_bytes());
+            buf.extend_from_slice(&fiber_id.to_le_bytes());
+        }
+        IslandCommand::EndpointResponse { endpoint_id, kind, fiber_id } => {
+            buf.push(4);
+            buf.extend_from_slice(&endpoint_id.to_le_bytes());
+            encode_endpoint_response_kind(&mut buf, kind);
+            buf.extend_from_slice(&fiber_id.to_le_bytes());
+        }
+    }
+    buf
+}
+
+pub fn encode_island_transport_frame(target_island_id: u32, cmd: &IslandCommand) -> Vec<u8> {
+    let payload = encode_island_command(cmd);
+    let mut buf = Vec::with_capacity(4 + payload.len());
+    buf.extend_from_slice(&target_island_id.to_le_bytes());
+    buf.extend_from_slice(&payload);
+    buf
+}
+
+fn encode_endpoint_request_kind(buf: &mut Vec<u8>, kind: &EndpointRequestKind) {
+    match kind {
+        EndpointRequestKind::Send { data } => {
+            buf.push(0);
+            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(data);
+        }
+        EndpointRequestKind::Recv => buf.push(1),
+        EndpointRequestKind::Close => buf.push(2),
+        EndpointRequestKind::Transfer { new_peer } => {
+            buf.push(3);
+            buf.extend_from_slice(&new_peer.to_le_bytes());
+        }
+    }
+}
+
+fn encode_endpoint_response_kind(buf: &mut Vec<u8>, kind: &EndpointResponseKind) {
+    match kind {
+        EndpointResponseKind::SendAck { closed } => {
+            buf.push(0);
+            buf.push(u8::from(*closed));
+        }
+        EndpointResponseKind::RecvData { data, closed } => {
+            buf.push(1);
+            buf.push(u8::from(*closed));
+            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(data);
+        }
+        EndpointResponseKind::Closed => buf.push(2),
+    }
+}
+
+pub fn decode_island_command(data: &[u8]) -> Result<IslandCommand, IslandCommandDecodeError> {
+    let mut offset = 0usize;
+    let tag = read_byte(data, &mut offset)?;
+    match tag {
+        0 => {
+            let len = read_u32_checked(data, &mut offset)? as usize;
+            let payload = read_bytes(data, &mut offset, len)?;
+            Ok(IslandCommand::SpawnFiber {
+                closure_data: PackedValue::from_data(payload),
+            })
+        }
+        1 => Ok(IslandCommand::WakeFiber {
+            fiber_id: read_u32_checked(data, &mut offset)?,
+        }),
+        2 => Ok(IslandCommand::Shutdown),
+        3 => {
+            let endpoint_id = read_u64_checked(data, &mut offset)?;
+            let kind = decode_endpoint_request_kind(data, &mut offset)?;
+            let from_island = read_u32_checked(data, &mut offset)?;
+            let fiber_id = read_u64_checked(data, &mut offset)?;
+            Ok(IslandCommand::EndpointRequest {
+                endpoint_id,
+                kind,
+                from_island,
+                fiber_id,
+            })
+        }
+        4 => {
+            let endpoint_id = read_u64_checked(data, &mut offset)?;
+            let kind = decode_endpoint_response_kind(data, &mut offset)?;
+            let fiber_id = read_u64_checked(data, &mut offset)?;
+            Ok(IslandCommand::EndpointResponse {
+                endpoint_id,
+                kind,
+                fiber_id,
+            })
+        }
+        _ => Err(IslandCommandDecodeError::InvalidTag),
+    }
+}
+
+pub fn decode_island_transport_frame(
+    data: &[u8],
+) -> Result<(u32, IslandCommand), IslandTransportFrameDecodeError> {
+    if data.len() < 4 {
+        return Err(IslandTransportFrameDecodeError::UnexpectedEof);
+    }
+    let target_island_id = read_u32(data, 0);
+    let cmd = decode_island_command(&data[4..])
+        .map_err(IslandTransportFrameDecodeError::InvalidCommand)?;
+    Ok((target_island_id, cmd))
+}
+
+fn decode_endpoint_request_kind(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<EndpointRequestKind, IslandCommandDecodeError> {
+    match read_byte(data, offset)? {
+        0 => {
+            let len = read_u32_checked(data, offset)? as usize;
+            let data = read_bytes(data, offset, len)?;
+            Ok(EndpointRequestKind::Send { data })
+        }
+        1 => Ok(EndpointRequestKind::Recv),
+        2 => Ok(EndpointRequestKind::Close),
+        3 => Ok(EndpointRequestKind::Transfer {
+            new_peer: read_u32_checked(data, offset)?,
+        }),
+        _ => Err(IslandCommandDecodeError::InvalidTag),
+    }
+}
+
+fn decode_endpoint_response_kind(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<EndpointResponseKind, IslandCommandDecodeError> {
+    match read_byte(data, offset)? {
+        0 => Ok(EndpointResponseKind::SendAck {
+            closed: read_bool(data, offset)?,
+        }),
+        1 => {
+            let closed = read_bool(data, offset)?;
+            let len = read_u32_checked(data, offset)? as usize;
+            let data = read_bytes(data, offset, len)?;
+            Ok(EndpointResponseKind::RecvData { data, closed })
+        }
+        2 => Ok(EndpointResponseKind::Closed),
+        _ => Err(IslandCommandDecodeError::InvalidTag),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip(cmd: IslandCommand) {
+        let encoded = encode_island_command(&cmd);
+        let decoded = decode_island_command(&encoded).unwrap();
+        match (cmd, decoded) {
+            (
+                IslandCommand::SpawnFiber { closure_data: a },
+                IslandCommand::SpawnFiber { closure_data: b },
+            ) => assert_eq!(a.data(), b.data()),
+            (IslandCommand::WakeFiber { fiber_id: a }, IslandCommand::WakeFiber { fiber_id: b }) => assert_eq!(a, b),
+            (IslandCommand::Shutdown, IslandCommand::Shutdown) => {}
+            (
+                IslandCommand::EndpointRequest { endpoint_id: ae, kind: ak, from_island: af, fiber_id: afi },
+                IslandCommand::EndpointRequest { endpoint_id: be, kind: bk, from_island: bf, fiber_id: bfi },
+            ) => {
+                assert_eq!(ae, be);
+                assert_eq!(af, bf);
+                assert_eq!(afi, bfi);
+                assert_request_kind_eq(&ak, &bk);
+            }
+            (
+                IslandCommand::EndpointResponse { endpoint_id: ae, kind: ak, fiber_id: afi },
+                IslandCommand::EndpointResponse { endpoint_id: be, kind: bk, fiber_id: bfi },
+            ) => {
+                assert_eq!(ae, be);
+                assert_eq!(afi, bfi);
+                assert_response_kind_eq(&ak, &bk);
+            }
+            _ => panic!("decoded command variant mismatch"),
+        }
+    }
+
+    fn roundtrip_frame(target_island_id: u32, cmd: IslandCommand) {
+        let encoded = encode_island_transport_frame(target_island_id, &cmd);
+        let (decoded_target, decoded_cmd) = decode_island_transport_frame(&encoded).unwrap();
+        assert_eq!(decoded_target, target_island_id);
+        match (cmd, decoded_cmd) {
+            (
+                IslandCommand::SpawnFiber { closure_data: a },
+                IslandCommand::SpawnFiber { closure_data: b },
+            ) => assert_eq!(a.data(), b.data()),
+            (IslandCommand::WakeFiber { fiber_id: a }, IslandCommand::WakeFiber { fiber_id: b }) => assert_eq!(a, b),
+            (IslandCommand::Shutdown, IslandCommand::Shutdown) => {}
+            (
+                IslandCommand::EndpointRequest { endpoint_id: ae, kind: ak, from_island: af, fiber_id: afi },
+                IslandCommand::EndpointRequest { endpoint_id: be, kind: bk, from_island: bf, fiber_id: bfi },
+            ) => {
+                assert_eq!(ae, be);
+                assert_eq!(af, bf);
+                assert_eq!(afi, bfi);
+                assert_request_kind_eq(&ak, &bk);
+            }
+            (
+                IslandCommand::EndpointResponse { endpoint_id: ae, kind: ak, fiber_id: afi },
+                IslandCommand::EndpointResponse { endpoint_id: be, kind: bk, fiber_id: bfi },
+            ) => {
+                assert_eq!(ae, be);
+                assert_eq!(afi, bfi);
+                assert_response_kind_eq(&ak, &bk);
+            }
+            _ => panic!("decoded frame command variant mismatch"),
+        }
+    }
+
+    fn assert_request_kind_eq(a: &EndpointRequestKind, b: &EndpointRequestKind) {
+        match (a, b) {
+            (EndpointRequestKind::Send { data: ad }, EndpointRequestKind::Send { data: bd }) => assert_eq!(ad, bd),
+            (EndpointRequestKind::Recv, EndpointRequestKind::Recv) => {}
+            (EndpointRequestKind::Close, EndpointRequestKind::Close) => {}
+            (EndpointRequestKind::Transfer { new_peer: a }, EndpointRequestKind::Transfer { new_peer: b }) => assert_eq!(a, b),
+            _ => panic!("request kind mismatch"),
+        }
+    }
+
+    fn assert_response_kind_eq(a: &EndpointResponseKind, b: &EndpointResponseKind) {
+        match (a, b) {
+            (EndpointResponseKind::SendAck { closed: a }, EndpointResponseKind::SendAck { closed: b }) => assert_eq!(a, b),
+            (
+                EndpointResponseKind::RecvData { data: ad, closed: ac },
+                EndpointResponseKind::RecvData { data: bd, closed: bc },
+            ) => {
+                assert_eq!(ad, bd);
+                assert_eq!(ac, bc);
+            }
+            (EndpointResponseKind::Closed, EndpointResponseKind::Closed) => {}
+            _ => panic!("response kind mismatch"),
+        }
+    }
+
+    #[test]
+    fn island_command_codec_roundtrips_all_variants() {
+        roundtrip(IslandCommand::SpawnFiber {
+            closure_data: PackedValue::from_data(vec![1, 2, 3, 4]),
+        });
+        roundtrip(IslandCommand::WakeFiber { fiber_id: 42 });
+        roundtrip(IslandCommand::Shutdown);
+        roundtrip(IslandCommand::EndpointRequest {
+            endpoint_id: 99,
+            kind: EndpointRequestKind::Send { data: vec![7, 8, 9] },
+            from_island: 3,
+            fiber_id: 1234,
+        });
+        roundtrip(IslandCommand::EndpointRequest {
+            endpoint_id: 100,
+            kind: EndpointRequestKind::Recv,
+            from_island: 4,
+            fiber_id: 1235,
+        });
+        roundtrip(IslandCommand::EndpointRequest {
+            endpoint_id: 101,
+            kind: EndpointRequestKind::Close,
+            from_island: 5,
+            fiber_id: 1236,
+        });
+        roundtrip(IslandCommand::EndpointRequest {
+            endpoint_id: 102,
+            kind: EndpointRequestKind::Transfer { new_peer: 8 },
+            from_island: 6,
+            fiber_id: 1237,
+        });
+        roundtrip(IslandCommand::EndpointResponse {
+            endpoint_id: 103,
+            kind: EndpointResponseKind::SendAck { closed: true },
+            fiber_id: 2234,
+        });
+        roundtrip(IslandCommand::EndpointResponse {
+            endpoint_id: 104,
+            kind: EndpointResponseKind::RecvData { data: vec![10, 11], closed: false },
+            fiber_id: 2235,
+        });
+        roundtrip(IslandCommand::EndpointResponse {
+            endpoint_id: 105,
+            kind: EndpointResponseKind::Closed,
+            fiber_id: 2236,
+        });
+    }
+
+    #[test]
+    fn island_transport_frame_roundtrips_target_and_command() {
+        roundtrip_frame(
+            7,
+            IslandCommand::SpawnFiber {
+                closure_data: PackedValue::from_data(vec![9, 8, 7]),
+            },
+        );
+        roundtrip_frame(
+            11,
+            IslandCommand::EndpointRequest {
+                endpoint_id: 44,
+                kind: EndpointRequestKind::Transfer { new_peer: 12 },
+                from_island: 3,
+                fiber_id: 99,
+            },
+        );
+    }
+
+    #[test]
+    fn island_command_codec_rejects_truncated_payload() {
+        let encoded = encode_island_command(&IslandCommand::WakeFiber { fiber_id: 7 });
+        let truncated = &encoded[..encoded.len() - 1];
+        match decode_island_command(truncated) {
+            Err(IslandCommandDecodeError::UnexpectedEof) => {}
+            other => panic!("expected UnexpectedEof, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn island_transport_frame_rejects_truncated_header() {
+        match decode_island_transport_frame(&[1, 2, 3]) {
+            Err(IslandTransportFrameDecodeError::UnexpectedEof) => {}
+            other => panic!("expected UnexpectedEof, got {:?}", other),
+        }
+    }
 }

@@ -124,6 +124,17 @@ export interface Bridge {
   shell: ShellClient;
 }
 
+type DevModeModuleFile = {
+  name: string;
+  content: string;
+};
+
+type DevModeLocalModule = {
+  modulePath: string;
+  files: DevModeModuleFile[];
+  wasmBytes?: number[] | Uint8Array | null;
+};
+
 let _bridge: Bridge | null = null;
 
 export function bridge(): Bridge {
@@ -148,19 +159,63 @@ function parentDir(path: string): string {
 async function initTauriBridge(onProgress: (step: string) => void): Promise<void> {
   onProgress('Connecting to backend…');
   const { invoke } = await import('@tauri-apps/api/core');
+  registerExtModuleGlobals();
 
   const appWorkspaceRoot: string = await invoke('cmd_get_workspace_root');
 
+  onProgress('Initializing shell…');
   const shellTransport = new TauriTransport();
   const shellClient    = new ShellClient(shellTransport);
   await shellClient.initialize();
 
-  // Seed built-in examples into workspace (always overwrite so updates propagate)
-  for (const ex of STUDIO_SYNC_EXAMPLES) {
-    const fullPath = appWorkspaceRoot + '/' + ex.path;
-    await shellClient.exec({ kind: 'fs.mkdir', path: parentDir(fullPath), recursive: true });
-    await shellClient.exec({ kind: 'fs.write', path: fullPath, content: ex.content });
+  const localModuleSources = new Map<string, DevModeModuleFile[]>();
+  const localModuleWasmUrls = new Map<string, string>();
+
+  function clearDevModeClosure(): void {
+    for (const [, url] of localModuleWasmUrls) {
+      URL.revokeObjectURL(url);
+    }
+    localModuleSources.clear();
+    localModuleWasmUrls.clear();
   }
+
+  function installDevModeHooks(): void {
+    const w = window as any;
+    w._voGetLocalModule = (module: string, _version: string) => {
+      const files = localModuleSources.get(module);
+      if (!files) return null;
+      return files.map((file) => ({ name: file.name, content: file.content }));
+    };
+    w._voGetLocalWasm = (module: string, _version: string) => {
+      return localModuleWasmUrls.get(module) ?? null;
+    };
+  }
+
+  async function loadDevModeClosure(): Promise<void> {
+    clearDevModeClosure();
+    const modules = await invoke<DevModeLocalModule[]>('cmd_get_dev_mode_workspace_closure');
+    for (const module of modules) {
+      localModuleSources.set(module.modulePath, module.files.map((file) => ({
+        name: file.name,
+        content: file.content,
+      })));
+      if (module.wasmBytes && module.wasmBytes.length > 0) {
+        const bytes = module.wasmBytes instanceof Uint8Array
+          ? module.wasmBytes
+          : new Uint8Array(module.wasmBytes);
+        const copy = new Uint8Array(bytes.length);
+        copy.set(bytes);
+        const blob = new Blob([copy.buffer], { type: 'application/wasm' });
+        const url = URL.createObjectURL(blob);
+        localModuleWasmUrls.set(module.modulePath, url);
+      }
+    }
+  }
+
+  installDevModeHooks();
+
+  onProgress('Syncing examples…');
+  await invoke('cmd_sync_studio_examples', { examples: STUDIO_SYNC_EXAMPLES });
 
   _bridge = {
     appWorkspaceRoot,
@@ -184,11 +239,13 @@ async function initTauriBridge(onProgress: (step: string) => void): Promise<void
     async activateLocalDevMode(path: string): Promise<string> {
       const resolved = await invoke<{ targetPath: string; sessionRoot: string }>('cmd_activate_local_dev_mode', { targetPath: path });
       shellClient.setWorkspaceRoot(resolved.sessionRoot);
+      await loadDevModeClosure();
       return resolved.targetPath;
     },
     async resetLaunchMode(): Promise<void> {
       await invoke('cmd_reset_launch_mode');
       shellClient.setWorkspaceRoot(appWorkspaceRoot);
+      clearDevModeClosure();
     },
 
     // Poll for platform-driven renders (game loop, timers) via RAF loop.
@@ -475,14 +532,21 @@ async function initWasmBridge(onProgress: (step: string) => void): Promise<void>
       if (result instanceof Error) throw result;
       return result as string;
     },
-    runGui(entryPath: string): Uint8Array {
+    runGui(entryPath: string): { renderBytes: Uint8Array; moduleBytes: Uint8Array; entryPath: string } {
       clearAllGuiTimers();
       const result = wasmMod.runGuiEntry(entryPath);
       if (result instanceof Error) throw result;
-      return result as Uint8Array;
+      return {
+        renderBytes: result as Uint8Array,
+        moduleBytes: new Uint8Array(),
+        entryPath,
+      };
     },
     sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
       return queueGuiEvent(handlerId, payload, false);
+    },
+    async sendGuiEventAsync(handlerId: number, payload: string): Promise<void> {
+      await queueGuiEvent(handlerId, payload, true);
     },
     stopGui(): void {
       clearAllGuiTimers();

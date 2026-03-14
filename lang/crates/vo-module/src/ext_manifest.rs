@@ -158,6 +158,10 @@ fn extract_toml_string(line: &str) -> Option<String> {
     }
 }
 
+pub fn extension_name_from_content(content: &str) -> Option<String> {
+    extract_toml_string_from_content(content, "name")
+}
+
 /// Check if a `vo.ext.toml` content string declares `type = "wasm-bindgen"`.
 ///
 /// This is used to determine whether a WASM extension module needs a JS glue

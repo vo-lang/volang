@@ -5,17 +5,33 @@
 //! - Unified shell API via ShellRouter (shell/mod.rs)
 //!
 //! All filesystem operations are routed through `cmd_shell_exec` → Vo shell handler.
+mod gui_runtime;
 mod shell;
 
+use std::collections::BTreeMap;
 use std::env;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tauri::Manager;
-use vo_vox::gui::{GuestHandle, PushReceiver};
+use gui_runtime::{GuestHandle, PushReceiver};
 use vo_vox::{compile_prepared, prepare_with_auto_install, run_with_output as run_vox, RunMode};
 use vo_runtime::output::CaptureSink;
+use vo_module::ModFile;
 
 static VOWORK_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) fn debug_log(message: &str) {
+    eprintln!("{message}");
+    if let Ok(path) = std::env::var("VIBE_STUDIO_DEBUG_LOG") {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{message}");
+        }
+    }
+}
 
 // =============================================================================
 // AppState
@@ -32,6 +48,35 @@ pub struct AppState {
     shell_runner: shell::VoRunner,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GuiRunOutput {
+    render_bytes: Vec<u8>,
+    module_bytes: Vec<u8>,
+    entry_path: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenderIslandVfsFile {
+    path:  String,
+    bytes: Vec<u8>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenderIslandVfsSnapshot {
+    root_path: String,
+    files:     Vec<RenderIslandVfsFile>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StudioSyncExampleInput {
+    path: String,
+    content: String,
+}
+
 fn default_workspace() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -45,12 +90,36 @@ fn default_workspace() -> PathBuf {
 
 #[tauri::command]
 fn cmd_get_workspace_root(state: tauri::State<'_, AppState>) -> String {
+    debug_log("[studio-native] cmd_get_workspace_root");
     state.workspace_root.to_string_lossy().to_string()
 }
 
 #[tauri::command]
 fn cmd_get_launch_url(state: tauri::State<'_, AppState>) -> Option<String> {
+    debug_log("[studio-native] cmd_get_launch_url");
     state.launch_url.clone()
+}
+
+#[tauri::command]
+fn cmd_sync_studio_examples(
+    examples: Vec<StudioSyncExampleInput>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), shell::StudioError> {
+    debug_log(&format!(
+        "[studio-native] cmd_sync_studio_examples count={}",
+        examples.len()
+    ));
+    for example in examples {
+        let path = resolve_path(&state.workspace_root, &example.path)
+            .map_err(|e| shell::StudioError::access_denied(&e))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| shell::StudioError::internal(&format!("{}: {}", parent.display(), e)))?;
+        }
+        std::fs::write(&path, example.content)
+            .map_err(|e| shell::StudioError::internal(&format!("{}: {}", path.display(), e)))?;
+    }
+    Ok(())
 }
 
 fn detect_launch_url() -> Option<String> {
@@ -267,6 +336,21 @@ struct LocalDevLaunchTarget {
     session_root: String,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DevModeModuleFile {
+    name: String,
+    content: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DevModeLocalModule {
+    module_path: String,
+    files: Vec<DevModeModuleFile>,
+    wasm_bytes: Option<Vec<u8>>,
+}
+
 fn resolve_local_dev_target(target_path: &Path) -> Result<LocalDevLaunchTarget, shell::StudioError> {
     if !target_path.exists() {
         return Err(shell::StudioError::not_found(&format!(
@@ -286,6 +370,132 @@ fn resolve_local_dev_target(target_path: &Path) -> Result<LocalDevLaunchTarget, 
         target_path: canonical_target.to_string_lossy().to_string(),
         session_root: session_root.to_string_lossy().to_string(),
     })
+}
+
+fn read_mod_file(path: &Path) -> Result<ModFile, shell::StudioError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| shell::StudioError::internal(&format!("{}: {}", path.display(), e)))?;
+    ModFile::parse(&content, path)
+        .map_err(|e| shell::StudioError::internal(&e.to_string()))
+}
+
+fn read_project_replaces(project_root: &Path) -> Result<BTreeMap<String, PathBuf>, shell::StudioError> {
+    let mut map = BTreeMap::new();
+    let mod_path = project_root.join("vo.mod");
+    if !mod_path.is_file() {
+        return Ok(map);
+    }
+    let mod_file = read_mod_file(&mod_path)?;
+    for rep in &mod_file.replaces {
+        let local = Path::new(&rep.local_path);
+        let abs = if local.is_absolute() {
+            local.to_path_buf()
+        } else {
+            project_root.join(local)
+        };
+        let abs = abs.canonicalize().unwrap_or(abs);
+        map.insert(rep.module.clone(), abs);
+    }
+    Ok(map)
+}
+
+fn collect_module_files(module_root: &Path) -> Result<Vec<DevModeModuleFile>, shell::StudioError> {
+    let vo_mod_path = module_root.join("vo.mod");
+    let vo_mod_content = std::fs::read_to_string(&vo_mod_path)
+        .map_err(|e| shell::StudioError::internal(&format!("{}: {}", vo_mod_path.display(), e)))?;
+    let mod_file = ModFile::parse(&vo_mod_content, &vo_mod_path)
+        .map_err(|e| shell::StudioError::internal(&e.to_string()))?;
+
+    let mut files = Vec::new();
+    files.push(DevModeModuleFile {
+        name: "vo.mod".to_string(),
+        content: vo_mod_content,
+    });
+
+    let ext_path = module_root.join("vo.ext.toml");
+    if ext_path.is_file() {
+        let content = std::fs::read_to_string(&ext_path)
+            .map_err(|e| shell::StudioError::internal(&format!("{}: {}", ext_path.display(), e)))?;
+        files.push(DevModeModuleFile {
+            name: "vo.ext.toml".to_string(),
+            content,
+        });
+    }
+
+    for rel in &mod_file.files {
+        let path = module_root.join(rel);
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| shell::StudioError::internal(&format!("{}: {}", path.display(), e)))?;
+        files.push(DevModeModuleFile {
+            name: rel.clone(),
+            content,
+        });
+    }
+
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(files)
+}
+
+fn read_module_wasm_bytes(module_root: &Path, module_path: &str) -> Result<Option<Vec<u8>>, shell::StudioError> {
+    let module_name = module_path.rsplit('/').next().unwrap_or(module_path);
+    let wasm_path = module_root.join(format!("{}.wasm", module_name));
+    if !wasm_path.is_file() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&wasm_path)
+        .map_err(|e| shell::StudioError::internal(&format!("{}: {}", wasm_path.display(), e)))?;
+    Ok(Some(bytes))
+}
+
+fn collect_render_island_vfs_files(root: &Path) -> Result<Vec<RenderIslandVfsFile>, shell::StudioError> {
+    fn walk(dir: &Path, out: &mut Vec<RenderIslandVfsFile>) -> Result<(), shell::StudioError> {
+        for entry in std::fs::read_dir(dir)
+            .map_err(|e| shell::StudioError::internal(&format!("{}: {}", dir.display(), e)))?
+        {
+            let entry = entry
+                .map_err(|e| shell::StudioError::internal(&format!("{}: {}", dir.display(), e)))?;
+            let path = entry.path();
+            let file_type = entry.file_type()
+                .map_err(|e| shell::StudioError::internal(&format!("{}: {}", path.display(), e)))?;
+            if file_type.is_dir() {
+                walk(&path, out)?;
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let bytes = std::fs::read(&path)
+                .map_err(|e| shell::StudioError::internal(&format!("{}: {}", path.display(), e)))?;
+            out.push(RenderIslandVfsFile {
+                path: path.to_string_lossy().to_string(),
+                bytes,
+            });
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    walk(root, &mut files)?;
+    Ok(files)
+}
+
+fn build_dev_mode_local_modules(project_root: &Path) -> Result<Vec<DevModeLocalModule>, shell::StudioError> {
+    let mut module_roots: BTreeMap<String, PathBuf> = vo_module::find_workspace_replaces(project_root)
+        .into_iter()
+        .collect();
+    for (module, path) in read_project_replaces(project_root)? {
+        module_roots.insert(module, path);
+    }
+
+    let mut modules = Vec::with_capacity(module_roots.len());
+    for (module_path, module_root) in module_roots {
+        modules.push(DevModeLocalModule {
+            module_path: module_path.clone(),
+            files: collect_module_files(&module_root)?,
+            wasm_bytes: read_module_wasm_bytes(&module_root, &module_path)?,
+        });
+    }
+    Ok(modules)
 }
 
 pub(crate) fn current_session_root(state: &AppState) -> PathBuf {
@@ -381,7 +591,11 @@ fn cmd_compile_run_app(entry_path: String, state: tauri::State<'_, AppState>) ->
 
 /// Compile user GUI code from entry path, start a guest VM thread, return initial render bytes.
 #[tauri::command]
-fn cmd_run_gui(entry_path: String, state: tauri::State<'_, AppState>) -> Result<Vec<u8>, shell::StudioError> {
+fn cmd_run_gui(
+    entry_path: String,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<GuiRunOutput, shell::StudioError> {
     // Drop previous guest (sends Shutdown, cleans up timers).
     clear_guest_runtime(&state);
 
@@ -390,12 +604,32 @@ fn cmd_run_gui(entry_path: String, state: tauri::State<'_, AppState>) -> Result<
 
     let compile_output = with_session_workspace_mode(&state, || compile_prepared(&compile_str))
         .map_err(|e| shell::StudioError::vo_compile(&e.to_string()))?;
-    let (initial_bytes, handle, push) = vo_vox::gui::run_gui(compile_output)
+    let module_bytes = compile_output.module.serialize();
+    let (initial_bytes, handle, push) = gui_runtime::run_gui(compile_output, app)
         .map_err(|e| shell::StudioError::vo_runtime(&e))?;
 
     *state.guest.lock().unwrap() = Some(handle);
     *state.push_rx.lock().unwrap() = Some(push);
-    Ok(initial_bytes)
+    Ok(GuiRunOutput {
+        render_bytes: initial_bytes,
+        module_bytes,
+        entry_path,
+    })
+}
+
+#[tauri::command]
+fn cmd_get_render_island_vfs_snapshot(
+    entry_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<RenderIslandVfsSnapshot, shell::StudioError> {
+    let session_root = current_session_root(&state);
+    let compile_target = resolve_compile_target(&session_root, &entry_path)?;
+    let root_path = materialize_source_root(Path::new(&compile_target));
+    let files = collect_render_island_vfs_files(&root_path)?;
+    Ok(RenderIslandVfsSnapshot {
+        root_path: root_path.to_string_lossy().to_string(),
+        files,
+    })
 }
 
 #[tauri::command]
@@ -410,6 +644,35 @@ fn cmd_send_gui_event(
         .ok_or_else(|| shell::StudioError::vo_runtime("guest VM not running"))?;
     handle
         .send_event(handler_id, &payload)
+        .map_err(|e| shell::StudioError::vo_runtime(&e))
+}
+
+#[tauri::command]
+fn cmd_send_gui_event_async(
+    handler_id: i32,
+    payload: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), shell::StudioError> {
+    let guest = state.guest.lock().unwrap();
+    let handle = guest
+        .as_ref()
+        .ok_or_else(|| shell::StudioError::vo_runtime("guest VM not running"))?;
+    handle
+        .send_event_async(handler_id, &payload)
+        .map_err(|e| shell::StudioError::vo_runtime(&e))
+}
+
+#[tauri::command]
+fn __island_transport_push(
+    data: Vec<u8>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), shell::StudioError> {
+    let guest = state.guest.lock().unwrap();
+    let handle = guest
+        .as_ref()
+        .ok_or_else(|| shell::StudioError::vo_runtime("guest VM not running"))?;
+    handle
+        .push_island_data(&data)
         .map_err(|e| shell::StudioError::vo_runtime(&e))
 }
 
@@ -438,6 +701,17 @@ fn cmd_activate_local_dev_mode(
     let resolved = resolve_local_dev_target(Path::new(&target_path))?;
     set_session_root(&state, PathBuf::from(&resolved.session_root));
     Ok(resolved)
+}
+
+#[tauri::command]
+fn cmd_get_dev_mode_workspace_closure(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<DevModeLocalModule>, shell::StudioError> {
+    if !session_uses_workspace_mode(&state) {
+        return Ok(Vec::new());
+    }
+    let session_root = current_session_root(&state);
+    build_dev_mode_local_modules(&session_root)
 }
 
 #[tauri::command]
@@ -478,13 +752,18 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             cmd_get_workspace_root,
             cmd_get_launch_url,
+            cmd_sync_studio_examples,
             cmd_materialize_local_launch_target,
             cmd_activate_local_dev_mode,
+            cmd_get_dev_mode_workspace_closure,
             cmd_reset_launch_mode,
             cmd_prepare_app,
             cmd_compile_run_app,
             cmd_run_gui,
+            cmd_get_render_island_vfs_snapshot,
             cmd_send_gui_event,
+            cmd_send_gui_event_async,
+            __island_transport_push,
             cmd_poll_gui_render,
             cmd_stop_gui,
             shell::cmd_shell_init,
@@ -496,7 +775,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use crate::{materialize_local_target, materialize_source_root, resolve_compile_target, resolve_local_dev_target};
+    use crate::{build_dev_mode_local_modules, materialize_local_target, materialize_source_root, resolve_compile_target, resolve_local_dev_target};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -603,6 +882,77 @@ mod tests {
             PathBuf::from(&compile_target).canonicalize().unwrap(),
             project_root.canonicalize().unwrap()
         );
+
+        fs::remove_dir_all(&workspace_root).unwrap();
+    }
+
+    #[test]
+    fn build_dev_mode_local_modules_includes_workspace_module_sources_and_wasm() {
+        let workspace_root = make_temp_dir("workspace-dev-closure");
+        let project_root = workspace_root.join("demo");
+        let voplay_root = workspace_root.join("voplay");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::create_dir_all(&voplay_root).unwrap();
+
+        fs::write(project_root.join("vo.work"), "vo 0.1\n\nuse ../voplay\n").unwrap();
+        fs::write(
+            project_root.join("vo.mod"),
+            "module demo\n\nvo 0.1\n\nrequire github.com/vo-lang/voplay v0.1.0\n\nfiles (\n    main.vo\n)\n",
+        ).unwrap();
+        fs::write(project_root.join("main.vo"), "package main\n").unwrap();
+
+        fs::write(
+            voplay_root.join("vo.mod"),
+            "module github.com/vo-lang/voplay\n\nvo 0.1\n\nfiles (\n    voplay.vo\n)\n",
+        ).unwrap();
+        fs::write(voplay_root.join("vo.ext.toml"), "[extension]\nname = \"voplay\"\npath = \"rust/target/{profile}/libvo_voplay\"\n").unwrap();
+        fs::write(voplay_root.join("voplay.vo"), "package voplay\n").unwrap();
+        fs::write(voplay_root.join("voplay.wasm"), [0, 97, 115, 109]).unwrap();
+
+        let modules = build_dev_mode_local_modules(&project_root).unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].module_path, "github.com/vo-lang/voplay");
+        assert!(modules[0].files.iter().any(|f| f.name == "vo.mod"));
+        assert!(modules[0].files.iter().any(|f| f.name == "vo.ext.toml"));
+        assert!(modules[0].files.iter().any(|f| f.name == "voplay.vo"));
+        assert_eq!(modules[0].wasm_bytes.as_deref(), Some(&[0, 97, 115, 109][..]));
+
+        fs::remove_dir_all(&workspace_root).unwrap();
+    }
+
+    #[test]
+    fn build_dev_mode_local_modules_uses_project_replace_to_override_workspace_entry() {
+        let workspace_root = make_temp_dir("workspace-dev-replace");
+        let project_root = workspace_root.join("demo");
+        let workspace_voplay = workspace_root.join("voplay-workspace");
+        let replace_voplay = workspace_root.join("voplay-replace");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::create_dir_all(&workspace_voplay).unwrap();
+        fs::create_dir_all(&replace_voplay).unwrap();
+
+        fs::write(project_root.join("vo.work"), "vo 0.1\n\nuse ../voplay-workspace\n").unwrap();
+        fs::write(
+            project_root.join("vo.mod"),
+            "module demo\n\nvo 0.1\n\nreplace github.com/vo-lang/voplay => ../voplay-replace\n\nfiles (\n    main.vo\n)\n",
+        ).unwrap();
+        fs::write(project_root.join("main.vo"), "package main\n").unwrap();
+
+        fs::write(
+            workspace_voplay.join("vo.mod"),
+            "module github.com/vo-lang/voplay\n\nvo 0.1\n\nfiles (\n    workspace.vo\n)\n",
+        ).unwrap();
+        fs::write(workspace_voplay.join("workspace.vo"), "package workspace\n").unwrap();
+
+        fs::write(
+            replace_voplay.join("vo.mod"),
+            "module github.com/vo-lang/voplay\n\nvo 0.1\n\nfiles (\n    replace.vo\n)\n",
+        ).unwrap();
+        fs::write(replace_voplay.join("replace.vo"), "package replace\n").unwrap();
+
+        let modules = build_dev_mode_local_modules(&project_root).unwrap();
+        assert_eq!(modules.len(), 1);
+        assert!(modules[0].files.iter().any(|f| f.name == "replace.vo"));
+        assert!(!modules[0].files.iter().any(|f| f.name == "workspace.vo"));
 
         fs::remove_dir_all(&workspace_root).unwrap();
     }

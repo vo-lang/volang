@@ -7,10 +7,14 @@
 //! Source files are read from the JS VirtualFS (via vo_web_runtime_wasm::vfs).
 
 use std::cell::RefCell;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use js_sys::{Object, Reflect};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
 use vo_common::vfs::{FileSystem, MemoryFs};
+use vo_runtime::island_msg::{decode_island_transport_frame, encode_island_transport_frame};
+use vo_vm::vm::SchedulingOutcome;
 
 fn ensure_panic_hook() {
     use std::sync::Once;
@@ -29,10 +33,26 @@ include!(concat!(env!("OUT_DIR"), "/shell_embedded.rs"));
 struct GuestState {
     vm: vo_web::Vm,
     event_wait_token: Option<u64>,
+    outbound_frames: VecDeque<Vec<u8>>,
+    pending_host_events: VecDeque<(u64, u32)>,
+    pending_host_event_tokens: HashSet<u64>,
 }
 
 thread_local! {
     static GUEST: RefCell<Option<GuestState>> = RefCell::new(None);
+}
+
+fn load_guest_from_bytecode(bytecode: &[u8]) -> Result<GuestState, JsValue> {
+    let vm = vo_web::create_loaded_vm(bytecode, |reg, exts| {
+        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
+    }).map_err(|e| JsValue::from_str(&e))?;
+    Ok(GuestState {
+        vm,
+        event_wait_token: None,
+        outbound_frames: VecDeque::new(),
+        pending_host_events: VecDeque::new(),
+        pending_host_event_tokens: HashSet::new(),
+    })
 }
 
 // =============================================================================
@@ -249,20 +269,15 @@ pub fn run_gui_entry(entry_path: &str) -> Result<Vec<u8>, JsValue> {
     GUEST.with(|g| *g.borrow_mut() = None);
 
     let bytecode = compile_from_vfs(entry_path).map_err(|e| JsValue::from_str(&e))?;
+    let mut guest = load_guest_from_bytecode(&bytecode)?;
 
-    let mut vm = vo_web::create_vm(&bytecode, |reg, exts| {
-        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
-    }).map_err(|e| JsValue::from_str(&e))?;
+    let outcome = guest.vm.run()
+        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+    handle_guest_outcome(&mut guest, outcome)?;
 
-    let render_bytes = vm.take_host_output()
+    let render_bytes = guest.vm.take_host_output()
         .ok_or_else(|| JsValue::from_str("guest app did not emit a render"))?;
-
-    let event_wait_token = vm.scheduler.take_pending_host_events()
-        .iter()
-        .find(|e| e.replay)
-        .map(|e| e.token);
-
-    GUEST.with(|g| *g.borrow_mut() = Some(GuestState { vm, event_wait_token }));
+    GUEST.with(|g| *g.borrow_mut() = Some(guest));
     Ok(render_bytes)
 }
 
@@ -286,38 +301,138 @@ pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<Vec<u8>, JsValue
     event_data.extend_from_slice(&handler_id.to_le_bytes());
     event_data.extend_from_slice(payload.as_bytes());
 
-    // Wake the fiber and run until it blocks on waitForEvent again
     guest.vm.wake_host_event_with_data(token, event_data);
-    let run_result = guest.vm.run_scheduled();
-
-    // Update event_wait_token (waitForEvent re-suspends with a new token)
-    guest.event_wait_token = guest.vm.scheduler.take_pending_host_events()
-        .iter()
-        .find(|e| e.replay)
-        .map(|e| e.token);
-
-    // Put state back before checking result
+    let outcome = guest.vm.run_scheduled()
+        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+    handle_guest_outcome(&mut guest, outcome)?;
+    let render_bytes = guest.vm.take_host_output().unwrap_or_default();
     GUEST.with(|g| *g.borrow_mut() = Some(guest));
-
-    run_result.map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-
-    let stdout = vo_web::take_output();
-    if !stdout.is_empty() {
-        web_sys::console::log_1(&format!("[guest] {}", stdout.trim_end()).into());
-    }
-
-    // Read render bytes from VM host output channel
-    // Note: take from guest state since we put it back above
-    let render_bytes = GUEST.with(|g| {
-        g.borrow_mut().as_mut().and_then(|s| s.vm.take_host_output()).unwrap_or_default()
-    });
     Ok(render_bytes)
+}
+
+#[wasm_bindgen(js_name = "startRenderIsland")]
+pub fn start_render_island(bytecode: &[u8]) -> Result<(), JsValue> {
+    ensure_panic_hook();
+    GUEST.with(|g| *g.borrow_mut() = None);
+    let guest = load_guest_from_bytecode(bytecode)?;
+    GUEST.with(|g| *g.borrow_mut() = Some(guest));
+    Ok(())
+}
+
+#[wasm_bindgen(js_name = "pushIslandData")]
+pub fn push_island_data(data: &[u8]) -> Result<(), JsValue> {
+    let mut guest = GUEST.with(|g| g.borrow_mut().take())
+        .ok_or_else(|| JsValue::from_str("No guest app running"))?;
+    guest.vm.clear_host_output();
+    vo_runtime::output::clear_output();
+    let (target_island_id, cmd) = decode_island_transport_frame(data)
+        .map_err(|e| JsValue::from_str(&format!("invalid island transport frame: {:?}", e)))?;
+    let current_island_id = guest.vm.current_island_id();
+    if current_island_id == 0 {
+        guest.vm.set_island_id(target_island_id);
+    } else if current_island_id != target_island_id {
+        return Err(JsValue::from_str(&format!(
+            "render island id mismatch: have {}, got {}",
+            current_island_id,
+            target_island_id
+        )));
+    }
+    guest.vm.push_island_command(cmd);
+    let outcome = guest.vm.run_scheduled()
+        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+    handle_guest_outcome(&mut guest, outcome)?;
+    let _ = guest.vm.take_host_output();
+    GUEST.with(|g| *g.borrow_mut() = Some(guest));
+    Ok(())
+}
+
+#[wasm_bindgen(js_name = "pollIslandData")]
+pub fn poll_island_data() -> Vec<u8> {
+    GUEST.with(|g| {
+        g.borrow_mut()
+            .as_mut()
+            .and_then(|guest| guest.outbound_frames.pop_front())
+            .unwrap_or_default()
+    })
+}
+
+#[wasm_bindgen(js_name = "pollPendingHostEvent")]
+pub fn poll_pending_host_event() -> JsValue {
+    GUEST.with(|g| {
+        let mut guest = g.borrow_mut();
+        let Some(guest) = guest.as_mut() else {
+            return JsValue::NULL;
+        };
+        let Some((token, delay_ms)) = guest.pending_host_events.pop_front() else {
+            return JsValue::NULL;
+        };
+        let obj = Object::new();
+        let _ = Reflect::set(&obj, &JsValue::from_str("token"), &JsValue::from_str(&token.to_string()));
+        let _ = Reflect::set(&obj, &JsValue::from_str("delayMs"), &JsValue::from_f64(delay_ms as f64));
+        obj.into()
+    })
+}
+
+#[wasm_bindgen(js_name = "wakeHostEvent")]
+pub fn wake_host_event(token: &str) -> Result<(), JsValue> {
+    let token = token
+        .parse::<u64>()
+        .map_err(|e| JsValue::from_str(&format!("invalid host event token '{}': {}", token, e)))?;
+    let mut guest = GUEST.with(|g| g.borrow_mut().take())
+        .ok_or_else(|| JsValue::from_str("No guest app running"))?;
+    guest.pending_host_event_tokens.remove(&token);
+    guest.vm.clear_host_output();
+    vo_runtime::output::clear_output();
+    guest.vm.wake_host_event(token);
+    let outcome = guest.vm.run_scheduled()
+        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+    handle_guest_outcome(&mut guest, outcome)?;
+    let _ = guest.vm.take_host_output();
+    GUEST.with(|g| *g.borrow_mut() = Some(guest));
+    Ok(())
 }
 
 /// Stop the running guest app (clears state).
 #[wasm_bindgen(js_name = "stopGui")]
 pub fn stop_gui() {
     GUEST.with(|g| *g.borrow_mut() = None);
+}
+
+fn handle_guest_outcome(guest: &mut GuestState, outcome: SchedulingOutcome) -> Result<(), JsValue> {
+    match outcome {
+        SchedulingOutcome::Completed
+        | SchedulingOutcome::Suspended
+        | SchedulingOutcome::SuspendedForHostEvents => {}
+        SchedulingOutcome::Blocked => {
+            return Err(JsValue::from_str(&format!("{:?}", guest.vm.deadlock_err())));
+        }
+        SchedulingOutcome::Panicked => {
+            return Err(JsValue::from_str("unexpected bounded panic outcome"));
+        }
+    }
+
+    let pending_host_events = guest.vm.scheduler.take_pending_host_events();
+    guest.event_wait_token = pending_host_events
+        .iter()
+        .find(|e| e.replay)
+        .map(|e| e.token);
+
+    for event in pending_host_events.iter().filter(|e| !e.replay) {
+        if guest.pending_host_event_tokens.insert(event.token) {
+            guest.pending_host_events.push_back((event.token, event.delay_ms));
+        }
+    }
+
+    for (target_island_id, cmd) in guest.vm.take_outbound_commands() {
+        guest.outbound_frames.push_back(encode_island_transport_frame(target_island_id, &cmd));
+    }
+
+    let stdout = vo_web::take_output();
+    if !stdout.is_empty() {
+        web_sys::console::log_1(&format!("[guest] {}", stdout.trim_end()).into());
+    }
+
+    Ok(())
 }
 
 // =============================================================================

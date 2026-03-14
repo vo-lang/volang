@@ -53,6 +53,8 @@ export async function openFile(filePath: string, options: { preserveRunEntry?: b
     code: content,
     dirty: false,
     guestRender: null,
+    guestModuleBytes: null,
+    guestEntryPath: null,
     isGuiApp: false,
     isRunning: false,
   }));

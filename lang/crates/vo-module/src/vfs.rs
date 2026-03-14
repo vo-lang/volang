@@ -8,7 +8,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use vo_common::abi::package_abi_path;
 use vo_common::vfs::{FileSystem, RealFs};
+use crate::ext_manifest::extension_name_from_content;
 
 /// A resolved package from the package resolver.
 #[derive(Debug, Clone)]
@@ -17,6 +19,10 @@ pub struct VfsPackage {
     pub name: String,
     /// Package path (e.g., "fmt", "./mylib", "github.com/user/pkg")
     pub path: String,
+    /// Stable ABI path used for extern lookup names.
+    pub abi_path: String,
+    /// Root module path if this package belongs to a module.
+    pub module_path: Option<String>,
     /// Resolved path in the underlying file system.
     pub fs_path: PathBuf,
     /// Source files in the package
@@ -210,26 +216,162 @@ fn resolve_package<F: FileSystem>(fs: &F, fs_path: &str, import_path: &str) -> O
     
     let files = load_vo_files(fs, pkg_path)?;
 
-    // If the package directory contains a vo.mod file, use the declared module path
-    // as the canonical package path. This ensures that relative imports like
-    // `"../../libs/vox"` produce the same extern lookup names as the full module
-    // path `"github.com/vo-lang/vox"` — both resolve to the same VfsPackage.path.
-    let canonical_path = try_read_module_path(fs, pkg_path)
-        .unwrap_or_else(|| import_path.to_string());
-
-    let name = canonical_path.rsplit('/').next().unwrap_or(&canonical_path).to_string();
-    
     let fs_path_abs = match fs.root() {
         Some(root) => root.join(pkg_path),
         None => pkg_path.to_path_buf(),
     };
 
+    let (module_path, canonical_path) =
+        resolve_canonical_package_path(fs, pkg_path, &fs_path_abs, import_path);
+    let extension_name = find_extension_name_abs(&fs_path_abs)
+        .or_else(|| find_extension_name_in_fs(fs, pkg_path));
+    let abi_path = package_abi_path(
+        &canonical_path,
+        module_path.as_deref(),
+        extension_name.as_deref(),
+    );
+    let name = abi_path.rsplit('/').next().unwrap_or(&abi_path).to_string();
+
     Some(VfsPackage {
         name,
         path: canonical_path,
+        abi_path,
+        module_path,
         fs_path: fs_path_abs,
         files,
     })
+}
+
+fn resolve_canonical_package_path<F: FileSystem>(
+    fs: &F,
+    pkg_path: &Path,
+    abs_pkg_path: &Path,
+    import_path: &str,
+) -> (Option<String>, String) {
+    if let Some((module_path, sub_path)) = find_module_identity_abs(abs_pkg_path) {
+        let canonical_path = join_module_and_subpath(&module_path, &sub_path);
+        return (Some(module_path), canonical_path);
+    }
+    if let Some((module_path, sub_path)) = find_module_identity_in_fs(fs, pkg_path) {
+        let canonical_path = join_module_and_subpath(&module_path, &sub_path);
+        return (Some(module_path), canonical_path);
+    }
+    (None, import_path.to_string())
+}
+
+fn find_module_identity_in_fs<F: FileSystem>(fs: &F, pkg_path: &Path) -> Option<(String, String)> {
+    for ancestor in relative_path_ancestors(pkg_path) {
+        if let Some(module_path) = try_read_module_path(fs, &ancestor) {
+            let sub_path = diff_path(pkg_path, &ancestor);
+            return Some((module_path, sub_path));
+        }
+    }
+    None
+}
+
+fn find_module_identity_abs(abs_pkg_path: &Path) -> Option<(String, String)> {
+    if !abs_pkg_path.is_absolute() {
+        return None;
+    }
+    let mut dir = abs_pkg_path;
+    loop {
+        let module_path = read_module_path_from_disk(dir);
+        if let Some(module_path) = module_path {
+            let sub_path = abs_pkg_path
+                .strip_prefix(dir)
+                .ok()
+                .map(path_to_forward_slashes)
+                .unwrap_or_default();
+            return Some((module_path, sub_path));
+        }
+        dir = dir.parent()?;
+    }
+}
+
+fn read_module_path_from_disk(dir: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(dir.join("vo.mod")).ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.trim().strip_prefix("module ") {
+            let m = rest.trim();
+            if !m.is_empty() {
+                return Some(m.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn find_extension_name_in_fs<F: FileSystem>(fs: &F, pkg_path: &Path) -> Option<String> {
+    for ancestor in relative_path_ancestors(pkg_path) {
+        if let Ok(content) = fs.read_file(&ancestor.join("vo.ext.toml")) {
+            if let Some(name) = extension_name_from_content(&content) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn find_extension_name_abs(abs_pkg_path: &Path) -> Option<String> {
+    if !abs_pkg_path.is_absolute() {
+        return None;
+    }
+    let mut dir = abs_pkg_path;
+    loop {
+        if let Ok(content) = std::fs::read_to_string(dir.join("vo.ext.toml")) {
+            if let Some(name) = extension_name_from_content(&content) {
+                return Some(name);
+            }
+        }
+        dir = dir.parent()?;
+    }
+}
+
+fn relative_path_ancestors(path: &Path) -> Vec<PathBuf> {
+    let mut ancestors = Vec::new();
+    let mut current = if path.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        path.to_path_buf()
+    };
+    loop {
+        ancestors.push(current.clone());
+        if current == Path::new(".") || current.as_os_str().is_empty() {
+            break;
+        }
+        if !current.pop() {
+            ancestors.push(PathBuf::from("."));
+            break;
+        }
+        if current.as_os_str().is_empty() {
+            current = PathBuf::from(".");
+        }
+    }
+    ancestors
+}
+
+fn diff_path(path: &Path, base: &Path) -> String {
+    path.strip_prefix(base)
+        .ok()
+        .map(path_to_forward_slashes)
+        .unwrap_or_default()
+}
+
+fn join_module_and_subpath(module_path: &str, sub_path: &str) -> String {
+    if sub_path.is_empty() {
+        module_path.to_string()
+    } else {
+        format!("{}/{}", module_path, sub_path)
+    }
+}
+
+fn path_to_forward_slashes(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    if raw == "." {
+        String::new()
+    } else {
+        raw
+    }
 }
 
 /// Try to read the `module` declaration from a `vo.mod` file in `pkg_dir`.

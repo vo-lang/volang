@@ -16,13 +16,21 @@ pub fn run_island_thread(
     module: Arc<Module>,
     transport: impl IslandTransport,
     island_registry: IslandRegistry,
+    extension_manifests: Vec<vo_runtime::ext_loader::ExtensionManifest>,
     jit_config: Option<super::JitConfig>,
 ) {
     let mut vm = match jit_config {
         Some(config) => Vm::with_jit_config(config),
         None => Vm::new(),
     };
-    run_island_vm(island_id, module, transport, island_registry, &mut vm);
+    run_island_vm(
+        island_id,
+        module,
+        transport,
+        island_registry,
+        extension_manifests,
+        &mut vm,
+    );
 }
 
 #[cfg(not(feature = "jit"))]
@@ -31,9 +39,17 @@ pub fn run_island_thread(
     module: Arc<Module>,
     transport: impl IslandTransport,
     island_registry: IslandRegistry,
+    extension_manifests: Vec<vo_runtime::ext_loader::ExtensionManifest>,
 ) {
     let mut vm = Vm::new();
-    run_island_vm(island_id, module, transport, island_registry, &mut vm);
+    run_island_vm(
+        island_id,
+        module,
+        transport,
+        island_registry,
+        extension_manifests,
+        &mut vm,
+    );
 }
 
 fn run_island_vm(
@@ -41,9 +57,18 @@ fn run_island_vm(
     module: Arc<Module>,
     transport: impl IslandTransport,
     island_registry: IslandRegistry,
+    extension_manifests: Vec<vo_runtime::ext_loader::ExtensionManifest>,
     vm: &mut Vm,
 ) {
-    vm.load((*module).clone());
+    let ext_loader = if extension_manifests.is_empty() {
+        None
+    } else {
+        Some(
+            vo_runtime::ext_loader::ExtensionLoader::from_manifests(&extension_manifests)
+                .unwrap_or_else(|e| panic!("failed to load island extensions: {}", e))
+        )
+    };
+    vm.load_with_extensions((*module).clone(), ext_loader);
     vm.state.island_registry = Some(island_registry);
     vm.state.current_island_id = island_id;
     run_island_loop(vm, &transport);

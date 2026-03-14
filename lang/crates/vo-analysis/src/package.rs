@@ -9,6 +9,7 @@ use std::fmt;
 #[derive(Debug)]
 pub struct Package {
     path: String,
+    abi_path: String,
     name: Option<String>,
     scope: ScopeKey,
     complete: bool,
@@ -17,9 +18,10 @@ pub struct Package {
 }
 
 impl Package {
-    pub fn new(path: String, name: Option<String>, scope: ScopeKey) -> Package {
+    pub fn new(path: String, abi_path: String, name: Option<String>, scope: ScopeKey) -> Package {
         Package {
             path,
+            abi_path,
             name,
             scope,
             complete: false,
@@ -30,6 +32,10 @@ impl Package {
 
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    pub fn abi_path(&self) -> &str {
+        &self.abi_path
     }
 
     pub fn name(&self) -> &Option<String> {

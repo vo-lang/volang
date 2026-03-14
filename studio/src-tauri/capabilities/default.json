@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for the Vibe Studio main window.",
+  "windows": ["main"],
+  "remote": {
+    "urls": [
+      "http://localhost:5173/*",
+      "http://127.0.0.1:5173/*"
+    ]
+  },
+  "permissions": [
+    "core:default",
+    "shell:default"
+  ]
+}

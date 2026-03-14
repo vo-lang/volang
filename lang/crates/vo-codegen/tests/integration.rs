@@ -20,7 +20,9 @@ fn analyze_source(source: &str) -> Result<Project, AnalysisError> {
     }
     
     let mut checker = Checker::new_with_trace(PackageKey::null(), interner.clone(), false);
-    let main_pkg_key = checker.tc_objs.new_package("main".to_string());
+    let main_pkg_key = checker
+        .tc_objs
+        .new_package("main".to_string(), "main".to_string());
     checker.pkg = main_pkg_key;
     
     let mut importer = NullImporter::new(PathBuf::from("."));

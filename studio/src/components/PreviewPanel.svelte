@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { render, injectStyles, decodeBinaryRender } from '@vogui/index';
+  import { render, injectStyles, decodeBinaryRender, destroyWidgets } from '@vogui/index';
   import type { RendererConfig } from '@vogui/types';
   import { bridge } from '../lib/bridge';
+  import { ensureRenderIslandWidgetRegistered } from '../lib/render_island';
   import { consolePushLines, ide } from '../stores/ide';
 
   export let guestRender: Uint8Array | null = null;
+  export let guestModuleBytes: Uint8Array | null = null;
   export let chromeless: boolean = false;
   export let showFullscreenAction: boolean = false;
   export let onFullscreenAction: (() => void) | null = null;
@@ -13,6 +15,20 @@
   let root: HTMLDivElement;
   let stylesInjected = false;
   let cleanupKeyHandler: (() => void) | null = null;
+  let renderedModuleBytes: Uint8Array | null = null;
+
+  function isAsyncGuiEventPayload(payload: string): boolean {
+    try {
+      const value = JSON.parse(payload);
+      return value !== null
+        && typeof value === 'object'
+        && (value.type === 'mount' || value.type === 'resize')
+        && typeof value.width === 'number'
+        && typeof value.height === 'number';
+    } catch {
+      return false;
+    }
+  }
 
   // Resizable width (panel mode only)
   let panelWidth = 400;
@@ -43,6 +59,10 @@
 
   async function onEvent(handlerId: number, payload: string): Promise<void> {
     try {
+      if (isAsyncGuiEventPayload(payload)) {
+        await bridge().shell.exec({ kind: 'gui.eventAsync', handlerId, payload });
+        return;
+      }
       const result = await bridge().shell.exec({ kind: 'gui.event', handlerId, payload });
       const bytes = (result as { renderBytes: Uint8Array }).renderBytes;
       if (bytes && bytes.length > 0) ide.update(s => ({ ...s, guestRender: bytes }));
@@ -52,6 +72,8 @@
         ...s,
         isGuiApp: false,
         guestRender: null,
+        guestModuleBytes: null,
+        guestEntryPath: null,
         isRunning: false,
         runStatus: 'error',
       }));
@@ -61,6 +83,7 @@
   const config: RendererConfig = { onEvent };
 
   onMount(() => {
+    ensureRenderIslandWidgetRegistered();
     bridge().setGuiRenderCallback((bytes) => {
       if (bytes.length > 0) ide.update(s => ({ ...s, guestRender: bytes }));
     });
@@ -84,11 +107,23 @@
     bridge().clearGuiRenderCallback();
     cleanupKeyHandler?.();
     cleanupKeyHandler = null;
-    if (root) root.innerHTML = '';
+    clearPreview();
   });
 
   $: if (root && guestRender && guestRender.length > 0) {
+    if (guestModuleBytes !== renderedModuleBytes) {
+      clearPreview();
+      renderedModuleBytes = guestModuleBytes;
+    }
     applyRender(guestRender);
+  } else if (root) {
+    clearPreview();
+    renderedModuleBytes = null;
+  }
+
+  function clearPreview() {
+    destroyWidgets();
+    if (root) root.innerHTML = '';
   }
 
   function applyRender(bytes: Uint8Array) {

@@ -262,6 +262,8 @@ pub struct VmState {
     /// Single-owner per island thread — no Mutex wrapper needed.
     #[cfg(feature = "std")]
     pub island_senders: StdHashMap<u32, Arc<dyn IslandSender>>,
+    #[cfg(feature = "std")]
+    pub external_island_transport: bool,
     /// Next endpoint ID counter for this island.
     pub next_endpoint_id: u64,
     /// Endpoint registry — maps endpoint IDs to local channel GcRefs.
@@ -295,6 +297,8 @@ impl VmState {
             main_transport: None,
             #[cfg(feature = "std")]
             island_senders: StdHashMap::new(),
+            #[cfg(feature = "std")]
+            external_island_transport: false,
             next_endpoint_id: 1, // 0 is reserved
             endpoint_registry: EndpointRegistry::new(),
             command_queue: VecDeque::new(),
@@ -336,6 +340,10 @@ impl VmState {
     pub fn send_to_island(&mut self, island_id: u32, cmd: IslandCommand) {
         #[cfg(feature = "std")]
         {
+            if self.external_island_transport {
+                self.outbound_commands.push_back((island_id, cmd));
+                return;
+            }
             self.try_send_to_island(island_id, cmd).unwrap_or_else(|error| {
                 panic!("send_to_island failed for island {}: {:?}", island_id, error)
             });

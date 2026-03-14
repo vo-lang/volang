@@ -47,6 +47,8 @@ export async function runCode(): Promise<void> {
     runStatus: 'preparing',
     runDurationMs: null,
     guestRender: null,
+    guestModuleBytes: null,
+    guestEntryPath: null,
     isGuiApp: false,
   }));
 
@@ -66,6 +68,8 @@ export async function runCode(): Promise<void> {
         isRunning: true,
         isGuiApp: true,
         guestRender: result.renderBytes,
+        guestModuleBytes: result.moduleBytes,
+        guestEntryPath: result.entryPath,
         runStatus: 'running',
         runDurationMs: elapsed,
       }));
@@ -80,6 +84,9 @@ export async function runCode(): Promise<void> {
         ...s,
         isRunning: false,
         isGuiApp: false,
+        guestRender: null,
+        guestModuleBytes: null,
+        guestEntryPath: null,
         runStatus: 'done',
         runDurationMs: elapsed,
       }));
@@ -92,6 +99,10 @@ export async function runCode(): Promise<void> {
     ide.update(s => ({
       ...s,
       isRunning: false,
+      isGuiApp: false,
+      guestRender: null,
+      guestModuleBytes: null,
+      guestEntryPath: null,
       runStatus: 'error',
       runDurationMs: elapsed,
     }));
@@ -116,6 +127,8 @@ export async function stopCode(): Promise<void> {
     isRunning: false,
     isGuiApp: false,
     guestRender: null,
+    guestModuleBytes: null,
+    guestEntryPath: null,
     runStatus: 'idle',
   }));
 }

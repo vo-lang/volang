@@ -146,10 +146,10 @@ impl TCObjects {
         skey
     }
 
-    pub fn new_package(&mut self, path: String) -> PackageKey {
+    pub fn new_package(&mut self, path: String, abi_path: String) -> PackageKey {
         let universe_scope = self.universe.as_ref().map(|u| u.scope());
         let skey = self.new_scope(universe_scope, 0, 0, &format!("package {}", path), false);
-        let pkg = Package::new(path.clone(), None, skey);
+        let pkg = Package::new(path.clone(), abi_path, None, skey);
         let key = self.pkgs.insert(pkg);
         self.pkg_path_cache.insert(path, key);
         key

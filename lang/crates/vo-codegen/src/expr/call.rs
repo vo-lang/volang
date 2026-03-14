@@ -1,6 +1,7 @@
 //! Function and method call compilation.
 
 use vo_analysis::objects::TypeKey;
+use vo_common::abi::abi_lookup_name;
 use vo_runtime::SlotType;
 use vo_syntax::ast::{Expr, ExprKind};
 use vo_vm::instruction::Opcode;
@@ -163,13 +164,9 @@ pub fn compile_call(
                 .ok_or_else(|| CodegenError::Internal("cannot resolve function name".to_string()))?;
             let pkg_key = obj.pkg();
             let pkg_name = pkg_key
-                .map(|pk| {
-                    let pkg = &info.project.tc_objs.pkgs[pk];
-                    // Use full path with / replaced by _, but remove .. and . components
-                    normalize_pkg_path(pkg.path())
-                })
+                .map(|pk| info.project.tc_objs.pkgs[pk].abi_path().to_string())
                 .unwrap_or_else(|| "main".to_string());
-            let extern_name = format!("{}_{}", pkg_name, func_name);
+            let extern_name = abi_lookup_name(&pkg_name, func_name);
             return compile_extern_call(call, &extern_name, dst, ctx, func, info);
         }
     }
@@ -623,7 +620,7 @@ pub fn get_extern_name(
             .ok_or_else(|| CodegenError::Internal("cannot resolve package".to_string()))?;
         let func_name = info.project.interner.resolve(sel.sel.symbol)
             .ok_or_else(|| CodegenError::Internal("cannot resolve function name".to_string()))?;
-        Ok(format!("{}_{}", pkg_name, func_name))
+        Ok(abi_lookup_name(&pkg_name, func_name))
     } else {
         Err(CodegenError::Internal("expected package.func".to_string()))
     }
@@ -780,18 +777,4 @@ fn pack_variadic_args(
     }
     
     Ok(dst)
-}
-
-/// Normalize a package path for extern name generation.
-/// Removes `.` and `..` components, replaces `/`, `.`, and `-` with `_`
-/// to match `make_lookup_name` in vo-ffi-macro and produce valid Rust identifiers.
-/// E.g., "../../libs/vox" -> "libs_vox", "encoding/json" -> "encoding_json",
-///       "github.com/vo-lang/resvg" -> "github_com_vo_lang_resvg"
-pub fn normalize_pkg_path(path: &str) -> String {
-    path.split('/')
-        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
-        .collect::<Vec<_>>()
-        .join("_")
-        .replace('.', "_")
-        .replace('-', "_")
 }

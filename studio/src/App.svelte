@@ -115,7 +115,12 @@
           <div class="expanded-surface">
             {#if isGuiApp}
               {#if PreviewPanelComponent}
-                <svelte:component this={PreviewPanelComponent} guestRender={$ide.guestRender} chromeless />
+                <svelte:component
+                  this={PreviewPanelComponent}
+                  guestRender={$ide.guestRender}
+                  guestModuleBytes={$ide.guestModuleBytes}
+                  chromeless
+                />
               {/if}
             {:else}
               <Console mode="fullscreen" />
@@ -140,6 +145,7 @@
                 <svelte:component
                   this={PreviewPanelComponent}
                   guestRender={$ide.guestRender}
+                  guestModuleBytes={$ide.guestModuleBytes}
                   showFullscreenAction
                   onFullscreenAction={() => ide.update(s => ({ ...s, outputExpanded: true }))}
                 />

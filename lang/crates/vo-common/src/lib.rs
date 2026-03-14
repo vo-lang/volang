@@ -11,6 +11,7 @@
 pub mod source;
 pub mod span;
 pub mod diagnostics;
+pub mod abi;
 pub mod vfs;
 
 pub use source::{SourceMap, SourceFile, FileId, SourceLoc};

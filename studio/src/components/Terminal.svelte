@@ -150,15 +150,15 @@
 
     if (result.guiPath) {
       try {
-        ide.update(s => ({ ...s, isRunning: true, isGuiApp: false, guestRender: null, runStatus: 'preparing', runDurationMs: null, outputExpanded: true }));
+        ide.update(s => ({ ...s, isRunning: true, isGuiApp: false, guestRender: null, guestModuleBytes: null, guestEntryPath: null, runStatus: 'preparing', runDurationMs: null, outputExpanded: true }));
         await bridge().shell.exec({ kind: 'app.prepare', path: result.guiPath });
         ide.update(s => ({ ...s, runStatus: 'compiling' }));
         const res = await bridge().shell.exec({ kind: 'gui.run', path: result.guiPath });
-        const bytes = (res as { renderBytes: Uint8Array }).renderBytes;
-        ide.update(s => ({ ...s, isRunning: true, isGuiApp: true, guestRender: bytes, runStatus: 'running', runDurationMs: null, outputExpanded: true }));
+        const guiResult = res as { renderBytes: Uint8Array; moduleBytes: Uint8Array; entryPath: string };
+        ide.update(s => ({ ...s, isRunning: true, isGuiApp: true, guestRender: guiResult.renderBytes, guestModuleBytes: guiResult.moduleBytes, guestEntryPath: guiResult.entryPath, runStatus: 'running', runDurationMs: null, outputExpanded: true }));
         explorer.update(e => ({ ...e, appMode: 'develop' }));
       } catch (e) {
-        ide.update(s => ({ ...s, isRunning: false, isGuiApp: false, guestRender: null, runStatus: 'error' }));
+        ide.update(s => ({ ...s, isRunning: false, isGuiApp: false, guestRender: null, guestModuleBytes: null, guestEntryPath: null, runStatus: 'error' }));
         termPush('error', `GUI launch failed: ${String(e)}`);
       }
     }

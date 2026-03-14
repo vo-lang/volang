@@ -9,6 +9,8 @@ Usage:
     ./d.py play [--build-only]  Build WASM and start playground
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os

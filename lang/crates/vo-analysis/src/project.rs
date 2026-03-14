@@ -244,7 +244,10 @@ pub fn analyze_project_with_options<R: Resolver>(
     }));
     
     // Create the main package
-    let main_pkg_key = state.borrow_mut().tc_objs.new_package("main".to_string());
+    let main_pkg_key = state
+        .borrow_mut()
+        .tc_objs
+        .new_package("main".to_string(), "main".to_string());
     
     // Parse the source files
     let parsed_files = parse_files(&files, &state)?;
@@ -522,7 +525,9 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
         // registers, regardless of whether the import used a relative or full path.
         let pkg_key = {
             let mut state = self.state.borrow_mut();
-            let pkg = state.tc_objs.new_package(vfs_pkg.path.clone());
+            let pkg = state
+                .tc_objs
+                .new_package(vfs_pkg.path.clone(), vfs_pkg.abi_path.clone());
             // Set short name for package (used when referencing: hex.Encode)
             state.tc_objs.pkgs[pkg].set_name(vfs_pkg.name.clone());
             // If the raw import_path differs from the canonical module path (e.g.

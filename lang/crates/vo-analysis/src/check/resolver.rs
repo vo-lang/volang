@@ -632,7 +632,7 @@ impl Checker {
         }
 
         // Create a new empty package as last resort
-        let pkg = self.new_package(path.to_string());
+        let pkg = self.new_package(path.to_string(), path.to_string());
 
         // Extract package name from path
         let name = if let Some(i) = path.rfind('/') {

@@ -375,8 +375,8 @@ impl Checker {
     }
     
     #[inline]
-    pub(crate) fn new_package(&mut self, path: String) -> PackageKey {
-        self.tc_objs.new_package(path)
+    pub(crate) fn new_package(&mut self, path: String, abi_path: String) -> PackageKey {
+        self.tc_objs.new_package(path, abi_path)
     }
     
     #[inline]

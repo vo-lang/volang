@@ -1835,6 +1835,7 @@ dependencies = [
  "vo-common",
  "vo-module",
  "vo-runtime",
+ "vo-vm",
  "vo-web",
  "vo-web-runtime-wasm",
  "wasm-bindgen",

@@ -4938,6 +4938,7 @@ dependencies = [
  "tauri-plugin-shell",
  "vo-module",
  "vo-runtime",
+ "vo-vm",
  "vo-vox",
  "vogui",
 ]

@@ -671,6 +671,19 @@ fn wasm_write_hook(s: &str) {
 
 /// Create a VM from a pre-deserialized module.
 pub fn create_vm_from_module(module: Module, register_externs: ExternRegistrar) -> Result<Vm, String> {
+    let mut vm = create_loaded_vm_from_module(module, register_externs)?;
+    let outcome = vm.run().map_err(|e| format!("{:?}", e))?;
+    validate_sync_outcome(&vm, outcome)?;
+    Ok(vm)
+}
+
+pub fn create_loaded_vm(bytecode: &[u8], register_externs: ExternRegistrar) -> Result<Vm, String> {
+    let module = Module::deserialize(bytecode)
+        .map_err(|e| format!("Failed to load bytecode: {:?}", e))?;
+    create_loaded_vm_from_module(module, register_externs)
+}
+
+pub fn create_loaded_vm_from_module(module: Module, register_externs: ExternRegistrar) -> Result<Vm, String> {
     #[cfg(target_arch = "wasm32")]
     vo_runtime::output::set_write_hook(wasm_write_hook);
     vo_runtime::output::clear_output();
@@ -693,8 +706,6 @@ pub fn create_vm_from_module(module: Module, register_externs: ExternRegistrar) 
     register_externs(reg, exts);
     
     vm.load(module);
-    let outcome = vm.run().map_err(|e| format!("{:?}", e))?;
-    validate_sync_outcome(&vm, outcome)?;
     Ok(vm)
 }
 

@@ -227,7 +227,12 @@ impl Universe {
         let unsafe_scope = objs
             .scopes
             .insert(Scope::new(Some(universe_scope), 0, 0, "package unsafe"));
-        let mut pkg = Package::new("unsafe".to_string(), Some("unsafe".to_string()), unsafe_scope);
+        let mut pkg = Package::new(
+            "unsafe".to_string(),
+            "unsafe".to_string(),
+            Some("unsafe".to_string()),
+            unsafe_scope,
+        );
         pkg.mark_complete();
         let unsafe_pkg = objs.pkgs.insert(pkg);
         (universe_scope, unsafe_pkg)

@@ -69,6 +69,7 @@ export type AppOp =
 export type GuiOp =
   | { kind: 'gui.run';        path: string }
   | { kind: 'gui.event';      handlerId: number; payload: string }
+  | { kind: 'gui.eventAsync'; handlerId: number; payload: string }
   | { kind: 'gui.stop' };
 
 export type ShellOp = FsOp | VoOp | GitOp | ZipOp | ProcOp | HttpOp | AppOp | GuiOp;
@@ -177,7 +178,7 @@ export type AppPrepareResult    = null;
 export interface AppCompileRunResult { stdout: string }
 
 // gui
-export interface GuiRunResult        { renderBytes: Uint8Array }
+export interface GuiRunResult        { renderBytes: Uint8Array; moduleBytes: Uint8Array; entryPath: string }
 export interface GuiEventResult      { renderBytes: Uint8Array }
 
 // ── Op → result type map (used by typed exec() overloads) ────────────────────
@@ -229,6 +230,7 @@ export interface OpResultMap {
   'app.compileRun': AppCompileRunResult;
   'gui.run':        GuiRunResult;
   'gui.event':      GuiEventResult;
+  'gui.eventAsync': null;
   'gui.stop':       null;
 }
 

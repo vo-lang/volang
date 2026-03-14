@@ -24,8 +24,9 @@ export interface ShellTransport {
 export interface WasmExecBackend {
   prepare(entryPath: string): Promise<void>;
   compileRun(entryPath: string): string;
-  runGui(entryPath: string): Uint8Array;
+  runGui(entryPath: string): { renderBytes: Uint8Array; moduleBytes: Uint8Array; entryPath: string };
   sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array>;
+  sendGuiEventAsync(handlerId: number, payload: string): Promise<void>;
   stopGui(): void;
 }
 
@@ -102,8 +103,20 @@ export class TauriTransport implements ShellTransport {
     if (kind === 'gui.run') {
       try {
         const op = req.op as { kind: string; path: string };
-        const raw = await this._invoke('cmd_run_gui', { entryPath: op.path }) as number[];
-        return { id: req.id, kind: 'ok', data: { renderBytes: new Uint8Array(raw) } };
+        const raw = await this._invoke('cmd_run_gui', { entryPath: op.path }) as {
+          renderBytes: number[];
+          moduleBytes: number[];
+          entryPath: string;
+        };
+        return {
+          id: req.id,
+          kind: 'ok',
+          data: {
+            renderBytes: new Uint8Array(raw.renderBytes),
+            moduleBytes: new Uint8Array(raw.moduleBytes),
+            entryPath: raw.entryPath,
+          },
+        };
       } catch (e) { return errResp(req.id, e); }
     }
 
@@ -112,6 +125,14 @@ export class TauriTransport implements ShellTransport {
         const op = req.op as { kind: string; handlerId: number; payload: string };
         const raw = await this._invoke('cmd_send_gui_event', { handlerId: op.handlerId, payload: op.payload }) as number[];
         return { id: req.id, kind: 'ok', data: { renderBytes: new Uint8Array(raw) } };
+      } catch (e) { return errResp(req.id, e); }
+    }
+
+    if (kind === 'gui.eventAsync') {
+      try {
+        const op = req.op as { kind: string; handlerId: number; payload: string };
+        await this._invoke('cmd_send_gui_event_async', { handlerId: op.handlerId, payload: op.payload });
+        return { id: req.id, kind: 'ok', data: null };
       } catch (e) { return errResp(req.id, e); }
     }
 
@@ -180,8 +201,8 @@ export class WasmTransport implements ShellTransport {
     if (kind === 'gui.run') {
       try {
         const op = req.op as { kind: string; path: string };
-        const renderBytes = this.execBackend.runGui(op.path);
-        return { id: req.id, kind: 'ok', data: { renderBytes } };
+        const { renderBytes, moduleBytes, entryPath } = this.execBackend.runGui(op.path);
+        return { id: req.id, kind: 'ok', data: { renderBytes, moduleBytes, entryPath } };
       } catch (e) { return errResp(req.id, e); }
     }
 
@@ -190,6 +211,14 @@ export class WasmTransport implements ShellTransport {
         const op = req.op as { kind: string; handlerId: number; payload: string };
         const renderBytes = await this.execBackend.sendGuiEvent(op.handlerId, op.payload);
         return { id: req.id, kind: 'ok', data: { renderBytes } };
+      } catch (e) { return errResp(req.id, e); }
+    }
+
+    if (kind === 'gui.eventAsync') {
+      try {
+        const op = req.op as { kind: string; handlerId: number; payload: string };
+        await this.execBackend.sendGuiEventAsync(op.handlerId, op.payload);
+        return { id: req.id, kind: 'ok', data: null };
       } catch (e) { return errResp(req.id, e); }
     }
 

@@ -79,9 +79,26 @@ pub struct Vm {
     pub jit_mgr: Option<JitManager>,
     #[cfg(feature = "std")]
     extension_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
+    #[cfg(feature = "std")]
+    extension_manifests: Option<Vec<vo_runtime::ext_loader::ExtensionManifest>>,
     pub module: Option<Module>,
     pub scheduler: Scheduler,
     pub state: VmState,
+}
+
+#[cfg(feature = "std")]
+fn debug_log(message: &str) {
+    eprintln!("{message}");
+    if let Ok(path) = std::env::var("VIBE_STUDIO_DEBUG_LOG") {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{message}");
+        }
+    }
 }
 
 #[cfg(feature = "std")]
@@ -111,10 +128,17 @@ impl Vm {
             jit_mgr: None,
             #[cfg(feature = "std")]
             extension_loader: None,
+            #[cfg(feature = "std")]
+            extension_manifests: None,
             module: None,
             scheduler: Scheduler::new(),
             state: VmState::new(),
         }
+    }
+
+    #[cfg(feature = "std")]
+    pub fn enable_external_island_transport(&mut self) {
+        self.state.external_island_transport = true;
     }
     
     /// Create a VM with custom JIT thresholds.
@@ -219,8 +243,40 @@ impl Vm {
             self.state.extern_registry.register_from_extension_loader(loader, &module.externs);
         }
 
+        debug_log(&format!(
+            "[studio-native] vm registry has {}/{} externs after registration",
+            module
+                .externs
+                .iter()
+                .enumerate()
+                .filter(|(id, _)| self.state.extern_registry.has(*id as u32))
+                .count(),
+            module.externs.len()
+        ));
+        for name in [
+            "voplay_initSurface",
+            "voplay_scene3d_physicsInit",
+            "voplay_scene3d_physicsQueryAABB",
+        ] {
+            if let Some((id, _)) = module.externs.iter().enumerate().find(|(_, def)| def.name == name) {
+                debug_log(&format!(
+                    "[studio-native] vm registry {} id={} has={} loader_lookup={}",
+                    name,
+                    id,
+                    self.state.extern_registry.has(id as u32),
+                    ext_loader
+                        .as_ref()
+                        .map(|loader| loader.lookup(name).is_some())
+                        .unwrap_or(false)
+                ));
+            }
+        }
+
         validate_externs_registered(&self.state.extern_registry, &module.externs);
         
+        self.extension_manifests = ext_loader
+            .as_ref()
+            .map(|loader| loader.manifests().to_vec());
         self.extension_loader = ext_loader;
         
         self.finish_load(module);
@@ -248,11 +304,15 @@ impl Vm {
     /// Returns the island handle (GcRef).
     #[cfg(feature = "std")]
     pub fn create_island(&mut self) -> GcRef {
+        let next_id = self.state.next_island_id;
+        self.state.next_island_id += 1;
+        if self.state.external_island_transport {
+            return vo_runtime::island::create(&mut self.state.gc, next_id);
+        }
+
         use vo_runtime::island_transport::{InThreadTransport, IslandSender};
 
         let module = self.module.as_ref().expect("module required for create_island");
-        let next_id = self.state.next_island_id;
-        self.state.next_island_id += 1;
         
         // Create transport pair for the new island
         let (island_sender, island_transport) = InThreadTransport::new();
@@ -280,13 +340,27 @@ impl Vm {
         // Spawn island thread with JIT config from main VM
         let module_arc = std::sync::Arc::new(module.clone());
         let registry_clone = registry.clone();
+        let extension_manifests = self.extension_manifests.clone().unwrap_or_default();
         #[cfg(feature = "jit")]
         let jit_config = self.jit_mgr.as_ref().map(|mgr| mgr.config().clone());
         let join_handle = std::thread::spawn(move || {
             #[cfg(feature = "jit")]
-            island_thread::run_island_thread(next_id, module_arc, island_transport, registry_clone, jit_config);
+            island_thread::run_island_thread(
+                next_id,
+                module_arc,
+                island_transport,
+                registry_clone,
+                extension_manifests,
+                jit_config,
+            );
             #[cfg(not(feature = "jit"))]
-            island_thread::run_island_thread(next_id, module_arc, island_transport, registry_clone);
+            island_thread::run_island_thread(
+                next_id,
+                module_arc,
+                island_transport,
+                registry_clone,
+                extension_manifests,
+            );
         });
         
         // Save thread handle
