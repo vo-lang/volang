@@ -1533,6 +1533,7 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_iface_to_iface", vo_iface_to_iface as *const u8),
         ("vo_iface_eq", vo_iface_eq as *const u8),
         ("vo_iface_assert", vo_iface_assert as *const u8),
+        ("vo_set_call_request", vo_set_call_request as *const u8),
         ("vo_ptr_clone", vo_ptr_clone as *const u8),
         ("vo_map_new", vo_map_new as *const u8),
         ("vo_map_len", vo_map_len as *const u8),
@@ -1548,6 +1549,8 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_chan_recv", vo_chan_recv as *const u8),
         ("vo_go_start", vo_go_start as *const u8),
         ("vo_go_island", vo_go_island as *const u8),
+        ("vo_defer_push", vo_defer_push as *const u8),
+        ("vo_recover", vo_recover as *const u8),
         ("vo_select_begin", vo_select_begin as *const u8),
         ("vo_select_send", vo_select_send as *const u8),
         ("vo_select_recv", vo_select_recv as *const u8),
@@ -1685,4 +1688,17 @@ pub extern "C" fn vo_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitRe
     let ctx = unsafe { &mut *ctx };
     let exec_fn = ctx.select_exec_fn.expect("select_exec_fn not set");
     exec_fn(ctx, result_reg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_symbols_include_jit_control_helpers() {
+        let symbols = get_runtime_symbols();
+        assert!(symbols.iter().any(|(name, _)| *name == "vo_set_call_request"));
+        assert!(symbols.iter().any(|(name, _)| *name == "vo_defer_push"));
+        assert!(symbols.iter().any(|(name, _)| *name == "vo_recover"));
+    }
 }

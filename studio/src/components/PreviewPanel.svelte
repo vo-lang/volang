@@ -1,275 +1,559 @@
+<script context="module" lang="ts">
+  // Module-level state shared across PreviewPanel instances.
+  // Tracks whether the native logic island VM has received the initial
+  // "mount" event.  This survives component destroy/recreate during
+  // fullscreen transitions so we don't re-send mount to a VM that is
+  // already running its render loop.
+  let voplayNativeMounted = false;
+</script>
+
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import { render, injectStyles, decodeBinaryRender, destroyWidgets } from '@vogui/index';
-  import type { RendererConfig } from '@vogui/types';
-  import { bridge } from '../lib/bridge';
-  import { ensureRenderIslandWidgetRegistered } from '../lib/render_island';
-  import { consolePushLines, ide } from '../stores/ide';
+  import { onDestroy, tick } from 'svelte';
+  import { runtime } from '../stores/runtime';
+  import GuiRuntimeSurface from './GuiRuntimeSurface.svelte';
+  import {
+    startRenderIsland, stopRenderIsland, deliverRenderBytes,
+    isRenderIslandActive,
+  } from '../lib/gui/render_island';
+  import type { ServiceRegistry } from '../lib/services/service_registry';
 
-  export let guestRender: Uint8Array | null = null;
-  export let guestModuleBytes: Uint8Array | null = null;
-  export let chromeless: boolean = false;
-  export let showFullscreenAction: boolean = false;
+  export let registry: ServiceRegistry | null = null;
+  export let chromeless = false;
+  export let collapsed = false;
+  export let fullscreen = false;
+  export let fullscreenTitle = '';
+  export let showFullscreenAction = false;
   export let onFullscreenAction: (() => void) | null = null;
+  export let onExitFullscreenAction: (() => void) | null = null;
+  export let onToggleCollapsed: (() => void) | null = null;
 
-  let root: HTMLDivElement;
-  let stylesInjected = false;
-  let cleanupKeyHandler: (() => void) | null = null;
-  let renderedModuleBytes: Uint8Array | null = null;
+  // Must match the canvasRef passed to runRenderWorker in voplay/host.vo
+  const CANVAS_ID = 'canvas';
 
-  function isAsyncGuiEventPayload(payload: string): boolean {
-    try {
-      const value = JSON.parse(payload);
-      return value !== null
-        && typeof value === 'object'
-        && (value.type === 'mount' || value.type === 'resize')
-        && typeof value.width === 'number'
-        && typeof value.height === 'number';
-    } catch {
-      return false;
-    }
-  }
-
-  // Resizable width (panel mode only)
   let panelWidth = 400;
   let isResizing = false;
   let resizeStartX = 0;
-  let resizeStartWidth = 0;
+  let resizeStartW = 0;
+  let renderIslandActive = false;
+  let renderIslandError: string | null = null;
+  let rendererContainer: HTMLDivElement | undefined;
+  let resizeObserver: ResizeObserver | null = null;
+  let pendingResizeFrame: number | null = null;
+  let pendingResizeWidth = 0;
+  let pendingResizeHeight = 0;
+
+  $: isGuiApp = $runtime.kind === 'gui' && $runtime.isRunning;
+  $: guiFramework = $runtime.guiFramework;
+  $: hasRenderIsland = guiFramework?.rendererPath != null;
+  $: capabilities = guiFramework?.capabilities ?? [];
+  $: isRenderSurface = capabilities.includes('render_surface');
+  $: isIslandTransport = capabilities.includes('island_transport');
+  $: effectiveCollapsed = !fullscreen && !chromeless && collapsed;
+
+  $: if (!isGuiApp) {
+    renderIslandError = null;
+  }
+
+  // Launch render island when GUI app with renderer becomes active.
+  // If the render island survived a layout transition (e.g. preview→fullscreen),
+  // just re-adopt the canvas without re-launching.
+  $: if (isGuiApp && hasRenderIsland && registry && $runtime.guiModuleBytes && $runtime.guiEntryPath && !renderIslandActive) {
+    if (isRenderIslandActive()) {
+      console.log('[PreviewPanel] re-adopt: render island still active, re-attaching canvas');
+      renderIslandActive = true;
+      tick().then(() => attachCanvas());
+    } else {
+      console.log('[PreviewPanel] fresh launch: no active render island');
+      void launchRenderIsland();
+    }
+  }
+  $: if (!isGuiApp && renderIslandActive) {
+    voplayNativeMounted = false;
+    teardownIsland();
+  }
+
+  // Deliver render bytes for non-island render paths (render_byte_stream)
+  $: if (renderIslandActive && !isIslandTransport && $runtime.guiRenderBytes && rendererContainer) {
+    deliverRenderBytes(rendererContainer, $runtime.guiRenderBytes);
+  }
+
+  // ---- Canvas management ----
+  // The canvas is created/managed via JS (not Svelte template) so it can
+  // survive component destroy/recreate during layout transitions.
+  // The WebGPU surface is tied to the canvas DOM element, not its position.
+
+  function ensureCanvas(): HTMLCanvasElement {
+    let canvas = document.getElementById(CANVAS_ID) as HTMLCanvasElement | null;
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      canvas.id = CANVAS_ID;
+    }
+    return canvas;
+  }
+
+  function applyCanvasStyle(canvas: HTMLCanvasElement): void {
+    // Inline styles because Svelte scoped CSS won't apply to JS-created elements.
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.display = 'block';
+    canvas.style.position = '';
+    canvas.style.left = '';
+    canvas.style.top = '';
+  }
+
+  function attachCanvas(): void {
+    if (!rendererContainer) {
+      console.warn('[PreviewPanel] attachCanvas: rendererContainer not ready, retrying after tick');
+      tick().then(() => attachCanvas());
+      return;
+    }
+    const canvas = ensureCanvas();
+    applyCanvasStyle(canvas);
+    if (canvas.parentElement !== rendererContainer) {
+      rendererContainer.appendChild(canvas);
+    }
+    maybeObserveRendererSize();
+  }
+
+  function parkCanvas(): void {
+    const canvas = document.getElementById(CANVAS_ID);
+    if (!canvas) return;
+    // Move canvas off-screen but keep it in the DOM so the WebGPU surface
+    // remains valid.  It will be re-adopted by the next PreviewPanel instance.
+    canvas.style.position = 'fixed';
+    canvas.style.left = '-9999px';
+    canvas.style.top = '0';
+    document.body.appendChild(canvas);
+  }
+
+  function removeCanvas(): void {
+    const canvas = document.getElementById(CANVAS_ID);
+    canvas?.remove();
+  }
+
+  // ---- Lifecycle ----
+
+  async function launchRenderIsland(): Promise<void> {
+    if (!registry) return;
+    try {
+      const moduleBytes = $runtime.guiModuleBytes;
+      const entryPath = $runtime.guiEntryPath;
+      if (!moduleBytes || !entryPath) {
+        throw new Error('Render-island host context missing gui runtime data');
+      }
+      renderIslandError = null;
+      await tick();
+      attachCanvas();
+      await startRenderIsland(CANVAS_ID, registry.backend, {
+        entryPath,
+        moduleBytes,
+        framework: $runtime.guiFramework,
+        onError: (message) => {
+          renderIslandError = message;
+        },
+      });
+      renderIslandActive = true;
+      if (isIslandTransport && !voplayNativeMounted) {
+        await launchVoplayIsland();
+        voplayNativeMounted = true;
+      }
+      maybeObserveRendererSize();
+    } catch (e) {
+      renderIslandError = e instanceof Error ? e.message : String(e);
+      console.error('[PreviewPanel] render island start failed:', e);
+    }
+  }
+
+  async function launchVoplayIsland(): Promise<void> {
+    if (!registry) return;
+    const externalHandlerId = $runtime.guiExternalWidgetHandlerId;
+    if (externalHandlerId == null) {
+      console.error('[PreviewPanel] voplay island: missing external widget handler id');
+      return;
+    }
+    await tick();
+    const width = rendererContainer?.clientWidth ?? 800;
+    const height = rendererContainer?.clientHeight ?? 600;
+
+    // Notify logic island that the canvas is mounted → triggers runRenderIslandSplit
+    const mountPayload = JSON.stringify({ type: 'mount', width, height });
+    try {
+      await registry.backend.sendGuiEvent(externalHandlerId, mountPayload);
+    } catch (e) {
+      renderIslandError = e instanceof Error ? e.message : String(e);
+      throw e;
+    }
+  }
+
+  function sendVoplayResize(width: number, height: number): void {
+    if (!registry || !isIslandTransport || !voplayNativeMounted) return;
+    const externalHandlerId = $runtime.guiExternalWidgetHandlerId;
+    if (externalHandlerId == null || width <= 0 || height <= 0) return;
+    pendingResizeWidth = width;
+    pendingResizeHeight = height;
+    if (pendingResizeFrame !== null) return;
+    pendingResizeFrame = requestAnimationFrame(() => {
+      pendingResizeFrame = null;
+      const payload = JSON.stringify({
+        type: 'resize',
+        width: pendingResizeWidth,
+        height: pendingResizeHeight,
+      });
+      registry?.backend.sendGuiEventAsync(externalHandlerId, payload).catch((e) => {
+        console.error('[PreviewPanel] voplay island resize failed:', e);
+      });
+    });
+  }
+
+  function maybeObserveRendererSize(): void {
+    if (!rendererContainer || !isIslandTransport || !voplayNativeMounted) return;
+    if (resizeObserver) return;
+    resizeObserver = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      sendVoplayResize(
+        Math.round(entry.contentRect.width),
+        Math.round(entry.contentRect.height),
+      );
+    });
+    resizeObserver.observe(rendererContainer);
+    sendVoplayResize(rendererContainer.clientWidth, rendererContainer.clientHeight);
+  }
+
+  function stopObservingRendererSize(): void {
+    resizeObserver?.disconnect();
+    resizeObserver = null;
+    if (pendingResizeFrame !== null) {
+      cancelAnimationFrame(pendingResizeFrame);
+      pendingResizeFrame = null;
+    }
+  }
+
+  function teardownIsland(): void {
+    stopObservingRendererSize();
+    renderIslandActive = false;
+    stopRenderIsland();
+    removeCanvas();
+  }
+
+  $: if (renderIslandActive && rendererContainer && isIslandTransport && voplayNativeMounted) {
+    maybeObserveRendererSize();
+  }
+  $: if (effectiveCollapsed && renderIslandActive) {
+    stopObservingRendererSize();
+    parkCanvas();
+  }
+  $: if (!effectiveCollapsed && renderIslandActive && rendererContainer) {
+    attachCanvas();
+  }
+
+  onDestroy(() => {
+    stopObservingRendererSize();
+    const running = $runtime.isRunning;
+    const active = isRenderIslandActive();
+    console.log('[PreviewPanel] onDestroy', { running, active, voplayNativeMounted });
+    if (running && active) {
+      // Layout transition (e.g. preview → fullscreen): keep the render island
+      // alive and park the canvas off-screen so the WebGPU surface stays valid.
+      parkCanvas();
+      console.log('[PreviewPanel] onDestroy: parked canvas for layout transition');
+    } else {
+      voplayNativeMounted = false;
+      teardownIsland();
+      console.log('[PreviewPanel] onDestroy: full teardown');
+    }
+  });
 
   function onResizeStart(e: MouseEvent) {
     isResizing = true;
     resizeStartX = e.clientX;
-    resizeStartWidth = panelWidth;
+    resizeStartW = panelWidth;
     e.preventDefault();
     window.addEventListener('mousemove', onResizeMove);
     window.addEventListener('mouseup', onResizeEnd);
   }
-
   function onResizeMove(e: MouseEvent) {
     if (!isResizing) return;
-    const delta = resizeStartX - e.clientX;
-    panelWidth = Math.max(220, Math.min(800, resizeStartWidth + delta));
+    panelWidth = Math.max(220, Math.min(800, resizeStartW + (resizeStartX - e.clientX)));
   }
-
   function onResizeEnd() {
     isResizing = false;
     window.removeEventListener('mousemove', onResizeMove);
     window.removeEventListener('mouseup', onResizeEnd);
-  }
-
-  async function onEvent(handlerId: number, payload: string): Promise<void> {
-    try {
-      if (isAsyncGuiEventPayload(payload)) {
-        await bridge().shell.exec({ kind: 'gui.eventAsync', handlerId, payload });
-        return;
-      }
-      const result = await bridge().shell.exec({ kind: 'gui.event', handlerId, payload });
-      const bytes = (result as { renderBytes: Uint8Array }).renderBytes;
-      if (bytes && bytes.length > 0) ide.update(s => ({ ...s, guestRender: bytes }));
-    } catch (e: any) {
-      consolePushLines('stderr', String(e));
-      ide.update(s => ({
-        ...s,
-        isGuiApp: false,
-        guestRender: null,
-        guestModuleBytes: null,
-        guestEntryPath: null,
-        isRunning: false,
-        runStatus: 'error',
-      }));
-    }
-  }
-
-  const config: RendererConfig = { onEvent };
-
-  onMount(() => {
-    ensureRenderIslandWidgetRegistered();
-    bridge().setGuiRenderCallback((bytes) => {
-      if (bytes.length > 0) ide.update(s => ({ ...s, guestRender: bytes }));
-    });
-
-    const gameKeys = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'PageUp', 'PageDown']);
-    const keyHandler = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement;
-      const tag = target.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      // Don't intercept events originating inside the code editor
-      if (target.closest('.cm-editor, .cm-content')) return;
-      if (!config.onEvent) return;
-      if (gameKeys.has(event.key)) event.preventDefault();
-      config.onEvent(-2, JSON.stringify({ key: event.key }));
-    };
-    document.addEventListener('keydown', keyHandler, { capture: true });
-    cleanupKeyHandler = () => document.removeEventListener('keydown', keyHandler, { capture: true });
-  });
-
-  onDestroy(() => {
-    bridge().clearGuiRenderCallback();
-    cleanupKeyHandler?.();
-    cleanupKeyHandler = null;
-    clearPreview();
-  });
-
-  $: if (root && guestRender && guestRender.length > 0) {
-    if (guestModuleBytes !== renderedModuleBytes) {
-      clearPreview();
-      renderedModuleBytes = guestModuleBytes;
-    }
-    applyRender(guestRender);
-  } else if (root) {
-    clearPreview();
-    renderedModuleBytes = null;
-  }
-
-  function clearPreview() {
-    destroyWidgets();
-    if (root) root.innerHTML = '';
-  }
-
-  function applyRender(bytes: Uint8Array) {
-    if (!bytes || bytes.length === 0) return;
-    if (!stylesInjected) {
-      injectStyles();
-      stylesInjected = true;
-    }
-    const msg = decodeBinaryRender(bytes);
-    if (msg.type !== 'render') return;
-    render(root, msg, config);
   }
 </script>
 
 <div
   class="preview-panel"
   class:chromeless
+  class:collapsed={effectiveCollapsed}
+  class:fullscreen
   class:resizing={isResizing}
-  style={chromeless ? '' : `width: ${panelWidth}px; flex: 0 0 ${panelWidth}px;`}
+  style={fullscreen ? '' : chromeless ? '' : effectiveCollapsed ? 'width: 56px; flex: 0 0 56px;' : `width: ${panelWidth}px; flex: 0 0 ${panelWidth}px;`}
 >
-  {#if !chromeless}
-    <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="resize-handle" on:mousedown={onResizeStart}>
-      <div class="resize-bar"></div>
-    </div>
-    <div class="panel-header">
-      <div class="panel-title">
-        <span class="label">Preview</span>
-        <span class="badge gui-badge">GUI</span>
-      </div>
-      {#if showFullscreenAction && onFullscreenAction}
-        <button class="header-action" on:click={onFullscreenAction}>Fullscreen</button>
+  {#if fullscreen}
+    <div class="fullscreen-bar">
+      {#if onExitFullscreenAction}
+        <button class="fs-back" on:click={onExitFullscreenAction}>← Back</button>
+      {/if}
+      {#if fullscreenTitle}
+        <span class="fs-title">{fullscreenTitle}</span>
       {/if}
     </div>
+  {:else if !chromeless}
+    {#if !effectiveCollapsed}
+      <!-- svelte-ignore a11y-no-static-element-interactions -->
+      <div class="resize-handle" on:mousedown={onResizeStart}>
+        <div class="resize-bar"></div>
+      </div>
+    {/if}
+    <div class="panel-header" class:collapsed-header={effectiveCollapsed}>
+      <div class="panel-leading" class:collapsed-leading={effectiveCollapsed}>
+        {#if !effectiveCollapsed && showFullscreenAction && onFullscreenAction}
+          <button class="panel-icon-btn" on:click={onFullscreenAction} aria-label="Open fullscreen preview">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M2.5 6V2.5H6" />
+              <path d="M9.5 2.5H13.5V6" />
+              <path d="M13.5 10V13.5H10" />
+              <path d="M6 13.5H2.5V10" />
+              <path d="M6 2.5L2.5 6" />
+              <path d="M10 2.5L13.5 6" />
+              <path d="M13.5 10L10 13.5" />
+              <path d="M6 13.5L2.5 10" />
+            </svg>
+          </button>
+        {/if}
+      </div>
+      <div class="panel-title" class:collapsed-title={effectiveCollapsed}>
+        {#if effectiveCollapsed}
+          <span class="label">GUI</span>
+        {:else if hasRenderIsland}
+          <span class="badge">Render Island</span>
+        {/if}
+      </div>
+      <div class="panel-trailing" class:collapsed-trailing={effectiveCollapsed}>
+        {#if onToggleCollapsed}
+          <button class="panel-icon-btn" on:click={onToggleCollapsed} aria-label={effectiveCollapsed ? 'Expand preview' : 'Collapse preview'}>
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              {#if effectiveCollapsed}
+                <path d="M10 3L5.5 8L10 13" />
+              {:else}
+                <path d="M6 3L10.5 8L6 13" />
+              {/if}
+            </svg>
+          </button>
+        {/if}
+      </div>
+    </div>
   {/if}
-  <div bind:this={root} class="preview-root"></div>
+
+  <div class="preview-body" class:hidden={effectiveCollapsed}>
+    {#if isGuiApp && registry}
+      {#if hasRenderIsland}
+        <div bind:this={rendererContainer} class="renderer-container">
+          {#if renderIslandError}
+            <div class="render-error">{renderIslandError}</div>
+          {/if}
+        </div>
+      {:else if isRenderSurface}
+        <canvas id={CANVAS_ID} class="render-canvas"></canvas>
+      {:else}
+        <GuiRuntimeSurface backend={registry.backend} />
+      {/if}
+    {:else}
+      <div class="idle-hint">
+        <span>Run to preview this GUI project</span>
+      </div>
+    {/if}
+  </div>
 </div>
 
 <style>
   .preview-panel {
-    /* width / flex-basis set via inline style when not chromeless */
     flex-shrink: 0;
-    background: #ffffff;
+    background: #181825;
     border-left: 1px solid #1e1e2e;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .preview-panel.fullscreen {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    border-left: none;
+    background: #0d0f16;
+  }
+  .preview-panel.chromeless {
+    flex: 1;
+    border-left: none;
+    background: #0d0f16;
+  }
+  .preview-panel.collapsed {
+    min-width: 56px;
+  }
+  .resizing { user-select: none; }
+  .resize-handle {
+    width: 6px;
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    cursor: col-resize;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .resize-bar { width: 2px; height: 32px; background: #313244; border-radius: 2px; }
+  .panel-header {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    height: var(--studio-topbar-height);
+    min-height: var(--studio-topbar-height);
+    padding: 6px 12px 6px 14px;
+    border-bottom: 1px solid #1e1e2e;
+    flex-shrink: 0;
+    gap: 8px;
+  }
+  .collapsed-header {
+    position: relative;
+    flex: 1;
+    height: auto;
+    min-height: 0;
+    padding: 10px 8px;
+    display: block;
+  }
+  .fullscreen-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: var(--studio-topbar-height);
+    min-height: var(--studio-topbar-height);
+    padding: 6px 12px;
+    background: #11111b;
+    border-bottom: 1px solid #1e1e2e;
+    flex-shrink: 0;
+  }
+  .panel-leading,
+  .panel-trailing {
+    display: flex;
+    align-items: center;
+    min-height: 28px;
+  }
+  .panel-trailing {
+    justify-content: flex-end;
+  }
+  .collapsed-leading {
+    display: none;
+  }
+  .collapsed-trailing {
+    position: absolute;
+    top: 10px;
+    right: 8px;
+    min-height: 28px;
+  }
+  .panel-title { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 28px; }
+  .collapsed-title {
+    height: 100%;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+  }
+  .label { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #585b70; }
+  .collapsed-title .label {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+  }
+  .badge {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(137, 180, 250, 0.15);
+    color: #89b4fa;
+    font-weight: 600;
+  }
+  .panel-icon-btn {
+    border: none;
+    background: none;
+    color: #89b4fa;
+    cursor: pointer;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 8px;
+    font-family: inherit;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .panel-icon-btn:hover {
+    background: #1e1e2e;
+  }
+  .panel-icon-btn svg {
+    width: 16px;
+    height: 16px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .fs-back {
+    border: none;
+    background: none;
+    color: #a6adc8;
+    cursor: pointer;
+    font-size: 13px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-family: inherit;
+  }
+  .fs-back:hover { background: #1e1e2e; }
+  .fs-title { color: #585b70; font-size: 12px; }
+  .preview-body {
+    flex: 1;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     position: relative;
   }
-
-  .preview-panel.chromeless {
-    flex: 1;
-    border-left: none;
+  .preview-body.hidden {
+    display: none;
   }
-
-  .preview-panel.resizing {
-    user-select: none;
+  .renderer-container {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
   }
-
-  /* Left-edge resize handle */
-  .resize-handle {
+  .render-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .render-error {
     position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 5px;
-    cursor: ew-resize;
-    z-index: 10;
+    inset: 12px;
+    padding: 12px;
+    border-radius: 8px;
+    background: rgba(24, 24, 37, 0.92);
+    border: 1px solid rgba(243, 139, 168, 0.35);
+    color: #f38ba8;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow: auto;
+  }
+  .idle-hint {
+    flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
-  }
-
-  .resize-handle:hover .resize-bar,
-  .preview-panel.resizing .resize-bar {
-    background: #3b3f5c;
-  }
-
-  .resize-bar {
-    width: 2px;
-    height: 40px;
-    border-radius: 1px;
-    background: #252535;
-    transition: background 0.15s;
-  }
-
-  .panel-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 12px;
-    background: #181825;
-    border-bottom: 1px solid #313244;
-    flex-shrink: 0;
-  }
-
-  .panel-title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .label {
-    color: #6c7086;
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .badge {
-    font-size: 10px;
-    font-weight: 700;
-    padding: 1px 6px;
-    border-radius: 3px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
-  .gui-badge { background: #1e3a5f80; color: #89b4fa; }
-
-  .header-action {
-    border: none;
-    border-radius: 4px;
-    padding: 4px 10px;
-    background: #313244;
-    color: #cdd6f4;
-    font-size: 11px;
-    font-weight: 600;
-    font-family: inherit;
-    cursor: pointer;
-    transition: background 0.12s;
-    flex-shrink: 0;
-  }
-
-  .header-action:hover {
-    background: #45475a;
-  }
-
-  .preview-root {
-    flex: 1;
-    overflow: auto;
-    position: relative;
-    color: #0f172a;
-    font-family: system-ui, -apple-system, sans-serif;
-    font-size: 14px;
+    color: #313244;
+    font-size: 13px;
   }
 </style>

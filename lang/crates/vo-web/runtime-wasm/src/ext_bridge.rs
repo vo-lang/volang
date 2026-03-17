@@ -64,6 +64,9 @@ extern "C" {
     #[wasm_bindgen(js_namespace = window, js_name = "voSetupExtModule")]
     pub fn js_setup_ext_module(module_key: &str, bytes: &[u8], js_glue_url: &str) -> js_sys::Promise;
 
+    #[wasm_bindgen(js_namespace = window, js_name = "voRegisterExtModuleAlias")]
+    fn js_register_ext_module_alias(existing_key: &str, alias_key: &str);
+
     #[wasm_bindgen(js_namespace = window, js_name = "voCallExt")]
     fn js_call_ext(extern_name: &str, input: &[u8]) -> Vec<u8>;
 
@@ -90,13 +93,36 @@ pub fn normalize_module_key(module_path: &str) -> String {
         .collect()
 }
 
+fn module_key_candidates(module_path: &str) -> Vec<String> {
+    let primary = normalize_module_key(module_path);
+    let mut keys = vec![primary.clone()];
+    if let Some(last_segment) = module_path.rsplit('/').next() {
+        let short = normalize_module_key(last_segment);
+        if !short.is_empty() && short != primary {
+            keys.push(short);
+        }
+    }
+    keys
+}
+
 pub async fn load_wasm_ext_module(module_path: &str, bytes: &[u8], js_glue_url: &str) -> Result<(), String> {
-    let key = normalize_module_key(module_path);
-    let promise = js_setup_ext_module(&key, bytes, js_glue_url);
+    let keys = module_key_candidates(module_path);
+    let primary_key = &keys[0];
+    let promise = js_setup_ext_module(primary_key, bytes, js_glue_url);
     wasm_bindgen_futures::JsFuture::from(promise)
         .await
         .map_err(|e: wasm_bindgen::JsValue| format!("Failed to instantiate {}: {:?}", module_path, e))?;
-    LOADED_PREFIXES.with(|p| p.borrow_mut().push(key));
+    for alias in keys.iter().skip(1) {
+        js_register_ext_module_alias(primary_key, alias);
+    }
+    LOADED_PREFIXES.with(|p| {
+        let mut prefixes = p.borrow_mut();
+        for key in keys {
+            if !prefixes.contains(&key) {
+                prefixes.push(key);
+            }
+        }
+    });
     Ok(())
 }
 

@@ -1427,15 +1427,7 @@ impl<'a> ExternCallContext<'a> {
     /// Writes 2 slots at `ret_start + n`: (slot0=packed_error_meta, slot1=error_gcref).
     /// This is the canonical way to return an error from Result-mode wrappers.
     pub fn ret_error_msg(&mut self, n: u16, msg: &str) {
-        use crate::objects::{interface, string};
-        // Allocate the error message string
-        let str_ref = string::from_rust_str(self.gc, msg);
-        // Create a simple string-based error (rttid=0, ValueKind::String for now)
-        // The sentinel_errors system provides pre-allocated errors for common cases.
-        // For arbitrary messages, we create a basic error interface value.
-        let slot0 = interface::pack_slot0(0, 0, ValueKind::String);
-        self.ret_u64(n, slot0);
-        self.ret_u64(n + 1, str_ref as u64);
+        crate::builtins::error_helper::write_error_to(self, n, msg);
     }
 
     // ==================== Protocol/Interface Support ====================

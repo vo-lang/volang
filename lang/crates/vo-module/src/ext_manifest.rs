@@ -4,13 +4,17 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+use toml::Value;
+
 /// Parsed extension manifest from `vo.ext.toml`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionManifest {
     /// Extension name.
     pub name: String,
     /// Path to native library.
     pub native_path: PathBuf,
+    pub manifest_path: PathBuf,
 }
 
 /// Error type for extension manifest parsing.
@@ -55,39 +59,23 @@ pub fn discover_extensions(pkg_root: &Path) -> Result<Vec<ExtensionManifest>, Ex
 /// Parse a vo.ext.toml manifest file.
 fn parse_manifest(path: &Path) -> Result<ExtensionManifest, ExtManifestError> {
     let content = std::fs::read_to_string(path)?;
-    
-    let mut name = String::new();
-    let mut native_path = String::new();
+    let value = parse_toml_value(&content)?;
+    let extension = value
+        .get("extension")
+        .and_then(Value::as_table)
+        .ok_or_else(|| ExtManifestError::Parse("missing [extension] section".to_string()))?;
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with("name") {
-            if let Some(val) = extract_toml_string(line) {
-                name = val;
-            }
-        } else if line.starts_with("path") {
-            if let Some(val) = extract_toml_string(line) {
-                native_path = val;
-            }
-        }
-    }
-
-    if name.is_empty() {
-        return Err(ExtManifestError::Parse("missing 'name' in [extension]".to_string()));
-    }
-    if native_path.is_empty() {
-        return Err(ExtManifestError::Parse("missing 'path' in [native]".to_string()));
-    }
+    let name = table_string(extension, "name")
+        .ok_or_else(|| ExtManifestError::Parse("missing 'name' in [extension]".to_string()))?;
+    let native_path = table_string(extension, "path")
+        .ok_or_else(|| ExtManifestError::Parse("missing 'path' in [extension]".to_string()))?;
 
     let parent = path.parent().unwrap_or(Path::new("."));
-    let full_path = parent.join(&native_path);
-    
-    // Auto-append platform-specific extension if not present
-    let full_path = resolve_library_path(full_path);
-
+    let full_path = resolve_library_path(parent.join(&native_path));
     Ok(ExtensionManifest {
         name,
         native_path: full_path,
+        manifest_path: path.to_path_buf(),
     })
 }
 
@@ -159,7 +147,11 @@ fn extract_toml_string(line: &str) -> Option<String> {
 }
 
 pub fn extension_name_from_content(content: &str) -> Option<String> {
-    extract_toml_string_from_content(content, "name")
+    let value = parse_toml_value(content).ok()?;
+    value
+        .get("extension")
+        .and_then(Value::as_table)
+        .and_then(|table| table_string(table, "name"))
 }
 
 /// Check if a `vo.ext.toml` content string declares `type = "wasm-bindgen"`.
@@ -170,21 +162,22 @@ pub fn extension_name_from_content(content: &str) -> Option<String> {
 /// Works on the raw content of `vo.ext.toml` — callers can source it from
 /// fetched files, a VFS, or disk.
 pub fn is_bindgen_ext_content(vo_ext_toml_content: &str) -> bool {
-    extract_toml_string_from_content(vo_ext_toml_content, "type")
+    let Ok(value) = parse_toml_value(vo_ext_toml_content) else {
+        return false;
+    };
+    value
+        .get("extension")
+        .and_then(Value::as_table)
+        .and_then(|table| table_string(table, "type"))
         .as_deref() == Some("wasm-bindgen")
 }
 
-/// Extract a string value for a given key from TOML content.
-fn extract_toml_string_from_content(content: &str, key: &str) -> Option<String> {
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with(key) {
-            if let Some(val) = extract_toml_string(line) {
-                return Some(val);
-            }
-        }
-    }
-    None
+fn parse_toml_value(content: &str) -> Result<Value, ExtManifestError> {
+    toml::from_str(content).map_err(|error| ExtManifestError::Parse(error.to_string()))
+}
+
+fn table_string(table: &toml::value::Table, key: &str) -> Option<String> {
+    table.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
 #[cfg(test)]

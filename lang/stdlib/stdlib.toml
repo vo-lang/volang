@@ -45,6 +45,7 @@ bufio = { path = "bufio" }
 log = { path = "log" }
 flag = { path = "flag" }
 "io/fs" = { path = "io/fs" }
+toolchain = { path = "toolchain" }
 
 # Runtime packages (deep VM integration)
 [packages.runtime]

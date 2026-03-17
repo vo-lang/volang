@@ -1,0 +1,231 @@
+// Tests for chan used WITHIN a single island goroutine.
+//
+// chan is island-local and cannot cross island boundaries.
+// These tests verify that the island's local scheduler correctly handles
+// chan operations (blocked send/recv, select, close, range) when multiple
+// goroutines run on the same island and communicate via local chan.
+
+package main
+
+import "time"
+
+func waitInt(ch port int, label string) int {
+	done := false
+	value := 0
+	for i := 0; i < 200 && !done; i += 1 {
+		select {
+		case value = <-ch:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, label)
+	return value
+}
+
+func waitBool(ch port bool, label string) bool {
+	done := false
+	value := false
+	for i := 0; i < 200 && !done; i += 1 {
+		select {
+		case value = <-ch:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, label)
+	return value
+}
+
+func main() {
+	testIslandLocalChanBasic()
+	testIslandLocalChanBlockedSend()
+	testIslandLocalChanBlockedRecv()
+	testIslandLocalChanBufferedOrdering()
+	testIslandLocalSelectMultiChan()
+	testIslandLocalChanRange()
+	testIslandLocalChanCloseUnblocks()
+	testIslandLocalPingPong()
+}
+
+// Basic: island goroutine spawns a sub-goroutine; they communicate via local chan.
+func testIslandLocalChanBasic() {
+	i := make(island)
+	result := make(port int, 1)
+
+	go @(i) func(out port int) {
+		ch := make(chan int, 1)
+		go func() {
+			ch <- 42
+		}()
+		v := <-ch
+		out <- v
+	}(result)
+
+	r := waitInt(result, "testIslandLocalChanBasic: timed out")
+	assert(r == 42, "testIslandLocalChanBasic: expected 42")
+}
+
+// Blocked send: island goroutine blocks on unbuffered chan send until sub-goroutine recvs.
+func testIslandLocalChanBlockedSend() {
+	i := make(island)
+	result := make(port int, 1)
+
+	go @(i) func(out port int) {
+		ch := make(chan int)
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			out <- <-ch
+		}()
+		ch <- 99
+	}(result)
+
+	r := waitInt(result, "testIslandLocalChanBlockedSend: timed out")
+	assert(r == 99, "testIslandLocalChanBlockedSend: expected 99")
+}
+
+// Blocked recv: island goroutine blocks on recv until sub-goroutine sends.
+func testIslandLocalChanBlockedRecv() {
+	i := make(island)
+	result := make(port int, 1)
+
+	go @(i) func(out port int) {
+		ch := make(chan int)
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			ch <- 77
+		}()
+		v := <-ch
+		out <- v
+	}(result)
+
+	r := waitInt(result, "testIslandLocalChanBlockedRecv: timed out")
+	assert(r == 77, "testIslandLocalChanBlockedRecv: expected 77")
+}
+
+// Buffered chan ordering: sub-goroutine sends N items, main goroutine in island drains and verifies order.
+func testIslandLocalChanBufferedOrdering() {
+	i := make(island)
+	result := make(port bool, 1)
+
+	go @(i) func(out port bool) {
+		ch := make(chan int, 5)
+		go func() {
+			for j := 0; j < 5; j += 1 {
+				ch <- j * 10
+			}
+			close(ch)
+		}()
+
+		ok := true
+		j := 0
+		for v := range ch {
+			if v != j*10 {
+				ok = false
+			}
+			j += 1
+		}
+		out <- (ok && j == 5)
+	}(result)
+
+	assert(waitBool(result, "testIslandLocalChanBufferedOrdering: timed out"), "buffered chan ordering must hold within island")
+}
+
+// Select across multiple local chans inside island goroutine.
+func testIslandLocalSelectMultiChan() {
+	i := make(island)
+	result := make(port int, 1)
+
+	go @(i) func(out port int) {
+		ch1 := make(chan int, 1)
+		ch2 := make(chan int, 1)
+		ch2 <- 55
+
+		selected := -1
+		select {
+		case v := <-ch1:
+			selected = v
+		case v := <-ch2:
+			selected = v
+		}
+		out <- selected
+	}(result)
+
+	r := waitInt(result, "testIslandLocalSelectMultiChan: timed out")
+	assert(r == 55, "testIslandLocalSelectMultiChan: expected 55 from ch2")
+}
+
+// Range over local chan: sub-goroutine sends then closes; island goroutine ranges and sums.
+func testIslandLocalChanRange() {
+	i := make(island)
+	result := make(port int, 1)
+
+	go @(i) func(out port int) {
+		ch := make(chan int, 4)
+		go func() {
+			ch <- 2
+			ch <- 4
+			ch <- 6
+			ch <- 8
+			close(ch)
+		}()
+		sum := 0
+		for v := range ch {
+			sum += v
+		}
+		out <- sum
+	}(result)
+
+	r := waitInt(result, "testIslandLocalChanRange: timed out")
+	assert(r == 20, "testIslandLocalChanRange: expected sum 20")
+}
+
+// Close unblocks: island goroutine blocks on recv, sub-goroutine closes the chan.
+func testIslandLocalChanCloseUnblocks() {
+	i := make(island)
+	result := make(port bool, 1)
+
+	go @(i) func(out port bool) {
+		ch := make(chan int)
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			close(ch)
+		}()
+		v, ok := <-ch
+		out <- (v == 0 && ok == false)
+	}(result)
+
+	assert(waitBool(result, "testIslandLocalChanCloseUnblocks: timed out"), "close must unblock blocked recv with zero+false")
+}
+
+// Ping-pong between two goroutines on the same island using local chan.
+func testIslandLocalPingPong() {
+	i := make(island)
+	result := make(port int, 1)
+
+	go @(i) func(out port int) {
+		req := make(chan int, 1)
+		resp := make(chan int, 1)
+
+		go func() {
+			for j := 0; j < 5; j += 1 {
+				v := <-req
+				resp <- v * 2
+			}
+		}()
+
+		sum := 0
+		for j := 0; j < 5; j += 1 {
+			req <- j + 1
+			r := <-resp
+			sum += r
+		}
+		out <- sum
+	}(result)
+
+	// 2+4+6+8+10 = 30
+	r := waitInt(result, "testIslandLocalPingPong: timed out")
+	assert(r == 30, "testIslandLocalPingPong: expected sum 30")
+}

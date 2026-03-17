@@ -410,7 +410,7 @@ fn pack_pointer(
     packed: &mut PackedValue,
     gc: &Gc,
     ptr_ref: GcRef,
-    _value_meta: ValueMeta,
+    value_meta: ValueMeta,
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
 ) {
@@ -421,10 +421,15 @@ fn pack_pointer(
 
     packed.data.push(1); // non-null marker
 
-    // Get pointed object metadata
-    let header = Gc::header(ptr_ref);
-    let obj_meta = header.value_meta();
-    let slots = header.slots as usize;
+    let Some(_) = gc.canonicalize_ref(ptr_ref) else {
+        panic!("pack_pointer: invalid pointer {:p}", ptr_ref);
+    };
+    let meta_id = value_meta.meta_id() as usize;
+    if meta_id >= struct_metas.len() {
+        panic!("pack_pointer: invalid pointee meta_id {}", meta_id);
+    }
+    let obj_meta = ValueMeta::new(value_meta.meta_id(), ValueKind::Struct);
+    let slots = struct_metas[meta_id].slot_types.len();
 
     packed.data.extend_from_slice(&obj_meta.to_raw().to_le_bytes());
     packed.data.extend_from_slice(&(slots as u32).to_le_bytes());
@@ -883,7 +888,7 @@ fn pack_queue_handle_inner(packed: &mut PackedValue, chan_ref: GcRef) {
         (proxy.endpoint_id, proxy.home_island, proxy.closed)
     } else {
         match queue::home_info(chan_ref) {
-            Some(info) => (info.endpoint_id, info.home_island, queue::is_closed(chan_ref)),
+            Some(info) => (info.endpoint_id, info.home_island, queue::is_closed(chan_ref) && queue::len(chan_ref) == 0),
             None => panic!("pack_chan_handle: LOCAL channel without HomeInfo — call prepare_value_chans_for_transfer first"),
         }
     };
@@ -1038,8 +1043,25 @@ fn write_element(base_ptr: *mut u8, idx: usize, elem_bytes: usize, src: &[u64]) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::objects::{queue, queue_state::QueueKind};
+    use crate::objects::{queue, queue_state::QueueKind, slice};
     use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    fn make_byte_slice(gc: &mut Gc, bytes: &[u8]) -> GcRef {
+        let slice_ref = slice::create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, bytes.len(), bytes.len());
+        for (i, &byte) in bytes.iter().enumerate() {
+            slice::set(slice_ref, i, byte as u64, 1);
+        }
+        slice_ref
+    }
+
+    fn assert_byte_slice_eq(slice_ref: GcRef, expected: &[u8]) {
+        assert!(!slice_ref.is_null());
+        assert_eq!(slice::elem_meta(slice_ref).value_kind(), ValueKind::Uint8);
+        assert_eq!(slice::len(slice_ref), expected.len());
+        for (i, &byte) in expected.iter().enumerate() {
+            assert_eq!(slice::get(slice_ref, i, 1), byte as u64);
+        }
+    }
 
     #[test]
     fn test_pack_unpack_scalar() {
@@ -1076,6 +1098,61 @@ mod tests {
         assert_eq!(string::as_str(unpacked_str), "hello");
         // Verify it's a different GcRef (deep copy)
         assert_ne!(str_ref, unpacked_str);
+    }
+
+    #[test]
+    fn test_pack_unpack_nil_byte_slice() {
+        let mut gc = Gc::new();
+        let struct_metas = vec![];
+        let runtime_types = vec![];
+
+        let src = [0u64];
+        let packed = pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::Slice), &struct_metas, &runtime_types);
+
+        let mut dst = [1u64];
+        unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);
+
+        assert_eq!(dst[0], 0);
+    }
+
+    #[test]
+    fn test_pack_unpack_empty_byte_slice() {
+        let mut gc = Gc::new();
+        let struct_metas = vec![];
+        let runtime_types = vec![];
+
+        let slice_ref = make_byte_slice(&mut gc, &[]);
+        let src = [slice_ref as u64];
+
+        let packed = pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::Slice), &struct_metas, &runtime_types);
+
+        let mut dst = [0u64];
+        unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);
+
+        let unpacked = dst[0] as GcRef;
+        assert_byte_slice_eq(unpacked, &[]);
+        assert_ne!(slice_ref, unpacked);
+        assert_ne!(slice::array_ref(slice_ref), slice::array_ref(unpacked));
+    }
+
+    #[test]
+    fn test_pack_unpack_non_empty_byte_slice() {
+        let mut gc = Gc::new();
+        let struct_metas = vec![];
+        let runtime_types = vec![];
+
+        let slice_ref = make_byte_slice(&mut gc, &[30, 1, 0, 0, 0]);
+        let src = [slice_ref as u64];
+
+        let packed = pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::Slice), &struct_metas, &runtime_types);
+
+        let mut dst = [0u64];
+        unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);
+
+        let unpacked = dst[0] as GcRef;
+        assert_byte_slice_eq(unpacked, &[30, 1, 0, 0, 0]);
+        assert_ne!(slice_ref, unpacked);
+        assert_ne!(slice::array_ref(slice_ref), slice::array_ref(unpacked));
     }
 
     #[test]

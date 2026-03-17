@@ -13,19 +13,8 @@
     "strict": true,
     "noUnusedLocals": false,
     "noUnusedParameters": false,
-    "noFallthroughCasesInSwitch": true,
-    "types": ["vite/client"],
-    "baseUrl": ".",
-    "paths": {
-      "@examples/*": ["../examples/*"],
-      "@vogui/*": ["../../vogui/js/src/*"],
-      "preact": ["../../vogui/js/node_modules/preact"],
-      "preact/*": ["../../vogui/js/node_modules/preact/*"],
-      "react": ["../../vogui/js/node_modules/preact/compat"],
-      "react-dom": ["../../vogui/js/node_modules/preact/compat"],
-      "react/jsx-runtime": ["../../vogui/js/node_modules/preact/jsx-runtime"]
-    }
+    "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"],
+  "include": ["src", "ambient.d.ts"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

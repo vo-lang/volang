@@ -5,7 +5,7 @@
 //! boundary for stable cross-compilation compatibility.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use libloading::{Library, Symbol};
 
@@ -100,21 +100,34 @@ impl ExtensionLoader {
     pub fn from_manifests(manifests: &[ExtensionManifest]) -> Result<Self, ExtError> {
         let mut loader = Self::new();
         for manifest in manifests {
-            loader.load(&manifest.native_path, &manifest.name)?;
+            loader.load_manifest(manifest)?;
         }
         Ok(loader)
     }
 
+    fn load_manifest(&mut self, manifest: &ExtensionManifest) -> Result<(), ExtError> {
+        self.load_impl(
+            &manifest.native_path,
+            &manifest.name,
+            manifest.manifest_path.clone(),
+        )
+    }
+
     /// Load an extension from a dynamic library path.
     pub fn load(&mut self, path: &Path, name: &str) -> Result<(), ExtError> {
+        self.load_impl(path, name, path.to_path_buf())
+    }
+
+    fn load_impl(&mut self, path: &Path, name: &str, manifest_path: PathBuf) -> Result<(), ExtError> {
         // Canonicalize path to resolve .. and symlinks (needed for QEMU compatibility)
         let canonical_path = path.canonicalize()
             .map_err(|e| ExtError::LoadFailed(format!("{}: {}", path.display(), e)))?;
         
-        // Use RTLD_GLOBAL so symbols are visible to other extensions
+        // Use RTLD_LOCAL to keep dylib symbols private and avoid linkme EXTERN_TABLE conflicts
+        // with the host binary. Extensions are standalone and do not share symbols.
         #[cfg(unix)]
         let lib = unsafe {
-            let flags = libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_GLOBAL;
+            let flags = libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_LOCAL;
             libloading::os::unix::Library::open(Some(&canonical_path), flags)
                 .map(|l| Library::from(l))
                 .map_err(|e| ExtError::LoadFailed(e.to_string()))?
@@ -160,6 +173,7 @@ impl ExtensionLoader {
         self.manifests.push(ExtensionManifest {
             name: name.to_string(),
             native_path: canonical_path,
+            manifest_path,
         });
 
         Ok(())

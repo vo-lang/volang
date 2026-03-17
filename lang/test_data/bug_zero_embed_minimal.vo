@@ -20,6 +20,11 @@ type Outer struct {
     name string
 }
 
+type OffsetOuter struct {
+    pad int
+    Inner
+}
+
 func main() {
     // Test 1: Zero value Outer, call embedded method
     var o1 Outer
@@ -32,6 +37,20 @@ func main() {
     o2.SetValue(42)
     assert(o2.GetValue() == 42, "after SetValue")
     fmt.Println("test 2 ok")
+
+    o3 := &OffsetOuter{pad: 9, Inner: Inner{value: 33}}
+    get3 := o3.GetValue
+    o3.Inner.value = 88
+    assert(get3() == 88, "embedded value receiver method value through pointer should see mutation")
+
+    set3 := o3.SetValue
+    set3(55)
+    assert(o3.Inner.value == 55, "embedded pointer receiver method value should target embedded field")
+
+    o4 := OffsetOuter{pad: 7, Inner: Inner{value: 22}}
+    get4 := o4.GetValue
+    o4.Inner.value = 99
+    assert(get4() == 22, "embedded value receiver method value on value should capture copied field")
     
     fmt.Println("done")
 }

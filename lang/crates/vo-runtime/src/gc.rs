@@ -3,6 +3,9 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use core::cell::{Cell, RefCell};
+use hashbrown::HashSet;
+
 #[cfg(feature = "std")]
 use std::alloc as heap_alloc;
 #[cfg(not(feature = "std"))]
@@ -157,6 +160,9 @@ pub type GcRef = *mut Slot;
 pub struct Gc {
     // ========== Object Storage ==========
     all_objects: Vec<GcRef>,
+    object_index: RefCell<Vec<GcRef>>,
+    base_objects: RefCell<HashSet<usize>>,
+    object_index_dirty: Cell<bool>,
     
     // ========== Mark Queues ==========
     gray: Vec<GcRef>,        // To be scanned
@@ -194,6 +200,9 @@ impl Gc {
     pub fn new() -> Self {
         Self {
             all_objects: Vec::new(),
+            object_index: RefCell::new(Vec::new()),
+            base_objects: RefCell::new(HashSet::new()),
+            object_index_dirty: Cell::new(false),
             gray: Vec::new(),
             grayagain: Vec::new(),
             state: GcState::Pause,
@@ -293,6 +302,8 @@ impl Gc {
         let data_ptr = unsafe { ptr.add(header_size) as GcRef };
 
         self.all_objects.push(data_ptr);
+        self.base_objects.borrow_mut().insert(data_ptr as usize);
+        self.object_index_dirty.set(true);
         self.total_bytes += total_size;
         self.debt += total_size as i64;
 
@@ -344,15 +355,63 @@ impl Gc {
         GcHeader::SIZE + slots * SLOT_BYTES
     }
 
+    #[inline]
+    fn object_data_size_bytes(obj: GcRef) -> usize {
+        Self::object_size_bytes(obj) - GcHeader::SIZE
+    }
+
+    fn refresh_object_index(&self) {
+        if !self.object_index_dirty.get() {
+            return;
+        }
+
+        let mut index = self.object_index.borrow_mut();
+        index.clear();
+        index.extend(self.all_objects.iter().copied());
+        index.sort_unstable_by_key(|&obj| obj as usize);
+        self.object_index_dirty.set(false);
+    }
+
+    pub fn canonicalize_ref(&self, obj: GcRef) -> Option<GcRef> {
+        if obj.is_null() {
+            return Some(obj);
+        }
+
+        let addr = obj as usize;
+        if (addr & (SLOT_BYTES - 1)) != 0 || addr < 4096 {
+            return None;
+        }
+
+        if self.base_objects.borrow().contains(&addr) {
+            return Some(obj);
+        }
+
+        self.refresh_object_index();
+        let index = self.object_index.borrow();
+        let pos = index.partition_point(|&candidate| (candidate as usize) <= addr);
+        if pos == 0 {
+            return None;
+        }
+
+        let base = index[pos - 1];
+        let base_addr = base as usize;
+        let data_end = base_addr + Self::object_data_size_bytes(base);
+        if addr == base_addr || addr < data_end {
+            Some(base)
+        } else {
+            None
+        }
+    }
+
     /// Mark an object as gray (pending scan).
     #[inline]
     pub fn mark_gray(&mut self, obj: GcRef) {
         if obj.is_null() {
             return;
         }
-        if (obj as usize) & (SLOT_BYTES - 1) != 0 || (obj as usize) < 4096 {
+        let Some(obj) = self.canonicalize_ref(obj) else {
             self.mark_gray_fail(obj);
-        }
+        };
         let header = Self::header_mut(obj);
         if header.is_white() {
             header.set_gray();
@@ -381,6 +440,12 @@ impl Gc {
         if parent.is_null() || child.is_null() {
             return;
         }
+        let Some(parent) = self.canonicalize_ref(parent) else {
+            self.mark_gray_fail(parent);
+        };
+        let Some(child) = self.canonicalize_ref(child) else {
+            return;
+        };
         let p_header = Self::header(parent);
         let c_header = Self::header(child);
         // Backward barrier: black parent writes white child → parent becomes gray
@@ -393,14 +458,18 @@ impl Gc {
     #[inline]
     pub fn is_black(&self, obj: GcRef) -> bool {
         if obj.is_null() { return false; }
-        Self::header(obj).is_black()
+        self.canonicalize_ref(obj)
+            .map(|base| !base.is_null() && Self::header(base).is_black())
+            .unwrap_or(false)
     }
     
     /// Check if object is white (for gc-debug)
     #[inline]
     pub fn is_white(&self, obj: GcRef) -> bool {
         if obj.is_null() { return false; }
-        Self::header(obj).is_white()
+        self.canonicalize_ref(obj)
+            .map(|base| !base.is_null() && Self::header(base).is_white())
+            .unwrap_or(false)
     }
     
     /// Backward barrier: turn black object back to gray for re-scan.
@@ -594,6 +663,7 @@ impl Gc {
                 crate::gc_debug::on_free(obj);
                 
                 finalize_object(obj);
+                self.base_objects.borrow_mut().remove(&(obj as usize));
                 self.total_bytes -= size_bytes;
                 work += size_bytes;
                 
@@ -608,6 +678,7 @@ impl Gc {
         // If sweep complete, truncate the vector
         if self.sweep_pos >= self.all_objects.len() {
             self.all_objects.truncate(self.sweep_write_pos);
+            self.object_index_dirty.set(true);
         }
         
         work
@@ -677,6 +748,58 @@ impl Gc {
 impl Default for Gc {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_canonicalize_ref_base_fast_path_keeps_dirty_index() {
+        let mut gc = Gc::new();
+        let meta = ValueMeta::new(1, ValueKind::Struct);
+        let obj = gc.alloc(meta, 2);
+
+        assert!(gc.object_index_dirty.get());
+        assert_eq!(gc.canonicalize_ref(obj), Some(obj));
+        assert!(gc.object_index_dirty.get());
+    }
+
+    #[test]
+    fn test_canonicalize_ref_interior_pointer_falls_back_to_index() {
+        let mut gc = Gc::new();
+        let meta = ValueMeta::new(1, ValueKind::Struct);
+        let obj = gc.alloc(meta, 2);
+        let interior = unsafe { obj.add(1) };
+
+        assert!(gc.object_index_dirty.get());
+        assert_eq!(gc.canonicalize_ref(interior), Some(obj));
+        assert!(!gc.object_index_dirty.get());
+    }
+
+    #[test]
+    fn test_sweep_removes_dead_object_from_base_objects() {
+        let mut gc = Gc::new();
+        let meta = ValueMeta::new(1, ValueKind::Struct);
+        let obj = gc.alloc(meta, 2);
+        let mut finalized = Vec::new();
+
+        assert!(gc.base_objects.borrow().contains(&(obj as usize)));
+        assert_eq!(gc.object_count(), 1);
+
+        let work = gc.step(
+            |_| {},
+            |_, _| {},
+            |dead| finalized.push(dead),
+        );
+
+        assert!(work > 0);
+        assert_eq!(finalized, vec![obj]);
+        assert_eq!(gc.state(), GcState::Pause);
+        assert_eq!(gc.object_count(), 0);
+        assert!(!gc.base_objects.borrow().contains(&(obj as usize)));
+        assert_eq!(gc.canonicalize_ref(obj), None);
     }
 }
 

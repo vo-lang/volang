@@ -47,6 +47,8 @@ enum WaitResult {
     Retry,
     /// All fibers completed normally.
     Done,
+    #[cfg(feature = "std")]
+    Interrupted,
     /// All fibers blocked (potential deadlock).
     Blocked,
     /// Fibers are blocked waiting for host-routed island commands/responses.
@@ -84,21 +86,6 @@ pub struct Vm {
     pub module: Option<Module>,
     pub scheduler: Scheduler,
     pub state: VmState,
-}
-
-#[cfg(feature = "std")]
-fn debug_log(message: &str) {
-    eprintln!("{message}");
-    if let Ok(path) = std::env::var("VIBE_STUDIO_DEBUG_LOG") {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            use std::io::Write;
-            let _ = writeln!(file, "{message}");
-        }
-    }
 }
 
 #[cfg(feature = "std")]
@@ -200,6 +187,25 @@ impl Vm {
     pub fn has_jit(&self) -> bool {
         false
     }
+
+    #[cfg(feature = "std")]
+    pub fn set_interrupt_flag(&mut self, interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.state.interrupt_flag = Some(interrupt_flag);
+    }
+
+    #[cfg(feature = "std")]
+    fn interrupt_requested(&self) -> bool {
+        self.state
+            .interrupt_flag
+            .as_ref()
+            .map(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn interrupt_requested(&self) -> bool {
+        false
+    }
 }
 
 impl Vm {
@@ -241,35 +247,6 @@ impl Vm {
         // Register extern functions from extension loader (if provided)
         if let Some(loader) = ext_loader.as_ref() {
             self.state.extern_registry.register_from_extension_loader(loader, &module.externs);
-        }
-
-        debug_log(&format!(
-            "[studio-native] vm registry has {}/{} externs after registration",
-            module
-                .externs
-                .iter()
-                .enumerate()
-                .filter(|(id, _)| self.state.extern_registry.has(*id as u32))
-                .count(),
-            module.externs.len()
-        ));
-        for name in [
-            "voplay_initSurface",
-            "voplay_scene3d_physicsInit",
-            "voplay_scene3d_physicsQueryAABB",
-        ] {
-            if let Some((id, _)) = module.externs.iter().enumerate().find(|(_, def)| def.name == name) {
-                debug_log(&format!(
-                    "[studio-native] vm registry {} id={} has={} loader_lookup={}",
-                    name,
-                    id,
-                    self.state.extern_registry.has(id as u32),
-                    ext_loader
-                        .as_ref()
-                        .map(|loader| loader.lookup(name).is_some())
-                        .unwrap_or(false)
-                ));
-            }
         }
 
         validate_externs_registered(&self.state.extern_registry, &module.externs);
@@ -399,6 +376,23 @@ impl Vm {
         self.run_scheduling_loop(None)
     }
 
+    /// Run island initialization only (global vars + user init functions, no main).
+    ///
+    /// Must be called on island VMs before processing SpawnFiber commands,
+    /// otherwise global variables (including interface values) remain zero-initialized.
+    pub fn run_init(&mut self) -> Result<SchedulingOutcome, VmError> {
+        let module = self.module.as_ref().ok_or(VmError::NoEntryFunction)?;
+        let init_func = module.island_init_func;
+        if init_func as usize >= module.functions.len() {
+            return Err(VmError::InvalidFunctionId(init_func));
+        }
+        let func = &module.functions[init_func as usize];
+        let mut fiber = Fiber::new(0);
+        fiber.push_frame(init_func, func.local_slots, 0, 0);
+        self.scheduler.spawn(fiber);
+        self.run_scheduling_loop(None)
+    }
+
     /// Run existing fibers without spawning an entry fiber.
     ///
     /// Used for event dispatch after initial `run()`, island command handlers, and WASM async
@@ -442,6 +436,9 @@ impl Vm {
         let mut iterations = 0;
         
         loop {
+            if self.interrupt_requested() {
+                return Err(VmError::Interrupted);
+            }
             if let Some(max) = max_iterations {
                 iterations += 1;
                 if iterations > max {
@@ -456,6 +453,8 @@ impl Vm {
                 match self.wait_for_work() {
                     WaitResult::Retry => continue,
                     WaitResult::Done => return Ok(SchedulingOutcome::Completed),
+                    #[cfg(feature = "std")]
+                    WaitResult::Interrupted => return Err(VmError::Interrupted),
                     WaitResult::Blocked => return Ok(SchedulingOutcome::Blocked),
                     WaitResult::Suspended => return Ok(SchedulingOutcome::Suspended),
                     WaitResult::SuspendedForHostEvents => return Ok(SchedulingOutcome::SuspendedForHostEvents),
@@ -525,6 +524,10 @@ impl Vm {
     /// When no fibers are runnable, try to make progress via I/O polling or
     /// island command waiting. Returns what the scheduling loop should do next.
     fn wait_for_work(&mut self) -> WaitResult {
+        #[cfg(feature = "std")]
+        if self.interrupt_requested() {
+            return WaitResult::Interrupted;
+        }
         // Try I/O polling first
         #[cfg(feature = "std")]
         {
@@ -580,6 +583,13 @@ impl Vm {
                 return WaitResult::Break;
             }
             if !self.scheduler.has_io_waiters() && self.state.main_transport.is_none() {
+                // If there are live cross-island endpoints, blocked fibers may be
+                // waiting for remote island responses delivered via push_island_command.
+                // Return Suspended so the host event loop keeps running.
+                if self.state.endpoint_registry.has_live() {
+                    self.state.clear_endpoint_tombstones_if_quiescent();
+                    return WaitResult::Suspended;
+                }
                 self.state.clear_endpoint_tombstones_if_quiescent();
                 return WaitResult::Blocked;
             }
@@ -590,6 +600,10 @@ impl Vm {
 
         #[cfg(not(feature = "std"))]
         if self.scheduler.has_blocked() {
+            if self.state.endpoint_registry.has_live() {
+                self.state.clear_endpoint_tombstones_if_quiescent();
+                return WaitResult::Suspended;
+            }
             self.state.clear_endpoint_tombstones_if_quiescent();
             return WaitResult::Blocked;
         }
@@ -633,6 +647,9 @@ impl Vm {
         match result {
             ExecResult::TimesliceExpired => {
                 self.scheduler.yield_current();
+            }
+            ExecResult::Interrupted => {
+                return Some(Err(VmError::Interrupted));
             }
             ExecResult::Block(reason) => {
                 match reason {
@@ -874,6 +891,9 @@ impl Vm {
         }
 
         for _ in 0..TIME_SLICE {
+            if self.interrupt_requested() {
+                return ExecResult::Interrupted;
+            }
             let frame = unsafe { &mut *frame_ptr };
             let inst = unsafe { *code.get_unchecked(frame.pc) };
             frame.pc += 1;
@@ -2088,6 +2108,10 @@ impl Default for Vm {
 mod tests {
     use super::*;
     use crate::fiber::Fiber;
+    #[cfg(feature = "std")]
+    use std::sync::Arc;
+    #[cfg(feature = "std")]
+    use std::sync::atomic::AtomicBool;
     use vo_runtime::island::{EndpointResponseKind, IslandCommand};
 
     #[test]
@@ -2133,5 +2157,25 @@ mod tests {
         assert_eq!(fiber.current_frame().unwrap().pc, 0);
         assert_eq!(vm.state.pending_island_responses, 0);
         assert_eq!(vm.scheduler.get_fiber(fid).state, crate::fiber::FiberState::Runnable);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn run_scheduled_returns_interrupted_when_interrupt_flag_is_set() {
+        let mut vm = Vm::new();
+        vm.set_interrupt_flag(Arc::new(AtomicBool::new(true)));
+
+        let err = vm.run_scheduled().unwrap_err();
+
+        assert!(matches!(err, VmError::Interrupted));
+    }
+
+    #[test]
+    fn handle_exec_result_propagates_interrupted_error() {
+        let mut vm = Vm::new();
+
+        let result = vm.handle_exec_result(ExecResult::Interrupted, false);
+
+        assert!(matches!(result, Some(Err(VmError::Interrupted))));
     }
 }

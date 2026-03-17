@@ -225,6 +225,223 @@ func main() int {
 }
 
 #[test]
+fn test_go_island_named_function_records_param_types() {
+    let source = r#"
+package main
+
+func worker(canvasRef string) {
+}
+
+func main() {
+    i := make(island)
+    go @(i) worker("canvas")
+}
+"#;
+
+    let module = compile_source(source);
+    let worker = module.functions.iter().find(|f| f.name == "worker")
+        .expect("worker function should be compiled");
+
+    assert_eq!(worker.param_types.len(), 1, "worker should record one transfer param");
+    assert_eq!(worker.param_types[0].slots, 1, "string param should occupy one transfer slot");
+}
+
+#[test]
+fn test_interface_method_value_wrappers_do_not_collide_across_interfaces() {
+    let source = r#"
+package main
+
+type Reader interface {
+    Read(p []byte)
+}
+
+type Flusher interface {
+    Read(s string)
+}
+
+func main() {
+    _ = Reader(nil).Read
+    _ = Flusher(nil).Read
+}
+"#;
+
+    let module = compile_source(source);
+    let wrappers: Vec<_> = module.functions.iter()
+        .filter(|f| f.name.starts_with("__method_value_iface_Read_0_t"))
+        .collect();
+
+    assert_eq!(wrappers.len(), 2, "distinct interface method values must get distinct wrappers");
+    assert_eq!(wrappers[0].param_types.len(), 1, "method value wrapper transfer params exclude captured receiver");
+    assert_eq!(wrappers[1].param_types.len(), 1, "method value wrapper transfer params exclude captured receiver");
+    assert_ne!(
+        wrappers[0].param_types[0].rttid_raw,
+        wrappers[1].param_types[0].rttid_raw,
+        "different interface method params must preserve distinct transfer metadata",
+    );
+}
+
+#[test]
+fn test_interface_method_expr_wrappers_do_not_collide_across_interfaces() {
+    let source = r#"
+package main
+
+type Reader interface {
+    Read(p []byte)
+}
+
+type Flusher interface {
+    Read(s string)
+}
+
+func main() {
+    _ = Reader.Read
+    _ = Flusher.Read
+}
+"#;
+
+    let module = compile_source(source);
+    let wrappers: Vec<_> = module.functions.iter()
+        .filter(|f| f.name.starts_with("Read$mexpr_iface_0_t"))
+        .collect();
+
+    assert_eq!(wrappers.len(), 2, "distinct interface method expressions must get distinct wrappers");
+    assert_eq!(wrappers[0].param_types.len(), 2, "method expression wrapper transfer params include receiver plus declared params");
+    assert_eq!(wrappers[1].param_types.len(), 2, "method expression wrapper transfer params include receiver plus declared params");
+    assert_ne!(
+        wrappers[0].param_types[0].rttid_raw,
+        wrappers[1].param_types[0].rttid_raw,
+        "different interface receivers must preserve distinct transfer metadata",
+    );
+    assert_ne!(
+        wrappers[0].param_types[1].rttid_raw,
+        wrappers[1].param_types[1].rttid_raw,
+        "different interface method params must preserve distinct transfer metadata",
+    );
+}
+
+#[test]
+fn test_value_method_value_wrapper_uses_precise_slot_layout_and_box_capture() {
+    let source = r#"
+package main
+
+type Box struct {
+    v any
+}
+
+func (b Box) Read(p []byte) []byte {
+    return p
+}
+
+func main() {
+    var b Box
+    _ = b.Read
+}
+"#;
+
+    let module = compile_source(source);
+    let wrappers: Vec<_> = module.functions.iter()
+        .filter(|f| f.name.starts_with("__method_value_") && !f.name.contains("iface"))
+        .collect();
+
+    assert_eq!(wrappers.len(), 1, "expected exactly one static method value wrapper");
+    let wrapper = wrappers[0];
+    assert_eq!(wrapper.capture_slot_types, vec![vo_runtime::SlotType::GcRef]);
+    assert_eq!(wrapper.capture_types.len(), 1, "method value wrapper should record captured receiver transfer type");
+    assert_eq!(wrapper.capture_types[0].slots, 2, "boxed value receiver should preserve full receiver slot count");
+    assert_eq!(wrapper.param_types.len(), 1, "wrapper transfer params exclude captured receiver");
+    assert_eq!(
+        wrapper.slot_types,
+        vec![
+            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::Interface0,
+            vo_runtime::SlotType::Interface1,
+            vo_runtime::SlotType::Interface0,
+            vo_runtime::SlotType::Interface1,
+            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcRef,
+        ],
+        "value-receiver method value wrapper must keep receiver and call buffer slot layout precise",
+    );
+}
+
+#[test]
+fn test_interface_method_value_wrapper_uses_box_capture_and_precise_slot_layout() {
+    let source = r#"
+package main
+
+type Reader interface {
+    Read(p []byte) []byte
+}
+
+func main() {
+    var r Reader
+    _ = r.Read
+}
+"#;
+
+    let module = compile_source(source);
+    let wrappers: Vec<_> = module.functions.iter()
+        .filter(|f| f.name.starts_with("__method_value_iface_Read_0_t"))
+        .collect();
+
+    assert_eq!(wrappers.len(), 1, "expected exactly one interface method value wrapper");
+    let wrapper = wrappers[0];
+    assert_eq!(wrapper.capture_slot_types, vec![vo_runtime::SlotType::GcRef]);
+    assert_eq!(wrapper.capture_types.len(), 1, "interface method value wrapper should capture one interface box");
+    assert_eq!(wrapper.capture_types[0].slots, 2, "interface capture box must preserve both interface slots");
+    assert_eq!(wrapper.param_types.len(), 1, "wrapper transfer params exclude captured receiver");
+    assert_eq!(
+        wrapper.slot_types,
+        vec![
+            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::Interface0,
+            vo_runtime::SlotType::Interface1,
+            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcRef,
+        ],
+        "interface method value wrapper must keep interface temp slots and call buffer precisely typed",
+    );
+}
+
+#[test]
+fn test_defer_iface_wrapper_uses_precise_param_and_call_buffer_slot_layout() {
+    let source = r#"
+package main
+
+type Reader interface {
+    Read(p []byte)
+}
+
+func main() {
+    var r Reader
+    defer r.Read(nil)
+}
+"#;
+
+    let module = compile_source(source);
+    let wrappers: Vec<_> = module.functions.iter()
+        .filter(|f| f.name == "Read$defer_iface_0")
+        .collect();
+
+    assert_eq!(wrappers.len(), 1, "expected exactly one defer interface wrapper");
+    let wrapper = wrappers[0];
+    assert_eq!(
+        wrapper.slot_types,
+        vec![
+            vo_runtime::SlotType::Interface0,
+            vo_runtime::SlotType::Interface1,
+            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcRef,
+        ],
+        "defer iface wrapper must keep interface receiver and forwarded args precisely typed",
+    );
+}
+
+#[test]
 fn test_function_call() {
     let source = r#"
 package main

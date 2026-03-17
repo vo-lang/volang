@@ -2,7 +2,6 @@
 package main
 
 import (
-	"github.com/vo-lang/vox"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"toolchain"
 )
 
 const (
@@ -342,6 +342,34 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 			continue
 		}
 
+		if isBlankVoFile(file) {
+			if runVM {
+				testMode := "vm"
+				if isNoStdMode {
+					testMode = "nostd"
+				}
+				jobs = append(jobs, TestJob{
+					file: file,
+					mode: testMode,
+					shouldFail: false,
+					gcDebug: false,
+					index: 0,
+					skipped: true,
+				})
+			}
+			if runJIT {
+				jobs = append(jobs, TestJob{
+					file: file,
+					mode: jitModeName,
+					shouldFail: false,
+					gcDebug: false,
+					index: 0,
+					skipped: true,
+				})
+			}
+			continue
+		}
+
 		gcDebug := isGCMode && isGCFile
 
 		// should_fail tests run once (not per mode)
@@ -615,13 +643,13 @@ func runSingleTest(job TestJob, verbose bool) TestResult {
 	}
 
 	// Compile
-	var module vox.Module
+	var module toolchain.Module
 	var err error
 	
 	if strings.HasSuffix(job.file, ".vo") {
-		module, err = vox.CompileFile(job.file)
+		module, err = toolchain.CompileFile(job.file)
 	} else {
-		module, err = vox.CompileDir(job.file)
+		module, err = toolchain.CompileDir(job.file)
 	}
 
 	if err != nil {
@@ -642,11 +670,11 @@ func runSingleTest(job TestJob, verbose bool) TestResult {
 	if job.mode == "nostd" {
 		output, err = runWithVoEmbed(module)
 	} else if job.mode == "jit" || job.mode == "osr" {
-		output, err = vox.RunJitCapture(module)
+		output, err = toolchain.RunJitCapture(module)
 	} else {
-		output, err = vox.RunCapture(module)
+		output, err = toolchain.RunCapture(module)
 	}
-	vox.Free(module)
+	toolchain.Free(module)
 
 	errorMsg := ""
 	if err != nil {
@@ -665,10 +693,10 @@ func runSingleTest(job TestJob, verbose bool) TestResult {
 	}
 }
 
-func runWithVoEmbed(module vox.Module) (string, error) {
+func runWithVoEmbed(module toolchain.Module) (string, error) {
 	// Save bytecode to unique temp file
 	tempFile := fmt.Sprintf("/tmp/vo_nostd_%d.vob", time.Now().UnixNano())
-	err := vox.SaveBytecodeBinary(module, tempFile)
+	err := toolchain.SaveBytecodeBinary(module, tempFile)
 	if err != nil {
 		return "", err
 	}
@@ -696,9 +724,9 @@ func runWithVoEmbed(module vox.Module) (string, error) {
 func runShouldFailTest(job TestJob, start time.Time) TestResult {
 	var err error
 	if strings.HasSuffix(job.file, ".vo") {
-		_, err = vox.CompileFile(job.file)
+		_, err = toolchain.CompileFile(job.file)
 	} else {
-		_, err = vox.CompileDir(job.file)
+		_, err = toolchain.CompileDir(job.file)
 	}
 
 	errMsg := ""

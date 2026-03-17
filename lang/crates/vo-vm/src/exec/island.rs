@@ -222,10 +222,11 @@ fn prepare_value_queue_handles_for_transfer_inner(
         ValueKind::Pointer => {
             let ptr_ref = slots[0] as GcRef;
             if ptr_ref.is_null() { return; }
-            let header = Gc::header(ptr_ref);
-            let obj_meta = header.value_meta();
-            if !may_contain_queue_handle(obj_meta.value_kind()) { return; }
-            let obj_slots_count = header.slots as usize;
+            let Some(_) = state.gc.canonicalize_ref(ptr_ref) else { return; };
+            let meta_id = value_meta.meta_id() as usize;
+            if meta_id >= struct_metas.len() { return; }
+            let obj_meta = vo_runtime::ValueMeta::new(value_meta.meta_id(), ValueKind::Struct);
+            let obj_slots_count = struct_metas[meta_id].slot_types.len();
             let mut obj_slots = vec![0u64; obj_slots_count];
             for i in 0..obj_slots_count {
                 obj_slots[i] = unsafe { Gc::read_slot(ptr_ref, i) };

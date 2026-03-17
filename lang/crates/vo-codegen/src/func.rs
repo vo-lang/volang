@@ -477,7 +477,22 @@ impl FuncBuilder {
     /// Allocate temp slots for function arguments. Returns 0 if slots == 0.
     #[inline]
     pub fn alloc_args(&mut self, slots: u16) -> u16 {
-        if slots > 0 { self.alloc_slots(&vec![SlotType::Value; slots as usize]) } else { 0 }
+        if slots > 0 { self.alloc_args_typed(&vec![SlotType::Value; slots as usize]) } else { 0 }
+    }
+
+    #[inline]
+    pub fn alloc_args_typed(&mut self, slot_types: &[SlotType]) -> u16 {
+        if slot_types.is_empty() { 0 } else { self.alloc_slots(slot_types) }
+    }
+
+    #[inline]
+    pub fn alloc_call_buffer(&mut self, arg_slot_types: &[SlotType], ret_slot_types: &[SlotType]) -> u16 {
+        let mut slot_types = arg_slot_types.to_vec();
+        slot_types.extend_from_slice(ret_slot_types);
+        if slot_types.is_empty() {
+            slot_types.push(SlotType::Value);
+        }
+        self.alloc_slots(&slot_types)
     }
 
     /// Allocate a single GcRef slot (for closure refs, etc.)
@@ -1197,6 +1212,31 @@ impl FuncBuilder {
     /// Add a parameter type for cross-island serialization.
     pub fn add_param_type(&mut self, meta_raw: u32, rttid_raw: u32, slots: u16) {
         self.param_types.push(TransferType { meta_raw, rttid_raw, slots });
+    }
+
+    pub fn add_param_type_key(
+        &mut self,
+        type_key: vo_analysis::objects::TypeKey,
+        ctx: &mut crate::context::CodegenContext,
+        info: &crate::type_info::TypeInfoWrapper,
+    ) {
+        let slots = info.type_slot_count(type_key);
+        let meta_raw = ctx.compute_value_meta_raw(type_key, info);
+        let rttid_raw = ctx.intern_type_key(type_key, info);
+        self.add_param_type(meta_raw, rttid_raw, slots);
+    }
+
+    pub fn add_param_transfer_types(
+        &mut self,
+        param_types: &[vo_vm::bytecode::TransferType],
+    ) {
+        for transfer_type in param_types {
+            self.add_param_type(
+                transfer_type.meta_raw,
+                transfer_type.rttid_raw,
+                transfer_type.slots,
+            );
+        }
     }
     
     /// Set error return slot offset. Called after set_return_types with type info.

@@ -7,6 +7,8 @@ description = "Module system for Vo: vo.mod parsing, dependency resolution, and 
 
 [dependencies]
 vo-common = { path = "../vo-common", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
 # Pure-Rust tarball extraction — works on both native and WASM
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"

@@ -321,7 +321,7 @@ pub fn emit_store_to_storage(
         // Interface assignment: convert value to interface format first
         let iface_tmp = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
         emit_assign_from_slot(iface_tmp, src_slot, src_type, dst_type, ctx, func, info)?;
-        func.emit_storage_store(storage, iface_tmp, &[vo_runtime::SlotType::Value, vo_runtime::SlotType::Interface1]);
+        func.emit_storage_store(storage, iface_tmp, &[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
     } else {
         // Non-interface: apply truncation and store directly
         crate::expr::emit_int_trunc(src_slot, dst_type, func, info);

@@ -13,28 +13,9 @@ use crate::type_info::TypeInfoWrapper;
 
 use super::{compile_expr, compile_expr_to};
 
-/// Allocate a call buffer with argument slots BEFORE return slots.
-///
-/// Layout: [arg_slot_types | ret_slot_types]
-///
-/// Arg slots use the actual parameter slot types so the GC can trace GcRef args
-/// (maps, closures, interfaces, etc.) while the call is in progress.
-/// Return slots use proper ret_slot_types so GC traces return values after exec_return.
-///
-/// exec_call sets ret_reg = args_start + arg_slots so exec_return writes return
-/// values into the correct (ret-typed) region after the arg slots.
-fn alloc_call_buffer(func: &mut FuncBuilder, arg_slot_types: &[SlotType], ret_slot_types: &[SlotType]) -> u16 {
-    let mut types = arg_slot_types.to_vec();
-    types.extend_from_slice(ret_slot_types);
-    if types.is_empty() {
-        types.push(SlotType::Value); // minimum 1 slot
-    }
-    func.alloc_slots(&types)
-}
-
 /// Compute slot types for the arg region of a call buffer, mirroring calc_method_arg_slots.
 /// For variadic (non-spread) calls the packed slice contributes a single GcRef slot.
-fn calc_arg_slot_types(
+pub(crate) fn calc_arg_slot_types(
     call: &vo_syntax::ast::CallExpr,
     param_types: &[TypeKey],
     is_variadic: bool,
@@ -122,7 +103,7 @@ pub fn compile_call(
         if is_closure {
             let closure_reg = compile_expr(&call.func, ctx, func, info)?;
             let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
-            let args_start = alloc_call_buffer(func, &arg_slot_types, &ret_slot_types);
+            let args_start = func.alloc_call_buffer(&arg_slot_types, &ret_slot_types);
             compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
             
             let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
@@ -145,7 +126,7 @@ pub fn compile_call(
             
             // Always allocate a fresh buffer — never reuse dst as arg buffer.
             let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
-            let args_start = alloc_call_buffer(func, &arg_slot_types, &ret_slot_types);
+            let args_start = func.alloc_call_buffer(&arg_slot_types, &ret_slot_types);
             
             compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
             
@@ -199,7 +180,7 @@ pub fn compile_closure_call_from_reg(
     
     let ret_slot_types = info.type_slot_types(info.expr_type(expr.id));
     let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
-    let args_start = alloc_call_buffer(func, &arg_slot_types, &ret_slot_types);
+    let args_start = func.alloc_call_buffer(&arg_slot_types, &ret_slot_types);
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
     
     let c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
@@ -320,7 +301,7 @@ fn compile_method_call(
                 let total_arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
                 let ret_slot_types = info.type_slot_types(info.expr_type(expr.id));
                 let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
-                let args_start = alloc_call_buffer(func, &arg_slot_types, &ret_slot_types);
+                let args_start = func.alloc_call_buffer(&arg_slot_types, &ret_slot_types);
                 
                 // Compile arguments with interface conversion
                 compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
@@ -407,7 +388,7 @@ fn emit_interface_call(
     let ret_slots = info.type_slot_count(ret_type);
     let ret_slot_types = info.type_slot_types(ret_type);
     let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
-    let args_start = alloc_call_buffer(func, &arg_slot_types, &ret_slot_types);
+    let args_start = func.alloc_call_buffer(&arg_slot_types, &ret_slot_types);
     
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
     
@@ -483,7 +464,7 @@ fn compile_method_call_dispatch(
             let arg_slot_types_only = calc_arg_slot_types(call, &param_types, is_variadic, info);
             let mut all_arg_slot_types = recv_slot_types;
             all_arg_slot_types.extend(arg_slot_types_only);
-            let args_start = alloc_call_buffer(func, &all_arg_slot_types, &ret_slot_types);
+            let args_start = func.alloc_call_buffer(&all_arg_slot_types, &ret_slot_types);
             
             // Emit receiver
             let recv_storage = if let ExprKind::Ident(ident) = &sel.expr.kind {

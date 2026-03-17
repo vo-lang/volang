@@ -1,113 +1,77 @@
 <script lang="ts">
-  import { afterUpdate, onMount } from 'svelte';
-  import { ide, consoleClear } from '../stores/ide';
-  import type { ConsoleLine, ConsoleLineKind, RunStatus } from '../stores/ide';
+  import { afterUpdate } from 'svelte';
+  import { console_, consoleClear, consoleToggleTimestamps, consoleToggleWordWrap, type ConsoleLine, type ConsoleLineKind } from '../stores/console';
+  import { runtime } from '../stores/runtime';
+  import type { RunStatus } from '../stores/ide';
 
   export let mode: 'panel' | 'fullscreen' = 'panel';
 
-  let scrollContainer: HTMLDivElement;
+  let scrollEl: HTMLDivElement;
   let userScrolledUp = false;
-  let showScrollPill = false;
 
-  $: lines = $ide.consoleLines;
-  $: runStatus = $ide.runStatus;
-  $: durationMs = $ide.runDurationMs;
-  $: showTs = $ide.consoleShowTimestamps;
-  $: wordWrap = $ide.consoleWordWrap;
+  $: lines = $console_.lines;
+  $: showTs = $console_.showTimestamps;
+  $: wordWrap = $console_.wordWrap;
+  $: runStatus = ((): RunStatus => {
+    const s = $runtime;
+    if (s.status === 'idle') return 'idle';
+    if (s.status === 'running') return 'running';
+    if (s.lastError) return 'error';
+    return 'done';
+  })();
+  $: durationMs = null as number | null;
 
-  function toggleTimestamps() {
-    ide.update(s => ({ ...s, consoleShowTimestamps: !s.consoleShowTimestamps }));
-  }
-
-  function toggleWordWrap() {
-    ide.update(s => ({ ...s, consoleWordWrap: !s.consoleWordWrap }));
-  }
-
-  function copyAll() {
-    const text = lines.map(l => l.text).join('\n');
-    navigator.clipboard.writeText(text).catch(() => {});
-  }
-
-  function handleScroll() {
-    if (!scrollContainer) return;
-    const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
-    const atBottom = scrollHeight - scrollTop - clientHeight < 30;
-    userScrolledUp = !atBottom;
-    showScrollPill = userScrolledUp && lines.length > 0;
-  }
-
-  function scrollToBottom() {
-    if (!scrollContainer) return;
-    scrollContainer.scrollTop = scrollContainer.scrollHeight;
-    userScrolledUp = false;
-    showScrollPill = false;
-  }
-
-  afterUpdate(() => {
-    if (!userScrolledUp && scrollContainer) {
-      scrollContainer.scrollTop = scrollContainer.scrollHeight;
-    }
-  });
-
-  function formatTs(ts: number): string {
-    const d = new Date(ts);
-    const h = String(d.getHours()).padStart(2, '0');
-    const m = String(d.getMinutes()).padStart(2, '0');
-    const s = String(d.getSeconds()).padStart(2, '0');
-    return `${h}:${m}:${s}`;
-  }
-
-  function formatDuration(ms: number): string {
-    if (ms < 1000) return `${ms}ms`;
-    return `${(ms / 1000).toFixed(2)}s`;
-  }
-
-  function statusIcon(status: RunStatus): string {
-    switch (status) {
-      case 'preparing': return '◌';
-      case 'compiling': return '◌';
-      case 'running': return '●';
-      case 'done': return '✓';
-      case 'error': return '✗';
-      default: return '';
-    }
-  }
-
-  function lineClass(kind: ConsoleLineKind): string {
-    switch (kind) {
-      case 'stdout': return 'line-stdout';
-      case 'stderr': return 'line-stderr';
-      case 'system': return 'line-system';
-      case 'success': return 'line-success';
-    }
-  }
-
-  // Drag resize for panel mode
   let panelHeight = 180;
   let isDragging = false;
   let dragStartY = 0;
-  let dragStartHeight = 0;
+  let dragStartH = 0;
 
   function onDragStart(e: MouseEvent) {
     if (mode !== 'panel') return;
     isDragging = true;
     dragStartY = e.clientY;
-    dragStartHeight = panelHeight;
+    dragStartH = panelHeight;
     e.preventDefault();
     window.addEventListener('mousemove', onDragMove);
     window.addEventListener('mouseup', onDragEnd);
   }
-
   function onDragMove(e: MouseEvent) {
     if (!isDragging) return;
-    const delta = dragStartY - e.clientY;
-    panelHeight = Math.max(80, Math.min(600, dragStartHeight + delta));
+    panelHeight = Math.max(80, Math.min(600, dragStartH + (dragStartY - e.clientY)));
   }
-
   function onDragEnd() {
     isDragging = false;
     window.removeEventListener('mousemove', onDragMove);
     window.removeEventListener('mouseup', onDragEnd);
+  }
+
+  function handleScroll() {
+    if (!scrollEl) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollEl;
+    userScrolledUp = scrollHeight - scrollTop - clientHeight > 30;
+  }
+
+  afterUpdate(() => {
+    if (!userScrolledUp && scrollEl) {
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }
+  });
+
+  function lineClass(kind: ConsoleLineKind): string {
+    return { stdout: 'stdout', stderr: 'stderr', system: 'system', success: 'success' }[kind] ?? 'stdout';
+  }
+
+  function statusIcon(s: RunStatus): string {
+    return { preparing: '◌', compiling: '◌', running: '●', done: '✓', error: '✗', idle: '' }[s] ?? '';
+  }
+
+  function fmtTs(ts: number): string {
+    const d = new Date(ts);
+    return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+  }
+
+  function fmtDuration(ms: number): string {
+    return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(2)}s`;
   }
 </script>
 
@@ -117,346 +81,126 @@
 >
   {#if mode === 'panel'}
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="drag-handle" on:mousedown={onDragStart}>
-      <div class="drag-bar"></div>
-    </div>
+    <div class="drag-handle" on:mousedown={onDragStart}><div class="drag-bar"></div></div>
   {/if}
 
-  <div class="console-header">
-      <div class="header-left">
-        <span class="console-title">Console</span>
-        {#if runStatus !== 'idle'}
-          <span class="status-badge status-{runStatus}">
-            <span class="status-icon">{statusIcon(runStatus)}</span>
-            <span class="status-text">
-              {runStatus === 'preparing' ? 'Preparing' :
-               runStatus === 'compiling' ? 'Compiling' :
-               runStatus === 'running' ? 'Running' :
-               runStatus === 'done' ? 'Done' : 'Error'}
-            </span>
-            {#if durationMs !== null && (runStatus === 'done' || runStatus === 'error')}
-              <span class="status-duration">{formatDuration(durationMs)}</span>
-            {/if}
-          </span>
-        {/if}
-      </div>
-      <div class="header-actions">
-        <button
-          class="action-btn"
-          class:active={showTs}
-          title="Toggle timestamps"
-          on:click={toggleTimestamps}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-          </svg>
-        </button>
-        <button
-          class="action-btn"
-          class:active={wordWrap}
-          title="Toggle word wrap"
-          on:click={toggleWordWrap}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 6h18"/><path d="M3 12h15a3 3 0 1 1 0 6h-4"/><polyline points="16 16 14 18 16 20"/><path d="M3 18h7"/>
-          </svg>
-        </button>
-        <button class="action-btn" title="Copy all" on:click={copyAll}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-          </svg>
-        </button>
-        <button class="action-btn" title="Clear console" on:click={consoleClear}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
-          </svg>
-        </button>
+  <div class="con-header">
+    <div class="header-left">
+      <span class="con-title">Console</span>
+      {#if runStatus !== 'idle'}
+        <span class="status-badge status-{runStatus}">
+          <span class="status-icon">{statusIcon(runStatus)}</span>
+          <span class="status-text">{runStatus}</span>
+          {#if durationMs !== null && (runStatus === 'done' || runStatus === 'error')}
+            <span class="status-dur">{fmtDuration(durationMs)}</span>
+          {/if}
+        </span>
+      {/if}
+    </div>
+    <div class="header-actions">
+      <button class="act-btn" class:active={showTs} title="Timestamps"
+        on:click={consoleToggleTimestamps}>T</button>
+      <button class="act-btn" class:active={wordWrap} title="Word wrap"
+        on:click={consoleToggleWordWrap}>W</button>
+      <button class="act-btn" title="Clear" on:click={consoleClear}>✕</button>
     </div>
   </div>
 
-  <div
-    class="console-body"
-    class:word-wrap={wordWrap}
-    bind:this={scrollContainer}
-    on:scroll={handleScroll}
-  >
-    {#each lines as line, i (i)}
-      <div class="console-line {lineClass(line.kind)}">
-        {#if showTs}
-          <span class="line-ts">{formatTs(line.ts)}</span>
-        {/if}
-        <span class="line-text">{line.text}</span>
+  <div class="lines" bind:this={scrollEl} on:scroll={handleScroll}>
+    {#each lines as line}
+      <div class="line {lineClass(line.kind)}" class:nowrap={!wordWrap}>
+        {#if showTs}<span class="ts">{fmtTs(line.ts)}</span>{/if}
+        <span class="text">{line.text}</span>
       </div>
     {/each}
+    {#if lines.length === 0 && runStatus === 'idle'}
+      <div class="empty-hint">Run a file to see output</div>
+    {/if}
   </div>
-
-  {#if showScrollPill}
-    <button class="scroll-pill" on:click={scrollToBottom}>
-      ↓ New output
-    </button>
-  {/if}
 </div>
 
 <style>
   .console-root {
     display: flex;
     flex-direction: column;
-    background: #0a0a0f;
+    background: #11111b;
+    border-top: 1px solid #1e1e2e;
+    min-height: 0;
     overflow: hidden;
-    position: relative;
   }
-
-  .console-root.panel {
-    border-top: 1px solid #1a1a2e;
-    flex-shrink: 0;
-  }
-
   .console-root.fullscreen {
     flex: 1;
+    border-top: none;
   }
-
-  /* Drag handle */
   .drag-handle {
     height: 6px;
-    cursor: ns-resize;
+    cursor: row-resize;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    background: #0a0a0f;
   }
-
-  .drag-handle:hover .drag-bar {
-    background: #3b3b5c;
-  }
-
-  .drag-bar {
-    width: 40px;
-    height: 2px;
-    border-radius: 1px;
-    background: #1e1e35;
-    transition: background 0.15s;
-  }
-
-  /* Header */
-  .console-header {
+  .drag-bar { width: 32px; height: 2px; border-radius: 2px; background: #313244; }
+  .con-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 4px 12px;
+    padding: 4px 10px;
+    border-bottom: 1px solid #1e1e2e;
     flex-shrink: 0;
-    min-height: 32px;
-    border-bottom: 1px solid #111122;
   }
-
-  .header-left {
+  .header-left { display: flex; align-items: center; gap: 8px; }
+  .con-title { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #585b70; }
+  .status-badge {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 4px;
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(100,100,180,0.12);
+    color: #89b4fa;
   }
-
-  .console-title {
+  .status-badge.status-running { color: #a6e3a1; background: rgba(100,200,100,0.1); }
+  .status-badge.status-done    { color: #a6e3a1; background: rgba(100,200,100,0.1); }
+  .status-badge.status-error   { color: #f38ba8; background: rgba(200,100,100,0.1); }
+  .status-icon { font-size: 10px; }
+  .status-dur  { color: #585b70; font-size: 10px; }
+  .header-actions { display: flex; gap: 4px; }
+  .act-btn {
+    border: none;
+    background: none;
+    color: #45475a;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
     font-size: 11px;
     font-weight: 700;
-    color: #4a4a6a;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+    font-family: inherit;
+    transition: background 0.1s, color 0.1s;
   }
-
-  .status-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 11px;
-    font-weight: 500;
-    padding: 1px 8px;
-    border-radius: 10px;
-    line-height: 1.4;
-  }
-
-  .status-compiling {
-    color: #94a3b8;
-    background: #1e293b;
-  }
-
-  .status-preparing .status-icon,
-  .status-compiling .status-icon {
-    animation: spin 1.2s linear infinite;
-  }
-
-  .status-preparing {
-    color: #cbd5e1;
-    background: #0f172a;
-  }
-
-  .status-running {
-    color: #4ade80;
-    background: #052e16;
-  }
-
-  .status-running .status-icon {
-    animation: pulse 1.5s ease-in-out infinite;
-  }
-
-  .status-done {
-    color: #4ade80;
-    background: #052e16;
-  }
-
-  .status-error {
-    color: #f87171;
-    background: #2d0f0f;
-  }
-
-  .status-duration {
-    opacity: 0.7;
-    font-size: 10px;
-  }
-
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to   { transform: rotate(360deg); }
-  }
-
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50%      { opacity: 0.4; }
-  }
-
-  /* Header actions */
-  .header-actions {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-
-  .action-btn {
-    width: 26px;
-    height: 26px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    color: #3b3b5c;
-    cursor: pointer;
-    transition: color 0.12s, background 0.12s;
-  }
-
-  .action-btn:hover {
-    color: #8888aa;
-    background: #151528;
-  }
-
-  .action-btn.active {
-    color: #89b4fa;
-  }
-
-  /* Console body */
-  .console-body {
+  .act-btn:hover { background: #1e1e2e; color: #a6adc8; }
+  .act-btn.active { color: #89b4fa; }
+  .lines {
     flex: 1;
-    overflow-x: auto;
     overflow-y: auto;
-    padding: 8px 0;
-    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', 'Consolas', monospace;
-    font-size: 12.5px;
-    line-height: 1.65;
+    padding: 6px 0;
+    font-family: 'JetBrains Mono', 'Fira Mono', monospace;
+    font-size: 12px;
+    line-height: 1.55;
   }
-
-  .console-body.word-wrap {
-    overflow-x: hidden;
-  }
-
-  .console-body.word-wrap .line-text {
-    white-space: pre-wrap;
+  .line {
+    display: flex;
+    gap: 8px;
+    padding: 1px 10px;
     word-break: break-all;
   }
-
-  /* Scrollbar */
-  .console-body::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-  }
-
-  .console-body::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .console-body::-webkit-scrollbar-thumb {
-    background: #1e1e35;
-    border-radius: 3px;
-  }
-
-  .console-body::-webkit-scrollbar-thumb:hover {
-    background: #2e2e4e;
-  }
-
-  /* Lines */
-  .console-line {
-    display: flex;
-    align-items: baseline;
-    padding: 0 14px;
-    min-height: 20px;
-  }
-
-  .console-line:hover {
-    background: #0d0d18;
-  }
-
-  .line-ts {
-    flex-shrink: 0;
-    width: 62px;
-    color: #2a2a45;
-    font-size: 10.5px;
-    margin-right: 10px;
-    user-select: none;
-  }
-
-  .line-text {
-    white-space: pre;
-    flex: 1;
-    min-width: 0;
-  }
-
-  /* Line kinds */
-  .line-stdout .line-text {
-    color: #c8cee0;
-  }
-
-  .line-stderr .line-text {
-    color: #f87171;
-  }
-
-  .line-system .line-text {
-    color: #4a4a6a;
-    font-style: italic;
-  }
-
-  .line-success .line-text {
-    color: #4ade80;
-  }
-
-  /* Scroll pill */
-  .scroll-pill {
-    position: absolute;
-    bottom: 12px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: #1e293b;
-    color: #89b4fa;
-    border: 1px solid #2d3f5f;
-    border-radius: 16px;
-    padding: 4px 14px;
-    font-size: 11px;
-    font-weight: 600;
-    cursor: pointer;
-    z-index: 10;
-    transition: background 0.12s;
-    font-family: inherit;
-  }
-
-  .scroll-pill:hover {
-    background: #253349;
-  }
+  .line.nowrap { white-space: nowrap; word-break: normal; }
+  .stdout { color: #cdd6f4; }
+  .stderr { color: #f38ba8; }
+  .system { color: #585b70; }
+  .success { color: #a6e3a1; }
+  .ts { color: #45475a; flex-shrink: 0; user-select: none; }
+  .text { min-width: 0; }
+  .empty-hint { color: #313244; font-size: 12px; padding: 12px 10px; }
 </style>

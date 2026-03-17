@@ -1,269 +1,645 @@
 <script lang="ts">
-  import type { ComponentType } from 'svelte';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { readable, type Readable } from 'svelte/store';
+  import { createServiceRegistry, type ServiceRegistry } from './lib/services/service_registry';
+  import type { BootstrapContext, FsEntry, SessionInfo } from './lib/types';
+  import type { GitHubAccountState, ManagedProject } from './lib/project_catalog/types';
+  import { ide } from './stores/ide';
+  import { consolePush } from './stores/console';
+  import { editor, editorMarkSaved, editorOpen } from './stores/editor';
+  import { session, sessionOpen } from './stores/session';
+  import { runtime } from './stores/runtime';
   import Sidebar from './components/Sidebar.svelte';
   import Toolbar from './components/Toolbar.svelte';
   import FileTree from './components/FileTree.svelte';
-  import Home from './components/Home.svelte';
   import Editor from './components/Editor.svelte';
   import Console from './components/Console.svelte';
-  import Terminal from './components/Terminal.svelte';
-  import ContextMenu from './components/ContextMenu.svelte';
-  import { ide } from './stores/ide';
-  import { explorer } from './stores/explorer';
-  import { initBridge, bridge } from './lib/bridge';
-  import { actions } from './lib/actions';
-  import { termInit } from './stores/terminal';
-  import { executeStudioLaunch } from './lib/launch';
-  import { resolveInitialStudioLaunchUrl } from './lib/launch_protocol';
+  import Home from './components/Home.svelte';
+  import GitHubConnectModal from './components/home/GitHubConnectModal.svelte';
+  import PreviewPanel from './components/PreviewPanel.svelte';
+  import TerminalPanel from './components/TerminalPanel.svelte';
+  import RunnerModeLayout from './components/RunnerModeLayout.svelte';
 
-  let bridgeReady = false;
-  let bridgeError = '';
-  let bridgeErrorTitle = 'Failed to initialize Vibe Studio bridge';
-  let loadingStep = 'Loading…';
-  let PreviewPanelComponent: ComponentType | null = null;
-  let previewPanelLoading: Promise<void> | null = null;
-
-  function formatStartupError(err: unknown): string {
-    if (typeof err === 'string') return err;
-    if (err instanceof Error) return err.message;
-    if (typeof err === 'object' && err !== null) {
-      const message = (err as any).message;
-      const code = (err as any).code;
-      if (typeof message === 'string' && typeof code === 'string') {
-        return `[${code}] ${message}`;
-      }
-      if (typeof message === 'string') return message;
-      try {
-        return JSON.stringify(err, null, 2);
-      } catch {
-      }
-    }
-    return String(err);
-  }
-
-  async function ensurePreviewPanelLoaded(): Promise<void> {
-    if (PreviewPanelComponent) return;
-    if (!previewPanelLoading) {
-      previewPanelLoading = import('./components/PreviewPanel.svelte').then(mod => {
-        PreviewPanelComponent = mod.default;
-      });
-    }
-    await previewPanelLoading;
-  }
+  let registry: ServiceRegistry | null = null;
+  let bootstrap: BootstrapContext | null = null;
+  let sessionInfo: SessionInfo | null = null;
+  let explorerEntries: FsEntry[] = [];
+  let currentDir = '';
+  let localPathInput = '';
+  let urlInput = '';
+  let loading = 'Bootstrapping Studio…';
+  let error = '';
+  let runtimePollTimer: number | null = null;
+  let sessionProjectHasGui = false;
+  let showGitHubConnectModal = false;
+  let confirmDialog: { title: string; message: string; danger: boolean; action: () => void } | null = null;
+  let githubStore: Readable<GitHubAccountState> = readable({
+    token: null,
+    user: null,
+    connecting: false,
+    error: '',
+  });
 
   onMount(async () => {
     try {
-      await initBridge((step) => { loadingStep = step; });
-      loadingStep = 'Preparing workspace…';
-      await actions.initWorkspace();
-      termInit(bridge().workspaceRoot);
-      bridgeReady = true;
-      const launchUrl = await resolveInitialStudioLaunchUrl();
-      if (launchUrl) {
-        loadingStep = 'Opening launch target…';
-        try {
-          await executeStudioLaunch(launchUrl);
-        } catch (e: unknown) {
-          bridgeErrorTitle = 'Failed to open Studio launch target';
-          bridgeError = formatStartupError(e);
+      registry = await createServiceRegistry();
+      githubStore = registry.projectCatalog.github;
+      bootstrap = registry.project.bootstrapContext;
+      const isRunner = bootstrap.mode === 'runner';
+      const runTarget = bootstrap.initialRunTarget ?? bootstrap.initialPath;
+      let openedSession: SessionInfo;
+      if (isRunner && runTarget) {
+        loading = `Running ${runTarget.split('/').pop()}…`;
+        openedSession = await registry.project.openRunSession(runTarget);
+      } else if (bootstrap.initialUrl) {
+        loading = `Importing ${bootstrap.initialUrl}…`;
+        openedSession = await registry.project.openUrl(bootstrap.initialUrl);
+      } else {
+        loading = 'Opening workspace session…';
+        openedSession = await registry.project.openWorkspace();
+      }
+      if (isRunner) {
+        await bindRunnerSession(openedSession);
+        ide.update((s) => ({ ...s, appMode: 'runner' }));
+      } else {
+        await bindDevSession(openedSession, {
+          openEntry: Boolean((bootstrap.initialPath || bootstrap.initialUrl) && openedSession.entryPath),
+        });
+        if (!bootstrap.initialPath && !bootstrap.initialUrl) {
+          ide.update((s) => ({ ...s, appMode: 'manage' }));
+        } else {
+          ide.update((s) => ({ ...s, appMode: 'develop' }));
         }
       }
-    } catch (e: unknown) {
-      bridgeErrorTitle = 'Failed to initialize Vibe Studio bridge';
-      bridgeError = formatStartupError(e);
+      loading = '';
+      if (!isRunner) {
+        void registry.projectCatalog.initialize(openedSession.root).catch((catalogError) => {
+          consolePush('stderr', formatError(catalogError));
+        });
+      }
+      const shouldAutoRunGui = Boolean(openedSession.entryPath && isRunner);
+      if (shouldAutoRunGui && openedSession.entryPath) {
+        await autoRunGui(openedSession.entryPath);
+      }
+    } catch (err) {
+      error = formatError(err);
+      loading = '';
     }
   });
 
-  $: isGuiApp = $ide.isGuiApp && $ide.guestRender !== null && $ide.guestRender.length > 0;
-  $: appMode  = $explorer.appMode;
-  $: expanded = $ide.outputExpanded;
-  $: if (isGuiApp && !PreviewPanelComponent) {
-    void ensurePreviewPanelLoaded();
+  async function autoRunGui(target: string): Promise<void> {
+    if (!registry) return;
+    registry.runtime.clearConsole();
+    try {
+      await registry.runtime.runGui(target);
+      startRuntimePolling();
+    } catch (_) {}
   }
 
+  onDestroy(() => { stopRuntimePolling(); });
+
+  async function bindRunnerSession(nextSessionInfo: SessionInfo): Promise<void> {
+    if (!registry) return;
+    sessionInfo = nextSessionInfo;
+    registry.terminal.syncCwd(nextSessionInfo.root);
+    registry.runtime.clearConsole();
+    sessionOpen(nextSessionInfo.root, 'runner', nextSessionInfo.entryPath ?? null, nextSessionInfo.projectMode);
+    currentDir = nextSessionInfo.root;
+    explorerEntries = [];
+    editorOpen('', '');
+  }
+
+  async function bindDevSession(
+    nextSessionInfo: SessionInfo,
+    options: { openEntry?: boolean; syncCatalogRoot?: boolean } = {},
+  ): Promise<void> {
+    if (!registry) return;
+    sessionInfo = nextSessionInfo;
+    registry.terminal.syncCwd(nextSessionInfo.root);
+    registry.runtime.clearConsole();
+    sessionOpen(nextSessionInfo.root, 'dev', nextSessionInfo.entryPath ?? null, nextSessionInfo.projectMode);
+    sessionProjectHasGui = registry.projectCatalog.getSessionProjectConfig(nextSessionInfo).hasGui;
+    ide.update((s) => ({ ...s, outputExpanded: false, previewCollapsed: false }));
+    currentDir = nextSessionInfo.root;
+    explorerEntries = [];
+    editorOpen('', '');
+    if (nextSessionInfo.projectMode === 'module') {
+      await refreshDirectory(nextSessionInfo.root);
+    }
+    if (options.syncCatalogRoot) {
+      void registry.projectCatalog.setRoot(nextSessionInfo.root).catch((catalogError) => {
+        consolePush('stderr', formatError(catalogError));
+      });
+    }
+    const shouldOpenEntry = Boolean(nextSessionInfo.entryPath && (options.openEntry || nextSessionInfo.projectMode === 'single-file'));
+    if (shouldOpenEntry && nextSessionInfo.entryPath) {
+      try {
+        const content = await registry.workspace.readFile(nextSessionInfo.entryPath);
+        editorOpen(nextSessionInfo.entryPath, content);
+      } catch (_) {}
+    }
+  }
+
+  async function refreshDirectory(path: string): Promise<void> {
+    if (!registry) return;
+    explorerEntries = await registry.workspace.list(path);
+    currentDir = path;
+  }
+
+  async function openEntry(entry: FsEntry): Promise<void> {
+    if (!registry) return;
+    if (entry.isDir) { await refreshDirectory(entry.path); return; }
+    const content = await registry.workspace.readFile(entry.path);
+    editorOpen(entry.path, content);
+  }
+
+  async function saveActiveEditor(options: { quiet?: boolean } = {}): Promise<boolean> {
+    if (!registry) return false;
+    const activeFilePath = $editor.activeFilePath;
+    const entryPath = sessionInfo?.entryPath ?? '';
+    const targetFilePath = activeFilePath || entryPath;
+    if (!targetFilePath) return false;
+    if (!activeFilePath) {
+      if ($editor.dirty) {
+        throw new Error('Active editor is not bound to a file');
+      }
+      return true;
+    }
+    if (!$editor.dirty) return true;
+    await registry.workspace.writeFile(activeFilePath, $editor.code);
+    editorMarkSaved();
+    if (!options.quiet) {
+      consolePush('system', `Saved ${activeFilePath.split('/').pop() ?? activeFilePath}`);
+    }
+    return true;
+  }
+
+  async function flushEditorBeforeRun(): Promise<boolean> {
+    if (!registry) return false;
+    try {
+      return await saveActiveEditor({ quiet: true });
+    } catch (error) {
+      consolePush('stderr', formatError(error));
+      return false;
+    }
+  }
+
+  async function openWorkspace(): Promise<void> {
+    if (!registry) return;
+    stopRuntimePolling();
+    await registry.runtime.stop().catch(() => undefined);
+    const openedSession = await registry.project.openWorkspace();
+    await bindDevSession(openedSession, { syncCatalogRoot: true });
+    ide.update((s) => ({ ...s, appMode: 'develop' }));
+  }
+
+  async function openLocalPath(): Promise<void> {
+    if (!registry || !localPathInput.trim()) return;
+    stopRuntimePolling();
+    await registry.runtime.stop().catch(() => undefined);
+    const openedSession = await registry.project.openRunSession(localPathInput.trim());
+    await bindDevSession(openedSession, { openEntry: true, syncCatalogRoot: true });
+    ide.update((s) => ({ ...s, appMode: 'develop' }));
+  }
+
+  async function openUrl(): Promise<void> {
+    if (!registry || !urlInput.trim()) return;
+    stopRuntimePolling();
+    await registry.runtime.stop().catch(() => undefined);
+    const openedSession = await registry.project.openUrl(urlInput.trim());
+    await bindDevSession(openedSession, { openEntry: true, syncCatalogRoot: true });
+    ide.update((s) => ({ ...s, appMode: 'develop' }));
+  }
+
+  async function openManagedProject(project: ManagedProject): Promise<void> {
+    if (!registry || !project.localPath) return;
+    stopRuntimePolling();
+    await registry.runtime.stop().catch(() => undefined);
+    const openPath = project.type === 'single'
+      ? (project.entryPath ?? project.localPath)
+      : project.localPath;
+    const openedSession = await registry.project.openRunSession(openPath);
+    await bindDevSession(openedSession, { openEntry: true });
+    ide.update((s) => ({ ...s, appMode: 'develop' }));
+  }
+
+  async function goParent(): Promise<void> {
+    if (!sessionInfo || currentDir === sessionInfo.root) return;
+    const idx = currentDir.lastIndexOf('/');
+    const parent = idx > 0 ? currentDir.slice(0, idx) : '/';
+    if (parent.startsWith(sessionInfo.root)) await refreshDirectory(parent);
+  }
+
+  function formatError(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+
+  function currentRunTarget(): string {
+    const filePath = $editor.activeFilePath;
+    if (filePath.endsWith('.vo')) return filePath;
+    return sessionInfo?.entryPath ?? '';
+  }
+
+  async function runCode(): Promise<boolean> {
+    if (!registry) return false;
+    const target = currentRunTarget();
+    if (!target) return false;
+    registry.runtime.clearConsole();
+    const flushed = await flushEditorBeforeRun();
+    if (!flushed) return false;
+    try {
+      await registry.runtime.runConsole(target, 'vm');
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function runGui(): Promise<boolean> {
+    if (!registry) return false;
+    const target = currentRunTarget();
+    if (!target) return false;
+    registry.runtime.clearConsole();
+    const flushed = await flushEditorBeforeRun();
+    if (!flushed) return false;
+    try {
+      await registry.runtime.runGui(target);
+      startRuntimePolling();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function runProject(): Promise<void> {
+    if (sessionProjectHasGui) {
+      await runGui();
+      return;
+    }
+    await runCode();
+  }
+
+  function openGitHubConnectModal(): void {
+    showGitHubConnectModal = true;
+  }
+
+  function closeGitHubConnectModal(): void {
+    showGitHubConnectModal = false;
+  }
+
+  async function connectGitHub(token: string): Promise<void> {
+    if (!registry) return;
+    try {
+      await registry.projectCatalog.connectGitHub(token);
+      showGitHubConnectModal = false;
+    } catch {}
+  }
+
+  function disconnectGitHub(): void {
+    if (!registry) return;
+    confirmDialog = {
+      title: 'Disconnect GitHub',
+      message: 'Sign out of GitHub? Remote project metadata will no longer be synced.',
+      danger: false,
+      action: () => {
+        confirmDialog = null;
+        void registry.projectCatalog.disconnectGitHub().catch((connectError) => {
+          consolePush('stderr', formatError(connectError));
+        });
+      },
+    };
+  }
+
+  async function stopCode(): Promise<void> {
+    if (!registry) return;
+    stopRuntimePolling();
+    await registry.runtime.stop().catch(() => undefined);
+  }
+
+  async function runFullscreen(): Promise<void> {
+    if (!sessionProjectHasGui) return;
+    const started = await runGui();
+    if (started) {
+      ide.update((s) => ({ ...s, outputExpanded: true, previewCollapsed: false }));
+    }
+  }
+
+  function exitFullscreen(): void {
+    ide.update((s) => ({ ...s, outputExpanded: false }));
+  }
+
+  async function setSessionProjectHasGui(hasGui: boolean): Promise<void> {
+    if (!registry || !sessionInfo || $runtime.isRunning || sessionProjectHasGui === hasGui) {
+      return;
+    }
+    sessionProjectHasGui = hasGui;
+    if (hasGui) {
+      ide.update((s) => ({ ...s, previewCollapsed: false }));
+    } else {
+      stopRuntimePolling();
+      ide.update((s) => ({ ...s, outputExpanded: false, previewCollapsed: false }));
+    }
+    try {
+      const nextConfig = await registry.projectCatalog.updateSessionProjectConfig(sessionInfo, hasGui);
+      sessionProjectHasGui = nextConfig.hasGui;
+    } catch (error) {
+      sessionProjectHasGui = !hasGui;
+      consolePush('stderr', formatError(error));
+      if (!hasGui) {
+        ide.update((s) => ({ ...s, previewCollapsed: false }));
+      } else {
+        ide.update((s) => ({ ...s, outputExpanded: false, previewCollapsed: false }));
+      }
+    }
+  }
+
+  function startRuntimePolling(): void {
+    stopRuntimePolling();
+    runtimePollTimer = window.setInterval(async () => {
+      if (!registry) return;
+      try {
+        await registry.runtime.pollGuiRender();
+      } catch (e) {
+        consolePush('stderr', formatError(e));
+        stopRuntimePolling();
+      }
+    }, 50);
+  }
+
+  function stopRuntimePolling(): void {
+    if (runtimePollTimer !== null) { window.clearInterval(runtimePollTimer); runtimePollTimer = null; }
+  }
+
+  $: appMode = $ide.appMode;
+  $: isGuiProject = sessionProjectHasGui;
+  $: showExplorer = $session.projectMode === 'module';
+  $: isSingleFileSession = $session.projectMode === 'single-file';
+  $: hasSidePanel = showExplorer || isGuiProject;
+  $: outputExpanded = $ide.outputExpanded;
+  $: previewCollapsed = $ide.previewCollapsed;
+  $: previewTitle = $runtime.guiEntryPath
+    ? ($runtime.guiEntryPath.split('/').pop() ?? '')
+    : $session.entryPath
+      ? ($session.entryPath.split('/').pop() ?? '')
+      : $session.projectName;
 </script>
 
-{#if bridgeError}
+<svelte:window
+  on:keydown={(event) => {
+    if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return;
+    if (appMode !== 'develop') return;
+    event.preventDefault();
+    void saveActiveEditor().catch((error) => {
+      consolePush('stderr', formatError(error));
+    });
+  }}
+/>
+
+{#if error}
   <div class="splash">
-    <pre class="error-text">{bridgeErrorTitle}:{'\n'}{bridgeError}</pre>
+    <div class="splash-card error">
+      <div class="splash-vo">Vo<span>Studio</span></div>
+      <p class="splash-error">{error}</p>
+    </div>
   </div>
-{:else if !bridgeReady}
+{:else if loading}
   <div class="splash">
-    <span class="loading-text">{loadingStep}</span>
+    <div class="splash-card">
+      <div class="splash-vo">Vo<span>Studio</span></div>
+      <p class="splash-loading">{loading}</p>
+    </div>
   </div>
+{:else if appMode === 'runner' && registry}
+  <RunnerModeLayout {registry} />
 {:else}
-  <div class="app-root">
-    <Sidebar />
+  <div class="app">
+    <Sidebar
+      {githubStore}
+      onConnectGitHub={openGitHubConnectModal}
+      onDisconnectGitHub={disconnectGitHub}
+    />
 
-    {#if appMode === 'manage'}
-      <Home />
+    <div class="main-area">
+      {#if appMode === 'manage'}
+        <!-- HOME: project management -->
+        <Home
+          {bootstrap}
+          projectCatalog={registry.projectCatalog}
+          bind:localPathInput
+          bind:urlInput
+          onOpenWorkspace={openWorkspace}
+          onOpenLocalPath={openLocalPath}
+          onOpenUrl={openUrl}
+          onOpenProject={openManagedProject}
+          onDevelop={() => ide.update(s => ({ ...s, appMode: 'develop' }))}
+        />
 
-    {:else if appMode === 'terminal'}
-      <div class="terminal-tab">
-        <Terminal mode="full" />
-      </div>
+      {:else if appMode === 'develop'}
+        <div class="develop-layout" class:single-file={isSingleFileSession}>
+          {#if showExplorer}
+            <FileTree
+              entries={explorerEntries}
+              {currentDir}
+              sessionRoot={$session.root}
+              onOpenEntry={openEntry}
+              onGoParent={goParent}
+            />
+          {/if}
 
-    {:else if appMode === 'develop'}
-      <div class="develop-panel" class:fullscreen={expanded}>
-        {#if expanded}
-          <button
-            class="fs-exit"
-            title="Exit fullscreen"
-            on:click={() => ide.update(s => ({ ...s, outputExpanded: false }))}
-          >×</button>
-          <div class="expanded-surface">
-            {#if isGuiApp}
-              {#if PreviewPanelComponent}
-                <svelte:component
-                  this={PreviewPanelComponent}
-                  guestRender={$ide.guestRender}
-                  guestModuleBytes={$ide.guestModuleBytes}
-                  chromeless
-                />
-              {/if}
-            {:else}
-              <Console mode="fullscreen" />
-            {/if}
-          </div>
-        {:else}
-          <Toolbar />
-          <div class="ide-body">
-            {#if $ide.projectMode === 'multi'}
-              <FileTree />
-            {/if}
-            <div class="editor-console">
-              <Editor
-                value={$ide.code}
-                filePath={$ide.activeFilePath}
-                on:change={(e) => actions.onEditorChange(e.detail)}
-              />
-              <Console mode="panel" />
+          <div class="center-col" class:with-side-panel={hasSidePanel}>
+            <Toolbar
+              onSave={() => void saveActiveEditor().catch((error) => consolePush('stderr', formatError(error)))}
+              onRun={runProject}
+              onRunFullscreen={runFullscreen}
+              onStop={stopCode}
+              onSetProjectHasGui={(hasGui) => void setSessionProjectHasGui(hasGui)}
+              projectHasGui={sessionProjectHasGui}
+            />
+            <div class="editor-area">
+              <Editor />
             </div>
-            {#if isGuiApp}
-              {#if PreviewPanelComponent}
-                <svelte:component
-                  this={PreviewPanelComponent}
-                  guestRender={$ide.guestRender}
-                  guestModuleBytes={$ide.guestModuleBytes}
-                  showFullscreenAction
-                  onFullscreenAction={() => ide.update(s => ({ ...s, outputExpanded: true }))}
-                />
-              {/if}
-            {/if}
+            <Console mode="panel" />
           </div>
-        {/if}
-      </div>
-    {/if}
 
-    <ContextMenu />
+          {#if isGuiProject && registry}
+            <PreviewPanel
+              {registry}
+              collapsed={previewCollapsed}
+              fullscreen={outputExpanded}
+              fullscreenTitle={previewTitle}
+              showFullscreenAction={true}
+              onFullscreenAction={() => ide.update((s) => ({ ...s, outputExpanded: true, previewCollapsed: false }))}
+              onExitFullscreenAction={exitFullscreen}
+              onToggleCollapsed={() => ide.update((s) => ({ ...s, previewCollapsed: !s.previewCollapsed }))}
+            />
+          {/if}
+        </div>
+
+      {:else if appMode === 'terminal'}
+        <!-- TERMINAL: full terminal view -->
+        <div class="terminal-layout">
+          {#if registry}
+            <TerminalPanel terminal={registry.terminal} afterExecute={() => {}} />
+          {/if}
+        </div>
+      {/if}
+    </div>
+  </div>
+{/if}
+
+{#if showGitHubConnectModal}
+  <GitHubConnectModal
+    connecting={$githubStore.connecting}
+    error={$githubStore.error}
+    on:close={closeGitHubConnectModal}
+    on:submit={(event) => connectGitHub(event.detail.token)}
+  />
+{/if}
+
+{#if confirmDialog}
+  <div
+    class="confirm-backdrop"
+    role="button"
+    tabindex="0"
+    aria-label="Close"
+    on:click|self={() => (confirmDialog = null)}
+    on:keydown={(event) => event.key === 'Escape' && (confirmDialog = null)}
+  >
+    <div class="confirm-modal" role="dialog" aria-modal="true">
+      <h3 class:danger={confirmDialog.danger}>{confirmDialog.title}</h3>
+      <p class="confirm-msg">{confirmDialog.message}</p>
+      <div class="confirm-actions">
+        <button class="secondary" on:click={() => (confirmDialog = null)}>Cancel</button>
+        <button class={confirmDialog.danger ? 'danger-btn' : 'primary'} on:click={confirmDialog.action}>
+          {confirmDialog.title}
+        </button>
+      </div>
+    </div>
   </div>
 {/if}
 
 <style>
-  :global(*) { box-sizing: border-box; margin: 0; padding: 0; }
-  :global(html, body) { height: 100%; overflow: hidden; }
-  :global(body) { font-family: -apple-system, 'Segoe UI', system-ui, sans-serif; }
-
-  .app-root {
-    display: flex;
-    flex-direction: row;
-    height: 100vh;
+  :global(*, *::before, *::after) { box-sizing: border-box; }
+  :global(:root) {
+    --studio-topbar-height: 44px;
+  }
+  :global(html, body) {
+    height: 100%;
+    margin: 0;
+    padding: 0;
     background: #11111b;
     color: #cdd6f4;
-    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-size: 14px;
   }
+  :global(#app) { height: 100%; display: flex; flex-direction: column; }
 
+  /* Splash */
   .splash {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 100vh;
+    display: grid;
+    place-items: center;
+    height: 100%;
     background: #11111b;
-    padding: 20px;
   }
-  .loading-text { color: #585b70; font-size: 14px; }
-  .error-text   { color: #f38ba8; font-size: 13px; white-space: pre-wrap; }
+  .splash-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    padding: 48px 40px;
+    border-radius: 20px;
+    background: #181825;
+    border: 1px solid #313244;
+  }
+  .splash-card.error { border-color: #f38ba8; }
+  .splash-vo { font-size: 36px; font-weight: 900; color: #89b4fa; }
+  .splash-vo span { font-weight: 300; color: #585b70; margin-left: 8px; font-size: 28px; }
+  .splash-loading { color: #585b70; font-size: 14px; margin: 0; }
+  .splash-error { color: #f38ba8; font-size: 13px; margin: 0; max-width: 400px; text-align: center; }
 
-  /* Fullscreen exit — floating × bottom-left */
-  .fs-exit {
+  /* App layout */
+  .app { display: flex; height: 100%; overflow: hidden; }
+  .main-area { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+
+  /* Develop layout */
+  .develop-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+  .develop-layout.single-file {
+    background: linear-gradient(180deg, rgba(17, 17, 27, 0.98), rgba(24, 24, 37, 0.96));
+  }
+  .center-col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .center-col.with-side-panel { border-right: 1px solid #1e1e2e; }
+  .editor-area { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+
+  /* Terminal layout */
+  .terminal-layout { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .confirm-backdrop {
     position: fixed;
-    bottom: 20px;
-    left: 20px;
-    z-index: 100;
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    border: 1px solid rgba(239, 68, 68, 0.30);
-    background: rgba(239, 68, 68, 0.15);
-    color: rgba(255, 180, 180, 0.80);
-    font-size: 20px;
-    line-height: 1;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(6px);
     display: flex;
     align-items: center;
     justify-content: center;
+    z-index: 210;
+  }
+  .confirm-modal {
+    width: min(100%, 380px);
+    background: #1e1e2e;
+    border: 1px solid #313244;
+    border-radius: 16px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+    padding: 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .confirm-modal h3 {
+    margin: 0;
+    color: #cdd6f4;
+    font-size: 16px;
+    font-weight: 700;
+  }
+  .confirm-modal h3.danger {
+    color: #f38ba8;
+  }
+  .confirm-msg {
+    margin: 0;
+    color: #7f849c;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .primary,
+  .secondary,
+  .danger-btn {
+    border: none;
+    border-radius: 8px;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 8px 12px;
     cursor: pointer;
-    backdrop-filter: blur(8px);
-    transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.12s;
-    font-family: inherit;
   }
-  .fs-exit:hover {
-    background: rgba(239, 68, 68, 0.28);
-    border-color: rgba(239, 68, 68, 0.50);
-    color: rgba(255, 200, 200, 0.95);
-    transform: scale(1.08);
+  .primary {
+    background: #89b4fa;
+    color: #11111b;
   }
-
-  /* Code — thin toolbar + IDE */
-  .develop-panel {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    min-width: 0;
-    background: #11111b;
+  .secondary {
+    background: #313244;
+    color: #cdd6f4;
   }
-
-  .develop-panel.fullscreen {
-    background:
-      radial-gradient(circle at top center, rgba(137, 180, 250, 0.05), transparent 24%),
-      linear-gradient(180deg, #0d0f16 0%, #090b11 100%);
-  }
-
-  .expanded-surface {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    min-height: 0;
-    background:
-      radial-gradient(circle at center, rgba(255, 255, 255, 0.02), transparent 55%),
-      linear-gradient(180deg, #090b11 0%, #06070b 100%);
-  }
-
-  .ide-body {
-    flex: 1;
-    display: flex;
-    flex-direction: row;
-    overflow: hidden;
-    min-height: 0;
-  }
-
-  .editor-console {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    min-width: 0;
-  }
-
-  /* Terminal */
-  .terminal-tab {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    min-width: 0;
-    min-height: 0;
+  .danger-btn {
+    background: #f38ba8;
+    color: #11111b;
   }
 </style>

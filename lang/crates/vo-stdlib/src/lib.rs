@@ -24,6 +24,8 @@ pub mod json;
 pub mod toml_pkg;
 pub mod tag;
 pub mod io;
+#[cfg(feature = "std")]
+pub mod toolchain;
 
 // Internal modules (used by json/toml)
 pub(crate) mod serde;
@@ -38,6 +40,13 @@ pub mod filepath;
 pub mod exec;
 
 pub use source::{EmbeddedStdlib, StdlibFs};
+#[cfg(feature = "std")]
+pub use toolchain::{
+    install_toolchain_host,
+    ToolchainHost,
+    ToolchainModule,
+    ToolchainRunMode,
+};
 
 use vo_runtime::bytecode::ExternDef;
 use vo_runtime::ffi::ExternRegistry;
@@ -60,6 +69,8 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     json::register_externs(registry, externs);
     toml_pkg::register_externs(registry, externs);
     io::register_externs(registry, externs);
+    #[cfg(feature = "std")]
+    toolchain::register_externs(registry, externs);
 
     // cross-platform (no std required)
     regexp::register_externs(registry, externs);

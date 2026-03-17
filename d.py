@@ -92,7 +92,7 @@ def run_repeated(cmd: list[str], *, repeat: int, label: str) -> int:
 
 
 def ensure_vo_test_built(need_embed=False):
-    """Build vo-test (and vo-vox extension) if needed."""
+    """Build vo-test (and optionally vo-embed) if needed."""
     # Build vo-test (and optionally vo-embed) from volang workspace
     packages = ['vo-test']
     if need_embed:
@@ -112,23 +112,6 @@ def ensure_vo_test_built(need_embed=False):
     )
     if result.returncode != 0:
         print("Failed to build vo-test:", file=sys.stderr)
-        print(result.stderr, file=sys.stderr)
-        sys.exit(1)
-    
-    # Build vo-vox extension from sibling vox repo
-    vox_rust = PROJECT_ROOT.parent / 'vox' / 'rust'
-    vox_cmd = ['cargo', 'build', '--features', 'ffi']
-    if USE_RELEASE:
-        vox_cmd.append('--release')
-    
-    result = subprocess.run(
-        vox_cmd,
-        cwd=vox_rust,
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        print("Failed to build vo-vox:", file=sys.stderr)
         print(result.stderr, file=sys.stderr)
         sys.exit(1)
 

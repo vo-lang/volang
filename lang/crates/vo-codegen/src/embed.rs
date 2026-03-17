@@ -471,7 +471,7 @@ pub enum ReceiverValue {
     /// Value in register(s), ready to use
     Value { reg: u16, value_type: TypeKey, slots: u16 },
     /// Pointer to value in register
-    Pointer { reg: u16, pointee_type: TypeKey },
+    Pointer { reg: u16 },
 }
 
 /// Extract method receiver from expression, handling all cases:
@@ -498,76 +498,83 @@ pub fn extract_receiver(
     
     let expr_is_ptr = info.is_pointer(recv_type);
     let has_embedding = !embed_path.steps.is_empty();
-    
-    // Case 1: Embedded pointer field - always traverse to get pointer
-    if has_embedding && embed_path.has_pointer_step {
-        let base_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
-        let start = TraverseStart::new(base_reg, expr_is_ptr);
-        let final_ptr = func.alloc_slots(&[SlotType::GcRef]);
-        emit_embed_path_traversal(func, start, &embed_path.steps, true, 1, final_ptr);
-        return Ok(ReceiverValue::Pointer { 
-            reg: final_ptr, 
-            pointee_type: embed_path.final_type 
-        });
-    }
-    
-    // Case 2: Simple pointer type - just compile and return
-    if expr_is_ptr {
-        let ptr_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
-        let base_type = info.pointer_base(recv_type);
-        return Ok(ReceiverValue::Pointer { 
-            reg: ptr_reg, 
-            pointee_type: base_type 
-        });
-    }
-    
-    // Case 3 & 4: Value type - check HeapBoxed first (unified check)
-    let expr_source = crate::expr::get_expr_source(expr, ctx, func, info);
-    if let ExprSource::Location(StorageKind::HeapBoxed { gcref_slot, stores_pointer, .. }) = expr_source {
-        debug_assert!(!stores_pointer, "HeapBoxed with stores_pointer in non-pointer context");
-        
-        if has_embedding && need_pointer {
-            // HeapBoxed with embed path, need pointer - traverse to get embedded field address
+    let capture_by_ref = !need_pointer && (expr_is_ptr || embed_path.has_pointer_step);
+
+    if need_pointer || capture_by_ref {
+        let expr_source = crate::expr::get_expr_source(expr, ctx, func, info);
+        let start = if expr_is_ptr {
+            let base_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
+            TraverseStart::new(base_reg, true)
+        } else if let ExprSource::Location(StorageKind::HeapBoxed { gcref_slot, stores_pointer, .. }) = expr_source {
+            debug_assert!(!stores_pointer, "HeapBoxed with stores_pointer in non-pointer context");
+            TraverseStart::new(gcref_slot, true)
+        } else if need_pointer {
+            let base_ptr = func.alloc_slots(&[SlotType::GcRef]);
+            crate::expr::compile_expr_to_ptr(expr, base_ptr, ctx, func, info)?;
+            TraverseStart::new(base_ptr, true)
+        } else {
+            let base_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
+            TraverseStart::new(base_reg, false)
+        };
+
+        if has_embedding {
             let final_ptr = func.alloc_slots(&[SlotType::GcRef]);
-            let start = TraverseStart::new(gcref_slot, true);
             emit_embed_path_traversal(func, start, &embed_path.steps, true, 1, final_ptr);
-            return Ok(ReceiverValue::Pointer { 
-                reg: final_ptr, 
-                pointee_type: embed_path.final_type 
-            });
+            return Ok(ReceiverValue::Pointer { reg: final_ptr });
         }
-        
-        // HeapBoxed without embed path, or don't need pointer - return GcRef directly
-        // Caller will either use as pointer or dereference as needed
-        return Ok(ReceiverValue::Pointer { 
-            reg: gcref_slot, 
-            pointee_type: if has_embedding { embed_path.final_type } else { recv_type }
-        });
+
+        return Ok(ReceiverValue::Pointer { reg: start.reg });
     }
-    
-    // Case 5: Stack value - copy embedded field or whole value
+
     if has_embedding {
-        let base_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
+        let expr_source = crate::expr::get_expr_source(expr, ctx, func, info);
+        let start = if let ExprSource::Location(StorageKind::HeapBoxed { gcref_slot, stores_pointer, .. }) = expr_source {
+            debug_assert!(!stores_pointer, "HeapBoxed with stores_pointer in non-pointer context");
+            TraverseStart::new(gcref_slot, true)
+        } else {
+            let base_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
+            TraverseStart::new(base_reg, false)
+        };
+
         let value_slots = info.type_slot_count(embed_path.final_type);
         let value_slot_types = info.type_slot_types(embed_path.final_type);
         let value_reg = func.alloc_slots(&value_slot_types);
-        func.emit_copy(value_reg, base_reg + embed_path.total_offset, value_slots);
-        Ok(ReceiverValue::Value { 
-            reg: value_reg, 
+        emit_embed_path_traversal(func, start, &embed_path.steps, false, value_slots, value_reg);
+        return Ok(ReceiverValue::Value {
+            reg: value_reg,
             value_type: embed_path.final_type,
             slots: value_slots,
-        })
-    } else {
+        });
+    }
+
+    if expr_is_ptr {
+        let ptr_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
+        return Ok(ReceiverValue::Pointer { reg: ptr_reg });
+    }
+
+    let expr_source = crate::expr::get_expr_source(expr, ctx, func, info);
+    if let ExprSource::Location(StorageKind::HeapBoxed { gcref_slot, stores_pointer, .. }) = expr_source {
+        debug_assert!(!stores_pointer, "HeapBoxed with stores_pointer in non-pointer context");
         let recv_slots = info.type_slot_count(recv_type);
         let recv_slot_types = info.type_slot_types(recv_type);
         let recv_reg = func.alloc_slots(&recv_slot_types);
-        crate::expr::compile_expr_to(expr, recv_reg, ctx, func, info)?;
-        Ok(ReceiverValue::Value { 
-            reg: recv_reg, 
+        func.emit_ptr_get(recv_reg, gcref_slot, 0, recv_slots);
+        return Ok(ReceiverValue::Value {
+            reg: recv_reg,
             value_type: recv_type,
             slots: recv_slots,
-        })
+        });
     }
+
+    let recv_slots = info.type_slot_count(recv_type);
+    let recv_slot_types = info.type_slot_types(recv_type);
+    let recv_reg = func.alloc_slots(&recv_slot_types);
+    crate::expr::compile_expr_to(expr, recv_reg, ctx, func, info)?;
+    Ok(ReceiverValue::Value {
+        reg: recv_reg,
+        value_type: recv_type,
+        slots: recv_slots,
+    })
 }
 
 #[cfg(test)]

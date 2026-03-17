@@ -443,25 +443,39 @@ pub fn compile_func_lit(
     // Also collect param types for cross-island serialization
     let mut escaped_params = Vec::new();
     let params = &func_lit.sig.params;
-    for (i, param) in params.iter().enumerate() {
-        let variadic_last = func_lit.sig.variadic && i == params.len() - 1;
-        let (slots, slot_types) = if variadic_last { (1, vec![SlotType::GcRef]) } else { info.type_expr_layout(param.ty.id) };
-        // Get param type for cross-island serialization (per parameter, not per name)
-        let param_type_key = info.type_expr_type(param.ty.id);
-        // Compute raw ValueMeta directly (not constant pool index)
-        let meta_raw = ctx.compute_value_meta_raw(param_type_key, info);
-        let rttid_raw = ctx.intern_type_key(param_type_key, info);
+    let func_type = info.expr_type(expr.id);
+    let param_type_keys = info.func_param_types(func_type);
+    let mut param_type_iter = param_type_keys.into_iter();
+    for param in params {
+        if param.names.is_empty() {
+            let param_type_key = param_type_iter
+                .next()
+                .expect("closure signature param types missing anonymous parameter entry");
+            let slots = info.type_slot_count(param_type_key);
+            let slot_types = info.type_slot_types(param_type_key);
+            closure_builder.define_param(None, slots, &slot_types);
+            closure_builder.add_param_type_key(param_type_key, ctx, info);
+            continue;
+        }
         for name in &param.names {
+            let param_type_key = param_type_iter
+                .next()
+                .expect("closure signature param types missing named parameter entry");
+            let slots = info.type_slot_count(param_type_key);
+            let slot_types = info.type_slot_types(param_type_key);
             let obj_key = info.get_def(name);
             let type_key = info.obj_type(obj_key, "param must have type");
             closure_builder.define_param(Some(name.symbol), slots, &slot_types);
-            // Add param type for each named parameter
-            closure_builder.add_param_type(meta_raw, rttid_raw, slots);
+            closure_builder.add_param_type_key(param_type_key, ctx, info);
             if info.needs_boxing(obj_key, type_key) {
                 escaped_params.push((name.symbol, type_key, slots, slot_types.clone()));
             }
         }
     }
+    assert!(
+        param_type_iter.next().is_none(),
+        "closure signature param types had extra entries after binding AST params"
+    );
     
     // Box escaped parameters: allocate heap storage and copy param values
     for (sym, type_key, slots, _slot_types) in escaped_params {

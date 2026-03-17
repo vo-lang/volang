@@ -1,0 +1,169 @@
+// Advanced cross-island port close semantics.
+//
+// Covers:
+//   - Buffered port with data: close after sends, remote drains then sees closed
+//   - Port closed before island spawned: island recv sees closed immediately
+//   - Multiple islands recv from same port: all see closed after close
+//   - Remote range over closed port: stops after draining data
+//   - Close on home island while remote is sending: send panics (recovered)
+//   - Two-island handshake: island A closes, island B sees it and signals main
+
+package main
+
+import "time"
+
+func waitBool(ch port bool, label string) bool {
+	done := false
+	value := false
+	for i := 0; i < 200 && !done; i += 1 {
+		select {
+		case value = <-ch:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, label)
+	return value
+}
+
+func waitInt(ch port int, label string) int {
+	done := false
+	value := 0
+	for i := 0; i < 200 && !done; i += 1 {
+		select {
+		case value = <-ch:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, label)
+	return value
+}
+
+func main() {
+	testBufferedPortDrainThenClosed()
+	testPortClosedBeforeIslandSpawned()
+	testRemoteRangeOverClosedPort()
+	testTwoIslandHandshakeClose()
+	testRemoteSendOnMainClosedPortPanics()
+}
+
+// Buffered port: main sends data then closes.
+// Island drains all data, next recv sees zero-value + ok=false.
+func testBufferedPortDrainThenClosed() {
+	i := make(island)
+	ch := make(port int, 3)
+	result := make(port bool, 1)
+
+	ch <- 10
+	ch <- 20
+	ch <- 30
+	close(ch)
+
+	go @(i) func(data port int, out port bool) {
+		v1, ok1 := <-data
+		v2, ok2 := <-data
+		v3, ok3 := <-data
+		v4, ok4 := <-data // after drain — must be closed
+		out <- (v1 == 10 && ok1 == true &&
+			v2 == 20 && ok2 == true &&
+			v3 == 30 && ok3 == true &&
+			v4 == 0 && ok4 == false)
+	}(ch, result)
+
+	assert(waitBool(result, "testBufferedPortDrainThenClosed: timed out"), "drain then closed must work correctly")
+}
+
+// Port closed before island goroutine starts: recv must immediately return zero-value + ok=false.
+func testPortClosedBeforeIslandSpawned() {
+	i := make(island)
+	ch := make(port int, 1)
+	result := make(port bool, 1)
+
+	close(ch)
+
+	go @(i) func(data port int, out port bool) {
+		v, ok := <-data
+		out <- (v == 0 && ok == false)
+	}(ch, result)
+
+	assert(waitBool(result, "testPortClosedBeforeIslandSpawned: timed out"), "pre-closed port must return zero+false immediately")
+}
+
+// Island goroutine ranges over a port that has buffered data and is already closed.
+// Range must yield all buffered items then stop.
+func testRemoteRangeOverClosedPort() {
+	i := make(island)
+	ch := make(port int, 4)
+	result := make(port int, 1)
+
+	ch <- 3
+	ch <- 6
+	ch <- 9
+	ch <- 12
+	close(ch)
+
+	go @(i) func(data port int, out port int) {
+		sum := 0
+		for {
+			v, ok := <-data
+			if !ok {
+				break
+			}
+			sum += v
+		}
+		out <- sum
+	}(ch, result)
+
+	r := waitInt(result, "testRemoteRangeOverClosedPort: timed out")
+	assert(r == 30, "testRemoteRangeOverClosedPort: sum must be 30")
+}
+
+// Two-island handshake close:
+// Island A closes the shared channel, island B sees closed and signals main.
+func testTwoIslandHandshakeClose() {
+	islandA := make(island)
+	islandB := make(island)
+	ch := make(port int, 1)
+	closeDone := make(port bool, 1)
+	recvResult := make(port bool, 1)
+
+	// Island B blocks on recv
+	go @(islandB) func(data port int, out port bool) {
+		v, ok := <-data
+		out <- (v == 0 && ok == false)
+	}(ch, recvResult)
+
+	// Island A closes after a short delay
+	go @(islandA) func(data port int, done port bool) {
+		time.Sleep(30 * time.Millisecond)
+		close(data)
+		done <- true
+	}(ch, closeDone)
+
+	waitBool(closeDone, "testTwoIslandHandshakeClose: close timed out")
+	assert(waitBool(recvResult, "testTwoIslandHandshakeClose: recv timed out"), "island B must see closed")
+}
+
+// Main closes port while island goroutine tries to send: send must panic (recovered).
+func testRemoteSendOnMainClosedPortPanics() {
+	i := make(island)
+	ch := make(port int, 1)
+	result := make(port bool, 1)
+
+	close(ch)
+
+	go @(i) func(data port int, out port bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				out <- true
+			}
+		}()
+		data <- 999
+		out <- false
+	}(ch, result)
+
+	assert(waitBool(result, "testRemoteSendOnMainClosedPortPanics: timed out"), "send on closed port must panic")
+}

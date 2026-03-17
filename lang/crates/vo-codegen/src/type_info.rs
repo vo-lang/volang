@@ -988,23 +988,37 @@ impl<'a> TypeInfoWrapper<'a> {
         panic!("get_interface_method_index: method {} not found", method_name)
     }
 
-    /// Get parameter types and variadic flag for an interface method
-    pub fn get_interface_method_signature(&self, iface_type: TypeKey, method_name: &str) -> (Vec<TypeKey>, bool) {
+    pub fn interface_method_obj(&self, iface_type: TypeKey, method_name: &str) -> Option<ObjKey> {
         let underlying = typ::underlying_type(iface_type, self.tc_objs());
         if let Type::Interface(iface) = &self.tc_objs().types[underlying] {
             let all_methods = iface.all_methods();
             let methods = all_methods.as_ref().map(|v| v.as_slice()).unwrap_or(iface.methods());
             for &method in methods {
                 if self.obj_name(method) == method_name {
-                    let method_type = self.tc_objs().lobjs[method].typ()
-                        .expect("interface method must have type");
-                    let param_types = self.func_param_types(method_type);
-                    let is_variadic = self.is_variadic(method_type);
-                    return (param_types, is_variadic);
+                    return Some(method);
                 }
             }
         }
-        panic!("get_interface_method_signature: method {} not found", method_name)
+        None
+    }
+
+    /// Get parameter types and variadic flag for an interface method
+    pub fn get_interface_method_signature(&self, iface_type: TypeKey, method_name: &str) -> (Vec<TypeKey>, bool) {
+        let method = self.interface_method_obj(iface_type, method_name)
+            .unwrap_or_else(|| panic!("get_interface_method_signature: method {} not found", method_name));
+        let method_type = self.tc_objs().lobjs[method].typ()
+            .expect("interface method must have type");
+        let param_types = self.func_param_types(method_type);
+        let is_variadic = self.is_variadic(method_type);
+        (param_types, is_variadic)
+    }
+
+    pub fn get_interface_method_result_types(&self, iface_type: TypeKey, method_name: &str) -> Vec<TypeKey> {
+        let method = self.interface_method_obj(iface_type, method_name)
+            .unwrap_or_else(|| panic!("get_interface_method_result_types: method {} not found", method_name));
+        let method_type = self.tc_objs().lobjs[method].typ()
+            .expect("interface method must have type");
+        self.func_result_types(method_type)
     }
     
     /// Get interface method's param_slots and ret_slots for method value wrapper generation.
@@ -1080,6 +1094,18 @@ impl<'a> TypeInfoWrapper<'a> {
         Some((recv_slots, recv_slots + other_param_slots, ret_slots))
     }
 
+    pub fn method_receiver_type(&self, method_obj: ObjKey) -> Option<TypeKey> {
+        let method_type = self.tc_objs().lobjs[method_obj].typ()?;
+        let sig = self.as_signature(method_type);
+        let recv_obj = sig.recv().as_ref()?;
+        self.tc_objs().lobjs[*recv_obj].typ()
+    }
+
+    pub fn method_result_types(&self, method_obj: ObjKey) -> Option<Vec<TypeKey>> {
+        let method_type = self.tc_objs().lobjs[method_obj].typ()?;
+        Some(self.func_result_types(method_type))
+    }
+
     /// Get channel element slot count
     pub fn chan_elem_slots(&self, type_key: TypeKey) -> u16 {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
@@ -1151,6 +1177,22 @@ impl<'a> TypeInfoWrapper<'a> {
         if let Type::Signature(sig) = &self.tc_objs().types[underlying] {
             let params_key = sig.params();
             if let Type::Tuple(tuple) = &self.tc_objs().types[params_key] {
+                tuple.vars().iter()
+                    .filter_map(|&var_key| self.tc_objs().lobjs[var_key].typ())
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn func_result_types(&self, type_key: TypeKey) -> Vec<TypeKey> {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        if let Type::Signature(sig) = &self.tc_objs().types[underlying] {
+            let results_key = sig.results();
+            if let Type::Tuple(tuple) = &self.tc_objs().types[results_key] {
                 tuple.vars().iter()
                     .filter_map(|&var_key| self.tc_objs().lobjs[var_key].typ())
                     .collect()

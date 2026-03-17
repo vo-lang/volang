@@ -330,6 +330,7 @@ pub use native::*;
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::{extract_tarball_files, github_tarball_url};
+    use crate::ExtensionManifest;
     use std::collections::BTreeSet;
     use std::io::Read;
     use std::path::{Path, PathBuf};
@@ -401,8 +402,20 @@ mod native {
     }
 
     /// Download a GitHub module, extract it to `~/.vo/mod/<module_path>/`,
-    /// update `~/.vo/mod/vo.sum`, and return the installed directory.
+    /// build its native extension if present, update `~/.vo/mod/vo.sum`,
+    /// and return the installed directory.
     pub fn install_module(module: &str, version: &str) -> Result<PathBuf, String> {
+        install_module_impl(module, version, true)
+    }
+
+    /// Download a GitHub module, extract it to `~/.vo/mod/<module_path>/`,
+    /// update `~/.vo/mod/vo.sum`, and return the installed directory without
+    /// building any native extension yet.
+    pub fn install_module_without_native_build(module: &str, version: &str) -> Result<PathBuf, String> {
+        install_module_impl(module, version, false)
+    }
+
+    fn install_module_impl(module: &str, version: &str, build_native_extension: bool) -> Result<PathBuf, String> {
         let url = github_tarball_url(module, version)?;
         eprintln!("Downloading {}...", url);
         let tarball = fetch_bytes_blocking(&url)?;
@@ -477,7 +490,9 @@ mod native {
         let sum_path = mod_cache.join("vo.sum");
         update_sum_file(&sum_path, module, version, &hash)?;
 
-        ensure_native_extension_built(&target_dir)?;
+        if build_native_extension {
+            ensure_native_extension_built(&target_dir)?;
+        }
 
         Ok(target_dir)
     }
@@ -611,13 +626,16 @@ mod native {
             Err(_) => return true,
         };
 
-        let mut paths = BTreeSet::new();
-        for path in local_patch_source_paths(rust_manifest) {
-            paths.insert(path);
-        }
-        for path in injected_patch_source_paths() {
-            paths.insert(path);
-        }
+        let local = local_patch_source_paths(rust_manifest);
+        // If the module's own Cargo.toml already declares [patch] entries with
+        // local paths, trust those as the complete patch set.  Only fall back
+        // to the injected volang-repo patches for remotely-installed modules
+        // that have no [patch] section of their own.
+        let paths: BTreeSet<PathBuf> = if local.is_empty() {
+            injected_patch_source_paths().into_iter().collect()
+        } else {
+            local.into_iter().collect()
+        };
 
         paths
             .into_iter()
@@ -660,6 +678,37 @@ mod native {
         ensure_native_extension_built_impl(module_dir, false)
     }
 
+    pub fn ensure_extension_manifests_built(manifests: &[ExtensionManifest]) -> Result<(), String> {
+        let mod_cache = mod_cache_root()?;
+        let mut seen = BTreeSet::new();
+
+        for manifest in manifests {
+            let module_dir = manifest_module_dir(manifest)?;
+            if !seen.insert(module_dir.clone()) {
+                continue;
+            }
+
+            if module_dir.starts_with(&mod_cache) {
+                ensure_native_extension_built(&module_dir)?;
+            } else {
+                ensure_local_native_extension_built(&module_dir)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn manifest_module_dir(manifest: &ExtensionManifest) -> Result<PathBuf, String> {
+        let module_dir = manifest
+            .manifest_path
+            .parent()
+            .ok_or_else(|| format!(
+                "extension manifest path has no parent: {}",
+                manifest.manifest_path.display()
+            ))?;
+        Ok(module_dir.canonicalize().unwrap_or_else(|_| module_dir.to_path_buf()))
+    }
+
     fn ensure_native_extension_built_impl(module_dir: &Path, sanitize_manifest: bool) -> Result<(), String> {
         let rust_manifest = module_dir.join("rust").join("Cargo.toml");
         if !rust_manifest.exists() {
@@ -671,12 +720,24 @@ mod native {
         }
 
         // Skip build if the library exists AND is newer than all Rust sources.
-        let lib_path = crate::discover_extensions(module_dir)
+        let manifest = crate::discover_extensions(module_dir)
             .ok()
-            .and_then(|manifests| manifests.into_iter().next())
-            .map(|m| m.native_path);
+            .and_then(|manifests| manifests.into_iter().next());
+        let lib_path = manifest.as_ref().map(|m| m.native_path.clone());
+        let module_name = manifest
+            .as_ref()
+            .map(|m| m.name.clone())
+            .or_else(|| module_dir.file_name().and_then(|name| name.to_str()).map(str::to_owned))
+            .unwrap_or_else(|| "ext".to_string());
+        let release = !cfg!(debug_assertions);
+        let profile = if release { "release" } else { "debug" };
+        let shared_target_dir = native_target_dir(module_dir, &module_name)?;
         let up_to_date = lib_path.as_ref().map_or(false, |lib| {
+            let shared_lib_exists = shared_native_library_path(&shared_target_dir, profile, lib)
+                .map(|shared| shared.exists())
+                .unwrap_or(false);
             lib.exists()
+                && shared_lib_exists
                 && !is_rust_source_newer(lib, &module_dir.join("rust"))
                 && !patch_sources_newer_than(lib, &rust_manifest)
         });
@@ -684,8 +745,6 @@ mod native {
             return Ok(());
         }
 
-        let release = !cfg!(debug_assertions);
-        let profile = if release { "release" } else { "debug" };
         eprintln!("Building native extension in {} ({})...", module_dir.display(), profile);
 
         let mut cmd = std::process::Command::new("cargo");
@@ -694,23 +753,28 @@ mod native {
 
         // Patch git deps to use the local volang repo so the extension's
         // vo-runtime ABI matches the currently running vo binary exactly.
-        if let Some(repo_root) = detect_volang_repo_root() {
-            for krate in PATCHED_VOLANG_CRATES {
-                let local_path = repo_root.join("lang").join("crates").join(krate);
-                if local_path.exists() {
-                    // Use dotted-key TOML syntax; cargo --config does not
-                    // accept inline tables.  Hyphens in crate names are valid
-                    // bare-key characters in TOML so no extra quoting needed.
-                    cmd.arg("--config").arg(format!(
-                        "patch.'https://github.com/vo-lang/volang'.{}.path=\"{}\"",
-                        krate,
-                        local_path.display()
-                    ));
+        // Skip if the module already declares its own [patch] section with
+        // local paths — injecting duplicate patches causes resolver overhead
+        // and potential conflicts.
+        let has_local_patches = !local_patch_source_paths(&rust_manifest).is_empty();
+        if !has_local_patches {
+            if let Some(repo_root) = detect_volang_repo_root() {
+                for krate in PATCHED_VOLANG_CRATES {
+                    let local_path = repo_root.join("lang").join("crates").join(krate);
+                    if local_path.exists() {
+                        // Use dotted-key TOML syntax; cargo --config does not
+                        // accept inline tables.  Hyphens in crate names are valid
+                        // bare-key characters in TOML so no extra quoting needed.
+                        cmd.arg("--config").arg(format!(
+                            "patch.'https://github.com/vo-lang/volang'.{}.path=\"{}\"",
+                            krate,
+                            local_path.display()
+                        ));
+                    }
                 }
             }
         }
 
-        let shared_target_dir = shared_native_target_dir()?;
         fs::create_dir_all(&shared_target_dir).map_err(|e| e.to_string())?;
 
         cmd.env("CARGO_TARGET_DIR", &shared_target_dir);
@@ -739,12 +803,35 @@ mod native {
         Ok(mod_cache_root_from_home(&home))
     }
 
-    pub(super) fn shared_native_target_dir_from_mod_cache(mod_cache: &Path) -> PathBuf {
-        mod_cache.join(".cargo-target").join("native-ext")
+    pub(super) fn native_target_dir_from_mod_cache(
+        mod_cache: &Path,
+        module_dir: &Path,
+        module_name: &str,
+    ) -> PathBuf {
+        mod_cache
+            .join(".cargo-target")
+            .join("native-ext")
+            .join(module_target_key(module_dir, module_name))
     }
 
-    fn shared_native_target_dir() -> Result<PathBuf, String> {
-        Ok(shared_native_target_dir_from_mod_cache(&mod_cache_root()?))
+    fn native_target_dir(module_dir: &Path, module_name: &str) -> Result<PathBuf, String> {
+        Ok(native_target_dir_from_mod_cache(
+            &mod_cache_root()?,
+            module_dir,
+            module_name,
+        ))
+    }
+
+    fn module_target_key(module_dir: &Path, module_name: &str) -> String {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        module_dir.to_string_lossy().hash(&mut hasher);
+        let name = module_name
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect::<String>();
+        format!("{}-{:016x}", name, hasher.finish())
     }
 
     pub(super) fn shared_native_library_path(
@@ -903,8 +990,8 @@ mod wasm {
         if !hook.is_function() {
             return None;
         }
-        let func = js_sys::Function::unchecked_from_js(hook);
-        let result = func.call2(
+        let func: js_sys::Function = hook.unchecked_into();
+        let result: wasm_bindgen::JsValue = func.call2(
             &wasm_bindgen::JsValue::NULL,
             &wasm_bindgen::JsValue::from_str(module),
             &wasm_bindgen::JsValue::from_str(version),
@@ -1063,8 +1150,8 @@ mod wasm {
         if !hook.is_function() {
             return None;
         }
-        let func = js_sys::Function::unchecked_from_js(hook);
-        let result = func.call2(
+        let func: js_sys::Function = hook.unchecked_into();
+        let result: wasm_bindgen::JsValue = func.call2(
             &wasm_bindgen::JsValue::NULL,
             &wasm_bindgen::JsValue::from_str(module),
             &wasm_bindgen::JsValue::from_str(version),
@@ -1110,6 +1197,7 @@ mod wasm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ExtensionManifest;
 
     #[test]
     fn test_detect_github_imports_single() {
@@ -1314,28 +1402,33 @@ import "encoding/json"
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn test_shared_native_target_dir_layout() {
+    fn test_module_native_target_dir_layout() {
         let home = std::path::PathBuf::from("/tmp/vo-home");
         let mod_cache = super::native::mod_cache_root_from_home(&home);
         assert_eq!(mod_cache, std::path::PathBuf::from("/tmp/vo-home/.vo/mod"));
 
-        let shared_target_dir = super::native::shared_native_target_dir_from_mod_cache(&mod_cache);
-        assert_eq!(
-            shared_target_dir,
-            std::path::PathBuf::from("/tmp/vo-home/.vo/mod/.cargo-target/native-ext")
-        );
+        let voplay_dir = std::path::PathBuf::from("/tmp/vo-home/.vo/mod/github.com/vo-lang/voplay");
+        let vogui_dir = std::path::PathBuf::from("/tmp/vo-home/.vo/mod/github.com/vo-lang/vogui");
+        let target_root = mod_cache.join(".cargo-target").join("native-ext");
+        let voplay_target_dir = super::native::native_target_dir_from_mod_cache(&mod_cache, &voplay_dir, "voplay");
+        let vogui_target_dir = super::native::native_target_dir_from_mod_cache(&mod_cache, &vogui_dir, "vogui");
+
+        assert!(voplay_target_dir.starts_with(&target_root));
+        assert!(vogui_target_dir.starts_with(&target_root));
+        assert_ne!(voplay_target_dir, vogui_target_dir);
+        assert!(voplay_target_dir.file_name().unwrap().to_string_lossy().starts_with("voplay-"));
 
         let module_lib_path = std::path::PathBuf::from(
             "/tmp/vo-home/.vo/mod/github.com/vo-lang/voplay/rust/target/debug/libvo_voplay.dylib"
         );
         let shared_lib_path = super::native::shared_native_library_path(
-            &shared_target_dir,
+            &voplay_target_dir,
             "debug",
             &module_lib_path,
         ).unwrap();
         assert_eq!(
             shared_lib_path,
-            std::path::PathBuf::from("/tmp/vo-home/.vo/mod/.cargo-target/native-ext/debug/libvo_voplay.dylib")
+            voplay_target_dir.join("debug").join("libvo_voplay.dylib")
         );
     }
 
@@ -1440,5 +1533,36 @@ foo = { path = "../../deps/dep" }
         assert!(super::native::patch_sources_newer_than(&lib_path, &rust_dir.join("Cargo.toml")));
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_manifest_module_dir_uses_manifest_parent() {
+        let manifest = ExtensionManifest {
+            name: "demo".to_string(),
+            native_path: std::path::PathBuf::from("/tmp/demo/rust/target/release/libdemo.dylib"),
+            manifest_path: std::path::PathBuf::from("/tmp/demo/vo.ext.toml"),
+        };
+
+        assert_eq!(
+            super::native::manifest_module_dir(&manifest).unwrap(),
+            std::path::PathBuf::from("/tmp/demo")
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_manifest_module_dir_detects_mod_cache_layout() {
+        let home = std::path::PathBuf::from("/tmp/vo-home");
+        let mod_cache = super::native::mod_cache_root_from_home(&home);
+        let manifest = ExtensionManifest {
+            name: "demo".to_string(),
+            native_path: mod_cache
+                .join("github.com/example/demo/rust/target/release/libdemo.dylib"),
+            manifest_path: mod_cache.join("github.com/example/demo/vo.ext.toml"),
+        };
+
+        let module_dir = super::native::manifest_module_dir(&manifest).unwrap();
+        assert!(module_dir.starts_with(&mod_cache));
     }
 }

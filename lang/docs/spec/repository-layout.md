@@ -16,7 +16,7 @@ A single published module should use:
 ```text
 repo/
 ├── vo.mod
-├── vo.sum
+├── vo.lock
 ├── README.md
 ├── LICENSE
 ├── .gitignore
@@ -39,7 +39,7 @@ repo/
 
 Rules:
 
-- `vo.mod` and `vo.sum` must be committed.
+- `vo.mod` and `vo.lock` must be committed.
 - `.vodeps/`, `.vo-cache/`, build artifacts, and Rust `target/` outputs must not be committed.
 - Public reusable packages should be placed under `pkg/`.
 - Non-public implementation packages should be placed under `internal/`.
@@ -52,7 +52,7 @@ A module that ships native extension code should use:
 ```text
 repo/
 ├── vo.mod
-├── vo.sum
+├── vo.lock
 ├── vo.ext.toml
 ├── <vo packages>
 ├── rust/
@@ -86,7 +86,7 @@ repo/
 
 Rules:
 
-- Each module must have its own `vo.mod` and `vo.sum`.
+- Each module must have its own `vo.mod` and `vo.lock`.
 - CI must validate each module independently.
 - Shared tooling/scripts may live in repo root.
 
@@ -95,7 +95,9 @@ Rules:
 - Every published module version must map to an immutable Git tag.
 - Tags should follow `vX.Y.Z` for single-module repos.
 - For monorepos, tags should include module name, e.g. `core/v1.2.3`.
-- A release tag must contain `vo.mod`, source code, and extension metadata (if any).
+- A release must publish a machine-readable `vo.release.json` asset.
+- A release must publish a canonical source-package asset for the module version.
+- If the module ships target-specific binary artifacts, they must be published as release assets and listed in `vo.release.json`.
 
 ## 6. CI Baseline
 
@@ -116,7 +118,7 @@ Additional required checks when `vo.ext.toml` is present:
 
 Additional recommended checks:
 
-- `vo.sum` checksum consistency (no modified dependencies without corresponding sum update)
+- `vo.lock` integrity consistency (no dependency or artifact drift without corresponding lock update)
 - no forbidden committed directories (`.vodeps`, `.vo-cache`, `target/`)
 - If `vo.ext.toml` is present: at least one native test that invokes an extern function to verify the dylib loads correctly
 
@@ -124,7 +126,7 @@ Additional recommended checks:
 
 Before tagging a release:
 
-1. `vo.mod` and `vo.sum` are up-to-date and committed.
+1. `vo.mod` and `vo.lock` are up-to-date and committed.
 2. README states which targets are supported (native / wasm), verified by CI results, not by declaration.
 3. If `vo.ext.toml` exists: confirm `native.path` resolves correctly on each target OS; build the dylib in CI before running tests.
 4. All CI jobs pass on the release commit.

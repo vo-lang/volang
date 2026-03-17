@@ -435,6 +435,16 @@ const extBindgenModules = new Map<string, any>();
   }
 };
 
+(window as any).voRegisterExtModuleAlias = (existingKey: string, aliasKey: string): void => {
+  if (!aliasKey || aliasKey === existingKey) return;
+  if (extBindgenModules.has(existingKey)) {
+    extBindgenModules.set(aliasKey, extBindgenModules.get(existingKey)!);
+  }
+  if (extInstances.has(existingKey)) {
+    extInstances.set(aliasKey, extInstances.get(existingKey)!);
+  }
+};
+
 /// Called from Rust's wasm_ext_bridge for any ext module function.
 ///
 /// Dispatches to wasm-bindgen modules first, then falls back to standalone modules.

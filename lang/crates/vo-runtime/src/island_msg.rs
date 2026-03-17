@@ -104,6 +104,7 @@ fn capture_box_meta(value_meta: ValueMeta) -> ValueMeta {
             vk,
             ValueKind::Array
                 | ValueKind::Map
+                | ValueKind::Pointer
                 | ValueKind::Slice
                 | ValueKind::String
                 | ValueKind::Closure

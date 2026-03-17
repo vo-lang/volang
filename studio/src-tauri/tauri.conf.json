@@ -1,20 +1,21 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Vibe Studio",
+  "productName": "Studio",
   "version": "0.1.0",
-  "identifier": "com.volang.vibe-studio",
+  "identifier": "com.volang.studio",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://localhost:5174",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
   },
   "app": {
     "windows": [
       {
-        "title": "Vibe Studio",
-        "width": 1280,
-        "height": 800,
+        "label": "main",
+        "title": "Studio",
+        "width": 1440,
+        "height": 900,
         "resizable": true,
         "fullscreen": false
       }

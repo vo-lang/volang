@@ -1,0 +1,83 @@
+import type {
+  BootstrapContext,
+  BuildResult,
+  CheckResult,
+  CompileResult,
+  DiscoveredProject,
+  FsEntry,
+  FsStat,
+  GitOp,
+  GitResult,
+  GrepMatch,
+  GrepOpts,
+  GuiRunOutput,
+  HttpOpts,
+  HttpResult,
+  InstallEvent,
+  InstalledModule,
+  ProcEvent,
+  ReadManyResult,
+  RenderIslandVfsSnapshot,
+  RunEvent,
+  RunOpts,
+  SessionInfo,
+  StreamHandle,
+} from '../types';
+
+export interface Backend {
+  readonly platform: 'native' | 'wasm';
+
+  // Bootstrap
+  getBootstrapContext(): Promise<BootstrapContext>;
+
+  // Session
+  openWorkspaceSession(): Promise<SessionInfo>;
+  openRunSession(path: string): Promise<SessionInfo>;
+  openUrlSession(url: string): Promise<SessionInfo>;
+
+  // Filesystem
+  discoverProjects(root: string): Promise<DiscoveredProject[]>;
+  listDir(path: string): Promise<FsEntry[]>;
+  statPath(path: string): Promise<FsStat>;
+  readFile(path: string): Promise<string>;
+  readMany(paths: string[]): Promise<ReadManyResult[]>;
+  writeFile(path: string, content: string): Promise<void>;
+  mkdir(path: string): Promise<void>;
+  removeEntry(path: string, recursive: boolean): Promise<void>;
+  renameEntry(oldPath: string, newPath: string): Promise<void>;
+  copyEntry(src: string, dst: string): Promise<void>;
+  grep(path: string, pattern: string, opts?: GrepOpts): Promise<GrepMatch[]>;
+
+  // Compiler
+  checkVo(path: string): Promise<CheckResult>;
+  compileVo(path: string): Promise<CompileResult>;
+  formatVo(path: string): Promise<string>;
+  buildVo(path: string, output?: string): Promise<BuildResult>;
+  dumpVo(path: string): Promise<string>;
+
+  // Runtime
+  runVo(path: string, opts?: RunOpts): StreamHandle<RunEvent>;
+  stopVoRun(): Promise<void>;
+  runGui(path: string): Promise<GuiRunOutput>;
+  sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array>;
+  sendGuiEventAsync(handlerId: number, payload: string): Promise<void>;
+  pushIslandTransport(data: Uint8Array): Promise<void>;
+  pollGuiRender(): Promise<Uint8Array>;
+  stopGui(): Promise<void>;
+  getRenderIslandVfsSnapshot(path: string): Promise<RenderIslandVfsSnapshot>;
+
+  // Toolchain
+  voGet(spec: string): StreamHandle<InstallEvent>;
+  voInit(path: string, name?: string): Promise<string>;
+  voVersion(): Promise<string>;
+  listInstalledModules(): Promise<InstalledModule[]>;
+
+  // Process (native only)
+  spawnProcess(program: string, args: string[], cwd?: string, env?: Record<string, string>): StreamHandle<ProcEvent>;
+
+  // HTTP
+  httpRequest(method: string, url: string, opts?: HttpOpts): Promise<HttpResult>;
+
+  // Git
+  gitExec(op: GitOp): Promise<GitResult>;
+}

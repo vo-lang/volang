@@ -1,659 +1,811 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { get } from 'svelte/store';
-  import { explorer } from '../stores/explorer';
-  import { github, logout, loadSavedToken } from '../stores/github';
-  import { projects, syncState, syncStateLabel } from '../stores/projects';
-  import type { ProjectEntry, SyncState } from '../stores/projects';
-  import { actions } from '../lib/actions';
-  import { bridge } from '../lib/bridge';
-  import { DEFAULT_MAIN_VO, DEFAULT_PROJECT_VO_MOD } from '../lib/starter_templates';
-  import SyncDetailModal from './SyncDetailModal.svelte';
-  import GitHubAuthModal from './GitHubAuthModal.svelte';
-  import ProjectContextMenu from './ProjectContextMenu.svelte';
-  import RenameProjectModal from './RenameProjectModal.svelte';
+  import { tick } from 'svelte';
+  import type { BootstrapContext } from '../lib/types';
+  import type { ProjectCatalogService } from '../lib/services/project_catalog_service';
+  import type { ManagedProject, ProjectDiffResult } from '../lib/project_catalog/types';
+  import { projectKey, syncState } from '../lib/project_catalog/types';
+  import { formatError } from '../lib/format_error';
+  import CreateProjectModal from './home/CreateProjectModal.svelte';
+  import ProjectActionsMenu from './home/ProjectActionsMenu.svelte';
+  import ProjectCard from './home/ProjectCard.svelte';
+  import ProjectRenameModal from './home/ProjectRenameModal.svelte';
+  import ProjectSyncModal from './home/ProjectSyncModal.svelte';
 
-  // ── Auth ───────────────────────────────────────────────────────────────────
-  let showAuthModal = false;
+  export let bootstrap: BootstrapContext | null = null;
+  export let projectCatalog: ProjectCatalogService;
+  export let localPathInput = '';
+  export let urlInput = '';
+  export let onOpenWorkspace: () => void = () => {};
+  export let onOpenLocalPath: () => void = () => {};
+  export let onOpenUrl: () => void = () => {};
+  export let onOpenProject: (project: ManagedProject) => Promise<void> | void = () => {};
+  export let onDevelop: () => void = () => {};
 
-  onMount(() => {
-    loadSavedToken();
-    const root = get(explorer).localRoot;
-    if (root) actions.loadProjects(root);
-  });
-
-  // Reload projects when GitHub auth state changes
-  let prevToken: string | null = null;
-  $: {
-    const tok = $github.token;
-    if (tok !== prevToken) {
-      prevToken = tok;
-      const root = $explorer.localRoot;
-      if (root) actions.loadProjects(root);
-    }
-  }
-
-  // ── Project actions ────────────────────────────────────────────────────────
-  let busyProject = '';
+  let searchQuery = '';
   let actionError = '';
+  let showCreateModal = false;
+  let menuState: { x: number; y: number; project: ManagedProject } | null = null;
+  let renameTarget: ManagedProject | null = null;
+  let syncDialog: ProjectDiffResult | null = null;
+  let syncDialogProjectKey = '';
+  let confirmDialog: { title: string; message: string; danger: boolean; action: () => void } | null = null;
+  let creating = false;
+  let createError = '';
+  let showAdvanced = false;
+  let localRefreshRequested = false;
 
-  function projectKey(p: ProjectEntry): string {
-    return p.name + ':' + p.type;
+  $: githubStore = projectCatalog.github;
+  $: catalogStore = projectCatalog.catalog;
+  $: filteredProjects = $catalogStore.projects.filter((project) =>
+    !searchQuery || project.name.toLowerCase().includes(searchQuery.toLowerCase()),
+  );
+  $: isInitialLoading = $catalogStore.loading;
+  $: isRefreshing = localRefreshRequested || $catalogStore.refreshing || $catalogStore.remoteLoading;
+
+  function busy(project: ManagedProject): boolean {
+    return $catalogStore.busyKeys.includes(projectKey(project));
   }
 
-  async function openProject(p: ProjectEntry) {
-    busyProject = projectKey(p); actionError = '';
-    try {
-      await actions.openProjectEntry(p, $explorer.localRoot);
-    } catch (e: any) {
-      actionError = `Open failed: ${e.message ?? e}`;
-    } finally { busyProject = ''; }
+  function checkingSync(project: ManagedProject): boolean {
+    return $catalogStore.checkingSyncKeys.includes(projectKey(project));
   }
 
-  async function pushProject(p: ProjectEntry) {
-    busyProject = projectKey(p); actionError = '';
-    try {
-      await actions.pushProject(p);
-    } catch (e: any) {
-      actionError = `Push failed: ${e.message ?? e}`;
-    } finally { busyProject = ''; }
+  function waitForPaint(): Promise<void> {
+    return tick().then(() => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0))));
   }
 
-  async function pullProject(p: ProjectEntry) {
-    busyProject = projectKey(p); actionError = '';
-    try {
-      await actions.pullProject(p, $explorer.localRoot);
-    } catch (e: any) {
-      actionError = `Pull failed: ${e.message ?? e}`;
-    } finally { busyProject = ''; }
-  }
-
-  async function deleteProject(p: ProjectEntry) {
-    busyProject = projectKey(p); actionError = '';
-    try {
-      await actions.deleteProject(p, $explorer.localRoot);
-    } catch (e: any) {
-      actionError = `Delete failed: ${e.message ?? e}`;
-    } finally { busyProject = ''; }
-  }
-
-  async function createNewFile() {
-    const b = bridge();
-    const root = $explorer.localRoot;
-    // Find a unique name
-    let idx = 1;
-    let name = 'main.vo';
-    const existing = $projects.projects.map(p => p.name);
-    while (existing.includes(name.replace(/\.vo$/, ''))) {
-      idx++;
-      name = `main${idx}.vo`;
-    }
-    await b.fsWriteFile(root + '/' + name, DEFAULT_MAIN_VO);
-    await actions.loadProjects(root);
-    // Open the new file
-    const ps = get(projects);
-    const created = ps.projects.find(p => p.name === name.replace(/\.vo$/, '') && p.type === 'single');
-    if (created) await openProject(created);
-  }
-
-  async function createNewProject() {
-    const b = bridge();
-    const root = $explorer.localRoot;
-    let idx = 1;
-    let dirName = 'project';
-    const existing = $projects.projects.map(p => p.name);
-    while (existing.includes(dirName)) {
-      idx++;
-      dirName = `project${idx}`;
-    }
-    const dir = root + '/' + dirName;
-    await b.fsMkdir(dir);
-    await b.fsWriteFile(dir + '/vo.mod', DEFAULT_PROJECT_VO_MOD);
-    await b.fsWriteFile(dir + '/main.vo', DEFAULT_MAIN_VO);
-    await actions.loadProjects(root);
-    const ps = get(projects);
-    const created = ps.projects.find(p => p.name === dirName && p.type === 'multi');
-    if (created) await openProject(created);
-  }
-
-  async function refresh() {
-    const root = $explorer.localRoot;
-    if (root) await actions.loadProjects(root);
-  }
-
-  // ── Helpers ────────────────────────────────────────────────────────────────
-  function formatTimestamp(value: string | null): string {
-    if (!value) return '';
-    const d = new Date(value);
-    if (Number.isNaN(d.getTime())) return '';
-    return d.toLocaleString(undefined, {
-      month: 'short', day: 'numeric',
-      hour: '2-digit', minute: '2-digit', hour12: false,
+  async function triggerRefresh(): Promise<void> {
+    if (isInitialLoading || localRefreshRequested || $catalogStore.refreshing || $catalogStore.remoteLoading) return;
+    localRefreshRequested = true;
+    await waitForPaint();
+    void projectCatalog.refresh().finally(() => {
+      localRefreshRequested = false;
     });
   }
 
-  function syncIcon(state: SyncState): string {
-    switch (state) {
-      case 'in-sync': return '✓';
-      case 'local-ahead': return '↑';
-      case 'remote-ahead': return '↓';
-      case 'diverged': return '⇅';
-      case 'local-only': return '→';
-      case 'remote-only': return '←';
-    }
-  }
-
-  // ── Sync detail modal ──────────────────────────────────────────────────────
-  let syncDetailProject: { project: ProjectEntry; state: SyncState } | null = null;
-
-  function openSyncDetail(p: ProjectEntry, state: SyncState) {
-    syncDetailProject = { project: p, state };
-  }
-
-  async function handleSyncPush() {
-    if (!syncDetailProject) return;
-    const p = syncDetailProject.project;
-    syncDetailProject = null;
-    await pushProject(p);
-  }
-
-  async function handleSyncPull() {
-    if (!syncDetailProject) return;
-    const p = syncDetailProject.project;
-    syncDetailProject = null;
-    await pullProject(p);
-  }
-
-  // ── Filtered / sorted list ─────────────────────────────────────────────────
-  let searchQuery = '';
-  $: filteredProjects = $projects.projects.filter(p =>
-    !searchQuery || p.name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
-  // ── Context menu ──────────────────────────────────────────────────────────
-  let ctxMenu: { x: number; y: number; project: ProjectEntry; state: SyncState } | null = null;
-  let renameTarget: ProjectEntry | null = null;
-
-  function onCardContext(e: MouseEvent, p: ProjectEntry, state: SyncState) {
-    const menuW = 220, menuH = 290;
-    const x = e.clientX + menuW > window.innerWidth ? e.clientX - menuW : e.clientX;
-    const y = e.clientY + menuH > window.innerHeight ? e.clientY - menuH : e.clientY;
-    ctxMenu = { x: Math.max(0, x), y: Math.max(0, y), project: p, state };
-  }
-
-  async function handleRenameConfirm(e: CustomEvent<{ project: ProjectEntry; newName: string }>) {
-    const { project: p, newName } = e.detail;
-    const root = $explorer.localRoot;
-    if (!root) return;
+  async function createProject(kind: 'single' | 'module', name: string): Promise<void> {
+    createError = '';
+    creating = true;
     try {
-      await actions.renameProject(p, newName, root);
-    } catch (e: any) {
-      actionError = `Rename failed: ${e.message ?? e}`;
+      const project = kind === 'single'
+        ? await projectCatalog.createSingleProject(name)
+        : await projectCatalog.createModuleProject(name);
+      showCreateModal = false;
+      createError = '';
+      await openProject(project);
+    } catch (error) {
+      createError = formatError(error);
     } finally {
+      creating = false;
+    }
+  }
+
+  async function openProject(project: ManagedProject): Promise<void> {
+    actionError = '';
+    try {
+      const ready = await projectCatalog.ensureProjectReady(project);
+      await onOpenProject(ready);
+      onDevelop();
+    } catch (error) {
+      actionError = formatError(error);
+    }
+  }
+
+  async function pushProject(project: ManagedProject): Promise<void> {
+    actionError = '';
+    try {
+      const updated = await projectCatalog.pushProject(project);
+      if (syncDialog && projectKey(syncDialog.project) === projectKey(project)) {
+        syncDialog = await projectCatalog.loadDiff(updated);
+      }
+    } catch (error) {
+      actionError = formatError(error);
+    }
+  }
+
+  async function pullProject(project: ManagedProject): Promise<void> {
+    actionError = '';
+    try {
+      const updated = await projectCatalog.pullProject(project);
+      if (syncDialogProjectKey === projectKey(project)) {
+        syncDialog = await projectCatalog.loadDiff(updated);
+      }
+    } catch (error) {
+      actionError = formatError(error);
+    }
+  }
+
+  async function openDiff(project: ManagedProject): Promise<void> {
+    actionError = '';
+    syncDialogProjectKey = projectKey(project);
+    try {
+      syncDialog = await projectCatalog.loadDiff(project);
+    } catch (error) {
+      actionError = formatError(error);
+    }
+  }
+
+  async function renameProject(name: string): Promise<void> {
+    if (!renameTarget) return;
+    actionError = '';
+    try {
+      await projectCatalog.renameProject(renameTarget, name);
       renameTarget = null;
+    } catch (error) {
+      actionError = formatError(error);
     }
   }
 
-  function viewOnGitHub(p: ProjectEntry) {
-    if (!p.remote) return;
-    if (p.remote.kind === 'gist') {
-      window.open(`https://gist.github.com/${p.remote.gistId}`, '_blank', 'noopener,noreferrer');
-    } else {
-      window.open(`https://github.com/${p.remote.owner}/${p.remote.repo}`, '_blank', 'noopener,noreferrer');
+  function confirmDeleteProject(project: ManagedProject): void {
+    confirmDialog = {
+      title: 'Delete Project',
+      message: `Delete "${project.name}" from local storage? This cannot be undone.`,
+      danger: true,
+      action: () => doDeleteProject(project),
+    };
+  }
+
+  function confirmDeleteRemoteProject(project: ManagedProject): void {
+    confirmDialog = {
+      title: 'Delete Cloud Copy',
+      message: project.localPath
+        ? `Delete the cloud copy of "${project.name}"? Your local copy will remain available.`
+        : `Delete the cloud copy of "${project.name}"? This will permanently remove it from GitHub.`,
+      danger: true,
+      action: () => doDeleteRemoteProject(project),
+    };
+  }
+
+  function confirmDeleteEverywhere(project: ManagedProject): void {
+    confirmDialog = {
+      title: 'Delete Everywhere',
+      message: `Delete both the local and cloud copies of "${project.name}"? This cannot be undone.`,
+      danger: true,
+      action: () => doDeleteEverywhere(project),
+    };
+  }
+
+  function confirmForgetProject(project: ManagedProject): void {
+    confirmDialog = {
+      title: 'Remove from List',
+      message: `Remove "${project.name}" from the project list? The cloud copy on GitHub will remain available.`,
+      danger: true,
+      action: () => doForgetProject(project),
+    };
+  }
+
+  async function doDeleteProject(project: ManagedProject): Promise<void> {
+    actionError = '';
+    confirmDialog = null;
+    try {
+      await projectCatalog.deleteProject(project);
+    } catch (error) {
+      actionError = formatError(error);
     }
   }
 
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      if (syncDetailProject) { syncDetailProject = null; }
-      else if (ctxMenu) { ctxMenu = null; }
-      else if (renameTarget) { renameTarget = null; }
-      else if (showAuthModal) { showAuthModal = false; }
+  async function doForgetProject(project: ManagedProject): Promise<void> {
+    actionError = '';
+    confirmDialog = null;
+    try {
+      await projectCatalog.forgetRemoteProject(project);
+    } catch (error) {
+      actionError = formatError(error);
     }
   }
+
+  async function doDeleteRemoteProject(project: ManagedProject): Promise<void> {
+    actionError = '';
+    confirmDialog = null;
+    try {
+      await projectCatalog.deleteRemoteProject(project);
+    } catch (error) {
+      actionError = formatError(error);
+    }
+  }
+
+  async function doDeleteEverywhere(project: ManagedProject): Promise<void> {
+    actionError = '';
+    confirmDialog = null;
+    try {
+      await projectCatalog.deleteEverywhere(project);
+    } catch (error) {
+      actionError = formatError(error);
+    }
+  }
+
+  function viewRemote(project: ManagedProject): void {
+    if (!project.remote) return;
+    const url = project.remote.kind === 'gist' && project.remote.gistId
+      ? `https://gist.github.com/${project.remote.gistId}`
+      : project.remote.owner && project.remote.repo
+        ? `https://github.com/${project.remote.owner}/${project.remote.repo}`
+        : '';
+    if (!url) return;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
+<svelte:window
+  on:keydown={(event) => {
+    if (event.key !== 'Escape') return;
+    menuState = null;
+    renameTarget = null;
+    syncDialog = null;
+    showCreateModal = false;
+    confirmDialog = null;
+  }}
+/>
 
 <div class="home">
-  <!-- ── Brand header ── -->
-  <div class="brand-bar">
-    <svg class="brand-logo" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-    <span class="brand-name">Vibe Studio</span>
-    <span class="spacer"></span>
-    {#if $github.user}
-      <img class="avatar" src={$github.user.avatar_url} alt={$github.user.login} width="24" height="24" />
-      <span class="gh-login">@{$github.user.login}</span>
-      <button class="link-btn" on:click={logout}>Sign out</button>
-    {:else if $github.isLoading}
-      <span class="gh-hint">Connecting…</span>
-      {:else}
-      <button class="connect-btn" on:click={() => (showAuthModal = true)}>
-        <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-        Connect GitHub
-      </button>
-    {/if}
-  </div>
-  {#if showAuthModal}
-    <GitHubAuthModal on:close={() => (showAuthModal = false)} />
-  {/if}
-
-  <!-- ── Toolbar ── -->
-  <div class="toolbar-bar">
-    <div class="search-wrap">
-      <svg class="search-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <input class="search-input" type="text" placeholder="Search…" bind:value={searchQuery} />
+  <!-- ── Header bar ── -->
+  <div class="header">
+    <div class="brand">
+      <span class="logo-vo">Vo</span><span class="logo-studio">Studio</span>
     </div>
-    <button class="new-btn file" on:click={createNewFile} title="New single file">
-      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
-      File
-    </button>
-    <button class="new-btn proj" on:click={createNewProject} title="New multi-file project">
-      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
-      Project
-    </button>
-    <button class="icon-btn" title="Refresh" on:click={refresh}>
-      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
-    </button>
-    {#if $projects.isRemoteLoading}
-      <span class="remote-sync-hint">
-        <span class="mini-spinner"></span>
-        Syncing…
-      </span>
-    {/if}
+    <div class="search">
+      <input bind:value={searchQuery} placeholder="Search projects…" />
+    </div>
   </div>
 
-  {#if actionError}
-    <div class="error-bar">{actionError}</div>
+  <!-- ── Action row ── -->
+  <div class="actions">
+    <button class="primary" on:click={() => { createError = ''; showCreateModal = true; }}>+ New Project</button>
+    <button
+      class="icon-btn"
+      title="Refresh projects"
+      disabled={isInitialLoading}
+      on:click={triggerRefresh}
+    ><span class="refresh-icon" class:spinning={isInitialLoading || isRefreshing}>↻</span></button>
+    {#if $catalogStore.remoteLoading}
+      <span class="sync-hint">Syncing GitHub…</span>
+    {/if}
+    <div class="actions-spacer"></div>
+    <button class="text-btn" on:click={() => (showAdvanced = !showAdvanced)}>{showAdvanced ? 'Less ▴' : 'More ▾'}</button>
+  </div>
+
+  {#if showAdvanced}
+    <div class="advanced">
+      {#if bootstrap?.platform === 'native'}
+        <div class="adv-row">
+          <button class="secondary" on:click={onOpenWorkspace}>Browse Folder…</button>
+          <span class="adv-hint">Pick a folder from your filesystem to open as a project</span>
+        </div>
+        <div class="adv-row">
+          <div class="inline-open">
+            <input bind:value={localPathInput} placeholder="/absolute/path/to/project" on:keydown={(event) => event.key === 'Enter' && onOpenLocalPath()} />
+            <button class="secondary" on:click={onOpenLocalPath}>Open Path</button>
+          </div>
+          <span class="adv-hint">Open a project by its absolute filesystem path</span>
+        </div>
+      {/if}
+      <div class="adv-row">
+        <div class="inline-open">
+          <input bind:value={urlInput} placeholder="https://github.com/user/repo" on:keydown={(event) => event.key === 'Enter' && onOpenUrl()} />
+          <button class="secondary" on:click={onOpenUrl}>Clone URL</button>
+        </div>
+        <span class="adv-hint">Download a project from a GitHub URL or tarball link</span>
+      </div>
+    </div>
   {/if}
 
-  <!-- ── Project list ── -->
-  <div class="project-list">
-    {#if $projects.isLoading}
-      <div class="empty-state">
-        <div class="spinner"></div>
-        <span>Loading projects…</span>
-      </div>
-    {:else if $projects.error}
-      <div class="empty-state"><span class="err-msg">{$projects.error}</span></div>
-    {:else if filteredProjects.length === 0}
-      <div class="empty-state">
-        <svg class="empty-icon" viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
-        <span>{searchQuery ? 'No matching projects' : 'No projects yet'}</span>
-        <span class="empty-sub">Create a file or project to get started</span>
-      </div>
-    {:else}
-      <div class="card-grid">
-        {#each filteredProjects as p (projectKey(p))}
-          {@const state = syncState(p)}
-          {@const busy = busyProject === projectKey(p)}
-          <button class="card" class:busy on:click={() => openProject(p)} on:contextmenu|preventDefault={(e) => onCardContext(e, p, state)} disabled={busy}>
-            <!-- Type icon -->
-            <div class="card-icon" class:single={p.type === 'single'} class:multi={p.type === 'multi'}>
-              {#if p.type === 'single'}
-                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-              {:else}
-                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
-              {/if}
-            </div>
-            <!-- Info + sync status -->
-            <div class="card-body">
-              <span class="card-name">{p.name}</span>
-              <div class="sync-row">
-                <!-- Sync state badge (clickable to open diff when both local+remote exist) -->
-                {#if p.localPath && p.remote}
-                  <button class="sync-badge {state}" title="View sync details" on:click|stopPropagation={() => openSyncDetail(p, state)}>
-                    <span class="sync-icon">{syncIcon(state)}</span>
-                    {syncStateLabel(state)}
-                  </button>
-                {:else}
-                  <span class="sync-badge {state}">
-                    <span class="sync-icon">{syncIcon(state)}</span>
-                    {syncStateLabel(state)}
-                  </span>
-                {/if}
+  <!-- ── Progress bar ── -->
+  {#if isInitialLoading || isRefreshing}
+    <div class="progress-track"><div class="progress-bar"></div></div>
+  {/if}
 
-                <!-- Timestamps -->
-                {#if p.localPath && p.remote}
-                  {#if state !== 'in-sync'}
-                    <span class="sync-ts local" title="Last synced">
-                      <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                      {formatTimestamp(p.pushedAt) || 'never'}
-                    </span>
-                    {#if p.remoteUpdatedAt}
-                      <span class="sync-ts remote" title="Remote updated">
-                        <svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-                        {formatTimestamp(p.remoteUpdatedAt)}
-                      </span>
-                    {/if}
-                  {:else}
-                    <span class="sync-ts synced" title="Last synced">{formatTimestamp(p.pushedAt)}</span>
-                  {/if}
-                {/if}
+  <!-- ── Error / status ── -->
+  {#if actionError || $catalogStore.error || $githubStore.error}
+    <div class="error-bar">
+      <span>{actionError || $catalogStore.error || $githubStore.error}</span>
+      <button class="error-dismiss" on:click={() => (actionError = '')}>×</button>
+    </div>
+  {/if}
 
-                <!-- Action buttons -->
-                {#if state === 'local-only' && $github.token}
-                  <button class="sync-act push" title="Push to GitHub" disabled={busy} on:click|stopPropagation={() => pushProject(p)}>
-                    <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
-                    Push
-                  </button>
-                {:else if state === 'remote-only'}
-                  <button class="sync-act pull" title="Pull to local" disabled={busy} on:click|stopPropagation={() => pullProject(p)}>
-                    <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
-                    Pull
-                  </button>
-                {:else if state === 'local-ahead' || state === 'diverged'}
-                  <button class="sync-act push" title="Push local to remote (overwrite)" disabled={busy} on:click|stopPropagation={() => pushProject(p)}>
-                    <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
-                    Push
-                  </button>
-                  {#if state === 'diverged'}
-                    <button class="sync-act pull" title="Pull remote to local (overwrite)" disabled={busy} on:click|stopPropagation={() => pullProject(p)}>
-                      <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
-                      Pull
-                    </button>
-                  {/if}
-                {:else if state === 'remote-ahead'}
-                  <button class="sync-act pull" title="Pull remote to local (overwrite)" disabled={busy} on:click|stopPropagation={() => pullProject(p)}>
-                    <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
-                    Pull
-                  </button>
-                {/if}
-              </div>
+  <!-- ── Project grid ── -->
+  {#if $catalogStore.loading}
+    <div class="grid">
+      {#each Array(6) as _}
+        <div class="skeleton-card">
+          <div class="skeleton-row">
+            <div class="skeleton-icon"></div>
+            <div class="skeleton-info">
+              <div class="skeleton-line skeleton-name"></div>
+              <div class="skeleton-line skeleton-meta"></div>
             </div>
-            <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-            <div role="presentation" class="del-wrap" on:click|stopPropagation={() => {}}>
-              <button class="del-btn" title="Delete" disabled={busy} on:click={() => deleteProject(p)}>
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-              </button>
-            </div>
-          </button>
-        {/each}
+          </div>
+        </div>
+      {/each}
+    </div>
+  {:else if filteredProjects.length === 0}
+    <div class="empty">
+      <div class="empty-title">{searchQuery ? 'No matching projects' : 'No projects yet'}</div>
+      <div class="empty-sub">Create a new project or connect GitHub to see remote projects.</div>
+      <div class="empty-actions">
+        <button class="primary" on:click={() => (showCreateModal = true)}>+ New Project</button>
       </div>
-    {/if}
-  </div>
+    </div>
+  {:else}
+    <div class="grid">
+      {#each filteredProjects as project (projectKey(project))}
+        {@const state = syncState(project)}
+        <ProjectCard
+          {project}
+          {state}
+          busy={busy(project)}
+          checkingSync={checkingSync(project)}
+          on:open={() => openProject(project)}
+          on:menu={(event) => {
+            menuState = { x: event.detail.x, y: event.detail.y, project };
+          }}
+        />
+      {/each}
+    </div>
+  {/if}
 
-  {#if ctxMenu}
-    <ProjectContextMenu
-      x={ctxMenu.x}
-      y={ctxMenu.y}
-      project={ctxMenu.project}
-      state={ctxMenu.state}
-      on:close={() => (ctxMenu = null)}
-      on:open={(e) => openProject(e.detail)}
-      on:rename={(e) => { renameTarget = e.detail; }}
-      on:viewDiff={(e) => openSyncDetail(e.detail.project, e.detail.state)}
-      on:push={(e) => pushProject(e.detail)}
-      on:pull={(e) => pullProject(e.detail)}
-      on:viewOnGitHub={(e) => viewOnGitHub(e.detail)}
-      on:delete={(e) => deleteProject(e.detail)}
+  {#if showCreateModal}
+    <CreateProjectModal
+      busy={creating}
+      error={createError}
+      on:close={() => { showCreateModal = false; createError = ''; }}
+      on:create={(event) => createProject(event.detail.kind, event.detail.name)}
+    />
+  {/if}
+
+  {#if menuState}
+    {@const project = menuState.project}
+    {@const state = syncState(project)}
+    <ProjectActionsMenu
+      x={menuState.x}
+      y={menuState.y}
+      {project}
+      {state}
+      hasGitHub={Boolean($githubStore.user)}
+      busy={busy(project)}
+      checkingSync={checkingSync(project)}
+      on:close={() => (menuState = null)}
+      on:open={() => openProject(project)}
+      on:rename={() => {
+        renameTarget = project;
+        menuState = null;
+      }}
+      on:diff={() => {
+        menuState = null;
+        void openDiff(project);
+      }}
+      on:push={() => {
+        menuState = null;
+        void pushProject(project);
+      }}
+      on:pull={() => {
+        menuState = null;
+        void pullProject(project);
+      }}
+      on:remote={() => {
+        menuState = null;
+        viewRemote(project);
+      }}
+      on:delete={() => { menuState = null; confirmDeleteProject(project); }}
+      on:deleteRemote={() => { menuState = null; confirmDeleteRemoteProject(project); }}
+      on:deleteEverywhere={() => { menuState = null; confirmDeleteEverywhere(project); }}
+      on:forget={() => { menuState = null; confirmForgetProject(project); }}
     />
   {/if}
 
   {#if renameTarget}
-    <RenameProjectModal
+    <ProjectRenameModal
       project={renameTarget}
+      busy={busy(renameTarget)}
       on:close={() => (renameTarget = null)}
-      on:confirm={handleRenameConfirm}
+      on:confirm={(event) => renameProject(event.detail.name)}
     />
   {/if}
 
-  {#if syncDetailProject}
-    <SyncDetailModal
-      project={syncDetailProject.project}
-      state={syncDetailProject.state}
-      busy={busyProject === projectKey(syncDetailProject.project)}
-      on:close={() => (syncDetailProject = null)}
-      on:push={handleSyncPush}
-      on:pull={handleSyncPull}
+  {#if confirmDialog}
+    <div class="confirm-backdrop" role="button" tabindex="0" aria-label="Close" on:click|self={() => (confirmDialog = null)} on:keydown={(e) => e.key === 'Escape' && (confirmDialog = null)}>
+      <div class="confirm-modal" role="dialog" aria-modal="true">
+        <h3 class:danger={confirmDialog.danger}>{confirmDialog.title}</h3>
+        <p class="confirm-msg">{confirmDialog.message}</p>
+        <div class="confirm-actions">
+          <button class="secondary" on:click={() => (confirmDialog = null)}>Cancel</button>
+          <button class={confirmDialog.danger ? 'danger-btn' : 'primary'} on:click={confirmDialog.action}>{confirmDialog.title}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if syncDialog}
+    <ProjectSyncModal
+      diff={syncDialog}
+      busy={$catalogStore.busyKeys.includes(projectKey(syncDialog.project))}
+      on:close={() => {
+        syncDialog = null;
+        syncDialogProjectKey = '';
+      }}
+      on:push={() => void pushProject(syncDialog.project)}
+      on:pull={() => void pullProject(syncDialog.project)}
     />
   {/if}
 </div>
 
 <style>
   .home {
-    flex: 1; display: flex; flex-direction: column;
-    overflow: hidden; min-width: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: auto;
     background: #11111b;
   }
 
-  /* ── Brand bar ── */
-  .brand-bar {
-    display: flex; align-items: center; gap: 8px;
-    padding: 10px 16px;
-    background: linear-gradient(135deg, #181825 0%, #1e1e2e 100%);
-    border-bottom: 1px solid #252535;
-    flex-shrink: 0;
-  }
-  .brand-logo { color: #89b4fa; flex-shrink: 0; }
-  .brand-name { font-size: 13px; font-weight: 700; color: #cdd6f4; letter-spacing: 0.04em; }
-  .spacer { flex: 1; }
-
-  .avatar { width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid #313244; }
-  .gh-login { font-size: 12px; color: #7f849c; font-weight: 500; }
-  .gh-hint { font-size: 12px; color: #45475a; }
-
-  .connect-btn {
-    display: flex; align-items: center; gap: 6px;
-    border: 1px solid #313244; background: rgba(137,180,250,0.08);
-    color: #89b4fa; font-size: 12px; font-weight: 600;
-    padding: 5px 12px; border-radius: 6px; cursor: pointer; font-family: inherit;
-    transition: all 0.15s;
-  }
-  .connect-btn:hover { background: rgba(137,180,250,0.16); border-color: #89b4fa; }
-  .connect-btn svg { flex-shrink: 0; }
-
-  .link-btn {
-    border: none; background: none; color: #585b70; font-size: 11px;
-    cursor: pointer; font-family: inherit; padding: 2px 4px;
-    transition: color 0.1s;
-  }
-  .link-btn:hover { color: #a6adc8; }
-
-  /* ── Toolbar bar ── */
-  .toolbar-bar {
-    display: flex; align-items: center; gap: 6px;
-    padding: 8px 16px;
-    background: #181825;
+  /* ── Header ── */
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 20px;
     border-bottom: 1px solid #1e1e2e;
     flex-shrink: 0;
   }
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .logo-vo {
+    font-size: 20px;
+    font-weight: 900;
+    color: #89b4fa;
+  }
+  .logo-studio {
+    font-size: 14px;
+    font-weight: 400;
+    color: #585b70;
+  }
+  .search {
+    flex: 1;
+    min-width: 0;
+  }
+  .search input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid #252535;
+    background: #181825;
+    color: #cdd6f4;
+    font-size: 13px;
+    outline: none;
+  }
+  .search input:focus {
+    border-color: #45475a;
+  }
+  .search input::placeholder {
+    color: #45475a;
+  }
+  .text-btn {
+    border: none;
+    background: none;
+    color: #585b70;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 4px;
+  }
+  .text-btn:hover {
+    color: #a6adc8;
+  }
 
-  .search-wrap {
-    flex: 1; position: relative; display: flex; align-items: center;
+  /* ── Action row ── */
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    border-bottom: 1px solid #1e1e2e;
+    flex-shrink: 0;
   }
-  .search-icon {
-    position: absolute; left: 8px; color: #45475a; pointer-events: none;
+  .actions-spacer {
+    flex: 1;
   }
-  .search-input {
-    width: 100%; background: #11111b; border: 1px solid #252535;
-    border-radius: 6px; color: #cdd6f4; font-size: 12px;
-    padding: 6px 10px 6px 28px; outline: none; font-family: inherit;
-    transition: border-color 0.15s;
+  .sync-hint {
+    color: #585b70;
+    font-size: 11px;
+    white-space: nowrap;
   }
-  .search-input:focus { border-color: #45475a; }
-  .search-input::placeholder { color: #313244; }
 
-  .new-btn {
-    display: flex; align-items: center; gap: 5px;
-    border: 1px solid #252535; background: #1e1e2e; color: #a6adc8;
-    font-size: 12px; font-weight: 500; padding: 5px 10px;
-    border-radius: 6px; cursor: pointer; font-family: inherit;
-    white-space: nowrap; transition: all 0.12s;
+  /* ── Advanced section ── */
+  .advanced {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 20px;
+    border-bottom: 1px solid #1e1e2e;
+    background: rgba(24, 24, 37, 0.5);
+    flex-shrink: 0;
   }
-  .new-btn:hover { border-color: #45475a; color: #cdd6f4; background: #252535; }
-  .new-btn svg { flex-shrink: 0; }
+  .adv-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .adv-hint {
+    color: #45475a;
+    font-size: 11px;
+  }
+  .inline-open {
+    display: flex;
+    gap: 4px;
+  }
+  .inline-open input {
+    width: 220px;
+    box-sizing: border-box;
+    padding: 7px 10px;
+    border-radius: 8px;
+    border: 1px solid #252535;
+    background: #181825;
+    color: #cdd6f4;
+    font-size: 12px;
+    outline: none;
+  }
+  .inline-open input:focus {
+    border-color: #45475a;
+  }
+  .inline-open input::placeholder {
+    color: #45475a;
+  }
 
+  /* ── Buttons ── */
+  button {
+    font: inherit;
+  }
+  .primary {
+    border: none;
+    border-radius: 8px;
+    padding: 7px 14px;
+    background: linear-gradient(135deg, #89b4fa, #74c7ec);
+    color: #11111b;
+    font-weight: 700;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .primary:hover {
+    filter: brightness(1.1);
+  }
+  .secondary {
+    border: 1px solid #252535;
+    border-radius: 8px;
+    padding: 7px 12px;
+    background: #1e1e2e;
+    color: #a6adc8;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .secondary:hover {
+    border-color: #45475a;
+    color: #cdd6f4;
+  }
   .icon-btn {
-    border: none; background: none; color: #45475a;
-    padding: 5px; cursor: pointer; border-radius: 5px;
-    display: flex; align-items: center; justify-content: center;
-    transition: all 0.1s;
+    border: 1px solid #252535;
+    border-radius: 8px;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #1e1e2e;
+    color: #a6adc8;
+    font-size: 16px;
+    cursor: pointer;
+    flex-shrink: 0;
   }
-  .icon-btn:hover { color: #a6adc8; background: #252535; }
-
-  .remote-sync-hint {
-    display: flex; align-items: center; gap: 5px;
-    font-size: 11px; color: #45475a; white-space: nowrap;
-    padding: 0 4px;
+  .icon-btn:hover:not(:disabled) {
+    border-color: #45475a;
+    color: #cdd6f4;
   }
-  .mini-spinner {
-    width: 10px; height: 10px; border: 1.5px solid #313244;
-    border-top-color: #6c7086; border-radius: 50%;
-    animation: spin 0.7s linear infinite; flex-shrink: 0;
+  .icon-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .refresh-icon {
+    display: inline-block;
+  }
+  .refresh-icon.spinning {
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 
   /* ── Error bar ── */
   .error-bar {
-    padding: 7px 16px; font-size: 12px; color: #f38ba8;
-    background: rgba(243,139,168,0.08);
-    border-bottom: 1px solid rgba(243,139,168,0.15);
+    margin: 0 20px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid rgba(243, 139, 168, 0.2);
+    background: rgba(243, 139, 168, 0.06);
+    color: #f38ba8;
+    font-size: 12px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .error-dismiss {
+    border: none;
+    background: none;
+    color: #f38ba8;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 0 2px;
+    opacity: 0.6;
     flex-shrink: 0;
   }
-
-  /* ── Project list ── */
-  .project-list {
-    flex: 1; overflow-y: auto; min-height: 0;
-    padding: 12px 16px;
-  }
-  .project-list::-webkit-scrollbar { width: 4px; }
-  .project-list::-webkit-scrollbar-track { background: transparent; }
-  .project-list::-webkit-scrollbar-thumb { background: #252535; border-radius: 2px; }
-
-  .empty-state {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 8px; padding: 48px 20px; color: #45475a; font-size: 13px;
-  }
-  .empty-icon { color: #313244; }
-  .empty-sub { font-size: 11px; color: #313244; }
-  .err-msg { color: #f38ba8; font-size: 13px; text-align: center; }
-
-  .spinner {
-    width: 20px; height: 20px; border: 2px solid #252535;
-    border-top-color: #89b4fa; border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  /* ── Card grid ── */
-  .card-grid {
-    display: flex; flex-direction: column; gap: 4px;
+  .error-dismiss:hover {
+    opacity: 1;
   }
 
-  .card {
-    position: relative;
-    display: flex; align-items: center; gap: 12px;
-    padding: 10px 12px;
-    background: #181825;
-    border: 1px solid #1e1e2e;
-    border-radius: 8px;
-    cursor: pointer; text-align: left; color: inherit;
-    font-family: inherit;
-    transition: all 0.12s ease;
-    min-width: 0;
+  /* ── Confirm dialog ── */
+  .confirm-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 210;
   }
-  .card:hover {
+  .confirm-modal {
+    width: min(100%, 380px);
     background: #1e1e2e;
-    border-color: #313244;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.2);
+    border: 1px solid #313244;
+    border-radius: 14px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
   }
-  .card:hover .del-btn { opacity: 0.4; }
-  .card.busy { opacity: 0.45; pointer-events: none; }
-  .card:disabled { cursor: wait; }
-
-  /* ── Card icon ── */
-  .card-icon {
-    width: 38px; height: 38px;
-    display: flex; align-items: center; justify-content: center;
-    border-radius: 8px; flex-shrink: 0;
-    transition: background 0.12s;
+  .confirm-modal h3 {
+    margin: 0;
+    color: #cdd6f4;
+    font-size: 16px;
+    font-weight: 700;
   }
-  .card-icon.single { background: rgba(137,180,250,0.1); color: #89b4fa; }
-  .card-icon.multi  { background: rgba(166,227,161,0.1); color: #a6e3a1; }
-  .card:hover .card-icon.single { background: rgba(137,180,250,0.18); }
-  .card:hover .card-icon.multi  { background: rgba(166,227,161,0.18); }
-
-  /* ── Card body ── */
-  .card-body {
-    flex: 1; display: flex; flex-direction: column; gap: 5px; min-width: 0;
+  .confirm-modal h3.danger {
+    color: #f38ba8;
   }
-  .card-name {
-    font-size: 13px; font-weight: 600; color: #cdd6f4;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  .confirm-msg {
+    margin: 0;
+    color: #7f849c;
+    font-size: 13px;
+    line-height: 1.6;
   }
-
-  /* ── Sync row (always visible, shows status + timestamps + actions) ── */
-  .sync-row {
-    display: flex; align-items: center; gap: 5px;
-    flex-wrap: nowrap; min-width: 0;
+  .confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
   }
-
-  /* ── Sync badge ── */
-  .sync-badge {
-    display: inline-flex; align-items: center; gap: 3px;
-    padding: 2px 7px; border-radius: 4px;
-    font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
-    border: 1px solid; white-space: nowrap; flex-shrink: 0;
-    user-select: none; transition: all 0.12s;
-    background: none; font-family: inherit; color: inherit;
+  .danger-btn {
+    border: none;
+    border-radius: 8px;
+    padding: 7px 14px;
+    background: #f38ba8;
+    color: #11111b;
+    font-weight: 700;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
   }
-  button.sync-badge { cursor: pointer; }
-  button.sync-badge:hover { filter: brightness(1.15); }
-  .sync-icon { font-weight: 800; font-size: 11px; line-height: 1; }
-
-  .sync-badge.in-sync {
-    color: #a6e3a1; border-color: rgba(166,227,161,0.3); background: rgba(166,227,161,0.08);
-  }
-  .sync-badge.local-ahead {
-    color: #f9e2af; border-color: rgba(249,226,175,0.3); background: rgba(249,226,175,0.08);
-  }
-  .sync-badge.remote-ahead {
-    color: #89b4fa; border-color: rgba(137,180,250,0.3); background: rgba(137,180,250,0.08);
-  }
-  .sync-badge.diverged {
-    color: #f38ba8; border-color: rgba(243,139,168,0.3); background: rgba(243,139,168,0.08);
-  }
-  .sync-badge.local-only {
-    color: #45475a; border-color: #252535; background: rgba(69,71,90,0.06);
-  }
-  .sync-badge.remote-only {
-    color: #585b70; border-color: #252535; background: rgba(88,91,112,0.06);
+  .danger-btn:hover {
+    filter: brightness(1.1);
   }
 
-  /* ── Sync timestamps ── */
-  .sync-ts {
-    display: inline-flex; align-items: center; gap: 3px;
-    font-size: 10px; color: #45475a; white-space: nowrap; flex-shrink: 0;
+  /* ── Progress bar ── */
+  .progress-track {
+    height: 2px;
+    background: #1e1e2e;
+    overflow: hidden;
+    flex-shrink: 0;
   }
-  .sync-ts svg { flex-shrink: 0; opacity: 0.6; }
-  .sync-ts.local { color: #585b70; }
-  .sync-ts.remote { color: #585b70; }
-  .sync-ts.synced { color: #45475a; font-style: italic; }
-
-  /* ── Sync action buttons ── */
-  .sync-act {
-    display: inline-flex; align-items: center; gap: 4px;
-    padding: 2px 7px; border-radius: 4px;
-    font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
-    cursor: pointer; font-family: inherit; border: 1px solid;
-    white-space: nowrap; flex-shrink: 0; transition: all 0.12s;
+  .progress-bar {
+    height: 100%;
+    width: 30%;
+    background: linear-gradient(90deg, #89b4fa, #74c7ec);
+    border-radius: 1px;
+    animation: progress-slide 1.2s ease-in-out infinite;
   }
-  .sync-act:disabled { opacity: 0.25; cursor: not-allowed; }
-  .sync-act.push { color: #89b4fa; background: rgba(137,180,250,0.08); border-color: rgba(137,180,250,0.3); }
-  .sync-act.push:hover:not(:disabled) { background: rgba(137,180,250,0.2); border-color: #89b4fa; }
-  .sync-act.pull { color: #a6e3a1; background: rgba(166,227,161,0.08); border-color: rgba(166,227,161,0.3); }
-  .sync-act.pull:hover:not(:disabled) { background: rgba(166,227,161,0.2); border-color: #a6e3a1; }
-
-  /* ── Delete button (revealed on card hover) ── */
-  .del-wrap { flex-shrink: 0; }
-  .del-btn {
-    width: 28px; height: 28px;
-    display: flex; align-items: center; justify-content: center;
-    border: 1px solid transparent; background: none; color: #313244;
-    cursor: pointer; border-radius: 6px;
-    opacity: 0; transition: all 0.12s;
+  @keyframes progress-slide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(430%); }
   }
-  .del-btn:hover:not(:disabled) { color: #f38ba8; background: rgba(243,139,168,0.1); border-color: rgba(243,139,168,0.25); opacity: 1; }
-  .del-btn:disabled { opacity: 0; cursor: not-allowed; }
 
+  /* ── Project grid ── */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 12px;
+    padding: 16px 20px;
+  }
+
+  /* ── Skeleton cards ── */
+  .skeleton-card {
+    border: 1px solid #252535;
+    background: #181825;
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .skeleton-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .skeleton-icon {
+    width: 36px;
+    height: 28px;
+    border-radius: 6px;
+    background: #252535;
+    flex-shrink: 0;
+    animation: skeleton-pulse 1.4s ease-in-out infinite;
+  }
+  .skeleton-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .skeleton-line {
+    border-radius: 4px;
+    background: #252535;
+    animation: skeleton-pulse 1.4s ease-in-out infinite;
+  }
+  .skeleton-name {
+    width: 60%;
+    height: 14px;
+  }
+  .skeleton-meta {
+    width: 40%;
+    height: 11px;
+    animation-delay: 0.15s;
+  }
+  @keyframes skeleton-pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
+
+  /* ── Empty state ── */
+  .empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 60px 20px;
+    text-align: center;
+  }
+  .empty-title {
+    color: #585b70;
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .empty-sub {
+    color: #45475a;
+    font-size: 13px;
+    max-width: 400px;
+    line-height: 1.6;
+  }
+  .empty-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+  }
 </style>

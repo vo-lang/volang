@@ -1,0 +1,141 @@
+package main
+
+import "time"
+
+func main() {
+	testBlockedRemoteRecvThenSendBytes()
+	testBlockedRemoteRecvThenSendEmptyBytes()
+	testRepeatedBlockedRemoteRecvThenSendBytes()
+	testRepeatedBlockedRemoteRecvThenSendEmptyBytes()
+}
+
+func waitReady(ready port bool, msg string) {
+	armed := false
+	for i := 0; i < 100 && !armed; i += 1 {
+		select {
+		case armed = <-ready:
+		default:
+			time.Sleep(1 * time.Millisecond)
+		}
+	}
+	assert(armed, msg)
+}
+
+func waitDone(done port bool, msg string) bool {
+	received := false
+	matched := false
+	for i := 0; i < 100 && !received; i += 1 {
+		select {
+		case matched = <-done:
+			received = true
+		default:
+			time.Sleep(1 * time.Millisecond)
+		}
+	}
+	assert(received, msg)
+	return matched
+}
+
+func testBlockedRemoteRecvThenSendBytes() {
+	worker := make(island)
+	dataCh := make(port []byte, 1)
+	ready := make(port bool, 1)
+	done := make(port bool, 1)
+
+	go @(worker) func(ch port []byte, ready port bool, done port bool) {
+		ready <- true
+		data := <-ch
+		ok := len(data) == 5 &&
+			data[0] == 30 &&
+			data[1] == 1 &&
+			data[2] == 0 &&
+			data[3] == 0 &&
+			data[4] == 0
+		done <- ok
+	}(dataCh, ready, done)
+
+	waitReady(ready, "timed out waiting for remote receiver to arm")
+	time.Sleep(20 * time.Millisecond)
+	dataCh <- []byte{30, 1, 0, 0, 0}
+
+	matched := waitDone(done, "timed out waiting for blocked remote recv bytes result")
+	assert(matched, "blocked remote recv bytes payload mismatch")
+}
+
+func testBlockedRemoteRecvThenSendEmptyBytes() {
+	worker := make(island)
+	dataCh := make(port []byte, 1)
+	ready := make(port bool, 1)
+	done := make(port bool, 1)
+
+	go @(worker) func(ch port []byte, ready port bool, done port bool) {
+		ready <- true
+		data := <-ch
+		done <- (len(data) == 0)
+	}(dataCh, ready, done)
+
+	waitReady(ready, "timed out waiting for remote empty-bytes receiver to arm")
+	time.Sleep(20 * time.Millisecond)
+	dataCh <- []byte{}
+
+	matched := waitDone(done, "timed out waiting for blocked remote recv empty bytes result")
+	assert(matched, "blocked remote recv empty bytes payload mismatch")
+}
+
+func testRepeatedBlockedRemoteRecvThenSendBytes() {
+	worker := make(island)
+	dataCh := make(port []byte, 1)
+	ready := make(port bool, 1)
+	done := make(port bool, 1)
+
+	go @(worker) func(ch port []byte, ready port bool, done port bool) {
+		ok := true
+		for i := 0; i < 16; i += 1 {
+			ready <- true
+			data := <-ch
+			ok = ok &&
+				len(data) == 5 &&
+				data[0] == 30 &&
+				data[1] == 1 &&
+				data[2] == 0 &&
+				data[3] == 0 &&
+				data[4] == 0
+		}
+		done <- ok
+	}(dataCh, ready, done)
+
+	for i := 0; i < 16; i += 1 {
+		waitReady(ready, "timed out waiting for repeated remote bytes receiver to arm")
+		time.Sleep(1 * time.Millisecond)
+		dataCh <- []byte{30, 1, 0, 0, 0}
+	}
+
+	matched := waitDone(done, "timed out waiting for repeated blocked remote recv bytes result")
+	assert(matched, "repeated blocked remote recv bytes payload mismatch")
+}
+
+func testRepeatedBlockedRemoteRecvThenSendEmptyBytes() {
+	worker := make(island)
+	dataCh := make(port []byte, 1)
+	ready := make(port bool, 1)
+	done := make(port bool, 1)
+
+	go @(worker) func(ch port []byte, ready port bool, done port bool) {
+		ok := true
+		for i := 0; i < 16; i += 1 {
+			ready <- true
+			data := <-ch
+			ok = ok && len(data) == 0
+		}
+		done <- ok
+	}(dataCh, ready, done)
+
+	for i := 0; i < 16; i += 1 {
+		waitReady(ready, "timed out waiting for repeated remote empty-bytes receiver to arm")
+		time.Sleep(1 * time.Millisecond)
+		dataCh <- []byte{}
+	}
+
+	matched := waitDone(done, "timed out waiting for repeated blocked remote recv empty bytes result")
+	assert(matched, "repeated blocked remote recv empty bytes payload mismatch")
+}

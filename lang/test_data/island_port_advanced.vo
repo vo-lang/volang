@@ -1,0 +1,199 @@
+// Advanced cross-island port communication patterns.
+//
+// Covers:
+//   - Fan-out: one island sends to multiple distinct ports
+//   - Fan-in: multiple islands send to the same port
+//   - Unbuffered port: blocked send until receiver is ready
+//   - Pipeline: chained island stages A -> B -> main
+//   - Large message count ordering verification
+//   - Island goroutine that both sends and recvs on different ports
+
+package main
+
+import "time"
+
+func waitInt(ch port int, label string) int {
+	done := false
+	value := 0
+	for i := 0; i < 200 && !done; i += 1 {
+		select {
+		case value = <-ch:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, label)
+	return value
+}
+
+func waitBool(ch port bool, label string) bool {
+	done := false
+	value := false
+	for i := 0; i < 200 && !done; i += 1 {
+		select {
+		case value = <-ch:
+			done = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	assert(done, label)
+	return value
+}
+
+func main() {
+	testFanOut()
+	testFanIn()
+	testPortBlockedSendWhenFull()
+	testPortBlockedRecvWhenEmpty()
+	testPipeline()
+	testLargeMessageCountOrdering()
+	testIslandBidirectionalDifferentPorts()
+}
+
+// Fan-out: single island goroutine sends to two distinct ports, main receives from both.
+func testFanOut() {
+	i := make(island)
+	portA := make(port int, 1)
+	portB := make(port int, 1)
+
+	go @(i) func(a port int, b port int) {
+		a <- 11
+		b <- 22
+	}(portA, portB)
+
+	va := waitInt(portA, "testFanOut: portA timed out")
+	vb := waitInt(portB, "testFanOut: portB timed out")
+	assert(va == 11, "testFanOut: portA must be 11")
+	assert(vb == 22, "testFanOut: portB must be 22")
+}
+
+// Fan-in: three different islands all send to the same port. Main receives 3 values.
+func testFanIn() {
+	i1 := make(island)
+	i2 := make(island)
+	i3 := make(island)
+	ch := make(port int, 3)
+
+	go @(i1) func(out port int) { out <- 100 }(ch)
+	go @(i2) func(out port int) { out <- 200 }(ch)
+	go @(i3) func(out port int) { out <- 300 }(ch)
+
+	sum := 0
+	for k := 0; k < 3; k += 1 {
+		sum += waitInt(ch, "testFanIn: timed out")
+	}
+	assert(sum == 600, "testFanIn: sum must be 600")
+}
+
+// Port blocked send: port cap=1 is pre-filled by main.
+// Island tries to send second value — must block until main drains the first.
+func testPortBlockedSendWhenFull() {
+	i := make(island)
+	ch := make(port int, 1)
+	sendDone := make(port bool, 1)
+
+	ch <- 111 // fill the buffer
+
+	go @(i) func(out port int, d port bool) {
+		out <- 222 // must block until main recvs 111
+		d <- true
+	}(ch, sendDone)
+
+	// Give island time to start and block on send
+	time.Sleep(20 * time.Millisecond)
+
+	v1 := <-ch // drain 111 — this unblocks island
+	assert(v1 == 111, "testPortBlockedSendWhenFull: first recv must be 111")
+	waitBool(sendDone, "testPortBlockedSendWhenFull: island send timed out")
+	v2 := <-ch
+	assert(v2 == 222, "testPortBlockedSendWhenFull: second recv must be 222")
+}
+
+// Port blocked recv: island goroutine blocks on recv from empty port.
+// Main sends after a delay, island unblocks and reports value.
+func testPortBlockedRecvWhenEmpty() {
+	i := make(island)
+	ch := make(port int, 1)
+	result := make(port int, 1)
+	ready := make(port bool, 1)
+
+	go @(i) func(data port int, out port int, rdy port bool) {
+		rdy <- true
+		v := <-data // blocks — port is empty
+		out <- v
+	}(ch, result, ready)
+
+	waitBool(ready, "testPortBlockedRecvWhenEmpty: island not ready")
+	time.Sleep(10 * time.Millisecond) // ensure island is blocked on recv
+	ch <- 555
+	r := waitInt(result, "testPortBlockedRecvWhenEmpty: timed out")
+	assert(r == 555, "testPortBlockedRecvWhenEmpty: expected 555")
+}
+
+// Pipeline: main -> island A -> island B -> main.
+// Each stage doubles the value.
+func testPipeline() {
+	islandA := make(island)
+	islandB := make(island)
+
+	input := make(port int, 1)
+	mid := make(port int, 1)
+	output := make(port int, 1)
+
+	go @(islandA) func(in port int, out port int) {
+		v := <-in
+		out <- v * 2
+	}(input, mid)
+
+	go @(islandB) func(in port int, out port int) {
+		v := <-in
+		out <- v * 2
+	}(mid, output)
+
+	input <- 5
+	result := waitInt(output, "testPipeline: timed out")
+	assert(result == 20, "testPipeline: expected 5*2*2=20")
+}
+
+// Large message count: island sends 50 values, main receives all and verifies ordering.
+func testLargeMessageCountOrdering() {
+	i := make(island)
+	ch := make(port int, 50)
+	done := make(port bool, 1)
+
+	go @(i) func(out port int, d port bool) {
+		for j := 0; j < 50; j += 1 {
+			out <- j
+		}
+		d <- true
+	}(ch, done)
+
+	waitBool(done, "testLargeMessageCountOrdering: island did not finish")
+
+	for j := 0; j < 50; j += 1 {
+		v := <-ch
+		assert(v == j, "testLargeMessageCountOrdering: ordering broken")
+	}
+}
+
+// Island goroutine both receives a request and sends a response on different ports.
+func testIslandBidirectionalDifferentPorts() {
+	i := make(island)
+	req := make(port int, 1)
+	resp := make(port int, 1)
+
+	go @(i) func(in port int, out port int) {
+		for j := 0; j < 5; j += 1 {
+			v := <-in
+			out <- v + 1000
+		}
+	}(req, resp)
+
+	for j := 0; j < 5; j += 1 {
+		req <- j
+		r := waitInt(resp, "testIslandBidirectionalDifferentPorts: timed out")
+		assert(r == j+1000, "testIslandBidirectionalDifferentPorts: wrong response")
+	}
+}

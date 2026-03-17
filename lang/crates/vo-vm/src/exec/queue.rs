@@ -397,7 +397,27 @@ pub fn exec_queue_close(stack: *const Slot, bp: usize, inst: &Instruction) -> Qu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::VmState;
+    use crate::fiber::RemoteRecvResponse;
+    use crate::vm::{EndpointRegistry, VmState};
+    use vo_runtime::objects::slice;
+    use vo_runtime::ValueKind;
+
+    fn make_byte_slice(gc: &mut Gc, bytes: &[u8]) -> GcRef {
+        let slice_ref = slice::create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, bytes.len(), bytes.len());
+        for (i, &byte) in bytes.iter().enumerate() {
+            slice::set(slice_ref, i, byte as u64, 1);
+        }
+        slice_ref
+    }
+
+    fn assert_byte_slice_eq(slice_ref: GcRef, expected: &[u8]) {
+        assert!(!slice_ref.is_null());
+        assert_eq!(slice::elem_meta(slice_ref).value_kind(), ValueKind::Uint8);
+        assert_eq!(slice::len(slice_ref), expected.len());
+        for (i, &byte) in expected.iter().enumerate() {
+            assert_eq!(slice::get(slice_ref, i, 1), byte as u64);
+        }
+    }
 
     #[test]
     fn nil_queue_send_blocks() {
@@ -419,5 +439,106 @@ mod tests {
     fn nil_queue_recv_blocks() {
         let result = queue_recv_core(core::ptr::null_mut(), 0, 1);
         assert!(matches!(result, QueueRecvCoreResult::WouldBlock));
+    }
+
+    #[test]
+    fn replay_remote_queue_recv_response_restores_closed_result() {
+        let mut gc = Gc::new();
+        let struct_metas = vec![];
+        let runtime_types = vec![];
+        let mut endpoint_registry = EndpointRegistry::new();
+        let response = RemoteRecvResponse {
+            data: Vec::new(),
+            closed: true,
+        };
+        let mut dst = [99u64, 99u64];
+
+        replay_remote_queue_recv_response(
+            &mut gc,
+            response,
+            1,
+            true,
+            &struct_metas,
+            &runtime_types,
+            &mut endpoint_registry,
+            |i, value| dst[i] = value,
+        );
+
+        assert_eq!(dst[0], 0);
+        assert_eq!(dst[1], 0);
+    }
+
+    #[test]
+    fn replay_remote_queue_recv_response_restores_empty_byte_slice() {
+        let mut gc = Gc::new();
+        let struct_metas = vec![];
+        let runtime_types = vec![];
+        let mut endpoint_registry = EndpointRegistry::new();
+        let slice_ref = make_byte_slice(&mut gc, &[]);
+        let response = RemoteRecvResponse {
+            data: crate::exec::transport::pack_transport_message(
+                &gc,
+                &[slice_ref as u64],
+                ValueMeta::new(0, ValueKind::Slice),
+                &struct_metas,
+                &runtime_types,
+            ),
+            closed: false,
+        };
+        let mut dst = [0u64; 2];
+
+        replay_remote_queue_recv_response(
+            &mut gc,
+            response,
+            1,
+            true,
+            &struct_metas,
+            &runtime_types,
+            &mut endpoint_registry,
+            |i, value| dst[i] = value,
+        );
+
+        let unpacked = dst[0] as GcRef;
+        assert_byte_slice_eq(unpacked, &[]);
+        assert_eq!(dst[1], 1);
+        assert_ne!(slice_ref, unpacked);
+        assert_ne!(slice::array_ref(slice_ref), slice::array_ref(unpacked));
+    }
+
+    #[test]
+    fn replay_remote_queue_recv_response_restores_non_empty_byte_slice() {
+        let mut gc = Gc::new();
+        let struct_metas = vec![];
+        let runtime_types = vec![];
+        let mut endpoint_registry = EndpointRegistry::new();
+        let slice_ref = make_byte_slice(&mut gc, &[30, 1, 0, 0, 0]);
+        let response = RemoteRecvResponse {
+            data: crate::exec::transport::pack_transport_message(
+                &gc,
+                &[slice_ref as u64],
+                ValueMeta::new(0, ValueKind::Slice),
+                &struct_metas,
+                &runtime_types,
+            ),
+            closed: false,
+        };
+        let mut dst = [0u64; 2];
+
+        replay_remote_queue_recv_response(
+            &mut gc,
+            response,
+            1,
+            true,
+            &struct_metas,
+            &runtime_types,
+            &mut endpoint_registry,
+            |i, value| dst[i] = value,
+        );
+
+        let unpacked = dst[0] as GcRef;
+        assert_byte_slice_eq(unpacked, &[30, 1, 0, 0, 0]);
+        assert_eq!(dst[1], 1);
+        assert_ne!(slice_ref, unpacked);
+        assert_ne!(slice::array_ref(slice_ref), slice::array_ref(unpacked));
     }
 }

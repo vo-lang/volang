@@ -13,8 +13,70 @@ use js_sys::{Object, Reflect};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
 use vo_common::vfs::{FileSystem, MemoryFs};
+use vo_runtime::island::{EndpointRequestKind, EndpointResponseKind, IslandCommand};
 use vo_runtime::island_msg::{decode_island_transport_frame, encode_island_transport_frame};
 use vo_vm::vm::SchedulingOutcome;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = globalThis, js_name = __voStudioDebugLog)]
+    fn vo_studio_debug_log(message: &str);
+}
+
+fn studio_debug_log(message: &str) {
+    vo_studio_debug_log(message);
+}
+
+fn hex_bytes(data: &[u8]) -> String {
+    let mut out = String::new();
+    for (i, byte) in data.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(&format!("{:02x}", byte));
+    }
+    out
+}
+
+fn describe_island_command(cmd: &IslandCommand) -> String {
+    match cmd {
+        IslandCommand::SpawnFiber { closure_data } => {
+            format!("SpawnFiber(data_len={})", closure_data.data().len())
+        }
+        IslandCommand::WakeFiber { fiber_id } => {
+            format!("WakeFiber(fiber_id={fiber_id})")
+        }
+        IslandCommand::Shutdown => "Shutdown".to_string(),
+        IslandCommand::EndpointRequest { endpoint_id, kind, from_island, fiber_id } => {
+            let kind_desc = match kind {
+                EndpointRequestKind::Send { data } => format!("Send(len={})", data.len()),
+                EndpointRequestKind::Recv => "Recv".to_string(),
+                EndpointRequestKind::Close => "Close".to_string(),
+                EndpointRequestKind::Transfer { new_peer } => format!("Transfer(new_peer={new_peer})"),
+            };
+            format!(
+                "EndpointRequest(endpoint_id={endpoint_id}, from_island={from_island}, fiber_id={fiber_id}, kind={kind_desc})"
+            )
+        }
+        IslandCommand::EndpointResponse { endpoint_id, kind, fiber_id } => {
+            let kind_desc = match kind {
+                EndpointResponseKind::SendAck { closed } => format!("SendAck(closed={closed})"),
+                EndpointResponseKind::RecvData { data, closed } => {
+                    let preview = if data.len() <= 64 {
+                        hex_bytes(data)
+                    } else {
+                        format!("{} ...", hex_bytes(&data[..64]))
+                    };
+                    format!("RecvData(len={}, closed={closed}, data=[{}])", data.len(), preview)
+                }
+                EndpointResponseKind::Closed => "Closed".to_string(),
+            };
+            format!(
+                "EndpointResponse(endpoint_id={endpoint_id}, fiber_id={fiber_id}, kind={kind_desc})"
+            )
+        }
+    }
+}
 
 fn ensure_panic_hook() {
     use std::sync::Once;
@@ -53,6 +115,180 @@ fn load_guest_from_bytecode(bytecode: &[u8]) -> Result<GuestState, JsValue> {
         pending_host_events: VecDeque::new(),
         pending_host_event_tokens: HashSet::new(),
     })
+}
+
+// =============================================================================
+// VoVm — instance-based VM for render islands (framework-neutral)
+// =============================================================================
+
+/// A Vo VM instance with ext_bridge externs registered.
+/// Exposes the VoWebModule.VoVm interface expected by render island bootstrappers.
+#[wasm_bindgen(js_name = "StudioVoVm")]
+pub struct StudioVoVm {
+    vm: vo_web::Vm,
+    outbound_frames: VecDeque<Vec<u8>>,
+    pending_host_events: VecDeque<(u64, u32)>,
+    pending_host_event_tokens: HashSet<u64>,
+}
+
+#[wasm_bindgen(js_class = "StudioVoVm")]
+impl StudioVoVm {
+    /// Create a VM from bytecode with ext_bridge externs registered.
+    /// Corresponds to VoWebModule.VoVm.withExterns(bytecode).
+    #[wasm_bindgen(js_name = "withExterns")]
+    pub fn with_externs(bytecode: &[u8]) -> Result<StudioVoVm, JsValue> {
+        ensure_panic_hook();
+        let module = vo_vm::bytecode::Module::deserialize(bytecode)
+            .map_err(|e| JsValue::from_str(&format!("Failed to load bytecode: {:?}", e)))?;
+        let vm = vo_web::create_loaded_vm_from_module(module, |reg, exts| {
+            vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
+        }).map_err(|e| JsValue::from_str(&e))?;
+        Ok(StudioVoVm {
+            vm,
+            outbound_frames: VecDeque::new(),
+            pending_host_events: VecDeque::new(),
+            pending_host_event_tokens: HashSet::new(),
+        })
+    }
+
+    /// Run the VM entry point (cold start).
+    pub fn run(&mut self) -> Result<String, JsValue> {
+        self.vm.clear_host_output();
+        vo_runtime::output::clear_output();
+        let outcome = self.vm.run()
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        self.process_outcome(&outcome)?;
+        let _ = self.vm.take_host_output();
+        Ok(format!("{:?}", outcome))
+    }
+
+    /// Run island initialization only (global vars + user init functions, no main).
+    /// Must be called on island VMs before processing SpawnFiber commands.
+    #[wasm_bindgen(js_name = "runInit")]
+    pub fn run_init(&mut self) -> Result<String, JsValue> {
+        self.vm.clear_host_output();
+        vo_runtime::output::clear_output();
+        let outcome = self.vm.run_init()
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        self.process_outcome(&outcome)?;
+        let _ = self.vm.take_host_output();
+        Ok(format!("{:?}", outcome))
+    }
+
+    /// Run already-scheduled fibers (used after island commands or host events).
+    #[wasm_bindgen(js_name = "runScheduled")]
+    pub fn run_scheduled(&mut self) -> Result<String, JsValue> {
+        self.vm.clear_host_output();
+        vo_runtime::output::clear_output();
+        let outcome = self.vm.run_scheduled()
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        self.process_outcome(&outcome)?;
+        let _ = self.vm.take_host_output();
+        Ok(format!("{:?}", outcome))
+    }
+
+    /// Push an island transport frame into the VM command queue (does not run the VM).
+    #[wasm_bindgen(js_name = "pushIslandCommand")]
+    pub fn push_island_command(&mut self, frame: &[u8]) -> Result<(), JsValue> {
+        let (target_island_id, cmd) = decode_island_transport_frame(frame)
+            .map_err(|e| JsValue::from_str(&format!("invalid island frame: {:?}", e)))?;
+        let current_island_id = self.vm.current_island_id();
+        if current_island_id == 0 {
+            self.vm.set_island_id(target_island_id);
+        } else if current_island_id != target_island_id {
+            return Err(JsValue::from_str(&format!(
+                "render island id mismatch: have {}, got {}",
+                current_island_id, target_island_id
+            )));
+        }
+        self.vm.push_island_command(cmd);
+        Ok(())
+    }
+
+    /// Drain all outbound island transport frames queued since the last call.
+    #[wasm_bindgen(js_name = "takeOutboundCommands")]
+    pub fn take_outbound_commands(&mut self) -> js_sys::Array {
+        let arr = js_sys::Array::new();
+        while let Some(frame) = self.outbound_frames.pop_front() {
+            arr.push(&js_sys::Uint8Array::from(frame.as_slice()));
+        }
+        arr
+    }
+
+    /// Drain pending host events (timers) that JS must schedule.
+    /// Each element is { token: string, delayMs: number, replay: boolean }.
+    #[wasm_bindgen(js_name = "takePendingHostEvents")]
+    pub fn take_pending_host_events(&mut self) -> js_sys::Array {
+        let arr = js_sys::Array::new();
+        while let Some((token, delay_ms)) = self.pending_host_events.pop_front() {
+            let obj = Object::new();
+            let _ = Reflect::set(&obj, &JsValue::from_str("token"), &JsValue::from_str(&token.to_string()));
+            let _ = Reflect::set(&obj, &JsValue::from_str("delayMs"), &JsValue::from_f64(delay_ms as f64));
+            let _ = Reflect::set(&obj, &JsValue::from_str("replay"), &JsValue::from_bool(false));
+            arr.push(&obj);
+        }
+        arr
+    }
+
+    /// Wake a suspended host event fiber and run scheduled work.
+    #[wasm_bindgen(js_name = "wakeHostEvent")]
+    pub fn wake_host_event_vm(&mut self, token: &str) -> Result<(), JsValue> {
+        let token = token.parse::<u64>()
+            .map_err(|e| JsValue::from_str(&format!("invalid token: {}", e)))?;
+        self.pending_host_event_tokens.remove(&token);
+        self.vm.wake_host_event(token);
+        Ok(())
+    }
+
+    /// Take any stdout produced by the last VM run.
+    #[wasm_bindgen(js_name = "takeOutput")]
+    pub fn take_output(&self) -> String {
+        vo_web::take_output()
+    }
+
+    fn process_outcome(&mut self, outcome: &SchedulingOutcome) -> Result<(), JsValue> {
+        match outcome {
+            SchedulingOutcome::Completed
+            | SchedulingOutcome::Suspended
+            | SchedulingOutcome::SuspendedForHostEvents => {}
+            SchedulingOutcome::Blocked => {
+                return Err(JsValue::from_str(&format!("{:?}", self.vm.deadlock_err())));
+            }
+            SchedulingOutcome::Panicked => {
+                return Err(JsValue::from_str("unexpected bounded panic outcome in VoVm"));
+            }
+        }
+
+        let pending = self.vm.scheduler.take_pending_host_events();
+        for event in pending.iter().filter(|e| !e.replay) {
+            if self.pending_host_event_tokens.insert(event.token) {
+                self.pending_host_events.push_back((event.token, event.delay_ms));
+            }
+        }
+
+        for (target_island_id, cmd) in self.vm.take_outbound_commands() {
+            self.outbound_frames.push_back(encode_island_transport_frame(target_island_id, &cmd));
+        }
+
+        let stdout = vo_web::take_output();
+        if !stdout.is_empty() {
+            studio_debug_log(&format!("[render-stdout] {}", stdout.trim_end()));
+            web_sys::console::log_1(&format!("[render-island] {}", stdout.trim_end()).into());
+        }
+
+        Ok(())
+    }
+}
+
+// =============================================================================
+// VoWebModule exports — initVFS
+// preloadExtModule is provided by vo-web (3-param version with optional jsGlueUrl).
+// =============================================================================
+
+/// No-op: VFS is initialized as part of the Studio frontend startup.
+#[wasm_bindgen(js_name = "initVFS")]
+pub fn init_vfs() -> js_sys::Promise {
+    js_sys::Promise::resolve(&JsValue::UNDEFINED)
 }
 
 // =============================================================================
@@ -381,13 +617,7 @@ pub fn wake_host_event(token: &str) -> Result<(), JsValue> {
     let mut guest = GUEST.with(|g| g.borrow_mut().take())
         .ok_or_else(|| JsValue::from_str("No guest app running"))?;
     guest.pending_host_event_tokens.remove(&token);
-    guest.vm.clear_host_output();
-    vo_runtime::output::clear_output();
     guest.vm.wake_host_event(token);
-    let outcome = guest.vm.run_scheduled()
-        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-    handle_guest_outcome(&mut guest, outcome)?;
-    let _ = guest.vm.take_host_output();
     GUEST.with(|g| *g.borrow_mut() = Some(guest));
     Ok(())
 }

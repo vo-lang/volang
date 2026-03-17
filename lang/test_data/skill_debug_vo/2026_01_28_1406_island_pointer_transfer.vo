@@ -8,6 +8,11 @@ type Data struct {
 	Y int
 }
 
+type Holder struct {
+	pad  int
+	data Data
+}
+
 func main() {
 	i := make(island)
 	p := make(port int, 1)
@@ -24,6 +29,26 @@ func main() {
 	time.Sleep(50 * time.Millisecond)
 	result := <-p
 	assert(result == 300, "expected 100+200=300")
+
+	holder := &Holder{
+		pad:  9,
+		data: Data{X: 11, Y: 22},
+	}
+
+	go @(i) func(ch port int, ptr *Data) {
+		assert(ptr != nil, "interior pointer should not be nil")
+		assert(ptr.X == 11, "interior X mismatch")
+		assert(ptr.Y == 22, "interior Y mismatch")
+		ptr.X = ptr.X + 100
+		ptr.Y = ptr.Y + 200
+		ch <- ptr.X + ptr.Y
+	}(p, &holder.data)
+
+	time.Sleep(50 * time.Millisecond)
+	result2 := <-p
+	assert(result2 == 333, "expected interior pointer copy to sum to 333")
+	assert(holder.data.X == 11, "interior pointer transfer must deep-copy pointee")
+	assert(holder.data.Y == 22, "interior pointer transfer must not mutate source")
 	
 	close(p)
 	println("PASS")

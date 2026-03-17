@@ -71,6 +71,11 @@ fn run_island_vm(
     vm.load_with_extensions((*module).clone(), ext_loader);
     vm.state.island_registry = Some(island_registry);
     vm.state.current_island_id = island_id;
+    // Initialize global variables (including interface values) before processing commands.
+    if let Err(e) = vm.run_init() {
+        eprintln!("island {}: run_init failed: {:?}", island_id, e);
+        return;
+    }
     run_island_loop(vm, &transport);
 }
 

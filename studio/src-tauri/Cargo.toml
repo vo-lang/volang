@@ -1,14 +1,14 @@
 [package]
-name = "vibe-studio"
+name = "studio"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "vibe_studio_lib"
+name = "studio_lib"
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [[bin]]
-name = "vibe-studio"
+name = "studio"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -16,19 +16,18 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["devtools"] }
-tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-vo-module = { git = "https://github.com/vo-lang/volang" }
-vo-vox = { git = "https://github.com/vo-lang/vox" }
-vo-runtime = { git = "https://github.com/vo-lang/volang" }
-vo-vm = { git = "https://github.com/vo-lang/volang" }
-vogui = { git = "https://github.com/vo-lang/vogui", default-features = false }
+toml = "0.8"
 dirs = "5"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
+vo-engine = { path = "../../lang/crates/vo-engine" }
+vo-ext = { path = "../../lang/crates/vo-ext" }
+vo-module = { path = "../../lang/crates/vo-module" }
+vo-runtime = { path = "../../lang/crates/vo-runtime" }
+vo-vm = { path = "../../lang/crates/vo-vm" }
+vogui = { path = "../../../vogui/rust", default-features = false }
 
-[workspace]
-
-# Redirect git deps to local sibling repos for development
 [patch."https://github.com/vo-lang/volang"]
 vo-common    = { path = "../../lang/crates/vo-common" }
 vo-engine    = { path = "../../lang/crates/vo-engine" }
@@ -36,12 +35,5 @@ vo-ext       = { path = "../../lang/crates/vo-ext" }
 vo-ffi-macro = { path = "../../lang/crates/vo-ffi-macro" }
 vo-module    = { path = "../../lang/crates/vo-module" }
 vo-runtime   = { path = "../../lang/crates/vo-runtime" }
-vo-stdlib    = { path = "../../lang/crates/vo-stdlib" }
 vo-syntax    = { path = "../../lang/crates/vo-syntax" }
 vo-vm        = { path = "../../lang/crates/vo-vm" }
-
-[patch."https://github.com/vo-lang/vox"]
-vo-vox = { path = "../../../vox/rust" }
-
-[patch."https://github.com/vo-lang/vogui"]
-vogui = { path = "../../../vogui/rust" }

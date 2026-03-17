@@ -27,7 +27,7 @@ use vo_vm::bytecode::Module;
 /// Compile a type-checked project to VM bytecode.
 pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     let info = TypeInfoWrapper::for_main_package(project);
-    let pkg_name = "main"; // TODO: get from project
+    let pkg_name = project.main_pkg().name().as_deref().unwrap_or("main");
     let mut ctx = CodegenContext::new(pkg_name);
     
     // 1. Register types (StructMeta, InterfaceMeta)
@@ -762,6 +762,7 @@ fn collect_promoted_methods(
                             iface_type,
                             &method_name,
                             obj_key,
+                            info,
                             tc_objs,
                             interner,
                         )
@@ -773,9 +774,11 @@ fn collect_promoted_methods(
                             ctx,
                             type_key,
                             &indices[..indices.len()-1],
+                            obj_key,
                             original_func_id,
                             base_iface_func,
                             &method_name,
+                            info,
                             tc_objs,
                         )
                     } else {
@@ -979,6 +982,8 @@ fn compile_func_body(
 ) -> Result<vo_vm::bytecode::FunctionDef, CodegenError> {
     let name = info.project.interner.resolve(func_decl.name.symbol)
         .unwrap_or("unknown");
+    let func_type = info.obj_type(info.get_def(&func_decl.name), "function must have type");
+    let param_type_keys = info.func_param_types(func_type);
     
     let mut builder = FuncBuilder::new(name);
     
@@ -1008,18 +1013,37 @@ fn compile_func_body(
     }
     
     let params = &func_decl.sig.params;
-    for (i, param) in params.iter().enumerate() {
-        let variadic_last = func_decl.sig.variadic && i == params.len() - 1;
-        let (slots, slot_types) = if variadic_last { (1, vec![vo_runtime::SlotType::GcRef]) } else { info.type_expr_layout(param.ty.id) };
+    let mut param_type_iter = param_type_keys.into_iter();
+    for param in params {
+        if param.names.is_empty() {
+            let param_type_key = param_type_iter
+                .next()
+                .expect("function signature param types missing anonymous parameter entry");
+            let slots = info.type_slot_count(param_type_key);
+            let slot_types = info.type_slot_types(param_type_key);
+            builder.define_param(None, slots, &slot_types);
+            builder.add_param_type_key(param_type_key, ctx, info);
+            continue;
+        }
         for name in &param.names {
+            let param_type_key = param_type_iter
+                .next()
+                .expect("function signature param types missing named parameter entry");
+            let slots = info.type_slot_count(param_type_key);
+            let slot_types = info.type_slot_types(param_type_key);
             let obj_key = info.get_def(name);
             let type_key = info.obj_type(obj_key, "param must have type");
             builder.define_param(Some(name.symbol), slots, &slot_types);
+            builder.add_param_type_key(param_type_key, ctx, info);
             if info.needs_boxing(obj_key, type_key) {
                 escaped_params.push((name.symbol, type_key, slots, slot_types.clone()));
             }
         }
     }
+    assert!(
+        param_type_iter.next().is_none(),
+        "function signature param types had extra entries after binding AST params"
+    );
     
     // Box escaped parameters: allocate heap storage and copy param values
     for (sym, type_key, slots, _slot_types) in escaped_params {
@@ -1292,8 +1316,24 @@ fn compile_init_and_entry(
     
     // 2. Find main function
     let main_func_id = ctx.main_func_id();
+    if main_func_id.is_none() {
+        return Err(CodegenError::FunctionNotFound(
+            "missing entry function `func main()`".to_string(),
+        ));
+    }
     
-    // 3. Generate __entry__ function
+    // 3. Generate __island_init__ function (init only, no main - for island VMs)
+    let mut island_init_builder = FuncBuilder::new("__island_init__");
+    island_init_builder.emit_op(vo_vm::instruction::Opcode::Call, init_func_id as u16, 0, 0);
+    for &user_init_id in ctx.init_functions() {
+        island_init_builder.emit_op(vo_vm::instruction::Opcode::Call, user_init_id as u16, 0, 0);
+    }
+    island_init_builder.emit_op(vo_vm::instruction::Opcode::Return, 0, 0, 0);
+    let island_init_func = island_init_builder.build();
+    let island_init_func_id = ctx.add_function(island_init_func);
+    ctx.set_island_init_func(island_init_func_id);
+
+    // 4. Generate __entry__ function (full: init + main - for main island)
     let mut entry_builder = FuncBuilder::new("__entry__");
     
     // Call __init__ for global variable initialization
@@ -1304,7 +1344,7 @@ fn compile_init_and_entry(
         entry_builder.emit_op(vo_vm::instruction::Opcode::Call, user_init_id as u16, 0, 0);
     }
     
-    // Call main if exists
+    // Call main
     if let Some(main_id) = main_func_id {
         entry_builder.emit_op(vo_vm::instruction::Opcode::Call, main_id as u16, 0, 0);
     }

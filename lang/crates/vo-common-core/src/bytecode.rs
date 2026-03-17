@@ -258,6 +258,7 @@ pub struct Module {
     pub functions: Vec<FunctionDef>,
     pub externs: Vec<ExternDef>,
     pub entry_func: u32,
+    pub island_init_func: u32,
     pub debug_info: DebugInfo,
 }
 
@@ -276,6 +277,7 @@ impl Module {
             functions: Vec::new(),
             externs: Vec::new(),
             entry_func: 0,
+            island_init_func: 0,
             debug_info: DebugInfo::new(),
         }
     }

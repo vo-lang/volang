@@ -1,5 +1,6 @@
 //! Defer and go statement compilation.
 
+use vo_runtime::SlotType;
 use vo_vm::instruction::Opcode;
 
 use vo_analysis::objects::TypeKey;
@@ -24,8 +25,12 @@ impl CallSigInfo {
         }
     }
     
-    fn calc_arg_slots(&self, call_expr: &vo_syntax::ast::CallExpr, info: &TypeInfoWrapper) -> u16 {
-        crate::expr::call::calc_method_arg_slots(call_expr, &self.param_types, self.is_variadic, info)
+    fn calc_arg_slot_types(
+        &self,
+        call_expr: &vo_syntax::ast::CallExpr,
+        info: &TypeInfoWrapper,
+    ) -> Vec<SlotType> {
+        crate::expr::call::calc_arg_slot_types(call_expr, &self.param_types, self.is_variadic, info)
     }
     
     fn compile_args(
@@ -123,8 +128,9 @@ fn compile_call_args(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(u16, u16), CodegenError> {
-    let total_arg_slots = sig.calc_arg_slots(call_expr, info);
-    let args_start = func.alloc_args(total_arg_slots);
+    let arg_slot_types = sig.calc_arg_slot_types(call_expr, info);
+    let total_arg_slots = arg_slot_types.len() as u16;
+    let args_start = func.alloc_args_typed(&arg_slot_types);
     sig.compile_args(call_expr, args_start, ctx, func, info)?;
     Ok((args_start, total_arg_slots))
 }
@@ -177,7 +183,12 @@ fn compile_defer_pkg_func_call(
     // Compile args as interface values for print/println/assert style functions
     let any_type = info.any_type();
     let total_arg_slots = call_expr.args.len() as u16 * 2; // each arg is interface (2 slots)
-    let args_start = func.alloc_args(total_arg_slots);
+    let mut arg_slot_types = Vec::with_capacity(total_arg_slots as usize);
+    for _ in &call_expr.args {
+        arg_slot_types.push(SlotType::Interface0);
+        arg_slot_types.push(SlotType::Interface1);
+    }
+    let args_start = func.alloc_args_typed(&arg_slot_types);
     
     for (i, arg) in call_expr.args.iter().enumerate() {
         let dst = args_start + (i as u16 * 2);
@@ -230,9 +241,15 @@ fn compile_defer_method_call(
             
             let sig = CallSigInfo::from_call(call_expr, info);
             let recv_slots = if *expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
-            let other_arg_slots = sig.calc_arg_slots(call_expr, info);
-            let total_arg_slots = recv_slots + other_arg_slots;
-            let args_start = func.alloc_args(total_arg_slots);
+            let mut arg_slot_types = if *expects_ptr_recv {
+                vec![SlotType::GcRef]
+            } else {
+                info.type_slot_types(actual_recv_type)
+            };
+            arg_slot_types.extend(sig.calc_arg_slot_types(call_expr, info));
+            let total_arg_slots = arg_slot_types.len() as u16;
+            debug_assert_eq!(recv_slots, if *expects_ptr_recv { 1 } else { arg_slot_types.len() as u16 - sig.calc_arg_slot_types(call_expr, info).len() as u16 });
+            let args_start = func.alloc_args_typed(&arg_slot_types);
             
             crate::expr::emit_receiver(
                 &sel.expr, args_start, recv_type, recv_storage,
@@ -276,14 +293,19 @@ fn compile_defer_iface_call(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let sig = CallSigInfo::from_call(call_expr, info);
-    let arg_slots = sig.calc_arg_slots(call_expr, info);
+    let arg_slot_types = sig.calc_arg_slot_types(call_expr, info);
     
     let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
-        ctx, method_name, method_idx as usize, arg_slots, 0
+        ctx,
+        method_name,
+        method_idx as usize,
+        sig.param_types.iter().map(|&type_key| info.type_slot_types(type_key)).collect(),
     );
     
-    let total_arg_slots = 2 + arg_slots;
-    let args_start = func.alloc_args(total_arg_slots);
+    let mut total_arg_slot_types = vec![SlotType::Interface0, SlotType::Interface1];
+    total_arg_slot_types.extend(arg_slot_types);
+    let total_arg_slots = total_arg_slot_types.len() as u16;
+    let args_start = func.alloc_args_typed(&total_arg_slot_types);
     
     // Compile interface receiver
     let iface_reg = crate::expr::compile_expr(&sel.expr, ctx, func, info)?;

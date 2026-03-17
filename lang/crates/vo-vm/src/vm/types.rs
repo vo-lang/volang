@@ -21,9 +21,11 @@ use vo_runtime::island::{EndpointRequestKind, EndpointResponseKind, IslandComman
 #[cfg(feature = "std")]
 use std::collections::{HashMap as StdHashMap, VecDeque};
 #[cfg(feature = "std")]
-use std::thread::JoinHandle;
+use std::sync::atomic::AtomicBool;
 #[cfg(feature = "std")]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "std")]
+use std::thread::JoinHandle;
 #[cfg(feature = "std")]
 use vo_runtime::island_transport::{IslandSender, IslandTransport, TransportError};
 use hashbrown::HashMap as HbHashMap;
@@ -121,6 +123,12 @@ impl EndpointRegistry {
         self.tombstone_count != 0
     }
 
+    /// Check if there are any live (non-tombstoned) endpoints.
+    /// Used to detect active cross-island communication.
+    pub fn has_live(&self) -> bool {
+        self.entries.len() > self.tombstone_count
+    }
+
     /// Iterate all live GcRefs for GC root scanning.
     pub fn live_handles(&self) -> impl Iterator<Item = GcRef> + '_ {
         self.entries.values().filter_map(|e| match e {
@@ -145,6 +153,7 @@ pub enum ExecResult {
     FrameChanged,
     /// Time slice expired, yield to scheduler.
     TimesliceExpired,
+    Interrupted,
     /// Block on external event.
     Block(crate::fiber::BlockReason),
     /// Panic, unwind or kill.
@@ -212,6 +221,7 @@ pub enum VmError {
     StackOverflow,
     StackUnderflow,
     InvalidOpcode(u8),
+    Interrupted,
     RuntimeTrap {
         kind: RuntimeTrapKind,
         msg: String,
@@ -263,6 +273,8 @@ pub struct VmState {
     #[cfg(feature = "std")]
     pub island_senders: StdHashMap<u32, Arc<dyn IslandSender>>,
     #[cfg(feature = "std")]
+    pub interrupt_flag: Option<Arc<AtomicBool>>,
+    #[cfg(feature = "std")]
     pub external_island_transport: bool,
     /// Next endpoint ID counter for this island.
     pub next_endpoint_id: u64,
@@ -297,6 +309,8 @@ impl VmState {
             main_transport: None,
             #[cfg(feature = "std")]
             island_senders: StdHashMap::new(),
+            #[cfg(feature = "std")]
+            interrupt_flag: None,
             #[cfg(feature = "std")]
             external_island_transport: false,
             next_endpoint_id: 1, // 0 is reserved

@@ -64,6 +64,23 @@ func main() {
     // Test 6: Value receiver captures copy
     c2.value = 200
     assert(getVal() == 100, "value receiver captures copy at creation time")
+
+    c3 := Counter{value: 5}
+    inc2 := c3.Inc
+    inc2()
+    assert(c3.value == 6, "pointer receiver method value on addressable value")
+
+    cp := &Counter{value: 7}
+    getFromPtr := cp.Get
+    cp.value = 8
+    assert(getFromPtr() == 8, "value receiver method value from pointer should see pointee mutation")
+
+    c4 := Counter{value: 11}
+    observe := func() int { return c4.value }
+    getEscaped := c4.Get
+    c4.value = 12
+    assert(getEscaped() == 11, "value receiver method value from escaped value captures copy")
+    assert(observe() == 12, "escaped value closure should see current value")
     
     // Test 7: Interface method value
     var iface interface {

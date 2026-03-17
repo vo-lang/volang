@@ -4,7 +4,6 @@ members = [
   "lang/crates/*",
   "lang/crates/vo-web/runtime-wasm",
   "playground/rust",
-  "studio/wasm",
   "cmd/vo",
   "cmd/vo-embed",
   "cmd/vo-test/rust",

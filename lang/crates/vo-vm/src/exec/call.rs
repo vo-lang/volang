@@ -108,7 +108,30 @@ pub fn exec_call_iface(
     let slot1 = stack_get(stack, caller_bp + inst.a as usize + 1);
 
     let itab_id = (slot0 >> 32) as u32;
-    let func_id = itab_cache.lookup_method(itab_id, method_idx);
+    let itab = itab_cache.get_itab(itab_id)
+        .unwrap_or_else(|| panic!("CallIface: missing itab_id={} method_idx={}", itab_id, method_idx));
+    let func_id = *itab.methods.get(method_idx).unwrap_or_else(|| {
+        let caller = fiber.frames.last().copied();
+        let (caller_func_id, caller_pc, caller_name) = caller
+            .map(|frame| {
+                let name = module.functions.get(frame.func_id as usize)
+                    .map(|func| func.name.as_str())
+                    .unwrap_or("<missing-func>");
+                (frame.func_id, frame.pc, name)
+            })
+            .unwrap_or((u32::MAX, 0, "<no-frame>"));
+        panic!(
+            "CallIface: method_idx={} out of bounds for itab_id={} len={} caller_func_id={} caller_name={} caller_pc={} iface_slot0={:#x} iface_slot1={:#x}",
+            method_idx,
+            itab_id,
+            itab.methods.len(),
+            caller_func_id,
+            caller_name,
+            caller_pc,
+            slot0,
+            slot1,
+        )
+    });
 
     let func = &module.functions[func_id as usize];
     let recv_slots = func.recv_slots as usize;

@@ -1,7 +1,7 @@
 //! Execution functions for Vo modules.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool};
 use vo_common_core::debug_info::SourceLoc;
 use vo_vm::bytecode::Module;
 use vo_vm::vm::{RuntimeTrapKind, SchedulingOutcome, Vm, VmError};
@@ -9,6 +9,7 @@ use vo_runtime::ext_loader::{ExtensionLoader, ExtensionManifest};
 use vo_runtime::output::{OutputSink, StdoutSink};
 
 use crate::compile::{CompileOutput, CompileError};
+use crate::toolchain::ensure_toolchain_host_installed;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunMode {
@@ -27,6 +28,7 @@ pub struct RuntimeError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeErrorKind {
     Panic,
+    Interrupted,
     IndexOutOfBounds,
     NilPointerDereference,
     TypeAssertionFailed,
@@ -43,6 +45,9 @@ impl RuntimeError {
         };
         
         let (message, location, kind) = match e {
+            VmError::Interrupted => {
+                ("interrupted by host".to_string(), None, RuntimeErrorKind::Interrupted)
+            }
             VmError::RuntimeTrap { kind, msg, loc } => {
                 let k = match kind {
                     RuntimeTrapKind::IndexOutOfBounds => RuntimeErrorKind::IndexOutOfBounds,
@@ -110,6 +115,17 @@ pub fn run_with_output(
     args: Vec<String>,
     sink: Arc<dyn OutputSink>,
 ) -> Result<(), RunError> {
+    run_with_output_interruptible(compiled, mode, args, sink, None)
+}
+
+pub fn run_with_output_interruptible(
+    compiled: CompileOutput,
+    mode: RunMode,
+    args: Vec<String>,
+    sink: Arc<dyn OutputSink>,
+    interrupt_flag: Option<Arc<AtomicBool>>,
+) -> Result<(), RunError> {
+    ensure_toolchain_host_installed();
     let module = compiled.module;
     let extensions = &compiled.extensions;
     let ext_loader = load_extensions(extensions)?;
@@ -147,6 +163,9 @@ pub fn run_with_output(
     
     vm.state.output = sink;
     vm.set_program_args(args);
+    if let Some(interrupt_flag) = interrupt_flag {
+        vm.set_interrupt_flag(interrupt_flag);
+    }
     vm.load_with_extensions(module, ext_loader);
 
     let outcome = vm.run().map_err(|e| vm_err_to_run_err(&vm, &e))?;
@@ -173,14 +192,18 @@ fn load_extensions(manifests: &[ExtensionManifest]) -> Result<Option<ExtensionLo
         return Ok(None);
     }
 
-    let mut loader = ExtensionLoader::new();
-    for manifest in manifests {
-        loader.load(&manifest.native_path, &manifest.name)
-            .map_err(|e| RunError::Runtime(RuntimeError {
-                message: format!("failed to load extension '{}': {}", manifest.name, e),
-                location: None,
-                kind: RuntimeErrorKind::Other,
-            }))?;
-    }
+    vo_module::fetch::ensure_extension_manifests_built(manifests)
+        .map_err(|e| RunError::Runtime(RuntimeError {
+            message: format!("failed to prepare native extensions: {}", e),
+            location: None,
+            kind: RuntimeErrorKind::Other,
+        }))?;
+
+    let loader = ExtensionLoader::from_manifests(manifests)
+        .map_err(|e| RunError::Runtime(RuntimeError {
+            message: format!("failed to load extensions: {}", e),
+            location: None,
+            kind: RuntimeErrorKind::Other,
+        }))?;
     Ok(Some(loader))
 }

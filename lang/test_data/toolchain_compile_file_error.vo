@@ -1,0 +1,15 @@
+package main
+
+import (
+	"strings"
+	"toolchain"
+)
+
+func main() {
+	_, err := toolchain.CompileFile("lang/test_data/select_stmt_assert_fail.vo")
+	assert(err != nil, "CompileFile should return an error for select_stmt_assert_fail.vo")
+
+	msg := err.Error()
+	assert(strings.Contains(msg, "assertion failed"), "CompileFile error should mention assertion failed")
+	assert(strings.Contains(msg, "select_stmt_assert_fail.vo"), "CompileFile error should mention the failing file")
+}

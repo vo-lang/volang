@@ -581,6 +581,7 @@ impl Module {
         });
 
         w.write_u32(self.entry_func);
+        w.write_u32(self.island_init_func);
 
         // Debug info
         w.write_vec(&self.debug_info.files, |w, f| w.write_string(f));
@@ -802,6 +803,7 @@ impl Module {
         })?;
 
         let entry_func = r.read_u32()?;
+        let island_init_func = r.read_u32()?;
 
         // Debug info (may not exist in older bytecode files)
         let debug_info = if r.remaining() > 0 {
@@ -835,6 +837,7 @@ impl Module {
             functions,
             externs,
             entry_func,
+            island_init_func,
             debug_info,
         })
     }

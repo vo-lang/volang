@@ -1,0 +1,39 @@
+package toolchain
+
+type Module any
+
+type AstNode any
+
+func CompileFile(path string) (Module, error)
+func CompileDir(path string) (Module, error)
+func CompileString(code string) (Module, error)
+
+func Run(m Module) error
+func RunJit(m Module) error
+func RunCapture(m Module) (string, error)
+func RunJitCapture(m Module) (string, error)
+func RunFile(path string) error
+func RunFileJit(path string) error
+
+func Free(m Module)
+func FreeAst(node AstNode)
+
+func Name(m Module) string
+func FormatSource(code string) (string, error)
+func FormatBytecode(m Module) string
+
+func ParseFile(path string) (AstNode, error)
+func ParseString(code string) (AstNode, error)
+func PrintAst(node AstNode) string
+
+func SaveBytecodeText(m Module, path string) error
+func LoadBytecodeText(path string) (Module, error)
+func SaveBytecodeBinary(m Module, path string) error
+func LoadBytecodeBinary(path string) (Module, error)
+
+func CompileCheck(code string) (string, error)
+
+func InitProject(dir, modName string) (string, error)
+func InitFile(path string) error
+
+func Get(spec string) (string, error)

@@ -29,9 +29,9 @@ enum MethodValueWrapperKey {
     /// Pointer receiver: captures pointer directly
     Pointer { recv_type: TypeKey, func_id: u32 },
     /// Interface: captures interface (2 slots), uses CallIface
-    Interface { method_idx: u32, param_slots: u16, ret_slots: u16 },
+    Interface { iface_type: TypeKey, method_idx: u32, param_slots: u16, ret_slots: u16 },
     /// Embedded interface: captures boxed outer struct, reads iface from offset, uses CallIface
-    EmbeddedInterface { embed_offset: u16, method_idx: u32 },
+    EmbeddedInterface { iface_type: TypeKey, embed_offset: u16, method_idx: u32 },
 }
 
 /// Get ret_slots for builtin extern functions.
@@ -114,6 +114,10 @@ pub struct CodegenContext {
     /// Type meta_id: TypeKey -> struct_meta_id
     struct_meta_ids: HashMap<TypeKey, u32>,
 
+    /// Box layout cache: physical slot layout -> synthetic struct_meta_id.
+    /// Used for PtrNew boxes whose object layout does not match the logical ValueKind.
+    box_struct_meta_ids: HashMap<Vec<u8>, u32>,
+
     /// Type meta_id: TypeKey -> interface_meta_id
     interface_meta_ids: HashMap<TypeKey, u32>,
 
@@ -188,6 +192,7 @@ impl CodegenContext {
                 functions: Vec::new(),
                 externs: Vec::new(),
                 entry_func: 0,
+                island_init_func: 0,
                 debug_info: vo_common_core::debug_info::DebugInfo::new(),
             },
             func_indices: HashMap::new(),
@@ -198,6 +203,7 @@ impl CodegenContext {
             const_float: HashMap::new(),
             const_string: HashMap::new(),
             struct_meta_ids: HashMap::new(),
+            box_struct_meta_ids: HashMap::from([(vec![vo_runtime::SlotType::GcRef as u8], 0)]),
             interface_meta_ids: HashMap::new(),
             named_type_ids: HashMap::new(),
             type_interner: TypeInterner::new(),
@@ -849,6 +855,29 @@ impl CodegenContext {
             .unwrap_or_else(|| panic!("compute_value_meta_raw: missing struct meta for type {:?}", canonical))
     }
 
+    fn box_layout_key(slot_types: &[vo_runtime::SlotType]) -> Vec<u8> {
+        slot_types.iter().map(|&slot_type| slot_type as u8).collect()
+    }
+
+    fn get_or_create_box_struct_meta_id(
+        &mut self,
+        slot_types: &[vo_runtime::SlotType],
+    ) -> u32 {
+        let key = Self::box_layout_key(slot_types);
+        if let Some(&id) = self.box_struct_meta_ids.get(&key) {
+            return id;
+        }
+
+        let id = self.module.struct_metas.len() as u32;
+        self.module.struct_metas.push(StructMeta {
+            slot_types: slot_types.to_vec(),
+            fields: Vec::new(),
+            field_index: HashMap::new(),
+        });
+        self.box_struct_meta_ids.insert(key, id);
+        id
+    }
+
     pub fn compute_value_meta_raw(
         &mut self,
         type_key: TypeKey,
@@ -881,22 +910,22 @@ impl CodegenContext {
     }
     
     /// Get ValueMeta for boxing a variable.
-    /// For reference types (channel, slice, etc.), returns ref box meta (Struct)
-    /// to avoid creating invalid GC objects with wrong ValueKind.
-    /// For value types, returns the actual type's ValueMeta.
+    /// For boxed values whose physical object layout differs from the logical ValueKind,
+    /// returns a synthetic Struct meta matching the actual slot layout stored by PtrNew.
+    /// For inline value types whose object layout already matches their logical type
+    /// (e.g. structs), returns the actual type's ValueMeta.
     pub fn get_boxing_meta(
         &mut self,
         type_key: TypeKey,
         info: &crate::type_info::TypeInfoWrapper,
     ) -> u16 {
-        // Reference types and arrays: use ref box meta (Struct with meta_id=0).
-        // PtrNew boxes for these types contain GcRef(s) pointing to the real object,
-        // NOT the object's native layout. Using the actual ValueKind (e.g. Array)
-        // would cause GC scan_object to dispatch to type-specific scanning (scan_array)
-        // which expects ArrayHeader layout — but PtrNew boxes don't have ArrayHeader.
-        if info.is_reference_type(type_key) || info.is_array(type_key) {
+        // Reference types, arrays, and interfaces are boxed as raw slot sequences.
+        // Their PtrNew object layout must therefore be described by box-local slot_types,
+        // not by the logical ValueKind's runtime object layout.
+        if info.is_reference_type(type_key) || info.is_array(type_key) || info.is_interface(type_key) {
             use vo_runtime::ValueKind;
-            let value_meta = (0u32 << 8) | (ValueKind::Struct as u32);
+            let meta_id = self.get_or_create_box_struct_meta_id(&info.type_slot_types(type_key));
+            let value_meta = (meta_id << 8) | (ValueKind::Struct as u32);
             self.add_const(Constant::Int(value_meta as i64))
         } else {
             self.get_or_create_value_meta(type_key, info)
@@ -970,6 +999,39 @@ impl CodegenContext {
         }
     }
 
+    fn define_wrapper_params(
+        builder: &mut crate::func::FuncBuilder,
+        param_layouts: &[Vec<vo_runtime::SlotType>],
+    ) -> Option<u16> {
+        let mut first_param = None;
+        for layout in param_layouts {
+            let slot = builder.define_param(None, layout.len() as u16, layout);
+            if first_param.is_none() {
+                first_param = Some(slot);
+            }
+        }
+        first_param
+    }
+
+    fn flatten_param_layouts(param_layouts: &[Vec<vo_runtime::SlotType>]) -> Vec<vo_runtime::SlotType> {
+        let mut slot_types = Vec::new();
+        for layout in param_layouts {
+            slot_types.extend_from_slice(layout);
+        }
+        slot_types
+    }
+
+    fn register_method_value_wrapper_from_builder(
+        &mut self,
+        cache_key: MethodValueWrapperKey,
+        builder: crate::func::FuncBuilder,
+    ) -> u32 {
+        let wrapper_id = self.module.functions.len() as u32;
+        self.module.functions.push(builder.build());
+        self.method_value_wrappers.insert(cache_key, wrapper_id);
+        wrapper_id
+    }
+
     /// Helper: create and register a wrapper function
     fn register_wrapper_func(
         &mut self,
@@ -980,6 +1042,7 @@ impl CodegenContext {
         code: Vec<vo_vm::instruction::Instruction>,
         slot_types: Vec<vo_runtime::SlotType>,
         capture_slot_types: Vec<vo_runtime::SlotType>,
+        param_types: Vec<vo_vm::bytecode::TransferType>,
         cache_key: MethodValueWrapperKey,
     ) -> u32 {
         use vo_vm::bytecode::FunctionDef;
@@ -1003,7 +1066,7 @@ impl CodegenContext {
             slot_types,
             capture_types: Vec::new(),
             capture_slot_types,
-            param_types: Vec::new(),
+            param_types,
         };
         let wrapper_id = self.module.functions.len() as u32;
         self.module.functions.push(wrapper_func);
@@ -1020,117 +1083,108 @@ impl CodegenContext {
         &mut self,
         recv_type: TypeKey,
         method_func_id: u32,
-        needs_deref: bool,
-        recv_slots: u16,
-        param_slots: u16,
-        ret_slots: u16,
+        is_pointer_recv: bool,
+        recv_slot_types: Vec<vo_runtime::SlotType>,
+        param_slot_types: Vec<Vec<vo_runtime::SlotType>>,
+        param_types: Vec<vo_vm::bytecode::TransferType>,
+        ret_slot_types: Vec<vo_runtime::SlotType>,
+        capture_type: vo_vm::bytecode::TransferType,
     ) -> Result<u32, crate::error::CodegenError> {
-        let cache_key = if needs_deref {
-            MethodValueWrapperKey::Value { recv_type, func_id: method_func_id }
-        } else {
+        let cache_key = if is_pointer_recv {
             MethodValueWrapperKey::Pointer { recv_type, func_id: method_func_id }
+        } else {
+            MethodValueWrapperKey::Value { recv_type, func_id: method_func_id }
         };
         if let Some(&wrapper_id) = self.method_value_wrappers.get(&cache_key) {
             return Ok(wrapper_id);
         }
-        
-        use vo_vm::instruction::{Instruction, Opcode};
-        
-        let other_param_slots = param_slots.saturating_sub(recv_slots);
-        let wrapper_param_slots = 1 + other_param_slots;
-        
-        let mut code = Vec::new();
-        let recv_reg = wrapper_param_slots;
-        
-        // ClosureGet: get receiver (pointer or boxed value) from capture 0
-        code.push(Instruction::new(Opcode::ClosureGet, recv_reg, 0, 0));
-        
-        // For value receiver: unbox via PtrGet
-        if needs_deref {
-            if recv_slots == 1 {
-                code.push(Instruction::new(Opcode::PtrGet, recv_reg, recv_reg, 0));
-            } else {
-                code.push(Instruction::with_flags(Opcode::PtrGetN, recv_slots as u8, recv_reg, recv_reg, 0));
-            }
-        }
-        
-        // Copy other params after receiver
-        Self::emit_copy_params(&mut code, 1, recv_reg + recv_slots, other_param_slots);
-        
-        // Call and return
-        let (func_id_low, func_id_high) = crate::type_info::encode_func_id(method_func_id);
-        let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
-        code.push(Instruction::with_flags(Opcode::Call, func_id_high, func_id_low, recv_reg, call_c));
-        // Return values live at recv_reg + param_slots (new call buffer layout).
-        let ret_start = recv_reg + param_slots;
-        code.push(Instruction::with_flags(Opcode::Return, 0, ret_start, ret_slots, 0));
-        
-        let suffix = if needs_deref { "" } else { "_ptr" };
+
+        let forwarded_slot_types = Self::flatten_param_layouts(&param_slot_types);
+        let recv_slots = recv_slot_types.len() as u16;
+        let forwarded_param_slots = forwarded_slot_types.len() as u16;
+        let total_arg_slots = recv_slots + forwarded_param_slots;
+        let ret_slots = ret_slot_types.len() as u16;
+
+        let suffix = if is_pointer_recv { "_ptr" } else { "" };
         let wrapper_name = format!("__method_value{}_{}", suffix, method_func_id);
-        let local_slots = wrapper_param_slots + (param_slots + ret_slots).max(1);
-        let mut slot_types = vec![vo_runtime::SlotType::GcRef]; // closure ref
-        slot_types.extend(std::iter::repeat(vo_runtime::SlotType::Value).take((local_slots - 1) as usize));
-        let capture_slot_types = vec![vo_runtime::SlotType::GcRef];
-        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, slot_types, capture_slot_types, cache_key);
-        Ok(wrapper_id)
+        let mut builder = crate::func::FuncBuilder::new_closure(&wrapper_name);
+        let first_param_slot = Self::define_wrapper_params(&mut builder, &param_slot_types);
+        builder.add_param_transfer_types(&param_types);
+        builder.add_capture_type(capture_type.meta_raw, capture_type.rttid_raw, capture_type.slots);
+        builder.add_capture_slot_types(&[vo_runtime::SlotType::GcRef]);
+
+        let capture_box = builder.alloc_slots(&[vo_runtime::SlotType::GcRef]);
+        builder.emit_op(vo_vm::instruction::Opcode::ClosureGet, capture_box, 0, 0);
+
+        let recv_reg = builder.alloc_slots(&recv_slot_types);
+        builder.emit_ptr_get(recv_reg, capture_box, 0, recv_slots);
+
+        let mut arg_slot_types = recv_slot_types;
+        arg_slot_types.extend_from_slice(&forwarded_slot_types);
+        let args_start = builder.alloc_call_buffer(&arg_slot_types, &ret_slot_types);
+        builder.emit_copy(args_start, recv_reg, recv_slots);
+        if let Some(first_param) = first_param_slot {
+            builder.emit_copy(args_start + recv_slots, first_param, forwarded_param_slots);
+        }
+
+        let (func_id_low, func_id_high) = crate::type_info::encode_func_id(method_func_id);
+        let call_c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
+        builder.emit_with_flags(vo_vm::instruction::Opcode::Call, func_id_high, func_id_low, args_start, call_c);
+        builder.set_ret_slots(ret_slots);
+        builder.emit_op(vo_vm::instruction::Opcode::Return, args_start + total_arg_slots, ret_slots, 0);
+
+        Ok(self.register_method_value_wrapper_from_builder(cache_key, builder))
     }
     
     /// Get or create wrapper function for interface method value.
     /// The wrapper gets interface from captures and calls via CallIface.
     pub fn get_or_create_method_value_wrapper_iface(
         &mut self,
+        iface_type: TypeKey,
         method_idx: u32,
-        param_slots: u16,
-        ret_slots: u16,
+        param_slot_types: Vec<Vec<vo_runtime::SlotType>>,
+        ret_slot_types: Vec<vo_runtime::SlotType>,
         method_name: &str,
+        param_types: Vec<vo_vm::bytecode::TransferType>,
+        capture_type: vo_vm::bytecode::TransferType,
     ) -> Result<u32, crate::error::CodegenError> {
-        let cache_key = MethodValueWrapperKey::Interface { method_idx, param_slots, ret_slots };
+        let param_slots = param_slot_types.iter().map(|slot_types| slot_types.len() as u16).sum();
+        let ret_slots = ret_slot_types.len() as u16;
+        let cache_key = MethodValueWrapperKey::Interface { iface_type, method_idx, param_slots, ret_slots };
         if let Some(&wrapper_id) = self.method_value_wrappers.get(&cache_key) {
             return Ok(wrapper_id);
         }
-        
-        use vo_vm::instruction::{Instruction, Opcode};
-        
-        let wrapper_param_slots = 1 + param_slots;
-        let iface_slots = 2u16;
-        
-        let mut code = Vec::new();
-        let iface_reg = wrapper_param_slots;
-        
-        // ClosureGet: get interface (2 slots) from captures
-        code.push(Instruction::new(Opcode::ClosureGet, iface_reg, 0, 0));
-        code.push(Instruction::new(Opcode::ClosureGet, iface_reg + 1, 1, 0));
-        
-        // Copy params and call
-        let args_start = iface_reg + iface_slots;
-        Self::emit_copy_params(&mut code, 1, args_start, param_slots);
-        
+
+        let wrapper_name = format!(
+            "__method_value_iface_{}_{}_t{}",
+            method_name,
+            method_idx,
+            iface_type.raw(),
+        );
+        let mut builder = crate::func::FuncBuilder::new_closure(&wrapper_name);
+        let first_param_slot = Self::define_wrapper_params(&mut builder, &param_slot_types);
+        builder.add_param_transfer_types(&param_types);
+        builder.add_capture_type(capture_type.meta_raw, capture_type.rttid_raw, capture_type.slots);
+        builder.add_capture_slot_types(&[vo_runtime::SlotType::GcRef]);
+
+        let capture_box = builder.alloc_slots(&[vo_runtime::SlotType::GcRef]);
+        builder.emit_op(vo_vm::instruction::Opcode::ClosureGet, capture_box, 0, 0);
+
+        let iface_slot = builder.alloc_slots(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
+        builder.emit_ptr_get(iface_slot, capture_box, 0, 2);
+
+        let forwarded_slot_types = Self::flatten_param_layouts(&param_slot_types);
+        let args_start = builder.alloc_call_buffer(&forwarded_slot_types, &ret_slot_types);
+        if let Some(first_param) = first_param_slot {
+            builder.emit_copy(args_start, first_param, param_slots);
+        }
+
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
-        code.push(Instruction::with_flags(Opcode::CallIface, method_idx as u8, iface_reg, args_start, call_c));
-        // Return values live at args_start + param_slots (new call buffer layout).
-        let ret_start = args_start + param_slots;
-        code.push(Instruction::with_flags(Opcode::Return, 0, ret_start, ret_slots, 0));
-        
-        let wrapper_name = format!("__method_value_iface_{}_{}", method_name, method_idx);
-        let local_slots = wrapper_param_slots + iface_slots + (param_slots + ret_slots).max(1);
-        // Interface wrapper: ClosureGet writes itab/data to iface_reg and iface_reg+1.
-        // iface_reg = wrapper_param_slots = 1 + param_slots, NOT always slot 1.
-        // slot_types must place Interface0/Interface1 at the correct offset.
-        let mut slot_types = vec![vo_runtime::SlotType::GcRef]; // slot 0: closure ref
-        // slots 1..wrapper_param_slots: forwarded params (Value)
-        for _ in 1..wrapper_param_slots {
-            slot_types.push(vo_runtime::SlotType::Value);
-        }
-        // slots wrapper_param_slots..wrapper_param_slots+2: interface from ClosureGet
-        slot_types.push(vo_runtime::SlotType::Interface0);
-        slot_types.push(vo_runtime::SlotType::Interface1);
-        // remaining slots: Value
-        while slot_types.len() < local_slots as usize {
-            slot_types.push(vo_runtime::SlotType::Value);
-        }
-        let capture_slot_types = vec![vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1];
-        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, slot_types, capture_slot_types, cache_key);
-        Ok(wrapper_id)
+        builder.emit_with_flags(vo_vm::instruction::Opcode::CallIface, method_idx as u8, iface_slot, args_start, call_c);
+        builder.set_ret_slots(ret_slots);
+        builder.emit_op(vo_vm::instruction::Opcode::Return, args_start + param_slots, ret_slots, 0);
+
+        Ok(self.register_method_value_wrapper_from_builder(cache_key, builder))
     }
     
     /// Get or create wrapper function for method value on embedded interface field.
@@ -1138,13 +1192,15 @@ impl CodegenContext {
     /// and calls via CallIface.
     pub fn get_or_create_method_value_wrapper_embedded_iface(
         &mut self,
+        iface_type: TypeKey,
         embed_offset: u16,
         method_idx: u32,
         param_slots: u16,
         ret_slots: u16,
         method_name: &str,
+        param_types: Vec<vo_vm::bytecode::TransferType>,
     ) -> Result<u32, crate::error::CodegenError> {
-        let cache_key = MethodValueWrapperKey::EmbeddedInterface { embed_offset, method_idx };
+        let cache_key = MethodValueWrapperKey::EmbeddedInterface { iface_type, embed_offset, method_idx };
         if let Some(&wrapper_id) = self.method_value_wrappers.get(&cache_key) {
             return Ok(wrapper_id);
         }
@@ -1172,12 +1228,28 @@ impl CodegenContext {
         let ret_start = args_start + param_slots;
         code.push(Instruction::with_flags(Opcode::Return, 0, ret_start, ret_slots, 0));
         
-        let wrapper_name = format!("__method_value_embed_iface_{}_{}", method_name, method_idx);
+        let wrapper_name = format!(
+            "__method_value_embed_iface_{}_{}_t{}_o{}",
+            method_name,
+            method_idx,
+            iface_type.raw(),
+            embed_offset,
+        );
         let local_slots = wrapper_param_slots + 1 + iface_slots + (param_slots + ret_slots).max(1);
         let mut slot_types = vec![vo_runtime::SlotType::GcRef; 2]; // closure ref + ClosureGet dest
         slot_types.extend(std::iter::repeat(vo_runtime::SlotType::Value).take((local_slots as usize).saturating_sub(2)));
         let capture_slot_types = vec![vo_runtime::SlotType::GcRef];
-        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, slot_types, capture_slot_types, cache_key);
+        let wrapper_id = self.register_wrapper_func(
+            wrapper_name,
+            wrapper_param_slots,
+            ret_slots,
+            local_slots,
+            code,
+            slot_types,
+            capture_slot_types,
+            param_types,
+            cache_key,
+        );
         Ok(wrapper_id)
     }
 
@@ -1209,6 +1281,10 @@ impl CodegenContext {
 
     pub fn set_entry_func(&mut self, func_id: u32) {
         self.module.entry_func = func_id;
+    }
+
+    pub fn set_island_init_func(&mut self, func_id: u32) {
+        self.module.island_init_func = func_id;
     }
 
     pub fn set_runtime_types(&mut self, runtime_types: Vec<vo_runtime::RuntimeType>) {

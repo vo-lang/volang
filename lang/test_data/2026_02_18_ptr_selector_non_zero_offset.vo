@@ -36,6 +36,8 @@ func main() {
 	testIndirectEmbeddedPointerSelector()
 	testHeapBoxedSelectorAddress()
 	testHeapBoxedNestedSelectorAddress()
+	testInteriorPointerMethodValueAcrossGC()
+	testInteriorPointerClosureAcrossGC()
 }
 
 func testDirectPointerSelector() {
@@ -126,4 +128,61 @@ func testHeapBoxedNestedSelectorAddress() {
 	p.Move(3, 4)
 	assert(w.c.pt.x == 14)
 	assert(w.c.pt.y == 26)
+}
+
+func allocatePressure() {
+	items := make([]*Wrapper, 0)
+	for i := 0; i < 4096; i += 1 {
+		items = append(items, &Wrapper{
+			tag: i,
+			c: Container{
+				pad: i + 1,
+				pt:  Point{x: i, y: i * 2},
+			},
+		})
+	}
+	assert(len(items) == 4096)
+}
+
+func testInteriorPointerMethodValueAcrossGC() {
+	c := &Container{
+		pad: 7,
+		pt:  Point{x: 40, y: 50},
+	}
+	move := c.pt.Move
+	done := make(chan bool, 1)
+
+	go func() {
+		move(9, 11)
+		done <- true
+	}()
+
+	allocatePressure()
+	<-done
+
+	assert(c.pt.x == 49)
+	assert(c.pt.y == 61)
+}
+
+func testInteriorPointerClosureAcrossGC() {
+	w := &Wrapper{
+		tag: 3,
+		c: Container{
+			pad: 2,
+			pt:  Point{x: 5, y: 8},
+		},
+	}
+	p := &w.c.pt
+	done := make(chan bool, 1)
+
+	go func() {
+		p.Move(4, 6)
+		done <- true
+	}()
+
+	allocatePressure()
+	<-done
+
+	assert(w.c.pt.x == 9)
+	assert(w.c.pt.y == 14)
 }

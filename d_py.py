@@ -73,8 +73,6 @@ STUDIO_NATIVE_DEBUG_LOG = PROJECT_ROOT / '.tmp' / 'studio-native-debug.log'
 
 # Cache directories
 CLI_CACHE_DIR = PROJECT_ROOT / 'cmd' / 'vo' / '.vo-cache'
-VOX_EXT_DIR = PROJECT_ROOT.parent / 'vox'
-VOX_EXT_RUST_DIR = VOX_EXT_DIR / 'rust' / 'src'
 
 
 def get_newest_mtime(*paths: Path, pattern: str = '*') -> float:
@@ -92,7 +90,7 @@ def get_newest_mtime(*paths: Path, pattern: str = '*') -> float:
     return newest
 
 
-def invalidate_cli_cache_if_needed():
+def invalidate_cli_cache_if_needed(vo_bin: Optional[Path] = None):
     """Clear CLI .vo-cache if source files or vox binary are newer than cache."""
     import shutil
     
@@ -103,20 +101,12 @@ def invalidate_cli_cache_if_needed():
     
     # Check CLI source files
     cli_src_mtime = get_newest_mtime(PROJECT_ROOT / 'cmd' / 'vo', pattern='*.vo')
-    
-    # Check vox library source files
-    vox_vo_mtime = get_newest_mtime(VOX_EXT_DIR, pattern='*.vo')
-    
-    # Check vox Rust extension source files
-    vox_rust_mtime = get_newest_mtime(VOX_EXT_RUST_DIR, pattern='*.rs')
-    
-    # Check vo-vox extension binary mtime (catches runtime changes)
-    # This is what CLI actually uses to compile/run code
-    vox_lib = VOX_EXT_DIR / 'rust' / 'target' / 'debug' / 'libvo_vox.dylib'
-    vox_lib_mtime = vox_lib.stat().st_mtime if vox_lib.exists() else 0.0
+    stdlib_src_mtime = get_newest_mtime(STDLIB_DIR, STDLIB_DIR / 'stdlib.toml', pattern='*.vo')
+    current_vo_bin = vo_bin or VO_BIN_DEBUG
+    vo_bin_mtime = current_vo_bin.stat().st_mtime if current_vo_bin.exists() else 0.0
     
     # Check if any source or binary is newer than cache
-    newest_src = max(cli_src_mtime, vox_vo_mtime, vox_rust_mtime, vox_lib_mtime)
+    newest_src = max(cli_src_mtime, stdlib_src_mtime, vo_bin_mtime)
     if newest_src > cache_mtime:
         print(f"{Colors.DIM}CLI cache outdated, clearing...{Colors.NC}")
         shutil.rmtree(CLI_CACHE_DIR)
@@ -268,7 +258,7 @@ def run_playground(build_only: bool = False):
         print(f"\n{Colors.GREEN}Playground stopped{Colors.NC}")
 
 
-STUDIO_WASM_FILE = PROJECT_ROOT / 'studio' / 'wasm' / 'pkg' / 'vo_studio_wasm_bg.wasm'
+STUDIO_WASM_FILE = PROJECT_ROOT / 'studio' / 'public' / 'wasm' / 'vo_studio_wasm_bg.wasm'
 STUDIO_WASM_SOURCE_CRATES = [
     'vo-codegen', 'vo-analysis', 'vo-runtime', 'vo-vm', 'vo-common-core',
     'vo-stdlib', 'vo-web', 'vo-web/runtime-wasm', 'vo-ffi-macro', 'vo-common',
@@ -307,11 +297,6 @@ def studio_wasm_needs_build() -> bool:
     if get_newest_mtime(shell_vo, shell_vo / 'vo.mod', pattern='*.vo') > wasm_mtime:
         return True
 
-    # vox/vox.vo — embedded as shell handler dependency
-    vox_vo = VOX_EXT_DIR / 'vox.vo'
-    if vox_vo.exists() and vox_vo.stat().st_mtime > wasm_mtime:
-        return True
-
     # lang/crates/* dependencies
     for crate in STUDIO_WASM_SOURCE_CRATES:
         crate_src = PROJECT_ROOT / 'lang' / 'crates' / crate / 'src'
@@ -330,7 +315,13 @@ def build_studio_wasm():
     """Build vo-studio WASM (studio/wasm)."""
     print(f"{Colors.BOLD}Building vo-studio WASM...{Colors.NC}")
     studio_wasm_dir = PROJECT_ROOT / 'studio' / 'wasm'
-    build_cmd = ['wasm-pack', 'build', str(studio_wasm_dir), '--target', 'web', '--release']
+    build_cmd = [
+        'wasm-pack', 'build', str(studio_wasm_dir),
+        '--target', 'web',
+        '--out-dir', '../public/wasm',
+        '--out-name', 'vo_studio_wasm',
+        '--release',
+    ]
     code, stdout, stderr = run_cmd(build_cmd, capture=False)
     if code != 0:
         print(f"{Colors.RED}vo-studio WASM build failed{Colors.NC}")
@@ -395,48 +386,6 @@ def run_studio_native(build_wasm: bool = False, launch_url: Optional[str] = None
         subprocess.run(['zsh', '-lc', 'npm run tauri dev'], cwd=studio_dir, check=True, env=env)
     except KeyboardInterrupt:
         print(f"\n{Colors.GREEN}Studio (native) stopped{Colors.NC}")
-
-
-def ensure_vox_extension_built(arch: str = '64', release: bool = False, native: bool = False):
-    """Build vo-vox extension if needed."""
-    if native:
-        profile = 'release-native'
-    else:
-        profile = 'release' if release else 'debug'
-    
-    vox_target_dir = VOX_EXT_DIR / 'rust' / 'target'
-    if arch == '32':
-        lib_path = vox_target_dir / TARGET_32 / profile / 'libvo_vox.dylib'
-    else:
-        lib_path = vox_target_dir / profile / 'libvo_vox.dylib'
-    
-    # Check if library exists and is up-to-date
-    if lib_path.exists():
-        lib_mtime = lib_path.stat().st_mtime
-        # Check vox source files
-        vox_src_mtime = get_newest_mtime(VOX_EXT_RUST_DIR, pattern='*.rs')
-        cargo_mtime = (VOX_EXT_DIR / 'rust' / 'Cargo.toml').stat().st_mtime
-        # Also check all runtime/vm/codegen source files (vox depends on them)
-        crates_dir = PROJECT_ROOT / 'lang' / 'crates'
-        runtime_mtime = get_newest_mtime(crates_dir, pattern='*.rs')
-        if lib_mtime > max(vox_src_mtime, cargo_mtime, runtime_mtime):
-            return  # Up-to-date
-    
-    print(f"{Colors.DIM}Building vo-vox extension ({profile})...{Colors.NC}")
-    build_cmd = ['cargo', 'build', '-q', '--features', 'ffi']
-    if native:
-        build_cmd.extend(['--profile', 'release-native'])
-    elif release:
-        build_cmd.append('--release')
-    if arch == '32':
-        build_cmd.extend(['--target', TARGET_32])
-    
-    code, _, stderr = run_cmd(build_cmd, cwd=VOX_EXT_DIR / 'rust')
-    if code != 0:
-        print(f"{Colors.RED}Extension build failed:{Colors.NC}\n{stderr}")
-        sys.exit(1)
-
-
 
 def get_vo_bin(release: bool = False, arch: str = '64', native: bool = False) -> Path:
     """Get the path to vo binary for the given architecture."""
@@ -541,6 +490,9 @@ class TestRunner:
         else:
             self.cli_cache = CLI_DIR
 
+    def _is_blank_vo_file(self, path: Path) -> bool:
+        return path.read_bytes().strip() == b''
+
     def _make_vo_cmd(self, *args) -> list[str]:
         """Build vo command: vo <cli_args...>"""
         base = [str(self.vo_bin)] + list(args)
@@ -588,61 +540,32 @@ class TestRunner:
         import shutil
         
         cli_32 = self.cli_cache
-        libs_32 = PROJECT_ROOT / 'target' / TARGET_32 / 'libs'
         
         # Check if CLI .vo files need update
         cli_marker = cli_32 / '.32bit_cache_ready'
         cli_needs_update = not cli_marker.exists()
         if not cli_needs_update:
             marker_time = cli_marker.stat().st_mtime
-            cli_src_mtime = get_newest_mtime(CLI_DIR, pattern='*.vo')
-            cli_needs_update = cli_src_mtime > marker_time
-        
-        # Check if vox needs update (separate from CLI)
-        libs_marker = libs_32 / 'vox' / '.libs_ready'
-        libs_needs_update = not libs_marker.exists()
-        if not libs_needs_update:
-            marker_time = libs_marker.stat().st_mtime
-            vox_src_mtime = max(
-                get_newest_mtime(VOX_EXT_DIR, pattern='*.vo'),
-                get_newest_mtime(VOX_EXT_DIR / 'vo.ext.toml'),
+            cli_src_mtime = max(
+                get_newest_mtime(CLI_DIR, pattern='*.vo'),
+                get_newest_mtime(STDLIB_DIR, STDLIB_DIR / 'stdlib.toml', pattern='*.vo'),
             )
-            libs_needs_update = vox_src_mtime > marker_time
-        
-        if not cli_needs_update and not libs_needs_update:
+            cli_needs_update = cli_src_mtime > marker_time
+
+        if not cli_needs_update:
             return
         
         # Update CLI .vo files if needed
-        if cli_needs_update:
-            # Only remove .vo files, keep .vo-cache
-            cli_32.mkdir(parents=True, exist_ok=True)
-            for vo_file in cli_32.glob('*.vo'):
-                vo_file.unlink()
-            for vo_file in CLI_DIR.glob('*.vo'):
-                shutil.copy(vo_file, cli_32 / vo_file.name)
-            # Clear .vo-cache since CLI source changed
-            vo_cache = cli_32 / '.vo-cache'
-            if vo_cache.exists():
-                shutil.rmtree(vo_cache)
-            cli_marker.touch()
-        
-        # Update vox cache if needed
-        if libs_needs_update:
-            dst_dir = libs_32 / 'vox'
-            dst_dir.mkdir(parents=True, exist_ok=True)
-            
-            for vo_file in VOX_EXT_DIR.glob('*.vo'):
-                shutil.copy(vo_file, dst_dir / vo_file.name)
-            
-            toml_src = VOX_EXT_DIR / 'vo.ext.toml'
-            if toml_src.exists():
-                # Write vo.ext.toml with absolute path to the 32-bit library
-                # to avoid fragile relative path calculations across repos.
-                vox_lib_abs = (VOX_EXT_DIR / 'rust' / 'target' / TARGET_32 / 'debug' / 'libvo_vox').resolve()
-                with open(dst_dir / 'vo.ext.toml', 'w') as f:
-                    f.write(f'[extension]\nname = "vox"\npath = "{vox_lib_abs}"\n')
-            
-            libs_marker.touch()
+        cli_32.mkdir(parents=True, exist_ok=True)
+        for vo_file in cli_32.glob('*.vo'):
+            vo_file.unlink()
+        for vo_file in CLI_DIR.glob('*.vo'):
+            shutil.copy(vo_file, cli_32 / vo_file.name)
+        # Clear .vo-cache since CLI source changed
+        vo_cache = cli_32 / '.vo-cache'
+        if vo_cache.exists():
+            shutil.rmtree(vo_cache)
+        cli_marker.touch()
 
     def run(self, mode: str, single_file: Optional[str] = None):
         # Handle WASM tests separately
@@ -661,11 +584,8 @@ class TestRunner:
             print(f"{Colors.RED}Build failed:{Colors.NC}\n{stderr}")
             sys.exit(1)
         
-        # Build vo-vox extension (both 32-bit and 64-bit need it)
-        ensure_vox_extension_built(arch=self.arch, release=False)
-        
         # Invalidate CLI cache if source files or binary changed
-        invalidate_cli_cache_if_needed()
+        invalidate_cli_cache_if_needed(self.vo_bin)
         
         # Setup 32-bit CLI cache with adjusted extension paths
         if self.arch == '32':
@@ -709,6 +629,21 @@ class TestRunner:
 
             # gc mode: only gc_* files; other modes: all files
             if is_gc_mode and not is_gc_file:
+                continue
+
+            if self._is_blank_vo_file(path):
+                if run_vm:
+                    self.vm_skipped += 1
+                    if self.verbose:
+                        print(f"  {Colors.YELLOW}⊘{Colors.NC} {rel_file} [vm blank placeholder]")
+                if run_jit:
+                    self.jit_skipped += 1
+                    if self.verbose:
+                        print(f"  {Colors.YELLOW}⊘{Colors.NC} {rel_file} [jit blank placeholder]")
+                if run_nostd:
+                    self.nostd_skipped += 1
+                    if self.verbose:
+                        print(f"  {Colors.YELLOW}⊘{Colors.NC} {rel_file} [nostd blank placeholder]")
                 continue
 
             should_fail = self.should_fail(rel_file)
@@ -1255,19 +1190,6 @@ class BenchmarkRunner:
             print(f"{Colors.RED}Build failed:{Colors.NC}\n{stderr}")
             sys.exit(1)
     
-    def _set_vox_path_for_benchmark(self):
-        """Temporarily update vo.ext.toml to use release library."""
-        vox_toml = PROJECT_ROOT / 'libs' / 'vox' / 'vo.ext.toml'
-        if vox_toml.exists():
-            content = vox_toml.read_text()
-            new_content = content.replace(
-                'target/debug/libvo_vox.so',
-                'target/release/libvo_vox.so'
-            )
-            if new_content != content:
-                vox_toml.write_text(new_content)
-                print(f"{Colors.DIM}Updated vo.ext.toml for release{Colors.NC}")
-
     def _list_benchmarks(self):
         print("Available benchmarks:")
         for d in sorted(BENCHMARK_DIR.iterdir()):
@@ -1553,7 +1475,7 @@ class LocStats:
         'Code Generation': ['vo-codegen'],
         'Runtime': ['vo-vm', 'vo-runtime'],
         'JIT': ['vo-jit'],
-        'Tools (CLI/Module)': ['vo', 'vo-vox', 'vo-module'],
+        'Tools (CLI/Module)': ['vo', 'vo-module'],
     }
 
     def __init__(self, with_tests: bool = False):
