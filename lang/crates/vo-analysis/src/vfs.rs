@@ -1,16 +1,18 @@
 //! Package resolution system.
 //!
-//! Provides three package sources:
+//! Provides package sources and resolver decorators:
 //! - StdSource: Standard library packages (embedded in binary for vo-cli)
-//! - LocalSource: Local packages (relative paths)
 //! - ModSource: External module dependencies
+//!
+//! Migrated from vo-module-old/src/vfs.rs — package resolution is a compiler
+//! concern, not a module protocol concern (spec §9.1).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use vo_common::abi::package_abi_path;
 use vo_common::vfs::{FileSystem, RealFs};
-use crate::ext_manifest::extension_name_from_content;
+use vo_module::ext_manifest::extension_name_from_content;
 
 /// A resolved package from the package resolver.
 #[derive(Debug, Clone)]
@@ -55,7 +57,7 @@ impl<F: FileSystem> StdSource<F> {
     }
     
     pub fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
-        resolve_package(&self.fs, import_path, import_path)
+        resolve_package(&self.fs, Path::new(import_path), import_path)
     }
     
     pub fn can_handle(&self, import_path: &str) -> bool {
@@ -63,95 +65,126 @@ impl<F: FileSystem> StdSource<F> {
     }
 }
 
-/// Local package source (relative paths).
-pub struct LocalSource<F: FileSystem = RealFs> {
-    fs: F,
-}
-
-impl LocalSource<RealFs> {
-    pub fn new(root: PathBuf) -> Self {
-        Self { fs: RealFs::new(&root) }
-    }
-}
-
-impl<F: FileSystem> LocalSource<F> {
-    pub fn with_fs(fs: F) -> Self {
-        Self { fs }
-    }
-    
-    /// Resolve a local import path relative to the importer's directory.
-    /// 
-    /// Go semantics: `../foo` from `pkg/sub/` resolves to `pkg/foo/`
-    pub fn resolve(&self, import_path: &str, importer_dir: &str) -> Option<VfsPackage> {
-        // Combine importer_dir with the relative import path, then normalize
-        // so that "../" sequences are resolved before hitting the filesystem.
-        // This is critical for MemoryFs which stores keys verbatim.
-        let raw = if importer_dir.is_empty() || importer_dir == "." {
-            import_path.to_string()
-        } else {
-            format!("{}/{}", importer_dir, import_path)
-        };
-        let full_path = normalize_path(&raw);
-        resolve_package(&self.fs, &full_path, import_path)
-    }
-    
-    pub fn can_handle(&self, import_path: &str) -> bool {
-        import_path.starts_with("./") || import_path.starts_with("../")
-    }
-}
-
 /// External module package source (module cache).
 pub struct ModSource<F: FileSystem = RealFs> {
     fs: F,
+    allowed_modules: Option<HashSet<String>>,
+    module_roots: Option<HashMap<String, PathBuf>>,
 }
 
 impl ModSource<RealFs> {
     pub fn new(root: PathBuf) -> Self {
-        Self { fs: RealFs::new(&root) }
+        Self {
+            fs: RealFs::new(&root),
+            allowed_modules: None,
+            module_roots: None,
+        }
     }
 }
 
 impl<F: FileSystem> ModSource<F> {
     pub fn with_fs(fs: F) -> Self {
-        Self { fs }
+        Self {
+            fs,
+            allowed_modules: None,
+            module_roots: None,
+        }
+    }
+
+    pub fn with_allowed_modules<I, S>(mut self, modules: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_modules = Some(modules.into_iter().map(Into::into).collect());
+        self
+    }
+
+    pub fn with_module_roots<I, S, P>(mut self, roots: I) -> Self
+    where
+        I: IntoIterator<Item = (S, P)>,
+        S: Into<String>,
+        P: Into<PathBuf>,
+    {
+        self.module_roots = Some(
+            roots
+                .into_iter()
+                .map(|(module, root)| (module.into(), root.into()))
+                .collect(),
+        );
+        self
     }
     
     pub fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
-        resolve_package(&self.fs, import_path, import_path)
+        if !self.is_allowed(import_path) {
+            return None;
+        }
+        if let Some((module, root)) = self.match_module_root(import_path) {
+            let fs_path = if import_path == module {
+                root.clone()
+            } else {
+                root.join(&import_path[module.len() + 1..])
+            };
+            return resolve_package(&self.fs, &fs_path, import_path);
+        }
+        resolve_package(&self.fs, Path::new(import_path), import_path)
     }
     
     pub fn can_handle(&self, import_path: &str) -> bool {
-        !import_path.starts_with("./") 
+        import_path.contains('.')
+            && import_path != "."
+            && import_path != ".."
+            && !import_path.starts_with("./")
             && !import_path.starts_with("../")
-            && import_path.contains('.')
+            && !import_path.starts_with('/')
+    }
+
+    fn is_allowed(&self, import_path: &str) -> bool {
+        match &self.allowed_modules {
+            None => true,
+            Some(allowed_modules) => allowed_modules.iter().any(|module| {
+                import_path == module
+                    || (import_path.starts_with(module) && import_path.as_bytes().get(module.len()) == Some(&b'/'))
+            }),
+        }
+    }
+
+    fn match_module_root(&self, import_path: &str) -> Option<(&str, &PathBuf)> {
+        self.module_roots
+            .as_ref()?
+            .iter()
+            .filter(|(module, _)| {
+                import_path == module.as_str()
+                    || (import_path.starts_with(module.as_str())
+                        && import_path.as_bytes().get(module.len()) == Some(&b'/'))
+            })
+            .max_by_key(|(module, _)| module.len())
+            .map(|(module, root)| (module.as_str(), root))
     }
 }
 
 /// Trait for package resolution.
 pub trait Resolver: Send + Sync {
     /// Resolve an import path.
-    /// 
-    /// `import_path` - the import path (e.g., "fmt", "./foo", "../bar")
-    /// `importer_dir` - directory of the importing package (for relative path resolution)
-    fn resolve(&self, import_path: &str, importer_dir: &str) -> Option<VfsPackage>;
+    ///
+    /// `import_path` - the import path (e.g., "fmt", "encoding/json", "github.com/acme/lib")
+    fn resolve(&self, import_path: &str) -> Option<VfsPackage>;
 }
 
 /// Package resolver with potentially different file systems for each source.
-pub struct PackageResolverMixed<S: FileSystem, L: FileSystem, M: FileSystem> {
+pub struct PackageResolverMixed<S: FileSystem, M: FileSystem> {
     pub std: StdSource<S>,
-    pub local: LocalSource<L>,
     pub r#mod: ModSource<M>,
 }
 
 /// Type alias for resolver with same filesystem for all sources.
-pub type PackageResolver<F = RealFs> = PackageResolverMixed<F, F, F>;
+pub type PackageResolver<F = RealFs> = PackageResolverMixed<F, F>;
 
 impl PackageResolver<RealFs> {
-    /// Create a resolver with three filesystem root paths using real filesystem.
-    pub fn with_roots(std_root: PathBuf, local_root: PathBuf, mod_root: PathBuf) -> Self {
+    /// Create a resolver with stdlib and module-cache roots using real filesystem.
+    pub fn with_roots(std_root: PathBuf, mod_root: PathBuf) -> Self {
         Self {
             std: StdSource::new(std_root),
-            local: LocalSource::new(local_root),
             r#mod: ModSource::new(mod_root),
         }
     }
@@ -162,54 +195,24 @@ impl<F: FileSystem + Clone> PackageResolver<F> {
     pub fn with_fs(fs: F) -> Self {
         Self {
             std: StdSource::with_fs(fs.clone()),
-            local: LocalSource::with_fs(fs.clone()),
             r#mod: ModSource::with_fs(fs),
         }
     }
 }
 
-impl<S: FileSystem + Send + Sync, L: FileSystem + Send + Sync, M: FileSystem + Send + Sync> Resolver for PackageResolverMixed<S, L, M> {
-    fn resolve(&self, import_path: &str, importer_dir: &str) -> Option<VfsPackage> {
-        if import_path.starts_with("./") || import_path.starts_with("../") {
-            return self.local.resolve(import_path, importer_dir);
-        }
-        
+impl<S: FileSystem + Send + Sync, M: FileSystem + Send + Sync> Resolver for PackageResolverMixed<S, M> {
+    fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
         if import_path.contains('.') {
             return self.r#mod.resolve(import_path);
         }
-        
-        if let Some(pkg) = self.std.resolve(import_path) {
-            return Some(pkg);
-        }
-        
-        self.local.resolve(import_path, importer_dir)
-    }
-}
 
-/// Normalize a forward-slash path string by resolving `.` and `..` components.
-///
-/// This is needed for `MemoryFs` which stores keys verbatim and cannot resolve
-/// `"pkg/sub/../foo"` the way the OS would.  RealFs is also normalized as a
-/// minor cleanliness win.
-fn normalize_path(path: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    for component in path.split('/') {
-        match component {
-            "" | "." => {}
-            ".." => { parts.pop(); }
-            other => parts.push(other),
-        }
-    }
-    if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
+        self.std.resolve(import_path)
     }
 }
 
 /// Helper to resolve a package from a file system.
-fn resolve_package<F: FileSystem>(fs: &F, fs_path: &str, import_path: &str) -> Option<VfsPackage> {
-    let pkg_path = Path::new(fs_path);
+fn resolve_package<F: FileSystem>(fs: &F, fs_path: &Path, import_path: &str) -> Option<VfsPackage> {
+    let pkg_path = fs_path;
     if !fs.is_dir(pkg_path) {
         return None;
     }
@@ -288,7 +291,7 @@ fn find_module_identity_abs(abs_pkg_path: &Path) -> Option<(String, String)> {
     }
 }
 
-fn read_module_path_from_disk(dir: &Path) -> Option<String> {
+pub fn read_module_path_from_disk(dir: &Path) -> Option<String> {
     let content = std::fs::read_to_string(dir.join("vo.mod")).ok()?;
     for line in content.lines() {
         if let Some(rest) = line.trim().strip_prefix("module ") {
@@ -351,6 +354,9 @@ fn relative_path_ancestors(path: &Path) -> Vec<PathBuf> {
 }
 
 fn diff_path(path: &Path, base: &Path) -> String {
+    if base == Path::new(".") || base.as_os_str().is_empty() {
+        return path_to_forward_slashes(path);
+    }
     path.strip_prefix(base)
         .ok()
         .map(path_to_forward_slashes)
@@ -432,7 +438,7 @@ impl<R> ReplacingResolver<R> {
 }
 
 impl<R: Resolver> Resolver for ReplacingResolver<R> {
-    fn resolve(&self, import_path: &str, importer_dir: &str) -> Option<VfsPackage> {
+    fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
         // Check if any replace directive matches this import.
         // Matches exact module path or sub-packages (module + "/").
         for (module, local_dir) in &self.replaces {
@@ -453,11 +459,11 @@ impl<R: Resolver> Resolver for ReplacingResolver<R> {
                     local_dir.join(sub)
                 };
                 let fs = RealFs::new(&resolve_dir);
-                return resolve_package(&fs, ".", import_path);
+                return resolve_package(&fs, Path::new("."), import_path);
             }
         }
 
-        self.inner.resolve(import_path, importer_dir)
+        self.inner.resolve(import_path)
     }
 }
 
@@ -484,7 +490,7 @@ impl<R, F> CurrentModuleResolver<R, F> {
 }
 
 impl<R: Resolver, F: FileSystem> Resolver for CurrentModuleResolver<R, F> {
-    fn resolve(&self, import_path: &str, importer_dir: &str) -> Option<VfsPackage> {
+    fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
         if let Some(module) = &self.current_module {
             let sub_path = if import_path == module {
                 Some("")
@@ -498,9 +504,9 @@ impl<R: Resolver, F: FileSystem> Resolver for CurrentModuleResolver<R, F> {
 
             if let Some(sub_path) = sub_path {
                 let local_path = if sub_path.is_empty() {
-                    "."
+                    Path::new(".")
                 } else {
-                    sub_path
+                    Path::new(sub_path)
                 };
                 if let Some(pkg) = resolve_package(&self.local_fs, local_path, import_path) {
                     return Some(pkg);
@@ -508,7 +514,7 @@ impl<R: Resolver, F: FileSystem> Resolver for CurrentModuleResolver<R, F> {
             }
         }
 
-        self.inner.resolve(import_path, importer_dir)
+        self.inner.resolve(import_path)
     }
 }
 
@@ -520,19 +526,13 @@ mod tests {
     #[test]
     fn test_can_handle() {
         let std_vfs = StdSource::new(PathBuf::new());
-        let local_vfs = LocalSource::new(PathBuf::new());
         let mod_vfs = ModSource::new(PathBuf::new());
         
         // Stdlib
         assert!(std_vfs.can_handle("fmt"));
         assert!(std_vfs.can_handle("encoding/json"));
         assert!(!std_vfs.can_handle("github.com/user/pkg"));
-        
-        // Local
-        assert!(local_vfs.can_handle("./mylib"));
-        assert!(local_vfs.can_handle("../shared"));
-        assert!(!local_vfs.can_handle("fmt"));
-        
+
         // Mod
         assert!(mod_vfs.can_handle("github.com/user/pkg"));
         assert!(!mod_vfs.can_handle("fmt"));
@@ -540,33 +540,18 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_path() {
-        assert_eq!(normalize_path("./foo"), "foo");
-        assert_eq!(normalize_path("pkg/sub/../foo"), "pkg/foo");
-        assert_eq!(normalize_path("a/b/../../c"), "c");
-        assert_eq!(normalize_path("a/./b"), "a/b");
-        assert_eq!(normalize_path(".."), ".");
-        assert_eq!(normalize_path("a/b/c"), "a/b/c");
-    }
-
-    #[test]
-    fn test_local_source_resolves_parent_relative_path_with_memory_fs() {
+    fn test_package_resolver_does_not_resolve_relative_imports() {
         let mut fs = MemoryFs::new();
         fs.add_file("shared/utils.vo", "package utils\n");
 
-        let source = LocalSource::with_fs(fs);
-        // Importer is in "pkg/sub", import path is "../../shared"
-        // Raw: "pkg/sub/../../shared" → normalized: "shared"
-        let pkg = source.resolve("../../shared", "pkg/sub")
-            .expect("../../shared from pkg/sub should resolve to shared/");
-        assert_eq!(pkg.name, "shared");
-        assert_eq!(pkg.files.len(), 1);
+        let resolver = PackageResolver::with_fs(fs);
+        assert!(resolver.resolve("../../shared").is_none());
     }
 
     #[test]
     fn test_current_module_resolves_root_and_subpackage_from_local_fs() {
         let mut fs = MemoryFs::new();
-        fs.add_file("vo.mod", "module github.com/acme/game\n");
+        fs.add_file("vo.mod", "module github.com/acme/game\n\nvo 0.1\n");
         fs.add_file("main.vo", "package main\n");
         fs.add_file("codec/codec.vo", "package codec\n");
 
@@ -577,16 +562,56 @@ mod tests {
             Some("github.com/acme/game".to_string()),
         );
 
-        let root = resolver.resolve("github.com/acme/game", ".")
+        let root = resolver.resolve("github.com/acme/game")
             .expect("root package should resolve");
         assert_eq!(root.path, "github.com/acme/game");
         assert_eq!(root.name, "game");
         assert_eq!(root.files.len(), 1);
 
-        let sub = resolver.resolve("github.com/acme/game/codec", ".")
+        let sub = resolver.resolve("github.com/acme/game/codec")
             .expect("subpackage should resolve");
         assert_eq!(sub.path, "github.com/acme/game/codec");
         assert_eq!(sub.name, "codec");
         assert_eq!(sub.files.len(), 1);
+    }
+
+    #[test]
+    fn test_mod_source_resolves_versioned_module_roots() {
+        let mut fs = MemoryFs::new();
+        fs.add_file(
+            "cache/github.com/acme/game/.vo/versions/v0.1.0/vo.mod",
+            "module github.com/acme/game\n\nvo 0.1\n",
+        );
+        fs.add_file(
+            "cache/github.com/acme/game/.vo/versions/v0.1.0/game.vo",
+            "package game\n",
+        );
+        fs.add_file(
+            "cache/github.com/acme/game/.vo/versions/v0.1.0/codec/codec.vo",
+            "package codec\n",
+        );
+
+        let mod_source = ModSource::with_fs(fs).with_module_roots([(
+            "github.com/acme/game",
+            PathBuf::from("cache/github.com/acme/game/.vo/versions/v0.1.0"),
+        )]);
+
+        let root = mod_source
+            .resolve("github.com/acme/game")
+            .expect("root package should resolve from mapped version dir");
+        assert_eq!(root.path, "github.com/acme/game");
+        assert_eq!(
+            root.fs_path,
+            PathBuf::from("cache/github.com/acme/game/.vo/versions/v0.1.0")
+        );
+
+        let sub = mod_source
+            .resolve("github.com/acme/game/codec")
+            .expect("subpackage should resolve from mapped version dir");
+        assert_eq!(sub.path, "github.com/acme/game/codec");
+        assert_eq!(
+            sub.fs_path,
+            PathBuf::from("cache/github.com/acme/game/.vo/versions/v0.1.0/codec")
+        );
     }
 }

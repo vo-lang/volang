@@ -126,9 +126,13 @@ pub fn run_with_output_interruptible(
     interrupt_flag: Option<Arc<AtomicBool>>,
 ) -> Result<(), RunError> {
     ensure_toolchain_host_installed();
-    let module = compiled.module;
-    let extensions = &compiled.extensions;
-    let ext_loader = load_extensions(extensions)?;
+    let CompileOutput {
+        module,
+        source_root: _,
+        extensions,
+        locked_modules,
+    } = compiled;
+    let ext_loader = load_extensions(&extensions, &locked_modules)?;
     
     #[cfg(feature = "jit")]
     let mut vm = match mode {
@@ -187,12 +191,15 @@ fn vm_err_to_run_err(vm: &Vm, e: &VmError) -> RunError {
     RunError::Runtime(runtime_err)
 }
 
-fn load_extensions(manifests: &[ExtensionManifest]) -> Result<Option<ExtensionLoader>, RunError> {
+fn load_extensions(
+    manifests: &[ExtensionManifest],
+    locked_modules: &[vo_module::schema::lockfile::LockedModule],
+) -> Result<Option<ExtensionLoader>, RunError> {
     if manifests.is_empty() {
         return Ok(None);
     }
 
-    vo_module::fetch::ensure_extension_manifests_built(manifests)
+    crate::compile::ensure_extension_manifests_built(manifests, locked_modules)
         .map_err(|e| RunError::Runtime(RuntimeError {
             message: format!("failed to prepare native extensions: {}", e),
             location: None,

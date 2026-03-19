@@ -13,15 +13,15 @@ use vo_vm::vm::{SchedulingOutcome, Vm};
 const EVENT_ID_GAME_LOOP: i32 = -5;
 
 // =============================================================================
-// StudioNativePlatform — vogui platform for the native Studio GUI VM thread
+// StudioTickProvider — tick loop capability for the native Studio GUI VM thread
 // =============================================================================
 
-struct StudioNativePlatform {
+struct StudioTickProvider {
     event_tx: mpsc::Sender<GuestEvent>,
     loop_stop_flags: Arc<Mutex<HashMap<i32, Arc<AtomicBool>>>>,
 }
 
-impl StudioNativePlatform {
+impl StudioTickProvider {
     fn new(event_tx: mpsc::Sender<GuestEvent>) -> Self {
         Self {
             event_tx,
@@ -30,20 +30,9 @@ impl StudioNativePlatform {
     }
 }
 
-impl vogui::VoguiPlatform for StudioNativePlatform {
-    fn start_timeout(&self, _id: i32, _ms: i32) {}
-    fn clear_timeout(&self, _id: i32) {}
-    fn start_interval(&self, _id: i32, _ms: i32) {}
-    fn clear_interval(&self, _id: i32) {}
-    fn navigate(&self, _path: &str) {}
-    fn get_current_path(&self) -> String { "/".to_string() }
-
-    fn has_host_capability(&self, name: &str) -> bool {
-        name == "external_island_host"
-    }
-
-    fn start_game_loop(&self, id: i32) {
-        debug_log(&format!("[studio-native] start_game_loop id={}", id));
+impl vo_ext::host::tick::TickProvider for StudioTickProvider {
+    fn start_tick_loop(&self, id: i32) {
+        debug_log(&format!("[studio-native] start_tick_loop id={}", id));
         let stop = Arc::new(AtomicBool::new(false));
         self.loop_stop_flags.lock().unwrap().insert(id, Arc::clone(&stop));
         let tx = self.event_tx.clone();
@@ -67,8 +56,8 @@ impl vogui::VoguiPlatform for StudioNativePlatform {
         });
     }
 
-    fn stop_game_loop(&self, id: i32) {
-        debug_log(&format!("[studio-native] stop_game_loop id={}", id));
+    fn stop_tick_loop(&self, id: i32) {
+        debug_log(&format!("[studio-native] stop_tick_loop id={}", id));
         if let Some(flag) = self.loop_stop_flags.lock().unwrap().remove(&id) {
             flag.store(true, Ordering::Relaxed);
         }
@@ -181,7 +170,7 @@ fn build_gui_vm(output: CompileOutput) -> Result<Vm, String> {
     let ext_loader = if output.extensions.is_empty() {
         None
     } else {
-        vo_module::fetch::ensure_extension_manifests_built(&output.extensions)
+        vo_engine::ensure_extension_manifests_built(&output.extensions, &output.locked_modules)
             .map_err(|error| format!("failed to prepare extensions: {}", error))?;
         Some(
             ExtensionLoader::from_manifests(&output.extensions)
@@ -209,7 +198,14 @@ fn run_gui_thread(
             return;
         }
     };
-    vogui::set_platform(Box::new(StudioNativePlatform::new(platform_tx)));
+    let bridge = vo_ext::host::HostBridge::new()
+        .with_capability("external_island_host")
+        .with_tick(Box::new(StudioTickProvider::new(platform_tx)));
+    vo_ext::host::install(bridge);
+    // Broadcast the bridge pointer into extension dylibs (RTLD_LOCAL means
+    // they have their own copy of the BRIDGE thread-local).
+    let ptr = vo_ext::host::with_bridge(|b| vo_ext::host::encode_bridge_ptr(b)).unwrap();
+    unsafe { vm.broadcast_bridge(ptr); }
     vm.clear_host_output();
     let outcome = match vm.run() {
         Ok(outcome) => outcome,
@@ -226,7 +222,11 @@ fn run_gui_thread(
     let _ = render_tx.send(Ok(bytes));
     while let Ok(event) = event_rx.recv() {
         match event {
-            GuestEvent::Shutdown => { vogui::clear_platform(); break; },
+            GuestEvent::Shutdown => {
+                vm.clear_extension_bridges();
+                vo_ext::host::clear();
+                break;
+            },
             GuestEvent::Ide { handler_id, payload } => match dispatch_event(&mut vm, handler_id, &payload, &app) {
                 Ok(bytes) => {
                     let _ = render_tx.send(Ok(bytes));
@@ -248,7 +248,8 @@ fn run_gui_thread(
                         // arrived while another event was being processed) — skip.
                     } else {
                         eprintln!("guest VM error on async IDE event: {}", error);
-                        vogui::clear_platform();
+                        vm.clear_extension_bridges();
+                        vo_ext::host::clear();
                         return;
                     }
                 }

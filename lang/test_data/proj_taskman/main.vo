@@ -4,8 +4,8 @@ package main
 
 import (
 	"fmt"
-    "utils"
-    "task"
+    "github.com/vo-lang/test/taskman/utils"
+    "github.com/vo-lang/test/taskman/task"
 )
 
 // printHeader prints a formatted header

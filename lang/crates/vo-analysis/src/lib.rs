@@ -20,6 +20,7 @@ pub mod scope;
 pub mod selection;
 pub mod typ;
 pub mod universe;
+pub mod vfs;
 
 pub use check::sendable::{check_sendable, Sendability};
 pub use check::{Checker, Initializer, TypeAndValue, TypeInfo};

@@ -9,7 +9,6 @@ description = "Proc macro for Vo native FFI - generates type-safe extern functio
 proc-macro = true
 
 [dependencies]
-vo-module = { path = "../vo-module" }
 vo-syntax = { path = "../vo-syntax" }
 vo-common = { path = "../vo-common", default-features = false }
 syn = { version = "2", features = ["full"] }

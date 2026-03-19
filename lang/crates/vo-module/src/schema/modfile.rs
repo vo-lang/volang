@@ -1,0 +1,253 @@
+use crate::identity::ModulePath;
+use crate::version::{DepConstraint, ToolchainConstraint};
+use crate::Error;
+
+/// Parsed representation of a `vo.mod` file.
+#[derive(Debug, Clone)]
+pub struct ModFile {
+    pub module: ModulePath,
+    pub vo: ToolchainConstraint,
+    pub require: Vec<Require>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Require {
+    pub module: ModulePath,
+    pub constraint: DepConstraint,
+}
+
+impl ModFile {
+    /// Parse a `vo.mod` file from its text content.
+    pub fn parse(content: &str) -> Result<Self, Error> {
+        let mut module: Option<ModulePath> = None;
+        let mut vo: Option<ToolchainConstraint> = None;
+        let mut require: Vec<Require> = Vec::new();
+
+        for (line_num, raw_line) in content.lines().enumerate() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with("//") {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(3, ' ').collect();
+            let directive = parts[0];
+            match directive {
+                "module" => {
+                    if module.is_some() {
+                        return Err(Error::ModFileParse(
+                            format!("line {}: duplicate 'module' directive", line_num + 1),
+                        ));
+                    }
+                    if parts.len() < 2 {
+                        return Err(Error::ModFileParse(
+                            format!("line {}: 'module' requires a path argument", line_num + 1),
+                        ));
+                    }
+                    if parts.len() > 2 {
+                        return Err(Error::ModFileParse(
+                            format!("line {}: unexpected tokens after module path", line_num + 1),
+                        ));
+                    }
+                    module = Some(ModulePath::parse(parts[1]).map_err(|e| {
+                        Error::ModFileParse(format!("line {}: {e}", line_num + 1))
+                    })?);
+                }
+                "vo" => {
+                    if vo.is_some() {
+                        return Err(Error::ModFileParse(
+                            format!("line {}: duplicate 'vo' directive", line_num + 1),
+                        ));
+                    }
+                    if parts.len() < 2 {
+                        return Err(Error::ModFileParse(
+                            format!("line {}: 'vo' requires a constraint argument", line_num + 1),
+                        ));
+                    }
+                    if parts.len() > 2 {
+                        return Err(Error::ModFileParse(
+                            format!("line {}: unexpected tokens after vo constraint", line_num + 1),
+                        ));
+                    }
+                    vo = Some(ToolchainConstraint::parse(parts[1]).map_err(|e| {
+                        Error::ModFileParse(format!("line {}: {e}", line_num + 1))
+                    })?);
+                }
+                "require" => {
+                    if parts.len() < 3 {
+                        return Err(Error::ModFileParse(
+                            format!("line {}: 'require' needs <module-path> <constraint>", line_num + 1),
+                        ));
+                    }
+                    let mp = ModulePath::parse(parts[1]).map_err(|e| {
+                        Error::ModFileParse(format!("line {}: {e}", line_num + 1))
+                    })?;
+                    let constraint = DepConstraint::parse(parts[2]).map_err(|e| {
+                        Error::ModFileParse(format!("line {}: {e}", line_num + 1))
+                    })?;
+                    // Check for duplicate module path
+                    if require.iter().any(|r| r.module == mp) {
+                        return Err(Error::ModFileParse(
+                            format!("line {}: duplicate require for {}", line_num + 1, mp),
+                        ));
+                    }
+                    require.push(Require { module: mp, constraint });
+                }
+                "replace" => {
+                    return Err(Error::ModFileParse(
+                        format!("line {}: 'replace' directive is not supported in vo.mod", line_num + 1),
+                    ));
+                }
+                _ => {
+                    return Err(Error::ModFileParse(
+                        format!("line {}: unknown directive '{directive}'", line_num + 1),
+                    ));
+                }
+            }
+        }
+
+        let module = module.ok_or_else(|| {
+            Error::ModFileParse("missing 'module' directive".to_string())
+        })?;
+        let vo = vo.ok_or_else(|| {
+            Error::ModFileParse("missing 'vo' directive".to_string())
+        })?;
+
+        Ok(ModFile { module, vo, require })
+    }
+
+    /// Render the canonical `vo.mod` text.
+    /// Canonical format: module, then vo, then require lines sorted by module path.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("module {}\n", self.module));
+        out.push_str(&format!("vo {}\n", self.vo));
+        if !self.require.is_empty() {
+            out.push('\n');
+            let mut sorted: Vec<&Require> = self.require.iter().collect();
+            sorted.sort_by(|a, b| a.module.cmp(&b.module));
+            for req in sorted {
+                out.push_str(&format!("require {} {}\n", req.module, req.constraint));
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_basic() {
+        let content = "\
+module github.com/acme/app
+vo ^1.0.0
+
+require github.com/vo-lang/vogui ^0.4.0
+require github.com/acme/http v1.3.1
+";
+        let mf = ModFile::parse(content).unwrap();
+        assert_eq!(mf.module.as_str(), "github.com/acme/app");
+        assert_eq!(mf.vo.to_string(), "^1.0.0");
+        assert_eq!(mf.require.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_with_comments() {
+        let content = "\
+// This is my module
+module github.com/acme/app
+vo ^1.0.0
+// A dependency
+require github.com/vo-lang/vogui ^0.4.0
+";
+        let mf = ModFile::parse(content).unwrap();
+        assert_eq!(mf.require.len(), 1);
+    }
+
+    #[test]
+    fn test_reject_replace() {
+        let content = "\
+module github.com/acme/app
+vo ^1.0.0
+replace github.com/vo-lang/vogui ../vogui
+";
+        assert!(ModFile::parse(content).is_err());
+    }
+
+    #[test]
+    fn test_reject_duplicate_module() {
+        let content = "\
+module github.com/acme/app
+module github.com/acme/other
+vo ^1.0.0
+";
+        assert!(ModFile::parse(content).is_err());
+    }
+
+    #[test]
+    fn test_reject_duplicate_require() {
+        let content = "\
+module github.com/acme/app
+vo ^1.0.0
+require github.com/vo-lang/vogui ^0.4.0
+require github.com/vo-lang/vogui ^0.5.0
+";
+        assert!(ModFile::parse(content).is_err());
+    }
+
+    #[test]
+    fn test_reject_unknown_directive() {
+        let content = "\
+module github.com/acme/app
+vo ^1.0.0
+files (something)
+";
+        assert!(ModFile::parse(content).is_err());
+    }
+
+    #[test]
+    fn test_render_canonical() {
+        let content = "\
+module github.com/acme/app
+vo ^1.0.0
+
+require github.com/vo-lang/voplay ~0.7.2
+require github.com/acme/http v1.3.1
+require github.com/vo-lang/vogui ^0.4.0
+";
+        let mf = ModFile::parse(content).unwrap();
+        let rendered = mf.render();
+        let reparsed = ModFile::parse(&rendered).unwrap();
+        // Check sorted order
+        assert_eq!(reparsed.require[0].module.as_str(), "github.com/acme/http");
+        assert_eq!(reparsed.require[1].module.as_str(), "github.com/vo-lang/vogui");
+        assert_eq!(reparsed.require[2].module.as_str(), "github.com/vo-lang/voplay");
+    }
+
+    #[test]
+    fn test_roundtrip() {
+        let content = "\
+module github.com/acme/app
+vo ^1.0.0
+
+require github.com/acme/http v1.3.1
+require github.com/vo-lang/vogui ^0.4.0
+";
+        let mf = ModFile::parse(content).unwrap();
+        let rendered = mf.render();
+        let mf2 = ModFile::parse(&rendered).unwrap();
+        assert_eq!(mf2.render(), rendered);
+    }
+
+    #[test]
+    fn test_missing_module() {
+        let content = "vo ^1.0.0\n";
+        assert!(ModFile::parse(content).is_err());
+    }
+
+    #[test]
+    fn test_missing_vo() {
+        let content = "module github.com/acme/app\n";
+        assert!(ModFile::parse(content).is_err());
+    }
+}

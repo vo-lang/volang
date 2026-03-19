@@ -2,7 +2,7 @@ use crate::commands::pathing::{resolve_compile_target, resolve_run_target};
 use crate::state::AppState;
 use std::path::PathBuf;
 use vo_engine::{
-    compile_prepared, format_text, prepare_with_auto_install, run_with_output,
+    compile_with_auto_install, format_text, run_with_output,
     run_with_output_interruptible, CompileOutput, RunError, RunMode, RuntimeErrorKind,
 };
 use vo_runtime::output::CaptureSink;
@@ -55,8 +55,7 @@ pub enum RunEvent {
 }
 
 pub(crate) fn prepare_and_compile(target: &str) -> Result<CompileOutput, String> {
-    prepare_with_auto_install(target).map_err(|e| e.to_string())?;
-    compile_prepared(target).map_err(|e| e.to_string())
+    compile_with_auto_install(target).map_err(|e| e.to_string())
 }
 
 fn diagnostic_from_error(file: String, message: String) -> DiagnosticError {

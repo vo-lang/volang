@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use vo_module::ExtensionManifest;
+use vo_module::ext_manifest::ExtensionManifest;
 
 use crate::gui_runtime::{GuestHandle, PushReceiver};
 

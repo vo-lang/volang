@@ -111,20 +111,9 @@ pub struct File {
     pub span: Span,
 }
 
-/// The kind of import (local/stdlib vs external).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImportKind {
-    /// Standard library or local package: `import "fmt"`, `import "utils"`
-    Standard,
-    /// External dependency with @ marker: `import @"gin"`
-    External,
-}
-
 /// An import declaration.
 #[derive(Debug, Clone)]
 pub struct ImportDecl {
-    /// The kind of import (standard/local vs external).
-    pub kind: ImportKind,
     /// The import path (string literal).
     pub path: StringLit,
     /// Optional alias for the import (e.g., `import m "math"`).

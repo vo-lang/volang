@@ -259,6 +259,30 @@ impl Vm {
         self.finish_load(module);
     }
     
+    /// Broadcast a host bridge pointer to all loaded extension dylibs.
+    ///
+    /// Each dylib that exports `vo_ext_set_host_bridge` will receive the
+    /// raw pointer.  Call this after `vo_ext::host::install` on the host side.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must come from `vo_ext::host::encode_bridge_ptr` and the
+    /// bridge must remain alive until `clear_extension_bridges`.
+    #[cfg(feature = "std")]
+    pub unsafe fn broadcast_bridge(&self, ptr: usize) {
+        if let Some(loader) = &self.extension_loader {
+            loader.broadcast_bridge(ptr);
+        }
+    }
+
+    /// Clear the host bridge reference from all loaded extension dylibs.
+    #[cfg(feature = "std")]
+    pub fn clear_extension_bridges(&self) {
+        if let Some(loader) = &self.extension_loader {
+            loader.clear_bridge_all();
+        }
+    }
+
     /// Finish loading a module (shared by load and load_with_extensions).
     fn finish_load(&mut self, module: Module) {
         let total_global_slots: usize = module.globals.iter().map(|g| g.slots as usize).sum();

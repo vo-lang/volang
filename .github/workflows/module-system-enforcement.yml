@@ -1,0 +1,83 @@
+name: Module System Enforcement
+
+on:
+  pull_request:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+jobs:
+  quality:
+    name: Format & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --exclude vo-playground -- -D warnings
+
+      - name: cargo check (native)
+        run: cargo check --workspace --all-targets --exclude vo-playground
+
+      - name: cargo check (wasm)
+        run: cargo check -p vo-web --target wasm32-unknown-unknown
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test (release)
+        run: cargo test --workspace --release --exclude vo-playground
+
+      - name: vo-web wasm target check (release)
+        run: cargo check -p vo-web --target wasm32-unknown-unknown --release
+
+  first-party-phase6-lint:
+    name: Phase 6 - ${{ matrix.repo }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        repo:
+          - vogui
+          - voplay
+          - vopack
+          - vostore
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: volang
+
+      - uses: actions/checkout@v4
+        with:
+          repository: vo-lang/${{ matrix.repo }}
+          path: module
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: volang -> target
+
+      - name: Phase 6 release verify
+        working-directory: volang
+        run: cargo run -p vo --release -- release verify ../module

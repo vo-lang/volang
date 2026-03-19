@@ -1,109 +1,82 @@
-//! Extension manifest discovery.
-//!
-//! Discovers native extension manifests (`vo.ext.toml`) from package directories.
-
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use toml::Value;
+
+use crate::Error;
 
 /// Parsed extension manifest from `vo.ext.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionManifest {
-    /// Extension name.
     pub name: String,
-    /// Path to native library.
     pub native_path: PathBuf,
     pub manifest_path: PathBuf,
+    pub wasm: Option<WasmExtensionManifest>,
 }
 
-/// Error type for extension manifest parsing.
-#[derive(Debug)]
-pub enum ExtManifestError {
-    /// Manifest parse error.
-    Parse(String),
-    /// IO error.
-    Io(std::io::Error),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WasmExtensionKind {
+    Standalone,
+    Bindgen,
 }
 
-impl std::fmt::Display for ExtManifestError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ExtManifestError::Parse(msg) => write!(f, "manifest error: {}", msg),
-            ExtManifestError::Io(e) => write!(f, "IO error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for ExtManifestError {}
-
-impl From<std::io::Error> for ExtManifestError {
-    fn from(e: std::io::Error) -> Self {
-        ExtManifestError::Io(e)
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmExtensionManifest {
+    pub kind: WasmExtensionKind,
+    pub wasm: String,
+    pub js_glue: Option<String>,
 }
 
 /// Discover extension manifests from a package directory.
-///
-/// Looks for `vo.ext.toml` files and returns parsed manifests.
-pub fn discover_extensions(pkg_root: &Path) -> Result<Vec<ExtensionManifest>, ExtManifestError> {
+/// Looks for `vo.ext.toml` and returns parsed manifests.
+pub fn discover_extensions(pkg_root: &Path) -> Result<Vec<ExtensionManifest>, Error> {
     let manifest_path = pkg_root.join("vo.ext.toml");
     if !manifest_path.exists() {
         return Ok(Vec::new());
     }
-
     let manifest = parse_manifest(&manifest_path)?;
     Ok(vec![manifest])
 }
 
-/// Parse a vo.ext.toml manifest file.
-fn parse_manifest(path: &Path) -> Result<ExtensionManifest, ExtManifestError> {
+fn parse_manifest(path: &Path) -> Result<ExtensionManifest, Error> {
     let content = std::fs::read_to_string(path)?;
-    let value = parse_toml_value(&content)?;
+    let value: toml::Value =
+        toml::from_str(&content).map_err(|e| Error::ExtManifestParse(e.to_string()))?;
     let extension = value
         .get("extension")
-        .and_then(Value::as_table)
-        .ok_or_else(|| ExtManifestError::Parse("missing [extension] section".to_string()))?;
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| Error::ExtManifestParse("missing [extension] section".to_string()))?;
 
     let name = table_string(extension, "name")
-        .ok_or_else(|| ExtManifestError::Parse("missing 'name' in [extension]".to_string()))?;
-    let native_path = table_string(extension, "path")
-        .ok_or_else(|| ExtManifestError::Parse("missing 'path' in [extension]".to_string()))?;
+        .ok_or_else(|| Error::ExtManifestParse("missing 'name' in [extension]".to_string()))?;
+    let native_path_str = table_string(extension, "path")
+        .ok_or_else(|| Error::ExtManifestParse("missing 'path' in [extension]".to_string()))?;
 
     let parent = path.parent().unwrap_or(Path::new("."));
-    let full_path = resolve_library_path(parent.join(&native_path));
+    let full_path = resolve_library_path(parent.join(&native_path_str));
+    let wasm = parse_wasm_extension_from_value(&value)?;
     Ok(ExtensionManifest {
         name,
         native_path: full_path,
         manifest_path: path.to_path_buf(),
+        wasm,
     })
 }
 
-/// Resolve library path with platform-specific extension and profile.
-///
-/// - Replaces `{profile}` with the Cargo build profile (`debug`, `release`,
-///   `release-native`, …) captured at compile time via `build.rs`.
-/// - If the path doesn't have a known library extension (.so, .dylib, .dll),
-///   automatically append the correct one for the current platform.
 fn resolve_library_path(path: PathBuf) -> PathBuf {
-    // Replace {profile} placeholder with the actual Cargo profile name embedded
-    // by build.rs.  This correctly distinguishes debug / release / release-native.
     let path_str = path.to_string_lossy();
     let path = if path_str.contains("{profile}") {
         PathBuf::from(path_str.replace("{profile}", env!("VO_BUILD_PROFILE")))
     } else {
         path
     };
-    
-    // Check if already has a library extension
+
     if let Some(ext) = path.extension() {
         let ext = ext.to_string_lossy();
         if ext == "so" || ext == "dylib" || ext == "dll" {
             return path;
         }
     }
-    
-    // Append platform-specific extension
+
     #[cfg(target_os = "linux")]
     {
         path.with_extension("so")
@@ -114,70 +87,108 @@ fn resolve_library_path(path: PathBuf) -> PathBuf {
     }
     #[cfg(target_os = "windows")]
     {
-        // Windows: libfoo -> foo.dll
-        let file_name = path.file_name()
+        let file_name = path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
-        let new_name = if file_name.starts_with("lib") {
-            &file_name[3..]
-        } else {
-            file_name
-        };
+        let new_name = file_name.strip_prefix("lib").unwrap_or(file_name);
         path.with_file_name(new_name).with_extension("dll")
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
-        // Fallback: try .so
         path.with_extension("so")
     }
 }
 
-/// Extract a string value from a TOML line like `key = "value"`.
-fn extract_toml_string(line: &str) -> Option<String> {
-    let parts: Vec<&str> = line.splitn(2, '=').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let val = parts[1].trim();
-    if val.starts_with('"') && val.ends_with('"') && val.len() >= 2 {
-        Some(val[1..val.len()-1].to_string())
-    } else {
-        None
-    }
-}
-
 pub fn extension_name_from_content(content: &str) -> Option<String> {
-    let value = parse_toml_value(content).ok()?;
+    let value: toml::Value = toml::from_str(content).ok()?;
     value
         .get("extension")
-        .and_then(Value::as_table)
+        .and_then(toml::Value::as_table)
         .and_then(|table| table_string(table, "name"))
 }
 
-/// Check if a `vo.ext.toml` content string declares `type = "wasm-bindgen"`.
-///
-/// This is used to determine whether a WASM extension module needs a JS glue
-/// file (wasm-bindgen style) or uses the standalone C-ABI convention.
-///
-/// Works on the raw content of `vo.ext.toml` — callers can source it from
-/// fetched files, a VFS, or disk.
-pub fn is_bindgen_ext_content(vo_ext_toml_content: &str) -> bool {
-    let Ok(value) = parse_toml_value(vo_ext_toml_content) else {
-        return false;
-    };
-    value
-        .get("extension")
-        .and_then(Value::as_table)
-        .and_then(|table| table_string(table, "type"))
-        .as_deref() == Some("wasm-bindgen")
+pub fn wasm_extension_from_content(content: &str) -> Option<WasmExtensionManifest> {
+    let value: toml::Value = toml::from_str(content).ok()?;
+    parse_wasm_extension_from_value(&value).ok().flatten()
 }
 
-fn parse_toml_value(content: &str) -> Result<Value, ExtManifestError> {
-    toml::from_str(content).map_err(|error| ExtManifestError::Parse(error.to_string()))
+pub fn is_bindgen_ext_content(vo_ext_toml_content: &str) -> bool {
+    matches!(
+        wasm_extension_from_content(vo_ext_toml_content),
+        Some(WasmExtensionManifest {
+            kind: WasmExtensionKind::Bindgen,
+            ..
+        })
+    )
+}
+
+fn parse_wasm_extension_from_value(
+    value: &toml::Value,
+) -> Result<Option<WasmExtensionManifest>, Error> {
+    let Some(extension) = value.get("extension").and_then(toml::Value::as_table) else {
+        return Ok(None);
+    };
+    let Some(wasm) = extension.get("wasm") else {
+        return Ok(None);
+    };
+    let wasm = wasm
+        .as_table()
+        .ok_or_else(|| Error::ExtManifestParse("[extension.wasm] must be a table".to_string()))?;
+    Ok(Some(parse_wasm_extension_table(wasm)?))
+}
+
+fn parse_wasm_extension_table(
+    table: &toml::value::Table,
+) -> Result<WasmExtensionManifest, Error> {
+    let kind = match table_string(table, "type").as_deref() {
+        Some("standalone") => WasmExtensionKind::Standalone,
+        Some("bindgen") => WasmExtensionKind::Bindgen,
+        Some(other) => {
+            return Err(Error::ExtManifestParse(format!(
+                "unsupported [extension.wasm] type: {}",
+                other,
+            )))
+        }
+        None => {
+            return Err(Error::ExtManifestParse(
+                "missing 'type' in [extension.wasm]".to_string(),
+            ))
+        }
+    };
+    let wasm = table_string(table, "wasm")
+        .ok_or_else(|| Error::ExtManifestParse("missing 'wasm' in [extension.wasm]".to_string()))?;
+    if wasm.trim().is_empty() {
+        return Err(Error::ExtManifestParse(
+            "'wasm' in [extension.wasm] must not be empty".to_string(),
+        ));
+    }
+    let js_glue = table_string(table, "js_glue");
+    match kind {
+        WasmExtensionKind::Standalone => {
+            if js_glue.is_some() {
+                return Err(Error::ExtManifestParse(
+                    "'js_glue' is only valid for bindgen [extension.wasm]".to_string(),
+                ));
+            }
+        }
+        WasmExtensionKind::Bindgen => {
+            if js_glue.as_deref().unwrap_or("").trim().is_empty() {
+                return Err(Error::ExtManifestParse(
+                    "missing 'js_glue' in bindgen [extension.wasm]".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(WasmExtensionManifest {
+        kind,
+        wasm,
+        js_glue,
+    })
 }
 
 fn table_string(table: &toml::value::Table, key: &str) -> Option<String> {
-    table.get(key).and_then(Value::as_str).map(str::to_string)
+    table.get(key).and_then(toml::Value::as_str).map(str::to_string)
 }
 
 #[cfg(test)]
@@ -185,25 +196,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_toml_string() {
-        assert_eq!(extract_toml_string(r#"name = "test""#), Some("test".to_string()));
-        assert_eq!(extract_toml_string(r#"path = "native/lib.so""#), Some("native/lib.so".to_string()));
-        assert_eq!(extract_toml_string("invalid"), None);
+    fn test_is_bindgen_ext_content() {
+        assert!(is_bindgen_ext_content(
+            r#"
+[extension]
+name = "vogui"
+
+[extension.wasm]
+type = "bindgen"
+wasm = "vogui.wasm"
+js_glue = "vogui.js"
+"#
+        ));
+        assert!(!is_bindgen_ext_content(
+            r#"
+[extension]
+name = "zip"
+
+[extension.wasm]
+type = "standalone"
+wasm = "zip.wasm"
+"#
+        ));
+        assert!(!is_bindgen_ext_content(""));
     }
 
     #[test]
-    fn test_is_bindgen_ext_content() {
-        assert!(is_bindgen_ext_content(r#"
+    fn test_wasm_extension_from_content() {
+        let wasm = wasm_extension_from_content(
+            r#"
 [extension]
 name = "vogui"
-type = "wasm-bindgen"
-"#));
-        assert!(!is_bindgen_ext_content(r#"
+path = "rust/target/{profile}/libvo_vogui"
+
+[extension.wasm]
+type = "bindgen"
+wasm = "vogui.wasm"
+js_glue = "vogui.js"
+"#,
+        )
+        .unwrap();
+        assert_eq!(wasm.kind, WasmExtensionKind::Bindgen);
+        assert_eq!(wasm.wasm, "vogui.wasm");
+        assert_eq!(wasm.js_glue.as_deref(), Some("vogui.js"));
+    }
+
+    #[test]
+    fn test_extension_name_from_content() {
+        let name = extension_name_from_content(
+            r#"
 [extension]
-name = "zip"
-type = "standalone"
-"#));
-        assert!(!is_bindgen_ext_content(""));
-        assert!(!is_bindgen_ext_content(r#"name = "zip""#));
+name = "vogui"
+path = "rust/target/release/libvo_vogui"
+"#,
+        );
+        assert_eq!(name.as_deref(), Some("vogui"));
     }
 }

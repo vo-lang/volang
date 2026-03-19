@@ -4,7 +4,7 @@
 //!
 //! Every Vo ext WASM binary (`wasm-standalone` feature) must export:
 //!
-//! ```c
+//! ```c,ignore
 //! void* vo_alloc(uint32_t size);
 //! void  vo_dealloc(void* ptr, uint32_t size);
 //!
@@ -17,14 +17,14 @@
 //!
 //! ## Input encoding (Vo → WASM, one entry per param slot in declaration order)
 //!
-//! ```
+//! ```text
 //! Value slot (int/uint/bool/float/uint32): [u64 LE — 8 bytes]
 //! Bytes slot (string/[]byte):              [u32 LE len — 4 bytes][len bytes]
 //! ```
 //!
 //! ## Output tags (WASM → Vo, self-describing, concatenated)
 //!
-//! ```
+//! ```text
 //! 0xE0                           → nil error          (2 slots: write_nil_error)
 //! 0xE1 [u16 LE len] [len bytes]  → error string       (2 slots: write_error_to)
 //! 0xE2 [u64 LE — 8 bytes]        → u64/i64 value      (1 slot:  ret_u64)

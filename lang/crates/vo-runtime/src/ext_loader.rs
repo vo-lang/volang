@@ -12,7 +12,7 @@ use libloading::{Library, Symbol};
 use crate::ffi::{ExternEntry, ExternFnPtr, ExtensionTable};
 
 // Re-export from vo-module
-pub use vo_module::{ExtensionManifest, discover_extensions};
+pub use vo_module::ext_manifest::{ExtensionManifest, discover_extensions};
 
 /// ABI version — must match vo-ext's ABI_VERSION.
 pub const ABI_VERSION: u32 = 2;
@@ -174,6 +174,7 @@ impl ExtensionLoader {
             name: name.to_string(),
             native_path: canonical_path,
             manifest_path,
+            wasm: None,
         });
 
         Ok(())
@@ -218,6 +219,37 @@ impl ExtensionLoader {
                 symbol: String::from_utf8_lossy(symbol).trim_end_matches('\0').to_string(),
                 message: err.to_string(),
             }),
+        }
+    }
+
+    /// Inject a host bridge pointer into all loaded extension dylibs.
+    ///
+    /// Each dylib that exports `vo_ext_set_host_bridge` will receive the
+    /// raw `*const HostBridge` pointer.  Dylibs without the symbol are
+    /// silently skipped (they don't need a host bridge).
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must come from `vo_ext::host::encode_bridge_ptr` and the
+    /// bridge must remain alive until [`clear_bridge_all`] is called.
+    pub unsafe fn broadcast_bridge(&self, ptr: usize) {
+        type SetBridgeFn = unsafe extern "C" fn(usize);
+        for ext in &self.loaded {
+            if let Ok(sym) = ext._lib.get::<SetBridgeFn>(b"vo_ext_set_host_bridge") {
+                sym(ptr);
+            }
+        }
+    }
+
+    /// Clear the host bridge reference from all loaded extension dylibs.
+    ///
+    /// Must be called before dropping the bridge to avoid dangling pointers.
+    pub fn clear_bridge_all(&self) {
+        type ClearBridgeFn = extern "C" fn();
+        for ext in &self.loaded {
+            if let Ok(sym) = unsafe { ext._lib.get::<ClearBridgeFn>(b"vo_ext_clear_host_bridge") } {
+                sym();
+            }
         }
     }
 }

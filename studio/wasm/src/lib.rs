@@ -468,8 +468,7 @@ pub fn prepare_entry(entry_path: &str) -> js_sys::Promise {
         } else {
             let content = local_fs.read_file(std::path::Path::new(&entry_clean))
                 .map_err(|e| JsValue::from_str(&format!("read file '{}': {}", target.entry_path, e)))?;
-            vo_web::ensure_vfs_versioned_imports(&content)
-                .await
+            vo_web::reject_single_file_external_imports(&content)
                 .map_err(|e| JsValue::from_str(&e))?;
         }
 
@@ -721,6 +720,17 @@ fn shell_vo_mod_content() -> Result<String, String> {
         .map_err(|e| format!("vo.mod utf8: {}", e))
 }
 
+fn shell_vo_lock_content() -> Result<String, String> {
+    let bytes = SHELL_HANDLER_FILES
+        .iter()
+        .find(|(path, _)| *path == "studio/vo/shell/vo.lock")
+        .map(|(_, bytes)| *bytes)
+        .ok_or_else(|| "no embedded vo.lock found".to_string())?;
+    std::str::from_utf8(bytes)
+        .map(|s| s.to_string())
+        .map_err(|e| format!("vo.lock utf8: {}", e))
+}
+
 /// Return the module paths declared in the shell handler's embedded `vo.mod`.
 ///
 /// Used by the JS bridge to derive the VFS purge list dynamically rather than
@@ -729,9 +739,9 @@ fn shell_vo_mod_content() -> Result<String, String> {
 pub fn get_shell_dep_modules() -> js_sys::Array {
     let arr = js_sys::Array::new();
     if let Ok(content) = shell_vo_mod_content() {
-        if let Ok(mod_file) = vo_module::ModFile::parse(&content, std::path::Path::new("vo.mod")) {
-            for req in &mod_file.requires {
-                arr.push(&JsValue::from_str(&req.module));
+        if let Ok(mod_file) = vo_module::schema::modfile::ModFile::parse(&content) {
+            for req in &mod_file.require {
+                arr.push(&JsValue::from_str(req.module.as_str()));
             }
         }
     }
@@ -748,10 +758,12 @@ pub fn get_shell_dep_modules() -> js_sys::Array {
 #[wasm_bindgen(js_name = "preloadShellDeps")]
 pub fn preload_shell_deps() -> js_sys::Promise {
     wasm_bindgen_futures::future_to_promise(async move {
-        let content = shell_vo_mod_content()
+        let mod_content = shell_vo_mod_content()
+            .map_err(|e| JsValue::from_str(&e))?;
+        let lock_content = shell_vo_lock_content()
             .map_err(|e| JsValue::from_str(&e))?;
 
-        vo_web::ensure_vfs_deps(&content)
+        vo_web::ensure_vfs_deps(&mod_content, &lock_content)
             .await
             .map_err(|e| JsValue::from_str(&e))?;
 
@@ -770,13 +782,10 @@ pub fn preload_shell_deps() -> js_sys::Promise {
 /// TypeScript is a thin bridge that just awaits this Promise.
 #[wasm_bindgen(js_name = "preloadModule")]
 pub fn preload_module(spec: &str) -> js_sys::Promise {
-    let spec = spec.to_string();
-    wasm_bindgen_futures::future_to_promise(async move {
-        let path = vo_web::install_module_to_vfs(&spec)
-            .await
-            .map_err(|e| wasm_bindgen::JsValue::from_str(&e))?;
-        Ok(wasm_bindgen::JsValue::from_str(&path))
-    })
+    js_sys::Promise::reject(&JsValue::from_str(&format!(
+        "preloadModule({}) is no longer supported; declare dependencies in vo.mod and vo.lock and install them through the project dependency flow",
+        spec,
+    )))
 }
 
 /// Return a content hash of all embedded shell handler source files.

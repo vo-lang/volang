@@ -14,20 +14,23 @@ pub struct TraceConfig {
     pub trace_checker: bool,
 }
 
-/// Import key identifying a package by path and source directory.
+/// Import key identifying a package by canonical import path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ImportKey {
     pub path: String,
-    pub dir: String,
 }
 
 impl ImportKey {
-    pub fn new(path: &str, dir: &str) -> Self {
+    pub fn new(path: &str) -> Self {
         ImportKey {
             path: path.to_string(),
-            dir: dir.to_string(),
         }
     }
+}
+
+pub fn validate_import_path<'a>(path: &'a str) -> Result<&'a str, String> {
+    vo_module::compat::validate_import_path(path)?;
+    Ok(path)
 }
 
 /// Result of an import operation.
@@ -76,5 +79,27 @@ impl Importer for NullImporter {
     
     fn base_dir(&self) -> Option<&Path> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_import_path;
+
+    #[test]
+    fn test_validate_import_path_accepts_canonical_forms() {
+        assert!(validate_import_path("fmt").is_ok());
+        assert!(validate_import_path("encoding/json").is_ok());
+        assert!(validate_import_path("github.com/vo-lang/vogui").is_ok());
+        assert!(validate_import_path("github.com/vo-lang/vogui/app").is_ok());
+    }
+
+    #[test]
+    fn test_validate_import_path_rejects_legacy_forms() {
+        assert!(validate_import_path("./codec").is_err());
+        assert!(validate_import_path("../shared").is_err());
+        assert!(validate_import_path("std/io").is_err());
+        assert!(validate_import_path("github.com/vo-lang/zip@v0.1.0").is_err());
+        assert!(validate_import_path("example.com/acme/lib").is_err());
     }
 }

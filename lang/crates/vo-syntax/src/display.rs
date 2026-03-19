@@ -9,7 +9,7 @@ use vo_common::symbol::{Symbol, SymbolInterner};
 use crate::ast::{
     AssignOp, BinaryOp, Block, CaseClause, ChanDir, CommClause, CompositeLitKey, ConstDecl,
     ConstSpec, Decl, DynAccessOp, Expr, ExprKind, File, ForClause, FuncDecl, FuncSig, FuncType,
-    Ident, IfStmt, ImportDecl, ImportKind, InterfaceElem, InterfaceType, Param, PortType,
+    Ident, IfStmt, ImportDecl, InterfaceElem, InterfaceType, Param, PortType,
     Receiver, ResultParam, SelectCase, SelectStmt, Stmt, StmtKind, StructType, SwitchStmt,
     TypeCaseClause, TypeDecl, TypeExpr, TypeExprKind, TypeSwitchStmt, UnaryOp, VarDecl, VarSpec,
 };
@@ -265,9 +265,6 @@ impl<'a> SourcePrinter<'a> {
             if let Some(alias) = &import.alias {
                 self.write_ident(alias);
                 self.write_char(' ');
-            }
-            if import.kind == ImportKind::External {
-                self.write_char('@');
             }
             self.write_raw(import.path.raw);
             self.newline();

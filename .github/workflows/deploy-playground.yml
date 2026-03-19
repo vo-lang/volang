@@ -6,7 +6,7 @@ on:
     paths:
       - "playground/**"
       - "studio/**"
-      - "lang/crates/vo-web/**"
+      - "lang/crates/**"
   workflow_dispatch:
 
 permissions:
@@ -31,16 +31,17 @@ jobs:
           repository: vo-lang/vogui
           path: ../vogui
 
-      - name: Checkout vox
-        uses: actions/checkout@v4
-        with:
-          repository: vo-lang/vox
-          path: ../vox
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            studio/wasm -> target
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
@@ -53,13 +54,15 @@ jobs:
           cache-dependency-path: |
             playground/package-lock.json
             studio/package-lock.json
+            ../vogui/js/package-lock.json
 
       - name: Build vo-web WASM
         working-directory: lang/crates/vo-web
-        run: wasm-pack build --target web
+        run: wasm-pack build --target web --release
 
       - name: Build studio WASM
-        run: wasm-pack build studio/wasm --target web --release
+        working-directory: studio
+        run: wasm-pack build wasm --target web --release --out-dir ../public/wasm --out-name vo_studio_wasm
 
       - name: Build VoGUI JS
         working-directory: ../vogui/js
@@ -71,7 +74,7 @@ jobs:
 
       - name: Build Playground rust pkg
         working-directory: playground
-        run: wasm-pack build rust --target web
+        run: wasm-pack build rust --target web --release
 
       - name: Build Playground
         working-directory: playground
@@ -83,7 +86,7 @@ jobs:
 
       - name: Build Studio
         working-directory: studio
-        run: npm run build:pages
+        run: npm run build
 
       - name: Assemble site
         run: |

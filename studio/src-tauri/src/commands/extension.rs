@@ -1,6 +1,5 @@
 use crate::state::AppState;
 use super::pathing::resolve_path;
-use vo_engine::prepare_with_auto_install;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -28,12 +27,18 @@ pub async fn cmd_vo_get_stream(
     let spec_clone = spec.clone();
     std::thread::spawn(move || {
         let _ = on_event.send(InstallEvent::Fetch { message: format!("Fetching {}...", spec_clone) });
-        match prepare_with_auto_install(&spec_clone) {
+        let result = match spec_clone.rsplit_once('@') {
+            Some((module, version)) if !module.is_empty() && !version.is_empty() => {
+                vo_engine::install_module(module, version).map(|_| ())
+            }
+            _ => Err(format!("invalid spec: expected <module>@<version>, got {:?}", spec_clone)),
+        };
+        match result {
             Ok(()) => {
                 let _ = on_event.send(InstallEvent::Done { module: spec_clone });
             }
             Err(err) => {
-                let _ = on_event.send(InstallEvent::Error { message: err.to_string() });
+                let _ = on_event.send(InstallEvent::Error { message: err });
             }
         }
     });

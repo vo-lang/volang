@@ -232,26 +232,20 @@ impl<'a> Parser<'a> {
     /// Parse a single import spec (path with optional alias)
     /// If require_semi is true, expect a semicolon after the import path
     fn parse_import_spec(&mut self, start: BytePos, require_semi: bool) -> ParseResult<ImportDecl> {
-        use crate::ast::ImportKind;
-
         // Check for optional alias (identifier before path)
         // Supported forms:
-        //   import "path"           - standard import
-        //   import @"alias"         - external import
-        //   import name "path"      - standard import with alias
-        //   import name @"alias"    - external import with alias
+        //   import "path"      - standard import
+        //   import name "path" - standard import with alias
         //   import . "path"         - dot import
         //   import _ "path"         - blank import
         let alias = if self.at(TokenKind::Ident)
             && (self.peek_is(TokenKind::StringLit)
-                || self.peek_is(TokenKind::RawStringLit)
-                || self.peek_is(TokenKind::At))
+                || self.peek_is(TokenKind::RawStringLit))
         {
             Some(self.parse_ident()?)
         } else if self.at(TokenKind::Dot)
             && (self.peek_is(TokenKind::StringLit)
-                || self.peek_is(TokenKind::RawStringLit)
-                || self.peek_is(TokenKind::At))
+                || self.peek_is(TokenKind::RawStringLit))
         {
             // Dot import: import . "path"
             let dot_span = self.current.span;
@@ -266,12 +260,9 @@ impl<'a> Parser<'a> {
             None
         };
 
-        // Check for @ (external import marker)
-        let kind = if self.eat(TokenKind::At) {
-            ImportKind::External
-        } else {
-            ImportKind::Standard
-        };
+        if self.eat(TokenKind::At) {
+            self.error("`import @\"...\"` is no longer supported; use the canonical import path directly");
+        }
 
         let path = self.parse_string_lit()?;
 
@@ -284,7 +275,6 @@ impl<'a> Parser<'a> {
         }
 
         Ok(ImportDecl {
-            kind,
             path,
             alias,
             span: Span::new(start, self.current.span.start),
@@ -676,6 +666,14 @@ mod tests {
             panic!("parse errors: {:?}", diags.iter().collect::<Vec<_>>());
         }
         file
+    }
+
+    #[test]
+    fn test_reject_legacy_external_import_syntax() {
+        let (_, diags) = parse_str(r#"import @"github.com/vo-lang/zip""#);
+        assert!(diags.has_errors());
+        let messages: Vec<_> = diags.iter().map(|diag| diag.message.as_str()).collect();
+        assert!(messages.iter().any(|msg| msg.contains("no longer supported")));
     }
 
     // =========================================================================

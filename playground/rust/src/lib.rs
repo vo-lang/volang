@@ -218,15 +218,11 @@ pub fn init_gui_app_with_modules(source: &str) -> js_sys::Promise {
 
 #[cfg(target_arch = "wasm32")]
 async fn init_gui_with_modules_inner(source: &str) -> WasmGuiResult {
-    let (mut mod_fs, clean_source) = match vo_web::prepare_github_modules(source).await {
-        Ok(v) => v,
-        Err(e) => return WasmGuiResult::err(e),
-    };
-
     let std_fs = vo_web::build_stdlib_fs();
+    let mut mod_fs = vo_common::vfs::MemoryFs::new();
     add_vogui_to_fs(&mut mod_fs);
 
-    let bytecode = match vo_web::compile_source_with_mod_fs(&clean_source, "main.vo", std_fs, mod_fs) {
+    let bytecode = match vo_web::compile_source_with_mod_fs(source, "main.vo", std_fs, mod_fs) {
         Ok(b) => b,
         Err(e) => return WasmGuiResult::compile_err(e),
     };

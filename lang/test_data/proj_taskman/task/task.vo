@@ -1,7 +1,7 @@
 // Package task provides task management
 package task
 
-import "utils"
+import "github.com/vo-lang/test/taskman/utils"
 
 // Priority levels
 const (

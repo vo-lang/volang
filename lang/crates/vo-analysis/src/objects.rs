@@ -160,15 +160,6 @@ impl TCObjects {
         self.pkg_path_cache.get(path).copied()
     }
 
-    /// Register an additional path alias for an existing package.
-    ///
-    /// Used when a package is imported via a relative path (e.g. `"../../libs/vox"`)
-    /// but its canonical path (from `vo.mod`) is a full module path
-    /// (e.g. `"github.com/vo-lang/vox"`). Both paths must resolve to the same package.
-    pub fn alias_package_path(&mut self, alias: String, key: PackageKey) {
-        self.pkg_path_cache.insert(alias, key);
-    }
-
     pub fn new_pkg_name(
         &mut self,
         span: Span,

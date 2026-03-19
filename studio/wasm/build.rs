@@ -60,19 +60,20 @@ fn main() {
     // studio/wasm -> studio -> repo root
     let repo_root = manifest_dir.join("../..").canonicalize().unwrap();
 
-    // ── shell handler source files + vo.mod ─────────────────────────────────
+    // ── shell handler source files + manifests ──────────────────────────────
     let mut shell_entries = String::new();
     let shell_dir = repo_root.join("studio/vo/shell");
     collect_vo_files(&shell_dir, "studio/vo/shell", &mut shell_entries, &out_dir);
 
-    // Embed vo.mod so Rust can parse it at runtime to auto-install deps.
-    let vo_mod_path = shell_dir.join("vo.mod");
-    if vo_mod_path.is_file() {
-        shell_entries.push_str(&format!(
-            "    ({:?}, include_bytes!({:?})),\n",
-            "studio/vo/shell/vo.mod",
-            vo_mod_path.display()
-        ));
+    for manifest_name in ["vo.mod", "vo.lock"] {
+        let manifest_path = shell_dir.join(manifest_name);
+        if manifest_path.is_file() {
+            shell_entries.push_str(&format!(
+                "    ({:?}, include_bytes!({:?})),\n",
+                format!("studio/vo/shell/{}", manifest_name),
+                manifest_path.display()
+            ));
+        }
     }
 
     println!("cargo:rerun-if-changed={}", shell_dir.display());

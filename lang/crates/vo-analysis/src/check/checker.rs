@@ -78,14 +78,12 @@ pub type DelayedAction = Box<dyn FnOnce(&mut Checker)>;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ImportKey {
     pub path: String,
-    pub dir: String,
 }
 
 impl ImportKey {
-    pub(crate) fn new(path: &str, dir: &str) -> ImportKey {
+    pub(crate) fn new(path: &str) -> ImportKey {
         ImportKey {
             path: path.to_string(),
-            dir: dir.to_string(),
         }
     }
 }
@@ -102,7 +100,7 @@ pub struct Checker {
     pub pkg: PackageKey,
     /// Maps package-level objects and methods to declaration info.
     pub obj_map: HashMap<ObjKey, DeclInfoKey>,
-    /// Import cache: maps (path, dir) to imported package.
+    /// Import cache: maps canonical import path to imported package.
     pub imp_map: HashMap<ImportKey, PackageKey>,
     /// Object context.
     pub octx: ObjContext,

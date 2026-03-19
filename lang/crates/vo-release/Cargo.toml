@@ -1,0 +1,16 @@
+[package]
+name = "vo-release"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Release verification and staging for Vo modules"
+
+[dependencies]
+vo-module = { path = "../vo-module" }
+serde_json = "1.0"
+sha2 = "0.10"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
+
+[dev-dependencies]
+tempfile = "3.10"

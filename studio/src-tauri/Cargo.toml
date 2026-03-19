@@ -21,12 +21,12 @@ toml = "0.8"
 dirs = "5"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
+ureq = "2"
 vo-engine = { path = "../../lang/crates/vo-engine" }
 vo-ext = { path = "../../lang/crates/vo-ext" }
 vo-module = { path = "../../lang/crates/vo-module" }
 vo-runtime = { path = "../../lang/crates/vo-runtime" }
 vo-vm = { path = "../../lang/crates/vo-vm" }
-vogui = { path = "../../../vogui/rust", default-features = false }
 
 [patch."https://github.com/vo-lang/volang"]
 vo-common    = { path = "../../lang/crates/vo-common" }

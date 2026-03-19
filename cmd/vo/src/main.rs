@@ -14,9 +14,11 @@
 
 use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process;
 
-use vo_engine::{compile_with_auto_install, format_text, run, Module, RunMode};
+use vo_engine::{compile, format_text, run, Module, RunMode};
+use vo_release::{ArtifactInput, StageReleaseOptions};
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -37,6 +39,8 @@ fn main() {
         "compile" => cmd_compile(rest),
         "emit" => cmd_emit(rest),
         "init" => cmd_init(rest),
+        "mod" => cmd_mod(rest),
+        "release" => cmd_release(rest),
         "get" => cmd_get(rest),
         "-h" | "--help" | "help" => {
             print_usage();
@@ -66,7 +70,8 @@ fn print_usage() {
     println!("  compile <file>  Compile bytecode text to binary");
     println!("  emit <file>     Compile source to bytecode binary");
     println!("  init <path>     Initialize a new module");
-    println!("  get <module>    Download a dependency");
+    println!("  mod <subcommand> Explicit dependency lifecycle commands");
+    println!("  release <subcommand> Release verification and staging commands");
     println!("  check           Type-check current module");
     println!("  help            Show this help");
     println!("  version         Show version");
@@ -95,7 +100,7 @@ fn cmd_run(args: &[String]) -> i32 {
         }
     }
 
-    let output = match compile_with_auto_install(file) {
+    let output = match compile(file) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("[VO:COMPILE] {}", e);
@@ -122,7 +127,7 @@ fn cmd_build(args: &[String]) -> i32 {
 
     println!("Building project: {}", path);
 
-    let output = match compile_with_auto_install(path) {
+    let output = match compile(path) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("[VO:COMPILE] {}", e);
@@ -146,7 +151,7 @@ fn cmd_check(args: &[String]) -> i32 {
 
     println!("Checking project: {}", path);
 
-    match compile_with_auto_install(path) {
+    match compile(path) {
         Ok(_) => {
             println!("Check passed");
             0
@@ -225,7 +230,7 @@ fn cmd_emit(args: &[String]) -> i32 {
         }
     }
 
-    let output = match compile_with_auto_install(path) {
+    let output = match compile(path) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("[VO:COMPILE] {}", e);
@@ -251,71 +256,464 @@ fn cmd_init(args: &[String]) -> i32 {
     }
 
     let module_path = &args[0];
-    let content = format!("module {}\n\nvo 0.1\n", module_path);
-
-    if let Err(e) = fs::write("vo.mod", content) {
-        eprintln!("[VO:IO] {}", e);
-        return 1;
-    }
-
-    println!("Initialized module: {}", module_path);
-    0
-}
-
-fn cmd_get(args: &[String]) -> i32 {
-    if args.is_empty() {
-        eprintln!("usage: vo get <module@version>");
-        eprintln!("  e.g. vo get github.com/vo-lang/resvg@v0.1.0");
-        return 1;
-    }
-
-    let spec = &args[0];
-    let (module, version) = match parse_module_version(spec) {
-        Ok(v) => v,
-        Err(e) => { eprintln!("[VO:GET] {}", e); return 1; }
-    };
-
-    match vo_module::fetch::install_module(&module, &version) {
-        Ok(target_dir) => {
-            println!("get {} {}", module, version);
-            println!("  -> {}", target_dir.display());
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match vo_module::ops::mod_init(&cwd, module_path, "^0.1.0") {
+        Ok(()) => {
+            println!("Initialized module: {}", module_path);
             0
         }
         Err(e) => {
-            eprintln!("[VO:GET] {}", e);
+            eprintln!("[VO:INIT] {}", e);
             1
         }
     }
 }
 
-fn parse_module_version(spec: &str) -> Result<(String, String), String> {
-    match spec.rsplit_once('@') {
-        Some((m, v)) if !m.is_empty() && !v.is_empty() => Ok((m.to_string(), v.to_string())),
-        _ => Err(format!(
-            "invalid module spec {:?}: expected <module>@<version>, e.g. github.com/foo/bar@v1.0.0",
-            spec
-        )),
+fn cmd_mod(args: &[String]) -> i32 {
+    if args.is_empty() {
+        print_mod_usage();
+        return 1;
+    }
+
+    match args[0].as_str() {
+        "download" => cmd_mod_download(&args[1..]),
+        "add" => cmd_mod_add(&args[1..]),
+        "update" => cmd_mod_update(&args[1..]),
+        "sync" => cmd_mod_sync(&args[1..]),
+        "verify" => cmd_mod_verify(&args[1..]),
+        "remove" => cmd_mod_remove(&args[1..]),
+        "-h" | "--help" | "help" => {
+            print_mod_usage();
+            0
+        }
+        _ => {
+            eprintln!("[VO:MOD] unknown subcommand: {}", args[0]);
+            print_mod_usage();
+            1
+        }
+    }
+}
+
+fn print_mod_usage() {
+    println!("Usage: vo mod <subcommand> [arguments]");
+    println!();
+    println!("Subcommands:");
+    println!("  download [path]  Fetch dependencies pinned by vo.lock into the module cache");
+    println!("  add <module[@constraint]>  Add or update a direct dependency and refresh vo.lock");
+    println!("  update [module]            Re-solve dependency constraints and refresh vo.lock");
+    println!("  sync [path]                Recompute the full dependency graph and write vo.lock");
+    println!("  verify [path]              Verify that vo.lock exactly matches the current vo.mod graph");
+    println!("  remove <module>            Remove a direct dependency and refresh vo.lock");
+}
+
+fn cmd_mod_download(args: &[String]) -> i32 {
+    let path = if args.is_empty() { "." } else { &args[0] };
+    let project_root = match require_module_root_from_path(path, "VO:MOD:DOWNLOAD") {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+
+    let registry = vo_module::github_registry::GitHubRegistry::new();
+    let cache_root = vo_engine::default_mod_cache_root();
+    match vo_module::ops::mod_download(&project_root, &cache_root, &registry) {
+        Ok(()) => {
+            println!("downloaded dependencies to {}", cache_root.display());
+            0
+        }
+        Err(error) => {
+            eprintln!("[VO:MOD:DOWNLOAD] {}", error);
+            1
+        }
+    }
+}
+
+fn cmd_mod_add(args: &[String]) -> i32 {
+    if args.len() != 1 {
+        eprintln!("usage: vo mod add <module-path>[@constraint]");
+        return 1;
+    }
+    let project_root = match require_module_root_from_path(".", "VO:MOD:ADD") {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let (dep_path, constraint) = match args[0].rsplit_once('@') {
+        Some((module, constraint)) => (module, Some(constraint)),
+        None => (args[0].as_str(), None),
+    };
+    let registry = vo_module::github_registry::GitHubRegistry::new();
+    match vo_module::ops::mod_add(&project_root, dep_path, constraint, &registry, "vo mod add") {
+        Ok(()) => {
+            println!("added {}", dep_path);
+            print_lock_summary(&project_root);
+            0
+        }
+        Err(error) => {
+            eprintln!("[VO:MOD:ADD] {}", error);
+            1
+        }
+    }
+}
+
+fn cmd_mod_update(args: &[String]) -> i32 {
+    if args.len() > 1 {
+        eprintln!("usage: vo mod update [module-path]");
+        return 1;
+    }
+    let project_root = match require_module_root_from_path(".", "VO:MOD:UPDATE") {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let target = args.first().map(|value| value.as_str());
+    let registry = vo_module::github_registry::GitHubRegistry::new();
+    match vo_module::ops::mod_update(&project_root, target, &registry, "vo mod update") {
+        Ok(()) => {
+            if let Some(t) = target {
+                println!("updated {}", t);
+            } else {
+                println!("updated dependency graph");
+            }
+            print_lock_summary(&project_root);
+            0
+        }
+        Err(error) => {
+            eprintln!("[VO:MOD:UPDATE] {}", error);
+            1
+        }
+    }
+}
+
+fn cmd_mod_sync(args: &[String]) -> i32 {
+    if args.len() > 1 {
+        eprintln!("usage: vo mod sync [path]");
+        return 1;
+    }
+    let path = if args.is_empty() { "." } else { &args[0] };
+    let project_root = match require_module_root_from_path(path, "VO:MOD:SYNC") {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let registry = vo_module::github_registry::GitHubRegistry::new();
+    match vo_module::ops::mod_sync(&project_root, &registry, "vo mod sync") {
+        Ok(()) => {
+            println!("synced {}", project_root.join("vo.lock").display());
+            print_lock_summary(&project_root);
+            0
+        }
+        Err(error) => {
+            eprintln!("[VO:MOD:SYNC] {}", error);
+            1
+        }
+    }
+}
+
+fn cmd_mod_verify(args: &[String]) -> i32 {
+    if args.len() > 1 {
+        eprintln!("usage: vo mod verify [path]");
+        return 1;
+    }
+    let path = if args.is_empty() { "." } else { &args[0] };
+    let project_root = match require_module_root_from_path(path, "VO:MOD:VERIFY") {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let cache_root = vo_engine::default_mod_cache_root();
+    match vo_module::ops::mod_verify(&project_root, &cache_root) {
+        Ok(()) => {
+            println!("verified {}", project_root.join("vo.lock").display());
+            print_lock_summary(&project_root);
+            0
+        }
+        Err(error) => {
+            eprintln!("[VO:MOD:VERIFY] {}", error);
+            1
+        }
+    }
+}
+
+fn cmd_mod_remove(args: &[String]) -> i32 {
+    if args.len() != 1 {
+        eprintln!("usage: vo mod remove <module-path>");
+        return 1;
+    }
+    let project_root = match require_module_root_from_path(".", "VO:MOD:REMOVE") {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let registry = vo_module::github_registry::GitHubRegistry::new();
+    match vo_module::ops::mod_remove(&project_root, &args[0], &registry, "vo mod remove") {
+        Ok(()) => {
+            println!("removed {}", args[0]);
+            print_lock_summary(&project_root);
+            0
+        }
+        Err(error) => {
+            eprintln!("[VO:MOD:REMOVE] {}", error);
+            1
+        }
+    }
+}
+
+fn cmd_release(args: &[String]) -> i32 {
+    if args.is_empty() {
+        print_release_usage();
+        return 1;
+    }
+
+    match args[0].as_str() {
+        "verify" => cmd_release_verify(&args[1..]),
+        "stage" => cmd_release_stage(&args[1..]),
+        "-h" | "--help" | "help" => {
+            print_release_usage();
+            0
+        }
+        _ => {
+            eprintln!("[VO:RELEASE] unknown subcommand: {}", args[0]);
+            print_release_usage();
+            1
+        }
+    }
+}
+
+fn print_release_usage() {
+    println!("Usage: vo release <subcommand> [arguments]");
+    println!();
+    println!("Subcommands:");
+    println!("  verify [path]              Verify release policy and vo.lock freshness for a module repo");
+    println!("  stage [path] --version <version> --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]");
+}
+
+fn cmd_release_verify(args: &[String]) -> i32 {
+    if args.len() > 1 {
+        eprintln!("usage: vo release verify [path]");
+        return 1;
+    }
+    let path = if args.is_empty() { "." } else { &args[0] };
+    let project_root = match require_module_root_from_path(path, "VO:RELEASE:VERIFY") {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    match vo_release::verify_repo(&project_root) {
+        Ok(()) => {
+            println!("release ready {}", project_root.display());
+            0
+        }
+        Err(error) => {
+            eprintln!("[VO:RELEASE:VERIFY] {}", error);
+            1
+        }
+    }
+}
+
+fn cmd_release_stage(args: &[String]) -> i32 {
+    let mut path = ".";
+    let mut index = 0;
+    if !args.is_empty() && !args[0].starts_with('-') {
+        path = &args[0];
+        index = 1;
+    }
+
+    let cwd = match env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("[VO:RELEASE:STAGE] failed to read current directory: {}", error);
+            return 1;
+        }
+    };
+
+    let mut version: Option<String> = None;
+    let mut commit: Option<String> = None;
+    let mut out_dir: Option<PathBuf> = None;
+    let mut artifacts: Vec<ArtifactInput> = Vec::new();
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--version" => {
+                if index + 1 >= args.len() {
+                    eprintln!("usage: vo release stage [path] --version <version> --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]");
+                    return 1;
+                }
+                version = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--commit" => {
+                if index + 1 >= args.len() {
+                    eprintln!("usage: vo release stage [path] --version <version> --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]");
+                    return 1;
+                }
+                commit = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--out-dir" => {
+                if index + 1 >= args.len() {
+                    eprintln!("usage: vo release stage [path] --version <version> --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]");
+                    return 1;
+                }
+                out_dir = Some(resolve_cli_path(&cwd, &args[index + 1]));
+                index += 2;
+            }
+            "--artifact" => {
+                if index + 4 >= args.len() {
+                    eprintln!("usage: vo release stage [path] --version <version> --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]");
+                    return 1;
+                }
+                artifacts.push(ArtifactInput {
+                    kind: args[index + 1].clone(),
+                    target: args[index + 2].clone(),
+                    name: args[index + 3].clone(),
+                    path: resolve_cli_path(&cwd, &args[index + 4]),
+                });
+                index += 5;
+            }
+            "-h" | "--help" | "help" => {
+                print_release_usage();
+                return 0;
+            }
+            argument => {
+                eprintln!("[VO:RELEASE:STAGE] unknown argument: {}", argument);
+                eprintln!("usage: vo release stage [path] --version <version> --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]");
+                return 1;
+            }
+        }
+    }
+
+    let Some(version) = version else {
+        eprintln!("usage: vo release stage [path] --version <version> --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]");
+        return 1;
+    };
+    let Some(out_dir) = out_dir else {
+        eprintln!("usage: vo release stage [path] --version <version> --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]");
+        return 1;
+    };
+
+    let project_root = match require_module_root_from_path(path, "VO:RELEASE:STAGE") {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let options = StageReleaseOptions {
+        version,
+        commit,
+        artifacts,
+        out_dir,
+    };
+    match vo_release::stage_release(&project_root, &options) {
+        Ok(staged) => {
+            println!("staged release assets in {}", staged.out_dir.display());
+            println!("source {}", staged.source_path.display());
+            println!("manifest {}", staged.manifest_path.display());
+            for artifact in &staged.artifacts {
+                println!("artifact {}", artifact.output_path.display());
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("[VO:RELEASE:STAGE] {}", error);
+            1
+        }
+    }
+}
+
+fn cmd_get(args: &[String]) -> i32 {
+    let _ = args;
+    eprintln!("[VO:GET] `vo get` has been removed");
+    eprintln!("[VO:GET] use `vo mod add <module[@constraint]>` to change direct dependencies");
+    eprintln!("[VO:GET] use `vo mod sync` to refresh vo.lock and `vo mod download` to fill the cache");
+    eprintln!("[VO:GET] dependency lifecycle now lives under `vo mod ...`");
+    1
+}
+
+
+fn require_module_root_from_path(path: &str, scope: &str) -> Result<PathBuf, i32> {
+    module_root_from_path(path).map_err(|error| {
+        eprintln!("[{}] {}", scope, error);
+        1
+    })
+}
+
+fn resolve_cli_path(cwd: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn print_lock_summary(project_root: &Path) {
+    match vo_module::ops::read_lock_file(project_root) {
+        Ok(lock) => {
+            println!("wrote vo.lock with {} resolved modules", lock.resolved.len());
+            for module in &lock.resolved {
+                println!("locked {}@{}", module.path, module.version);
+            }
+        }
+        Err(e) => {
+            eprintln!("warning: could not read vo.lock: {}", e);
+        }
+    }
+}
+
+fn module_root_from_path(path: &str) -> Result<PathBuf, String> {
+    let path = Path::new(path);
+    let mut dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent().unwrap_or(Path::new(".")).to_path_buf()
+    };
+    dir = dir.canonicalize().unwrap_or(dir);
+    let search_start = dir.clone();
+    let mut current = dir.as_path();
+    loop {
+        if current.join("vo.mod").is_file() {
+            return Ok(current.to_path_buf());
+        }
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => {
+                return Err(format!(
+                    "no vo.mod found from {}",
+                    search_start.display(),
+                ))
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn test_parse_module_version_ok() {
-        let (m, v) = parse_module_version("github.com/vo-lang/resvg@v0.1.0").unwrap();
-        assert_eq!(m, "github.com/vo-lang/resvg");
-        assert_eq!(v, "v0.1.0");
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("vo-cli-{}-{}-{}", name, std::process::id(), nanos))
     }
 
     #[test]
-    fn test_parse_module_version_no_at() {
-        assert!(parse_module_version("github.com/vo-lang/resvg").is_err());
+    fn test_module_root_from_path_walks_up_to_vo_mod() {
+        let root = unique_temp_dir("module-root");
+        let nested = root.join("src/bin");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("vo.mod"), "module github.com/acme/app\n\nvo 0.1\n").unwrap();
+
+        let resolved = module_root_from_path(nested.join("main.vo").to_str().unwrap()).unwrap();
+        assert_eq!(resolved, root.canonicalize().unwrap());
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn test_parse_module_version_empty_version() {
-        assert!(parse_module_version("github.com/vo-lang/resvg@").is_err());
+    fn test_module_root_from_path_errors_without_vo_mod() {
+        let root = unique_temp_dir("plain-dir");
+        let nested = root.join("src");
+        fs::create_dir_all(&nested).unwrap();
+
+        let error = module_root_from_path(nested.to_str().unwrap()).unwrap_err();
+        assert!(error.contains("no vo.mod found"), "{error}");
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }

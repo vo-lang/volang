@@ -32,6 +32,7 @@ fn into_toolchain_module(output: CompileOutput) -> ToolchainModule {
         module: output.module,
         source_root: output.source_root,
         extensions: output.extensions,
+        locked_modules: output.locked_modules,
     }
 }
 
@@ -40,6 +41,7 @@ fn from_toolchain_module(module: &ToolchainModule) -> CompileOutput {
         module: module.module.clone(),
         source_root: module.source_root.clone(),
         extensions: module.extensions.clone(),
+        locked_modules: module.locked_modules.clone(),
     }
 }
 
@@ -188,6 +190,7 @@ impl ToolchainHost for EngineToolchainHost {
             module,
             source_root,
             extensions: Vec::new(),
+            locked_modules: Vec::new(),
         })
     }
 
@@ -206,6 +209,7 @@ impl ToolchainHost for EngineToolchainHost {
             module,
             source_root,
             extensions: Vec::new(),
+            locked_modules: Vec::new(),
         })
     }
 
@@ -227,10 +231,64 @@ impl ToolchainHost for EngineToolchainHost {
                     spec,
                 )
             })?;
-        vo_module::fetch::install_module(module, version)
+        install_module(module, version)
             .map(|path| path.to_string_lossy().to_string())
             .map_err(|e| e.to_string())
     }
+}
+
+pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf, String> {
+    use vo_module::identity::ModulePath;
+    use vo_module::version::ExactVersion;
+    use vo_module::github_registry::GitHubRegistry;
+    use vo_module::materialize;
+    use vo_module::registry::Registry;
+    use vo_module::schema::lockfile::LockedModule;
+
+    let mp = ModulePath::parse(module).map_err(|e| format!("{e}"))?;
+    let ev = ExactVersion::parse(version).map_err(|e| format!("{e}"))?;
+
+    let registry = GitHubRegistry::new();
+    let manifest = registry.fetch_manifest(&mp, &ev).map_err(|e| format!("{e}"))?;
+
+    let mod_cache = crate::compile::default_mod_cache_root();
+    let cache_dir = materialize::cache_dir(&mod_cache, &mp, &ev);
+
+    // Build a synthetic LockedModule for download
+    let locked = LockedModule {
+        path: mp.clone(),
+        version: ev.clone(),
+        vo: manifest.vo.clone(),
+        commit: manifest.commit.clone(),
+        release_manifest: manifest.source.digest.clone(), // placeholder
+        source: manifest.source.digest.clone(),
+        deps: manifest.require.iter().map(|r| r.module.clone()).collect(),
+        artifacts: manifest.artifacts.iter().map(|a| {
+            vo_module::schema::lockfile::LockedArtifact {
+                id: a.id.clone(),
+                size: a.size,
+                digest: a.digest.clone(),
+            }
+        }).collect(),
+    };
+
+    let lf = vo_module::schema::lockfile::LockFile {
+        version: 1,
+        created_by: "vo get".to_string(),
+        root: vo_module::schema::lockfile::LockRoot {
+            module: mp.clone(),
+            vo: manifest.vo.clone(),
+        },
+        resolved: vec![locked],
+    };
+
+    materialize::download_all(&mod_cache, &lf, &registry).map_err(|e| format!("{e}"))?;
+
+    // Build native extension if present
+    crate::compile::ensure_local_native_extension_built(&cache_dir)
+        .map_err(|e| format!("{e}"))?;
+
+    Ok(cache_dir)
 }
 
 pub fn ensure_toolchain_host_installed() {

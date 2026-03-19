@@ -13,7 +13,7 @@ use crate::objects::{ObjKey, PackageKey, ScopeKey};
 
 use super::checker::Checker;
 use super::errors::TypeError;
-use crate::importer::Importer;
+use crate::importer::{Importer, validate_import_path};
 
 /// DeclInfo for const declarations.
 #[derive(Debug, Clone)]
@@ -253,8 +253,7 @@ impl Checker {
         // Import the package using importer if available
         let imp = if let Some(importer) = importer.as_mut() {
             use crate::importer::{ImportKey as ImpKey, ImportResult};
-            let dir = importer.working_dir().to_string_lossy().to_string();
-            let key = ImpKey::new(path, &dir);
+            let key = ImpKey::new(path);
             match importer.import(&key) {
                 ImportResult::Ok(pkg) => pkg,
                 ImportResult::Err(e) => {
@@ -593,20 +592,7 @@ impl Checker {
 
     /// Validates an import path.
     fn valid_import_path<'a>(&self, path: &'a str) -> Result<&'a str, String> {
-        if path.is_empty() {
-            return Err("empty string".to_owned());
-        }
-        let illegal_chars: &[char] = &[
-            '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', ',', ':', ';', '<', '=', '>', '?',
-            '[', '\\', ']', '^', '{', '|', '}', '`', '\u{FFFD}',
-        ];
-        if let Some(c) = path
-            .chars()
-            .find(|&x| !x.is_ascii_graphic() || x.is_whitespace() || illegal_chars.contains(&x))
-        {
-            return Err(format!("invalid character: {}", c));
-        }
-        Ok(path)
+        validate_import_path(path)
     }
 
     /// Imports a package (fallback when no importer is available).
@@ -617,8 +603,7 @@ impl Checker {
             self.error_code_msg(TypeError::InvalidImportPath, span, format!("invalid import path ({})", e));
         }
 
-        let dir = ".".to_string();
-        let key = super::checker::ImportKey::new(path, &dir);
+        let key = super::checker::ImportKey::new(path);
 
         // Check if already imported in this checker
         if let Some(&imp) = self.imp_map.get(&key) {

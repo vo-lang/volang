@@ -5,19 +5,20 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use vo_common::diagnostics::{DiagnosticEmitter, DiagnosticSink};
 use vo_common::source::SourceMap;
 use vo_common::symbol::SymbolInterner;
 use vo_common::vfs::FileSet;
-use vo_module::{Resolver, discover_extensions, ExtensionManifest};
+use vo_module::ext_manifest::{discover_extensions, ExtensionManifest};
+use crate::vfs::{Resolver, VfsPackage};
 use vo_syntax::ast::File;
 use vo_syntax::parser;
 
 use crate::check::Checker;
-use crate::importer::{ImportKey, ImportResult, Importer};
+use crate::importer::{ImportKey, ImportResult, Importer, validate_import_path};
 use crate::objects::{PackageKey, TCObjects, TypeKey};
 
 /// Analysis error.
@@ -270,7 +271,12 @@ pub fn analyze_project_with_options<R: Resolver>(
     
     // Pre-load all imports BEFORE swap (importer needs state.tc_objs)
     {
-        let mut importer = ProjectImporter::new(vfs, &files.root, Rc::clone(&state));
+        let mut importer = ProjectImporter::new(
+            vfs,
+            &files.root,
+            current_package_path_from_root(&files.root),
+            Rc::clone(&state),
+        );
         if let Err(e) = preload_imports(&parsed_files, &mut importer) {
             return Err(AnalysisError::Import(e));
         }
@@ -376,7 +382,7 @@ fn parse_files(files: &FileSet, state: &Rc<RefCell<ProjectState>>) -> Result<Vec
 
 /// Parse package files from VFS.
 fn parse_vfs_package(
-    vfs_pkg: &vo_module::vfs::VfsPackage,
+    vfs_pkg: &VfsPackage,
     state: &Rc<RefCell<ProjectState>>,
 ) -> Result<Vec<File>, AnalysisError> {
     let mut parsed_files = Vec::new();
@@ -391,27 +397,67 @@ fn parse_vfs_package(
     Ok(parsed_files)
 }
 
-/// Compute the package directory for nested imports.
-/// 
-/// Given the import path (e.g., "./system") and the importer's directory (e.g., "."),
-/// returns the resolved directory (e.g., "system").
-fn get_pkg_dir(import_path: &str, importer_dir: &str) -> String {
-    let rel_path = import_path.trim_start_matches("./");
-    if importer_dir.is_empty() || importer_dir == "." {
-        rel_path.to_string()
-    } else {
-        format!("{}/{}", importer_dir, rel_path)
+fn current_package_path_from_root(root: &Path) -> Option<String> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut current = Some(root.as_path());
+    while let Some(dir) = current {
+        if let Some(module_path) = read_module_path_from_disk(dir) {
+            if !vo_module::compat::is_valid_module_path(&module_path) {
+                return None;
+            }
+            let sub_path = root
+                .strip_prefix(dir)
+                .ok()
+                .map(path_to_forward_slashes)
+                .unwrap_or_default();
+            return Some(if sub_path.is_empty() {
+                module_path
+            } else {
+                format!("{}/{}", module_path, sub_path)
+            });
+        }
+        current = dir.parent();
     }
+    None
+}
+
+fn read_module_path_from_disk(dir: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(dir.join("vo.mod")).ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.trim().strip_prefix("module ") {
+            let module_path = rest.trim();
+            if !module_path.is_empty() {
+                return Some(module_path.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn path_to_forward_slashes(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn declared_package_name(files: &[File], interner: &SymbolInterner) -> Option<String> {
+    for file in files {
+        if let Some(package) = &file.package {
+            if let Some(name) = interner.resolve(package.symbol) {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Pre-load imports from files. Must be called BEFORE swapping tc_objs with checker.
-/// 
-/// `pkg_dir` is the directory of the package containing these files (for relative import resolution).
-fn preload_file_imports<R: Resolver>(files: &[File], pkg_dir: &str, importer: &mut ProjectImporter<R>) -> Result<(), String> {
+fn preload_file_imports<R: Resolver>(files: &[File], importer: &mut ProjectImporter<R>) -> Result<(), String> {
     for file in files {
         for import in &file.imports {
             let path = &import.path.value;
-            let key = ImportKey::new(path, pkg_dir);
+            let key = ImportKey::new(path);
             match importer.import(&key) {
                 ImportResult::Ok(_) => {}
                 ImportResult::Err(e) => return Err(e),
@@ -425,14 +471,13 @@ fn preload_file_imports<R: Resolver>(files: &[File], pkg_dir: &str, importer: &m
 /// Pre-load all imports including core packages. For main package entry point.
 fn preload_imports<R: Resolver>(files: &[File], importer: &mut ProjectImporter<R>) -> Result<(), String> {
     // Always-link core packages required by runtime.
-    let key = ImportKey::new("errors", ".");
+    let key = ImportKey::new("errors");
     match importer.import(&key) {
         ImportResult::Ok(_) => {}
         ImportResult::Err(e) => return Err(e),
         ImportResult::Cycle => return Err("import cycle detected for 'errors'".to_string()),
     }
-    // Main package is at root, so pkg_dir = "."
-    preload_file_imports(files, ".", importer)
+    preload_file_imports(files, importer)
 }
 
 /// Project-level importer that uses VFS to resolve packages.
@@ -441,15 +486,22 @@ struct ProjectImporter<'a, R: Resolver> {
     vfs: &'a R,
     /// Working directory (project root).
     working_dir: PathBuf,
+    current_package_path: Option<String>,
     /// Shared project state.
     state: Rc<RefCell<ProjectState>>,
 }
 
 impl<'a, R: Resolver> ProjectImporter<'a, R> {
-    fn new(vfs: &'a R, working_dir: &std::path::Path, state: Rc<RefCell<ProjectState>>) -> Self {
+    fn new(
+        vfs: &'a R,
+        working_dir: &std::path::Path,
+        current_package_path: Option<String>,
+        state: Rc<RefCell<ProjectState>>,
+    ) -> Self {
         Self {
             vfs,
             working_dir: working_dir.to_path_buf(),
+            current_package_path,
             state,
         }
     }
@@ -458,6 +510,15 @@ impl<'a, R: Resolver> ProjectImporter<'a, R> {
 impl<R: Resolver> Importer for ProjectImporter<'_, R> {
     fn import(&mut self, key: &ImportKey) -> ImportResult {
         let import_path = &key.path;
+
+        if let Err(e) = validate_import_path(import_path) {
+            return ImportResult::Err(format!("invalid import path \"{}\": {}", import_path, e));
+        }
+        if let Some(current_package_path) = self.current_package_path.as_deref() {
+            if let Err(e) = vo_module::compat::validate_internal_access(current_package_path, import_path) {
+                return ImportResult::Err(e);
+            }
+        }
         
         // Check cache first
         {
@@ -472,8 +533,7 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
             }
         }
         
-        // Resolve package using VFS (importer_dir from ImportKey.dir)
-        let vfs_pkg = match self.vfs.resolve(import_path, &key.dir) {
+        let vfs_pkg = match self.vfs.resolve(import_path) {
             Some(pkg) => pkg,
             None => return ImportResult::Err(format!("package not found: {}", import_path)),
         };
@@ -489,6 +549,19 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
                 return ImportResult::Err(format!("failed to parse {}: {}", import_path, e));
             }
         };
+        let package_name = {
+            let state = self.state.borrow();
+            declared_package_name(&parsed_files, &state.interner)
+        };
+        if let Some(package_name) = package_name {
+            if package_name == "main" {
+                self.state.borrow_mut().in_progress.remove(import_path);
+                return ImportResult::Err(format!(
+                    "cannot import package {}: package clause is main",
+                    import_path,
+                ));
+            }
+        }
 
         // Discover extension manifests in the package root
         match discover_extensions(&vfs_pkg.fs_path) {
@@ -508,11 +581,14 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
         }
         
         // Pre-load imports BEFORE swap (importer needs state.tc_objs)
-        // Use the resolved package path as the importer directory for nested imports
-        let pkg_dir = get_pkg_dir(&vfs_pkg.path, &key.dir);
         {
-            let mut sub_importer = ProjectImporter::new(self.vfs, &self.working_dir, Rc::clone(&self.state));
-            if let Err(e) = preload_file_imports(&parsed_files, &pkg_dir, &mut sub_importer) {
+            let mut sub_importer = ProjectImporter::new(
+                self.vfs,
+                &self.working_dir,
+                Some(vfs_pkg.path.clone()),
+                Rc::clone(&self.state),
+            );
+            if let Err(e) = preload_file_imports(&parsed_files, &mut sub_importer) {
                 self.state.borrow_mut().in_progress.remove(import_path);
                 return ImportResult::Err(e);
             }
@@ -530,13 +606,6 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
                 .new_package(vfs_pkg.path.clone(), vfs_pkg.abi_path.clone());
             // Set short name for package (used when referencing: hex.Encode)
             state.tc_objs.pkgs[pkg].set_name(vfs_pkg.name.clone());
-            // If the raw import_path differs from the canonical module path (e.g.
-            // "../../libs/vox" vs "github.com/vo-lang/vox"), register the import_path
-            // as an alias so checker's find_package_by_path() can locate the package
-            // regardless of which form was used in the source.
-            if import_path.as_str() != vfs_pkg.path.as_str() {
-                state.tc_objs.alias_package_path(import_path.to_string(), pkg);
-            }
             pkg
         };
         
@@ -597,6 +666,117 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
     
     fn base_dir(&self) -> Option<&std::path::Path> {
         Some(&self.working_dir)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use vo_common::vfs::{FileSet, MemoryFs};
+    use crate::vfs::{ModSource, PackageResolver, StdSource};
+
+    #[test]
+    fn test_analyze_project_rejects_relative_imports() {
+        let mut files = FileSet::new(PathBuf::from("."));
+        files.files.insert(
+            PathBuf::from("main.vo"),
+            concat!(
+                "package main\n",
+                "import \"./codec\"\n",
+                "func main() {}\n",
+            )
+            .to_string(),
+        );
+
+        let mut std_fs = MemoryFs::new();
+        std_fs.add_file("errors/errors.vo", "package errors\n");
+        let resolver = PackageResolver {
+            std: StdSource::with_fs(std_fs),
+            r#mod: ModSource::with_fs(MemoryFs::new()),
+        };
+
+        let result = analyze_project(files, &resolver);
+        match result {
+            Err(AnalysisError::Import(msg)) => {
+                assert!(msg.contains("relative or absolute import paths are not allowed"));
+            }
+            _ => panic!("expected relative import rejection"),
+        }
+    }
+
+    #[test]
+    fn test_analyze_project_rejects_imported_main_package() {
+        let mut files = FileSet::new(PathBuf::from("."));
+        files.files.insert(
+            PathBuf::from("main.vo"),
+            concat!(
+                "package main\n",
+                "import \"github.com/acme/tool\"\n",
+                "func main() {}\n",
+            )
+            .to_string(),
+        );
+
+        let std_fs = MemoryFs::new().with_file("errors/errors.vo", "package errors\n");
+        let mod_fs = MemoryFs::new().with_file(
+            "github.com/acme/tool/tool.vo",
+            "package main\nfunc Run() {}\n",
+        );
+        let resolver = PackageResolver {
+            std: StdSource::with_fs(std_fs),
+            r#mod: ModSource::with_fs(mod_fs),
+        };
+
+        let result = analyze_project(files, &resolver);
+        match result {
+            Err(AnalysisError::Import(msg)) => {
+                assert!(msg.contains("package clause is main"), "{msg}");
+            }
+            _ => panic!("expected imported main package rejection"),
+        }
+    }
+
+    #[test]
+    fn test_analyze_project_enforces_internal_visibility_in_import_pipeline() {
+        let mut files = FileSet::new(PathBuf::from("."));
+        files.files.insert(
+            PathBuf::from("main.vo"),
+            concat!(
+                "package main\n",
+                "import \"github.com/acme/lib\"\n",
+                "func main() {}\n",
+            )
+            .to_string(),
+        );
+
+        let std_fs = MemoryFs::new().with_file("errors/errors.vo", "package errors\n");
+        let mod_fs = MemoryFs::new()
+            .with_file(
+                "github.com/acme/lib/lib.vo",
+                concat!(
+                    "package lib\n",
+                    "import \"github.com/acme/secret/internal/secret\"\n",
+                ),
+            )
+            .with_file(
+                "github.com/acme/secret/internal/secret/secret.vo",
+                "package secret\n",
+            );
+        let resolver = PackageResolver {
+            std: StdSource::with_fs(std_fs),
+            r#mod: ModSource::with_fs(mod_fs),
+        };
+
+        let result = analyze_project(files, &resolver);
+        match result {
+            Err(AnalysisError::Import(msg)) => {
+                assert!(msg.contains("use of internal package not allowed"), "{msg}");
+                assert!(msg.contains("github.com/acme/lib"), "{msg}");
+                assert!(msg.contains("github.com/acme/secret/internal/secret"), "{msg}");
+            }
+            _ => panic!("expected internal package rejection"),
+        }
     }
 }
 

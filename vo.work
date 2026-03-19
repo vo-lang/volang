@@ -1,10 +1,25 @@
-vo 0.1
+version = 1
 
-use ../gix
-use ../image
-use ../notify
-use ../resvg
-use ../vogui
-use ../vopack
-use ../voplay
-use ../zip
+[[use]]
+path = "../gix"
+
+[[use]]
+path = "../image"
+
+[[use]]
+path = "../notify"
+
+[[use]]
+path = "../resvg"
+
+[[use]]
+path = "../vogui"
+
+[[use]]
+path = "../vopack"
+
+[[use]]
+path = "../voplay"
+
+[[use]]
+path = "../zip"

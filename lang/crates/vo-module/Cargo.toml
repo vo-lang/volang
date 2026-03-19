@@ -3,21 +3,19 @@ name = "vo-module"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Module system for Vo: vo.mod parsing, dependency resolution, and import path resolution"
+description = "Vo module system: identity, schema, resolution, registry, and build policy"
 
 [dependencies]
 vo-common = { path = "../vo-common", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 toml = "0.8"
-# Pure-Rust tarball extraction — works on both native and WASM
+sha2 = "0.10"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { version = "2", features = ["gzip"] }
-sha2 = "0.10"
-base64 = "0.22"
-dirs = "5"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"

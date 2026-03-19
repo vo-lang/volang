@@ -77,7 +77,7 @@ pub fn cmd_open_url_session(url: String, state: tauri::State<'_, AppState>) -> R
 }
 
 fn import_url_project(url: &str, workspace_root: &Path) -> Result<PathBuf, String> {
-    let bytes = vo_module::fetch::fetch_bytes_blocking(url)?;
+    let bytes = fetch_bytes_blocking(url)?;
     let session_root = build_url_session_root(workspace_root, url);
     if session_root.exists() {
         fs::remove_dir_all(&session_root).map_err(|err| format!("{}: {}", session_root.display(), err))?;
@@ -89,6 +89,18 @@ fn import_url_project(url: &str, workspace_root: &Path) -> Result<PathBuf, Strin
         write_text_import(url, &bytes, &session_root)?;
     }
     Ok(session_root)
+}
+
+fn fetch_bytes_blocking(url: &str) -> Result<Vec<u8>, String> {
+    let response = ureq::get(url)
+        .call()
+        .map_err(|e| format!("HTTP fetch failed for {}: {}", url, e))?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("failed to read response body from {}: {}", url, e))?;
+    Ok(bytes)
 }
 
 fn build_url_session_root(workspace_root: &Path, url: &str) -> PathBuf {

@@ -37,6 +37,9 @@
 //!         └── lib.rs       # Native implementation
 //! ```
 
+#[cfg(feature = "native")]
+pub mod host;
+
 pub use vo_ffi_macro::vo_fn;
 pub use vo_runtime::ffi::{
     ExternCallContext, ExternFn,
@@ -94,6 +97,18 @@ macro_rules! export_extensions {
                 entry_count: $crate::EXTERN_TABLE.len() as u32,
                 entries: $crate::EXTERN_TABLE.as_ptr(),
             }
+        }
+
+        /// Receive a host bridge pointer from the extension loader.
+        #[no_mangle]
+        pub unsafe extern "C" fn vo_ext_set_host_bridge(ptr: usize) {
+            $crate::host::receive_host_bridge(ptr);
+        }
+
+        /// Clear the host bridge reference before the host drops it.
+        #[no_mangle]
+        pub extern "C" fn vo_ext_clear_host_bridge() {
+            $crate::host::receive_clear_host_bridge();
         }
     };
 

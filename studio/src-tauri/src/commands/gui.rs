@@ -420,7 +420,7 @@ fn collect_render_island_vfs_files_virtual(
     Ok(files)
 }
 
-fn extract_framework_contract(extensions: &[vo_module::ExtensionManifest]) -> Option<FrameworkContract> {
+fn extract_framework_contract(extensions: &[vo_module::ext_manifest::ExtensionManifest]) -> Option<FrameworkContract> {
     for ext in extensions {
         if let Some(studio) = parse_studio_manifest(&ext.manifest_path) {
             return Some(FrameworkContract {

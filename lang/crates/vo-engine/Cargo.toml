@@ -19,5 +19,5 @@ vo-analysis = { path = "../vo-analysis" }
 vo-codegen = { path = "../vo-codegen" }
 vo-module = { path = "../vo-module" }
 vo-syntax = { path = "../vo-syntax" }
-dirs = "5"
 serde_json = "1"
+sha2 = "0.10"

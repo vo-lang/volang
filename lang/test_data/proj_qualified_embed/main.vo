@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"iface"
+	"github.com/vo-lang/test/qualified_embed/iface"
 )
 
 // MyGreeter embeds iface.Greeter using qualified name
