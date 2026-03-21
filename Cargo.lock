@@ -2020,7 +2020,6 @@ dependencies = [
  "flate2",
  "include_dir",
  "js-sys",
- "sha2",
  "tar",
  "vo-analysis",
  "vo-codegen",

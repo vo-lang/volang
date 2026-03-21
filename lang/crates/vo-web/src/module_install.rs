@@ -11,8 +11,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use sha2::{Digest as Sha2Digest, Sha256};
 use vo_common::vfs::MemoryFs;
+use vo_module::digest::Digest;
+use vo_module::materialize;
 use vo_module::schema::lockfile::{LockFile, LockedModule, LockedArtifact};
 use vo_module::schema::modfile::ModFile;
 use vo_module::schema::manifest::ReleaseManifest;
@@ -21,7 +22,6 @@ use vo_module::ext_manifest::{WasmExtensionKind, WasmExtensionManifest};
 use vo_web_runtime_wasm::ext_bridge;
 
 const VFS_ARTIFACT_DIR: &str = ".vo-artifacts";
-const VFS_SOURCE_DIGEST_FILE: &str = ".vo-source-digest";
 const VFS_WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 fn read_vfs_text(path: &str) -> Result<String, String> {
@@ -64,16 +64,8 @@ fn write_vfs_text(path: &str, content: &str) -> Result<(), String> {
     write_vfs_bytes(path, content.as_bytes())
 }
 
-fn sha256_digest(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", <Sha256 as Sha2Digest>::digest(bytes))
-}
-
-/// VFS cache directory for a module: `/<path_encoded>/<version>/`
-///
-/// The module path is encoded by replacing `/` with `@` (which is forbidden
-/// in module-path segments) so that different paths never collide.
 fn vfs_module_dir(module: &str, version: &str) -> String {
-    format!("/{}/{}", module.replace('/', "@"), version)
+    format!("/{}", materialize::relative_module_dir(module, version))
 }
 
 fn vfs_module_file_path(module: &str, version: &str, file_name: &str) -> String {
@@ -81,7 +73,7 @@ fn vfs_module_file_path(module: &str, version: &str, file_name: &str) -> String 
 }
 
 fn vfs_source_digest_path(module: &str, version: &str) -> String {
-    format!("{}/{}", vfs_module_dir(module, version), VFS_SOURCE_DIGEST_FILE)
+    format!("{}/{}", vfs_module_dir(module, version), materialize::SOURCE_DIGEST_MARKER)
 }
 
 fn vfs_release_manifest_path(module: &str, version: &str) -> String {
@@ -93,7 +85,7 @@ fn vfs_artifact_path(module: &str, version: &str, asset_name: &str) -> String {
 }
 
 fn read_vfs_installed_version(module: &str, version: &str) -> Option<String> {
-    let path = vfs_module_file_path(module, version, ".vo-version");
+    let path = vfs_module_file_path(module, version, materialize::VERSION_MARKER);
     let content = read_vfs_text(&path).ok()?;
     let version = content.trim();
     if version.is_empty() {
@@ -113,7 +105,7 @@ fn read_vfs_installed_source_digest(module: &str, version: &str) -> Option<Strin
 
 fn read_vfs_release_manifest_digest(module: &str, version: &str) -> Option<String> {
     let content = read_vfs_text(&vfs_release_manifest_path(module, version)).ok()?;
-    Some(sha256_digest(content.as_bytes()))
+    Some(Digest::from_sha256(content.as_bytes()).to_string())
 }
 
 fn collect_locked_specs(
@@ -214,7 +206,7 @@ fn write_versioned_module_files_to_vfs(
     files: &[(PathBuf, String)],
 ) -> Result<(), String> {
     let module_prefix = Path::new(module);
-    let install_root = PathBuf::from(format!("{}/{}", module.replace('/', "@"), version));
+    let install_root = PathBuf::from(materialize::relative_module_dir(module, version));
     for (vfs_path, content) in files {
         let file_rel = vfs_path.strip_prefix(module_prefix).map_err(|_| {
             format!(
@@ -315,7 +307,7 @@ async fn load_locked_ext_from_vfs(locked: &LockedModule) -> Result<(), String> {
         ))?;
     let wasm_path = vfs_artifact_path(module, &version, &wasm_artifact.id.name);
     let wasm_bytes = read_vfs_bytes(&wasm_path)?;
-    let wasm_digest = sha256_digest(&wasm_bytes);
+    let wasm_digest = Digest::from_sha256(&wasm_bytes).to_string();
     if wasm_digest != wasm_artifact.digest.as_str() {
         return Err(format!(
             "locked wasm artifact {} for {}@{} digest mismatch in the VFS: expected {}, found {}",
@@ -333,7 +325,7 @@ async fn load_locked_ext_from_vfs(locked: &LockedModule) -> Result<(), String> {
                 ))?;
             let js_glue_path = vfs_artifact_path(module, &version, &js_glue_artifact.id.name);
             let js_glue_bytes = read_vfs_bytes(&js_glue_path)?;
-            let js_glue_digest = sha256_digest(&js_glue_bytes);
+            let js_glue_digest = Digest::from_sha256(&js_glue_bytes).to_string();
             if js_glue_digest != js_glue_artifact.digest.as_str() {
                 return Err(format!(
                     "locked wasm JS glue artifact {} for {}@{} digest mismatch in the VFS: expected {}, found {}",
@@ -358,11 +350,11 @@ async fn install_locked_module_to_vfs(locked: &LockedModule) -> Result<String, S
     let files = wasm_fetch::fetch_locked_module_files(locked).await?;
     write_versioned_module_files_to_vfs(module, &version, &files)?;
     write_vfs_text(
-        &vfs_module_file_path(module, &version, ".vo-version"),
+        &vfs_module_file_path(module, &version, materialize::VERSION_MARKER),
         &format!("{}\n", version),
     )?;
     write_vfs_text(
-        &vfs_source_digest_path(module, &version),
+        &vfs_module_file_path(module, &version, materialize::SOURCE_DIGEST_MARKER),
         &format!("{}\n", locked.source),
     )?;
 
@@ -608,11 +600,11 @@ pub async fn install_module_to_vfs(spec: &str) -> Result<String, String> {
     let manifest = release_manifest_from_files(&module, &version, &files)?;
     write_versioned_module_files_to_vfs(&module, &version, &files)?;
     write_vfs_text(
-        &vfs_module_file_path(&module, &version, ".vo-version"),
+        &vfs_module_file_path(&module, &version, materialize::VERSION_MARKER),
         &format!("{}\n", version),
     )?;
     write_vfs_text(
-        &vfs_source_digest_path(&module, &version),
+        &vfs_module_file_path(&module, &version, materialize::SOURCE_DIGEST_MARKER),
         &format!("{}\n", manifest.source.digest),
     )?;
 
@@ -702,8 +694,8 @@ mod wasm_fetch {
         let Some(expected_hex) = expected_digest.strip_prefix("sha256:") else {
             return Err(format!("{} declares an invalid digest: {}", label, expected_digest));
         };
-        let actual = super::sha256_digest(bytes);
-        let actual = actual.strip_prefix("sha256:").expect("sha256 digest helper must include prefix");
+        let actual = vo_module::digest::Digest::from_sha256(bytes);
+        let actual = actual.hex();
         if !expected_hex.eq_ignore_ascii_case(actual) {
             return Err(format!(
                 "{} digest mismatch: expected sha256:{}, got sha256:{}",
@@ -824,7 +816,7 @@ mod wasm_fetch {
         let manifest_url = release_manifest_url(module, version)?;
         let manifest_bytes = fetch_bytes(&manifest_url).await
             .map_err(|e| format!("failed to fetch release manifest for {}@{}: {}", module, version, e))?;
-        let manifest_digest = super::sha256_digest(&manifest_bytes);
+        let manifest_digest = vo_module::digest::Digest::from_sha256(&manifest_bytes).to_string();
         let manifest_content = String::from_utf8(manifest_bytes)
             .map_err(|error| format!("release manifest for {}@{} is not valid UTF-8: {}", module, version, error))?;
         let manifest = parse_requested_release_manifest(&manifest_content, module, version)?;
@@ -842,94 +834,23 @@ mod wasm_fetch {
 
     // ── Source package extraction ─────────────────────────────────────────────
 
-    fn source_package_entry_allowed(path: &Path) -> bool {
-        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
-        let path = path.to_string_lossy();
-        path.ends_with(".vo")
-            || name == "vo.mod"
-            || name == "vo.lock"
-            || name == "vo.ext.toml"
-    }
-
-    fn strip_source_package_root(
-        raw_path: &Path,
-        archive_root: &mut Option<String>,
-    ) -> Result<Option<PathBuf>, String> {
-        let mut components = raw_path.components();
-        let first = match components.next() {
-            Some(first) => first,
-            None => return Ok(None),
-        };
-        let std::path::Component::Normal(first) = first else {
-            return Err(format!("invalid source package entry path: {}", raw_path.display()));
-        };
-        let first = first.to_string_lossy().to_string();
-        match archive_root {
-            Some(existing) if existing != &first => {
-                return Err("source package must unpack into a single top-level directory".to_string());
-            }
-            Some(_) => {}
-            None => *archive_root = Some(first),
-        }
-        let stripped = components.as_path();
-        if stripped.as_os_str().is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(stripped.to_path_buf()))
-    }
-
     fn extract_release_source_package_files(
         source_package: &[u8],
         manifest: &ReleaseManifest,
     ) -> Result<Vec<(PathBuf, String)>, String> {
-        use flate2::read::GzDecoder;
-        use tar::Archive;
-        use std::io::Read;
-
-        let gz = GzDecoder::new(source_package);
-        let mut archive = Archive::new(gz);
-        let mut archive_root = None;
-        let mut files = Vec::new();
-        let module = manifest.module.as_str();
-
-        for entry in archive.entries().map_err(|error| error.to_string())? {
-            let mut entry = entry.map_err(|error| error.to_string())?;
-            if !entry.header().entry_type().is_file() {
-                continue;
-            }
-
-            let raw_path = entry.path().map_err(|error| error.to_string())?.into_owned();
-            let Some(stripped_path) = strip_source_package_root(&raw_path, &mut archive_root)? else {
-                continue;
-            };
-            if !source_package_entry_allowed(&stripped_path) {
-                continue;
-            }
-
-            let mut buf = Vec::new();
-            entry.read_to_end(&mut buf).map_err(|error| error.to_string())?;
-
-            let content = match String::from_utf8(buf) {
-                Ok(content) => content,
-                Err(_) => continue,
-            };
-            let vfs_path = PathBuf::from(format!("{}/{}", module, stripped_path.display()));
-            files.push((vfs_path, content));
-        }
-
-        if archive_root.is_none() {
-            return Err(format!(
-                "source package for {}@{} is empty",
-                module, manifest.version,
-            ));
-        }
-        if files.is_empty() {
+        let entries = vo_module::materialize::extract_source_entries(source_package)
+            .map_err(|e| format!("{} for {}@{}", e, manifest.module, manifest.version))?;
+        if entries.is_empty() {
             return Err(format!(
                 "no Vo files found in source package for {}@{}",
-                module, manifest.version,
+                manifest.module, manifest.version,
             ));
         }
-        Ok(files)
+        let module = manifest.module.as_str();
+        Ok(entries
+            .into_iter()
+            .map(|e| (PathBuf::from(format!("{}/{}", module, e.relative_path.display())), e.content))
+            .collect())
     }
 
     fn append_release_manifest_file(files: &mut Vec<(PathBuf, String)>, module: &str, manifest_content: &str) {
