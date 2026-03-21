@@ -30,6 +30,7 @@
   let loading = 'Bootstrapping Studio…';
   let error = '';
   let runtimePollTimer: number | null = null;
+  let runtimePollGeneration = 0;
   let sessionProjectHasGui = false;
   let showGitHubConnectModal = false;
   let confirmDialog: { title: string; message: string; danger: boolean; action: () => void } | null = null;
@@ -46,11 +47,15 @@
       githubStore = registry.projectCatalog.github;
       bootstrap = registry.project.bootstrapContext;
       const isRunner = bootstrap.mode === 'runner';
-      const runTarget = bootstrap.initialRunTarget ?? bootstrap.initialPath;
+      const runTarget = bootstrap.initialRunTarget;
+      const initialPath = bootstrap.initialPath;
       let openedSession: SessionInfo;
       if (isRunner && runTarget) {
         loading = `Running ${runTarget.split('/').pop()}…`;
         openedSession = await registry.project.openRunSession(runTarget);
+      } else if (initialPath) {
+        loading = `Opening ${initialPath.split('/').pop()}…`;
+        openedSession = await registry.project.openRunSession(initialPath);
       } else if (bootstrap.initialUrl) {
         loading = `Importing ${bootstrap.initialUrl}…`;
         openedSession = await registry.project.openUrl(bootstrap.initialUrl);
@@ -91,6 +96,7 @@
     if (!registry) return;
     registry.runtime.clearConsole();
     try {
+      stopRuntimePolling();
       await registry.runtime.runGui(target);
       startRuntimePolling();
     } catch (_) {}
@@ -263,6 +269,7 @@
     const flushed = await flushEditorBeforeRun();
     if (!flushed) return false;
     try {
+      stopRuntimePolling();
       await registry.runtime.runGui(target);
       startRuntimePolling();
       return true;
@@ -355,19 +362,29 @@
 
   function startRuntimePolling(): void {
     stopRuntimePolling();
-    runtimePollTimer = window.setInterval(async () => {
-      if (!registry) return;
+    const generation = ++runtimePollGeneration;
+    const pollOnce = async (): Promise<void> => {
+      if (!registry || generation !== runtimePollGeneration) return;
       try {
         await registry.runtime.pollGuiRender();
       } catch (e) {
         consolePush('stderr', formatError(e));
-        stopRuntimePolling();
+        if (generation === runtimePollGeneration) {
+          stopRuntimePolling();
+        }
+        return;
       }
-    }, 50);
+      if (generation !== runtimePollGeneration) return;
+      runtimePollTimer = window.setTimeout(() => {
+        void pollOnce();
+      }, 16);
+    };
+    void pollOnce();
   }
 
   function stopRuntimePolling(): void {
-    if (runtimePollTimer !== null) { window.clearInterval(runtimePollTimer); runtimePollTimer = null; }
+    runtimePollGeneration++;
+    if (runtimePollTimer !== null) { window.clearTimeout(runtimePollTimer); runtimePollTimer = null; }
   }
 
   $: appMode = $ide.appMode;

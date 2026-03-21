@@ -1,4 +1,4 @@
-use crate::commands::pathing::{resolve_compile_target, resolve_run_target};
+use crate::commands::pathing::{resolve_run_target, resolve_target, ResolvedTarget};
 use crate::state::AppState;
 use std::path::PathBuf;
 use vo_engine::{
@@ -62,10 +62,26 @@ fn diagnostic_from_error(file: String, message: String) -> DiagnosticError {
     DiagnosticError { file, line: 0, column: 0, message }
 }
 
+fn resolve_command_target(
+    state: &tauri::State<'_, AppState>,
+    path: &str,
+) -> Result<ResolvedTarget, String> {
+    resolve_target(
+        &state.session_root(),
+        state.workspace_root(),
+        path,
+        state.single_file_run(),
+    )
+}
+
+fn default_output_path(target: &ResolvedTarget) -> PathBuf {
+    target.output_base_path.with_extension("vob")
+}
+
 #[tauri::command]
 pub fn cmd_check_vo(path: String, state: tauri::State<'_, AppState>) -> Result<CheckResult, String> {
-    let compile_path = resolve_compile_target(&state.session_root(), &path)?;
-    let compile_str = compile_path.to_string_lossy().to_string();
+    let target = resolve_command_target(&state, &path)?;
+    let compile_str = target.compile_path.to_string_lossy().to_string();
     match prepare_and_compile(&compile_str) {
         Ok(_) => Ok(CheckResult { ok: true, errors: vec![] }),
         Err(msg) => Ok(CheckResult { ok: false, errors: vec![diagnostic_from_error(compile_str, msg)] }),
@@ -74,11 +90,11 @@ pub fn cmd_check_vo(path: String, state: tauri::State<'_, AppState>) -> Result<C
 
 #[tauri::command]
 pub fn cmd_compile_vo(path: String, state: tauri::State<'_, AppState>) -> Result<CompileResult, String> {
-    let compile_path = resolve_compile_target(&state.session_root(), &path)?;
-    let compile_str = compile_path.to_string_lossy().to_string();
+    let target = resolve_command_target(&state, &path)?;
+    let compile_str = target.compile_path.to_string_lossy().to_string();
     match prepare_and_compile(&compile_str) {
         Ok(output) => {
-            let output_path = compile_path.with_extension("vob");
+            let output_path = default_output_path(&target);
             std::fs::write(&output_path, output.module.serialize())
                 .map_err(|err| format!("failed to write output: {}", err))?;
             Ok(CompileResult { ok: true, errors: vec![], output_path: Some(output_path.to_string_lossy().to_string()) })
@@ -94,11 +110,11 @@ pub fn cmd_format_vo(_path: String, _state: tauri::State<'_, AppState>) -> Resul
 
 #[tauri::command]
 pub fn cmd_build_vo(path: String, output: Option<String>, state: tauri::State<'_, AppState>) -> Result<BuildResult, String> {
-    let compile_path = resolve_compile_target(&state.session_root(), &path)?;
-    let compile_str = compile_path.to_string_lossy().to_string();
+    let target = resolve_command_target(&state, &path)?;
+    let compile_str = target.compile_path.to_string_lossy().to_string();
     match prepare_and_compile(&compile_str) {
         Ok(compiled) => {
-            let output_path = output.map(std::path::PathBuf::from).unwrap_or_else(|| compile_path.with_extension("vob"));
+            let output_path = output.map(std::path::PathBuf::from).unwrap_or_else(|| default_output_path(&target));
             std::fs::write(&output_path, compiled.module.serialize())
                 .map_err(|err| format!("failed to write output: {}", err))?;
             Ok(BuildResult { ok: true, errors: vec![], output_path: Some(output_path.to_string_lossy().to_string()) })
@@ -109,8 +125,8 @@ pub fn cmd_build_vo(path: String, output: Option<String>, state: tauri::State<'_
 
 #[tauri::command]
 pub fn cmd_dump_vo(path: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let compile_path = resolve_compile_target(&state.session_root(), &path)?;
-    let output = prepare_and_compile(&compile_path.to_string_lossy())?;
+    let target = resolve_command_target(&state, &path)?;
+    let output = prepare_and_compile(&target.compile_path.to_string_lossy())?;
     Ok(format_text(&output.module))
 }
 

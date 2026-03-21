@@ -248,10 +248,17 @@ pub fn session_info(
 }
 
 fn default_workspace() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".studio")
-        .join("workspace")
+    resolve_workspace_root(
+        parse_env_any(&["STUDIO_WORKSPACE", "VIBE_STUDIO_WORKSPACE"]).as_deref(),
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")),
+    )
+}
+
+fn resolve_workspace_root(workspace_override: Option<&str>, home_dir: PathBuf) -> PathBuf {
+    if let Some(path) = workspace_override {
+        return PathBuf::from(strip_file_prefix(path));
+    }
+    home_dir.join(".studio").join("workspace")
 }
 
 // ---------------------------------------------------------------------------
@@ -399,4 +406,25 @@ fn detect_entry_path(path: &Path) -> Option<String> {
         return Some(main_vo.to_string_lossy().to_string());
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_workspace_root;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolve_workspace_root_uses_override_when_present() {
+        let resolved = resolve_workspace_root(
+            Some("/tmp/vo-studio-workspace"),
+            PathBuf::from("/Users/example"),
+        );
+        assert_eq!(resolved, PathBuf::from("/tmp/vo-studio-workspace"));
+    }
+
+    #[test]
+    fn resolve_workspace_root_defaults_under_home_directory() {
+        let resolved = resolve_workspace_root(None, PathBuf::from("/Users/example"));
+        assert_eq!(resolved, PathBuf::from("/Users/example/.studio/workspace"));
+    }
 }

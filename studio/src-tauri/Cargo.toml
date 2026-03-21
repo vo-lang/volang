@@ -27,6 +27,7 @@ vo-ext = { path = "../../lang/crates/vo-ext" }
 vo-module = { path = "../../lang/crates/vo-module" }
 vo-runtime = { path = "../../lang/crates/vo-runtime" }
 vo-vm = { path = "../../lang/crates/vo-vm" }
+vogui-protocol = { path = "../../../vogui/rust/protocol" }
 
 [patch."https://github.com/vo-lang/volang"]
 vo-common    = { path = "../../lang/crates/vo-common" }

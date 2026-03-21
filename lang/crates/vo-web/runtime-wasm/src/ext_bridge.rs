@@ -56,6 +56,9 @@ pub const TAG_NIL_REF:    u8 = 0xE4;
 // to produce non-Ok ExternResult variants.
 pub const TAG_SUSPEND:     u8 = 0x01; // HostEventWaitAndReplay
 pub const TAG_HOST_OUTPUT: u8 = 0x02; // set_host_output with payload
+pub const TAG_DISPLAY_PULSE: u8 = 0x03;
+
+const DISPLAY_PULSE_DELAY_MS: u32 = u32::MAX;
 
 // ── JS bindings ───────────────────────────────────────────────────────────────
 
@@ -291,6 +294,13 @@ fn wasm_ext_bridge(call: &mut ExternCallContext) -> ExternResult {
             TAG_SUSPEND => {
                 let token = call.next_host_event_token();
                 ExternResult::HostEventWaitAndReplay { token }
+            }
+            TAG_DISPLAY_PULSE => {
+                let token = call.next_host_event_token();
+                ExternResult::HostEventWait {
+                    token,
+                    delay_ms: DISPLAY_PULSE_DELAY_MS,
+                }
             }
             TAG_HOST_OUTPUT => {
                 call.set_host_output(output[1..].to_vec());

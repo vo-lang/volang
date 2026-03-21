@@ -1,5 +1,6 @@
 import { get, type Readable } from 'svelte/store';
 
+import { findExternalWidgetHandlerIdInBytes } from '../../../../../vogui/js/dist/index.js';
 import type { Backend } from '../backend/backend';
 import type { GuiRunOutput, RunEvent, RunOpts, StreamHandle } from '../types';
 import { formatError } from '../format_error';
@@ -103,9 +104,14 @@ export class RuntimeService {
   }
 
   async runGui(target: string): Promise<GuiRunOutput> {
+    const state = get(runtime);
+    if (state.kind === 'gui' && state.isRunning) {
+      await this.stopGui().catch(() => undefined);
+    }
     runtime.set({ ...IDLE_RUNTIME, status: 'running', kind: 'gui', target, isRunning: true });
     try {
       const output = await this.backend.runGui(target);
+      const externalWidgetHandlerId = output.externalWidgetHandlerId ?? findExternalWidgetHandlerIdInBytes(output.renderBytes);
       runtime.set({
         ...IDLE_RUNTIME,
         status: 'ready',
@@ -116,9 +122,12 @@ export class RuntimeService {
         guiModuleBytes: output.moduleBytes,
         guiRenderBytes: output.renderBytes,
         guiFramework: output.framework,
-        guiExternalWidgetHandlerId: output.externalWidgetHandlerId,
+        guiExternalWidgetHandlerId: externalWidgetHandlerId,
       });
-      return output;
+      return {
+        ...output,
+        externalWidgetHandlerId,
+      };
     } catch (error) {
       const message = formatError(error);
       consolePush('stderr', message);
@@ -130,7 +139,17 @@ export class RuntimeService {
   async pollGuiRender(): Promise<Uint8Array> {
     const bytes = await this.backend.pollGuiRender();
     if (bytes.length > 0) {
-      runtime.update((s) => ({ ...s, kind: 'gui', status: 'ready', isRunning: true, guiRenderBytes: bytes }));
+      runtime.update((s) => {
+        const externalWidgetHandlerId = findExternalWidgetHandlerIdInBytes(bytes);
+        return {
+          ...s,
+          kind: 'gui',
+          status: 'ready',
+          isRunning: true,
+          guiRenderBytes: bytes,
+          guiExternalWidgetHandlerId: externalWidgetHandlerId ?? s.guiExternalWidgetHandlerId,
+        };
+      });
     }
     return bytes;
   }

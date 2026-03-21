@@ -3788,6 +3788,7 @@ dependencies = [
  "vo-module",
  "vo-runtime",
  "vo-vm",
+ "vogui-protocol",
 ]
 
 [[package]]
@@ -4819,6 +4820,10 @@ dependencies = [
  "vo-runtime",
  "vo-stdlib",
 ]
+
+[[package]]
+name = "vogui-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "vswhom"

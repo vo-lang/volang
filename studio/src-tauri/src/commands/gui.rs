@@ -63,25 +63,10 @@ pub struct GuiRunOutput {
     external_widget_handler_id: Option<i32>,
 }
 
-/// Scan binary render bytes for the `onWidget` prop of a `vo-external-widget` node.
-/// Format: ...[u16:8]["onWidget"][u8:2 binValInt][i32:handlerID]...
+/// Decode binary render bytes and find the `onWidget` handler ID of a `vo-external-widget` node.
 fn find_on_widget_handler_id(bytes: &[u8]) -> Option<i32> {
-    const KEY: &[u8] = b"onWidget";
-    const KEY_LEN: usize = KEY.len();
-    // Minimum: 2 (u16 len prefix) + 8 (key) + 1 (binValInt tag) + 4 (i32) = 15
-    if bytes.len() < 5 + KEY_LEN + 5 { return None; }
-    let end = bytes.len().saturating_sub(KEY_LEN + 5);
-    for i in 2..=end {
-        if &bytes[i..i + KEY_LEN] != KEY { continue; }
-        let key_len_lo = bytes[i - 2];
-        let key_len_hi = bytes[i - 1];
-        if u16::from_le_bytes([key_len_lo, key_len_hi]) as usize != KEY_LEN { continue; }
-        let after = i + KEY_LEN;
-        if bytes[after] != 2 { continue; } // binValInt
-        let id_bytes: [u8; 4] = bytes[after + 1..after + 5].try_into().ok()?;
-        return Some(i32::from_le_bytes(id_bytes));
-    }
-    None
+    let frame = vogui_protocol::decode_binary_render(bytes).ok()?;
+    vogui_protocol::query::find_external_widget_handler_id(&frame)
 }
 
 #[derive(serde::Serialize)]

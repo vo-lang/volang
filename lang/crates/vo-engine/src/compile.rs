@@ -544,6 +544,69 @@ mod tests {
     }
 
     #[test]
+    fn test_compile_single_file_without_vo_mod_uses_ancestor_workfile_extension_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "vo_compile_single_file_work_ext_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let repo_root = root.join("repo");
+        let volang_root = repo_root.join("volang");
+        let examples_root = volang_root.join("examples");
+        let local_vogui = repo_root.join("vogui");
+
+        fs::create_dir_all(&examples_root).unwrap();
+        fs::create_dir_all(local_vogui.join("rust").join("src")).unwrap();
+
+        fs::write(
+            volang_root.join("vo.work"),
+            "version = 1\n\n[[use]]\npath = \"../vogui\"\n",
+        )
+        .unwrap();
+        fs::write(
+            examples_root.join("tetris.vo"),
+            "package main\nimport \"github.com/vo-lang/vogui\"\nfunc main(){vogui.Hello()}\n",
+        )
+        .unwrap();
+        fs::write(
+            local_vogui.join("vo.mod"),
+            "module github.com/vo-lang/vogui\nvo 0.1.0\n",
+        )
+        .unwrap();
+        fs::write(
+            local_vogui.join("vo.ext.toml"),
+            "[extension]\nname = \"vogui\"\npath = \"rust/target/{profile}/libvo_vogui\"\n",
+        )
+        .unwrap();
+        fs::write(
+            local_vogui.join("vogui.vo"),
+            "package vogui\nfunc Hello(){}\n",
+        )
+        .unwrap();
+        fs::write(
+            local_vogui.join("rust").join("Cargo.toml"),
+            "[package]\nname = \"vo_vogui\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let output = compile(examples_root.join("tetris.vo").to_string_lossy().as_ref()).unwrap();
+        let local_vogui = local_vogui.canonicalize().unwrap();
+        assert!(
+            output.extensions.iter().any(|manifest| {
+                manifest.name == "vogui"
+                    && manifest.native_path.starts_with(local_vogui.join("rust").join("target"))
+            }),
+            "extensions = {:?}",
+            output.extensions
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn test_compile_all_replaced_external_deps_succeeds_without_vo_lock() {
         let root = std::env::temp_dir().join(format!(
             "vo_compile_all_replaced_no_lock_{}_{}",

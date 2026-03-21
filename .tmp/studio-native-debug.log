@@ -1,9 +1,2 @@
-[studio-native] compile extensions: []
-[studio-native] compile extensions: []
-[studio-native] compile extensions: []
-[studio-native] compile extensions: []
-[studio-native] compile extensions: []
-[studio-native] compile extensions: []
-[studio-native] compile extensions: []
-[studio-native] compile extensions: []
-[studio-native] compile extensions: []
+[studio-native] compile extensions: ["vogui => /Users/macm1/code/github/vogui/rust/target/debug/libvo_vogui.dylib", "voplay => /Users/macm1/code/github/voplay/rust/target/debug/libvo_voplay.dylib"]
+[studio-frontend] render island channel init

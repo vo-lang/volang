@@ -380,6 +380,7 @@ def run_studio_native(build_wasm: bool = False, launch_url: Optional[str] = None
         STUDIO_NATIVE_DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
         STUDIO_NATIVE_DEBUG_LOG.write_text('')
         env['VIBE_STUDIO_DEBUG_LOG'] = str(STUDIO_NATIVE_DEBUG_LOG)
+        env.setdefault('VIBE_STUDIO_WORKSPACE', str(PROJECT_ROOT))
         if launch_url:
             env['VIBE_STUDIO_LAUNCH_URL'] = launch_url
         print(f"{Colors.DIM}Native debug log: {STUDIO_NATIVE_DEBUG_LOG}{Colors.NC}")

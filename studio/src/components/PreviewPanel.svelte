@@ -1,10 +1,10 @@
 <script context="module" lang="ts">
   // Module-level state shared across PreviewPanel instances.
-  // Tracks whether the native logic island VM has received the initial
-  // "mount" event.  This survives component destroy/recreate during
-  // fullscreen transitions so we don't re-send mount to a VM that is
-  // already running its render loop.
-  let voplayNativeMounted = false;
+  // Tracks whether the external widget on the logic island has received
+  // the initial "mount" event.  This survives component destroy/recreate
+  // during fullscreen transitions so we don't re-send mount to a VM that
+  // is already running its render loop.
+  let externalWidgetMounted = false;
 </script>
 
 <script lang="ts">
@@ -27,7 +27,7 @@
   export let onExitFullscreenAction: (() => void) | null = null;
   export let onToggleCollapsed: (() => void) | null = null;
 
-  // Must match the canvasRef passed to runRenderWorker in voplay/host.vo
+  // Must match the canvasRef passed to the external widget renderer
   const CANVAS_ID = 'canvas';
 
   let panelWidth = 400;
@@ -35,6 +35,8 @@
   let resizeStartX = 0;
   let resizeStartW = 0;
   let renderIslandActive = false;
+  let renderIslandLaunching = false;
+  let renderIslandLaunchGeneration = 0;
   let renderIslandError: string | null = null;
   let rendererContainer: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | null = null;
@@ -57,7 +59,7 @@
   // Launch render island when GUI app with renderer becomes active.
   // If the render island survived a layout transition (e.g. preview→fullscreen),
   // just re-adopt the canvas without re-launching.
-  $: if (isGuiApp && hasRenderIsland && registry && $runtime.guiModuleBytes && $runtime.guiEntryPath && !renderIslandActive) {
+  $: if (isGuiApp && hasRenderIsland && registry && $runtime.guiModuleBytes && $runtime.guiEntryPath && !renderIslandActive && !renderIslandLaunching) {
     if (isRenderIslandActive()) {
       console.log('[PreviewPanel] re-adopt: render island still active, re-attaching canvas');
       renderIslandActive = true;
@@ -68,8 +70,12 @@
     }
   }
   $: if (!isGuiApp && renderIslandActive) {
-    voplayNativeMounted = false;
+    externalWidgetMounted = false;
     teardownIsland();
+  }
+
+  $: if (renderIslandActive && isIslandTransport && !externalWidgetMounted && $runtime.guiExternalWidgetHandlerId != null) {
+    void ensureExternalWidgetMounted();
   }
 
   // Deliver render bytes for non-island render paths (render_byte_stream)
@@ -88,6 +94,7 @@
       canvas = document.createElement('canvas');
       canvas.id = CANVAS_ID;
     }
+    canvas.tabIndex = 0;
     return canvas;
   }
 
@@ -112,6 +119,13 @@
     if (canvas.parentElement !== rendererContainer) {
       rendererContainer.appendChild(canvas);
     }
+    if (chromeless || fullscreen) {
+      requestAnimationFrame(() => {
+        if (canvas.parentElement === rendererContainer) {
+          canvas.focus();
+        }
+      });
+    }
     maybeObserveRendererSize();
   }
 
@@ -134,7 +148,9 @@
   // ---- Lifecycle ----
 
   async function launchRenderIsland(): Promise<void> {
-    if (!registry) return;
+    if (!registry || renderIslandLaunching) return;
+    const launchGeneration = ++renderIslandLaunchGeneration;
+    renderIslandLaunching = true;
     try {
       const moduleBytes = $runtime.guiModuleBytes;
       const entryPath = $runtime.guiEntryPath;
@@ -152,41 +168,51 @@
           renderIslandError = message;
         },
       });
-      renderIslandActive = true;
-      if (isIslandTransport && !voplayNativeMounted) {
-        await launchVoplayIsland();
-        voplayNativeMounted = true;
+      if (launchGeneration !== renderIslandLaunchGeneration || !($runtime.kind === 'gui' && $runtime.isRunning)) {
+        stopRenderIsland();
+        removeCanvas();
+        return;
       }
+      renderIslandActive = true;
       maybeObserveRendererSize();
     } catch (e) {
       renderIslandError = e instanceof Error ? e.message : String(e);
       console.error('[PreviewPanel] render island start failed:', e);
+    } finally {
+      renderIslandLaunching = false;
     }
   }
 
-  async function launchVoplayIsland(): Promise<void> {
-    if (!registry) return;
+  async function mountExternalWidget(): Promise<boolean> {
+    if (!registry) return false;
     const externalHandlerId = $runtime.guiExternalWidgetHandlerId;
     if (externalHandlerId == null) {
-      console.error('[PreviewPanel] voplay island: missing external widget handler id');
-      return;
+      console.error('[PreviewPanel] external widget: missing handler id');
+      return false;
     }
     await tick();
     const width = rendererContainer?.clientWidth ?? 800;
     const height = rendererContainer?.clientHeight ?? 600;
 
-    // Notify logic island that the canvas is mounted → triggers runRenderIslandSplit
+    // Notify logic island that the external widget canvas is mounted
     const mountPayload = JSON.stringify({ type: 'mount', width, height });
     try {
       await registry.backend.sendGuiEvent(externalHandlerId, mountPayload);
+      return true;
     } catch (e) {
       renderIslandError = e instanceof Error ? e.message : String(e);
       throw e;
     }
   }
 
-  function sendVoplayResize(width: number, height: number): void {
-    if (!registry || !isIslandTransport || !voplayNativeMounted) return;
+  async function ensureExternalWidgetMounted(): Promise<void> {
+    if (!renderIslandActive || !isIslandTransport || externalWidgetMounted) return;
+    externalWidgetMounted = await mountExternalWidget();
+    maybeObserveRendererSize();
+  }
+
+  function sendExternalWidgetResize(width: number, height: number): void {
+    if (!registry || !isIslandTransport || !externalWidgetMounted) return;
     const externalHandlerId = $runtime.guiExternalWidgetHandlerId;
     if (externalHandlerId == null || width <= 0 || height <= 0) return;
     pendingResizeWidth = width;
@@ -200,24 +226,24 @@
         height: pendingResizeHeight,
       });
       registry?.backend.sendGuiEventAsync(externalHandlerId, payload).catch((e) => {
-        console.error('[PreviewPanel] voplay island resize failed:', e);
+        console.error('[PreviewPanel] external widget resize failed:', e);
       });
     });
   }
 
   function maybeObserveRendererSize(): void {
-    if (!rendererContainer || !isIslandTransport || !voplayNativeMounted) return;
+    if (!rendererContainer || !isIslandTransport || !externalWidgetMounted) return;
     if (resizeObserver) return;
     resizeObserver = new ResizeObserver((entries) => {
       const entry = entries[0];
       if (!entry) return;
-      sendVoplayResize(
+      sendExternalWidgetResize(
         Math.round(entry.contentRect.width),
         Math.round(entry.contentRect.height),
       );
     });
     resizeObserver.observe(rendererContainer);
-    sendVoplayResize(rendererContainer.clientWidth, rendererContainer.clientHeight);
+    sendExternalWidgetResize(rendererContainer.clientWidth, rendererContainer.clientHeight);
   }
 
   function stopObservingRendererSize(): void {
@@ -230,13 +256,14 @@
   }
 
   function teardownIsland(): void {
+    renderIslandLaunchGeneration++;
     stopObservingRendererSize();
     renderIslandActive = false;
     stopRenderIsland();
     removeCanvas();
   }
 
-  $: if (renderIslandActive && rendererContainer && isIslandTransport && voplayNativeMounted) {
+  $: if (renderIslandActive && rendererContainer && isIslandTransport && externalWidgetMounted) {
     maybeObserveRendererSize();
   }
   $: if (effectiveCollapsed && renderIslandActive) {
@@ -251,14 +278,14 @@
     stopObservingRendererSize();
     const running = $runtime.isRunning;
     const active = isRenderIslandActive();
-    console.log('[PreviewPanel] onDestroy', { running, active, voplayNativeMounted });
+    console.log('[PreviewPanel] onDestroy', { running, active, externalWidgetMounted });
     if (running && active) {
       // Layout transition (e.g. preview → fullscreen): keep the render island
       // alive and park the canvas off-screen so the WebGPU surface stays valid.
       parkCanvas();
       console.log('[PreviewPanel] onDestroy: parked canvas for layout transition');
     } else {
-      voplayNativeMounted = false;
+      externalWidgetMounted = false;
       teardownIsland();
       console.log('[PreviewPanel] onDestroy: full teardown');
     }

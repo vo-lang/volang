@@ -47,12 +47,61 @@ export interface VoWebModule {
 
 // ── Ext-bridge JS globals (mirrors playground/src/wasm/vo.ts) ─────────────────
 
+type BindgenModule = Record<string, unknown> & {
+  __voDispose?: () => void;
+};
+
 // Maps normalized module key → WebAssembly.Instance (standalone C-ABI modules).
 const extInstances = new Map<string, WebAssembly.Instance>();
 // Maps normalized module key → wasm-bindgen module (DOM/WebGPU access).
-const extBindgenModules = new Map<string, unknown>();
+const extBindgenModules = new Map<string, BindgenModule>();
 
 let extBridgeInstalled = false;
+
+function removeStandaloneModuleEntries(instance: WebAssembly.Instance): void {
+  for (const [key, value] of Array.from(extInstances.entries())) {
+    if (value === instance) {
+      extInstances.delete(key);
+    }
+  }
+}
+
+function removeBindgenModuleEntries(module: BindgenModule): void {
+  for (const [key, value] of Array.from(extBindgenModules.entries())) {
+    if (value === module) {
+      extBindgenModules.delete(key);
+    }
+  }
+}
+
+function disposeBindgenModule(module: BindgenModule): void {
+  try {
+    module.__voDispose?.();
+  } catch (error) {
+    console.error('[voDisposeExtModule] bindgen dispose failed:', error);
+  }
+}
+
+function unloadExtModule(key: string): void {
+  const bindgenModule = extBindgenModules.get(key);
+  if (bindgenModule) {
+    disposeBindgenModule(bindgenModule);
+    removeBindgenModuleEntries(bindgenModule);
+  }
+  const instance = extInstances.get(key);
+  if (instance) {
+    removeStandaloneModuleEntries(instance);
+  }
+}
+
+function unloadAllExtModules(): void {
+  const bindgenModules = Array.from(new Set(extBindgenModules.values()));
+  for (const module of bindgenModules) {
+    disposeBindgenModule(module);
+  }
+  extBindgenModules.clear();
+  extInstances.clear();
+}
 
 function installExtBridgeGlobals(): void {
   if (extBridgeInstalled) return;
@@ -63,6 +112,7 @@ function installExtBridgeGlobals(): void {
     bytes: Uint8Array,
     jsGlueUrl?: string,
   ): Promise<void> => {
+    unloadExtModule(key);
     if (jsGlueUrl) {
       const resp = await fetch(jsGlueUrl, { cache: 'no-store' });
       if (!resp.ok) throw new Error(`Failed to fetch JS glue: HTTP ${resp.status}`);
@@ -70,7 +120,7 @@ function installExtBridgeGlobals(): void {
       const blob = new Blob([jsText], { type: 'application/javascript' });
       const blobUrl = URL.createObjectURL(blob);
       try {
-        const glue = await import(/* @vite-ignore */ blobUrl) as Record<string, unknown>;
+        const glue = await import(/* @vite-ignore */ blobUrl) as BindgenModule;
         await (glue.default as (opts: { module_or_path: Uint8Array }) => Promise<void>)({
           module_or_path: bytes.slice(),
         });
@@ -99,6 +149,14 @@ function installExtBridgeGlobals(): void {
     if (extInstances.has(existingKey)) {
       extInstances.set(aliasKey, extInstances.get(existingKey)!);
     }
+  };
+
+  (window as unknown as Record<string, unknown>).voDisposeExtModule = (key: string): void => {
+    unloadExtModule(key);
+  };
+
+  (window as unknown as Record<string, unknown>).voDisposeAllExtModules = (): void => {
+    unloadAllExtModules();
   };
 
   (window as unknown as Record<string, unknown>).voCallExt = (
@@ -239,6 +297,7 @@ export async function loadStudioWasm(): Promise<StudioWasm> {
 }
 
 export function resetStudioWasmInstance(): void {
+  unloadAllExtModules();
   instance = null;
   initPromise = null;
 }
