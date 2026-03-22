@@ -1794,6 +1794,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-app-runtime"
+version = "0.1.0"
+dependencies = [
+ "vo-ext",
+ "vo-runtime",
+ "vo-vm",
+]
+
+[[package]]
 name = "vo-codegen"
 version = "0.1.0"
 dependencies = [

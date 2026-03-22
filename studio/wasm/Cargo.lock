@@ -1173,6 +1173,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-app-runtime"
+version = "0.1.0"
+dependencies = [
+ "vo-runtime",
+ "vo-vm",
+]
+
+[[package]]
 name = "vo-codegen"
 version = "0.1.0"
 dependencies = [
@@ -1269,6 +1277,8 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
+ "toml",
+ "vo-app-runtime",
  "vo-common",
  "vo-module",
  "vo-runtime",

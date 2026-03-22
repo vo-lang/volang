@@ -191,6 +191,21 @@ fn vm_err_to_run_err(vm: &Vm, e: &VmError) -> RunError {
     RunError::Runtime(runtime_err)
 }
 
+/// Build a GUI VM from compiled output, ready for use with `vo-app-runtime`.
+///
+/// This handles the standard sequence: ensure toolchain installed, build
+/// native extensions, create a VM with external island transport enabled,
+/// and load the module with extensions.
+pub fn build_gui_vm(compiled: CompileOutput) -> Result<Vm, String> {
+    ensure_toolchain_host_installed();
+    let ext_loader = load_extensions(&compiled.extensions, &compiled.locked_modules)
+        .map_err(|e| e.to_string())?;
+    let mut vm = Vm::new();
+    vm.enable_external_island_transport();
+    vm.load_with_extensions(compiled.module, ext_loader);
+    Ok(vm)
+}
+
 fn load_extensions(
     manifests: &[ExtensionManifest],
     locked_modules: &[vo_module::schema::lockfile::LockedModule],

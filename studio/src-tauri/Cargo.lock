@@ -3783,11 +3783,9 @@ dependencies = [
  "tauri-build",
  "toml 0.8.2",
  "ureq",
+ "vo-app-runtime",
  "vo-engine",
- "vo-ext",
  "vo-module",
- "vo-runtime",
- "vo-vm",
  "vogui-protocol",
 ]
 
@@ -4646,6 +4644,15 @@ dependencies = [
  "vo-common-core",
  "vo-module",
  "vo-syntax",
+]
+
+[[package]]
+name = "vo-app-runtime"
+version = "0.1.0"
+dependencies = [
+ "vo-ext",
+ "vo-runtime",
+ "vo-vm",
 ]
 
 [[package]]

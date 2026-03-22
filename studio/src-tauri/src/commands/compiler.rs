@@ -1,11 +1,11 @@
 use crate::commands::pathing::{resolve_run_target, resolve_target, ResolvedTarget};
 use crate::state::AppState;
 use std::path::PathBuf;
+use vo_app_runtime::take_captured_stdout;
 use vo_engine::{
     compile_with_auto_install, format_text, run_with_output,
-    run_with_output_interruptible, CompileOutput, RunError, RunMode, RuntimeErrorKind,
+    run_with_output_interruptible, CompileOutput, CaptureSink, RunError, RunMode, RuntimeErrorKind,
 };
-use vo_runtime::output::CaptureSink;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -136,7 +136,7 @@ pub fn cmd_run_vo(path: String, run_mode: String, state: tauri::State<'_, AppSta
     let compiled = prepare_and_compile(&run_target.compile_path.to_string_lossy())?;
     let sink = CaptureSink::new();
     let result = run_with_output(compiled, parse_run_mode(&run_mode)?, Vec::new(), sink.clone());
-    let captured = sink.take();
+    let captured = take_captured_stdout(sink.as_ref()).unwrap_or_default();
     match result {
         Ok(()) => Ok(captured),
         Err(err) => {
@@ -189,8 +189,7 @@ pub async fn cmd_run_vo_stream(
             _ => RunMode::Vm,
         };
         let result = run_with_output_interruptible(compiled, mode, Vec::new(), sink.clone(), Some(interrupt_flag));
-        let captured = sink.take();
-        if !captured.is_empty() {
+        if let Some(captured) = take_captured_stdout(sink.as_ref()) {
             let _ = on_event.send(RunEvent::Stdout { text: captured });
         }
         let duration_ms = start.elapsed().as_millis() as u64;

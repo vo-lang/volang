@@ -12,6 +12,7 @@ wasm-opt = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+vo-app-runtime = { path = "../../lang/crates/vo-app-runtime", default-features = false }
 vo-web = { path = "../../lang/crates/vo-web" }
 vo-web-runtime-wasm = { path = "../../lang/crates/vo-web/runtime-wasm" }
 vo-common = { path = "../../lang/crates/vo-common" }
@@ -23,6 +24,7 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["console"] }
 console_error_panic_hook = "0.1"
+toml = "0.8"
 
 [patch."https://github.com/vo-lang/volang"]
 vo-common    = { path = "../../lang/crates/vo-common" }

@@ -22,11 +22,9 @@ dirs = "5"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
 ureq = "2"
+vo-app-runtime = { path = "../../lang/crates/vo-app-runtime", features = ["std"] }
 vo-engine = { path = "../../lang/crates/vo-engine" }
-vo-ext = { path = "../../lang/crates/vo-ext" }
 vo-module = { path = "../../lang/crates/vo-module" }
-vo-runtime = { path = "../../lang/crates/vo-runtime" }
-vo-vm = { path = "../../lang/crates/vo-vm" }
 vogui-protocol = { path = "../../../vogui/rust/protocol" }
 
 [patch."https://github.com/vo-lang/volang"]

@@ -24,6 +24,7 @@ import type {
   SessionInfo,
   StreamHandle,
 } from '../types';
+import { loadStudioWasm, type StudioWasm } from '../studio_wasm';
 import { makeErrorStreamHandle, makeResolvedStreamHandle } from './stream_handle';
 
 const WORKSPACE_ROOT = '/workspace';
@@ -34,7 +35,36 @@ const defaultWorkspaceFiles = new Map<string, string>([
   [`${WORKSPACE_ROOT}/main.vo`, 'package main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println("Studio rewrite bootstrap")\n}\n'],
 ]);
 const files = new Map<string, string>();
+const vfsFiles = new Map<string, Uint8Array>();
 const directories = new Set<string>();
+const vfsFileModes = new Map<string, number>();
+const vfsFileModTimes = new Map<string, number>();
+const vfsDirModes = new Map<string, number>();
+const vfsDirModTimes = new Map<string, number>();
+const textEncoder = new TextEncoder();
+const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+let studioWasmPromise: Promise<StudioWasm> | null = null;
+let pendingGuiRender: Uint8Array | null = null;
+let vfsBindingsInstalled = false;
+
+type OpenVfsFile = { path: string; flags: number; position: number };
+
+const openVfsFiles = new Map<number, OpenVfsFile>();
+let nextVfsFd = 100;
+
+const O_RDONLY = 0;
+const O_WRONLY = 1;
+const O_RDWR = 2;
+const O_APPEND = 8;
+const O_CREATE = 16;
+const O_EXCL = 32;
+const O_TRUNC = 128;
+const ERR_NOT_EXIST = 'file does not exist';
+const ERR_EXIST = 'file already exists';
+const ERR_NOT_DIR = 'not a directory';
+const ERR_IS_DIR = 'is a directory';
+const ERR_INVALID = 'invalid argument';
+const ERR_BAD_FD = 'invalid file descriptor';
 
 resetWorkspaceState();
 
@@ -107,23 +137,29 @@ export class WebBackend implements Backend {
   async statPath(path: string): Promise<FsStat> {
     const normalized = normalizePath(path);
     const isDir = directories.has(normalized);
-    const content = files.get(normalized);
+    const content = vfsFiles.get(normalized);
     if (!isDir && content === undefined) throw new Error(`Path not found: ${normalized}`);
-    return { path: normalized, isDir, isFile: !isDir, size: content?.length ?? 0, modifiedMs: 0 };
+    return {
+      path: normalized,
+      isDir,
+      isFile: !isDir,
+      size: content?.length ?? 0,
+      modifiedMs: isDir ? (vfsDirModTimes.get(normalized) ?? 0) : (vfsFileModTimes.get(normalized) ?? 0),
+    };
   }
 
   async readFile(path: string): Promise<string> {
     const normalized = normalizePath(path);
-    const content = files.get(normalized);
-    if (content === undefined) throw new Error(`File not found: ${normalized}`);
+    const content = readTextFile(normalized);
+    if (content === null) throw new Error(`File not found: ${normalized}`);
     return content;
   }
 
   async readMany(paths: string[]): Promise<ReadManyResult[]> {
     return paths.map((path) => {
       const normalized = normalizePath(path);
-      const content = files.get(normalized);
-      return content !== undefined
+      const content = readTextFile(normalized);
+      return content !== null
         ? { path: normalized, content, error: null }
         : { path, content: null, error: `File not found: ${path}` };
     });
@@ -140,8 +176,8 @@ export class WebBackend implements Backend {
 
   async removeEntry(path: string, recursive: boolean): Promise<void> {
     const normalized = normalizePath(path);
-    if (files.has(normalized)) {
-      files.delete(normalized);
+    if (vfsFiles.has(normalized)) {
+      deleteFile(normalized);
       return;
     }
     if (!directories.has(normalized)) return;
@@ -150,14 +186,16 @@ export class WebBackend implements Backend {
       throw new Error(`Directory not empty: ${normalized}`);
     }
     const descendants = [...directories].filter((dir) => dir === normalized || dir.startsWith(`${normalized}/`));
-    for (const filePath of [...files.keys()]) {
+    for (const filePath of [...vfsFiles.keys()]) {
       if (filePath.startsWith(`${normalized}/`)) {
-        files.delete(filePath);
+        deleteFile(filePath);
       }
     }
     for (const dir of descendants.sort((a, b) => b.length - a.length)) {
       if (dir !== ROOT && dir !== WORKSPACE_ROOT) {
         directories.delete(dir);
+        vfsDirModes.delete(dir);
+        vfsDirModTimes.delete(dir);
       }
     }
   }
@@ -165,10 +203,11 @@ export class WebBackend implements Backend {
   async renameEntry(oldPath: string, newPath: string): Promise<void> {
     const oldNorm = normalizePath(oldPath);
     const newNorm = normalizePath(newPath);
-    const content = files.get(oldNorm);
+    const content = vfsFiles.get(oldNorm);
     if (content !== undefined) {
-      files.delete(oldNorm);
-      setFile(newNorm, content);
+      const mode = vfsFileModes.get(oldNorm) ?? 0o644;
+      deleteFile(oldNorm);
+      setVfsFile(newNorm, content, mode);
       return;
     }
     if (!directories.has(oldNorm)) {
@@ -178,13 +217,15 @@ export class WebBackend implements Backend {
     const dirMoves = [...directories]
       .filter((dir) => dir === oldNorm || dir.startsWith(`${oldNorm}/`))
       .sort((a, b) => a.length - b.length);
-    const fileMoves = [...files.entries()]
+    const fileMoves = [...vfsFiles.entries()]
       .filter(([filePath]) => filePath.startsWith(`${oldNorm}/`));
     for (const [filePath] of fileMoves) {
-      files.delete(filePath);
+      deleteFile(filePath);
     }
     for (const dir of dirMoves.sort((a, b) => b.length - a.length)) {
       directories.delete(dir);
+      vfsDirModes.delete(dir);
+      vfsDirModTimes.delete(dir);
     }
     for (const dir of dirMoves) {
       const moved = dir === oldNorm ? newNorm : `${newNorm}${dir.slice(oldNorm.length)}`;
@@ -192,16 +233,16 @@ export class WebBackend implements Backend {
     }
     for (const [filePath, fileContent] of fileMoves) {
       const moved = `${newNorm}${filePath.slice(oldNorm.length)}`;
-      setFile(moved, fileContent);
+      setVfsFile(moved, fileContent, vfsFileModes.get(filePath) ?? 0o644);
     }
   }
 
   async copyEntry(src: string, dst: string): Promise<void> {
     const srcNorm = normalizePath(src);
     const dstNorm = normalizePath(dst);
-    const content = files.get(srcNorm);
+    const content = vfsFiles.get(srcNorm);
     if (content !== undefined) {
-      setFile(dstNorm, content);
+      setVfsFile(dstNorm, content, vfsFileModes.get(srcNorm) ?? 0o644);
       return;
     }
     if (!directories.has(srcNorm)) {
@@ -211,9 +252,9 @@ export class WebBackend implements Backend {
     for (const dir of [...directories].filter((dir) => dir.startsWith(`${srcNorm}/`)).sort((a, b) => a.length - b.length)) {
       ensureDir(`${dstNorm}${dir.slice(srcNorm.length)}`);
     }
-    for (const [filePath, fileContent] of files) {
+    for (const [filePath, fileContent] of vfsFiles) {
       if (filePath.startsWith(`${srcNorm}/`)) {
-        setFile(`${dstNorm}${filePath.slice(srcNorm.length)}`, fileContent);
+        setVfsFile(`${dstNorm}${filePath.slice(srcNorm.length)}`, fileContent, vfsFileModes.get(filePath) ?? 0o644);
       }
     }
   }
@@ -223,8 +264,10 @@ export class WebBackend implements Backend {
     const maxResults = opts?.maxResults ?? 500;
     const caseSensitive = opts?.caseSensitive ?? false;
     const patternCmp = caseSensitive ? pattern : pattern.toLowerCase();
-    for (const [filePath, content] of files) {
+    for (const [filePath] of vfsFiles) {
       if (!filePath.startsWith(normalizePath(path))) continue;
+      const content = readTextFile(filePath);
+      if (content === null) continue;
       content.split('\n').forEach((line, idx) => {
         if (results.length >= maxResults) return;
         const lineCmp = caseSensitive ? line : line.toLowerCase();
@@ -263,32 +306,48 @@ export class WebBackend implements Backend {
     return;
   }
 
-  async runGui(_path: string): Promise<GuiRunOutput> {
-    throw new Error('GUI runtime is not wired in WASM mode yet');
+  async runGui(path: string): Promise<GuiRunOutput> {
+    const normalized = normalizePath(path);
+    const wasm = await getStudioWasm();
+    pendingGuiRender = null;
+    await wasm.prepareEntry(normalized);
+    return wasm.runGui(normalized);
   }
 
-  async sendGuiEvent(_handlerId: number, _payload: string): Promise<Uint8Array> {
-    throw new Error('GUI runtime is not wired in WASM mode yet');
+  async sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
+    const wasm = await getStudioWasm();
+    return wasm.sendGuiEvent(handlerId, payload);
   }
 
-  async sendGuiEventAsync(_handlerId: number, _payload: string): Promise<void> {
-    throw new Error('GUI runtime is not wired in WASM mode yet');
+  async sendGuiEventAsync(handlerId: number, payload: string): Promise<void> {
+    const bytes = await this.sendGuiEvent(handlerId, payload);
+    pendingGuiRender = bytes.length > 0 ? bytes : null;
   }
 
-  async pushIslandTransport(_data: Uint8Array): Promise<void> {
-    throw new Error('Render-island transport is not wired in WASM mode yet');
+  async pushIslandTransport(data: Uint8Array): Promise<void> {
+    const wasm = await getStudioWasm();
+    wasm.pushIslandData(data);
   }
 
   async pollGuiRender(): Promise<Uint8Array> {
-    throw new Error('GUI runtime is not wired in WASM mode yet');
+    if (pendingGuiRender) {
+      const bytes = pendingGuiRender;
+      pendingGuiRender = null;
+      return bytes;
+    }
+    const wasm = await getStudioWasm();
+    return wasm.pollGuiRender();
   }
 
   async stopGui(): Promise<void> {
-    throw new Error('GUI runtime is not wired in WASM mode yet');
+    pendingGuiRender = null;
+    const wasm = await getStudioWasm();
+    wasm.stopGui();
   }
 
-  async getRenderIslandVfsSnapshot(_path: string): Promise<RenderIslandVfsSnapshot> {
-    throw new Error('Render-island VFS is not wired in WASM mode yet');
+  async getRenderIslandVfsSnapshot(path: string): Promise<RenderIslandVfsSnapshot> {
+    const wasm = await getStudioWasm();
+    return wasm.getRenderIslandVfsSnapshot(normalizePath(path));
   }
 
   voGet(_spec: string): StreamHandle<InstallEvent> {
@@ -350,9 +409,441 @@ function sortEntries(entries: FsEntry[]): FsEntry[] {
   });
 }
 
+function getStudioWasm(): Promise<StudioWasm> {
+  ensureVfsBindings();
+  if (!studioWasmPromise) {
+    (globalThis as Record<string, unknown>).__voStudioDebugLog = (message: string) => {
+      console.debug(`[studio-wasm] ${message}`);
+    };
+    studioWasmPromise = loadStudioWasm();
+  }
+  return studioWasmPromise;
+}
+
+function ensureVfsBindings(): void {
+  if (vfsBindingsInstalled) {
+    return;
+  }
+  vfsBindingsInstalled = true;
+  const windowWithVfs = window as unknown as Record<string, unknown>;
+  windowWithVfs._vfsOpenFile = (path: string, flags: number | bigint, mode: number | bigint) =>
+    vfsOpenFile(path, toNum(flags), toNum(mode));
+  windowWithVfs._vfsRead = (fd: number | bigint, length: number | bigint) =>
+    vfsRead(toNum(fd), toNum(length));
+  windowWithVfs._vfsWrite = (fd: number | bigint, data: Uint8Array) =>
+    vfsWrite(toNum(fd), data);
+  windowWithVfs._vfsReadAt = (fd: number | bigint, length: number | bigint, offset: number | bigint) =>
+    vfsReadAt(toNum(fd), toNum(length), toNum(offset));
+  windowWithVfs._vfsWriteAt = (fd: number | bigint, data: Uint8Array, offset: number | bigint) =>
+    vfsWriteAt(toNum(fd), data, toNum(offset));
+  windowWithVfs._vfsSeek = (fd: number | bigint, offset: number | bigint, whence: number | bigint) =>
+    vfsSeek(toNum(fd), toNum(offset), toNum(whence));
+  windowWithVfs._vfsClose = (fd: number | bigint) => vfsClose(toNum(fd));
+  windowWithVfs._vfsSync = (fd: number | bigint) => vfsSync(toNum(fd));
+  windowWithVfs._vfsFstat = (fd: number | bigint) => vfsFstat(toNum(fd));
+  windowWithVfs._vfsFtruncate = (fd: number | bigint, size: number | bigint) =>
+    vfsFtruncate(toNum(fd), toNum(size));
+  windowWithVfs._vfsMkdir = (path: string, mode: number | bigint) => vfsMkdir(path, toNum(mode));
+  windowWithVfs._vfsMkdirAll = (path: string, mode: number | bigint) => vfsMkdirAll(path, toNum(mode));
+  windowWithVfs._vfsRemove = (path: string) => vfsRemove(path);
+  windowWithVfs._vfsRemoveAll = (path: string) => vfsRemoveAll(path);
+  windowWithVfs._vfsRename = (oldPath: string, newPath: string) => vfsRename(oldPath, newPath);
+  windowWithVfs._vfsStat = (path: string) => vfsStat(path);
+  windowWithVfs._vfsReadDir = (path: string) => vfsReadDir(path);
+  windowWithVfs._vfsChmod = (path: string, mode: number | bigint) => vfsChmod(path, toNum(mode));
+  windowWithVfs._vfsTruncate = (path: string, size: number | bigint) => vfsTruncate(path, toNum(size));
+  windowWithVfs._vfsReadFile = (path: string) => vfsReadFile(path);
+  windowWithVfs._vfsWriteFile = (path: string, data: Uint8Array, mode: number | bigint) =>
+    vfsWriteFile(path, data, toNum(mode));
+}
+
+function toNum(value: number | bigint): number {
+  return typeof value === 'bigint' ? Number(value) : value;
+}
+
+function readTextFile(path: string): string | null {
+  const normalized = normalizePath(path);
+  const cached = files.get(normalized);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const bytes = vfsFiles.get(normalized);
+  if (!bytes) {
+    return null;
+  }
+  const decoded = tryDecodeUtf8(bytes);
+  if (decoded === null) {
+    return null;
+  }
+  files.set(normalized, decoded);
+  return decoded;
+}
+
+function tryDecodeUtf8(bytes: Uint8Array): string | null {
+  try {
+    return utf8Decoder.decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+function setVfsFile(path: string, bytes: Uint8Array, mode = 0o644): void {
+  const normalized = normalizePath(path);
+  const parent = dirname(normalized);
+  ensureDir(parent);
+  const copy = new Uint8Array(bytes);
+  vfsFiles.set(normalized, copy);
+  vfsFileModes.set(normalized, mode);
+  vfsFileModTimes.set(normalized, Date.now());
+  const decoded = tryDecodeUtf8(copy);
+  if (decoded === null) {
+    files.delete(normalized);
+  } else {
+    files.set(normalized, decoded);
+  }
+}
+
+function deleteFile(path: string): void {
+  const normalized = normalizePath(path);
+  files.delete(normalized);
+  vfsFiles.delete(normalized);
+  vfsFileModes.delete(normalized);
+  vfsFileModTimes.delete(normalized);
+}
+
+function hasVfsFile(path: string): boolean {
+  return vfsFiles.has(normalizePath(path));
+}
+
+function resolveSnapshotRoot(path: string): string {
+  const normalized = normalizePath(path);
+  if (directories.has(normalized)) {
+    return findProjectRoot(normalized) ?? normalized;
+  }
+  const parent = dirname(normalized);
+  return findProjectRoot(parent) ?? parent;
+}
+
+function findProjectRoot(start: string): string | null {
+  let current = normalizePath(start);
+  while (true) {
+    if (hasVfsFile(`${current}/vo.mod`)) {
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
+function listVfsEntries(path: string): Array<[string, boolean, number]> {
+  const normalized = normalizePath(path);
+  const entries = new Map<string, [string, boolean, number]>();
+  for (const dir of directories) {
+    if (dir === normalized || dirname(dir) !== normalized) continue;
+    const name = dir.slice(dir.lastIndexOf('/') + 1);
+    entries.set(name, [name, true, vfsDirModes.get(dir) ?? 0o755]);
+  }
+  for (const [filePath] of vfsFiles) {
+    if (dirname(filePath) !== normalized) continue;
+    const name = filePath.slice(filePath.lastIndexOf('/') + 1);
+    entries.set(name, [name, false, vfsFileModes.get(filePath) ?? 0o644]);
+  }
+  return [...entries.values()];
+}
+
+function vfsOpenFile(path: string, flags: number, mode: number): [number, string | null] {
+  const normalized = normalizePath(path);
+  const access = flags & 0x3;
+  const create = (flags & O_CREATE) !== 0;
+  const excl = (flags & O_EXCL) !== 0;
+  const trunc = (flags & O_TRUNC) !== 0;
+  let bytes = vfsFiles.get(normalized);
+  if (!bytes) {
+    if (!create) return [-1, ERR_NOT_EXIST];
+    setVfsFile(normalized, new Uint8Array(0), mode);
+    bytes = vfsFiles.get(normalized) ?? new Uint8Array(0);
+  } else {
+    if (excl) return [-1, ERR_EXIST];
+    if (directories.has(normalized)) return [-1, ERR_IS_DIR];
+    if (trunc && access !== O_RDONLY) {
+      setVfsFile(normalized, new Uint8Array(0), vfsFileModes.get(normalized) ?? mode);
+      bytes = vfsFiles.get(normalized) ?? new Uint8Array(0);
+    }
+  }
+  const fd = nextVfsFd++;
+  openVfsFiles.set(fd, {
+    path: normalized,
+    flags,
+    position: (flags & O_APPEND) !== 0 ? bytes.length : 0,
+  });
+  return [fd, null];
+}
+
+function vfsRead(fd: number, length: number): [Uint8Array | null, string | null] {
+  const file = openVfsFiles.get(fd);
+  if (!file) return [null, ERR_BAD_FD];
+  if (directories.has(file.path)) return [null, ERR_IS_DIR];
+  const bytes = vfsFiles.get(file.path) ?? new Uint8Array(0);
+  const start = file.position;
+  const end = Math.min(start + length, bytes.length);
+  const chunk = bytes.slice(start, end);
+  file.position = end;
+  return [chunk, null];
+}
+
+function writeBytes(path: string, offset: number, data: Uint8Array): number {
+  const existing = vfsFiles.get(path) ?? new Uint8Array(0);
+  const nextLength = Math.max(existing.length, offset + data.length);
+  const next = new Uint8Array(nextLength);
+  next.set(existing);
+  next.set(data, offset);
+  setVfsFile(path, next, vfsFileModes.get(path) ?? 0o644);
+  return data.length;
+}
+
+function vfsWrite(fd: number, data: Uint8Array): [number, string | null] {
+  const file = openVfsFiles.get(fd);
+  if (!file) return [0, ERR_BAD_FD];
+  if (directories.has(file.path)) return [0, ERR_IS_DIR];
+  const access = file.flags & 0x3;
+  if (access === O_RDONLY) return [0, 'file not open for writing'];
+  const written = writeBytes(file.path, file.position, data);
+  file.position += written;
+  return [written, null];
+}
+
+function vfsReadAt(fd: number, length: number, offset: number): [Uint8Array | null, string | null] {
+  const file = openVfsFiles.get(fd);
+  if (!file) return [null, ERR_BAD_FD];
+  if (directories.has(file.path)) return [null, ERR_IS_DIR];
+  const bytes = vfsFiles.get(file.path) ?? new Uint8Array(0);
+  if (offset >= bytes.length) return [new Uint8Array(0), null];
+  return [bytes.slice(offset, Math.min(offset + length, bytes.length)), null];
+}
+
+function vfsWriteAt(fd: number, data: Uint8Array, offset: number): [number, string | null] {
+  const file = openVfsFiles.get(fd);
+  if (!file) return [0, ERR_BAD_FD];
+  if (directories.has(file.path)) return [0, ERR_IS_DIR];
+  const access = file.flags & 0x3;
+  if (access === O_RDONLY) return [0, 'file not open for writing'];
+  return [writeBytes(file.path, offset, data), null];
+}
+
+function vfsSeek(fd: number, offset: number, whence: number): [number, string | null] {
+  const file = openVfsFiles.get(fd);
+  if (!file) return [-1, ERR_BAD_FD];
+  const bytes = vfsFiles.get(file.path) ?? new Uint8Array(0);
+  let nextPosition: number;
+  switch (whence) {
+    case 0:
+      nextPosition = offset;
+      break;
+    case 1:
+      nextPosition = file.position + offset;
+      break;
+    case 2:
+      nextPosition = bytes.length + offset;
+      break;
+    default:
+      return [-1, ERR_INVALID];
+  }
+  if (nextPosition < 0) return [-1, ERR_INVALID];
+  file.position = nextPosition;
+  return [nextPosition, null];
+}
+
+function vfsClose(fd: number): string | null {
+  return openVfsFiles.delete(fd) ? null : ERR_BAD_FD;
+}
+
+function vfsSync(_fd: number): string | null {
+  return null;
+}
+
+function vfsFstat(fd: number): [number, number, number, boolean, string | null] {
+  const file = openVfsFiles.get(fd);
+  if (!file) return [0, 0, 0, false, ERR_BAD_FD];
+  const isDir = directories.has(file.path);
+  const size = isDir ? 0 : (vfsFiles.get(file.path)?.length ?? 0);
+  return [
+    size,
+    isDir ? (vfsDirModes.get(file.path) ?? 0o755) : (vfsFileModes.get(file.path) ?? 0o644),
+    isDir ? (vfsDirModTimes.get(file.path) ?? 0) : (vfsFileModTimes.get(file.path) ?? 0),
+    isDir,
+    null,
+  ];
+}
+
+function vfsFtruncate(fd: number, size: number): string | null {
+  const file = openVfsFiles.get(fd);
+  if (!file) return ERR_BAD_FD;
+  if (directories.has(file.path)) return ERR_IS_DIR;
+  return vfsTruncate(file.path, size);
+}
+
+function vfsMkdir(path: string, mode: number): string | null {
+  const normalized = normalizePath(path);
+  const parent = dirname(normalized);
+  if (!directories.has(parent)) return ERR_NOT_EXIST;
+  if (directories.has(normalized) || vfsFiles.has(normalized)) return ERR_EXIST;
+  directories.add(normalized);
+  vfsDirModes.set(normalized, mode);
+  vfsDirModTimes.set(normalized, Date.now());
+  return null;
+}
+
+function vfsMkdirAll(path: string, mode: number): string | null {
+  const normalized = normalizePath(path);
+  const parts = normalized.split('/').filter(Boolean);
+  let current = ROOT;
+  for (const part of parts) {
+    current = current === ROOT ? `/${part}` : `${current}/${part}`;
+    if (vfsFiles.has(current)) return ERR_NOT_DIR;
+    if (!directories.has(current)) {
+      directories.add(current);
+      vfsDirModes.set(current, mode);
+      vfsDirModTimes.set(current, Date.now());
+    }
+  }
+  return null;
+}
+
+function vfsRemove(path: string): string | null {
+  const normalized = normalizePath(path);
+  if (vfsFiles.has(normalized)) {
+    deleteFile(normalized);
+    return null;
+  }
+  if (!directories.has(normalized)) return ERR_NOT_EXIST;
+  if (listVfsEntries(normalized).length > 0) return 'directory not empty';
+  directories.delete(normalized);
+  vfsDirModes.delete(normalized);
+  vfsDirModTimes.delete(normalized);
+  return null;
+}
+
+function vfsRemoveAll(path: string): string | null {
+  const normalized = normalizePath(path);
+  if (vfsFiles.has(normalized)) {
+    deleteFile(normalized);
+    return null;
+  }
+  if (!directories.has(normalized)) return ERR_NOT_EXIST;
+  for (const filePath of [...vfsFiles.keys()]) {
+    if (filePath === normalized || filePath.startsWith(`${normalized}/`)) {
+      deleteFile(filePath);
+    }
+  }
+  for (const dir of [...directories].sort((a, b) => b.length - a.length)) {
+    if (dir === normalized || dir.startsWith(`${normalized}/`)) {
+      directories.delete(dir);
+      vfsDirModes.delete(dir);
+      vfsDirModTimes.delete(dir);
+    }
+  }
+  return null;
+}
+
+function vfsRename(oldPath: string, newPath: string): string | null {
+  const oldNorm = normalizePath(oldPath);
+  const newNorm = normalizePath(newPath);
+  if (vfsFiles.has(oldNorm)) {
+    setVfsFile(newNorm, vfsFiles.get(oldNorm) ?? new Uint8Array(0), vfsFileModes.get(oldNorm) ?? 0o644);
+    deleteFile(oldNorm);
+    return null;
+  }
+  if (!directories.has(oldNorm)) return ERR_NOT_EXIST;
+  const children = listVfsEntries(oldNorm);
+  vfsMkdirAll(newNorm, vfsDirModes.get(oldNorm) ?? 0o755);
+  for (const [name, isDir] of children) {
+    const from = oldNorm === ROOT ? `/${name}` : `${oldNorm}/${name}`;
+    const to = newNorm === ROOT ? `/${name}` : `${newNorm}/${name}`;
+    if (isDir) {
+      vfsRename(from, to);
+    } else {
+      setVfsFile(to, vfsFiles.get(from) ?? new Uint8Array(0), vfsFileModes.get(from) ?? 0o644);
+      deleteFile(from);
+    }
+  }
+  directories.delete(oldNorm);
+  vfsDirModes.delete(oldNorm);
+  vfsDirModTimes.delete(oldNorm);
+  return null;
+}
+
+function vfsStat(path: string): [string, number, number, number, boolean, string | null] {
+  const normalized = normalizePath(path);
+  const name = normalized === ROOT ? '' : normalized.slice(normalized.lastIndexOf('/') + 1);
+  if (directories.has(normalized)) {
+    return [name, 0, vfsDirModes.get(normalized) ?? 0o755, vfsDirModTimes.get(normalized) ?? 0, true, null];
+  }
+  const bytes = vfsFiles.get(normalized);
+  if (!bytes) return ['', 0, 0, 0, false, ERR_NOT_EXIST];
+  return [name, bytes.length, vfsFileModes.get(normalized) ?? 0o644, vfsFileModTimes.get(normalized) ?? 0, false, null];
+}
+
+function vfsReadDir(path: string): [Array<[string, boolean, number]>, string | null] {
+  const normalized = normalizePath(path);
+  if (!directories.has(normalized)) return [[], ERR_NOT_EXIST];
+  return [listVfsEntries(normalized), null];
+}
+
+function vfsChmod(path: string, mode: number): string | null {
+  const normalized = normalizePath(path);
+  if (directories.has(normalized)) {
+    vfsDirModes.set(normalized, mode);
+    return null;
+  }
+  if (!vfsFiles.has(normalized)) return ERR_NOT_EXIST;
+  vfsFileModes.set(normalized, mode);
+  return null;
+}
+
+function vfsTruncate(path: string, size: number): string | null {
+  const normalized = normalizePath(path);
+  if (directories.has(normalized)) return ERR_IS_DIR;
+  const existing = vfsFiles.get(normalized);
+  if (!existing) return ERR_NOT_EXIST;
+  let next: Uint8Array;
+  if (size < existing.length) {
+    next = existing.slice(0, size);
+  } else if (size > existing.length) {
+    next = new Uint8Array(size);
+    next.set(existing);
+  } else {
+    next = existing;
+  }
+  setVfsFile(normalized, next, vfsFileModes.get(normalized) ?? 0o644);
+  return null;
+}
+
+function vfsReadFile(path: string): [Uint8Array | null, string | null] {
+  const normalized = normalizePath(path);
+  if (directories.has(normalized)) return [null, ERR_IS_DIR];
+  const bytes = vfsFiles.get(normalized);
+  if (!bytes) return [null, ERR_NOT_EXIST];
+  return [new Uint8Array(bytes), null];
+}
+
+function vfsWriteFile(path: string, data: Uint8Array, mode: number): string | null {
+  setVfsFile(path, data, mode);
+  return null;
+}
+
 function resetWorkspaceState(): void {
   files.clear();
+  vfsFiles.clear();
   directories.clear();
+  vfsFileModes.clear();
+  vfsFileModTimes.clear();
+  vfsDirModes.clear();
+  vfsDirModTimes.clear();
+  openVfsFiles.clear();
+  nextVfsFd = 100;
   directories.add(ROOT);
   ensureDir(WORKSPACE_ROOT);
   ensureDir(URL_SESSION_ROOT);
@@ -366,9 +857,17 @@ function ensureDir(path: string): void {
   const parts = normalized.split('/').filter(Boolean);
   let current = ROOT;
   directories.add(ROOT);
+  if (!vfsDirModes.has(ROOT)) {
+    vfsDirModes.set(ROOT, 0o755);
+    vfsDirModTimes.set(ROOT, Date.now());
+  }
   for (const part of parts) {
     current = current === ROOT ? `/${part}` : `${current}/${part}`;
-    directories.add(current);
+    if (!directories.has(current)) {
+      directories.add(current);
+      vfsDirModes.set(current, 0o755);
+      vfsDirModTimes.set(current, Date.now());
+    }
   }
 }
 
@@ -377,6 +876,9 @@ function setFile(path: string, content: string): void {
   const parent = dirname(normalized);
   ensureDir(parent);
   files.set(normalized, content);
+  vfsFiles.set(normalized, textEncoder.encode(content));
+  vfsFileModes.set(normalized, 0o644);
+  vfsFileModTimes.set(normalized, Date.now());
 }
 
 function dirname(path: string): string {
@@ -394,7 +896,7 @@ function listDirEntries(path: string): FsEntry[] {
     const name = dir.slice(dir.lastIndexOf('/') + 1);
     entries.set(name, { name, path: dir, isDir: true });
   }
-  for (const [filePath, content] of files) {
+  for (const [filePath, content] of vfsFiles) {
     if (dirname(filePath) !== normalized) continue;
     const name = filePath.slice(filePath.lastIndexOf('/') + 1);
     entries.set(name, { name, path: filePath, isDir: false, size: content.length });
@@ -408,7 +910,7 @@ function buildSessionInfo(root: string, origin: SessionInfo['origin']): SessionI
   return {
     root: normalizedRoot,
     origin,
-    projectMode: files.has(`${normalizedRoot}/vo.mod`) ? 'module' : 'single-file',
+    projectMode: hasVfsFile(`${normalizedRoot}/vo.mod`) ? 'module' : 'single-file',
     entryPath,
     singleFileRun: false,
   };
@@ -416,8 +918,8 @@ function buildSessionInfo(root: string, origin: SessionInfo['origin']): SessionI
 
 function detectEntryPath(root: string): string | null {
   const main = `${root}/main.vo`;
-  if (files.has(main)) return main;
-  const first = [...files.keys()]
+  if (hasVfsFile(main)) return main;
+  const first = [...vfsFiles.keys()]
     .filter((path) => path.startsWith(`${root}/`) && path.endsWith('.vo'))
     .sort()[0];
   return first ?? null;
@@ -458,14 +960,16 @@ async function importProjectFromUrl(url: string): Promise<string> {
 }
 
 async function clearImportedRoot(root: string): Promise<void> {
-  for (const filePath of [...files.keys()]) {
+  for (const filePath of [...vfsFiles.keys()]) {
     if (filePath.startsWith(`${root}/`)) {
-      files.delete(filePath);
+      deleteFile(filePath);
     }
   }
   for (const dir of [...directories].sort((a, b) => b.length - a.length)) {
     if (dir.startsWith(`${root}/`) || dir === root) {
       directories.delete(dir);
+      vfsDirModes.delete(dir);
+      vfsDirModTimes.delete(dir);
     }
   }
 }

@@ -18,8 +18,22 @@ export interface VoVmInstance {
 
 export interface StudioWasm {
   // Legacy singleton-based island API (still used for non-VoWebModule paths)
+  runGui(entryPath: string): {
+    renderBytes: Uint8Array;
+    moduleBytes: Uint8Array;
+    entryPath: string;
+    framework: { name: string; entry: string; capabilities: string[]; rendererPath: string | null } | null;
+    externalWidgetHandlerId: number | null;
+  };
+  runGuiEntry(entryPath: string): Uint8Array;
+  sendGuiEvent(handlerId: number, payload: string): Uint8Array;
   startRenderIsland(bytecode: Uint8Array): void;
   pushIslandData(data: Uint8Array): void;
+  pollGuiRender(): Uint8Array;
+  getRenderIslandVfsSnapshot(entryPath: string): {
+    rootPath: string;
+    files: Array<{ path: string; bytes: Uint8Array }>;
+  };
   pollIslandData(): Uint8Array;
   pollPendingHostEvent(): { token: string; delayMs: number } | null;
   wakeHostEvent(token: string): void;
@@ -27,6 +41,7 @@ export interface StudioWasm {
   // Instance-based VM (VoWebModule interface)
   VoVm: { withExterns(bytecode: Uint8Array): VoVmInstance };
   preloadExtModule(path: string, bytes: Uint8Array, jsGlueUrl?: string): Promise<void>;
+  prepareEntry(entryPath: string): Promise<void>;
   initVFS(): Promise<void>;
 }
 
@@ -262,13 +277,19 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
     throw new Error('studio/wasm missing VM export: StudioVoVm, VoVm, or VoVmIsland');
   }
   return {
+    runGui: requireStudioExport(mod.runGui, 'runGui'),
+    runGuiEntry: requireStudioExport(mod.runGuiEntry, 'runGuiEntry'),
+    sendGuiEvent: requireStudioExport(mod.sendGuiEvent, 'sendGuiEvent'),
     startRenderIsland: requireStudioExport(mod.startRenderIsland, 'startRenderIsland'),
     pushIslandData: requireStudioExport(mod.pushIslandData, 'pushIslandData'),
+    pollGuiRender: requireStudioExport(mod.pollGuiRender, 'pollGuiRender'),
+    getRenderIslandVfsSnapshot: requireStudioExport(mod.getRenderIslandVfsSnapshot, 'getRenderIslandVfsSnapshot'),
     pollIslandData: requireStudioExport(mod.pollIslandData, 'pollIslandData'),
     pollPendingHostEvent: requireStudioExport(mod.pollPendingHostEvent, 'pollPendingHostEvent'),
     wakeHostEvent: requireStudioExport(mod.wakeHostEvent, 'wakeHostEvent'),
     stopGui: requireStudioExport(mod.stopGui, 'stopGui'),
     preloadExtModule: requireStudioExport(mod.preloadExtModule, 'preloadExtModule'),
+    prepareEntry: requireStudioExport(mod.prepareEntry, 'prepareEntry'),
     initVFS: requireStudioExport(mod.initVFS, 'initVFS'),
     VoVm: {
       withExterns: (bytecode) => vmExport.withExterns(bytecode),

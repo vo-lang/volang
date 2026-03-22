@@ -1,0 +1,15 @@
+[package]
+name = "vo-app-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared app session runtime orchestration for Vo hosts"
+
+[features]
+default = []
+std = ["vo-runtime/std", "vo-vm/std", "vo-ext"]
+
+[dependencies]
+vo-runtime = { path = "../vo-runtime", default-features = false }
+vo-vm = { path = "../vo-vm", default-features = false }
+vo-ext = { path = "../vo-ext", optional = true }

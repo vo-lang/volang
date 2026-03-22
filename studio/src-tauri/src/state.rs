@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use vo_app_runtime::SyncRenderBuffer;
 use vo_module::ext_manifest::ExtensionManifest;
 
-use crate::gui_runtime::{GuestHandle, PushReceiver};
+use crate::gui_runtime::GuestHandle;
 
 // ---------------------------------------------------------------------------
 // Domain enums
@@ -118,7 +119,7 @@ pub struct AppState {
     session: Mutex<SessionConfig>,
     console_run: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     guest: Mutex<Option<GuestHandle>>,
-    push_rx: Mutex<Option<Arc<PushReceiver>>>,
+    push_rx: Mutex<Option<Arc<SyncRenderBuffer>>>,
     last_extensions: Mutex<Vec<ExtensionManifest>>,
 }
 
@@ -187,7 +188,7 @@ impl AppState {
         }
     }
 
-    pub fn install_guest_runtime(&self, guest: GuestHandle, push_rx: Arc<PushReceiver>) {
+    pub fn install_guest_runtime(&self, guest: GuestHandle, push_rx: Arc<SyncRenderBuffer>) {
         *self.guest.lock().unwrap() = Some(guest);
         *self.push_rx.lock().unwrap() = Some(push_rx);
     }

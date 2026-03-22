@@ -7,15 +7,13 @@
 //! Source files are read from the JS VirtualFS (via vo_web_runtime_wasm::vfs).
 
 use std::cell::RefCell;
-use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use js_sys::{Object, Reflect};
+use toml::Value;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
 use vo_common::vfs::{FileSystem, MemoryFs};
-use vo_runtime::island::{EndpointRequestKind, EndpointResponseKind, IslandCommand};
-use vo_runtime::island_msg::{decode_island_transport_frame, encode_island_transport_frame};
-use vo_vm::vm::SchedulingOutcome;
+use vo_app_runtime::{GuestRuntime, RenderBuffer, RenderIslandRuntime, SessionError};
 
 #[wasm_bindgen]
 extern "C" {
@@ -27,55 +25,8 @@ fn studio_debug_log(message: &str) {
     vo_studio_debug_log(message);
 }
 
-fn hex_bytes(data: &[u8]) -> String {
-    let mut out = String::new();
-    for (i, byte) in data.iter().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        out.push_str(&format!("{:02x}", byte));
-    }
-    out
-}
-
-fn describe_island_command(cmd: &IslandCommand) -> String {
-    match cmd {
-        IslandCommand::SpawnFiber { closure_data } => {
-            format!("SpawnFiber(data_len={})", closure_data.data().len())
-        }
-        IslandCommand::WakeFiber { fiber_id } => {
-            format!("WakeFiber(fiber_id={fiber_id})")
-        }
-        IslandCommand::Shutdown => "Shutdown".to_string(),
-        IslandCommand::EndpointRequest { endpoint_id, kind, from_island, fiber_id } => {
-            let kind_desc = match kind {
-                EndpointRequestKind::Send { data } => format!("Send(len={})", data.len()),
-                EndpointRequestKind::Recv => "Recv".to_string(),
-                EndpointRequestKind::Close => "Close".to_string(),
-                EndpointRequestKind::Transfer { new_peer } => format!("Transfer(new_peer={new_peer})"),
-            };
-            format!(
-                "EndpointRequest(endpoint_id={endpoint_id}, from_island={from_island}, fiber_id={fiber_id}, kind={kind_desc})"
-            )
-        }
-        IslandCommand::EndpointResponse { endpoint_id, kind, fiber_id } => {
-            let kind_desc = match kind {
-                EndpointResponseKind::SendAck { closed } => format!("SendAck(closed={closed})"),
-                EndpointResponseKind::RecvData { data, closed } => {
-                    let preview = if data.len() <= 64 {
-                        hex_bytes(data)
-                    } else {
-                        format!("{} ...", hex_bytes(&data[..64]))
-                    };
-                    format!("RecvData(len={}, closed={closed}, data=[{}])", data.len(), preview)
-                }
-                EndpointResponseKind::Closed => "Closed".to_string(),
-            };
-            format!(
-                "EndpointResponse(endpoint_id={endpoint_id}, fiber_id={fiber_id}, kind={kind_desc})"
-            )
-        }
-    }
+fn session_error_to_js(error: SessionError) -> JsValue {
+    JsValue::from_str(&error.to_string())
 }
 
 fn ensure_panic_hook() {
@@ -84,37 +35,42 @@ fn ensure_panic_hook() {
     INIT.call_once(|| console_error_panic_hook::set_once());
 }
 
-// Embed shell handler source files for runShellHandler.
 include!(concat!(env!("OUT_DIR"), "/shell_embedded.rs"));
 
+fn flush_stdout(label: &str, stdout: Option<&str>) {
+    if let Some(s) = stdout {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            web_sys::console::log_1(&format!("[{}] {}", label, trimmed).into());
+        }
+    }
+}
+
+fn guest_stdout_source() -> Box<dyn Fn() -> String> {
+    Box::new(vo_web::take_output)
+}
 
 // =============================================================================
 // Guest state (for a running vogui app)
 // =============================================================================
 
-struct GuestState {
-    vm: vo_web::Vm,
-    event_wait_token: Option<u64>,
-    outbound_frames: VecDeque<Vec<u8>>,
-    pending_host_events: VecDeque<(u64, u32)>,
-    pending_host_event_tokens: HashSet<u64>,
-}
-
 thread_local! {
-    static GUEST: RefCell<Option<GuestState>> = RefCell::new(None);
+    static GUEST: RefCell<Option<GuestRuntime>> = RefCell::new(None);
+    static GUI_RENDER: RefCell<RenderBuffer> = RefCell::new(RenderBuffer::new());
 }
 
-fn load_guest_from_bytecode(bytecode: &[u8]) -> Result<GuestState, JsValue> {
+fn load_gui_app_from_bytecode(bytecode: &[u8]) -> Result<GuestRuntime, JsValue> {
     let vm = vo_web::create_loaded_vm(bytecode, |reg, exts| {
         vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
     }).map_err(|e| JsValue::from_str(&e))?;
-    Ok(GuestState {
-        vm,
-        event_wait_token: None,
-        outbound_frames: VecDeque::new(),
-        pending_host_events: VecDeque::new(),
-        pending_host_event_tokens: HashSet::new(),
-    })
+    Ok(GuestRuntime::new_gui_app(vm, guest_stdout_source()))
+}
+
+fn load_render_island_from_bytecode(bytecode: &[u8]) -> Result<GuestRuntime, JsValue> {
+    let vm = vo_web::create_loaded_vm(bytecode, |reg, exts| {
+        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
+    }).map_err(|e| JsValue::from_str(&e))?;
+    Ok(GuestRuntime::new_render_island(vm, guest_stdout_source()))
 }
 
 // =============================================================================
@@ -125,10 +81,7 @@ fn load_guest_from_bytecode(bytecode: &[u8]) -> Result<GuestState, JsValue> {
 /// Exposes the VoWebModule.VoVm interface expected by render island bootstrappers.
 #[wasm_bindgen(js_name = "StudioVoVm")]
 pub struct StudioVoVm {
-    vm: vo_web::Vm,
-    outbound_frames: VecDeque<Vec<u8>>,
-    pending_host_events: VecDeque<(u64, u32)>,
-    pending_host_event_tokens: HashSet<u64>,
+    runtime: RenderIslandRuntime,
 }
 
 #[wasm_bindgen(js_class = "StudioVoVm")]
@@ -144,64 +97,40 @@ impl StudioVoVm {
             vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
         }).map_err(|e| JsValue::from_str(&e))?;
         Ok(StudioVoVm {
-            vm,
-            outbound_frames: VecDeque::new(),
-            pending_host_events: VecDeque::new(),
-            pending_host_event_tokens: HashSet::new(),
+            runtime: RenderIslandRuntime::new(vm, guest_stdout_source()),
         })
     }
 
-    /// Run the VM entry point (cold start).
     pub fn run(&mut self) -> Result<String, JsValue> {
-        self.vm.clear_host_output();
-        vo_runtime::output::clear_output();
-        let outcome = self.vm.run()
-            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-        self.process_outcome(&outcome)?;
-        let _ = self.vm.take_host_output();
-        Ok(format!("{:?}", outcome))
+        let step = self.runtime
+            .run()
+            .map_err(session_error_to_js)?;
+        flush_stdout("render-island", step.stdout.as_deref());
+        Ok(format!("{:?}", step.outcome))
     }
 
-    /// Run island initialization only (global vars + user init functions, no main).
-    /// Must be called on island VMs before processing SpawnFiber commands.
     #[wasm_bindgen(js_name = "runInit")]
     pub fn run_init(&mut self) -> Result<String, JsValue> {
-        self.vm.clear_host_output();
-        vo_runtime::output::clear_output();
-        let outcome = self.vm.run_init()
-            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-        self.process_outcome(&outcome)?;
-        let _ = self.vm.take_host_output();
-        Ok(format!("{:?}", outcome))
+        let step = self.runtime
+            .run_init()
+            .map_err(session_error_to_js)?;
+        flush_stdout("render-island", step.stdout.as_deref());
+        Ok(format!("{:?}", step.outcome))
     }
 
-    /// Run already-scheduled fibers (used after island commands or host events).
     #[wasm_bindgen(js_name = "runScheduled")]
     pub fn run_scheduled(&mut self) -> Result<String, JsValue> {
-        self.vm.clear_host_output();
-        vo_runtime::output::clear_output();
-        let outcome = self.vm.run_scheduled()
-            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-        self.process_outcome(&outcome)?;
-        let _ = self.vm.take_host_output();
-        Ok(format!("{:?}", outcome))
+        let step = self.runtime
+            .run_scheduled()
+            .map_err(session_error_to_js)?;
+        flush_stdout("render-island", step.stdout.as_deref());
+        Ok(format!("{:?}", step.outcome))
     }
 
     /// Push an island transport frame into the VM command queue (does not run the VM).
     #[wasm_bindgen(js_name = "pushIslandCommand")]
     pub fn push_island_command(&mut self, frame: &[u8]) -> Result<(), JsValue> {
-        let (target_island_id, cmd) = decode_island_transport_frame(frame)
-            .map_err(|e| JsValue::from_str(&format!("invalid island frame: {:?}", e)))?;
-        let current_island_id = self.vm.current_island_id();
-        if current_island_id == 0 {
-            self.vm.set_island_id(target_island_id);
-        } else if current_island_id != target_island_id {
-            return Err(JsValue::from_str(&format!(
-                "render island id mismatch: have {}, got {}",
-                current_island_id, target_island_id
-            )));
-        }
-        self.vm.push_island_command(cmd);
+        self.runtime.push_inbound_island_frame(frame).map_err(session_error_to_js)?;
         Ok(())
     }
 
@@ -209,7 +138,7 @@ impl StudioVoVm {
     #[wasm_bindgen(js_name = "takeOutboundCommands")]
     pub fn take_outbound_commands(&mut self) -> js_sys::Array {
         let arr = js_sys::Array::new();
-        while let Some(frame) = self.outbound_frames.pop_front() {
+        for frame in self.runtime.take_outbound_frames() {
             arr.push(&js_sys::Uint8Array::from(frame.as_slice()));
         }
         arr
@@ -220,10 +149,10 @@ impl StudioVoVm {
     #[wasm_bindgen(js_name = "takePendingHostEvents")]
     pub fn take_pending_host_events(&mut self) -> js_sys::Array {
         let arr = js_sys::Array::new();
-        while let Some((token, delay_ms)) = self.pending_host_events.pop_front() {
+        for event in self.runtime.take_pending_host_events() {
             let obj = Object::new();
-            let _ = Reflect::set(&obj, &JsValue::from_str("token"), &JsValue::from_str(&token.to_string()));
-            let _ = Reflect::set(&obj, &JsValue::from_str("delayMs"), &JsValue::from_f64(delay_ms as f64));
+            let _ = Reflect::set(&obj, &JsValue::from_str("token"), &JsValue::from_str(&event.token.to_string()));
+            let _ = Reflect::set(&obj, &JsValue::from_str("delayMs"), &JsValue::from_f64(event.delay_ms as f64));
             let _ = Reflect::set(&obj, &JsValue::from_str("replay"), &JsValue::from_bool(false));
             arr.push(&obj);
         }
@@ -235,8 +164,7 @@ impl StudioVoVm {
     pub fn wake_host_event_vm(&mut self, token: &str) -> Result<(), JsValue> {
         let token = token.parse::<u64>()
             .map_err(|e| JsValue::from_str(&format!("invalid token: {}", e)))?;
-        self.pending_host_event_tokens.remove(&token);
-        self.vm.wake_host_event(token);
+        self.runtime.wake_host_event(token);
         Ok(())
     }
 
@@ -245,39 +173,6 @@ impl StudioVoVm {
     pub fn take_output(&self) -> String {
         vo_web::take_output()
     }
-
-    fn process_outcome(&mut self, outcome: &SchedulingOutcome) -> Result<(), JsValue> {
-        match outcome {
-            SchedulingOutcome::Completed
-            | SchedulingOutcome::Suspended
-            | SchedulingOutcome::SuspendedForHostEvents => {}
-            SchedulingOutcome::Blocked => {
-                return Err(JsValue::from_str(&format!("{:?}", self.vm.deadlock_err())));
-            }
-            SchedulingOutcome::Panicked => {
-                return Err(JsValue::from_str("unexpected bounded panic outcome in VoVm"));
-            }
-        }
-
-        let pending = self.vm.scheduler.take_pending_host_events();
-        for event in pending.iter().filter(|e| !e.replay) {
-            if self.pending_host_event_tokens.insert(event.token) {
-                self.pending_host_events.push_back((event.token, event.delay_ms));
-            }
-        }
-
-        for (target_island_id, cmd) in self.vm.take_outbound_commands() {
-            self.outbound_frames.push_back(encode_island_transport_frame(target_island_id, &cmd));
-        }
-
-        let stdout = vo_web::take_output();
-        if !stdout.is_empty() {
-            studio_debug_log(&format!("[render-stdout] {}", stdout.trim_end()));
-            web_sys::console::log_1(&format!("[render-island] {}", stdout.trim_end()).into());
-        }
-
-        Ok(())
-    }
 }
 
 // =============================================================================
@@ -285,7 +180,6 @@ impl StudioVoVm {
 // preloadExtModule is provided by vo-web (3-param version with optional jsGlueUrl).
 // =============================================================================
 
-/// No-op: VFS is initialized as part of the Studio frontend startup.
 #[wasm_bindgen(js_name = "initVFS")]
 pub fn init_vfs() -> js_sys::Promise {
     js_sys::Promise::resolve(&JsValue::UNDEFINED)
@@ -295,14 +189,34 @@ pub fn init_vfs() -> js_sys::Promise {
 // FS helpers
 // =============================================================================
 
-/// VFS root for third-party modules.
-/// Modules are installed at `/<module_path>/...` in the JS VFS
-/// (e.g. `/github.com/vo-lang/vox/vox.vo`), so the root is empty.
 const VFS_MOD_ROOT: &str = "";
 
 struct ResolvedVfsCompileTarget {
     entry_path: String,
     project_root: Option<String>,
+}
+
+#[derive(Clone)]
+struct StudioManifest {
+    entry: String,
+    capabilities: Vec<String>,
+    renderer_path: Option<String>,
+}
+
+#[derive(Clone)]
+struct FrameworkContract {
+    name: String,
+    entry: String,
+    capabilities: Vec<String>,
+    renderer_path: Option<String>,
+}
+
+#[derive(Clone)]
+struct FrameworkModule {
+    contract: FrameworkContract,
+    module_root: String,
+    wasm_asset: Option<String>,
+    js_glue_asset: Option<String>,
 }
 
 fn normalize_vfs_path(path: &str) -> String {
@@ -385,7 +299,6 @@ fn resolve_vfs_compile_target(entry_path: &str) -> Result<ResolvedVfsCompileTarg
     })
 }
 
-/// Read all .vo files from a JS VFS directory (recursively) into a MemoryFs.
 fn read_vfs_package(pkg_dir: &str, local_fs: &mut MemoryFs) -> Result<(), String> {
     let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(pkg_dir);
     if let Some(e) = err {
@@ -406,7 +319,6 @@ fn read_vfs_package(pkg_dir: &str, local_fs: &mut MemoryFs) -> Result<(), String
             }
             let content = String::from_utf8(data)
                 .map_err(|e| format!("utf8 '{}': {}", full, e))?;
-            // Store with a path relative to the VFS root (strip leading /)
             let rel = full.trim_start_matches('/');
             local_fs.add_file(PathBuf::from(rel), content);
         }
@@ -414,17 +326,287 @@ fn read_vfs_package(pkg_dir: &str, local_fs: &mut MemoryFs) -> Result<(), String
     Ok(())
 }
 
-/// Compile user code from a VFS entry path (e.g. "/workspace/main/main.vo").
-///
-/// Single-file mode (no vo.mod in package dir): only the entry file is compiled,
-/// so other .vo files in the same directory don't cause "duplicate main" errors.
-/// Multi-file mode (vo.mod present): all .vo files in the package directory are read.
+fn read_vfs_text(path: &str) -> Result<String, String> {
+    let (data, err) = vo_web_runtime_wasm::vfs::read_file(path);
+    if let Some(e) = err {
+        return Err(format!("read file '{}': {}", path, e));
+    }
+    String::from_utf8(data).map_err(|e| format!("utf8 '{}': {}", path, e))
+}
+
+fn read_vfs_bytes(path: &str) -> Result<Vec<u8>, String> {
+    let (data, err) = vo_web_runtime_wasm::vfs::read_file(path);
+    if let Some(e) = err {
+        return Err(format!("read file '{}': {}", path, e));
+    }
+    Ok(data)
+}
+
+fn vfs_exists(path: &str) -> bool {
+    let (_, _, _, _, _, err) = vo_web_runtime_wasm::vfs::stat(path);
+    err.is_none()
+}
+
+fn framework_module_root(locked: &vo_module::schema::lockfile::LockedModule) -> String {
+    format!(
+        "/{}",
+        vo_module::materialize::relative_module_dir(locked.path.as_str(), &locked.version.to_string())
+    )
+}
+
+fn parse_studio_manifest(content: &str, manifest_path: &str) -> Result<Option<StudioManifest>, String> {
+    let value: Value = toml::from_str(content)
+        .map_err(|e| format!("parse {}: {}", manifest_path, e))?;
+    let Some(studio) = value.get("studio").and_then(Value::as_table) else {
+        return Ok(None);
+    };
+    let entry = studio
+        .get("entry")
+        .and_then(Value::as_str)
+        .unwrap_or("Run")
+        .to_string();
+    let capabilities = studio
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let renderer_path = studio
+        .get("renderer")
+        .and_then(Value::as_str)
+        .map(|renderer| {
+            if renderer.starts_with('/') {
+                normalize_vfs_path(renderer)
+            } else {
+                let base = vfs_parent_dir(manifest_path).unwrap_or_else(|| "/".to_string());
+                join_vfs_path(&base, renderer)
+            }
+        });
+    Ok(Some(StudioManifest {
+        entry,
+        capabilities,
+        renderer_path,
+    }))
+}
+
+fn parse_framework_module(manifest_path: &str) -> Result<Option<FrameworkModule>, String> {
+    let content = read_vfs_text(manifest_path)?;
+    let Some(studio) = parse_studio_manifest(&content, manifest_path)? else {
+        return Ok(None);
+    };
+    let manifest: Value = toml::from_str(&content)
+        .map_err(|e| format!("parse {}: {}", manifest_path, e))?;
+    let extension = manifest
+        .get("extension")
+        .and_then(Value::as_table)
+        .ok_or_else(|| format!("{} missing [extension] section", manifest_path))?;
+    let name = extension
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{} missing extension.name", manifest_path))?
+        .to_string();
+    let wasm_table = extension.get("wasm").and_then(Value::as_table);
+    let wasm_asset = wasm_table
+        .and_then(|table| table.get("wasm"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let js_glue_asset = wasm_table
+        .and_then(|table| table.get("js_glue"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let module_root = vfs_parent_dir(manifest_path).unwrap_or_else(|| "/".to_string());
+    Ok(Some(FrameworkModule {
+        contract: FrameworkContract {
+            name,
+            entry: studio.entry,
+            capabilities: studio.capabilities,
+            renderer_path: studio.renderer_path,
+        },
+        module_root,
+        wasm_asset,
+        js_glue_asset,
+    }))
+}
+
+fn discover_framework_modules(target: &ResolvedVfsCompileTarget) -> Result<Vec<FrameworkModule>, String> {
+    let mut modules = Vec::new();
+    if let Some(project_root) = &target.project_root {
+        let project_manifest = join_vfs_path(project_root, "vo.ext.toml");
+        if vfs_exists(&project_manifest) {
+            if let Some(module) = parse_framework_module(&project_manifest)? {
+                modules.push(module);
+            }
+        }
+
+        let lock_path = join_vfs_path(project_root, "vo.lock");
+        if vfs_exists(&lock_path) {
+            let lock = vo_module::schema::lockfile::LockFile::parse(&read_vfs_text(&lock_path)?)
+                .map_err(|e| format!("parse {}: {}", lock_path, e))?;
+            for locked in &lock.resolved {
+                let manifest_path = join_vfs_path(&framework_module_root(locked), "vo.ext.toml");
+                if !vfs_exists(&manifest_path) {
+                    continue;
+                }
+                if let Some(module) = parse_framework_module(&manifest_path)? {
+                    modules.push(module);
+                }
+            }
+        }
+    }
+    Ok(modules)
+}
+
+fn framework_contract_to_js(contract: &FrameworkContract) -> JsValue {
+    let obj = Object::new();
+    let _ = Reflect::set(&obj, &JsValue::from_str("name"), &JsValue::from_str(&contract.name));
+    let _ = Reflect::set(&obj, &JsValue::from_str("entry"), &JsValue::from_str(&contract.entry));
+    let capabilities = js_sys::Array::new();
+    for capability in &contract.capabilities {
+        capabilities.push(&JsValue::from_str(capability));
+    }
+    let _ = Reflect::set(&obj, &JsValue::from_str("capabilities"), &capabilities);
+    let renderer_value = contract
+        .renderer_path
+        .as_ref()
+        .map(|path| JsValue::from_str(path))
+        .unwrap_or(JsValue::NULL);
+    let _ = Reflect::set(&obj, &JsValue::from_str("rendererPath"), &renderer_value);
+    obj.into()
+}
+
+fn collect_vfs_files(root: &str, virtual_prefix: Option<&str>) -> Result<Vec<(String, Vec<u8>)>, String> {
+    fn walk(
+        dir: &str,
+        root: &str,
+        virtual_prefix: Option<&str>,
+        out: &mut Vec<(String, Vec<u8>)>,
+    ) -> Result<(), String> {
+        let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(dir);
+        if let Some(e) = err {
+            return Err(format!("read dir '{}': {}", dir, e));
+        }
+        for (name, is_dir, _mode) in entries {
+            let full = if dir == "/" {
+                format!("/{}", name)
+            } else {
+                format!("{}/{}", dir, name)
+            };
+            if is_dir {
+                walk(&full, root, virtual_prefix, out)?;
+                continue;
+            }
+            let bytes = read_vfs_bytes(&full)?;
+            let path = match virtual_prefix {
+                Some(prefix) => {
+                    let rel = full.trim_start_matches(root).trim_start_matches('/');
+                    if prefix.is_empty() {
+                        rel.to_string()
+                    } else if rel.is_empty() {
+                        prefix.trim_end_matches('/').to_string()
+                    } else {
+                        format!("{}/{}", prefix.trim_end_matches('/'), rel)
+                    }
+                }
+                None => full.clone(),
+            };
+            out.push((path, bytes));
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    walk(root, root, virtual_prefix, &mut files)?;
+    Ok(files)
+}
+
+fn gui_run_output_to_js(
+    render_bytes: Vec<u8>,
+    module_bytes: Vec<u8>,
+    entry_path: &str,
+    framework: Option<&FrameworkContract>,
+) -> JsValue {
+    let obj = Object::new();
+    let render = js_sys::Uint8Array::from(render_bytes.as_slice());
+    let module = js_sys::Uint8Array::from(module_bytes.as_slice());
+    let _ = Reflect::set(&obj, &JsValue::from_str("renderBytes"), &render);
+    let _ = Reflect::set(&obj, &JsValue::from_str("moduleBytes"), &module);
+    let _ = Reflect::set(&obj, &JsValue::from_str("entryPath"), &JsValue::from_str(entry_path));
+    let framework_value = framework
+        .map(framework_contract_to_js)
+        .unwrap_or(JsValue::NULL);
+    let _ = Reflect::set(&obj, &JsValue::from_str("framework"), &framework_value);
+    let _ = Reflect::set(&obj, &JsValue::from_str("externalWidgetHandlerId"), &JsValue::NULL);
+    obj.into()
+}
+
+fn render_island_snapshot_to_js(root_path: &str, files: Vec<(String, Vec<u8>)>) -> JsValue {
+    let obj = Object::new();
+    let _ = Reflect::set(&obj, &JsValue::from_str("rootPath"), &JsValue::from_str(root_path));
+    let js_files = js_sys::Array::new();
+    for (path, bytes) in files {
+        let file = Object::new();
+        let _ = Reflect::set(&file, &JsValue::from_str("path"), &JsValue::from_str(&path));
+        let bytes = js_sys::Uint8Array::from(bytes.as_slice());
+        let _ = Reflect::set(&file, &JsValue::from_str("bytes"), &bytes);
+        js_files.push(&file);
+    }
+    let _ = Reflect::set(&obj, &JsValue::from_str("files"), &js_files);
+    obj.into()
+}
+
 fn compile_from_vfs(entry_path: &str) -> Result<Vec<u8>, String> {
     let (target, local_fs) = prepare_from_vfs(entry_path)?;
     let entry_clean = target.entry_path.trim_start_matches('/');
 
     vo_web::compile_entry_with_vfs(entry_clean, local_fs, VFS_MOD_ROOT)
         .map_err(|e| format!("compile error: {}", e))
+}
+
+fn compile_gui_run_output(entry_path: &str) -> Result<(ResolvedVfsCompileTarget, Vec<u8>, Option<FrameworkContract>), String> {
+    let target = resolve_vfs_compile_target(entry_path)?;
+    let bytecode = compile_from_vfs(entry_path)?;
+    let framework = discover_framework_modules(&target)?.into_iter().next().map(|module| module.contract);
+    Ok((target, bytecode, framework))
+}
+
+fn collect_render_island_snapshot(entry_path: &str) -> Result<JsValue, String> {
+    let target = resolve_vfs_compile_target(entry_path)?;
+    let root_path = target
+        .project_root
+        .clone()
+        .unwrap_or_else(|| vfs_parent_dir(&target.entry_path).unwrap_or_else(|| "/".to_string()));
+    let mut files = collect_vfs_files(&root_path, None)?;
+    for module in discover_framework_modules(&target)? {
+        if let Some(renderer_path) = module.contract.renderer_path.as_ref() {
+            let renderer_dir = vfs_parent_dir(renderer_path).unwrap_or_else(|| module.module_root.clone());
+            if is_vfs_dir(&renderer_dir) {
+                files.extend(collect_vfs_files(&renderer_dir, None)?);
+            }
+        }
+        let artifact_dir = join_vfs_path(&module.module_root, ".vo-artifact");
+        if is_vfs_dir(&artifact_dir) {
+            files.extend(collect_vfs_files(&artifact_dir, None)?);
+            files.extend(collect_vfs_files(&artifact_dir, Some("wasm"))?);
+        }
+        if let Some(wasm_asset) = module.wasm_asset.as_ref() {
+            let asset_path = join_vfs_path(&artifact_dir, wasm_asset);
+            if vfs_exists(&asset_path) {
+                files.push((format!("wasm/{}", wasm_asset), read_vfs_bytes(&asset_path)?));
+            }
+        }
+        if let Some(js_glue_asset) = module.js_glue_asset.as_ref() {
+            let asset_path = join_vfs_path(&artifact_dir, js_glue_asset);
+            if vfs_exists(&asset_path) {
+                files.push((format!("wasm/{}", js_glue_asset), read_vfs_bytes(&asset_path)?));
+            }
+        }
+    }
+    Ok(render_island_snapshot_to_js(&root_path, files))
 }
 
 fn prepare_from_vfs(entry_path: &str) -> Result<(ResolvedVfsCompileTarget, MemoryFs), String> {
@@ -476,7 +658,6 @@ pub fn prepare_entry(entry_path: &str) -> js_sys::Promise {
     })
 }
 
-/// Compile and run user Vo code (console app) from VFS entry path, returning captured stdout.
 #[wasm_bindgen(js_name = "compileRunEntry")]
 pub fn compile_run_entry(entry_path: &str) -> Result<String, JsValue> {
     ensure_panic_hook();
@@ -494,7 +675,6 @@ pub fn compile_run_entry(entry_path: &str) -> Result<String, JsValue> {
     Ok(output)
 }
 
-/// Compile and start a guest vogui app from VFS entry path, returning initial render bytes.
 ///
 /// The Vo app's `Run()` does initial render then blocks on `waitForEvent()`.
 /// `vm.run()` returns `SuspendedForHostEvents` once the main fiber blocks.
@@ -502,18 +682,34 @@ pub fn compile_run_entry(entry_path: &str) -> Result<String, JsValue> {
 pub fn run_gui_entry(entry_path: &str) -> Result<Vec<u8>, JsValue> {
     ensure_panic_hook();
     GUEST.with(|g| *g.borrow_mut() = None);
+    GUI_RENDER.with(|r| { r.borrow_mut().poll(); });
 
-    let bytecode = compile_from_vfs(entry_path).map_err(|e| JsValue::from_str(&e))?;
-    let mut guest = load_guest_from_bytecode(&bytecode)?;
+    let (_target, bytecode, _framework) = compile_gui_run_output(entry_path).map_err(|e| JsValue::from_str(&e))?;
+    let mut guest = load_gui_app_from_bytecode(&bytecode)?;
 
-    let outcome = guest.vm.run()
-        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-    handle_guest_outcome(&mut guest, outcome)?;
-
-    let render_bytes = guest.vm.take_host_output()
-        .ok_or_else(|| JsValue::from_str("guest app did not emit a render"))?;
+    let step = guest
+        .start_gui_app()
+        .map_err(session_error_to_js)?;
+    flush_stdout("guest", step.stdout.as_deref());
     GUEST.with(|g| *g.borrow_mut() = Some(guest));
-    Ok(render_bytes)
+    Ok(step.render_output.unwrap_or_default())
+}
+
+#[wasm_bindgen(js_name = "runGui")]
+pub fn run_gui(entry_path: &str) -> Result<JsValue, JsValue> {
+    ensure_panic_hook();
+    GUEST.with(|g| *g.borrow_mut() = None);
+    GUI_RENDER.with(|r| { r.borrow_mut().poll(); });
+
+    let (target, bytecode, framework) = compile_gui_run_output(entry_path)
+        .map_err(|e| JsValue::from_str(&e))?;
+    let mut guest = load_gui_app_from_bytecode(&bytecode)?;
+    let step = guest
+        .start_gui_app()
+        .map_err(session_error_to_js)?;
+    flush_stdout("guest", step.stdout.as_deref());
+    GUEST.with(|g| *g.borrow_mut() = Some(guest));
+    Ok(gui_run_output_to_js(step.render_output.unwrap_or_default(), bytecode, &target.entry_path, framework.as_ref()))
 }
 
 /// Send an event to the running guest app, returning the new render bytes.
@@ -523,33 +719,22 @@ pub fn run_gui_entry(entry_path: &str) -> Result<Vec<u8>, JsValue> {
 /// No new fiber is created — zero allocation per event.
 #[wasm_bindgen(js_name = "sendGuiEvent")]
 pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<Vec<u8>, JsValue> {
+    GUI_RENDER.with(|r| { r.borrow_mut().poll(); });
     let mut guest = GUEST.with(|g| g.borrow_mut().take())
         .ok_or_else(|| JsValue::from_str("No guest app running"))?;
-
-    guest.vm.clear_host_output();
-    vo_runtime::output::clear_output();
-
-    // Encode event data: [i32 handler_id LE][UTF-8 payload]
-    let token = guest.event_wait_token
-        .ok_or_else(|| JsValue::from_str("Main fiber not waiting for events"))?;
-    let mut event_data = Vec::with_capacity(4 + payload.len());
-    event_data.extend_from_slice(&handler_id.to_le_bytes());
-    event_data.extend_from_slice(payload.as_bytes());
-
-    guest.vm.wake_host_event_with_data(token, event_data);
-    let outcome = guest.vm.run_scheduled()
-        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-    handle_guest_outcome(&mut guest, outcome)?;
-    let render_bytes = guest.vm.take_host_output().unwrap_or_default();
+    let step = guest
+        .dispatch_gui_event(handler_id, payload)
+        .map_err(session_error_to_js)?;
+    flush_stdout("guest", step.stdout.as_deref());
     GUEST.with(|g| *g.borrow_mut() = Some(guest));
-    Ok(render_bytes)
+    Ok(step.render_output.unwrap_or_default())
 }
 
 #[wasm_bindgen(js_name = "startRenderIsland")]
 pub fn start_render_island(bytecode: &[u8]) -> Result<(), JsValue> {
     ensure_panic_hook();
     GUEST.with(|g| *g.borrow_mut() = None);
-    let guest = load_guest_from_bytecode(bytecode)?;
+    let guest = load_render_island_from_bytecode(bytecode)?;
     GUEST.with(|g| *g.borrow_mut() = Some(guest));
     Ok(())
 }
@@ -558,27 +743,25 @@ pub fn start_render_island(bytecode: &[u8]) -> Result<(), JsValue> {
 pub fn push_island_data(data: &[u8]) -> Result<(), JsValue> {
     let mut guest = GUEST.with(|g| g.borrow_mut().take())
         .ok_or_else(|| JsValue::from_str("No guest app running"))?;
-    guest.vm.clear_host_output();
-    vo_runtime::output::clear_output();
-    let (target_island_id, cmd) = decode_island_transport_frame(data)
-        .map_err(|e| JsValue::from_str(&format!("invalid island transport frame: {:?}", e)))?;
-    let current_island_id = guest.vm.current_island_id();
-    if current_island_id == 0 {
-        guest.vm.set_island_id(target_island_id);
-    } else if current_island_id != target_island_id {
-        return Err(JsValue::from_str(&format!(
-            "render island id mismatch: have {}, got {}",
-            current_island_id,
-            target_island_id
-        )));
+    let step = guest
+        .push_island_frame(data)
+        .map_err(session_error_to_js)?;
+    flush_stdout("guest", step.stdout.as_deref());
+    if let Some(render_output) = step.render_output {
+        GUI_RENDER.with(|r| r.borrow_mut().push(render_output));
     }
-    guest.vm.push_island_command(cmd);
-    let outcome = guest.vm.run_scheduled()
-        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-    handle_guest_outcome(&mut guest, outcome)?;
-    let _ = guest.vm.take_host_output();
     GUEST.with(|g| *g.borrow_mut() = Some(guest));
     Ok(())
+}
+
+#[wasm_bindgen(js_name = "pollGuiRender")]
+pub fn poll_gui_render() -> Vec<u8> {
+    GUI_RENDER.with(|r| r.borrow_mut().poll().unwrap_or_default())
+}
+
+#[wasm_bindgen(js_name = "getRenderIslandVfsSnapshot")]
+pub fn get_render_island_vfs_snapshot(entry_path: &str) -> Result<JsValue, JsValue> {
+    collect_render_island_snapshot(entry_path).map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen(js_name = "pollIslandData")]
@@ -586,7 +769,7 @@ pub fn poll_island_data() -> Vec<u8> {
     GUEST.with(|g| {
         g.borrow_mut()
             .as_mut()
-            .and_then(|guest| guest.outbound_frames.pop_front())
+            .and_then(|guest| guest.poll_outbound_frame())
             .unwrap_or_default()
     })
 }
@@ -598,12 +781,12 @@ pub fn poll_pending_host_event() -> JsValue {
         let Some(guest) = guest.as_mut() else {
             return JsValue::NULL;
         };
-        let Some((token, delay_ms)) = guest.pending_host_events.pop_front() else {
+        let Some(event) = guest.poll_pending_host_event() else {
             return JsValue::NULL;
         };
         let obj = Object::new();
-        let _ = Reflect::set(&obj, &JsValue::from_str("token"), &JsValue::from_str(&token.to_string()));
-        let _ = Reflect::set(&obj, &JsValue::from_str("delayMs"), &JsValue::from_f64(delay_ms as f64));
+        let _ = Reflect::set(&obj, &JsValue::from_str("token"), &JsValue::from_str(&event.token.to_string()));
+        let _ = Reflect::set(&obj, &JsValue::from_str("delayMs"), &JsValue::from_f64(event.delay_ms as f64));
         obj.into()
     })
 }
@@ -615,8 +798,7 @@ pub fn wake_host_event(token: &str) -> Result<(), JsValue> {
         .map_err(|e| JsValue::from_str(&format!("invalid host event token '{}': {}", token, e)))?;
     let mut guest = GUEST.with(|g| g.borrow_mut().take())
         .ok_or_else(|| JsValue::from_str("No guest app running"))?;
-    guest.pending_host_event_tokens.remove(&token);
-    guest.vm.wake_host_event(token);
+    guest.wake_host_event(token);
     GUEST.with(|g| *g.borrow_mut() = Some(guest));
     Ok(())
 }
@@ -624,52 +806,19 @@ pub fn wake_host_event(token: &str) -> Result<(), JsValue> {
 /// Stop the running guest app (clears state).
 #[wasm_bindgen(js_name = "stopGui")]
 pub fn stop_gui() {
-    GUEST.with(|g| *g.borrow_mut() = None);
-}
-
-fn handle_guest_outcome(guest: &mut GuestState, outcome: SchedulingOutcome) -> Result<(), JsValue> {
-    match outcome {
-        SchedulingOutcome::Completed
-        | SchedulingOutcome::Suspended
-        | SchedulingOutcome::SuspendedForHostEvents => {}
-        SchedulingOutcome::Blocked => {
-            return Err(JsValue::from_str(&format!("{:?}", guest.vm.deadlock_err())));
+    GUEST.with(|g| {
+        if let Some(guest) = g.borrow_mut().as_mut() {
+            guest.shutdown();
         }
-        SchedulingOutcome::Panicked => {
-            return Err(JsValue::from_str("unexpected bounded panic outcome"));
-        }
-    }
-
-    let pending_host_events = guest.vm.scheduler.take_pending_host_events();
-    guest.event_wait_token = pending_host_events
-        .iter()
-        .find(|e| e.replay)
-        .map(|e| e.token);
-
-    for event in pending_host_events.iter().filter(|e| !e.replay) {
-        if guest.pending_host_event_tokens.insert(event.token) {
-            guest.pending_host_events.push_back((event.token, event.delay_ms));
-        }
-    }
-
-    for (target_island_id, cmd) in guest.vm.take_outbound_commands() {
-        guest.outbound_frames.push_back(encode_island_transport_frame(target_island_id, &cmd));
-    }
-
-    let stdout = vo_web::take_output();
-    if !stdout.is_empty() {
-        web_sys::console::log_1(&format!("[guest] {}", stdout.trim_end()).into());
-    }
-
-    Ok(())
+        *g.borrow_mut() = None;
+    });
+    GUI_RENDER.with(|r| { r.borrow_mut().poll(); });
 }
 
 // =============================================================================
 // Shell handler runner
 // =============================================================================
 
-// Cache the compiled shell handler bytecode — compilation is expensive inside
-// WASM (~2-5s), so we compile once and reuse across all runShellHandler calls.
 thread_local! {
     static SHELL_HANDLER_BYTECODE: std::cell::RefCell<Option<Vec<u8>>> =
         std::cell::RefCell::new(None);
