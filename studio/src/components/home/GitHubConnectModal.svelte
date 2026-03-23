@@ -78,6 +78,8 @@
       <div class="error">{error}</div>
     {/if}
 
+    <p class="warn">Code is AI-assisted and not audited for security. Use a test account with a minimal-scope token.</p>
+
     <div class="actions">
       <button class="secondary" on:click={() => dispatch('close')} disabled={connecting}>Cancel</button>
       <button class="primary" on:click={submit} disabled={connecting || !token.trim()}>
@@ -201,6 +203,12 @@
   .token-input:focus {
     border-color: #89b4fa;
     box-shadow: 0 0 0 2px rgba(137, 180, 250, 0.16);
+  }
+  .warn {
+    font-size: 11px;
+    color: #f9e2af;
+    opacity: 0.7;
+    line-height: 1.4;
   }
   .error {
     color: #f38ba8;

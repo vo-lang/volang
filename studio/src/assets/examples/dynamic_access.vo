@@ -1,0 +1,37 @@
+package main
+
+import "encoding/json"
+
+// Dynamic access with ~> operator (duck typing)
+
+type Person struct {
+    Name string
+    Age  int
+}
+
+func main() {
+    // Parse JSON into any
+    data := `{"name": "Alice", "age": 30, "city": "NYC"}`
+    obj := json.Decode([]byte(data))?
+
+    // Dynamic field access with ~>
+    name := obj~>name?
+    age := obj~>age?
+    city := obj~>city?
+    println("Name:", name)
+    println("Age:", age)
+    println("City:", city)
+
+    // Dynamic access on struct via interface
+    var p any = Person{Name: "Bob", Age: 25}
+    n := p~>Name?
+    a := p~>Age?
+    println("\nStruct via any:")
+    println("Name:", n, "Age:", a)
+
+    // Error handling for missing fields
+    _, err := obj~>missing
+    if err != nil {
+        println("\nMissing field error:", err)
+    }
+}

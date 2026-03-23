@@ -28,6 +28,7 @@ mod module_install;
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use module_install::{
     ensure_vfs_deps, ensure_vfs_deps_from_fs, ensure_vfs_versioned_imports, install_module_to_vfs, prepare_github_modules,
+    resolve_and_install_module, build_synthetic_project_files,
 };
 
 /// Initialize panic hook for better error messages in console.
@@ -205,6 +206,89 @@ fn read_locked_external_modules<F: FileSystem>(fs: &F) -> Result<Option<Vec<vo_m
     Ok(Some(lock_file.resolved.clone()))
 }
 
+/// Like `read_current_module` but searches for `vo.mod` at `dir/vo.mod` first,
+/// then falls back to `vo.mod` at the filesystem root.
+#[cfg(feature = "compiler")]
+fn read_current_module_near<F: FileSystem>(fs: &F, dir: &Path) -> Option<String> {
+    let candidates = [dir.join("vo.mod"), PathBuf::from("vo.mod")];
+    for candidate in &candidates {
+        if let Ok(content) = fs.read_file(candidate) {
+            let modfile = vo_module::schema::modfile::ModFile::parse(&content).ok()?;
+            return Some(modfile.module.as_str().to_string());
+        }
+    }
+    None
+}
+
+/// Like `read_locked_external_modules` but searches for `vo.mod`/`vo.lock`
+/// at `dir/` first, then falls back to the filesystem root.
+#[cfg(feature = "compiler")]
+fn read_locked_external_modules_near<F: FileSystem>(fs: &F, dir: &Path) -> Result<Option<Vec<vo_module::schema::lockfile::LockedModule>>, String> {
+    let mod_candidates = [dir.join("vo.mod"), PathBuf::from("vo.mod")];
+    let lock_candidates = [dir.join("vo.lock"), PathBuf::from("vo.lock")];
+
+    for mod_candidate in &mod_candidates {
+        let mod_content = match fs.read_file(mod_candidate) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+
+        let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content)
+            .map_err(|e| format!("vo.mod parse error: {}", e))?;
+        if mod_file.require.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        for lock_candidate in &lock_candidates {
+            if let Ok(lock_content) = fs.read_file(lock_candidate) {
+                let lock_file = vo_module::schema::lockfile::LockFile::parse(&lock_content)
+                    .map_err(|e| format!("vo.lock parse error: {}", e))?;
+                vo_module::lock::verify_root_consistency(&mod_file, &lock_file)
+                    .map_err(|e| format!("vo.lock validation error: {}", e))?;
+                vo_module::lock::verify_graph_completeness(&mod_file, &lock_file)
+                    .map_err(|e| format!("vo.lock validation error: {}", e))?;
+                return Ok(Some(lock_file.resolved.clone()));
+            }
+        }
+
+        return Err("this build requires external modules but vo.lock is missing".to_string());
+    }
+    Ok(None)
+}
+
+/// Extract unique external module root paths from source code imports.
+///
+/// For each `import "github.com/owner/repo/..."`, extracts the 3-segment
+/// module root `github.com/owner/repo`. Returns deduplicated module paths.
+#[cfg(feature = "compiler")]
+pub fn extract_external_module_paths(source: &str) -> Vec<String> {
+    let (file, diagnostics, _) = vo_syntax::parser::parse(source, 0);
+    if diagnostics.has_errors() {
+        return Vec::new();
+    }
+    let mut modules = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for import in &file.imports {
+        let import_path = import.path.value.as_str();
+        if vo_module::compat::validate_import_path(import_path).is_ok()
+            && import_path
+                .split('/')
+                .next()
+                .is_some_and(|segment| segment.contains('.'))
+        {
+            // Extract 3-segment module root: github.com/owner/repo
+            let segments: Vec<&str> = import_path.split('/').collect();
+            if segments.len() >= 3 {
+                let module_path = format!("{}/{}/{}", segments[0], segments[1], segments[2]);
+                if seen.insert(module_path.clone()) {
+                    modules.push(module_path);
+                }
+            }
+        }
+    }
+    modules
+}
+
 #[cfg(feature = "compiler")]
 pub fn reject_single_file_external_imports(source: &str) -> Result<(), String> {
     let (file, diagnostics, _) = vo_syntax::parser::parse(source, 0);
@@ -352,8 +436,11 @@ pub fn compile_entry_with_vfs(entry: &str, local_fs: MemoryFs, vfs_mod_root: &st
     let file_set = FileSet::collect(&local_fs, pkg_dir, PathBuf::from("."))
         .map_err(|e| format!("Failed to collect package files: {}", e))?;
 
-    let current_module = read_current_module(&local_fs);
-    let locked_modules = read_locked_external_modules(&local_fs)?;
+    // Search for vo.mod/vo.lock at the package directory level first, then at root.
+    // This handles both root-level projects (files at "vo.mod") and VFS projects
+    // where files are stored with full relative paths (e.g. "workspace/.examples/vo.mod").
+    let current_module = read_current_module_near(&local_fs, pkg_dir);
+    let locked_modules = read_locked_external_modules_near(&local_fs, pkg_dir)?;
     let mod_source = match locked_modules {
         Some(locked_modules) => {
             let allowed_modules = locked_modules

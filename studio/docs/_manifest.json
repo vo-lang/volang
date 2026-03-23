@@ -1,0 +1,38 @@
+{
+  "sections": [
+    {
+      "title": "Getting Started",
+      "slug": "getting-started",
+      "pages": [
+        { "title": "Introduction", "file": "getting-started/introduction.md" },
+        { "title": "Installation", "file": "getting-started/installation.md" },
+        { "title": "Hello World", "file": "getting-started/hello-world.md" }
+      ]
+    },
+    {
+      "title": "Language",
+      "slug": "language",
+      "pages": [
+        { "title": "Vo for Go Programmers", "file": "language/vo-for-gophers.md" },
+        { "title": "Syntax Overview", "file": "language/syntax.md" },
+        { "title": "Error Handling", "file": "language/error-handling.md" },
+        { "title": "Dynamic Access", "file": "language/dynamic-access.md" }
+      ]
+    },
+    {
+      "title": "CLI",
+      "slug": "cli",
+      "pages": [
+        { "title": "Commands", "file": "cli/commands.md" }
+      ]
+    },
+    {
+      "title": "Advanced",
+      "slug": "advanced",
+      "pages": [
+        { "title": "Execution Backends", "file": "advanced/backends.md" },
+        { "title": "Module System", "file": "advanced/modules.md" }
+      ]
+    }
+  ]
+}

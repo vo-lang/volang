@@ -1,0 +1,21 @@
+package main
+
+// Select for multiplexing channels
+
+func main() {
+    ch1 := make(chan string)
+    ch2 := make(chan string)
+    
+    go func() { ch1 <- "from ch1" }()
+    go func() { ch2 <- "from ch2" }()
+    
+    for i := 0; i < 2; i++ {
+        select {
+        case msg := <-ch1:
+            println("Received:", msg)
+        case msg := <-ch2:
+            println("Received:", msg)
+        }
+    }
+    println("Done")
+}

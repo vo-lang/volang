@@ -1,0 +1,13 @@
+package main
+
+// Defer executes in LIFO order at function exit
+
+func main() {
+    println("Start")
+    
+    defer func() { println("First defer (runs last)") }()
+    defer func() { println("Second defer") }()
+    defer func() { println("Third defer (runs first)") }()
+    
+    println("End of main")
+}

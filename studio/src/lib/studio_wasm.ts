@@ -38,6 +38,8 @@ export interface StudioWasm {
   pollPendingHostEvent(): { token: string; delayMs: number } | null;
   wakeHostEvent(token: string): void;
   stopGui(): void;
+  // Console run (compile + execute, returns stdout)
+  compileRunEntry(entryPath: string): string;
   // Instance-based VM (VoWebModule interface)
   VoVm: { withExterns(bytecode: Uint8Array): VoVmInstance };
   preloadExtModule(path: string, bytes: Uint8Array, jsGlueUrl?: string): Promise<void>;
@@ -289,6 +291,7 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
     wakeHostEvent: requireStudioExport(mod.wakeHostEvent, 'wakeHostEvent'),
     stopGui: requireStudioExport(mod.stopGui, 'stopGui'),
     preloadExtModule: requireStudioExport(mod.preloadExtModule, 'preloadExtModule'),
+    compileRunEntry: requireStudioExport(mod.compileRunEntry as StudioWasm['compileRunEntry'], 'compileRunEntry'),
     prepareEntry: requireStudioExport(mod.prepareEntry, 'prepareEntry'),
     initVFS: requireStudioExport(mod.initVFS, 'initVFS'),
     VoVm: {

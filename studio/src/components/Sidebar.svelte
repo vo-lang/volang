@@ -15,6 +15,7 @@
   const modes: { id: AppMode; icon: string; label: string; title: string }[] = [
     { id: 'manage',   icon: '⌂',  label: 'Home',  title: 'Home'           },
     { id: 'develop',  icon: '⌨',  label: 'Dev',   title: 'Development'    },
+    { id: 'docs',     icon: '☰',  label: 'Docs',  title: 'Documentation'  },
     { id: 'terminal', icon: '$_', label: 'Shell', title: 'Shell Terminal' },
   ];
 

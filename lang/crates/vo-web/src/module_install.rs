@@ -632,6 +632,193 @@ pub async fn install_module_to_vfs(spec: &str) -> Result<String, String> {
     Ok(vfs_module_dir(&module, &version))
 }
 
+// ── Single-file external import support ──────────────────────────────────────
+//
+// When a single `.vo` file imports external modules (e.g. `import "github.com/vo-lang/vogui"`),
+// these helpers auto-discover, install, and generate synthetic `vo.mod`/`vo.lock` content
+// so the compile path can resolve them correctly.
+
+/// Discover the installed version of a module in the JS VFS.
+///
+/// Scans `/<cache_key(module)>/` for version subdirectories that contain
+/// a `.vo-version` marker file.  Returns the first installed version found,
+/// or `None` if no version is installed.
+pub fn discover_vfs_installed_version(module: &str) -> Option<String> {
+    let encoded = vo_module::materialize::cache_key(module);
+    let module_dir = format!("/{}", encoded);
+    let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(&module_dir);
+    if err.is_some() {
+        return None;
+    }
+    for (name, is_dir, _mode) in entries {
+        if !is_dir || !name.starts_with('v') {
+            continue;
+        }
+        let version_marker = format!("{}/{}/{}", module_dir, name, vo_module::materialize::VERSION_MARKER);
+        if let Ok(content) = read_vfs_text(&version_marker) {
+            let v = content.trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Fetch the latest release version for a module from the GitHub API.
+async fn fetch_latest_module_version(module: &str) -> Result<String, String> {
+    let repo = vo_module::compat::module_repository(module)
+        .ok_or_else(|| format!("not a github.com module path: {}", module))?;
+    let module_root = vo_module::compat::module_root(module)
+        .unwrap_or_else(|| ".".to_string());
+
+    // For root-level modules, use the /releases/latest endpoint.
+    // For sub-module repos (module_root != "."), list releases and find the matching tag prefix.
+    if module_root == "." {
+        let api_url = format!(
+            "https://api.github.com/repos/{}/{}/releases/latest",
+            repo.owner, repo.repo,
+        );
+        let bytes = wasm_fetch::fetch_bytes(&api_url).await
+            .map_err(|e| format!("failed to fetch latest release for {}: {}", module, e))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|e| format!("invalid UTF-8 in GitHub API response: {}", e))?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("invalid JSON from GitHub API for {}: {}", module, e))?;
+        let tag = value["tag_name"].as_str()
+            .ok_or_else(|| format!("no tag_name in GitHub latest release for {}", module))?;
+        Ok(tag.to_string())
+    } else {
+        let api_url = format!(
+            "https://api.github.com/repos/{}/{}/releases?per_page=20",
+            repo.owner, repo.repo,
+        );
+        let bytes = wasm_fetch::fetch_bytes(&api_url).await
+            .map_err(|e| format!("failed to list releases for {}: {}", module, e))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|e| format!("invalid UTF-8 in GitHub API response: {}", e))?;
+        let releases: Vec<serde_json::Value> = serde_json::from_str(&text)
+            .map_err(|e| format!("invalid JSON from GitHub API for {}: {}", module, e))?;
+        let prefix = format!("{}/", module_root);
+        for release in &releases {
+            if let Some(tag) = release["tag_name"].as_str() {
+                if let Some(version) = tag.strip_prefix(&prefix) {
+                    return Ok(version.to_string());
+                }
+            }
+        }
+        Err(format!("no release found for module {} (tag prefix '{}')", module, prefix))
+    }
+}
+
+/// Resolve a module version: check VFS cache first, then fetch latest from GitHub.
+pub async fn resolve_module_version(module: &str) -> Result<String, String> {
+    if let Some(version) = discover_vfs_installed_version(module) {
+        return Ok(version);
+    }
+    fetch_latest_module_version(module).await
+}
+
+/// Resolve, install, and return `(module, version)` for a single external module.
+///
+/// If the module is already installed in VFS, uses the cached version.
+/// Otherwise fetches the latest version from GitHub, installs it, and returns.
+pub async fn resolve_and_install_module(module: &str) -> Result<(String, String), String> {
+    let version = resolve_module_version(module).await?;
+    // Check if already installed at this version
+    if discover_vfs_installed_version(module).as_deref() != Some(&version) {
+        let spec = format!("{}@{}", module, version);
+        install_module_to_vfs(&spec).await?;
+    } else {
+        // Already installed — just ensure ext is loaded
+        load_ext_if_present(module, &version).await;
+    }
+    Ok((module.to_string(), version))
+}
+
+/// Read a `LockedModule` from the installed release manifest in VFS.
+///
+/// After `install_module_to_vfs` completes, the release manifest is stored at
+/// `/<cache_key>/<version>/vo.release.json`.  This function reads it back and
+/// builds a `LockedModule` suitable for generating a synthetic `vo.lock`.
+pub fn read_locked_module_from_vfs(module: &str, version: &str) -> Result<LockedModule, String> {
+    let manifest_path = vfs_module_file_path(module, version, "vo.release.json");
+    let manifest_content = read_vfs_text(&manifest_path)?;
+    let manifest = vo_module::schema::manifest::ReleaseManifest::parse(&manifest_content)
+        .map_err(|e| format!("parse release manifest for {}@{}: {}", module, version, e))?;
+
+    let manifest_digest = Digest::from_sha256(manifest_content.as_bytes());
+
+    let deps: Vec<vo_module::identity::ModulePath> = manifest.require.iter()
+        .map(|r| r.module.clone())
+        .collect();
+
+    let artifacts: Vec<LockedArtifact> = manifest.artifacts.iter()
+        .map(|a| LockedArtifact {
+            id: a.id.clone(),
+            size: a.size,
+            digest: a.digest.clone(),
+        })
+        .collect();
+
+    Ok(LockedModule {
+        path: manifest.module,
+        version: manifest.version,
+        vo: manifest.vo,
+        commit: manifest.commit,
+        release_manifest: manifest_digest,
+        source: manifest.source.digest,
+        deps,
+        artifacts,
+    })
+}
+
+/// Build synthetic `vo.mod` and `vo.lock` content for a set of installed modules.
+///
+/// `synthetic_module` is the module name for the synthetic project (e.g. `"studio.examples"`).
+/// `installed` is a list of `(module_path, version)` pairs.
+///
+/// Returns `(vo_mod_content, vo_lock_content)`.
+pub fn build_synthetic_project_files(
+    synthetic_module: &str,
+    installed: &[(String, String)],
+) -> Result<(String, String), String> {
+    use vo_module::schema::lockfile::{LockFile, LockRoot};
+
+    let module = vo_module::identity::ModulePath::parse(synthetic_module)
+        .map_err(|e| format!("invalid synthetic module path '{}': {}", synthetic_module, e))?;
+    let vo = vo_module::version::ToolchainConstraint::parse("0.1.0")
+        .map_err(|e| format!("invalid toolchain constraint: {}", e))?;
+
+    // Build vo.mod
+    let mut mod_content = format!("module {}\nvo {}\n", module, vo);
+    if !installed.is_empty() {
+        mod_content.push('\n');
+        let mut sorted: Vec<&(String, String)> = installed.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        for (m, v) in &sorted {
+            mod_content.push_str(&format!("require {} {}\n", m, v));
+        }
+    }
+
+    // Build vo.lock from installed release manifests
+    let mut resolved = Vec::new();
+    for (m, v) in installed {
+        let locked = read_locked_module_from_vfs(m, v)?;
+        resolved.push(locked);
+    }
+
+    let lock_file = LockFile {
+        version: 1,
+        created_by: "vo-studio".to_string(),
+        root: LockRoot { module, vo },
+        resolved,
+    };
+    let lock_content = lock_file.render();
+
+    Ok((mod_content, lock_content))
+}
+
 // ── WASM-specific fetch helpers (browser Fetch API) ──────────────────────────
 //
 // These were previously in `vo-module-old/src/fetch.rs` under `#[cfg(target_arch = "wasm32")]`.
@@ -647,7 +834,7 @@ mod wasm_fetch {
     use vo_module::schema::manifest::ReleaseManifest;
 
     /// Async HTTP GET → raw bytes (uses browser Fetch API).
-    async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
+    pub(super) async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
         let window = web_sys::window().ok_or("no window object")?;
 
         let opts = web_sys::RequestInit::new();

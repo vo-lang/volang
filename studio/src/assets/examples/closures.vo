@@ -1,0 +1,24 @@
+package main
+
+// Closures capture variables by reference
+
+func main() {
+    counter := makeCounter(10)
+    
+    println(counter())  // 11
+    println(counter())  // 12
+    println(counter())  // 13
+    
+    // Each closure has its own state
+    another := makeCounter(100)
+    println(another())  // 101
+    println(counter())  // 14
+}
+
+func makeCounter(start int) func() int {
+    count := start
+    return func() int {
+        count++
+        return count
+    }
+}

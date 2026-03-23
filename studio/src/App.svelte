@@ -5,6 +5,7 @@
   import type { BootstrapContext, FsEntry, SessionInfo } from './lib/types';
   import type { GitHubAccountState, ManagedProject } from './lib/project_catalog/types';
   import { ide } from './stores/ide';
+  import { route, setModeHash } from './lib/router';
   import { consolePush } from './stores/console';
   import { editor, editorMarkSaved, editorOpen } from './stores/editor';
   import { session, sessionOpen } from './stores/session';
@@ -19,14 +20,13 @@
   import PreviewPanel from './components/PreviewPanel.svelte';
   import TerminalPanel from './components/TerminalPanel.svelte';
   import RunnerModeLayout from './components/RunnerModeLayout.svelte';
+  import DocsPanel from './components/DocsPanel.svelte';
 
   let registry: ServiceRegistry | null = null;
   let bootstrap: BootstrapContext | null = null;
   let sessionInfo: SessionInfo | null = null;
   let explorerEntries: FsEntry[] = [];
   let currentDir = '';
-  let localPathInput = '';
-  let urlInput = '';
   let loading = 'Bootstrapping Studio…';
   let error = '';
   let runtimePollTimer: number | null = null;
@@ -102,7 +102,27 @@
     } catch (_) {}
   }
 
-  onDestroy(() => { stopRuntimePolling(); });
+  // Sync hash route → appMode (for docs deep links and browser back/forward)
+  const unsubRoute = route.subscribe(r => {
+    if (r.mode === 'docs' && $ide.appMode !== 'docs') {
+      ide.update(s => ({ ...s, appMode: 'docs' }));
+    }
+  });
+
+  // Sync appMode → hash (when user clicks sidebar)
+  let prevAppMode = $ide.appMode;
+  const unsubIde = ide.subscribe(s => {
+    if (s.appMode !== prevAppMode) {
+      prevAppMode = s.appMode;
+      setModeHash(s.appMode);
+    }
+  });
+
+  onDestroy(() => {
+    stopRuntimePolling();
+    unsubRoute();
+    unsubIde();
+  });
 
   async function bindRunnerSession(nextSessionInfo: SessionInfo): Promise<void> {
     if (!registry) return;
@@ -190,30 +210,23 @@
     }
   }
 
-  async function openWorkspace(): Promise<void> {
+  async function openExample(source: string, filename: string): Promise<void> {
     if (!registry) return;
     stopRuntimePolling();
     await registry.runtime.stop().catch(() => undefined);
-    const openedSession = await registry.project.openWorkspace();
-    await bindDevSession(openedSession, { syncCatalogRoot: true });
-    ide.update((s) => ({ ...s, appMode: 'develop' }));
-  }
-
-  async function openLocalPath(): Promise<void> {
-    if (!registry || !localPathInput.trim()) return;
-    stopRuntimePolling();
-    await registry.runtime.stop().catch(() => undefined);
-    const openedSession = await registry.project.openRunSession(localPathInput.trim());
-    await bindDevSession(openedSession, { openEntry: true, syncCatalogRoot: true });
-    ide.update((s) => ({ ...s, appMode: 'develop' }));
-  }
-
-  async function openUrl(): Promise<void> {
-    if (!registry || !urlInput.trim()) return;
-    stopRuntimePolling();
-    await registry.runtime.stop().catch(() => undefined);
-    const openedSession = await registry.project.openUrl(urlInput.trim());
-    await bindDevSession(openedSession, { openEntry: true, syncCatalogRoot: true });
+    // Write to .examples/ (dot-prefixed → invisible to discoverProjects)
+    const wsRoot = registry.project.bootstrapContext.workspaceRoot;
+    const exDir = `${wsRoot}/.examples`;
+    const filePath = `${exDir}/${filename}`;
+    await registry.workspace.writeFile(filePath, source);
+    const exSession: SessionInfo = {
+      root: exDir,
+      origin: 'workspace',
+      projectMode: 'single-file',
+      entryPath: filePath,
+      singleFileRun: false,
+    };
+    await bindDevSession(exSession, { openEntry: true });
     ide.update((s) => ({ ...s, appMode: 'develop' }));
   }
 
@@ -440,15 +453,12 @@
       {#if appMode === 'manage'}
         <!-- HOME: project management -->
         <Home
-          {bootstrap}
           projectCatalog={registry.projectCatalog}
-          bind:localPathInput
-          bind:urlInput
-          onOpenWorkspace={openWorkspace}
-          onOpenLocalPath={openLocalPath}
-          onOpenUrl={openUrl}
           onOpenProject={openManagedProject}
+          onOpenExample={openExample}
+          onDocs={() => ide.update(s => ({ ...s, appMode: 'docs' }))}
           onDevelop={() => ide.update(s => ({ ...s, appMode: 'develop' }))}
+          onConnectGitHub={openGitHubConnectModal}
         />
 
       {:else if appMode === 'develop'}
@@ -491,6 +501,9 @@
             />
           {/if}
         </div>
+
+      {:else if appMode === 'docs'}
+        <DocsPanel />
 
       {:else if appMode === 'terminal'}
         <!-- TERMINAL: full terminal view -->

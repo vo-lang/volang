@@ -1,0 +1,83 @@
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	// Write a file
+	err := os.WriteFile("/hello.txt", []byte("Hello from Vo!"), 0644)
+	if err != nil {
+		fmt.Println("WriteFile error:", err)
+		return
+	}
+	fmt.Println("Created /hello.txt")
+
+	// Read it back
+	data, err := os.ReadFile("/hello.txt")
+	if err != nil {
+		fmt.Println("ReadFile error:", err)
+		return
+	}
+	fmt.Println("Content:", string(data))
+
+	// Create nested directories
+	err = os.MkdirAll("/myapp/data/logs", 0755)
+	if err != nil {
+		fmt.Println("MkdirAll error:", err)
+		return
+	}
+	fmt.Println("Created /myapp/data/logs")
+
+	// Write to nested path
+	os.WriteFile("/myapp/data/config.txt", []byte("debug=true"), 0644)
+
+	// File info
+	info, err := os.Stat("/hello.txt")
+	if err != nil {
+		fmt.Println("Stat error:", err)
+		return
+	}
+	fmt.Println("File:", info.Name(), "Size:", info.Size(), "bytes")
+
+	// Open file for read/write
+	f, err := os.OpenFile("/myapp/log.txt", os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		fmt.Println("OpenFile error:", err)
+		return
+	}
+	f.Write([]byte("Line 1\n"))
+	f.Write([]byte("Line 2\n"))
+	f.Seek(0, 0) // back to start
+
+	buf := make([]byte, 100)
+	n, _ := f.Read(buf)
+	fmt.Println("Read from file:")
+	fmt.Print(string(buf[:n]))
+	f.Close()
+
+	// List directory
+	entries, err := os.ReadDir("/myapp")
+	if err != nil {
+		fmt.Println("ReadDir error:", err)
+		return
+	}
+	fmt.Println("\nContents of /myapp:")
+	for _, e := range entries {
+		if e.IsDir() {
+			fmt.Println("  [dir]", e.Name())
+		} else {
+			fmt.Println("  [file]", e.Name())
+		}
+	}
+
+	// Clean up
+	os.Remove("/hello.txt")
+	os.RemoveAll("/myapp")
+	fmt.Println("\nCleaned up!")
+
+	// Note: Files persist in browser storage (OPFS)
+	// Try refreshing the page - your files will still be there!
+	fmt.Println("\n=== File System Demo Complete ===")
+}

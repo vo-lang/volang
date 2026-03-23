@@ -1,6 +1,5 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import type { BootstrapContext } from '../lib/types';
   import type { ProjectCatalogService } from '../lib/services/project_catalog_service';
   import type { ManagedProject, ProjectDiffResult } from '../lib/project_catalog/types';
   import { projectKey, syncState } from '../lib/project_catalog/types';
@@ -11,15 +10,58 @@
   import ProjectRenameModal from './home/ProjectRenameModal.svelte';
   import ProjectSyncModal from './home/ProjectSyncModal.svelte';
 
-  export let bootstrap: BootstrapContext | null = null;
+  // Example source imports (raw strings)
+  import exChannels from '../assets/examples/channels.vo?raw';
+  import exClosures from '../assets/examples/closures.vo?raw';
+  import exDefer from '../assets/examples/defer.vo?raw';
+  import exErrorHandling from '../assets/examples/error_handling.vo?raw';
+  import exGoroutines from '../assets/examples/goroutines.vo?raw';
+  import exInterfaces from '../assets/examples/interfaces.vo?raw';
+  import exSelect from '../assets/examples/select.vo?raw';
+  import exTime from '../assets/examples/time.vo?raw';
+  import exRegexp from '../assets/examples/regexp.vo?raw';
+  import exGuiCounter from '../assets/examples/gui_counter.vo?raw';
+  import exGuiTodo from '../assets/examples/gui_todo.vo?raw';
+  import exGuiTetris from '../assets/examples/gui_tetris.vo?raw';
+  import exGuiShowcase from '../assets/examples/gui_showcase.vo?raw';
+  import exDashboard from '../assets/examples/dashboard.vo?raw';
+
+  interface Example {
+    name: string;
+    file: string;
+    desc: string;
+    source: string;
+    tag: 'lang' | 'gui';
+  }
+
+  const examples: Example[] = [
+    { name: 'Channels',        file: 'channels.vo',        desc: 'Goroutine communication',       source: exChannels,      tag: 'lang' },
+    { name: 'Closures',        file: 'closures.vo',        desc: 'Captured variables',            source: exClosures,      tag: 'lang' },
+    { name: 'Defer',           file: 'defer.vo',           desc: 'LIFO cleanup',                  source: exDefer,         tag: 'lang' },
+    { name: 'Error Handling',  file: 'error_handling.vo',  desc: '? operator and errdefer',       source: exErrorHandling, tag: 'lang' },
+    { name: 'Goroutines',      file: 'goroutines.vo',      desc: 'Concurrent computation',        source: exGoroutines,    tag: 'lang' },
+    { name: 'Interfaces',      file: 'interfaces.vo',      desc: 'Duck typing',                   source: exInterfaces,    tag: 'lang' },
+    { name: 'Select',          file: 'select.vo',          desc: 'Channel multiplexing',          source: exSelect,        tag: 'lang' },
+    { name: 'Time',            file: 'time.vo',            desc: 'Duration and timers',           source: exTime,          tag: 'lang' },
+    { name: 'Regexp',          file: 'regexp.vo',          desc: 'Pattern matching',              source: exRegexp,        tag: 'lang' },
+    { name: 'Counter',         file: 'gui_counter.vo',     desc: 'Minimal GUI app',               source: exGuiCounter,    tag: 'gui' },
+    { name: 'Todo App',        file: 'gui_todo.vo',        desc: 'List rendering & events',       source: exGuiTodo,       tag: 'gui' },
+    { name: 'Tetris',          file: 'gui_tetris.vo',      desc: 'Canvas 2D game loop',           source: exGuiTetris,     tag: 'gui' },
+    { name: 'Showcase',        file: 'gui_showcase.vo',    desc: 'All GUI components',            source: exGuiShowcase,   tag: 'gui' },
+    { name: 'Dashboard',       file: 'dashboard.vo',       desc: 'Composition patterns',          source: exDashboard,     tag: 'gui' },
+  ];
+
+  $: langExamples = examples.filter(e => e.tag === 'lang');
+  $: guiExamples = examples.filter(e => e.tag === 'gui');
+
+  let examplesExpanded = false;
+
   export let projectCatalog: ProjectCatalogService;
-  export let localPathInput = '';
-  export let urlInput = '';
-  export let onOpenWorkspace: () => void = () => {};
-  export let onOpenLocalPath: () => void = () => {};
-  export let onOpenUrl: () => void = () => {};
   export let onOpenProject: (project: ManagedProject) => Promise<void> | void = () => {};
+  export let onOpenExample: (source: string, filename: string) => Promise<void> | void = () => {};
+  export let onDocs: () => void = () => {};
   export let onDevelop: () => void = () => {};
+  export let onConnectGitHub: () => void = () => {};
 
   let searchQuery = '';
   let actionError = '';
@@ -31,7 +73,6 @@
   let confirmDialog: { title: string; message: string; danger: boolean; action: () => void } | null = null;
   let creating = false;
   let createError = '';
-  let showAdvanced = false;
   let localRefreshRequested = false;
 
   $: githubStore = projectCatalog.github;
@@ -41,6 +82,8 @@
   );
   $: isInitialLoading = $catalogStore.loading;
   $: isRefreshing = localRefreshRequested || $catalogStore.refreshing || $catalogStore.remoteLoading;
+  $: hasProjects = !$catalogStore.loading && $catalogStore.projects.length > 0;
+  $: isGitHubConnected = Boolean($githubStore.user);
 
   function busy(project: ManagedProject): boolean {
     return $catalogStore.busyKeys.includes(projectKey(project));
@@ -239,110 +282,179 @@
 />
 
 <div class="home">
-  <!-- ── Header bar ── -->
-  <div class="header">
-    <div class="brand">
-      <span class="logo-vo">Vo</span><span class="logo-studio">Studio</span>
-    </div>
-    <div class="search">
-      <input bind:value={searchQuery} placeholder="Search projects…" />
-    </div>
-  </div>
+  <div class="ambient"></div>
 
-  <!-- ── Action row ── -->
-  <div class="actions">
-    <button class="primary" on:click={() => { createError = ''; showCreateModal = true; }}>+ New Project</button>
-    <button
-      class="icon-btn"
-      title="Refresh projects"
-      disabled={isInitialLoading}
-      on:click={triggerRefresh}
-    ><span class="refresh-icon" class:spinning={isInitialLoading || isRefreshing}>↻</span></button>
-    {#if $catalogStore.remoteLoading}
-      <span class="sync-hint">Syncing GitHub…</span>
-    {/if}
-    <div class="actions-spacer"></div>
-    <button class="text-btn" on:click={() => (showAdvanced = !showAdvanced)}>{showAdvanced ? 'Less ▴' : 'More ▾'}</button>
-  </div>
-
-  {#if showAdvanced}
-    <div class="advanced">
-      {#if bootstrap?.platform === 'native'}
-        <div class="adv-row">
-          <button class="secondary" on:click={onOpenWorkspace}>Browse Folder…</button>
-          <span class="adv-hint">Pick a folder from your filesystem to open as a project</span>
+  <!-- ═══════ DASHBOARD ═══════ -->
+  <div class="dashboard">
+    <!-- ── Left column: brand + examples ── -->
+    <aside class="sidebar">
+      <div class="brand-block">
+        <h1 class="brand">Vo</h1>
+        <p class="tagline">The scripting language<br/>for the Rust ecosystem.</p>
+        <p class="subtitle">Statically typed · Go-like syntax<br/>Embeds in Rust · Compiles to WASM</p>
+        <div class="pills">
+          <span class="pill">VM</span>
+          <span class="pill pill-jit">JIT</span>
+          <span class="pill pill-wasm">WASM</span>
         </div>
-        <div class="adv-row">
-          <div class="inline-open">
-            <input bind:value={localPathInput} placeholder="/absolute/path/to/project" on:keydown={(event) => event.key === 'Enter' && onOpenLocalPath()} />
-            <button class="secondary" on:click={onOpenLocalPath}>Open Path</button>
-          </div>
-          <span class="adv-hint">Open a project by its absolute filesystem path</span>
+        <div class="actions">
+          <button class="btn-primary" on:click={() => { createError = ''; showCreateModal = true; }}>
+            <svg class="btn-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
+            New Project
+          </button>
+          <button class="btn-ghost" on:click={onDocs}>
+            Docs
+            <svg class="btn-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg>
+          </button>
         </div>
-      {/if}
-      <div class="adv-row">
-        <div class="inline-open">
-          <input bind:value={urlInput} placeholder="https://github.com/user/repo" on:keydown={(event) => event.key === 'Enter' && onOpenUrl()} />
-          <button class="secondary" on:click={onOpenUrl}>Clone URL</button>
-        </div>
-        <span class="adv-hint">Download a project from a GitHub URL or tarball link</span>
       </div>
-    </div>
-  {/if}
 
-  <!-- ── Progress bar ── -->
-  {#if isInitialLoading || isRefreshing}
-    <div class="progress-track"><div class="progress-bar"></div></div>
-  {/if}
+      <div class="quick-try">
+        <span class="quick-try-label">Quick try</span>
+        <div class="ex-list">
+          {#each langExamples as ex}
+            <button class="ex-link" on:click={() => onOpenExample(ex.source, ex.file)}>
+              <span class="ex-link-name">{ex.name}</span>
+              <span class="ex-link-dot">·</span>
+              <span class="ex-link-desc">{ex.desc}</span>
+            </button>
+          {/each}
+        </div>
+        <span class="quick-try-label quick-try-label-gui">GUI</span>
+        <div class="ex-list">
+          {#each guiExamples as ex}
+            <button class="ex-link ex-link-gui" on:click={() => onOpenExample(ex.source, ex.file)}>
+              <span class="ex-link-name">{ex.name}</span>
+              <span class="ex-link-dot">·</span>
+              <span class="ex-link-desc">{ex.desc}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
+    </aside>
 
-  <!-- ── Error / status ── -->
-  {#if actionError || $catalogStore.error || $githubStore.error}
-    <div class="error-bar">
-      <span>{actionError || $catalogStore.error || $githubStore.error}</span>
-      <button class="error-dismiss" on:click={() => (actionError = '')}>×</button>
-    </div>
-  {/if}
+    <!-- ── Right column: code + workspace ── -->
+    <main class="content">
+      <div class="code-area">
+        <div class="code-glow"></div>
+        <div class="code-window">
+          <div class="code-titlebar">
+            <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+            <span class="code-filename">error_handling.vo</span>
+          </div>
+          <pre class="code-body"><code><span class="hl-kw">func</span> <span class="hl-fn">readConfig</span>(path <span class="hl-type">string</span>) (<span class="hl-type">Config</span>, <span class="hl-type">error</span>) &#123;
+    file := open(path)<span class="hl-op">?</span>
+    <span class="hl-kw">errdefer</span> file.Close()
 
-  <!-- ── Project grid ── -->
-  {#if $catalogStore.loading}
-    <div class="grid">
-      {#each Array(6) as _}
-        <div class="skeleton-card">
-          <div class="skeleton-row">
-            <div class="skeleton-icon"></div>
-            <div class="skeleton-info">
-              <div class="skeleton-line skeleton-name"></div>
-              <div class="skeleton-line skeleton-meta"></div>
+    data := readAll(file)<span class="hl-op">?</span>
+    config := parse(data)<span class="hl-op">?</span>
+
+    <span class="hl-kw">if</span> config.Version &lt; <span class="hl-num">1</span> &#123;
+        <span class="hl-kw">fail</span> errors.New(<span class="hl-str">"invalid version"</span>)
+    &#125;
+    <span class="hl-kw">return</span> config, <span class="hl-lit">nil</span>
+&#125;</code></pre>
+          <button class="code-try" on:click={() => onOpenExample(exErrorHandling, 'error_handling.vo')}>
+            Open in editor
+            <svg class="btn-arrow small" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- ── Workspace area (always visible) ── -->
+      <div class="workspace">
+        {#if !isGitHubConnected}
+          <div class="gh-block">
+            <button class="gh-cta" on:click={onConnectGitHub}>
+              <div class="gh-cta-left">
+                <svg class="gh-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                <div class="gh-cta-text">
+                  <span class="gh-cta-title">Connect GitHub</span>
+                  <span class="gh-cta-desc">Sync projects across devices and back up to Gist</span>
+                </div>
+              </div>
+              <svg class="btn-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg>
+            </button>
+            <p class="gh-warn">Code is AI-assisted and not audited for security. Use a test account with a minimal-scope token.</p>
+          </div>
+        {/if}
+
+        <div class="projects-area">
+          <div class="projects-header">
+            <span class="projects-title">{isGitHubConnected ? 'Your Projects' : 'Local Projects'}</span>
+            {#if hasProjects}
+              <div class="projects-search">
+                <svg class="search-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l4 4"/></svg>
+                <input bind:value={searchQuery} placeholder="Search…" />
+              </div>
+            {/if}
+            <div class="projects-header-spacer"></div>
+            <button
+              class="icon-btn"
+              title="Refresh projects"
+              disabled={isInitialLoading}
+              on:click={triggerRefresh}
+            ><span class="refresh-icon" class:spinning={isInitialLoading || isRefreshing}>↻</span></button>
+            {#if $catalogStore.remoteLoading}
+              <span class="sync-hint">Syncing GitHub…</span>
+            {/if}
+          </div>
+
+          {#if isInitialLoading || isRefreshing}
+            <div class="progress-track"><div class="progress-bar"></div></div>
+          {/if}
+
+          {#if actionError || $catalogStore.error || $githubStore.error}
+            <div class="error-bar">
+              <span>{actionError || $catalogStore.error || $githubStore.error}</span>
+              <button class="error-dismiss" on:click={() => (actionError = '')}>×</button>
             </div>
-          </div>
+          {/if}
+
+          {#if $catalogStore.loading}
+            <div class="grid">
+              {#each Array(3) as _}
+                <div class="skeleton-card">
+                  <div class="skeleton-row">
+                    <div class="skeleton-icon"></div>
+                    <div class="skeleton-info">
+                      <div class="skeleton-line skeleton-name"></div>
+                      <div class="skeleton-line skeleton-meta"></div>
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {:else if filteredProjects.length === 0 && searchQuery}
+            <div class="empty">
+              <div class="empty-title">No matching projects</div>
+              <div class="empty-sub">Try a different search term.</div>
+            </div>
+          {:else if hasProjects}
+            <div class="grid">
+              {#each filteredProjects as project (projectKey(project))}
+                {@const state = syncState(project)}
+                <ProjectCard
+                  {project}
+                  {state}
+                  busy={busy(project)}
+                  checkingSync={checkingSync(project)}
+                  on:open={() => openProject(project)}
+                  on:menu={(event) => {
+                    menuState = { x: event.detail.x, y: event.detail.y, project };
+                  }}
+                />
+              {/each}
+            </div>
+          {:else}
+            <div class="empty-workspace">
+              <span class="empty-workspace-text">No projects yet. Click <strong>New Project</strong> to get started.</span>
+            </div>
+          {/if}
         </div>
-      {/each}
-    </div>
-  {:else if filteredProjects.length === 0}
-    <div class="empty">
-      <div class="empty-title">{searchQuery ? 'No matching projects' : 'No projects yet'}</div>
-      <div class="empty-sub">Create a new project or connect GitHub to see remote projects.</div>
-      <div class="empty-actions">
-        <button class="primary" on:click={() => (showCreateModal = true)}>+ New Project</button>
       </div>
-    </div>
-  {:else}
-    <div class="grid">
-      {#each filteredProjects as project (projectKey(project))}
-        {@const state = syncState(project)}
-        <ProjectCard
-          {project}
-          {state}
-          busy={busy(project)}
-          checkingSync={checkingSync(project)}
-          on:open={() => openProject(project)}
-          on:menu={(event) => {
-            menuState = { x: event.detail.x, y: event.detail.y, project };
-          }}
-        />
-      {/each}
-    </div>
-  {/if}
+    </main>
+  </div>
 
   {#if showCreateModal}
     <CreateProjectModal
@@ -430,382 +542,614 @@
 </div>
 
 <style>
+  /* ══════════════════════════════════════════
+     ROOT — full-height, no page scroll
+     ══════════════════════════════════════════ */
   .home {
     flex: 1;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    overflow: auto;
-    background: #11111b;
-  }
-
-  /* ── Header ── */
-  .header {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    padding: 12px 20px;
-    border-bottom: 1px solid #1e1e2e;
-    flex-shrink: 0;
-  }
-  .brand {
-    display: flex;
-    align-items: baseline;
-    gap: 4px;
-    flex-shrink: 0;
-  }
-  .logo-vo {
-    font-size: 20px;
-    font-weight: 900;
-    color: #89b4fa;
-  }
-  .logo-studio {
-    font-size: 14px;
-    font-weight: 400;
-    color: #585b70;
-  }
-  .search {
-    flex: 1;
-    min-width: 0;
-  }
-  .search input {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 8px 12px;
-    border-radius: 8px;
-    border: 1px solid #252535;
-    background: #181825;
+    position: relative;
+    background: #06060c;
     color: #cdd6f4;
-    font-size: 13px;
-    outline: none;
-  }
-  .search input:focus {
-    border-color: #45475a;
-  }
-  .search input::placeholder {
-    color: #45475a;
-  }
-  .text-btn {
-    border: none;
-    background: none;
-    color: #585b70;
-    font: inherit;
-    font-size: 11px;
-    cursor: pointer;
-    padding: 2px 4px;
-  }
-  .text-btn:hover {
-    color: #a6adc8;
   }
 
-  /* ── Action row ── */
-  .actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 20px;
-    border-bottom: 1px solid #1e1e2e;
-    flex-shrink: 0;
+  .ambient {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background:
+      radial-gradient(ellipse 60% 50% at 20% 0%, rgba(137, 180, 250, 0.08) 0%, transparent 70%),
+      radial-gradient(ellipse 40% 40% at 80% 10%, rgba(116, 199, 236, 0.05) 0%, transparent 60%);
   }
-  .actions-spacer {
+
+  /* ══════════════════════════════════════════
+     DASHBOARD — two-column layout
+     ══════════════════════════════════════════ */
+  .dashboard {
     flex: 1;
-  }
-  .sync-hint {
-    color: #585b70;
-    font-size: 11px;
-    white-space: nowrap;
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    min-height: 0;
+    position: relative;
+    z-index: 1;
   }
 
-  /* ── Advanced section ── */
-  .advanced {
+  /* ══════════════════════════════════════════
+     LEFT SIDEBAR
+     ══════════════════════════════════════════ */
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 32px 24px 24px;
+    border-right: 1px solid rgba(88, 91, 112, 0.08);
+    overflow-y: auto;
+    gap: 0;
+  }
+
+  .brand-block {
     display: flex;
     flex-direction: column;
     gap: 10px;
-    padding: 12px 20px;
-    border-bottom: 1px solid #1e1e2e;
-    background: rgba(24, 24, 37, 0.5);
-    flex-shrink: 0;
-  }
-  .adv-row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  .adv-hint {
-    color: #45475a;
-    font-size: 11px;
-  }
-  .inline-open {
-    display: flex;
-    gap: 4px;
-  }
-  .inline-open input {
-    width: 220px;
-    box-sizing: border-box;
-    padding: 7px 10px;
-    border-radius: 8px;
-    border: 1px solid #252535;
-    background: #181825;
-    color: #cdd6f4;
-    font-size: 12px;
-    outline: none;
-  }
-  .inline-open input:focus {
-    border-color: #45475a;
-  }
-  .inline-open input::placeholder {
-    color: #45475a;
+    padding-bottom: 20px;
   }
 
-  /* ── Buttons ── */
-  button {
-    font: inherit;
+  .brand {
+    margin: 0;
+    font-size: 52px;
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    line-height: 1;
+    background: linear-gradient(135deg, #89b4fa 0%, #74c7ec 50%, #94e2d5 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    filter: drop-shadow(0 0 30px rgba(137, 180, 250, 0.2));
   }
-  .primary {
-    border: none;
-    border-radius: 8px;
-    padding: 7px 14px;
-    background: linear-gradient(135deg, #89b4fa, #74c7ec);
-    color: #11111b;
-    font-weight: 700;
-    font-size: 13px;
-    cursor: pointer;
-    white-space: nowrap;
+
+  .tagline {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: #cdd6f4;
+    line-height: 1.4;
+    letter-spacing: -0.01em;
   }
-  .primary:hover {
-    filter: brightness(1.1);
-  }
-  .secondary {
-    border: 1px solid #252535;
-    border-radius: 8px;
-    padding: 7px 12px;
-    background: #1e1e2e;
-    color: #a6adc8;
+
+  .subtitle {
+    margin: 0;
     font-size: 12px;
-    cursor: pointer;
-    white-space: nowrap;
+    color: #6c7086;
+    line-height: 1.5;
   }
-  .secondary:hover {
-    border-color: #45475a;
+
+  .pills {
+    display: flex;
+    gap: 6px;
+    margin: 2px 0;
+  }
+  .pill {
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    border: 1px solid rgba(137, 180, 250, 0.2);
+    color: #89b4fa;
+    background: rgba(137, 180, 250, 0.06);
+  }
+  .pill-jit {
+    border-color: rgba(250, 179, 135, 0.2);
+    color: #fab387;
+    background: rgba(250, 179, 135, 0.06);
+  }
+  .pill-wasm {
+    border-color: rgba(166, 227, 161, 0.2);
+    color: #a6e3a1;
+    background: rgba(166, 227, 161, 0.06);
+  }
+
+  .actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  button { font: inherit; }
+
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: none;
+    border-radius: 10px;
+    padding: 9px 16px;
+    background: linear-gradient(135deg, #89b4fa, #74c7ec);
+    color: #06060c;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: filter 0.2s, transform 0.2s, box-shadow 0.2s;
+    box-shadow: 0 0 0 rgba(137, 180, 250, 0);
+  }
+  .btn-primary:hover {
+    filter: brightness(1.1);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px rgba(137, 180, 250, 0.2);
+  }
+  .btn-icon {
+    width: 13px; height: 13px;
+    stroke: currentColor; fill: none;
+    stroke-width: 2.2; stroke-linecap: round;
+  }
+
+  .btn-ghost {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid rgba(88, 91, 112, 0.3);
+    border-radius: 10px;
+    padding: 9px 14px;
+    background: transparent;
+    color: #7f849c;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.2s, color 0.2s;
+  }
+  .btn-ghost:hover {
+    border-color: rgba(137, 180, 250, 0.4);
+    color: #89b4fa;
+  }
+  .btn-arrow {
+    width: 12px; height: 12px;
+    stroke: currentColor; fill: none;
+    stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+  }
+  .btn-arrow.small { width: 11px; height: 11px; }
+
+  /* ── Quick try (example links) ── */
+  .quick-try {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border-top: 1px solid rgba(88, 91, 112, 0.08);
+    padding-top: 16px;
+  }
+
+  .quick-try-label {
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #89b4fa;
+    padding: 0 0 4px;
+  }
+  .quick-try-label-gui {
+    color: #a6e3a1;
+    padding-top: 8px;
+  }
+
+  .ex-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .ex-link {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    margin: 0 -8px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    transition: background 0.15s;
+  }
+  .ex-link:hover {
+    background: rgba(137, 180, 250, 0.06);
+  }
+  .ex-link-gui:hover {
+    background: rgba(166, 227, 161, 0.06);
+  }
+  .ex-link-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: #bac2de;
+  }
+  .ex-link:hover .ex-link-name {
     color: #cdd6f4;
   }
-  .icon-btn {
-    border: 1px solid #252535;
-    border-radius: 8px;
-    width: 32px;
-    height: 32px;
+  .ex-link-dot {
+    color: #313244;
+    font-size: 10px;
+  }
+  .ex-link-desc {
+    font-size: 11px;
+    color: #45475a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ══════════════════════════════════════════
+     RIGHT CONTENT
+     ══════════════════════════════════════════ */
+  .content {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 28px 28px 24px;
+    gap: 20px;
+  }
+
+  /* ── Code window ── */
+  .code-area {
+    position: relative;
+    flex-shrink: 0;
+  }
+  .code-glow {
+    position: absolute;
+    inset: -1px;
+    border-radius: 16px;
+    background: linear-gradient(135deg, rgba(137, 180, 250, 0.12), rgba(116, 199, 236, 0.08), rgba(148, 226, 213, 0.06));
+    filter: blur(18px);
+    z-index: 0;
+    animation: glow-pulse 4s ease-in-out infinite alternate;
+  }
+  @keyframes glow-pulse {
+    0% { opacity: 0.5; }
+    100% { opacity: 1; }
+  }
+
+  .code-window {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    border-radius: 14px;
+    border: 1px solid rgba(88, 91, 112, 0.2);
+    background: rgba(11, 11, 18, 0.85);
+    backdrop-filter: blur(16px);
+    overflow: hidden;
+  }
+  .code-titlebar {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(88, 91, 112, 0.1);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot-r { background: #f38ba8; opacity: 0.5; }
+  .dot-y { background: #f9e2af; opacity: 0.5; }
+  .dot-g { background: #a6e3a1; opacity: 0.5; }
+  .code-filename {
+    margin-left: 8px;
+    font-size: 11px;
+    color: #585b70;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+  .code-body {
+    margin: 0;
+    padding: 16px 18px;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: #a6adc8;
+    tab-size: 4;
+  }
+  .code-body code { font: inherit; color: inherit; }
+
+  .hl-kw  { color: #cba6f7; }
+  .hl-fn  { color: #89b4fa; }
+  .hl-type { color: #89dceb; }
+  .hl-op  { color: #f38ba8; font-weight: 700; }
+  .hl-str { color: #a6e3a1; }
+  .hl-num { color: #fab387; }
+  .hl-lit { color: #f9e2af; }
+
+  .code-try {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #1e1e2e;
-    color: #a6adc8;
-    font-size: 16px;
+    gap: 5px;
+    padding: 9px;
+    border: none;
+    border-top: 1px solid rgba(88, 91, 112, 0.1);
+    background: rgba(137, 180, 250, 0.02);
+    color: #585b70;
+    font-size: 11px;
+    font-weight: 600;
     cursor: pointer;
-    flex-shrink: 0;
+    transition: background 0.2s, color 0.2s;
   }
-  .icon-btn:hover:not(:disabled) {
-    border-color: #45475a;
-    color: #cdd6f4;
-  }
-  .icon-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .refresh-icon {
-    display: inline-block;
-  }
-  .refresh-icon.spinning {
-    animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+  .code-try:hover {
+    background: rgba(137, 180, 250, 0.07);
+    color: #89b4fa;
   }
 
-  /* ── Error bar ── */
-  .error-bar {
-    margin: 0 20px;
-    padding: 10px 14px;
-    border-radius: 8px;
-    border: 1px solid rgba(243, 139, 168, 0.2);
-    background: rgba(243, 139, 168, 0.06);
-    color: #f38ba8;
-    font-size: 12px;
+  /* ══════════════════════════════════════════
+     WORKSPACE (always visible)
+     ══════════════════════════════════════════ */
+  .workspace {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-height: 0;
+  }
+
+  /* ── GitHub CTA ── */
+  .gh-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
     flex-shrink: 0;
+  }
+  .gh-warn {
+    margin: 0;
+    padding: 0 4px;
+    font-size: 10px;
+    color: #f9e2af;
+    opacity: 0.6;
+    line-height: 1.4;
+  }
+  .gh-cta {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 10px;
-  }
-  .error-dismiss {
-    border: none;
-    background: none;
-    color: #f38ba8;
-    font-size: 16px;
+    gap: 12px;
+    padding: 14px 16px;
+    border: 1px solid rgba(88, 91, 112, 0.15);
+    border-radius: 12px;
+    background: linear-gradient(135deg, rgba(137, 180, 250, 0.04) 0%, rgba(116, 199, 236, 0.02) 100%);
     cursor: pointer;
-    padding: 0 2px;
-    opacity: 0.6;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    flex-shrink: 0;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  .gh-cta:hover {
+    border-color: rgba(137, 180, 250, 0.25);
+    background: linear-gradient(135deg, rgba(137, 180, 250, 0.07) 0%, rgba(116, 199, 236, 0.04) 100%);
+  }
+  .gh-cta-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+  .gh-icon {
+    width: 20px;
+    height: 20px;
+    fill: #7f849c;
+    flex-shrink: 0;
+    transition: fill 0.2s;
+  }
+  .gh-cta:hover .gh-icon { fill: #cdd6f4; }
+  .gh-cta-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .gh-cta-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #cdd6f4;
+  }
+  .gh-cta-desc {
+    font-size: 11px;
+    color: #585b70;
+    line-height: 1.35;
+  }
+  .gh-cta .btn-arrow {
+    stroke: #45475a;
+    flex-shrink: 0;
+    transition: stroke 0.2s;
+  }
+  .gh-cta:hover .btn-arrow { stroke: #89b4fa; }
+
+  /* ── Empty workspace ── */
+  .empty-workspace {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 16px;
+  }
+  .empty-workspace-text {
+    font-size: 12px;
+    color: #45475a;
+    text-align: center;
+  }
+  .empty-workspace-text strong {
+    color: #585b70;
+  }
+
+  /* ── Projects ── */
+  .projects-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .projects-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 0 10px;
     flex-shrink: 0;
   }
-  .error-dismiss:hover {
-    opacity: 1;
+  .projects-title {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #585b70;
+    flex-shrink: 0;
+  }
+  .projects-search {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    max-width: 200px;
+    padding: 5px 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(88, 91, 112, 0.15);
+    background: rgba(11, 11, 18, 0.5);
+    transition: border-color 0.2s;
+  }
+  .projects-search:focus-within {
+    border-color: rgba(137, 180, 250, 0.3);
+  }
+  .search-icon {
+    width: 12px; height: 12px;
+    stroke: #45475a; fill: none;
+    stroke-width: 1.6; stroke-linecap: round;
+    flex-shrink: 0;
+  }
+  .projects-search input {
+    flex: 1; min-width: 0;
+    border: none; background: transparent;
+    color: #cdd6f4; font-size: 12px;
+    outline: none; padding: 0;
+  }
+  .projects-search input::placeholder { color: #45475a; }
+  .projects-header-spacer { flex: 1; }
+  .sync-hint { color: #585b70; font-size: 11px; white-space: nowrap; }
+
+  .secondary {
+    border: 1px solid rgba(88, 91, 112, 0.2);
+    border-radius: 8px;
+    padding: 6px 10px;
+    background: rgba(11, 11, 18, 0.5);
+    color: #a6adc8; font-size: 12px;
+    cursor: pointer; white-space: nowrap;
+  }
+  .secondary:hover { border-color: rgba(88, 91, 112, 0.4); color: #cdd6f4; }
+
+  .icon-btn {
+    border: 1px solid rgba(88, 91, 112, 0.15);
+    border-radius: 8px;
+    width: 28px; height: 28px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(11, 11, 18, 0.5);
+    color: #6c7086; font-size: 14px;
+    cursor: pointer; flex-shrink: 0;
+    transition: border-color 0.2s, color 0.2s;
+  }
+  .icon-btn:hover:not(:disabled) { border-color: rgba(88, 91, 112, 0.4); color: #cdd6f4; }
+  .icon-btn:disabled { opacity: 0.35; cursor: default; }
+  .refresh-icon { display: inline-block; }
+  .refresh-icon.spinning { animation: spin 0.8s linear infinite; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+  .error-bar {
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(243, 139, 168, 0.12);
+    background: rgba(243, 139, 168, 0.04);
+    color: #f38ba8; font-size: 12px;
+    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  .error-dismiss {
+    border: none; background: none; color: #f38ba8;
+    font-size: 16px; cursor: pointer; padding: 0 2px;
+    opacity: 0.5; flex-shrink: 0;
+  }
+  .error-dismiss:hover { opacity: 1; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 10px;
   }
 
   /* ── Confirm dialog ── */
   .confirm-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.72);
-    backdrop-filter: blur(4px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.78);
+    backdrop-filter: blur(8px);
+    display: flex; align-items: center; justify-content: center;
     z-index: 210;
   }
   .confirm-modal {
     width: min(100%, 380px);
-    background: #1e1e2e;
-    border: 1px solid #313244;
-    border-radius: 14px;
-    padding: 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
+    background: #13131e;
+    border: 1px solid rgba(88, 91, 112, 0.3);
+    border-radius: 16px;
+    padding: 22px;
+    display: flex; flex-direction: column; gap: 12px;
   }
-  .confirm-modal h3 {
-    margin: 0;
-    color: #cdd6f4;
-    font-size: 16px;
-    font-weight: 700;
-  }
-  .confirm-modal h3.danger {
-    color: #f38ba8;
-  }
-  .confirm-msg {
-    margin: 0;
-    color: #7f849c;
-    font-size: 13px;
-    line-height: 1.6;
-  }
-  .confirm-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    margin-top: 4px;
-  }
+  .confirm-modal h3 { margin: 0; color: #cdd6f4; font-size: 16px; font-weight: 700; }
+  .confirm-modal h3.danger { color: #f38ba8; }
+  .confirm-msg { margin: 0; color: #7f849c; font-size: 13px; line-height: 1.6; }
+  .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
   .danger-btn {
-    border: none;
-    border-radius: 8px;
-    padding: 7px 14px;
-    background: #f38ba8;
-    color: #11111b;
-    font-weight: 700;
-    font-size: 13px;
-    cursor: pointer;
-    white-space: nowrap;
+    border: none; border-radius: 8px;
+    padding: 8px 14px;
+    background: #f38ba8; color: #06060c;
+    font-weight: 700; font-size: 13px;
+    cursor: pointer; white-space: nowrap;
   }
-  .danger-btn:hover {
-    filter: brightness(1.1);
-  }
+  .danger-btn:hover { filter: brightness(1.1); }
 
-  /* ── Progress bar ── */
-  .progress-track {
-    height: 2px;
-    background: #1e1e2e;
-    overflow: hidden;
-    flex-shrink: 0;
-  }
+  .progress-track { height: 2px; background: rgba(30, 30, 46, 0.3); overflow: hidden; flex-shrink: 0; }
   .progress-bar {
-    height: 100%;
-    width: 30%;
+    height: 100%; width: 30%;
     background: linear-gradient(90deg, #89b4fa, #74c7ec);
     border-radius: 1px;
     animation: progress-slide 1.2s ease-in-out infinite;
   }
-  @keyframes progress-slide {
-    0% { transform: translateX(-100%); }
-    100% { transform: translateX(430%); }
-  }
+  @keyframes progress-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(430%); } }
 
-  /* ── Project grid ── */
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-    gap: 12px;
-    padding: 16px 20px;
-  }
-
-  /* ── Skeleton cards ── */
   .skeleton-card {
-    border: 1px solid #252535;
-    background: #181825;
-    border-radius: 10px;
-    padding: 14px;
+    border: 1px solid rgba(88, 91, 112, 0.1);
+    background: rgba(11, 11, 18, 0.5);
+    border-radius: 12px; padding: 12px;
   }
-  .skeleton-row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
+  .skeleton-row { display: flex; align-items: center; gap: 10px; }
   .skeleton-icon {
-    width: 36px;
-    height: 28px;
-    border-radius: 6px;
-    background: #252535;
-    flex-shrink: 0;
-    animation: skeleton-pulse 1.4s ease-in-out infinite;
+    width: 32px; height: 24px; border-radius: 5px;
+    background: rgba(88, 91, 112, 0.1);
+    flex-shrink: 0; animation: pulse 1.4s ease-in-out infinite;
   }
-  .skeleton-info {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .skeleton-line {
-    border-radius: 4px;
-    background: #252535;
-    animation: skeleton-pulse 1.4s ease-in-out infinite;
-  }
-  .skeleton-name {
-    width: 60%;
-    height: 14px;
-  }
-  .skeleton-meta {
-    width: 40%;
-    height: 11px;
-    animation-delay: 0.15s;
-  }
-  @keyframes skeleton-pulse {
-    0%, 100% { opacity: 0.4; }
-    50% { opacity: 1; }
-  }
+  .skeleton-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+  .skeleton-line { border-radius: 3px; background: rgba(88, 91, 112, 0.1); animation: pulse 1.4s ease-in-out infinite; }
+  .skeleton-name { width: 60%; height: 13px; }
+  .skeleton-meta { width: 40%; height: 10px; animation-delay: 0.15s; }
+  @keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 0.8; } }
 
-  /* ── Empty state ── */
   .empty {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    padding: 60px 20px;
-    text-align: center;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; padding: 40px 20px; text-align: center;
   }
-  .empty-title {
-    color: #585b70;
-    font-size: 16px;
-    font-weight: 600;
-  }
-  .empty-sub {
-    color: #45475a;
-    font-size: 13px;
-    max-width: 400px;
-    line-height: 1.6;
-  }
-  .empty-actions {
-    display: flex;
-    gap: 10px;
-    margin-top: 10px;
+  .empty-title { color: #585b70; font-size: 13px; font-weight: 600; }
+  .empty-sub { color: #45475a; font-size: 12px; max-width: 300px; line-height: 1.5; }
+
+  /* ── Responsive ── */
+  @media (max-width: 700px) {
+    .dashboard { grid-template-columns: 1fr; }
+    .sidebar {
+      border-right: none;
+      border-bottom: 1px solid rgba(88, 91, 112, 0.08);
+      padding: 20px 16px 16px;
+      overflow-y: visible;
+    }
+    .quick-try { display: none; }
+    .content { padding: 16px; }
   }
 </style>

@@ -25,7 +25,7 @@ import type {
   StreamHandle,
 } from '../types';
 import { loadStudioWasm, type StudioWasm } from '../studio_wasm';
-import { makeErrorStreamHandle, makeResolvedStreamHandle } from './stream_handle';
+import { makeErrorStreamHandle, makeResolvedStreamHandle, makeStreamHandleFromProducer } from './stream_handle';
 
 const WORKSPACE_ROOT = '/workspace';
 const ROOT = '/';
@@ -97,8 +97,19 @@ export class WebBackend implements Backend {
     return buildSessionInfo(WORKSPACE_ROOT, 'workspace');
   }
 
-  async openRunSession(_path: string): Promise<SessionInfo> {
-    throw new Error('Run sessions are not available in web mode');
+  async openRunSession(path: string): Promise<SessionInfo> {
+    const normalized = normalizePath(path);
+    if (normalized.endsWith('.vo') && hasVfsFile(normalized)) {
+      const parent = normalized.substring(0, normalized.lastIndexOf('/')) || WORKSPACE_ROOT;
+      return {
+        root: parent,
+        origin: 'workspace',
+        projectMode: 'single-file',
+        entryPath: normalized,
+        singleFileRun: false,
+      };
+    }
+    return buildSessionInfo(normalized, 'workspace');
   }
 
   async openUrlSession(url: string): Promise<SessionInfo> {
@@ -298,8 +309,27 @@ export class WebBackend implements Backend {
     throw new Error('vo dump is not wired in WASM mode yet');
   }
 
-  runVo(_path: string, _opts?: RunOpts): StreamHandle<RunEvent> {
-    return makeErrorStreamHandle<RunEvent>('vo run is not wired in WASM mode yet');
+  runVo(path: string, _opts?: RunOpts): StreamHandle<RunEvent> {
+    const normalized = normalizePath(path);
+    return makeStreamHandleFromProducer<RunEvent>((emit, onDone, onError) => {
+      (async () => {
+        const start = performance.now();
+        const wasm = await getStudioWasm();
+        await wasm.prepareEntry(normalized);
+        const output = wasm.compileRunEntry(normalized);
+        if (output) {
+          for (const line of output.split('\n')) {
+            emit({ kind: 'stdout', text: line });
+          }
+        }
+        const durationMs = Math.round(performance.now() - start);
+        emit({ kind: 'done', exitCode: 0, durationMs });
+        onDone();
+      })().catch((err) => {
+        emit({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
+        onDone();
+      });
+    });
   }
 
   async stopVoRun(): Promise<void> {

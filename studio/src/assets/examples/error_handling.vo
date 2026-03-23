@@ -1,0 +1,31 @@
+package main
+
+import "errors"
+
+// Vo's elegant error handling: ? operator and fail statement
+
+func main() {
+    result, err := process(10)
+    if err != nil {
+        println("Error:", err)
+    } else {
+        println("Result:", result)
+    }
+
+    _, err = process(-5)
+    if err != nil {
+        println("Caught:", err)
+    }
+}
+
+func process(n int) (int, error) {
+    validate(n)?  // ? auto-propagates error
+    return n * 2, nil
+}
+
+func validate(n int) error {
+    if n < 0 {
+        fail errors.New("negative not allowed")  // concise error return
+    }
+    return nil
+}

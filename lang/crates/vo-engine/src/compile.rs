@@ -60,6 +60,19 @@ struct ExternalModulePlan {
     locked_modules: Vec<LockedModule>,
 }
 
+/// Type-check a Vo source directory without codegen.
+/// Unlike `compile()`, this succeeds for library projects that have no `main()`.
+pub fn check(path: &str) -> Result<(), CompileError> {
+    let p = Path::new(path);
+    let root = source_root(p);
+    let single_file = if p.is_file() {
+        Some(p.file_name().unwrap_or_default())
+    } else {
+        None
+    };
+    check_with_fs(RealFs::new(&root), &root, single_file)
+}
+
 /// Compile a Vo source file, directory, zip archive, or bytecode file.
 pub fn compile(path: &str) -> Result<CompileOutput, CompileError> {
     let p = Path::new(path);
@@ -890,6 +903,40 @@ fn load_bytecode(path: &Path) -> Result<CompileOutput, CompileError> {
         extensions: Vec::new(),
         locked_modules: Vec::new(),
     })
+}
+
+fn check_with_fs<F: FileSystem + Clone>(fs: F, root: &Path, single_file: Option<&std::ffi::OsStr>) -> Result<(), CompileError> {
+    let file_set = if let Some(file_name) = single_file {
+        FileSet::from_file(&fs, Path::new(file_name), root.to_path_buf())?
+    } else {
+        FileSet::collect(&fs, Path::new("."), root.to_path_buf())?
+    };
+
+    if file_set.files.is_empty() {
+        return Err(CompileError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no .vo files found"
+        )));
+    }
+
+    let current_module = read_current_module(&fs);
+    let replaces = read_all_replaces(root)?;
+    let external_modules = read_external_module_plan(&fs, &replaces)?;
+    validate_locked_modules_installed(&external_modules.locked_modules, &default_mod_cache_root())?;
+    let base = create_resolver(&external_modules);
+    let replaced = ReplacingResolver::new(base, replaces);
+    let resolver = CurrentModuleResolver::new(replaced, fs, current_module);
+
+    let project = analyze_project(file_set, &resolver)
+        .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
+    validate_extension_manifests_for_frozen_build(
+        &project.extensions,
+        &external_modules.locked_modules,
+        &default_mod_cache_root(),
+    )
+    .map_err(CompileError::Analysis)?;
+
+    Ok(())
 }
 
 fn compile_with_fs<F: FileSystem + Clone>(fs: F, root: &Path, single_file: Option<&std::ffi::OsStr>) -> Result<CompileOutput, CompileError> {

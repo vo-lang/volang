@@ -312,7 +312,7 @@ fn read_vfs_package(pkg_dir: &str, local_fs: &mut MemoryFs) -> Result<(), String
         };
         if is_dir {
             read_vfs_package(&full, local_fs)?;
-        } else if name.ends_with(".vo") {
+        } else if name.ends_with(".vo") || name == "vo.mod" || name == "vo.lock" || name == "vo.ext.toml" {
             let (data, err) = vo_web_runtime_wasm::vfs::read_file(&full);
             if let Some(e) = err {
                 return Err(format!("read file '{}': {}", full, e));
@@ -648,10 +648,40 @@ pub fn prepare_entry(entry_path: &str) -> js_sys::Promise {
                 .await
                 .map_err(|e| JsValue::from_str(&e))?;
         } else {
+            // Single-file mode: auto-discover external imports, install modules,
+            // and write synthetic vo.mod/vo.lock so the compile path finds them.
             let content = local_fs.read_file(std::path::Path::new(&entry_clean))
                 .map_err(|e| JsValue::from_str(&format!("read file '{}': {}", target.entry_path, e)))?;
-            vo_web::reject_single_file_external_imports(&content)
-                .map_err(|e| JsValue::from_str(&e))?;
+            let external_modules = vo_web::extract_external_module_paths(&content);
+            if !external_modules.is_empty() {
+                let mut installed = Vec::new();
+                for module in &external_modules {
+                    let (m, v) = vo_web::resolve_and_install_module(module)
+                        .await
+                        .map_err(|e| JsValue::from_str(&e))?;
+                    installed.push((m, v));
+                }
+
+                // Write synthetic vo.mod + vo.lock into the parent directory
+                let parent_dir = vfs_parent_dir(&target.entry_path)
+                    .unwrap_or_else(|| "/".to_string());
+                let (mod_content, lock_content) =
+                    vo_web::build_synthetic_project_files("github.com/vo-lang/studio-examples", &installed)
+                        .map_err(|e| JsValue::from_str(&e))?;
+
+                let mod_path = join_vfs_path(&parent_dir, "vo.mod");
+                if let Some(err) = vo_web_runtime_wasm::vfs::write_file(
+                    &mod_path, mod_content.as_bytes(), 0o644,
+                ) {
+                    return Err(JsValue::from_str(&format!("write {}: {}", mod_path, err)));
+                }
+                let lock_path = join_vfs_path(&parent_dir, "vo.lock");
+                if let Some(err) = vo_web_runtime_wasm::vfs::write_file(
+                    &lock_path, lock_content.as_bytes(), 0o644,
+                ) {
+                    return Err(JsValue::from_str(&format!("write {}: {}", lock_path, err)));
+                }
+            }
         }
 
         Ok(JsValue::NULL)

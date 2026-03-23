@@ -1,23 +1,25 @@
-//! Vo CLI - Pure Rust implementation
+//! Vo CLI
 //!
 //! Commands:
-//!   run <file>      Run a Vo program
-//!   build [path]    Build and run a project
-//!   check [path]    Type-check a project
-//!   dump <file>     Dump bytecode to text
-//!   compile <file>  Compile bytecode text to binary
-//!   emit <file>     Compile source to bytecode binary
-//!   init <path>     Initialize a new module
-//!   get <module>    Download a dependency (not implemented)
-//!   help            Show help
-//!   version         Show version
+//!   run <file|dir>         Run a Vo program
+//!   build [path] [-o out]  Compile to bytecode artifact (.vob)
+//!   check [path]           Type-check without running
+//!   test [path]            Run tests
+//!   fmt [path...]          Format Vo source files
+//!   init <module-path>     Initialize a new module
+//!   mod <subcommand>       Dependency lifecycle commands
+//!   release <subcommand>   Release verification and staging
+//!   emit <file> [-o out]   Compile source to bytecode binary
+//!   dump <file.vob>        Disassemble bytecode
+//!   help                   Show help
+//!   version                Show version
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use vo_engine::{compile, format_text, run, Module, RunMode};
+use vo_engine::{check, compile, format_source, format_text, run, Module, RunMode};
 use vo_release::{ArtifactInput, StageReleaseOptions};
 
 fn main() {
@@ -35,8 +37,9 @@ fn main() {
         "run" => cmd_run(rest),
         "build" => cmd_build(rest),
         "check" => cmd_check(rest),
+        "test" => cmd_test(rest),
+        "fmt" => cmd_fmt(rest),
         "dump" => cmd_dump(rest),
-        "compile" => cmd_compile(rest),
         "emit" => cmd_emit(rest),
         "init" => cmd_init(rest),
         "mod" => cmd_mod(rest),
@@ -47,7 +50,7 @@ fn main() {
             0
         }
         "-v" | "--version" | "version" => {
-            println!("vo version 0.1.0");
+            print_version();
             0
         }
         _ => {
@@ -61,49 +64,82 @@ fn main() {
 }
 
 fn print_usage() {
+    println!("Vo Programming Language");
+    println!();
     println!("Usage: vo <command> [arguments]");
     println!();
-    println!("Commands:");
-    println!("  run <file>      Run a Vo program");
-    println!("  build [path]    Build a project");
-    println!("  dump <file>     Dump bytecode to text");
-    println!("  compile <file>  Compile bytecode text to binary");
-    println!("  emit <file>     Compile source to bytecode binary");
-    println!("  init <path>     Initialize a new module");
-    println!("  mod <subcommand> Explicit dependency lifecycle commands");
-    println!("  release <subcommand> Release verification and staging commands");
-    println!("  check           Type-check current module");
-    println!("  help            Show this help");
-    println!("  version         Show version");
+    println!("Common commands:");
+    println!("  run <file|dir> [args...]  Run a Vo program");
+    println!("  build [path] [-o out]     Compile to bytecode (.vob)");
+    println!("  check [path]              Type-check without running");
+    println!("  test [path]               Run tests");
+    println!("  fmt [file|dir...]         Format Vo source files");
+    println!("  init <module-path>        Initialize a new module");
+    println!();
+    println!("Module commands:");
+    println!("  mod add <module[@ver]>    Add a dependency");
+    println!("  mod update [module]       Update dependencies");
+    println!("  mod sync [path]           Recompute and write vo.lock");
+    println!("  mod download [path]       Fetch pinned dependencies");
+    println!("  mod verify [path]         Verify vo.lock integrity");
+    println!("  mod remove <module>       Remove a dependency");
+    println!();
+    println!("Advanced commands:");
+    println!("  emit <file> [-o out]      Compile source to bytecode binary");
+    println!("  dump <file.vob>           Disassemble bytecode");
+    println!("  release verify [path]     Verify release readiness");
+    println!("  release stage [path] ...  Stage release assets");
+    println!();
+    println!("  help                      Show this help");
+    println!("  version                   Show version");
     println!();
     println!("Run 'vo <command> --help' for more information.");
 }
 
+fn print_version() {
+    print!("vo version 0.1.0");
+    if let Some(hash) = option_env!("VO_BUILD_COMMIT") {
+        print!(" ({})", hash);
+    }
+    if let Some(date) = option_env!("VO_BUILD_DATE") {
+        print!(" {}", date);
+    }
+    println!();
+}
+
 fn cmd_run(args: &[String]) -> i32 {
     if args.is_empty() {
-        eprintln!("usage: vo run <file> [--mode=jit] [--codegen]");
+        eprintln!("usage: vo run <file|dir> [--mode=jit] [--codegen] [-- args...]");
         return 1;
     }
 
     let file = &args[0];
     let mut mode = RunMode::Vm;
     let mut print_codegen = false;
+    let mut program_args: Vec<String> = Vec::new();
+    let mut saw_dashdash = false;
 
     for arg in &args[1..] {
-        if arg.starts_with("--mode=") {
+        if saw_dashdash {
+            program_args.push(arg.clone());
+        } else if arg == "--" {
+            saw_dashdash = true;
+        } else if arg.starts_with("--mode=") {
             let m = &arg[7..];
             if m == "jit" {
                 mode = RunMode::Jit;
             }
         } else if arg == "--codegen" {
             print_codegen = true;
+        } else {
+            program_args.push(arg.clone());
         }
     }
 
     let output = match compile(file) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("[VO:COMPILE] {}", e);
+            eprintln!("{}", e);
             return 1;
         }
     };
@@ -113,36 +149,52 @@ fn cmd_run(args: &[String]) -> i32 {
         return 0;
     }
 
-    if let Err(e) = run(output, mode, Vec::new()) {
-        eprintln!("[VO:PANIC] {}", e);
+    if let Err(e) = run(output, mode, program_args) {
+        eprintln!("{}", e);
         return 1;
     }
 
-    println!("[VO:OK]");
     0
 }
 
 fn cmd_build(args: &[String]) -> i32 {
-    let path = if args.is_empty() { "." } else { &args[0] };
+    let mut path = ".";
+    let mut output_path = String::new();
 
-    println!("Building project: {}", path);
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-o" && i + 1 < args.len() {
+            output_path = args[i + 1].clone();
+            i += 2;
+        } else if !args[i].starts_with('-') && path == "." {
+            path = &args[i];
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
 
     let output = match compile(path) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("[VO:COMPILE] {}", e);
+            eprintln!("{}", e);
             return 1;
         }
     };
 
-    println!("Running module: {}", output.module.name);
+    if output_path.is_empty() {
+        let name = &output.module.name;
+        let base = if name.is_empty() { "out" } else { name.as_str() };
+        output_path = format!("{}.vob", base);
+    }
 
-    if let Err(e) = run(output, RunMode::Vm, Vec::new()) {
-        eprintln!("[VO:PANIC] {}", e);
+    let bytes = output.module.serialize();
+    if let Err(e) = fs::write(&output_path, bytes) {
+        eprintln!("[VO:IO] {}", e);
         return 1;
     }
 
-    println!("[VO:OK]");
+    println!("{}", output_path);
     0
 }
 
@@ -150,15 +202,157 @@ fn cmd_check(args: &[String]) -> i32 {
     let path = if args.is_empty() { "." } else { &args[0] };
 
     println!("Checking project: {}", path);
-
-    match compile(path) {
-        Ok(_) => {
-            println!("Check passed");
-            0
-        }
+    match check(path) {
+        Ok(()) => 0,
         Err(e) => {
-            eprintln!("[VO:CHECK] {}", e);
+            eprintln!("{}", e);
             1
+        }
+    }
+}
+
+fn cmd_test(args: &[String]) -> i32 {
+    let mut mode = RunMode::Vm;
+    let mut path: Option<&str> = None;
+
+    for arg in args {
+        if arg.starts_with("--mode=") {
+            let m = &arg[7..];
+            if m == "jit" {
+                mode = RunMode::Jit;
+            }
+        } else if !arg.starts_with('-') && path.is_none() {
+            path = Some(arg);
+        }
+    }
+
+    // Resolve test target: explicit path, or tests/ subdir, or current dir
+    let test_path = if let Some(p) = path {
+        p.to_string()
+    } else {
+        let tests_dir = Path::new("tests");
+        if tests_dir.is_dir() {
+            "tests".to_string()
+        } else {
+            ".".to_string()
+        }
+    };
+
+    let output = match compile(&test_path) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+
+    if let Err(e) = run(output, mode, Vec::new()) {
+        eprintln!("{}", e);
+        return 1;
+    }
+
+    0
+}
+
+fn cmd_fmt(args: &[String]) -> i32 {
+    let mut write_back = true;
+    let mut paths: Vec<String> = Vec::new();
+
+    for arg in args {
+        if arg == "--check" {
+            write_back = false;
+        } else if !arg.starts_with('-') {
+            paths.push(arg.clone());
+        }
+    }
+
+    if paths.is_empty() {
+        paths.push(".".to_string());
+    }
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for p in &paths {
+        let path = Path::new(p);
+        if path.is_file() {
+            files.push(path.to_path_buf());
+        } else if path.is_dir() {
+            collect_vo_files(path, &mut files);
+        } else {
+            eprintln!("not found: {}", p);
+            return 1;
+        }
+    }
+
+    if files.is_empty() {
+        return 0;
+    }
+
+    let mut unformatted = 0;
+    let mut errors = 0;
+
+    for file in &files {
+        let source = match fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{}: {}", file.display(), e);
+                errors += 1;
+                continue;
+            }
+        };
+
+        let formatted = match format_source(&source) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("{}: {}", file.display(), e);
+                errors += 1;
+                continue;
+            }
+        };
+
+        if formatted != source {
+            if write_back {
+                if let Err(e) = fs::write(file, &formatted) {
+                    eprintln!("{}: {}", file.display(), e);
+                    errors += 1;
+                } else {
+                    println!("{}", file.display());
+                }
+            } else {
+                println!("{}", file.display());
+                unformatted += 1;
+            }
+        }
+    }
+
+    if errors > 0 {
+        return 1;
+    }
+    if !write_back && unformatted > 0 {
+        return 1;
+    }
+    0
+}
+
+fn collect_vo_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            collect_vo_files(&path, out);
+        } else if name_str.ends_with(".vo") {
+            out.push(path);
         }
     }
 }
@@ -189,18 +383,6 @@ fn cmd_dump(args: &[String]) -> i32 {
 
     print!("{}", format_text(&module));
     0
-}
-
-fn cmd_compile(args: &[String]) -> i32 {
-    if args.is_empty() {
-        eprintln!("usage: vo compile <file.vot> [-o output.vob]");
-        return 1;
-    }
-
-    let _file = &args[0];
-
-    eprintln!("Bytecode text parsing not yet implemented");
-    1
 }
 
 fn cmd_emit(args: &[String]) -> i32 {

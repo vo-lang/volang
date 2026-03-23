@@ -1321,6 +1321,7 @@ dependencies = [
  "flate2",
  "include_dir",
  "js-sys",
+ "serde_json",
  "tar",
  "vo-analysis",
  "vo-codegen",

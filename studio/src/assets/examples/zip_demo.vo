@@ -1,0 +1,90 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	zip "github.com/vo-lang/zip@v0.1.0"
+)
+
+func main() {
+	tmpDir, err := os.MkdirTemp("", "zip-demo-*")
+	if err != nil {
+		fmt.Println("MkdirTemp failed:", err)
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// ── Pack / Unpack (in-memory) ─────────────────────────────────────────────
+
+	entries := []zip.Entry{
+		{Name: "hello.txt", Data: []byte("Hello, Vo!")},
+		{Name: "nested/world.txt", Data: []byte("World from zip")},
+	}
+
+	archive, err := zip.Pack(entries)
+	if err != nil {
+		fmt.Println("Pack failed:", err)
+		return
+	}
+	fmt.Printf("Packed %d files → %d bytes\n", len(entries), len(archive))
+
+	if err = zip.Validate(archive); err != nil {
+		fmt.Println("Validate failed:", err)
+		return
+	}
+	fmt.Println("Archive is valid")
+
+	names, err := zip.ListNames(archive)
+	if err != nil {
+		fmt.Println("ListNames failed:", err)
+		return
+	}
+	fmt.Println("Files:", names)
+
+	unpacked, err := zip.Unpack(archive)
+	if err != nil {
+		fmt.Println("Unpack failed:", err)
+		return
+	}
+	for _, e := range unpacked {
+		fmt.Printf("  %s: %q\n", e.Name, string(e.Data))
+	}
+
+	// ── PackDir / UnpackToDir (filesystem) ───────────────────────────────────
+
+	srcDir := filepath.Join([]string{tmpDir, "src"})
+	if err = os.MkdirAll(srcDir, 0755); err != nil {
+		fmt.Println("MkdirAll failed:", err)
+		return
+	}
+	if err = os.WriteFile(filepath.Join([]string{srcDir, "readme.txt"}), []byte("readme content"), 0644); err != nil {
+		fmt.Println("WriteFile failed:", err)
+		return
+	}
+	if err = os.WriteFile(filepath.Join([]string{srcDir, "data.json"}), []byte(`{"key":"value"}`), 0644); err != nil {
+		fmt.Println("WriteFile failed:", err)
+		return
+	}
+
+	zipPath := filepath.Join([]string{tmpDir, "dir.zip"})
+	if err = zip.PackDir(srcDir, zipPath); err != nil {
+		fmt.Println("PackDir failed:", err)
+		return
+	}
+	fmt.Println("PackDir succeeded")
+
+	outDir := filepath.Join([]string{tmpDir, "out"})
+	if err = zip.UnpackToDir(zipPath, outDir); err != nil {
+		fmt.Println("UnpackToDir failed:", err)
+		return
+	}
+
+	content, err := os.ReadFile(filepath.Join([]string{outDir, "readme.txt"}))
+	if err != nil {
+		fmt.Println("ReadFile failed:", err)
+		return
+	}
+	fmt.Println("Unpacked readme.txt:", string(content))
+	fmt.Println("Done")
+}

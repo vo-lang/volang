@@ -1,0 +1,387 @@
+// Workspace - productivity app demonstrating v2 Dialog, Drawer, DropdownMenu, Tabs, Sidebar
+package main
+
+import (
+	"fmt"
+	"github.com/vo-lang/vogui"
+)
+
+type State struct {
+	// Navigation
+	ActiveTab string
+
+	// Tasks
+	Tasks         []Task
+	TaskFilter    string // "all", "active", "completed"
+	ShowTaskDlg   bool
+	NewTaskTitle  string
+	NewTaskPri    string
+	TaskNextID    int
+
+	// Notes
+	Notes         []Note
+	ActiveNoteIdx int
+	ShowNoteDlg   bool
+	NewNoteTitle  string
+	NoteNextID    int
+
+	// Settings
+	ShowSettings bool
+	DarkMode     bool
+	Username     string
+}
+
+type Task struct {
+	ID       int
+	Title    string
+	Priority string // "low", "medium", "high"
+	Done     bool
+}
+
+type Note struct {
+	ID      int
+	Title   string
+	Content string
+}
+
+func initState() any {
+	return &State{
+		ActiveTab:  "tasks",
+		TaskFilter: "all",
+		NewTaskPri: "medium",
+		Tasks: []Task{
+			{ID: 1, Title: "Design v2 API", Priority: "high", Done: true},
+			{ID: 2, Title: "Implement renderer", Priority: "high"},
+			{ID: 3, Title: "Write documentation", Priority: "medium"},
+			{ID: 4, Title: "Add animations", Priority: "low"},
+		},
+		Notes: []Note{
+			{ID: 1, Title: "Meeting Notes", Content: "Discussed v2 architecture..."},
+			{ID: 2, Title: "Ideas", Content: "- Theming system\n- Managed components"},
+		},
+		TaskNextID:    5,
+		NoteNextID:    3,
+		ActiveNoteIdx: -1,
+		Username:      "admin",
+	}
+}
+
+func view(state any) vogui.Node {
+	s := state.(*State)
+	return vogui.Row(
+		sidebar(s),
+		vogui.Column(
+			topBar(s),
+			content(s),
+		).Flex(1),
+		settingsDrawer(s),
+		taskDialog(s),
+		noteDialog(s),
+	).Class("min-h-screen")
+}
+
+// ============ Sidebar ============
+
+func sidebar(s *State) vogui.Node {
+	return vogui.Sidebar(
+		vogui.H3("Workspace").Class("p-3"),
+		vogui.SidebarSection("MAIN"),
+		vogui.SidebarItem("Tasks", "check-square", s.ActiveTab == "tasks",
+			vogui.OnClick(func(s *State) { s.ActiveTab = "tasks" })),
+		vogui.SidebarItem("Notes", "file-text", s.ActiveTab == "notes",
+			vogui.OnClick(func(s *State) { s.ActiveTab = "notes" })),
+		vogui.Spacer(),
+		vogui.SidebarSection(""),
+		vogui.SidebarItem("Settings", "settings", false,
+			vogui.OnClick(func(s *State) { s.ShowSettings = true })),
+	).Bg("var(--vo-surface)").H("100vh").Border("0 1px 0 0 solid var(--vo-border)")
+}
+
+// ============ Top Bar ============
+
+func topBar(s *State) vogui.Node {
+	title := "Tasks"
+	if s.ActiveTab == "notes" {
+		title = "Notes"
+	}
+	return vogui.Row(
+		vogui.H2(title),
+		vogui.Spacer(),
+		vogui.If(s.ActiveTab == "tasks",
+			vogui.Button("+ New Task", vogui.OnClick(func(s *State) { s.ShowTaskDlg = true })).Variant("primary"),
+		),
+		vogui.If(s.ActiveTab == "notes",
+			vogui.Button("+ New Note", vogui.OnClick(func(s *State) { s.ShowNoteDlg = true })).Variant("primary"),
+		),
+	).Class("items-center p-4 border-b gap-3")
+}
+
+// ============ Content ============
+
+func content(s *State) vogui.Node {
+	if s.ActiveTab == "tasks" {
+		return tasksView(s)
+	}
+	return notesView(s)
+}
+
+// ============ Tasks ============
+
+func tasksView(s *State) vogui.Node {
+	tabIdx := 0
+	if s.TaskFilter == "active" {
+		tabIdx = 1
+	} else if s.TaskFilter == "completed" {
+		tabIdx = 2
+	}
+	return vogui.Column(
+		vogui.Tabs(vogui.TabsProps{
+			Active: tabIdx,
+			OnChange: vogui.OnIndex(func(s *State, idx int) {
+				filters := []string{"all", "active", "completed"}
+				s.TaskFilter = filters[idx]
+			}),
+		}, []vogui.TabItem{
+			{Label: "All", Content: vogui.Empty()},
+			{Label: "Active", Content: vogui.Empty()},
+			{Label: "Completed", Content: vogui.Empty()},
+		}),
+		taskList(s),
+		vogui.Text(fmt.Sprintf("%d tasks, %d completed", len(s.Tasks), countDone(s))).
+			Fg("var(--vo-text-muted)").Class("p-2"),
+	).P(16).Gap(12)
+}
+
+func taskList(s *State) vogui.Node {
+	var nodes []vogui.Node
+	for idx, task := range s.Tasks {
+		if s.TaskFilter == "active" && task.Done {
+			continue
+		}
+		if s.TaskFilter == "completed" && !task.Done {
+			continue
+		}
+		nodes = append(nodes, taskRow(task, idx))
+	}
+	return vogui.Column(nodes...).Gap(4)
+}
+
+func taskRow(task Task, idx int) vogui.Node {
+	priColor := "var(--vo-secondary)"
+	switch task.Priority {
+	case "high":
+		priColor = "var(--vo-danger)"
+	case "medium":
+		priColor = "var(--vo-warning)"
+	case "low":
+		priColor = "var(--vo-success)"
+	}
+
+	titleNode := vogui.Text(task.Title).Flex(1)
+	if task.Done {
+		titleNode = titleNode.Style("textDecoration", "line-through").Fg("var(--vo-text-muted)")
+	}
+
+	return vogui.Row(
+		vogui.Checkbox(task.Done, vogui.OnIntChecked(toggleTask, task.ID)),
+		titleNode,
+		vogui.Badge(task.Priority).Bg(priColor).Fg("#fff"),
+		vogui.DropdownMenu(
+			vogui.Button("...", vogui.OnClick(func(s *State) {})).Variant("ghost"),
+			vogui.MenuItem("Delete", vogui.OnInt(deleteTask, idx)),
+		),
+	).Class("items-center gap-3 p-2 rounded").Bg("var(--vo-surface)")
+}
+
+func toggleTask(s *State, id int, done bool) {
+	for i := range s.Tasks {
+		if s.Tasks[i].ID == id {
+			s.Tasks[i].Done = done
+			return
+		}
+	}
+}
+
+func deleteTask(s *State, idx int) {
+	if idx >= 0 && idx < len(s.Tasks) {
+		s.Tasks = append(s.Tasks[:idx], s.Tasks[idx+1:]...)
+	}
+}
+
+func countDone(s *State) int {
+	n := 0
+	for _, t := range s.Tasks {
+		if t.Done {
+			n++
+		}
+	}
+	return n
+}
+
+// ============ Notes ============
+
+func notesView(s *State) vogui.Node {
+	return vogui.Row(
+		noteList(s),
+		vogui.If(s.ActiveNoteIdx >= 0 && s.ActiveNoteIdx < len(s.Notes),
+			noteEditor(s),
+		),
+		vogui.If(s.ActiveNoteIdx < 0 || s.ActiveNoteIdx >= len(s.Notes),
+			vogui.Center(
+				vogui.Text("Select a note to edit").Fg("var(--vo-text-muted)"),
+			).Flex(1),
+		),
+	).Flex(1)
+}
+
+func noteList(s *State) vogui.Node {
+	var nodes []vogui.Node
+	for i, note := range s.Notes {
+		active := i == s.ActiveNoteIdx
+		nodes = append(nodes, noteItem(note, i, active))
+	}
+	return vogui.Column(nodes...).W(240).Bg("var(--vo-surface)").Border("0 1px 0 0 solid var(--vo-border)").Gap(1)
+}
+
+func noteItem(note Note, idx int, active bool) vogui.Node {
+	n := vogui.Column(
+		vogui.Text(note.Title).Bold(),
+		vogui.Text(note.Content).Fg("var(--vo-text-muted)").Class("truncate"),
+	).Gap(2).P(12).Cursor("pointer")
+	if active {
+		n = n.Bg("rgba(59,130,246,0.08)")
+	}
+	return n.On("click", vogui.Handle(func(s *State, payload string) {
+		s.ActiveNoteIdx = idx
+	}))
+}
+
+func noteEditor(s *State) vogui.Node {
+	note := s.Notes[s.ActiveNoteIdx]
+	return vogui.Column(
+		vogui.Input(note.Title, vogui.OnIntValue(setNoteTitle, s.ActiveNoteIdx)).
+			Font(18).Bold().Border("none").P(16),
+		vogui.Divider(),
+		vogui.TextArea(note.Content, vogui.OnIntValue(setNoteContent, s.ActiveNoteIdx)).
+			Flex(1).Border("none").P(16),
+	).Flex(1)
+}
+
+func setNoteTitle(s *State, idx int, val string) {
+	if idx >= 0 && idx < len(s.Notes) {
+		s.Notes[idx].Title = val
+	}
+}
+
+func setNoteContent(s *State, idx int, val string) {
+	if idx >= 0 && idx < len(s.Notes) {
+		s.Notes[idx].Content = val
+	}
+}
+
+// ============ Task Dialog ============
+
+func taskDialog(s *State) vogui.Node {
+	return vogui.Dialog(vogui.DialogProps{Open: s.ShowTaskDlg, OnClose: vogui.OnClick(closeTaskDlg)},
+		vogui.DialogTitle("New Task"),
+		vogui.DialogContent(
+			vogui.FormField("Title",
+				vogui.Input(s.NewTaskTitle, vogui.OnValue(func(s *State, v string) { s.NewTaskTitle = v })).
+					Placeholder("Task title..."),
+			),
+			vogui.FormField("Priority",
+				vogui.Select(s.NewTaskPri, []vogui.SelectOption{
+					{Label: "Low", Value: "low"},
+					{Label: "Medium", Value: "medium"},
+					{Label: "High", Value: "high"},
+				}, vogui.OnSelect(func(s *State, v string) { s.NewTaskPri = v })),
+			),
+		),
+		vogui.DialogActions(
+			vogui.Button("Cancel", vogui.OnClick(closeTaskDlg)).Variant("outline"),
+			vogui.Button("Create", vogui.OnClick(addTask)).Variant("primary"),
+		),
+	)
+}
+
+func closeTaskDlg(s *State) { s.ShowTaskDlg = false }
+
+func addTask(s *State) {
+	if s.NewTaskTitle != "" {
+		s.Tasks = append(s.Tasks, Task{
+			ID:       s.TaskNextID,
+			Title:    s.NewTaskTitle,
+			Priority: s.NewTaskPri,
+		})
+		s.TaskNextID++
+		s.NewTaskTitle = ""
+		s.NewTaskPri = "medium"
+		s.ShowTaskDlg = false
+	}
+}
+
+// ============ Note Dialog ============
+
+func noteDialog(s *State) vogui.Node {
+	return vogui.Dialog(vogui.DialogProps{Open: s.ShowNoteDlg, OnClose: vogui.OnClick(closeNoteDlg)},
+		vogui.DialogTitle("New Note"),
+		vogui.DialogContent(
+			vogui.FormField("Title",
+				vogui.Input(s.NewNoteTitle, vogui.OnValue(func(s *State, v string) { s.NewNoteTitle = v })).
+					Placeholder("Note title..."),
+			),
+		),
+		vogui.DialogActions(
+			vogui.Button("Cancel", vogui.OnClick(closeNoteDlg)).Variant("outline"),
+			vogui.Button("Create", vogui.OnClick(addNote)).Variant("primary"),
+		),
+	)
+}
+
+func closeNoteDlg(s *State) { s.ShowNoteDlg = false }
+
+func addNote(s *State) {
+	if s.NewNoteTitle != "" {
+		s.Notes = append(s.Notes, Note{ID: s.NoteNextID, Title: s.NewNoteTitle})
+		s.NoteNextID++
+		s.NewNoteTitle = ""
+		s.ShowNoteDlg = false
+		s.ActiveNoteIdx = len(s.Notes) - 1
+	}
+}
+
+// ============ Settings Drawer ============
+
+func settingsDrawer(s *State) vogui.Node {
+	return vogui.Drawer(vogui.DrawerProps{
+		Open: s.ShowSettings, Side: "right",
+		OnClose: vogui.OnClick(func(s *State) { s.ShowSettings = false }),
+	},
+		vogui.Column(
+			vogui.H3("Settings"),
+			vogui.Divider(),
+			vogui.FormField("Username",
+				vogui.Input(s.Username, vogui.OnValue(func(s *State, v string) { s.Username = v })),
+			),
+			vogui.Switch(s.DarkMode, vogui.OnChecked(toggleDarkMode)).Text("Dark Mode"),
+			vogui.Spacer(),
+			vogui.Button("Close", vogui.OnClick(func(s *State) { s.ShowSettings = false })).Variant("outline"),
+		).Gap(16).H("100%"),
+	)
+}
+
+func toggleDarkMode(s *State, dark bool) {
+	s.DarkMode = dark
+	if dark {
+		vogui.SetTheme(vogui.DarkTheme())
+	} else {
+		vogui.SetTheme(vogui.DefaultTheme())
+	}
+}
+
+func main() {
+	vogui.Run(vogui.App{
+		Init: initState,
+		View: view,
+	})
+}

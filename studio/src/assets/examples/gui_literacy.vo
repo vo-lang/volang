@@ -1,0 +1,355 @@
+// 识字冒险 (Literacy Adventure)
+// A Chinese literacy app for kids with Minecraft theme.
+// Features: Multiple levels, progress tracking, flashcards with pinyin/meaning/examples.
+
+package main
+
+import "github.com/vo-lang/vogui"
+import "fmt"
+
+// ============ Theme Colors ============
+
+const ColorGreen = "#4ade80"   // Grass green - success, primary
+const ColorBrown = "#8b5a2b"   // Dirt brown - borders
+const ColorBlue = "#60a5fa"    // Sky blue - secondary
+const ColorYellow = "#ffd700"  // Gold - highlights
+const ColorRed = "#ee5544"     // Redstone - hanzi, danger
+const ColorPurple = "#a855f7"  // Amethyst - special
+const ColorBg = "#f5f0e6"      // Beige paper
+const ColorBorder = "#d4a574"  // Paper border
+const ColorText = "#5a4a42"    // Dark brown text
+
+// ============ Data Types ============
+
+type Character struct {
+	Char       string
+	Pinyin     string
+	Meaning    string
+	Words      string   // Comma-separated
+	Example    string
+	McSentence string
+}
+
+type Course struct {
+	Id    int
+	Name  string
+	Icon  string
+	Chars []Character
+}
+
+type State struct {
+	Page          string // "home", "lesson", "complete"
+	CurrentCourse int
+	CurrentChar   int
+	ShowDetail    bool
+	Learned       []bool // Track learned characters per course
+	Courses       []Course
+	TotalLearned  int
+}
+
+// ============ Character Data (JSON-style) ============
+
+func loadCourses() []Course {
+	return []Course{
+		Course{Id: 0, Name: "入门篇", Icon: "🌱", Chars: []Character{
+			Character{"一", "yī", "数字1", "一个,一天,一起", "我有一本书。", "史蒂夫找到了一块钻石！"},
+			Character{"二", "èr", "数字2", "二月,第二", "我有二本书。", "需要二个木棍做木剑。"},
+			Character{"三", "sān", "数字3", "三个,三天", "三个苹果。", "三只僵尸在追我！"},
+			Character{"十", "shí", "数字10", "十个,十天", "我有十块钱。", "挖了十个铁矿石。"},
+			Character{"大", "dà", "Big", "大人,大山,大家", "这是一个大苹果。", "好大的一棵树！"},
+			Character{"小", "xiǎo", "Small", "小鸟,小心,小朋友", "小猫很可爱。", "小心苦力怕！"},
+			Character{"上", "shàng", "Up/On", "上面,上学,上山", "书在桌子上面。", "爬上山顶看日出。"},
+			Character{"下", "xià", "Down", "下面,下雨,下山", "鞋子在床下面。", "下矿洞挖钻石！"},
+		}},
+		Course{Id: 1, Name: "自然篇", Icon: "🌲", Chars: []Character{
+			Character{"山", "shān", "Mountain", "大山,上山,山洞", "远处有一座大山。", "我们在高山上建城堡。"},
+			Character{"水", "shuǐ", "Water", "喝水,河水,水果", "我想喝水。", "小心别掉进水里！"},
+			Character{"火", "huǒ", "Fire", "火车,火山,着火", "小心火！", "用打火石点燃火把。"},
+			Character{"土", "tǔ", "Earth/Soil", "土地,泥土", "花长在土里。", "挖掉泥土找矿石。"},
+			Character{"木", "mù", "Wood", "木头,树木,木棍", "这是木头做的。", "先砍树收集木头！"},
+			Character{"石", "shí", "Stone", "石头,宝石", "河里有很多石头。", "用石头做石镐。"},
+			Character{"天", "tiān", "Sky/Day", "蓝天,今天,天气", "今天天气很好。", "天黑了，僵尸出来了！"},
+			Character{"日", "rì", "Sun/Day", "日出,生日,日记", "太阳升起来了。", "日出时怪物会燃烧。"},
+			Character{"月", "yuè", "Moon", "月亮,月饼", "月亮好圆啊。", "满月时狼人会变身！"},
+			Character{"云", "yún", "Cloud", "白云,云朵", "天上有白云。", "飞到云层上面去！"},
+		}},
+		Course{Id: 2, Name: "动物篇", Icon: "🐷", Chars: []Character{
+			Character{"牛", "niú", "Cow", "牛奶,小牛", "牛在吃草。", "用小麦喂牛可以繁殖。"},
+			Character{"羊", "yáng", "Sheep", "小羊,羊毛", "羊毛是白色的。", "剪羊毛做床！"},
+			Character{"马", "mǎ", "Horse", "小马,马路", "马跑得很快。", "驯服一匹马当坐骑。"},
+			Character{"鸟", "niǎo", "Bird", "小鸟,鸟窝", "小鸟会飞。", "鹦鹉可以当宠物！"},
+			Character{"鱼", "yú", "Fish", "小鱼,鱼儿", "鱼在水里游。", "钓鱼可以获得食物。"},
+			Character{"虫", "chóng", "Insect", "虫子,毛虫", "草丛里有虫子。", "蜘蛛会掉蜘蛛丝。"},
+			Character{"猪", "zhū", "Pig", "小猪,猪肉", "小猪很可爱。", "猪排是重要的食物！"},
+			Character{"狗", "gǒu", "Dog", "小狗,狗狗", "小狗很忠诚。", "驯服狼变成狗！"},
+		}},
+		Course{Id: 3, Name: "人物篇", Icon: "👨", Chars: []Character{
+			Character{"人", "rén", "Person", "大人,好人,人们", "他是好人。", "村庄里住着很多村民。"},
+			Character{"口", "kǒu", "Mouth", "门口,出口,人口", "张开口说话。", "山洞的入口在哪里？"},
+			Character{"手", "shǒu", "Hand", "小手,左手,右手", "洗洗手。", "空手也能挖木头！"},
+			Character{"足", "zú", "Foot", "双足,足球", "脚印在地上。", "穿上靴子跑得更快。"},
+			Character{"目", "mù", "Eye", "目光,眼目", "睁开眼睛看。", "末影人不喜欢被盯着看。"},
+			Character{"耳", "ěr", "Ear", "耳朵,耳机", "用耳朵听声音。", "听到僵尸的声音了！"},
+		}},
+		Course{Id: 4, Name: "动作篇", Icon: "🏃", Chars: []Character{
+			Character{"走", "zǒu", "Walk", "走路,走开", "我们走吧。", "走路太慢了，要跑！"},
+			Character{"跑", "pǎo", "Run", "跑步,快跑", "快跑！", "被苦力怕追着跑！"},
+			Character{"飞", "fēi", "Fly", "飞机,飞鸟", "鸟在天上飞。", "用鞘翅可以飞翔！"},
+			Character{"吃", "chī", "Eat", "吃饭,吃东西", "我想吃苹果。", "吃金苹果回血！"},
+			Character{"看", "kàn", "Look", "看见,看书", "看那边！", "看地图找宝藏。"},
+			Character{"打", "dǎ", "Hit", "打球,打人", "不要打人。", "打败末影龙！"},
+			Character{"做", "zuò", "Make/Do", "做饭,做事", "我在做作业。", "用工作台做工具。"},
+			Character{"找", "zhǎo", "Find", "找到,寻找", "我在找钥匙。", "找到隐藏的宝箱！"},
+		}},
+	}
+}
+
+// ============ App Entry ============
+
+func main() {
+	vogui.SetGlobalKeyHandler(handleKey)
+	vogui.Run(vogui.App{
+		Init: initApp,
+		View: view,
+	})
+}
+
+func initApp() any {
+	courses := loadCourses()
+	learned := make([]bool, 50) // Track up to 50 chars
+	return &State{
+		Page:          "home",
+		CurrentCourse: 0,
+		CurrentChar:   0,
+		ShowDetail:    false,
+		Learned:       learned,
+		Courses:       courses,
+		TotalLearned:  0,
+	}
+}
+
+// ============ Update Logic ============
+
+func handleKey(state any, key string) {
+	s := state.(*State)
+	if s.Page == "lesson" {
+		if key == "ArrowLeft" {
+			actionPrevChar(s)
+		} else if key == "ArrowRight" {
+			actionNextChar(s)
+		} else if key == " " || key == "Enter" {
+			actionToggleDetail(s)
+		} else if key == "Escape" {
+			actionGoHome(s)
+		}
+	}
+}
+
+func actionSelectCourse(s *State, idx int) {
+	s.CurrentCourse = idx
+	s.CurrentChar = 0
+	s.ShowDetail = false
+	s.Page = "lesson"
+}
+
+func actionGoHome(s *State) {
+	s.Page = "home"
+}
+
+func actionNextChar(s *State) {
+	course := s.Courses[s.CurrentCourse]
+	// Mark current as learned
+	charIdx := getGlobalCharIndex(s)
+	if charIdx < len(s.Learned) && !s.Learned[charIdx] {
+		s.Learned[charIdx] = true
+		s.TotalLearned++
+	}
+	if s.CurrentChar < len(course.Chars)-1 {
+		s.CurrentChar++
+		s.ShowDetail = false
+	} else {
+		s.Page = "complete"
+	}
+}
+
+func actionPrevChar(s *State) {
+	if s.CurrentChar > 0 {
+		s.CurrentChar--
+		s.ShowDetail = false
+	}
+}
+
+func actionToggleDetail(s *State) {
+	s.ShowDetail = !s.ShowDetail
+}
+
+func actionContinue(s *State) {
+	s.Page = "home"
+}
+
+func getGlobalCharIndex(s *State) int {
+	idx := 0
+	for i := 0; i < s.CurrentCourse; i++ {
+		idx += len(s.Courses[i].Chars)
+	}
+	return idx + s.CurrentChar
+}
+
+func getTotalChars(s *State) int {
+	total := 0
+	for _, c := range s.Courses {
+		total += len(c.Chars)
+	}
+	return total
+}
+
+// ============ View ============
+
+func view(state any) vogui.Node {
+	s := state.(*State)
+	if s.Page == "home" {
+		return viewHome(s)
+	}
+	if s.Page == "complete" {
+		return viewComplete(s)
+	}
+	return viewLesson(s)
+}
+
+func viewHome(s *State) vogui.Node {
+	total := getTotalChars(s)
+	progress := 0
+	if total > 0 {
+		progress = s.TotalLearned * 100 / total
+	}
+
+	var courseNodes []vogui.Node
+	for i, c := range s.Courses {
+		idx := i
+		courseNodes = append(courseNodes,
+			vogui.Button(fmt.Sprintf("%s %s (%d字)", c.Icon, c.Name, len(c.Chars)), vogui.OnInt(actionSelectCourse, idx)).
+				Bg(ColorGreen).
+				Fg("#fff").
+				Rounded(10).
+				M(5).
+				P(15).
+				Border("3px solid "+ColorBrown),
+		)
+	}
+
+	return vogui.Center(
+		vogui.Column(
+			// Title
+			vogui.Row(
+				vogui.Text("🎮 识字").Font(28).Bold().Fg(ColorGreen),
+				vogui.Text("冒险").Font(28).Bold().Fg(ColorBrown),
+			).M(15),
+
+			// Progress
+			vogui.Column(
+				vogui.Text(fmt.Sprintf("已学习: %d / %d 字", s.TotalLearned, total)).Font(14).Fg(ColorText),
+				vogui.Row(
+					vogui.Div().W(progress*2).H(8).Bg(ColorGreen).Rounded(4),
+					vogui.Div().W((100-progress)*2).H(8).Bg("#ddd").Rounded(4),
+				).Gap(0),
+			).M(10).P(10).Bg("#fff").Rounded(8).Border("2px solid "+ColorBorder),
+
+			// Course List
+			vogui.Text("选择课程:").Font(16).Bold().Fg(ColorText).M(10),
+			vogui.Column(courseNodes...).Gap(5),
+
+			// Footer
+			vogui.Text("← → 方向键导航 | Space 显示详情").Font(11).Fg("#999").M(15),
+		).Bg(ColorBg).P(15).Gap(5).W(300),
+	)
+}
+
+func viewLesson(s *State) vogui.Node {
+	course := s.Courses[s.CurrentCourse]
+	char := course.Chars[s.CurrentChar]
+
+	return vogui.Column(
+		// Navbar
+		vogui.Row(
+			vogui.Button("← 返回", vogui.OnClick(actionGoHome)).
+				Bg(ColorRed).Fg("#fff").Rounded(8).P(8),
+			vogui.Spacer(),
+			vogui.Text(fmt.Sprintf("%s %s  %d/%d", course.Icon, course.Name, s.CurrentChar+1, len(course.Chars))).
+				Font(14).Fg(ColorText).Bold(),
+			vogui.Spacer(),
+		).P(8).Bg(ColorBg).Border("0 0 2px 0 solid "+ColorBorder),
+
+		// Main Content
+		vogui.Center(
+			vogui.Column(
+				// Pinyin (Conditional)
+				vogui.Show(s.ShowDetail,
+					vogui.Text(char.Pinyin).Font(32).Fg(ColorPurple).Bold().M(5),
+				),
+
+				// Hanzi Card
+				vogui.Button(char.Char, vogui.OnClick(actionToggleDetail)).
+					Font(90).
+					Fg(ColorRed).
+					Bg("#fff").
+					W(160).H(160).
+					Border("4px dashed "+ColorBorder).
+					Rounded(10),
+
+				// Hint
+				vogui.Show(!s.ShowDetail,
+					vogui.Text("👆 点击查看详情").Font(12).Fg("#999").M(8),
+				),
+
+				// Details
+				vogui.Show(s.ShowDetail,
+					vogui.Column(
+						vogui.Row(
+							vogui.Text("📖 释义: ").Bold().Fg(ColorBrown),
+							vogui.Text(char.Meaning).Fg(ColorText),
+						),
+						vogui.Row(
+							vogui.Text("📝 组词: ").Bold().Fg(ColorBrown),
+							vogui.Text(char.Words).Fg(ColorText),
+						),
+						vogui.Row(
+							vogui.Text("💬 例句: ").Bold().Fg(ColorBrown),
+							vogui.Text(char.Example).Fg(ColorText),
+						),
+					).P(12).Bg("#fff").Rounded(8).Border("2px solid "+ColorBorder).M(8).Gap(8),
+				),
+
+				// Minecraft Sentence
+				vogui.Column(
+					vogui.Text("⛏️ Minecraft 造句").Bold().Fg(ColorYellow),
+					vogui.Text(char.McSentence).Fg("#fff").Font(14),
+				).P(12).M(5).Bg("#2d2d2d").Rounded(8).Border("3px solid "+ColorBrown),
+			).Gap(5),
+		).Flex(1),
+
+		// Navigation
+		vogui.Row(
+			vogui.If(s.CurrentChar > 0,
+				vogui.Button("◀ 上一个", vogui.OnClick(actionPrevChar)).
+					Bg(ColorBlue).Fg("#fff").Rounded(20).P(10),
+			),
+			vogui.Spacer(),
+			vogui.Button("下一个 ▶", vogui.OnClick(actionNextChar)).
+				Bg(ColorGreen).Fg("#fff").Rounded(20).P(10),
+		).P(15),
+	).Bg(ColorBg).W(300)
+}
+
+func viewComplete(s *State) vogui.Node {
+	course := s.Courses[s.CurrentCourse]
+	return vogui.Center(
+		vogui.Column(
+			vogui.Text("🎉").Font(60),
+			vogui.Text("太棒了！").Font(28).Bold().Fg(ColorGreen),
+			vogui.Text(fmt.Sprintf("你完成了 %s！", course.Name)).Font(16).Fg(ColorText),
+			vogui.Text(fmt.Sprintf("学习了 %d 个汉字", len(course.Chars))).Font(14).Fg(ColorText).M(10),
+			vogui.Button("继续学习", vogui.OnClick(actionContinue)).
+				Bg(ColorGreen).Fg("#fff").Rounded(10).P(15).M(20),
+		).Bg(ColorBg).P(30).Rounded(15).Border("4px solid "+ColorBorder).Gap(10).W(300),
+	)
+}

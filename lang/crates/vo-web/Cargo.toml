@@ -25,6 +25,7 @@ compiler = [
     "include_dir",
     "flate2",
     "tar",
+    "serde_json",
 ]
 # Minimal: only bytecode execution
 # Use: cargo build --no-default-features
@@ -44,6 +45,7 @@ vo-codegen = { path = "../vo-codegen", optional = true }
 vo-module = { path = "../vo-module", optional = true }
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
+serde_json = { version = "1.0", optional = true }
 
 # WASM bindings
 wasm-bindgen = "0.2"
