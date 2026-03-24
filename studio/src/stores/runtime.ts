@@ -16,6 +16,7 @@ export interface RuntimeState {
   guiModuleBytes: Uint8Array | null;
   guiRenderBytes: Uint8Array | null;
   guiFramework: FrameworkContract | null;
+  guiSessionId: number | null;
   guiExternalWidgetHandlerId: number | null;
 }
 
@@ -31,6 +32,7 @@ export const IDLE_RUNTIME: RuntimeState = {
   guiModuleBytes: null,
   guiRenderBytes: null,
   guiFramework: null,
+  guiSessionId: null,
   guiExternalWidgetHandlerId: null,
 };
 

@@ -2,6 +2,8 @@
 // The wasm-pack output is expected at /wasm/ (served from studio/public/wasm/).
 // Build: wasm-pack build studio/wasm --target web --out-dir ../public/wasm
 
+import { getRef } from '../../../../vogui/js/dist/index.js';
+
 // ── VoVm instance interface (matches VoVm wasm-bindgen class exports) ────────
 
 export interface VoVmInstance {
@@ -27,6 +29,7 @@ export interface StudioWasm {
   };
   runGuiEntry(entryPath: string): Uint8Array;
   sendGuiEvent(handlerId: number, payload: string): Uint8Array;
+  sendGuiEventAsync(handlerId: number, payload: string): void;
   startRenderIsland(bytecode: Uint8Array): void;
   pushIslandData(data: Uint8Array): void;
   pollGuiRender(): Uint8Array;
@@ -75,6 +78,61 @@ const extBindgenModules = new Map<string, BindgenModule>();
 
 let extBridgeInstalled = false;
 
+type StandaloneGuiEventDispatcher = (handlerId: number, payload: string) => Promise<void>;
+type StandaloneGameLoopState = { rafId: number; lastTs: number };
+let standaloneGuiEventDispatcher: StandaloneGuiEventDispatcher | null = null;
+let standalonePopstateHandler: (() => void) | null = null;
+
+function clearStandaloneHostState(): void {
+  for (const handle of standaloneTimers.values()) {
+    clearTimeout(handle);
+  }
+  standaloneTimers.clear();
+  for (const handle of standaloneIntervals.values()) {
+    clearInterval(handle);
+  }
+  standaloneIntervals.clear();
+  standaloneRunningIntervalHandlers.clear();
+  for (const handle of standaloneAnimFrames.values()) {
+    cancelAnimationFrame(handle);
+  }
+  standaloneAnimFrames.clear();
+  for (const loop of standaloneGameLoops.values()) {
+    cancelAnimationFrame(loop.rafId);
+  }
+  standaloneGameLoops.clear();
+}
+
+function dispatchStandaloneGuiEventAsync(handlerId: number, payload: string): Promise<void> {
+  const dispatcher = standaloneGuiEventDispatcher;
+  if (!dispatcher) {
+    return Promise.resolve();
+  }
+  return dispatcher(handlerId, payload);
+}
+
+function fireAndForgetStandaloneGuiEvent(handlerId: number, payload: string, label: string): void {
+  void dispatchStandaloneGuiEventAsync(handlerId, payload).catch((error) => {
+    console.error(`[vogui host] ${label} failed:`, error);
+  });
+}
+
+export function setStandaloneGuiEventDispatcher(dispatcher: StandaloneGuiEventDispatcher | null): void {
+  clearStandaloneHostState();
+  if (standalonePopstateHandler) {
+    window.removeEventListener('popstate', standalonePopstateHandler);
+    standalonePopstateHandler = null;
+  }
+  standaloneGuiEventDispatcher = dispatcher;
+  if (!dispatcher) {
+    return;
+  }
+  standalonePopstateHandler = () => {
+    fireAndForgetStandaloneGuiEvent(-3, JSON.stringify({ path: window.location.pathname }), 'navigation');
+  };
+  window.addEventListener('popstate', standalonePopstateHandler);
+}
+
 function removeStandaloneModuleEntries(instance: WebAssembly.Instance): void {
   for (const [key, value] of Array.from(extInstances.entries())) {
     if (value === instance) {
@@ -111,6 +169,199 @@ function unloadExtModule(key: string): void {
   }
 }
 
+// Late-binding reference for standalone WASM host imports.
+// The imports capture this ref; after instantiation the caller sets ref.instance
+// so that host functions can access the WASM linear memory.
+interface StandaloneRef {
+  instance: WebAssembly.Instance | null;
+}
+
+function readWasmString(ref: StandaloneRef, ptr: number, len: number): string {
+  const mem = (ref.instance!.exports.memory as WebAssembly.Memory).buffer;
+  return new TextDecoder().decode(new Uint8Array(mem, ptr, len));
+}
+
+function wasmAlloc(ref: StandaloneRef, size: number): number {
+  return (ref.instance!.exports.vo_alloc as (size: number) => number)(size);
+}
+
+// Active timers/intervals/animation-frames/game-loops keyed by the Vo-level id.
+const standaloneTimers = new Map<number, ReturnType<typeof setTimeout>>();
+const standaloneIntervals = new Map<number, ReturnType<typeof setInterval>>();
+const standaloneRunningIntervalHandlers = new Set<number>();
+const standaloneAnimFrames = new Map<number, number>();
+const standaloneGameLoops = new Map<number, StandaloneGameLoopState>();
+
+function buildStandaloneImports(): WebAssembly.Imports {
+  const ref: StandaloneRef = { instance: null };
+
+  // Stash the ref so the caller can bind it after instantiation.
+  // We use a convention: the returned object has a hidden __ref property.
+  const imports: WebAssembly.Imports & { __ref?: StandaloneRef } = {
+    env: {
+      host_start_timeout(id: number, ms: number): void {
+        if (!standaloneGuiEventDispatcher) {
+          return;
+        }
+        const existing = standaloneTimers.get(id);
+        if (existing !== undefined) {
+          clearTimeout(existing);
+        }
+        const handle = setTimeout(() => {
+          standaloneTimers.delete(id);
+          fireAndForgetStandaloneGuiEvent(-1, JSON.stringify({ id }), `timeout:${id}`);
+        }, ms);
+        standaloneTimers.set(id, handle);
+      },
+      host_clear_timeout(id: number): void {
+        const handle = standaloneTimers.get(id);
+        if (handle !== undefined) { clearTimeout(handle); standaloneTimers.delete(id); }
+      },
+      host_start_interval(id: number, ms: number): void {
+        if (!standaloneGuiEventDispatcher) {
+          return;
+        }
+        const existing = standaloneIntervals.get(id);
+        if (existing !== undefined) {
+          clearInterval(existing);
+        }
+        standaloneRunningIntervalHandlers.delete(id);
+        const handle = setInterval(() => {
+          if (standaloneRunningIntervalHandlers.has(id)) {
+            return;
+          }
+          standaloneRunningIntervalHandlers.add(id);
+          void dispatchStandaloneGuiEventAsync(-1, JSON.stringify({ id }))
+            .catch((error) => {
+              console.error(`[vogui host] interval:${id} failed:`, error);
+            })
+            .finally(() => {
+              standaloneRunningIntervalHandlers.delete(id);
+            });
+        }, ms);
+        standaloneIntervals.set(id, handle);
+      },
+      host_clear_interval(id: number): void {
+        const handle = standaloneIntervals.get(id);
+        if (handle !== undefined) { clearInterval(handle); standaloneIntervals.delete(id); }
+        standaloneRunningIntervalHandlers.delete(id);
+      },
+      host_navigate(ptr: number, len: number): void {
+        const path = readWasmString(ref, ptr, len);
+        if (window.location.pathname !== path) {
+          window.history.pushState({}, '', path);
+        }
+      },
+      host_get_current_path(outLenPtr: number): number {
+        const path = window.location.pathname;
+        const encoded = new TextEncoder().encode(path);
+        const destPtr = wasmAlloc(ref, encoded.length);
+        const mem = (ref.instance!.exports.memory as WebAssembly.Memory).buffer;
+        new Uint8Array(mem, destPtr, encoded.length).set(encoded);
+        new Uint32Array(mem, outLenPtr, 1)[0] = encoded.length;
+        return destPtr;
+      },
+      host_focus(ptr: number, len: number): void {
+        const name = readWasmString(ref, ptr, len);
+        const el = getRef(name);
+        if (el instanceof HTMLElement) {
+          el.focus();
+        }
+      },
+      host_blur(ptr: number, len: number): void {
+        const name = readWasmString(ref, ptr, len);
+        const el = getRef(name);
+        if (el instanceof HTMLElement) {
+          el.blur();
+        }
+      },
+      host_scroll_to(ptr: number, len: number, top: number): void {
+        const name = readWasmString(ref, ptr, len);
+        const el = getRef(name);
+        el?.scrollTo({ top });
+      },
+      host_scroll_into_view(ptr: number, len: number): void {
+        const name = readWasmString(ref, ptr, len);
+        getRef(name)?.scrollIntoView();
+      },
+      host_select_text(ptr: number, len: number): void {
+        const name = readWasmString(ref, ptr, len);
+        const el = getRef(name);
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) { el.select(); }
+      },
+      host_set_title(ptr: number, len: number): void {
+        document.title = readWasmString(ref, ptr, len);
+      },
+      host_set_meta(namePtr: number, nameLen: number, contentPtr: number, contentLen: number): void {
+        const name = readWasmString(ref, namePtr, nameLen);
+        const content = readWasmString(ref, contentPtr, contentLen);
+        let el = document.querySelector(`meta[name="${name}"]`) as HTMLMetaElement | null;
+        if (!el) { el = document.createElement('meta'); el.name = name; document.head.appendChild(el); }
+        el.content = content;
+      },
+      host_toast(msgPtr: number, msgLen: number, _typPtr: number, _typLen: number, _durationMs: number): void {
+        const msg = readWasmString(ref, msgPtr, msgLen);
+        console.log('[vogui host] toast:', msg);
+      },
+      host_start_anim_frame(id: number): void {
+        if (!standaloneGuiEventDispatcher) {
+          return;
+        }
+        const existing = standaloneAnimFrames.get(id);
+        if (existing !== undefined) {
+          cancelAnimationFrame(existing);
+        }
+        const handle = requestAnimationFrame(() => {
+          standaloneAnimFrames.delete(id);
+          fireAndForgetStandaloneGuiEvent(-4, JSON.stringify({ Id: id }), `anim_frame:${id}`);
+        });
+        standaloneAnimFrames.set(id, handle);
+      },
+      host_cancel_anim_frame(id: number): void {
+        const handle = standaloneAnimFrames.get(id);
+        if (handle !== undefined) { cancelAnimationFrame(handle); standaloneAnimFrames.delete(id); }
+      },
+      host_start_game_loop(id: number): void {
+        if (!standaloneGuiEventDispatcher) {
+          return;
+        }
+        const existing = standaloneGameLoops.get(id);
+        if (existing) {
+          cancelAnimationFrame(existing.rafId);
+        }
+        const state: StandaloneGameLoopState = { rafId: 0, lastTs: 0 };
+        standaloneGameLoops.set(id, state);
+        const tick = (ts: number): void => {
+          const loop = standaloneGameLoops.get(id);
+          if (!loop) {
+            return;
+          }
+          const dt = loop.lastTs === 0 ? 0 : ts - loop.lastTs;
+          loop.lastTs = ts;
+          dispatchStandaloneGuiEventAsync(-5, JSON.stringify({ Dt: dt })).then(
+            () => {
+              if (standaloneGameLoops.has(id)) {
+                standaloneGameLoops.get(id)!.rafId = requestAnimationFrame(tick);
+              }
+            },
+            (error) => {
+              console.error(`[vogui host] game_loop:${id} failed:`, error);
+              standaloneGameLoops.delete(id);
+            },
+          );
+        };
+        state.rafId = requestAnimationFrame(tick);
+      },
+      host_stop_game_loop(id: number): void {
+        const loop = standaloneGameLoops.get(id);
+        if (loop !== undefined) { cancelAnimationFrame(loop.rafId); standaloneGameLoops.delete(id); }
+      },
+    },
+  };
+  imports.__ref = ref;
+  return imports;
+}
+
 function unloadAllExtModules(): void {
   const bindgenModules = Array.from(new Set(extBindgenModules.values()));
   for (const module of bindgenModules) {
@@ -118,6 +369,35 @@ function unloadAllExtModules(): void {
   }
   extBindgenModules.clear();
   extInstances.clear();
+}
+
+function encodeStandaloneTagValueI64(value: number): Uint8Array {
+  const bytes = new Uint8Array(9);
+  bytes[0] = 0xE2;
+  new DataView(bytes.buffer).setBigUint64(1, BigInt.asUintN(64, BigInt(value)), true);
+  return bytes;
+}
+
+function encodeStandaloneTagBytes(bytes: Uint8Array): Uint8Array {
+  const result = new Uint8Array(5 + bytes.length);
+  result[0] = 0xE3;
+  new DataView(result.buffer).setUint32(1, bytes.length, true);
+  result.set(bytes, 5);
+  return result;
+}
+
+function decodeWaitForEventReplayOutput(resumeData: Uint8Array): Uint8Array {
+  if (resumeData.length < 4) {
+    throw new Error(`invalid waitForEvent replay payload: expected at least 4 bytes, got ${resumeData.length}`);
+  }
+  const handlerId = new DataView(resumeData.buffer, resumeData.byteOffset, resumeData.byteLength).getInt32(0, true);
+  const payloadBytes = resumeData.slice(4);
+  const handlerOutput = encodeStandaloneTagValueI64(handlerId);
+  const payloadOutput = encodeStandaloneTagBytes(payloadBytes);
+  const output = new Uint8Array(handlerOutput.length + payloadOutput.length);
+  output.set(handlerOutput, 0);
+  output.set(payloadOutput, handlerOutput.length);
+  return output;
 }
 
 function installExtBridgeGlobals(): void {
@@ -150,7 +430,11 @@ function installExtBridgeGlobals(): void {
         URL.revokeObjectURL(blobUrl);
       }
     } else {
-      const { instance } = await WebAssembly.instantiate(bytes.slice());
+      const imports = buildStandaloneImports();
+      const { instance } = await WebAssembly.instantiate(bytes.slice(), imports);
+      // Bind the late reference so host imports can access this instance's memory.
+      const ref = (imports as { __ref?: { instance: WebAssembly.Instance | null } }).__ref;
+      if (ref) ref.instance = instance;
       extInstances.set(key, instance);
     }
   };
@@ -251,9 +535,9 @@ function installExtBridgeGlobals(): void {
     externName: string,
     resumeData: Uint8Array,
   ): Uint8Array => {
-    // Replay path: delegate to the same bindgen/standalone dispatch as voCallExt.
-    // For bindgen modules that support TAG_SUSPEND, the function is called again
-    // with resume data to produce the final result.
+    if (externName.endsWith('waitForEvent')) {
+      return decodeWaitForEventReplayOutput(resumeData);
+    }
     return ((window as unknown as Record<string, unknown>).voCallExt as (n: string, d: Uint8Array) => Uint8Array)(
       externName,
       resumeData,
@@ -282,6 +566,7 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
     runGui: requireStudioExport(mod.runGui, 'runGui'),
     runGuiEntry: requireStudioExport(mod.runGuiEntry, 'runGuiEntry'),
     sendGuiEvent: requireStudioExport(mod.sendGuiEvent, 'sendGuiEvent'),
+    sendGuiEventAsync: requireStudioExport(mod.sendGuiEventAsync, 'sendGuiEventAsync'),
     startRenderIsland: requireStudioExport(mod.startRenderIsland, 'startRenderIsland'),
     pushIslandData: requireStudioExport(mod.pushIslandData, 'pushIslandData'),
     pollGuiRender: requireStudioExport(mod.pollGuiRender, 'pollGuiRender'),

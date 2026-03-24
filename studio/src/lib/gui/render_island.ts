@@ -3,6 +3,7 @@
 // from the VFS snapshot using a blob URL — no framework-specific imports.
 
 import type { Backend } from '../backend/backend';
+import { isGuiSessionSupersededError, type RuntimeService } from '../services/runtime_service';
 import type { FrameworkContract } from '../types';
 import type { VoWebModule } from '../studio_wasm';
 import { loadStudioWasm, makeVoWebModule } from '../studio_wasm';
@@ -78,6 +79,7 @@ export type RenderIslandHostContext = {
 type ActiveRenderIsland = {
   renderer: RendererModule;
   blobUrls: string[];
+  sessionId: number;
 } | null;
 
 type RendererBlobGraph = {
@@ -89,8 +91,11 @@ const widgetRegistry = new Map<string, WidgetFactory>();
 
 // Whether the render island WASM VM is currently alive.
 // Used by PreviewPanel to avoid re-launching during layout transitions.
-export function isRenderIslandActive(): boolean {
-  return activeRenderIsland !== null;
+export function isRenderIslandActive(sessionId?: number | null): boolean {
+  if (sessionId == null) {
+    return activeRenderIsland !== null;
+  }
+  return activeRenderIsland?.sessionId === sessionId;
 }
 
 function revokeBlobUrls(urls: string[]): void {
@@ -195,6 +200,7 @@ function buildRendererBlobGraph(entryFile: VfsFile, files: VfsFile[]): RendererB
 function makeStudioGuiHost(
   canvasId: string,
   backend: Backend,
+  runtime: RuntimeService,
   voWeb: VoWebModule,
   moduleBytes: Uint8Array,
   vfsFiles: VfsFile[],
@@ -208,7 +214,7 @@ function makeStudioGuiHost(
       return document.getElementById(canvasId) as HTMLCanvasElement | null;
     },
     async sendEvent(handlerId: number, payload: string): Promise<Uint8Array> {
-      return backend.sendGuiEvent(handlerId, payload);
+      return runtime.sendGuiEvent(handlerId, payload);
     },
     async createIslandChannel(): Promise<StudioIslandChannel> {
       if (backend.platform !== 'native') {
@@ -226,7 +232,10 @@ function makeStudioGuiHost(
           });
         },
         send(frame: Uint8Array): void {
-          backend.pushIslandTransport(frame).catch((error) => {
+          runtime.pushIslandTransport(frame).catch((error) => {
+            if (isGuiSessionSupersededError(error)) {
+              return;
+            }
             console.error('[RenderIsland] island transport push failed:', error);
           });
         },
@@ -301,6 +310,8 @@ export function getWidgetFactory(name: string): WidgetFactory | undefined {
 export async function startRenderIsland(
   canvasId: string,
   backend: Backend,
+  runtime: RuntimeService,
+  sessionId: number,
   context: RenderIslandHostContext,
 ): Promise<void> {
   stopRenderIsland();
@@ -321,10 +332,10 @@ export async function startRenderIsland(
   const voWeb = makeVoWebModule(wasm);
 
   const [renderer, vfsFiles, blobUrls] = await loadRendererAndSnapshot(rendererPath, backend, context.entryPath);
-  const host = makeStudioGuiHost(canvasId, backend, voWeb, context.moduleBytes, vfsFiles, context.onError);
+  const host = makeStudioGuiHost(canvasId, backend, runtime, voWeb, context.moduleBytes, vfsFiles, context.onError);
   try {
     await renderer.init(host);
-    activeRenderIsland = { renderer, blobUrls };
+    activeRenderIsland = { renderer, blobUrls, sessionId };
   } catch (error) {
     revokeBlobUrls(blobUrls);
     throw error;
@@ -332,15 +343,19 @@ export async function startRenderIsland(
 }
 
 // Stop the active render island
-export function stopRenderIsland(): void {
+export function stopRenderIsland(sessionId?: number | null): boolean {
   const active = activeRenderIsland;
-  if (!active) return;
+  if (!active) return false;
+  if (sessionId != null && active.sessionId !== sessionId) {
+    return false;
+  }
   activeRenderIsland = null;
   try {
     active.renderer.stop();
   } finally {
     revokeBlobUrls(active.blobUrls);
   }
+  return true;
 }
 
 // Deliver render bytes to the active renderer

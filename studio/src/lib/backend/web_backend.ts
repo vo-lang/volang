@@ -24,7 +24,9 @@ import type {
   SessionInfo,
   StreamHandle,
 } from '../types';
-import { loadStudioWasm, type StudioWasm } from '../studio_wasm';
+import { loadStudioWasm, setStandaloneGuiEventDispatcher, type StudioWasm } from '../studio_wasm';
+import { consolePush } from '../../stores/console';
+import { formatCommonGuiLogLine, formatDurationMs, pushUiConsole, type UiConsoleLine } from './gui_console';
 import { makeErrorStreamHandle, makeResolvedStreamHandle, makeStreamHandleFromProducer } from './stream_handle';
 
 const WORKSPACE_ROOT = '/workspace';
@@ -44,8 +46,75 @@ const vfsDirModTimes = new Map<string, number>();
 const textEncoder = new TextEncoder();
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 let studioWasmPromise: Promise<StudioWasm> | null = null;
-let pendingGuiRender: Uint8Array | null = null;
 let vfsBindingsInstalled = false;
+
+function displayPath(path: string): string {
+  const normalized = normalizePath(path);
+  if (normalized === ROOT) {
+    return ROOT;
+  }
+  if (normalized.startsWith(`${WORKSPACE_ROOT}/`)) {
+    return normalized.slice(WORKSPACE_ROOT.length + 1);
+  }
+  return normalized.startsWith('/') ? normalized.slice(1) : normalized;
+}
+
+function formatStudioDebugLine(source: string, message: string): UiConsoleLine | null {
+  const commonLine = formatCommonGuiLogLine(source, message, displayPath);
+  if (commonLine) {
+    return commonLine;
+  }
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (source === 'render-island') {
+    return { kind: 'stdout', text: `[render-island] ${trimmed}` };
+  }
+  if (source === 'studio-wasm') {
+    if (
+      trimmed.startsWith('prepareEntry total ')
+      || trimmed.startsWith('runGui total ')
+      || trimmed.startsWith('prepareEntry read package ')
+      || trimmed.startsWith('prepareEntry load single file ')
+      || trimmed.startsWith('prepareEntry ensure deps ')
+      || trimmed.startsWith('prepareEntry resolve/install ')
+    ) {
+      return null;
+    }
+  }
+  if (source === 'vo-web') {
+    const cachedVersion = trimmed.match(/^using cached library version (.+) -> (.+)$/);
+    if (cachedVersion) {
+      return { kind: 'success', text: `Using cached dependency ${cachedVersion[1]}@${cachedVersion[2]}` };
+    }
+    const fetchVersion = trimmed.match(/^fetching library version for (.+)$/);
+    if (fetchVersion) {
+      return { kind: 'system', text: `Resolving dependency version for ${fetchVersion[1]}...` };
+    }
+    const fetchLibrary = trimmed.match(/^fetching library (.+)@([^@]+)$/);
+    if (fetchLibrary) {
+      return { kind: 'system', text: `Downloading dependency ${fetchLibrary[1]}@${fetchLibrary[2]}...` };
+    }
+    const fetchedLibrary = trimmed.match(/^fetched library (.+) in (\d+)ms$/);
+    if (fetchedLibrary) {
+      return { kind: 'success', text: `Downloaded dependency ${fetchedLibrary[1]} in ${formatDurationMs(Number(fetchedLibrary[2]))}` };
+    }
+    const cachedExt = trimmed.match(/^using cached library ext (.+)@([^@]+)$/);
+    if (cachedExt) {
+      return { kind: 'success', text: `Using cached extension for ${cachedExt[1]}@${cachedExt[2]}` };
+    }
+    const fetchExtWasm = trimmed.match(/^fetching (cached )?library ext wasm (.+)@([^@]+) \((.+)\)$/);
+    if (fetchExtWasm) {
+      return { kind: 'system', text: `Loading extension WASM for ${fetchExtWasm[2]}@${fetchExtWasm[3]}...` };
+    }
+    const fetchExtJs = trimmed.match(/^fetching (cached )?library ext JS glue (.+)@([^@]+) \((.+)\)$/);
+    if (fetchExtJs) {
+      return { kind: 'system', text: `Loading extension JS glue for ${fetchExtJs[2]}@${fetchExtJs[3]}...` };
+    }
+  }
+  return { kind: 'system', text: `[${source}] ${trimmed}` };
+}
 
 type OpenVfsFile = { path: string; flags: number; position: number };
 
@@ -70,6 +139,95 @@ resetWorkspaceState();
 
 export class WebBackend implements Backend {
   readonly platform = 'wasm' as const;
+
+  private guiOperationChain: Promise<void> = Promise.resolve();
+  private guiSessionId = 0;
+  private guiFatalError: Error | null = null;
+
+  private installStandaloneGuiDispatcher(sessionId: number): void {
+    setStandaloneGuiEventDispatcher(async (handlerId, payload) => {
+      if (sessionId !== this.guiSessionId) {
+        return;
+      }
+      await this.dispatchGuiEventAsyncSerialized(handlerId, payload, sessionId);
+    });
+  }
+
+  private async runGuiEventSerialized<T>(
+    runWithWasm: (wasm: StudioWasm) => T | Promise<T>,
+    staleValue: T,
+    sessionId = this.guiSessionId,
+  ): Promise<T> {
+    if (sessionId !== this.guiSessionId) {
+      return staleValue;
+    }
+    if (this.guiFatalError) {
+      throw this.guiFatalError;
+    }
+
+    const run = async (): Promise<T> => {
+      if (sessionId !== this.guiSessionId) {
+        return staleValue;
+      }
+      if (this.guiFatalError) {
+        throw this.guiFatalError;
+      }
+      const wasm = await getStudioWasm();
+      if (sessionId !== this.guiSessionId) {
+        return staleValue;
+      }
+      try {
+        return await runWithWasm(wasm);
+      } catch (error) {
+        if (sessionId !== this.guiSessionId) {
+          return staleValue;
+        }
+        this.guiFatalError = error instanceof Error ? error : new Error(String(error));
+        setStandaloneGuiEventDispatcher(null);
+        throw this.guiFatalError;
+      }
+    };
+
+    return this.serializeGuiOperation(run);
+  }
+
+  private serializeGuiOperation<T>(run: () => Promise<T>): Promise<T> {
+    const next = this.guiOperationChain.then(run, run);
+    this.guiOperationChain = next.then(() => undefined, () => undefined);
+    return next;
+  }
+
+  private assertGuiSessionCurrent(sessionId: number): void {
+    if (sessionId !== this.guiSessionId) {
+      throw new Error('GUI backend session superseded');
+    }
+  }
+
+  private async dispatchGuiEventSerialized(
+    handlerId: number,
+    payload: string,
+    sessionId = this.guiSessionId,
+  ): Promise<Uint8Array> {
+    return this.runGuiEventSerialized(
+      (wasm) => wasm.sendGuiEvent(handlerId, payload),
+      new Uint8Array(0),
+      sessionId,
+    );
+  }
+
+  private async dispatchGuiEventAsyncSerialized(
+    handlerId: number,
+    payload: string,
+    sessionId = this.guiSessionId,
+  ): Promise<void> {
+    await this.runGuiEventSerialized<void>(
+      (wasm) => {
+        wasm.sendGuiEventAsync(handlerId, payload);
+      },
+      undefined,
+      sessionId,
+    );
+  }
 
   async getBootstrapContext(): Promise<BootstrapContext> {
     const params = new URLSearchParams(window.location.search);
@@ -338,41 +496,75 @@ export class WebBackend implements Backend {
 
   async runGui(path: string): Promise<GuiRunOutput> {
     const normalized = normalizePath(path);
-    const wasm = await getStudioWasm();
-    pendingGuiRender = null;
-    await wasm.prepareEntry(normalized);
-    return wasm.runGui(normalized);
+    const targetLabel = displayPath(normalized);
+    const sessionId = this.guiSessionId + 1;
+    this.guiSessionId = sessionId;
+    this.guiFatalError = null;
+    setStandaloneGuiEventDispatcher(null);
+    return this.serializeGuiOperation(async () => {
+      consolePush('system', `Opening GUI ${targetLabel}`);
+      const totalStart = performance.now();
+      const wasm = await getStudioWasm();
+      this.assertGuiSessionCurrent(sessionId);
+      consolePush('system', `Preparing dependencies for ${targetLabel}...`);
+      const prepareStart = performance.now();
+      await wasm.prepareEntry(normalized);
+      const prepareDurationMs = performance.now() - prepareStart;
+      consolePush('system', `Prepared dependencies for ${targetLabel} in ${formatDurationMs(prepareDurationMs)}`);
+      console.info(`[studio-gui] prepareEntry ${normalized} ${Math.round(prepareDurationMs)}ms`);
+      this.assertGuiSessionCurrent(sessionId);
+      this.installStandaloneGuiDispatcher(sessionId);
+      try {
+        consolePush('system', `Compiling and starting GUI ${targetLabel}...`);
+        const runStart = performance.now();
+        const output = wasm.runGui(normalized);
+        const runDurationMs = performance.now() - runStart;
+        const totalDurationMs = performance.now() - totalStart;
+        consolePush('success', `Opened GUI ${targetLabel} in ${formatDurationMs(totalDurationMs)}`);
+        console.info(`[studio-gui] runGui ${normalized} ${Math.round(runDurationMs)}ms`);
+        console.info(`[studio-gui] total open ${normalized} ${Math.round(totalDurationMs)}ms`);
+        return output;
+      } catch (error) {
+        if (sessionId === this.guiSessionId) {
+          setStandaloneGuiEventDispatcher(null);
+        }
+        throw error;
+      }
+    });
   }
 
   async sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
-    const wasm = await getStudioWasm();
-    return wasm.sendGuiEvent(handlerId, payload);
+    return this.dispatchGuiEventSerialized(handlerId, payload);
   }
 
   async sendGuiEventAsync(handlerId: number, payload: string): Promise<void> {
-    const bytes = await this.sendGuiEvent(handlerId, payload);
-    pendingGuiRender = bytes.length > 0 ? bytes : null;
+    await this.dispatchGuiEventAsyncSerialized(handlerId, payload);
   }
 
   async pushIslandTransport(data: Uint8Array): Promise<void> {
-    const wasm = await getStudioWasm();
-    wasm.pushIslandData(data);
+    await this.runGuiEventSerialized<void>(
+      (wasm) => {
+        wasm.pushIslandData(data);
+      },
+      undefined,
+    );
   }
 
   async pollGuiRender(): Promise<Uint8Array> {
-    if (pendingGuiRender) {
-      const bytes = pendingGuiRender;
-      pendingGuiRender = null;
-      return bytes;
-    }
-    const wasm = await getStudioWasm();
-    return wasm.pollGuiRender();
+    return this.runGuiEventSerialized(
+      (wasm) => wasm.pollGuiRender(),
+      new Uint8Array(0),
+    );
   }
 
   async stopGui(): Promise<void> {
-    pendingGuiRender = null;
-    const wasm = await getStudioWasm();
-    wasm.stopGui();
+    this.guiSessionId += 1;
+    this.guiFatalError = null;
+    setStandaloneGuiEventDispatcher(null);
+    await this.serializeGuiOperation(async () => {
+      const wasm = await getStudioWasm();
+      wasm.stopGui();
+    });
   }
 
   async getRenderIslandVfsSnapshot(path: string): Promise<RenderIslandVfsSnapshot> {
@@ -442,8 +634,11 @@ function sortEntries(entries: FsEntry[]): FsEntry[] {
 function getStudioWasm(): Promise<StudioWasm> {
   ensureVfsBindings();
   if (!studioWasmPromise) {
-    (globalThis as Record<string, unknown>).__voStudioDebugLog = (message: string) => {
-      console.debug(`[studio-wasm] ${message}`);
+    (globalThis as Record<string, unknown>).__voStudioDebugLog = (sourceOrMessage: string, maybeMessage?: string) => {
+      const source = maybeMessage === undefined ? 'studio-wasm' : sourceOrMessage;
+      const message = maybeMessage === undefined ? sourceOrMessage : maybeMessage;
+      pushUiConsole(formatStudioDebugLine(source, message));
+      console.debug(`[${source}] ${message}`);
     };
     studioWasmPromise = loadStudioWasm();
   }

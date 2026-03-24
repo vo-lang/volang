@@ -180,6 +180,15 @@ fn js_glue_data_url(js_text: &str) -> Result<String, String> {
     Ok(format!("data:text/javascript;charset=utf-8,{}", encoded))
 }
 
+fn log_info(message: &str) {
+    crate::emit_host_log("vo-web", message);
+    web_sys::console::log_1(&format!("[vo-web] {}", message).into());
+}
+
+fn log_duration(label: &str, start_ms: f64) {
+    log_info(&format!("{} in {:.0}ms", label, js_sys::Date::now() - start_ms));
+}
+
 async fn load_wasm_extension_bytes(
     module: &str,
     wasm_bytes: &[u8],
@@ -190,14 +199,6 @@ async fn load_wasm_extension_bytes(
         None => String::new(),
     };
     ext_bridge::load_wasm_ext_module(module, wasm_bytes, &js_glue_url).await
-}
-
-fn write_module_files_to_vfs(files: &[(PathBuf, String)]) -> Result<(), String> {
-    for (vfs_path, content) in files {
-        let full = format!("/{}", vfs_path.display());
-        write_vfs_text(&full, content)?;
-    }
-    Ok(())
 }
 
 fn write_versioned_module_files_to_vfs(
@@ -347,7 +348,10 @@ async fn install_locked_module_to_vfs(locked: &LockedModule) -> Result<String, S
     let module = locked.path.as_str();
     let version = locked.version.to_string();
 
+    let fetch_start = js_sys::Date::now();
+    log_info(&format!("fetching library {}@{}", module, version));
     let files = wasm_fetch::fetch_locked_module_files(locked).await?;
+    log_duration(&format!("fetched library {}@{}", module, version), fetch_start);
     write_versioned_module_files_to_vfs(module, &version, &files)?;
     write_vfs_text(
         &vfs_module_file_path(module, &version, materialize::VERSION_MARKER),
@@ -359,14 +363,32 @@ async fn install_locked_module_to_vfs(locked: &LockedModule) -> Result<String, S
     )?;
 
     if let Some(wasm_extension) = read_wasm_extension_from_vfs(module, &version) {
+        let wasm_fetch_start = js_sys::Date::now();
+        log_info(&format!(
+            "fetching library ext wasm {}@{} ({})",
+            module, version, wasm_extension.wasm,
+        ));
         let wasm_bytes = wasm_fetch::fetch_locked_wasm_binary(locked, &wasm_extension.wasm).await?;
+        log_duration(
+            &format!("fetched library ext wasm {}@{} ({})", module, version, wasm_extension.wasm),
+            wasm_fetch_start,
+        );
         write_vfs_bytes(
             &vfs_artifact_path(module, &version, &wasm_extension.wasm),
             &wasm_bytes,
         )?;
         if let WasmExtensionKind::Bindgen = wasm_extension.kind {
             let js_glue_name = wasm_extension.js_glue.as_deref().unwrap_or_default();
+            let js_glue_fetch_start = js_sys::Date::now();
+            log_info(&format!(
+                "fetching library ext JS glue {}@{} ({})",
+                module, version, js_glue_name,
+            ));
             let js_glue_text = wasm_fetch::fetch_locked_wasm_js_glue_text(locked, js_glue_name).await?;
+            log_duration(
+                &format!("fetched library ext JS glue {}@{} ({})", module, version, js_glue_name),
+                js_glue_fetch_start,
+            );
             write_vfs_text(
                 &vfs_artifact_path(module, &version, js_glue_name),
                 &js_glue_text,
@@ -418,28 +440,29 @@ async fn ensure_vfs_versioned_module_closure(initial: Vec<(String, String)>) -> 
             load_ext_if_present(&module, &version).await;
         }
 
-        let vo_mod_path = vfs_module_file_path(&module, &version, "vo.mod");
-        let dep_vo_mod = match read_vfs_text(&vo_mod_path) {
-            Ok(content) => content,
-            Err(_) => continue,
-        };
-        let dep_mod_file = ModFile::parse(&dep_vo_mod)
-            .map_err(|e| format!("vo.mod parse error for {}: {}", module, e))?;
-        if !requires_registry_modules(&dep_mod_file) {
-            continue;
-        }
-
-        let vo_lock_path = vfs_module_file_path(&module, &version, "vo.lock");
-        let dep_vo_lock = read_vfs_text(&vo_lock_path)
-            .map_err(|_| format!("module {}@{} requires external modules but vo.lock is missing", module, version))?;
-        let dep_lock_file = LockFile::parse(&dep_vo_lock)
-            .map_err(|e| format!("vo.lock parse error for {}: {}", module, e))?;
-        for spec in collect_locked_specs(&dep_mod_file, &dep_lock_file)? {
-            stack.push(spec);
-        }
+        let specs = read_vfs_locked_specs(&module, &version)?;
+        stack.extend(specs);
     }
 
     Ok(())
+}
+
+fn read_vfs_locked_specs(module: &str, version: &str) -> Result<Vec<(String, String)>, String> {
+    let vo_mod_path = vfs_module_file_path(module, version, "vo.mod");
+    let dep_vo_mod = read_vfs_text(&vo_mod_path)
+        .map_err(|_| format!("module {}@{} is missing cached vo.mod in the VFS", module, version))?;
+    let dep_mod_file = ModFile::parse(&dep_vo_mod)
+        .map_err(|e| format!("vo.mod parse error for {}: {}", module, e))?;
+    if !requires_registry_modules(&dep_mod_file) {
+        return Ok(Vec::new());
+    }
+
+    let vo_lock_path = vfs_module_file_path(module, version, "vo.lock");
+    let dep_vo_lock = read_vfs_text(&vo_lock_path)
+        .map_err(|_| format!("module {}@{} requires external modules but vo.lock is missing", module, version))?;
+    let dep_lock_file = LockFile::parse(&dep_vo_lock)
+        .map_err(|e| format!("vo.lock parse error for {}: {}", module, e))?;
+    collect_locked_specs(&dep_mod_file, &dep_lock_file)
 }
 
 /// Load the pre-built WASM extension binary for a module if one exists on GitHub.
@@ -455,6 +478,21 @@ pub(crate) async fn load_ext_if_present(module: &str, version: &str) {
         return;
     };
 
+    match load_cached_ext_from_vfs(module, version).await {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            web_sys::console::warn_1(
+                &format!("[vo-web] cached ext load failed for {}@{}: {}", module, version, e).into(),
+            );
+        }
+    }
+
+    let wasm_fetch_start = js_sys::Date::now();
+    log_info(&format!(
+        "fetching cached library ext wasm {}@{} ({})",
+        module, version, wasm_extension.wasm,
+    ));
     let wasm_bytes = match wasm_fetch::fetch_wasm_binary(module, version, &wasm_extension.wasm).await {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -464,12 +502,43 @@ pub(crate) async fn load_ext_if_present(module: &str, version: &str) {
             return;
         }
     };
+    log_duration(
+        &format!("fetched cached library ext wasm {}@{} ({})", module, version, wasm_extension.wasm),
+        wasm_fetch_start,
+    );
+    if let Err(e) = write_vfs_bytes(
+        &vfs_artifact_path(module, version, &wasm_extension.wasm),
+        &wasm_bytes,
+    ) {
+        web_sys::console::warn_1(
+            &format!("[vo-web] failed to cache ext wasm for {}@{}: {}", module, version, e).into(),
+        );
+    }
 
-    let js_glue_url = match wasm_extension.kind {
+    let js_glue_text = match wasm_extension.kind {
         WasmExtensionKind::Bindgen => {
             let js_glue_name = wasm_extension.js_glue.as_deref().unwrap_or_default();
-            match wasm_fetch::fetch_wasm_js_glue_url(module, version, js_glue_name).await {
-                Ok(url) => url,
+            let js_glue_fetch_start = js_sys::Date::now();
+            log_info(&format!(
+                "fetching cached library ext JS glue {}@{} ({})",
+                module, version, js_glue_name,
+            ));
+            match wasm_fetch::fetch_wasm_js_glue_text(module, version, js_glue_name).await {
+                Ok(text) => {
+                    log_duration(
+                        &format!("fetched cached library ext JS glue {}@{} ({})", module, version, js_glue_name),
+                        js_glue_fetch_start,
+                    );
+                    if let Err(e) = write_vfs_text(
+                        &vfs_artifact_path(module, version, js_glue_name),
+                        &text,
+                    ) {
+                        web_sys::console::warn_1(
+                            &format!("[vo-web] failed to cache ext JS glue for {}@{}: {}", module, version, e).into(),
+                        );
+                    }
+                    Some(text)
+                }
                 Err(e) => {
                     web_sys::console::warn_1(
                         &format!("[vo-web] ext wasm JS glue fetch failed for {}: {}", module, e).into(),
@@ -478,10 +547,10 @@ pub(crate) async fn load_ext_if_present(module: &str, version: &str) {
                 }
             }
         }
-        WasmExtensionKind::Standalone => String::new(),
+        WasmExtensionKind::Standalone => None,
     };
 
-    if let Err(e) = ext_bridge::load_wasm_ext_module(module, &wasm_bytes, &js_glue_url).await {
+    if let Err(e) = load_wasm_extension_bytes(module, &wasm_bytes, js_glue_text.as_deref()).await {
         web_sys::console::warn_1(
             &format!("[vo-web] ext module {} load failed: {}", module, e).into(),
         );
@@ -498,6 +567,35 @@ fn read_wasm_extension_from_vfs(module: &str, version: &str) -> Option<WasmExten
         Ok(content) => vo_module::ext_manifest::wasm_extension_from_content(&content),
         Err(_) => None,
     }
+}
+
+async fn load_cached_ext_from_vfs(module: &str, version: &str) -> Result<bool, String> {
+    let Some(wasm_extension) = read_wasm_extension_from_vfs(module, version) else {
+        return Ok(false);
+    };
+    let wasm_path = vfs_artifact_path(module, version, &wasm_extension.wasm);
+    let wasm_bytes = match read_vfs_bytes(&wasm_path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(false),
+    };
+    let js_glue_text = match wasm_extension.kind {
+        WasmExtensionKind::Bindgen => {
+            let js_glue_name = wasm_extension.js_glue.as_deref().unwrap_or_default();
+            let js_glue_path = vfs_artifact_path(module, version, js_glue_name);
+            let js_glue_bytes = match read_vfs_bytes(&js_glue_path) {
+                Ok(bytes) => bytes,
+                Err(_) => return Ok(false),
+            };
+            Some(
+                String::from_utf8(js_glue_bytes)
+                    .map_err(|error| format!("cached wasm JS glue for {}@{} is not valid UTF-8: {}", module, version, error))?
+            )
+        }
+        WasmExtensionKind::Standalone => None,
+    };
+    load_wasm_extension_bytes(module, &wasm_bytes, js_glue_text.as_deref()).await?;
+    log_info(&format!("using cached library ext {}@{}", module, version));
+    Ok(true)
 }
 
 /// Fetch module source files from GitHub and add them to a `MemoryFs` for compilation.
@@ -594,9 +692,12 @@ pub async fn install_module_to_vfs(spec: &str) -> Result<String, String> {
         .map(|(m, v)| (m.to_string(), v.to_string()))
         .ok_or_else(|| format!("invalid spec {:?}: expected module@version", spec))?;
 
+    let fetch_start = js_sys::Date::now();
+    log_info(&format!("fetching library {}@{}", module, version));
     let files = wasm_fetch::fetch_module_files(&module, &version)
         .await
         .map_err(|e| format!("fetch module {}: {}", module, e))?;
+    log_duration(&format!("fetched library {}@{}", module, version), fetch_start);
     let manifest = release_manifest_from_files(&module, &version, &files)?;
     write_versioned_module_files_to_vfs(&module, &version, &files)?;
     write_vfs_text(
@@ -609,7 +710,16 @@ pub async fn install_module_to_vfs(spec: &str) -> Result<String, String> {
     )?;
 
     if let Some(wasm_extension) = read_wasm_extension_from_vfs(&module, &version) {
+        let wasm_fetch_start = js_sys::Date::now();
+        log_info(&format!(
+            "fetching library ext wasm {}@{} ({})",
+            module, version, wasm_extension.wasm,
+        ));
         let wasm_bytes = wasm_fetch::fetch_wasm_binary(&module, &version, &wasm_extension.wasm).await?;
+        log_duration(
+            &format!("fetched library ext wasm {}@{} ({})", module, version, wasm_extension.wasm),
+            wasm_fetch_start,
+        );
         write_vfs_bytes(
             &vfs_artifact_path(&module, &version, &wasm_extension.wasm),
             &wasm_bytes,
@@ -617,7 +727,16 @@ pub async fn install_module_to_vfs(spec: &str) -> Result<String, String> {
         let js_glue_text = match wasm_extension.kind {
             WasmExtensionKind::Bindgen => {
                 let js_glue_name = wasm_extension.js_glue.as_deref().unwrap_or_default();
+                let js_glue_fetch_start = js_sys::Date::now();
+                log_info(&format!(
+                    "fetching library ext JS glue {}@{} ({})",
+                    module, version, js_glue_name,
+                ));
                 let js_glue_text = wasm_fetch::fetch_wasm_js_glue_text(&module, &version, js_glue_name).await?;
+                log_duration(
+                    &format!("fetched library ext JS glue {}@{} ({})", module, version, js_glue_name),
+                    js_glue_fetch_start,
+                );
                 write_vfs_text(
                     &vfs_artifact_path(&module, &version, js_glue_name),
                     &js_glue_text,
@@ -671,6 +790,8 @@ async fn fetch_latest_module_version(module: &str) -> Result<String, String> {
         .ok_or_else(|| format!("not a github.com module path: {}", module))?;
     let module_root = vo_module::compat::module_root(module)
         .unwrap_or_else(|| ".".to_string());
+    let fetch_start = js_sys::Date::now();
+    log_info(&format!("fetching library version for {}", module));
 
     // For root-level modules, use the /releases/latest endpoint.
     // For sub-module repos (module_root != "."), list releases and find the matching tag prefix.
@@ -687,6 +808,7 @@ async fn fetch_latest_module_version(module: &str) -> Result<String, String> {
             .map_err(|e| format!("invalid JSON from GitHub API for {}: {}", module, e))?;
         let tag = value["tag_name"].as_str()
             .ok_or_else(|| format!("no tag_name in GitHub latest release for {}", module))?;
+        log_duration(&format!("resolved library version {} -> {}", module, tag), fetch_start);
         Ok(tag.to_string())
     } else {
         let api_url = format!(
@@ -703,6 +825,7 @@ async fn fetch_latest_module_version(module: &str) -> Result<String, String> {
         for release in &releases {
             if let Some(tag) = release["tag_name"].as_str() {
                 if let Some(version) = tag.strip_prefix(&prefix) {
+                    log_duration(&format!("resolved library version {} -> {}", module, version), fetch_start);
                     return Ok(version.to_string());
                 }
             }
@@ -714,6 +837,7 @@ async fn fetch_latest_module_version(module: &str) -> Result<String, String> {
 /// Resolve a module version: check VFS cache first, then fetch latest from GitHub.
 pub async fn resolve_module_version(module: &str) -> Result<String, String> {
     if let Some(version) = discover_vfs_installed_version(module) {
+        log_info(&format!("using cached library version {} -> {}", module, version));
         return Ok(version);
     }
     fetch_latest_module_version(module).await
@@ -725,18 +849,10 @@ pub async fn resolve_module_version(module: &str) -> Result<String, String> {
 /// Otherwise fetches the latest version from GitHub, installs it, and returns.
 pub async fn resolve_and_install_module(module: &str) -> Result<(String, String), String> {
     let version = resolve_module_version(module).await?;
-    // Check if already installed at this version
-    if discover_vfs_installed_version(module).as_deref() != Some(&version) {
-        let spec = format!("{}@{}", module, version);
-        install_module_to_vfs(&spec).await?;
-    } else {
-        // Already installed — just ensure ext is loaded
-        load_ext_if_present(module, &version).await;
-    }
+    ensure_vfs_versioned_module_closure(vec![(module.to_string(), version.clone())]).await?;
     Ok((module.to_string(), version))
 }
 
-/// Read a `LockedModule` from the installed release manifest in VFS.
 ///
 /// After `install_module_to_vfs` completes, the release manifest is stored at
 /// `/<cache_key>/<version>/vo.release.json`.  This function reads it back and
@@ -773,6 +889,38 @@ pub fn read_locked_module_from_vfs(module: &str, version: &str) -> Result<Locked
     })
 }
 
+/// Collects the VFS locked-module closure for a set of initial modules.
+///
+/// This function is used to generate synthetic `vo.lock` content that includes
+/// transitive dependencies.
+fn collect_vfs_locked_module_closure(initial: Vec<(String, String)>) -> Result<Vec<LockedModule>, String> {
+    let mut visited = HashSet::new();
+    let mut selected_versions = HashMap::new();
+    let mut stack = initial;
+    let mut resolved = Vec::new();
+
+    while let Some((module, version)) = stack.pop() {
+        remember_selected_version(&mut selected_versions, &module, &version)?;
+        let visit_key = format!("{}@{}", module, version);
+        if !visited.insert(visit_key) {
+            continue;
+        }
+
+        let locked = read_locked_module_from_vfs(&module, &version)?;
+        let specs = read_vfs_locked_specs(&module, &version)?;
+        stack.extend(specs);
+        resolved.push(locked);
+    }
+
+    resolved.sort_by(|a, b| {
+        a.path
+            .as_str()
+            .cmp(b.path.as_str())
+            .then_with(|| a.version.to_string().cmp(&b.version.to_string()))
+    });
+    Ok(resolved)
+}
+
 /// Build synthetic `vo.mod` and `vo.lock` content for a set of installed modules.
 ///
 /// `synthetic_module` is the module name for the synthetic project (e.g. `"studio.examples"`).
@@ -802,11 +950,7 @@ pub fn build_synthetic_project_files(
     }
 
     // Build vo.lock from installed release manifests
-    let mut resolved = Vec::new();
-    for (m, v) in installed {
-        let locked = read_locked_module_from_vfs(m, v)?;
-        resolved.push(locked);
-    }
+    let resolved = collect_vfs_locked_module_closure(installed.to_vec())?;
 
     let lock_file = LockFile {
         version: 1,
@@ -825,7 +969,7 @@ pub fn build_synthetic_project_files(
 // They are WASM-platform-specific and belong in vo-web, not in the abstract module system.
 
 mod wasm_fetch {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
@@ -833,14 +977,28 @@ mod wasm_fetch {
     use vo_module::schema::lockfile::LockedModule;
     use vo_module::schema::manifest::ReleaseManifest;
 
+    /// Rewrite GitHub release download URLs to go through the dev-server
+    /// CORS proxy (`/gh-release/`).  Azure blob storage behind the GitHub
+    /// 302 redirect does not send `Access-Control-Allow-Origin`, so direct
+    /// browser fetches fail.  The proxy follows the redirect server-side.
+    fn cors_proxy_url(url: &str) -> String {
+        const GITHUB_PREFIX: &str = "https://github.com/";
+        const PROXY_PREFIX: &str = "/gh-release/";
+        if url.starts_with(GITHUB_PREFIX) && url.contains("/releases/download/") {
+            return format!("{}{}", PROXY_PREFIX, &url[GITHUB_PREFIX.len()..]);
+        }
+        url.to_string()
+    }
+
     /// Async HTTP GET → raw bytes (uses browser Fetch API).
     pub(super) async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
+        let effective_url = cors_proxy_url(url);
         let window = web_sys::window().ok_or("no window object")?;
 
         let opts = web_sys::RequestInit::new();
         opts.set_method("GET");
         opts.set_cache(web_sys::RequestCache::NoStore);
-        let request = web_sys::Request::new_with_str_and_init(url, &opts)
+        let request = web_sys::Request::new_with_str_and_init(&effective_url, &opts)
             .map_err(|e| e.as_string().unwrap_or_else(|| "request error".to_string()))?;
 
         let resp_value = JsFuture::from(window.fetch_with_request(&request))

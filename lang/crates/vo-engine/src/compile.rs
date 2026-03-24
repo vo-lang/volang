@@ -1,9 +1,14 @@
 //! Compilation functions for Vo source code.
 
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+#[cfg(test)]
 use std::time::SystemTime;
 
+use vo_common::stable_hash::StableHasher;
 use vo_common::vfs::{FileSet, FileSystem, MemoryFs, RealFs, ZipFs};
 use vo_analysis::analyze_project;
 use vo_codegen::compile_project;
@@ -15,6 +20,43 @@ use vo_vm::bytecode::Module;
 use vo_stdlib::EmbeddedStdlib;
 
 const MOD_CACHE_DIR: &str = ".vo/mod";
+const COMPILE_CACHE_SCHEMA_VERSION: &str = "2";
+const COMPILE_CACHE_SLOT_NAMESPACE: &str = "vo-compile-cache-slot";
+const COMPILE_CACHE_NATIVE_NAMESPACE: &str = "vo-compile-cache-native";
+
+type CompileLogSink = dyn Fn(&str, &str) + Send + Sync;
+
+thread_local! {
+    static COMPILE_LOG_SINK: RefCell<Option<Arc<CompileLogSink>>> = RefCell::new(None);
+}
+
+pub fn with_compile_log_sink<T, S, F>(sink: S, f: F) -> T
+where
+    S: Fn(&str, &str) + Send + Sync + 'static,
+    F: FnOnce() -> T,
+{
+    struct RestoreCompileLogSink(Option<Arc<CompileLogSink>>);
+
+    impl Drop for RestoreCompileLogSink {
+        fn drop(&mut self) {
+            COMPILE_LOG_SINK.with(|slot| {
+                *slot.borrow_mut() = self.0.take();
+            });
+        }
+    }
+
+    let previous = COMPILE_LOG_SINK.with(|slot| slot.borrow_mut().replace(Arc::new(sink)));
+    let _restore = RestoreCompileLogSink(previous);
+    f()
+}
+
+fn emit_compile_log(source: &str, message: &str) {
+    COMPILE_LOG_SINK.with(|slot| {
+        if let Some(sink) = slot.borrow().as_ref() {
+            sink(source, message);
+        }
+    });
+}
 
 #[derive(Debug)]
 pub enum CompileError {
@@ -58,6 +100,14 @@ struct ExternalModulePlan {
     has_mod_file: bool,
     allowed_modules: Vec<String>,
     locked_modules: Vec<LockedModule>,
+}
+
+struct CompileCacheSlot {
+    dir: PathBuf,
+    fingerprint_file: PathBuf,
+    module_file: PathBuf,
+    extensions_file: PathBuf,
+    locked_modules_file: PathBuf,
 }
 
 /// Type-check a Vo source directory without codegen.
@@ -134,33 +184,29 @@ fn compile_zip(zip_path: &Path, internal_root: Option<&str>) -> Result<CompileOu
 /// Caches compiled bytecode in `.vo-cache` directory under the source root.
 pub fn compile_with_cache(path: &str) -> Result<CompileOutput, CompileError> {
     let entry_path = Path::new(path);
+    if path.ends_with(".voc") || path.ends_with(".vob") || parse_zip_path(path).is_some() {
+        return compile(path);
+    }
     let root = source_root(entry_path);
-    
-    let cache_dir = root.join(".vo-cache");
-    let cache_file = cache_dir.join("module.voc");
-    let meta_file = cache_dir.join("mtime");
-    let ext_file = cache_dir.join("extensions");
-    let locked_file = cache_dir.join("locked_modules");
-    
-    let current_mtime = max_mtime(&root);
-    
-    // Try cache
-    if let Some(output) = try_load_cache(&cache_file, &meta_file, &ext_file, &locked_file, &root, current_mtime) {
+    let single_file = if entry_path.is_file() {
+        Some(entry_path.file_name().unwrap_or_default())
+    } else {
+        None
+    };
+    let replaces = read_all_replaces(&root)?;
+    let cache_slot = compile_cache_slot(&root, single_file);
+    let fingerprint = compute_compile_cache_fingerprint(&root, single_file, &replaces)?;
+
+    if let Some(output) = try_load_cache(&cache_slot, &root, &fingerprint) {
+        emit_compile_log("vo-engine", &format!("compile cache hit {}", path));
         return Ok(output);
     }
-    
-    // Compile
+
     let output = compile(path)?;
-    
-    // Save cache
-    if let Some(mtime) = current_mtime {
-        let _ = fs::create_dir_all(&cache_dir);
-        let _ = fs::write(&cache_file, output.module.serialize());
-        let _ = fs::write(&meta_file, mtime.to_string());
-        save_extensions(&ext_file, &output.extensions);
-        save_locked_modules(&locked_file, &output.locked_modules);
-    }
-    
+
+    save_compile_cache(&cache_slot, &fingerprint, &output);
+    emit_compile_log("vo-engine", &format!("compile cache store {}", path));
+
     Ok(output)
 }
 
@@ -208,7 +254,7 @@ pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileErr
     let p = Path::new(path);
     let root = source_root(p);
     auto_download_locked_modules(&root)?;
-    compile(path)
+    compile_with_cache(path)
 }
 
 /// Read `vo.mod` + `vo.lock` from `root` and download any missing modules into
@@ -241,8 +287,31 @@ fn auto_download_locked_modules(root: &Path) -> Result<(), CompileError> {
 
     let mod_cache = default_mod_cache_root();
     let registry = GitHubRegistry::new();
+    let module_cache_state = lock_file
+        .resolved
+        .iter()
+        .map(|locked| {
+            let source_cached = vo_module::materialize::is_source_cached(&mod_cache, locked);
+            let artifacts_cached = locked
+                .artifacts
+                .iter()
+                .all(|artifact| vo_module::materialize::is_artifact_cached(&mod_cache, locked, artifact));
+            let fully_cached = source_cached && artifacts_cached;
+            if fully_cached {
+                emit_compile_log("vo-engine", &format!("using cached library {}@{}", locked.path, locked.version));
+            } else {
+                emit_compile_log("vo-engine", &format!("fetching library {}@{}", locked.path, locked.version));
+            }
+            (locked.path.to_string(), locked.version.to_string(), fully_cached)
+        })
+        .collect::<Vec<_>>();
     vo_module::materialize::download_all(&mod_cache, &lock_file, &registry)
         .map_err(|e| CompileError::Analysis(format!("failed to download dependencies: {}", e)))?;
+    for (module, version, fully_cached) in module_cache_state {
+        if !fully_cached {
+            emit_compile_log("vo-engine", &format!("fetched library {}@{}", module, version));
+        }
+    }
 
     // Build native extensions for any newly-downloaded modules
     for locked in &lock_file.resolved {
@@ -352,6 +421,11 @@ mod tests {
             resolved: modules.to_vec(),
         };
         lf.render()
+    }
+
+    fn read_saved_cache_fingerprint(root: &Path, single_file: Option<&std::ffi::OsStr>) -> String {
+        let slot = compile_cache_slot(root, single_file);
+        fs::read_to_string(slot.fingerprint_file).unwrap().trim().to_string()
     }
 
     #[test]
@@ -521,11 +595,7 @@ mod tests {
         )
         .unwrap();
 
-        fs::write(
-            local_voplay.join("vo.mod"),
-            "module github.com/vo-lang/voplay\nvo 0.1.0\n",
-        )
-        .unwrap();
+        fs::write(local_voplay.join("vo.mod"), "module github.com/vo-lang/voplay\nvo 0.1.0\n").unwrap();
         fs::write(
             local_voplay.join("vo.ext.toml"),
             "[extension]\nname = \"voplay\"\npath = \"rust/target/{profile}/libvo_voplay\"\n",
@@ -658,16 +728,124 @@ mod tests {
         .unwrap();
 
         // All external deps are workspace-replaced → no vo.lock needed → compile succeeds
-        let result = compile(app_root.to_str().unwrap());
-        assert!(result.is_ok(), "expected success when all external deps are replaced, got: {result:?}");
+         let result = compile(app_root.to_str().unwrap());
+         assert!(result.is_ok(), "expected success when all external deps are replaced, got: {result:?}");
 
-        fs::remove_dir_all(&root).unwrap();
-    }
+         fs::remove_dir_all(&root).unwrap();
+     }
 
-    #[test]
-    fn test_compile_unreplaced_external_dep_requires_vo_lock() {
-        let mut fs = MemoryFs::new();
-        fs.add_file(
+     #[test]
+     fn test_compile_with_cache_separates_sibling_single_file_entries() {
+         let root = std::env::temp_dir().join(format!(
+             "vo_compile_cache_single_entry_{}_{}",
+             std::process::id(),
+             SystemTime::now()
+                 .duration_since(std::time::UNIX_EPOCH)
+                 .unwrap()
+                 .as_nanos()
+         ));
+         let a_path = root.join("a.vo");
+         let b_path = root.join("b.vo");
+
+         fs::create_dir_all(&root).unwrap();
+         fs::write(&a_path, "package main\nfunc main() {}\nfunc a() {}\n").unwrap();
+         fs::write(&b_path, "package main\nfunc main() {}\nfunc b() {}\n").unwrap();
+
+         let a1 = compile_with_cache(a_path.to_string_lossy().as_ref()).unwrap();
+         let b1 = compile_with_cache(b_path.to_string_lossy().as_ref()).unwrap();
+         let a2 = compile_with_cache(a_path.to_string_lossy().as_ref()).unwrap();
+
+         assert_eq!(a1.module.serialize(), a2.module.serialize());
+         assert_ne!(a1.module.serialize(), b1.module.serialize());
+
+         fs::remove_dir_all(&root).unwrap();
+     }
+
+     #[test]
+     fn test_compile_with_cache_fingerprint_tracks_extension_manifest() {
+         let root = std::env::temp_dir().join(format!(
+             "vo_compile_cache_ext_manifest_{}_{}",
+             std::process::id(),
+             SystemTime::now()
+                 .duration_since(std::time::UNIX_EPOCH)
+                 .unwrap()
+                 .as_nanos()
+         ));
+
+         fs::create_dir_all(root.join("rust")).unwrap();
+         fs::write(root.join("vo.mod"), "module github.com/acme/app\nvo 0.1.0\n").unwrap();
+         fs::write(root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
+         fs::write(
+             root.join("vo.ext.toml"),
+             "[extension]\nname = \"demo\"\npath = \"rust/target/{profile}/libdemo\"\n",
+         )
+         .unwrap();
+
+         compile_with_cache(root.to_string_lossy().as_ref()).unwrap();
+         let first = read_saved_cache_fingerprint(&root, None);
+
+         fs::write(
+             root.join("vo.ext.toml"),
+             "[extension]\nname = \"demo2\"\npath = \"rust/target/{profile}/libdemo2\"\n",
+         )
+         .unwrap();
+
+         compile_with_cache(root.to_string_lossy().as_ref()).unwrap();
+         let second = read_saved_cache_fingerprint(&root, None);
+
+         assert_ne!(first, second);
+
+         fs::remove_dir_all(&root).unwrap();
+     }
+
+     #[test]
+     fn test_compile_with_cache_fingerprint_tracks_workspace_replace_sources() {
+         let root = std::env::temp_dir().join(format!(
+             "vo_compile_cache_replace_source_{}_{}",
+             std::process::id(),
+             SystemTime::now()
+                 .duration_since(std::time::UNIX_EPOCH)
+                 .unwrap()
+                 .as_nanos()
+         ));
+         let app_root = root.join("app");
+         let local_lib = root.join("lib");
+
+         fs::create_dir_all(&app_root).unwrap();
+         fs::create_dir_all(&local_lib).unwrap();
+
+         fs::write(
+             app_root.join("vo.mod"),
+             "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/example/lib ^0.1.0\n",
+         )
+         .unwrap();
+         fs::write(app_root.join("vo.work"), "version = 1\n\n[[use]]\npath = \"../lib\"\n").unwrap();
+         fs::write(
+             app_root.join("main.vo"),
+             "package main\nimport \"github.com/example/lib\"\nfunc main(){lib.Hello()}\n",
+         )
+         .unwrap();
+
+         fs::write(local_lib.join("vo.mod"), "module github.com/example/lib\nvo 0.1.0\n").unwrap();
+         fs::write(local_lib.join("lib.vo"), "package lib\nfunc Hello(){}\n").unwrap();
+
+         compile_with_cache(app_root.to_string_lossy().as_ref()).unwrap();
+         let first = read_saved_cache_fingerprint(&app_root, None);
+
+         fs::write(local_lib.join("lib.vo"), "package lib\nfunc Hello(){}\nfunc Extra(){}\n").unwrap();
+
+         compile_with_cache(app_root.to_string_lossy().as_ref()).unwrap();
+         let second = read_saved_cache_fingerprint(&app_root, None);
+
+         assert_ne!(first, second);
+
+         fs::remove_dir_all(&root).unwrap();
+     }
+
+     #[test]
+     fn test_compile_unreplaced_external_dep_requires_vo_lock() {
+         let mut fs = MemoryFs::new();
+         fs.add_file(
             "vo.mod",
             "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/vo-lang/voplay ^0.1.0\n",
         );
@@ -1339,7 +1517,7 @@ pub fn ensure_extension_manifests_built(
 ) -> Result<(), String> {
     use std::collections::BTreeSet;
     let mod_cache = default_mod_cache_root();
-    let mod_cache = mod_cache.canonicalize().unwrap_or_else(|_| mod_cache.clone());
+    let mod_cache = mod_cache.canonicalize().unwrap_or(mod_cache);
     let mut seen = BTreeSet::new();
 
     for manifest in manifests {
@@ -1404,6 +1582,10 @@ pub(crate) fn ensure_local_native_extension_built(module_dir: &Path) -> Result<(
                             .unwrap_or(false)
                     });
                 if all_older {
+                    emit_compile_log(
+                        "vo-engine",
+                        &format!("using cached native extension {}", manifest.native_path.display()),
+                    );
                     return Ok(());
                 }
             }
@@ -1416,6 +1598,7 @@ pub(crate) fn ensure_local_native_extension_built(module_dir: &Path) -> Result<(
 
 fn build_native_extension(module_dir: &Path) -> Result<(), String> {
     let rust_dir = module_dir.join("rust");
+    emit_compile_log("vo-engine", &format!("building native extension {}", rust_dir.display()));
     eprintln!("Building native extension at {}...", rust_dir.display());
     let output = std::process::Command::new("cargo")
         .arg("build")
@@ -1427,6 +1610,7 @@ fn build_native_extension(module_dir: &Path) -> Result<(), String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("cargo build failed for {}: {}", rust_dir.display(), stderr));
     }
+    emit_compile_log("vo-engine", &format!("built native extension {}", rust_dir.display()));
     Ok(())
 }
 
@@ -1475,62 +1659,166 @@ fn parse_zip_path(path: &str) -> Option<(String, Option<String>)> {
     }
 }
 
-fn max_mtime(dir: &Path) -> Option<u64> {
-    let mut max = 0u64;
-    for entry in walkdir(dir) {
-        if entry.extension().map(|e| e == "vo").unwrap_or(false) {
-            if let Ok(meta) = entry.metadata() {
-                if let Ok(mtime) = meta.modified() {
-                    if let Ok(dur) = mtime.duration_since(SystemTime::UNIX_EPOCH) {
-                        max = max.max(dur.as_secs());
-                    }
-                }
-            }
-        }
+fn compile_cache_slot(root: &Path, single_file: Option<&std::ffi::OsStr>) -> CompileCacheSlot {
+    let mut slot_hasher = StableHasher::new(COMPILE_CACHE_SLOT_NAMESPACE);
+    if let Some(file_name) = single_file {
+        slot_hasher.update_str("entry_kind", "file");
+        slot_hasher.update_str("entry_name", &file_name.to_string_lossy());
+    } else {
+        slot_hasher.update_str("entry_kind", "dir");
+        slot_hasher.update_str("entry_name", ".");
     }
-    if max == 0 { None } else { Some(max) }
+    let slot_id = slot_hasher.finish_suffix();
+    let dir = root.join(".vo-cache").join("compile").join("native").join(slot_id);
+    CompileCacheSlot {
+        fingerprint_file: dir.join("fingerprint"),
+        module_file: dir.join("module.voc"),
+        extensions_file: dir.join("extensions"),
+        locked_modules_file: dir.join("locked_modules"),
+        dir,
+    }
 }
 
-fn walkdir(path: &Path) -> Vec<PathBuf> {
-    let mut result = Vec::new();
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                result.extend(walkdir(&p));
-            } else {
-                result.push(p);
-            }
+fn compute_compile_cache_fingerprint(
+    root: &Path,
+    single_file: Option<&std::ffi::OsStr>,
+    replaces: &std::collections::HashMap<String, PathBuf>,
+) -> Result<String, CompileError> {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mod_cache_root = default_mod_cache_root();
+    let canonical_mod_cache = mod_cache_root.canonicalize().unwrap_or(mod_cache_root);
+    let mut hasher = StableHasher::new(COMPILE_CACHE_NATIVE_NAMESPACE);
+    hasher.update_str("schema", COMPILE_CACHE_SCHEMA_VERSION);
+    hasher.update_str("target_triple", current_target_triple());
+    hasher.update_path("source_root", &canonical_root);
+    hasher.update_path("mod_cache_root", &canonical_mod_cache);
+    hasher.update_bool("single_file", single_file.is_some());
+    if let Some(file_name) = single_file {
+        hasher.update_str("entry_name", &file_name.to_string_lossy());
+    } else {
+        hasher.update_str("entry_name", ".");
+    }
+
+    hash_compile_input_tree(&mut hasher, "source_root", &canonical_root)?;
+
+    if let Some(workfile_path) = vo_module::workspace::discover_workfile(&canonical_root) {
+        let canonical_workfile = workfile_path.canonicalize().unwrap_or(workfile_path);
+        hasher.update_path("workspace_file", &canonical_workfile);
+        hasher.update_bytes("workspace_file_bytes", &fs::read(&canonical_workfile)?);
+    } else {
+        hasher.update_str("workspace_file", "");
+    }
+
+    let mut replace_entries = replaces
+        .iter()
+        .map(|(module, path)| {
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            (module.clone(), canonical)
+        })
+        .collect::<Vec<_>>();
+    replace_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut seen_roots = BTreeSet::new();
+    for (module, replace_root) in replace_entries {
+        hasher.update_str("replace_module", &module);
+        hasher.update_path("replace_root", &replace_root);
+        if seen_roots.insert(replace_root.clone()) {
+            hash_compile_input_tree(&mut hasher, &format!("replace:{module}"), &replace_root)?;
         }
     }
-    result
+
+    Ok(hasher.finish())
+}
+
+fn hash_compile_input_tree(
+    hasher: &mut StableHasher,
+    label: &str,
+    root: &Path,
+) -> Result<(), CompileError> {
+    let mut files = Vec::new();
+    collect_compile_input_files(root, root, &mut files)?;
+    files.sort();
+
+    hasher.update_str("tree_label", label);
+    hasher.update_path("tree_root", root);
+    for rel in files {
+        hasher.update_path("file_path", &rel);
+        hasher.update_bytes("file_bytes", &fs::read(root.join(&rel))?);
+    }
+
+    Ok(())
+}
+
+fn collect_compile_input_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), CompileError> {
+    let mut entries = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            if should_skip_compile_input_dir(&path) {
+                continue;
+            }
+            collect_compile_input_files(root, &path, out)?;
+            continue;
+        }
+        if !is_compile_input_file(&path) {
+            continue;
+        }
+        out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+    }
+    Ok(())
+}
+
+fn should_skip_compile_input_dir(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(".git") | Some(".vo-cache") | Some("node_modules") | Some("target")
+    )
+}
+
+fn is_compile_input_file(path: &Path) -> bool {
+    if path.extension().map(|ext| ext == "vo").unwrap_or(false) {
+        return true;
+    }
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("vo.mod") | Some("vo.lock") | Some("vo.ext.toml") | Some("vo.work")
+    )
 }
 
 fn try_load_cache(
-    cache_file: &Path,
-    meta_file: &Path,
-    ext_file: &Path,
-    locked_file: &Path,
+    slot: &CompileCacheSlot,
     source_root: &Path,
-    current_mtime: Option<u64>,
+    fingerprint: &str,
 ) -> Option<CompileOutput> {
-    let current = current_mtime?;
-    let cached: u64 = fs::read_to_string(meta_file).ok()?.trim().parse().ok()?;
-    if cached != current {
+    let cached_fingerprint = fs::read_to_string(&slot.fingerprint_file).ok()?;
+    if cached_fingerprint.trim() != fingerprint {
         return None;
     }
-    
-    let bytes = fs::read(cache_file).ok()?;
+
+    let bytes = fs::read(&slot.module_file).ok()?;
     let module = Module::deserialize(&bytes).ok()?;
-    let extensions = load_extensions(ext_file);
-    let locked_modules = load_locked_modules(locked_file);
-    
+    let extensions = load_extensions(&slot.extensions_file);
+    let locked_modules = load_locked_modules(&slot.locked_modules_file);
+
     Some(CompileOutput {
         module,
         source_root: source_root.to_path_buf(),
         extensions,
         locked_modules,
     })
+}
+
+fn save_compile_cache(slot: &CompileCacheSlot, fingerprint: &str, output: &CompileOutput) {
+    let _ = fs::create_dir_all(&slot.dir);
+    let _ = fs::write(&slot.module_file, output.module.serialize());
+    save_extensions(&slot.extensions_file, &output.extensions);
+    save_locked_modules(&slot.locked_modules_file, &output.locked_modules);
+    let _ = fs::write(&slot.fingerprint_file, format!("{fingerprint}\n"));
 }
 
 fn save_extensions(path: &Path, extensions: &[ExtensionManifest]) {

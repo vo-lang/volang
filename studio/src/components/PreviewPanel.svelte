@@ -9,6 +9,7 @@
 
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
+  import { isGuiSessionSupersededError } from '../lib/services/runtime_service';
   import { runtime } from '../stores/runtime';
   import GuiRuntimeSurface from './GuiRuntimeSurface.svelte';
   import {
@@ -37,6 +38,7 @@
   let renderIslandActive = false;
   let renderIslandLaunching = false;
   let renderIslandLaunchGeneration = 0;
+  let renderIslandSessionId: number | null = null;
   let renderIslandError: string | null = null;
   let rendererContainer: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | null = null;
@@ -59,10 +61,15 @@
   // Launch render island when GUI app with renderer becomes active.
   // If the render island survived a layout transition (e.g. preview→fullscreen),
   // just re-adopt the canvas without re-launching.
-  $: if (isGuiApp && hasRenderIsland && registry && $runtime.guiModuleBytes && $runtime.guiEntryPath && !renderIslandActive && !renderIslandLaunching) {
-    if (isRenderIslandActive()) {
+  $: if (renderIslandActive && renderIslandSessionId != null && $runtime.guiSessionId !== renderIslandSessionId) {
+    externalWidgetMounted = false;
+    teardownIsland(renderIslandSessionId);
+  }
+  $: if (isGuiApp && hasRenderIsland && registry && $runtime.guiModuleBytes && $runtime.guiEntryPath && $runtime.guiSessionId != null && !renderIslandActive && !renderIslandLaunching) {
+    if (isRenderIslandActive($runtime.guiSessionId)) {
       console.log('[PreviewPanel] re-adopt: render island still active, re-attaching canvas');
       renderIslandActive = true;
+      renderIslandSessionId = $runtime.guiSessionId;
       tick().then(() => attachCanvas());
     } else {
       console.log('[PreviewPanel] fresh launch: no active render island');
@@ -150,17 +157,21 @@
   async function launchRenderIsland(): Promise<void> {
     if (!registry || renderIslandLaunching) return;
     const launchGeneration = ++renderIslandLaunchGeneration;
+    const sessionId = $runtime.guiSessionId;
     renderIslandLaunching = true;
     try {
       const moduleBytes = $runtime.guiModuleBytes;
       const entryPath = $runtime.guiEntryPath;
-      if (!moduleBytes || !entryPath) {
+      if (!moduleBytes || !entryPath || sessionId == null) {
         throw new Error('Render-island host context missing gui runtime data');
       }
       renderIslandError = null;
       await tick();
+      if ($runtime.guiSessionId !== sessionId || !($runtime.kind === 'gui' && $runtime.isRunning)) {
+        return;
+      }
       attachCanvas();
-      await startRenderIsland(CANVAS_ID, registry.backend, {
+      await startRenderIsland(CANVAS_ID, registry.backend, registry.runtime, sessionId, {
         entryPath,
         moduleBytes,
         framework: $runtime.guiFramework,
@@ -168,12 +179,15 @@
           renderIslandError = message;
         },
       });
-      if (launchGeneration !== renderIslandLaunchGeneration || !($runtime.kind === 'gui' && $runtime.isRunning)) {
-        stopRenderIsland();
-        removeCanvas();
+      if (launchGeneration !== renderIslandLaunchGeneration || !($runtime.kind === 'gui' && $runtime.isRunning) || $runtime.guiSessionId !== sessionId) {
+        stopRenderIsland(sessionId);
+        if (!isRenderIslandActive(sessionId)) {
+          removeCanvas();
+        }
         return;
       }
       renderIslandActive = true;
+      renderIslandSessionId = sessionId;
       maybeObserveRendererSize();
     } catch (e) {
       renderIslandError = e instanceof Error ? e.message : String(e);
@@ -197,9 +211,12 @@
     // Notify logic island that the external widget canvas is mounted
     const mountPayload = JSON.stringify({ type: 'mount', width, height });
     try {
-      await registry.backend.sendGuiEvent(externalHandlerId, mountPayload);
+      await registry.runtime.sendGuiEvent(externalHandlerId, mountPayload);
       return true;
     } catch (e) {
+      if (isGuiSessionSupersededError(e)) {
+        return false;
+      }
       renderIslandError = e instanceof Error ? e.message : String(e);
       throw e;
     }
@@ -225,7 +242,10 @@
         width: pendingResizeWidth,
         height: pendingResizeHeight,
       });
-      registry?.backend.sendGuiEventAsync(externalHandlerId, payload).catch((e) => {
+      registry?.runtime.sendGuiEventAsync(externalHandlerId, payload).catch((e) => {
+        if (isGuiSessionSupersededError(e)) {
+          return;
+        }
         console.error('[PreviewPanel] external widget resize failed:', e);
       });
     });
@@ -255,11 +275,12 @@
     }
   }
 
-  function teardownIsland(): void {
+  function teardownIsland(sessionId = renderIslandSessionId): void {
     renderIslandLaunchGeneration++;
     stopObservingRendererSize();
     renderIslandActive = false;
-    stopRenderIsland();
+    renderIslandSessionId = null;
+    stopRenderIsland(sessionId);
     removeCanvas();
   }
 
@@ -276,17 +297,18 @@
 
   onDestroy(() => {
     stopObservingRendererSize();
+    const sessionId = renderIslandSessionId;
     const running = $runtime.isRunning;
-    const active = isRenderIslandActive();
+    const active = sessionId != null && isRenderIslandActive(sessionId);
     console.log('[PreviewPanel] onDestroy', { running, active, externalWidgetMounted });
-    if (running && active) {
+    if (running && active && $runtime.guiSessionId === sessionId) {
       // Layout transition (e.g. preview → fullscreen): keep the render island
       // alive and park the canvas off-screen so the WebGPU surface stays valid.
       parkCanvas();
       console.log('[PreviewPanel] onDestroy: parked canvas for layout transition');
     } else {
       externalWidgetMounted = false;
-      teardownIsland();
+      teardownIsland(sessionId);
       console.log('[PreviewPanel] onDestroy: full teardown');
     }
   });
@@ -385,7 +407,7 @@
       {:else if isRenderSurface}
         <canvas id={CANVAS_ID} class="render-canvas"></canvas>
       {:else}
-        <GuiRuntimeSurface backend={registry.backend} />
+        <GuiRuntimeSurface runtimeService={registry.runtime} />
       {/if}
     {:else}
       <div class="idle-hint">

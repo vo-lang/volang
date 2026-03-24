@@ -7,23 +7,14 @@
 //! Source files are read from the JS VirtualFS (via vo_web_runtime_wasm::vfs).
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use js_sys::{Object, Reflect};
 use toml::Value;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
+use vo_common::stable_hash::StableHasher;
 use vo_common::vfs::{FileSystem, MemoryFs};
 use vo_app_runtime::{GuestRuntime, RenderBuffer, RenderIslandRuntime, SessionError};
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = globalThis, js_name = __voStudioDebugLog)]
-    fn vo_studio_debug_log(message: &str);
-}
-
-fn studio_debug_log(message: &str) {
-    vo_studio_debug_log(message);
-}
 
 fn session_error_to_js(error: SessionError) -> JsValue {
     JsValue::from_str(&error.to_string())
@@ -37,13 +28,37 @@ fn ensure_panic_hook() {
 
 include!(concat!(env!("OUT_DIR"), "/shell_embedded.rs"));
 
+fn emit_host_log(source: &str, message: &str) {
+    let global = js_sys::global();
+    let hook = Reflect::get(&global, &JsValue::from_str("__voStudioDebugLog"))
+        .unwrap_or(JsValue::UNDEFINED);
+    if hook.is_function() {
+        let func = js_sys::Function::from(hook);
+        let _ = func.call2(
+            &JsValue::NULL,
+            &JsValue::from_str(source),
+            &JsValue::from_str(message),
+        );
+    }
+}
+
 fn flush_stdout(label: &str, stdout: Option<&str>) {
     if let Some(s) = stdout {
         let trimmed = s.trim();
         if !trimmed.is_empty() {
+            emit_host_log(label, trimmed);
             web_sys::console::log_1(&format!("[{}] {}", label, trimmed).into());
         }
     }
+}
+
+fn log_wasm_info(message: &str) {
+    emit_host_log("studio-wasm", message);
+    web_sys::console::log_1(&format!("[studio-wasm] {}", message).into());
+}
+
+fn log_wasm_duration(label: &str, start_ms: f64) {
+    log_wasm_info(&format!("{} {:.0}ms", label, js_sys::Date::now() - start_ms));
 }
 
 fn guest_stdout_source() -> Box<dyn Fn() -> String> {
@@ -57,6 +72,14 @@ fn guest_stdout_source() -> Box<dyn Fn() -> String> {
 thread_local! {
     static GUEST: RefCell<Option<GuestRuntime>> = RefCell::new(None);
     static GUI_RENDER: RefCell<RenderBuffer> = RefCell::new(RenderBuffer::new());
+}
+
+fn with_guest_mut<T>(f: impl FnOnce(&mut GuestRuntime) -> Result<T, JsValue>) -> Result<T, JsValue> {
+    let mut guest = GUEST.with(|g| g.borrow_mut().take())
+        .ok_or_else(|| JsValue::from_str("No guest app running"))?;
+    let result = f(&mut guest);
+    GUEST.with(|g| *g.borrow_mut() = Some(guest));
+    result
 }
 
 fn load_gui_app_from_bytecode(bytecode: &[u8]) -> Result<GuestRuntime, JsValue> {
@@ -190,10 +213,25 @@ pub fn init_vfs() -> js_sys::Promise {
 // =============================================================================
 
 const VFS_MOD_ROOT: &str = "";
+const STUDIO_SYNTHETIC_MODULE: &str = "github.com/vo-lang/studio-examples";
+const STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION: &str = "1";
+const STUDIO_VFS_COMPILE_CACHE_SLOT_NAMESPACE: &str = "studio-vfs-compile-cache-slot";
+const STUDIO_VFS_COMPILE_CACHE_NAMESPACE: &str = "studio-vfs-compile-cache";
 
 struct ResolvedVfsCompileTarget {
     entry_path: String,
     project_root: Option<String>,
+}
+
+struct VfsCompileCacheSlot {
+    fingerprint_path: String,
+    module_path: String,
+}
+
+struct SingleFileEntry {
+    entry_clean: String,
+    content: String,
+    external_modules: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -251,6 +289,33 @@ fn join_vfs_path(base: &str, child: &str) -> String {
     }
 }
 
+fn is_studio_synthetic_project_root(dir: &str) -> bool {
+    let vo_mod_path = join_vfs_path(dir, "vo.mod");
+    let Ok(mod_content) = read_vfs_text(&vo_mod_path) else {
+        return false;
+    };
+    let Ok(mod_file) = vo_module::schema::modfile::ModFile::parse(&mod_content) else {
+        return false;
+    };
+    if mod_file.module.as_str() != STUDIO_SYNTHETIC_MODULE {
+        return false;
+    }
+    let vo_lock_path = join_vfs_path(dir, "vo.lock");
+    let Ok(lock_content) = read_vfs_text(&vo_lock_path) else {
+        return false;
+    };
+    let Ok(lock_file) = vo_module::schema::lockfile::LockFile::parse(&lock_content) else {
+        return false;
+    };
+    lock_file.created_by == "vo-studio" && lock_file.root.module == mod_file.module
+}
+
+fn is_persistent_vfs_project_root(dir: &str) -> bool {
+    let vo_mod_path = join_vfs_path(dir, "vo.mod");
+    let (_, vo_mod_err) = vo_web_runtime_wasm::vfs::read_file(&vo_mod_path);
+    vo_mod_err.is_none() && !is_studio_synthetic_project_root(dir)
+}
+
 fn is_vfs_dir(path: &str) -> bool {
     let normalized = normalize_vfs_path(path);
     let (_, err) = vo_web_runtime_wasm::vfs::read_dir(&normalized);
@@ -268,7 +333,7 @@ fn find_vfs_project_root(entry_path: &str) -> Option<String> {
     loop {
         let vo_mod_path = join_vfs_path(&current, "vo.mod");
         let (_, vo_mod_err) = vo_web_runtime_wasm::vfs::read_file(&vo_mod_path);
-        if vo_mod_err.is_none() {
+        if vo_mod_err.is_none() && is_persistent_vfs_project_root(&current) {
             return Some(current);
         }
 
@@ -342,9 +407,187 @@ fn read_vfs_bytes(path: &str) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
+impl SingleFileEntry {
+    fn load(target: &ResolvedVfsCompileTarget) -> Result<Self, String> {
+        let entry_clean = target.entry_path.trim_start_matches('/').to_string();
+        let content = read_vfs_text(&target.entry_path)?;
+        let external_modules = vo_web::extract_external_module_paths(&content);
+        Ok(Self {
+            entry_clean,
+            content,
+            external_modules,
+        })
+    }
+
+    fn installed_modules(&self) -> Result<Vec<(String, String)>, String> {
+        let mut installed = Vec::new();
+        for module in &self.external_modules {
+            let version = vo_web::discover_vfs_installed_version(module)
+                .ok_or_else(|| format!(
+                    "module {} is not installed in the VFS; call prepareEntry before compiling",
+                    module,
+                ))?;
+            installed.push((module.clone(), version));
+        }
+        Ok(installed)
+    }
+
+    fn locked_modules(&self) -> Result<Vec<vo_module::schema::lockfile::LockedModule>, String> {
+        let installed = self.installed_modules()?;
+        if installed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (_mod_content, lock_content) =
+            vo_web::build_synthetic_project_files(STUDIO_SYNTHETIC_MODULE, &installed)?;
+        let lock = vo_module::schema::lockfile::LockFile::parse(&lock_content)
+            .map_err(|e| format!("parse synthetic vo.lock: {}", e))?;
+        Ok(lock.resolved)
+    }
+
+    fn populate_compile_fs(&self, local_fs: &mut MemoryFs) -> Result<(), String> {
+        local_fs.add_file(PathBuf::from(&self.entry_clean), self.content.clone());
+        let installed = self.installed_modules()?;
+        if installed.is_empty() {
+            return Ok(());
+        }
+        let (mod_content, lock_content) =
+            vo_web::build_synthetic_project_files(STUDIO_SYNTHETIC_MODULE, &installed)?;
+        local_fs.add_file(entry_local_file_path(&self.entry_clean, "vo.mod"), mod_content);
+        local_fs.add_file(entry_local_file_path(&self.entry_clean, "vo.lock"), lock_content);
+        Ok(())
+    }
+}
+
+fn entry_local_file_path(entry_clean: &str, file_name: &str) -> PathBuf {
+    let entry_dir = std::path::Path::new(entry_clean)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    if entry_dir == std::path::Path::new(".") {
+        PathBuf::from(file_name)
+    } else {
+        entry_dir.join(file_name)
+    }
+}
+
+fn build_compile_fs_from_vfs(entry_path: &str) -> Result<(ResolvedVfsCompileTarget, MemoryFs), String> {
+    let target = resolve_vfs_compile_target(entry_path)?;
+    let mut local_fs = MemoryFs::new();
+
+    if let Some(project_root) = &target.project_root {
+        read_vfs_package(project_root, &mut local_fs)?;
+    } else {
+        let single_file = SingleFileEntry::load(&target)?;
+        single_file.populate_compile_fs(&mut local_fs)?;
+    }
+
+    Ok((target, local_fs))
+}
+
+fn ensure_vfs_parent_dir(path: &str) -> Result<(), String> {
+    if let Some(parent) = Path::new(path).parent() {
+        let parent = normalize_vfs_path(&parent.to_string_lossy());
+        if parent != "/" && !parent.is_empty() {
+            if let Some(error) = vo_web_runtime_wasm::vfs::mkdir_all(&parent, 0o755) {
+                return Err(format!("mkdir {}: {}", parent, error));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_vfs_bytes(path: &str, bytes: &[u8]) -> Result<(), String> {
+    ensure_vfs_parent_dir(path)?;
+    if let Some(error) = vo_web_runtime_wasm::vfs::write_file(path, bytes, 0o644) {
+        return Err(format!("write {}: {}", path, error));
+    }
+    Ok(())
+}
+
+fn write_vfs_text(path: &str, content: &str) -> Result<(), String> {
+    write_vfs_bytes(path, content.as_bytes())
+}
+
+fn vfs_compile_cache_slot(target: &ResolvedVfsCompileTarget) -> VfsCompileCacheSlot {
+    let mut slot_hasher = StableHasher::new(STUDIO_VFS_COMPILE_CACHE_SLOT_NAMESPACE);
+    slot_hasher.update_str("entry_path", &target.entry_path);
+    slot_hasher.update_str("project_root", target.project_root.as_deref().unwrap_or(""));
+    let slot_id = slot_hasher.finish_suffix();
+    let cache_base = target
+        .project_root
+        .clone()
+        .unwrap_or_else(|| vfs_parent_dir(&target.entry_path).unwrap_or_else(|| "/".to_string()));
+    let cache_dir = join_vfs_path(&join_vfs_path(&join_vfs_path(&cache_base, ".vo-cache"), "compile"), "studio-wasm");
+    let slot_dir = join_vfs_path(&cache_dir, &slot_id);
+    VfsCompileCacheSlot {
+        fingerprint_path: join_vfs_path(&slot_dir, "fingerprint"),
+        module_path: join_vfs_path(&slot_dir, "module.voc"),
+    }
+}
+
+fn collect_memory_fs_files(fs: &MemoryFs, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let mut entries = fs.read_dir(dir)
+        .map_err(|e| format!("read local fs dir {:?}: {}", dir, e))?;
+    entries.sort();
+    for entry in entries {
+        if fs.is_dir(&entry) {
+            collect_memory_fs_files(fs, &entry, out)?;
+        } else {
+            out.push(entry);
+        }
+    }
+    Ok(())
+}
+
+fn compute_vfs_compile_cache_fingerprint(
+    target: &ResolvedVfsCompileTarget,
+    local_fs: &MemoryFs,
+) -> Result<String, String> {
+    let mut hasher = StableHasher::new(STUDIO_VFS_COMPILE_CACHE_NAMESPACE);
+    hasher.update_str("schema", STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION);
+    hasher.update_str("entry_path", &target.entry_path);
+    hasher.update_str("project_root", target.project_root.as_deref().unwrap_or(""));
+    let mut files = Vec::new();
+    collect_memory_fs_files(local_fs, Path::new("."), &mut files)?;
+    files.sort();
+    for file in files {
+        let content = local_fs.read_file(&file)
+            .map_err(|e| format!("read local fs file {:?}: {}", file, e))?;
+        hasher.update_path("file_path", &file);
+        hasher.update_bytes("file_bytes", content.as_bytes());
+    }
+    Ok(hasher.finish())
+}
+
+fn try_load_vfs_compile_cache(slot: &VfsCompileCacheSlot, fingerprint: &str) -> Result<Option<Vec<u8>>, String> {
+    if !vfs_exists(&slot.fingerprint_path) || !vfs_exists(&slot.module_path) {
+        return Ok(None);
+    }
+    if read_vfs_text(&slot.fingerprint_path)?.trim() != fingerprint {
+        return Ok(None);
+    }
+    Ok(Some(read_vfs_bytes(&slot.module_path)?))
+}
+
+fn save_vfs_compile_cache(slot: &VfsCompileCacheSlot, fingerprint: &str, bytecode: &[u8]) -> Result<(), String> {
+    write_vfs_bytes(&slot.module_path, bytecode)?;
+    write_vfs_text(&slot.fingerprint_path, &format!("{fingerprint}\n"))
+}
+
 fn vfs_exists(path: &str) -> bool {
     let (_, _, _, _, _, err) = vo_web_runtime_wasm::vfs::stat(path);
     err.is_none()
+}
+
+fn read_project_locked_modules(
+    project_root: &str,
+) -> Result<Vec<vo_module::schema::lockfile::LockedModule>, String> {
+    let lock_path = join_vfs_path(project_root, "vo.lock");
+    if !vfs_exists(&lock_path) {
+        return Ok(Vec::new());
+    }
+    let lock = vo_module::schema::lockfile::LockFile::parse(&read_vfs_text(&lock_path)?)
+        .map_err(|e| format!("parse {}: {}", lock_path, e))?;
+    Ok(lock.resolved)
 }
 
 fn framework_module_root(locked: &vo_module::schema::lockfile::LockedModule) -> String {
@@ -433,6 +676,22 @@ fn parse_framework_module(manifest_path: &str) -> Result<Option<FrameworkModule>
     }))
 }
 
+fn append_locked_framework_modules(
+    modules: &mut Vec<FrameworkModule>,
+    locked_modules: &[vo_module::schema::lockfile::LockedModule],
+) -> Result<(), String> {
+    for locked in locked_modules {
+        let manifest_path = join_vfs_path(&framework_module_root(locked), "vo.ext.toml");
+        if !vfs_exists(&manifest_path) {
+            continue;
+        }
+        if let Some(module) = parse_framework_module(&manifest_path)? {
+            modules.push(module);
+        }
+    }
+    Ok(())
+}
+
 fn discover_framework_modules(target: &ResolvedVfsCompileTarget) -> Result<Vec<FrameworkModule>, String> {
     let mut modules = Vec::new();
     if let Some(project_root) = &target.project_root {
@@ -443,20 +702,12 @@ fn discover_framework_modules(target: &ResolvedVfsCompileTarget) -> Result<Vec<F
             }
         }
 
-        let lock_path = join_vfs_path(project_root, "vo.lock");
-        if vfs_exists(&lock_path) {
-            let lock = vo_module::schema::lockfile::LockFile::parse(&read_vfs_text(&lock_path)?)
-                .map_err(|e| format!("parse {}: {}", lock_path, e))?;
-            for locked in &lock.resolved {
-                let manifest_path = join_vfs_path(&framework_module_root(locked), "vo.ext.toml");
-                if !vfs_exists(&manifest_path) {
-                    continue;
-                }
-                if let Some(module) = parse_framework_module(&manifest_path)? {
-                    modules.push(module);
-                }
-            }
-        }
+        let locked_modules = read_project_locked_modules(project_root)?;
+        append_locked_framework_modules(&mut modules, &locked_modules)?;
+    } else {
+        let single_file = SingleFileEntry::load(target)?;
+        let locked_modules = single_file.locked_modules()?;
+        append_locked_framework_modules(&mut modules, &locked_modules)?;
     }
     Ok(modules)
 }
@@ -524,6 +775,21 @@ fn collect_vfs_files(root: &str, virtual_prefix: Option<&str>) -> Result<Vec<(St
     Ok(files)
 }
 
+fn render_island_snapshot_to_js(root_path: &str, files: Vec<(String, Vec<u8>)>) -> JsValue {
+    let obj = Object::new();
+    let _ = Reflect::set(&obj, &JsValue::from_str("rootPath"), &JsValue::from_str(root_path));
+    let js_files = js_sys::Array::new();
+    for (path, bytes) in files {
+        let file = Object::new();
+        let _ = Reflect::set(&file, &JsValue::from_str("path"), &JsValue::from_str(&path));
+        let bytes = js_sys::Uint8Array::from(bytes.as_slice());
+        let _ = Reflect::set(&file, &JsValue::from_str("bytes"), &bytes);
+        js_files.push(&file);
+    }
+    let _ = Reflect::set(&obj, &JsValue::from_str("files"), &js_files);
+    obj.into()
+}
+
 fn gui_run_output_to_js(
     render_bytes: Vec<u8>,
     module_bytes: Vec<u8>,
@@ -544,27 +810,20 @@ fn gui_run_output_to_js(
     obj.into()
 }
 
-fn render_island_snapshot_to_js(root_path: &str, files: Vec<(String, Vec<u8>)>) -> JsValue {
-    let obj = Object::new();
-    let _ = Reflect::set(&obj, &JsValue::from_str("rootPath"), &JsValue::from_str(root_path));
-    let js_files = js_sys::Array::new();
-    for (path, bytes) in files {
-        let file = Object::new();
-        let _ = Reflect::set(&file, &JsValue::from_str("path"), &JsValue::from_str(&path));
-        let bytes = js_sys::Uint8Array::from(bytes.as_slice());
-        let _ = Reflect::set(&file, &JsValue::from_str("bytes"), &bytes);
-        js_files.push(&file);
-    }
-    let _ = Reflect::set(&obj, &JsValue::from_str("files"), &js_files);
-    obj.into()
-}
-
 fn compile_from_vfs(entry_path: &str) -> Result<Vec<u8>, String> {
-    let (target, local_fs) = prepare_from_vfs(entry_path)?;
+    let (target, local_fs) = build_compile_fs_from_vfs(entry_path)?;
+    let cache_slot = vfs_compile_cache_slot(&target);
+    let fingerprint = compute_vfs_compile_cache_fingerprint(&target, &local_fs)?;
+    if let Some(bytecode) = try_load_vfs_compile_cache(&cache_slot, &fingerprint)? {
+        log_wasm_info(&format!("compile cache hit {}", target.entry_path));
+        return Ok(bytecode);
+    }
     let entry_clean = target.entry_path.trim_start_matches('/');
-
-    vo_web::compile_entry_with_vfs(entry_clean, local_fs, VFS_MOD_ROOT)
-        .map_err(|e| format!("compile error: {}", e))
+    let bytecode = vo_web::compile_entry_with_vfs(entry_clean, local_fs, VFS_MOD_ROOT)
+        .map_err(|e| format!("compile error: {}", e))?;
+    save_vfs_compile_cache(&cache_slot, &fingerprint, &bytecode)?;
+    log_wasm_info(&format!("compile cache store {}", target.entry_path));
+    Ok(bytecode)
 }
 
 fn compile_gui_run_output(entry_path: &str) -> Result<(ResolvedVfsCompileTarget, Vec<u8>, Option<FrameworkContract>), String> {
@@ -580,7 +839,11 @@ fn collect_render_island_snapshot(entry_path: &str) -> Result<JsValue, String> {
         .project_root
         .clone()
         .unwrap_or_else(|| vfs_parent_dir(&target.entry_path).unwrap_or_else(|| "/".to_string()));
-    let mut files = collect_vfs_files(&root_path, None)?;
+    let mut files = if target.project_root.is_some() {
+        collect_vfs_files(&root_path, None)?
+    } else {
+        vec![(target.entry_path.clone(), read_vfs_bytes(&target.entry_path)?)]
+    };
     for module in discover_framework_modules(&target)? {
         if let Some(renderer_path) = module.contract.renderer_path.as_ref() {
             let renderer_dir = vfs_parent_dir(renderer_path).unwrap_or_else(|| module.module_root.clone());
@@ -609,80 +872,42 @@ fn collect_render_island_snapshot(entry_path: &str) -> Result<JsValue, String> {
     Ok(render_island_snapshot_to_js(&root_path, files))
 }
 
-fn prepare_from_vfs(entry_path: &str) -> Result<(ResolvedVfsCompileTarget, MemoryFs), String> {
-    let target = resolve_vfs_compile_target(entry_path)?;
-    let entry_clean = target.entry_path.trim_start_matches('/');
-
-    let mut local_fs = MemoryFs::new();
-
-    if let Some(project_root) = &target.project_root {
-        read_vfs_package(project_root, &mut local_fs)?;
-    } else {
-        let (data, err) = vo_web_runtime_wasm::vfs::read_file(&target.entry_path);
-        if let Some(e) = err {
-            return Err(format!("read file '{}': {}", target.entry_path, e));
-        }
-        let content = String::from_utf8(data)
-            .map_err(|e| format!("utf8 '{}': {}", target.entry_path, e))?;
-        local_fs.add_file(PathBuf::from(entry_clean), content);
-    }
-
-    Ok((target, local_fs))
-}
-
-// =============================================================================
-// WASM exports
-// =============================================================================
-
 #[wasm_bindgen(js_name = "prepareEntry")]
 pub fn prepare_entry(entry_path: &str) -> js_sys::Promise {
     ensure_panic_hook();
     let entry_path = entry_path.to_string();
     wasm_bindgen_futures::future_to_promise(async move {
-        let (target, local_fs) = prepare_from_vfs(&entry_path)
+        let total_start = js_sys::Date::now();
+        let target = resolve_vfs_compile_target(&entry_path)
             .map_err(|e| JsValue::from_str(&e))?;
-        let entry_clean = target.entry_path.trim_start_matches('/').to_string();
 
-        if target.project_root.is_some() {
+        if let Some(project_root) = &target.project_root {
+            let read_start = js_sys::Date::now();
+            let mut local_fs = MemoryFs::new();
+            read_vfs_package(project_root, &mut local_fs)
+                .map_err(|e| JsValue::from_str(&e))?;
+            log_wasm_duration(&format!("prepareEntry read package {}", project_root), read_start);
+            let entry_clean = target.entry_path.trim_start_matches('/').to_string();
+            let deps_start = js_sys::Date::now();
             vo_web::ensure_vfs_deps_from_fs(&local_fs, &entry_clean)
                 .await
                 .map_err(|e| JsValue::from_str(&e))?;
+            log_wasm_duration(&format!("prepareEntry ensure deps {}", entry_clean), deps_start);
         } else {
-            // Single-file mode: auto-discover external imports, install modules,
-            // and write synthetic vo.mod/vo.lock so the compile path finds them.
-            let content = local_fs.read_file(std::path::Path::new(&entry_clean))
-                .map_err(|e| JsValue::from_str(&format!("read file '{}': {}", target.entry_path, e)))?;
-            let external_modules = vo_web::extract_external_module_paths(&content);
-            if !external_modules.is_empty() {
-                let mut installed = Vec::new();
-                for module in &external_modules {
-                    let (m, v) = vo_web::resolve_and_install_module(module)
-                        .await
-                        .map_err(|e| JsValue::from_str(&e))?;
-                    installed.push((m, v));
-                }
-
-                // Write synthetic vo.mod + vo.lock into the parent directory
-                let parent_dir = vfs_parent_dir(&target.entry_path)
-                    .unwrap_or_else(|| "/".to_string());
-                let (mod_content, lock_content) =
-                    vo_web::build_synthetic_project_files("github.com/vo-lang/studio-examples", &installed)
-                        .map_err(|e| JsValue::from_str(&e))?;
-
-                let mod_path = join_vfs_path(&parent_dir, "vo.mod");
-                if let Some(err) = vo_web_runtime_wasm::vfs::write_file(
-                    &mod_path, mod_content.as_bytes(), 0o644,
-                ) {
-                    return Err(JsValue::from_str(&format!("write {}: {}", mod_path, err)));
-                }
-                let lock_path = join_vfs_path(&parent_dir, "vo.lock");
-                if let Some(err) = vo_web_runtime_wasm::vfs::write_file(
-                    &lock_path, lock_content.as_bytes(), 0o644,
-                ) {
-                    return Err(JsValue::from_str(&format!("write {}: {}", lock_path, err)));
-                }
+            let single_file_start = js_sys::Date::now();
+            let single_file = SingleFileEntry::load(&target)
+                .map_err(|e| JsValue::from_str(&e))?;
+            log_wasm_duration(&format!("prepareEntry load single file {}", target.entry_path), single_file_start);
+            for module in &single_file.external_modules {
+                let module_start = js_sys::Date::now();
+                vo_web::resolve_and_install_module(module)
+                    .await
+                    .map_err(|e| JsValue::from_str(&e))?;
+                log_wasm_duration(&format!("prepareEntry resolve/install {}", module), module_start);
             }
         }
+
+        log_wasm_duration(&format!("prepareEntry total {}", target.entry_path), total_start);
 
         Ok(JsValue::NULL)
     })
@@ -731,14 +956,22 @@ pub fn run_gui(entry_path: &str) -> Result<JsValue, JsValue> {
     GUEST.with(|g| *g.borrow_mut() = None);
     GUI_RENDER.with(|r| { r.borrow_mut().poll(); });
 
+    let total_start = js_sys::Date::now();
+    let compile_start = js_sys::Date::now();
     let (target, bytecode, framework) = compile_gui_run_output(entry_path)
         .map_err(|e| JsValue::from_str(&e))?;
+    log_wasm_duration(&format!("runGui compile {}", target.entry_path), compile_start);
+    let load_start = js_sys::Date::now();
     let mut guest = load_gui_app_from_bytecode(&bytecode)?;
+    log_wasm_duration(&format!("runGui load vm {}", target.entry_path), load_start);
+    let start_start = js_sys::Date::now();
     let step = guest
         .start_gui_app()
         .map_err(session_error_to_js)?;
+    log_wasm_duration(&format!("runGui start app {}", target.entry_path), start_start);
     flush_stdout("guest", step.stdout.as_deref());
     GUEST.with(|g| *g.borrow_mut() = Some(guest));
+    log_wasm_duration(&format!("runGui total {}", target.entry_path), total_start);
     Ok(gui_run_output_to_js(step.render_output.unwrap_or_default(), bytecode, &target.entry_path, framework.as_ref()))
 }
 
@@ -750,14 +983,29 @@ pub fn run_gui(entry_path: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen(js_name = "sendGuiEvent")]
 pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<Vec<u8>, JsValue> {
     GUI_RENDER.with(|r| { r.borrow_mut().poll(); });
-    let mut guest = GUEST.with(|g| g.borrow_mut().take())
-        .ok_or_else(|| JsValue::from_str("No guest app running"))?;
-    let step = guest
-        .dispatch_gui_event(handler_id, payload)
-        .map_err(session_error_to_js)?;
-    flush_stdout("guest", step.stdout.as_deref());
-    GUEST.with(|g| *g.borrow_mut() = Some(guest));
-    Ok(step.render_output.unwrap_or_default())
+    with_guest_mut(|guest| {
+        let step = guest
+            .dispatch_gui_event(handler_id, payload)
+            .map_err(session_error_to_js)?;
+        flush_stdout("guest", step.stdout.as_deref());
+        Ok(step.render_output.unwrap_or_default())
+    })
+}
+
+#[wasm_bindgen(js_name = "sendGuiEventAsync")]
+pub fn send_gui_event_async(handler_id: i32, payload: &str) -> Result<(), JsValue> {
+    with_guest_mut(|guest| {
+        let step = guest
+            .try_dispatch_gui_event(handler_id, payload)
+            .map_err(session_error_to_js)?;
+        if let Some(step) = step {
+            flush_stdout("guest", step.stdout.as_deref());
+            if let Some(render_output) = step.render_output {
+                GUI_RENDER.with(|r| r.borrow_mut().push(render_output));
+            }
+        }
+        Ok(())
+    })
 }
 
 #[wasm_bindgen(js_name = "startRenderIsland")]
@@ -771,17 +1019,16 @@ pub fn start_render_island(bytecode: &[u8]) -> Result<(), JsValue> {
 
 #[wasm_bindgen(js_name = "pushIslandData")]
 pub fn push_island_data(data: &[u8]) -> Result<(), JsValue> {
-    let mut guest = GUEST.with(|g| g.borrow_mut().take())
-        .ok_or_else(|| JsValue::from_str("No guest app running"))?;
-    let step = guest
-        .push_island_frame(data)
-        .map_err(session_error_to_js)?;
-    flush_stdout("guest", step.stdout.as_deref());
-    if let Some(render_output) = step.render_output {
-        GUI_RENDER.with(|r| r.borrow_mut().push(render_output));
-    }
-    GUEST.with(|g| *g.borrow_mut() = Some(guest));
-    Ok(())
+    with_guest_mut(|guest| {
+        let step = guest
+            .push_island_frame(data)
+            .map_err(session_error_to_js)?;
+        flush_stdout("guest", step.stdout.as_deref());
+        if let Some(render_output) = step.render_output {
+            GUI_RENDER.with(|r| r.borrow_mut().push(render_output));
+        }
+        Ok(())
+    })
 }
 
 #[wasm_bindgen(js_name = "pollGuiRender")]
@@ -826,11 +1073,10 @@ pub fn wake_host_event(token: &str) -> Result<(), JsValue> {
     let token = token
         .parse::<u64>()
         .map_err(|e| JsValue::from_str(&format!("invalid host event token '{}': {}", token, e)))?;
-    let mut guest = GUEST.with(|g| g.borrow_mut().take())
-        .ok_or_else(|| JsValue::from_str("No guest app running"))?;
-    guest.wake_host_event(token);
-    GUEST.with(|g| *g.borrow_mut() = Some(guest));
-    Ok(())
+    with_guest_mut(|guest| {
+        guest.wake_host_event(token);
+        Ok(())
+    })
 }
 
 /// Stop the running guest app (clears state).

@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use tauri::AppHandle;
 use toml::Value;
+use vo_engine::with_compile_log_sink;
 use crate::commands::compiler::prepare_and_compile;
 use crate::commands::pathing::resolve_run_target;
 use crate::gui_runtime;
@@ -86,18 +88,37 @@ pub struct RenderIslandVfsSnapshot {
 #[tauri::command]
 pub fn cmd_run_gui(
     entry_path: String,
+    session_id: u64,
     state: tauri::State<'_, AppState>,
     app: AppHandle,
 ) -> Result<GuiRunOutput, String> {
     state.clear_guest_runtime();
     let session_root = state.session_root();
     let run_target = resolve_run_target(&session_root, state.workspace_root(), &entry_path, state.single_file_run())?;
-    let compile_output = prepare_and_compile(&run_target.compile_path.to_string_lossy())?;
+    let compile_path = run_target.compile_path.to_string_lossy().to_string();
+    let compile_start = Instant::now();
+    let compile_output = with_compile_log_sink(
+        gui_runtime::make_gui_log_sink(app.clone(), session_id),
+        || prepare_and_compile(&compile_path),
+    )?;
+    gui_runtime::emit_gui_log(
+        &app,
+        session_id,
+        "studio-native",
+        &format!("runGui compile {} {}ms", entry_path, compile_start.elapsed().as_millis()),
+    );
     let module_bytes = compile_output.module.serialize();
     let framework = extract_framework_contract(&compile_output.extensions);
     state.set_last_extensions(compile_output.extensions.clone());
-    let (render_bytes, handle, push_rx) = gui_runtime::run_gui(compile_output, app)
+    let start_start = Instant::now();
+    let (render_bytes, handle, push_rx) = gui_runtime::run_gui(compile_output, app.clone(), session_id)
         .map_err(|error| error.to_string())?;
+    gui_runtime::emit_gui_log(
+        &app,
+        session_id,
+        "studio-native",
+        &format!("runGui start app {} {}ms", entry_path, start_start.elapsed().as_millis()),
+    );
     state.install_guest_runtime(handle, push_rx);
     let external_widget_handler_id = find_on_widget_handler_id(&render_bytes);
     Ok(GuiRunOutput {

@@ -24,13 +24,72 @@ import type {
   SessionInfo,
   StreamHandle,
 } from '../types';
+import { consolePush } from '../../stores/console';
+import { formatCommonGuiLogLine, formatDurationMs, pushUiConsole, type UiConsoleLine } from './gui_console';
 import { makeTauriStreamHandle } from './stream_handle';
 
 type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+type GuiFatalErrorEvent = { sessionId: number; message: string };
+type GuiLogEvent = { sessionId: number; source: string; message: string };
+
+function displayPath(path: string): string {
+  const normalized = path.trim().replace(/\\/g, '/');
+  return normalized || path;
+}
+
+function formatNativeGuiLogLine(source: string, message: string): UiConsoleLine | null {
+  const commonLine = formatCommonGuiLogLine(source, message, displayPath);
+  if (commonLine) {
+    return commonLine;
+  }
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (source === 'vo-engine') {
+    const cachedLibrary = trimmed.match(/^using cached library (.+)@([^@]+)$/);
+    if (cachedLibrary) {
+      return { kind: 'success', text: `Using cached dependency ${cachedLibrary[1]}@${cachedLibrary[2]}` };
+    }
+    const fetchingLibrary = trimmed.match(/^fetching library (.+)@([^@]+)$/);
+    if (fetchingLibrary) {
+      return { kind: 'system', text: `Downloading dependency ${fetchingLibrary[1]}@${fetchingLibrary[2]}...` };
+    }
+    const fetchedLibrary = trimmed.match(/^fetched library (.+)@([^@]+)$/);
+    if (fetchedLibrary) {
+      return { kind: 'success', text: `Downloaded dependency ${fetchedLibrary[1]}@${fetchedLibrary[2]}` };
+    }
+    const cachedNativeExt = trimmed.match(/^using cached native extension (.+)$/);
+    if (cachedNativeExt) {
+      return { kind: 'success', text: `Using cached native extension ${displayPath(cachedNativeExt[1])}` };
+    }
+    const buildingNativeExt = trimmed.match(/^building native extension (.+)$/);
+    if (buildingNativeExt) {
+      return { kind: 'system', text: `Building native extension ${displayPath(buildingNativeExt[1])}...` };
+    }
+    const builtNativeExt = trimmed.match(/^built native extension (.+)$/);
+    if (builtNativeExt) {
+      return { kind: 'success', text: `Built native extension ${displayPath(builtNativeExt[1])}` };
+    }
+  }
+  if (source === 'studio-native') {
+    const prepareExtensions = trimmed.match(/^prepare gui extensions (.+)$/);
+    if (prepareExtensions) {
+      return prepareExtensions[1] === 'none'
+        ? { kind: 'system', text: 'Preparing GUI runtime...' }
+        : { kind: 'system', text: `Preparing GUI extensions: ${prepareExtensions[1]}` };
+    }
+  }
+  return { kind: 'system', text: `[${source}] ${trimmed}` };
+}
 
 export class NativeBackend implements Backend {
   readonly platform = 'native' as const;
   private invokePromise: Promise<Invoke> | null = null;
+  private guiSessionId = 0;
+  private guiFatalError: Error | null = null;
+  private guiFatalListenerPromise: Promise<void> | null = null;
+  private guiLogListenerPromise: Promise<void> | null = null;
 
   async getBootstrapContext(): Promise<BootstrapContext> {
     return this.invoke<BootstrapContext>('cmd_get_bootstrap_context');
@@ -130,13 +189,23 @@ export class NativeBackend implements Backend {
   }
 
   async runGui(path: string): Promise<GuiRunOutput> {
+    await this.ensureGuiListeners();
+    const sessionId = this.guiSessionId + 1;
+    this.guiSessionId = sessionId;
+    this.guiFatalError = null;
+    const targetLabel = displayPath(path);
+    consolePush('system', `Opening GUI ${targetLabel}`);
+    consolePush('system', `Preparing dependencies and compiling GUI ${targetLabel}...`);
+    const totalStart = performance.now();
     const raw = await this.invoke<{
       renderBytes: number[];
       moduleBytes: number[];
       entryPath: string;
       framework: { name: string; entry: string; capabilities: string[]; rendererPath: string | null } | null;
       externalWidgetHandlerId: number | null;
-    }>('cmd_run_gui', { entryPath: path });
+    }>('cmd_run_gui', { entryPath: path, sessionId });
+    this.assertNoGuiFatalError();
+    consolePush('success', `Opened GUI ${targetLabel} in ${formatDurationMs(performance.now() - totalStart)}`);
     return {
       renderBytes: new Uint8Array(raw.renderBytes),
       moduleBytes: new Uint8Array(raw.moduleBytes),
@@ -147,24 +216,34 @@ export class NativeBackend implements Backend {
   }
 
   async sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
+    this.assertNoGuiFatalError();
     const raw = await this.invoke<number[]>('cmd_send_gui_event', { handlerId, payload });
+    this.assertNoGuiFatalError();
     return new Uint8Array(raw);
   }
 
   async sendGuiEventAsync(handlerId: number, payload: string): Promise<void> {
+    this.assertNoGuiFatalError();
     await this.invoke<void>('cmd_send_gui_event_async', { handlerId, payload });
+    this.assertNoGuiFatalError();
   }
 
   async pushIslandTransport(data: Uint8Array): Promise<void> {
+    this.assertNoGuiFatalError();
     await this.invoke<void>('__island_transport_push', { data: Array.from(data) });
+    this.assertNoGuiFatalError();
   }
 
   async pollGuiRender(): Promise<Uint8Array> {
+    this.assertNoGuiFatalError();
     const raw = await this.invoke<number[]>('cmd_poll_gui_render');
+    this.assertNoGuiFatalError();
     return new Uint8Array(raw);
   }
 
   async stopGui(): Promise<void> {
+    this.guiSessionId += 1;
+    this.guiFatalError = null;
     await this.invoke<void>('cmd_stop_gui');
   }
 
@@ -228,5 +307,40 @@ export class NativeBackend implements Backend {
       this.invokePromise = import('@tauri-apps/api/core').then(({ invoke }) => invoke as Invoke);
     }
     return this.invokePromise;
+  }
+
+  private async ensureGuiListeners(): Promise<void> {
+    if (!this.guiFatalListenerPromise) {
+      this.guiFatalListenerPromise = import('@tauri-apps/api/event')
+        .then(({ listen }) => listen<GuiFatalErrorEvent>('gui_fatal_error', (event) => {
+          if (event.payload.sessionId !== this.guiSessionId) {
+            return;
+          }
+          this.guiFatalError = new Error(event.payload.message);
+        }))
+        .then(() => undefined);
+    }
+    if (!this.guiLogListenerPromise) {
+      this.guiLogListenerPromise = import('@tauri-apps/api/event')
+        .then(({ listen }) => listen<GuiLogEvent>('gui_log', (event) => {
+          if (event.payload.sessionId !== this.guiSessionId) {
+            return;
+          }
+          const line = formatNativeGuiLogLine(event.payload.source, event.payload.message);
+          if (!line) {
+            return;
+          }
+          pushUiConsole(line);
+        }))
+        .then(() => undefined);
+    }
+    await this.guiFatalListenerPromise;
+    await this.guiLogListenerPromise;
+  }
+
+  private assertNoGuiFatalError(): void {
+    if (this.guiFatalError) {
+      throw this.guiFatalError;
+    }
   }
 }

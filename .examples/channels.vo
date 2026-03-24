@@ -1,0 +1,29 @@
+package main
+
+// Channel communication patterns
+
+func main() {
+    // Buffered channel
+    jobs := make(chan int, 5)
+    done := make(chan bool)
+    
+    // Producer
+    go func() {
+        for i := 1; i <= 5; i++ {
+            jobs <- i
+            println("Sent job", i)
+        }
+        close(jobs)
+    }()
+    
+    // Consumer
+    go func() {
+        for job := range jobs {
+            println("Processing job", job)
+        }
+        done <- true
+    }()
+    
+    <-done
+    println("All done!")
+}

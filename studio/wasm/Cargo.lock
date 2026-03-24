@@ -1198,6 +1198,7 @@ version = "0.1.0"
 dependencies = [
  "codespan-reporting",
  "rustc-hash",
+ "sha2",
  "string-interner",
  "termcolor",
  "thiserror 1.0.69",

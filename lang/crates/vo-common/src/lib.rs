@@ -13,6 +13,7 @@ pub mod span;
 pub mod diagnostics;
 pub mod abi;
 pub mod vfs;
+pub mod stable_hash;
 
 pub use source::{SourceMap, SourceFile, FileId, SourceLoc};
 pub use span::{Span, Spanned, BytePos};

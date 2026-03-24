@@ -110,6 +110,9 @@ fn module_key_candidates(module_path: &str) -> Vec<String> {
 
 pub async fn load_wasm_ext_module(module_path: &str, bytes: &[u8], js_glue_url: &str) -> Result<(), String> {
     let keys = module_key_candidates(module_path);
+    web_sys::console::log_1(
+        &format!("[ext_bridge] load_wasm_ext_module: module_path={}, keys={:?}, bytes.len={}", module_path, keys, bytes.len()).into(),
+    );
     let primary_key = &keys[0];
     let promise = js_setup_ext_module(primary_key, bytes, js_glue_url);
     wasm_bindgen_futures::JsFuture::from(promise)
@@ -120,17 +123,26 @@ pub async fn load_wasm_ext_module(module_path: &str, bytes: &[u8], js_glue_url: 
     }
     LOADED_PREFIXES.with(|p| {
         let mut prefixes = p.borrow_mut();
-        for key in keys {
-            if !prefixes.contains(&key) {
-                prefixes.push(key);
+        for key in &keys {
+            if !prefixes.contains(key) {
+                prefixes.push(key.clone());
             }
         }
     });
+    let final_prefixes: Vec<String> = LOADED_PREFIXES.with(|p| p.borrow().clone());
+    web_sys::console::log_1(
+        &format!("[ext_bridge] load_wasm_ext_module done: LOADED_PREFIXES = {:?}", final_prefixes).into(),
+    );
     Ok(())
 }
 
 pub fn register_wasm_ext_bridges(reg: &mut ExternRegistry, externs: &[ExternDef]) {
+    let prefixes: Vec<String> = LOADED_PREFIXES.with(|p| p.borrow().clone());
+    web_sys::console::log_1(
+        &format!("[ext_bridge] register_wasm_ext_bridges: LOADED_PREFIXES = {:?}, externs.len() = {}", prefixes, externs.len()).into(),
+    );
     EXTERN_ID_TO_INFO.with(|m| m.borrow_mut().clear());
+    let mut registered_count = 0u32;
     for (id, def) in externs.iter().enumerate() {
         if is_wasm_ext_extern(&def.name) {
             let id = id as u32;
@@ -138,8 +150,12 @@ pub fn register_wasm_ext_bridges(reg: &mut ExternRegistry, externs: &[ExternDef]
                 m.borrow_mut().insert(id, (def.name.clone(), def.param_kinds.clone()));
             });
             reg.register(id, wasm_ext_bridge);
+            registered_count += 1;
         }
     }
+    web_sys::console::log_1(
+        &format!("[ext_bridge] registered {} wasm ext bridges out of {} externs", registered_count, externs.len()).into(),
+    );
 }
 
 pub fn clear_wasm_ext_state() {

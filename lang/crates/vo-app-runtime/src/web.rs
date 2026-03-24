@@ -85,6 +85,14 @@ impl GuestRuntime {
         self.session.dispatch_gui_event(handler_id, payload)
     }
 
+    pub fn try_dispatch_gui_event(
+        &mut self,
+        handler_id: i32,
+        payload: &str,
+    ) -> Result<Option<StepResult>, SessionError> {
+        self.session.try_dispatch_gui_event(handler_id, payload)
+    }
+
     pub fn push_island_frame(
         &mut self,
         data: &[u8],

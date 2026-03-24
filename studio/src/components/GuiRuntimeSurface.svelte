@@ -7,10 +7,10 @@
     render as renderGui,
     setupKeyHandler,
   } from '../../../../vogui/js/dist/index.js';
-  import type { Backend } from '../lib/backend/backend';
+  import { isGuiSessionSupersededError, type RuntimeService } from '../lib/services/runtime_service';
   import { runtime } from '../stores/runtime';
 
-  export let backend: Backend;
+  export let runtimeService: RuntimeService;
 
   let host: HTMLDivElement;
   let renderRevision = 0;
@@ -58,10 +58,10 @@
     const state = get(runtime);
     if (state.kind !== 'gui' || !state.isRunning) return;
     try {
-      const bytes = await backend.sendGuiEvent(handlerId, payload);
-      if (bytes.length === 0 || revision !== renderRevision) return;
-      renderFrame(bytes, revision);
+      if (revision !== renderRevision) return;
+      await runtimeService.sendGuiEvent(handlerId, payload);
     } catch (e) {
+      if (isGuiSessionSupersededError(e)) return;
       console.error(e);
     }
   }

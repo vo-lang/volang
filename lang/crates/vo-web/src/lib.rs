@@ -28,7 +28,7 @@ mod module_install;
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use module_install::{
     ensure_vfs_deps, ensure_vfs_deps_from_fs, ensure_vfs_versioned_imports, install_module_to_vfs, prepare_github_modules,
-    resolve_and_install_module, build_synthetic_project_files,
+    resolve_and_install_module, build_synthetic_project_files, discover_vfs_installed_version,
 };
 
 /// Initialize panic hook for better error messages in console.
@@ -36,6 +36,21 @@ pub use module_install::{
 #[wasm_bindgen(start)]
 pub fn init() {
     console_error_panic_hook::set_once();
+}
+
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
+pub(crate) fn emit_host_log(source: &str, message: &str) {
+    let global = js_sys::global();
+    let hook = js_sys::Reflect::get(&global, &JsValue::from_str("__voStudioDebugLog"))
+        .unwrap_or(JsValue::UNDEFINED);
+    if hook.is_function() {
+        let func = js_sys::Function::from(hook);
+        let _ = func.call2(
+            &JsValue::NULL,
+            &JsValue::from_str(source),
+            &JsValue::from_str(message),
+        );
+    }
 }
 
 /// Get version information.

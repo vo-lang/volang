@@ -9,9 +9,25 @@ import { runtime, IDLE_RUNTIME, type RuntimeState } from '../../stores/runtime';
 
 export type { RuntimeKind, RuntimeStatus, RuntimeState } from '../../stores/runtime';
 
+const GUI_SESSION_SUPERSEDED_MESSAGE = 'GUI session superseded';
+
+export class GuiSessionSupersededError extends Error {
+  constructor() {
+    super(GUI_SESSION_SUPERSEDED_MESSAGE);
+    this.name = 'GuiSessionSupersededError';
+  }
+}
+
+export function isGuiSessionSupersededError(error: unknown): error is GuiSessionSupersededError {
+  return error instanceof GuiSessionSupersededError;
+}
+
 export class RuntimeService {
   private activeConsoleRunId = 0;
   private nextConsoleRunId = 0;
+  private guiSessionId = 0;
+  private guiSessionActive = false;
+  private guiOperationChain: Promise<void> = Promise.resolve();
 
   constructor(private readonly backend: Backend) {}
 
@@ -104,59 +120,142 @@ export class RuntimeService {
   }
 
   async runGui(target: string): Promise<GuiRunOutput> {
-    const state = get(runtime);
-    if (state.kind === 'gui' && state.isRunning) {
-      await this.stopGui().catch(() => undefined);
+    const sessionId = this.beginGuiSession(target);
+    return this.serializeGuiOperation(async () => {
+      try {
+        this.assertGuiSessionCurrent(sessionId);
+        await this.backend.stopGui();
+        this.assertGuiSessionCurrent(sessionId);
+        const output = await this.backend.runGui(target);
+        this.assertGuiSessionCurrent(sessionId);
+        const externalWidgetHandlerId = output.externalWidgetHandlerId ?? findExternalWidgetHandlerIdInBytes(output.renderBytes);
+        runtime.set({
+          ...IDLE_RUNTIME,
+          status: 'ready',
+          kind: 'gui',
+          target,
+          isRunning: true,
+          guiEntryPath: output.entryPath,
+          guiModuleBytes: output.moduleBytes,
+          guiRenderBytes: output.renderBytes,
+          guiFramework: output.framework,
+          guiSessionId: sessionId,
+          guiExternalWidgetHandlerId: externalWidgetHandlerId,
+        });
+        return {
+          ...output,
+          externalWidgetHandlerId,
+        };
+      } catch (error) {
+        const sessionError = this.coerceGuiSessionError(error, sessionId);
+        if (!isGuiSessionSupersededError(sessionError) && this.isGuiSessionCurrent(sessionId)) {
+          this.guiSessionActive = false;
+          const message = formatError(sessionError);
+          consolePush('stderr', message);
+          runtime.set({ ...IDLE_RUNTIME, status: 'ready', kind: 'gui', target, lastError: message });
+        }
+        throw sessionError;
+      }
+    });
+  }
+
+  async sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
+    const sessionId = this.requireActiveGuiSession();
+    return this.serializeGuiOperation(async () => {
+      try {
+        this.assertGuiSessionCurrent(sessionId);
+        const bytes = await this.backend.sendGuiEvent(handlerId, payload);
+        this.assertGuiSessionCurrent(sessionId);
+        this.applyGuiRender(bytes);
+        return bytes;
+      } catch (error) {
+        throw this.coerceGuiSessionError(error, sessionId);
+      }
+    });
+  }
+
+  async sendGuiEventAsync(handlerId: number, payload: string): Promise<void> {
+    if (!this.guiSessionActive) {
+      return;
     }
-    runtime.set({ ...IDLE_RUNTIME, status: 'running', kind: 'gui', target, isRunning: true });
-    try {
-      const output = await this.backend.runGui(target);
-      const externalWidgetHandlerId = output.externalWidgetHandlerId ?? findExternalWidgetHandlerIdInBytes(output.renderBytes);
-      runtime.set({
-        ...IDLE_RUNTIME,
-        status: 'ready',
-        kind: 'gui',
-        target,
-        isRunning: true,
-        guiEntryPath: output.entryPath,
-        guiModuleBytes: output.moduleBytes,
-        guiRenderBytes: output.renderBytes,
-        guiFramework: output.framework,
-        guiExternalWidgetHandlerId: externalWidgetHandlerId,
-      });
-      return {
-        ...output,
-        externalWidgetHandlerId,
-      };
-    } catch (error) {
-      const message = formatError(error);
-      consolePush('stderr', message);
-      runtime.set({ ...IDLE_RUNTIME, status: 'ready', kind: 'gui', target, lastError: message });
-      throw error;
+    const sessionId = this.guiSessionId;
+    await this.serializeGuiOperation(async () => {
+      if (!this.isGuiSessionActiveFor(sessionId)) {
+        return;
+      }
+      try {
+        await this.backend.sendGuiEventAsync(handlerId, payload);
+        if (!this.isGuiSessionActiveFor(sessionId)) {
+          return;
+        }
+      } catch (error) {
+        const sessionError = this.coerceGuiSessionError(error, sessionId);
+        if (isGuiSessionSupersededError(sessionError)) {
+          return;
+        }
+        throw sessionError;
+      }
+    });
+  }
+
+  async pushIslandTransport(data: Uint8Array): Promise<void> {
+    if (!this.guiSessionActive) {
+      return;
     }
+    const sessionId = this.guiSessionId;
+    await this.serializeGuiOperation(async () => {
+      if (!this.isGuiSessionActiveFor(sessionId)) {
+        return;
+      }
+      try {
+        await this.backend.pushIslandTransport(data);
+        if (!this.isGuiSessionActiveFor(sessionId)) {
+          return;
+        }
+      } catch (error) {
+        const sessionError = this.coerceGuiSessionError(error, sessionId);
+        if (isGuiSessionSupersededError(sessionError)) {
+          return;
+        }
+        throw sessionError;
+      }
+    });
   }
 
   async pollGuiRender(): Promise<Uint8Array> {
-    const bytes = await this.backend.pollGuiRender();
-    if (bytes.length > 0) {
-      runtime.update((s) => {
-        const externalWidgetHandlerId = findExternalWidgetHandlerIdInBytes(bytes);
-        return {
-          ...s,
-          kind: 'gui',
-          status: 'ready',
-          isRunning: true,
-          guiRenderBytes: bytes,
-          guiExternalWidgetHandlerId: externalWidgetHandlerId ?? s.guiExternalWidgetHandlerId,
-        };
-      });
+    if (!this.guiSessionActive) {
+      return new Uint8Array(0);
     }
-    return bytes;
+    const sessionId = this.guiSessionId;
+    return this.serializeGuiOperation(async () => {
+      if (!this.isGuiSessionActiveFor(sessionId)) {
+        return new Uint8Array(0);
+      }
+      try {
+        const bytes = await this.backend.pollGuiRender();
+        if (!this.isGuiSessionActiveFor(sessionId)) {
+          return new Uint8Array(0);
+        }
+        this.applyGuiRender(bytes);
+        return bytes;
+      } catch (error) {
+        const sessionError = this.coerceGuiSessionError(error, sessionId);
+        if (isGuiSessionSupersededError(sessionError)) {
+          return new Uint8Array(0);
+        }
+        throw sessionError;
+      }
+    });
   }
 
   async stopGui(): Promise<void> {
-    await this.backend.stopGui();
-    runtime.set({ ...IDLE_RUNTIME });
+    const sessionId = this.invalidateGuiSession();
+    await this.serializeGuiOperation(async () => {
+      await this.backend.stopGui();
+      if (this.isGuiSessionCurrent(sessionId) && !this.guiSessionActive) {
+        runtime.set({ ...IDLE_RUNTIME });
+      }
+    });
   }
 
   async stopConsole(): Promise<void> {
@@ -201,6 +300,58 @@ export class RuntimeService {
     return runId;
   }
 
+  private beginGuiSession(target: string): number {
+    const sessionId = this.guiSessionId + 1;
+    this.guiSessionId = sessionId;
+    this.guiSessionActive = true;
+    runtime.set({ ...IDLE_RUNTIME, status: 'running', kind: 'gui', target, isRunning: true, guiSessionId: sessionId });
+    return sessionId;
+  }
+
+  private invalidateGuiSession(): number {
+    const sessionId = this.guiSessionId + 1;
+    this.guiSessionId = sessionId;
+    this.guiSessionActive = false;
+    return sessionId;
+  }
+
+  private requireActiveGuiSession(): number {
+    if (!this.guiSessionActive) {
+      throw new GuiSessionSupersededError();
+    }
+    return this.guiSessionId;
+  }
+
+  private isGuiSessionCurrent(sessionId: number): boolean {
+    return this.guiSessionId === sessionId;
+  }
+
+  private isGuiSessionActiveFor(sessionId: number): boolean {
+    return this.guiSessionActive && this.isGuiSessionCurrent(sessionId);
+  }
+
+  private assertGuiSessionCurrent(sessionId: number): void {
+    if (!this.isGuiSessionActiveFor(sessionId)) {
+      throw new GuiSessionSupersededError();
+    }
+  }
+
+  private coerceGuiSessionError(error: unknown, sessionId: number): unknown {
+    if (isGuiSessionSupersededError(error)) {
+      return error;
+    }
+    if (!this.guiSessionActive || !this.isGuiSessionCurrent(sessionId)) {
+      return new GuiSessionSupersededError();
+    }
+    return error;
+  }
+
+  private serializeGuiOperation<T>(run: () => Promise<T>): Promise<T> {
+    const next = this.guiOperationChain.then(run, run);
+    this.guiOperationChain = next.then(() => undefined, () => undefined);
+    return next;
+  }
+
   private isConsoleRunActive(runId: number): boolean {
     return this.activeConsoleRunId === runId;
   }
@@ -211,5 +362,22 @@ export class RuntimeService {
     }
     this.activeConsoleRunId = 0;
     runtime.update((state) => ({ ...state, ...patch }));
+  }
+
+  private applyGuiRender(bytes: Uint8Array): void {
+    if (bytes.length === 0) {
+      return;
+    }
+    runtime.update((state) => {
+      const externalWidgetHandlerId = findExternalWidgetHandlerIdInBytes(bytes);
+      return {
+        ...state,
+        kind: 'gui',
+        status: 'ready',
+        isRunning: true,
+        guiRenderBytes: bytes,
+        guiExternalWidgetHandlerId: externalWidgetHandlerId ?? state.guiExternalWidgetHandlerId,
+      };
+    });
   }
 }
