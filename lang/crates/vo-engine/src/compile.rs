@@ -20,11 +20,47 @@ use vo_vm::bytecode::Module;
 use vo_stdlib::EmbeddedStdlib;
 
 const MOD_CACHE_DIR: &str = ".vo/mod";
-const COMPILE_CACHE_SCHEMA_VERSION: &str = "2";
+const COMPILE_CACHE_SCHEMA_VERSION: &str = "3";
 const COMPILE_CACHE_SLOT_NAMESPACE: &str = "vo-compile-cache-slot";
 const COMPILE_CACHE_NATIVE_NAMESPACE: &str = "vo-compile-cache-native";
 
-type CompileLogSink = dyn Fn(&str, &str) + Send + Sync;
+#[derive(Clone, Debug)]
+pub struct CompileLogRecord {
+    pub source: &'static str,
+    pub code: &'static str,
+    pub path: Option<String>,
+    pub module: Option<String>,
+    pub version: Option<String>,
+}
+
+impl CompileLogRecord {
+    pub fn new(source: &'static str, code: &'static str) -> Self {
+        Self {
+            source,
+            code,
+            path: None,
+            module: None,
+            version: None,
+        }
+    }
+
+    pub fn path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    pub fn module(mut self, module: impl Into<String>) -> Self {
+        self.module = Some(module.into());
+        self
+    }
+
+    pub fn version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
+        self
+    }
+}
+
+type CompileLogSink = dyn Fn(CompileLogRecord) + Send + Sync;
 
 thread_local! {
     static COMPILE_LOG_SINK: RefCell<Option<Arc<CompileLogSink>>> = RefCell::new(None);
@@ -32,7 +68,7 @@ thread_local! {
 
 pub fn with_compile_log_sink<T, S, F>(sink: S, f: F) -> T
 where
-    S: Fn(&str, &str) + Send + Sync + 'static,
+    S: Fn(CompileLogRecord) + Send + Sync + 'static,
     F: FnOnce() -> T,
 {
     struct RestoreCompileLogSink(Option<Arc<CompileLogSink>>);
@@ -50,10 +86,10 @@ where
     f()
 }
 
-fn emit_compile_log(source: &str, message: &str) {
+fn emit_compile_log(record: CompileLogRecord) {
     COMPILE_LOG_SINK.with(|slot| {
         if let Some(sink) = slot.borrow().as_ref() {
-            sink(source, message);
+            sink(record);
         }
     });
 }
@@ -168,6 +204,19 @@ fn compile_zip(zip_path: &Path, internal_root: Option<&str>) -> Result<CompileOu
     
     let project = analyze_project(file_set, &resolver)
         .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
+    let mod_cache = default_mod_cache_root();
+    validate_extension_manifests_for_frozen_build(
+        &project.extensions,
+        &external_modules.locked_modules,
+        &mod_cache,
+    )
+    .map_err(CompileError::Analysis)?;
+    let extensions = resolve_extension_manifests(
+        &project.extensions,
+        &external_modules.locked_modules,
+        &mod_cache,
+    )
+    .map_err(CompileError::Analysis)?;
     
     let module = compile_project(&project)
         .map_err(|e| CompileError::Codegen(format!("{}", e)))?;
@@ -175,7 +224,7 @@ fn compile_zip(zip_path: &Path, internal_root: Option<&str>) -> Result<CompileOu
     Ok(CompileOutput {
         module,
         source_root: abs_root,
-        extensions: project.extensions,
+        extensions,
         locked_modules: external_modules.locked_modules,
     })
 }
@@ -198,14 +247,14 @@ pub fn compile_with_cache(path: &str) -> Result<CompileOutput, CompileError> {
     let fingerprint = compute_compile_cache_fingerprint(&root, single_file, &replaces)?;
 
     if let Some(output) = try_load_cache(&cache_slot, &root, &fingerprint) {
-        emit_compile_log("vo-engine", &format!("compile cache hit {}", path));
+        emit_compile_log(CompileLogRecord::new("vo-engine", "compile_cache_hit").path(path));
         return Ok(output);
     }
 
     let output = compile(path)?;
 
     save_compile_cache(&cache_slot, &fingerprint, &output);
-    emit_compile_log("vo-engine", &format!("compile cache store {}", path));
+    emit_compile_log(CompileLogRecord::new("vo-engine", "compile_cache_store").path(path));
 
     Ok(output)
 }
@@ -298,9 +347,9 @@ fn auto_download_locked_modules(root: &Path) -> Result<(), CompileError> {
                 .all(|artifact| vo_module::materialize::is_artifact_cached(&mod_cache, locked, artifact));
             let fully_cached = source_cached && artifacts_cached;
             if fully_cached {
-                emit_compile_log("vo-engine", &format!("using cached library {}@{}", locked.path, locked.version));
+                emit_compile_log(CompileLogRecord::new("vo-engine", "dependency_cached").module(locked.path.as_str()).version(locked.version.to_string()));
             } else {
-                emit_compile_log("vo-engine", &format!("fetching library {}@{}", locked.path, locked.version));
+                emit_compile_log(CompileLogRecord::new("vo-engine", "dependency_fetch_start").module(locked.path.as_str()).version(locked.version.to_string()));
             }
             (locked.path.to_string(), locked.version.to_string(), fully_cached)
         })
@@ -309,14 +358,22 @@ fn auto_download_locked_modules(root: &Path) -> Result<(), CompileError> {
         .map_err(|e| CompileError::Analysis(format!("failed to download dependencies: {}", e)))?;
     for (module, version, fully_cached) in module_cache_state {
         if !fully_cached {
-            emit_compile_log("vo-engine", &format!("fetched library {}@{}", module, version));
+            emit_compile_log(CompileLogRecord::new("vo-engine", "dependency_fetch_done").module(module).version(version));
         }
     }
 
     // Build native extensions for any newly-downloaded modules
     for locked in &lock_file.resolved {
         let cache_dir = vo_module::materialize::cache_dir(&mod_cache, &locked.path, &locked.version);
-        let _ = ensure_local_native_extension_built(&cache_dir);
+        let manifests = vo_module::ext_manifest::discover_extensions(&cache_dir)
+            .map_err(|e| CompileError::Analysis(format!(
+                "invalid cached extension manifest for {}@{}: {}",
+                locked.path,
+                locked.version,
+                e,
+            )))?;
+        ensure_extension_manifests_built(&manifests, &lock_file.resolved)
+            .map_err(CompileError::Analysis)?;
     }
 
     Ok(())
@@ -393,7 +450,8 @@ mod tests {
     }
 
     use vo_module::digest::Digest;
-    use vo_module::identity::ModulePath;
+    use vo_module::identity::{ArtifactId, ModulePath};
+    use vo_module::schema::lockfile::LockedArtifact;
     use vo_module::version::{ExactVersion, ToolchainConstraint};
 
     fn make_locked(path: &str, version: &str, vo: &str, commit: &str, release_manifest: &str, source: &str) -> LockedModule {
@@ -426,6 +484,25 @@ mod tests {
     fn read_saved_cache_fingerprint(root: &Path, single_file: Option<&std::ffi::OsStr>) -> String {
         let slot = compile_cache_slot(root, single_file);
         fs::read_to_string(slot.fingerprint_file).unwrap().trim().to_string()
+    }
+
+    fn write_minimal_native_extension_crate(rust_dir: &Path, crate_name: &str) {
+        let vo_ext_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("vo-ext");
+        let vo_ext_path = vo_ext_path.to_string_lossy().replace('\\', "/");
+        fs::create_dir_all(rust_dir.join("src")).unwrap();
+        fs::write(
+            rust_dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nvo-ext = {{ path = \"{}\" }}\n",
+                crate_name,
+                vo_ext_path,
+            ),
+        )
+        .unwrap();
+        fs::write(rust_dir.join("src").join("lib.rs"), "vo_ext::export_extensions!();\n").unwrap();
     }
 
     #[test]
@@ -556,6 +633,82 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_extension_manifests_uses_cached_native_artifact_path() {
+        let mod_root = std::env::temp_dir().join(format!(
+            "vo_resolve_locked_extensions_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let locked = make_locked(
+            "github.com/example/demo",
+            "v0.1.0",
+            "0.1.0",
+            "0123456789abcdef0123456789abcdef01234567",
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        );
+        let module_dir = locked_module_cache_dir(&mod_root, &locked);
+        fs::create_dir_all(&module_dir).unwrap();
+        fs::write(module_dir.join("vo.mod"), "module github.com/example/demo\nvo 0.1.0\n").unwrap();
+        fs::write(module_dir.join(".vo-version"), "v0.1.0\n").unwrap();
+        let source_digest = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        fs::write(module_dir.join(".vo-source-digest"), format!("{}\n", source_digest)).unwrap();
+        fs::write(module_dir.join("vo.release.json"), "{\"module\":\"github.com/example/demo\"}\n").unwrap();
+        fs::write(
+            module_dir.join("vo.ext.toml"),
+            "[extension]\nname = \"demo\"\npath = \"rust/target/{profile}/libdemo\"\n",
+        )
+        .unwrap();
+
+        let manifest = vo_module::ext_manifest::discover_extensions(&module_dir)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let artifact_name = manifest
+            .native_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .to_string();
+        let artifact_path = module_dir.join("artifacts").join(&artifact_name);
+        fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
+        let artifact_bytes = b"fake-native-artifact";
+        fs::write(&artifact_path, artifact_bytes).unwrap();
+        let artifact_path = artifact_path.canonicalize().unwrap();
+
+        let mut locked = make_locked(
+            "github.com/example/demo",
+            "v0.1.0",
+            "0.1.0",
+            "0123456789abcdef0123456789abcdef01234567",
+            &installed_module_release_manifest_digest(&module_dir).unwrap().unwrap(),
+            source_digest,
+        );
+        locked.artifacts.push(LockedArtifact {
+            id: ArtifactId {
+                kind: "extension-native".to_string(),
+                target: current_target_triple().to_string(),
+                name: artifact_name.clone(),
+            },
+            size: artifact_bytes.len() as u64,
+            digest: Digest::from_sha256(artifact_bytes),
+        });
+
+        assert!(
+            validate_extension_manifests_for_frozen_build(&[manifest.clone()], &[locked.clone()], &mod_root)
+                .is_ok()
+        );
+        let resolved = resolve_extension_manifests(&[manifest], &[locked], &mod_root).unwrap();
+        assert_eq!(resolved[0].native_path, artifact_path);
+
+        fs::remove_dir_all(&mod_root).unwrap();
+    }
+
+    #[test]
     fn test_compile_prefers_local_replace_extension_manifest_paths() {
         let root = std::env::temp_dir().join(format!(
             "vo_compile_local_ext_{}_{}",
@@ -565,59 +718,47 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let app_root = root.join("app");
-        let local_voplay = root.join("voplay");
+        let repo_root = root.join("repo");
+        let volang_root = repo_root.join("volang");
+        let examples_root = volang_root.join("examples");
+        let local_vogui = repo_root.join("vogui");
 
-        fs::create_dir_all(&app_root).unwrap();
-        fs::create_dir_all(local_voplay.join("rust").join("src")).unwrap();
+        fs::create_dir_all(&examples_root).unwrap();
+        fs::create_dir_all(local_vogui.join("rust").join("src")).unwrap();
 
         fs::write(
-            app_root.join("vo.mod"),
-            "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/vo-lang/voplay ^0.1.0\n",
+            volang_root.join("vo.work"),
+            "version = 1\n\n[[use]]\npath = \"../vogui\"\n",
         )
         .unwrap();
-        let voplay_locked = make_locked(
-            "github.com/vo-lang/voplay",
-            "v0.1.0",
-            "^0.1.0",
-            "0123456789abcdef0123456789abcdef01234567",
-            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-            "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-        );
-        let lock_content = render_lock_with_modules(
-            "github.com/acme/app", "^0.1.0", &[voplay_locked],
-        );
-        fs::write(app_root.join("vo.lock"), lock_content).unwrap();
-        fs::write(app_root.join("vo.work"), "version = 1\n\n[[use]]\npath = \"../voplay\"\n").unwrap();
         fs::write(
-            app_root.join("main.vo"),
-            "package main\nimport \"github.com/vo-lang/voplay\"\nfunc main(){voplay.Hello()}\n",
+            examples_root.join("tetris.vo"),
+            "package main\nimport \"github.com/vo-lang/vogui\"\nfunc main(){vogui.Hello()}\n",
         )
         .unwrap();
+        fs::write(
+            local_vogui.join("vo.mod"),
+            "module github.com/vo-lang/vogui\nvo 0.1.0\n",
+        )
+        .unwrap();
+        fs::write(
+            local_vogui.join("vo.ext.toml"),
+            "[extension]\nname = \"vogui\"\npath = \"rust/target/{profile}/libvo_vogui\"\n",
+        )
+        .unwrap();
+        fs::write(
+            local_vogui.join("vogui.vo"),
+            "package vogui\nfunc Hello(){}\n",
+        )
+        .unwrap();
+        write_minimal_native_extension_crate(&local_vogui.join("rust"), "vo_vogui");
 
-        fs::write(local_voplay.join("vo.mod"), "module github.com/vo-lang/voplay\nvo 0.1.0\n").unwrap();
-        fs::write(
-            local_voplay.join("vo.ext.toml"),
-            "[extension]\nname = \"voplay\"\npath = \"rust/target/{profile}/libvo_voplay\"\n",
-        )
-        .unwrap();
-        fs::write(
-            local_voplay.join("hello.vo"),
-            "package voplay\nfunc Hello(){}\n",
-        )
-        .unwrap();
-        fs::write(
-            local_voplay.join("rust").join("Cargo.toml"),
-            "[package]\nname = \"vo_voplay\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
-
-        let output = compile(app_root.to_str().unwrap()).unwrap();
-        let local_voplay = local_voplay.canonicalize().unwrap();
+        let output = compile(examples_root.join("tetris.vo").to_string_lossy().as_ref()).unwrap();
+        let local_vogui = local_vogui.canonicalize().unwrap();
         assert!(
             output.extensions.iter().any(|manifest| {
-                manifest.name == "voplay"
-                    && manifest.native_path.starts_with(local_voplay.join("rust").join("target"))
+                manifest.name == "vogui"
+                    && manifest.native_path.starts_with(local_vogui.join("rust").join("target"))
             }),
             "extensions = {:?}",
             output.extensions
@@ -669,11 +810,7 @@ mod tests {
             "package vogui\nfunc Hello(){}\n",
         )
         .unwrap();
-        fs::write(
-            local_vogui.join("rust").join("Cargo.toml"),
-            "[package]\nname = \"vo_vogui\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
+        write_minimal_native_extension_crate(&local_vogui.join("rust"), "vo_vogui");
 
         let output = compile(examples_root.join("tetris.vo").to_string_lossy().as_ref()).unwrap();
         let local_vogui = local_vogui.canonicalize().unwrap();
@@ -752,11 +889,17 @@ mod tests {
          fs::write(&b_path, "package main\nfunc main() {}\nfunc b() {}\n").unwrap();
 
          let a1 = compile_with_cache(a_path.to_string_lossy().as_ref()).unwrap();
-         let b1 = compile_with_cache(b_path.to_string_lossy().as_ref()).unwrap();
-         let a2 = compile_with_cache(a_path.to_string_lossy().as_ref()).unwrap();
+        let _b1 = compile_with_cache(b_path.to_string_lossy().as_ref()).unwrap();
+        let a2 = compile_with_cache(a_path.to_string_lossy().as_ref()).unwrap();
+        let a_slot = compile_cache_slot(&root, Some(a_path.file_name().unwrap()));
+        let b_slot = compile_cache_slot(&root, Some(b_path.file_name().unwrap()));
 
-         assert_eq!(a1.module.serialize(), a2.module.serialize());
-         assert_ne!(a1.module.serialize(), b1.module.serialize());
+        assert_eq!(a1.module.serialize(), a2.module.serialize());
+        assert_ne!(a_slot.dir, b_slot.dir);
+        assert_ne!(
+            read_saved_cache_fingerprint(&root, Some(a_path.file_name().unwrap())),
+            read_saved_cache_fingerprint(&root, Some(b_path.file_name().unwrap())),
+        );
 
          fs::remove_dir_all(&root).unwrap();
      }
@@ -1141,10 +1284,17 @@ fn compile_with_fs<F: FileSystem + Clone>(fs: F, root: &Path, single_file: Optio
     
     let project = analyze_project(file_set, &resolver)
         .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
+    let mod_cache = default_mod_cache_root();
     validate_extension_manifests_for_frozen_build(
         &project.extensions,
         &external_modules.locked_modules,
-        &default_mod_cache_root(),
+        &mod_cache,
+    )
+    .map_err(CompileError::Analysis)?;
+    let extensions = resolve_extension_manifests(
+        &project.extensions,
+        &external_modules.locked_modules,
+        &mod_cache,
     )
     .map_err(CompileError::Analysis)?;
     
@@ -1154,7 +1304,7 @@ fn compile_with_fs<F: FileSystem + Clone>(fs: F, root: &Path, single_file: Optio
     Ok(CompileOutput {
         module,
         source_root: root.to_path_buf(),
-        extensions: project.extensions,
+        extensions,
         locked_modules: external_modules.locked_modules,
     })
 }
@@ -1297,6 +1447,39 @@ fn locked_module_cache_relative_dir(locked: &LockedModule) -> PathBuf {
     vo_module::materialize::cache_relative_dir(&locked.path, &locked.version)
 }
 
+fn read_trimmed_metadata(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let trimmed = content.trim().to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed)
+}
+
+fn installed_module_version(module_dir: &Path) -> Option<String> {
+    read_trimmed_metadata(&module_dir.join(vo_module::materialize::VERSION_MARKER))
+}
+
+fn installed_module_source_digest(module_dir: &Path) -> Option<String> {
+    read_trimmed_metadata(&module_dir.join(vo_module::materialize::SOURCE_DIGEST_MARKER))
+}
+
+fn installed_module_release_manifest_digest(module_dir: &Path) -> Result<Option<String>, String> {
+    let path = module_dir.join("vo.release.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "failed to read cached release manifest at {}: {}",
+                path.display(),
+                error,
+            ));
+        }
+    };
+    Ok(Some(vo_module::digest::Digest::from_sha256(&bytes).to_string()))
+}
+
 fn validate_locked_modules_installed(
     locked_modules: &[LockedModule],
     mod_root: &Path,
@@ -1377,35 +1560,13 @@ fn validate_installed_module(module_dir: &Path, locked: &LockedModule) -> Result
     Ok(())
 }
 
-fn installed_module_version(module_dir: &Path) -> Option<String> {
-    std::fs::read_to_string(module_dir.join(".vo-version"))
-        .ok()
-        .map(|s| s.trim().to_string())
-}
-
-fn installed_module_source_digest(module_dir: &Path) -> Option<String> {
-    std::fs::read_to_string(module_dir.join(".vo-source-digest"))
-        .ok()
-        .map(|s| s.trim().to_string())
-}
-
-fn installed_module_release_manifest_digest(module_dir: &Path) -> Result<Option<String>, String> {
-    let manifest_path = module_dir.join("vo.release.json");
-    if !manifest_path.is_file() {
-        return Ok(None);
-    }
-    let bytes = std::fs::read(&manifest_path)
-        .map_err(|e| format!("failed to read {}: {}", manifest_path.display(), e))?;
-    Ok(Some(sha256_digest(&bytes)))
-}
-
 fn validate_extension_manifests_for_frozen_build(
     manifests: &[ExtensionManifest],
     locked_modules: &[LockedModule],
-    mod_cache: &Path,
+    mod_root: &Path,
 ) -> Result<(), String> {
     use std::collections::BTreeSet;
-    let mod_cache = mod_cache.canonicalize().unwrap_or_else(|_| mod_cache.to_path_buf());
+    let mod_root = mod_root.canonicalize().unwrap_or_else(|_| mod_root.to_path_buf());
     let mut seen = BTreeSet::new();
 
     for manifest in manifests {
@@ -1420,83 +1581,25 @@ fn validate_extension_manifests_for_frozen_build(
         if !seen.insert(module_dir.clone()) {
             continue;
         }
-        if !module_dir.starts_with(&mod_cache) {
-            // Local extension — validated and built at runtime, not at compile time
-            continue;
-        }
 
-        let (module_path, version) = module_identity_from_cache_dir(&mod_cache, &module_dir)
-            .ok_or_else(|| format!(
-                "failed to infer module path for cached extension at {}",
-                module_dir.display(),
-            ))?;
-        let locked = locked_modules
-            .iter()
-            .find(|l| l.path.as_str() == module_path && l.version.to_string() == version)
-            .ok_or_else(|| format!(
-                "missing locked module metadata for cached extension {}@{}",
-                module_path, version,
-            ))?;
-        validate_installed_module(&module_dir, locked)?;
-        validate_locked_native_artifact(&module_dir, locked)?;
+        if module_dir.starts_with(&mod_root) {
+            let locked = locked_module_for_cached_extension(&module_dir, &mod_root, locked_modules)?;
+            validate_installed_module(&module_dir, locked)?;
+            validate_locked_native_artifact(&module_dir, locked)?;
+        } else {
+            ensure_local_native_extension_built(&module_dir)?;
+        }
     }
 
     Ok(())
 }
 
-fn validate_locked_native_artifact(module_dir: &Path, locked: &LockedModule) -> Result<(), String> {
-    let target = current_target_triple();
-    let artifact = locked.artifacts.iter().find(|a| {
-        a.id.kind == "extension-native" && a.id.target == target
-    });
-    let Some(artifact) = artifact else {
-        // No native artifact locked for this target — check if extension needs one
-        let has_rust_project = module_dir.join("rust").join("Cargo.toml").is_file();
-        if has_rust_project {
-            let manifests = vo_module::ext_manifest::discover_extensions(module_dir)
-                .map_err(|e| format!("failed to read extension manifest for {}: {}", locked.path, e))?;
-            if let Some(manifest) = manifests.into_iter().next() {
-                return Err(format!(
-                    "locked module {}@{} declares native extension {} but vo.lock does not pin an extension-native artifact for target {}; frozen builds do not compile cached modules from source\n  run: vo mod sync\n  then: vo mod download",
-                    locked.path, locked.version, manifest.name, target,
-                ));
-            }
-        }
-        return Ok(());
-    };
-
-    let manifests = vo_module::ext_manifest::discover_extensions(module_dir)
-        .map_err(|e| format!("failed to read extension manifest for {}: {}", locked.path, e))?;
-    let Some(manifest) = manifests.into_iter().next() else {
-        return Err(format!(
-            "locked module {}@{} requires native artifact {} for {} but vo.ext.toml is missing",
-            locked.path, locked.version, artifact.id.name, artifact.id.target,
-        ));
-    };
-    if !manifest.native_path.is_file() {
-        return Err(format!(
-            "locked native artifact {} for {}@{} is missing at {}; run `vo mod download`",
-            artifact.id.name, locked.path, locked.version, manifest.native_path.display(),
-        ));
-    }
-    let actual_digest = sha256_digest_file(&manifest.native_path)?;
-    if actual_digest != artifact.digest.as_str() {
-        return Err(format!(
-            "locked native artifact {} for {}@{} digest mismatch at {}: expected {}, found {}",
-            artifact.id.name, locked.path, locked.version,
-            manifest.native_path.display(), artifact.digest, actual_digest,
-        ));
-    }
-    Ok(())
-}
-
-fn module_identity_from_cache_dir(mod_cache: &Path, module_dir: &Path) -> Option<(String, String)> {
-    let rel = module_dir.strip_prefix(mod_cache).ok()?;
-    let components: Vec<&str> = rel.components()
-        .map(|c| c.as_os_str().to_str().unwrap_or(""))
+fn module_identity_from_cache_dir(mod_root: &Path, module_dir: &Path) -> Option<(String, String)> {
+    let rel = module_dir.strip_prefix(mod_root).ok()?;
+    let components: Vec<&str> = rel
+        .components()
+        .map(|component| component.as_os_str().to_str().unwrap_or(""))
         .collect();
-    // Layout: <module_path_encoded>/<version>
-    // e.g. "github.com@acme@lib/v1.2.3"
     if components.len() >= 2 {
         let module_path = components[0].replace('@', "/");
         let version = components[1].to_string();
@@ -1511,13 +1614,163 @@ fn current_target_triple() -> &'static str {
     env!("VO_TARGET_TRIPLE")
 }
 
+fn resolve_extension_manifests(
+    manifests: &[ExtensionManifest],
+    locked_modules: &[LockedModule],
+    mod_root: &Path,
+) -> Result<Vec<ExtensionManifest>, String> {
+    let mod_root = mod_root.canonicalize().unwrap_or_else(|_| mod_root.to_path_buf());
+    manifests
+        .iter()
+        .map(|manifest| resolve_extension_manifest(manifest, locked_modules, &mod_root))
+        .collect()
+}
+
+fn resolve_extension_manifest(
+    manifest: &ExtensionManifest,
+    locked_modules: &[LockedModule],
+    mod_root: &Path,
+) -> Result<ExtensionManifest, String> {
+    let module_dir = manifest
+        .manifest_path
+        .parent()
+        .ok_or_else(|| format!(
+            "extension manifest path has no parent: {}",
+            manifest.manifest_path.display(),
+        ))?;
+    let module_dir = module_dir.canonicalize().unwrap_or_else(|_| module_dir.to_path_buf());
+    if !module_dir.starts_with(mod_root) {
+        return Ok(manifest.clone());
+    }
+
+    let locked = locked_module_for_cached_extension(&module_dir, mod_root, locked_modules)?;
+    let artifact = find_locked_native_artifact(manifest, locked)?;
+    let mut resolved = manifest.clone();
+    resolved.native_path = locked_native_artifact_path(&module_dir, artifact);
+    Ok(resolved)
+}
+
+fn locked_module_for_cached_extension<'a>(
+    module_dir: &Path,
+    mod_root: &Path,
+    locked_modules: &'a [LockedModule],
+) -> Result<&'a LockedModule, String> {
+    let (module_path, version) = module_identity_from_cache_dir(mod_root, module_dir)
+        .ok_or_else(|| format!(
+            "failed to infer module path for cached extension at {}",
+            module_dir.display(),
+        ))?;
+    locked_modules
+        .iter()
+        .find(|locked| locked.path.as_str() == module_path && locked.version.to_string() == version)
+        .ok_or_else(|| format!(
+            "missing locked module metadata for cached extension {}@{}",
+            module_path, version,
+        ))
+}
+
+fn native_extension_artifact_name(
+    manifest: &ExtensionManifest,
+    locked: &LockedModule,
+) -> Result<String, String> {
+    manifest
+        .native_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!(
+            "invalid native extension artifact path for {}@{}: {}",
+            locked.path,
+            locked.version,
+            manifest.native_path.display(),
+        ))
+}
+
+fn find_locked_native_artifact<'a>(
+    manifest: &ExtensionManifest,
+    locked: &'a LockedModule,
+) -> Result<&'a vo_module::schema::lockfile::LockedArtifact, String> {
+    let artifact_name = native_extension_artifact_name(manifest, locked)?;
+    locked
+        .artifacts
+        .iter()
+        .find(|artifact| {
+            artifact.id.kind == "extension-native"
+                && artifact.id.target == current_target_triple()
+                && artifact.id.name == artifact_name
+        })
+        .ok_or_else(|| format!(
+            "vo.lock does not pin an extension-native artifact for {}@{} ({})",
+            locked.path,
+            locked.version,
+            artifact_name,
+        ))
+}
+
+fn locked_native_artifact_path(
+    module_dir: &Path,
+    artifact: &vo_module::schema::lockfile::LockedArtifact,
+) -> PathBuf {
+    module_dir.join("artifacts").join(&artifact.id.name)
+}
+
+fn validate_locked_native_artifact(module_dir: &Path, locked: &LockedModule) -> Result<(), String> {
+    let manifest = vo_module::ext_manifest::discover_extensions(module_dir)
+        .map_err(|error| format!(
+            "invalid cached extension manifest for {}@{} at {}: {}",
+            locked.path,
+            locked.version,
+            module_dir.display(),
+            error,
+        ))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!(
+            "missing extension manifest for {}@{} at {}",
+            locked.path,
+            locked.version,
+            module_dir.display(),
+        ))?;
+    let artifact = find_locked_native_artifact(&manifest, locked)?;
+    let artifact_path = locked_native_artifact_path(module_dir, artifact);
+    let bytes = std::fs::read(&artifact_path).map_err(|error| format!(
+        "failed to read cached native extension artifact for {}@{} at {}: {}",
+        locked.path,
+        locked.version,
+        artifact_path.display(),
+        error,
+    ))?;
+    if bytes.len() as u64 != artifact.size {
+        return Err(format!(
+            "cached native extension artifact size mismatch for {}@{} ({}): expected {}, found {}",
+            locked.path,
+            locked.version,
+            artifact.id.name,
+            artifact.size,
+            bytes.len(),
+        ));
+    }
+    let digest = vo_module::digest::Digest::from_sha256(&bytes);
+    if digest != artifact.digest {
+        return Err(format!(
+            "cached native extension artifact digest mismatch for {}@{} ({}): expected {}, found {}",
+            locked.path,
+            locked.version,
+            artifact.id.name,
+            artifact.digest,
+            digest,
+        ));
+    }
+    Ok(())
+}
+
 pub fn ensure_extension_manifests_built(
     manifests: &[ExtensionManifest],
     locked_modules: &[LockedModule],
 ) -> Result<(), String> {
     use std::collections::BTreeSet;
-    let mod_cache = default_mod_cache_root();
-    let mod_cache = mod_cache.canonicalize().unwrap_or(mod_cache);
+    let mod_root = default_mod_cache_root();
+    let mod_root = mod_root.canonicalize().unwrap_or_else(|_| mod_root.to_path_buf());
     let mut seen = BTreeSet::new();
 
     for manifest in manifests {
@@ -1533,19 +1786,8 @@ pub fn ensure_extension_manifests_built(
             continue;
         }
 
-        if module_dir.starts_with(&mod_cache) {
-            let (module_path, version) = module_identity_from_cache_dir(&mod_cache, &module_dir)
-                .ok_or_else(|| format!(
-                    "failed to infer module path for cached extension at {}",
-                    module_dir.display(),
-                ))?;
-            let locked = locked_modules
-                .iter()
-                .find(|l| l.path.as_str() == module_path && l.version.to_string() == version)
-                .ok_or_else(|| format!(
-                    "missing locked module metadata for cached extension {}@{}",
-                    module_path, version,
-                ))?;
+        if module_dir.starts_with(&mod_root) {
+            let locked = locked_module_for_cached_extension(&module_dir, &mod_root, locked_modules)?;
             validate_installed_module(&module_dir, locked)?;
             validate_locked_native_artifact(&module_dir, locked)?;
         } else {
@@ -1582,10 +1824,7 @@ pub(crate) fn ensure_local_native_extension_built(module_dir: &Path) -> Result<(
                             .unwrap_or(false)
                     });
                 if all_older {
-                    emit_compile_log(
-                        "vo-engine",
-                        &format!("using cached native extension {}", manifest.native_path.display()),
-                    );
+                    emit_compile_log(CompileLogRecord::new("vo-engine", "native_extension_cached").path(manifest.native_path.display().to_string()));
                     return Ok(());
                 }
             }
@@ -1598,7 +1837,7 @@ pub(crate) fn ensure_local_native_extension_built(module_dir: &Path) -> Result<(
 
 fn build_native_extension(module_dir: &Path) -> Result<(), String> {
     let rust_dir = module_dir.join("rust");
-    emit_compile_log("vo-engine", &format!("building native extension {}", rust_dir.display()));
+    emit_compile_log(CompileLogRecord::new("vo-engine", "native_extension_build_start").path(rust_dir.display().to_string()));
     eprintln!("Building native extension at {}...", rust_dir.display());
     let output = std::process::Command::new("cargo")
         .arg("build")
@@ -1610,7 +1849,7 @@ fn build_native_extension(module_dir: &Path) -> Result<(), String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("cargo build failed for {}: {}", rust_dir.display(), stderr));
     }
-    emit_compile_log("vo-engine", &format!("built native extension {}", rust_dir.display()));
+    emit_compile_log(CompileLogRecord::new("vo-engine", "native_extension_build_done").path(rust_dir.display().to_string()));
     Ok(())
 }
 
@@ -1627,21 +1866,6 @@ fn walkdir_files(path: &Path) -> Vec<PathBuf> {
         }
     }
     result
-}
-
-fn sha256_digest_file(path: &Path) -> Result<String, String> {
-    let data = std::fs::read(path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-    Ok(sha256_digest(&data))
-}
-
-fn sha256_digest(data: &[u8]) -> String {
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let result = hasher.finalize();
-    let hex: String = result.iter().map(|b| format!("{b:02x}")).collect();
-    format!("sha256:{hex}")
 }
 
 fn parse_zip_path(path: &str) -> Option<(String, Option<String>)> {

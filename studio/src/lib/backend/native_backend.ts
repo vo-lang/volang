@@ -25,62 +25,20 @@ import type {
   StreamHandle,
 } from '../types';
 import { consolePush } from '../../stores/console';
-import { formatCommonGuiLogLine, formatDurationMs, pushUiConsole, type UiConsoleLine } from './gui_console';
+import { formatDurationMs, pushUiConsole, renderStudioLogRecord, type StudioLogRecord } from './gui_console';
 import { makeTauriStreamHandle } from './stream_handle';
 
 type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 type GuiFatalErrorEvent = { sessionId: number; message: string };
-type GuiLogEvent = { sessionId: number; source: string; message: string };
+type StudioLogEvent = { sessionId: number; record: StudioLogRecord };
 
 function displayPath(path: string): string {
   const normalized = path.trim().replace(/\\/g, '/');
   return normalized || path;
 }
 
-function formatNativeGuiLogLine(source: string, message: string): UiConsoleLine | null {
-  const commonLine = formatCommonGuiLogLine(source, message, displayPath);
-  if (commonLine) {
-    return commonLine;
-  }
-  const trimmed = message.trim();
-  if (!trimmed) {
-    return null;
-  }
-  if (source === 'vo-engine') {
-    const cachedLibrary = trimmed.match(/^using cached library (.+)@([^@]+)$/);
-    if (cachedLibrary) {
-      return { kind: 'success', text: `Using cached dependency ${cachedLibrary[1]}@${cachedLibrary[2]}` };
-    }
-    const fetchingLibrary = trimmed.match(/^fetching library (.+)@([^@]+)$/);
-    if (fetchingLibrary) {
-      return { kind: 'system', text: `Downloading dependency ${fetchingLibrary[1]}@${fetchingLibrary[2]}...` };
-    }
-    const fetchedLibrary = trimmed.match(/^fetched library (.+)@([^@]+)$/);
-    if (fetchedLibrary) {
-      return { kind: 'success', text: `Downloaded dependency ${fetchedLibrary[1]}@${fetchedLibrary[2]}` };
-    }
-    const cachedNativeExt = trimmed.match(/^using cached native extension (.+)$/);
-    if (cachedNativeExt) {
-      return { kind: 'success', text: `Using cached native extension ${displayPath(cachedNativeExt[1])}` };
-    }
-    const buildingNativeExt = trimmed.match(/^building native extension (.+)$/);
-    if (buildingNativeExt) {
-      return { kind: 'system', text: `Building native extension ${displayPath(buildingNativeExt[1])}...` };
-    }
-    const builtNativeExt = trimmed.match(/^built native extension (.+)$/);
-    if (builtNativeExt) {
-      return { kind: 'success', text: `Built native extension ${displayPath(builtNativeExt[1])}` };
-    }
-  }
-  if (source === 'studio-native') {
-    const prepareExtensions = trimmed.match(/^prepare gui extensions (.+)$/);
-    if (prepareExtensions) {
-      return prepareExtensions[1] === 'none'
-        ? { kind: 'system', text: 'Preparing GUI runtime...' }
-        : { kind: 'system', text: `Preparing GUI extensions: ${prepareExtensions[1]}` };
-    }
-  }
-  return { kind: 'system', text: `[${source}] ${trimmed}` };
+function pushNativeStudioLog(record: StudioLogRecord): void {
+  pushUiConsole(renderStudioLogRecord(record, displayPath));
 }
 
 export class NativeBackend implements Backend {
@@ -322,15 +280,11 @@ export class NativeBackend implements Backend {
     }
     if (!this.guiLogListenerPromise) {
       this.guiLogListenerPromise = import('@tauri-apps/api/event')
-        .then(({ listen }) => listen<GuiLogEvent>('gui_log', (event) => {
+        .then(({ listen }) => listen<StudioLogEvent>('studio_log', (event) => {
           if (event.payload.sessionId !== this.guiSessionId) {
             return;
           }
-          const line = formatNativeGuiLogLine(event.payload.source, event.payload.message);
-          if (!line) {
-            return;
-          }
-          pushUiConsole(line);
+          pushNativeStudioLog(event.payload.record);
         }))
         .then(() => undefined);
     }

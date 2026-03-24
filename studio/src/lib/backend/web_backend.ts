@@ -26,7 +26,7 @@ import type {
 } from '../types';
 import { loadStudioWasm, setStandaloneGuiEventDispatcher, type StudioWasm } from '../studio_wasm';
 import { consolePush } from '../../stores/console';
-import { formatCommonGuiLogLine, formatDurationMs, pushUiConsole, type UiConsoleLine } from './gui_console';
+import { formatDurationMs, pushUiConsole, renderStudioLogRecord, type StudioLogRecord } from './gui_console';
 import { makeErrorStreamHandle, makeResolvedStreamHandle, makeStreamHandleFromProducer } from './stream_handle';
 
 const WORKSPACE_ROOT = '/workspace';
@@ -59,61 +59,8 @@ function displayPath(path: string): string {
   return normalized.startsWith('/') ? normalized.slice(1) : normalized;
 }
 
-function formatStudioDebugLine(source: string, message: string): UiConsoleLine | null {
-  const commonLine = formatCommonGuiLogLine(source, message, displayPath);
-  if (commonLine) {
-    return commonLine;
-  }
-  const trimmed = message.trim();
-  if (!trimmed) {
-    return null;
-  }
-  if (source === 'render-island') {
-    return { kind: 'stdout', text: `[render-island] ${trimmed}` };
-  }
-  if (source === 'studio-wasm') {
-    if (
-      trimmed.startsWith('prepareEntry total ')
-      || trimmed.startsWith('runGui total ')
-      || trimmed.startsWith('prepareEntry read package ')
-      || trimmed.startsWith('prepareEntry load single file ')
-      || trimmed.startsWith('prepareEntry ensure deps ')
-      || trimmed.startsWith('prepareEntry resolve/install ')
-    ) {
-      return null;
-    }
-  }
-  if (source === 'vo-web') {
-    const cachedVersion = trimmed.match(/^using cached library version (.+) -> (.+)$/);
-    if (cachedVersion) {
-      return { kind: 'success', text: `Using cached dependency ${cachedVersion[1]}@${cachedVersion[2]}` };
-    }
-    const fetchVersion = trimmed.match(/^fetching library version for (.+)$/);
-    if (fetchVersion) {
-      return { kind: 'system', text: `Resolving dependency version for ${fetchVersion[1]}...` };
-    }
-    const fetchLibrary = trimmed.match(/^fetching library (.+)@([^@]+)$/);
-    if (fetchLibrary) {
-      return { kind: 'system', text: `Downloading dependency ${fetchLibrary[1]}@${fetchLibrary[2]}...` };
-    }
-    const fetchedLibrary = trimmed.match(/^fetched library (.+) in (\d+)ms$/);
-    if (fetchedLibrary) {
-      return { kind: 'success', text: `Downloaded dependency ${fetchedLibrary[1]} in ${formatDurationMs(Number(fetchedLibrary[2]))}` };
-    }
-    const cachedExt = trimmed.match(/^using cached library ext (.+)@([^@]+)$/);
-    if (cachedExt) {
-      return { kind: 'success', text: `Using cached extension for ${cachedExt[1]}@${cachedExt[2]}` };
-    }
-    const fetchExtWasm = trimmed.match(/^fetching (cached )?library ext wasm (.+)@([^@]+) \((.+)\)$/);
-    if (fetchExtWasm) {
-      return { kind: 'system', text: `Loading extension WASM for ${fetchExtWasm[2]}@${fetchExtWasm[3]}...` };
-    }
-    const fetchExtJs = trimmed.match(/^fetching (cached )?library ext JS glue (.+)@([^@]+) \((.+)\)$/);
-    if (fetchExtJs) {
-      return { kind: 'system', text: `Loading extension JS glue for ${fetchExtJs[2]}@${fetchExtJs[3]}...` };
-    }
-  }
-  return { kind: 'system', text: `[${source}] ${trimmed}` };
+function pushStudioLogRecord(record: StudioLogRecord): void {
+  pushUiConsole(renderStudioLogRecord(record, displayPath));
 }
 
 type OpenVfsFile = { path: string; flags: number; position: number };
@@ -634,11 +581,9 @@ function sortEntries(entries: FsEntry[]): FsEntry[] {
 function getStudioWasm(): Promise<StudioWasm> {
   ensureVfsBindings();
   if (!studioWasmPromise) {
-    (globalThis as Record<string, unknown>).__voStudioDebugLog = (sourceOrMessage: string, maybeMessage?: string) => {
-      const source = maybeMessage === undefined ? 'studio-wasm' : sourceOrMessage;
-      const message = maybeMessage === undefined ? sourceOrMessage : maybeMessage;
-      pushUiConsole(formatStudioDebugLine(source, message));
-      console.debug(`[${source}] ${message}`);
+    (globalThis as Record<string, unknown>).__voStudioLogRecord = (record: StudioLogRecord) => {
+      pushStudioLogRecord(record);
+      console.debug('[studio-log]', record);
     };
     studioWasmPromise = loadStudioWasm();
   }

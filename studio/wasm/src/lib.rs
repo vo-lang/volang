@@ -28,17 +28,14 @@ fn ensure_panic_hook() {
 
 include!(concat!(env!("OUT_DIR"), "/shell_embedded.rs"));
 
-fn emit_host_log(source: &str, message: &str) {
-    let global = js_sys::global();
-    let hook = Reflect::get(&global, &JsValue::from_str("__voStudioDebugLog"))
-        .unwrap_or(JsValue::UNDEFINED);
-    if hook.is_function() {
-        let func = js_sys::Function::from(hook);
-        let _ = func.call2(
-            &JsValue::NULL,
-            &JsValue::from_str(source),
-            &JsValue::from_str(message),
-        );
+fn emit_host_log(record: vo_web::HostLogRecord) {
+    let source = record.source.clone();
+    let code = record.code.clone();
+    let text = record.text.clone();
+    vo_web::emit_host_log(record);
+    match text {
+        Some(text) => web_sys::console::log_1(&format!("[{}:{}] {}", source, code, text).into()),
+        None => web_sys::console::log_1(&format!("[{}:{}]", source, code).into()),
     }
 }
 
@@ -46,19 +43,25 @@ fn flush_stdout(label: &str, stdout: Option<&str>) {
     if let Some(s) = stdout {
         let trimmed = s.trim();
         if !trimmed.is_empty() {
-            emit_host_log(label, trimmed);
-            web_sys::console::log_1(&format!("[{}] {}", label, trimmed).into());
+            emit_host_log(vo_web::HostLogRecord::new(label, "stdout", "stdout").text(trimmed));
         }
     }
 }
 
-fn log_wasm_info(message: &str) {
-    emit_host_log("studio-wasm", message);
-    web_sys::console::log_1(&format!("[studio-wasm] {}", message).into());
+fn log_wasm_path(code: &str, path: &str, level: &str, start_ms: Option<f64>) {
+    let mut record = vo_web::HostLogRecord::new("studio-wasm", code, level).path(path);
+    if let Some(start_ms) = start_ms {
+        record = record.duration_ms(js_sys::Date::now() - start_ms);
+    }
+    emit_host_log(record);
 }
 
-fn log_wasm_duration(label: &str, start_ms: f64) {
-    log_wasm_info(&format!("{} {:.0}ms", label, js_sys::Date::now() - start_ms));
+fn log_wasm_module(code: &str, module: &str, start_ms: f64) {
+    emit_host_log(
+        vo_web::HostLogRecord::new("studio-wasm", code, "system")
+            .module(module)
+            .duration_ms(js_sys::Date::now() - start_ms),
+    );
 }
 
 fn guest_stdout_source() -> Box<dyn Fn() -> String> {
@@ -815,14 +818,14 @@ fn compile_from_vfs(entry_path: &str) -> Result<Vec<u8>, String> {
     let cache_slot = vfs_compile_cache_slot(&target);
     let fingerprint = compute_vfs_compile_cache_fingerprint(&target, &local_fs)?;
     if let Some(bytecode) = try_load_vfs_compile_cache(&cache_slot, &fingerprint)? {
-        log_wasm_info(&format!("compile cache hit {}", target.entry_path));
+        log_wasm_path("compile_cache_hit", &target.entry_path, "success", None);
         return Ok(bytecode);
     }
     let entry_clean = target.entry_path.trim_start_matches('/');
     let bytecode = vo_web::compile_entry_with_vfs(entry_clean, local_fs, VFS_MOD_ROOT)
         .map_err(|e| format!("compile error: {}", e))?;
     save_vfs_compile_cache(&cache_slot, &fingerprint, &bytecode)?;
-    log_wasm_info(&format!("compile cache store {}", target.entry_path));
+    log_wasm_path("compile_cache_store", &target.entry_path, "system", None);
     Ok(bytecode)
 }
 
@@ -886,28 +889,28 @@ pub fn prepare_entry(entry_path: &str) -> js_sys::Promise {
             let mut local_fs = MemoryFs::new();
             read_vfs_package(project_root, &mut local_fs)
                 .map_err(|e| JsValue::from_str(&e))?;
-            log_wasm_duration(&format!("prepareEntry read package {}", project_root), read_start);
+            log_wasm_path("prepare_entry_read_package_done", project_root, "system", Some(read_start));
             let entry_clean = target.entry_path.trim_start_matches('/').to_string();
             let deps_start = js_sys::Date::now();
             vo_web::ensure_vfs_deps_from_fs(&local_fs, &entry_clean)
                 .await
                 .map_err(|e| JsValue::from_str(&e))?;
-            log_wasm_duration(&format!("prepareEntry ensure deps {}", entry_clean), deps_start);
+            log_wasm_path("prepare_entry_ensure_deps_done", &entry_clean, "system", Some(deps_start));
         } else {
             let single_file_start = js_sys::Date::now();
             let single_file = SingleFileEntry::load(&target)
                 .map_err(|e| JsValue::from_str(&e))?;
-            log_wasm_duration(&format!("prepareEntry load single file {}", target.entry_path), single_file_start);
+            log_wasm_path("prepare_entry_load_single_file_done", &target.entry_path, "system", Some(single_file_start));
             for module in &single_file.external_modules {
                 let module_start = js_sys::Date::now();
                 vo_web::resolve_and_install_module(module)
                     .await
                     .map_err(|e| JsValue::from_str(&e))?;
-                log_wasm_duration(&format!("prepareEntry resolve/install {}", module), module_start);
+                log_wasm_module("prepare_entry_resolve_install_done", module, module_start);
             }
         }
 
-        log_wasm_duration(&format!("prepareEntry total {}", target.entry_path), total_start);
+        log_wasm_path("prepare_entry_done", &target.entry_path, "system", Some(total_start));
 
         Ok(JsValue::NULL)
     })
@@ -960,18 +963,18 @@ pub fn run_gui(entry_path: &str) -> Result<JsValue, JsValue> {
     let compile_start = js_sys::Date::now();
     let (target, bytecode, framework) = compile_gui_run_output(entry_path)
         .map_err(|e| JsValue::from_str(&e))?;
-    log_wasm_duration(&format!("runGui compile {}", target.entry_path), compile_start);
+    log_wasm_path("gui_compile_done", &target.entry_path, "system", Some(compile_start));
     let load_start = js_sys::Date::now();
     let mut guest = load_gui_app_from_bytecode(&bytecode)?;
-    log_wasm_duration(&format!("runGui load vm {}", target.entry_path), load_start);
+    log_wasm_path("gui_load_vm_done", &target.entry_path, "system", Some(load_start));
     let start_start = js_sys::Date::now();
     let step = guest
         .start_gui_app()
         .map_err(session_error_to_js)?;
-    log_wasm_duration(&format!("runGui start app {}", target.entry_path), start_start);
+    log_wasm_path("gui_start_done", &target.entry_path, "system", Some(start_start));
     flush_stdout("guest", step.stdout.as_deref());
     GUEST.with(|g| *g.borrow_mut() = Some(guest));
-    log_wasm_duration(&format!("runGui total {}", target.entry_path), total_start);
+    log_wasm_path("gui_total_done", &target.entry_path, "system", Some(total_start));
     Ok(gui_run_output_to_js(step.render_output.unwrap_or_default(), bytecode, &target.entry_path, framework.as_ref()))
 }
 

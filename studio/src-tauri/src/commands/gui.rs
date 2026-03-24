@@ -98,14 +98,15 @@ pub fn cmd_run_gui(
     let compile_path = run_target.compile_path.to_string_lossy().to_string();
     let compile_start = Instant::now();
     let compile_output = with_compile_log_sink(
-        gui_runtime::make_gui_log_sink(app.clone(), session_id),
+        gui_runtime::make_studio_log_sink(app.clone(), session_id),
         || prepare_and_compile(&compile_path),
     )?;
-    gui_runtime::emit_gui_log(
+    gui_runtime::emit_studio_log(
         &app,
         session_id,
-        "studio-native",
-        &format!("runGui compile {} {}ms", entry_path, compile_start.elapsed().as_millis()),
+        gui_runtime::StudioLogRecord::new("studio-native", "gui_compile_done", "system")
+            .path(entry_path.clone())
+            .duration_ms(compile_start.elapsed().as_millis()),
     );
     let module_bytes = compile_output.module.serialize();
     let framework = extract_framework_contract(&compile_output.extensions);
@@ -113,11 +114,12 @@ pub fn cmd_run_gui(
     let start_start = Instant::now();
     let (render_bytes, handle, push_rx) = gui_runtime::run_gui(compile_output, app.clone(), session_id)
         .map_err(|error| error.to_string())?;
-    gui_runtime::emit_gui_log(
+    gui_runtime::emit_studio_log(
         &app,
         session_id,
-        "studio-native",
-        &format!("runGui start app {} {}ms", entry_path, start_start.elapsed().as_millis()),
+        gui_runtime::StudioLogRecord::new("studio-native", "gui_start_done", "system")
+            .path(entry_path.clone())
+            .duration_ms(start_start.elapsed().as_millis()),
     );
     state.install_guest_runtime(handle, push_rx);
     let external_widget_handler_id = find_on_widget_handler_id(&render_bytes);

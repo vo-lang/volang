@@ -325,8 +325,15 @@ export async function startRenderIsland(
   }
 
   // Load studio WASM to obtain the VoWebModule capability surface.
-  (globalThis as Record<string, unknown>).__voStudioDebugLog = (message: string) => {
-    void logNativeDebug(`[studio-wasm] ${message}`);
+  (globalThis as Record<string, unknown>).__voStudioLogRecord = (record: {
+    source?: string;
+    code?: string;
+    text?: string;
+  }) => {
+    const source = record.source ?? 'studio-wasm';
+    const code = record.code ?? 'message';
+    const suffix = record.text ? ` ${record.text}` : '';
+    void logNativeDebug(`[${source}:${code}]${suffix}`);
   };
   const wasm = await loadStudioWasm();
   const voWeb = makeVoWebModule(wasm);
