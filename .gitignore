@@ -86,5 +86,5 @@ studio/node_modules/
 studio/dist/
 studio/wasm/pkg/
 
-
 .tmp/
+/.examples/
