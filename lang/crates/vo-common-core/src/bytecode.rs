@@ -4,10 +4,10 @@
 pub const RETURN_FLAG_HEAP_RETURNS: u8 = 0x02;
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec::Vec, collections::BTreeMap};
 
 #[cfg(feature = "std")]
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 
@@ -181,7 +181,7 @@ pub struct NamedTypeMeta {
     pub name: String,
     pub underlying_meta: ValueMeta,
     pub underlying_rttid: ValueRttid,
-    pub methods: HashMap<String, MethodInfo>,
+    pub methods: BTreeMap<String, MethodInfo>,
 }
 
 impl StructMeta {

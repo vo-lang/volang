@@ -116,10 +116,8 @@ func sidebar(s *State) vogui.Node {
 }
 
 func navItem(s *State, tab string, icon string, label string) vogui.Node {
-	active := s.ActiveTab == tab
-	n := vogui.SidebarItem(icon+" "+label, "", active,
-		vogui.OnClick(func(s *State) { s.ActiveTab = tab }))
-	return n
+	return vogui.SidebarItem(icon+" "+label,
+		vogui.OnClick(func(s *State) { s.ActiveTab = tab })).Active(s.ActiveTab == tab)
 }
 
 // ============ Top Bar ============

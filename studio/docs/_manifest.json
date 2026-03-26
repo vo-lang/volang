@@ -31,7 +31,8 @@
       "slug": "advanced",
       "pages": [
         { "title": "Execution Backends", "file": "advanced/backends.md" },
-        { "title": "Module System", "file": "advanced/modules.md" }
+        { "title": "Module System", "file": "advanced/modules.md" },
+        { "title": "Embedding Vo in Rust", "file": "advanced/embedding.md" }
       ]
     }
   ]

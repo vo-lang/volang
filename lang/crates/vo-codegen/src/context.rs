@@ -460,7 +460,7 @@ impl CodegenContext {
     /// Returns true if a new method was added, false if the method already existed.
     pub fn update_named_type_method_if_absent_check(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool, signature_rttid: u32) -> bool {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
-            use std::collections::hash_map::Entry;
+            use std::collections::btree_map::Entry;
             match meta.methods.entry(method_name) {
                 Entry::Vacant(e) => {
                     e.insert(MethodInfo { func_id, is_pointer_receiver, signature_rttid });

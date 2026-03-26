@@ -9,6 +9,21 @@ export async function discoverLocalProjects(workspace: WorkspaceService, root: s
     return [];
   }
 
+  return mapDiscovered(discovered);
+}
+
+export async function discoverWorkspaceProjects(workspace: WorkspaceService): Promise<ManagedProject[]> {
+  let discovered = [] as Awaited<ReturnType<WorkspaceService['discoverWorkspaceProjects']>>;
+  try {
+    discovered = await workspace.discoverWorkspaceProjects();
+  } catch {
+    return [];
+  }
+
+  return mapDiscovered(discovered);
+}
+
+function mapDiscovered(discovered: Awaited<ReturnType<WorkspaceService['discoverProjects']>>): ManagedProject[] {
   return discovered.map((entry) => ({
     name: entry.name,
     type: entry.type as ManagedProject['type'],

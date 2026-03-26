@@ -4,7 +4,7 @@
   import { runtime } from '../stores/runtime';
   import type { RunStatus } from '../stores/ide';
 
-  export let mode: 'panel' | 'fullscreen' = 'panel';
+  export let mode: 'panel' | 'pane' | 'fullscreen' = 'panel';
 
   let scrollEl: HTMLDivElement;
   let userScrolledUp = false;
@@ -130,6 +130,11 @@
   }
   .console-root.fullscreen {
     flex: 1;
+    border-top: none;
+  }
+  .console-root.pane {
+    flex: 1;
+    height: 100%;
     border-top: none;
   }
   .drag-handle {

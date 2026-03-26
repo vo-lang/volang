@@ -59,9 +59,6 @@
     expandedSections = expandedSections;
   }
 
-  function isActive(file: string): boolean {
-    return file === activeFile;
-  }
 </script>
 
 <div class="docs-layout">
@@ -82,7 +79,7 @@
             {#each section.pages as page}
               <button
                 class="docs-page-link"
-                class:active={isActive(page.file)}
+                class:active={page.file === activeFile}
                 on:click={() => loadPage(page.file, true)}
               >
                 {page.title}

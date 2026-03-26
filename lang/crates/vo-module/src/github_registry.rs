@@ -1,6 +1,6 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::Mutex;
 
 use serde::Deserialize;
 
@@ -12,10 +12,12 @@ use crate::Error;
 
 /// Concrete `Registry` implementation backed by the GitHub Releases API.
 /// Caches version lists and manifests for the lifetime of the struct.
-#[derive(Default)]
 pub struct GitHubRegistry {
-    version_cache: RefCell<HashMap<String, Vec<ExactVersion>>>,
-    manifest_cache: RefCell<HashMap<(String, String), (ReleaseManifest, Vec<u8>)>>,
+    /// Optional GitHub personal access token for authenticated API requests.
+    /// Resolves rate-limit issues and enables access to private repositories.
+    token: Option<String>,
+    version_cache: Mutex<HashMap<String, Vec<ExactVersion>>>,
+    manifest_cache: Mutex<HashMap<(String, String), (ReleaseManifest, Vec<u8>)>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,8 +28,23 @@ struct GitHubReleaseEntry {
 }
 
 impl GitHubRegistry {
+    /// Create a new `GitHubRegistry`, automatically resolving a GitHub token
+    /// from the environment.
+    ///
+    /// Token resolution order:
+    /// 1. `VO_GITHUB_TOKEN` environment variable
+    /// 2. `GITHUB_TOKEN` environment variable
+    /// 3. No token (anonymous access)
     pub fn new() -> Self {
-        Self::default()
+        let token = std::env::var("VO_GITHUB_TOKEN")
+            .or_else(|_| std::env::var("GITHUB_TOKEN"))
+            .ok()
+            .filter(|t| !t.is_empty());
+        Self {
+            token,
+            version_cache: Mutex::new(HashMap::new()),
+            manifest_cache: Mutex::new(HashMap::new()),
+        }
     }
 
     fn fetch_versions_uncached(&self, module: &ModulePath) -> Result<Vec<ExactVersion>, Error> {
@@ -40,7 +57,7 @@ impl GitHubRegistry {
                 "https://api.github.com/repos/{}/{}/releases?per_page={}&page={}",
                 rid.owner, rid.repo, page_size, page,
             );
-            let body = fetch_bytes(&url)?;
+            let body = self.fetch_bytes(&url)?;
             let releases: Vec<GitHubReleaseEntry> =
                 serde_json::from_slice(&body).map_err(|e| {
                     Error::RegistryError(format!(
@@ -76,7 +93,7 @@ impl GitHubRegistry {
         version: &ExactVersion,
     ) -> Result<(ReleaseManifest, Vec<u8>), Error> {
         let url = release_download_url(module, version, "vo.release.json");
-        let bytes = fetch_bytes(&url)?;
+        let bytes = self.fetch_bytes(&url)?;
         let content = String::from_utf8(bytes.clone()).map_err(|e| {
             Error::InvalidReleaseMetadata(format!(
                 "release manifest for {}@{} is not valid UTF-8: {}",
@@ -92,19 +109,57 @@ impl GitHubRegistry {
         validate_manifest(&manifest, module, version)?;
         Ok((manifest, bytes))
     }
+
+    fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, Error> {
+        let mut request = ureq::get(url)
+            .set("User-Agent", "vo-module")
+            .set("Accept", "application/vnd.github+json");
+        if let Some(ref token) = self.token {
+            request = request.set("Authorization", &format!("Bearer {}", token));
+        }
+        let response = match request.call() {
+            Ok(response) => response,
+            Err(ureq::Error::Status(code, response)) => {
+                return Err(Error::RegistryError(format!(
+                    "HTTP GET {}: {} {}",
+                    url,
+                    code,
+                    response.status_text()
+                )));
+            }
+            Err(ureq::Error::Transport(e)) => {
+                return Err(Error::RegistryError(format!("HTTP GET {}: {}", url, e)));
+            }
+        };
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut bytes)
+            .map_err(|e| Error::RegistryError(format!("reading response from {}: {}", url, e)))?;
+        Ok(bytes)
+    }
 }
 
 impl Registry for GitHubRegistry {
     fn list_versions(&self, module: &ModulePath) -> Result<Vec<ExactVersion>, Error> {
         let key = module.as_str().to_string();
-        if let Some(cached) = self.version_cache.borrow().get(&key) {
+        if let Some(cached) = self.version_cache.lock().unwrap().get(&key) {
             return Ok(cached.clone());
         }
         let versions = self.fetch_versions_uncached(module)?;
         self.version_cache
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .insert(key, versions.clone());
         Ok(versions)
+    }
+
+    fn probe_module_path(&self, module: &ModulePath) -> Result<bool, Error> {
+        match self.list_versions(module) {
+            Ok(versions) => Ok(!crate::registry::filter_compatible_versions(module, &versions).is_empty()),
+            Err(Error::RegistryError(message)) if message.contains(": 404 ") => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     fn fetch_manifest(
@@ -121,12 +176,13 @@ impl Registry for GitHubRegistry {
         version: &ExactVersion,
     ) -> Result<(ReleaseManifest, Vec<u8>), Error> {
         let key = (module.as_str().to_string(), version.to_string());
-        if let Some(cached) = self.manifest_cache.borrow().get(&key) {
+        if let Some(cached) = self.manifest_cache.lock().unwrap().get(&key) {
             return Ok(cached.clone());
         }
         let result = self.fetch_manifest_uncached(module, version)?;
         self.manifest_cache
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .insert(key, result.clone());
         Ok(result)
     }
@@ -138,7 +194,7 @@ impl Registry for GitHubRegistry {
         asset_name: &str,
     ) -> Result<Vec<u8>, Error> {
         let url = release_download_url(module, version, asset_name);
-        fetch_bytes(&url)
+        self.fetch_bytes(&url)
     }
 
     fn fetch_artifact(
@@ -148,7 +204,7 @@ impl Registry for GitHubRegistry {
         asset_name: &str,
     ) -> Result<Vec<u8>, Error> {
         let url = release_download_url(module, version, asset_name);
-        fetch_bytes(&url)
+        self.fetch_bytes(&url)
     }
 }
 
@@ -162,33 +218,6 @@ fn version_from_tag(module: &ModulePath, tag: &str) -> Option<ExactVersion> {
         tag.strip_prefix(&prefix)?
     };
     ExactVersion::parse(version_str).ok()
-}
-
-fn fetch_bytes(url: &str) -> Result<Vec<u8>, Error> {
-    let response = match ureq::get(url)
-        .set("User-Agent", "vo-module")
-        .set("Accept", "application/vnd.github+json")
-        .call()
-    {
-        Ok(response) => response,
-        Err(ureq::Error::Status(code, response)) => {
-            return Err(Error::RegistryError(format!(
-                "HTTP GET {}: {} {}",
-                url,
-                code,
-                response.status_text()
-            )));
-        }
-        Err(ureq::Error::Transport(e)) => {
-            return Err(Error::RegistryError(format!("HTTP GET {}: {}", url, e)));
-        }
-    };
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .read_to_end(&mut bytes)
-        .map_err(|e| Error::RegistryError(format!("reading response from {}: {}", url, e)))?;
-    Ok(bytes)
 }
 
 #[cfg(test)]

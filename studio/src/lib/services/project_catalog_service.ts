@@ -1,6 +1,7 @@
 import { get, writable, type Readable } from 'svelte/store';
 import { editor, editorMarkSaved } from '../../stores/editor';
-import { collectLocalProjectFiles, discoverLocalProjects } from '../project_catalog/discovery';
+import { collectLocalProjectFiles, discoverWorkspaceProjects } from '../project_catalog/discovery';
+import { addRecentProject, loadRecentProjects, recentProjectIdentity, type RecentProject } from '../project_catalog/recent';
 import {
   defaultProjectConfig,
   deleteStoredProjectConfig,
@@ -63,7 +64,7 @@ export class ProjectCatalogService {
   private manifestPersistQueue: Promise<void> = Promise.resolve();
 
   constructor(
-    backend: Backend,
+    private readonly backend: Backend,
     private readonly workspace: WorkspaceService,
   ) {
     this.github = { subscribe: this.githubStore.subscribe };
@@ -83,7 +84,8 @@ export class ProjectCatalogService {
 
     this.githubStore.update((state) => ({ ...state, token, connecting: true, error: '' }));
     const [localProjects] = await Promise.all([
-      discoverLocalProjects(this.workspace, root)
+      discoverWorkspaceProjects(this.workspace)
+        .then((projects) => mergeRecentIntoLocal(projects, root))
         .then((projects) => this.applyStoredConfigToLocals(projects, previousProjects))
         .catch((): ManagedProject[] => []),
       this.remote.getViewer(token).then(
@@ -168,8 +170,9 @@ export class ProjectCatalogService {
 
     let localProjects: ManagedProject[];
     try {
+      const discovered = await discoverWorkspaceProjects(this.workspace);
       localProjects = this.applyStoredConfigToLocals(
-        await discoverLocalProjects(this.workspace, root),
+        mergeRecentIntoLocal(discovered, root),
         previousProjects,
       );
     } catch (error) {
@@ -251,27 +254,98 @@ export class ProjectCatalogService {
     }
   }
 
-  async createSingleProject(name: string): Promise<ManagedProject> {
+  async createSingleProject(name: string, location?: string): Promise<ManagedProject> {
     const projectName = assertProjectName(name);
-    const filePath = `${this.requireRoot()}/${projectName}.vo`;
-    await this.workspace.writeFile(filePath, singleFileTemplate(projectName));
-    await this.refresh();
-    const project = this.requireProject(projectKey({ name: projectName, type: 'single' }));
+    const root = location ?? this.requireRoot();
+    const filePath = `${root}/${projectName}.vo`;
+    const isExternal = location != null && normalizePath(root) !== normalizePath(this.catalogSnapshot().root);
+    const shouldBypassWrite = normalizePath(root) !== normalizePath(this.workspace.root);
+    if (shouldBypassWrite) {
+      await this.backend.createProjectFiles([{ path: filePath, content: singleFileTemplate(projectName) }]);
+    } else {
+      await this.workspace.writeFile(filePath, singleFileTemplate(projectName));
+    }
+    const project: ManagedProject = {
+      name: projectName,
+      type: 'single',
+      localPath: filePath,
+      entryPath: filePath,
+      remote: null,
+      pushedAt: null,
+      remoteUpdatedAt: null,
+      syncedHash: null,
+      currentLocalHash: null,
+      currentRemoteHash: null,
+      hasGui: false,
+    };
     writeStoredProjectConfig(projectConfigKey(project), defaultProjectConfig());
+    if (isExternal) {
+      addRecentProject({ name: project.name, type: project.type, localPath: filePath, entryPath: filePath });
+    }
+    await this.refresh();
     return project;
   }
 
-  async createModuleProject(name: string): Promise<ManagedProject> {
+  async createModuleProject(name: string, location?: string): Promise<ManagedProject> {
     const projectName = assertProjectName(name);
     const moduleId = toVoIdentifier(projectName);
-    const dirPath = `${this.requireRoot()}/${projectName}`;
-    await this.workspace.mkdir(dirPath);
-    await this.workspace.writeFile(`${dirPath}/vo.mod`, `module ${moduleId}\n\nvo 1.0\n`);
-    await this.workspace.writeFile(`${dirPath}/main.vo`, moduleTemplate(moduleId, projectName));
-    await this.refresh();
-    const project = this.requireProject(projectKey({ name: projectName, type: 'module' }));
+    const root = location ?? this.requireRoot();
+    const dirPath = `${root}/${projectName}`;
+    const isExternal = location != null && normalizePath(root) !== normalizePath(this.catalogSnapshot().root);
+    const shouldBypassWrite = normalizePath(root) !== normalizePath(this.workspace.root);
+    const modContent = `module ${moduleId}\n\nvo 1.0\n`;
+    const mainContent = moduleTemplate(moduleId, projectName);
+    if (shouldBypassWrite) {
+      await this.backend.createProjectFiles([
+        { path: `${dirPath}/vo.mod`, content: modContent },
+        { path: `${dirPath}/main.vo`, content: mainContent },
+      ]);
+    } else {
+      await this.workspace.mkdir(dirPath);
+      await this.workspace.writeFile(`${dirPath}/vo.mod`, modContent);
+      await this.workspace.writeFile(`${dirPath}/main.vo`, mainContent);
+    }
+    const entryPath = `${dirPath}/main.vo`;
+    const project: ManagedProject = {
+      name: projectName,
+      type: 'module',
+      localPath: dirPath,
+      entryPath,
+      remote: null,
+      pushedAt: null,
+      remoteUpdatedAt: null,
+      syncedHash: null,
+      currentLocalHash: null,
+      currentRemoteHash: null,
+      hasGui: false,
+    };
     writeStoredProjectConfig(projectConfigKey(project), defaultProjectConfig());
+    if (isExternal) {
+      addRecentProject({ name: project.name, type: project.type, localPath: dirPath, entryPath });
+    }
+    await this.refresh();
     return project;
+  }
+
+  trackRecentSessionTarget(
+    targetPath: string,
+    sessionInfo: Pick<SessionInfo, 'projectMode' | 'root' | 'entryPath'>,
+  ): void {
+    const type = sessionInfo.projectMode === 'module' ? 'module' : 'single';
+    const recentPath = type === 'single'
+      ? (sessionInfo.entryPath ?? targetPath)
+      : sessionInfo.root;
+    const name = recentPath.split('/').pop() ?? recentPath;
+    addRecentProject({
+      name: type === 'single' ? name.replace(/\.vo$/, '') : name,
+      type,
+      localPath: recentPath,
+      entryPath: sessionInfo.entryPath,
+    });
+  }
+
+  trackRecentProject(project: { name: string; type: ManagedProject['type']; localPath: string; entryPath: string | null }): void {
+    addRecentProject(project);
   }
 
   getSessionProjectConfig(
@@ -747,6 +821,47 @@ export class ProjectCatalogService {
       return projectEntry != null && normalizePath(projectEntry) === (sessionEntry ?? sessionRoot);
     });
   }
+}
+
+function mergeRecentIntoLocal(discovered: ManagedProject[], catalogRoot: string): ManagedProject[] {
+  const recent = loadRecentProjects();
+  if (recent.length === 0) return discovered;
+  const normalizedRoot = normalizePath(catalogRoot);
+  const discoveredIdentities = new Set(discovered.map(projectLocalIdentity));
+  const merged = [...discovered];
+  for (const entry of recent) {
+    const identity = recentProjectIdentity(entry);
+    const scopePath = normalizePath(identity);
+    if (
+      scopePath === normalizedRoot
+      || scopePath.startsWith(`${normalizedRoot}/`)
+      || discoveredIdentities.has(identity)
+    ) {
+      continue;
+    }
+    discoveredIdentities.add(identity);
+    merged.push({
+      name: entry.name,
+      type: entry.type,
+      localPath: entry.localPath,
+      entryPath: entry.entryPath,
+      remote: null,
+      pushedAt: null,
+      remoteUpdatedAt: null,
+      syncedHash: null,
+      currentLocalHash: null,
+      currentRemoteHash: null,
+      hasGui: false,
+    });
+  }
+  return merged;
+}
+
+function projectLocalIdentity(project: Pick<ManagedProject, 'type' | 'localPath' | 'entryPath'>): string {
+  if (project.type === 'module') {
+    return project.localPath ?? '';
+  }
+  return project.entryPath ?? project.localPath ?? '';
 }
 
 function mergeProjects(

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::identity::ModulePath;
 use crate::version::{DepConstraint, ExactVersion, ToolchainConstraint};
@@ -38,9 +38,12 @@ pub struct SolvePreferences {
 /// 1. Start with root module's direct requirements.
 /// 2. For each unresolved module, fetch candidate versions from registry.
 /// 3. Filter to compatible versions (major-path rule + constraint satisfaction).
-/// 4. Select the highest satisfying version (or locked version if preferred).
-/// 5. Fetch manifest, add transitive dependencies.
-/// 6. Repeat until graph is closed.
+/// 4. Filter out candidates whose release manifest toolchain constraint does not
+///    support the root project's toolchain requirement.
+/// 5. Order candidates by preference (locked version first for non-targeted
+///    updates, otherwise highest version first).
+/// 6. Recursively search candidates, adding transitive constraints and
+///    backtracking whenever a branch becomes inconsistent.
 ///
 /// Single-version rule: each module path appears at most once.
 pub fn solve(
@@ -50,118 +53,126 @@ pub fn solve(
     registry: &dyn Registry,
     prefs: &SolvePreferences,
 ) -> Result<ResolvedGraph, Error> {
-    let mut resolved: BTreeMap<ModulePath, ResolvedModule> = BTreeMap::new();
-    // Constraints accumulated for each module from all dependents
     let mut constraints: BTreeMap<ModulePath, Vec<(String, DepConstraint)>> = BTreeMap::new();
-    // Work queue of modules to resolve
-    let mut queue: Vec<ModulePath> = Vec::new();
-    let mut queued: BTreeSet<ModulePath> = BTreeSet::new();
-
-    // Seed with root's direct requirements
     for (mp, constraint) in root_requires {
         constraints
             .entry(mp.clone())
             .or_default()
             .push((root_module.as_str().to_string(), constraint.clone()));
-        if queued.insert(mp.clone()) {
-            queue.push(mp.clone());
-        }
     }
 
-    while let Some(mp) = queue.pop() {
-        if resolved.contains_key(&mp) {
+    solve_search(root_vo, registry, prefs, BTreeMap::new(), constraints)
+}
+
+fn solve_search(
+    root_vo: &ToolchainConstraint,
+    registry: &dyn Registry,
+    prefs: &SolvePreferences,
+    resolved: BTreeMap<ModulePath, ResolvedModule>,
+    constraints: BTreeMap<ModulePath, Vec<(String, DepConstraint)>>,
+) -> Result<ResolvedGraph, Error> {
+    let Some((module, candidates)) = pick_next_module(root_vo, registry, prefs, &resolved, &constraints)? else {
+        validate_resolved_graph(&resolved, &constraints)?;
+        return Ok(ResolvedGraph { modules: resolved });
+    };
+
+    let mut first_error: Option<Error> = None;
+    for candidate in candidates {
+        let mut next_resolved = resolved.clone();
+        let mut next_constraints = constraints.clone();
+        let mut branch_error: Option<Error> = None;
+        let source = module.as_str().to_string();
+
+        for req in &candidate.manifest.require {
+            let dep_mp = req.module.clone();
+            next_constraints
+                .entry(dep_mp.clone())
+                .or_default()
+                .push((source.clone(), req.constraint.clone()));
+
+            let selected_version = if dep_mp == module {
+                Some(&candidate.version)
+            } else {
+                next_resolved.get(&dep_mp).map(|resolved| &resolved.version)
+            };
+            if let Some(selected_version) = selected_version {
+                if !req.constraint.satisfies(selected_version) {
+                    branch_error = Some(Error::ConflictingConstraints {
+                        module: dep_mp.as_str().to_string(),
+                        detail: format!(
+                            "selected {} but {} requires {}",
+                            selected_version,
+                            module,
+                            req.constraint,
+                        ),
+                    });
+                    break;
+                }
+            }
+        }
+
+        if let Some(error) = branch_error {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
             continue;
         }
 
-        let active_constraints = constraints.get(&mp).cloned().unwrap_or_default();
-
-        // Determine the version to select
-        let version = select_version(&mp, &active_constraints, registry, prefs)?;
-
-        // Fetch and validate manifest
-        let (manifest, manifest_raw) = registry.fetch_manifest_raw(&mp, &version)?;
-        crate::registry::validate_manifest(&manifest, &mp, &version)?;
-
-        // Toolchain constraint subset check: the root's `vo` constraint must be
-        // a subset of the dependency's `vo` constraint.  If it isn't, the
-        // dependency might require a toolchain version the root cannot provide.
-        if !root_vo.is_subset_of(&manifest.vo) {
-            return Err(Error::DependencyToolchainMismatch {
-                module: mp.as_str().to_string(),
-                project_constraint: root_vo.to_string(),
-                dependency_constraint: manifest.vo.to_string(),
-            });
-        }
-
-        // Add transitive dependencies to the queue
-        for req in &manifest.require {
-            let dep_mp = req.module.clone();
-            constraints
-                .entry(dep_mp.clone())
-                .or_default()
-                .push((mp.as_str().to_string(), req.constraint.clone()));
-            if !resolved.contains_key(&dep_mp) && queued.insert(dep_mp.clone()) {
-                queue.push(dep_mp);
-            }
-        }
-
-        // If module was already resolved by a different path through the graph,
-        // verify the selected version still satisfies all (now-expanded) constraints.
-        // (In this algorithm we resolve before re-visiting, so this is the first resolution.)
-        resolved.insert(mp, ResolvedModule { version, manifest, manifest_raw });
-    }
-
-    // Final validation pass: verify all constraints are satisfied by selected versions
-    for (mp, cs) in &constraints {
-        let rm = resolved.get(mp).ok_or_else(|| {
-            Error::NoSatisfyingVersion {
-                module: mp.as_str().to_string(),
-                detail: "module was required but never resolved".to_string(),
-            }
-        })?;
-        for (source, constraint) in cs {
-            if !constraint.satisfies(&rm.version) {
-                return Err(Error::ConflictingConstraints {
-                    module: mp.as_str().to_string(),
-                    detail: format!(
-                        "selected {} but {} requires {}",
-                        rm.version, source, constraint
-                    ),
-                });
+        next_resolved.insert(module.clone(), candidate);
+        match solve_search(root_vo, registry, prefs, next_resolved, next_constraints) {
+            Ok(graph) => return Ok(graph),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
             }
         }
     }
 
-    Ok(ResolvedGraph { modules: resolved })
+    Err(first_error.unwrap_or_else(|| Error::NoSatisfyingVersion {
+        module: module.as_str().to_string(),
+        detail: "no candidate version leads to a consistent dependency graph".to_string(),
+    }))
 }
 
-fn select_version(
-    mp: &ModulePath,
-    constraints: &[(String, DepConstraint)],
+fn pick_next_module(
+    root_vo: &ToolchainConstraint,
     registry: &dyn Registry,
     prefs: &SolvePreferences,
-) -> Result<ExactVersion, Error> {
-    // Check if we should prefer a locked version
-    let should_prefer_locked = match &prefs.target_update {
-        Some(target) => *target != *mp, // prefer locked for non-target modules
-        None => false,
-    };
+    resolved: &BTreeMap<ModulePath, ResolvedModule>,
+    constraints: &BTreeMap<ModulePath, Vec<(String, DepConstraint)>>,
+) -> Result<Option<(ModulePath, Vec<ResolvedModule>)>, Error> {
+    let mut best: Option<(ModulePath, Vec<ResolvedModule>)> = None;
 
-    if should_prefer_locked {
-        if let Some(locked_v) = prefs.locked.get(mp) {
-            // Verify the locked version still satisfies all constraints
-            let all_satisfied = constraints.iter().all(|(_, c)| c.satisfies(locked_v));
-            if all_satisfied && mp.accepts_version(locked_v) {
-                return Ok(locked_v.clone());
+    for (module, module_constraints) in constraints {
+        if resolved.contains_key(module) {
+            continue;
+        }
+
+        let candidates = candidate_modules(module, module_constraints, root_vo, registry, prefs)?;
+        let should_replace = match &best {
+            None => true,
+            Some((best_module, best_candidates)) => {
+                candidates.len() < best_candidates.len()
+                    || (candidates.len() == best_candidates.len() && module < best_module)
             }
-            // Locked version no longer works; fall through to fresh selection.
+        };
+        if should_replace {
+            best = Some((module.clone(), candidates));
         }
     }
 
-    // Fetch candidate versions from registry
-    let all_versions = registry.list_versions(mp)?;
+    Ok(best)
+}
 
-    // Filter to major-compatible versions
+fn candidate_modules(
+    mp: &ModulePath,
+    constraints: &[(String, DepConstraint)],
+    root_vo: &ToolchainConstraint,
+    registry: &dyn Registry,
+    prefs: &SolvePreferences,
+) -> Result<Vec<ResolvedModule>, Error> {
+    let all_versions = registry.list_versions(mp)?;
     let compatible: Vec<ExactVersion> = crate::registry::filter_compatible_versions(mp, &all_versions);
     if compatible.is_empty() {
         return Err(Error::NoSatisfyingVersion {
@@ -170,27 +181,117 @@ fn select_version(
         });
     }
 
-    // Filter by all active constraints
-    let satisfying: Vec<&ExactVersion> = compatible
-        .iter()
-        .filter(|v| constraints.iter().all(|(_, c)| c.satisfies(v)))
+    let satisfying: Vec<ExactVersion> = compatible
+        .into_iter()
+        .filter(|version| constraints.iter().all(|(_, constraint)| constraint.satisfies(version)))
         .collect();
-
     if satisfying.is_empty() {
-        let detail = constraints
-            .iter()
-            .map(|(src, c)| format!("  {src} requires: {c}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(Error::NoSatisfyingVersion {
-            module: mp.as_str().to_string(),
-            detail,
-        });
+        return Err(no_satisfying_version_error(mp, constraints));
     }
 
-    // Select highest version (deterministic: Ord on SemVer)
-    let selected = satisfying.into_iter().max().unwrap();
-    Ok(selected.clone())
+    let mut toolchain_mismatch: Option<String> = None;
+    let mut first_error: Option<Error> = None;
+    let mut candidates = Vec::new();
+    for version in satisfying {
+        let (manifest, manifest_raw) = match registry.fetch_manifest_raw(mp, &version) {
+            Ok(result) => result,
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+        };
+        if let Err(error) = crate::registry::validate_manifest(&manifest, mp, &version) {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+            continue;
+        }
+        if !root_vo.is_subset_of(&manifest.vo) {
+            if toolchain_mismatch.is_none() {
+                toolchain_mismatch = Some(manifest.vo.to_string());
+            }
+            continue;
+        }
+        candidates.push(ResolvedModule { version, manifest, manifest_raw });
+    }
+
+    if candidates.is_empty() {
+        if let Some(dependency_constraint) = toolchain_mismatch {
+            return Err(Error::DependencyToolchainMismatch {
+                module: mp.as_str().to_string(),
+                project_constraint: root_vo.to_string(),
+                dependency_constraint,
+            });
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        return Err(no_satisfying_version_error(mp, constraints));
+    }
+
+    candidates.sort_by(|left, right| right.version.cmp(&left.version));
+    if should_prefer_locked(mp, prefs) {
+        if let Some(locked_version) = prefs.locked.get(mp) {
+            if let Some(index) = candidates.iter().position(|candidate| candidate.version == *locked_version) {
+                if index != 0 {
+                    let locked_candidate = candidates.remove(index);
+                    candidates.insert(0, locked_candidate);
+                }
+            }
+        }
+    }
+
+    Ok(candidates)
+}
+
+fn should_prefer_locked(mp: &ModulePath, prefs: &SolvePreferences) -> bool {
+    match &prefs.target_update {
+        Some(target) => *target != *mp,
+        None => false,
+    }
+}
+
+fn no_satisfying_version_error(
+    mp: &ModulePath,
+    constraints: &[(String, DepConstraint)],
+) -> Error {
+    let detail = constraints
+        .iter()
+        .map(|(source, constraint)| format!("  {source} requires: {constraint}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Error::NoSatisfyingVersion {
+        module: mp.as_str().to_string(),
+        detail,
+    }
+}
+
+fn validate_resolved_graph(
+    resolved: &BTreeMap<ModulePath, ResolvedModule>,
+    constraints: &BTreeMap<ModulePath, Vec<(String, DepConstraint)>>,
+) -> Result<(), Error> {
+    for (mp, module_constraints) in constraints {
+        let resolved_module = resolved.get(mp).ok_or_else(|| Error::NoSatisfyingVersion {
+            module: mp.as_str().to_string(),
+            detail: "module was required but never resolved".to_string(),
+        })?;
+        for (source, constraint) in module_constraints {
+            if !constraint.satisfies(&resolved_module.version) {
+                return Err(Error::ConflictingConstraints {
+                    module: mp.as_str().to_string(),
+                    detail: format!(
+                        "selected {} but {} requires {}",
+                        resolved_module.version,
+                        source,
+                        constraint,
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -412,6 +513,69 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("toolchain"), "expected toolchain error, got: {msg}");
+    }
+
+    #[test]
+    fn test_solve_skips_toolchain_incompatible_higher_version() {
+        let mut reg = MockRegistry::new();
+        reg.add_module_with_vo("github.com/acme/lib", "v1.0.0", "^1.0.0", &[]);
+        reg.add_module_with_vo("github.com/acme/lib", "v1.1.0", "~2.0.0", &[]);
+
+        let root = ModulePath::parse("github.com/acme/app").unwrap();
+        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let reqs = vec![(
+            ModulePath::parse("github.com/acme/lib").unwrap(),
+            DepConstraint::parse("^1.0.0").unwrap(),
+        )];
+
+        let graph = solve(&root, &root_vo, &reqs, &reg, &SolvePreferences::default()).unwrap();
+        let lib = &graph.modules[&ModulePath::parse("github.com/acme/lib").unwrap()];
+        assert_eq!(lib.version.to_string(), "v1.0.0");
+    }
+
+    #[test]
+    fn test_solve_backtrack_diamond() {
+        // Graph: root -> A v1.0.0 -> {B ^1.0.0, C ^1.0.0}
+        //        B v1.1.0 -> C ~1.1.0  (>= 1.1.0, < 1.2.0)
+        //        B v1.0.0 -> C ^1.0.0
+        //        C: v1.0.0, v1.1.0, v1.2.0
+        //
+        // Greedy (LIFO queue) resolves C=v1.2.0 first (only ^1.0.0 from A),
+        // then B=v1.1.0 which adds C ~1.1.0. Final validation detects
+        // C=v1.2.0 violates ~1.1.0. Backtrack excludes C=v1.2.0.
+        // Retry picks C=v1.1.0 which satisfies both ^1.0.0 and ~1.1.0.
+        let mut reg = MockRegistry::new();
+        reg.add_module("github.com/acme/a", "v1.0.0", &[
+            ("github.com/acme/b", "^1.0.0"),
+            ("github.com/acme/c", "^1.0.0"),
+        ]);
+        reg.add_module("github.com/acme/b", "v1.0.0", &[
+            ("github.com/acme/c", "^1.0.0"),
+        ]);
+        reg.add_module("github.com/acme/b", "v1.1.0", &[
+            ("github.com/acme/c", "~1.1.0"),
+        ]);
+        reg.add_module("github.com/acme/c", "v1.0.0", &[]);
+        reg.add_module("github.com/acme/c", "v1.1.0", &[]);
+        reg.add_module("github.com/acme/c", "v1.2.0", &[]);
+
+        let root = ModulePath::parse("github.com/acme/app").unwrap();
+        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let reqs = vec![(
+            ModulePath::parse("github.com/acme/a").unwrap(),
+            DepConstraint::parse("^1.0.0").unwrap(),
+        )];
+
+        let graph = solve(&root, &root_vo, &reqs, &reg, &SolvePreferences::default()).unwrap();
+        assert_eq!(graph.modules.len(), 3);
+
+        // C should be v1.1.0 (v1.2.0 excluded by backtrack)
+        let c = &graph.modules[&ModulePath::parse("github.com/acme/c").unwrap()];
+        assert_eq!(c.version.to_string(), "v1.1.0");
+
+        // B should still be v1.1.0 (highest)
+        let b = &graph.modules[&ModulePath::parse("github.com/acme/b").unwrap()];
+        assert_eq!(b.version.to_string(), "v1.1.0");
     }
 
     #[test]

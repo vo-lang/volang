@@ -13,10 +13,10 @@
 //! - entry_func: u32
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec::Vec, collections::BTreeMap};
 
 #[cfg(feature = "std")]
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 
@@ -651,7 +651,7 @@ impl Module {
             let underlying_meta = ValueMeta::from_raw(r.read_u32()?);
             let underlying_rttid = ValueRttid::from_raw(r.read_u32()?);
             let method_count = r.read_u32()? as usize;
-            let mut methods = HashMap::new();
+            let mut methods = BTreeMap::new();
             for _ in 0..method_count {
                 let n = r.read_string()?;
                 let func_id = r.read_u32()?;

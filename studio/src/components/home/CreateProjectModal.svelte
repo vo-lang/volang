@@ -3,17 +3,37 @@
 
   export let busy = false;
   export let error = '';
+  export let platform: 'native' | 'wasm' = 'wasm';
+  export let defaultLocation = '';
+  export let onPickDirectory: (() => Promise<string | null>) | null = null;
 
   const dispatch = createEventDispatcher<{
     close: void;
-    create: { kind: 'single' | 'module'; name: string };
+    create: { kind: 'single' | 'module'; name: string; location: string | undefined };
   }>();
 
   let kind: 'single' | 'module' = 'single';
   let name = '';
+  let location = defaultLocation;
+
+  $: isNative = platform === 'native';
+  $: effectiveName = name.trim() || (kind === 'single' ? 'my_app' : 'my_project');
+  $: normalizedLocation = location.trim();
+  $: effectiveLocation = normalizedLocation || defaultLocation;
+  $: previewPath = isNative && effectiveLocation
+    ? `${effectiveLocation}/${kind === 'single' ? `${effectiveName}.vo` : `${effectiveName}/vo.mod`}`
+    : kind === 'single' ? `${effectiveName}.vo` : `${effectiveName}/vo.mod`;
+
+  async function browseLocation(): Promise<void> {
+    if (!onPickDirectory) return;
+    const picked = await onPickDirectory();
+    if (picked) {
+      location = picked;
+    }
+  }
 
   function submit(): void {
-    dispatch('create', { kind, name });
+    dispatch('create', { kind, name, location: isNative && normalizedLocation ? normalizedLocation : undefined });
   }
 </script>
 
@@ -43,12 +63,24 @@
       on:keydown={(event) => event.key === 'Enter' && submit()}
     />
 
-    <div class="preview">
-      {#if kind === 'single'}
-        Creates <code>{name.trim() || 'my_app'}.vo</code>
+    <div class="location-row">
+      <label class="location-label">Location</label>
+      {#if isNative}
+        <div class="location-native">
+          <input
+            bind:value={location}
+            class="location-input"
+            placeholder="~/code"
+          />
+          <button class="browse-btn" on:click={browseLocation} disabled={busy}>Browse</button>
+        </div>
       {:else}
-        Creates <code>{name.trim() || 'my_project'}/vo.mod</code> and <code>main.vo</code>
+        <span class="location-static">Browser Workspace</span>
       {/if}
+    </div>
+
+    <div class="preview">
+      Creates <code>{previewPath}</code>
     </div>
 
     {#if error}
@@ -128,6 +160,58 @@
   .name-input:focus {
     border-color: #89b4fa;
     box-shadow: 0 0 0 2px rgba(137, 180, 250, 0.16);
+  }
+  .location-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .location-label {
+    color: #7f849c;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .location-native {
+    display: flex;
+    gap: 8px;
+  }
+  .location-input {
+    flex: 1;
+    padding: 9px 13px;
+    border-radius: 10px;
+    border: 1px solid #313244;
+    background: #181825;
+    color: #cdd6f4;
+    font-size: 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    outline: none;
+  }
+  .location-input:focus {
+    border-color: #89b4fa;
+    box-shadow: 0 0 0 2px rgba(137, 180, 250, 0.16);
+  }
+  .browse-btn {
+    border: 1px solid #313244;
+    background: #313244;
+    color: #cdd6f4;
+    border-radius: 10px;
+    padding: 9px 14px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .browse-btn:hover {
+    background: #45475a;
+  }
+  .browse-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .location-static {
+    color: #585b70;
+    font-size: 13px;
+    font-style: italic;
   }
   .preview {
     color: #7f849c;

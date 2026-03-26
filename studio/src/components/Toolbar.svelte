@@ -19,6 +19,7 @@
   $: projectMode = $session.projectMode;
   $: projectModeLabel = projectMode === 'single-file' ? 'Single File' : projectMode === 'module' ? 'Project' : 'Session';
   $: isGuiProject = projectHasGui;
+  $: sessionRoot = $session.root || '/';
 </script>
 
 <div class="toolbar">
@@ -42,6 +43,10 @@
   <div class="meta-group">
     <span class="session-badge">{projectModeLabel}</span>
     <span class="filename">{fileName || 'Untitled'}{dirty ? ' ·' : ''}</span>
+    <div class="session-root" title={sessionRoot}>
+      <span class="session-root-label">Session Root</span>
+      <span class="session-root-value">{sessionRoot}</span>
+    </div>
   </div>
 
   <div class="spacer"></div>
@@ -124,6 +129,34 @@
     text-overflow: ellipsis;
     min-width: 0;
   }
+  .session-root {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(69, 71, 90, 0.9);
+    background: rgba(17, 17, 27, 0.72);
+  }
+  .session-root-label {
+    flex-shrink: 0;
+    color: #7f849c;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .session-root-value {
+    min-width: 0;
+    color: #bac2de;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', 'Fira Mono', monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: min(36vw, 420px);
+  }
   .kind-label {
     color: #6c7086;
     font-size: 11px;
@@ -177,5 +210,10 @@
   .gui-toggle:disabled {
     opacity: 0.45;
     cursor: not-allowed;
+  }
+  @media (max-width: 1100px) {
+    .session-root {
+      display: none;
+    }
   }
 </style>

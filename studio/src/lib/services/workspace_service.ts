@@ -22,6 +22,10 @@ export class WorkspaceService {
     return this.backend.discoverProjects(root);
   }
 
+  async discoverWorkspaceProjects(): Promise<DiscoveredProject[]> {
+    return this.backend.discoverWorkspaceProjects();
+  }
+
   async list(path: string): Promise<FsEntry[]> {
     return this.backend.listDir(path);
   }

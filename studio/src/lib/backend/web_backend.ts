@@ -1,4 +1,4 @@
-import type { Backend } from './backend';
+import type { Backend, FileDialogFilter } from './backend';
 import type {
   BootstrapContext,
   BuildResult,
@@ -220,6 +220,10 @@ export class WebBackend implements Backend {
   async openUrlSession(url: string): Promise<SessionInfo> {
     const importedRoot = await importProjectFromUrl(url);
     return buildSessionInfo(importedRoot, 'url');
+  }
+
+  async discoverWorkspaceProjects(): Promise<DiscoveredProject[]> {
+    return this.discoverProjects(WORKSPACE_ROOT);
   }
 
   async discoverProjects(root: string): Promise<DiscoveredProject[]> {
@@ -550,6 +554,20 @@ export class WebBackend implements Backend {
     const headers: Record<string, string> = {};
     response.headers.forEach((value, key) => { headers[key] = value; });
     return { status: response.status, headers, body };
+  }
+
+  async pickDirectory(_defaultPath?: string): Promise<string | null> {
+    return null;
+  }
+
+  async pickFile(_defaultPath?: string, _filters?: FileDialogFilter[]): Promise<string | null> {
+    return null;
+  }
+
+  async createProjectFiles(files: { path: string; content: string }[]): Promise<void> {
+    for (const file of files) {
+      setFile(normalizePath(file.path), file.content);
+    }
   }
 
   async gitExec(_op: GitOp): Promise<GitResult> {

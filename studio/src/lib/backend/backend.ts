@@ -24,6 +24,11 @@ import type {
   StreamHandle,
 } from '../types';
 
+export interface FileDialogFilter {
+  name: string;
+  extensions: string[];
+}
+
 export interface Backend {
   readonly platform: 'native' | 'wasm';
 
@@ -37,6 +42,7 @@ export interface Backend {
 
   // Filesystem
   discoverProjects(root: string): Promise<DiscoveredProject[]>;
+  discoverWorkspaceProjects(): Promise<DiscoveredProject[]>;
   listDir(path: string): Promise<FsEntry[]>;
   statPath(path: string): Promise<FsStat>;
   readFile(path: string): Promise<string>;
@@ -77,6 +83,13 @@ export interface Backend {
 
   // HTTP
   httpRequest(method: string, url: string, opts?: HttpOpts): Promise<HttpResult>;
+
+  // Dialog (native only — web returns null)
+  pickDirectory(defaultPath?: string): Promise<string | null>;
+  pickFile(defaultPath?: string, filters?: FileDialogFilter[]): Promise<string | null>;
+
+  // Project creation (bypass session root restriction)
+  createProjectFiles(files: { path: string; content: string }[]): Promise<void>;
 
   // Git
   gitExec(op: GitOp): Promise<GitResult>;

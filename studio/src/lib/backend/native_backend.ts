@@ -1,4 +1,4 @@
-import type { Backend } from './backend';
+import type { Backend, FileDialogFilter } from './backend';
 import type {
   BootstrapContext,
   BuildResult,
@@ -67,6 +67,10 @@ export class NativeBackend implements Backend {
 
   async discoverProjects(root: string): Promise<DiscoveredProject[]> {
     return this.invoke<DiscoveredProject[]>('cmd_discover_projects', { root });
+  }
+
+  async discoverWorkspaceProjects(): Promise<DiscoveredProject[]> {
+    return this.invoke<DiscoveredProject[]>('cmd_discover_workspace_projects');
   }
 
   async listDir(path: string): Promise<FsEntry[]> {
@@ -249,6 +253,21 @@ export class NativeBackend implements Backend {
 
   async httpRequest(method: string, url: string, opts?: HttpOpts): Promise<HttpResult> {
     return this.invoke<HttpResult>('cmd_http_request', { method, url, opts });
+  }
+
+  async pickDirectory(defaultPath?: string): Promise<string | null> {
+    return this.invoke<string | null>('cmd_pick_directory', { defaultPath: defaultPath ?? null });
+  }
+
+  async pickFile(defaultPath?: string, filters?: FileDialogFilter[]): Promise<string | null> {
+    return this.invoke<string | null>('cmd_pick_file', {
+      defaultPath: defaultPath ?? null,
+      filters: filters ?? null,
+    });
+  }
+
+  async createProjectFiles(files: { path: string; content: string }[]): Promise<void> {
+    await this.invoke<void>('cmd_create_project_files', { files });
   }
 
   async gitExec(op: GitOp): Promise<GitResult> {

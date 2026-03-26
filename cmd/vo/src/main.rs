@@ -464,6 +464,9 @@ fn cmd_mod(args: &[String]) -> i32 {
         "sync" => cmd_mod_sync(&args[1..]),
         "verify" => cmd_mod_verify(&args[1..]),
         "remove" => cmd_mod_remove(&args[1..]),
+        "tidy" => cmd_mod_tidy(&args[1..]),
+        "why" => cmd_mod_why(&args[1..]),
+        "clean" => cmd_mod_clean(&args[1..]),
         "-h" | "--help" | "help" => {
             print_mod_usage();
             0
@@ -480,12 +483,15 @@ fn print_mod_usage() {
     println!("Usage: vo mod <subcommand> [arguments]");
     println!();
     println!("Subcommands:");
-    println!("  download [path]  Fetch dependencies pinned by vo.lock into the module cache");
+    println!("  download [path]            Fetch dependencies pinned by vo.lock into the module cache");
     println!("  add <module[@constraint]>  Add or update a direct dependency and refresh vo.lock");
     println!("  update [module]            Re-solve dependency constraints and refresh vo.lock");
     println!("  sync [path]                Recompute the full dependency graph and write vo.lock");
     println!("  verify [path]              Verify that vo.lock exactly matches the current vo.mod graph");
     println!("  remove <module>            Remove a direct dependency and refresh vo.lock");
+    println!("  tidy [path]                Add missing and remove unused dependencies based on imports");
+    println!("  why <module>               Show why a module is in the dependency graph");
+    println!("  clean [--all]              Remove unused cached modules (--all removes everything)");
 }
 
 fn cmd_mod_download(args: &[String]) -> i32 {
@@ -523,7 +529,8 @@ fn cmd_mod_add(args: &[String]) -> i32 {
         None => (args[0].as_str(), None),
     };
     let registry = vo_module::github_registry::GitHubRegistry::new();
-    match vo_module::ops::mod_add(&project_root, dep_path, constraint, &registry, "vo mod add") {
+    let cache_root = vo_engine::default_mod_cache_root();
+    match vo_module::ops::mod_add(&project_root, dep_path, constraint, &cache_root, &registry, "vo mod add") {
         Ok(()) => {
             println!("added {}", dep_path);
             print_lock_summary(&project_root);
@@ -547,7 +554,8 @@ fn cmd_mod_update(args: &[String]) -> i32 {
     };
     let target = args.first().map(|value| value.as_str());
     let registry = vo_module::github_registry::GitHubRegistry::new();
-    match vo_module::ops::mod_update(&project_root, target, &registry, "vo mod update") {
+    let cache_root = vo_engine::default_mod_cache_root();
+    match vo_module::ops::mod_update(&project_root, target, &cache_root, &registry, "vo mod update") {
         Ok(()) => {
             if let Some(t) = target {
                 println!("updated {}", t);
@@ -575,7 +583,8 @@ fn cmd_mod_sync(args: &[String]) -> i32 {
         Err(code) => return code,
     };
     let registry = vo_module::github_registry::GitHubRegistry::new();
-    match vo_module::ops::mod_sync(&project_root, &registry, "vo mod sync") {
+    let cache_root = vo_engine::default_mod_cache_root();
+    match vo_module::ops::mod_sync(&project_root, &cache_root, &registry, "vo mod sync") {
         Ok(()) => {
             println!("synced {}", project_root.join("vo.lock").display());
             print_lock_summary(&project_root);
@@ -622,7 +631,8 @@ fn cmd_mod_remove(args: &[String]) -> i32 {
         Err(code) => return code,
     };
     let registry = vo_module::github_registry::GitHubRegistry::new();
-    match vo_module::ops::mod_remove(&project_root, &args[0], &registry, "vo mod remove") {
+    let cache_root = vo_engine::default_mod_cache_root();
+    match vo_module::ops::mod_remove(&project_root, &args[0], &cache_root, &registry, "vo mod remove") {
         Ok(()) => {
             println!("removed {}", args[0]);
             print_lock_summary(&project_root);
@@ -630,6 +640,87 @@ fn cmd_mod_remove(args: &[String]) -> i32 {
         }
         Err(error) => {
             eprintln!("[VO:MOD:REMOVE] {}", error);
+            1
+        }
+    }
+}
+
+fn cmd_mod_tidy(args: &[String]) -> i32 {
+    let path = if args.is_empty() { "." } else { &args[0] };
+    let project_root = match require_module_root_from_path(path, "VO:MOD:TIDY") {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let registry = vo_module::github_registry::GitHubRegistry::new();
+    let cache_root = vo_engine::default_mod_cache_root();
+    match vo_module::ops::mod_tidy(&project_root, &cache_root, &registry, "vo mod tidy") {
+        Ok(result) => {
+            for m in &result.added {
+                println!("  + {}", m);
+            }
+            for m in &result.removed {
+                println!("  - {}", m);
+            }
+            if result.added.is_empty() && result.removed.is_empty() {
+                println!("no changes");
+            }
+            print_lock_summary(&project_root);
+            0
+        }
+        Err(error) => {
+            eprintln!("[VO:MOD:TIDY] {}", error);
+            1
+        }
+    }
+}
+
+fn cmd_mod_why(args: &[String]) -> i32 {
+    if args.len() != 1 {
+        eprintln!("usage: vo mod why <module-path>");
+        return 1;
+    }
+    let project_root = match require_module_root_from_path(".", "VO:MOD:WHY") {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    match vo_module::ops::mod_why(&project_root, &args[0]) {
+        Ok(chain) => {
+            println!("{}", chain.join(" -> "));
+            0
+        }
+        Err(error) => {
+            eprintln!("[VO:MOD:WHY] {}", error);
+            1
+        }
+    }
+}
+
+fn cmd_mod_clean(args: &[String]) -> i32 {
+    if args.iter().any(|arg| arg != "--all") {
+        eprintln!("usage: vo mod clean [--all]");
+        return 1;
+    }
+    let keep_locked = !args.iter().any(|a| a == "--all");
+    let project_root = if keep_locked {
+        match require_module_root_from_path(".", "VO:MOD:CLEAN") {
+            Ok(path) => path,
+            Err(code) => return code,
+        }
+    } else {
+        PathBuf::from(".")
+    };
+    let cache_root = vo_engine::default_mod_cache_root();
+    match vo_module::ops::mod_clean(&project_root, &cache_root, keep_locked) {
+        Ok(result) => {
+            if result.removed_dirs == 0 {
+                println!("cache is clean");
+            } else {
+                println!("removed {} cached module version(s)", result.removed_dirs);
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("[VO:MOD:CLEAN] {}", error);
             1
         }
     }

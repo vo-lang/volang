@@ -62,15 +62,12 @@ benchmarks/sum-array/c_bench
 benchmarks/recursive-tree/go_bench
 benchmarks/recursive-tree/c_bench
 benchmarks/sieve/go_bench
-cmd/vo/.vo-cache/
+**/.vo-cache/
 
 # Playground
 playground/node_modules/
 playground/dist/
 playground/src/wasm/pkg/
-
-# Sibling repos (vox, vogui) are separate git repos at ../vox, ../vogui
-cmd/vo-test/.vo-cache/
 lang/crates/vo-web/node_modules/
 lang/crates/vo-web/pkg/
 lang/crates/vo-web/dist/

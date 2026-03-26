@@ -6,7 +6,7 @@ import { ExtensionService } from './extension_service';
 import { ProjectCatalogService } from './project_catalog_service';
 import { ProjectService } from './project_service';
 import { RuntimeService } from './runtime_service';
-import { TerminalService } from './terminal_service';
+import { TermService } from './term_service';
 import { WorkspaceService } from './workspace_service';
 
 export interface ServiceRegistry {
@@ -16,7 +16,7 @@ export interface ServiceRegistry {
   projectCatalog: ProjectCatalogService;
   project: ProjectService;
   runtime: RuntimeService;
-  terminal: TerminalService;
+  term: TermService;
   workspace: WorkspaceService;
 }
 
@@ -28,7 +28,7 @@ export async function createServiceRegistry(): Promise<ServiceRegistry> {
   const project = new ProjectService(backend, workspace);
   const projectCatalog = new ProjectCatalogService(backend, workspace);
   const runtime = new RuntimeService(backend);
-  const terminal = new TerminalService(workspace, compiler, runtime, backend);
+  const term = new TermService(workspace, compiler, runtime, backend);
   await project.initialize();
   return {
     backend,
@@ -37,7 +37,7 @@ export async function createServiceRegistry(): Promise<ServiceRegistry> {
     projectCatalog,
     project,
     runtime,
-    terminal,
+    term,
     workspace,
   };
 }

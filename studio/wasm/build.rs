@@ -1,6 +1,6 @@
-//! Build script: embed shell handler .vo source files for WASM compilation.
+//! Build script: embed term handler .vo source files for WASM compilation.
 //!
-//! Only the shell handler's own source files are embedded. Third-party
+//! Only the term handler's own source files are embedded. Third-party
 //! dependencies (vogui, vox, git2, zip) are installed into the JS VFS at
 //! runtime via `install_module_to_vfs` and resolved through `WasmVfs`.
 
@@ -17,8 +17,10 @@ func handleHttp(id, workspace, cwd, kind string, op any) error {
 }
 "#;
 
-// Shell handler files to substitute with stubs in WASM (avoid heavy stdlib deps).
-const WASM_STUB_SHELL_FILES: &[&str] = &[
+const TERM_HANDLER_VFS_ROOT: &str = "studio/vo/term";
+
+// Term handler files to substitute with stubs in WASM (avoid heavy stdlib deps).
+const WASM_STUB_TERM_HANDLER_FILES: &[&str] = &[
     "http.vo",
 ];
 
@@ -32,7 +34,7 @@ fn collect_vo_files(dir: &Path, prefix: &str, entries: &mut String, out_dir: &st
         for path in paths {
             let name = path.file_name().unwrap().to_str().unwrap();
             let vfs_path = format!("{}/{}", prefix, name);
-            if WASM_STUB_SHELL_FILES.contains(&name) {
+            if WASM_STUB_TERM_HANDLER_FILES.contains(&name) {
                 // Write stub and embed from OUT_DIR so the function is defined
                 // without pulling in heavy stdlib dependencies.
                 let stub_name = format!("stub_{}", name);
@@ -60,26 +62,26 @@ fn main() {
     // studio/wasm -> studio -> repo root
     let repo_root = manifest_dir.join("../..").canonicalize().unwrap();
 
-    // ── shell handler source files + manifests ──────────────────────────────
-    let mut shell_entries = String::new();
-    let shell_dir = repo_root.join("studio/vo/shell");
-    collect_vo_files(&shell_dir, "studio/vo/shell", &mut shell_entries, &out_dir);
+    // ── term handler source files + manifests ───────────────────────────────
+    let mut term_handler_entries = String::new();
+    let term_handler_dir = repo_root.join(TERM_HANDLER_VFS_ROOT);
+    collect_vo_files(&term_handler_dir, TERM_HANDLER_VFS_ROOT, &mut term_handler_entries, &out_dir);
 
     for manifest_name in ["vo.mod", "vo.lock"] {
-        let manifest_path = shell_dir.join(manifest_name);
+        let manifest_path = term_handler_dir.join(manifest_name);
         if manifest_path.is_file() {
-            shell_entries.push_str(&format!(
+            term_handler_entries.push_str(&format!(
                 "    ({:?}, include_bytes!({:?})),\n",
-                format!("studio/vo/shell/{}", manifest_name),
+                format!("{}/{}", TERM_HANDLER_VFS_ROOT, manifest_name),
                 manifest_path.display()
             ));
         }
     }
 
-    println!("cargo:rerun-if-changed={}", shell_dir.display());
+    println!("cargo:rerun-if-changed={}", term_handler_dir.display());
 
     fs::write(
-        Path::new(&out_dir).join("shell_embedded.rs"),
-        format!("pub static SHELL_HANDLER_FILES: &[(&str, &[u8])] = &[\n{}];\n", shell_entries),
+        Path::new(&out_dir).join("term_embedded.rs"),
+        format!("pub static TERM_HANDLER_FILES: &[(&str, &[u8])] = &[\n{}];\n", term_handler_entries),
     ).unwrap();
 }

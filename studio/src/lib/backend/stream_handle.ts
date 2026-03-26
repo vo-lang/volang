@@ -63,7 +63,7 @@ export function makeStreamHandleFromProducer<T>(
 
 export function makeTauriStreamHandle<T>(
   invokeSetup: (channel: Channel<T>) => Promise<void>,
-  isTerminalEvent: (msg: T) => boolean = () => false,
+  isCompletionEvent: (msg: T) => boolean = () => false,
 ): StreamHandle<T> {
   const channelRefs: Channel<T>[] = [];
   return makeStreamHandleFromProducer<T>((emit, onDone, onError) => {
@@ -71,7 +71,7 @@ export function makeTauriStreamHandle<T>(
     channelRefs.push(ch);
     ch.onmessage = (msg) => {
       emit(msg);
-      if (isTerminalEvent(msg)) {
+      if (isCompletionEvent(msg)) {
         channelRefs.length = 0;
         onDone();
       }

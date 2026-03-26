@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::identity::{classify_import, find_owning_module, ImportClass, ModulePath};
-use crate::version::DepConstraint;
+use crate::version::{DepConstraint, ExactVersion};
 use crate::lock;
 use crate::materialize;
 use crate::registry::Registry;
@@ -42,6 +42,7 @@ pub fn mod_add(
     project_dir: &Path,
     dep_path: &str,
     constraint: Option<&str>,
+    cache_root: &Path,
     registry: &dyn Registry,
     created_by: &str,
 ) -> Result<(), Error> {
@@ -51,18 +52,7 @@ pub fn mod_add(
     let dep_constraint = match constraint {
         Some(c) => DepConstraint::parse(c)?,
         None => {
-            // Resolve latest non-prerelease version
-            let versions = registry.list_versions(&dep_mp)?;
-            let compatible = crate::registry::filter_compatible_versions(&dep_mp, &versions);
-            let latest = compatible
-                .iter()
-                .filter(|v| !v.semver().is_prerelease())
-                .max()
-                .ok_or_else(|| Error::NoSatisfyingVersion {
-                    module: dep_path.to_string(),
-                    detail: "no non-prerelease versions found; specify an explicit constraint"
-                        .to_string(),
-                })?;
+            let latest = latest_supported_requirement_version(&mf.vo, &dep_mp, registry)?;
             // Write ^MAJOR.MINOR.PATCH
             DepConstraint {
                 op: crate::version::ConstraintOp::Compatible,
@@ -81,13 +71,10 @@ pub fn mod_add(
         });
     }
 
-    // Write updated vo.mod
+    let lock_file = prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
     write_mod_file(project_dir, &mf)?;
-
-    // Re-solve and write vo.lock
-    let graph = solve_from_modfile(&mf, registry, &SolvePreferences::default())?;
-    let lf = lock::generate_lock(&mf, &graph, created_by)?;
-    write_lock_file(project_dir, &lf)?;
+    write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
+    download_lock_file(cache_root, lock_file.as_ref(), registry)?;
 
     Ok(())
 }
@@ -101,6 +88,7 @@ pub fn mod_add(
 pub fn mod_update(
     project_dir: &Path,
     target: Option<&str>,
+    cache_root: &Path,
     registry: &dyn Registry,
     created_by: &str,
 ) -> Result<(), Error> {
@@ -123,9 +111,9 @@ pub fn mod_update(
         SolvePreferences::default()
     };
 
-    let graph = solve_from_modfile(&mf, registry, &prefs)?;
-    let lf = lock::generate_lock(&mf, &graph, created_by)?;
-    write_lock_file(project_dir, &lf)?;
+    let lock_file = prepare_lock_file(&mf, registry, &prefs, created_by)?;
+    write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
+    download_lock_file(cache_root, lock_file.as_ref(), registry)?;
 
     Ok(())
 }
@@ -137,13 +125,14 @@ pub fn mod_update(
 /// Recompute the full dependency graph from `vo.mod` and write a fresh `vo.lock`.
 pub fn mod_sync(
     project_dir: &Path,
+    cache_root: &Path,
     registry: &dyn Registry,
     created_by: &str,
 ) -> Result<(), Error> {
     let mf = read_mod_file(project_dir)?;
-    let graph = solve_from_modfile(&mf, registry, &SolvePreferences::default())?;
-    let lf = lock::generate_lock(&mf, &graph, created_by)?;
-    write_lock_file(project_dir, &lf)?;
+    let lock_file = prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
+    write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
+    download_lock_file(cache_root, lock_file.as_ref(), registry)?;
     Ok(())
 }
 
@@ -184,6 +173,7 @@ pub fn mod_verify(project_dir: &Path, cache_root: &Path) -> Result<(), Error> {
 pub fn mod_remove(
     project_dir: &Path,
     dep_path: &str,
+    cache_root: &Path,
     registry: &dyn Registry,
     created_by: &str,
 ) -> Result<(), Error> {
@@ -198,14 +188,256 @@ pub fn mod_remove(
         )));
     }
 
+    let lock_file = prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
     write_mod_file(project_dir, &mf)?;
-
-    // Re-solve to prune orphaned transitive dependencies
-    let graph = solve_from_modfile(&mf, registry, &SolvePreferences::default())?;
-    let lf = lock::generate_lock(&mf, &graph, created_by)?;
-    write_lock_file(project_dir, &lf)?;
+    write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
+    download_lock_file(cache_root, lock_file.as_ref(), registry)?;
 
     Ok(())
+}
+
+// ============================================================
+// vo mod tidy
+// ============================================================
+
+/// Synchronize `vo.mod` require entries with actual import usage.
+///
+/// `external_imports` is the set of external import paths found by scanning
+/// all `.vo` source files in the project (caller is responsible for scanning).
+///
+/// - Adds missing require entries (resolves latest compatible version).
+/// - Removes require entries not referenced by any import.
+/// - Re-solves the dependency graph and writes `vo.lock`.
+pub fn mod_tidy(
+    project_dir: &Path,
+    cache_root: &Path,
+    registry: &dyn Registry,
+    created_by: &str,
+) -> Result<TidyResult, Error> {
+    let external_imports = scan_external_imports(project_dir)?;
+    let mut mf = read_mod_file(project_dir)?;
+    let existing_lock = read_lock_file(project_dir).ok();
+
+    // Determine which modules are actually needed by imports.
+    let mut needed_modules: BTreeSet<ModulePath> = BTreeSet::new();
+    for import_path in &external_imports {
+        if let Some((module, _)) = find_owning_module(import_path, mf.require.iter().map(|r| &r.module)) {
+            needed_modules.insert(module.clone());
+            continue;
+        }
+        if let Some(lock_file) = existing_lock.as_ref() {
+            if let Some((module, _)) = find_owning_module(import_path, lock_file.resolved.iter().map(|locked| &locked.path)) {
+                needed_modules.insert(module.clone());
+                continue;
+            }
+        }
+        needed_modules.insert(infer_module_path(import_path, registry)?);
+    }
+
+    // Compute added and removed modules.
+    let existing: BTreeSet<ModulePath> = mf.require.iter().map(|r| r.module.clone()).collect();
+    let added: Vec<ModulePath> = needed_modules.difference(&existing).cloned().collect();
+    let removed: Vec<ModulePath> = existing.difference(&needed_modules).cloned().collect();
+
+    // Remove unused requires.
+    mf.require.retain(|r| needed_modules.contains(&r.module));
+
+    // Add new requires (resolve latest compatible version).
+    for mp in &added {
+        let latest = latest_supported_requirement_version(&mf.vo, mp, registry)?;
+        mf.require.push(Require {
+            module: mp.clone(),
+            constraint: DepConstraint {
+                op: crate::version::ConstraintOp::Compatible,
+                version: latest.semver().clone(),
+            },
+        });
+    }
+
+    let lock_file = prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
+    write_mod_file(project_dir, &mf)?;
+    write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
+    download_lock_file(cache_root, lock_file.as_ref(), registry)?;
+
+    Ok(TidyResult {
+        added: added.iter().map(|m| m.as_str().to_string()).collect(),
+        removed: removed.iter().map(|m| m.as_str().to_string()).collect(),
+    })
+}
+
+/// Result of a tidy operation.
+#[derive(Debug, Clone)]
+pub struct TidyResult {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+/// Infer the module path from an external import path.
+///
+/// For `github.com/acme/lib/util/sub`, the module is `github.com/acme/lib`
+/// (3 segments for standard repos). For paths with a major-version suffix
+/// like `github.com/acme/lib/v2/util`, the module is `github.com/acme/lib/v2`.
+fn infer_module_path(import_path: &str, registry: &dyn Registry) -> Result<ModulePath, Error> {
+    let segments: Vec<&str> = import_path.split('/').collect();
+    if segments.len() < 3 {
+        return Err(Error::InvalidImportPath(format!(
+            "cannot infer module from import path: {import_path}"
+        )));
+    }
+
+    let mut first_error: Option<Error> = None;
+    for end in (3..=segments.len()).rev() {
+        let candidate_str = segments[..end].join("/");
+        let candidate = match ModulePath::parse(&candidate_str) {
+            Ok(candidate) => candidate,
+            Err(_) => continue,
+        };
+        match registry.probe_module_path(&candidate) {
+            Ok(true) => return Ok(candidate),
+            Ok(false) => {}
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+
+    Err(Error::NoSatisfyingVersion {
+        module: import_path.to_string(),
+        detail: "could not infer a published owning module for import".to_string(),
+    })
+}
+
+// ============================================================
+// vo mod why
+// ============================================================
+
+/// Explain why a module is in the dependency graph.
+///
+/// Returns the shortest dependency chain from the root module to the target,
+/// or an error if the target is not in the lock file.
+pub fn mod_why(project_dir: &Path, target: &str) -> Result<Vec<String>, Error> {
+    let mf = read_mod_file(project_dir)?;
+    let lf = read_lock_file(project_dir)?;
+    let target_mp = ModulePath::parse(target)?;
+
+    if lf.find(&target_mp).is_none() {
+        return Err(Error::LockFileParse(format!(
+            "{target} is not in vo.lock"
+        )));
+    }
+
+    // BFS from root's direct deps to target.
+    let root_str = mf.module.as_str().to_string();
+    let mut queue: std::collections::VecDeque<Vec<String>> = std::collections::VecDeque::new();
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+
+    // Seed with root's direct requirements.
+    for req in &mf.require {
+        let path = vec![root_str.clone(), req.module.as_str().to_string()];
+        if req.module == target_mp {
+            return Ok(path);
+        }
+        if visited.insert(req.module.as_str().to_string()) {
+            queue.push_back(path);
+        }
+    }
+
+    while let Some(chain) = queue.pop_front() {
+        let current = chain.last().unwrap();
+        let current_mp = ModulePath::parse(current)?;
+        if let Some(lm) = lf.find(&current_mp) {
+            for dep in &lm.deps {
+                let dep_str = dep.as_str().to_string();
+                let mut new_chain = chain.clone();
+                new_chain.push(dep_str.clone());
+                if *dep == target_mp {
+                    return Ok(new_chain);
+                }
+                if visited.insert(dep_str) {
+                    queue.push_back(new_chain);
+                }
+            }
+        }
+    }
+
+    // Target is in vo.lock but unreachable from root (orphaned).
+    Err(Error::LockFileParse(format!(
+        "{target} is in vo.lock but not reachable from root module"
+    )))
+}
+
+// ============================================================
+// vo mod clean
+// ============================================================
+
+/// Clean the module cache.
+///
+/// If `keep_locked` is true and a lock file exists, only removes modules
+/// NOT referenced by the current `vo.lock`. Otherwise removes everything.
+pub fn mod_clean(
+    project_dir: &Path,
+    cache_root: &Path,
+    keep_locked: bool,
+) -> Result<CleanResult, Error> {
+    if !cache_root.exists() {
+        return Ok(CleanResult { removed_dirs: 0 });
+    }
+
+    let locked_dirs: BTreeSet<std::path::PathBuf> = if keep_locked {
+        if let Ok(lf) = read_lock_file(project_dir) {
+            lf.resolved
+                .iter()
+                .map(|lm| materialize::cache_dir(cache_root, &lm.path, &lm.version))
+                .collect()
+        } else {
+            BTreeSet::new()
+        }
+    } else {
+        BTreeSet::new()
+    };
+
+    let mut removed = 0u64;
+    // Iterate top-level module dirs (github.com@owner@repo)
+    let entries = std::fs::read_dir(cache_root)?;
+    for entry in entries {
+        let entry = entry?;
+        let module_dir = entry.path();
+        if !module_dir.is_dir() {
+            continue;
+        }
+        // Iterate version dirs inside each module dir
+        let version_entries = std::fs::read_dir(&module_dir)?;
+        for ve in version_entries {
+            let ve = ve?;
+            let version_dir = ve.path();
+            if !version_dir.is_dir() {
+                continue;
+            }
+            if locked_dirs.contains(&version_dir) {
+                continue;
+            }
+            std::fs::remove_dir_all(&version_dir)?;
+            removed += 1;
+        }
+        // Remove the module dir if now empty.
+        if std::fs::read_dir(&module_dir)?.next().is_none() {
+            std::fs::remove_dir(&module_dir)?;
+        }
+    }
+
+    Ok(CleanResult { removed_dirs: removed })
+}
+
+/// Result of a clean operation.
+#[derive(Debug, Clone)]
+pub struct CleanResult {
+    pub removed_dirs: u64,
 }
 
 // ============================================================
@@ -298,6 +530,61 @@ pub fn read_lock_file(project_dir: &Path) -> Result<LockFile, Error> {
     LockFile::parse(&content)
 }
 
+fn scan_external_imports(project_dir: &Path) -> Result<BTreeSet<String>, Error> {
+    let mut imports = BTreeSet::new();
+    scan_external_imports_dir(project_dir, &mut imports)?;
+    Ok(imports)
+}
+
+fn scan_external_imports_dir(dir: &Path, imports: &mut BTreeSet<String>) -> Result<(), Error> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+            if name.starts_with('.')
+                || name == "vendor"
+                || name == "testdata"
+                || name == "node_modules"
+                || name == "target"
+                || name == "dist"
+            {
+                continue;
+            }
+            scan_external_imports_dir(&path, imports)?;
+            continue;
+        }
+        if path.extension().map(|value| value == "vo").unwrap_or(false) {
+            scan_external_imports_file(&path, imports)?;
+        }
+    }
+    Ok(())
+}
+
+fn scan_external_imports_file(path: &Path, imports: &mut BTreeSet<String>) -> Result<(), Error> {
+    let content = std::fs::read_to_string(path)?;
+    let (file, diagnostics, _) = vo_syntax::parse(&content, 0);
+    if diagnostics.has_errors() {
+        let detail = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(Error::SourceScan(format!(
+            "failed to parse {} while scanning imports: {}",
+            path.display(),
+            detail,
+        )));
+    }
+    for import in &file.imports {
+        let import_path = import.path.value.clone();
+        if classify_import(&import_path)? == ImportClass::External {
+            imports.insert(import_path);
+        }
+    }
+    Ok(())
+}
+
 fn write_mod_file(project_dir: &Path, mf: &ModFile) -> Result<(), Error> {
     let path = project_dir.join("vo.mod");
     std::fs::write(&path, mf.render())?;
@@ -308,6 +595,83 @@ fn write_lock_file(project_dir: &Path, lf: &LockFile) -> Result<(), Error> {
     let path = project_dir.join("vo.lock");
     std::fs::write(&path, lf.render())?;
     Ok(())
+}
+
+fn remove_lock_file_if_exists(project_dir: &Path) -> Result<(), Error> {
+    let path = project_dir.join("vo.lock");
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn write_or_remove_lock_file(project_dir: &Path, lock_file: Option<&LockFile>) -> Result<(), Error> {
+    match lock_file {
+        Some(lock_file) => write_lock_file(project_dir, lock_file),
+        None => remove_lock_file_if_exists(project_dir),
+    }
+}
+
+fn download_lock_file(
+    cache_root: &Path,
+    lock_file: Option<&LockFile>,
+    registry: &dyn Registry,
+) -> Result<(), Error> {
+    if let Some(lock_file) = lock_file {
+        materialize::download_all(cache_root, lock_file, registry)?;
+    }
+    Ok(())
+}
+
+fn prepare_lock_file(
+    mf: &ModFile,
+    registry: &dyn Registry,
+    prefs: &SolvePreferences,
+    created_by: &str,
+) -> Result<Option<LockFile>, Error> {
+    if mf.require.is_empty() {
+        return Ok(None);
+    }
+    let graph = solve_from_modfile(mf, registry, prefs)?;
+    Ok(Some(lock::generate_lock(mf, &graph, created_by)?))
+}
+
+fn latest_supported_requirement_version(
+    project_vo: &crate::version::ToolchainConstraint,
+    module: &ModulePath,
+    registry: &dyn Registry,
+) -> Result<ExactVersion, Error> {
+    let versions = registry.list_versions(module)?;
+    let mut compatible = crate::registry::filter_compatible_versions(module, &versions)
+        .into_iter()
+        .filter(|version| !version.semver().is_prerelease())
+        .collect::<Vec<_>>();
+    compatible.sort_by(|left, right| right.cmp(left));
+
+    let mut first_toolchain_mismatch: Option<String> = None;
+    for version in compatible {
+        let (manifest, _) = registry.fetch_manifest_raw(module, &version)?;
+        crate::registry::validate_manifest(&manifest, module, &version)?;
+        if project_vo.is_subset_of(&manifest.vo) {
+            return Ok(version);
+        }
+        if first_toolchain_mismatch.is_none() {
+            first_toolchain_mismatch = Some(manifest.vo.to_string());
+        }
+    }
+
+    if let Some(dependency_constraint) = first_toolchain_mismatch {
+        return Err(Error::DependencyToolchainMismatch {
+            module: module.as_str().to_string(),
+            project_constraint: project_vo.to_string(),
+            dependency_constraint,
+        });
+    }
+
+    Err(Error::NoSatisfyingVersion {
+        module: module.as_str().to_string(),
+        detail: "no non-prerelease versions found".to_string(),
+    })
 }
 
 fn solve_from_modfile(

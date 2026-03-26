@@ -86,14 +86,14 @@ func sidebar(s *State) vogui.Node {
 	return vogui.Sidebar(
 		vogui.H3("Workspace").Class("p-3"),
 		vogui.SidebarSection("MAIN"),
-		vogui.SidebarItem("Tasks", "check-square", s.ActiveTab == "tasks",
-			vogui.OnClick(func(s *State) { s.ActiveTab = "tasks" })),
-		vogui.SidebarItem("Notes", "file-text", s.ActiveTab == "notes",
-			vogui.OnClick(func(s *State) { s.ActiveTab = "notes" })),
+		vogui.SidebarItem("Tasks",
+			vogui.OnClick(func(s *State) { s.ActiveTab = "tasks" })).Icon("check-square").Active(s.ActiveTab == "tasks"),
+		vogui.SidebarItem("Notes",
+			vogui.OnClick(func(s *State) { s.ActiveTab = "notes" })).Icon("file-text").Active(s.ActiveTab == "notes"),
 		vogui.Spacer(),
 		vogui.SidebarSection(""),
-		vogui.SidebarItem("Settings", "settings", false,
-			vogui.OnClick(func(s *State) { s.ShowSettings = true })),
+		vogui.SidebarItem("Settings",
+			vogui.OnClick(func(s *State) { s.ShowSettings = true })).Icon("settings"),
 	).Bg("var(--vo-surface)").H("100vh").Border("0 1px 0 0 solid var(--vo-border)")
 }
 
@@ -251,7 +251,7 @@ func noteItem(note Note, idx int, active bool) vogui.Node {
 	if active {
 		n = n.Bg("rgba(59,130,246,0.08)")
 	}
-	return n.On("click", vogui.Handle(func(s *State, payload string) {
+	return n.On("click", vogui.OnEvent(func(s *State, payload string) {
 		s.ActiveNoteIdx = idx
 	}))
 }

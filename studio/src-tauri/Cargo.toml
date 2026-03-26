@@ -22,6 +22,7 @@ dirs = "5"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
 ureq = "2"
+rfd = "0.15"
 vo-app-runtime = { path = "../../lang/crates/vo-app-runtime", features = ["std"] }
 vo-engine = { path = "../../lang/crates/vo-engine" }
 vo-module = { path = "../../lang/crates/vo-module" }

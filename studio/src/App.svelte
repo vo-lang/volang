@@ -11,14 +11,10 @@
   import { session, sessionOpen } from './stores/session';
   import { runtime } from './stores/runtime';
   import Sidebar from './components/Sidebar.svelte';
-  import Toolbar from './components/Toolbar.svelte';
-  import FileTree from './components/FileTree.svelte';
-  import Editor from './components/Editor.svelte';
-  import Console from './components/Console.svelte';
+  import DevWorkbench from './components/DevWorkbench.svelte';
   import Home from './components/Home.svelte';
   import GitHubConnectModal from './components/home/GitHubConnectModal.svelte';
-  import PreviewPanel from './components/PreviewPanel.svelte';
-  import TerminalPanel from './components/TerminalPanel.svelte';
+  import TermPanel from './components/TermPanel.svelte';
   import RunnerModeLayout from './components/RunnerModeLayout.svelte';
   import DocsPanel from './components/DocsPanel.svelte';
 
@@ -106,6 +102,10 @@
   const unsubRoute = route.subscribe(r => {
     if (r.mode === 'docs' && $ide.appMode !== 'docs') {
       ide.update(s => ({ ...s, appMode: 'docs' }));
+      return;
+    }
+    if (r.mode === 'term' && $ide.appMode !== 'term') {
+      ide.update(s => ({ ...s, appMode: 'term' }));
     }
   });
 
@@ -127,7 +127,7 @@
   async function bindRunnerSession(nextSessionInfo: SessionInfo): Promise<void> {
     if (!registry) return;
     sessionInfo = nextSessionInfo;
-    registry.terminal.syncCwd(nextSessionInfo.root);
+    registry.term.syncCwd(nextSessionInfo.root);
     registry.runtime.clearConsole();
     sessionOpen(nextSessionInfo.root, 'runner', nextSessionInfo.entryPath ?? null, nextSessionInfo.projectMode);
     currentDir = nextSessionInfo.root;
@@ -141,7 +141,7 @@
   ): Promise<void> {
     if (!registry) return;
     sessionInfo = nextSessionInfo;
-    registry.terminal.syncCwd(nextSessionInfo.root);
+    registry.term.syncCwd(nextSessionInfo.root);
     registry.runtime.clearConsole();
     sessionOpen(nextSessionInfo.root, 'dev', nextSessionInfo.entryPath ?? null, nextSessionInfo.projectMode);
     sessionProjectHasGui = registry.projectCatalog.getSessionProjectConfig(nextSessionInfo).hasGui;
@@ -210,7 +210,7 @@
     }
   }
 
-  async function openExample(source: string, filename: string): Promise<void> {
+  async function openExample(source: string, filename: string, hasGui: boolean): Promise<void> {
     if (!registry) return;
     stopRuntimePolling();
     await registry.runtime.stop().catch(() => undefined);
@@ -226,6 +226,7 @@
       entryPath: filePath,
       singleFileRun: false,
     };
+    await registry.projectCatalog.updateSessionProjectConfig(exSession, hasGui);
     await bindDevSession(exSession, { openEntry: true });
     ide.update((s) => ({ ...s, appMode: 'develop' }));
   }
@@ -238,6 +239,17 @@
       ? (project.entryPath ?? project.localPath)
       : project.localPath;
     const openedSession = await registry.project.openRunSession(openPath);
+    registry.projectCatalog.trackRecentSessionTarget(openPath, openedSession);
+    await bindDevSession(openedSession, { openEntry: true });
+    ide.update((s) => ({ ...s, appMode: 'develop' }));
+  }
+
+  async function openLocalPath(path: string): Promise<void> {
+    if (!registry) return;
+    stopRuntimePolling();
+    await registry.runtime.stop().catch(() => undefined);
+    const openedSession = await registry.project.openRunSession(path);
+    registry.projectCatalog.trackRecentSessionTarget(path, openedSession);
     await bindDevSession(openedSession, { openEntry: true });
     ide.update((s) => ({ ...s, appMode: 'develop' }));
   }
@@ -404,7 +416,6 @@
   $: isGuiProject = sessionProjectHasGui;
   $: showExplorer = $session.projectMode === 'module';
   $: isSingleFileSession = $session.projectMode === 'single-file';
-  $: hasSidePanel = showExplorer || isGuiProject;
   $: outputExpanded = $ide.outputExpanded;
   $: previewCollapsed = $ide.previewCollapsed;
   $: previewTitle = $runtime.guiEntryPath
@@ -454,7 +465,10 @@
         <!-- HOME: project management -->
         <Home
           projectCatalog={registry.projectCatalog}
+          backend={registry.backend}
+          platform={registry.backend.platform}
           onOpenProject={openManagedProject}
+          onOpenLocalPath={openLocalPath}
           onOpenExample={openExample}
           onDocs={() => ide.update(s => ({ ...s, appMode: 'docs' }))}
           onDevelop={() => ide.update(s => ({ ...s, appMode: 'develop' }))}
@@ -462,54 +476,43 @@
         />
 
       {:else if appMode === 'develop'}
-        <div class="develop-layout" class:single-file={isSingleFileSession}>
-          {#if showExplorer}
-            <FileTree
-              entries={explorerEntries}
-              {currentDir}
-              sessionRoot={$session.root}
-              onOpenEntry={openEntry}
-              onGoParent={goParent}
-            />
-          {/if}
-
-          <div class="center-col" class:with-side-panel={hasSidePanel}>
-            <Toolbar
-              onSave={() => void saveActiveEditor().catch((error) => consolePush('stderr', formatError(error)))}
-              onRun={runProject}
-              onRunFullscreen={runFullscreen}
-              onStop={stopCode}
-              onSetProjectHasGui={(hasGui) => void setSessionProjectHasGui(hasGui)}
-              projectHasGui={sessionProjectHasGui}
-            />
-            <div class="editor-area">
-              <Editor />
-            </div>
-            <Console mode="panel" />
-          </div>
-
-          {#if isGuiProject && registry}
-            <PreviewPanel
-              {registry}
-              collapsed={previewCollapsed}
-              fullscreen={outputExpanded}
-              fullscreenTitle={previewTitle}
-              showFullscreenAction={true}
-              onFullscreenAction={() => ide.update((s) => ({ ...s, outputExpanded: true, previewCollapsed: false }))}
-              onExitFullscreenAction={exitFullscreen}
-              onToggleCollapsed={() => ide.update((s) => ({ ...s, previewCollapsed: !s.previewCollapsed }))}
-            />
-          {/if}
-        </div>
+        <DevWorkbench
+          {registry}
+          explorerEntries={explorerEntries}
+          {currentDir}
+          sessionRoot={$session.root}
+          {showExplorer}
+          {isSingleFileSession}
+          {isGuiProject}
+          projectHasGui={sessionProjectHasGui}
+          {previewCollapsed}
+          {outputExpanded}
+          {previewTitle}
+          onSave={() => void saveActiveEditor().catch((error) => consolePush('stderr', formatError(error)))}
+          onRun={runProject}
+          onRunFullscreen={runFullscreen}
+          onStop={stopCode}
+          onSetProjectHasGui={(hasGui) => void setSessionProjectHasGui(hasGui)}
+          onOpenEntry={openEntry}
+          onGoParent={goParent}
+          onExitFullscreen={exitFullscreen}
+          onTogglePreviewCollapsed={() => ide.update((s) => ({ ...s, previewCollapsed: !s.previewCollapsed }))}
+        />
 
       {:else if appMode === 'docs'}
         <DocsPanel />
 
-      {:else if appMode === 'terminal'}
-        <!-- TERMINAL: full terminal view -->
-        <div class="terminal-layout">
+      {:else if appMode === 'term'}
+        <!-- TERM: full term view -->
+        <div class="term-layout">
           {#if registry}
-            <TerminalPanel terminal={registry.terminal} afterExecute={() => {}} />
+            <TermPanel
+              term={registry.term}
+              sessionRoot={$session.root}
+              currentDir={currentDir}
+              platform={registry.backend.platform}
+              afterExecute={() => {}}
+            />
           {/if}
         </div>
       {/if}
@@ -591,23 +594,8 @@
   .app { display: flex; height: 100%; overflow: hidden; }
   .main-area { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
 
-  /* Develop layout */
-  .develop-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
-  .develop-layout.single-file {
-    background: linear-gradient(180deg, rgba(17, 17, 27, 0.98), rgba(24, 24, 37, 0.96));
-  }
-  .center-col {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    overflow: hidden;
-  }
-  .center-col.with-side-panel { border-right: 1px solid #1e1e2e; }
-  .editor-area { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-
-  /* Terminal layout */
-  .terminal-layout { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  /* Term layout */
+  .term-layout { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
   .confirm-backdrop {
     position: fixed;
     inset: 0;

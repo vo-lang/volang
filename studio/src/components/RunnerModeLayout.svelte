@@ -13,7 +13,7 @@
   $: consoleLines = $console_.lines;
 </script>
 
-<div class="runner-shell">
+<div class="runner-surface">
   {#if isRunning}
     <div class="runner-loading">
       <div class="runner-loading-inner">
@@ -48,7 +48,7 @@
 </div>
 
 <style>
-  .runner-shell {
+  .runner-surface {
     display: flex;
     flex-direction: column;
     width: 100%;

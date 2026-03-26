@@ -49,6 +49,13 @@ pub fn run() {
             commands::extension::cmd_vo_init,
             commands::extension::cmd_vo_version,
             commands::extension::cmd_list_installed_modules,
+            // Dialog
+            commands::dialog::cmd_pick_directory,
+            commands::dialog::cmd_pick_file,
+            // Project creation (bypass session root)
+            commands::workspace::cmd_create_project_files,
+            // Workspace discovery (bypass session root)
+            commands::workspace::cmd_discover_workspace_projects,
             // Process
             commands::process::cmd_spawn_process,
             // Git

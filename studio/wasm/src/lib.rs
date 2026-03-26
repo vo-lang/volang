@@ -26,7 +26,7 @@ fn ensure_panic_hook() {
     INIT.call_once(|| console_error_panic_hook::set_once());
 }
 
-include!(concat!(env!("OUT_DIR"), "/shell_embedded.rs"));
+include!(concat!(env!("OUT_DIR"), "/term_embedded.rs"));
 
 fn emit_host_log(record: vo_web::HostLogRecord) {
     let source = record.source.clone();
@@ -1095,52 +1095,52 @@ pub fn stop_gui() {
 }
 
 // =============================================================================
-// Shell handler runner
+// Term handler runner
 // =============================================================================
 
 thread_local! {
-    static SHELL_HANDLER_BYTECODE: std::cell::RefCell<Option<Vec<u8>>> =
+    static TERM_HANDLER_BYTECODE: std::cell::RefCell<Option<Vec<u8>>> =
         std::cell::RefCell::new(None);
 }
 
-fn build_shell_handler_bytecode() -> Result<Vec<u8>, String> {
+fn build_term_handler_bytecode() -> Result<Vec<u8>, String> {
     let mut local_fs = MemoryFs::new();
 
-    // Only the shell handler's own source files are embedded at build time.
+    // Only the term handler's own source files are embedded at build time.
     // Third-party deps (vox, git2, zip) are resolved from JS VFS via WasmVfs.
-    for (vfs_path, bytes) in SHELL_HANDLER_FILES {
+    for (vfs_path, bytes) in TERM_HANDLER_FILES {
         let Ok(content) = std::str::from_utf8(bytes) else { continue };
         local_fs.add_file(std::path::PathBuf::from(*vfs_path), content.to_string());
     }
 
     vo_web::compile_entry_with_vfs(
-        "studio/vo/shell/main.vo",
+        "studio/vo/term/main.vo",
         local_fs,
         VFS_MOD_ROOT,
     ).map_err(|e| format!("error:{}", e))
 }
 
-fn get_shell_handler_bytecode() -> Result<Vec<u8>, String> {
-    SHELL_HANDLER_BYTECODE.with(|cell| {
+fn get_term_handler_bytecode() -> Result<Vec<u8>, String> {
+    TERM_HANDLER_BYTECODE.with(|cell| {
         let cached = cell.borrow();
         if let Some(bc) = cached.as_ref() {
             return Ok(bc.clone());
         }
         drop(cached);
 
-        let bc = build_shell_handler_bytecode()?;
+        let bc = build_term_handler_bytecode()?;
         *cell.borrow_mut() = Some(bc.clone());
         Ok(bc)
     })
 }
 
-/// Read the shell handler's embedded `vo.mod` content.
+/// Read the term handler's embedded `vo.mod` content.
 ///
 /// Returns `Err` if the file is missing or not valid UTF-8.
-fn shell_vo_mod_content() -> Result<String, String> {
-    let bytes = SHELL_HANDLER_FILES
+fn term_handler_vo_mod_content() -> Result<String, String> {
+    let bytes = TERM_HANDLER_FILES
         .iter()
-        .find(|(path, _)| *path == "studio/vo/shell/vo.mod")
+        .find(|(path, _)| *path == "studio/vo/term/vo.mod")
         .map(|(_, bytes)| *bytes)
         .ok_or_else(|| "no embedded vo.mod found".to_string())?;
     std::str::from_utf8(bytes)
@@ -1148,10 +1148,10 @@ fn shell_vo_mod_content() -> Result<String, String> {
         .map_err(|e| format!("vo.mod utf8: {}", e))
 }
 
-fn shell_vo_lock_content() -> Result<String, String> {
-    let bytes = SHELL_HANDLER_FILES
+fn term_handler_vo_lock_content() -> Result<String, String> {
+    let bytes = TERM_HANDLER_FILES
         .iter()
-        .find(|(path, _)| *path == "studio/vo/shell/vo.lock")
+        .find(|(path, _)| *path == "studio/vo/term/vo.lock")
         .map(|(_, bytes)| *bytes)
         .ok_or_else(|| "no embedded vo.lock found".to_string())?;
     std::str::from_utf8(bytes)
@@ -1159,14 +1159,14 @@ fn shell_vo_lock_content() -> Result<String, String> {
         .map_err(|e| format!("vo.lock utf8: {}", e))
 }
 
-/// Return the module paths declared in the shell handler's embedded `vo.mod`.
+/// Return the module paths declared in the term handler's embedded `vo.mod`.
 ///
 /// Used by the JS bridge to derive the VFS purge list dynamically rather than
 /// hardcoding module paths.  Returns a JS `Array<string>`.
-#[wasm_bindgen(js_name = "getShellDepModules")]
-pub fn get_shell_dep_modules() -> js_sys::Array {
+#[wasm_bindgen(js_name = "getTermDepModules")]
+pub fn get_term_dep_modules() -> js_sys::Array {
     let arr = js_sys::Array::new();
-    if let Ok(content) = shell_vo_mod_content() {
+    if let Ok(content) = term_handler_vo_mod_content() {
         if let Ok(mod_file) = vo_module::schema::modfile::ModFile::parse(&content) {
             for req in &mod_file.require {
                 arr.push(&JsValue::from_str(req.module.as_str()));
@@ -1176,19 +1176,19 @@ pub fn get_shell_dep_modules() -> js_sys::Array {
     arr
 }
 
-/// Install all dependencies declared in the shell handler's embedded `vo.mod`.
+/// Install all dependencies declared in the term handler's embedded `vo.mod`.
 ///
 /// Extracts the `vo.mod` that was embedded at build time and delegates to
 /// `vo_web::ensure_vfs_deps` — the module system handles parsing, checking
 /// whether each module is already in VFS, and fetching missing ones.
 ///
-/// Adding a new shell dependency is a one-line change to `studio/vo/shell/vo.mod`.
-#[wasm_bindgen(js_name = "preloadShellDeps")]
-pub fn preload_shell_deps() -> js_sys::Promise {
+/// Adding a new term dependency is a one-line change to `studio/vo/term/vo.mod`.
+#[wasm_bindgen(js_name = "preloadTermDeps")]
+pub fn preload_term_deps() -> js_sys::Promise {
     wasm_bindgen_futures::future_to_promise(async move {
-        let mod_content = shell_vo_mod_content()
+        let mod_content = term_handler_vo_mod_content()
             .map_err(|e| JsValue::from_str(&e))?;
-        let lock_content = shell_vo_lock_content()
+        let lock_content = term_handler_vo_lock_content()
             .map_err(|e| JsValue::from_str(&e))?;
 
         vo_web::ensure_vfs_deps(&mod_content, &lock_content)
@@ -1216,75 +1216,75 @@ pub fn preload_module(spec: &str) -> js_sys::Promise {
     )))
 }
 
-/// Return a content hash of all embedded shell handler source files.
+/// Return a content hash of all embedded term handler source files.
 ///
 /// The JS bridge uses this as an IndexedDB cache key so it can skip
 /// recompilation when the sources haven't changed between page loads.
-#[wasm_bindgen(js_name = "shellHandlerSourceHash")]
-pub fn shell_handler_source_hash() -> String {
+#[wasm_bindgen(js_name = "termHandlerSourceHash")]
+pub fn term_handler_source_hash() -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
-    for (path, bytes) in SHELL_HANDLER_FILES {
+    for (path, bytes) in TERM_HANDLER_FILES {
         path.hash(&mut hasher);
         bytes.hash(&mut hasher);
     }
     format!("{:016x}", hasher.finish())
 }
 
-/// Accept pre-compiled shell handler bytecode from the JS-side IndexedDB cache.
+/// Accept pre-compiled term handler bytecode from the JS-side IndexedDB cache.
 ///
 /// If the bytecode is valid, it's stored in the thread-local cache so
-/// `runShellHandler` never needs to recompile.  Returns `true` on success.
-#[wasm_bindgen(js_name = "loadCachedShellHandler")]
-pub fn load_cached_shell_handler(bytes: &[u8]) -> bool {
+/// `runTermHandler` never needs to recompile.  Returns `true` on success.
+#[wasm_bindgen(js_name = "loadCachedTermHandler")]
+pub fn load_cached_term_handler(bytes: &[u8]) -> bool {
     ensure_panic_hook();
     if bytes.is_empty() {
         return false;
     }
-    SHELL_HANDLER_BYTECODE.with(|cell| {
+    TERM_HANDLER_BYTECODE.with(|cell| {
         *cell.borrow_mut() = Some(bytes.to_vec());
     });
     true
 }
 
-/// Compile the shell handler and return the bytecode for JS-side caching.
+/// Compile the term handler and return the bytecode for JS-side caching.
 ///
 /// Returns the compiled bytecode on success, or an error string.
-/// The JS bridge stores this in IndexedDB keyed by `shellHandlerSourceHash()`.
-#[wasm_bindgen(js_name = "buildShellHandler")]
-pub fn build_shell_handler_export() -> Result<Vec<u8>, JsValue> {
+/// The JS bridge stores this in IndexedDB keyed by `termHandlerSourceHash()`.
+#[wasm_bindgen(js_name = "buildTermHandler")]
+pub fn build_term_handler_export() -> Result<Vec<u8>, JsValue> {
     ensure_panic_hook();
-    let bc = build_shell_handler_bytecode()
+    let bc = build_term_handler_bytecode()
         .map_err(|e| JsValue::from_str(&e))?;
-    SHELL_HANDLER_BYTECODE.with(|cell| {
+    TERM_HANDLER_BYTECODE.with(|cell| {
         *cell.borrow_mut() = Some(bc.clone());
     });
     Ok(bc)
 }
 
-/// Pre-warm the shell handler bytecode cache during bridge initialization.
-/// Call this once after WASM module load so the first shell op is fast.
-#[wasm_bindgen(js_name = "initShellHandler")]
-pub fn init_shell_handler() -> Option<String> {
+/// Pre-warm the term handler bytecode cache during bridge initialization.
+/// Call this once after WASM module load so the first term op is fast.
+#[wasm_bindgen(js_name = "initTermHandler")]
+pub fn init_term_handler() -> Option<String> {
     ensure_panic_hook();
-    match get_shell_handler_bytecode() {
+    match get_term_handler_bytecode() {
         Ok(_) => None,
         Err(e) => Some(e),
     }
 }
 
-/// Compile and run the embedded shell handler with the given os.Args.
+/// Compile and run the embedded term handler with the given os.Args.
 ///
 /// `args` is a JS `Array<string>` that becomes `os.Args` inside the Vo program.
 /// Conventionally args = ["wasm", <req_json>, <workspace>].
-/// Returns stdout from the Vo program (a JSON-encoded ShellResponse).
+/// Returns stdout from the Vo program (a JSON-encoded TermResponse).
 /// Returns an error string (prefixed with "error:") on compile/runtime failure.
-#[wasm_bindgen(js_name = "runShellHandler")]
-pub fn run_shell_handler(args: js_sys::Array) -> String {
+#[wasm_bindgen(js_name = "runTermHandler")]
+pub fn run_term_handler(args: js_sys::Array) -> String {
     ensure_panic_hook();
 
-    let bytecode = match get_shell_handler_bytecode() {
+    let bytecode = match get_term_handler_bytecode() {
         Ok(b) => b,
         Err(e) => return e,
     };
@@ -1296,7 +1296,7 @@ pub fn run_shell_handler(args: js_sys::Array) -> String {
     });
 
     vo_runtime::output::clear_output();
-    // Save and restore ext state so the shell handler doesn't clobber
+    // Save and restore ext state so the term handler doesn't clobber
     // EXTERN_ID_TO_INFO while a guest GUI VM (e.g. game loop) is live.
     let saved = vo_web::ext_bridge::save_extern_state();
     let run_result = vo_web::create_vm(&bytecode, |reg, exts| {

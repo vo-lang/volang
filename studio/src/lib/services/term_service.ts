@@ -6,20 +6,20 @@ import type { RuntimeService } from './runtime_service';
 import type { WorkspaceService } from './workspace_service';
 import { formatError } from '../format_error';
 
-export interface TerminalLine {
+export interface TermLine {
   kind: 'input' | 'output' | 'error';
   text: string;
 }
 
-export interface TerminalState {
+export interface TermState {
   cwd: string;
   history: string[];
   lastCommand: string | null;
-  lines: TerminalLine[];
+  lines: TermLine[];
 }
 
-export class TerminalService {
-  private readonly stateStore = writable<TerminalState>({
+export class TermService {
+  private readonly stateStore = writable<TermState>({
     cwd: '/',
     history: [],
     lastCommand: null,
@@ -35,8 +35,12 @@ export class TerminalService {
     this.syncCwd(workspace.root);
   }
 
-  get state(): Readable<TerminalState> {
+  get state(): Readable<TermState> {
     return { subscribe: this.stateStore.subscribe };
+  }
+
+  get sessionRoot(): string {
+    return this.workspace.root;
   }
 
   syncCwd(cwd: string): void {
@@ -46,9 +50,21 @@ export class TerminalService {
     }));
   }
 
+  async setCwd(path: string): Promise<void> {
+    const target = this.resolvePath(path || '.');
+    await this.workspace.list(target);
+    this.syncCwd(target);
+  }
+
   async execute(command: string): Promise<void> {
     const input = command.trim();
     if (!input) {
+      return;
+    }
+    // Handle clear before appending input echo to avoid render-then-clear flash
+    if (input === 'clear') {
+      this.record(input);
+      this.clear();
       return;
     }
     this.append('input', `${this.snapshot().cwd} $ ${input}`);
@@ -61,7 +77,7 @@ export class TerminalService {
           return;
         case 'help':
           this.append('output', [
-            'Studio Terminal — Vo development commands',
+            'Studio TERM — Vo development commands',
             '',
             'File system:',
             '  ls [path]            list directory',
@@ -78,10 +94,8 @@ export class TerminalService {
             '  vo check [path]      type-check',
             '  vo compile [path]    compile to bytecode',
             '  vo build [path]      build project',
-            '  vo format [path]     format source',
             '  vo dump [path]       disassemble bytecode',
             '  vo run [path] [--mode=vm|jit]  run program',
-            '  vo test [path]       run tests',
             '  vo get <spec>        install module',
             '  vo init [name]       init new module',
             '  vo version           show compiler version',
@@ -91,12 +105,9 @@ export class TerminalService {
             '',
             'Other:',
             '  echo <text>          print text',
-            '  clear                clear terminal',
+            '  clear                clear TERM output',
             '  help                 this help',
           ].join('\n'));
-          return;
-        case 'clear':
-          this.clear();
           return;
         case 'ls':
           await this.runLs(args[0]);
@@ -184,9 +195,7 @@ export class TerminalService {
   }
 
   private async runCd(pathArg?: string): Promise<void> {
-    const target = this.resolvePath(pathArg ?? this.workspace.root);
-    await this.workspace.list(target);
-    this.syncCwd(target);
+    await this.setCwd(pathArg ?? this.workspace.root);
   }
 
   private async runVoCommand(args: string[]): Promise<void> {
@@ -198,17 +207,11 @@ export class TerminalService {
       case 'run':
         await this.runVoRun(args.slice(1));
         return;
-      case 'test':
-        await this.runVoTest(args.slice(1));
-        return;
       case 'build':
         await this.runVoBuild(args.slice(1));
         return;
       case 'compile':
         await this.runVoCompile(args.slice(1));
-        return;
-      case 'format':
-        await this.runVoFormat(args.slice(1));
         return;
       case 'dump':
         await this.runVoDump(args.slice(1));
@@ -223,7 +226,7 @@ export class TerminalService {
         await this.runVoGet(args.slice(1));
         return;
       default:
-        this.append('error', `Unsupported vo command: ${subcommand ?? '(missing)'}\nAvailable: check, run, build, compile, format, dump, version, init, get`);
+        this.append('error', `Unsupported vo command: ${subcommand ?? '(missing)'}\nAvailable: check, run, build, compile, dump, version, init, get`);
     }
   }
 
@@ -250,9 +253,19 @@ export class TerminalService {
   }
 
   private async runVoBuild(args: string[]): Promise<void> {
-    const target = this.resolvePath(args[0] ?? '.');
-    const outputArg = args.find((a) => a.startsWith('-o='))?.slice(3) ??
-      args[args.indexOf('-o') + 1];
+    let outputArg: string | undefined;
+    let targetArg: string | undefined;
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a.startsWith('-o=')) {
+        outputArg = a.slice(3);
+      } else if (a === '-o') {
+        outputArg = args[++i];
+      } else if (!targetArg) {
+        targetArg = a;
+      }
+    }
+    const target = this.resolvePath(targetArg ?? '.');
     const result = await this.compiler.build(target, outputArg);
     if (result.ok) {
       this.append('output', `✓ Built: ${result.outputPath ?? target}`);
@@ -271,11 +284,6 @@ export class TerminalService {
     }
   }
 
-  private async runVoFormat(args: string[]): Promise<void> {
-    const target = this.resolvePath(args[0] ?? '.');
-    const result = await this.compiler.format(target);
-    this.append('output', result);
-  }
 
   private async runVoDump(args: string[]): Promise<void> {
     const target = this.resolvePath(args[0] ?? '.');
@@ -284,26 +292,12 @@ export class TerminalService {
   }
 
   private async runVoInit(args: string[]): Promise<void> {
-    const target = this.resolvePath(args[0] ?? '.');
-    const name = args[1];
+    const name = args[0];
+    const target = this.resolvePath(args[1] ?? '.');
     const dir = await this.backend.voInit(target, name);
     this.append('output', `✓ Initialized: ${dir}`);
   }
 
-  private async runVoTest(args: string[]): Promise<void> {
-    const target = this.resolvePath(args[0] ?? '.');
-    this.append('output', `$ vo test ${target}`);
-    const opts = { args: ['--test'] };
-    const stream = this.backend.runVo(target, opts);
-    for await (const event of stream) {
-      if (event.kind === 'stdout') this.append('output', event.text);
-      else if (event.kind === 'stderr') this.append('error', event.text);
-      else if (event.kind === 'done') {
-        this.append(event.exitCode === 0 ? 'output' : 'error',
-          `Test finished (exit ${event.exitCode}, ${event.durationMs}ms)`);
-      } else if (event.kind === 'error') this.append('error', event.message);
-    }
-  }
 
   private async runVoGet(args: string[]): Promise<void> {
     const spec = args[0];
@@ -330,13 +324,37 @@ export class TerminalService {
     let op: import('../types').GitOp;
     switch (subcommand) {
       case 'status': op = { kind: 'git.status' }; break;
-      case 'add': op = { kind: 'git.add', paths: args.slice(1) }; break;
-      case 'commit': op = { kind: 'git.commit', message: args.slice(1).join(' ') }; break;
+      case 'add': {
+        const paths = args.slice(1);
+        if (paths.length === 0) { this.append('error', 'git add requires at least one path'); return; }
+        op = { kind: 'git.add', paths };
+        break;
+      }
+      case 'commit': {
+        const mIdx = args.indexOf('-m');
+        const message = mIdx >= 0 && mIdx + 1 < args.length
+          ? args.slice(mIdx + 1).join(' ')
+          : args.slice(1).join(' ');
+        if (!message) { this.append('error', 'git commit requires a message (-m "message")'); return; }
+        op = { kind: 'git.commit', message };
+        break;
+      }
       case 'push': op = { kind: 'git.push', remote: args[1], branch: args[2] }; break;
       case 'pull': op = { kind: 'git.pull', remote: args[1], branch: args[2] }; break;
       case 'log': op = { kind: 'git.log', limit: args[1] ? Number(args[1]) : undefined }; break;
       case 'diff': op = { kind: 'git.diff', path: args[1] }; break;
-      case 'branch': op = { kind: 'git.branch', list: !args[1] }; break;
+      case 'branch': {
+        const branchArg = args[1];
+        if (!branchArg) {
+          op = { kind: 'git.branch', list: true };
+        } else if (args[1] === '-d' || args[1] === '--delete') {
+          if (!args[2]) { this.append('error', 'git branch -d requires a branch name'); return; }
+          op = { kind: 'git.branch', delete: args[2] };
+        } else {
+          op = { kind: 'git.branch', create: branchArg };
+        }
+        break;
+      }
       default:
         this.append('error', `Unknown git subcommand: ${subcommand}`);
         return;
@@ -388,7 +406,7 @@ export class TerminalService {
     this.append('output', `Copied: ${args[0]} → ${args[1]}`);
   }
 
-  private append(kind: TerminalLine['kind'], text: string): void {
+  private append(kind: TermLine['kind'], text: string): void {
     this.stateStore.update((state) => ({
       ...state,
       lines: [...state.lines, { kind, text }],
@@ -406,16 +424,38 @@ export class TerminalService {
     return normalizePath(`${this.snapshot().cwd}/${value}`);
   }
 
-  private snapshot(): TerminalState {
+  snapshot(): TermState {
     return get(this.stateStore);
   }
 }
 
 function tokenize(input: string): string[] {
-  return input
-    .split(/\s+/)
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
+  const tokens: string[] = [];
+  let current = '';
+  let inQuote: '"' | "'" | null = null;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (inQuote) {
+      if (ch === inQuote) {
+        inQuote = null;
+      } else {
+        current += ch;
+      }
+    } else if (ch === '"' || ch === "'") {
+      inQuote = ch;
+    } else if (/\s/.test(ch)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = '';
+      }
+    } else {
+      current += ch;
+    }
+  }
+  if (current.length > 0) {
+    tokens.push(current);
+  }
+  return tokens;
 }
 
 function parseVoRunArgs(args: string[]): { mode: 'vm' | 'jit'; target: string | null } {

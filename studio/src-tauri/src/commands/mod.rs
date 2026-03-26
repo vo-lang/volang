@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod compiler;
+pub mod dialog;
 pub mod extension;
 pub mod git;
 pub mod gui;

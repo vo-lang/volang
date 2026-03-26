@@ -143,9 +143,7 @@ pub fn cache_relative_dir(module: &ModulePath, version: &ExactVersion) -> PathBu
 
 /// Check if a source package is already cached and valid.
 pub fn is_source_cached(cache_root: &Path, locked: &LockedModule) -> bool {
-    let dir = cache_dir(cache_root, &locked.path, &locked.version);
-    let marker = dir.join(SOURCE_DIGEST_MARKER);
-    marker.exists()
+    validate_source_cache_entry(cache_root, locked).is_ok()
 }
 
 /// Check if a specific artifact is cached and valid.
@@ -154,9 +152,7 @@ pub fn is_artifact_cached(
     locked: &LockedModule,
     artifact: &LockedArtifact,
 ) -> bool {
-    let dir = cache_dir(cache_root, &locked.path, &locked.version);
-    let art_path = dir.join("artifacts").join(&artifact.id.name);
-    art_path.exists()
+    validate_artifact_cache_entry(cache_root, locked, artifact).is_ok()
 }
 
 /// Download and verify a source package into the cache.
@@ -165,6 +161,7 @@ pub fn download_source(
     locked: &LockedModule,
     registry: &dyn Registry,
     source_asset_name: &str,
+    manifest_raw: &[u8],
 ) -> Result<(), Error> {
     let data = registry.fetch_source_package(&locked.path, &locked.version, source_asset_name)?;
 
@@ -178,17 +175,47 @@ pub fn download_source(
         });
     }
 
-    // Extract to cache directory
     let dir = cache_dir(cache_root, &locked.path, &locked.version);
-    std::fs::create_dir_all(&dir)?;
+    let parent = dir.parent().ok_or_else(|| {
+        Error::SourceScan(format!(
+            "cache directory has no parent for {} {}",
+            locked.path, locked.version,
+        ))
+    })?;
+    std::fs::create_dir_all(parent)?;
 
-    let gz = flate2::read::GzDecoder::new(data.as_slice());
-    let mut archive = tar::Archive::new(gz);
-    archive.unpack(&dir)?;
+    let stage_name = format!(".{}.installing", locked.version);
+    let stage_dir = parent.join(stage_name);
+    if stage_dir.exists() {
+        std::fs::remove_dir_all(&stage_dir)?;
+    }
+    std::fs::create_dir_all(&stage_dir)?;
+
+    safe_unpack_tar_gz(&data, &stage_dir).map_err(|e| {
+        Error::DigestMismatch {
+            context: format!("source package for {} {}", locked.path, locked.version),
+            expected: "safe archive".to_string(),
+            found: e,
+        }
+    })?;
+
+    if !stage_dir.join("vo.mod").is_file() {
+        std::fs::remove_dir_all(&stage_dir)?;
+        return Err(Error::SourceScan(format!(
+            "source package for {} {} does not contain vo.mod at the module root",
+            locked.path, locked.version,
+        )));
+    }
 
     // Write metadata files used by compile-time frozen-build validation
-    std::fs::write(dir.join(SOURCE_DIGEST_MARKER), format!("{}\n", locked.source))?;
-    std::fs::write(dir.join(VERSION_MARKER), format!("{}\n", locked.version))?;
+    std::fs::write(stage_dir.join(SOURCE_DIGEST_MARKER), format!("{}\n", locked.source))?;
+    std::fs::write(stage_dir.join(VERSION_MARKER), format!("{}\n", locked.version))?;
+    std::fs::write(stage_dir.join("vo.release.json"), manifest_raw)?;
+
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    std::fs::rename(&stage_dir, &dir)?;
 
     Ok(())
 }
@@ -241,56 +268,52 @@ pub fn download_artifact(
 /// Returns an error describing the first missing or invalid entry.
 pub fn verify_frozen_cache(cache_root: &Path, lock_file: &LockFile) -> Result<(), Error> {
     for locked in &lock_file.resolved {
-        if !is_source_cached(cache_root, locked) {
-            return Err(Error::MissingArtifact {
-                module: locked.path.as_str().to_string(),
-                version: locked.version.to_string(),
-                detail: "source package not in cache".to_string(),
-            });
-        }
-
-        // Verify the cached source marker matches the locked digest
-        let dir = cache_dir(cache_root, &locked.path, &locked.version);
-        let marker = dir.join(SOURCE_DIGEST_MARKER);
-        if let Ok(contents) = std::fs::read_to_string(&marker) {
-            if contents.trim() != locked.source.as_str() {
-                // Cache entry is stale — treat as missing per spec §8.3
-                return Err(Error::MissingArtifact {
-                    module: locked.path.as_str().to_string(),
-                    version: locked.version.to_string(),
-                    detail: "cached source digest does not match vo.lock".to_string(),
-                });
-            }
-        }
+        validate_source_cache_entry(cache_root, locked)?;
 
         for artifact in &locked.artifacts {
-            if !is_artifact_cached(cache_root, locked, artifact) {
-                return Err(Error::MissingArtifact {
-                    module: locked.path.as_str().to_string(),
-                    version: locked.version.to_string(),
-                    detail: format!("artifact {} not in cache", artifact.id.name),
-                });
-            }
+            validate_artifact_cache_entry(cache_root, locked, artifact)?;
         }
     }
     Ok(())
 }
 
+/// A single unit of download work identified during the planning phase.
+struct DownloadJob<'a> {
+    locked: &'a LockedModule,
+    source_asset: Option<String>,
+    manifest_raw: Option<Vec<u8>>,
+    artifacts: Vec<&'a LockedArtifact>,
+}
+
 /// Download all missing source packages and artifacts for the locked graph.
+///
+/// Phase 1 (sequential): fetch manifests (uses registry cache) and determine
+/// which source packages and artifacts need downloading.
+/// Phase 2 (parallel on native, sequential on wasm): download all identified
+/// items concurrently with progress output to stderr.
 pub fn download_all(
     cache_root: &Path,
     lock_file: &LockFile,
     registry: &dyn Registry,
 ) -> Result<(), Error> {
+    // Phase 1: plan downloads (sequential — manifests may use the registry cache).
+    let mut jobs: Vec<DownloadJob> = Vec::new();
     for locked in &lock_file.resolved {
-        if !is_source_cached(cache_root, locked) {
-            // Fetch manifest raw bytes — used to get asset name and to write
-            // `vo.release.json` into the cache for frozen-build validation.
-            let (manifest, manifest_raw) =
-                registry.fetch_manifest_raw(&locked.path, &locked.version)?;
+        let needs_source = !is_source_cached(cache_root, locked);
+        let missing_artifacts: Vec<&LockedArtifact> = locked
+            .artifacts
+            .iter()
+            .filter(|a| !is_artifact_cached(cache_root, locked, a))
+            .collect();
 
-            // Verify the fetched manifest digest matches the locked value.
-            let computed = Digest::from_sha256(&manifest_raw);
+        if !needs_source && missing_artifacts.is_empty() {
+            continue;
+        }
+
+        let (source_asset, manifest_raw) = if needs_source {
+            let (manifest, raw) =
+                registry.fetch_manifest_raw(&locked.path, &locked.version)?;
+            let computed = Digest::from_sha256(&raw);
             if computed != locked.release_manifest {
                 return Err(Error::DigestMismatch {
                     context: format!(
@@ -301,30 +324,283 @@ pub fn download_all(
                     found: computed.as_str().to_string(),
                 });
             }
+            (Some(manifest.source.name.clone()), Some(raw))
+        } else {
+            (None, None)
+        };
 
-            download_source(cache_root, locked, registry, &manifest.source.name)?;
-            write_release_manifest(cache_root, locked, &manifest_raw)?;
+        jobs.push(DownloadJob {
+            locked,
+            source_asset,
+            manifest_raw,
+            artifacts: missing_artifacts,
+        });
+    }
+
+    if jobs.is_empty() {
+        return Ok(());
+    }
+
+    let total = jobs.len();
+    eprintln!("downloading {} module(s)...", total);
+
+    // Phase 2: execute downloads.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        download_jobs_parallel(cache_root, &jobs, registry, total)?;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        download_jobs_sequential(cache_root, &jobs, registry, total)?;
+    }
+
+    Ok(())
+}
+
+/// Sequential download fallback (used on wasm).
+#[cfg(target_arch = "wasm32")]
+fn download_jobs_sequential(
+    cache_root: &Path,
+    jobs: &[DownloadJob],
+    registry: &dyn Registry,
+    total: usize,
+) -> Result<(), Error> {
+    for (i, job) in jobs.iter().enumerate() {
+        eprintln!(
+            "  [{}/{}] {} {}",
+            i + 1,
+            total,
+            job.locked.path,
+            job.locked.version
+        );
+        if let (Some(asset_name), Some(raw)) = (job.source_asset.as_deref(), job.manifest_raw.as_deref()) {
+            download_source(cache_root, job.locked, registry, asset_name, raw)?;
         }
-        for artifact in &locked.artifacts {
-            if !is_artifact_cached(cache_root, locked, artifact) {
-                download_artifact(cache_root, locked, artifact, registry)?;
-            }
+        for artifact in &job.artifacts {
+            download_artifact(cache_root, job.locked, artifact, registry)?;
         }
     }
     Ok(())
 }
 
-/// Write the release manifest (`vo.release.json`) into the module cache directory.
-fn write_release_manifest(
+/// Parallel download using std::thread::scope (native only).
+#[cfg(not(target_arch = "wasm32"))]
+fn download_jobs_parallel(
     cache_root: &Path,
-    locked: &LockedModule,
-    manifest_raw: &[u8],
+    jobs: &[DownloadJob],
+    registry: &dyn Registry,
+    total: usize,
 ) -> Result<(), Error> {
-    let dir = cache_dir(cache_root, &locked.path, &locked.version);
-    std::fs::write(dir.join("vo.release.json"), manifest_raw)?;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let counter = AtomicUsize::new(0);
+    let first_error: std::sync::Mutex<Option<Error>> = std::sync::Mutex::new(None);
+    let max_threads = 8usize.min(jobs.len());
+
+    let counter_ref = &counter;
+    let error_ref = &first_error;
+
+    std::thread::scope(|s| {
+        let chunk_size = (jobs.len() + max_threads - 1) / max_threads;
+        for chunk in jobs.chunks(chunk_size) {
+            s.spawn(move || {
+                for job in chunk {
+                    if error_ref.lock().unwrap().is_some() {
+                        return;
+                    }
+
+                    let idx = counter_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                    eprintln!(
+                        "  [{}/{}] {} {}",
+                        idx, total, job.locked.path, job.locked.version
+                    );
+
+                    if let (Some(asset_name), Some(raw)) = (job.source_asset.as_deref(), job.manifest_raw.as_deref()) {
+                        if let Err(e) = download_source(cache_root, job.locked, registry, asset_name, raw) {
+                            *error_ref.lock().unwrap() = Some(e);
+                            return;
+                        }
+                    }
+                    for artifact in &job.artifacts {
+                        if error_ref.lock().unwrap().is_some() {
+                            return;
+                        }
+                        if let Err(e) = download_artifact(cache_root, job.locked, artifact, registry) {
+                            *error_ref.lock().unwrap() = Some(e);
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    if let Some(e) = first_error.into_inner().unwrap() {
+        return Err(e);
+    }
     Ok(())
 }
 
+fn validate_source_cache_entry(cache_root: &Path, locked: &LockedModule) -> Result<(), Error> {
+    let dir = cache_dir(cache_root, &locked.path, &locked.version);
+    if !dir.is_dir() {
+        return Err(Error::MissingArtifact {
+            module: locked.path.as_str().to_string(),
+            version: locked.version.to_string(),
+            detail: "source package not in cache".to_string(),
+        });
+    }
+
+    let version = read_trimmed_metadata(&dir.join(VERSION_MARKER)).ok_or_else(|| Error::MissingArtifact {
+        module: locked.path.as_str().to_string(),
+        version: locked.version.to_string(),
+        detail: "cached version metadata is missing".to_string(),
+    })?;
+    if version != locked.version.to_string() {
+        return Err(Error::MissingArtifact {
+            module: locked.path.as_str().to_string(),
+            version: locked.version.to_string(),
+            detail: "cached version metadata does not match vo.lock".to_string(),
+        });
+    }
+
+    let source_digest = read_trimmed_metadata(&dir.join(SOURCE_DIGEST_MARKER)).ok_or_else(|| Error::MissingArtifact {
+        module: locked.path.as_str().to_string(),
+        version: locked.version.to_string(),
+        detail: "cached source digest metadata is missing".to_string(),
+    })?;
+    if source_digest != locked.source.as_str() {
+        return Err(Error::MissingArtifact {
+            module: locked.path.as_str().to_string(),
+            version: locked.version.to_string(),
+            detail: "cached source digest does not match vo.lock".to_string(),
+        });
+    }
+
+    if !dir.join("vo.mod").is_file() {
+        return Err(Error::MissingArtifact {
+            module: locked.path.as_str().to_string(),
+            version: locked.version.to_string(),
+            detail: "cached module is missing vo.mod".to_string(),
+        });
+    }
+
+    let manifest_path = dir.join("vo.release.json");
+    let manifest_raw = std::fs::read(&manifest_path).map_err(|_| Error::MissingArtifact {
+        module: locked.path.as_str().to_string(),
+        version: locked.version.to_string(),
+        detail: "cached module is missing vo.release.json".to_string(),
+    })?;
+    let manifest_digest = Digest::from_sha256(&manifest_raw);
+    if manifest_digest != locked.release_manifest {
+        return Err(Error::MissingArtifact {
+            module: locked.path.as_str().to_string(),
+            version: locked.version.to_string(),
+            detail: "cached release manifest does not match vo.lock".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_artifact_cache_entry(
+    cache_root: &Path,
+    locked: &LockedModule,
+    artifact: &LockedArtifact,
+) -> Result<(), Error> {
+    let path = cache_dir(cache_root, &locked.path, &locked.version)
+        .join("artifacts")
+        .join(&artifact.id.name);
+    let bytes = std::fs::read(&path).map_err(|_| Error::MissingArtifact {
+        module: locked.path.as_str().to_string(),
+        version: locked.version.to_string(),
+        detail: format!("artifact {} not in cache", artifact.id.name),
+    })?;
+    if bytes.len() as u64 != artifact.size {
+        return Err(Error::MissingArtifact {
+            module: locked.path.as_str().to_string(),
+            version: locked.version.to_string(),
+            detail: format!("artifact {} size does not match vo.lock", artifact.id.name),
+        });
+    }
+    let digest = Digest::from_sha256(&bytes);
+    if digest != artifact.digest {
+        return Err(Error::MissingArtifact {
+            module: locked.path.as_str().to_string(),
+            version: locked.version.to_string(),
+            detail: format!("artifact {} digest does not match vo.lock", artifact.id.name),
+        });
+    }
+    Ok(())
+}
+
+fn read_trimmed_metadata(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok().map(|value| value.trim().to_string())
+}
+
+/// Safely unpack a tar.gz archive into `dest`, rejecting entries with
+/// path-traversal components (`..`), absolute paths, or symlinks.
+fn safe_unpack_tar_gz(data: &[u8], dest: &Path) -> Result<(), String> {
+    use std::io::Read;
+
+    let gz = flate2::read::GzDecoder::new(data);
+    let mut archive = tar::Archive::new(gz);
+    let mut archive_root: Option<String> = None;
+
+    for entry in archive.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let header = entry.header();
+
+        // Reject symlinks and hardlinks.
+        let entry_type = header.entry_type();
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            return Err(format!(
+                "archive contains a symlink or hardlink, which is not allowed"
+            ));
+        }
+
+        let raw_path = entry.path().map_err(|e| e.to_string())?.into_owned();
+        let Some(relative_path) = strip_archive_root(&raw_path, &mut archive_root)? else {
+            continue;
+        };
+
+        for component in relative_path.components() {
+            if !matches!(component, std::path::Component::Normal(_)) {
+                return Err(format!(
+                    "archive entry contains invalid path component: {}",
+                    relative_path.display()
+                ));
+            }
+        }
+
+        let full_path = dest.join(&relative_path);
+
+        if !full_path.starts_with(dest) {
+            return Err(format!(
+                "archive entry escapes destination: {}",
+                relative_path.display()
+            ));
+        }
+
+        if entry_type.is_dir() {
+            std::fs::create_dir_all(&full_path).map_err(|e| e.to_string())?;
+        } else if entry_type.is_file() {
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+            std::fs::write(&full_path, &buf).map_err(|e| e.to_string())?;
+        }
+        // Skip other entry types (device nodes, etc.)
+    }
+
+    if archive_root.is_none() {
+        return Err("source package archive is empty".to_string());
+    }
+
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

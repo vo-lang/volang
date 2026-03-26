@@ -143,7 +143,7 @@ fn type_key_to_runtime_type(
                         name: String::new(),
                         underlying_meta: vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Void),
                         underlying_rttid: vo_runtime::ValueRttid::new(0, vo_runtime::ValueKind::Void),
-                        methods: std::collections::HashMap::new(),
+                        methods: std::collections::BTreeMap::new(),
                     });
                     id
                 })

@@ -2,9 +2,11 @@
   import { tick } from 'svelte';
   import type { ProjectCatalogService } from '../lib/services/project_catalog_service';
   import type { ManagedProject, ProjectDiffResult } from '../lib/project_catalog/types';
+  import type { Backend, FileDialogFilter } from '../lib/backend/backend';
   import { projectKey, syncState } from '../lib/project_catalog/types';
   import { formatError } from '../lib/format_error';
   import CreateProjectModal from './home/CreateProjectModal.svelte';
+  import OpenProjectModal from './home/OpenProjectModal.svelte';
   import ProjectActionsMenu from './home/ProjectActionsMenu.svelte';
   import ProjectCard from './home/ProjectCard.svelte';
   import ProjectRenameModal from './home/ProjectRenameModal.svelte';
@@ -31,49 +33,61 @@
     file: string;
     desc: string;
     source: string;
-    tag: 'lang' | 'gui';
+    hasGui: boolean;
   }
 
   const examples: Example[] = [
-    { name: 'Channels',        file: 'channels.vo',        desc: 'Goroutine communication',       source: exChannels,      tag: 'lang' },
-    { name: 'Closures',        file: 'closures.vo',        desc: 'Captured variables',            source: exClosures,      tag: 'lang' },
-    { name: 'Defer',           file: 'defer.vo',           desc: 'LIFO cleanup',                  source: exDefer,         tag: 'lang' },
-    { name: 'Error Handling',  file: 'error_handling.vo',  desc: '? operator and errdefer',       source: exErrorHandling, tag: 'lang' },
-    { name: 'Goroutines',      file: 'goroutines.vo',      desc: 'Concurrent computation',        source: exGoroutines,    tag: 'lang' },
-    { name: 'Interfaces',      file: 'interfaces.vo',      desc: 'Duck typing',                   source: exInterfaces,    tag: 'lang' },
-    { name: 'Select',          file: 'select.vo',          desc: 'Channel multiplexing',          source: exSelect,        tag: 'lang' },
-    { name: 'Time',            file: 'time.vo',            desc: 'Duration and timers',           source: exTime,          tag: 'lang' },
-    { name: 'Regexp',          file: 'regexp.vo',          desc: 'Pattern matching',              source: exRegexp,        tag: 'lang' },
-    { name: 'Counter',         file: 'gui_counter.vo',     desc: 'Minimal GUI app',               source: exGuiCounter,    tag: 'gui' },
-    { name: 'Todo App',        file: 'gui_todo.vo',        desc: 'List rendering & events',       source: exGuiTodo,       tag: 'gui' },
-    { name: 'Tetris',          file: 'gui_tetris.vo',      desc: 'Canvas 2D game loop',           source: exGuiTetris,     tag: 'gui' },
-    { name: 'Showcase',        file: 'gui_showcase.vo',    desc: 'All GUI components',            source: exGuiShowcase,   tag: 'gui' },
-    { name: 'Dashboard',       file: 'dashboard.vo',       desc: 'Composition patterns',          source: exDashboard,     tag: 'gui' },
+    { name: 'Channels',        file: 'channels.vo',        desc: 'Goroutine communication',       source: exChannels,      hasGui: false },
+    { name: 'Closures',        file: 'closures.vo',        desc: 'Captured variables',            source: exClosures,      hasGui: false },
+    { name: 'Defer',           file: 'defer.vo',           desc: 'LIFO cleanup',                  source: exDefer,         hasGui: false },
+    { name: 'Error Handling',  file: 'error_handling.vo',  desc: '? operator and errdefer',       source: exErrorHandling, hasGui: false },
+    { name: 'Goroutines',      file: 'goroutines.vo',      desc: 'Concurrent computation',        source: exGoroutines,    hasGui: false },
+    { name: 'Interfaces',      file: 'interfaces.vo',      desc: 'Duck typing',                   source: exInterfaces,    hasGui: false },
+    { name: 'Select',          file: 'select.vo',          desc: 'Channel multiplexing',          source: exSelect,        hasGui: false },
+    { name: 'Time',            file: 'time.vo',            desc: 'Duration and timers',           source: exTime,          hasGui: false },
+    { name: 'Regexp',          file: 'regexp.vo',          desc: 'Pattern matching',              source: exRegexp,        hasGui: false },
+    { name: 'Counter',         file: 'gui_counter.vo',     desc: 'Minimal GUI app',               source: exGuiCounter,    hasGui: true },
+    { name: 'Todo App',        file: 'gui_todo.vo',        desc: 'List rendering & events',       source: exGuiTodo,       hasGui: true },
+    { name: 'Tetris',          file: 'gui_tetris.vo',      desc: 'Canvas 2D game loop',           source: exGuiTetris,     hasGui: true },
+    { name: 'Showcase',        file: 'gui_showcase.vo',    desc: 'All GUI components',            source: exGuiShowcase,   hasGui: true },
+    { name: 'Dashboard',       file: 'dashboard.vo',       desc: 'Composition patterns',          source: exDashboard,     hasGui: true },
   ];
 
-  $: langExamples = examples.filter(e => e.tag === 'lang');
-  $: guiExamples = examples.filter(e => e.tag === 'gui');
+  $: langExamples = examples.filter((e) => !e.hasGui);
+  $: guiExamples = examples.filter((e) => e.hasGui);
 
   let examplesExpanded = false;
 
   export let projectCatalog: ProjectCatalogService;
+  export let backend: Backend;
+  export let platform: 'native' | 'wasm' = 'wasm';
   export let onOpenProject: (project: ManagedProject) => Promise<void> | void = () => {};
-  export let onOpenExample: (source: string, filename: string) => Promise<void> | void = () => {};
+  export let onOpenLocalPath: (path: string) => Promise<void> | void = () => {};
+  export let onOpenExample: (source: string, filename: string, hasGui: boolean) => Promise<void> | void = () => {};
   export let onDocs: () => void = () => {};
   export let onDevelop: () => void = () => {};
   export let onConnectGitHub: () => void = () => {};
 
+  const LAST_CREATE_LOCATION_KEY = 'vo_studio_last_create_location';
+  const VO_FILE_FILTERS: FileDialogFilter[] = [{ name: 'Vo source', extensions: ['vo'] }];
+
   let searchQuery = '';
   let actionError = '';
   let showCreateModal = false;
+  let showOpenProjectModal = false;
   let menuState: { x: number; y: number; project: ManagedProject } | null = null;
   let renameTarget: ManagedProject | null = null;
   let syncDialog: ProjectDiffResult | null = null;
   let syncDialogProjectKey = '';
   let confirmDialog: { title: string; message: string; danger: boolean; action: () => void } | null = null;
   let creating = false;
+  let openingProject = false;
   let createError = '';
+  let openProjectError = '';
   let localRefreshRequested = false;
+  let lastCreateLocation = '';
+
+  $: isNative = platform === 'native';
 
   $: githubStore = projectCatalog.github;
   $: catalogStore = projectCatalog.catalog;
@@ -84,6 +98,8 @@
   $: isRefreshing = localRefreshRequested || $catalogStore.refreshing || $catalogStore.remoteLoading;
   $: hasProjects = !$catalogStore.loading && $catalogStore.projects.length > 0;
   $: isGitHubConnected = Boolean($githubStore.user);
+  $: createLocationDefault = lastCreateLocation || $catalogStore.root;
+  $: openLocationDefault = createLocationDefault;
 
   function busy(project: ManagedProject): boolean {
     return $catalogStore.busyKeys.includes(projectKey(project));
@@ -106,13 +122,17 @@
     });
   }
 
-  async function createProject(kind: 'single' | 'module', name: string): Promise<void> {
+  async function createProject(kind: 'single' | 'module', name: string, location: string | undefined): Promise<void> {
     createError = '';
     creating = true;
     try {
+      if (location) {
+        lastCreateLocation = location;
+        localStorage.setItem(LAST_CREATE_LOCATION_KEY, location);
+      }
       const project = kind === 'single'
-        ? await projectCatalog.createSingleProject(name)
-        : await projectCatalog.createModuleProject(name);
+        ? await projectCatalog.createSingleProject(name, location)
+        : await projectCatalog.createModuleProject(name, location);
       showCreateModal = false;
       createError = '';
       await openProject(project);
@@ -122,6 +142,35 @@
       creating = false;
     }
   }
+
+  async function openProjectFromDirectory(): Promise<void> {
+    await openPickedProject(() => backend.pickDirectory(openLocationDefault || undefined));
+  }
+
+  async function openProjectFromFile(): Promise<void> {
+    await openPickedProject(() => backend.pickFile(openLocationDefault || undefined, VO_FILE_FILTERS));
+  }
+
+  async function openPickedProject(pick: () => Promise<string | null>): Promise<void> {
+    openProjectError = '';
+    openingProject = true;
+    try {
+      const picked = await pick();
+      if (!picked) return;
+      await onOpenLocalPath(picked);
+      showOpenProjectModal = false;
+    } catch (error) {
+      openProjectError = formatError(error);
+    } finally {
+      openingProject = false;
+    }
+  }
+
+  function pickDirectoryForCreate(): Promise<string | null> {
+    return backend.pickDirectory(createLocationDefault || undefined);
+  }
+
+  lastCreateLocation = localStorage.getItem(LAST_CREATE_LOCATION_KEY) ?? '';
 
   async function openProject(project: ManagedProject): Promise<void> {
     actionError = '';
@@ -277,6 +326,7 @@
     renameTarget = null;
     syncDialog = null;
     showCreateModal = false;
+    showOpenProjectModal = false;
     confirmDialog = null;
   }}
 />
@@ -284,9 +334,8 @@
 <div class="home">
   <div class="ambient"></div>
 
-  <!-- ═══════ DASHBOARD ═══════ -->
   <div class="dashboard">
-    <!-- ── Left column: brand + examples ── -->
+    <!-- ── Left: brand identity + exploration ── -->
     <aside class="sidebar">
       <div class="brand-block">
         <h1 class="brand">Vo</h1>
@@ -297,23 +346,21 @@
           <span class="pill pill-jit">JIT</span>
           <span class="pill pill-wasm">WASM</span>
         </div>
-        <div class="actions">
-          <button class="btn-primary" on:click={() => { createError = ''; showCreateModal = true; }}>
-            <svg class="btn-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
-            New Project
-          </button>
-          <button class="btn-ghost" on:click={onDocs}>
-            Docs
-            <svg class="btn-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg>
-          </button>
-        </div>
+        <button class="docs-cta" on:click={onDocs}>
+          <svg class="docs-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 2h8l4 4v8H2V2z" fill="none"/><path d="M10 2v4h4" fill="none"/><path d="M5 9h6M5 11.5h4" fill="none"/></svg>
+          <span class="docs-cta-text">
+            <span class="docs-cta-title">Documentation</span>
+            <span class="docs-cta-desc">Language guide, stdlib & API reference</span>
+          </span>
+          <svg class="btn-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg>
+        </button>
       </div>
 
       <div class="quick-try">
         <span class="quick-try-label">Quick try</span>
         <div class="ex-list">
           {#each langExamples as ex}
-            <button class="ex-link" on:click={() => onOpenExample(ex.source, ex.file)}>
+            <button class="ex-link" on:click={() => onOpenExample(ex.source, ex.file, ex.hasGui)}>
               <span class="ex-link-name">{ex.name}</span>
               <span class="ex-link-dot">·</span>
               <span class="ex-link-desc">{ex.desc}</span>
@@ -323,7 +370,7 @@
         <span class="quick-try-label quick-try-label-gui">GUI</span>
         <div class="ex-list">
           {#each guiExamples as ex}
-            <button class="ex-link ex-link-gui" on:click={() => onOpenExample(ex.source, ex.file)}>
+            <button class="ex-link ex-link-gui" on:click={() => onOpenExample(ex.source, ex.file, ex.hasGui)}>
               <span class="ex-link-name">{ex.name}</span>
               <span class="ex-link-dot">·</span>
               <span class="ex-link-desc">{ex.desc}</span>
@@ -331,127 +378,99 @@
           {/each}
         </div>
       </div>
+
     </aside>
 
-    <!-- ── Right column: code + workspace ── -->
+    <!-- ── Right: workspace (projects first, then extras) ── -->
     <main class="content">
-      <div class="code-area">
-        <div class="code-glow"></div>
-        <div class="code-window">
-          <div class="code-titlebar">
-            <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
-            <span class="code-filename">error_handling.vo</span>
-          </div>
-          <pre class="code-body"><code><span class="hl-kw">func</span> <span class="hl-fn">readConfig</span>(path <span class="hl-type">string</span>) (<span class="hl-type">Config</span>, <span class="hl-type">error</span>) &#123;
-    file := open(path)<span class="hl-op">?</span>
-    <span class="hl-kw">errdefer</span> file.Close()
-
-    data := readAll(file)<span class="hl-op">?</span>
-    config := parse(data)<span class="hl-op">?</span>
-
-    <span class="hl-kw">if</span> config.Version &lt; <span class="hl-num">1</span> &#123;
-        <span class="hl-kw">fail</span> errors.New(<span class="hl-str">"invalid version"</span>)
-    &#125;
-    <span class="hl-kw">return</span> config, <span class="hl-lit">nil</span>
-&#125;</code></pre>
-          <button class="code-try" on:click={() => onOpenExample(exErrorHandling, 'error_handling.vo')}>
-            Open in editor
-            <svg class="btn-arrow small" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg>
+      <div class="projects-area">
+        <div class="projects-header">
+          <span class="projects-title">{isGitHubConnected ? 'Your Projects' : 'Projects'}</span>
+          {#if hasProjects}
+            <div class="projects-search">
+              <svg class="search-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l4 4"/></svg>
+              <input bind:value={searchQuery} placeholder="Search…" />
+            </div>
+          {/if}
+          {#if !isGitHubConnected}
+            <button class="header-action header-action-gh" on:click={onConnectGitHub} title="Sync projects across devices and back up to Gist">
+              <svg class="header-action-icon gh-header-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+              GitHub
+            </button>
+          {/if}
+          <div class="projects-header-spacer"></div>
+          {#if $catalogStore.remoteLoading}
+            <span class="sync-hint">Syncing…</span>
+          {/if}
+          <button
+            class="icon-btn"
+            title="Refresh projects"
+            disabled={isInitialLoading}
+            on:click={triggerRefresh}
+          ><span class="refresh-icon" class:spinning={isInitialLoading || isRefreshing}>↻</span></button>
+          {#if isNative}
+            <button class="header-action" on:click={() => { openProjectError = ''; showOpenProjectModal = true; }}>
+              <svg class="header-action-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 13h12M3 9l5-5 5 5"/></svg>
+              Open
+            </button>
+          {/if}
+          <button class="header-action header-action-primary" on:click={() => { createError = ''; showCreateModal = true; }}>
+            <svg class="header-action-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
+            New
           </button>
         </div>
-      </div>
 
-      <!-- ── Workspace area (always visible) ── -->
-      <div class="workspace">
-        {#if !isGitHubConnected}
-          <div class="gh-block">
-            <button class="gh-cta" on:click={onConnectGitHub}>
-              <div class="gh-cta-left">
-                <svg class="gh-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-                <div class="gh-cta-text">
-                  <span class="gh-cta-title">Connect GitHub</span>
-                  <span class="gh-cta-desc">Sync projects across devices and back up to Gist</span>
-                </div>
-              </div>
-              <svg class="btn-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg>
-            </button>
-            <p class="gh-warn">Code is AI-assisted and not audited for security. Use a test account with a minimal-scope token.</p>
+        {#if isInitialLoading || isRefreshing}
+          <div class="progress-track"><div class="progress-bar"></div></div>
+        {/if}
+
+        {#if actionError || $catalogStore.error || $githubStore.error}
+          <div class="error-bar">
+            <span>{actionError || $catalogStore.error || $githubStore.error}</span>
+            <button class="error-dismiss" on:click={() => (actionError = '')}>×</button>
           </div>
         {/if}
 
-        <div class="projects-area">
-          <div class="projects-header">
-            <span class="projects-title">{isGitHubConnected ? 'Your Projects' : 'Local Projects'}</span>
-            {#if hasProjects}
-              <div class="projects-search">
-                <svg class="search-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l4 4"/></svg>
-                <input bind:value={searchQuery} placeholder="Search…" />
-              </div>
-            {/if}
-            <div class="projects-header-spacer"></div>
-            <button
-              class="icon-btn"
-              title="Refresh projects"
-              disabled={isInitialLoading}
-              on:click={triggerRefresh}
-            ><span class="refresh-icon" class:spinning={isInitialLoading || isRefreshing}>↻</span></button>
-            {#if $catalogStore.remoteLoading}
-              <span class="sync-hint">Syncing GitHub…</span>
-            {/if}
-          </div>
-
-          {#if isInitialLoading || isRefreshing}
-            <div class="progress-track"><div class="progress-bar"></div></div>
-          {/if}
-
-          {#if actionError || $catalogStore.error || $githubStore.error}
-            <div class="error-bar">
-              <span>{actionError || $catalogStore.error || $githubStore.error}</span>
-              <button class="error-dismiss" on:click={() => (actionError = '')}>×</button>
-            </div>
-          {/if}
-
-          {#if $catalogStore.loading}
-            <div class="grid">
-              {#each Array(3) as _}
-                <div class="skeleton-card">
-                  <div class="skeleton-row">
-                    <div class="skeleton-icon"></div>
-                    <div class="skeleton-info">
-                      <div class="skeleton-line skeleton-name"></div>
-                      <div class="skeleton-line skeleton-meta"></div>
-                    </div>
+        {#if $catalogStore.loading}
+          <div class="grid">
+            {#each Array(3) as _}
+              <div class="skeleton-card">
+                <div class="skeleton-row">
+                  <div class="skeleton-icon"></div>
+                  <div class="skeleton-info">
+                    <div class="skeleton-line skeleton-name"></div>
+                    <div class="skeleton-line skeleton-meta"></div>
                   </div>
                 </div>
-              {/each}
-            </div>
-          {:else if filteredProjects.length === 0 && searchQuery}
-            <div class="empty">
-              <div class="empty-title">No matching projects</div>
-              <div class="empty-sub">Try a different search term.</div>
-            </div>
-          {:else if hasProjects}
-            <div class="grid">
-              {#each filteredProjects as project (projectKey(project))}
-                {@const state = syncState(project)}
-                <ProjectCard
-                  {project}
-                  {state}
-                  busy={busy(project)}
-                  checkingSync={checkingSync(project)}
-                  on:open={() => openProject(project)}
-                  on:menu={(event) => {
-                    menuState = { x: event.detail.x, y: event.detail.y, project };
-                  }}
-                />
-              {/each}
-            </div>
-          {:else}
-            <div class="empty-workspace">
-              <span class="empty-workspace-text">No projects yet. Click <strong>New Project</strong> to get started.</span>
-            </div>
-          {/if}
-        </div>
+              </div>
+            {/each}
+          </div>
+        {:else if filteredProjects.length === 0 && searchQuery}
+          <div class="empty">
+            <div class="empty-title">No matching projects</div>
+            <div class="empty-sub">Try a different search term.</div>
+          </div>
+        {:else if hasProjects}
+          <div class="grid">
+            {#each filteredProjects as project (projectKey(project))}
+              {@const state = syncState(project)}
+              <ProjectCard
+                {project}
+                {state}
+                busy={busy(project)}
+                checkingSync={checkingSync(project)}
+                on:open={() => openProject(project)}
+                on:menu={(event) => {
+                  menuState = { x: event.detail.x, y: event.detail.y, project };
+                }}
+              />
+            {/each}
+          </div>
+        {:else}
+          <div class="empty-workspace">
+            <span class="empty-workspace-text">No projects yet — click <strong>New</strong> above to get started.</span>
+          </div>
+        {/if}
       </div>
     </main>
   </div>
@@ -460,8 +479,21 @@
     <CreateProjectModal
       busy={creating}
       error={createError}
+      {platform}
+      defaultLocation={createLocationDefault}
+      onPickDirectory={isNative ? pickDirectoryForCreate : null}
       on:close={() => { showCreateModal = false; createError = ''; }}
-      on:create={(event) => createProject(event.detail.kind, event.detail.name)}
+      on:create={(event) => createProject(event.detail.kind, event.detail.name, event.detail.location)}
+    />
+  {/if}
+
+  {#if showOpenProjectModal}
+    <OpenProjectModal
+      busy={openingProject}
+      error={openProjectError}
+      on:close={() => { showOpenProjectModal = false; openProjectError = ''; }}
+      on:openFolder={() => void openProjectFromDirectory()}
+      on:openFile={() => void openProjectFromFile()}
     />
   {/if}
 
@@ -543,7 +575,7 @@
 
 <style>
   /* ══════════════════════════════════════════
-     ROOT — full-height, no page scroll
+     ROOT
      ══════════════════════════════════════════ */
   .home {
     flex: 1;
@@ -566,40 +598,39 @@
   }
 
   /* ══════════════════════════════════════════
-     DASHBOARD — two-column layout
+     TWO-COLUMN LAYOUT
      ══════════════════════════════════════════ */
   .dashboard {
     flex: 1;
     display: grid;
-    grid-template-columns: 280px 1fr;
+    grid-template-columns: 260px 1fr;
     min-height: 0;
     position: relative;
     z-index: 1;
   }
 
   /* ══════════════════════════════════════════
-     LEFT SIDEBAR
+     LEFT SIDEBAR — brand + explore
      ══════════════════════════════════════════ */
   .sidebar {
     display: flex;
     flex-direction: column;
     min-height: 0;
-    padding: 32px 24px 24px;
+    padding: 28px 22px 20px;
     border-right: 1px solid rgba(88, 91, 112, 0.08);
     overflow-y: auto;
-    gap: 0;
   }
 
   .brand-block {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding-bottom: 20px;
+    gap: 8px;
+    padding-bottom: 18px;
   }
 
   .brand {
     margin: 0;
-    font-size: 52px;
+    font-size: 48px;
     font-weight: 900;
     letter-spacing: -0.04em;
     line-height: 1;
@@ -612,7 +643,7 @@
 
   .tagline {
     margin: 0;
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 600;
     color: #cdd6f4;
     line-height: 1.4;
@@ -621,18 +652,18 @@
 
   .subtitle {
     margin: 0;
-    font-size: 12px;
+    font-size: 11px;
     color: #6c7086;
     line-height: 1.5;
   }
 
   .pills {
     display: flex;
-    gap: 6px;
+    gap: 5px;
     margin: 2px 0;
   }
   .pill {
-    padding: 3px 10px;
+    padding: 2px 9px;
     border-radius: 20px;
     font-size: 9px;
     font-weight: 800;
@@ -652,72 +683,18 @@
     background: rgba(166, 227, 161, 0.06);
   }
 
-  .actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 4px;
-  }
-
   button { font: inherit; }
-
-  .btn-primary {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    border: none;
-    border-radius: 10px;
-    padding: 9px 16px;
-    background: linear-gradient(135deg, #89b4fa, #74c7ec);
-    color: #06060c;
-    font-size: 12px;
-    font-weight: 700;
-    cursor: pointer;
-    transition: filter 0.2s, transform 0.2s, box-shadow 0.2s;
-    box-shadow: 0 0 0 rgba(137, 180, 250, 0);
-  }
-  .btn-primary:hover {
-    filter: brightness(1.1);
-    transform: translateY(-1px);
-    box-shadow: 0 6px 20px rgba(137, 180, 250, 0.2);
-  }
-  .btn-icon {
-    width: 13px; height: 13px;
-    stroke: currentColor; fill: none;
-    stroke-width: 2.2; stroke-linecap: round;
-  }
-
-  .btn-ghost {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    border: 1px solid rgba(88, 91, 112, 0.3);
-    border-radius: 10px;
-    padding: 9px 14px;
-    background: transparent;
-    color: #7f849c;
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: border-color 0.2s, color 0.2s;
-  }
-  .btn-ghost:hover {
-    border-color: rgba(137, 180, 250, 0.4);
-    color: #89b4fa;
-  }
-  .btn-arrow {
-    width: 12px; height: 12px;
-    stroke: currentColor; fill: none;
-    stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
-  }
-  .btn-arrow.small { width: 11px; height: 11px; }
 
   /* ── Quick try (example links) ── */
   .quick-try {
+    flex: 1;
     display: flex;
     flex-direction: column;
     gap: 4px;
     border-top: 1px solid rgba(88, 91, 112, 0.08);
-    padding-top: 16px;
+    padding-top: 14px;
+    min-height: 0;
+    overflow-y: auto;
   }
 
   .quick-try-label {
@@ -727,6 +704,7 @@
     text-transform: uppercase;
     color: #89b4fa;
     padding: 0 0 4px;
+    flex-shrink: 0;
   }
   .quick-try-label-gui {
     color: #a6e3a1;
@@ -742,7 +720,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     margin: 0 -8px;
     border: none;
     border-radius: 6px;
@@ -779,224 +757,114 @@
     text-overflow: ellipsis;
   }
 
+  .docs-cta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    margin-top: 4px;
+    border: 1px solid rgba(137, 180, 250, 0.15);
+    border-radius: 10px;
+    background: linear-gradient(135deg, rgba(137, 180, 250, 0.05) 0%, rgba(116, 199, 236, 0.02) 100%);
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  .docs-cta:hover {
+    border-color: rgba(137, 180, 250, 0.35);
+    background: linear-gradient(135deg, rgba(137, 180, 250, 0.10) 0%, rgba(116, 199, 236, 0.05) 100%);
+  }
+  .docs-icon {
+    width: 18px;
+    height: 18px;
+    stroke: #89b4fa;
+    fill: none;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    flex-shrink: 0;
+    transition: stroke 0.2s;
+  }
+  .docs-cta:hover .docs-icon { stroke: #b4d0fb; }
+  .docs-cta-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1;
+    min-width: 0;
+  }
+  .docs-cta-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #cdd6f4;
+  }
+  .docs-cta-desc {
+    font-size: 10px;
+    color: #585b70;
+    line-height: 1.3;
+  }
+  .docs-cta .btn-arrow {
+    stroke: #45475a;
+    flex-shrink: 0;
+    transition: stroke 0.2s;
+  }
+  .docs-cta:hover .btn-arrow { stroke: #89b4fa; }
+
+  .btn-ghost {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid rgba(88, 91, 112, 0.2);
+    border-radius: 8px;
+    padding: 7px 12px;
+    background: transparent;
+    color: #7f849c;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.2s, color 0.2s;
+  }
+  .btn-ghost:hover {
+    border-color: rgba(137, 180, 250, 0.4);
+    color: #89b4fa;
+  }
+  .btn-arrow {
+    width: 12px; height: 12px;
+    stroke: currentColor; fill: none;
+    stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+  }
+  .btn-arrow.small { width: 11px; height: 11px; }
+
   /* ══════════════════════════════════════════
-     RIGHT CONTENT
+     RIGHT CONTENT — projects-first
      ══════════════════════════════════════════ */
   .content {
     display: flex;
     flex-direction: column;
     min-height: 0;
     overflow-y: auto;
-    padding: 28px 28px 24px;
-    gap: 20px;
+    padding: 24px 28px 24px;
+    gap: 24px;
   }
 
-  /* ── Code window ── */
-  .code-area {
-    position: relative;
-    flex-shrink: 0;
-  }
-  .code-glow {
-    position: absolute;
-    inset: -1px;
-    border-radius: 16px;
-    background: linear-gradient(135deg, rgba(137, 180, 250, 0.12), rgba(116, 199, 236, 0.08), rgba(148, 226, 213, 0.06));
-    filter: blur(18px);
-    z-index: 0;
-    animation: glow-pulse 4s ease-in-out infinite alternate;
-  }
-  @keyframes glow-pulse {
-    0% { opacity: 0.5; }
-    100% { opacity: 1; }
-  }
-
-  .code-window {
-    position: relative;
-    z-index: 1;
-    display: flex;
-    flex-direction: column;
-    border-radius: 14px;
-    border: 1px solid rgba(88, 91, 112, 0.2);
-    background: rgba(11, 11, 18, 0.85);
-    backdrop-filter: blur(16px);
-    overflow: hidden;
-  }
-  .code-titlebar {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 10px 14px;
-    border-bottom: 1px solid rgba(88, 91, 112, 0.1);
-  }
-  .dot { width: 8px; height: 8px; border-radius: 50%; }
-  .dot-r { background: #f38ba8; opacity: 0.5; }
-  .dot-y { background: #f9e2af; opacity: 0.5; }
-  .dot-g { background: #a6e3a1; opacity: 0.5; }
-  .code-filename {
-    margin-left: 8px;
-    font-size: 11px;
-    color: #585b70;
-    font-weight: 500;
-    letter-spacing: 0.02em;
-  }
-  .code-body {
-    margin: 0;
-    padding: 16px 18px;
-    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace;
-    font-size: 12.5px;
-    line-height: 1.7;
-    color: #a6adc8;
-    tab-size: 4;
-  }
-  .code-body code { font: inherit; color: inherit; }
-
-  .hl-kw  { color: #cba6f7; }
-  .hl-fn  { color: #89b4fa; }
-  .hl-type { color: #89dceb; }
-  .hl-op  { color: #f38ba8; font-weight: 700; }
-  .hl-str { color: #a6e3a1; }
-  .hl-num { color: #fab387; }
-  .hl-lit { color: #f9e2af; }
-
-  .code-try {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    padding: 9px;
-    border: none;
-    border-top: 1px solid rgba(88, 91, 112, 0.1);
-    background: rgba(137, 180, 250, 0.02);
-    color: #585b70;
-    font-size: 11px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.2s, color 0.2s;
-  }
-  .code-try:hover {
-    background: rgba(137, 180, 250, 0.07);
-    color: #89b4fa;
-  }
-
-  /* ══════════════════════════════════════════
-     WORKSPACE (always visible)
-     ══════════════════════════════════════════ */
-  .workspace {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    min-height: 0;
-  }
-
-  /* ── GitHub CTA ── */
-  .gh-block {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    flex-shrink: 0;
-  }
-  .gh-warn {
-    margin: 0;
-    padding: 0 4px;
-    font-size: 10px;
-    color: #f9e2af;
-    opacity: 0.6;
-    line-height: 1.4;
-  }
-  .gh-cta {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 14px 16px;
-    border: 1px solid rgba(88, 91, 112, 0.15);
-    border-radius: 12px;
-    background: linear-gradient(135deg, rgba(137, 180, 250, 0.04) 0%, rgba(116, 199, 236, 0.02) 100%);
-    cursor: pointer;
-    font: inherit;
-    color: inherit;
-    text-align: left;
-    flex-shrink: 0;
-    transition: border-color 0.2s, background 0.2s;
-  }
-  .gh-cta:hover {
-    border-color: rgba(137, 180, 250, 0.25);
-    background: linear-gradient(135deg, rgba(137, 180, 250, 0.07) 0%, rgba(116, 199, 236, 0.04) 100%);
-  }
-  .gh-cta-left {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    min-width: 0;
-  }
-  .gh-icon {
-    width: 20px;
-    height: 20px;
-    fill: #7f849c;
-    flex-shrink: 0;
-    transition: fill 0.2s;
-  }
-  .gh-cta:hover .gh-icon { fill: #cdd6f4; }
-  .gh-cta-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-  .gh-cta-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: #cdd6f4;
-  }
-  .gh-cta-desc {
-    font-size: 11px;
-    color: #585b70;
-    line-height: 1.35;
-  }
-  .gh-cta .btn-arrow {
-    stroke: #45475a;
-    flex-shrink: 0;
-    transition: stroke 0.2s;
-  }
-  .gh-cta:hover .btn-arrow { stroke: #89b4fa; }
-
-  /* ── Empty workspace ── */
-  .empty-workspace {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 24px 16px;
-  }
-  .empty-workspace-text {
-    font-size: 12px;
-    color: #45475a;
-    text-align: center;
-  }
-  .empty-workspace-text strong {
-    color: #585b70;
-  }
-
-  /* ── Projects ── */
+  /* ── Projects area ── */
   .projects-area {
-    flex: 1;
     display: flex;
     flex-direction: column;
-    min-height: 0;
+    gap: 10px;
   }
   .projects-header {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 0 0 10px;
     flex-shrink: 0;
   }
   .projects-title {
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: #585b70;
+    font-size: 16px;
+    font-weight: 700;
+    color: #cdd6f4;
     flex-shrink: 0;
   }
   .projects-search {
@@ -1030,16 +898,6 @@
   .projects-header-spacer { flex: 1; }
   .sync-hint { color: #585b70; font-size: 11px; white-space: nowrap; }
 
-  .secondary {
-    border: 1px solid rgba(88, 91, 112, 0.2);
-    border-radius: 8px;
-    padding: 6px 10px;
-    background: rgba(11, 11, 18, 0.5);
-    color: #a6adc8; font-size: 12px;
-    cursor: pointer; white-space: nowrap;
-  }
-  .secondary:hover { border-color: rgba(88, 91, 112, 0.4); color: #cdd6f4; }
-
   .icon-btn {
     border: 1px solid rgba(88, 91, 112, 0.15);
     border-radius: 8px;
@@ -1056,6 +914,84 @@
   .refresh-icon.spinning { animation: spin 0.8s linear infinite; }
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
+  .header-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid rgba(88, 91, 112, 0.2);
+    border-radius: 8px;
+    padding: 5px 12px;
+    background: rgba(11, 11, 18, 0.5);
+    color: #a6adc8;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: border-color 0.2s, color 0.2s, background 0.2s;
+  }
+  .header-action:hover {
+    border-color: rgba(137, 180, 250, 0.35);
+    color: #cdd6f4;
+  }
+  .header-action-primary {
+    border-color: rgba(137, 180, 250, 0.25);
+    background: rgba(137, 180, 250, 0.08);
+    color: #89b4fa;
+  }
+  .header-action-primary:hover {
+    border-color: rgba(137, 180, 250, 0.5);
+    background: rgba(137, 180, 250, 0.14);
+    color: #89b4fa;
+  }
+  .header-action-icon {
+    width: 12px; height: 12px;
+    stroke: currentColor; fill: none;
+    stroke-width: 2.2; stroke-linecap: round;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 10px;
+  }
+
+  /* ── GitHub header button ── */
+  .header-action-gh {
+    border-color: rgba(88, 91, 112, 0.15);
+    color: #7f849c;
+  }
+  .header-action-gh:hover {
+    border-color: rgba(88, 91, 112, 0.35);
+    color: #cdd6f4;
+  }
+  .gh-header-icon {
+    fill: currentColor;
+    stroke: none;
+  }
+
+  /* ── Empty states ── */
+  .empty-workspace {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  .empty-workspace-text {
+    font-size: 13px;
+    color: #45475a;
+    text-align: center;
+  }
+  .empty-workspace-text strong {
+    color: #7f849c;
+  }
+  .empty {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; padding: 40px 20px; text-align: center;
+  }
+  .empty-title { color: #585b70; font-size: 13px; font-weight: 600; }
+  .empty-sub { color: #45475a; font-size: 12px; max-width: 300px; line-height: 1.5; }
+
+  /* ── Error bar ── */
   .error-bar {
     padding: 8px 12px;
     border-radius: 8px;
@@ -1072,11 +1008,44 @@
   }
   .error-dismiss:hover { opacity: 1; }
 
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 10px;
+  /* ── Shared secondary button ── */
+  .secondary {
+    border: 1px solid rgba(88, 91, 112, 0.2);
+    border-radius: 8px;
+    padding: 6px 10px;
+    background: rgba(11, 11, 18, 0.5);
+    color: #a6adc8; font-size: 12px;
+    cursor: pointer; white-space: nowrap;
   }
+  .secondary:hover { border-color: rgba(88, 91, 112, 0.4); color: #cdd6f4; }
+
+  /* ── Progress ── */
+  .progress-track { height: 2px; background: rgba(30, 30, 46, 0.3); overflow: hidden; flex-shrink: 0; }
+  .progress-bar {
+    height: 100%; width: 30%;
+    background: linear-gradient(90deg, #89b4fa, #74c7ec);
+    border-radius: 1px;
+    animation: progress-slide 1.2s ease-in-out infinite;
+  }
+  @keyframes progress-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(430%); } }
+
+  /* ── Skeleton loading ── */
+  .skeleton-card {
+    border: 1px solid rgba(88, 91, 112, 0.1);
+    background: rgba(11, 11, 18, 0.5);
+    border-radius: 12px; padding: 12px;
+  }
+  .skeleton-row { display: flex; align-items: center; gap: 10px; }
+  .skeleton-icon {
+    width: 32px; height: 24px; border-radius: 5px;
+    background: rgba(88, 91, 112, 0.1);
+    flex-shrink: 0; animation: pulse 1.4s ease-in-out infinite;
+  }
+  .skeleton-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+  .skeleton-line { border-radius: 3px; background: rgba(88, 91, 112, 0.1); animation: pulse 1.4s ease-in-out infinite; }
+  .skeleton-name { width: 60%; height: 13px; }
+  .skeleton-meta { width: 40%; height: 10px; animation-delay: 0.15s; }
+  @keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 0.8; } }
 
   /* ── Confirm dialog ── */
   .confirm-backdrop {
@@ -1107,49 +1076,17 @@
   }
   .danger-btn:hover { filter: brightness(1.1); }
 
-  .progress-track { height: 2px; background: rgba(30, 30, 46, 0.3); overflow: hidden; flex-shrink: 0; }
-  .progress-bar {
-    height: 100%; width: 30%;
-    background: linear-gradient(90deg, #89b4fa, #74c7ec);
-    border-radius: 1px;
-    animation: progress-slide 1.2s ease-in-out infinite;
-  }
-  @keyframes progress-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(430%); } }
-
-  .skeleton-card {
-    border: 1px solid rgba(88, 91, 112, 0.1);
-    background: rgba(11, 11, 18, 0.5);
-    border-radius: 12px; padding: 12px;
-  }
-  .skeleton-row { display: flex; align-items: center; gap: 10px; }
-  .skeleton-icon {
-    width: 32px; height: 24px; border-radius: 5px;
-    background: rgba(88, 91, 112, 0.1);
-    flex-shrink: 0; animation: pulse 1.4s ease-in-out infinite;
-  }
-  .skeleton-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
-  .skeleton-line { border-radius: 3px; background: rgba(88, 91, 112, 0.1); animation: pulse 1.4s ease-in-out infinite; }
-  .skeleton-name { width: 60%; height: 13px; }
-  .skeleton-meta { width: 40%; height: 10px; animation-delay: 0.15s; }
-  @keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 0.8; } }
-
-  .empty {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 8px; padding: 40px 20px; text-align: center;
-  }
-  .empty-title { color: #585b70; font-size: 13px; font-weight: 600; }
-  .empty-sub { color: #45475a; font-size: 12px; max-width: 300px; line-height: 1.5; }
-
   /* ── Responsive ── */
   @media (max-width: 700px) {
     .dashboard { grid-template-columns: 1fr; }
     .sidebar {
       border-right: none;
       border-bottom: 1px solid rgba(88, 91, 112, 0.08);
-      padding: 20px 16px 16px;
+      padding: 16px;
       overflow-y: visible;
     }
     .quick-try { display: none; }
     .content { padding: 16px; }
+    .projects-title { font-size: 14px; }
   }
 </style>

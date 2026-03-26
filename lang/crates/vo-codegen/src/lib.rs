@@ -84,7 +84,7 @@ fn register_types(
         use vo_syntax::ast::{Decl, TypeExprKind};
         use vo_vm::bytecode::{StructMeta, InterfaceMeta, NamedTypeMeta};
         use vo_runtime::ValueMeta;
-        use std::collections::HashMap;
+        use std::collections::BTreeMap;
 
         // Collect all type declarations (including those inside functions)
         let mut type_decls = Vec::new();
@@ -249,7 +249,7 @@ fn register_types(
                 name: qualified_type_name.to_string(),
                 underlying_meta,
                 underlying_rttid,
-                methods: HashMap::new(),
+                methods: BTreeMap::new(),
             };
             ctx.register_named_type_meta(obj_key, named_type_meta);
         }

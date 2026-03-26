@@ -101,18 +101,26 @@ const SKIP_DIRS: &[&str] = &[".vo-cache", ".git", "node_modules"];
 #[tauri::command]
 pub async fn cmd_discover_projects(root: String, state: tauri::State<'_, AppState>) -> Result<Vec<DiscoveredProject>, String> {
     let session_root = state.session_root();
-    run_blocking(move || discover_projects_impl(session_root, root)).await
+    run_blocking(move || {
+        let resolved = resolve_path(&session_root, &root)?;
+        scan_projects_in_dir(&resolved)
+    }).await
 }
 
-fn discover_projects_impl(session_root: PathBuf, root: String) -> Result<Vec<DiscoveredProject>, String> {
-    let resolved = resolve_path(&session_root, &root)?;
-    if !resolved.is_dir() {
-        return Err(format!("Not a directory: {}", resolved.display()));
+#[tauri::command]
+pub async fn cmd_discover_workspace_projects(state: tauri::State<'_, AppState>) -> Result<Vec<DiscoveredProject>, String> {
+    let workspace_root = state.workspace_root().to_path_buf();
+    run_blocking(move || scan_projects_in_dir(&workspace_root)).await
+}
+
+fn scan_projects_in_dir(dir: &Path) -> Result<Vec<DiscoveredProject>, String> {
+    if !dir.is_dir() {
+        return Err(format!("Not a directory: {}", dir.display()));
     }
 
     let mut projects = Vec::new();
-    let entries = std::fs::read_dir(&resolved)
-        .map_err(|err| format!("{}: {}", resolved.display(), err))?;
+    let entries = std::fs::read_dir(dir)
+        .map_err(|err| format!("{}: {}", dir.display(), err))?;
 
     for entry in entries {
         let entry = match entry {
@@ -337,6 +345,33 @@ fn grep_impl(
     let mut results = Vec::new();
     grep_dir(&resolved, &pattern, case_sensitive, max_results, &mut results)?;
     Ok(results)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateFileEntry {
+    pub path: String,
+    pub content: String,
+}
+
+#[tauri::command]
+pub async fn cmd_create_project_files(files: Vec<CreateFileEntry>) -> Result<(), String> {
+    run_blocking(move || {
+        for file in &files {
+            let path = PathBuf::from(&file.path);
+            if !path.is_absolute() {
+                return Err(format!("Path must be absolute: {}", file.path));
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|err| format!("{}: {}", parent.display(), err))?;
+            }
+            std::fs::write(&path, &file.content)
+                .map_err(|err| format!("{}: {}", path.display(), err))?;
+        }
+        Ok(())
+    })
+    .await
 }
 
 fn grep_dir(

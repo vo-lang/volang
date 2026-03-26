@@ -12,11 +12,16 @@ pub struct RepositoryId {
 
 /// Trait for registry access — abstracted for testability.
 /// The registry provides version discovery and manifest retrieval.
-pub trait Registry {
+pub trait Registry: Send + Sync {
     /// List all valid published versions for a module path.
     /// Only versions with complete release metadata (tag + release + manifest + source)
     /// are returned. Tags without proper releases are excluded.
     fn list_versions(&self, module: &ModulePath) -> Result<Vec<ExactVersion>, Error>;
+
+    fn probe_module_path(&self, module: &ModulePath) -> Result<bool, Error> {
+        let versions = self.list_versions(module)?;
+        Ok(!filter_compatible_versions(module, &versions).is_empty())
+    }
 
     /// Fetch the release manifest for a specific module version.
     fn fetch_manifest(
