@@ -1333,6 +1333,7 @@ impl Vm {
                     let resume_io_token = fiber.resume_io_token.take();
                     let resume_host_event_token = fiber.resume_host_event_token.take();
                     let resume_host_event_data = fiber.resume_host_event_data.take();
+
                     let (closure_replay_results, closure_replay_panic_message) = fiber.closure_replay.take_for_extern();
                     let invoke = ExternInvoke {
                         extern_id,
@@ -1402,8 +1403,6 @@ impl Vm {
                             let new_bp = fiber.sp;
                             let local_slots = func_def.local_slots as usize;
                             fiber.reserve_slots_at(new_bp, local_slots);
-                            // Zero frame slots: stale values in GcRef-typed slots cause GC segfault.
-                            fiber.zero_slots_at(new_bp, local_slots);
                             
                             // Use call_layout for correct slot placement (matches exec_call_closure)
                             let layout = vo_runtime::objects::closure::call_layout(
@@ -1412,22 +1411,25 @@ impl Vm {
                                 func_def.recv_slots as usize,
                                 func_def.is_closure,
                             );
+
+                            if layout.slot0.is_some() && layout.arg_offset > 1 {
+                                fiber.zero_slots_at(new_bp + 1, layout.arg_offset - 1);
+                            }
+                            fiber.zero_slots_tail_at(new_bp, local_slots, layout.arg_offset + args.len());
                             
                             let fstack = fiber.stack_ptr();
                             if let Some(slot0_val) = layout.slot0 {
                                 helpers::stack_set(fstack, new_bp, slot0_val);
                             }
                             
-                            // Copy args at the correct offset
-                            for (i, &arg) in args.iter().enumerate() {
-                                helpers::stack_set(fstack, new_bp + layout.arg_offset + i, arg);
-                            }
+                            fiber.copy_slots_from_slice(new_bp + layout.arg_offset, &args);
                             
                             fiber.push_call_frame(
                                 closure_func_id,
                                 new_bp,
                                 0, // ret_reg=0 (return values go via replay cache, not caller stack)
                                 func_def.ret_slots,
+                                func_def.local_slots,
                             );
                             
                             // Mark replay depth so return path knows to cache results.
@@ -2112,12 +2114,11 @@ impl Vm {
         let local_slots = func_def.local_slots as usize;
         fiber.reserve_slots_at(bp, local_slots);
 
-        // Zero locals, then copy args
-        fiber.zero_slots_at(bp, local_slots);
         let n = (func_def.param_slots as usize).min(args.len());
-        fiber.stack[bp..bp + n].copy_from_slice(&args[..n]);
+        fiber.zero_slots_tail_at(bp, local_slots, n);
+        fiber.copy_slots_from_slice(bp, &args[..n]);
 
-        fiber.push_call_frame(func_id, bp, 0, func_def.ret_slots);
+        fiber.push_call_frame(func_id, bp, 0, func_def.ret_slots, func_def.local_slots);
     }
 }
 

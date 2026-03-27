@@ -481,7 +481,7 @@ fn generate_embedded_iface_wrapper_impl(
     crate::embed::emit_embed_path_traversal(&mut builder, start, &embed_path.steps, false, 2, iface_slot);
     
     // Allocate call buffer: [Value×param_slots | Value×ret_slots]
-    let args_start = builder.alloc_call_buffer(&forwarded_slot_types, &ret_slot_types);
+    let args_start = builder.alloc_dynamic_call_buffer(&[SlotType::Value], &forwarded_slot_types, &ret_slot_types);
     if let Some(first_param) = first_param_slot {
         builder.emit_copy(args_start, first_param, param_slots);
     }
@@ -524,7 +524,7 @@ fn generate_iface_call_wrapper(
     let ret_slots = ret_slot_types.len() as u16;
     
     // Allocate call buffer: [Value×param_slots | Value×ret_slots]
-    let args_start = builder.alloc_call_buffer(&flatten_param_layouts(&param_slot_types), &ret_slot_types);
+    let args_start = builder.alloc_dynamic_call_buffer(&[SlotType::Value], &flatten_param_layouts(&param_slot_types), &ret_slot_types);
     if let Some(first_param) = first_param_slot {
         builder.emit_copy(args_start, first_param, param_slots);
     }
@@ -581,7 +581,7 @@ pub fn generate_method_expr_iface_wrapper(
     let computed_ret_slots = ret_slot_types.len() as u16;
     debug_assert_eq!(param_slots, computed_param_slots);
     debug_assert_eq!(ret_slots, computed_ret_slots);
-    let args_start = builder.alloc_call_buffer(&flatten_param_layouts(&param_slot_types), &ret_slot_types);
+    let args_start = builder.alloc_dynamic_call_buffer(&[SlotType::Value], &flatten_param_layouts(&param_slot_types), &ret_slot_types);
     if let Some(first_param) = first_param_slot {
         builder.emit_copy(args_start, first_param, computed_param_slots);
     }

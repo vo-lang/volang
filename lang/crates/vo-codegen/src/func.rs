@@ -495,6 +495,23 @@ impl FuncBuilder {
         self.alloc_slots(&slot_types)
     }
 
+    #[inline]
+    pub fn alloc_dynamic_call_buffer(
+        &mut self,
+        hidden_prefix_slot_types: &[SlotType],
+        arg_slot_types: &[SlotType],
+        ret_slot_types: &[SlotType],
+    ) -> u16 {
+        let mut slot_types = hidden_prefix_slot_types.to_vec();
+        slot_types.extend_from_slice(arg_slot_types);
+        slot_types.extend_from_slice(ret_slot_types);
+        if slot_types.is_empty() {
+            slot_types.push(SlotType::Value);
+        }
+        let base = self.alloc_slots(&slot_types);
+        base + hidden_prefix_slot_types.len() as u16
+    }
+
     /// Allocate a single GcRef slot (for closure refs, etc.)
     pub fn alloc_gcref(&mut self) -> u16 {
         self.alloc_slots(&[SlotType::GcRef])

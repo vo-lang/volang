@@ -249,7 +249,10 @@ fn compile_iface_assign_internal(
     let src_vk = info.type_value_kind(src_type);
     
     // Optimization: if src is any (empty interface), just copy - no itab rebuild needed
-    if src_vk == vo_runtime::ValueKind::Interface && info.is_empty_interface(src_type) {
+    if src_vk == vo_runtime::ValueKind::Interface
+        && info.is_empty_interface(src_type)
+        && info.is_empty_interface(iface_type)
+    {
         let src_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
         func.emit_copy(dst, src_reg, 2);
         return Ok(());

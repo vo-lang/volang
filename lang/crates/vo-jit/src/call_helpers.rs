@@ -22,10 +22,15 @@ pub const JIT_RESULT_CALL: i32 = 2;
 /// 64 slots = 512 bytes on native stack per dynamic call site.
 const MAX_IC_NATIVE_SLOTS: usize = 64;
 
+fn current_call_conv<'a, E: IrEmitter<'a>>(emitter: &mut E) -> cranelift_codegen::isa::CallConv {
+    emitter.builder().func.signature.call_conv
+}
+
 /// Create signature for push_frame_fn callback: (ctx, func_id, local_slots, ret_reg, ret_slots, caller_resume_pc) -> args_ptr
 pub fn import_push_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
+    let call_conv = current_call_conv(emitter);
     emitter.builder().func.import_signature({
-        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // func_id
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // local_slots
@@ -39,8 +44,9 @@ pub fn import_push_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
 
 /// Create signature for pop_frame_fn callback: (ctx, caller_bp) -> ()
 pub fn import_pop_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
+    let call_conv = current_call_conv(emitter);
     emitter.builder().func.import_signature({
-        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // caller_bp
         sig
@@ -49,8 +55,9 @@ pub fn import_pop_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
 
 /// Create signature for push_resume_point_fn callback: (ctx, func_id, resume_pc, bp, caller_bp, ret_reg, ret_slots) -> ()
 pub fn import_push_resume_point_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
+    let call_conv = current_call_conv(emitter);
     emitter.builder().func.import_signature({
-        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // func_id
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // resume_pc
@@ -64,8 +71,9 @@ pub fn import_push_resume_point_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> Si
 
 /// Create signature for JIT function: (ctx, args_ptr, ret_ptr) -> JitResult
 pub fn import_jit_func_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
+    let call_conv = current_call_conv(emitter);
     emitter.builder().func.import_signature({
-        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // args_ptr
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr
@@ -78,8 +86,9 @@ pub fn import_jit_func_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
 /// (ctx, closure_ref, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr, out) -> void
 /// Uses output pointer to avoid ABI mismatch (PreparedCall is 48 bytes, too large for register return).
 fn import_prepare_closure_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
+    let call_conv = current_call_conv(emitter);
     emitter.builder().func.import_signature({
-        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // closure_ref
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_reg
@@ -96,8 +105,9 @@ fn import_prepare_closure_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
 /// Create signature for prepare_iface_call callback.
 /// (ctx, slot0, slot1, method_idx, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr, out) -> void
 fn import_prepare_iface_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
+    let call_conv = current_call_conv(emitter);
     emitter.builder().func.import_signature({
-        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // iface_slot0
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // iface_slot1
@@ -149,6 +159,7 @@ fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
     for (i, val) in user_arg_vals.iter().enumerate() {
         emitter.builder().ins().store(MemFlags::trusted(), *val, user_dst_base, (i * 8) as i32);
     }
+    emitter.spill_all_vars();
     
     // Leaf callee optimization: skip ctx stores if callee never reads jit_bp/fiber_sp
     let is_leaf_flag = emitter.builder().ins().icmp_imm(IntCC::NotEqual, p.ic_is_leaf, 0);
@@ -1047,6 +1058,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     let ret_slots_val = emitter.builder().ins().iconst(types::I32, config.call_ret_slots as i64);
     let current_pc = emitter.current_pc();
     let caller_resume_pc_val = emitter.builder().ins().iconst(types::I32, (current_pc + 1) as i64);
+    emitter.spill_all_vars();
     
     // Inline update ctx.jit_bp and ctx.fiber_sp for callee's correct saved_jit_bp
     let new_bp = old_fiber_sp;

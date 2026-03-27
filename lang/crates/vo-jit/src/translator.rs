@@ -74,7 +74,28 @@ pub struct HelperFuncs {
     pub select_exec: Option<FuncRef>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum SelectSyncCase {
+    Send,
+    Recv {
+        dst_reg: u16,
+        elem_slots: u8,
+        has_ok: bool,
+    },
+}
+
 pub fn emit_funcref_call<'a>(emitter: &mut impl IrEmitter<'a>, func_ref: FuncRef, args: &[Value]) -> Inst {
+    // TODO(jit): This unconditional spill is a conservative correctness barrier for helper calls.
+    // Today some imported/runtime helpers may trigger GC, suspend into the VM, return non-OK,
+    // reallocate fiber.stack, or otherwise observe the caller frame through fiber.stack materialization.
+    // In those cases the caller's SSA-only locals must already be synchronized before the call.
+    // The downside is that pure helpers also pay a full-frame spill cost, which shows up in
+    // helper-heavy benchmarks such as dynamic calls, task queues, select, and runtime-intensive code.
+    // The intended refactor is to make helper-call lowering effect-aware: classify each helper as
+    // may_gc / may_suspend / may_return_non_ok / may_realloc_stack / may_observe_frame, spill only
+    // when one of those effects is present, and eventually narrow the spill set to live GC-visible
+    // slots instead of materializing the entire frame on every helper call.
+    emitter.spill_all_vars();
     if cfg!(target_arch = "aarch64") {
         let sig = emitter.builder().func.dfg.ext_funcs[func_ref].signature;
         let func_addr = emitter.builder().ins().func_addr(types::I64, func_ref);
@@ -149,6 +170,24 @@ pub trait IrEmitter<'a> {
     /// Called after external callbacks that may write to locals memory without updating SSA
     /// (e.g., select_exec writes recv results to fiber.stack via callback).
     fn reload_all_vars_from_memory(&mut self);
+
+    /// Begin tracking compile-time SelectSend/SelectRecv metadata for a SelectExec.
+    fn begin_select_tracking(&mut self) {}
+
+    /// Record a SelectSend case in source order.
+    fn record_select_send_case(&mut self) {}
+
+    /// Record a SelectRecv case in source order.
+    fn record_select_recv_case(&mut self, _dst_reg: u16, _elem_slots: u8, _has_ok: bool) {}
+
+    /// Synchronize only the slots that SelectExec may have written.
+    fn sync_select_exec_state(&mut self, _result_reg: u16) {
+        self.reload_all_vars_from_memory();
+    }
+
+    fn sync_written_slots(&mut self, _start_slot: u16, _slot_count: u16) {
+        self.reload_all_vars_from_memory();
+    }
 
     /// Check if a slot has been verified non-nil in the current basic block.
     fn is_checked_non_nil(&self, slot: u16) -> bool;

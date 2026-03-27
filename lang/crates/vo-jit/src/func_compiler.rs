@@ -12,7 +12,7 @@ use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::jit_api::JitContext;
 use crate::translate::translate_inst;
-use crate::translator::{HelperFuncs, IrEmitter, TranslateResult};
+use crate::translator::{HelperFuncs, IrEmitter, SelectSyncCase, TranslateResult};
 use crate::JitError;
 
 pub struct FunctionCompiler<'a> {
@@ -38,6 +38,7 @@ pub struct FunctionCompiler<'a> {
     /// allowing refresh_stack_base_after_reallocation to redefine it after any call that may
     /// have triggered fiber.stack reallocation via jit_push_frame.
     args_ptr_var: Option<Variable>,
+    args_ptr_is_stack_var: Option<Variable>,
     /// Slots that have been verified non-nil in the current basic block.
     /// Cleared on block transitions (jump targets).
     checked_non_nil: HashSet<u16>,
@@ -48,6 +49,7 @@ pub struct FunctionCompiler<'a> {
     saved_caller_bp: Option<Value>,
     /// ctx.fiber_sp at function entry (i32). Reused by all call sites as old_fiber_sp.
     saved_fiber_sp: Option<Value>,
+    pending_select_cases: Vec<SelectSyncCase>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -80,10 +82,12 @@ impl<'a> FunctionCompiler<'a> {
             callee_func_refs,
             saved_jit_bp: None,
             args_ptr_var: None,
+            args_ptr_is_stack_var: None,
             checked_non_nil: HashSet::new(),
             memory_only_start: u16::MAX,
             saved_caller_bp: None,
             saved_fiber_sp: None,
+            pending_select_cases: Vec::new(),
         }
     }
 
@@ -164,7 +168,7 @@ impl<'a> FunctionCompiler<'a> {
     /// so we recompute the destination from ctx.stack_ptr + saved_jit_bp.
     fn emit_variable_spill(&mut self) {
         let dst_ptr = self.fiber_stack_args_ptr();
-        let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
+        let args_ptr = self.current_memory_base_ptr();
         let num_slots = self.vars.len();
         let mem_start = (self.memory_only_start as usize).min(num_slots);
         
@@ -185,6 +189,14 @@ impl<'a> FunctionCompiler<'a> {
             self.builder.ins().store(MemFlags::trusted(), val, dst_ptr, offset);
         }
     }
+
+    fn current_memory_base_ptr(&mut self) -> Value {
+        let entry_args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
+        let uses_stack = self.builder.use_var(self.args_ptr_is_stack_var.unwrap());
+        let use_stack = self.builder.ins().icmp_imm(IntCC::NotEqual, uses_stack, 0);
+        let stack_args_ptr = self.fiber_stack_args_ptr();
+        self.builder.ins().select(use_stack, stack_args_ptr, entry_args_ptr)
+    }
     
     /// Compute fiber.stack base dynamically from ctx.stack_ptr + saved_jit_bp.
     /// Needed because fiber.stack may reallocate during nested calls.
@@ -197,6 +209,79 @@ impl<'a> FunctionCompiler<'a> {
         // fiber_args_ptr = stack_ptr + jit_bp * 8
         let bp_offset = self.builder.ins().imul_imm(jit_bp, 8);
         self.builder.ins().iadd(stack_ptr, bp_offset)
+    }
+
+    fn sync_select_exec_state_precise(&mut self, result_reg: u16) {
+        let stack_args_ptr = self.fiber_stack_args_ptr();
+        let result_offset = (result_reg as i32) * 8;
+        let result_val = self.builder.ins().load(types::I64, MemFlags::trusted(), stack_args_ptr, result_offset);
+        self.store_local(result_reg, result_val);
+
+        let recv_cases: Vec<(usize, u16, usize, bool)> = self.pending_select_cases
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, case)| match *case {
+                SelectSyncCase::Send => None,
+                SelectSyncCase::Recv { dst_reg, elem_slots, has_ok } => {
+                    Some((idx, dst_reg, elem_slots as usize, has_ok))
+                }
+            })
+            .collect();
+
+        if recv_cases.is_empty() {
+            self.pending_select_cases.clear();
+            return;
+        }
+
+        let done_block = self.builder.create_block();
+        for (case_idx, dst_reg, elem_slots, has_ok) in recv_cases {
+            let match_block = self.builder.create_block();
+            let miss_block = self.builder.create_block();
+            let case_idx_val = self.builder.ins().iconst(types::I64, case_idx as i64);
+            let is_match = self.builder.ins().icmp(IntCC::Equal, result_val, case_idx_val);
+            self.builder.ins().brif(is_match, match_block, &[], miss_block, &[]);
+
+            self.builder.switch_to_block(match_block);
+            self.builder.seal_block(match_block);
+            let slot_count = elem_slots + if has_ok { 1 } else { 0 };
+            for slot_offset in 0..slot_count {
+                let slot = dst_reg + slot_offset as u16;
+                let byte_offset = (slot as i32) * 8;
+                if self.is_float_slot(slot) {
+                    let val = self.builder.ins().load(types::F64, MemFlags::trusted(), stack_args_ptr, byte_offset);
+                    self.write_var_f64(slot, val);
+                } else {
+                    let val = self.builder.ins().load(types::I64, MemFlags::trusted(), stack_args_ptr, byte_offset);
+                    self.store_local(slot, val);
+                }
+            }
+            self.builder.ins().jump(done_block, &[]);
+
+            self.builder.switch_to_block(miss_block);
+            self.builder.seal_block(miss_block);
+        }
+
+        self.builder.ins().jump(done_block, &[]);
+        self.builder.switch_to_block(done_block);
+        self.builder.seal_block(done_block);
+        self.pending_select_cases.clear();
+    }
+
+    fn sync_written_slots_precise(&mut self, start_slot: u16, slot_count: u16) {
+        if slot_count == 0 {
+            return;
+        }
+        let args_ptr = self.current_memory_base_ptr();
+        for slot in start_slot..start_slot + slot_count {
+            let offset = (slot as i32) * 8;
+            if self.is_float_slot(slot) {
+                let val = self.builder.ins().load(types::F64, MemFlags::trusted(), args_ptr, offset);
+                self.write_var_f64(slot, val);
+            } else {
+                let val = self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, offset);
+                self.store_local(slot, val);
+            }
+        }
     }
 
     fn emit_prologue(&mut self) {
@@ -226,6 +311,15 @@ impl<'a> FunctionCompiler<'a> {
         let jit_bp_i64 = self.builder.ins().uextend(types::I64, jit_bp_i32);
         self.builder.def_var(jit_bp_var, jit_bp_i64);
         self.saved_jit_bp = Some(jit_bp_var);
+        let args_ptr_is_stack_var = Variable::from_u32((self.vars.len() + 1002) as u32);
+        self.builder.declare_var(args_ptr_is_stack_var, types::I8);
+        let stack_args_ptr = self.fiber_stack_args_ptr();
+        let uses_stack = self.builder.ins().icmp(IntCC::Equal, args_ptr, stack_args_ptr);
+        let one_i8 = self.builder.ins().iconst(types::I8, 1);
+        let zero_i8 = self.builder.ins().iconst(types::I8, 0);
+        let uses_stack_i8 = self.builder.ins().select(uses_stack, one_i8, zero_i8);
+        self.builder.def_var(args_ptr_is_stack_var, uses_stack_i8);
+        self.args_ptr_is_stack_var = Some(args_ptr_is_stack_var);
         self.saved_caller_bp = Some(jit_bp_i32);
         
         // Save fiber_sp from ctx at function entry. Reused by all call sites.
@@ -324,7 +418,7 @@ impl<'a> FunctionCompiler<'a> {
                 val
             }
         } else {
-            let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
+            let args_ptr = self.current_memory_base_ptr();
             self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
         }
     }
@@ -340,7 +434,7 @@ impl<'a> FunctionCompiler<'a> {
             self.builder.def_var(self.vars[slot as usize], val);
         }
         if slot >= self.memory_only_start {
-            let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
+            let args_ptr = self.current_memory_base_ptr();
             self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
         }
         // Clear non-nil status when slot is written
@@ -411,7 +505,7 @@ impl<'a> FunctionCompiler<'a> {
                 // Spill GcRef slots to args_ptr so VM can read them from fiber.stack.
                 // SSA-only slots (< memory_only_start) aren't written to memory by store_local.
                 let gcref_count = inst.b as usize;
-                let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
+                let args_ptr = self.fiber_stack_args_ptr();
                 for i in 0..gcref_count {
                     let slot = (inst.a as usize + i) as u16;
                     if slot < self.memory_only_start {
@@ -431,7 +525,7 @@ impl<'a> FunctionCompiler<'a> {
                 // Escaped named returns (no defers): dereference GcRefs and copy to ret buffer.
                 let gcref_start = inst.a as usize;
                 let gcref_count = inst.b as usize;
-                
+
                 let mut ret_offset = 0i32;
                 for i in 0..gcref_count {
                     let gcref = self.load_local((gcref_start + i) as u16);
@@ -663,7 +757,7 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     fn get_reg_const(&self, reg: u16) -> Option<i64> { self.reg_consts.get(&reg).copied() }
     fn panic_return_value(&self) -> i32 { 1 }
     fn var_addr(&mut self, slot: u16) -> Value {
-        let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
+        let args_ptr = self.current_memory_base_ptr();
         self.builder.ins().iadd_imm(args_ptr, (slot as i64) * 8)
     }
     fn spill_all_vars(&mut self) {
@@ -687,7 +781,7 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
                 self.builder.ins().bitcast(types::F64, MemFlags::new(), val)
             }
         } else {
-            let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
+            let args_ptr = self.current_memory_base_ptr();
             self.builder.ins().load(types::F64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
         }
     }
@@ -699,19 +793,38 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
             self.builder.def_var(self.vars[slot as usize], i64_val);
         }
         if slot >= self.memory_only_start {
-            let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
+            let args_ptr = self.current_memory_base_ptr();
             self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
         }
         self.checked_non_nil.remove(&slot);
     }
     fn reload_all_vars_from_memory(&mut self) {
-        let args_ptr = self.builder.use_var(self.args_ptr_var.unwrap());
+        let args_ptr = self.current_memory_base_ptr();
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
             let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
             let val = self.builder.ins().load(ty, MemFlags::trusted(), args_ptr, offset);
             self.builder.def_var(self.vars[i], val);
         }
+    }
+    fn begin_select_tracking(&mut self) {
+        self.pending_select_cases.clear();
+    }
+    fn record_select_send_case(&mut self) {
+        self.pending_select_cases.push(SelectSyncCase::Send);
+    }
+    fn record_select_recv_case(&mut self, dst_reg: u16, elem_slots: u8, has_ok: bool) {
+        self.pending_select_cases.push(SelectSyncCase::Recv {
+            dst_reg,
+            elem_slots,
+            has_ok,
+        });
+    }
+    fn sync_select_exec_state(&mut self, result_reg: u16) {
+        self.sync_select_exec_state_precise(result_reg);
+    }
+    fn sync_written_slots(&mut self, start_slot: u16, slot_count: u16) {
+        self.sync_written_slots_precise(start_slot, slot_count);
     }
     fn is_checked_non_nil(&self, slot: u16) -> bool {
         self.checked_non_nil.contains(&slot)
@@ -726,7 +839,5 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
         self.saved_fiber_sp
     }
     fn refresh_stack_base_after_reallocation(&mut self) {
-        let refreshed = self.fiber_stack_args_ptr();
-        self.builder.def_var(self.args_ptr_var.unwrap(), refreshed);
     }
 }

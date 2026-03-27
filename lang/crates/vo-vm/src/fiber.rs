@@ -24,19 +24,39 @@ pub struct CallFrame {
     pub func_id: u32,
     pub pc: usize,
     pub bp: usize,
+    pub sp_restore: usize,
     pub ret_reg: u16,
     pub ret_count: u16,
+    pub scan_slots: u16,
+    pub caller_scan_slots_restore: Option<u16>,
+    pub caller_zero_start: u16,
+    pub caller_zero_end: u16,
 }
 
 impl CallFrame {
     #[inline]
-    pub fn new(func_id: u32, bp: usize, ret_reg: u16, ret_count: u16) -> Self {
+    pub fn new(
+        func_id: u32,
+        bp: usize,
+        sp_restore: usize,
+        ret_reg: u16,
+        ret_count: u16,
+        scan_slots: u16,
+        caller_scan_slots_restore: Option<u16>,
+        caller_zero_start: u16,
+        caller_zero_end: u16,
+    ) -> Self {
         Self {
             func_id,
             pc: 0,
             bp,
+            sp_restore,
             ret_reg,
             ret_count,
+            scan_slots,
+            caller_scan_slots_restore,
+            caller_zero_start,
+            caller_zero_end,
         }
     }
 }
@@ -649,8 +669,110 @@ impl Fiber {
     }
 
     #[inline]
-    pub fn push_call_frame(&mut self, func_id: u32, bp: usize, ret_reg: u16, ret_count: u16) {
-        self.frames.push(CallFrame::new(func_id, bp, ret_reg, ret_count));
+    pub fn zero_slots_tail_at(&mut self, bp: usize, slot_count: usize, initialized_prefix: usize) {
+        let zero_start = initialized_prefix.min(slot_count);
+        if zero_start < slot_count {
+            self.zero_slots_at(bp + zero_start, slot_count - zero_start);
+        }
+    }
+
+    #[inline]
+    pub fn copy_stack_slots(&mut self, dst: usize, src: usize, slot_count: usize) {
+        if slot_count > 0 {
+            self.stack.copy_within(src..src + slot_count, dst);
+        }
+    }
+
+    #[inline]
+    pub fn copy_slots_from_slice(&mut self, dst: usize, values: &[u64]) {
+        if !values.is_empty() {
+            self.stack[dst..dst + values.len()].copy_from_slice(values);
+        }
+    }
+
+    pub fn push_call_frame(
+        &mut self,
+        func_id: u32,
+        bp: usize,
+        ret_reg: u16,
+        ret_count: u16,
+        scan_slots: u16,
+    ) {
+        self.push_call_frame_extended(
+            func_id,
+            bp,
+            bp,
+            ret_reg,
+            ret_count,
+            scan_slots,
+            None,
+            0,
+            0,
+        );
+    }
+
+    pub fn push_call_frame_extended(
+        &mut self,
+        func_id: u32,
+        bp: usize,
+        sp_restore: usize,
+        ret_reg: u16,
+        ret_count: u16,
+        scan_slots: u16,
+        caller_scan_slots_restore: Option<u16>,
+        caller_zero_start: u16,
+        caller_zero_end: u16,
+    ) {
+        self.frames.push(CallFrame::new(
+            func_id,
+            bp,
+            sp_restore,
+            ret_reg,
+            ret_count,
+            scan_slots,
+            caller_scan_slots_restore,
+            caller_zero_start,
+            caller_zero_end,
+        ));
+    }
+
+    pub fn push_borrowed_call_frame(
+        &mut self,
+        func_id: u32,
+        borrowed_start: u16,
+        ret_reg: u16,
+        ret_count: u16,
+        local_slots: u16,
+    ) -> usize {
+        let (caller_bp, caller_sp, caller_scan_slots) = {
+            let caller_frame = self.frames.last_mut().expect("push_borrowed_call_frame: missing caller frame");
+            assert!(
+                borrowed_start <= caller_frame.scan_slots,
+                "push_borrowed_call_frame: borrowed_start={} caller_scan_slots={}",
+                borrowed_start,
+                caller_frame.scan_slots,
+            );
+            let caller_bp = caller_frame.bp;
+            let caller_sp = self.sp;
+            let caller_scan_slots = caller_frame.scan_slots;
+            caller_frame.scan_slots = borrowed_start;
+            (caller_bp, caller_sp, caller_scan_slots)
+        };
+
+        let bp = caller_bp + borrowed_start as usize;
+        self.reserve_slots_at(bp, local_slots as usize);
+        self.push_call_frame_extended(
+            func_id,
+            bp,
+            caller_sp,
+            ret_reg,
+            ret_count,
+            local_slots,
+            Some(caller_scan_slots),
+            borrowed_start,
+            caller_scan_slots,
+        );
+        bp
     }
 
     pub fn push_frame(&mut self, func_id: u32, local_slots: u16, ret_reg: u16, ret_count: u16) -> usize {
@@ -663,16 +785,51 @@ impl Fiber {
         // This zero-fill is the canonical fix (same approach as JVM/CLR).
         // Safety: ensure_capacity guarantees stack[bp..new_sp] is valid.
         self.zero_slots_at(bp, local_slots as usize);
-        self.push_call_frame(func_id, bp, ret_reg, ret_count);
+        self.push_call_frame(func_id, bp, ret_reg, ret_count, local_slots);
         bp
     }
 
     pub fn pop_frame(&mut self) -> Option<CallFrame> {
         if let Some(frame) = self.frames.pop() {
-            self.sp = frame.bp;
+            self.sp = frame.sp_restore;
+            if let Some(scan_slots_restore) = frame.caller_scan_slots_restore {
+                let parent_idx = self.frames.len().checked_sub(1);
+                if let Some(parent_idx) = parent_idx {
+                    self.frames[parent_idx].scan_slots = scan_slots_restore;
+                }
+            }
             Some(frame)
         } else {
             None
+        }
+    }
+
+    #[inline]
+    pub fn clear_parent_borrowed_slots(
+        &mut self,
+        frame: &CallFrame,
+        preserved_start: usize,
+        preserved_len: usize,
+    ) {
+        if frame.caller_scan_slots_restore.is_none() || self.frames.is_empty() {
+            return;
+        }
+
+        let parent_bp = self.frames.last().unwrap().bp;
+        let zero_start = frame.caller_zero_start as usize;
+        let zero_end = frame.caller_zero_end as usize;
+        if zero_start >= zero_end {
+            return;
+        }
+
+        let keep_start = preserved_start.max(zero_start).min(zero_end);
+        let keep_end = preserved_start.saturating_add(preserved_len).max(keep_start).min(zero_end);
+
+        if zero_start < keep_start {
+            self.zero_slots_at(parent_bp + zero_start, keep_start - zero_start);
+        }
+        if keep_end < zero_end {
+            self.zero_slots_at(parent_bp + keep_end, zero_end - keep_end);
         }
     }
 

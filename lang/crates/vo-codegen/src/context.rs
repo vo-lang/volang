@@ -1174,7 +1174,7 @@ impl CodegenContext {
         builder.emit_ptr_get(iface_slot, capture_box, 0, 2);
 
         let forwarded_slot_types = Self::flatten_param_layouts(&param_slot_types);
-        let args_start = builder.alloc_call_buffer(&forwarded_slot_types, &ret_slot_types);
+        let args_start = builder.alloc_dynamic_call_buffer(&[vo_runtime::SlotType::Value], &forwarded_slot_types, &ret_slot_types);
         if let Some(first_param) = first_param_slot {
             builder.emit_copy(args_start, first_param, param_slots);
         }
@@ -1213,7 +1213,7 @@ impl CodegenContext {
         let mut code = Vec::new();
         let outer_ptr = wrapper_param_slots;
         let iface_reg = outer_ptr + 1;
-        let args_start = iface_reg + iface_slots;
+        let args_start = iface_reg + iface_slots + 1;
         
         // ClosureGet + PtrGet: get embedded interface from boxed outer struct
         code.push(Instruction::new(Opcode::ClosureGet, outer_ptr, 0, 0));
@@ -1235,7 +1235,7 @@ impl CodegenContext {
             iface_type.raw(),
             embed_offset,
         );
-        let local_slots = wrapper_param_slots + 1 + iface_slots + (param_slots + ret_slots).max(1);
+        let local_slots = wrapper_param_slots + 1 + iface_slots + 1 + (param_slots + ret_slots).max(1);
         let mut slot_types = vec![vo_runtime::SlotType::GcRef; 2]; // closure ref + ClosureGet dest
         slot_types.extend(std::iter::repeat(vo_runtime::SlotType::Value).take((local_slots as usize).saturating_sub(2)));
         let capture_slot_types = vec![vo_runtime::SlotType::GcRef];

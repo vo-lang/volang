@@ -23,26 +23,15 @@ pub fn exec_call(
     let ret_slots = (inst.c & 0xFF) as usize;
 
     let func = &module.functions[func_id as usize];
-
-    // Get caller's bp before pushing new frame
-    let caller_bp = fiber.frames.last().map_or(0, |f| f.bp);
-    
-    // New frame's bp is current stack top
-    let new_bp = fiber.sp;
-    fiber.reserve_slots_at(new_bp, func.local_slots as usize);
-    // Zero frame slots: stale integer values in GcRef-typed slots cause GC segfault.
-    // Args are copied on top of the zeroed region immediately after.
-    fiber.zero_slots_at(new_bp, func.local_slots as usize);
-    let stack = fiber.stack_ptr();
-    
-    // Copy args from caller's frame to new frame
-    for i in 0..arg_slots {
-        stack_set(stack, new_bp + i, stack_get(stack, caller_bp + arg_start + i));
-    }
-    
-    // ret_reg points past arg slots: return values are written to args_start + arg_slots
-    // in the caller's frame (call buffer layout: [Value×arg_slots | ret_slot_types]).
-    fiber.push_call_frame(func_id, new_bp, inst.b + arg_slots as u16, ret_slots as u16);
+    let local_slots = func.local_slots as usize;
+    let new_bp = fiber.push_borrowed_call_frame(
+        func_id,
+        arg_start as u16,
+        inst.b + arg_slots as u16,
+        ret_slots as u16,
+        local_slots as u16,
+    );
+    fiber.zero_slots_tail_at(new_bp, local_slots, arg_slots);
 
     ExecResult::FrameChanged
 }
@@ -63,31 +52,43 @@ pub fn exec_call_closure(
     let func = &module.functions[func_id as usize];
 
     // New frame's bp is current stack top
-    let new_bp = fiber.sp;
-    fiber.reserve_slots_at(new_bp, func.local_slots as usize);
-    // Zero frame slots: stale integer values in GcRef-typed slots cause GC segfault.
-    fiber.zero_slots_at(new_bp, func.local_slots as usize);
-    let stack = fiber.stack_ptr();
-    
-    // Use common closure call layout logic
     let layout = vo_runtime::objects::closure::call_layout(
         closure_ref as u64,
         closure_ref,
         func.recv_slots as usize,
         func.is_closure,
     );
-    
+
+    assert!(
+        layout.arg_offset <= 1,
+        "CallClosure ABI only supports arg_offset <= 1, got {} for func_id={} name={}",
+        layout.arg_offset,
+        func_id,
+        func.name,
+    );
+    assert!(
+        arg_start >= layout.arg_offset,
+        "CallClosure ABI underflow: arg_start={} arg_offset={} func_id={} name={}",
+        arg_start,
+        layout.arg_offset,
+        func_id,
+        func.name,
+    );
+
+    let borrowed_start = (arg_start - layout.arg_offset) as u16;
+    let new_bp = fiber.push_borrowed_call_frame(
+        func_id,
+        borrowed_start,
+        inst.b + arg_slots as u16,
+        ret_slots,
+        func.local_slots as u16,
+    );
+    fiber.zero_slots_tail_at(new_bp, func.local_slots as usize, layout.arg_offset + arg_slots);
+    let stack = fiber.stack_ptr();
+
     if let Some(slot0_val) = layout.slot0 {
         stack_set(stack, new_bp, slot0_val);
     }
-    
-    // Copy args to new frame
-    for i in 0..arg_slots {
-        stack_set(stack, new_bp + layout.arg_offset + i, stack_get(stack, caller_bp + arg_start + i));
-    }
-    
-    // ret_reg points past arg slots: return values are written to args_start + arg_slots.
-    fiber.push_call_frame(func_id, new_bp, inst.b + arg_slots as u16, ret_slots);
 
     ExecResult::FrameChanged
 }
@@ -135,24 +136,34 @@ pub fn exec_call_iface(
 
     let func = &module.functions[func_id as usize];
     let recv_slots = func.recv_slots as usize;
+    let local_slots = func.local_slots as usize;
 
-    // New frame's bp is current stack top
-    let new_bp = fiber.sp;
-    fiber.reserve_slots_at(new_bp, func.local_slots as usize);
-    // Zero frame slots: stale integer values in GcRef-typed slots cause GC segfault.
-    fiber.zero_slots_at(new_bp, func.local_slots as usize);
+    assert!(
+        recv_slots == 1,
+        "CallIface ABI only supports recv_slots == 1, got {} for func_id={} name={}",
+        recv_slots,
+        func_id,
+        func.name,
+    );
+    assert!(
+        inst.b > 0,
+        "CallIface ABI requires a hidden receiver prefix slot before arg_start (func_id={} name={})",
+        func_id,
+        func.name,
+    );
+
+    let new_bp = fiber.push_borrowed_call_frame(
+        func_id,
+        inst.b - 1,
+        inst.b + arg_slots as u16,
+        ret_slots as u16,
+        local_slots as u16,
+    );
+    fiber.zero_slots_tail_at(new_bp, local_slots, 1 + arg_slots);
     let stack = fiber.stack_ptr();
-    
+
     // Pass slot1 directly as receiver (1 slot: GcRef or primitive)
     stack_set(stack, new_bp, slot1);
-    
-    // Copy args directly
-    for i in 0..arg_slots {
-        stack_set(stack, new_bp + recv_slots + i, stack_get(stack, caller_bp + inst.b as usize + i));
-    }
-    
-    // ret_reg points past arg slots: return values are written to args_start + arg_slots.
-    fiber.push_call_frame(func_id, new_bp, inst.b + arg_slots as u16, ret_slots as u16);
 
     ExecResult::FrameChanged
 }

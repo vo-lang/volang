@@ -230,11 +230,13 @@ pub fn queue_send_core(
             state,
         );
         let elem_meta = queue_state::elem_meta(ch);
-        return QueueExecResult::RemoteSend {
+        let result = QueueExecResult::RemoteSend {
             endpoint_id: proxy.endpoint_id,
             home_island: proxy.home_island,
             data: super::transport::pack_transport_message(&state.gc, src, elem_meta, struct_metas, runtime_types),
         };
+
+        return result;
     }
 
     let value: Box<[u64]> = src.iter().copied().collect();

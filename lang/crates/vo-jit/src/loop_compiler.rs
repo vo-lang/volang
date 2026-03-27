@@ -537,6 +537,22 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
             self.builder.def_var(self.vars[i], val);
         }
     }
+    fn sync_written_slots(&mut self, start_slot: u16, slot_count: u16) {
+        if slot_count == 0 {
+            return;
+        }
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+        for slot in start_slot..start_slot + slot_count {
+            let offset = (slot as i32) * 8;
+            if self.is_float_slot(slot) {
+                let val = self.builder.ins().load(types::F64, MemFlags::trusted(), locals_ptr, offset);
+                self.write_var_f64(slot, val);
+            } else {
+                let val = self.builder.ins().load(types::I64, MemFlags::trusted(), locals_ptr, offset);
+                self.write_var(slot, val);
+            }
+        }
+    }
     fn is_checked_non_nil(&self, slot: u16) -> bool {
         self.checked_non_nil.contains(&slot)
     }

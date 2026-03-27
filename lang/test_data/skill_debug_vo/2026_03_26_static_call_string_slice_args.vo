@@ -1,0 +1,35 @@
+package main
+
+import (
+    "fmt"
+    "strings"
+)
+
+func parseLikeRunner(mode string, args []string) string {
+    assert(mode == "both", "mode mismatch")
+
+    verbose := false
+    singleFile := ""
+    for i := 0; i < len(args); i++ {
+        arg := args[i]
+        if arg == "-v" || arg == "--verbose" {
+            verbose = true
+        } else if strings.HasPrefix(arg, "--color=") {
+            continue
+        } else if !strings.HasPrefix(arg, "-") {
+            singleFile = arg
+        }
+    }
+
+    assert(verbose, "verbose should be true")
+    assert(singleFile == "lang/test_data/multi_return_as_arg.vo", "singleFile mismatch")
+    assert(strings.HasPrefix(singleFile, "lang/test_data/"), "singleFile prefix mismatch")
+    return singleFile
+}
+
+func main() {
+    args := []string{"-v", "lang/test_data/multi_return_as_arg.vo"}
+    file := parseLikeRunner("both", args)
+    assert(file == "lang/test_data/multi_return_as_arg.vo", "returned file mismatch")
+    fmt.Println("static_call_string_slice_args: ok")
+}

@@ -1,0 +1,51 @@
+package main
+
+import (
+    "fmt"
+    "os"
+    "strings"
+)
+
+func collectVoFiles(dir string, files []string) []string {
+    entries, err := os.ReadDir(dir)
+    assert(err == nil, "ReadDir failed: "+dir)
+
+    for _, entry := range entries {
+        name := entry.Name()
+        path := dir + "/" + name
+
+        if strings.HasPrefix(name, ".") {
+            continue
+        }
+        if strings.HasPrefix(name, "proj_") {
+            continue
+        }
+
+        if entry.IsDir() {
+            files = collectVoFiles(path, files)
+        } else if strings.HasSuffix(name, ".vo") {
+            files = append(files, path)
+        }
+    }
+
+    return files
+}
+
+func contains(paths []string, target string) bool {
+    for _, path := range paths {
+        if path == target {
+            return true
+        }
+    }
+    return false
+}
+
+func main() {
+    files := collectVoFiles("lang/test_data", []string{})
+
+    assert(len(files) > 100, "expected many .vo files")
+    assert(contains(files, "lang/test_data/multi_return_as_arg.vo"), "missing multi_return_as_arg.vo")
+    assert(!contains(files, "lang/test_data/proj_multifile/main.vo"), "proj_* directory should be skipped")
+
+    fmt.Println("runner_collect_vo_files: ok")
+}

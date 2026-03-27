@@ -154,8 +154,26 @@ fn scan_fibers(gc: &mut Gc, fibers: &[Box<Fiber>], functions: &[FunctionDef]) {
         // resume_stack to fiber.frames before VM takes over.
         for frame in &fiber.frames {
             let func = &functions[frame.func_id as usize];
-            let stack_slice = &fiber.stack[frame.bp..];
-            scan_slots_by_types(gc, stack_slice, &func.slot_types);
+            let scan_slots = frame.scan_slots as usize;
+            let stack_slice = &fiber.stack[frame.bp..frame.bp + scan_slots];
+            let slot_types = &func.slot_types[..func.slot_types.len().min(scan_slots)];
+            for (slot_idx, slot_type) in slot_types.iter().enumerate() {
+                if *slot_type == vo_runtime::SlotType::GcRef {
+                    let raw = stack_slice[slot_idx];
+                    if raw != 0 && gc.canonicalize_ref(raw as GcRef).is_none() {
+                        panic!(
+                            "scan_fibers: invalid GcRef in fiber={} func={} name={} frame_bp={} scan_slot={} raw=0x{:016x}",
+                            fiber.id,
+                            frame.func_id,
+                            func.name,
+                            frame.bp,
+                            slot_idx,
+                            raw,
+                        );
+                    }
+                }
+            }
+            scan_slots_by_types(gc, stack_slice, slot_types);
         }
 
         // Scan defer_stack

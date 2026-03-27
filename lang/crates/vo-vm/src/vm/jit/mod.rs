@@ -98,32 +98,23 @@ pub fn dispatch_jit_call(
     jit_func: vo_jit::JitFunc,
     func_id: u32,
 ) -> ExecResult {
-    let caller_bp = fiber.frames.last().map_or(0, |f| f.bp);
     let arg_start = inst.b as usize;
     let arg_slots = (inst.c >> 8) as usize;
     let ret_slots = (inst.c & 0xFF) as usize;
 
     let func_def = &module.functions[func_id as usize];
     let local_slots = func_def.local_slots as usize;
-    
-    // Allocate JIT frame directly in fiber.stack (not a separate Vec)
-    let jit_bp = fiber.sp;
-    fiber.reserve_slots_at(jit_bp, local_slots);
-    
-    // Zero the frame region first
-    fiber.zero_slots_at(jit_bp, local_slots);
-    
-    // Copy caller args directly to fiber.stack[jit_bp..]
-    for i in 0..arg_slots {
-        fiber.stack[jit_bp + i] = fiber.stack[caller_bp + arg_start + i];
-    }
-    
-    // Push frame so panic_unwind has correct frame info.
-    // ret_reg = arg_start + arg_slots: return values live after the arg slots
-    // in the call buffer (layout: [Value×arg_slots | ret_slot_types]).
-    fiber.push_call_frame(func_id, jit_bp, (arg_start + arg_slots) as u16, ret_slots as u16);
 
-    invoke_jit_and_handle(vm, fiber, module, jit_func, jit_bp, ret_slots, caller_bp, arg_start + arg_slots)
+    let jit_bp = fiber.push_borrowed_call_frame(
+        func_id,
+        arg_start as u16,
+        (arg_start + arg_slots) as u16,
+        ret_slots as u16,
+        local_slots as u16,
+    );
+    fiber.zero_slots_tail_at(jit_bp, local_slots, arg_slots);
+
+    invoke_jit_and_handle(vm, fiber, module, jit_func, jit_bp, ret_slots)
 }
 
 /// Execute a JIT callee when frame is already set up (from Call request).
@@ -138,10 +129,8 @@ fn execute_jit_callee(
     _callee_func_id: u32,
     callee_bp: usize,
     callee_ret_slots: usize,
-    caller_bp: usize,
-    caller_arg_start: usize,
 ) -> ExecResult {
-    invoke_jit_and_handle(vm, fiber, module, jit_func, callee_bp, callee_ret_slots, caller_bp, caller_arg_start)
+    invoke_jit_and_handle(vm, fiber, module, jit_func, callee_bp, callee_ret_slots)
 }
 
 /// Shared JIT invocation: build context, call function, handle result.
@@ -152,8 +141,6 @@ fn invoke_jit_and_handle(
     jit_func: vo_jit::JitFunc,
     jit_bp: usize,
     ret_slots: usize,
-    caller_bp: usize,
-    caller_arg_start: usize,
 ) -> ExecResult {
     let mut ctx = build_jit_context(vm, fiber, module);
     ctx.ctx.stack_ptr = fiber.stack_ptr();
@@ -174,7 +161,7 @@ fn invoke_jit_and_handle(
     let args_ptr = unsafe { fiber.stack_ptr().add(jit_bp) };
     let result = jit_func(ctx.as_ptr(), args_ptr, ret.as_mut_ptr());
 
-    handle_jit_result(vm, fiber, module, result, ctx, caller_bp, caller_arg_start, ret_slots, jit_bp, ret)
+    handle_jit_result(vm, fiber, module, result, ctx, ret_slots, ret)
 }
 
 fn handle_jit_result(
@@ -183,19 +170,12 @@ fn handle_jit_result(
     module: &Module,
     result: JitResult,
     ctx: JitContextWrapper,
-    caller_bp: usize,
-    arg_start: usize,
     ret_slots: usize,
-    jit_bp: usize,
     ret: &[u64],
 ) -> ExecResult {
     match result {
         JitResult::Ok => {
             fiber.resume_stack.clear();
-
-            let frame_depth = fiber.frames.len();
-            let has_defers = fiber.defer_stack.last()
-                .map_or(false, |e| e.frame_depth == frame_depth);
 
             let frame = fiber.frames.last().unwrap();
             let func = &module.functions[frame.func_id as usize];
@@ -239,30 +219,17 @@ fn handle_jit_result(
                 }
             };
 
-            // When there are defers, or when heap returns are enabled, we must
-            // delegate to the unified unwinding engine.
-            if has_defers || heap_returns {
-                let ret_start = ctx.ret_start() as usize;
-                return crate::exec::handle_jit_ok_return(
-                    fiber,
-                    func,
-                    module,
-                    &ret[..ret_slots],
-                    heap_returns,
-                    ret_gcref_start,
-                    ret_start,
-                    include_errdefers,
-                );
-            }
-
-            // No defers, stack returns: fast path
-            fiber.frames.pop();
-            fiber.sp = jit_bp;
-
-            for i in 0..ret_slots {
-                fiber.stack[caller_bp + arg_start + i] = ret[i];
-            }
-            ExecResult::FrameChanged
+            let ret_start = ctx.ret_start() as usize;
+            crate::exec::handle_jit_ok_return(
+                fiber,
+                func,
+                module,
+                &ret[..ret_slots],
+                heap_returns,
+                ret_gcref_start,
+                ret_start,
+                include_errdefers,
+            )
         }
         JitResult::Panic => {
             let panic_msg = setup_jit_panic(&ctx, fiber, &mut vm.state.gc, module);
@@ -304,7 +271,7 @@ fn handle_jit_result(
             // Regular call: JIT requests VM to execute a non-JIT function.
             let resume_pc = ctx.call_resume_pc();
             let call_ret_reg = ctx.call_ret_reg();
-            let (callee_bp, actual_caller_bp) = setup_regular_call(
+            let callee_bp = setup_regular_call(
                 fiber, module, callee_func_id,
                 callee_ret_slots as u16, call_ret_reg,
                 call_arg_start, resume_pc,
@@ -314,8 +281,7 @@ fn handle_jit_result(
             if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
                 let callee_func_def = &module.functions[callee_func_id as usize];
                 if let Some(jit_func) = jit_mgr.resolve_call(callee_func_id, callee_func_def, module) {
-                    // Pass call_ret_reg (= arg_start + arg_slots) as the return value destination.
-                    return execute_jit_callee(vm, fiber, module, jit_func, callee_func_id, callee_bp, callee_ret_slots, actual_caller_bp, call_ret_reg as usize);
+                    return execute_jit_callee(vm, fiber, module, jit_func, callee_func_id, callee_bp, callee_ret_slots);
                 }
             }
 
@@ -384,16 +350,14 @@ fn setup_prepared_call(
     }
     
     fiber.reserve_slots_at(callee_bp, local_slots);
-    // Zero non-arg local slots for VM interpreter
-    if local_slots > param_slots {
-        fiber.zero_slots_at(callee_bp + param_slots, local_slots - param_slots);
-    }
+    fiber.zero_slots_tail_at(callee_bp, local_slots, param_slots);
     
     fiber.push_call_frame(
         callee_func_id,
         callee_bp,
         call_ret_reg,
         callee_ret_slots,
+        local_slots as u16,
     );
 }
 
@@ -410,7 +374,7 @@ fn setup_regular_call(
     call_ret_reg: u16,
     call_arg_start: usize,
     resume_pc: u32,
-) -> (usize, usize) {
+) -> usize {
     materialize_jit_frames(fiber, module, resume_pc);
     
     // After materialize_jit_frames, the last frame is the immediate caller.
@@ -422,28 +386,19 @@ fn setup_regular_call(
     fiber.sp = actual_caller_bp + caller_func.local_slots as usize;
     
     let callee_func_def = &module.functions[callee_func_id as usize];
-    let callee_bp = fiber.sp;
     let callee_local_slots = callee_func_def.local_slots as usize;
-    
-    fiber.reserve_slots_at(callee_bp, callee_local_slots);
-    
-    // Zero callee's local slots
-    fiber.zero_slots_at(callee_bp, callee_local_slots);
-    
-    // Copy args from caller's locals area
     let arg_slots = callee_func_def.param_slots as usize;
-    for i in 0..arg_slots {
-        fiber.stack[callee_bp + i] = fiber.stack[actual_caller_bp + call_arg_start + i];
-    }
-    
-    fiber.push_call_frame(
+
+    let callee_bp = fiber.push_borrowed_call_frame(
         callee_func_id,
-        callee_bp,
+        call_arg_start as u16,
         call_ret_reg,
         callee_ret_slots,
+        callee_local_slots as u16,
     );
-    
-    (callee_bp, actual_caller_bp)
+    fiber.zero_slots_tail_at(callee_bp, callee_local_slots, arg_slots);
+
+    callee_bp
 }
 
 /// Convert resume_stack to fiber.frames when VM takes over from JIT.
@@ -498,7 +453,10 @@ fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
     
     // Step 2: Convert resume_stack entries to frames (reverse order: outermost first)
     for i in (0..len).rev() {
-        let rp = &fiber.resume_stack[i];
+        let rp = fiber.resume_stack[i];
+        let func_id = rp.func_id;
+        let bp = rp.bp as usize;
+        let func_def = &module.functions[func_id as usize];
         
         // Calculate pc for this frame:
         // - innermost (i=0): use resume_pc parameter (where VM should continue)
@@ -516,7 +474,7 @@ fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
         
         // Check for OSR duplicate: same func_id AND same bp means same frame
         let existing = fiber.frames.iter_mut().find(|f| 
-            f.func_id == rp.func_id && f.bp == rp.bp as usize
+            f.func_id == func_id && f.bp == bp
         );
         
         if let Some(frame) = existing {
@@ -525,10 +483,15 @@ fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
         } else {
             // Normal case: create new frame
             let mut frame = CallFrame::new(
-                rp.func_id,
-                rp.bp as usize,
+                func_id,
+                bp,
+                bp,
                 rp.ret_reg,
                 rp.ret_slots,
+                func_def.local_slots,
+                None,
+                0,
+                0,
             );
             frame.pc = pc;
             fiber.frames.push(frame);
@@ -545,7 +508,6 @@ fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
     // Clear resume_stack since VM now owns the frames
     fiber.resume_stack.clear();
 }
-
 
 /// Callback for JIT code to call extern functions.
 ///

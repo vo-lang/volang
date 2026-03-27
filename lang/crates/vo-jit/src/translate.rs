@@ -1843,6 +1843,16 @@ fn queue_close<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(),
     emit_close_with_panic_check(e, queue_close_func, inst.a)
 }
 
+fn queue_send<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    let queue_send_func = e.helpers().queue_send.expect("queue_send helper not registered");
+    emit_queue_send(e, inst, queue_send_func)
+}
+
+fn queue_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    let queue_recv_func = e.helpers().queue_recv.expect("queue_recv helper not registered");
+    emit_queue_recv(e, inst, queue_recv_func)
+}
+
 /// Emit close operation: call helper(ctx, obj), check for Panic result.
 fn emit_close_with_panic_check<'a>(
     e: &mut impl IrEmitter<'a>,
@@ -1940,184 +1950,115 @@ fn emit_queue_recv<'a>(
     let ctx = e.ctx_param();
     let resume_pc_val = e.builder().ins().iconst(types::I32, resume_pc as i64);
     e.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
-    
+
     let queue = e.read_var(inst.b);
+    let dst_ptr = e.var_addr(inst.a);
     let elem_slots = ((inst.flags >> 1) & 0x7F) as u32;
     let has_ok = (inst.flags & 1) as u32;
-    let dst_start = inst.a;
-    
-    let dst_ptr = e.var_addr(dst_start);
+    let written_slots = elem_slots + has_ok;
     let elem_slots_val = e.builder().ins().iconst(types::I32, elem_slots as i64);
     let has_ok_val = e.builder().ins().iconst(types::I32, has_ok as i64);
-    
+
     let call = emit_funcref_call(e, recv_func, &[ctx, queue, dst_ptr, elem_slots_val, has_ok_val]);
     let result = e.builder().inst_results(call)[0];
-    
-    // Branch on result
+
     let ok_val = e.builder().ins().iconst(types::I32, 0);
     let is_ok = e.builder().ins().icmp(IntCC::Equal, result, ok_val);
     let ok_block = e.builder().create_block();
     let not_ok_block = e.builder().create_block();
     e.builder().ins().brif(is_ok, ok_block, &[], not_ok_block, &[]);
-    
-    // Not-ok: spill and return
+
     e.builder().switch_to_block(not_ok_block);
     e.builder().seal_block(not_ok_block);
     e.spill_all_vars();
     e.builder().ins().return_(&[result]);
-    
-    // Ok: reload received values into SSA vars
+
     e.builder().switch_to_block(ok_block);
     e.builder().seal_block(ok_block);
-    for i in 0..elem_slots {
-        let val = e.builder().ins().load(types::I64, MemFlags::trusted(), dst_ptr, (i * 8) as i32);
-        e.write_var(dst_start + i as u16, val);
-    }
-    if has_ok != 0 {
-        let ok_flag = e.builder().ins().load(types::I64, MemFlags::trusted(), dst_ptr, (elem_slots * 8) as i32);
-        e.write_var(dst_start + elem_slots as u16, ok_flag);
-    }
+    e.sync_written_slots(inst.a, written_slots as u16);
     Ok(())
 }
 
-fn queue_send<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
-    emit_queue_send(e, inst, e.helpers().queue_send.expect("queue_send not registered"))
-}
-
-fn queue_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
-    emit_queue_recv(e, inst, e.helpers().queue_recv.expect("queue_recv not registered"))
-}
-
-// =============================================================================
-// Goroutine Start
-// =============================================================================
-
-/// GoStart: Spawn a new goroutine.
-/// - a: func_id_low (if flags bit 0 = 0) or closure_reg (if flags bit 0 = 1)
-/// - b: args_start
-/// - c: arg_slots
-/// - flags bit 0: is_closure, bits 1-7: func_id_high (when not closure)
 fn go_start<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let go_start_func = e.helpers().go_start.expect("go_start not registered");
+    let go_start_func = e.helpers().go_start.expect("go_start helper not registered");
     let ctx = e.ctx_param();
-    
-    let is_closure = (inst.flags & 1) != 0;
-    
-    let (func_id, closure_ref) = if is_closure {
-        // Closure: func_id is extracted from closure, inst.a is closure register
-        let closure = e.read_var(inst.a);
-        // func_id will be extracted by callback from closure_ref
-        // Pass 0 as func_id, callback will read from closure
-        let func_id_val = e.builder().ins().iconst(types::I32, 0);
-        (func_id_val, closure)
+    let is_closure_call = (inst.flags & 1) != 0;
+    let func_id = if is_closure_call {
+        0
     } else {
-        // Regular function: func_id encoded in inst.a and flags
-        let func_id = inst.a as u32 | ((inst.flags as u32 >> 1) << 16);
-        let func_id_val = e.builder().ins().iconst(types::I32, func_id as i64);
-        let closure_ref = e.builder().ins().iconst(types::I64, 0);
-        (func_id_val, closure_ref)
+        inst.a as u32 | ((inst.flags as u32 >> 1) << 16)
     };
-    
-    let is_closure_val = e.builder().ins().iconst(types::I32, if is_closure { 1 } else { 0 });
+    let func_id_val = e.builder().ins().iconst(types::I32, func_id as i64);
+    let is_closure_val = e.builder().ins().iconst(types::I32, if is_closure_call { 1 } else { 0 });
+    let closure_ref = if is_closure_call {
+        e.read_var(inst.a)
+    } else {
+        e.builder().ins().iconst(types::I64, 0)
+    };
     let args_ptr = e.var_addr(inst.b);
     let arg_slots = e.builder().ins().iconst(types::I32, inst.c as i64);
-    
-    emit_funcref_call(e, go_start_func, &[ctx, func_id, is_closure_val, closure_ref, args_ptr, arg_slots]);
+    emit_funcref_call(e, go_start_func, &[ctx, func_id_val, is_closure_val, closure_ref, args_ptr, arg_slots]);
 }
 
-/// GoIsland: Spawn goroutine on specific island.
-/// - a: island handle
-/// - b: closure
-/// - c: args_start
-/// - flags: arg_slots
 fn go_island<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let go_island_func = e.helpers().go_island.expect("go_island not registered");
+    let go_island_func = e.helpers().go_island.expect("go_island helper not registered");
     let ctx = e.ctx_param();
-    
     let island = e.read_var(inst.a);
-    let closure = e.read_var(inst.b);
+    let closure_ref = e.read_var(inst.b);
     let args_ptr = e.var_addr(inst.c);
     let arg_slots = e.builder().ins().iconst(types::I32, inst.flags as i64);
-    
-    emit_funcref_call(e, go_island_func, &[ctx, island, closure, args_ptr, arg_slots]);
+    emit_funcref_call(e, go_island_func, &[ctx, island, closure_ref, args_ptr, arg_slots]);
 }
 
-// =============================================================================
-// Defer/Recover
-// =============================================================================
-
-/// DeferPush / ErrDeferPush
-/// - a: func_id_low (if flags bit 0 = 0) or closure_reg (if flags bit 0 = 1)
-/// - b: arg_start
-/// - c: arg_count
-/// - flags bit 0: is_closure, bits 1-7: func_id_high (when not closure)
 fn defer_push<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, is_errdefer: bool) {
-    let func = e.helpers().defer_push.expect("defer_push not registered");
+    let defer_push_func = e.helpers().defer_push.expect("defer_push helper not registered");
     let ctx = e.ctx_param();
-    
-    let is_closure = (inst.flags & 1) != 0;
-    let (func_id_val, closure_ref_val) = if is_closure {
-        let closure = e.read_var(inst.a);
-        let func_id_val = e.builder().ins().iconst(types::I32, 0);
-        (func_id_val, closure)
+    let is_closure_call = (inst.flags & 1) != 0;
+    let func_id = if is_closure_call {
+        0
     } else {
-        let func_id = inst.a as u32 | ((inst.flags as u32 >> 1) << 16);
-        let func_id_val = e.builder().ins().iconst(types::I32, func_id as i64);
-        let closure_ref = e.builder().ins().iconst(types::I64, 0);
-        (func_id_val, closure_ref)
+        inst.a as u32 | ((inst.flags as u32 >> 1) << 16)
     };
-    
-    let is_closure_val = e.builder().ins().iconst(types::I32, if is_closure { 1 } else { 0 });
+    let func_id_val = e.builder().ins().iconst(types::I32, func_id as i64);
+    let is_closure_val = e.builder().ins().iconst(types::I32, if is_closure_call { 1 } else { 0 });
+    let closure_ref = if is_closure_call {
+        e.read_var(inst.a)
+    } else {
+        e.builder().ins().iconst(types::I64, 0)
+    };
     let args_ptr = e.var_addr(inst.b);
     let arg_count = e.builder().ins().iconst(types::I32, inst.c as i64);
     let is_errdefer_val = e.builder().ins().iconst(types::I32, if is_errdefer { 1 } else { 0 });
-    
     emit_funcref_call(
         e,
-        func,
-        &[ctx, func_id_val, is_closure_val, closure_ref_val, args_ptr, arg_count, is_errdefer_val],
+        defer_push_func,
+        &[ctx, func_id_val, is_closure_val, closure_ref, args_ptr, arg_count, is_errdefer_val],
     );
 }
 
-/// Recover
-/// - a: dst_start (interface{} occupies 2 slots)
 fn recover<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
-    
-    let func = e.helpers().recover.expect("recover not registered");
+    let recover_func = e.helpers().recover.expect("recover helper not registered");
     let ctx = e.ctx_param();
-    
-    let result_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        16,
-        8,
-    ));
-    let result_ptr = e.builder().ins().stack_addr(types::I64, result_slot, 0);
-    
-    emit_funcref_call(e, func, &[ctx, result_ptr]);
-    let slot0 = e.builder().ins().stack_load(types::I64, result_slot, 0);
-    let slot1 = e.builder().ins().stack_load(types::I64, result_slot, 8);
-    
-    e.write_var(inst.a, slot0);
-    e.write_var(inst.a + 1, slot1);
+    let result_ptr = e.var_addr(inst.a);
+    let call = emit_funcref_call(e, recover_func, &[ctx, result_ptr]);
+    let _ = e.builder().inst_results(call)[0];
+    e.sync_written_slots(inst.a, 2);
 }
 
-// =============================================================================
 // Select Statement
 // =============================================================================
 
 /// SelectBegin: Initialize a select statement.
 /// - a: case_count
 /// - flags bit 0: has_default
-fn select_begin<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+fn select_begin<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
     let func = e.helpers().select_begin.expect("select_begin not registered");
     let ctx = e.ctx_param();
-    
     let case_count = e.builder().ins().iconst(types::I32, inst.a as i64);
     let has_default = e.builder().ins().iconst(types::I32, (inst.flags & 1) as i64);
-    
-    // Result is always Ok for select_begin
+    e.begin_select_tracking();
     emit_funcref_call(e, func, &[ctx, case_count, has_default]);
+    Ok(())
 }
 
 /// SelectSend: Add a send case to the current select.
@@ -2128,13 +2069,11 @@ fn select_begin<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 fn select_send<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().select_send.expect("select_send not registered");
     let ctx = e.ctx_param();
-    
     let queue_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
     let val_reg = e.builder().ins().iconst(types::I32, inst.b as i64);
     let elem_slots = e.builder().ins().iconst(types::I32, inst.flags as i64);
     let case_idx = e.builder().ins().iconst(types::I32, inst.c as i64);
-    
-    // Result is always Ok for select_send
+    e.record_select_send_case();
     emit_funcref_call(e, func, &[ctx, queue_reg, val_reg, elem_slots, case_idx]);
 }
 
@@ -2149,9 +2088,12 @@ fn select_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     
     let dst_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
     let queue_reg = e.builder().ins().iconst(types::I32, inst.b as i64);
-    let elem_slots = e.builder().ins().iconst(types::I32, ((inst.flags >> 1) & 0x7F) as i64);
-    let has_ok = e.builder().ins().iconst(types::I32, (inst.flags & 1) as i64);
+    let elem_slots_u32 = ((inst.flags >> 1) & 0x7F) as u32;
+    let has_ok_u32 = (inst.flags & 1) as u32;
+    let elem_slots = e.builder().ins().iconst(types::I32, elem_slots_u32 as i64);
+    let has_ok = e.builder().ins().iconst(types::I32, has_ok_u32 as i64);
     let case_idx = e.builder().ins().iconst(types::I32, inst.c as i64);
+    e.record_select_recv_case(inst.a, elem_slots_u32 as u8, has_ok_u32 != 0);
     
     // Result is always Ok for select_recv
     emit_funcref_call(e, func, &[ctx, dst_reg, queue_reg, elem_slots, has_ok, case_idx]);
@@ -2196,10 +2138,8 @@ fn select_exec<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(),
     e.builder().seal_block(ok_block);
     
     // The select callback writes result_reg AND recv dst slots directly to fiber.stack.
-    // Reload all SSA variables from memory to resync.
-    // (For FunctionCompiler this is a no-op since args_ptr != fiber.stack.)
     e.refresh_stack_base_after_reallocation();
-    e.reload_all_vars_from_memory();
+    e.sync_select_exec_state(inst.a);
     
     Ok(())
 }

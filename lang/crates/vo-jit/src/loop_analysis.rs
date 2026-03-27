@@ -406,15 +406,14 @@ fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
     
     match inst.opcode() {
         Opcode::Call => {
-            let ret_start = inst.b;  // Return values start at arg_start
+            let ret_start = inst.b + ((inst.c >> 8) as u16);
             let ret_slots = (inst.c & 0xFF) as u16;
             for i in 0..ret_slots {
                 regs.push(ret_start + i);
             }
         }
-        // CallClosure: ret_slots in low byte of c, returns start at arg_start (b)
         Opcode::CallClosure => {
-            let ret_start = inst.b;
+            let ret_start = inst.b + ((inst.c >> 8) as u16);
             let ret_slots = (inst.c & 0xFF) as u16;
             for i in 0..ret_slots {
                 regs.push(ret_start + i);
@@ -427,8 +426,7 @@ fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
             regs.push(inst.a);
         }
         Opcode::CallIface => {
-            // CallIface: ret_slots in low byte of c, args start at b
-            let ret_start = inst.b;
+            let ret_start = inst.b + ((inst.c >> 8) as u16);
             let ret_slots = (inst.c & 0xFF) as u16;
             for i in 0..ret_slots {
                 regs.push(ret_start + i);
@@ -803,10 +801,9 @@ mod tests {
 
     #[test]
     fn test_get_write_regs_multi_call_iface() {
-        // CallIface: ret_slots in low byte of c, returns start at arg_start (b)
         let inst = call_iface(5, 10, 2, 3, 0);
         let regs = get_write_regs_multi(&inst);
-        assert_eq!(regs, vec![10, 11, 12], "CallIface should write ret_slots to arg_start");
+        assert_eq!(regs, vec![12, 13, 14], "CallIface should write ret_slots after arg slots");
     }
 
     #[test]

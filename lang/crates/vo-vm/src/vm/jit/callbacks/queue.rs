@@ -118,6 +118,7 @@ pub extern "C" fn jit_queue_recv(
     let (vm, fiber) = unsafe { extract_context(ctx) };
     let ch = chan as GcRef;
     let has_ok = has_ok != 0;
+
     if let Some(recv_response) = fiber.take_remote_recv_response() {
         crate::exec::replay_remote_queue_recv_response(
             &mut vm.state.gc,
