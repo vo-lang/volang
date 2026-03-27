@@ -685,6 +685,7 @@ impl CodegenContext {
             param_count: 0,
             param_slots: 0,
             local_slots: 0,
+            gc_scan_slots: 0,
             ret_slots: 0,
             recv_slots: 0,
             heap_ret_gcref_count: 0,
@@ -697,6 +698,7 @@ impl CodegenContext {
             has_call_extern: false,
             code: Vec::new(),
             slot_types: Vec::new(),
+            borrowed_scan_slots_prefix: vec![0],
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
@@ -1047,12 +1049,15 @@ impl CodegenContext {
     ) -> u32 {
         use vo_vm::bytecode::FunctionDef;
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
+        let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&slot_types);
+        let borrowed_scan_slots_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
         let wrapper_func = FunctionDef {
             name,
             param_count: param_slots,
             param_slots,
             ret_slots,
             local_slots,
+            gc_scan_slots,
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
@@ -1064,6 +1069,7 @@ impl CodegenContext {
             has_call_extern,
             code,
             slot_types,
+            borrowed_scan_slots_prefix,
             capture_types: Vec::new(),
             capture_slot_types,
             param_types,

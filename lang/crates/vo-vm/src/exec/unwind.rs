@@ -805,7 +805,7 @@ fn call_defer_entry(
     if layout.slot0.is_some() && layout.arg_offset > 1 {
         fiber.zero_slots_at(args_start + 1, layout.arg_offset - 1);
     }
-    fiber.zero_slots_tail_at(args_start, total_slots, arg_space);
+    fiber.zero_slots_tail_at(args_start, func.gc_scan_slots as usize, arg_space);
     let stack = fiber.stack_ptr();
 
     // Set slot 0 if needed
@@ -820,7 +820,7 @@ fn call_defer_entry(
         }
     }
 
-    fiber.push_call_frame(func_id, args_start, 0, 0, total_slots as u16);
+    fiber.push_call_frame(func_id, args_start, 0, 0, func.gc_scan_slots);
 
     ExecResult::FrameChanged
 }

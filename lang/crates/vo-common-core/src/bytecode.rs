@@ -32,12 +32,13 @@ pub struct TransferType {
     pub slots: u16,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDef {
     pub name: String,
     pub param_count: u16,
     pub param_slots: u16,
     pub local_slots: u16,
+    pub gc_scan_slots: u16,
     pub ret_slots: u16,
     /// Receiver slots for methods (0 for functions, >0 for methods)
     /// Used by CallIface to know how many slots to copy from interface data
@@ -70,6 +71,7 @@ pub struct FunctionDef {
     pub has_call_extern: bool,
     pub code: Vec<Instruction>,
     pub slot_types: Vec<SlotType>,
+    pub borrowed_scan_slots_prefix: Vec<u16>,
     /// Capture types for cross-island transfer (closures only).
     /// Each entry: (ValueMeta raw, slot_count) for the captured variable's inner type.
     /// Empty for non-closure functions.
@@ -78,7 +80,6 @@ pub struct FunctionDef {
     /// Length = total slots across all captures (e.g., 2 for an interface capture).
     /// For regular closures, all entries are GcRef (escape boxes).
     /// For method value wrappers, may contain Interface0/Interface1.
-    /// Empty for non-closure functions.
     pub capture_slot_types: Vec<SlotType>,
     /// Parameter types for cross-island transfer.
     /// Each entry: (ValueMeta raw, slot_count) for one parameter.
@@ -102,6 +103,39 @@ impl FunctionDef {
             if has_calls && has_call_extern { break; }
         }
         (has_calls, has_call_extern)
+    }
+
+    pub fn compute_gc_scan_slots(slot_types: &[SlotType]) -> u16 {
+        let mut scan_slots = 0usize;
+        for (idx, slot_type) in slot_types.iter().enumerate() {
+            match slot_type {
+                SlotType::GcRef => scan_slots = idx + 1,
+                SlotType::Interface0 => scan_slots = idx + 2,
+                _ => {}
+            }
+        }
+        scan_slots as u16
+    }
+
+    pub fn compute_borrowed_scan_slots_prefix(slot_types: &[SlotType]) -> Vec<u16> {
+        let mut prefix = Vec::with_capacity(slot_types.len() + 1);
+        let mut scan_slots = 0u16;
+        prefix.push(0);
+        for (idx, slot_type) in slot_types.iter().enumerate() {
+            match slot_type {
+                SlotType::GcRef => scan_slots = (idx + 1) as u16,
+                SlotType::Interface0 => scan_slots = (idx + 2) as u16,
+                _ => {}
+            }
+            prefix.push(scan_slots);
+        }
+        prefix
+    }
+
+    #[inline]
+    pub fn scan_slots_before_borrowed_start(&self, borrowed_start: u16) -> u16 {
+        let end = (borrowed_start as usize).min(self.slot_types.len());
+        self.borrowed_scan_slots_prefix[end]
     }
 }
 

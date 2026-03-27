@@ -53,7 +53,7 @@ pub fn exec_go_start(
     } else {
         let func = &functions[func_id as usize];
         let mut new_fiber = Fiber::new(next_fiber_id);
-        new_fiber.push_frame(func_id, func.local_slots, 0, 0);
+        new_fiber.push_frame(func_id, func.local_slots, func.gc_scan_slots, 0, 0);
         let new_stack = new_fiber.stack_ptr();
         for i in 0..arg_count {
             unsafe { *new_stack.add(i) = stack_get(stack, src_start + i) };

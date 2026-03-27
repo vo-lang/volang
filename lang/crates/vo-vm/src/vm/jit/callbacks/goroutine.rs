@@ -48,7 +48,7 @@ pub extern "C" fn jit_go_start(
         let func = &module.functions[func_id as usize];
         let next_id = vm.scheduler.fibers.len() as u32;
         let mut new_fiber = Fiber::new(next_id);
-        new_fiber.push_frame(func_id, func.local_slots, 0, 0);
+        new_fiber.push_frame(func_id, func.local_slots, func.gc_scan_slots, 0, 0);
         let new_stack = new_fiber.stack_ptr();
         for i in 0..arg_slots as usize {
             unsafe { *new_stack.add(i) = *args_ptr.add(i) };

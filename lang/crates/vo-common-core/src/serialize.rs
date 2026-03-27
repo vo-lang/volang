@@ -764,11 +764,14 @@ impl Module {
                     slots: r.read_u16()?,
                 })
             })?;
+            let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&slot_types);
+            let borrowed_scan_slots_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
             Ok(FunctionDef {
                 name,
                 param_count,
                 param_slots,
                 local_slots,
+                gc_scan_slots,
                 ret_slots,
                 recv_slots,
                 heap_ret_gcref_count,
@@ -780,6 +783,7 @@ impl Module {
                 has_calls,
                 has_call_extern,
                 slot_types,
+                borrowed_scan_slots_prefix,
                 code,
                 capture_types,
                 capture_slot_types,
@@ -887,6 +891,7 @@ mod tests {
             param_count: 0,
             param_slots: 0,
             local_slots: 2,
+            gc_scan_slots: 0,
             ret_slots: 0,
             recv_slots: 0,
             heap_ret_gcref_count: 0,
@@ -898,6 +903,7 @@ mod tests {
             has_calls: false,
             has_call_extern: false,
             slot_types: vec![SlotType::Value, SlotType::Value],
+            borrowed_scan_slots_prefix: vec![0, 0, 0],
             code: vec![
                 Instruction::new(Opcode::LoadInt, 0, 0x0001, 0x0000),
                 Instruction::new(Opcode::LoadInt, 1, 0x0002, 0x0000),

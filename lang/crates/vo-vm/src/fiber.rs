@@ -347,6 +347,9 @@ impl ClosureReplayState {
 /// Initial stack capacity in slots (64KB = 8192 slots).
 const INITIAL_STACK_CAPACITY: usize = 8192;
 
+const CALL_IFACE_IC_TABLE_SIZE: usize = 512;
+const CALL_IFACE_IC_TABLE_MASK: u32 = (CALL_IFACE_IC_TABLE_SIZE - 1) as u32;
+
 /// Resume point for JIT call chain suspension.
 ///
 /// When JIT returns `Call` or `WaitIo`, this captures the minimal state
@@ -365,6 +368,29 @@ pub struct ResumePoint {
     pub ret_reg: u16,
     /// Return slots expected.
     pub ret_slots: u16,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CallIfaceICEntry {
+    pub caller_func_id: u32,
+    pub callsite_pc: u32,
+    pub itab_id: u32,
+    pub method_idx: u8,
+    pub valid: bool,
+    pub local_slots: u16,
+    pub gc_scan_slots: u16,
+    pub func_id: u32,
+}
+
+impl CallIfaceICEntry {
+    #[inline]
+    pub fn matches(&self, caller_func_id: u32, callsite_pc: u32, itab_id: u32, method_idx: u8) -> bool {
+        self.valid
+            && self.caller_func_id == caller_func_id
+            && self.callsite_pc == callsite_pc
+            && self.itab_id == itab_id
+            && self.method_idx == method_idx
+    }
 }
 
 #[derive(Debug)]
@@ -406,6 +432,7 @@ pub struct Fiber {
     /// Lazily allocated on first JIT use. Per-fiber to avoid data races between goroutines.
     #[cfg(feature = "jit")]
     pub ic_table: Vec<vo_runtime::jit_api::DynCallIC>,
+    pub call_iface_ic_table: Vec<CallIfaceICEntry>,
     /// Closure callback suspend/replay state for extern functions.
     pub closure_replay: ClosureReplayState,
     /// JIT panic flag — set by JIT code when a runtime error occurs (nil deref, bounds check).
@@ -455,6 +482,7 @@ impl Fiber {
             resume_stack: Vec::new(),  // Lazy: only allocates on first push (Call/WaitIo)
             #[cfg(feature = "jit")]
             ic_table: Vec::new(),  // Lazy: allocated on first JIT dispatch
+            call_iface_ic_table: Vec::new(),
             closure_replay: ClosureReplayState::new(),
             #[cfg(feature = "jit")]
             jit_panic_flag: false,
@@ -527,6 +555,11 @@ impl Fiber {
                 core::ptr::write_bytes(self.ic_table.as_mut_ptr(), 0, self.ic_table.len());
             }
         }
+        if !self.call_iface_ic_table.is_empty() {
+            unsafe {
+                core::ptr::write_bytes(self.call_iface_ic_table.as_mut_ptr(), 0, self.call_iface_ic_table.len());
+            }
+        }
         self.closure_replay.reset();
         #[cfg(feature = "jit")]
         {
@@ -547,6 +580,19 @@ impl Fiber {
             self.ic_table = vo_runtime::jit_api::alloc_ic_table();
         }
         self.ic_table.as_mut_ptr()
+    }
+
+    #[inline]
+    pub fn call_iface_ic_index(caller_func_id: u32, callsite_pc: u32) -> usize {
+        ((caller_func_id.wrapping_mul(97)).wrapping_add(callsite_pc) & CALL_IFACE_IC_TABLE_MASK) as usize
+    }
+
+    pub fn ensure_call_iface_ic_table(&mut self) -> &mut [CallIfaceICEntry] {
+        if self.call_iface_ic_table.is_empty() {
+            self.call_iface_ic_table = Vec::with_capacity(CALL_IFACE_IC_TABLE_SIZE);
+            self.call_iface_ic_table.resize(CALL_IFACE_IC_TABLE_SIZE, CallIfaceICEntry::default());
+        }
+        self.call_iface_ic_table.as_mut_slice()
     }
     
     /// Check if current panic is recoverable and return the interface{} value if so.
@@ -742,21 +788,38 @@ impl Fiber {
         borrowed_start: u16,
         ret_reg: u16,
         ret_count: u16,
+        caller_scan_slots: u16,
         local_slots: u16,
+        scan_slots: u16,
     ) -> usize {
-        let (caller_bp, caller_sp, caller_scan_slots) = {
+        assert!(
+            scan_slots <= local_slots,
+            "push_borrowed_call_frame: scan_slots={} local_slots={}",
+            scan_slots,
+            local_slots,
+        );
+        let (caller_bp, caller_sp, caller_scan_slots_restore, caller_zero_start, caller_zero_end) = {
             let caller_frame = self.frames.last_mut().expect("push_borrowed_call_frame: missing caller frame");
-            assert!(
-                borrowed_start <= caller_frame.scan_slots,
-                "push_borrowed_call_frame: borrowed_start={} caller_scan_slots={}",
-                borrowed_start,
-                caller_frame.scan_slots,
-            );
             let caller_bp = caller_frame.bp;
             let caller_sp = self.sp;
-            let caller_scan_slots = caller_frame.scan_slots;
-            caller_frame.scan_slots = borrowed_start;
-            (caller_bp, caller_sp, caller_scan_slots)
+            let previous_scan_slots = caller_frame.scan_slots;
+            caller_frame.scan_slots = caller_scan_slots;
+            let caller_scan_slots_restore = if previous_scan_slots != caller_scan_slots {
+                Some(previous_scan_slots)
+            } else {
+                None
+            };
+            if borrowed_start < previous_scan_slots {
+                (
+                    caller_bp,
+                    caller_sp,
+                    caller_scan_slots_restore,
+                    borrowed_start,
+                    previous_scan_slots,
+                )
+            } else {
+                (caller_bp, caller_sp, caller_scan_slots_restore, 0, 0)
+            }
         };
 
         let bp = caller_bp + borrowed_start as usize;
@@ -767,15 +830,21 @@ impl Fiber {
             caller_sp,
             ret_reg,
             ret_count,
-            local_slots,
-            Some(caller_scan_slots),
-            borrowed_start,
-            caller_scan_slots,
+            scan_slots,
+            caller_scan_slots_restore,
+            caller_zero_start,
+            caller_zero_end,
         );
         bp
     }
 
-    pub fn push_frame(&mut self, func_id: u32, local_slots: u16, ret_reg: u16, ret_count: u16) -> usize {
+    pub fn push_frame(&mut self, func_id: u32, local_slots: u16, scan_slots: u16, ret_reg: u16, ret_count: u16) -> usize {
+        assert!(
+            scan_slots <= local_slots,
+            "push_frame: scan_slots={} local_slots={}",
+            scan_slots,
+            local_slots,
+        );
         let bp = self.sp;
         self.reserve_slots_at(bp, local_slots as usize);
         // Zero the new frame's slots. ensure_capacity zeros newly-allocated memory, but
@@ -784,8 +853,8 @@ impl Fiber {
         // GcRefs — a stale integer in a GcRef-typed slot causes mark_gray to segfault.
         // This zero-fill is the canonical fix (same approach as JVM/CLR).
         // Safety: ensure_capacity guarantees stack[bp..new_sp] is valid.
-        self.zero_slots_at(bp, local_slots as usize);
-        self.push_call_frame(func_id, bp, ret_reg, ret_count, local_slots);
+        self.zero_slots_at(bp, scan_slots as usize);
+        self.push_call_frame(func_id, bp, ret_reg, ret_count, scan_slots);
         bp
     }
 

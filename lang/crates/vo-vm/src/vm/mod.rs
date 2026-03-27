@@ -382,7 +382,7 @@ impl Vm {
         }
         let func = &module.functions[entry_func as usize];
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(entry_func, func.local_slots, 0, 0);
+        fiber.push_frame(entry_func, func.local_slots, func.gc_scan_slots, 0, 0);
         self.scheduler.spawn(fiber);
         Ok(())
     }
@@ -392,7 +392,7 @@ impl Vm {
     /// Returns `Ok(outcome)` where outcome is one of:
     /// - `Completed`              — program exited normally
     /// - `Blocked`                — all goroutines stuck on channels; call `deadlock_err()` for details
-    /// - `SuspendedForHostEvents` — waiting for async host callbacks (WASM timer/HTTP, GUI events)
+    /// - `Suspended`              — waiting for async host callbacks (WASM timer/HTTP, GUI events)
     ///
     /// Callers decide whether `Blocked` is a deadlock error or expected behaviour (e.g. GUI host VM).
     pub fn run(&mut self) -> Result<SchedulingOutcome, VmError> {
@@ -412,7 +412,7 @@ impl Vm {
         }
         let func = &module.functions[init_func as usize];
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(init_func, func.local_slots, 0, 0);
+        fiber.push_frame(init_func, func.local_slots, func.gc_scan_slots, 0, 0);
         self.scheduler.spawn(fiber);
         self.run_scheduling_loop(None)
     }
@@ -720,7 +720,6 @@ impl Vm {
         None
     }
     
-    
     /// Report deadlock with detailed fiber state.
     fn report_deadlock(&self) -> Result<(), VmError> {
         if let Some(module) = self.module.as_ref() {
@@ -773,7 +772,6 @@ impl Vm {
         let mut stack = fiber.stack_ptr();
         let frames_ptr = &mut fiber.frames as *mut Vec<crate::fiber::CallFrame>;
         let frames = unsafe { &mut *frames_ptr };
-        
         // Initialize frame variables using raw pointers
         let mut frame_ptr: *mut crate::fiber::CallFrame = match frames.last_mut() {
             Some(f) => f as *mut _,
@@ -781,8 +779,9 @@ impl Vm {
         };
         let mut func_id: u32 = unsafe { (*frame_ptr).func_id };
         let mut bp: usize = unsafe { (*frame_ptr).bp };
-        let mut code: &[Instruction] = &module.functions[func_id as usize].code;
-        
+        let mut func = &module.functions[func_id as usize];
+        let mut code: &[Instruction] = &func.code;
+
         // Macro to refetch frame after Call/Return - only called when frame actually changes
         macro_rules! refetch {
             () => {{
@@ -793,10 +792,11 @@ impl Vm {
                 };
                 func_id = unsafe { (*frame_ptr).func_id };
                 bp = unsafe { (*frame_ptr).bp };
-                code = &module.functions[func_id as usize].code;
+                func = &module.functions[func_id as usize];
+                code = &func.code;
             }};
         }
-        
+
         // Macro to handle panic/trap results that may return FrameChanged (when defer/recover exists).
         // Without this, `return runtime_trap(...)` would leak FrameChanged to the scheduling loop.
         macro_rules! handle_panic_result {
@@ -919,8 +919,9 @@ impl Vm {
                 return ExecResult::Interrupted;
             }
             let frame = unsafe { &mut *frame_ptr };
-            let inst = unsafe { *code.get_unchecked(frame.pc) };
-            frame.pc += 1;
+            let pc = frame.pc;
+            let inst = unsafe { *code.get_unchecked(pc) };
+            frame.pc = pc + 1;
 
             match inst.opcode() {
                 // === SIMPLE INSTRUCTIONS: no frame change, just continue ===
@@ -1415,7 +1416,7 @@ impl Vm {
                             if layout.slot0.is_some() && layout.arg_offset > 1 {
                                 fiber.zero_slots_at(new_bp + 1, layout.arg_offset - 1);
                             }
-                            fiber.zero_slots_tail_at(new_bp, local_slots, layout.arg_offset + args.len());
+                            fiber.zero_slots_tail_at(new_bp, func_def.gc_scan_slots as usize, layout.arg_offset + args.len());
                             
                             let fstack = fiber.stack_ptr();
                             if let Some(slot0_val) = layout.slot0 {
@@ -1429,7 +1430,7 @@ impl Vm {
                                 new_bp,
                                 0, // ret_reg=0 (return values go via replay cache, not caller stack)
                                 func_def.ret_slots,
-                                func_def.local_slots,
+                                func_def.gc_scan_slots,
                             );
                             
                             // Mark replay depth so return path knows to cache results.
@@ -1483,8 +1484,7 @@ impl Vm {
                     let len = if s.is_null() { 0 } else { string_len(s) };
                     if idx >= len {
                         handle_panic_result!(runtime_panic(
-                            &mut self.state.gc, fiber, stack, module,
-                            RuntimeTrapKind::IndexOutOfBounds,
+                            &mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
                             format!("runtime error: index out of range [{}] with length {}", idx, len)
                         ));
                     }
@@ -1649,7 +1649,14 @@ impl Vm {
                 // Slice operations
                 Opcode::SliceNew => {
                     if let Err(msg) = exec::exec_slice_new(stack, bp, &inst, &mut self.state.gc) {
-                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakeSlice, msg));
+                        handle_panic_result!(runtime_panic(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::MakeSlice,
+                            msg
+                        ));
                     }
                 }
                 Opcode::SliceGet => {
@@ -2115,13 +2122,12 @@ impl Vm {
         fiber.reserve_slots_at(bp, local_slots);
 
         let n = (func_def.param_slots as usize).min(args.len());
-        fiber.zero_slots_tail_at(bp, local_slots, n);
+        fiber.zero_slots_tail_at(bp, func_def.gc_scan_slots as usize, n);
         fiber.copy_slots_from_slice(bp, &args[..n]);
 
-        fiber.push_call_frame(func_id, bp, 0, func_def.ret_slots, func_def.local_slots);
+        fiber.push_call_frame(func_id, bp, 0, func_def.ret_slots, func_def.gc_scan_slots);
     }
 }
-
 
 impl Default for Vm {
     fn default() -> Self {
@@ -2161,7 +2167,7 @@ mod tests {
         let fid = vm.scheduler.spawn(Fiber::new(0));
         {
             let fiber = vm.scheduler.get_fiber_mut(fid);
-            fiber.push_frame(0, 0, 0, 0);
+            fiber.push_frame(0, 0, 0, 0, 0);
             fiber.current_frame_mut().unwrap().pc = 1;
         }
 

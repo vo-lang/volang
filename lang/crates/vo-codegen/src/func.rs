@@ -160,10 +160,6 @@ pub struct FuncBuilder {
     // Parameter types for cross-island transfer.
     // Each entry: (ValueMeta raw, slot_count) for one parameter.
     param_types: Vec<TransferType>,
-    // Temporary slot reuse: checkpoint stack for nested temp regions.
-    // Each statement/expression can save next_slot and restore it when done,
-    // allowing subsequent statements to reuse the same temp slots.
-    // slot_types is kept at high-water mark (never shrinks) for JIT.
     temp_checkpoint_stack: Vec<u16>,
 }
 
@@ -1184,20 +1180,23 @@ impl FuncBuilder {
             let slots: Vec<u16> = self.named_return_slots.iter().map(|(_, s, _)| *s).collect();
             (self.named_return_slots.len() as u16, start, slots)
         } else {
-            (0, 0, vec![]) // Mixed or non-escaped: not supported for panic recovery
+            (0, 0, Vec::new())
         };
-        
+
         // Scan code for defer instructions
         let has_defer = self.code.iter().any(|inst| {
             matches!(inst.opcode(), Opcode::DeferPush | Opcode::ErrDeferPush)
         });
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&self.code);
-        
+        let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&self.slot_types);
+        let borrowed_scan_slots_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&self.slot_types);
+
         FunctionDef {
             name: self.name,
             param_count: self.param_count,
             param_slots: self.param_slots,
             local_slots,
+            gc_scan_slots,
             ret_slots: self.ret_slots,
             recv_slots: self.recv_slots,
             heap_ret_gcref_count,
@@ -1210,12 +1209,13 @@ impl FuncBuilder {
             has_call_extern,
             code: self.code,
             slot_types: self.slot_types,
+            borrowed_scan_slots_prefix,
             capture_types: self.capture_types,
             capture_slot_types: self.capture_slot_types,
             param_types: self.param_types,
         }
     }
-    
+
     /// Add a capture type for cross-island serialization.
     pub fn add_capture_type(&mut self, meta_raw: u32, rttid_raw: u32, slots: u16) {
         self.capture_types.push(TransferType { meta_raw, rttid_raw, slots });

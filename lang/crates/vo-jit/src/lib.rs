@@ -389,11 +389,15 @@ mod tests {
 
     fn make_func(code: Vec<Instruction>, local_slots: u16) -> FunctionDef {
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
+        let slot_types = vec![SlotType::Value; local_slots as usize];
+        let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&slot_types);
+        let borrowed_scan_slots_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
         FunctionDef {
             name: "test".into(),
             param_count: 0,
             param_slots: 0,
             local_slots,
+            gc_scan_slots,
             ret_slots: 0,
             recv_slots: 0,
             heap_ret_gcref_count: 0,
@@ -405,7 +409,8 @@ mod tests {
             has_calls,
             has_call_extern,
             code,
-            slot_types: vec![SlotType::Value; local_slots as usize],
+            slot_types,
+            borrowed_scan_slots_prefix,
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),

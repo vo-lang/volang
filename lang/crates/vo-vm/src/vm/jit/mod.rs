@@ -101,18 +101,24 @@ pub fn dispatch_jit_call(
     let arg_start = inst.b as usize;
     let arg_slots = (inst.c >> 8) as usize;
     let ret_slots = (inst.c & 0xFF) as usize;
+    let caller_frame = fiber.frames.last().copied().expect("dispatch_jit_call: missing caller frame");
+    let caller_func = &module.functions[caller_frame.func_id as usize];
+    let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(arg_start as u16);
 
     let func_def = &module.functions[func_id as usize];
     let local_slots = func_def.local_slots as usize;
+    let gc_scan_slots = func_def.gc_scan_slots as usize;
 
     let jit_bp = fiber.push_borrowed_call_frame(
         func_id,
         arg_start as u16,
         (arg_start + arg_slots) as u16,
         ret_slots as u16,
+        caller_scan_slots,
         local_slots as u16,
+        func_def.gc_scan_slots,
     );
-    fiber.zero_slots_tail_at(jit_bp, local_slots, arg_slots);
+    fiber.zero_slots_tail_at(jit_bp, gc_scan_slots, arg_slots);
 
     invoke_jit_and_handle(vm, fiber, module, jit_func, jit_bp, ret_slots)
 }
@@ -126,7 +132,6 @@ fn execute_jit_callee(
     fiber: &mut Fiber,
     module: &Module,
     jit_func: vo_jit::JitFunc,
-    _callee_func_id: u32,
     callee_bp: usize,
     callee_ret_slots: usize,
 ) -> ExecResult {
@@ -281,7 +286,7 @@ fn handle_jit_result(
             if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
                 let callee_func_def = &module.functions[callee_func_id as usize];
                 if let Some(jit_func) = jit_mgr.resolve_call(callee_func_id, callee_func_def, module) {
-                    return execute_jit_callee(vm, fiber, module, jit_func, callee_func_id, callee_bp, callee_ret_slots);
+                    return execute_jit_callee(vm, fiber, module, jit_func, callee_bp, callee_ret_slots);
                 }
             }
 
@@ -338,6 +343,7 @@ fn setup_prepared_call(
     let callee_func_def = &module.functions[callee_func_id as usize];
     let param_slots = callee_func_def.param_slots as usize;
     let local_slots = callee_func_def.local_slots as usize;
+    let gc_scan_slots = callee_func_def.gc_scan_slots as usize;
     
     // Materialize any intermediate JIT frames from non-OK propagation
     if !fiber.resume_stack.is_empty() {
@@ -350,14 +356,14 @@ fn setup_prepared_call(
     }
     
     fiber.reserve_slots_at(callee_bp, local_slots);
-    fiber.zero_slots_tail_at(callee_bp, local_slots, param_slots);
+    fiber.zero_slots_tail_at(callee_bp, gc_scan_slots, param_slots);
     
     fiber.push_call_frame(
         callee_func_id,
         callee_bp,
         call_ret_reg,
         callee_ret_slots,
-        local_slots as u16,
+        callee_func_def.gc_scan_slots,
     );
 }
 
@@ -387,16 +393,20 @@ fn setup_regular_call(
     
     let callee_func_def = &module.functions[callee_func_id as usize];
     let callee_local_slots = callee_func_def.local_slots as usize;
+    let callee_gc_scan_slots = callee_func_def.gc_scan_slots as usize;
     let arg_slots = callee_func_def.param_slots as usize;
+    let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(call_arg_start as u16);
 
     let callee_bp = fiber.push_borrowed_call_frame(
         callee_func_id,
         call_arg_start as u16,
         call_ret_reg,
         callee_ret_slots,
+        caller_scan_slots,
         callee_local_slots as u16,
+        callee_func_def.gc_scan_slots,
     );
-    fiber.zero_slots_tail_at(callee_bp, callee_local_slots, arg_slots);
+    fiber.zero_slots_tail_at(callee_bp, callee_gc_scan_slots, arg_slots);
 
     callee_bp
 }
@@ -480,6 +490,7 @@ fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
         if let Some(frame) = existing {
             // OSR case: frame already exists, just update pc
             frame.pc = pc;
+            frame.scan_slots = func_def.gc_scan_slots;
         } else {
             // Normal case: create new frame
             let mut frame = CallFrame::new(
@@ -488,7 +499,7 @@ fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
                 bp,
                 rp.ret_reg,
                 rp.ret_slots,
-                func_def.local_slots,
+                func_def.gc_scan_slots,
                 None,
                 0,
                 0,

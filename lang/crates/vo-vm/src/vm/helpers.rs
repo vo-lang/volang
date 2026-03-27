@@ -205,7 +205,7 @@ pub unsafe fn build_closure_fiber_from_args_ptr(
     let func_def = &functions[func_id as usize];
 
     let mut fiber = Fiber::new(next_fiber_id);
-    fiber.push_frame(func_id, func_def.local_slots, 0, 0);
+    fiber.push_frame(func_id, func_def.local_slots, func_def.gc_scan_slots, 0, 0);
 
     let layout = closure_call_layout(
         closure_ref,
@@ -255,11 +255,13 @@ mod tests {
     use vo_runtime::objects::closure;
 
     fn make_func(local_slots: u16, recv_slots: u16, is_closure: bool) -> FunctionDef {
+        let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&[]);
         FunctionDef {
             name: String::new(),
             param_count: 0,
             param_slots: 0,
             local_slots,
+            gc_scan_slots,
             ret_slots: 0,
             recv_slots,
             heap_ret_gcref_count: 0,
@@ -272,6 +274,7 @@ mod tests {
             has_call_extern: false,
             code: Vec::new(),
             slot_types: Vec::new(),
+            borrowed_scan_slots_prefix: vec![0],
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
