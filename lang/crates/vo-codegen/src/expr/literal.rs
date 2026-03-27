@@ -412,6 +412,36 @@ pub fn compile_func_lit(
     parent_func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    let (func_id, captures) = lower_func_lit(expr, func_lit, ctx, info)?;
+
+    let capture_count = captures.len() as u16;
+    parent_func.emit_closure_new(dst, func_id, capture_count);
+
+    for (i, obj_key) in captures.iter().enumerate() {
+        let var_name = info.obj_name(*obj_key);
+        if let Some(sym) = info.project.interner.get(var_name) {
+            let offset = 1 + i as u16;
+
+            if let Some(local) = parent_func.lookup_local(sym) {
+                parent_func.emit_ptr_set_with_barrier(dst, offset, local.storage.slot(), 1, true);
+            } else if let Some(capture) = parent_func.lookup_capture(sym) {
+                let capture_index = capture.index;
+                let temp = parent_func.alloc_slots(&[SlotType::GcRef]);
+                parent_func.emit_op(Opcode::ClosureGet, temp, capture_index, 0);
+                parent_func.emit_ptr_set_with_barrier(dst, offset, temp, 1, true);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn lower_func_lit(
+    expr: &Expr,
+    func_lit: &vo_syntax::ast::FuncLit,
+    ctx: &mut CodegenContext,
+    info: &TypeInfoWrapper,
+) -> Result<(u32, Vec<vo_analysis::objects::ObjKey>), CodegenError> {
     // Get closure captures from type info
     let captures = info.closure_captures(expr.id);
     
@@ -419,7 +449,11 @@ pub fn compile_func_lit(
     let closure_name = format!("closure_{}", ctx.next_closure_id());
     
     // Create new FuncBuilder for the closure body (slot 0 reserved for closure ref)
-    let mut closure_builder = FuncBuilder::new_closure(&closure_name);
+    let mut closure_builder = if captures.is_empty() {
+        FuncBuilder::new(&closure_name)
+    } else {
+        FuncBuilder::new_closure(&closure_name)
+    };
     
     // Register captures in closure builder so it can access them via ClosureGet
     // Also collect capture types for cross-island serialization
@@ -566,31 +600,6 @@ pub fn compile_func_lit(
     // Build and add closure function to module
     let closure_func = closure_builder.build();
     let func_id = ctx.add_function(closure_func);
-    
-    // Emit ClosureNew instruction
-    let capture_count = captures.len() as u16;
-    parent_func.emit_closure_new(dst, func_id, capture_count);
-    
-    // Set captures (copy GcRefs from escaped variables)
-    // Closure layout: ClosureHeader (1 slot) + captures[]
-    // So capture[i] is at offset (1 + i)
-    for (i, obj_key) in captures.iter().enumerate() {
-        let var_name = info.obj_name(*obj_key);
-        if let Some(sym) = info.project.interner.get(var_name) {
-            let offset = 1 + i as u16;
-            
-            if let Some(local) = parent_func.lookup_local(sym) {
-                // Variable is a local in parent - copy its GcRef
-                parent_func.emit_ptr_set_with_barrier(dst, offset, local.storage.slot(), 1, true);
-            } else if let Some(capture) = parent_func.lookup_capture(sym) {
-                // Variable is a capture in parent - get it via ClosureGet first
-                let capture_index = capture.index;
-                let temp = parent_func.alloc_slots(&[SlotType::GcRef]);
-                parent_func.emit_op(Opcode::ClosureGet, temp, capture_index, 0);
-                parent_func.emit_ptr_set_with_barrier(dst, offset, temp, 1, true);
-            }
-        }
-    }
-    
-    Ok(())
+
+    Ok((func_id, captures))
 }

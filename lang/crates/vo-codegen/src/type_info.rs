@@ -4,6 +4,7 @@
 //! Core type layout functions are in vo_analysis::check::type_info.
 
 use vo_analysis::objects::{ObjKey, TCObjects, TypeKey};
+use vo_analysis::objects::PackageKey;
 use vo_analysis::typ::{self, Type};
 use vo_analysis::Project;
 use vo_analysis::check::type_info as type_layout;
@@ -35,22 +36,35 @@ enum QueueFlavor {
 pub struct TypeInfoWrapper<'a> {
     pub project: &'a Project,
     /// The type_info for the package being compiled.
+    pkg: PackageKey,
     type_info: &'a vo_analysis::check::TypeInfo,
 }
 
 impl<'a> TypeInfoWrapper<'a> {
     /// Create a TypeInfoWrapper for the main package.
     pub fn for_main_package(project: &'a Project) -> Self {
-        Self { project, type_info: &project.type_info }
+        Self {
+            project,
+            pkg: project.main_package,
+            type_info: &project.type_info,
+        }
     }
     
     /// Create a TypeInfoWrapper for an imported package.
-    pub fn for_package(project: &'a Project, type_info: &'a vo_analysis::check::TypeInfo) -> Self {
-        Self { project, type_info }
+    pub fn for_package(
+        project: &'a Project,
+        pkg: PackageKey,
+        type_info: &'a vo_analysis::check::TypeInfo,
+    ) -> Self {
+        Self { project, pkg, type_info }
     }
 
     pub fn tc_objs(&self) -> &TCObjects {
         &self.project.tc_objs
+    }
+
+    pub fn package_key(&self) -> PackageKey {
+        self.pkg
     }
 
     fn type_info(&self) -> &vo_analysis::check::TypeInfo {

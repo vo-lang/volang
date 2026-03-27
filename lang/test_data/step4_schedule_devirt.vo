@@ -1,0 +1,81 @@
+package main
+
+var state int
+
+type notifier interface {
+	mark()
+	signal(chan int)
+}
+
+type inner struct {
+	value int
+}
+
+func (i *inner) mark() {
+	state += i.value
+}
+
+func (i *inner) signal(out chan int) {
+	out <- i.value
+}
+
+type outer struct {
+	*inner
+}
+
+func bumpOne() {
+	state += 1
+}
+
+func signalSeven(out chan int) {
+	out <- 7
+}
+
+func main() {
+	state = 0
+	func() {
+		defer ((bumpOne))()
+		defer (func() { state += 2 })()
+	}()
+	assert(state == 3, "defer known direct targets")
+
+	state = 0
+	func() {
+		o := &outer{inner: &inner{value: 4}}
+		defer notifier(o).mark()
+	}()
+	assert(state == 4, "defer monomorphic iface target")
+
+	state = 0
+	func() {
+		o := &outer{inner: &inner{value: 8}}
+		defer notifier.mark(notifier(o))
+	}()
+	assert(state == 8, "defer monomorphic iface method expr")
+
+	out1 := make(chan int, 1)
+	o1 := &outer{inner: &inner{value: 5}}
+	go notifier(o1).signal(out1)
+	assert(<-out1 == 5, "go monomorphic iface target")
+
+	out4 := make(chan int, 1)
+	o4 := &outer{inner: &inner{value: 9}}
+	go notifier.signal(notifier(o4), out4)
+	assert(<-out4 == 9, "go monomorphic iface method expr")
+
+	out2 := make(chan int, 1)
+	go (func(out chan int) { out <- 6 })(out2)
+	assert(<-out2 == 6, "go zero-capture func lit")
+
+	out3 := make(chan int, 1)
+	go (signalSeven)(out3)
+	assert(<-out3 == 7, "go paren named func")
+
+	println("PASS")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic(msg)
+	}
+}

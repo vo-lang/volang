@@ -1,6 +1,8 @@
 //! Function and method call compilation.
 
-use vo_analysis::objects::TypeKey;
+use vo_analysis::objects::{ObjKey, TypeKey};
+use vo_analysis::selection::{Selection, SelectionKind};
+use vo_common::symbol::Symbol;
 use vo_common::abi::abi_lookup_name;
 use vo_runtime::SlotType;
 use vo_syntax::ast::{Expr, ExprKind};
@@ -21,20 +23,192 @@ pub(crate) fn calc_arg_slot_types(
     is_variadic: bool,
     info: &TypeInfoWrapper,
 ) -> Vec<SlotType> {
-    let arg_info = info.get_call_arg_info(&call.args, param_types);
+    calc_arg_slot_types_for_args(&call.args, call.spread, param_types, is_variadic, info)
+}
+
+/// Compute slot types for the arg region of a call buffer, mirroring calc_method_arg_slots.
+/// For variadic (non-spread) calls the packed slice contributes a single GcRef slot.
+pub(crate) fn calc_arg_slot_types_for_args(
+    args: &[Expr],
+    spread: bool,
+    param_types: &[TypeKey],
+    is_variadic: bool,
+    info: &TypeInfoWrapper,
+) -> Vec<SlotType> {
+    let arg_info = info.get_call_arg_info(args, param_types);
     if arg_info.tuple_expand.is_some() {
         return param_types.iter().flat_map(|&t| info.type_slot_types(t)).collect();
     }
-    if is_variadic && !call.spread {
+    if is_variadic && !spread {
         let n_fixed = num_fixed_params(param_types, is_variadic);
         let mut types: Vec<SlotType> = param_types.iter().take(n_fixed)
             .flat_map(|&t| info.type_slot_types(t))
             .collect();
-        types.push(SlotType::GcRef); // packed variadic slice = GcRef
+        types.push(SlotType::GcRef);
         types
     } else {
         param_types.iter().flat_map(|&t| info.type_slot_types(t)).collect()
     }
+}
+
+pub(crate) fn strip_paren_expr(mut expr: &Expr) -> &Expr {
+    while let ExprKind::Paren(inner) = &expr.kind {
+        expr = inner;
+    }
+    expr
+}
+
+fn is_type_name_expr(expr: &Expr, info: &TypeInfoWrapper) -> bool {
+    match &strip_paren_expr(expr).kind {
+        ExprKind::Ident(ident) => {
+            let obj_key = info.get_use(ident);
+            info.project.tc_objs.lobjs[obj_key].entity_type().is_type_name()
+        }
+        ExprKind::Selector(sel) => {
+            if let ExprKind::Ident(pkg_ident) = &strip_paren_expr(&sel.expr).kind {
+                if info.package_path(pkg_ident).is_some() {
+                    let obj_key = info.get_use(&sel.sel);
+                    return info.project.tc_objs.lobjs[obj_key].entity_type().is_type_name();
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn explicit_interface_conversion_source<'a>(expr: &'a Expr, info: &TypeInfoWrapper) -> Option<&'a Expr> {
+    let expr = strip_paren_expr(expr);
+    if !info.is_interface(info.expr_type(expr.id)) {
+        return None;
+    }
+
+    let source = match &expr.kind {
+        ExprKind::Call(call) if !call.spread && call.args.len() == 1 && is_type_name_expr(&call.func, info) => {
+            &call.args[0]
+        }
+        ExprKind::Conversion(conv) => &conv.expr,
+        _ => return None,
+    };
+
+    let source = strip_paren_expr(source);
+    let source_type = info.expr_type(source.id);
+    if info.is_interface(source_type) {
+        return None;
+    }
+    Some(source)
+}
+
+pub(crate) struct MonomorphicIfaceTarget<'a> {
+    pub recv_expr: &'a Expr,
+    pub recv_type: TypeKey,
+    pub method_obj: ObjKey,
+    pub call_info: crate::embed::MethodCallInfo,
+}
+
+pub(crate) fn resolve_monomorphic_iface_target<'a>(
+    recv_expr: &'a Expr,
+    method_sym: Symbol,
+    ctx: &mut CodegenContext,
+    info: &TypeInfoWrapper,
+) -> Result<Option<MonomorphicIfaceTarget<'a>>, CodegenError> {
+    let recv_expr = match explicit_interface_conversion_source(recv_expr, info) {
+        Some(expr) => expr,
+        None => return Ok(None),
+    };
+
+    let recv_type = info.expr_type(recv_expr.id);
+    let method_name = info.project.interner.resolve(method_sym)
+        .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
+
+    let (method_obj, indices, indirect) = match vo_analysis::lookup::lookup_field_or_method(
+        recv_type,
+        true,
+        Some(info.package_key()),
+        method_name,
+        &info.project.tc_objs,
+    ) {
+        vo_analysis::lookup::LookupResult::Entry(method_obj, indices, indirect) => {
+            (method_obj, indices, indirect)
+        }
+        vo_analysis::lookup::LookupResult::NotFound => return Ok(None),
+        vo_analysis::lookup::LookupResult::Ambiguous(_) => {
+            return Err(CodegenError::Internal(format!(
+                "ambiguous monomorphic interface target: {}",
+                method_name,
+            )));
+        }
+        vo_analysis::lookup::LookupResult::BadMethodReceiver => {
+            return Err(CodegenError::Internal(format!(
+                "bad monomorphic interface receiver: {}",
+                method_name,
+            )));
+        }
+    };
+
+    let selection = Selection::new(
+        SelectionKind::MethodVal,
+        Some(recv_type),
+        method_obj,
+        indices,
+        indirect,
+        &info.project.tc_objs,
+    );
+    let call_info = crate::embed::resolve_method_call(
+        recv_type,
+        method_name,
+        method_sym,
+        Some(&selection),
+        false,
+        ctx,
+        &info.project.tc_objs,
+        &info.project.interner,
+    ).ok_or_else(|| {
+        CodegenError::Internal(format!(
+            "monomorphic interface target not found: type_key={:?}.{}",
+            recv_type,
+            method_name,
+        ))
+    })?;
+
+    Ok(Some(MonomorphicIfaceTarget {
+        recv_expr,
+        recv_type,
+        method_obj,
+        call_info,
+    }))
+}
+
+fn emit_direct_func_call(
+    expr: &Expr,
+    call: &vo_syntax::ast::CallExpr,
+    callee_expr: &Expr,
+    func_idx: u32,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let ret_slots = info.type_slot_count(info.expr_type(expr.id));
+    let ret_slot_types = info.type_slot_types(info.expr_type(expr.id));
+    let func_type = info.expr_type(callee_expr.id);
+    let param_types = info.func_param_types(func_type);
+    let is_variadic = info.is_variadic(func_type);
+    let total_arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
+    let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
+    let args_start = func.alloc_call_buffer(&arg_slot_types, &ret_slot_types);
+
+    compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
+
+    let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
+    let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_idx);
+    func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
+
+    let ret_start = args_start + total_arg_slots as u16;
+    if ret_slots > 0 && dst != ret_start {
+        func.emit_copy(dst, ret_start, ret_slots);
+    }
+    Ok(())
 }
 
 // =============================================================================
@@ -50,15 +224,22 @@ pub fn compile_call(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    let callee_expr = strip_paren_expr(&call.func);
+
     // Check if method call (selector expression)
-    if let ExprKind::Selector(sel) = &call.func.kind {
-        return compile_method_call(expr, call, sel, dst, ctx, func, info);
+    if let ExprKind::Selector(sel) = &callee_expr.kind {
+        if let Some(selection) = info.get_selection(callee_expr.id) {
+            if matches!(selection.kind(), SelectionKind::MethodExpr) {
+                return compile_method_expr_call(expr, call, sel, selection, dst, ctx, func, info);
+            }
+        }
+        return compile_method_call(expr, call, callee_expr, sel, dst, ctx, func, info);
     }
     
     // Check if builtin or type conversion
-    if let ExprKind::Ident(ident) = &call.func.kind {
+    if let ExprKind::Ident(ident) = &callee_expr.kind {
         // Use analysis phase info for builtin detection - correctly handles variable shadowing
-        if let Some(builtin_id) = info.expr_builtin(call.func.id) {
+        if let Some(builtin_id) = info.expr_builtin(callee_expr.id) {
             return super::builtin::compile_builtin_call_by_id(expr, builtin_id, call, dst, ctx, func, info);
         }
         
@@ -84,15 +265,25 @@ pub fn compile_call(
     let ret_slot_types = info.type_slot_types(info.expr_type(expr.id));
     
     // Get function type and parameter types for interface conversion
-    let func_type = info.expr_type(call.func.id);
+    let func_type = info.expr_type(callee_expr.id);
     let param_types = info.func_param_types(func_type);
     let is_variadic = info.is_variadic(func_type);
     
     // Compute total arg slots using calc_method_arg_slots (handles variadic packing)
     let total_arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
+
+    if let ExprKind::FuncLit(func_lit) = &callee_expr.kind {
+        if info.closure_captures(callee_expr.id).is_empty() {
+            let (func_id, captures) = super::literal::lower_func_lit(callee_expr, func_lit, ctx, info)?;
+            if !captures.is_empty() {
+                panic!("zero-capture func literal lowering returned captures");
+            }
+            return emit_direct_func_call(expr, call, callee_expr, func_id, dst, ctx, func, info);
+        }
+    }
     
     // Check if calling a closure (local variable with Signature type)
-    if let ExprKind::Ident(ident) = &call.func.kind {
+    if let ExprKind::Ident(ident) = &callee_expr.kind {
         let obj_key = info.get_use(ident);
         
         // Check if it's a closure (local, capture, or global variable)
@@ -101,7 +292,7 @@ pub fn compile_call(
             || ctx.get_global_index(obj_key).is_some();
         
         if is_closure {
-            let closure_reg = compile_expr(&call.func, ctx, func, info)?;
+            let closure_reg = compile_expr(callee_expr, ctx, func, info)?;
             let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
             let args_start = func.alloc_dynamic_call_buffer(&[SlotType::Value], &arg_slot_types, &ret_slot_types);
             compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
@@ -120,25 +311,9 @@ pub fn compile_call(
         let obj = &info.project.tc_objs.lobjs[obj_key];
         
         if obj.entity_type().func_has_body() {
-            // Vo function - use Call instruction
             let func_idx = ctx.get_func_by_objkey(obj_key)
                 .ok_or_else(|| CodegenError::Internal(format!("function not registered: {:?}", ident.symbol)))?;
-            
-            // Always allocate a fresh buffer — never reuse dst as arg buffer.
-            let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
-            let args_start = func.alloc_call_buffer(&arg_slot_types, &ret_slot_types);
-            
-            compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
-            
-            let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
-            let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_idx);
-            func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
-            
-            let ret_start = args_start + total_arg_slots as u16;
-            if ret_slots > 0 && dst != ret_start {
-                func.emit_copy(dst, ret_start, ret_slots);
-            }
-            return Ok(());
+            return emit_direct_func_call(expr, call, callee_expr, func_idx, dst, ctx, func, info);
         } else {
             // Extern function (no body) - use CallExtern instruction
             let func_name = info.project.interner.resolve(ident.symbol)
@@ -153,8 +328,80 @@ pub fn compile_call(
     }
     
     // Non-ident function call (e.g., expression returning a closure)
-    let closure_reg = compile_expr(&call.func, ctx, func, info)?;
-    compile_closure_call_from_reg(expr, call, closure_reg, dst, ctx, func, info)
+    let closure_reg = compile_expr(callee_expr, ctx, func, info)?;
+    compile_closure_call_from_reg(expr, call, callee_expr, closure_reg, dst, ctx, func, info)
+}
+
+pub fn compile_method_expr_call(
+    expr: &Expr,
+    call: &vo_syntax::ast::CallExpr,
+    sel: &vo_syntax::ast::SelectorExpr,
+    selection: &vo_analysis::selection::Selection,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let recv_type = selection.recv().ok_or_else(|| {
+        CodegenError::Internal("method expression has no receiver type".to_string())
+    })?;
+    let recv_arg = call.args.first().ok_or_else(|| {
+        CodegenError::Internal("method expression call missing receiver argument".to_string())
+    })?;
+    let forwarded_args = &call.args[1..];
+    let method_name = info.project.interner.resolve(sel.sel.symbol)
+        .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
+    if info.is_interface(recv_type) {
+        if let Some(target) = resolve_monomorphic_iface_target(recv_arg, sel.sel.symbol, ctx, info)? {
+            let method_type = info.project.tc_objs.lobjs[target.method_obj].typ()
+                .ok_or_else(|| CodegenError::Internal("method type missing".to_string()))?;
+            return compile_method_dispatch_with_args(
+                expr,
+                target.recv_expr,
+                target.recv_type,
+                method_type,
+                forwarded_args,
+                call.spread,
+                method_name,
+                &target.call_info,
+                dst,
+                ctx,
+                func,
+                info,
+            );
+        }
+    }
+
+    let is_interface_recv = info.is_interface(recv_type);
+    let call_info = crate::embed::resolve_method_call(
+        recv_type,
+        method_name,
+        sel.sel.symbol,
+        Some(selection),
+        is_interface_recv,
+        ctx,
+        &info.project.tc_objs,
+        &info.project.interner,
+    ).ok_or_else(|| {
+        CodegenError::Internal(format!("method not found: type_key={:?}.{}", recv_type, method_name))
+    })?;
+
+    let method_type = info.project.tc_objs.lobjs[selection.obj()].typ()
+        .ok_or_else(|| CodegenError::Internal("method type missing".to_string()))?;
+    compile_method_dispatch_with_args(
+        expr,
+        recv_arg,
+        recv_type,
+        method_type,
+        forwarded_args,
+        call.spread,
+        method_name,
+        &call_info,
+        dst,
+        ctx,
+        func,
+        info,
+    )
 }
 
 /// Compile closure call when closure is already in a register.
@@ -162,6 +409,7 @@ pub fn compile_call(
 pub fn compile_closure_call_from_reg(
     expr: &Expr,
     call: &vo_syntax::ast::CallExpr,
+    callee_expr: &Expr,
     closure_reg: u16,
     dst: u16,
     ctx: &mut CodegenContext,
@@ -171,7 +419,7 @@ pub fn compile_closure_call_from_reg(
     let ret_slots = info.type_slot_count(info.expr_type(expr.id)) as u16;
     
     // Get function type from the closure expression to handle variadic properly
-    let func_type = info.expr_type(call.func.id);
+    let func_type = info.expr_type(callee_expr.id);
     let param_types = info.func_param_types(func_type);
     let is_variadic = info.is_variadic(func_type);
     
@@ -263,6 +511,7 @@ pub fn emit_receiver(
 fn compile_method_call(
     expr: &Expr,
     call: &vo_syntax::ast::CallExpr,
+    callee_expr: &Expr,
     sel: &vo_syntax::ast::SelectorExpr,
     dst: u16,
     ctx: &mut CodegenContext,
@@ -292,29 +541,7 @@ fn compile_method_call(
                 // Use ObjKey to avoid cross-package Symbol collision
                 let func_idx = ctx.get_func_by_objkey(obj_key)
                     .ok_or_else(|| CodegenError::Internal(format!("pkg func not registered: {:?}", sel.sel.symbol)))?;
-                let ret_slots = info.type_slot_count(info.expr_type(expr.id));
-                let func_type = info.expr_type(call.func.id);
-                let param_types = info.func_param_types(func_type);
-                let is_variadic = info.is_variadic(func_type);
-                
-                // Compute total arg slots using PARAMETER types (handles interface conversion)
-                let total_arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
-                let ret_slot_types = info.type_slot_types(info.expr_type(expr.id));
-                let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
-                let args_start = func.alloc_call_buffer(&arg_slot_types, &ret_slot_types);
-                
-                // Compile arguments with interface conversion
-                compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
-                
-                let c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
-                let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_idx);
-                func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
-                
-                let ret_start = args_start + total_arg_slots as u16;
-                if ret_slots > 0 && dst != ret_start {
-                    func.emit_copy(dst, ret_start, ret_slots);
-                }
-                return Ok(());
+                return emit_direct_func_call(expr, call, callee_expr, func_idx, dst, ctx, func, info);
             }
             // Extern function - use CallExtern
             if let Ok(extern_name) = get_extern_name(sel, info) {
@@ -329,23 +556,43 @@ fn compile_method_call(
         .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
     
     // Check if this is a func field call or method expression call
-    let selection = info.get_selection(call.func.id);
+    let selection = info.get_selection(callee_expr.id);
     if let Some(sel_info) = selection {
         match sel_info.kind() {
-            vo_analysis::selection::SelectionKind::FieldVal |
-            vo_analysis::selection::SelectionKind::MethodExpr => {
+            SelectionKind::FieldVal | SelectionKind::MethodExpr => {
                 // FieldVal: struct field of function type
                 // MethodExpr: T.Method(recv, args...) or (*T).Method(recv, args...)
                 // Both compile to closure call
-                let field_type = info.expr_type(call.func.id);
+                let field_type = info.expr_type(callee_expr.id);
                 if info.is_func_type(field_type) {
-                    let closure_reg = compile_expr(&call.func, ctx, func, info)?;
-                    return compile_closure_call_from_reg(expr, call, closure_reg, dst, ctx, func, info);
+                    let closure_reg = compile_expr(callee_expr, ctx, func, info)?;
+                    return compile_closure_call_from_reg(expr, call, callee_expr, closure_reg, dst, ctx, func, info);
                 }
             }
-            vo_analysis::selection::SelectionKind::MethodVal => {
+            SelectionKind::MethodVal => {
                 // Method value is handled below via resolve_method_call
             }
+        }
+    }
+
+    if info.is_interface(recv_type) {
+        if let Some(target) = resolve_monomorphic_iface_target(&sel.expr, sel.sel.symbol, ctx, info)? {
+            let method_type = info.project.tc_objs.lobjs[target.method_obj].typ()
+                .ok_or_else(|| CodegenError::Internal("method type missing".to_string()))?;
+            return compile_method_dispatch_with_args(
+                expr,
+                target.recv_expr,
+                target.recv_type,
+                method_type,
+                &call.args,
+                call.spread,
+                method_name,
+                &target.call_info,
+                dst,
+                ctx,
+                func,
+                info,
+            );
         }
     }
     
@@ -364,15 +611,96 @@ fn compile_method_call(
     ).ok_or_else(|| {
         CodegenError::Internal(format!("method not found: type_key={:?}.{}", recv_type, method_name))
     })?;
-    
-    // Dispatch based on call type
-    compile_method_call_dispatch(expr, call, sel, &call_info, dst, ctx, func, info)
+
+    let method_type = info.expr_type(callee_expr.id);
+    compile_method_dispatch_with_args(
+        expr,
+        &sel.expr,
+        recv_type,
+        method_type,
+        &call.args,
+        call.spread,
+        method_name,
+        &call_info,
+        dst,
+        ctx,
+        func,
+        info,
+    )
 }
 
-/// Emit interface method call (common for Interface and EmbeddedInterface dispatch).
-fn emit_interface_call(
+fn emit_static_method_call(
     expr: &Expr,
-    call: &vo_syntax::ast::CallExpr,
+    recv_expr: &Expr,
+    recv_type: TypeKey,
+    method_type: TypeKey,
+    args: &[Expr],
+    spread: bool,
+    call_info: &crate::embed::MethodCallInfo,
+    func_id: u32,
+    expects_ptr_recv: bool,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let base_type = if call_info.recv_is_pointer {
+        info.pointer_base(recv_type)
+    } else {
+        recv_type
+    };
+    let actual_recv_type = call_info.actual_recv_type(base_type);
+    let is_variadic = info.is_variadic(method_type);
+    let param_types = info.func_param_types(method_type);
+    let recv_slots = if expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
+    let arg_slots = calc_method_arg_slots_for_args(args, spread, &param_types, is_variadic, info);
+    let total_slots = recv_slots + arg_slots;
+    let ret_type = info.expr_type(expr.id);
+    let ret_slots = info.type_slot_count(ret_type);
+    let ret_slot_types = info.type_slot_types(ret_type);
+    let recv_slot_types: Vec<SlotType> = if expects_ptr_recv {
+        vec![SlotType::GcRef]
+    } else {
+        info.type_slot_types(actual_recv_type)
+    };
+    let arg_slot_types_only = calc_arg_slot_types_for_args(args, spread, &param_types, is_variadic, info);
+    let mut all_arg_slot_types = recv_slot_types;
+    all_arg_slot_types.extend(arg_slot_types_only);
+    let args_start = func.alloc_call_buffer(&all_arg_slot_types, &ret_slot_types);
+
+    let recv_storage = if let ExprKind::Ident(ident) = &recv_expr.kind {
+        func.lookup_local(ident.symbol).map(|local| local.storage)
+    } else {
+        None
+    };
+    emit_receiver(
+        recv_expr,
+        args_start,
+        recv_type,
+        recv_storage,
+        call_info,
+        actual_recv_type,
+        ctx,
+        func,
+        info,
+    )?;
+    compile_method_args_for_args(args, spread, &param_types, is_variadic, args_start + recv_slots, ctx, func, info)?;
+
+    let c = crate::type_info::encode_call_args(total_slots, ret_slots);
+    let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_id);
+    func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
+
+    let ret_start = args_start + total_slots as u16;
+    if ret_slots > 0 && dst != ret_start {
+        func.emit_copy(dst, ret_start, ret_slots);
+    }
+    Ok(())
+}
+
+fn emit_interface_call_with_args(
+    expr: &Expr,
+    args: &[Expr],
+    spread: bool,
     iface_type: vo_analysis::objects::TypeKey,
     method_idx: u32,
     iface_slot: u16,
@@ -383,14 +711,14 @@ fn emit_interface_call(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let (param_types, is_variadic) = info.get_interface_method_signature(iface_type, method_name);
-    let arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
+    let arg_slots = calc_method_arg_slots_for_args(args, spread, &param_types, is_variadic, info);
     let ret_type = info.expr_type(expr.id);
     let ret_slots = info.type_slot_count(ret_type);
     let ret_slot_types = info.type_slot_types(ret_type);
-    let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
+    let arg_slot_types = calc_arg_slot_types_for_args(args, spread, &param_types, is_variadic, info);
     let args_start = func.alloc_dynamic_call_buffer(&[SlotType::Value], &arg_slot_types, &ret_slot_types);
     
-    compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
+    compile_method_args_for_args(args, spread, &param_types, is_variadic, args_start, ctx, func, info)?;
     
     let c = crate::type_info::encode_call_args(arg_slots, ret_slots);
     func.emit_with_flags(Opcode::CallIface, method_idx as u8, iface_slot, args_start, c);
@@ -403,10 +731,14 @@ fn emit_interface_call(
 }
 
 /// Dispatch method call based on MethodCallInfo.
-fn compile_method_call_dispatch(
+fn compile_method_dispatch_with_args(
     expr: &Expr,
-    call: &vo_syntax::ast::CallExpr,
-    sel: &vo_syntax::ast::SelectorExpr,
+    recv_expr: &Expr,
+    recv_type: TypeKey,
+    method_type: TypeKey,
+    args: &[Expr],
+    spread: bool,
+    method_name: &str,
     call_info: &crate::embed::MethodCallInfo,
     dst: u16,
     ctx: &mut CodegenContext,
@@ -414,82 +746,40 @@ fn compile_method_call_dispatch(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use crate::embed::MethodDispatch;
-    
-    let method_name = info.project.interner.resolve(sel.sel.symbol).unwrap_or("?");
-    let recv_type = info.expr_type(sel.expr.id);
-    
+
     match &call_info.dispatch {
         MethodDispatch::Interface { method_idx } => {
             // Interface dispatch - interface is the receiver directly
-            let iface_slot = compile_expr(&sel.expr, ctx, func, info)?;
-            emit_interface_call(expr, call, recv_type, *method_idx, iface_slot, method_name, dst, ctx, func, info)
+            let iface_slot = compile_expr(recv_expr, ctx, func, info)?;
+            emit_interface_call_with_args(expr, args, spread, recv_type, *method_idx, iface_slot, method_name, dst, ctx, func, info)
         }
         MethodDispatch::EmbeddedInterface { iface_type, method_idx } => {
             // Embedded interface dispatch - extract interface first
             let recv_is_ptr = info.is_pointer(recv_type);
-            let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
+            let recv_reg = compile_expr(recv_expr, ctx, func, info)?;
             let iface_slot = func.alloc_interface();
             let start = crate::embed::TraverseStart::new(recv_reg, recv_is_ptr);
             call_info.emit_target(func, start, iface_slot);
             
-            emit_interface_call(expr, call, *iface_type, *method_idx, iface_slot, method_name, dst, ctx, func, info)
+            emit_interface_call_with_args(expr, args, spread, *iface_type, *method_idx, iface_slot, method_name, dst, ctx, func, info)
         }
         MethodDispatch::Static { func_id, expects_ptr_recv } => {
             // Static call
-            let base_type = if call_info.recv_is_pointer {
-                info.pointer_base(recv_type)
-            } else {
-                recv_type
-            };
-            let actual_recv_type = call_info.actual_recv_type(base_type);
-            
-            // Get method signature
-            let method_type = info.expr_type(call.func.id);
-            let is_variadic = info.is_variadic(method_type);
-            let param_types = info.func_param_types(method_type);
-            
-            // Calculate slots
-            let recv_slots = if *expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
-            let arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
-            let total_slots = recv_slots + arg_slots;
-            let ret_type = info.expr_type(expr.id);
-            let ret_slots = info.type_slot_count(ret_type);
-            let ret_slot_types = info.type_slot_types(ret_type);
-            // Receiver slot types + arg slot types for correct GC tracing
-            let recv_slot_types: Vec<SlotType> = if *expects_ptr_recv {
-                vec![SlotType::GcRef]
-            } else {
-                info.type_slot_types(actual_recv_type)
-            };
-            let arg_slot_types_only = calc_arg_slot_types(call, &param_types, is_variadic, info);
-            let mut all_arg_slot_types = recv_slot_types;
-            all_arg_slot_types.extend(arg_slot_types_only);
-            let args_start = func.alloc_call_buffer(&all_arg_slot_types, &ret_slot_types);
-            
-            // Emit receiver
-            let recv_storage = if let ExprKind::Ident(ident) = &sel.expr.kind {
-                func.lookup_local(ident.symbol).map(|local| local.storage)
-            } else {
-                None
-            };
-            emit_receiver(
-                &sel.expr, args_start, recv_type, recv_storage,
-                call_info, actual_recv_type, ctx, func, info
-            )?;
-            
-            // Compile arguments
-            compile_method_args(call, &param_types, is_variadic, args_start + recv_slots, ctx, func, info)?;
-            
-            // Call
-            let c = crate::type_info::encode_call_args(total_slots, ret_slots);
-            let (func_id_low, func_id_high) = crate::type_info::encode_func_id(*func_id);
-            func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
-            
-            let ret_start = args_start + total_slots as u16;
-            if ret_slots > 0 && dst != ret_start {
-                func.emit_copy(dst, ret_start, ret_slots);
-            }
-            Ok(())
+            emit_static_method_call(
+                expr,
+                recv_expr,
+                recv_type,
+                method_type,
+                args,
+                spread,
+                call_info,
+                *func_id,
+                *expects_ptr_recv,
+                dst,
+                ctx,
+                func,
+                info,
+            )
         }
     }
 }
@@ -543,7 +833,7 @@ pub fn compile_extern_call(
 /// Used by method calls and defer with known param types.
 /// Handles multi-value function calls: f(g()) where g() returns multiple values.
 pub fn compile_args_with_types(
-    args: &[vo_syntax::ast::Expr],
+    args: &[Expr],
     param_types: &[TypeKey],
     args_start: u16,
     ctx: &mut CodegenContext,
@@ -627,29 +917,43 @@ pub fn compile_method_args(
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    compile_method_args_for_args(&call.args, call.spread, param_types, is_variadic, args_start, ctx, func, info)?;
+    Ok(())
+}
+
+pub(crate) fn compile_method_args_for_args(
+    args: &[Expr],
+    spread: bool,
+    param_types: &[TypeKey],
+    is_variadic: bool,
+    args_start: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
     // Tuple expansion for non-variadic calls: f(g()) where g() returns multiple values
-    let arg_info = info.get_call_arg_info(&call.args, param_types);
+    let arg_info = info.get_call_arg_info(args, param_types);
     if arg_info.tuple_expand.is_some() {
-        return compile_args_with_types(&call.args, param_types, args_start, ctx, func, info);
+        return compile_args_with_types(args, param_types, args_start, ctx, func, info);
     }
     
-    if is_variadic && !call.spread {
+    if is_variadic && !spread {
         let n_fixed = num_fixed_params(param_types, is_variadic);
         
         // Emit fixed arguments
-        let fixed_args: Vec<_> = call.args.iter().take(n_fixed).cloned().collect();
+        let fixed_args: Vec<_> = args.iter().take(n_fixed).cloned().collect();
         let mut offset = compile_args_with_types(&fixed_args, &param_types[..n_fixed], args_start, ctx, func, info)?;
         
         // Pack variadic arguments into slice (handles tuple expansion internally)
-        let variadic_args: Vec<_> = call.args.iter().skip(n_fixed).collect();
+        let variadic_args: Vec<_> = args.iter().skip(n_fixed).collect();
         let elem_type = info.slice_elem_type(param_types.last().copied().unwrap());
         let slice_reg = pack_variadic_args(&variadic_args, elem_type, ctx, func, info)?;
         func.emit_copy(args_start + offset, slice_reg, 1);
         offset += 1;
         Ok(offset)
     } else {
-        compile_args_with_types(&call.args, param_types, args_start, ctx, func, info)
+        compile_args_with_types(args, param_types, args_start, ctx, func, info)
     }
 }
 
@@ -660,15 +964,25 @@ pub fn calc_method_arg_slots(
     is_variadic: bool,
     info: &TypeInfoWrapper,
 ) -> u16 {
-    let arg_info = info.get_call_arg_info(&call.args, param_types);
+    calc_method_arg_slots_for_args(&call.args, call.spread, param_types, is_variadic, info)
+}
+
+pub(crate) fn calc_method_arg_slots_for_args(
+    args: &[Expr],
+    spread: bool,
+    param_types: &[TypeKey],
+    is_variadic: bool,
+    info: &TypeInfoWrapper,
+) -> u16 {
+    let arg_info = info.get_call_arg_info(args, param_types);
     if arg_info.tuple_expand.is_some() {
         return param_types.iter().map(|&t| info.type_slot_count(t)).sum();
     }
     
-    if is_variadic && !call.spread {
+    if is_variadic && !spread {
         let n_fixed = num_fixed_params(param_types, is_variadic);
         let fixed_slots: u16 = param_types.iter().take(n_fixed).map(|&t| info.type_slot_count(t)).sum();
-        fixed_slots + 1  // +1 for packed slice
+        fixed_slots + 1
     } else {
         param_types.iter().map(|&t| info.type_slot_count(t)).sum()
     }

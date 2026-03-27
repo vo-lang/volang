@@ -1,0 +1,44 @@
+package main
+
+type hiddenReader interface {
+	read() int
+}
+
+type inner struct {
+	value int
+}
+
+func (i *inner) read() int {
+	return i.value
+}
+
+type outer struct {
+	*inner
+}
+
+func addOne(x int) int {
+	return x + 1
+}
+
+func main() {
+	assert(((addOne))(41) == 42, "paren named func")
+	assert((func(x int) int { return x + 2 })(40) == 42, "zero-capture func lit")
+
+	o := &outer{inner: &inner{value: 42}}
+
+	assert(hiddenReader(o).read() == 42, "explicit iface conversion method call")
+
+	mv := hiddenReader(o).read
+	assert(mv() == 42, "explicit iface conversion method value")
+
+	assert(hiddenReader.read(hiddenReader(o)) == 42, "explicit iface conversion method expr immediate")
+	assert((hiddenReader.read)(hiddenReader(o)) == 42, "paren method expr immediate")
+
+	println("PASS")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic(msg)
+	}
+}

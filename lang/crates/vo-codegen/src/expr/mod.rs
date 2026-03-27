@@ -22,7 +22,6 @@ use crate::func::{ExprSource, FuncBuilder, StorageKind};
 use crate::type_info::TypeInfoWrapper;
 
 // Re-export commonly used items
-pub use call::emit_receiver;
 pub use literal::{compile_const_value, get_const_value};
 pub use pointer::compile_expr_to_ptr;
 pub use selector::{is_pkg_qualified_name, traverse_indirect_field};

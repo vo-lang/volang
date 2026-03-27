@@ -69,6 +69,39 @@ pub fn compile_method_value(
     
     // Interface method value: capture interface, use CallIface in wrapper
     if info.is_interface(recv_type) {
+        if let Some(target) = crate::expr::call::resolve_monomorphic_iface_target(&sel.expr, sel.sel.symbol, ctx, info)? {
+            match target.call_info.dispatch {
+                crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => {
+                    return compile_method_value_static(
+                        target.recv_expr,
+                        target.recv_type,
+                        target.method_obj,
+                        func_id,
+                        expects_ptr_recv,
+                        &target.call_info.embed_path,
+                        dst,
+                        ctx,
+                        func,
+                        info,
+                    );
+                }
+                crate::embed::MethodDispatch::EmbeddedInterface { .. } => {
+                    return compile_method_value_embedded_iface(
+                        target.recv_expr,
+                        target.recv_type,
+                        &target.call_info,
+                        method_name,
+                        dst,
+                        ctx,
+                        func,
+                        info,
+                    );
+                }
+                crate::embed::MethodDispatch::Interface { .. } => {
+                    return Err(CodegenError::Internal("unexpected interface dispatch after monomorphic interface resolution".to_string()));
+                }
+            }
+        }
         return compile_interface_method_value(sel, recv_type, method_name, dst, ctx, func, info);
     }
     
@@ -88,7 +121,7 @@ pub fn compile_method_value(
     match call_info.dispatch {
         crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => {
             return compile_method_value_static(
-                sel,
+                &sel.expr,
                 recv_type,
                 selection.obj(),
                 func_id,
@@ -102,7 +135,7 @@ pub fn compile_method_value(
         }
         crate::embed::MethodDispatch::EmbeddedInterface { .. } => {
             return compile_method_value_embedded_iface(
-                sel, recv_type, &call_info, method_name, dst, ctx, func, info
+                &sel.expr, recv_type, &call_info, method_name, dst, ctx, func, info
             );
         }
         crate::embed::MethodDispatch::Interface { .. } => {
@@ -137,7 +170,7 @@ fn emit_box_value(
 /// - Pointer receiver: capture the pointer directly
 /// - Value receiver: box the value and capture the box (so wrapper can deref)
 fn compile_method_value_static(
-    sel: &vo_syntax::ast::SelectorExpr,
+    recv_expr: &Expr,
     recv_type: vo_analysis::objects::TypeKey,
     method_obj: vo_analysis::objects::ObjKey,
     method_func_id: u32,
@@ -161,7 +194,7 @@ fn compile_method_value_static(
         .collect();
     let param_transfer_types = param_transfer_types(&param_type_keys, ctx, info);
     let ret_slot_types = flatten_type_slot_types(&ret_type_keys, info);
-    let recv = crate::embed::extract_receiver(&sel.expr, recv_type, embed_path, expects_ptr_recv, ctx, func, info)?;
+    let recv = crate::embed::extract_receiver(recv_expr, recv_type, embed_path, expects_ptr_recv, ctx, func, info)?;
     
     let capture_box = match recv {
         crate::embed::ReceiverValue::Pointer { reg, .. } if expects_ptr_recv => {
@@ -231,7 +264,7 @@ fn emit_iface_method_value_closure(
 
 /// Compile method value for embedded interface dispatch.
 fn compile_method_value_embedded_iface(
-    sel: &vo_syntax::ast::SelectorExpr,
+    recv_expr: &Expr,
     recv_type: vo_analysis::objects::TypeKey,
     call_info: &crate::embed::MethodCallInfo,
     method_name: &str,
@@ -246,7 +279,7 @@ fn compile_method_value_embedded_iface(
     };
     
     let recv_is_ptr = info.is_pointer(recv_type);
-    let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
+    let recv_reg = compile_expr(recv_expr, ctx, func, info)?;
     let iface_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
     let start = crate::embed::TraverseStart::new(recv_reg, recv_is_ptr);
     call_info.emit_target(func, start, iface_reg);

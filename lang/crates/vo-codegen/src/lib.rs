@@ -315,7 +315,9 @@ fn register_types(
 
     for (pkg_path, files) in &project.imported_files {
         if let Some(pkg_type_info) = project.imported_type_infos.get(pkg_path) {
-            let pkg_info = TypeInfoWrapper::for_package(project, pkg_type_info);
+            let pkg = project.tc_objs.find_package_by_path(pkg_path)
+                .unwrap_or_else(|| panic!("imported package not found during type registration: {}", pkg_path));
+            let pkg_info = TypeInfoWrapper::for_package(project, pkg, pkg_type_info);
             register_pkg_types(pkg_path, files, project, ctx, &pkg_info)?;
         }
     }
@@ -482,7 +484,9 @@ fn collect_declarations(
     // Then collect imported package declarations (using their respective type_info)
     for (pkg_path, files) in &project.imported_files {
         if let Some(pkg_type_info) = project.imported_type_infos.get(pkg_path) {
-            let pkg_info = TypeInfoWrapper::for_package(project, pkg_type_info);
+            let pkg = project.tc_objs.find_package_by_path(pkg_path)
+                .unwrap_or_else(|| panic!("imported package not found during declaration collection: {}", pkg_path));
+            let pkg_info = TypeInfoWrapper::for_package(project, pkg, pkg_type_info);
             for file in files {
                 collect_file_declarations(file, project, ctx, &pkg_info)?;
             }
@@ -582,7 +586,9 @@ fn compile_functions(
     // Then imported package files
     for (pkg_path, files) in &project.imported_files {
         if let Some(pkg_type_info) = project.imported_type_infos.get(pkg_path) {
-            let pkg_info = TypeInfoWrapper::for_package(project, pkg_type_info);
+            let pkg = project.tc_objs.find_package_by_path(pkg_path)
+                .unwrap_or_else(|| panic!("imported package not found during function compilation: {}", pkg_path));
+            let pkg_info = TypeInfoWrapper::for_package(project, pkg, pkg_type_info);
             for file in files {
                 compile_file_functions(file, project, ctx, &pkg_info, &mut method_mappings)?;
             }
@@ -1300,8 +1306,10 @@ fn compile_init_and_entry(
     
     // Initialize imported packages' global variables in dependency order
     // (dependencies are initialized before dependents)
-    for (_, pkg_type_info) in project.imported_packages_in_order() {
-        let pkg_info = TypeInfoWrapper::for_package(project, pkg_type_info);
+    for (pkg_path, pkg_type_info) in project.imported_packages_in_order() {
+        let pkg = project.tc_objs.find_package_by_path(pkg_path)
+            .unwrap_or_else(|| panic!("imported package not found during global init compilation: {}", pkg_path));
+        let pkg_info = TypeInfoWrapper::for_package(project, pkg, pkg_type_info);
         compile_package_globals(ctx, &mut init_builder, &pkg_info)?;
     }
     
