@@ -4,7 +4,7 @@ Vo Development Tool - Unified test/bench/loc script
 
 Usage:
     ./d.py test [vm|jit|gc|nostd|wasm] [-v] [file.vo]
-    ./d.py bench [all|vo|calls|<name>|score] [--all-langs] [--jit-hot]
+    ./d.py bench [all|vo|<name>|score] [--all-langs] [--jit-hot]
     ./d.py loc [--with-tests]
     ./d.py play [--build-only]  Build WASM and start playground
 """
@@ -1110,9 +1110,7 @@ class TestRunner:
 # =============================================================================
 
 class BenchmarkRunner:
-    BENCH_GROUPS = {
-        'calls': 'call-',
-    }
+    BENCH_GROUPS = {}
 
     def __init__(
         self,
@@ -1593,7 +1591,7 @@ def main():
     # bench
     bench_parser = subparsers.add_parser('bench', help='Run benchmarks')
     bench_parser.add_argument('target', nargs='?', default='all',
-                              help='all, vo, calls, score, or benchmark name')
+                              help='all, vo, score, or benchmark name')
     bench_parser.add_argument('--all-langs', action='store_true',
                               help='Include Python and Ruby')
     bench_parser.add_argument('--arch', choices=['32', '64'], default='64',

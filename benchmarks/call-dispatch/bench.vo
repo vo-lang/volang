@@ -1,0 +1,86 @@
+package main
+
+type Adder interface {
+	Add(int) int
+}
+
+type Inc struct {
+	base int
+}
+
+func (a *Inc) Add(x int) int {
+	return x + a.base
+}
+
+type Add1 struct{}
+type Add3 struct{}
+type Add5 struct{}
+type Add7 struct{}
+
+func (a *Add1) Add(x int) int { return x + 1 }
+func (a *Add3) Add(x int) int { return x + 3 }
+func (a *Add5) Add(x int) int { return x + 5 }
+func (a *Add7) Add(x int) int { return x + 7 }
+
+func makeAdder(base int) func(int) int {
+	return func(x int) int {
+		return x + base
+	}
+}
+
+func main() {
+	n := 5000000
+	acc := 0
+
+	// closure mono
+	f := makeAdder(7)
+	for i := 0; i < n; i++ {
+		acc += f(i & 1023)
+	}
+
+	// closure poly4
+	f0 := makeAdder(1)
+	f1 := makeAdder(3)
+	f2 := makeAdder(5)
+	f3 := makeAdder(7)
+	for i := 0; i < n; i++ {
+		x := i & 1023
+		slot := i & 3
+		if slot == 0 {
+			acc += f0(x)
+		} else if slot == 1 {
+			acc += f1(x)
+		} else if slot == 2 {
+			acc += f2(x)
+		} else {
+			acc += f3(x)
+		}
+	}
+
+	// iface mono
+	var adder Adder = &Inc{base: 7}
+	for i := 0; i < n; i++ {
+		acc += adder.Add(i & 1023)
+	}
+
+	// iface poly4
+	var a0 Adder = &Add1{}
+	var a1 Adder = &Add3{}
+	var a2 Adder = &Add5{}
+	var a3 Adder = &Add7{}
+	for i := 0; i < n; i++ {
+		x := i & 1023
+		slot := i & 3
+		if slot == 0 {
+			acc += a0.Add(x)
+		} else if slot == 1 {
+			acc += a1.Add(x)
+		} else if slot == 2 {
+			acc += a2.Add(x)
+		} else {
+			acc += a3.Add(x)
+		}
+	}
+
+	println(acc)
+}
