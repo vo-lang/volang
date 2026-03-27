@@ -491,6 +491,23 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     fn spill_all_vars(&mut self) {
         self.emit_variable_spill();
     }
+    fn sync_slots_to_memory(&mut self, start_slot: u16, slot_count: u16) {
+        if slot_count == 0 {
+            return;
+        }
+        let local_count = self.vars.len() as u16;
+        let end_slot = start_slot.saturating_add(slot_count).min(local_count);
+        let spill_end = end_slot.min(self.memory_only_start);
+        if start_slot >= spill_end {
+            return;
+        }
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+        for slot in start_slot..spill_end {
+            let offset = (slot as i32) * 8;
+            let val = self.builder.use_var(self.vars[slot as usize]);
+            self.builder.ins().store(MemFlags::trusted(), val, locals_ptr, offset);
+        }
+    }
     fn local_slot_count(&self) -> usize {
         self.vars.len()
     }

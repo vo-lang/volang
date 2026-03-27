@@ -96,6 +96,10 @@ pub fn emit_funcref_call<'a>(emitter: &mut impl IrEmitter<'a>, func_ref: FuncRef
     // when one of those effects is present, and eventually narrow the spill set to live GC-visible
     // slots instead of materializing the entire frame on every helper call.
     emitter.spill_all_vars();
+    emit_funcref_call_raw(emitter, func_ref, args)
+}
+
+pub fn emit_funcref_call_raw<'a>(emitter: &mut impl IrEmitter<'a>, func_ref: FuncRef, args: &[Value]) -> Inst {
     if cfg!(target_arch = "aarch64") {
         let sig = emitter.builder().func.dfg.ext_funcs[func_ref].signature;
         let func_addr = emitter.builder().ins().func_addr(types::I64, func_ref);
@@ -150,6 +154,12 @@ pub trait IrEmitter<'a> {
     /// Spill all SSA variables to memory.
     /// Called before returning non-Ok JitResult so VM can see/restore state.
     fn spill_all_vars(&mut self);
+    
+    fn sync_slots_to_memory(&mut self, start_slot: u16, slot_count: u16) {
+        let _ = start_slot;
+        let _ = slot_count;
+        self.spill_all_vars();
+    }
     
     /// Get the number of local variable slots.
     fn local_slot_count(&self) -> usize;

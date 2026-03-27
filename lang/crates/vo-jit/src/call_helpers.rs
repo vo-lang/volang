@@ -131,7 +131,6 @@ struct IcHitParams {
     ic_arg_offset: Value,
     ic_local_slots: Value,
     ic_func_id: Value,
-    ic_is_leaf: Value,
     ret_ptr: Value,
     caller_bp: Value,
     old_fiber_sp: Value,
@@ -159,27 +158,14 @@ fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
     for (i, val) in user_arg_vals.iter().enumerate() {
         emitter.builder().ins().store(MemFlags::trusted(), *val, user_dst_base, (i * 8) as i32);
     }
-    emitter.spill_all_vars();
     
-    // Leaf callee optimization: skip ctx stores if callee never reads jit_bp/fiber_sp
-    let is_leaf_flag = emitter.builder().ins().icmp_imm(IntCC::NotEqual, p.ic_is_leaf, 0);
+    // Update ctx
     let new_bp = p.old_fiber_sp;
     let new_sp = emitter.builder().ins().iadd(new_bp, p.ic_local_slots);
-    
-    // Pre-call: conditionally update ctx (skip for leaf callees)
-    let pre_store_block = emitter.builder().create_block();
-    let call_block = emitter.builder().create_block();
-    emitter.builder().ins().brif(is_leaf_flag, call_block, &[], pre_store_block, &[]);
-    
-    emitter.builder().switch_to_block(pre_store_block);
-    emitter.builder().seal_block(pre_store_block);
     emitter.builder().ins().store(MemFlags::trusted(), new_bp, p.ctx, JitContext::OFFSET_JIT_BP);
     emitter.builder().ins().store(MemFlags::trusted(), new_sp, p.ctx, JitContext::OFFSET_FIBER_SP);
-    emitter.builder().ins().jump(call_block, &[]);
     
     // Direct JIT call
-    emitter.builder().switch_to_block(call_block);
-    emitter.builder().seal_block(call_block);
     let jit_func_sig = import_jit_func_sig(emitter);
     let jit_call = emitter.builder().ins().call_indirect(
         jit_func_sig, p.ic_jit_ptr, &[p.ctx, p.ic_args_ptr, p.ret_ptr]
@@ -193,14 +179,9 @@ fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
     let ic_non_ok_block = emitter.builder().create_block();
     emitter.builder().ins().brif(is_ok, ic_ok_block, &[], ic_non_ok_block, &[]);
     
-    // IC hit OK: conditionally restore ctx (skip for leaf)
+    // IC hit OK: restore ctx
     emitter.builder().switch_to_block(ic_ok_block);
     emitter.builder().seal_block(ic_ok_block);
-    let restore_block = emitter.builder().create_block();
-    emitter.builder().ins().brif(is_leaf_flag, p.merge_block, &[], restore_block, &[]);
-    
-    emitter.builder().switch_to_block(restore_block);
-    emitter.builder().seal_block(restore_block);
     emitter.builder().ins().store(MemFlags::trusted(), p.caller_bp, p.ctx, JitContext::OFFSET_JIT_BP);
     emitter.builder().ins().store(MemFlags::trusted(), p.old_fiber_sp, p.ctx, JitContext::OFFSET_FIBER_SP);
     emitter.builder().ins().jump(p.merge_block, &[]);
@@ -342,6 +323,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(nil_block);
     emitter.builder().seal_block(nil_block);
     let panic_result = emitter.builder().ins().iconst(types::I32, panic_ret_val as i64);
+    emitter.spill_all_vars();
     emitter.builder().ins().return_(&[panic_result]);
     
     emitter.builder().switch_to_block(continue_block);
@@ -423,7 +405,6 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     let ic_arg_offset = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_ARG_OFFSET);
     let ic_slot0_kind = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_SLOT0_KIND);
     let ic_func_id = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_FUNC_ID);
-    let ic_is_leaf = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_IS_LEAF);
     
     // Write slot0 based on slot0_kind
     // SLOT0_NONE(0): skip, SLOT0_CLOSURE_REF(1): closure_ref, SLOT0_CAPTURE0(2): captures[0]
@@ -464,7 +445,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     
     emit_ic_hit_call_and_result(emitter, IcHitParams {
         ctx, ic_jit_ptr, ic_args_ptr, ic_arg_offset,
-        ic_local_slots, ic_func_id, ic_is_leaf, ret_ptr,
+        ic_local_slots, ic_func_id, ret_ptr,
         caller_bp, old_fiber_sp, merge_block,
         arg_start, arg_slots, ret_slots, resume_pc,
     }, &user_arg_vals);
@@ -638,14 +619,13 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     let ic_local_slots = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_LOCAL_SLOTS);
     let ic_arg_offset = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_ARG_OFFSET);
     let ic_func_id = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_FUNC_ID);
-    let ic_is_leaf = emitter.builder().ins().load(types::I32, MemFlags::trusted(), ic_entry, DynCallIC::OFFSET_IS_LEAF);
     
     // Write receiver (slot1) to slot 0 of callee args
     emitter.builder().ins().stack_store(slot1, ic_args_slot, 0);
     
     emit_ic_hit_call_and_result(emitter, IcHitParams {
         ctx, ic_jit_ptr, ic_args_ptr, ic_arg_offset,
-        ic_local_slots, ic_func_id, ic_is_leaf, ret_ptr,
+        ic_local_slots, ic_func_id, ret_ptr,
         caller_bp, old_fiber_sp, merge_block,
         arg_start, arg_slots, ret_slots, resume_pc,
     }, &user_arg_vals);
@@ -789,7 +769,7 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     // PREPARED doesn't need arg_start — args are already copied by the prepare callback.
     // The PREPARED handler uses this as the resume_pc for materialize_jit_frames so the
     // innermost caller frame gets the correct pc in nested call scenarios.
-    crate::translator::emit_funcref_call(emitter, set_call_request_func, &[ctx, p.func_id, p.resume_pc_val, callee_bp_val, p.ret_slots_val, p.ret_reg_val, prepared_kind]);
+    crate::translator::emit_funcref_call_raw(emitter, set_call_request_func, &[ctx, p.func_id, p.resume_pc_val, callee_bp_val, p.ret_slots_val, p.ret_reg_val, prepared_kind]);
     
     let call_result = emitter.builder().ins().iconst(types::I32, JIT_RESULT_CALL as i64);
     emitter.builder().ins().return_(&[call_result]);
@@ -969,7 +949,7 @@ pub fn emit_call_via_vm<'a, E: IrEmitter<'a>>(
     
     let ret_reg_val = emitter.builder().ins().iconst(types::I32, config.ret_reg as i64);
     let call_kind_val = emitter.builder().ins().iconst(types::I32, JitContext::CALL_KIND_REGULAR as i64);
-    crate::translator::emit_funcref_call(emitter, set_call_request_func, &[ctx, func_id_val, arg_start_val, resume_pc_val, ret_slots_val, ret_reg_val, call_kind_val]);
+    crate::translator::emit_funcref_call_raw(emitter, set_call_request_func, &[ctx, func_id_val, arg_start_val, resume_pc_val, ret_slots_val, ret_reg_val, call_kind_val]);
     
     // Return JitResult::Call
     let call_result = emitter.builder().ins().iconst(types::I32, JIT_RESULT_CALL as i64);
@@ -1058,7 +1038,6 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     let ret_slots_val = emitter.builder().ins().iconst(types::I32, config.call_ret_slots as i64);
     let current_pc = emitter.current_pc();
     let caller_resume_pc_val = emitter.builder().ins().iconst(types::I32, (current_pc + 1) as i64);
-    emitter.spill_all_vars();
     
     // Inline update ctx.jit_bp and ctx.fiber_sp for callee's correct saved_jit_bp
     let new_bp = old_fiber_sp;
@@ -1072,7 +1051,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     // Call callee - direct or indirect based on whether we have a FuncRef
     let jit_result = if let Some(func_ref) = config.callee_func_ref {
         // Direct call (fast path - no null check needed)
-        let call = crate::translator::emit_funcref_call(emitter, func_ref, &[ctx, args_ptr, ret_ptr]);
+        let call = crate::translator::emit_funcref_call_raw(emitter, func_ref, &[ctx, args_ptr, ret_ptr]);
         emitter.builder().inst_results(call)[0]
     } else {
         // Indirect call with null check and VM fallback
@@ -1146,7 +1125,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         let set_call_request_func = emitter.helpers().set_call_request.expect("set_call_request");
         let arg_start_val = emitter.builder().ins().iconst(types::I32, config.arg_start as i64);
         let call_kind_val = emitter.builder().ins().iconst(types::I32, JitContext::CALL_KIND_REGULAR as i64);
-        crate::translator::emit_funcref_call(emitter, set_call_request_func, &[ctx, func_id_val, arg_start_val, caller_resume_pc_val, ret_slots_val, ret_reg_val, call_kind_val]);
+        crate::translator::emit_funcref_call_raw(emitter, set_call_request_func, &[ctx, func_id_val, arg_start_val, caller_resume_pc_val, ret_slots_val, ret_reg_val, call_kind_val]);
         
         let call_result = emitter.builder().ins().iconst(types::I32, JIT_RESULT_CALL as i64);
         emitter.builder().ins().return_(&[call_result]);

@@ -132,7 +132,7 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         ErrDeferPush => { defer_push(e, inst, true); Ok(Completed) }
         Recover => { recover(e, inst); Ok(Completed) }
         // Select Statement
-        SelectBegin => { select_begin(e, inst); Ok(Completed) }
+        SelectBegin => { select_begin(e, inst)?; Ok(Completed) }
         SelectSend => { select_send(e, inst); Ok(Completed) }
         SelectRecv => { select_recv(e, inst); Ok(Completed) }
         SelectExec => { select_exec(e, inst)?; Ok(Completed) }
