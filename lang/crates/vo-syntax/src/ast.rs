@@ -1237,10 +1237,8 @@ pub fn walk_stmt<V: Visitor>(visitor: &mut V, stmt: &Stmt) {
             }
             visitor.visit_expr(&s.expr);
             for case in &s.cases {
-                for ty in &case.types {
-                    if let Some(ty) = ty {
-                        visitor.visit_type_expr(ty);
-                    }
+                for ty in case.types.iter().flatten() {
+                    visitor.visit_type_expr(ty);
                 }
                 for s in &case.body {
                     visitor.visit_stmt(s);

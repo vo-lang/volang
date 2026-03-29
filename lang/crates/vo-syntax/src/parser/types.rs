@@ -1,3 +1,4 @@
+#![allow(clippy::result_unit_err)]
 //! Type parsing.
 
 use super::{ParseResult, Parser};

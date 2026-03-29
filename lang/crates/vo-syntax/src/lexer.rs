@@ -285,7 +285,7 @@ impl<'src> Lexer<'src> {
                     self.advance();
                     self.advance();
                     TokenKind::Ellipsis
-                } else if self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                } else if self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     // Float starting with .
                     self.scan_float_after_dot()
                 } else {
@@ -553,7 +553,7 @@ impl<'src> Lexer<'src> {
             Some('.')
                 if self
                     .peek_next()
-                    .map_or(false, |c| c.is_ascii_digit() || c == 'e' || c == 'E') =>
+                    .is_some_and(|c| c.is_ascii_digit() || c == 'e' || c == 'E') =>
             {
                 self.advance();
                 self.scan_float_after_dot()
@@ -575,7 +575,7 @@ impl<'src> Lexer<'src> {
         // Check for hex float starting with dot: 0x.8p0
         if self.peek() == Some('.') {
             self.advance();
-            if !self.peek().map_or(false, |c| c.is_ascii_hexdigit()) {
+            if !self.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
                 let start = self.pos().saturating_sub(3);
                 self.diagnostics
                     .emit(SyntaxError::HexFloatNoDigits.at(start..self.pos()));
@@ -585,7 +585,7 @@ impl<'src> Lexer<'src> {
             return self.scan_hex_exponent();
         }
 
-        if !self.peek().map_or(false, |c| c.is_ascii_hexdigit()) {
+        if !self.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
             let start = self.pos().saturating_sub(2);
             self.diagnostics
                 .emit(SyntaxError::HexNoDigits.at(start..self.pos()));
@@ -610,7 +610,7 @@ impl<'src> Lexer<'src> {
     fn scan_octal_number(&mut self) -> TokenKind {
         self.advance(); // o or O
 
-        if !self.peek().map_or(false, |c| matches!(c, '0'..='7')) {
+        if !self.peek().is_some_and(|c| matches!(c, '0'..='7')) {
             let start = self.pos().saturating_sub(2);
             self.diagnostics
                 .emit(SyntaxError::OctalNoDigits.at(start..self.pos()));
@@ -652,7 +652,7 @@ impl<'src> Lexer<'src> {
     fn scan_binary_number(&mut self) -> TokenKind {
         self.advance(); // b or B
 
-        if !self.peek().map_or(false, |c| matches!(c, '0' | '1')) {
+        if !self.peek().is_some_and(|c| matches!(c, '0' | '1')) {
             let start = self.pos().saturating_sub(2);
             self.diagnostics
                 .emit(SyntaxError::BinaryNoDigits.at(start..self.pos()));
@@ -721,7 +721,7 @@ impl<'src> Lexer<'src> {
             self.advance();
         }
 
-        if !self.peek().map_or(false, |c| c.is_ascii_digit()) {
+        if !self.peek().is_some_and(|c| c.is_ascii_digit()) {
             let start = self.pos().saturating_sub(1);
             self.diagnostics
                 .emit(SyntaxError::ExponentNoDigits.at(start..self.pos()));
@@ -743,11 +743,11 @@ impl<'src> Lexer<'src> {
 
         self.advance(); // p or P
 
-        if self.peek() == Some('+') || self.peek() == Some('-') {
+        if self.peek().is_some_and(|c| matches!(c, '+' | '-')) {
             self.advance();
         }
 
-        if !self.peek().map_or(false, |c| c.is_ascii_digit()) {
+        if !self.peek().is_some_and(|c| c.is_ascii_digit()) {
             let start = self.pos().saturating_sub(1);
             self.diagnostics
                 .emit(SyntaxError::ExponentNoDigits.at(start..self.pos()));
@@ -921,7 +921,7 @@ impl<'src> Lexer<'src> {
     fn scan_octal_escape(&mut self, start: u32) {
         for _ in 0..3 {
             match self.peek() {
-                Some(c) if matches!(c, '0'..='7') => {
+                Some('0'..='7') => {
                     self.advance();
                 }
                 _ => {

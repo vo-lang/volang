@@ -1,3 +1,4 @@
+#![allow(clippy::result_unit_err)]
 //! Statement parsing.
 
 use super::{ParseResult, Parser};
@@ -355,7 +356,7 @@ impl<'a> Parser<'a> {
                         let exprs: Vec<Expr> = svd
                             .names
                             .iter()
-                            .map(|ident| self.make_expr(ExprKind::Ident(ident.clone()), ident.span))
+                            .map(|ident| self.make_expr(ExprKind::Ident(*ident), ident.span))
                             .collect();
                         let (key, value) = self.exprs_to_key_value(&exprs);
                         ForClause::Range {
@@ -408,7 +409,7 @@ impl<'a> Parser<'a> {
                 if svd.names.len() == 1 && svd.values.len() == 1 {
                     if let ExprKind::TypeAssert(ta) = &svd.values[0].kind {
                         if ta.ty.is_none() {
-                            return Some((Some(svd.names[0].clone()), svd.values[0].clone()));
+                            return Some((Some(svd.names[0]), svd.values[0].clone()));
                         }
                     }
                 }

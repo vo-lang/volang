@@ -1,3 +1,4 @@
+#![allow(clippy::result_unit_err)]
 //! Declaration parsing.
 
 use super::{ParseResult, Parser};
@@ -392,7 +393,7 @@ impl<'a> Parser<'a> {
 
             for name in names {
                 results.push(ResultParam {
-                    name: Some(name.clone()),
+                    name: Some(name),
                     ty: ty.clone(),
                     span: Span::new(start, self.current.span.start),
                 });

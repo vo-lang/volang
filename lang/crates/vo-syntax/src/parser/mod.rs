@@ -1,3 +1,4 @@
+#![allow(clippy::result_unit_err)]
 //! Parser for the Vo programming language.
 //!
 //! This module provides a recursive descent parser that converts a token stream
@@ -291,11 +292,10 @@ impl<'a> Parser<'a> {
     // =========================================================================
 
     fn advance(&mut self) -> Token {
-        let token = std::mem::replace(
+        std::mem::replace(
             &mut self.current,
             std::mem::replace(&mut self.peek, self.lexer.next_token()),
-        );
-        token
+        )
     }
 
     fn at(&self, kind: TokenKind) -> bool {
@@ -333,10 +333,8 @@ impl<'a> Parser<'a> {
     }
 
     fn expect_semi(&mut self) {
-        if !self.eat(TokenKind::Semicolon) {
-            if !self.at(TokenKind::RBrace) && !self.at_eof() {
-                self.error_expected("';'");
-            }
+        if !self.eat(TokenKind::Semicolon) && !self.at(TokenKind::RBrace) && !self.at_eof() {
+            self.error_expected("';'");
         }
     }
 

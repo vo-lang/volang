@@ -1,3 +1,4 @@
+#![allow(clippy::result_unit_err)]
 //! Expression parsing using Pratt parsing.
 
 use super::{ParseResult, Parser};
@@ -365,7 +366,7 @@ impl<'a> Parser<'a> {
                         if unary.op == UnaryOp::Deref {
                             if let ExprKind::Ident(ref ident) = unary.operand.kind {
                                 // This is (*T)(x) pattern - parse as type conversion
-                                let ident_clone = ident.clone();
+                                let ident_clone = *ident;
                                 let ident_span = ident.span;
                                 let left_span = left.span;
                                 self.advance();
