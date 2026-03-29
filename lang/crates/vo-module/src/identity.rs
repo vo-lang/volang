@@ -288,8 +288,7 @@ pub fn check_internal_visibility(importer_path: &str, target_path: &str) -> bool
         return false;
     }
     // Also check if the target path ends with "/internal"
-    if target_path.ends_with("/internal") {
-        let required_prefix = &target_path[..target_path.len() - "/internal".len()];
+    if let Some(required_prefix) = target_path.strip_suffix("/internal") {
         if importer_path.starts_with(required_prefix)
             && (importer_path.len() == required_prefix.len()
                 || importer_path.as_bytes().get(required_prefix.len()) == Some(&b'/'))
@@ -353,7 +352,7 @@ pub fn find_owning_module<'m, 'i>(
         if let Some(sub) = mp.owns_import(import_path) {
             let dominated = best
                 .as_ref()
-                .map_or(false, |(b, _)| b.as_str().len() >= mp.as_str().len());
+                .is_some_and(|(b, _)| b.as_str().len() >= mp.as_str().len());
             if !dominated {
                 best = Some((mp, sub));
             }

@@ -80,7 +80,7 @@ pub fn resolve_overrides(workfile: &WorkFile, workfile_dir: &Path) -> Result<Vec
 pub fn verify_override_identity(overrides: &[Override]) -> Result<(), Error> {
     for ov in overrides {
         let mod_path = ov.local_dir.join("vo.mod");
-        let content = std::fs::read_to_string(&mod_path).map_err(|e| Error::Io(e))?;
+        let content = std::fs::read_to_string(&mod_path).map_err(Error::Io)?;
         let mf = ModFile::parse(&content).map_err(|e| {
             Error::WorkFileParse(format!("override {}: error parsing vo.mod: {e}", ov.module))
         })?;

@@ -103,7 +103,7 @@ impl SemVer {
         let minor = parse_numeric_no_leading_zero(parts[1], s)?;
         let patch = parse_numeric_no_leading_zero(parts[2], s)?;
         let pre = match pre_part {
-            Some(p) if p.is_empty() => {
+            Some("") => {
                 return Err(Error::InvalidVersion(format!("empty prerelease: {s}")));
             }
             Some(p) => parse_prerelease(p, s)?,

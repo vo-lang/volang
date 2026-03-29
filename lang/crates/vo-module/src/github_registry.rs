@@ -10,6 +10,8 @@ use crate::schema::manifest::ReleaseManifest;
 use crate::version::ExactVersion;
 use crate::Error;
 
+type ManifestCache = Mutex<HashMap<(String, String), (ReleaseManifest, Vec<u8>)>>;
+
 /// Concrete `Registry` implementation backed by the GitHub Releases API.
 /// Caches version lists and manifests for the lifetime of the struct.
 pub struct GitHubRegistry {
@@ -17,7 +19,7 @@ pub struct GitHubRegistry {
     /// Resolves rate-limit issues and enables access to private repositories.
     token: Option<String>,
     version_cache: Mutex<HashMap<String, Vec<ExactVersion>>>,
-    manifest_cache: Mutex<HashMap<(String, String), (ReleaseManifest, Vec<u8>)>>,
+    manifest_cache: ManifestCache,
 }
 
 #[derive(Debug, Deserialize)]
@@ -25,6 +27,12 @@ struct GitHubReleaseEntry {
     tag_name: String,
     #[serde(default)]
     draft: bool,
+}
+
+impl Default for GitHubRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GitHubRegistry {
