@@ -50,8 +50,8 @@ jobs:
       - name: vo-web wasm target check (release)
         run: cargo check -p vo-web --target wasm32-unknown-unknown --release
 
-  first-party-phase6-lint:
-    name: Phase 6 - ${{ matrix.repo }}
+  first-party-release-verify:
+    name: Release Verify - ${{ matrix.repo }}
     runs-on: ubuntu-latest
     continue-on-error: true
     strategy:
@@ -78,6 +78,6 @@ jobs:
         with:
           workspaces: volang -> target
 
-      - name: Phase 6 release verify
+      - name: release verify
         working-directory: volang
         run: cargo run -p vo --release -- release verify ../module
