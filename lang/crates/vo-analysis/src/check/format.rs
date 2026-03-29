@@ -1,8 +1,8 @@
 //! AST formatting for trace output.
 
-use vo_common::symbol::SymbolInterner;
-use vo_syntax::ast::{Expr, ExprKind, Stmt, StmtKind, BinaryOp, UnaryOp};
 use std::fmt::Write;
+use vo_common::symbol::SymbolInterner;
+use vo_syntax::ast::{BinaryOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp};
 
 /// Format an expression for trace output.
 pub fn format_expr(expr: &Expr, interner: &SymbolInterner) -> String {
@@ -187,25 +187,33 @@ fn write_stmt(buf: &mut String, stmt: &Stmt, interner: &SymbolInterner) {
         }
         StmtKind::Assign(a) => {
             for (i, lhs) in a.lhs.iter().enumerate() {
-                if i > 0 { buf.push_str(", "); }
+                if i > 0 {
+                    buf.push_str(", ");
+                }
                 write_expr(buf, lhs, interner);
             }
             buf.push_str(" = ");
             for (i, rhs) in a.rhs.iter().enumerate() {
-                if i > 0 { buf.push_str(", "); }
+                if i > 0 {
+                    buf.push_str(", ");
+                }
                 write_expr(buf, rhs, interner);
             }
         }
         StmtKind::ShortVar(sd) => {
             for (i, name) in sd.names.iter().enumerate() {
-                if i > 0 { buf.push_str(", "); }
+                if i > 0 {
+                    buf.push_str(", ");
+                }
                 if let Some(n) = interner.resolve(name.symbol) {
                     buf.push_str(n);
                 }
             }
             buf.push_str(" := ");
             for (i, rhs) in sd.values.iter().enumerate() {
-                if i > 0 { buf.push_str(", "); }
+                if i > 0 {
+                    buf.push_str(", ");
+                }
                 write_expr(buf, rhs, interner);
             }
         }
@@ -229,7 +237,9 @@ fn write_stmt(buf: &mut String, stmt: &Stmt, interner: &SymbolInterner) {
             if !r.values.is_empty() {
                 buf.push(' ');
                 for (i, e) in r.values.iter().enumerate() {
-                    if i > 0 { buf.push_str(", "); }
+                    if i > 0 {
+                        buf.push_str(", ");
+                    }
                     write_expr(buf, e, interner);
                 }
             }
@@ -292,7 +302,9 @@ fn format_unop(op: &UnaryOp) -> &'static str {
 fn write_args(buf: &mut String, args: &[Expr], interner: &SymbolInterner) {
     buf.push('(');
     for (i, arg) in args.iter().enumerate() {
-        if i > 0 { buf.push_str(", ") }
+        if i > 0 {
+            buf.push_str(", ")
+        }
         write_expr(buf, arg, interner);
     }
     buf.push(')');

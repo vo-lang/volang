@@ -1,16 +1,16 @@
 //! path/filepath package WASM implementation.
 
+use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 use vo_runtime::bytecode::ExternDef;
 use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
 use vo_runtime::objects::string;
-use vo_runtime::builtins::error_helper::{write_nil_error, write_error_to};
 
 use crate::vfs;
 
 fn eval_symlinks(call: &mut ExternCallContext) -> ExternResult {
     let path = call.arg_str(0);
     let (_, _, _, _, _, err) = vfs::stat(&path);
-    
+
     if err.is_some() {
         // Path doesn't exist - try to resolve parent
         if let Some(slash) = path.rfind('/') {
@@ -28,7 +28,7 @@ fn eval_symlinks(call: &mut ExternCallContext) -> ExternResult {
         write_error_to(call, 1, "no such file or directory");
         return ExternResult::Ok;
     }
-    
+
     let result = normalize_path(&path);
     let str_ref = string::from_rust_str(call.gc(), &result);
     call.ret_ref(0, str_ref);
@@ -40,10 +40,10 @@ fn normalize_path(path: &str) -> String {
     if path.is_empty() {
         return ".".to_string();
     }
-    
+
     let rooted = path.starts_with('/');
     let mut parts: Vec<&str> = Vec::new();
-    
+
     for part in path.split('/') {
         match part {
             "" | "." => continue,
@@ -57,14 +57,14 @@ fn normalize_path(path: &str) -> String {
             _ => parts.push(part),
         }
     }
-    
+
     if parts.is_empty() {
         if rooted {
             return "/".to_string();
         }
         return ".".to_string();
     }
-    
+
     let result = parts.join("/");
     if rooted {
         format!("/{}", result)

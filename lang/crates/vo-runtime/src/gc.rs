@@ -6,10 +6,10 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use hashbrown::HashSet;
 
-#[cfg(feature = "std")]
-use std::alloc as heap_alloc;
 #[cfg(not(feature = "std"))]
 use alloc::alloc as heap_alloc;
+#[cfg(feature = "std")]
+use std::alloc as heap_alloc;
 
 use crate::slot::{Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta};
@@ -46,10 +46,10 @@ pub struct GcHeader {
 }
 
 // Marked field bit positions
-const AGE_MASK: u8 = 0x07;      // bits 0-2
-const WHITE0_BIT: u8 = 1 << 3;  // bit 3
-const WHITE1_BIT: u8 = 1 << 4;  // bit 4
-const BLACK_BIT: u8 = 1 << 5;   // bit 5
+const AGE_MASK: u8 = 0x07; // bits 0-2
+const WHITE0_BIT: u8 = 1 << 3; // bit 3
+const WHITE1_BIT: u8 = 1 << 4; // bit 4
+const BLACK_BIT: u8 = 1 << 5; // bit 5
 const WHITE_BITS: u8 = WHITE0_BIT | WHITE1_BIT;
 
 // Age values (for generational GC)
@@ -62,12 +62,11 @@ pub const G_TOUCHED: u8 = 3;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcState {
-    Pause = 0,      // Idle, waiting for trigger
-    Propagate = 1,  // Incremental marking (interruptible)
-    Atomic = 2,     // Atomic marking (not interruptible)
-    Sweep = 3,      // Sweeping dead objects
+    Pause = 0,     // Idle, waiting for trigger
+    Propagate = 1, // Incremental marking (interruptible)
+    Atomic = 2,    // Atomic marking (not interruptible)
+    Sweep = 3,     // Sweeping dead objects
 }
-
 
 impl GcHeader {
     pub const SIZE: usize = SLOT_BYTES;
@@ -75,7 +74,7 @@ impl GcHeader {
     pub fn new(value_meta: ValueMeta, slots: u16) -> Self {
         Self::new_with_white(value_meta, slots, WHITE0_BIT)
     }
-    
+
     pub fn new_with_white(value_meta: ValueMeta, slots: u16, white_bit: u8) -> Self {
         Self {
             marked: white_bit | G_YOUNG,
@@ -86,7 +85,7 @@ impl GcHeader {
     }
 
     // ========== Color methods ==========
-    
+
     #[inline]
     pub fn is_white(&self) -> bool {
         (self.marked & WHITE_BITS) != 0
@@ -118,7 +117,7 @@ impl GcHeader {
     }
 
     // ========== Age methods ==========
-    
+
     #[inline]
     pub fn age(&self) -> u8 {
         self.marked & AGE_MASK
@@ -130,7 +129,7 @@ impl GcHeader {
     }
 
     // ========== ValueMeta methods ==========
-    
+
     #[inline]
     pub fn meta_id(&self) -> u32 {
         self.value_meta.meta_id()
@@ -152,7 +151,6 @@ impl GcHeader {
     }
 }
 
-
 /// GC reference - pointer to GcObject data (after header).
 pub type GcRef = *mut Slot;
 
@@ -163,27 +161,27 @@ pub struct Gc {
     object_index: RefCell<Vec<GcRef>>,
     base_objects: RefCell<HashSet<usize>>,
     object_index_dirty: Cell<bool>,
-    
+
     // ========== Mark Queues ==========
-    gray: Vec<GcRef>,        // To be scanned
-    grayagain: Vec<GcRef>,   // Re-scan (barrier triggered)
-    
+    gray: Vec<GcRef>,      // To be scanned
+    grayagain: Vec<GcRef>, // Re-scan (barrier triggered)
+
     // ========== State ==========
     state: GcState,
-    current_white: u8,       // Current white bit (WHITE0_BIT or WHITE1_BIT)
-    sweep_pos: usize,        // Read position in sweep phase
-    sweep_write_pos: usize,  // Write position for live objects in sweep phase
-    
+    current_white: u8,      // Current white bit (WHITE0_BIT or WHITE1_BIT)
+    sweep_pos: usize,       // Read position in sweep phase
+    sweep_write_pos: usize, // Write position for live objects in sweep phase
+
     // ========== Memory Stats ==========
-    total_bytes: usize,      // Total allocated bytes
-    estimate: usize,         // Estimated live bytes after last GC
-    debt: i64,               // Work debt (triggers GC when > 0)
-    
+    total_bytes: usize, // Total allocated bytes
+    estimate: usize,    // Estimated live bytes after last GC
+    debt: i64,          // Work debt (triggers GC when > 0)
+
     // ========== Parameters ==========
-    pause: u16,              // Pause multiplier (default 200 = 2x)
-    stepmul: u16,            // Step multiplier (default 100)
-    stepsize: usize,         // Bytes per step (default 8KB)
-    
+    pause: u16,      // Pause multiplier (default 200 = 2x)
+    stepmul: u16,    // Step multiplier (default 100)
+    stepsize: usize, // Bytes per step (default 8KB)
+
     // ========== Phase Budget ==========
     /// Fixed per-step budget for sweep phase, snapshotted at sweep start.
     /// Using a constant prevents convergence issues (total_bytes shrinks as dead
@@ -193,8 +191,8 @@ pub struct Gc {
 
 impl Gc {
     // Default parameters
-    const DEFAULT_PAUSE: u16 = 200;      // Trigger at 2x estimated live size
-    const DEFAULT_STEPMUL: u16 = 100;    // Work multiplier
+    const DEFAULT_PAUSE: u16 = 200; // Trigger at 2x estimated live size
+    const DEFAULT_STEPMUL: u16 = 100; // Work multiplier
     const DEFAULT_STEPSIZE: usize = 8192; // 8KB per step
 
     pub fn new() -> Self {
@@ -218,25 +216,25 @@ impl Gc {
             sweep_budget: 0,
         }
     }
-    
+
     /// Get current GC state.
     #[inline]
     pub fn state(&self) -> GcState {
         self.state
     }
-    
+
     /// Get current white bit for new allocations.
     #[inline]
     pub fn current_white(&self) -> u8 {
         self.current_white
     }
-    
+
     /// Get the "other" white bit (for checking dead objects).
     #[inline]
     fn other_white(&self) -> u8 {
         self.current_white ^ WHITE_BITS
     }
-    
+
     /// Check if object is dead (has the "other" white color).
     #[inline]
     #[allow(dead_code)]
@@ -249,14 +247,18 @@ impl Gc {
     pub fn alloc(&mut self, value_meta: ValueMeta, slots: u16) -> GcRef {
         self.alloc_inner(value_meta, slots, slots as usize)
     }
-    
+
     /// Allocate a large array. For arrays with total_slots > u16::MAX,
     /// GcHeader.slots is set to 0, and the actual size is read from ArrayHeader.
     pub fn alloc_array(&mut self, value_meta: ValueMeta, total_slots: usize) -> GcRef {
-        let header_slots = if total_slots > u16::MAX as usize { 0 } else { total_slots as u16 };
+        let header_slots = if total_slots > u16::MAX as usize {
+            0
+        } else {
+            total_slots as u16
+        };
         self.alloc_inner(value_meta, header_slots, total_slots)
     }
-    
+
     fn alloc_inner(&mut self, value_meta: ValueMeta, header_slots: u16, slots: usize) -> GcRef {
         let header_size = GcHeader::SIZE;
         let data_size = match slots.checked_mul(SLOT_BYTES) {
@@ -272,7 +274,10 @@ impl Gc {
             Some(s) => s,
             None => {
                 #[cfg(feature = "std")]
-                eprintln!("GC allocation overflow: header_size={}, data_size={}", header_size, data_size);
+                eprintln!(
+                    "GC allocation overflow: header_size={}, data_size={}",
+                    header_size, data_size
+                );
                 return core::ptr::null_mut();
             }
         };
@@ -281,7 +286,10 @@ impl Gc {
             Ok(l) => l,
             Err(_) => {
                 #[cfg(feature = "std")]
-                eprintln!("GC allocation layout error: total_size={}, align={}", total_size, SLOT_BYTES);
+                eprintln!(
+                    "GC allocation layout error: total_size={}, align={}",
+                    total_size, SLOT_BYTES
+                );
                 return core::ptr::null_mut();
             }
         };
@@ -433,7 +441,7 @@ impl Gc {
     pub fn write_barrier(&mut self, parent: GcRef, child: GcRef) {
         #[cfg(feature = "gc-debug")]
         crate::gc_debug::on_barrier(parent, 0, child as u64);
-        
+
         if self.state != GcState::Propagate {
             return;
         }
@@ -453,25 +461,29 @@ impl Gc {
             self.barrier_back(parent);
         }
     }
-    
+
     /// Check if object is black (for gc-debug)
     #[inline]
     pub fn is_black(&self, obj: GcRef) -> bool {
-        if obj.is_null() { return false; }
+        if obj.is_null() {
+            return false;
+        }
         self.canonicalize_ref(obj)
             .map(|base| !base.is_null() && Self::header(base).is_black())
             .unwrap_or(false)
     }
-    
+
     /// Check if object is white (for gc-debug)
     #[inline]
     pub fn is_white(&self, obj: GcRef) -> bool {
-        if obj.is_null() { return false; }
+        if obj.is_null() {
+            return false;
+        }
         self.canonicalize_ref(obj)
             .map(|base| !base.is_null() && Self::header(base).is_white())
             .unwrap_or(false)
     }
-    
+
     /// Backward barrier: turn black object back to gray for re-scan.
     fn barrier_back(&mut self, obj: GcRef) {
         let header = Self::header_mut(obj);
@@ -552,10 +564,8 @@ impl Gc {
                 }
 
                 GcState::Sweep => {
-                    work += self.sweep_step(
-                        &mut finalize_object,
-                        self.sweep_budget.saturating_sub(work),
-                    );
+                    work += self
+                        .sweep_step(&mut finalize_object, self.sweep_budget.saturating_sub(work));
 
                     if self.sweep_pos >= self.all_objects.len() {
                         self.finish_cycle();
@@ -573,39 +583,44 @@ impl Gc {
         self.debt -= (work as i64).min(work_limit as i64);
         work
     }
-    
+
     /// Start a new GC cycle.
     fn start_cycle<R: FnMut(&mut Gc)>(&mut self, scan_roots: &mut R) {
         // Flip white for this cycle (objects allocated during GC get new white)
         self.current_white ^= WHITE_BITS;
         scan_roots(self);
     }
-    
+
     /// Propagate marking incrementally. Returns work done.
-    fn propagate_step<S: FnMut(&mut Gc, GcRef)>(&mut self, scan_object: &mut S, limit: usize) -> usize {
+    fn propagate_step<S: FnMut(&mut Gc, GcRef)>(
+        &mut self,
+        scan_object: &mut S,
+        limit: usize,
+    ) -> usize {
         let mut work = 0;
-        
+
         while let Some(obj) = self.gray.pop() {
             // Validate gray object before processing
             debug_assert!(
                 !obj.is_null() && (obj as usize) & (SLOT_BYTES - 1) == 0 && (obj as usize) >= 4096,
-                "propagate_step: invalid GcRef {:p} in gray queue", obj
+                "propagate_step: invalid GcRef {:p} in gray queue",
+                obj
             );
             let header = Self::header_mut(obj);
             if !header.is_black() {
                 header.set_black();
                 scan_object(self, obj);
                 work += Self::object_size_bytes(obj);
-                
+
                 if work >= limit {
                     break;
                 }
             }
         }
-        
+
         work
     }
-    
+
     /// Atomic phase: process grayagain and finalize marking.
     fn atomic_phase<S: FnMut(&mut Gc, GcRef)>(&mut self, scan_object: &mut S) {
         // Process grayagain (objects modified during propagate)
@@ -616,7 +631,7 @@ impl Gc {
                 scan_object(self, obj);
             }
         }
-        
+
         // Process any new gray objects added during grayagain processing
         while let Some(obj) = self.gray.pop() {
             let header = Self::header_mut(obj);
@@ -626,17 +641,17 @@ impl Gc {
             }
         }
     }
-    
+
     /// Sweep dead objects incrementally. Returns work done.
     fn sweep_step<F: FnMut(GcRef)>(&mut self, finalize_object: &mut F, limit: usize) -> usize {
         let mut work = 0;
         let dead_white = self.other_white();
-        
+
         while self.sweep_pos < self.all_objects.len() && work < limit {
             let obj = self.all_objects[self.sweep_pos];
             let header = Self::header(obj);
             let obj_white = header.marked & WHITE_BITS;
-            
+
             // Gray objects should never exist during sweep — atomic phase processes all of them.
             // If one leaks here, it would be silently dropped (memory leak). Catch it early.
             debug_assert!(
@@ -644,10 +659,10 @@ impl Gc {
                 "sweep_step: gray object {:p} found during sweep (neither white nor black)",
                 obj
             );
-            
+
             // Compute size once — both alive and dead branches need it for work accounting.
             let size_bytes = Self::object_size_bytes(obj);
-            
+
             if header.is_black() || obj_white == self.current_white {
                 // Alive: reset to current white
                 Self::header_mut(obj).set_white(self.current_white);
@@ -661,34 +676,34 @@ impl Gc {
                 // Dead: free it
                 #[cfg(feature = "gc-debug")]
                 crate::gc_debug::on_free(obj);
-                
+
                 finalize_object(obj);
                 self.base_objects.borrow_mut().remove(&(obj as usize));
                 self.total_bytes -= size_bytes;
                 work += size_bytes;
-                
+
                 let raw_ptr = unsafe { (obj as *mut u8).sub(GcHeader::SIZE) };
                 let layout = core::alloc::Layout::from_size_align(size_bytes, 8).unwrap();
                 unsafe { heap_alloc::dealloc(raw_ptr, layout) };
             }
-            
+
             self.sweep_pos += 1;
         }
-        
+
         // If sweep complete, truncate the vector
         if self.sweep_pos >= self.all_objects.len() {
             self.all_objects.truncate(self.sweep_write_pos);
             self.object_index_dirty.set(true);
         }
-        
+
         work
     }
-    
+
     /// Finish GC cycle.
     fn finish_cycle(&mut self) {
         self.estimate = self.total_bytes;
         self.state = GcState::Pause;
-        
+
         // Set debt threshold for next cycle
         let threshold = (self.estimate as u64 * self.pause as u64 / 100) as i64;
         self.debt = self.debt.min(-(threshold.max(1024) as i64));
@@ -717,13 +732,13 @@ impl Gc {
     /// src must be a valid GcRef or null.
     pub unsafe fn ptr_clone(&mut self, src: GcRef) -> GcRef {
         use crate::objects::array;
-        
+
         if src.is_null() {
             return src;
         }
         let header = Self::header(src);
         let value_meta = header.value_meta;
-        
+
         // For large arrays, slots == 0, read actual size from ArrayHeader
         let actual_slots = if header.slots == 0 {
             if value_meta.value_kind() != ValueKind::Array {
@@ -788,11 +803,7 @@ mod tests {
         assert!(gc.base_objects.borrow().contains(&(obj as usize)));
         assert_eq!(gc.object_count(), 1);
 
-        let work = gc.step(
-            |_| {},
-            |_, _| {},
-            |dead| finalized.push(dead),
-        );
+        let work = gc.step(|_| {}, |_, _| {}, |dead| finalized.push(dead));
 
         assert!(work > 0);
         assert_eq!(finalized, vec![obj]);
@@ -804,14 +815,14 @@ mod tests {
 }
 
 /// Scan a slice of values using SlotTypes for GC marking.
-/// 
+///
 /// This is the unified scanning function used by both VM root scanning
 /// and heap object scanning.
 #[inline]
 pub fn scan_slots_by_types(gc: &mut Gc, slots: &[u64], slot_types: &[crate::SlotType]) {
-    use crate::SlotType;
     use crate::objects::interface;
-    
+    use crate::SlotType;
+
     let mut i = 0;
     while i < slot_types.len() && i < slots.len() {
         match slot_types[i] {

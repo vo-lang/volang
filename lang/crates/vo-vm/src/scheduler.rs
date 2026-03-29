@@ -7,9 +7,9 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::fiber::{BlockReason, Fiber, FiberState};
 use crate::vm::RuntimeTrapKind;
-use vo_runtime::objects::queue_state::QueueWaiter;
 #[cfg(feature = "std")]
 use vo_runtime::io::{IoRuntime, IoToken};
+use vo_runtime::objects::queue_state::QueueWaiter;
 
 /// Type-safe fiber ID (newtype over u32 index into scheduler.fibers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,13 +21,13 @@ impl FiberId {
     pub fn to_raw(self) -> u32 {
         self.0
     }
-    
+
     /// Create from raw u32.
     #[inline]
     pub fn from_raw(raw: u32) -> Self {
         FiberId(raw)
     }
-    
+
     /// Get the index.
     #[inline]
     pub fn index(self) -> u32 {
@@ -93,7 +93,7 @@ impl Scheduler {
         self.ready_queue.push_back(id);
         id
     }
-    
+
     /// Spawn a new fiber without adding to ready_queue.
     fn spawn_not_ready(&mut self, mut fiber: Fiber) -> FiberId {
         if let Some(slot) = self.free_slots.pop() {
@@ -134,13 +134,13 @@ impl Scheduler {
     pub fn get_fiber(&self, id: FiberId) -> &Fiber {
         &*self.fibers[id.0 as usize]
     }
-    
+
     /// Get mutable fiber by FiberId (O(1) index access).
     #[inline]
     pub fn get_fiber_mut(&mut self, id: FiberId) -> &mut Fiber {
         &mut *self.fibers[id.0 as usize]
     }
-    
+
     /// Wake a blocked fiber.
     /// Blocked(*) -> Runnable (added to ready_queue).
     pub fn wake_fiber(&mut self, id: FiberId) {
@@ -203,12 +203,16 @@ impl Scheduler {
     /// Kill current fiber and return (trap_kind, panic_msg, error_location).
     /// error_location is (func_id, pc) captured at panic initiation (before frame unwind).
     /// * -> Dead.
-    pub fn kill_current(&mut self) -> (Option<RuntimeTrapKind>, Option<String>, Option<(u32, u32)>) {
+    pub fn kill_current(
+        &mut self,
+    ) -> (Option<RuntimeTrapKind>, Option<String>, Option<(u32, u32)>) {
         if let Some(id) = self.current.take() {
             let fiber = &mut self.fibers[id.0 as usize];
             let trap_kind = fiber.panic_trap_kind.take();
             let msg = fiber.panic_message();
-            let loc = fiber.panic_source_loc.take()
+            let loc = fiber
+                .panic_source_loc
+                .take()
                 .or_else(|| fiber.current_frame().map(|f| (f.func_id, f.pc as u32)));
             fiber.state = FiberState::Dead;
             self.free_slots.push(id.0);
@@ -244,7 +248,12 @@ impl Scheduler {
             let fiber = &mut self.fibers[id.0 as usize];
             fiber.state = FiberState::Blocked(BlockReason::HostEvent { token, delay_ms });
             self.blocked_count += 1;
-            self.host_event_waiters.push(HostEventWaiter { token, delay_ms, replay: false, fiber_id: id });
+            self.host_event_waiters.push(HostEventWaiter {
+                token,
+                delay_ms,
+                replay: false,
+                fiber_id: id,
+            });
         }
     }
 
@@ -256,7 +265,12 @@ impl Scheduler {
             let fiber = &mut self.fibers[id.0 as usize];
             fiber.state = FiberState::Blocked(BlockReason::HostEventReplay(token));
             self.blocked_count += 1;
-            self.host_event_waiters.push(HostEventWaiter { token, delay_ms: 0, replay: true, fiber_id: id });
+            self.host_event_waiters.push(HostEventWaiter {
+                token,
+                delay_ms: 0,
+                replay: true,
+                fiber_id: id,
+            });
         }
     }
 
@@ -264,7 +278,11 @@ impl Scheduler {
     /// For replay-style events, sets `resume_host_event_token` on the fiber
     /// so the extern knows it is being re-invoked.
     pub fn wake_host_event(&mut self, token: u64) {
-        if let Some(pos) = self.host_event_waiters.iter().position(|w| w.token == token) {
+        if let Some(pos) = self
+            .host_event_waiters
+            .iter()
+            .position(|w| w.token == token)
+        {
             let waiter = self.host_event_waiters.remove(pos);
             if waiter.replay {
                 self.fibers[waiter.fiber_id.0 as usize].resume_host_event_token = Some(token);
@@ -276,7 +294,11 @@ impl Scheduler {
     /// Wake the fiber waiting for the given host event token, attaching opaque data.
     /// The FFI function reads the data on replay via `ctx.take_resume_host_event_data()`.
     pub fn wake_host_event_with_data(&mut self, token: u64, data: Vec<u8>) {
-        if let Some(pos) = self.host_event_waiters.iter().position(|w| w.token == token) {
+        if let Some(pos) = self
+            .host_event_waiters
+            .iter()
+            .position(|w| w.token == token)
+        {
             let waiter = self.host_event_waiters.remove(pos);
             let fiber = &mut self.fibers[waiter.fiber_id.0 as usize];
             if waiter.replay {
@@ -290,18 +312,21 @@ impl Scheduler {
     /// Return all pending host event waiters for the async run loop.
     /// Entries remain in the list until individually consumed by `wake_host_event`.
     pub fn take_pending_host_events(&mut self) -> Vec<PendingHostEvent> {
-        self.host_event_waiters.iter().map(|w| PendingHostEvent {
-            token: w.token,
-            delay_ms: w.delay_ms,
-            replay: w.replay,
-        }).collect()
+        self.host_event_waiters
+            .iter()
+            .map(|w| PendingHostEvent {
+                token: w.token,
+                delay_ms: w.delay_ms,
+                replay: w.replay,
+            })
+            .collect()
     }
 
     /// Check if there are fibers waiting for host-side events.
     pub fn has_host_event_waiters(&self) -> bool {
         !self.host_event_waiters.is_empty()
     }
-    
+
     /// Current fiber blocks on I/O.
     /// Running -> Blocked(Io(token)).
     #[cfg(feature = "std")]
@@ -336,7 +361,7 @@ impl Scheduler {
         }
         woken
     }
-    
+
     /// Check if there are fibers waiting on I/O.
     #[cfg(feature = "std")]
     pub fn has_io_waiters(&self) -> bool {
@@ -372,7 +397,13 @@ mod tests {
 
         assert!(scheduler.current.is_none());
         assert_eq!(scheduler.blocked_count, 1);
-        assert!(scheduler.get_fiber(fid).state == FiberState::Blocked(BlockReason::HostEvent { token: 77, delay_ms: 123 }));
+        assert!(
+            scheduler.get_fiber(fid).state
+                == FiberState::Blocked(BlockReason::HostEvent {
+                    token: 77,
+                    delay_ms: 123
+                })
+        );
         assert_eq!(scheduler.host_event_waiters.len(), 1);
         let waiter = &scheduler.host_event_waiters[0];
         assert_eq!(waiter.token, 77);
@@ -390,7 +421,9 @@ mod tests {
 
         assert!(scheduler.current.is_none());
         assert_eq!(scheduler.blocked_count, 1);
-        assert!(scheduler.get_fiber(fid).state == FiberState::Blocked(BlockReason::HostEventReplay(42)));
+        assert!(
+            scheduler.get_fiber(fid).state == FiberState::Blocked(BlockReason::HostEventReplay(42))
+        );
         assert_eq!(scheduler.host_event_waiters.len(), 1);
         assert!(scheduler.host_event_waiters[0].replay);
     }

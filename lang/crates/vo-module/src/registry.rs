@@ -1,6 +1,6 @@
 use crate::identity::ModulePath;
-use crate::version::ExactVersion;
 use crate::schema::manifest::ReleaseManifest;
+use crate::version::ExactVersion;
 use crate::Error;
 
 /// Repository identity derived from a module path.
@@ -78,7 +78,11 @@ pub fn repository_id(module: &ModulePath) -> RepositoryId {
 ///
 /// Single source of truth for release asset URLs, used by both the native
 /// `GitHubRegistry` and the WASM fetch layer.
-pub fn release_download_url(module: &ModulePath, version: &ExactVersion, asset_name: &str) -> String {
+pub fn release_download_url(
+    module: &ModulePath,
+    version: &ExactVersion,
+    asset_name: &str,
+) -> String {
     let rid = repository_id(module);
     let tag = module.version_tag(version);
     format!(

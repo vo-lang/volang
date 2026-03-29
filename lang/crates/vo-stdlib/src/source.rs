@@ -2,9 +2,9 @@
 
 use rust_embed::RustEmbed;
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::{Path, PathBuf};
 use vo_common::vfs::FileSystem;
-use std::io;
 
 #[derive(RustEmbed)]
 #[folder = "../../stdlib/"]
@@ -39,18 +39,24 @@ impl EmbeddedStdlib {
 
 impl FileSystem for EmbeddedStdlib {
     fn read_file(&self, path: &Path) -> io::Result<String> {
-        self.files.get(path)
-            .cloned()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("file not found: {:?}", path)))
+        self.files.get(path).cloned().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("file not found: {:?}", path),
+            )
+        })
     }
-    
+
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         let mut seen = HashSet::new();
-        let is_root = path == Path::new(".") || path == Path::new("") || path.as_os_str().is_empty();
-        
+        let is_root =
+            path == Path::new(".") || path == Path::new("") || path.as_os_str().is_empty();
+
         for file_path in self.files.keys() {
             let entry = if is_root {
-                file_path.components().next()
+                file_path
+                    .components()
+                    .next()
                     .map(|c| PathBuf::from(c.as_os_str()))
             } else {
                 let path_str = format!("{}/", path.to_string_lossy());
@@ -63,8 +69,12 @@ impl FileSystem for EmbeddedStdlib {
                         } else {
                             path.join(rest)
                         })
-                    } else { None }
-                } else { None }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             };
             if let Some(e) = entry {
                 seen.insert(e);
@@ -72,7 +82,7 @@ impl FileSystem for EmbeddedStdlib {
         }
         Ok(seen.into_iter().collect())
     }
-    
+
     fn exists(&self, path: &Path) -> bool {
         if self.files.contains_key(path) {
             return true;
@@ -83,12 +93,12 @@ impl FileSystem for EmbeddedStdlib {
         let path_str = path.to_string_lossy();
         self.files.keys().any(|p| {
             let p_str = p.to_string_lossy();
-            p_str.starts_with(&*path_str) && 
-            p_str.len() > path_str.len() &&
-            p_str.chars().nth(path_str.len()) == Some('/')
+            p_str.starts_with(&*path_str)
+                && p_str.len() > path_str.len()
+                && p_str.chars().nth(path_str.len()) == Some('/')
         })
     }
-    
+
     fn is_dir(&self, path: &Path) -> bool {
         !self.files.contains_key(path) && self.exists(path)
     }

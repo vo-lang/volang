@@ -21,7 +21,7 @@ pub fn compile_index(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let container_type = info.expr_type(idx.expr.id);
-    
+
     if info.is_map(container_type) {
         let map_reg = compile_expr(&idx.expr, ctx, func, info)?;
         let (key_slots, val_slots) = info.map_key_val_slots(container_type);
@@ -55,10 +55,10 @@ pub fn compile_slice_expr(
 ) -> Result<(), CodegenError> {
     let container_type = info.expr_type(slice_expr.expr.id);
     let has_max = slice_expr.max.is_some();
-    
+
     // Compile container
     let container_reg = compile_expr(&slice_expr.expr, ctx, func, info)?;
-    
+
     // Compile lo bound (default 0)
     let lo_reg = if let Some(lo) = &slice_expr.low {
         compile_expr(lo, ctx, func, info)?
@@ -67,7 +67,7 @@ pub fn compile_slice_expr(
         func.emit_op(Opcode::LoadInt, tmp, 0, 0);
         tmp
     };
-    
+
     // Compile hi bound (default len)
     let hi_reg = if let Some(hi) = &slice_expr.high {
         compile_expr(hi, ctx, func, info)?
@@ -86,14 +86,14 @@ pub fn compile_slice_expr(
         }
         tmp
     };
-    
+
     // Compile max bound for three-index slice (default: no limit, use cap)
     let max_reg = if let Some(max) = &slice_expr.max {
         Some(compile_expr(max, ctx, func, info)?)
     } else {
         None
     };
-    
+
     // Prepare params: slots[c]=lo, slots[c+1]=hi, slots[c+2]=max (if present)
     let param_count = if has_max { 3 } else { 2 };
     let params_start = func.alloc_slots(&vec![SlotType::Value; param_count as usize]);
@@ -102,18 +102,24 @@ pub fn compile_slice_expr(
     if let Some(max_r) = max_reg {
         func.emit_op(Opcode::Copy, params_start + 2, max_r, 0);
     }
-    
+
     // flags encoding:
     //   bit0: 1 = input is array (not slice)
     //   bit1: 1 = has max (three-index slice)
     let flags_has_max = if has_max { 0b10 } else { 0 };
-    
+
     if info.is_string(container_type) {
         // StrSlice: a=dst, b=str, c=params_start (strings don't support 3-index)
         func.emit_op(Opcode::StrSlice, dst, container_reg, params_start);
     } else if info.is_slice(container_type) {
         // SliceSlice: a=dst, b=slice, c=params_start
-        func.emit_with_flags(Opcode::SliceSlice, flags_has_max, dst, container_reg, params_start);
+        func.emit_with_flags(
+            Opcode::SliceSlice,
+            flags_has_max,
+            dst,
+            container_reg,
+            params_start,
+        );
     } else if info.is_array(container_type) {
         // Array slicing creates a slice - the array MUST be escaped
         let flags = 0b01 | flags_has_max; // bit0=1 for array
@@ -123,8 +129,10 @@ pub fn compile_slice_expr(
             func.emit_with_flags(Opcode::SliceSlice, flags, dst, container_reg, params_start);
         }
     } else {
-        return Err(CodegenError::Internal("slice on unsupported type".to_string()));
+        return Err(CodegenError::Internal(
+            "slice on unsupported type".to_string(),
+        ));
     }
-    
+
     Ok(())
 }

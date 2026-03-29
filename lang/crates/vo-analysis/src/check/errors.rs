@@ -354,7 +354,9 @@ impl TypeError {
             TypeError::MissingReceiver => "method is missing receiver",
             TypeError::InvalidReceiver => "invalid receiver",
             TypeError::EmbeddedPointer => "embedded field type cannot be a pointer",
-            TypeError::EmbeddedPointerInterface => "embedded field type cannot be a pointer to an interface",
+            TypeError::EmbeddedPointerInterface => {
+                "embedded field type cannot be a pointer to an interface"
+            }
             TypeError::FieldRedeclared => "field redeclared",
             TypeError::PointerToNonStruct => "pointer type must point to a struct type",
             TypeError::AddrOfNonStruct => "cannot take address of non-struct value",
@@ -374,7 +376,9 @@ impl TypeError {
             TypeError::RecvFromNonChan => "cannot receive from non-chan type",
             TypeError::NonNumericIncDec => "non-numeric operand for inc/dec",
             TypeError::MissingLhs => "missing lhs in assignment",
-            TypeError::CompoundAssignMultiValue => "assignment operation requires single-valued expressions",
+            TypeError::CompoundAssignMultiValue => {
+                "assignment operation requires single-valued expressions"
+            }
             TypeError::ResultNotInScope => "result parameter not in scope at return",
             TypeError::TypeSwitchNonInterface => "cannot type switch on non-interface type",
             TypeError::BuiltinMustBeCalled => "builtin must be called",
@@ -391,7 +395,9 @@ impl TypeError {
             TypeError::CopyTypeMismatch => "arguments to copy have different element types",
             TypeError::DeleteNotMap => "first argument to delete must be a map",
             TypeError::DeleteKeyMismatch => "key is not assignable to map key type",
-            TypeError::MakeInvalidType => "cannot make; type must be slice, map, channel, or island",
+            TypeError::MakeInvalidType => {
+                "cannot make; type must be slice, map, channel, or island"
+            }
             TypeError::MakeArgCount => "make expects wrong number of arguments",
             TypeError::MakeLenGtCap => "length larger than capacity",
             TypeError::AssertNotBool => "argument to assert is not a boolean",
@@ -406,7 +412,9 @@ impl TypeError {
             TypeError::InvalidPackageName => "invalid package name",
             TypeError::PackageNameMismatch => "package name mismatch",
             TypeError::MissingFuncBody => "missing function body",
-            TypeError::InvalidInitSignature => "func init must have no arguments and no return values",
+            TypeError::InvalidInitSignature => {
+                "func init must have no arguments and no return values"
+            }
             TypeError::FieldMethodConflict => "field and method with the same name",
             TypeError::MethodRedeclared => "method already declared",
             TypeError::UnexpectedFuncDecl => "unexpected function declaration in statement",
@@ -427,11 +435,17 @@ impl TypeError {
             TypeError::UnusedVar => "declared but not used",
             TypeError::NoNewVars => "no new variables on left side of :=",
             TypeError::UnusedLabel => "label declared but not used",
-            
+
             // Errdefer
-            TypeError::ErrDeferNoErrorReturn => "errdefer requires function with error return value",
-            TypeError::DynWriteNoErrorReturn => "dynamic write requires function with error return value",
-            TypeError::TryUnwrapNoErrorReturn => "? operator requires function with error return value",
+            TypeError::ErrDeferNoErrorReturn => {
+                "errdefer requires function with error return value"
+            }
+            TypeError::DynWriteNoErrorReturn => {
+                "dynamic write requires function with error return value"
+            }
+            TypeError::TryUnwrapNoErrorReturn => {
+                "? operator requires function with error return value"
+            }
             TypeError::FailNoErrorReturn => "fail requires function with error return value",
             TypeError::GoIslandTargetNotIsland => "go @(island) target must be of type island",
             TypeError::GoIslandNotSendable => "value is not sendable across island boundary",
@@ -462,7 +476,11 @@ impl TypeError {
     }
 
     /// Creates a diagnostic with this error code, custom message, and span.
-    pub(crate) fn at_with_message(self, span: impl Into<Span>, message: impl Into<String>) -> Diagnostic {
+    pub(crate) fn at_with_message(
+        self,
+        span: impl Into<Span>,
+        message: impl Into<String>,
+    ) -> Diagnostic {
         self.with_message(message).with_label(Label::primary(span))
     }
 }
@@ -563,7 +581,8 @@ mod tests {
 
     #[test]
     fn test_at_with_message_and_span() {
-        let diag = TypeError::Redeclared.at_with_message(5u32..15u32, "foo redeclared in this block");
+        let diag =
+            TypeError::Redeclared.at_with_message(5u32..15u32, "foo redeclared in this block");
         assert_eq!(diag.code, Some(2201));
         assert_eq!(diag.message, "foo redeclared in this block");
         assert_eq!(diag.labels.len(), 1);

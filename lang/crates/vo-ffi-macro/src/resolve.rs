@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use syn::{ItemFn, FnArg, ReturnType, Type};
+use syn::{FnArg, ItemFn, ReturnType, Type};
 
 use crate::vo_parser;
 
@@ -129,7 +129,9 @@ pub fn validate_signature(func: &ItemFn, vo_sig: &vo_parser::VoFuncSig) -> syn::
             &func.sig.output,
             format!(
                 "return value count mismatch: Rust returns {} values, Vo '{}' expects {}",
-                rust_ret_count, vo_sig.name, vo_sig.results.len()
+                rust_ret_count,
+                vo_sig.name,
+                vo_sig.results.len()
             ),
         ));
     }
@@ -252,8 +254,7 @@ pub fn find_pkg_dir_for_slots(pkg_path: &str) -> Option<PathBuf> {
 ///
 /// Returns `pkg_name` unchanged when no metadata is found (stdlib packages, etc.).
 pub fn resolve_full_pkg_path(pkg_name: &str) -> String {
-    try_resolve_via_cargo_metadata(pkg_name)
-        .unwrap_or_else(|| pkg_name.to_string())
+    try_resolve_via_cargo_metadata(pkg_name).unwrap_or_else(|| pkg_name.to_string())
 }
 
 fn try_resolve_via_cargo_metadata(pkg_name: &str) -> Option<String> {
@@ -337,7 +338,9 @@ fn find_pkg_dir_by_vomod(full_module_path: &str) -> Option<PathBuf> {
                 }
             }
         }
-        if !dir.pop() { break; }
+        if !dir.pop() {
+            break;
+        }
     }
     None
 }

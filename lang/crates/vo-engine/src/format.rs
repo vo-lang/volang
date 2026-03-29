@@ -19,13 +19,12 @@ pub fn format_text(module: &Module) -> String {
     if !module.struct_metas.is_empty() {
         out.push_str("## Struct Types\n");
         for (i, s) in module.struct_metas.iter().enumerate() {
-            out.push_str(&format!(
-                "# [{}] ({} slots)\n",
-                i,
-                s.slot_count()
-            ));
+            out.push_str(&format!("# [{}] ({} slots)\n", i, s.slot_count()));
             for field in &s.fields {
-                out.push_str(&format!("#   {}: offset={}, slots={}\n", field.name, field.offset, field.slot_count));
+                out.push_str(&format!(
+                    "#   {}: offset={}, slots={}\n",
+                    field.name, field.offset, field.slot_count
+                ));
             }
         }
         out.push('\n');
@@ -151,7 +150,12 @@ fn format_instruction(instr: &Instruction) -> String {
 
     match op {
         // LOAD
-        Opcode::Hint => format!("Hint          flags={}, a={}, bc={}", flags, a, instr.imm32_unsigned()),
+        Opcode::Hint => format!(
+            "Hint          flags={}, a={}, bc={}",
+            flags,
+            a,
+            instr.imm32_unsigned()
+        ),
         Opcode::LoadInt => format!("LoadInt       r{}, {}", a, instr.imm32()),
         Opcode::LoadConst => format!("LoadConst     r{}, const_{}", a, b),
 
@@ -203,7 +207,7 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::LeI => format!("LeI           r{}, r{}, r{}", a, b, c),
         Opcode::GtI => format!("GtI           r{}, r{}, r{}", a, b, c),
         Opcode::GeI => format!("GeI           r{}, r{}, r{}", a, b, c),
-        
+
         // CMP Integer (unsigned)
         Opcode::LtU => format!("LtU           r{}, r{}, r{}", a, b, c),
         Opcode::LeU => format!("LeU           r{}, r{}, r{}", a, b, c),
@@ -242,21 +246,33 @@ fn format_instruction(instr: &Instruction) -> String {
             let func_id = a as u32 | ((flags as u32) << 16);
             let arg_slots = c >> 8;
             let ret_slots = c & 0xFF;
-            format!("Call          func_{}, args=r{}, arg_slots={}, ret_slots={}", func_id, b, arg_slots, ret_slots)
+            format!(
+                "Call          func_{}, args=r{}, arg_slots={}, ret_slots={}",
+                func_id, b, arg_slots, ret_slots
+            )
         }
         // CallExtern: a=result_start, b=extern_id, c=arg_start, flags=arg_count
-        Opcode::CallExtern => format!("CallExtern    r{}, extern_{}, args={}, count={}", a, b, c, flags),
+        Opcode::CallExtern => format!(
+            "CallExtern    r{}, extern_{}, args={}, count={}",
+            a, b, c, flags
+        ),
         // CallClosure: a=closure_reg, b=args_start, c=(arg_slots<<8|ret_slots)
         Opcode::CallClosure => {
             let arg_slots = c >> 8;
             let ret_slots = c & 0xFF;
-            format!("CallClosure   r{}, r{}, arg_slots={}, ret_slots={}", a, b, arg_slots, ret_slots)
+            format!(
+                "CallClosure   r{}, r{}, arg_slots={}, ret_slots={}",
+                a, b, arg_slots, ret_slots
+            )
         }
         // CallIface: a=iface_slot, b=args_start, c=(arg_slots<<8|ret_slots), flags=method_idx
         Opcode::CallIface => {
             let arg_slots = c >> 8;
             let ret_slots = c & 0xFF;
-            format!("CallIface     r{}, r{}, method={}, arg_slots={}, ret_slots={}", a, b, flags, arg_slots, ret_slots)
+            format!(
+                "CallIface     r{}, r{}, method={}, arg_slots={}, ret_slots={}",
+                a, b, flags, arg_slots, ret_slots
+            )
         }
         Opcode::Return => {
             if a == 0 && b == 0 {
@@ -282,7 +298,10 @@ fn format_instruction(instr: &Instruction) -> String {
 
         // ARRAY
         // ArrayNew: a=dst, b=meta_reg, c=len_reg, flags=elem_bytes_encoding
-        Opcode::ArrayNew => format!("ArrayNew      r{}, meta=r{}, len=r{}, flags={}", a, b, c, flags),
+        Opcode::ArrayNew => format!(
+            "ArrayNew      r{}, meta=r{}, len=r{}, flags={}",
+            a, b, c, flags
+        ),
         // ArrayGet: a=dst, b=array, c=idx, flags=elem_bytes_encoding
         Opcode::ArrayGet => format!("ArrayGet      r{}, r{}[r{}], flags={}", a, b, c, flags),
         // ArraySet: a=array, b=idx, c=val, flags=elem_bytes_encoding
@@ -291,7 +310,10 @@ fn format_instruction(instr: &Instruction) -> String {
 
         // SLICE
         // SliceNew: a=dst, b=meta_reg, c=len_reg (len at c, cap at c+1), flags=elem_bytes_encoding
-        Opcode::SliceNew => format!("SliceNew      r{}, meta=r{}, len=r{}, flags={}", a, b, c, flags),
+        Opcode::SliceNew => format!(
+            "SliceNew      r{}, meta=r{}, len=r{}, flags={}",
+            a, b, c, flags
+        ),
         // SliceGet: a=dst, b=slice, c=idx, flags=elem_bytes_encoding
         Opcode::SliceGet => format!("SliceGet      r{}, r{}[r{}], elem_slots={}", a, b, c, flags),
         // SliceSet: a=slice, b=idx, c=val, flags=elem_bytes_encoding
@@ -304,10 +326,15 @@ fn format_instruction(instr: &Instruction) -> String {
             let has_max = (flags & 2) != 0;
             let src_type = if is_array { "array" } else { "slice" };
             let max_str = if has_max { ", has_max" } else { "" };
-            format!("SliceSlice    r{}, r{}[r{}:], src={}{}", a, b, c, src_type, max_str)
+            format!(
+                "SliceSlice    r{}, r{}[r{}:], src={}{}",
+                a, b, c, src_type, max_str
+            )
         }
         // SliceAppend: a=dst, b=slice, c=meta_reg, flags=elem_bytes_encoding
-        Opcode::SliceAppend => format!("SliceAppend   r{}, r{}, meta=r{}, flags={}", a, b, c, flags),
+        Opcode::SliceAppend => {
+            format!("SliceAppend   r{}, r{}, meta=r{}, flags={}", a, b, c, flags)
+        }
         Opcode::SliceAddr => format!("SliceAddr     r{}, r{}[r{}], elem_bytes={}", a, b, c, flags),
 
         // MAP
@@ -320,7 +347,10 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::MapIterNext => {
             let key_slots = flags & 0x0F;
             let val_slots = (flags >> 4) & 0x0F;
-            format!("MapIterNext   r{}, iter=r{}, ok=r{}, key_slots={}, val_slots={}", a, b, c, key_slots, val_slots)
+            format!(
+                "MapIterNext   r{}, iter=r{}, ok=r{}, key_slots={}, val_slots={}",
+                a, b, c, key_slots, val_slots
+            )
         }
 
         // QUEUE
@@ -329,11 +359,20 @@ fn format_instruction(instr: &Instruction) -> String {
             a,
             b,
             c,
-            if (flags & vo_runtime::instruction::QUEUE_KIND_PORT_FLAG) != 0 { "port" } else { "chan" },
+            if (flags & vo_runtime::instruction::QUEUE_KIND_PORT_FLAG) != 0 {
+                "port"
+            } else {
+                "chan"
+            },
             flags & !vo_runtime::instruction::QUEUE_KIND_PORT_FLAG,
         ),
         Opcode::QueueSend => format!("QueueSend     r{}, r{}, slots={}", a, b, flags),
-        Opcode::QueueRecv => format!("QueueRecv     r{}, r{}, slots={}", a, b, (flags >> 1) & 0x7F),
+        Opcode::QueueRecv => format!(
+            "QueueRecv     r{}, r{}, slots={}",
+            a,
+            b,
+            (flags >> 1) & 0x7F
+        ),
         Opcode::QueueClose => format!("QueueClose    r{}", a),
         Opcode::QueueLen => format!("QueueLen      r{}, r{}", a, b),
         Opcode::QueueCap => format!("QueueCap      r{}, r{}", a, b),
@@ -391,7 +430,10 @@ fn format_instruction(instr: &Instruction) -> String {
         // IFACE
         // IfaceAssign: a=dst(2 slots), b=src, c=const_idx, flags=value_kind
         Opcode::IfaceAssign => format!("IfaceAssign   r{}, r{}, const={}, vk={}", a, b, c, flags),
-        Opcode::IfaceAssert => format!("IfaceAssert   r{}, r{}, target_meta={}, flags={}", a, b, c, flags),
+        Opcode::IfaceAssert => format!(
+            "IfaceAssert   r{}, r{}, target_meta={}, flags={}",
+            a, b, c, flags
+        ),
         Opcode::IfaceEq => format!("IfaceEq       r{}, r{}, r{}", a, b, c),
 
         // CONV
@@ -419,8 +461,14 @@ fn format_instruction(instr: &Instruction) -> String {
         // Island operations
         Opcode::IslandNew => format!("IslandNew     r{}", a),
         Opcode::GoIsland => format!("GoIsland      r{}, r{}, capture_slots={}", a, b, flags),
-        Opcode::ForLoop => format!("ForLoop       r{}, r{}, offset={}, flags={}", a, b, c as i16, flags),
+        Opcode::ForLoop => format!(
+            "ForLoop       r{}, r{}, offset={}, flags={}",
+            a, b, c as i16, flags
+        ),
 
-        Opcode::Invalid => format!("Invalid       op={}, flags={}, a={}, b={}, c={}", instr.op, flags, a, b, c),
+        Opcode::Invalid => format!(
+            "Invalid       op={}, flags={}, a={}, b={}, c={}",
+            instr.op, flags, a, b, c
+        ),
     }
 }

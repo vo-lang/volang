@@ -14,13 +14,16 @@ use super::helpers::{extract_context, set_jit_panic};
 
 /// Close a channel.
 pub extern "C" fn jit_queue_close(ctx: *mut JitContext, chan: u64) -> JitResult {
-    use crate::exec::{QueueAction, queue_close_core};
+    use crate::exec::{queue_close_core, QueueAction};
 
     let (vm, fiber) = unsafe { extract_context(ctx) };
     let ch = chan as GcRef;
     match queue_close_core(ch) {
         QueueAction::Continue => JitResult::Ok,
-        QueueAction::Close { waiters, endpoint_id } => {
+        QueueAction::Close {
+            waiters,
+            endpoint_id,
+        } => {
             for waiter in &waiters {
                 vm.state.wake_waiter(waiter, &mut vm.scheduler);
             }
@@ -29,8 +32,12 @@ pub extern "C" fn jit_queue_close(ctx: *mut JitContext, chan: u64) -> JitResult 
             }
             JitResult::Ok
         }
-        QueueAction::RemoteClose { endpoint_id, home_island } => {
-            vm.state.send_endpoint_close_request(home_island, endpoint_id);
+        QueueAction::RemoteClose {
+            endpoint_id,
+            home_island,
+        } => {
+            vm.state
+                .send_endpoint_close_request(home_island, endpoint_id);
             vm.state.endpoint_registry.mark_tombstone(endpoint_id);
             JitResult::Ok
         }
@@ -42,8 +49,12 @@ pub extern "C" fn jit_queue_close(ctx: *mut JitContext, chan: u64) -> JitResult 
         }
         QueueAction::Trap(_) => JitResult::Panic,
         // channel_close_core never produces these variants
-        QueueAction::Block | QueueAction::ReplayThenBlock | QueueAction::Wake(_) => unreachable!("close"),
-        QueueAction::RemoteSend { .. } | QueueAction::RemoteRecv { .. } | QueueAction::RemoteRecvData { .. } => unreachable!("close"),
+        QueueAction::Block | QueueAction::ReplayThenBlock | QueueAction::Wake(_) => {
+            unreachable!("close")
+        }
+        QueueAction::RemoteSend { .. }
+        | QueueAction::RemoteRecv { .. }
+        | QueueAction::RemoteRecvData { .. } => unreachable!("close"),
     }
 }
 
@@ -54,7 +65,7 @@ pub extern "C" fn jit_queue_send(
     val_ptr: *const u64,
     val_slots: u32,
 ) -> JitResult {
-    use crate::exec::{QueueAction, queue_send_core};
+    use crate::exec::{queue_send_core, QueueAction};
 
     let module = unsafe { &*((*ctx).module as *const vo_runtime::bytecode::Module) };
     let (vm, fiber) = unsafe { extract_context(ctx) };
@@ -82,8 +93,13 @@ pub extern "C" fn jit_queue_send(
         }
         QueueAction::Continue => JitResult::Ok,
         QueueAction::Block => JitResult::WaitQueue,
-        QueueAction::RemoteSend { endpoint_id, home_island, data } => {
-            vm.state.send_endpoint_send_request(home_island, endpoint_id, data, fiber.id as u64);
+        QueueAction::RemoteSend {
+            endpoint_id,
+            home_island,
+            data,
+        } => {
+            vm.state
+                .send_endpoint_send_request(home_island, endpoint_id, data, fiber.id as u64);
             JitResult::WaitQueue
         }
         QueueAction::Trap(RuntimeTrapKind::SendOnNilChannel) => {
@@ -93,8 +109,14 @@ pub extern "C" fn jit_queue_send(
             set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED)
         }
         QueueAction::Trap(_) => JitResult::Panic,
-        QueueAction::RemoteRecvData { endpoint_id, target_island, fiber_id, data } => {
-            vm.state.send_endpoint_recv_data_response(target_island, endpoint_id, data, fiber_id);
+        QueueAction::RemoteRecvData {
+            endpoint_id,
+            target_island,
+            fiber_id,
+            data,
+        } => {
+            vm.state
+                .send_endpoint_recv_data_response(target_island, endpoint_id, data, fiber_id);
             JitResult::Ok
         }
         // channel_send_core never produces these variants
@@ -112,7 +134,7 @@ pub extern "C" fn jit_queue_recv(
     elem_slots: u32,
     has_ok: u32,
 ) -> JitResult {
-    use crate::exec::{QueueRecvCoreResult, complete_queue_recv, queue_recv_core};
+    use crate::exec::{complete_queue_recv, queue_recv_core, QueueRecvCoreResult};
 
     let module = unsafe { &*((*ctx).module as *const vo_runtime::bytecode::Module) };
     let (vm, fiber) = unsafe { extract_context(ctx) };
@@ -144,8 +166,12 @@ pub extern "C" fn jit_queue_recv(
         }
         Ok(None) => JitResult::Ok,
         Err(QueueRecvCoreResult::WouldBlock) => JitResult::WaitQueue,
-        Err(QueueRecvCoreResult::Remote { endpoint_id, home_island }) => {
-            vm.state.send_endpoint_recv_request(home_island, endpoint_id, fiber.id as u64);
+        Err(QueueRecvCoreResult::Remote {
+            endpoint_id,
+            home_island,
+        }) => {
+            vm.state
+                .send_endpoint_recv_request(home_island, endpoint_id, fiber.id as u64);
             JitResult::WaitQueue
         }
         Err(QueueRecvCoreResult::Trap(RuntimeTrapKind::RecvOnNilChannel)) => {

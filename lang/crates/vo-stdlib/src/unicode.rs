@@ -127,7 +127,7 @@ fn simple_fold(r: i32) -> i32 {
         Some(c) => c,
         None => return r,
     };
-    
+
     if c.is_uppercase() {
         c.to_lowercase().next().map(|c| c as i32).unwrap_or(r)
     } else if c.is_lowercase() {

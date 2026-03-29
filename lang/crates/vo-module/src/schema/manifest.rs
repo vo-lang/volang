@@ -201,8 +201,6 @@ impl ReleaseManifest {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

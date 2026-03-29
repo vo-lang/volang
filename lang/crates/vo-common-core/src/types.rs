@@ -17,16 +17,16 @@ use num_enum::TryFromPrimitive;
 pub type MetaId = u32;
 
 pub const INVALID_META_ID: MetaId = 0xFF_FFFF; // 24-bit max
-pub const META_ID_MASK: MetaId = 0xFF_FFFF;    // 24-bit mask
+pub const META_ID_MASK: MetaId = 0xFF_FFFF; // 24-bit mask
 
 /// Value metadata - packed 32-bit representation.
 /// Layout: [meta_id:24 | value_kind:8]
-/// 
+///
 /// The meaning of `meta_id` depends on `value_kind`:
 /// - Struct/Pointer: `struct_meta_id` - index into `struct_metas[]` (for GC scan)
 /// - Interface: `iface_meta_id` - index into `interface_metas[]` (for itab lookup)
 /// - Other types: 0 (unused, never store rttid here to avoid confusion)
-/// 
+///
 /// Note: For runtime type identification, use `ValueRttid` which stores `rttid`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ValueMeta(u32);
@@ -103,7 +103,7 @@ impl ValueRttid {
 #[repr(u8)]
 pub enum ValueKind {
     // === Primitive Types (1 slot, no GC) ===
-    Void = 0,  // No type (distinct from semantic nil like nil pointer/slice/map)
+    Void = 0, // No type (distinct from semantic nil like nil pointer/slice/map)
     Bool = 1,
     Int = 2,
     Int8 = 3,
@@ -138,11 +138,23 @@ impl ValueKind {
     /// Basic types that don't have internal type info.
     /// Used for pre-registering RuntimeType::Basic in TypeInterner.
     pub const BASIC: [ValueKind; 15] = [
-        Self::Void, Self::Bool, Self::Int, Self::Int8, Self::Int16, Self::Int32, Self::Int64,
-        Self::Uint, Self::Uint8, Self::Uint16, Self::Uint32, Self::Uint64,
-        Self::Float32, Self::Float64, Self::String,
+        Self::Void,
+        Self::Bool,
+        Self::Int,
+        Self::Int8,
+        Self::Int16,
+        Self::Int32,
+        Self::Int64,
+        Self::Uint,
+        Self::Uint8,
+        Self::Uint16,
+        Self::Uint32,
+        Self::Uint64,
+        Self::Float32,
+        Self::Float64,
+        Self::String,
     ];
-    
+
     #[inline]
     pub fn from_u8(v: u8) -> Self {
         Self::try_from(v).unwrap_or(ValueKind::Void)
@@ -205,7 +217,7 @@ impl ValueKind {
     #[inline]
     pub fn is_signed_int(&self) -> bool {
         let v = *self as u8;
-        v >= 2 && v <= 6
+        (2..=6).contains(&v)
     }
 
     pub fn elem_bytes(&self) -> usize {
@@ -290,9 +302,9 @@ pub const ELEM_FLAG_SIGN_BIT: u8 = 0x80;
 pub const ELEM_FLAG_FLOAT_BIT: u8 = 0x40;
 pub const ELEM_FLAG_BYTES_MASK: u8 = 0x3F;
 
-pub const ELEM_FLAG_INT8: u8 = ELEM_FLAG_SIGN_BIT | 1;     // 0x81 = 129
-pub const ELEM_FLAG_INT16: u8 = ELEM_FLAG_SIGN_BIT | 2;    // 0x82 = 130
-pub const ELEM_FLAG_INT32: u8 = ELEM_FLAG_SIGN_BIT | 4;    // 0x84 = 132
+pub const ELEM_FLAG_INT8: u8 = ELEM_FLAG_SIGN_BIT | 1; // 0x81 = 129
+pub const ELEM_FLAG_INT16: u8 = ELEM_FLAG_SIGN_BIT | 2; // 0x82 = 130
+pub const ELEM_FLAG_INT32: u8 = ELEM_FLAG_SIGN_BIT | 4; // 0x84 = 132
 pub const ELEM_FLAG_FLOAT32: u8 = ELEM_FLAG_FLOAT_BIT | 4; // 0x44 = 68
 
 /// Convert elem_bytes and ValueKind to flags for instructions.
@@ -303,6 +315,12 @@ pub fn elem_flags(elem_bytes: usize, vk: ValueKind) -> u8 {
         ValueKind::Int16 => ELEM_FLAG_INT16,
         ValueKind::Int32 => ELEM_FLAG_INT32,
         ValueKind::Float32 => ELEM_FLAG_FLOAT32,
-        _ => if elem_bytes > (ELEM_FLAG_BYTES_MASK as usize) { 0 } else { elem_bytes as u8 }
+        _ => {
+            if elem_bytes > (ELEM_FLAG_BYTES_MASK as usize) {
+                0
+            } else {
+                elem_bytes as u8
+            }
+        }
     }
 }

@@ -6,7 +6,6 @@ use crate::slot::{byte_offset_for_slots, slot_to_ptr, Slot, SLOT_BYTES};
 use vo_common_core::bytecode::StructMeta;
 use vo_common_core::types::{SlotType, ValueKind, ValueMeta};
 
-
 /// Type-safe write barrier for mixed-slot values.
 ///
 /// Only barriers slots that are actually GcRefs (SlotType::GcRef) or
@@ -25,10 +24,7 @@ pub fn typed_write_barrier(gc: &mut Gc, parent: GcRef, vals: &[u64], slot_types:
                 }
             }
             SlotType::Interface0 => {
-                if i + 1 < vals.len()
-                    && interface::data_is_gc_ref(vals[i])
-                    && vals[i + 1] != 0
-                {
+                if i + 1 < vals.len() && interface::data_is_gc_ref(vals[i]) && vals[i + 1] != 0 {
                     gc.write_barrier(parent, vals[i + 1] as GcRef);
                 }
                 i += 1; // skip data slot (Interface1)
@@ -52,8 +48,14 @@ pub fn typed_write_barrier_by_meta(
     let vk = meta.value_kind();
     match vk {
         // Single-slot reference types: the entire value is a GcRef
-        ValueKind::String | ValueKind::Slice | ValueKind::Map | ValueKind::Closure |
-        ValueKind::Channel | ValueKind::Port | ValueKind::Pointer | ValueKind::Island => {
+        ValueKind::String
+        | ValueKind::Slice
+        | ValueKind::Map
+        | ValueKind::Closure
+        | ValueKind::Channel
+        | ValueKind::Port
+        | ValueKind::Pointer
+        | ValueKind::Island => {
             if !vals.is_empty() && vals[0] != 0 {
                 gc.write_barrier(parent, vals[0] as GcRef);
             }
@@ -84,9 +86,14 @@ pub fn typed_write_barrier_by_meta(
 ///
 /// `func_capture_slot_types`: indexed by func_id, each entry is the capture_slot_types for that function.
 /// Used to scan closure captures with correct types (Interface0/Interface1 vs GcRef).
-pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_capture_slot_types: &[&[SlotType]]) {
+pub fn scan_object(
+    gc: &mut Gc,
+    obj: GcRef,
+    struct_metas: &[StructMeta],
+    func_capture_slot_types: &[&[SlotType]],
+) {
     let gc_header = Gc::header(obj);
-    
+
     // Large arrays use GcHeader.slots == 0 and store the real size in ArrayHeader.
     // Any other ValueKind::Array object with slots < HEADER_SLOTS is a codegen bug.
     match gc_header.kind() {
@@ -103,12 +110,16 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_ca
         }
         ValueKind::String => {
             let arr = slice::array_ref(obj);
-            if !arr.is_null() { gc.mark_gray(arr); }
+            if !arr.is_null() {
+                gc.mark_gray(arr);
+            }
         }
 
         ValueKind::Slice => {
             let arr = slice::array_ref(obj);
-            if !arr.is_null() { gc.mark_gray(arr); }
+            if !arr.is_null() {
+                gc.mark_gray(arr);
+            }
         }
 
         ValueKind::Struct | ValueKind::Pointer => {
@@ -126,7 +137,9 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_ca
             debug_assert!(
                 gc_header.slots == map::DATA_SLOTS,
                 "scan_object: Map object {:p} has slots={} != DATA_SLOTS={} — codegen bug",
-                obj, gc_header.slots, map::DATA_SLOTS
+                obj,
+                gc_header.slots,
+                map::DATA_SLOTS
             );
             if gc_header.slots == map::DATA_SLOTS {
                 scan_map(gc, obj, struct_metas);
@@ -137,7 +150,9 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_ca
             debug_assert!(
                 gc_header.slots == queue_state::DATA_SLOTS,
                 "scan_object: Queue object {:p} has slots={} != DATA_SLOTS={} — codegen bug",
-                obj, gc_header.slots, queue_state::DATA_SLOTS
+                obj,
+                gc_header.slots,
+                queue_state::DATA_SLOTS
             );
             if gc_header.slots == queue_state::DATA_SLOTS {
                 scan_queue(gc, obj, struct_metas);
@@ -162,16 +177,18 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta], func_ca
 fn scan_closure(gc: &mut Gc, obj: GcRef, func_capture_slot_types: &[&[SlotType]]) {
     let func_id = closure::func_id(obj);
     let cap_count = closure::capture_count(obj);
-    if cap_count == 0 { return; }
+    if cap_count == 0 {
+        return;
+    }
 
     let capture_slots = unsafe {
-        core::slice::from_raw_parts(
-            (obj as *const u64).add(closure::HEADER_SLOTS),
-            cap_count,
-        )
+        core::slice::from_raw_parts((obj as *const u64).add(closure::HEADER_SLOTS), cap_count)
     };
 
-    let capture_types = func_capture_slot_types.get(func_id as usize).copied().unwrap_or(&[]);
+    let capture_types = func_capture_slot_types
+        .get(func_id as usize)
+        .copied()
+        .unwrap_or(&[]);
     debug_assert!(
         !capture_types.is_empty(),
         "scan_closure: func_id={} has {} captures but empty capture_slot_types — codegen must set capture_slot_types for all closures with captures",
@@ -183,7 +200,9 @@ fn scan_closure(gc: &mut Gc, obj: GcRef, func_capture_slot_types: &[&[SlotType]]
         // Method value wrappers have Interface0/Interface1 captures that would crash here.
         // The debug_assert above catches this in debug builds.
         for &slot in capture_slots {
-            if slot != 0 { gc.mark_gray(slot_to_ptr(slot)); }
+            if slot != 0 {
+                gc.mark_gray(slot_to_ptr(slot));
+            }
         }
     } else {
         scan_slots_by_types(gc, capture_slots, capture_types);
@@ -193,13 +212,15 @@ fn scan_closure(gc: &mut Gc, obj: GcRef, func_capture_slot_types: &[&[SlotType]]
 fn scan_array(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
     let elem_meta = array::elem_meta(obj);
     let elem_kind = elem_meta.value_kind();
-    
+
     // Packed types (bool, int8-32, float32) don't contain GcRefs
-    if !elem_kind.may_contain_gc_refs() { return; }
-    
+    if !elem_kind.may_contain_gc_refs() {
+        return;
+    }
+
     let len = array::len(obj);
     let elem_bytes = array::elem_bytes(obj);
-    
+
     // For INLINE struct elements (ValueKind::Struct), use field slot_types from struct_metas.
     // Pointer elements (ValueKind::Pointer) are a single GcRef slot each — using the
     // pointed-to struct's slot_types here would read beyond each 1-slot element into adjacent
@@ -229,23 +250,34 @@ fn scan_array(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
             let elem_off = base_off + idx * elem_bytes;
             let itab_slot = unsafe { *((obj as *const u8).add(elem_off) as *const Slot) };
             if interface::data_is_gc_ref(itab_slot) {
-                let data_slot = unsafe { *((obj as *const u8).add(elem_off + SLOT_BYTES) as *const Slot) };
-                if data_slot != 0 { gc.mark_gray(slot_to_ptr(data_slot)); }
+                let data_slot =
+                    unsafe { *((obj as *const u8).add(elem_off + SLOT_BYTES) as *const Slot) };
+                if data_slot != 0 {
+                    gc.mark_gray(slot_to_ptr(data_slot));
+                }
             }
         }
         return;
     }
-    
+
     // For reference types (slice, map, string, etc.), each element is a single GcRef
     let base_off = byte_offset_for_slots(array::HEADER_SLOTS);
     for idx in 0..len {
         let ptr = unsafe { (obj as *const u8).add(base_off + idx * elem_bytes) as *const Slot };
         let child = unsafe { *ptr };
-        if child != 0 { gc.mark_gray(slot_to_ptr(child)); }
+        if child != 0 {
+            gc.mark_gray(slot_to_ptr(child));
+        }
     }
 }
 
-fn scan_array_struct_elem(gc: &mut Gc, obj: GcRef, idx: usize, elem_bytes: usize, slot_types: &[SlotType]) {
+fn scan_array_struct_elem(
+    gc: &mut Gc,
+    obj: GcRef,
+    idx: usize,
+    elem_bytes: usize,
+    slot_types: &[SlotType],
+) {
     let base_off = byte_offset_for_slots(array::HEADER_SLOTS) + idx * elem_bytes;
     let mut i = 0;
     while i < slot_types.len() {
@@ -253,14 +285,21 @@ fn scan_array_struct_elem(gc: &mut Gc, obj: GcRef, idx: usize, elem_bytes: usize
         if st == SlotType::GcRef {
             let ptr = unsafe { (obj as *const u8).add(base_off + i * SLOT_BYTES) as *const Slot };
             let child = unsafe { *ptr };
-            if child != 0 { gc.mark_gray(slot_to_ptr(child)); }
+            if child != 0 {
+                gc.mark_gray(slot_to_ptr(child));
+            }
         } else if st == SlotType::Interface0 {
-            let header_ptr = unsafe { (obj as *const u8).add(base_off + i * SLOT_BYTES) as *const Slot };
+            let header_ptr =
+                unsafe { (obj as *const u8).add(base_off + i * SLOT_BYTES) as *const Slot };
             let header_slot = unsafe { *header_ptr };
             if interface::data_is_gc_ref(header_slot) {
-                let data_ptr = unsafe { (obj as *const u8).add(base_off + (i + 1) * SLOT_BYTES) as *const Slot };
+                let data_ptr = unsafe {
+                    (obj as *const u8).add(base_off + (i + 1) * SLOT_BYTES) as *const Slot
+                };
                 let child = unsafe { *data_ptr };
-                if child != 0 { gc.mark_gray(slot_to_ptr(child)); }
+                if child != 0 {
+                    gc.mark_gray(slot_to_ptr(child));
+                }
             }
             i += 1;
         }
@@ -270,15 +309,21 @@ fn scan_array_struct_elem(gc: &mut Gc, obj: GcRef, idx: usize, elem_bytes: usize
 
 fn scan_queue(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
     // REMOTE channels have no local state — elements live on the home island
-    if queue::is_remote(obj) { return; }
+    if queue::is_remote(obj) {
+        return;
+    }
 
     let elem_meta = queue_state::elem_meta(obj);
     let elem_kind = elem_meta.value_kind();
-    if !elem_kind.may_contain_gc_refs() { return; }
-    
+    if !elem_kind.may_contain_gc_refs() {
+        return;
+    }
+
     let elem_scan = resolve_elem_scan(elem_kind, elem_meta, true, struct_metas);
-    if matches!(elem_scan, ElemScan::Skip) { return; }
-    
+    if matches!(elem_scan, ElemScan::Skip) {
+        return;
+    }
+
     let state = queue::local_state(obj);
     for elem in state.iter_buffer() {
         scan_elem(gc, elem, &elem_scan);
@@ -296,8 +341,15 @@ enum ElemScan<'a> {
     Typed(&'a [SlotType]),
 }
 
-fn resolve_elem_scan<'a>(kind: ValueKind, meta: ValueMeta, should_scan: bool, struct_metas: &'a [StructMeta]) -> ElemScan<'a> {
-    if !should_scan { return ElemScan::Skip; }
+fn resolve_elem_scan<'a>(
+    kind: ValueKind,
+    meta: ValueMeta,
+    should_scan: bool,
+    struct_metas: &'a [StructMeta],
+) -> ElemScan<'a> {
+    if !should_scan {
+        return ElemScan::Skip;
+    }
     match kind {
         ValueKind::Struct => {
             let meta_id = meta.meta_id() as usize;
@@ -321,7 +373,9 @@ fn scan_elem(gc: &mut Gc, slots: &[u64], scan: &ElemScan) {
         ElemScan::Skip => {}
         ElemScan::GcRefs => {
             for &slot in slots {
-                if slot != 0 { gc.mark_gray(slot as GcRef); }
+                if slot != 0 {
+                    gc.mark_gray(slot as GcRef);
+                }
             }
         }
         ElemScan::Interface => {
@@ -342,14 +396,28 @@ fn scan_map(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
     let val_meta = map::val_meta(obj);
     let key_kind = key_meta.value_kind();
     let val_kind = val_meta.value_kind();
-    
-    if !key_kind.may_contain_gc_refs() && !val_kind.may_contain_gc_refs() { return; }
-    
-    let key_scan = resolve_elem_scan(key_kind, key_meta, key_kind.may_contain_gc_refs(), struct_metas);
-    let val_scan = resolve_elem_scan(val_kind, val_meta, val_kind.may_contain_gc_refs(), struct_metas);
-    
-    if matches!(key_scan, ElemScan::Skip) && matches!(val_scan, ElemScan::Skip) { return; }
-    
+
+    if !key_kind.may_contain_gc_refs() && !val_kind.may_contain_gc_refs() {
+        return;
+    }
+
+    let key_scan = resolve_elem_scan(
+        key_kind,
+        key_meta,
+        key_kind.may_contain_gc_refs(),
+        struct_metas,
+    );
+    let val_scan = resolve_elem_scan(
+        val_kind,
+        val_meta,
+        val_kind.may_contain_gc_refs(),
+        struct_metas,
+    );
+
+    if matches!(key_scan, ElemScan::Skip) && matches!(val_scan, ElemScan::Skip) {
+        return;
+    }
+
     let mut iter = map::iter_init(obj);
     while let Some((k, v)) = map::iter_next(&mut iter) {
         scan_elem(gc, k, &key_scan);
@@ -358,20 +426,26 @@ fn scan_map(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
 }
 
 fn scan_struct(gc: &mut Gc, obj: GcRef, meta_id: usize, struct_metas: &[StructMeta]) {
-    if meta_id >= struct_metas.len() { return; }
-    
+    if meta_id >= struct_metas.len() {
+        return;
+    }
+
     let meta = &struct_metas[meta_id];
     let mut i = 0;
     while i < meta.slot_types.len() {
         let st = meta.slot_types[i];
         if st == SlotType::GcRef {
             let child = unsafe { Gc::read_slot(obj, i) };
-            if child != 0 { gc.mark_gray(child as GcRef); }
+            if child != 0 {
+                gc.mark_gray(child as GcRef);
+            }
         } else if st == SlotType::Interface0 {
             let header_slot = unsafe { Gc::read_slot(obj, i) };
             if interface::data_is_gc_ref(header_slot) {
                 let child = unsafe { Gc::read_slot(obj, i + 1) };
-                if child != 0 { gc.mark_gray(child as GcRef); }
+                if child != 0 {
+                    gc.mark_gray(child as GcRef);
+                }
             }
             i += 1;
         }
@@ -388,12 +462,16 @@ pub fn finalize_object(obj: GcRef) {
             // Only finalize real channel objects (DATA_SLOTS=3), not heap-boxed
             // pointer-to-channel (1 slot) created by PtrNew.
             if header.slots == queue_state::DATA_SLOTS {
-                unsafe { queue::drop_inner(obj); }
+                unsafe {
+                    queue::drop_inner(obj);
+                }
             }
         }
         ValueKind::Map => {
             if header.slots == map::DATA_SLOTS {
-                unsafe { map::drop_inner(obj); }
+                unsafe {
+                    map::drop_inner(obj);
+                }
             }
         }
         // Island has no native resources to finalize (channels managed by VM)

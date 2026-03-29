@@ -10,7 +10,6 @@
 //!
 //! Adapted from goscript with Vo-specific modifications.
 
-
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -94,7 +93,6 @@ impl MethodInfo {
             String::new()
         }
     }
-
 }
 
 /// Interface method set information.
@@ -174,7 +172,11 @@ impl Checker {
                         // each method must have a unique non-blank name."
                         let name = self.resolve_ident(&m.name).to_string();
                         if name == "_" {
-                            self.error_code_msg(TypeError::InvalidOp, m.span, "invalid method name _");
+                            self.error_code_msg(
+                                TypeError::InvalidOp,
+                                m.span,
+                                "invalid method name _",
+                            );
                             continue;
                         }
 
@@ -195,7 +197,9 @@ impl Checker {
                         // We have an embedded interface with qualified name (pkg.Type).
                         let pkg_name = self.resolve_ident(pkg).to_string();
                         let type_name = self.resolve_ident(name).to_string();
-                        if let Some(e) = self.info_from_qualified_type_name(skey, &pkg_name, &type_name) {
+                        if let Some(e) =
+                            self.info_from_qualified_type_name(skey, &pkg_name, &type_name)
+                        {
                             embeddeds.push(e);
                             positions.push(*span);
                         }
@@ -279,7 +283,7 @@ impl Checker {
             if let Some(decl_key) = self.obj_map.get(&tname).copied() {
                 use super::resolver::DeclInfo;
                 use vo_syntax::ast::TypeExprKind;
-                
+
                 // Extract data we need before mutable borrow
                 let decl = &self.tc_objs.decls[decl_key];
                 let type_info = if let DeclInfo::Type(type_decl) = decl {
@@ -287,7 +291,7 @@ impl Checker {
                 } else {
                     None
                 };
-                
+
                 if let Some((file_scope, type_kind)) = type_info {
                     // Check what the RHS type expression is
                     match type_kind {
@@ -351,20 +355,20 @@ impl Checker {
             let imported_val = &self.tc_objs.pkgs[*imported];
             let pkg_scope = *imported_val.scope();
             let scope = &self.tc_objs.scopes[pkg_scope];
-            
+
             if let Some(obj2) = scope.lookup(type_name) {
                 let obj_val2 = self.lobj(obj2);
-                
+
                 // Check if it's exported
                 if !obj_val2.exported() {
                     return None;
                 }
-                
+
                 // Check if it's a type name
                 if !obj_val2.entity_type().is_type_name() {
                     return None;
                 }
-                
+
                 // Get the underlying type and check if it's an interface
                 // Note: This requires the imported package to be fully type-checked first.
                 // If typ() is None, the imported package hasn't been processed yet.
@@ -414,7 +418,7 @@ impl Checker {
 
     /// like declare_in_set but for method infos.
     /// Aligned with goscript/types/src/check/interface.rs::declare_in_method_set
-    /// 
+    ///
     /// Per Go spec: if the same method is inherited from multiple embedded interfaces
     /// with identical signatures, it's allowed (diamond pattern). Only report error
     /// if signatures differ.
@@ -431,31 +435,34 @@ impl Checker {
             if let (Some(existing_func), Some(new_func)) = (existing.func(), mi.func()) {
                 let existing_type = self.lobj(existing_func).typ();
                 let new_type = self.lobj(new_func).typ();
-                
+
                 // If signatures are identical (structurally), this is valid (diamond pattern)
                 // Use typ::identical_o to compare types structurally, not by TypeKey
                 if typ::identical_o(existing_type, new_type, self.objs()) {
                     return true;
                 }
-                
+
                 // Signatures differ - this is an error
                 self.error_code_msg(
-                    TypeError::MethodRedeclared, 
-                    pos, 
-                    format!("{} redeclared with different signature", name)
+                    TypeError::MethodRedeclared,
+                    pos,
+                    format!("{} redeclared with different signature", name),
                 );
                 return false;
             }
-            
+
             // One or both don't have func set yet (explicit methods being collected)
             // This is a redeclaration error
-            self.error_code_msg(TypeError::MethodRedeclared, pos, format!("{} redeclared", name));
+            self.error_code_msg(
+                TypeError::MethodRedeclared,
+                pos,
+                format!("{} redeclared", name),
+            );
             return false;
         }
-        
+
         // Method doesn't exist yet, add it
         set.insert(name.to_string(), mi);
         true
     }
-
 }

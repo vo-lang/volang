@@ -13,20 +13,21 @@
 //! - entry_func: u32
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec, collections::BTreeMap};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
-#[cfg(feature = "std")]
-use std::collections::{HashMap, BTreeMap};
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
+#[cfg(feature = "std")]
+use std::collections::{BTreeMap, HashMap};
 
-use crate::types::{SlotType, ValueMeta, ValueRttid};
-use crate::RuntimeType;
 use crate::bytecode::{
     Constant, ExtSlotKind, ExternDef, FieldMeta, FunctionDef, GlobalDef, InterfaceMeta,
-    InterfaceMethodMeta, Itab, MethodInfo, Module, NamedTypeMeta, StructMeta, TransferType, WellKnownTypes,
+    InterfaceMethodMeta, Itab, MethodInfo, Module, NamedTypeMeta, StructMeta, TransferType,
+    WellKnownTypes,
 };
 use crate::instruction::Instruction;
+use crate::types::{SlotType, ValueMeta, ValueRttid};
+use crate::RuntimeType;
 
 const MAGIC: &[u8; 3] = b"VOB";
 const VERSION: u32 = 1;
@@ -104,8 +105,8 @@ impl ByteWriter {
 // Helper functions for Option<u32> serialization
 fn write_option_u32(w: &mut ByteWriter, opt: Option<u32>) {
     match opt {
-        Some(v) => w.write_u32(1 + v),  // 1+v for Some(v)
-        None => w.write_u32(0),          // 0 for None
+        Some(v) => w.write_u32(1 + v), // 1+v for Some(v)
+        None => w.write_u32(0),        // 0 for None
     }
 }
 
@@ -172,7 +173,11 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
             w.write_u8(*dir as u8);
             w.write_u32(elem.to_raw());
         }
-        RuntimeType::Func { params, results, variadic } => {
+        RuntimeType::Func {
+            params,
+            results,
+            variadic,
+        } => {
             w.write_u8(RT_FUNC);
             w.write_u8(*variadic as u8);
             w.write_u32(params.len() as u32);
@@ -222,17 +227,23 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
     use crate::runtime_type::ChanDir;
     use crate::types::ValueKind;
     use num_enum::TryFromPrimitive;
-    
+
     let tag = r.read_u8()?;
     match tag {
         RT_BASIC => {
             let vk = r.read_u8()?;
-            Ok(RuntimeType::Basic(ValueKind::try_from_primitive(vk).unwrap_or(ValueKind::Void)))
+            Ok(RuntimeType::Basic(
+                ValueKind::try_from_primitive(vk).unwrap_or(ValueKind::Void),
+            ))
         }
         RT_NAMED => {
             let id = r.read_u32()?;
             let struct_meta_raw = r.read_u32()?;
-            let struct_meta_id = if struct_meta_raw == 0 { None } else { Some(struct_meta_raw - 1) };
+            let struct_meta_id = if struct_meta_raw == 0 {
+                None
+            } else {
+                Some(struct_meta_raw - 1)
+            };
             Ok(RuntimeType::Named { id, struct_meta_id })
         }
         RT_POINTER => {
@@ -285,7 +296,11 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             for _ in 0..result_count {
                 results.push(ValueRttid::from_raw(r.read_u32()?));
             }
-            Ok(RuntimeType::Func { params, results, variadic })
+            Ok(RuntimeType::Func {
+                params,
+                results,
+                variadic,
+            })
         }
         RT_STRUCT => {
             use crate::runtime_type::StructField;
@@ -322,9 +337,7 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             }
             Ok(RuntimeType::Tuple(types))
         }
-        RT_ISLAND => {
-            Ok(RuntimeType::Island)
-        }
+        RT_ISLAND => Ok(RuntimeType::Island),
         _ => Ok(RuntimeType::Basic(crate::types::ValueKind::Void)),
     }
 }
@@ -448,7 +461,10 @@ impl Module {
                 w.write_u32(f.type_info.to_raw());
                 w.write_u8(if f.embedded { 1 } else { 0 });
                 match &f.tag {
-                    Some(t) => { w.write_u8(1); w.write_string(t); }
+                    Some(t) => {
+                        w.write_u8(1);
+                        w.write_string(t);
+                    }
                     None => w.write_u8(0),
                 }
             });
@@ -624,15 +640,31 @@ impl Module {
                 let slot_count = r.read_u16()?;
                 let type_info = ValueRttid::from_raw(r.read_u32()?);
                 let embedded = r.read_u8()? != 0;
-                let tag = if r.read_u8()? != 0 { Some(r.read_string()?) } else { None };
-                Ok(FieldMeta { name, offset, slot_count, type_info, embedded, tag })
+                let tag = if r.read_u8()? != 0 {
+                    Some(r.read_string()?)
+                } else {
+                    None
+                };
+                Ok(FieldMeta {
+                    name,
+                    offset,
+                    slot_count,
+                    type_info,
+                    embedded,
+                    tag,
+                })
             })?;
             // Build field_index from fields
-            let field_index: HashMap<String, usize> = fields.iter()
+            let field_index: HashMap<String, usize> = fields
+                .iter()
                 .enumerate()
                 .map(|(i, f)| (f.name.clone(), i))
                 .collect();
-            Ok(StructMeta { slot_types, fields, field_index })
+            Ok(StructMeta {
+                slot_types,
+                fields,
+                field_index,
+            })
         })?;
 
         let interface_metas = r.read_vec(|r| {
@@ -641,9 +673,16 @@ impl Module {
             let methods = r.read_vec(|r| {
                 let name = r.read_string()?;
                 let signature_rttid = r.read_u32()?;
-                Ok(InterfaceMethodMeta { name, signature_rttid })
+                Ok(InterfaceMethodMeta {
+                    name,
+                    signature_rttid,
+                })
             })?;
-            Ok(InterfaceMeta { name, method_names, methods })
+            Ok(InterfaceMeta {
+                name,
+                method_names,
+                methods,
+            })
         })?;
 
         let named_type_metas = r.read_vec(|r| {
@@ -657,7 +696,14 @@ impl Module {
                 let func_id = r.read_u32()?;
                 let is_pointer_receiver = r.read_u8()? != 0;
                 let signature_rttid = r.read_u32()?;
-                methods.insert(n, MethodInfo { func_id, is_pointer_receiver, signature_rttid });
+                methods.insert(
+                    n,
+                    MethodInfo {
+                        func_id,
+                        is_pointer_receiver,
+                        signature_rttid,
+                    },
+                );
             }
             Ok(NamedTypeMeta {
                 name,
@@ -754,9 +800,7 @@ impl Module {
                     slots: r.read_u16()?,
                 })
             })?;
-            let capture_slot_types = r.read_vec(|r| {
-                Ok(SlotType::from_u8(r.read_u8()?))
-            })?;
+            let capture_slot_types = r.read_vec(|r| Ok(SlotType::from_u8(r.read_u8()?)))?;
             let param_types = r.read_vec(|r| {
                 Ok(TransferType {
                     meta_raw: r.read_u32()?,
@@ -765,7 +809,8 @@ impl Module {
                 })
             })?;
             let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&slot_types);
-            let borrowed_scan_slots_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
+            let borrowed_scan_slots_prefix =
+                FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
             Ok(FunctionDef {
                 name,
                 param_count,
@@ -819,7 +864,13 @@ impl Module {
                     let line = r.read_u32()?;
                     let col = r.read_u16()?;
                     let len = r.read_u16()?;
-                    Ok(crate::debug_info::DebugLoc { pc, file_id, line, col, len })
+                    Ok(crate::debug_info::DebugLoc {
+                        pc,
+                        file_id,
+                        line,
+                        col,
+                        len,
+                    })
                 })?;
                 Ok(crate::debug_info::FuncDebugInfo { entries })
             })?;
@@ -920,6 +971,9 @@ mod tests {
 
         assert_eq!(module.functions.len(), module2.functions.len());
         assert_eq!(module.functions[0].name, module2.functions[0].name);
-        assert_eq!(module.functions[0].code.len(), module2.functions[0].code.len());
+        assert_eq!(
+            module.functions[0].code.len(),
+            module2.functions[0].code.len()
+        );
     }
 }

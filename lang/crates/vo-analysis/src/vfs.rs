@@ -47,7 +47,9 @@ pub struct StdSource<F: FileSystem = RealFs> {
 
 impl StdSource<RealFs> {
     pub fn new(root: PathBuf) -> Self {
-        Self { fs: RealFs::new(&root) }
+        Self {
+            fs: RealFs::new(&root),
+        }
     }
 }
 
@@ -55,11 +57,11 @@ impl<F: FileSystem> StdSource<F> {
     pub fn with_fs(fs: F) -> Self {
         Self { fs }
     }
-    
+
     pub fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
         resolve_package(&self.fs, Path::new(import_path), import_path)
     }
-    
+
     pub fn can_handle(&self, import_path: &str) -> bool {
         !import_path.contains('.')
     }
@@ -114,7 +116,7 @@ impl<F: FileSystem> ModSource<F> {
         );
         self
     }
-    
+
     pub fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
         if !self.is_allowed(import_path) {
             return None;
@@ -129,7 +131,7 @@ impl<F: FileSystem> ModSource<F> {
         }
         resolve_package(&self.fs, Path::new(import_path), import_path)
     }
-    
+
     pub fn can_handle(&self, import_path: &str) -> bool {
         import_path.contains('.')
             && import_path != "."
@@ -144,7 +146,8 @@ impl<F: FileSystem> ModSource<F> {
             None => true,
             Some(allowed_modules) => allowed_modules.iter().any(|module| {
                 import_path == module
-                    || (import_path.starts_with(module) && import_path.as_bytes().get(module.len()) == Some(&b'/'))
+                    || (import_path.starts_with(module)
+                        && import_path.as_bytes().get(module.len()) == Some(&b'/'))
             }),
         }
     }
@@ -200,7 +203,9 @@ impl<F: FileSystem + Clone> PackageResolver<F> {
     }
 }
 
-impl<S: FileSystem + Send + Sync, M: FileSystem + Send + Sync> Resolver for PackageResolverMixed<S, M> {
+impl<S: FileSystem + Send + Sync, M: FileSystem + Send + Sync> Resolver
+    for PackageResolverMixed<S, M>
+{
     fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
         if import_path.contains('.') {
             return self.r#mod.resolve(import_path);
@@ -216,7 +221,7 @@ fn resolve_package<F: FileSystem>(fs: &F, fs_path: &Path, import_path: &str) -> 
     if !fs.is_dir(pkg_path) {
         return None;
     }
-    
+
     let files = load_vo_files(fs, pkg_path)?;
 
     let fs_path_abs = match fs.root() {
@@ -226,8 +231,8 @@ fn resolve_package<F: FileSystem>(fs: &F, fs_path: &Path, import_path: &str) -> 
 
     let (module_path, canonical_path) =
         resolve_canonical_package_path(fs, pkg_path, &fs_path_abs, import_path);
-    let extension_name = find_extension_name_abs(&fs_path_abs)
-        .or_else(|| find_extension_name_in_fs(fs, pkg_path));
+    let extension_name =
+        find_extension_name_abs(&fs_path_abs).or_else(|| find_extension_name_in_fs(fs, pkg_path));
     let abi_path = package_abi_path(
         &canonical_path,
         module_path.as_deref(),
@@ -400,7 +405,7 @@ fn try_read_module_path<F: FileSystem>(fs: &F, pkg_dir: &Path) -> Option<String>
 /// Helper to load all .vo files from a directory.
 fn load_vo_files<F: FileSystem>(fs: &F, dir: &Path) -> Option<Vec<VfsFile>> {
     let mut files = Vec::new();
-    
+
     let entries = fs.read_dir(dir).ok()?;
     for path in entries {
         if path.extension().is_some_and(|e| e == "vo") {
@@ -412,7 +417,7 @@ fn load_vo_files<F: FileSystem>(fs: &F, dir: &Path) -> Option<Vec<VfsFile>> {
             }
         }
     }
-    
+
     if files.is_empty() {
         None
     } else {
@@ -522,12 +527,12 @@ impl<R: Resolver, F: FileSystem> Resolver for CurrentModuleResolver<R, F> {
 mod tests {
     use super::*;
     use vo_common::vfs::MemoryFs;
-    
+
     #[test]
     fn test_can_handle() {
         let std_vfs = StdSource::new(PathBuf::new());
         let mod_vfs = ModSource::new(PathBuf::new());
-        
+
         // Stdlib
         assert!(std_vfs.can_handle("fmt"));
         assert!(std_vfs.can_handle("encoding/json"));
@@ -556,19 +561,18 @@ mod tests {
         fs.add_file("codec/codec.vo", "package codec\n");
 
         let base = PackageResolver::with_fs(fs.clone());
-        let resolver = CurrentModuleResolver::new(
-            base,
-            fs,
-            Some("github.com/acme/game".to_string()),
-        );
+        let resolver =
+            CurrentModuleResolver::new(base, fs, Some("github.com/acme/game".to_string()));
 
-        let root = resolver.resolve("github.com/acme/game")
+        let root = resolver
+            .resolve("github.com/acme/game")
             .expect("root package should resolve");
         assert_eq!(root.path, "github.com/acme/game");
         assert_eq!(root.name, "game");
         assert_eq!(root.files.len(), 1);
 
-        let sub = resolver.resolve("github.com/acme/game/codec")
+        let sub = resolver
+            .resolve("github.com/acme/game/codec")
             .expect("subpackage should resolve");
         assert_eq!(sub.path, "github.com/acme/game/codec");
         assert_eq!(sub.name, "codec");

@@ -1,17 +1,17 @@
 //! Type info wrapper - provides slot layout calculation and type queries.
-//! 
+//!
 //! This module provides a convenient wrapper around Project for codegen queries.
 //! Core type layout functions are in vo_analysis::check::type_info.
 
-use vo_analysis::objects::{ObjKey, TCObjects, TypeKey};
+use vo_analysis::check::type_info as type_layout;
 use vo_analysis::objects::PackageKey;
+use vo_analysis::objects::{ObjKey, TCObjects, TypeKey};
 use vo_analysis::typ::{self, Type};
 use vo_analysis::Project;
-use vo_analysis::check::type_info as type_layout;
-use vo_syntax::ast::Ident;
-use vo_syntax::ast::ExprId;
 use vo_runtime::instruction::QUEUE_KIND_PORT_FLAG;
 use vo_runtime::SlotType;
+use vo_syntax::ast::ExprId;
+use vo_syntax::ast::Ident;
 
 /// Describes how call arguments should be compiled.
 /// If `tuple_expand` is Some, the single argument is a tuple that needs expansion.
@@ -30,7 +30,7 @@ enum QueueFlavor {
 }
 
 /// Wrapper around Project for codegen queries.
-/// 
+///
 /// Each package has its own TypeInfo (because ExprId/IdentId are local to each package).
 /// When compiling a package, use the TypeInfoWrapper for that package.
 pub struct TypeInfoWrapper<'a> {
@@ -49,14 +49,18 @@ impl<'a> TypeInfoWrapper<'a> {
             type_info: &project.type_info,
         }
     }
-    
+
     /// Create a TypeInfoWrapper for an imported package.
     pub fn for_package(
         project: &'a Project,
         pkg: PackageKey,
         type_info: &'a vo_analysis::check::TypeInfo,
     ) -> Self {
-        Self { project, pkg, type_info }
+        Self {
+            project,
+            pkg,
+            type_info,
+        }
     }
 
     pub fn tc_objs(&self) -> &TCObjects {
@@ -74,7 +78,9 @@ impl<'a> TypeInfoWrapper<'a> {
     // === Expression type queries ===
 
     pub fn expr_type(&self, expr_id: ExprId) -> TypeKey {
-        self.type_info().types.get(&expr_id)
+        self.type_info()
+            .types
+            .get(&expr_id)
             .map(|tv| tv.typ)
             .unwrap_or_else(|| panic!("expression {:?} must have type during codegen", expr_id))
     }
@@ -85,7 +91,9 @@ impl<'a> TypeInfoWrapper<'a> {
         if let Type::Tuple(tuple) = &self.tc_objs().types[underlying] {
             let vars = tuple.vars();
             if i < vars.len() {
-                return self.tc_objs().lobjs[vars[i]].typ().expect("tuple element must have type");
+                return self.tc_objs().lobjs[vars[i]]
+                    .typ()
+                    .expect("tuple element must have type");
             }
         }
         panic!("tuple_elem_type: not a tuple or index out of bounds")
@@ -110,57 +118,80 @@ impl<'a> TypeInfoWrapper<'a> {
     /// Check if type is (any, error) tuple - used for dynamic access short-circuiting
     pub fn is_tuple_any_error(&self, type_key: TypeKey) -> bool {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
-        let Type::Tuple(tuple) = &self.tc_objs().types[underlying] else { return false };
+        let Type::Tuple(tuple) = &self.tc_objs().types[underlying] else {
+            return false;
+        };
         let vars = tuple.vars();
-        if vars.len() != 2 { return false }
-        
-        let Some(first_type) = self.tc_objs().lobjs[vars[0]].typ() else { return false };
+        if vars.len() != 2 {
+            return false;
+        }
+
+        let Some(first_type) = self.tc_objs().lobjs[vars[0]].typ() else {
+            return false;
+        };
         let first_underlying = typ::underlying_type(first_type, self.tc_objs());
         let is_interface = matches!(&self.tc_objs().types[first_underlying], Type::Interface(_));
-        
-        let Some(second_type) = self.tc_objs().lobjs[vars[1]].typ() else { return false };
-        let Some(ref universe) = self.project.tc_objs.universe else { return false };
+
+        let Some(second_type) = self.tc_objs().lobjs[vars[1]].typ() else {
+            return false;
+        };
+        let Some(ref universe) = self.project.tc_objs.universe else {
+            return false;
+        };
         let is_error = typ::identical(second_type, universe.error_type(), self.tc_objs());
-        
+
         is_interface && is_error
     }
-    
+
     /// Get expected return count for dynamic access expression.
     /// Expression type is a tuple: (any, any, ..., error) where last element is error.
     /// Returns the number of return values (tuple length - 1 for error).
     pub fn get_dyn_access_ret_count(&self, type_key: TypeKey) -> u16 {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
-        let Type::Tuple(tuple) = &self.tc_objs().types[underlying] else { return 1 };
+        let Type::Tuple(tuple) = &self.tc_objs().types[underlying] else {
+            return 1;
+        };
         let vars = tuple.vars();
-        if vars.is_empty() { return 1 }
+        if vars.is_empty() {
+            return 1;
+        }
         // Last element is error, so ret_count = len - 1
         (vars.len() - 1) as u16
     }
-    
+
     /// Get return types for dynamic access expression (excluding error).
     /// Returns a list of TypeKeys for each return value.
     pub fn get_dyn_access_ret_types(&self, type_key: TypeKey) -> Vec<TypeKey> {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
-        let Type::Tuple(tuple) = &self.tc_objs().types[underlying] else { 
-            return vec![]; 
+        let Type::Tuple(tuple) = &self.tc_objs().types[underlying] else {
+            return vec![];
         };
         let vars = tuple.vars();
-        if vars.is_empty() { return vec![]; }
+        if vars.is_empty() {
+            return vec![];
+        }
         // All elements except last (which is error)
         vars[..vars.len() - 1]
             .iter()
             .filter_map(|&var| self.tc_objs().lobjs[var].typ())
             .collect()
     }
-    
+
     /// Calculate total dst slots for dynamic access return types.
     /// Each any type takes 2 slots, each typed value takes its actual slot count.
     pub fn dyn_access_dst_slots(&self, ret_types: &[TypeKey]) -> u16 {
-        ret_types.iter()
-            .map(|&t| if self.is_any_type(t) { 2 } else { self.type_slot_count(t) })
+        ret_types
+            .iter()
+            .map(|&t| {
+                if self.is_any_type(t) {
+                    2
+                } else {
+                    self.type_slot_count(t)
+                }
+            })
             .sum()
     }
-    
+
     /// Check if a type is the empty interface (any).
     pub fn is_any_type(&self, type_key: TypeKey) -> bool {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
@@ -170,13 +201,15 @@ impl<'a> TypeInfoWrapper<'a> {
             false
         }
     }
-    
+
     /// Check if a type is the error interface.
     pub fn is_error_type(&self, type_key: TypeKey) -> bool {
-        let Some(ref universe) = self.project.tc_objs.universe else { return false };
+        let Some(ref universe) = self.project.tc_objs.universe else {
+            return false;
+        };
         typ::identical(type_key, universe.error_type(), self.tc_objs())
     }
-    
+
     /// Check if a call expression's callee is a builtin function.
     /// Returns Some(Builtin) if the callee expression is a builtin, None otherwise.
     /// This uses the OperandMode recorded during type checking, which correctly handles
@@ -190,12 +223,16 @@ impl<'a> TypeInfoWrapper<'a> {
             }
         })
     }
-    
+
     /// Convert TypeKey to RuntimeType.
     /// This is the unified entry point for type conversion in codegen.
-    pub fn type_to_runtime_type(&self, type_key: TypeKey, ctx: &mut crate::context::CodegenContext) -> vo_runtime::RuntimeType {
+    pub fn type_to_runtime_type(
+        &self,
+        type_key: TypeKey,
+        ctx: &mut crate::context::CodegenContext,
+    ) -> vo_runtime::RuntimeType {
         use vo_runtime::{RuntimeType, ValueKind};
-        
+
         // Check if it's a Named type - use ObjKey (the true identity) for lookup
         let tc_objs = self.tc_objs();
         if let Type::Named(named) = &tc_objs.types[type_key] {
@@ -208,7 +245,7 @@ impl<'a> TypeInfoWrapper<'a> {
             // Named type not registered - recurse on underlying type
             return self.type_to_runtime_type(named.underlying(), ctx);
         }
-        
+
         let value_kind = self.type_value_kind(type_key);
         if value_kind.is_queue() {
             let underlying = typ::underlying_type(type_key, tc_objs);
@@ -221,21 +258,36 @@ impl<'a> TypeInfoWrapper<'a> {
                     dir: self.queue_dir(type_key),
                     elem: self.intern_value_rttid(self.queue_elem_type(type_key), ctx),
                 },
-                _ => panic!("type_to_runtime_type: channel value kind without chan/port underlying"),
+                _ => {
+                    panic!("type_to_runtime_type: channel value kind without chan/port underlying")
+                }
             }
         } else {
             match value_kind {
-                vk @ (ValueKind::Int | ValueKind::Int8 | ValueKind::Int16 | ValueKind::Int32 | ValueKind::Int64 |
-                      ValueKind::Uint | ValueKind::Uint8 | ValueKind::Uint16 | ValueKind::Uint32 | ValueKind::Uint64 |
-                      ValueKind::Float32 | ValueKind::Float64 | ValueKind::Bool | ValueKind::String) => {
-                    RuntimeType::Basic(vk)
-                }
+                vk @ (ValueKind::Int
+                | ValueKind::Int8
+                | ValueKind::Int16
+                | ValueKind::Int32
+                | ValueKind::Int64
+                | ValueKind::Uint
+                | ValueKind::Uint8
+                | ValueKind::Uint16
+                | ValueKind::Uint32
+                | ValueKind::Uint64
+                | ValueKind::Float32
+                | ValueKind::Float64
+                | ValueKind::Bool
+                | ValueKind::String) => RuntimeType::Basic(vk),
                 ValueKind::Struct | ValueKind::Array | ValueKind::Interface => {
                     let rttid = ctx.intern_type_key(type_key, self);
                     ctx.runtime_type(rttid).clone()
                 }
-                ValueKind::Pointer => RuntimeType::Pointer(self.intern_value_rttid(self.pointer_elem(type_key), ctx)),
-                ValueKind::Slice => RuntimeType::Slice(self.intern_value_rttid(self.slice_elem_type(type_key), ctx)),
+                ValueKind::Pointer => {
+                    RuntimeType::Pointer(self.intern_value_rttid(self.pointer_elem(type_key), ctx))
+                }
+                ValueKind::Slice => {
+                    RuntimeType::Slice(self.intern_value_rttid(self.slice_elem_type(type_key), ctx))
+                }
                 ValueKind::Map => {
                     let (key_type, val_type) = self.map_key_val_types(type_key);
                     RuntimeType::Map {
@@ -252,7 +304,11 @@ impl<'a> TypeInfoWrapper<'a> {
                             variadic: sig.variadic(),
                         }
                     } else {
-                        RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false }
+                        RuntimeType::Func {
+                            params: Vec::new(),
+                            results: Vec::new(),
+                            variadic: false,
+                        }
                     }
                 }
                 ValueKind::Island => RuntimeType::Island,
@@ -261,19 +317,32 @@ impl<'a> TypeInfoWrapper<'a> {
             }
         }
     }
-    
+
     /// Intern a type and return its ValueRttid.
     #[inline]
-    fn intern_value_rttid(&self, type_key: TypeKey, ctx: &mut crate::context::CodegenContext) -> vo_runtime::ValueRttid {
-        vo_runtime::ValueRttid::new(ctx.intern_type_key(type_key, self), self.type_value_kind(type_key))
+    fn intern_value_rttid(
+        &self,
+        type_key: TypeKey,
+        ctx: &mut crate::context::CodegenContext,
+    ) -> vo_runtime::ValueRttid {
+        vo_runtime::ValueRttid::new(
+            ctx.intern_type_key(type_key, self),
+            self.type_value_kind(type_key),
+        )
     }
-    
+
     /// Convert tuple type to Vec<ValueRttid>
-    fn tuple_to_value_rttids(&self, tuple_key: TypeKey, ctx: &mut crate::context::CodegenContext) -> Vec<vo_runtime::ValueRttid> {
+    fn tuple_to_value_rttids(
+        &self,
+        tuple_key: TypeKey,
+        ctx: &mut crate::context::CodegenContext,
+    ) -> Vec<vo_runtime::ValueRttid> {
         use vo_runtime::ValueRttid;
         let tc_objs = self.tc_objs();
         if let Type::Tuple(tuple) = &tc_objs.types[tuple_key] {
-            tuple.vars().iter()
+            tuple
+                .vars()
+                .iter()
                 .filter_map(|&v| {
                     let obj = &tc_objs.lobjs[v];
                     obj.typ().map(|t| {
@@ -287,15 +356,29 @@ impl<'a> TypeInfoWrapper<'a> {
             Vec::new()
         }
     }
-    
+
     /// Get or create interface meta ID (simplified API - no need to pass tc_objs/interner).
-    pub fn get_or_create_interface_meta_id(&self, type_key: TypeKey, ctx: &mut crate::context::CodegenContext) -> u32 {
+    pub fn get_or_create_interface_meta_id(
+        &self,
+        type_key: TypeKey,
+        ctx: &mut crate::context::CodegenContext,
+    ) -> u32 {
         ctx.get_or_create_interface_meta_id(type_key, &self.project.tc_objs, &self.project.interner)
     }
-    
+
     /// Get method index in InterfaceMeta (for CallIface). Uses registered meta order.
-    pub fn get_iface_meta_method_index(&self, type_key: TypeKey, method_name: &str, ctx: &mut crate::context::CodegenContext) -> u32 {
-        ctx.get_interface_method_index(type_key, method_name, &self.project.tc_objs, &self.project.interner)
+    pub fn get_iface_meta_method_index(
+        &self,
+        type_key: TypeKey,
+        method_name: &str,
+        ctx: &mut crate::context::CodegenContext,
+    ) -> u32 {
+        ctx.get_interface_method_index(
+            type_key,
+            method_name,
+            &self.project.tc_objs,
+            &self.project.interner,
+        )
     }
 
     /// Lookup a type by package path and name.
@@ -313,24 +396,32 @@ impl<'a> TypeInfoWrapper<'a> {
     pub fn any_type(&self) -> TypeKey {
         self.tc_objs().universe().any_type()
     }
-    
+
     /// Get the int type from Universe.
     pub fn int_type(&self) -> TypeKey {
-        self.tc_objs().universe().lookup_type(vo_analysis::BasicType::Int).expect("int type must exist")
+        self.tc_objs()
+            .universe()
+            .lookup_type(vo_analysis::BasicType::Int)
+            .expect("int type must exist")
     }
 
     /// Get the bool type from Universe.
     pub fn bool_type(&self) -> TypeKey {
-        self.tc_objs().universe().lookup_type(vo_analysis::BasicType::Bool).expect("bool type must exist")
+        self.tc_objs()
+            .universe()
+            .lookup_type(vo_analysis::BasicType::Bool)
+            .expect("bool type must exist")
     }
-    
+
     /// Get the rune type from Universe.
     pub fn rune_type(&self) -> TypeKey {
         self.tc_objs().universe().rune()
     }
 
     pub fn expr_type_raw(&self, expr_id: ExprId) -> TypeKey {
-        self.type_info().types.get(&expr_id)
+        self.type_info()
+            .types
+            .get(&expr_id)
             .map(|tv| tv.typ)
             .expect("expression must have type during codegen")
     }
@@ -340,11 +431,13 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     pub fn type_expr_type(&self, type_expr_id: vo_syntax::ast::TypeExprId) -> TypeKey {
-        self.type_info().type_exprs.get(&type_expr_id)
+        self.type_info()
+            .type_exprs
+            .get(&type_expr_id)
             .copied()
             .expect("type expression must have type during codegen")
     }
-    
+
     /// Get constant value for an expression (if it's a constant)
     pub fn const_value(&self, expr_id: ExprId) -> Option<&vo_analysis::ConstValue> {
         let tv = self.type_info().types.get(&expr_id)?;
@@ -354,7 +447,7 @@ impl<'a> TypeInfoWrapper<'a> {
             None
         }
     }
-    
+
     /// Try to get constant integer value from an expression
     pub fn try_const_int(&self, expr: &vo_syntax::ast::Expr) -> Option<i64> {
         let val = self.const_value(expr.id)?;
@@ -363,25 +456,25 @@ impl<'a> TypeInfoWrapper<'a> {
             _ => None,
         }
     }
-    
+
     /// Get the simple name of a type (for embedded field names).
     /// For Named types, returns the type name. For pointer to Named, returns the base type name.
     pub fn get_type_name(&self, type_key: TypeKey) -> String {
         let tc_objs = self.tc_objs();
         let mut tk = type_key;
-        
+
         // Strip pointer if present
         if let Type::Pointer(p) = &tc_objs.types[tk] {
             tk = p.base();
         }
-        
+
         // Get name from Named type
         if let Type::Named(named) = &tc_objs.types[tk] {
             if let Some(obj_key) = named.obj() {
                 return tc_objs.lobjs[*obj_key].name().to_string();
             }
         }
-        
+
         // Fallback for anonymous types
         "?".to_string()
     }
@@ -389,12 +482,17 @@ impl<'a> TypeInfoWrapper<'a> {
     // === Definition/Use queries ===
 
     pub fn get_def(&self, ident: &Ident) -> ObjKey {
-        self.type_info().get_def(ident)
-            .unwrap_or_else(|| panic!("identifier {:?} (id={:?}) must have definition during codegen", ident.symbol, ident.id))
+        self.type_info().get_def(ident).unwrap_or_else(|| {
+            panic!(
+                "identifier {:?} (id={:?}) must have definition during codegen",
+                ident.symbol, ident.id
+            )
+        })
     }
 
     pub fn get_use(&self, ident: &Ident) -> ObjKey {
-        self.type_info().get_use(ident)
+        self.type_info()
+            .get_use(ident)
             .expect("identifier must have use during codegen")
     }
 
@@ -415,7 +513,9 @@ impl<'a> TypeInfoWrapper<'a> {
 
     /// Get closure captures for a function literal expression
     pub fn closure_captures(&self, expr_id: ExprId) -> Vec<vo_analysis::objects::ObjKey> {
-        self.type_info().closure_captures.get(&expr_id)
+        self.type_info()
+            .closure_captures
+            .get(&expr_id)
             .cloned()
             .unwrap_or_default()
     }
@@ -435,7 +535,7 @@ impl<'a> TypeInfoWrapper<'a> {
             None
         }
     }
-    
+
     /// Get the package name for extern function registration.
     pub fn package_name(&self, ident: &Ident) -> Option<String> {
         let obj = self.get_use(ident);
@@ -482,12 +582,14 @@ impl<'a> TypeInfoWrapper<'a> {
 
     /// Check if a variable is captured by any closure
     pub fn is_captured_by_closure(&self, obj: ObjKey) -> bool {
-        self.type_info().closure_captures.values()
+        self.type_info()
+            .closure_captures
+            .values()
             .any(|captures| captures.contains(&obj))
     }
 
     /// Determine if a variable needs boxing based on type and escape analysis.
-    /// 
+    ///
     /// Boxing rules:
     /// - Reference types: only box when captured by closure (to share storage location)
     /// - Non-reference types: box when escaped for any reason
@@ -509,7 +611,10 @@ impl<'a> TypeInfoWrapper<'a> {
 
     /// Get resolved protocol method for a dynamic access expression.
     /// Returns Some(Some(resolve)) for static dispatch, Some(None) for dynamic dispatch, None if not recorded.
-    pub fn get_dyn_access_resolve(&self, expr_id: ExprId) -> Option<&Option<vo_analysis::check::type_info::DynAccessResolve>> {
+    pub fn get_dyn_access_resolve(
+        &self,
+        expr_id: ExprId,
+    ) -> Option<&Option<vo_analysis::check::type_info::DynAccessResolve>> {
         self.type_info().dyn_access_methods.get(&expr_id)
     }
 
@@ -526,8 +631,8 @@ impl<'a> TypeInfoWrapper<'a> {
     /// Get ValueKind for each slot in a composite type (struct/array).
     /// Used for comparison to distinguish string GcRefs from others.
     pub fn type_slot_value_kinds(&self, type_key: TypeKey) -> Vec<vo_runtime::ValueKind> {
-        use vo_analysis::typ::{Type, underlying_type};
-        
+        use vo_analysis::typ::{underlying_type, Type};
+
         let underlying = underlying_type(type_key, self.tc_objs());
         match &self.tc_objs().types[underlying] {
             Type::Struct(st) => {
@@ -560,7 +665,10 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     /// Get slots and slot_types for a type expression (used for params/results).
-    pub fn type_expr_layout(&self, type_expr_id: vo_syntax::ast::TypeExprId) -> (u16, Vec<SlotType>) {
+    pub fn type_expr_layout(
+        &self,
+        type_expr_id: vo_syntax::ast::TypeExprId,
+    ) -> (u16, Vec<SlotType>) {
         let type_key = self.type_expr_type(type_expr_id);
         let slots = self.type_slot_count(type_key);
         let slot_types = self.type_slot_types(type_key);
@@ -573,29 +681,48 @@ impl<'a> TypeInfoWrapper<'a> {
         type_layout::struct_field_offset(type_key, field_name, self.tc_objs())
     }
 
-    pub fn struct_field_offset_by_index(&self, type_key: TypeKey, field_index: usize) -> (u16, u16) {
+    pub fn struct_field_offset_by_index(
+        &self,
+        type_key: TypeKey,
+        field_index: usize,
+    ) -> (u16, u16) {
         type_layout::struct_field_offset_by_index(type_key, field_index, self.tc_objs())
     }
-    
+
     pub fn struct_field_type_by_index(&self, type_key: TypeKey, field_index: usize) -> TypeKey {
         type_layout::struct_field_type_by_index(type_key, field_index, self.tc_objs())
     }
-    
+
     /// Get struct field offset, slots, and type by field name
-    pub fn struct_field_offset_with_type(&self, type_key: TypeKey, field_name: &str) -> (u16, u16, TypeKey) {
-        let (offset, slots) = type_layout::struct_field_offset(type_key, field_name, self.tc_objs());
+    pub fn struct_field_offset_with_type(
+        &self,
+        type_key: TypeKey,
+        field_name: &str,
+    ) -> (u16, u16, TypeKey) {
+        let (offset, slots) =
+            type_layout::struct_field_offset(type_key, field_name, self.tc_objs());
         let field_type = type_layout::struct_field_type(type_key, field_name, self.tc_objs());
         (offset, slots, field_type)
     }
-    
+
     /// Get struct field offset, slots, and type by field index
-    pub fn struct_field_offset_by_index_with_type(&self, type_key: TypeKey, field_index: usize) -> (u16, u16, TypeKey) {
-        let (offset, slots) = type_layout::struct_field_offset_by_index(type_key, field_index, self.tc_objs());
-        let field_type = type_layout::struct_field_type_by_index(type_key, field_index, self.tc_objs());
+    pub fn struct_field_offset_by_index_with_type(
+        &self,
+        type_key: TypeKey,
+        field_index: usize,
+    ) -> (u16, u16, TypeKey) {
+        let (offset, slots) =
+            type_layout::struct_field_offset_by_index(type_key, field_index, self.tc_objs());
+        let field_type =
+            type_layout::struct_field_type_by_index(type_key, field_index, self.tc_objs());
         (offset, slots, field_type)
     }
 
-    pub fn compute_field_offset_from_indices(&self, base_type: TypeKey, indices: &[usize]) -> (u16, u16) {
+    pub fn compute_field_offset_from_indices(
+        &self,
+        base_type: TypeKey,
+        indices: &[usize],
+    ) -> (u16, u16) {
         type_layout::compute_field_offset_from_indices(base_type, indices, self.tc_objs())
     }
 
@@ -622,7 +749,8 @@ impl<'a> TypeInfoWrapper<'a> {
     pub fn is_empty_interface(&self, type_key: TypeKey) -> bool {
         let underlying = vo_analysis::typ::underlying_type(type_key, self.tc_objs());
         if let vo_analysis::typ::Type::Interface(iface) = &self.tc_objs().types[underlying] {
-            iface.methods().is_empty() && iface.all_methods().as_ref().map_or(true, |m| m.is_empty())
+            iface.methods().is_empty()
+                && iface.all_methods().as_ref().map_or(true, |m| m.is_empty())
         } else {
             false
         }
@@ -654,7 +782,9 @@ impl<'a> TypeInfoWrapper<'a> {
 
     pub fn is_func_type(&self, type_key: TypeKey) -> bool {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
-        self.tc_objs().types[underlying].try_as_signature().is_some()
+        self.tc_objs().types[underlying]
+            .try_as_signature()
+            .is_some()
     }
 
     pub fn is_chan(&self, type_key: TypeKey) -> bool {
@@ -702,7 +832,8 @@ impl<'a> TypeInfoWrapper<'a> {
     /// Get map type details (key_type, val_type) from a map type key.
     fn get_map_types(&self, type_key: TypeKey) -> (TypeKey, TypeKey) {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
-        let map_type = self.tc_objs().types[underlying].try_as_map()
+        let map_type = self.tc_objs().types[underlying]
+            .try_as_map()
             .expect("get_map_types: not a map type");
         (map_type.key(), map_type.elem())
     }
@@ -710,7 +841,10 @@ impl<'a> TypeInfoWrapper<'a> {
     /// Get map key and value slot counts
     pub fn map_key_val_slots(&self, type_key: TypeKey) -> (u16, u16) {
         let (key_type, val_type) = self.get_map_types(type_key);
-        (self.type_slot_count(key_type), self.type_slot_count(val_type))
+        (
+            self.type_slot_count(key_type),
+            self.type_slot_count(val_type),
+        )
     }
 
     /// Get map key slot types
@@ -746,12 +880,12 @@ impl<'a> TypeInfoWrapper<'a> {
     pub fn obj_type(&self, obj: ObjKey, msg: &str) -> TypeKey {
         self.tc_objs().lobjs[obj].typ().expect(msg)
     }
-    
+
     /// Try to get object's type. Returns None if object has no type.
     pub fn try_obj_type(&self, obj: ObjKey) -> Option<TypeKey> {
         self.tc_objs().lobjs[obj].typ()
     }
-    
+
     /// Get type for an identifier by looking up uses/defs.
     /// Used when we have an Ident but not an Expr with valid ExprId.
     pub fn ident_type(&self, ident: &vo_syntax::ast::Ident) -> Option<TypeKey> {
@@ -769,7 +903,10 @@ impl<'a> TypeInfoWrapper<'a> {
     /// Get method receiver's base type from function declaration.
     /// For `func (r T) Method()` returns type of T.
     /// For `func (r *T) Method()` returns type of T (not *T).
-    pub fn method_receiver_base_type(&self, func_decl: &vo_syntax::ast::FuncDecl) -> Option<TypeKey> {
+    pub fn method_receiver_base_type(
+        &self,
+        func_decl: &vo_syntax::ast::FuncDecl,
+    ) -> Option<TypeKey> {
         let func_obj = self.get_def(&func_decl.name);
         let func_type = self.tc_objs().lobjs[func_obj].typ()?;
         let sig = self.as_signature(func_type);
@@ -790,11 +927,7 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     /// Get struct field offset from pointer type
-    pub fn struct_field_offset_from_ptr(
-        &self,
-        ptr_type: TypeKey,
-        field_name: &str,
-    ) -> (u16, u16) {
+    pub fn struct_field_offset_from_ptr(&self, ptr_type: TypeKey, field_name: &str) -> (u16, u16) {
         let underlying = typ::underlying_type(ptr_type, self.tc_objs());
         if let Type::Pointer(p) = &self.tc_objs().types[underlying] {
             self.struct_field_offset(p.base(), field_name)
@@ -878,7 +1011,8 @@ impl<'a> TypeInfoWrapper<'a> {
     /// Get map key and value types
     pub fn map_key_val_types(&self, type_key: TypeKey) -> (TypeKey, TypeKey) {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
-        let map_type = self.tc_objs().types[underlying].try_as_map()
+        let map_type = self.tc_objs().types[underlying]
+            .try_as_map()
             .expect("map_key_val_types: not a map type");
         (map_type.key(), map_type.elem())
     }
@@ -999,14 +1133,20 @@ impl<'a> TypeInfoWrapper<'a> {
                 }
             }
         }
-        panic!("get_interface_method_index: method {} not found", method_name)
+        panic!(
+            "get_interface_method_index: method {} not found",
+            method_name
+        )
     }
 
     pub fn interface_method_obj(&self, iface_type: TypeKey, method_name: &str) -> Option<ObjKey> {
         let underlying = typ::underlying_type(iface_type, self.tc_objs());
         if let Type::Interface(iface) = &self.tc_objs().types[underlying] {
             let all_methods = iface.all_methods();
-            let methods = all_methods.as_ref().map(|v| v.as_slice()).unwrap_or(iface.methods());
+            let methods = all_methods
+                .as_ref()
+                .map(|v| v.as_slice())
+                .unwrap_or(iface.methods());
             for &method in methods {
                 if self.obj_name(method) == method_name {
                     return Some(method);
@@ -1017,37 +1157,67 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     /// Get parameter types and variadic flag for an interface method
-    pub fn get_interface_method_signature(&self, iface_type: TypeKey, method_name: &str) -> (Vec<TypeKey>, bool) {
-        let method = self.interface_method_obj(iface_type, method_name)
-            .unwrap_or_else(|| panic!("get_interface_method_signature: method {} not found", method_name));
-        let method_type = self.tc_objs().lobjs[method].typ()
+    pub fn get_interface_method_signature(
+        &self,
+        iface_type: TypeKey,
+        method_name: &str,
+    ) -> (Vec<TypeKey>, bool) {
+        let method = self
+            .interface_method_obj(iface_type, method_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "get_interface_method_signature: method {} not found",
+                    method_name
+                )
+            });
+        let method_type = self.tc_objs().lobjs[method]
+            .typ()
             .expect("interface method must have type");
         let param_types = self.func_param_types(method_type);
         let is_variadic = self.is_variadic(method_type);
         (param_types, is_variadic)
     }
 
-    pub fn get_interface_method_result_types(&self, iface_type: TypeKey, method_name: &str) -> Vec<TypeKey> {
-        let method = self.interface_method_obj(iface_type, method_name)
-            .unwrap_or_else(|| panic!("get_interface_method_result_types: method {} not found", method_name));
-        let method_type = self.tc_objs().lobjs[method].typ()
+    pub fn get_interface_method_result_types(
+        &self,
+        iface_type: TypeKey,
+        method_name: &str,
+    ) -> Vec<TypeKey> {
+        let method = self
+            .interface_method_obj(iface_type, method_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "get_interface_method_result_types: method {} not found",
+                    method_name
+                )
+            });
+        let method_type = self.tc_objs().lobjs[method]
+            .typ()
             .expect("interface method must have type");
         self.func_result_types(method_type)
     }
-    
+
     /// Get interface method's param_slots and ret_slots for method value wrapper generation.
     /// Returns (param_slots, ret_slots) where param_slots includes receiver (2 slots for interface).
-    pub fn get_interface_method_slots(&self, iface_type: TypeKey, method_name: &str) -> Option<(u16, u16)> {
+    pub fn get_interface_method_slots(
+        &self,
+        iface_type: TypeKey,
+        method_name: &str,
+    ) -> Option<(u16, u16)> {
         let underlying = typ::underlying_type(iface_type, self.tc_objs());
         if let Type::Interface(iface) = &self.tc_objs().types[underlying] {
             let all_methods = iface.all_methods();
-            let methods = all_methods.as_ref().map(|v| v.as_slice()).unwrap_or(iface.methods());
+            let methods = all_methods
+                .as_ref()
+                .map(|v| v.as_slice())
+                .unwrap_or(iface.methods());
             for &method in methods {
                 if self.obj_name(method) == method_name {
-                    let method_type = self.tc_objs().lobjs[method].typ()
+                    let method_type = self.tc_objs().lobjs[method]
+                        .typ()
                         .expect("interface method must have type");
                     let sig = self.as_signature(method_type);
-                    
+
                     // Calculate param slots (excluding receiver - interface methods don't have receiver in signature)
                     let mut param_slots = 0u16;
                     let params_key = sig.params();
@@ -1057,7 +1227,7 @@ impl<'a> TypeInfoWrapper<'a> {
                             param_slots += self.type_slot_count(param_type);
                         }
                     }
-                    
+
                     // Calculate return slots
                     let mut ret_slots = 0u16;
                     let results_key = sig.results();
@@ -1067,7 +1237,7 @@ impl<'a> TypeInfoWrapper<'a> {
                             ret_slots += self.type_slot_count(ret_type);
                         }
                     }
-                    
+
                     return Some((param_slots, ret_slots));
                 }
             }
@@ -1149,7 +1319,8 @@ impl<'a> TypeInfoWrapper<'a> {
     /// Get signature details for a function type
     pub fn as_signature(&self, type_key: TypeKey) -> &typ::SignatureDetail {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
-        self.tc_objs().types[underlying].try_as_signature()
+        self.tc_objs().types[underlying]
+            .try_as_signature()
             .expect("as_signature: not a signature type")
     }
 
@@ -1165,7 +1336,11 @@ impl<'a> TypeInfoWrapper<'a> {
 
     /// Get call argument info for a function call.
     /// Handles the `f(g())` pattern where g() returns multiple values.
-    pub fn get_call_arg_info(&self, args: &[vo_syntax::ast::Expr], param_types: &[TypeKey]) -> CallArgInfo {
+    pub fn get_call_arg_info(
+        &self,
+        args: &[vo_syntax::ast::Expr],
+        param_types: &[TypeKey],
+    ) -> CallArgInfo {
         // Check for multi-value expansion: single arg that is a tuple matching multiple params
         if args.len() == 1 && param_types.len() > 1 {
             let arg_type = self.expr_type(args[0].id);
@@ -1191,7 +1366,9 @@ impl<'a> TypeInfoWrapper<'a> {
         if let Type::Signature(sig) = &self.tc_objs().types[underlying] {
             let params_key = sig.params();
             if let Type::Tuple(tuple) = &self.tc_objs().types[params_key] {
-                tuple.vars().iter()
+                tuple
+                    .vars()
+                    .iter()
                     .filter_map(|&var_key| self.tc_objs().lobjs[var_key].typ())
                     .collect()
             } else {
@@ -1207,7 +1384,9 @@ impl<'a> TypeInfoWrapper<'a> {
         if let Type::Signature(sig) = &self.tc_objs().types[underlying] {
             let results_key = sig.results();
             if let Type::Tuple(tuple) = &self.tc_objs().types[results_key] {
-                tuple.vars().iter()
+                tuple
+                    .vars()
+                    .iter()
                     .filter_map(|&var_key| self.tc_objs().lobjs[var_key].typ())
                     .collect()
             } else {
@@ -1222,7 +1401,9 @@ impl<'a> TypeInfoWrapper<'a> {
     /// The last parameter is a slice type; returns the element type.
     pub fn variadic_elem_type(&self, func_type: TypeKey) -> TypeKey {
         let param_types = self.func_param_types(func_type);
-        let last_param = param_types.last().expect("variadic function must have at least one param");
+        let last_param = param_types
+            .last()
+            .expect("variadic function must have at least one param");
         self.slice_elem_type(*last_param)
     }
 
@@ -1274,12 +1455,16 @@ impl<'a> TypeInfoWrapper<'a> {
 
     /// Check if type is []byte (slice of uint8/byte)
     pub fn is_byte_slice(&self, type_key: TypeKey) -> bool {
-        self.is_slice_of(type_key, |b| b == typ::BasicType::Byte || b == typ::BasicType::Uint8)
+        self.is_slice_of(type_key, |b| {
+            b == typ::BasicType::Byte || b == typ::BasicType::Uint8
+        })
     }
 
     /// Check if type is []rune (slice of int32/rune)
     pub fn is_rune_slice(&self, type_key: TypeKey) -> bool {
-        self.is_slice_of(type_key, |b| b == typ::BasicType::Rune || b == typ::BasicType::Int32)
+        self.is_slice_of(type_key, |b| {
+            b == typ::BasicType::Rune || b == typ::BasicType::Int32
+        })
     }
 
     /// Check if type is a slice of basic type matching predicate

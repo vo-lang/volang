@@ -4,13 +4,7 @@ use alloc::vec::Vec;
 
 use vo_vm::vm::Vm;
 
-use crate::{
-    AppSession,
-    PendingHostEvent,
-    SessionDispatchError,
-    SessionError,
-    StepResult,
-};
+use crate::{AppSession, PendingHostEvent, SessionDispatchError, SessionError, StepResult};
 
 const GUI_SESSION_PANIC_MESSAGE: &str = "unexpected bounded panic outcome";
 const MISSING_INITIAL_RENDER_OUTPUT: &str = "guest app did not emit a render";
@@ -39,7 +33,9 @@ impl GuiAppSession {
     pub fn start(&mut self) -> Result<StepResult, SessionError> {
         let step = self.session.run(GUI_SESSION_PANIC_MESSAGE)?;
         if step.render_output.is_none() {
-            return Err(SessionError::MissingRenderOutput(MISSING_INITIAL_RENDER_OUTPUT));
+            return Err(SessionError::MissingRenderOutput(
+                MISSING_INITIAL_RENDER_OUTPUT,
+            ));
         }
         Ok(step)
     }

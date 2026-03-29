@@ -48,17 +48,24 @@ fn compile_conversion_impl(
 ) -> Result<(), CodegenError> {
     // Interface conversion
     if info.is_interface(dst_type) {
-        return crate::assign::emit_assign(dst, crate::assign::AssignSource::Expr(src_expr), dst_type, ctx, func, info);
+        return crate::assign::emit_assign(
+            dst,
+            crate::assign::AssignSource::Expr(src_expr),
+            dst_type,
+            ctx,
+            func,
+            info,
+        );
     }
-    
+
     let src_reg = compile_expr(src_expr, ctx, func, info)?;
     let src_type = info.expr_type(src_expr.id);
-    
+
     // String conversion (extern call)
     if emit_string_conversion(src_reg, dst, src_type, dst_type, ctx, func, info) {
         return Ok(());
     }
-    
+
     // Numeric/other conversion (opcodes)
     emit_numeric_conversion(src_reg, dst, src_type, dst_type, func, info);
     Ok(())
@@ -74,7 +81,11 @@ fn emit_string_conversion(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> bool {
-    let extern_name = match (info.is_int(src_type), info.is_string(src_type), info.is_string(dst_type)) {
+    let extern_name = match (
+        info.is_int(src_type),
+        info.is_string(src_type),
+        info.is_string(dst_type),
+    ) {
         (true, _, true) => "vo_conv_int_str",
         (_, _, true) if info.is_byte_slice(src_type) => "vo_conv_bytes_str",
         (_, _, true) if info.is_rune_slice(src_type) => "vo_conv_runes_str",
@@ -82,7 +93,7 @@ fn emit_string_conversion(
         (_, true, _) if info.is_rune_slice(dst_type) => "vo_conv_str_runes",
         _ => return false,
     };
-    
+
     let extern_id = ctx.get_or_register_extern(extern_name);
     let args_start = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::Copy, args_start, src_reg, 0);
@@ -100,12 +111,12 @@ fn emit_numeric_conversion(
     info: &TypeInfoWrapper,
 ) {
     use vo_runtime::ValueKind;
-    
+
     let src_is_int = info.is_int(src_type);
     let src_is_float = info.is_float(src_type);
     let dst_is_int = info.is_int(dst_type);
     let dst_is_float = info.is_float(dst_type);
-    
+
     if src_is_int && dst_is_float {
         // ConvI2F: int -> f64, then maybe f64 -> f32
         func.emit_op(Opcode::ConvI2F, dst, src_reg, 0);
@@ -141,12 +152,22 @@ fn emit_numeric_conversion(
         match dst_vk {
             ValueKind::Int8 => func.emit_with_flags(Opcode::Trunc, 0x81, dst, src_reg, 0),
             ValueKind::Int16 => func.emit_with_flags(Opcode::Trunc, 0x82, dst, src_reg, 0),
-            ValueKind::Int32 if !matches!(src_vk, ValueKind::Int8 | ValueKind::Int16 | ValueKind::Int32) => {
+            ValueKind::Int32
+                if !matches!(
+                    src_vk,
+                    ValueKind::Int8 | ValueKind::Int16 | ValueKind::Int32
+                ) =>
+            {
                 func.emit_with_flags(Opcode::Trunc, 0x84, dst, src_reg, 0)
             }
             ValueKind::Uint8 => func.emit_with_flags(Opcode::Trunc, 0x01, dst, src_reg, 0),
             ValueKind::Uint16 => func.emit_with_flags(Opcode::Trunc, 0x02, dst, src_reg, 0),
-            ValueKind::Uint32 if !matches!(src_vk, ValueKind::Uint8 | ValueKind::Uint16 | ValueKind::Uint32) => {
+            ValueKind::Uint32
+                if !matches!(
+                    src_vk,
+                    ValueKind::Uint8 | ValueKind::Uint16 | ValueKind::Uint32
+                ) =>
+            {
                 func.emit_with_flags(Opcode::Trunc, 0x04, dst, src_reg, 0)
             }
             _ => func.emit_op(Opcode::Copy, dst, src_reg, 0),

@@ -65,7 +65,7 @@ impl CompiledTuple {
             offset += info.type_slot_count(elem_type);
         }
     }
-    
+
     /// Iterate over tuple elements with fallible callback.
     pub fn for_each_element_result<F, E>(&self, info: &TypeInfoWrapper, mut f: F) -> Result<(), E>
     where
@@ -85,7 +85,6 @@ impl CompiledTuple {
 // Helper Functions
 // =============================================================================
 
-
 /// Get ExprSource for an expression - determines where the value comes from.
 pub fn get_expr_source(
     expr: &Expr,
@@ -102,8 +101,15 @@ pub fn get_expr_source(
             if let Some(global_idx) = ctx.get_global_index(obj_key) {
                 if let Some(type_key) = info.try_obj_type(obj_key) {
                     // Global arrays are stored as GcRef (1 slot)
-                    let slots = if info.is_array(type_key) { 1 } else { info.type_slot_count(type_key) };
-                    return ExprSource::Location(StorageKind::Global { index: global_idx as u16, slots });
+                    let slots = if info.is_array(type_key) {
+                        1
+                    } else {
+                        info.type_slot_count(type_key)
+                    };
+                    return ExprSource::Location(StorageKind::Global {
+                        index: global_idx as u16,
+                        slots,
+                    });
                 }
             }
         }
@@ -127,14 +133,15 @@ pub fn get_expr_source(
             if info.is_pointer(recv_type) {
                 return ExprSource::NeedsCompile;
             }
-            if let ExprSource::Location(StorageKind::StackValue { slot: base_slot, .. }) = 
-                get_expr_source(&sel.expr, ctx, func, info) 
+            if let ExprSource::Location(StorageKind::StackValue {
+                slot: base_slot, ..
+            }) = get_expr_source(&sel.expr, ctx, func, info)
             {
                 if let Some(field_name) = info.project.interner.resolve(sel.sel.symbol) {
                     let (offset, _) = info.selector_field_offset(expr.id, recv_type, field_name);
-                    return ExprSource::Location(StorageKind::StackValue { 
-                        slot: base_slot + offset, 
-                        slots: field_slots 
+                    return ExprSource::Location(StorageKind::StackValue {
+                        slot: base_slot + offset,
+                        slots: field_slots,
                     });
                 }
             }
@@ -153,7 +160,9 @@ pub fn get_gcref_slot(storage: &StorageKind) -> Option<u16> {
         StorageKind::HeapBoxed { gcref_slot, .. } => Some(*gcref_slot),
         StorageKind::HeapArray { gcref_slot, .. } => Some(*gcref_slot),
         StorageKind::Reference { slot } => Some(*slot),
-        StorageKind::StackValue { .. } | StorageKind::StackArray { .. } | StorageKind::Global { .. } => None,
+        StorageKind::StackValue { .. }
+        | StorageKind::StackArray { .. }
+        | StorageKind::Global { .. } => None,
     }
 }
 
@@ -168,13 +177,13 @@ pub fn compile_map_key_expr(
 ) -> Result<u16, CodegenError> {
     let index_type = info.expr_type(index_expr.id);
     let needs_boxing = info.is_interface(key_type) && !info.is_interface(index_type);
-    
+
     if needs_boxing {
         let src_reg = compile_expr(index_expr, ctx, func, info)?;
         let key_slot_types = info.type_slot_types(key_type);
         let iface_reg = func.alloc_slots(&key_slot_types);
         crate::assign::emit_iface_assign_from_concrete(
-            iface_reg, src_reg, index_type, key_type, ctx, func, info
+            iface_reg, src_reg, index_type, key_type, ctx, func, info,
         )?;
         Ok(iface_reg)
     } else {
@@ -192,7 +201,14 @@ pub fn compile_elem_to(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    crate::assign::emit_assign(dst, crate::assign::AssignSource::Expr(elem_expr), target_type, ctx, func, info)
+    crate::assign::emit_assign(
+        dst,
+        crate::assign::AssignSource::Expr(elem_expr),
+        target_type,
+        ctx,
+        func,
+        info,
+    )
 }
 
 /// Get the GcRef slot of an escaped variable without copying.
@@ -273,11 +289,18 @@ pub fn compile_expr_to_type(
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
     let src_type = info.expr_type(expr.id);
-    
+
     // Check if implicit interface conversion is needed
     if info.is_interface(target_type) && !info.is_interface(src_type) {
         let dst = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]); // interface is 2 slots
-        crate::assign::emit_assign(dst, crate::assign::AssignSource::Expr(expr), target_type, ctx, func, info)?;
+        crate::assign::emit_assign(
+            dst,
+            crate::assign::AssignSource::Expr(expr),
+            target_type,
+            ctx,
+            func,
+            info,
+        )?;
         Ok(dst)
     } else {
         compile_expr(expr, ctx, func, info)
@@ -294,7 +317,10 @@ pub fn compile_expr_to(
 ) -> Result<(), CodegenError> {
     match &expr.kind {
         // === Literals ===
-        ExprKind::IntLit(_) | ExprKind::RuneLit(_) | ExprKind::FloatLit(_) | ExprKind::StringLit(_) => {
+        ExprKind::IntLit(_)
+        | ExprKind::RuneLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::StringLit(_) => {
             let val = get_const_value(expr.id, info)
                 .ok_or_else(|| CodegenError::Internal("literal has no const value".to_string()))?;
             let target_type = info.expr_type(expr.id);
@@ -321,7 +347,7 @@ pub fn compile_expr_to(
                     // Closure capture: ClosureGet returns GcRef to the captured storage
                     if let Some(capture) = func.lookup_capture(ident.symbol) {
                         func.emit_op(Opcode::ClosureGet, dst, capture.index, 0);
-                        
+
                         // Arrays: capture stores GcRef to [ArrayHeader][elems], use directly
                         // Others: capture stores GcRef to box [value], need PtrGet to read value
                         let type_key = info.obj_type(obj_key, "captured var must have type");
@@ -334,7 +360,8 @@ pub fn compile_expr_to(
                         if let Some(func_idx) = ctx.get_func_by_objkey(obj_key) {
                             func.emit_closure_new(dst, func_idx, 0);
                         } else {
-                            let ident_name = info.project.interner.resolve(ident.symbol).unwrap_or("?");
+                            let ident_name =
+                                info.project.interner.resolve(ident.symbol).unwrap_or("?");
                             let obj = &info.project.tc_objs.lobjs[obj_key];
                             return Err(CodegenError::VariableNotFound(format!(
                                 "name='{}' symbol={:?} obj_key={:?} entity={:?}",
@@ -456,7 +483,9 @@ pub fn compile_expr_to(
 
         // === Ellipsis (only valid in array type [...]T) ===
         ExprKind::Ellipsis => {
-            return Err(CodegenError::Internal("Ellipsis expression should not be compiled directly".to_string()));
+            return Err(CodegenError::Internal(
+                "Ellipsis expression should not be compiled directly".to_string(),
+            ));
         }
     }
 
@@ -476,7 +505,9 @@ fn compile_type_assert(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let iface_reg = compile_expr(&type_assert.expr, ctx, func, info)?;
-    let target_type = type_assert.ty.as_ref()
+    let target_type = type_assert
+        .ty
+        .as_ref()
         .map(|ty| info.type_expr_type(ty.id))
         .expect("type assertion must have target type");
     let target_slots = info.type_slot_count(target_type) as u8;
@@ -527,11 +558,11 @@ fn compile_try_unwrap(
     let inner_slot_types = info.type_slot_types(inner_type);
     let inner_start = func.alloc_slots(&inner_slot_types);
     compile_expr_to(inner, inner_start, ctx, func, info)?;
-    
+
     let error_slots = 2u16;
     let error_start = inner_start + inner_slots - error_slots;
     let skip_fail_jump = func.emit_jump(Opcode::JumpIfNot, error_start);
-    
+
     // Check if function returns error - determines propagate vs panic behavior
     if func.has_error_return(info) {
         // Use shared emit_error_return which handles escaped named returns correctly
@@ -539,11 +570,17 @@ fn compile_try_unwrap(
     } else {
         // Panic mode: panic with error directly
         let panic_extern = ctx.get_or_register_extern("panic_with_error");
-        func.emit_with_flags(Opcode::CallExtern, 2, error_start, panic_extern as u16, error_start);
+        func.emit_with_flags(
+            Opcode::CallExtern,
+            2,
+            error_start,
+            panic_extern as u16,
+            error_start,
+        );
     }
-    
+
     func.patch_jump(skip_fail_jump, func.current_pc());
-    
+
     let value_slots = inner_slots - error_slots;
     if value_slots > 0 {
         func.emit_copy(dst, inner_start, value_slots);
@@ -554,9 +591,9 @@ fn compile_try_unwrap(
 /// Emit truncation for narrow integer types (int8/16/32, uint8/16/32).
 /// This ensures Go semantics where operations are done in 64-bit but
 /// results are truncated to the target type width.
-/// 
+///
 /// On 32-bit platforms, Int and Uint are also truncated to 32 bits.
-/// 
+///
 /// Safe to call on any type - non-narrow-integer types are no-ops.
 pub fn emit_int_trunc(
     reg: u16,

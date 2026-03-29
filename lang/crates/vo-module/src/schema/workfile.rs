@@ -44,23 +44,22 @@ impl WorkFile {
                 .as_array()
                 .ok_or_else(|| Error::WorkFileParse("'use' must be an array of tables".into()))?;
             for (i, entry) in arr.iter().enumerate() {
-                let t = entry.as_table().ok_or_else(|| {
-                    Error::WorkFileParse(format!("use[{i}]: expected table"))
-                })?;
+                let t = entry
+                    .as_table()
+                    .ok_or_else(|| Error::WorkFileParse(format!("use[{i}]: expected table")))?;
                 let path = t
                     .get("path")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        Error::WorkFileParse(format!("use[{i}]: missing 'path'"))
-                    })?
+                    .ok_or_else(|| Error::WorkFileParse(format!("use[{i}]: missing 'path'")))?
                     .to_string();
                 let module = if let Some(m) = t.get("module") {
                     let s = m.as_str().ok_or_else(|| {
                         Error::WorkFileParse(format!("use[{i}].module: expected string"))
                     })?;
-                    Some(ModulePath::parse(s).map_err(|e| {
-                        Error::WorkFileParse(format!("use[{i}].module: {e}"))
-                    })?)
+                    Some(
+                        ModulePath::parse(s)
+                            .map_err(|e| Error::WorkFileParse(format!("use[{i}].module: {e}")))?,
+                    )
                 } else {
                     None
                 };

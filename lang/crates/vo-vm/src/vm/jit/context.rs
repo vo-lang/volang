@@ -13,7 +13,7 @@ use crate::fiber::Fiber;
 use crate::vm::Vm;
 
 use super::callbacks;
-use super::frame::{jit_push_frame, jit_pop_frame, jit_push_resume_point};
+use super::frame::{jit_pop_frame, jit_push_frame, jit_push_resume_point};
 
 /// JIT context wrapper.
 ///
@@ -77,7 +77,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
             jit_mgr.direct_call_table_len() as u32,
         )
     };
-    
+
     // IC table is per-fiber to avoid data races between goroutines
     let ic_table = fiber.ensure_ic_table();
 
@@ -151,7 +151,5 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         ic_table,
     };
 
-    JitContextWrapper {
-        ctx,
-    }
+    JitContextWrapper { ctx }
 }

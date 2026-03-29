@@ -212,28 +212,31 @@ pub fn verify_tri_color(gc: &Gc) {
             return;
         }
         dbg.stats.invariant_checks += 1;
-        
+
         // Collect violations first to avoid borrow conflict
         let mut violations = Vec::new();
-        
+
         // For each live object that is black, check its children
         for &obj in &dbg.live_objects {
             if gc.is_black(obj) {
                 let header = Gc::header(obj);
                 let slots = header.slots as usize;
-                
+
                 for i in 0..slots {
                     let child = unsafe { Gc::read_slot(obj, i) };
                     if child != 0 {
                         let child_ref = child as GcRef;
                         if dbg.live_objects.contains(&child_ref) && gc.is_white(child_ref) {
-                            violations.push(format!("black {:?} -> white {:?} at slot {}", obj, child_ref, i));
+                            violations.push(format!(
+                                "black {:?} -> white {:?} at slot {}",
+                                obj, child_ref, i
+                            ));
                         }
                     }
                 }
             }
         }
-        
+
         // Report violations
         for v in violations {
             dbg.report_violation("tri-color", &v);

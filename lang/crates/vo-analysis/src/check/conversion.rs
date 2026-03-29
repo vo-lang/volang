@@ -5,7 +5,6 @@
 //! - No complex types (complex64/128)
 //! - No UnsafePointer
 
-
 use crate::objects::TypeKey;
 use crate::operand::{Operand, OperandMode};
 use crate::typ::{self, BasicType, Type};

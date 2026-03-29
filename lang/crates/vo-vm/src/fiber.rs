@@ -5,9 +5,9 @@ use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use vo_runtime::objects::interface::InterfaceSlot;
 #[cfg(feature = "std")]
 use vo_runtime::io::IoToken;
+use vo_runtime::objects::interface::InterfaceSlot;
 
 use vo_runtime::gc::GcRef;
 
@@ -142,7 +142,7 @@ impl UnwindingState {
     pub fn at_defer_boundary(&self, frame_count: usize) -> bool {
         frame_count == self.target_depth + 1
     }
-    
+
     /// Switch from Panic to Return mode after successful recover().
     /// Filters out errdefers since function is now returning normally.
     pub fn switch_to_return_mode(&mut self) {
@@ -150,7 +150,6 @@ impl UnwindingState {
         self.mode = UnwindingMode::Return;
     }
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectCaseKind {
@@ -197,17 +196,17 @@ impl FiberState {
     pub fn is_runnable(&self) -> bool {
         matches!(self, FiberState::Runnable)
     }
-    
+
     #[inline]
     pub fn is_running(&self) -> bool {
         matches!(self, FiberState::Running)
     }
-    
+
     #[inline]
     pub fn is_blocked(&self) -> bool {
         matches!(self, FiberState::Blocked(_))
     }
-    
+
     #[inline]
     pub fn is_dead(&self) -> bool {
         matches!(self, FiberState::Dead)
@@ -230,7 +229,6 @@ pub enum BlockReason {
     /// Fiber re-executes the extern on wake (PC was undone before blocking).
     HostEventReplay(u64),
 }
-
 
 /// Unified panic state for both recoverable and fatal panics.
 #[derive(Debug, Clone, Copy)]
@@ -384,7 +382,13 @@ pub struct CallIfaceICEntry {
 
 impl CallIfaceICEntry {
     #[inline]
-    pub fn matches(&self, caller_func_id: u32, callsite_pc: u32, itab_id: u32, method_idx: u8) -> bool {
+    pub fn matches(
+        &self,
+        caller_func_id: u32,
+        callsite_pc: u32,
+        itab_id: u32,
+        method_idx: u8,
+    ) -> bool {
         self.valid
             && self.caller_func_id == caller_func_id
             && self.callsite_pc == callsite_pc
@@ -479,9 +483,9 @@ impl Fiber {
             resume_host_event_token: None,
             resume_host_event_data: None,
             #[cfg(feature = "jit")]
-            resume_stack: Vec::new(),  // Lazy: only allocates on first push (Call/WaitIo)
+            resume_stack: Vec::new(), // Lazy: only allocates on first push (Call/WaitIo)
             #[cfg(feature = "jit")]
-            ic_table: Vec::new(),  // Lazy: allocated on first JIT dispatch
+            ic_table: Vec::new(), // Lazy: allocated on first JIT dispatch
             call_iface_ic_table: Vec::new(),
             closure_replay: ClosureReplayState::new(),
             #[cfg(feature = "jit")]
@@ -526,7 +530,7 @@ impl Fiber {
             vo_runtime::island::EndpointResponseKind::Closed => {}
         }
     }
-    
+
     /// Reset fiber for reuse.
     pub fn reset(&mut self) {
         self.state = FiberState::Runnable;
@@ -557,7 +561,11 @@ impl Fiber {
         }
         if !self.call_iface_ic_table.is_empty() {
             unsafe {
-                core::ptr::write_bytes(self.call_iface_ic_table.as_mut_ptr(), 0, self.call_iface_ic_table.len());
+                core::ptr::write_bytes(
+                    self.call_iface_ic_table.as_mut_ptr(),
+                    0,
+                    self.call_iface_ic_table.len(),
+                );
             }
         }
         self.closure_replay.reset();
@@ -571,7 +579,7 @@ impl Fiber {
         self.remote_recv_response = None;
         self.remote_send_closed = false;
     }
-    
+
     /// Ensure IC table is allocated (lazy allocation on first JIT dispatch).
     /// Returns mutable pointer to the IC table.
     #[cfg(feature = "jit")]
@@ -584,17 +592,19 @@ impl Fiber {
 
     #[inline]
     pub fn call_iface_ic_index(caller_func_id: u32, callsite_pc: u32) -> usize {
-        ((caller_func_id.wrapping_mul(97)).wrapping_add(callsite_pc) & CALL_IFACE_IC_TABLE_MASK) as usize
+        ((caller_func_id.wrapping_mul(97)).wrapping_add(callsite_pc) & CALL_IFACE_IC_TABLE_MASK)
+            as usize
     }
 
     pub fn ensure_call_iface_ic_table(&mut self) -> &mut [CallIfaceICEntry] {
         if self.call_iface_ic_table.is_empty() {
             self.call_iface_ic_table = Vec::with_capacity(CALL_IFACE_IC_TABLE_SIZE);
-            self.call_iface_ic_table.resize(CALL_IFACE_IC_TABLE_SIZE, CallIfaceICEntry::default());
+            self.call_iface_ic_table
+                .resize(CALL_IFACE_IC_TABLE_SIZE, CallIfaceICEntry::default());
         }
         self.call_iface_ic_table.as_mut_slice()
     }
-    
+
     /// Check if current panic is recoverable and return the interface{} value if so.
     /// Used by recover() to consume the panic value.
     pub fn take_recoverable_panic(&mut self) -> Option<InterfaceSlot> {
@@ -609,13 +619,13 @@ impl Fiber {
             }
         }
     }
-    
+
     /// Set a fatal (non-recoverable) panic.
     pub fn set_fatal_panic(&mut self) {
         self.panic_state = Some(PanicState::Fatal);
         self.panic_trap_kind = None;
     }
-    
+
     /// Set a recoverable panic with full interface{} value (InterfaceSlot).
     /// Also increments panic_generation so we can track which defers can recover.
     pub fn set_recoverable_panic(&mut self, msg: InterfaceSlot) {
@@ -630,19 +640,20 @@ impl Fiber {
         self.panic_state = Some(PanicState::Recoverable(msg));
         self.panic_trap_kind = Some(kind);
     }
-    
+
     /// Get panic message for error reporting.
     pub fn panic_message(&self) -> Option<String> {
         self.panic_state.as_ref().map(|s| s.message())
     }
-    
+
     /// Check if we're at the defer boundary (defer function just returned).
     #[inline]
     pub fn at_defer_boundary(&self) -> bool {
-        self.unwinding.as_ref()
+        self.unwinding
+            .as_ref()
             .map_or(false, |s| s.at_defer_boundary(self.frames.len()))
     }
-    
+
     /// Check if we're in panic unwinding mode AND directly in the defer function
     /// (not in a nested call from the defer function).
     /// Per Go semantics, recover() only works when called directly from defer.
@@ -662,7 +673,7 @@ impl Fiber {
             _ => false,
         }
     }
-    
+
     /// Switch unwinding mode from Panic to Return after successful recover().
     /// This prevents nested calls within the defer function from triggering panic_unwind.
     pub fn switch_panic_to_return_mode(&mut self) {
@@ -672,7 +683,7 @@ impl Fiber {
             }
         }
     }
-    
+
     /// Get the effective generation for registering a new defer.
     /// During panic unwinding, returns the current_defer_generation so nested defers
     /// can recover the same panic as their parent defer.
@@ -690,13 +701,18 @@ impl Fiber {
     pub fn stack_ptr(&mut self) -> *mut u64 {
         self.stack.as_mut_ptr()
     }
-    
+
     /// Ensure stack has capacity for at least `required` slots.
     /// Grows by doubling if needed. Only call when sp might exceed capacity.
     #[inline]
     pub fn ensure_capacity(&mut self, required: usize) {
         if required > self.stack.len() {
-            let new_cap = self.stack.len().max(INITIAL_STACK_CAPACITY).max(required).next_power_of_two();
+            let new_cap = self
+                .stack
+                .len()
+                .max(INITIAL_STACK_CAPACITY)
+                .max(required)
+                .next_power_of_two();
             self.stack.resize(new_cap, 0);
         }
     }
@@ -744,17 +760,7 @@ impl Fiber {
         ret_count: u16,
         scan_slots: u16,
     ) {
-        self.push_call_frame_extended(
-            func_id,
-            bp,
-            bp,
-            ret_reg,
-            ret_count,
-            scan_slots,
-            None,
-            0,
-            0,
-        );
+        self.push_call_frame_extended(func_id, bp, bp, ret_reg, ret_count, scan_slots, None, 0, 0);
     }
 
     pub fn push_call_frame_extended(
@@ -799,7 +805,10 @@ impl Fiber {
             local_slots,
         );
         let (caller_bp, caller_sp, caller_scan_slots_restore, caller_zero_start, caller_zero_end) = {
-            let caller_frame = self.frames.last_mut().expect("push_borrowed_call_frame: missing caller frame");
+            let caller_frame = self
+                .frames
+                .last_mut()
+                .expect("push_borrowed_call_frame: missing caller frame");
             let caller_bp = caller_frame.bp;
             let caller_sp = self.sp;
             let previous_scan_slots = caller_frame.scan_slots;
@@ -838,7 +847,14 @@ impl Fiber {
         bp
     }
 
-    pub fn push_frame(&mut self, func_id: u32, local_slots: u16, scan_slots: u16, ret_reg: u16, ret_count: u16) -> usize {
+    pub fn push_frame(
+        &mut self,
+        func_id: u32,
+        local_slots: u16,
+        scan_slots: u16,
+        ret_reg: u16,
+        ret_count: u16,
+    ) -> usize {
         assert!(
             scan_slots <= local_slots,
             "push_frame: scan_slots={} local_slots={}",
@@ -892,7 +908,10 @@ impl Fiber {
         }
 
         let keep_start = preserved_start.max(zero_start).min(zero_end);
-        let keep_end = preserved_start.saturating_add(preserved_len).max(keep_start).min(zero_end);
+        let keep_end = preserved_start
+            .saturating_add(preserved_len)
+            .max(keep_start)
+            .min(zero_end);
 
         if zero_start < keep_start {
             self.zero_slots_at(parent_bp + zero_start, keep_start - zero_start);
@@ -908,7 +927,9 @@ impl Fiber {
     #[inline]
     pub fn capture_panic_source_loc(&mut self) {
         if self.panic_source_loc.is_none() {
-            self.panic_source_loc = self.frames.last()
+            self.panic_source_loc = self
+                .frames
+                .last()
                 .map(|f| (f.func_id as u32, f.pc.saturating_sub(1) as u32));
         }
     }

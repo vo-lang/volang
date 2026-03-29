@@ -42,30 +42,44 @@ pub mod host;
 
 pub use vo_ffi_macro::vo_fn;
 pub use vo_runtime::ffi::{
-    ExternCallContext, ExternFn,
-    ExternResult, StdlibEntry, ExternRegistry,
     // Extension ABI types (available on all platforms)
-    ext_abi, ExternFnPtr,
-    ExternInvoke, ExternWorld, ExternFiberInputs,
+    ext_abi,
+    ExternCallContext,
+    ExternFiberInputs,
+    ExternFn,
+    ExternFnPtr,
+    ExternInvoke,
+    ExternRegistry,
+    ExternResult,
+    ExternWorld,
     // Type-safe slot wrapper for interface types
     InterfaceSlot,
-    // Container accessors
-    VoSlice, VoSliceCursor, VoMap, VoMapCursor,
-    VoArray, VoArrayCursor, VoString, VoBytes,
-    VoElem, VoStringElem,
+    StdlibEntry,
+    VoArray,
+    VoArrayCursor,
+    VoBytes,
+    VoClosure,
+    VoElem,
+    VoMap,
+    VoMapCursor,
     // Pointer and closure accessors
-    VoPtr, VoClosure,
+    VoPtr,
+    // Container accessors
+    VoSlice,
+    VoSliceCursor,
+    VoString,
+    VoStringElem,
 };
 // Extension ABI types (native only - require dylib boundary support)
 #[cfg(feature = "native")]
-pub use vo_runtime::ffi::{ExternEntry, ExtensionTable};
+pub use vo_runtime::ffi::{ExtensionTable, ExternEntry};
 pub use vo_runtime::gc::GcRef;
 
 // Native platform: re-export linkme types for auto-registration
 #[cfg(feature = "native")]
-pub use vo_runtime::ffi::EXTERN_TABLE;
-#[cfg(feature = "native")]
 pub use vo_runtime::distributed_slice;
+#[cfg(feature = "native")]
+pub use vo_runtime::ffi::EXTERN_TABLE;
 
 /// ABI version for extension compatibility checking.
 /// Must match `vo_runtime::ext_loader::ABI_VERSION`.
@@ -123,16 +137,16 @@ macro_rules! export_extensions {
 pub mod prelude {
     pub use crate::export_extensions;
     pub use crate::vo_fn;
-    pub use crate::ExternResult;
     pub use crate::ExternCallContext;
-    pub use crate::InterfaceSlot;
+    pub use crate::ExternResult;
     pub use crate::GcRef;
+    pub use crate::InterfaceSlot;
     // Extension ABI types
     pub use crate::{ext_abi, ExternFnPtr};
     // Container accessors
-    pub use crate::{VoSlice, VoSliceCursor, VoMap, VoMapCursor};
-    pub use crate::{VoArray, VoArrayCursor, VoString, VoBytes};
+    pub use crate::{VoArray, VoArrayCursor, VoBytes, VoString};
     pub use crate::{VoElem, VoStringElem};
+    pub use crate::{VoMap, VoMapCursor, VoSlice, VoSliceCursor};
     // Pointer and closure accessors
-    pub use crate::{VoPtr, VoClosure};
+    pub use crate::{VoClosure, VoPtr};
 }

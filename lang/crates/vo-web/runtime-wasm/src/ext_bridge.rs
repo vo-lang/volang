@@ -39,22 +39,22 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use wasm_bindgen::prelude::*;
-use vo_runtime::bytecode::{ExternDef, ExtSlotKind};
-use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
+use vo_runtime::bytecode::{ExtSlotKind, ExternDef};
+use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
+use wasm_bindgen::prelude::*;
 
 // Output tag constants (WASM standalone modules use these)
-pub const TAG_NIL_ERROR:  u8 = 0xE0;
-pub const TAG_ERROR_STR:  u8 = 0xE1;
-pub const TAG_VALUE:      u8 = 0xE2;
-pub const TAG_BYTES:      u8 = 0xE3;
-pub const TAG_NIL_REF:    u8 = 0xE4;
+pub const TAG_NIL_ERROR: u8 = 0xE0;
+pub const TAG_ERROR_STR: u8 = 0xE1;
+pub const TAG_VALUE: u8 = 0xE2;
+pub const TAG_BYTES: u8 = 0xE3;
+pub const TAG_NIL_REF: u8 = 0xE4;
 
 // Control tags (< 0xE0) returned by voCallExt for VM-level operations.
 // These are distinct from output tags and interpreted by wasm_ext_bridge
 // to produce non-Ok ExternResult variants.
-pub const TAG_SUSPEND:     u8 = 0x01; // HostEventWaitAndReplay
+pub const TAG_SUSPEND: u8 = 0x01; // HostEventWaitAndReplay
 pub const TAG_HOST_OUTPUT: u8 = 0x02; // set_host_output with payload
 pub const TAG_DISPLAY_PULSE: u8 = 0x03;
 
@@ -65,7 +65,11 @@ const DISPLAY_PULSE_DELAY_MS: u32 = u32::MAX;
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = window, js_name = "voSetupExtModule")]
-    pub fn js_setup_ext_module(module_key: &str, bytes: &[u8], js_glue_url: &str) -> js_sys::Promise;
+    pub fn js_setup_ext_module(
+        module_key: &str,
+        bytes: &[u8],
+        js_glue_url: &str,
+    ) -> js_sys::Promise;
 
     #[wasm_bindgen(js_namespace = window, js_name = "voRegisterExtModuleAlias")]
     fn js_register_ext_module_alias(existing_key: &str, alias_key: &str);
@@ -92,7 +96,13 @@ thread_local! {
 pub fn normalize_module_key(module_path: &str) -> String {
     module_path
         .chars()
-        .map(|c| if c == '.' || c == '/' || c == '-' { '_' } else { c })
+        .map(|c| {
+            if c == '.' || c == '/' || c == '-' {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -108,16 +118,28 @@ fn module_key_candidates(module_path: &str) -> Vec<String> {
     keys
 }
 
-pub async fn load_wasm_ext_module(module_path: &str, bytes: &[u8], js_glue_url: &str) -> Result<(), String> {
+pub async fn load_wasm_ext_module(
+    module_path: &str,
+    bytes: &[u8],
+    js_glue_url: &str,
+) -> Result<(), String> {
     let keys = module_key_candidates(module_path);
     web_sys::console::log_1(
-        &format!("[ext_bridge] load_wasm_ext_module: module_path={}, keys={:?}, bytes.len={}", module_path, keys, bytes.len()).into(),
+        &format!(
+            "[ext_bridge] load_wasm_ext_module: module_path={}, keys={:?}, bytes.len={}",
+            module_path,
+            keys,
+            bytes.len()
+        )
+        .into(),
     );
     let primary_key = &keys[0];
     let promise = js_setup_ext_module(primary_key, bytes, js_glue_url);
     wasm_bindgen_futures::JsFuture::from(promise)
         .await
-        .map_err(|e: wasm_bindgen::JsValue| format!("Failed to instantiate {}: {:?}", module_path, e))?;
+        .map_err(|e: wasm_bindgen::JsValue| {
+            format!("Failed to instantiate {}: {:?}", module_path, e)
+        })?;
     for alias in keys.iter().skip(1) {
         js_register_ext_module_alias(primary_key, alias);
     }
@@ -131,7 +153,11 @@ pub async fn load_wasm_ext_module(module_path: &str, bytes: &[u8], js_glue_url: 
     });
     let final_prefixes: Vec<String> = LOADED_PREFIXES.with(|p| p.borrow().clone());
     web_sys::console::log_1(
-        &format!("[ext_bridge] load_wasm_ext_module done: LOADED_PREFIXES = {:?}", final_prefixes).into(),
+        &format!(
+            "[ext_bridge] load_wasm_ext_module done: LOADED_PREFIXES = {:?}",
+            final_prefixes
+        )
+        .into(),
     );
     Ok(())
 }
@@ -139,7 +165,12 @@ pub async fn load_wasm_ext_module(module_path: &str, bytes: &[u8], js_glue_url: 
 pub fn register_wasm_ext_bridges(reg: &mut ExternRegistry, externs: &[ExternDef]) {
     let prefixes: Vec<String> = LOADED_PREFIXES.with(|p| p.borrow().clone());
     web_sys::console::log_1(
-        &format!("[ext_bridge] register_wasm_ext_bridges: LOADED_PREFIXES = {:?}, externs.len() = {}", prefixes, externs.len()).into(),
+        &format!(
+            "[ext_bridge] register_wasm_ext_bridges: LOADED_PREFIXES = {:?}, externs.len() = {}",
+            prefixes,
+            externs.len()
+        )
+        .into(),
     );
     EXTERN_ID_TO_INFO.with(|m| m.borrow_mut().clear());
     let mut registered_count = 0u32;
@@ -147,14 +178,20 @@ pub fn register_wasm_ext_bridges(reg: &mut ExternRegistry, externs: &[ExternDef]
         if is_wasm_ext_extern(&def.name) {
             let id = id as u32;
             EXTERN_ID_TO_INFO.with(|m| {
-                m.borrow_mut().insert(id, (def.name.clone(), def.param_kinds.clone()));
+                m.borrow_mut()
+                    .insert(id, (def.name.clone(), def.param_kinds.clone()));
             });
             reg.register(id, wasm_ext_bridge);
             registered_count += 1;
         }
     }
     web_sys::console::log_1(
-        &format!("[ext_bridge] registered {} wasm ext bridges out of {} externs", registered_count, externs.len()).into(),
+        &format!(
+            "[ext_bridge] registered {} wasm ext bridges out of {} externs",
+            registered_count,
+            externs.len()
+        )
+        .into(),
     );
 }
 
@@ -189,7 +226,9 @@ pub fn restore_extern_state(state: SavedExternState) {
 
 fn is_wasm_ext_extern(name: &str) -> bool {
     LOADED_PREFIXES.with(|p| {
-        p.borrow().iter().any(|prefix| name.starts_with(prefix.as_str()))
+        p.borrow()
+            .iter()
+            .any(|prefix| name.starts_with(prefix.as_str()))
     })
 }
 
@@ -227,34 +266,45 @@ fn decode_ext_output(call: &mut ExternCallContext, output: &[u8]) {
     let mut pos = 0;
     let mut slot = 0u16;
     while pos < output.len() {
-        let tag = output[pos]; pos += 1;
+        let tag = output[pos];
+        pos += 1;
         match tag {
             TAG_NIL_ERROR => {
                 write_nil_error(call, slot);
                 slot += 2;
             }
             TAG_ERROR_STR => {
-                if pos + 2 > output.len() { break; }
+                if pos + 2 > output.len() {
+                    break;
+                }
                 let len = u16::from_le_bytes([output[pos], output[pos + 1]]) as usize;
                 pos += 2;
-                if pos + len > output.len() { break; }
+                if pos + len > output.len() {
+                    break;
+                }
                 let msg = std::str::from_utf8(&output[pos..pos + len]).unwrap_or("ext error");
                 pos += len;
                 write_error_to(call, slot, msg);
                 slot += 2;
             }
             TAG_VALUE => {
-                if pos + 8 > output.len() { break; }
+                if pos + 8 > output.len() {
+                    break;
+                }
                 let v = u64::from_le_bytes(output[pos..pos + 8].try_into().unwrap());
                 pos += 8;
                 call.ret_u64(slot, v);
                 slot += 1;
             }
             TAG_BYTES => {
-                if pos + 4 > output.len() { break; }
+                if pos + 4 > output.len() {
+                    break;
+                }
                 let len = u32::from_le_bytes(output[pos..pos + 4].try_into().unwrap()) as usize;
                 pos += 4;
-                if pos + len > output.len() { break; }
+                if pos + len > output.len() {
+                    break;
+                }
                 let r = call.alloc_bytes(&output[pos..pos + len]);
                 pos += len;
                 call.ret_ref(slot, r);
@@ -282,9 +332,9 @@ fn decode_ext_output(call: &mut ExternCallContext, output: &[u8]) {
 /// tagged output.
 fn wasm_ext_bridge(call: &mut ExternCallContext) -> ExternResult {
     let id = call.extern_id();
-    let (name, param_kinds) = EXTERN_ID_TO_INFO.with(|m| {
-        m.borrow().get(&id).cloned()
-    }).unwrap_or_else(|| panic!("wasm_ext_bridge: extern_id {} not registered", id));
+    let (name, param_kinds) = EXTERN_ID_TO_INFO
+        .with(|m| m.borrow().get(&id).cloned())
+        .unwrap_or_else(|| panic!("wasm_ext_bridge: extern_id {} not registered", id));
 
     // Replay path: fiber was suspended by TAG_SUSPEND, now resumed with event data.
     if let Some(_token) = call.take_resume_host_event_token() {

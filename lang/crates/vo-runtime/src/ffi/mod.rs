@@ -24,48 +24,45 @@
 //! ```
 
 #[cfg(not(feature = "std"))]
+use alloc::format;
+#[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-#[cfg(not(feature = "std"))]
-use alloc::format;
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::output::OutputSink;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 static HOST_EVENT_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // Structured call types (ExternInvoke, ExternWorld, ExternFiberInputs)
 pub mod call;
-pub use call::{ExternInvoke, ExternWorld, ExternFiberInputs};
+pub use call::{ExternFiberInputs, ExternInvoke, ExternWorld};
 
 // Container accessors
 pub mod containers;
 pub use containers::{
-    VoElem, VoStringElem, VoSlice, VoSliceCursor,
-    VoMap, VoMapCursor,
-    VoArray, VoArrayCursor,
-    VoString, VoBytes,
-    VoPtr, VoClosure,
+    VoArray, VoArrayCursor, VoBytes, VoClosure, VoElem, VoMap, VoMapCursor, VoPtr, VoSlice,
+    VoSliceCursor, VoString, VoStringElem,
 };
 
 // Public re-export for extension developers
+#[cfg(feature = "std")]
+use crate::distributed_slice;
+use crate::gc::{Gc, GcRef};
+#[cfg(feature = "std")]
+use crate::io::{IoRuntime, IoToken};
+use crate::itab::ItabCache;
 pub use crate::objects::interface::InterfaceSlot;
+use crate::objects::{slice, string};
 use vo_common_core::bytecode::{InterfaceMeta, Module, NamedTypeMeta, StructMeta, WellKnownTypes};
 use vo_common_core::runtime_type::RuntimeType;
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
-use crate::itab::ItabCache;
-use crate::gc::{Gc, GcRef};
-use crate::objects::{slice, string};
-#[cfg(feature = "std")]
-use crate::distributed_slice;
-#[cfg(feature = "std")]
-use crate::io::{IoRuntime, IoToken};
- 
-#[cfg(feature = "std")]
-use std::collections::HashMap;
+
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
+#[cfg(feature = "std")]
+use std::collections::HashMap;
 
 /// Cache for sentinel error instances (per-VM, keyed by package name).
 /// Each package (e.g., "dyn", "os") stores its sentinel errors as (slot0, slot1) pairs.
@@ -137,10 +134,7 @@ pub enum ExternResult {
     /// Request VM to execute a closure and replay the extern with cached results.
     /// The extern function will be re-executed from the beginning; previous
     /// closure results are available via `resume_closure_result()`.
-    CallClosure {
-        closure_ref: GcRef,
-        args: Vec<u64>,
-    },
+    CallClosure { closure_ref: GcRef, args: Vec<u64> },
 }
 
 /// Unified extern function signature.
@@ -186,9 +180,10 @@ impl ExternEntry {
     /// Get function name as a string slice.
     pub fn name(&self) -> &str {
         unsafe {
-            core::str::from_utf8_unchecked(
-                core::slice::from_raw_parts(self.name_ptr, self.name_len as usize)
-            )
+            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                self.name_ptr,
+                self.name_len as usize,
+            ))
         }
     }
 }
@@ -227,7 +222,7 @@ impl StdlibEntry {
     pub fn name(&self) -> &'static str {
         self.name
     }
-    
+
     /// Register this entry into the registry.
     pub fn register(&self, registry: &mut ExternRegistry, id: u32) {
         registry.register(id, self.func);
@@ -603,7 +598,12 @@ impl<'a> ExternCallContext<'a> {
     /// `src_is_pointer`: true if source is pointer type (*T), false if value type (T).
     /// Value types cannot use pointer receiver methods.
     #[inline]
-    pub fn get_or_create_itab(&mut self, named_type_id: u32, iface_meta_id: u32, src_is_pointer: bool) -> u32 {
+    pub fn get_or_create_itab(
+        &mut self,
+        named_type_id: u32,
+        iface_meta_id: u32,
+        src_is_pointer: bool,
+    ) -> u32 {
         self.itab_cache.get_or_create(
             named_type_id,
             iface_meta_id,
@@ -618,7 +618,12 @@ impl<'a> ExternCallContext<'a> {
     /// `src_is_pointer`: true if source is pointer type (*T), false if value type (T).
     /// Value types cannot use pointer receiver methods.
     #[inline]
-    pub fn try_get_or_create_itab(&mut self, named_type_id: u32, iface_meta_id: u32, src_is_pointer: bool) -> Option<u32> {
+    pub fn try_get_or_create_itab(
+        &mut self,
+        named_type_id: u32,
+        iface_meta_id: u32,
+        src_is_pointer: bool,
+    ) -> Option<u32> {
         self.itab_cache.try_get_or_create(
             named_type_id,
             iface_meta_id,
@@ -631,7 +636,9 @@ impl<'a> ExternCallContext<'a> {
     /// Get struct_meta_id from rttid using RuntimeType's embedded meta_id.
     /// O(1) lookup via RuntimeType.struct_meta_id().
     pub fn get_struct_meta_id_from_rttid(&self, rttid: u32) -> Option<u32> {
-        self.module.runtime_types.get(rttid as usize)
+        self.module
+            .runtime_types
+            .get(rttid as usize)
             .and_then(|rt| rt.struct_meta_id())
     }
 
@@ -679,7 +686,11 @@ impl<'a> ExternCallContext<'a> {
         let named_id = self.get_named_type_id_from_rttid(rttid, true)?;
         let named_meta = self.module.named_type_metas.get(named_id as usize)?;
         let method_info = named_meta.methods.get(method_name)?;
-        Some((method_info.func_id, method_info.is_pointer_receiver, method_info.signature_rttid))
+        Some((
+            method_info.func_id,
+            method_info.is_pointer_receiver,
+            method_info.signature_rttid,
+        ))
     }
 
     /// Get mutable GC reference.
@@ -825,13 +836,17 @@ impl<'a> ExternCallContext<'a> {
         for meta in &self.module.named_type_metas {
             if meta.name == type_name {
                 let struct_meta_id = meta.underlying_meta.meta_id();
-                let slot_count = self.module.struct_metas
+                let slot_count = self
+                    .module
+                    .struct_metas
                     .get(struct_meta_id as usize)
                     .map(|sm| sm.slot_count())
-                    .unwrap_or_else(|| panic!(
+                    .unwrap_or_else(|| {
+                        panic!(
                         "gc_alloc_struct: type '{}' has struct_meta_id={} but no StructMeta entry",
                         type_name, struct_meta_id
-                    ));
+                    )
+                    });
                 return (struct_meta_id, slot_count);
             }
         }
@@ -879,7 +894,12 @@ impl<'a> ExternCallContext<'a> {
     /// - **Array**: Allocate array with ArrayHeader, copy elements, return `InterfaceSlot(pack_slot0(rttid, vk), GcRef)`
     /// - **Interface**: Return as-is to preserve itab_id
     /// - **Others**: Return `InterfaceSlot(pack_slot0(rttid, vk), raw_slots[0])`
-    pub fn box_to_interface(&mut self, rttid: u32, vk: ValueKind, raw_slots: &[u64]) -> InterfaceSlot {
+    pub fn box_to_interface(
+        &mut self,
+        rttid: u32,
+        vk: ValueKind,
+        raw_slots: &[u64],
+    ) -> InterfaceSlot {
         use crate::objects::{array, interface};
 
         match vk {
@@ -898,7 +918,7 @@ impl<'a> ExternCallContext<'a> {
                 let elem_vk = elem_value_rttid.value_kind();
                 let elem_slots = self.get_type_slot_count(elem_value_rttid.rttid()) as usize;
                 let array_len = self.get_array_len_from_rttid(rttid);
-                
+
                 // Calculate elem_bytes (slot-based for non-packed, actual bytes for packed)
                 let elem_bytes = match elem_vk {
                     ValueKind::Bool | ValueKind::Int8 | ValueKind::Uint8 => 1,
@@ -906,16 +926,16 @@ impl<'a> ExternCallContext<'a> {
                     ValueKind::Int32 | ValueKind::Uint32 | ValueKind::Float32 => 4,
                     _ => elem_slots * crate::slot::SLOT_BYTES,
                 };
-                
+
                 let elem_meta = crate::ValueMeta::new(elem_value_rttid.rttid(), elem_vk);
                 let new_ref = array::create(&mut self.gc, elem_meta, elem_bytes, array_len);
-                
+
                 // Copy raw_slots to array data area
                 let data_ptr = array::data_ptr_bytes(new_ref) as *mut u64;
                 for (i, &val) in raw_slots.iter().enumerate() {
                     unsafe { *data_ptr.add(i) = val };
                 }
-                
+
                 let slot0 = interface::pack_slot0(0, rttid, vk);
                 InterfaceSlot::new(slot0, new_ref as u64)
             }
@@ -945,7 +965,9 @@ impl<'a> ExternCallContext<'a> {
     pub fn get_func_results(&self, func_rttid: u32) -> Vec<ValueRttid> {
         use crate::RuntimeType;
 
-        if let Some(RuntimeType::Func { results, .. }) = self.module.runtime_types.get(func_rttid as usize) {
+        if let Some(RuntimeType::Func { results, .. }) =
+            self.module.runtime_types.get(func_rttid as usize)
+        {
             return results.clone();
         }
         Vec::new()
@@ -953,11 +975,18 @@ impl<'a> ExternCallContext<'a> {
 
     /// Get full function signature info for dynamic calls.
     /// Returns (params, results, is_variadic).
-    pub fn get_func_signature(&self, func_rttid: u32) -> Option<(&Vec<ValueRttid>, &Vec<ValueRttid>, bool)> {
+    pub fn get_func_signature(
+        &self,
+        func_rttid: u32,
+    ) -> Option<(&Vec<ValueRttid>, &Vec<ValueRttid>, bool)> {
         use crate::RuntimeType;
 
         match self.module.runtime_types.get(func_rttid as usize)? {
-            RuntimeType::Func { params, results, variadic } => Some((params, results, *variadic)),
+            RuntimeType::Func {
+                params,
+                results,
+                variadic,
+            } => Some((params, results, *variadic)),
             _ => None,
         }
     }
@@ -986,12 +1015,17 @@ impl<'a> ExternCallContext<'a> {
             return Ok(());
         }
 
-        let get_func_sig = |rttid: u32| -> Option<(&Vec<crate::ValueRttid>, &Vec<crate::ValueRttid>, bool)> {
-            match self.module.runtime_types.get(rttid as usize)? {
-                RuntimeType::Func { params, results, variadic } => Some((params, results, *variadic)),
-                _ => None,
-            }
-        };
+        let get_func_sig =
+            |rttid: u32| -> Option<(&Vec<crate::ValueRttid>, &Vec<crate::ValueRttid>, bool)> {
+                match self.module.runtime_types.get(rttid as usize)? {
+                    RuntimeType::Func {
+                        params,
+                        results,
+                        variadic,
+                    } => Some((params, results, *variadic)),
+                    _ => None,
+                }
+            };
 
         let (closure_params, closure_results, closure_variadic) =
             get_func_sig(closure_sig_rttid).ok_or("closure is not a function type")?;
@@ -1021,8 +1055,11 @@ impl<'a> ExternCallContext<'a> {
 
             if let Some(variadic_param) = closure_params.last() {
                 let variadic_rttid = variadic_param.rttid();
-                if let Some(RuntimeType::Slice(elem_rttid)) = self.module.runtime_types.get(variadic_rttid as usize) {
-                    for (i, expected) in expected_params.iter().skip(non_variadic_count).enumerate() {
+                if let Some(RuntimeType::Slice(elem_rttid)) =
+                    self.module.runtime_types.get(variadic_rttid as usize)
+                {
+                    for (i, expected) in expected_params.iter().skip(non_variadic_count).enumerate()
+                    {
                         if !self.value_rttids_compatible(*expected, *elem_rttid) {
                             return Err(format!("variadic parameter {} type mismatch", i + 1));
                         }
@@ -1068,7 +1105,11 @@ impl<'a> ExternCallContext<'a> {
     }
 
     /// Check if source ValueRttid is compatible with target ValueRttid.
-    fn value_rttids_compatible(&self, source: crate::ValueRttid, target: crate::ValueRttid) -> bool {
+    fn value_rttids_compatible(
+        &self,
+        source: crate::ValueRttid,
+        target: crate::ValueRttid,
+    ) -> bool {
         use crate::RuntimeType;
 
         if source == target {
@@ -1076,14 +1117,18 @@ impl<'a> ExternCallContext<'a> {
         }
 
         let target_rttid = target.rttid();
-        if let Some(RuntimeType::Interface { methods, .. }) = self.module.runtime_types.get(target_rttid as usize) {
+        if let Some(RuntimeType::Interface { methods, .. }) =
+            self.module.runtime_types.get(target_rttid as usize)
+        {
             if methods.is_empty() {
                 return true;
             }
         }
 
         let source_rttid = source.rttid();
-        if let Some(RuntimeType::Interface { methods, .. }) = self.module.runtime_types.get(source_rttid as usize) {
+        if let Some(RuntimeType::Interface { methods, .. }) =
+            self.module.runtime_types.get(source_rttid as usize)
+        {
             if methods.is_empty() {
                 return true;
             }
@@ -1096,7 +1141,9 @@ impl<'a> ExternCallContext<'a> {
     pub fn get_elem_value_rttid_from_base(&self, base_rttid: u32) -> crate::ValueRttid {
         use crate::RuntimeType;
 
-        let rt = self.module.runtime_types
+        let rt = self
+            .module
+            .runtime_types
             .get(base_rttid as usize)
             .expect("dyn_get_index: base_rttid not found in runtime_types");
 
@@ -1122,7 +1169,9 @@ impl<'a> ExternCallContext<'a> {
     pub fn get_array_len_from_rttid(&self, rttid: u32) -> usize {
         use crate::RuntimeType;
 
-        let rt = self.module.runtime_types
+        let rt = self
+            .module
+            .runtime_types
             .get(rttid as usize)
             .expect("get_array_len_from_rttid: rttid not found in runtime_types");
 
@@ -1133,7 +1182,10 @@ impl<'a> ExternCallContext<'a> {
                 let underlying_rttid = meta.underlying_rttid.rttid();
                 self.get_array_len_from_rttid(underlying_rttid)
             }
-            _ => panic!("get_array_len_from_rttid: expected Array type, got {:?}", rt),
+            _ => panic!(
+                "get_array_len_from_rttid: expected Array type, got {:?}",
+                rt
+            ),
         }
     }
 
@@ -1141,7 +1193,9 @@ impl<'a> ExternCallContext<'a> {
     pub fn get_type_slot_count(&self, rttid: u32) -> u16 {
         use crate::RuntimeType;
 
-        let rt = self.module.runtime_types
+        let rt = self
+            .module
+            .runtime_types
             .get(rttid as usize)
             .expect("get_type_slot_count: rttid not found in runtime_types");
 
@@ -1243,7 +1297,8 @@ impl<'a> ExternCallContext<'a> {
     /// type, though in practice all compiled modules register them).
     pub fn find_basic_type_rttid(&self, vk: ValueKind) -> u32 {
         use crate::RuntimeType;
-        self.module.runtime_types
+        self.module
+            .runtime_types
             .iter()
             .position(|rt| matches!(rt, RuntimeType::Basic(k) if *k == vk))
             .map(|i| i as u32)
@@ -1256,7 +1311,9 @@ impl<'a> ExternCallContext<'a> {
     /// without requiring callers to access `module.named_type_metas` directly.
     #[inline]
     pub fn named_type_underlying_rttid(&self, named_id: u32) -> u32 {
-        self.module.named_type_metas[named_id as usize].underlying_rttid.rttid()
+        self.module.named_type_metas[named_id as usize]
+            .underlying_rttid
+            .rttid()
     }
 
     /// Allocate a new string slice ([]string).
@@ -1266,7 +1323,7 @@ impl<'a> ExternCallContext<'a> {
         // String is a reference type, takes 1 slot (8 bytes)
         let elem_meta = ValueMeta::new(0, ValueKind::String);
         let s = slice::create(self.gc, elem_meta, 8, len, len);
-        
+
         // Write each string to the slice
         for (i, rust_str) in strings.iter().enumerate() {
             let str_ref = string::from_rust_str(self.gc, rust_str);
@@ -1365,28 +1422,37 @@ impl<'a> ExternCallContext<'a> {
             ext_abi::RESULT_BLOCK => ExternResult::Block,
             #[cfg(feature = "std")]
             ext_abi::RESULT_WAIT_IO => {
-                let token = self.ext_wait_io_token.take()
+                let token = self
+                    .ext_wait_io_token
+                    .take()
                     .expect("ext_abi::RESULT_WAIT_IO without set_ext_wait_io");
                 ExternResult::WaitIo { token }
             }
             ext_abi::RESULT_PANIC => {
-                let msg = self.ext_panic_msg.take()
+                let msg = self
+                    .ext_panic_msg
+                    .take()
                     .unwrap_or_else(|| String::from("unknown panic from extension"));
                 ExternResult::Panic(msg)
             }
             ext_abi::RESULT_CALL_CLOSURE => {
-                let (closure_ref, args) = self.ext_call_closure.take()
+                let (closure_ref, args) = self
+                    .ext_call_closure
+                    .take()
                     .expect("ext_abi::RESULT_CALL_CLOSURE without set_ext_call_closure");
                 ExternResult::CallClosure { closure_ref, args }
             }
             ext_abi::RESULT_HOST_EVENT_WAIT => {
-                let (token, delay_ms) = self.ext_host_event_wait.take()
+                let (token, delay_ms) = self
+                    .ext_host_event_wait
+                    .take()
                     .expect("ext_abi::RESULT_HOST_EVENT_WAIT without set_ext_host_event_wait");
                 ExternResult::HostEventWait { token, delay_ms }
             }
             ext_abi::RESULT_HOST_EVENT_WAIT_REPLAY => {
-                let (token, _delay_ms) = self.ext_host_event_wait.take()
-                    .expect("ext_abi::RESULT_HOST_EVENT_WAIT_REPLAY without set_ext_host_event_wait");
+                let (token, _delay_ms) = self.ext_host_event_wait.take().expect(
+                    "ext_abi::RESULT_HOST_EVENT_WAIT_REPLAY without set_ext_host_event_wait",
+                );
                 ExternResult::HostEventWaitAndReplay { token }
             }
             _ => ExternResult::Panic(format!("invalid extension result code: {}", code)),
@@ -1408,7 +1474,8 @@ impl<'a> ExternCallContext<'a> {
             self.replay_index == replay_len,
             "FFI post-call violation: replay_index ({}) != replay_results.len() ({}). \
              Extern function did not consume all cached closure results.",
-            self.replay_index, replay_len,
+            self.replay_index,
+            replay_len,
         );
 
         // Check resume_io_token protocol: must be consumed if provided
@@ -1449,7 +1516,6 @@ impl<'a> ExternCallContext<'a> {
     pub fn get_itab(&self, itab_id: u32) -> Option<&vo_common_core::bytecode::Itab> {
         self.itab_cache.get_itab(itab_id)
     }
-
 }
 
 // ==================== Extern Registry ====================

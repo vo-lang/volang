@@ -33,10 +33,7 @@ pub fn discover_workfile(project_dir: &Path) -> Option<PathBuf> {
 /// Parse a `vo.work` file and resolve all override entries.
 /// For entries without an explicit `module` field, reads `<path>/vo.mod` to
 /// determine the canonical module path.
-pub fn resolve_overrides(
-    workfile: &WorkFile,
-    workfile_dir: &Path,
-) -> Result<Vec<Override>, Error> {
+pub fn resolve_overrides(workfile: &WorkFile, workfile_dir: &Path) -> Result<Vec<Override>, Error> {
     let mut overrides = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -83,14 +80,9 @@ pub fn resolve_overrides(
 pub fn verify_override_identity(overrides: &[Override]) -> Result<(), Error> {
     for ov in overrides {
         let mod_path = ov.local_dir.join("vo.mod");
-        let content = std::fs::read_to_string(&mod_path).map_err(|e| {
-            Error::Io(e)
-        })?;
+        let content = std::fs::read_to_string(&mod_path).map_err(|e| Error::Io(e))?;
         let mf = ModFile::parse(&content).map_err(|e| {
-            Error::WorkFileParse(format!(
-                "override {}: error parsing vo.mod: {e}",
-                ov.module
-            ))
+            Error::WorkFileParse(format!("override {}: error parsing vo.mod: {e}", ov.module))
         })?;
         if mf.module != ov.module {
             return Err(Error::WorkspaceIdentityMismatch {
@@ -136,7 +128,10 @@ pub fn check_override_imports_covered(
     }
 
     // Check if owned by an active override
-    if overrides.iter().any(|ov| ov.module.owns_import(import_path).is_some()) {
+    if overrides
+        .iter()
+        .any(|ov| ov.module.owns_import(import_path).is_some())
+    {
         return Ok(());
     }
 

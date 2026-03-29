@@ -11,8 +11,8 @@
 
 use std::str::Chars;
 
-use vo_common::span::Span;
 use vo_common::diagnostics::DiagnosticSink;
+use vo_common::span::Span;
 
 use crate::errors::SyntaxError;
 use crate::token::{Token, TokenKind};
@@ -37,7 +37,7 @@ pub struct Lexer<'src> {
 
 impl<'src> Lexer<'src> {
     /// Creates a new lexer for the given source with a base offset.
-    /// 
+    ///
     /// The base offset should come from `SourceMap::file_base()` to ensure
     /// all positions are globally unique.
     pub fn new(source: &'src str, base: u32) -> Self {
@@ -211,12 +211,13 @@ impl<'src> Lexer<'src> {
         let start = self.pos();
         self.advance(); // /
         self.advance(); // *
-        
+
         let mut depth = 1;
         while depth > 0 {
             match self.peek() {
                 None => {
-                    self.diagnostics.emit(SyntaxError::UnterminatedBlockComment.at(start..self.pos()));
+                    self.diagnostics
+                        .emit(SyntaxError::UnterminatedBlockComment.at(start..self.pos()));
                     return;
                 }
                 Some('*') if self.peek_next() == Some('/') => {
@@ -240,15 +241,42 @@ impl<'src> Lexer<'src> {
     fn scan_token(&mut self, c: char) -> TokenKind {
         match c {
             // Single-character tokens
-            '(' => { self.advance(); TokenKind::LParen }
-            ')' => { self.advance(); TokenKind::RParen }
-            '[' => { self.advance(); TokenKind::LBracket }
-            ']' => { self.advance(); TokenKind::RBracket }
-            '{' => { self.advance(); TokenKind::LBrace }
-            '}' => { self.advance(); TokenKind::RBrace }
-            ',' => { self.advance(); TokenKind::Comma }
-            ';' => { self.advance(); TokenKind::Semicolon }
-            '@' => { self.advance(); TokenKind::At }
+            '(' => {
+                self.advance();
+                TokenKind::LParen
+            }
+            ')' => {
+                self.advance();
+                TokenKind::RParen
+            }
+            '[' => {
+                self.advance();
+                TokenKind::LBracket
+            }
+            ']' => {
+                self.advance();
+                TokenKind::RBracket
+            }
+            '{' => {
+                self.advance();
+                TokenKind::LBrace
+            }
+            '}' => {
+                self.advance();
+                TokenKind::RBrace
+            }
+            ',' => {
+                self.advance();
+                TokenKind::Comma
+            }
+            ';' => {
+                self.advance();
+                TokenKind::Semicolon
+            }
+            '@' => {
+                self.advance();
+                TokenKind::At
+            }
 
             // Dot or ellipsis
             '.' => {
@@ -436,7 +464,12 @@ impl<'src> Lexer<'src> {
                     TokenKind::TildeArrow
                 } else {
                     let start = self.pos() - 1;
-                    self.diagnostics.emit(SyntaxError::UnexpectedChar.at_with_message(start..self.pos(), "expected '>' after '~'".to_string()));
+                    self.diagnostics.emit(
+                        SyntaxError::UnexpectedChar.at_with_message(
+                            start..self.pos(),
+                            "expected '>' after '~'".to_string(),
+                        ),
+                    );
                     TokenKind::Invalid
                 }
             }
@@ -458,7 +491,12 @@ impl<'src> Lexer<'src> {
             _ => {
                 let start = self.pos();
                 self.advance();
-                self.diagnostics.emit(SyntaxError::UnexpectedChar.at_with_message(start..self.pos(), format!("unexpected character: {:?}", c)));
+                self.diagnostics.emit(
+                    SyntaxError::UnexpectedChar.at_with_message(
+                        start..self.pos(),
+                        format!("unexpected character: {:?}", c),
+                    ),
+                );
                 TokenKind::Invalid
             }
         }
@@ -467,7 +505,7 @@ impl<'src> Lexer<'src> {
     /// Scans an identifier or keyword.
     fn scan_ident(&mut self) -> TokenKind {
         let start = self.local_pos as usize;
-        
+
         while let Some(c) = self.peek() {
             if is_ident_continue(c) {
                 self.advance();
@@ -512,7 +550,11 @@ impl<'src> Lexer<'src> {
         self.scan_digits(10);
 
         match self.peek() {
-            Some('.') if self.peek_next().map_or(false, |c| c.is_ascii_digit() || c == 'e' || c == 'E') => {
+            Some('.')
+                if self
+                    .peek_next()
+                    .map_or(false, |c| c.is_ascii_digit() || c == 'e' || c == 'E') =>
+            {
                 self.advance();
                 self.scan_float_after_dot()
             }
@@ -521,9 +563,7 @@ impl<'src> Lexer<'src> {
                 self.advance();
                 self.scan_float_after_dot()
             }
-            Some('e') | Some('E') => {
-                self.scan_float_exponent()
-            }
+            Some('e') | Some('E') => self.scan_float_exponent(),
             _ => TokenKind::IntLit,
         }
     }
@@ -531,22 +571,24 @@ impl<'src> Lexer<'src> {
     /// Scans a hexadecimal number.
     fn scan_hex_number(&mut self) -> TokenKind {
         self.advance(); // x or X
-        
+
         // Check for hex float starting with dot: 0x.8p0
         if self.peek() == Some('.') {
             self.advance();
             if !self.peek().map_or(false, |c| c.is_ascii_hexdigit()) {
                 let start = self.pos().saturating_sub(3);
-                self.diagnostics.emit(SyntaxError::HexFloatNoDigits.at(start..self.pos()));
+                self.diagnostics
+                    .emit(SyntaxError::HexFloatNoDigits.at(start..self.pos()));
                 return TokenKind::Invalid;
             }
             self.scan_hex_digits();
             return self.scan_hex_exponent();
         }
-        
+
         if !self.peek().map_or(false, |c| c.is_ascii_hexdigit()) {
             let start = self.pos().saturating_sub(2);
-            self.diagnostics.emit(SyntaxError::HexNoDigits.at(start..self.pos()));
+            self.diagnostics
+                .emit(SyntaxError::HexNoDigits.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
@@ -559,9 +601,7 @@ impl<'src> Lexer<'src> {
                 self.scan_hex_digits();
                 self.scan_hex_exponent()
             }
-            Some('p') | Some('P') => {
-                self.scan_hex_exponent()
-            }
+            Some('p') | Some('P') => self.scan_hex_exponent(),
             _ => TokenKind::IntLit,
         }
     }
@@ -569,10 +609,11 @@ impl<'src> Lexer<'src> {
     /// Scans an octal number (0o prefix style).
     fn scan_octal_number(&mut self) -> TokenKind {
         self.advance(); // o or O
-        
+
         if !self.peek().map_or(false, |c| matches!(c, '0'..='7')) {
             let start = self.pos().saturating_sub(2);
-            self.diagnostics.emit(SyntaxError::OctalNoDigits.at(start..self.pos()));
+            self.diagnostics
+                .emit(SyntaxError::OctalNoDigits.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
@@ -590,14 +631,17 @@ impl<'src> Lexer<'src> {
     fn scan_octal_digits(&mut self) {
         while let Some(c) = self.peek() {
             match c {
-                '0'..='7' | '_' => { self.advance(); }
+                '0'..='7' | '_' => {
+                    self.advance();
+                }
                 '8' | '9' => {
                     let digit_start = self.pos();
                     self.advance();
-                    self.diagnostics.emit(SyntaxError::OctalInvalidDigit.at_with_message(
-                        digit_start..self.pos(),
-                        format!("invalid digit '{}' in octal literal", c),
-                    ));
+                    self.diagnostics
+                        .emit(SyntaxError::OctalInvalidDigit.at_with_message(
+                            digit_start..self.pos(),
+                            format!("invalid digit '{}' in octal literal", c),
+                        ));
                 }
                 _ => break,
             }
@@ -607,20 +651,27 @@ impl<'src> Lexer<'src> {
     /// Scans a binary number.
     fn scan_binary_number(&mut self) -> TokenKind {
         self.advance(); // b or B
-        
+
         if !self.peek().map_or(false, |c| matches!(c, '0' | '1')) {
             let start = self.pos().saturating_sub(2);
-            self.diagnostics.emit(SyntaxError::BinaryNoDigits.at(start..self.pos()));
+            self.diagnostics
+                .emit(SyntaxError::BinaryNoDigits.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
         while let Some(c) = self.peek() {
             match c {
-                '0' | '1' | '_' => { self.advance(); }
+                '0' | '1' | '_' => {
+                    self.advance();
+                }
                 '2'..='9' => {
                     let digit_start = self.pos();
                     self.advance();
-                    self.diagnostics.emit(SyntaxError::BinaryInvalidDigit.at_with_message(digit_start..self.pos(), format!("invalid digit '{}' in binary literal", c)));
+                    self.diagnostics
+                        .emit(SyntaxError::BinaryInvalidDigit.at_with_message(
+                            digit_start..self.pos(),
+                            format!("invalid digit '{}' in binary literal", c),
+                        ));
                 }
                 _ => break,
             }
@@ -654,7 +705,7 @@ impl<'src> Lexer<'src> {
     /// Scans the fractional part and optional exponent of a float.
     fn scan_float_after_dot(&mut self) -> TokenKind {
         self.scan_digits(10);
-        
+
         if self.peek() == Some('e') || self.peek() == Some('E') {
             self.scan_float_exponent()
         } else {
@@ -665,14 +716,15 @@ impl<'src> Lexer<'src> {
     /// Scans a decimal float exponent.
     fn scan_float_exponent(&mut self) -> TokenKind {
         self.advance(); // e or E
-        
+
         if self.peek() == Some('+') || self.peek() == Some('-') {
             self.advance();
         }
 
         if !self.peek().map_or(false, |c| c.is_ascii_digit()) {
             let start = self.pos().saturating_sub(1);
-            self.diagnostics.emit(SyntaxError::ExponentNoDigits.at(start..self.pos()));
+            self.diagnostics
+                .emit(SyntaxError::ExponentNoDigits.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
@@ -684,7 +736,8 @@ impl<'src> Lexer<'src> {
     fn scan_hex_exponent(&mut self) -> TokenKind {
         if self.peek() != Some('p') && self.peek() != Some('P') {
             let start = self.pos().saturating_sub(1);
-            self.diagnostics.emit(SyntaxError::HexFloatNoExponent.at(start..self.pos()));
+            self.diagnostics
+                .emit(SyntaxError::HexFloatNoExponent.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
@@ -696,7 +749,8 @@ impl<'src> Lexer<'src> {
 
         if !self.peek().map_or(false, |c| c.is_ascii_digit()) {
             let start = self.pos().saturating_sub(1);
-            self.diagnostics.emit(SyntaxError::ExponentNoDigits.at(start..self.pos()));
+            self.diagnostics
+                .emit(SyntaxError::ExponentNoDigits.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
@@ -712,7 +766,8 @@ impl<'src> Lexer<'src> {
         loop {
             match self.peek() {
                 None | Some('\n') => {
-                    self.diagnostics.emit(SyntaxError::UnterminatedString.at(start..self.pos()));
+                    self.diagnostics
+                        .emit(SyntaxError::UnterminatedString.at(start..self.pos()));
                     return TokenKind::Invalid;
                 }
                 Some('"') => {
@@ -738,7 +793,8 @@ impl<'src> Lexer<'src> {
         loop {
             match self.peek() {
                 None => {
-                    self.diagnostics.emit(SyntaxError::UnterminatedRawString.at(start..self.pos()));
+                    self.diagnostics
+                        .emit(SyntaxError::UnterminatedRawString.at(start..self.pos()));
                     return TokenKind::Invalid;
                 }
                 Some('`') => {
@@ -759,12 +815,14 @@ impl<'src> Lexer<'src> {
 
         match self.peek() {
             None | Some('\n') => {
-                self.diagnostics.emit(SyntaxError::UnterminatedRune.at(start..self.pos()));
+                self.diagnostics
+                    .emit(SyntaxError::UnterminatedRune.at(start..self.pos()));
                 return TokenKind::Invalid;
             }
             Some('\'') => {
                 self.advance();
-                self.diagnostics.emit(SyntaxError::EmptyRune.at(start..self.pos()));
+                self.diagnostics
+                    .emit(SyntaxError::EmptyRune.at(start..self.pos()));
                 return TokenKind::Invalid;
             }
             Some('\\') => {
@@ -786,12 +844,13 @@ impl<'src> Lexer<'src> {
                     self.advance();
                 }
             }
-            
+
             if self.peek() == Some('\'') {
                 self.advance();
             }
-            
-            self.diagnostics.emit(SyntaxError::MultiCharRune.at(start..self.pos()));
+
+            self.diagnostics
+                .emit(SyntaxError::MultiCharRune.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
@@ -802,10 +861,10 @@ impl<'src> Lexer<'src> {
     /// Scans an escape sequence.
     fn scan_escape_sequence(&mut self) {
         let start = self.pos().saturating_sub(1);
-        
+
         match self.peek() {
-            Some('a') | Some('b') | Some('f') | Some('n') | Some('r') | 
-            Some('t') | Some('v') | Some('\\') | Some('\'') | Some('"') => {
+            Some('a') | Some('b') | Some('f') | Some('n') | Some('r') | Some('t') | Some('v')
+            | Some('\\') | Some('\'') | Some('"') => {
                 self.advance();
             }
             Some('x') => {
@@ -826,10 +885,15 @@ impl<'src> Lexer<'src> {
             }
             Some(c) => {
                 self.advance();
-                self.diagnostics.emit(SyntaxError::UnknownEscape.at_with_message(start..self.pos(), format!("unknown escape sequence: \\{}", c)));
+                self.diagnostics
+                    .emit(SyntaxError::UnknownEscape.at_with_message(
+                        start..self.pos(),
+                        format!("unknown escape sequence: \\{}", c),
+                    ));
             }
             None => {
-                self.diagnostics.emit(SyntaxError::UnterminatedEscape.at(start..self.pos()));
+                self.diagnostics
+                    .emit(SyntaxError::UnterminatedEscape.at(start..self.pos()));
             }
         }
     }
@@ -842,7 +906,11 @@ impl<'src> Lexer<'src> {
                     self.advance();
                 }
                 _ => {
-                    self.diagnostics.emit(SyntaxError::EscapeHexDigits.at_with_message(start..self.pos(), format!("escape sequence requires {} hex digits", digits)));
+                    self.diagnostics
+                        .emit(SyntaxError::EscapeHexDigits.at_with_message(
+                            start..self.pos(),
+                            format!("escape sequence requires {} hex digits", digits),
+                        ));
                     return;
                 }
             }
@@ -857,7 +925,8 @@ impl<'src> Lexer<'src> {
                     self.advance();
                 }
                 _ => {
-                    self.diagnostics.emit(SyntaxError::EscapeOctalDigits.at(start..self.pos()));
+                    self.diagnostics
+                        .emit(SyntaxError::EscapeOctalDigits.at(start..self.pos()));
                     return;
                 }
             }
@@ -913,7 +982,7 @@ mod tests {
     fn test_keywords() {
         assert_eq!(lex("func"), vec![TokenKind::Func, TokenKind::Eof]);
         assert_eq!(lex("struct"), vec![TokenKind::Struct, TokenKind::Eof]);
-        assert_eq!(lex("object"), vec![TokenKind::Ident, TokenKind::Eof]);  // object is no longer a keyword
+        assert_eq!(lex("object"), vec![TokenKind::Ident, TokenKind::Eof]); // object is no longer a keyword
         assert_eq!(lex("return"), vec![TokenKind::Return, TokenKind::Eof]);
     }
 
@@ -962,15 +1031,27 @@ mod tests {
 
     #[test]
     fn test_strings() {
-        assert_eq!(lex(r#""hello""#), vec![TokenKind::StringLit, TokenKind::Eof]);
-        assert_eq!(lex(r#""hello\nworld""#), vec![TokenKind::StringLit, TokenKind::Eof]);
+        assert_eq!(
+            lex(r#""hello""#),
+            vec![TokenKind::StringLit, TokenKind::Eof]
+        );
+        assert_eq!(
+            lex(r#""hello\nworld""#),
+            vec![TokenKind::StringLit, TokenKind::Eof]
+        );
         assert_eq!(lex(r#""""#), vec![TokenKind::StringLit, TokenKind::Eof]);
     }
 
     #[test]
     fn test_raw_strings() {
-        assert_eq!(lex("`hello`"), vec![TokenKind::RawStringLit, TokenKind::Eof]);
-        assert_eq!(lex("`hello\nworld`"), vec![TokenKind::RawStringLit, TokenKind::Eof]);
+        assert_eq!(
+            lex("`hello`"),
+            vec![TokenKind::RawStringLit, TokenKind::Eof]
+        );
+        assert_eq!(
+            lex("`hello\nworld`"),
+            vec![TokenKind::RawStringLit, TokenKind::Eof]
+        );
     }
 
     #[test]
@@ -1019,9 +1100,18 @@ mod tests {
 
     #[test]
     fn test_delimiters() {
-        assert_eq!(lex("()"), vec![TokenKind::LParen, TokenKind::RParen, TokenKind::Eof]);
-        assert_eq!(lex("[]"), vec![TokenKind::LBracket, TokenKind::RBracket, TokenKind::Eof]);
-        assert_eq!(lex("{}"), vec![TokenKind::LBrace, TokenKind::RBrace, TokenKind::Eof]);
+        assert_eq!(
+            lex("()"),
+            vec![TokenKind::LParen, TokenKind::RParen, TokenKind::Eof]
+        );
+        assert_eq!(
+            lex("[]"),
+            vec![TokenKind::LBracket, TokenKind::RBracket, TokenKind::Eof]
+        );
+        assert_eq!(
+            lex("{}"),
+            vec![TokenKind::LBrace, TokenKind::RBrace, TokenKind::Eof]
+        );
         assert_eq!(lex(","), vec![TokenKind::Comma, TokenKind::Eof]);
         assert_eq!(lex(":"), vec![TokenKind::Colon, TokenKind::Eof]);
         assert_eq!(lex("."), vec![TokenKind::Dot, TokenKind::Eof]);
@@ -1031,34 +1121,43 @@ mod tests {
     #[test]
     fn test_semicolon_insertion() {
         // After identifier
-        assert_eq!(lex("foo\nbar"), vec![
-            TokenKind::Ident, TokenKind::Semicolon,
-            TokenKind::Ident, TokenKind::Eof
-        ]);
-        
+        assert_eq!(
+            lex("foo\nbar"),
+            vec![
+                TokenKind::Ident,
+                TokenKind::Semicolon,
+                TokenKind::Ident,
+                TokenKind::Eof
+            ]
+        );
+
         // After literal
-        assert_eq!(lex("42\n"), vec![
-            TokenKind::IntLit, TokenKind::Semicolon, TokenKind::Eof
-        ]);
-        
+        assert_eq!(
+            lex("42\n"),
+            vec![TokenKind::IntLit, TokenKind::Semicolon, TokenKind::Eof]
+        );
+
         // After return
-        assert_eq!(lex("return\n"), vec![
-            TokenKind::Return, TokenKind::Semicolon, TokenKind::Eof
-        ]);
-        
+        assert_eq!(
+            lex("return\n"),
+            vec![TokenKind::Return, TokenKind::Semicolon, TokenKind::Eof]
+        );
+
         // After )
-        assert_eq!(lex(")\n"), vec![
-            TokenKind::RParen, TokenKind::Semicolon, TokenKind::Eof
-        ]);
-        
+        assert_eq!(
+            lex(")\n"),
+            vec![TokenKind::RParen, TokenKind::Semicolon, TokenKind::Eof]
+        );
+
         // After }
-        assert_eq!(lex("}\n"), vec![
-            TokenKind::RBrace, TokenKind::Semicolon, TokenKind::Eof
-        ]);
-        
+        assert_eq!(
+            lex("}\n"),
+            vec![TokenKind::RBrace, TokenKind::Semicolon, TokenKind::Eof]
+        );
+
         // No insertion after +
         assert_eq!(lex("+\n"), vec![TokenKind::Plus, TokenKind::Eof]);
-        
+
         // No insertion after {
         assert_eq!(lex("{\n"), vec![TokenKind::LBrace, TokenKind::Eof]);
     }
@@ -1066,52 +1165,67 @@ mod tests {
     #[test]
     fn test_line_comments() {
         assert_eq!(lex("// comment"), vec![TokenKind::Eof]);
-        assert_eq!(lex("foo // comment"), vec![TokenKind::Ident, TokenKind::Eof]);
-        assert_eq!(lex("foo // comment\nbar"), vec![
-            TokenKind::Ident, TokenKind::Semicolon,
-            TokenKind::Ident, TokenKind::Eof
-        ]);
+        assert_eq!(
+            lex("foo // comment"),
+            vec![TokenKind::Ident, TokenKind::Eof]
+        );
+        assert_eq!(
+            lex("foo // comment\nbar"),
+            vec![
+                TokenKind::Ident,
+                TokenKind::Semicolon,
+                TokenKind::Ident,
+                TokenKind::Eof
+            ]
+        );
     }
 
     #[test]
     fn test_block_comments() {
         assert_eq!(lex("/* comment */"), vec![TokenKind::Eof]);
-        assert_eq!(lex("foo /* comment */ bar"), vec![
-            TokenKind::Ident, TokenKind::Ident, TokenKind::Eof
-        ]);
+        assert_eq!(
+            lex("foo /* comment */ bar"),
+            vec![TokenKind::Ident, TokenKind::Ident, TokenKind::Eof]
+        );
         assert_eq!(lex("/* nested /* comment */ */"), vec![TokenKind::Eof]);
     }
 
     #[test]
     fn test_complex_expression() {
         let tokens = lex("x := 1 + 2 * 3");
-        assert_eq!(tokens, vec![
-            TokenKind::Ident,
-            TokenKind::ColonEq,
-            TokenKind::IntLit,
-            TokenKind::Plus,
-            TokenKind::IntLit,
-            TokenKind::Star,
-            TokenKind::IntLit,
-            TokenKind::Eof,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                TokenKind::Ident,
+                TokenKind::ColonEq,
+                TokenKind::IntLit,
+                TokenKind::Plus,
+                TokenKind::IntLit,
+                TokenKind::Star,
+                TokenKind::IntLit,
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_function_declaration() {
         let tokens = lex("func main() int { return 0 }");
-        assert_eq!(tokens, vec![
-            TokenKind::Func,
-            TokenKind::Ident,
-            TokenKind::LParen,
-            TokenKind::RParen,
-            TokenKind::Ident,
-            TokenKind::LBrace,
-            TokenKind::Return,
-            TokenKind::IntLit,
-            TokenKind::RBrace,
-            TokenKind::Eof,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                TokenKind::Func,
+                TokenKind::Ident,
+                TokenKind::LParen,
+                TokenKind::RParen,
+                TokenKind::Ident,
+                TokenKind::LBrace,
+                TokenKind::Return,
+                TokenKind::IntLit,
+                TokenKind::RBrace,
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]
@@ -1166,11 +1280,17 @@ mod tests {
     fn test_channel_type() {
         // chan<- should be parsed as chan, <-
         let tokens = lex("chan<-");
-        assert_eq!(tokens, vec![TokenKind::Chan, TokenKind::Arrow, TokenKind::Eof]);
-        
+        assert_eq!(
+            tokens,
+            vec![TokenKind::Chan, TokenKind::Arrow, TokenKind::Eof]
+        );
+
         // <-chan should be parsed as <-, chan
         let tokens = lex("<-chan");
-        assert_eq!(tokens, vec![TokenKind::Arrow, TokenKind::Chan, TokenKind::Eof]);
+        assert_eq!(
+            tokens,
+            vec![TokenKind::Arrow, TokenKind::Chan, TokenKind::Eof]
+        );
     }
 
     #[test]
@@ -1178,7 +1298,7 @@ mod tests {
         // Test that positions are offset by base
         let lexer = Lexer::new("foo", 100);
         let (tokens, _) = lexer.collect_tokens();
-        
+
         // First token "foo" should be at positions 100-103
         assert_eq!(tokens[0].span.start.0, 100);
         assert_eq!(tokens[0].span.end.0, 103);
@@ -1316,7 +1436,7 @@ mod tests {
     return nil
 }"#;
         let tokens = lex(code);
-        
+
         // Check key tokens are present
         assert!(tokens.contains(&TokenKind::Errdefer));
         assert!(tokens.contains(&TokenKind::Question));

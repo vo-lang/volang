@@ -21,10 +21,9 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{quote, format_ident};
+use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, ItemFn, FnArg, ReturnType, Type,
-    punctuated::Punctuated, Token, Expr, Lit,
+    parse_macro_input, punctuated::Punctuated, Expr, FnArg, ItemFn, Lit, ReturnType, Token, Type,
 };
 
 pub(crate) mod codegen;
@@ -280,7 +279,10 @@ fn detect_fn_mode(func: &ItemFn) -> syn::Result<FnMode> {
                         let args_vec: Vec<_> = args.args.iter().collect();
                         if args_vec.len() == 2 {
                             if let syn::GenericArgument::Type(Type::Path(err_p)) = args_vec[1] {
-                                let err_name = err_p.path.segments.last()
+                                let err_name = err_p
+                                    .path
+                                    .segments
+                                    .last()
                                     .map(|s| s.ident.to_string())
                                     .unwrap_or_default();
                                 return Err(syn::Error::new_spanned(
@@ -325,7 +327,8 @@ fn generate_wrapper(
             }
         }
         FnMode::Result(inner_ty) => {
-            let (ok_writes, err_zero_writes, err_slot) = codegen::generate_result_ret_writes(inner_ty)?;
+            let (ok_writes, err_zero_writes, err_slot) =
+                codegen::generate_result_ret_writes(inner_ty)?;
             quote! {
                 let __result = #call_expr;
                 match __result {
@@ -427,7 +430,13 @@ fn unified_manual_impl(
     };
 
     Ok(registration::emit_fn_registration(
-        fn_tokens, fn_name, raw_pkg, abi_pkg_path, func_name, is_std_only, flavor,
+        fn_tokens,
+        fn_name,
+        raw_pkg,
+        abi_pkg_path,
+        func_name,
+        is_std_only,
+        flavor,
     ))
 }
 
@@ -457,7 +466,13 @@ fn unified_auto_impl(
     };
 
     Ok(registration::emit_fn_registration(
-        fn_tokens, &wrapper_name, raw_pkg, abi_pkg_path, func_name, is_std_only, flavor,
+        fn_tokens,
+        &wrapper_name,
+        raw_pkg,
+        abi_pkg_path,
+        func_name,
+        is_std_only,
+        flavor,
     ))
 }
 
@@ -523,13 +538,18 @@ pub fn vostd_errors(input: TokenStream) -> TokenStream {
 }
 
 /// Parse the common `[internal] "pkg" =>` prefix shared by vo_errors! and vo_consts!.
-fn parse_flavor_and_pkg(input: syn::parse::ParseStream) -> syn::Result<(RegistrationFlavor, String)> {
+fn parse_flavor_and_pkg(
+    input: syn::parse::ParseStream,
+) -> syn::Result<(RegistrationFlavor, String)> {
     let flavor = if input.peek(syn::Ident) {
         let ident: syn::Ident = input.parse()?;
         if ident == "internal" {
             RegistrationFlavor::Internal
         } else {
-            return Err(syn::Error::new(ident.span(), "expected 'internal' or package name string"));
+            return Err(syn::Error::new(
+                ident.span(),
+                "expected 'internal' or package name string",
+            ));
         }
     } else {
         RegistrationFlavor::Extension
@@ -567,7 +587,11 @@ impl syn::parse::Parse for VoErrorsInput {
             }
         }
 
-        Ok(VoErrorsInput { flavor, pkg_name, errors })
+        Ok(VoErrorsInput {
+            flavor,
+            pkg_name,
+            errors,
+        })
     }
 }
 
@@ -651,7 +675,8 @@ fn errors_impl(parsed: VoErrorsInput) -> syn::Result<TokenStream2> {
     };
 
     let const_name = format_ident!("__STDLIB_{}", lookup_name);
-    let registration = registration::emit_registration(&parsed.flavor, &lookup_name, &getter_fn, &const_name);
+    let registration =
+        registration::emit_registration(&parsed.flavor, &lookup_name, &getter_fn, &const_name);
 
     Ok(quote! { #common #registration })
 }
@@ -746,7 +771,8 @@ fn vo_consts_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
     };
 
     let const_name = format_ident!("__STDLIB_{}", lookup_name);
-    let registration = registration::emit_registration(&parsed.flavor, &lookup_name, &getter_fn, &const_name);
+    let registration =
+        registration::emit_registration(&parsed.flavor, &lookup_name, &getter_fn, &const_name);
 
     Ok(quote! { #getter_body #registration })
 }
@@ -764,7 +790,7 @@ impl syn::parse::Parse for VoConstsInput {
 
         let content;
         syn::braced!(content in input);
-        
+
         let mut consts = Vec::new();
         while !content.is_empty() {
             let name: syn::Ident = content.parse()?;
@@ -772,12 +798,16 @@ impl syn::parse::Parse for VoConstsInput {
             let value: syn::LitInt = content.parse()?;
             let value_i64: i64 = value.base10_parse()?;
             consts.push((name, value_i64));
-            
+
             if content.peek(Token![,]) {
                 content.parse::<Token![,]>()?;
             }
         }
-        
-        Ok(VoConstsInput { flavor, pkg_name, consts })
+
+        Ok(VoConstsInput {
+            flavor,
+            pkg_name,
+            consts,
+        })
     }
 }

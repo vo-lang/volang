@@ -99,12 +99,24 @@ impl IoRuntime {
     }
 
     /// Submit a read at offset operation (for files).
-    pub fn submit_read_at(&mut self, handle: IoHandle, buf: *mut u8, len: usize, offset: i64) -> IoToken {
+    pub fn submit_read_at(
+        &mut self,
+        handle: IoHandle,
+        buf: *mut u8,
+        len: usize,
+        offset: i64,
+    ) -> IoToken {
         self.submit(handle, OpKind::Read, buf as usize, len, offset, None)
     }
 
     /// Submit a write at offset operation (for files).
-    pub fn submit_write_at(&mut self, handle: IoHandle, buf: *const u8, len: usize, offset: i64) -> IoToken {
+    pub fn submit_write_at(
+        &mut self,
+        handle: IoHandle,
+        buf: *const u8,
+        len: usize,
+        offset: i64,
+    ) -> IoToken {
         self.submit(handle, OpKind::Write, buf as usize, len, offset, None)
     }
 
@@ -114,7 +126,13 @@ impl IoRuntime {
     }
 
     /// Submit a sendto operation (UDP).
-    pub fn submit_send_to(&mut self, handle: IoHandle, buf: *const u8, len: usize, addr: std::net::SocketAddr) -> IoToken {
+    pub fn submit_send_to(
+        &mut self,
+        handle: IoHandle,
+        buf: *const u8,
+        len: usize,
+        addr: std::net::SocketAddr,
+    ) -> IoToken {
         self.submit(handle, OpKind::SendTo, buf as usize, len, -1, Some(addr))
     }
 
@@ -131,9 +149,25 @@ impl IoRuntime {
         token
     }
 
-    fn submit(&mut self, handle: IoHandle, kind: OpKind, buf_ptr: usize, buf_len: usize, offset: i64, dest_addr: Option<std::net::SocketAddr>) -> IoToken {
+    fn submit(
+        &mut self,
+        handle: IoHandle,
+        kind: OpKind,
+        buf_ptr: usize,
+        buf_len: usize,
+        offset: i64,
+        dest_addr: Option<std::net::SocketAddr>,
+    ) -> IoToken {
         let token = self.alloc_token();
-        let op = PendingOp { token, handle, kind, buf_ptr, buf_len, offset, dest_addr };
+        let op = PendingOp {
+            token,
+            handle,
+            kind,
+            buf_ptr,
+            buf_len,
+            offset,
+            dest_addr,
+        };
 
         // Driver handles concurrent op check and registration
         match self.driver.submit(op) {

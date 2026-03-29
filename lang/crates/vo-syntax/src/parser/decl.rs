@@ -1,6 +1,6 @@
 //! Declaration parsing.
 
-use super::{Parser, ParseResult};
+use super::{ParseResult, Parser};
 use crate::ast::*;
 use crate::token::TokenKind;
 use vo_common::span::Span;
@@ -24,7 +24,7 @@ impl<'a> Parser<'a> {
     pub fn parse_var_decl(&mut self) -> ParseResult<VarDecl> {
         let start = self.current.span.start;
         self.expect(TokenKind::Var)?;
-        
+
         let specs = if self.eat(TokenKind::LParen) {
             let mut specs = Vec::new();
             while !self.at(TokenKind::RParen) && !self.at_eof() {
@@ -36,7 +36,7 @@ impl<'a> Parser<'a> {
         } else {
             vec![self.parse_var_spec()?]
         };
-        
+
         self.expect_semi();
         Ok(VarDecl {
             specs,
@@ -47,20 +47,23 @@ impl<'a> Parser<'a> {
     fn parse_var_spec(&mut self) -> ParseResult<VarSpec> {
         let start = self.current.span.start;
         let names = self.parse_ident_list()?;
-        
+
         // Type is optional if there's an initializer
-        let ty = if !self.at(TokenKind::Eq) && !self.at(TokenKind::Semicolon) && !self.at(TokenKind::RParen) {
+        let ty = if !self.at(TokenKind::Eq)
+            && !self.at(TokenKind::Semicolon)
+            && !self.at(TokenKind::RParen)
+        {
             Some(self.parse_type()?)
         } else {
             None
         };
-        
+
         let values = if self.eat(TokenKind::Eq) {
             self.parse_expr_list()?
         } else {
             Vec::new()
         };
-        
+
         Ok(VarSpec {
             names,
             ty,
@@ -73,7 +76,7 @@ impl<'a> Parser<'a> {
     pub fn parse_const_decl(&mut self) -> ParseResult<ConstDecl> {
         let start = self.current.span.start;
         self.expect(TokenKind::Const)?;
-        
+
         let specs = if self.eat(TokenKind::LParen) {
             let mut specs = Vec::new();
             while !self.at(TokenKind::RParen) && !self.at_eof() {
@@ -85,7 +88,7 @@ impl<'a> Parser<'a> {
         } else {
             vec![self.parse_const_spec()?]
         };
-        
+
         self.expect_semi();
         Ok(ConstDecl {
             specs,
@@ -96,21 +99,24 @@ impl<'a> Parser<'a> {
     fn parse_const_spec(&mut self) -> ParseResult<ConstSpec> {
         let start = self.current.span.start;
         let names = self.parse_ident_list()?;
-        
+
         // Type is optional
-        let ty = if !self.at(TokenKind::Eq) && !self.at(TokenKind::Semicolon) && !self.at(TokenKind::RParen) {
+        let ty = if !self.at(TokenKind::Eq)
+            && !self.at(TokenKind::Semicolon)
+            && !self.at(TokenKind::RParen)
+        {
             Some(self.parse_type()?)
         } else {
             None
         };
-        
+
         // Values may be omitted for iota continuation
         let values = if self.eat(TokenKind::Eq) {
             self.parse_expr_list()?
         } else {
             Vec::new()
         };
-        
+
         Ok(ConstSpec {
             names,
             ty,
@@ -141,17 +147,17 @@ impl<'a> Parser<'a> {
     pub fn parse_func_decl(&mut self) -> ParseResult<FuncDecl> {
         let start = self.current.span.start;
         self.expect(TokenKind::Func)?;
-        
+
         // Check for receiver
         let receiver = if self.at(TokenKind::LParen) {
             Some(self.parse_receiver()?)
         } else {
             None
         };
-        
+
         let name = self.parse_ident()?;
         let sig = self.parse_func_sig()?;
-        
+
         // Body is optional - no body means extern function (implemented outside Vo)
         let body = if self.at(TokenKind::LBrace) {
             Some(self.parse_block()?)
@@ -159,7 +165,7 @@ impl<'a> Parser<'a> {
             self.expect_semi();
             None
         };
-        
+
         Ok(FuncDecl {
             receiver,
             name,
@@ -176,7 +182,7 @@ impl<'a> Parser<'a> {
     fn parse_receiver(&mut self) -> ParseResult<Receiver> {
         let start = self.current.span.start;
         self.expect(TokenKind::LParen)?;
-        
+
         // Check for anonymous pointer receiver: (*T)
         if self.at(TokenKind::Star) {
             self.advance();
@@ -189,10 +195,10 @@ impl<'a> Parser<'a> {
                 span: Span::new(start, self.current.span.start),
             });
         }
-        
+
         // Parse the first identifier
         let first_ident = self.parse_ident()?;
-        
+
         // Determine if this is named or anonymous receiver by looking at next token:
         // - `)` means anonymous: (T)
         // - `*` means named pointer: (r *T)
@@ -249,18 +255,22 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::RParen) {
             return Ok((Vec::new(), false));
         }
-        
+
         // Handle leading variadic: ...Type
         if self.eat(TokenKind::Ellipsis) {
             let start = self.current.span.start;
             let ty = self.parse_type()?;
-            let param = Param { names: Vec::new(), ty, span: Span::new(start, self.current.span.start) };
+            let param = Param {
+                names: Vec::new(),
+                ty,
+                span: Span::new(start, self.current.span.start),
+            };
             return Ok((vec![param], true));
         }
-        
+
         // Reuse the strategy from parse_func_type_params
         let first_group = self.collect_type_list()?;
-        
+
         // Check for variadic after first group
         if self.eat(TokenKind::Ellipsis) {
             let ty = self.parse_type()?;
@@ -268,7 +278,7 @@ impl<'a> Parser<'a> {
             let span = ty.span;
             return Ok((vec![Param { names, ty, span }], true));
         }
-        
+
         // Try to parse type after the list
         if let Some(ty) = self.try_parse_type() {
             // first_group was names, reuse parse_named_params
@@ -292,15 +302,15 @@ impl<'a> Parser<'a> {
         // Multiple results in parentheses
         if self.at(TokenKind::LParen) {
             self.advance();
-            
+
             if self.at(TokenKind::RParen) {
                 self.advance();
                 return Ok(Vec::new());
             }
-            
+
             // Phase 1: Collect first group (types that might be names)
             let first_group = self.collect_result_group()?;
-            
+
             // Phase 2: Try to parse a type after the group
             if let Some(ty) = self.try_parse_type() {
                 // Success: first_group was identifier names, ty is their type
@@ -327,7 +337,7 @@ impl<'a> Parser<'a> {
             }])
         }
     }
-    
+
     /// Collects a comma-separated group of types (stops at ')' or when a type follows idents).
     /// For result parsing: collects until we can determine if these are names or types.
     fn collect_result_group(&mut self) -> ParseResult<Vec<TypeExpr>> {
@@ -340,12 +350,16 @@ impl<'a> Parser<'a> {
         }
         Ok(types)
     }
-    
+
     /// Converts type expressions to named ResultParams with the given type.
     /// Continues parsing more named result groups.
-    fn parse_named_results(&mut self, first_names: Vec<TypeExpr>, first_type: TypeExpr) -> ParseResult<Vec<ResultParam>> {
+    fn parse_named_results(
+        &mut self,
+        first_names: Vec<TypeExpr>,
+        first_type: TypeExpr,
+    ) -> ParseResult<Vec<ResultParam>> {
         let mut results = Vec::new();
-        
+
         // Convert first group to named results
         for type_expr in first_names {
             if let TypeExprKind::Ident(ident) = type_expr.kind {
@@ -365,17 +379,17 @@ impl<'a> Parser<'a> {
                 });
             }
         }
-        
+
         // Continue parsing more named result groups
         while self.eat(TokenKind::Comma) && !self.at(TokenKind::RParen) {
             let start = self.current.span.start;
-            
+
             // Collect names
             let names = self.parse_ident_list()?;
-            
+
             // Parse their type
             let ty = self.parse_type()?;
-            
+
             for name in names {
                 results.push(ResultParam {
                     name: Some(name.clone()),
@@ -384,20 +398,23 @@ impl<'a> Parser<'a> {
                 });
             }
         }
-        
+
         Ok(results)
     }
-    
+
     /// Converts type expressions to anonymous ResultParams.
     fn types_to_anonymous_results(&self, types: Vec<TypeExpr>) -> Vec<ResultParam> {
-        types.into_iter().map(|ty| {
-            let span = ty.span;
-            ResultParam {
-                name: None,
-                ty,
-                span,
-            }
-        }).collect()
+        types
+            .into_iter()
+            .map(|ty| {
+                let span = ty.span;
+                ResultParam {
+                    name: None,
+                    ty,
+                    span,
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn parse_interface_elems(&mut self) -> ParseResult<Vec<InterfaceElem>> {
@@ -405,7 +422,7 @@ impl<'a> Parser<'a> {
         while !self.at(TokenKind::RBrace) && !self.at_eof() {
             let elem_start = self.current.span.start;
             let name = self.parse_ident()?;
-            
+
             if self.at(TokenKind::LParen) {
                 // Method specification
                 let sig = self.parse_func_sig()?;

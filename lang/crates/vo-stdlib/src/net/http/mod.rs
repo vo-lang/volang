@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use vo_ffi_macro::{vostd_errors, vostd_fn};
 #[cfg(feature = "std")]
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
+use vo_runtime::ffi::ExternRegistry;
 #[cfg(feature = "std")]
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 #[cfg(feature = "std")]
@@ -26,7 +27,6 @@ use vo_runtime::io::IoToken;
 use vo_runtime::objects::slice;
 #[cfg(feature = "std")]
 use vo_runtime::slot::slot_to_ptr;
-use vo_runtime::ffi::ExternRegistry;
 
 // ── Sentinel errors ──────────────────────────────────────────────────
 
@@ -169,7 +169,10 @@ fn http_native_https_request(call: &mut ExternCallContext) -> ExternResult {
             }
         }
 
-        let resp = PENDING_HTTP.lock().unwrap().remove(&token)
+        let resp = PENDING_HTTP
+            .lock()
+            .unwrap()
+            .remove(&token)
             .expect("HTTP response missing after WaitIo resume");
 
         return write_http_response(call, resp);
@@ -208,10 +211,13 @@ fn http_native_https_request(call: &mut ExternCallContext) -> ExternResult {
     }
 
     // Store cleanup state for resume
-    PIPE_CLEANUP.lock().unwrap().insert(token, PipeCleanup {
-        read_fd,
-        buf_ptr: buf as usize,
-    });
+    PIPE_CLEANUP.lock().unwrap().insert(
+        token,
+        PipeCleanup {
+            read_fd,
+            buf_ptr: buf as usize,
+        },
+    );
 
     // Spawn background thread — scheduler stays free for other fibers
     std::thread::spawn(move || {
@@ -309,7 +315,10 @@ fn split_header_line(line: &str) -> Option<(&str, &str)> {
 // ── Registration ─────────────────────────────────────────────────────
 
 #[cfg(feature = "std")]
-pub fn register_externs(registry: &mut ExternRegistry, externs: &[vo_runtime::bytecode::ExternDef]) {
+pub fn register_externs(
+    registry: &mut ExternRegistry,
+    externs: &[vo_runtime::bytecode::ExternDef],
+) {
     for (id, def) in externs.iter().enumerate() {
         if def.name.as_str() == "net_http_nativeHttpsRequest" {
             registry.register(id as u32, http_native_https_request);

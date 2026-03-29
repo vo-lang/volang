@@ -4,7 +4,7 @@
 //! slot indices, injected into the function body for convenient access.
 
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{quote, format_ident};
+use quote::{format_ident, quote};
 
 use crate::resolve;
 use crate::vo_parser;

@@ -3,26 +3,25 @@
 //! slot0 format: [itab_id:32 | rttid:24 | value_kind:8]
 //! slot1: data (immediate value or GcRef)
 
-use vo_runtime::{RuntimeType, ValueKind};
 use vo_runtime::gc::{Gc, GcRef};
-use vo_runtime::objects::interface;
 use vo_runtime::itab::{self, ItabCache};
+use vo_runtime::objects::interface;
 use vo_runtime::slot::Slot;
+use vo_runtime::{RuntimeType, ValueKind};
 
 use crate::bytecode::{Constant, Module};
 use crate::instruction::Instruction;
-use crate::vm::ExecResult;
 use crate::vm::helpers::{stack_get, stack_set};
+use crate::vm::ExecResult;
 
 /// Extract named_type_id from RuntimeType (recursively unwraps Pointer).
 /// Methods are always defined on the base Named type.
 fn extract_named_type_id(rt: &RuntimeType, runtime_types: &[RuntimeType]) -> Option<u32> {
     match rt {
         RuntimeType::Named { id, .. } => Some(*id),
-        RuntimeType::Pointer(elem_value_rttid) => {
-            runtime_types.get(elem_value_rttid.rttid() as usize)
-                .and_then(|inner| extract_named_type_id(inner, runtime_types))
-        }
+        RuntimeType::Pointer(elem_value_rttid) => runtime_types
+            .get(elem_value_rttid.rttid() as usize)
+            .and_then(|inner| extract_named_type_id(inner, runtime_types)),
         _ => None,
     }
 }
@@ -56,8 +55,8 @@ pub fn exec_iface_assign(
         let src_slot0 = src;
         let src_rttid = interface::unpack_rttid(src_slot0);
         let src_vk = interface::unpack_value_kind(src_slot0);
-        let iface_meta_id = low;  // low = target iface_meta_id
-        
+        let iface_meta_id = low; // low = target iface_meta_id
+
         let itab_id = if iface_meta_id == 0 {
             // Target is any (empty interface): itab_id must be 0
             // This invariant is relied upon by codegen optimizations
@@ -67,9 +66,11 @@ pub fn exec_iface_assign(
             // For Named types: Named(id) -> id
             // For Pointer types: Pointer(Named(id)) -> id (methods are on base type)
             // Note: named_type_id=0 is valid (e.g., bytes.Buffer), so use Option
-            let named_type_id_opt = module.runtime_types.get(src_rttid as usize)
+            let named_type_id_opt = module
+                .runtime_types
+                .get(src_rttid as usize)
                 .and_then(|rt| extract_named_type_id(rt, &module.runtime_types));
-            
+
             if let Some(named_type_id) = named_type_id_opt {
                 // Value types (non-pointer) cannot use pointer receiver methods
                 let src_is_pointer = src_vk == ValueKind::Pointer;
@@ -81,13 +82,13 @@ pub fn exec_iface_assign(
                     &module.interface_metas,
                 )
             } else {
-                0  // primitive or nil - no methods, itab_id=0 means empty itab
+                0 // primitive or nil - no methods, itab_id=0 means empty itab
             }
         };
         (src_rttid, src_vk, itab_id)
     } else {
         // Concrete type -> Interface: compile-time itab
-        (rttid, vk, low)  // low = itab_id
+        (rttid, vk, low) // low = itab_id
     };
 
     let slot0 = interface::pack_slot0(itab_id, actual_rttid, actual_vk);
@@ -166,7 +167,9 @@ pub fn exec_iface_assert(
         if assert_kind == 1 {
             // Interface assertion: return new interface with itab for target interface
             // Use extract_named_type_id to handle Pointer(Named(id)) case
-            let named_type_id = module.runtime_types.get(src_rttid as usize)
+            let named_type_id = module
+                .runtime_types
+                .get(src_rttid as usize)
                 .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
                 .unwrap_or(0);
             // Value types (non-pointer) cannot use pointer receiver methods
@@ -220,13 +223,23 @@ pub fn exec_iface_assert(
     };
 
     if has_ok {
-        let ok_slot = if assert_kind == 1 { inst.a + 2 } else if target_slots > 1 { inst.a + target_slots } else { inst.a + 1 };
+        let ok_slot = if assert_kind == 1 {
+            inst.a + 2
+        } else if target_slots > 1 {
+            inst.a + target_slots
+        } else {
+            inst.a + 1
+        };
         stack_set(stack, bp + ok_slot as usize, matches as u64);
         if matches {
             write_success(stack, itab_cache);
         } else {
             // Zero out destination on failure
-            let dst_slots = if assert_kind == 1 { 2 } else { target_slots.max(1) };
+            let dst_slots = if assert_kind == 1 {
+                2
+            } else {
+                target_slots.max(1)
+            };
             for i in 0..dst_slots {
                 stack_set(stack, bp + inst.a as usize + i as usize, 0);
             }
@@ -243,20 +256,25 @@ pub fn exec_iface_assert(
 /// IfaceEq: a = (b == c) where b,c are 2-slot interface values
 /// Go interface equality: same dynamic type (rttid + vk) AND same dynamic value
 /// Panics if dynamic type is not comparable (slice, map, func, chan).
-pub fn exec_iface_eq(stack: *mut Slot, bp: usize, inst: &Instruction, module: &Module) -> ExecResult {
+pub fn exec_iface_eq(
+    stack: *mut Slot,
+    bp: usize,
+    inst: &Instruction,
+    module: &Module,
+) -> ExecResult {
     use vo_runtime::objects::compare;
-    
+
     let b0 = stack_get(stack, bp + inst.b as usize);
     let b1 = stack_get(stack, bp + inst.b as usize + 1);
     let c0 = stack_get(stack, bp + inst.c as usize);
     let c1 = stack_get(stack, bp + inst.c as usize + 1);
-    
+
     let result = compare::iface_eq(b0, b1, c0, c1, module);
-    
+
     if result == 2 {
         return ExecResult::Panic;
     }
-    
+
     stack_set(stack, bp + inst.a as usize, result);
     ExecResult::FrameChanged
 }

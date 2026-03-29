@@ -1,15 +1,15 @@
 //! UDP connection implementations.
 
-use std::net::{UdpSocket, SocketAddr, ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::os::fd::AsRawFd;
 
 use vo_ffi_macro::vostd_fn;
-use vo_runtime::ffi::{ExternCallContext, ExternResult};
-use vo_runtime::io::{IoHandle, CompletionData};
-use vo_runtime::objects::slice;
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
+use vo_runtime::ffi::{ExternCallContext, ExternResult};
+use vo_runtime::io::{CompletionData, IoHandle};
+use vo_runtime::objects::slice;
 
-use super::{UDP_CONN_HANDLES, next_handle, write_io_error};
+use super::{next_handle, write_io_error, UDP_CONN_HANDLES};
 
 fn register_udp_conn(conn: UdpSocket) -> i32 {
     // Set non-blocking for async I/O
@@ -23,21 +23,19 @@ fn register_udp_conn(conn: UdpSocket) -> i32 {
 pub fn net_listen_packet(call: &mut ExternCallContext) -> ExternResult {
     let network = call.arg_str(slots::ARG_NETWORK).to_string();
     let address = call.arg_str(slots::ARG_ADDRESS).to_string();
-    
+
     match network.as_str() {
-        "udp" | "udp4" | "udp6" => {
-            match UdpSocket::bind(address) {
-                Ok(socket) => {
-                    let h = register_udp_conn(socket);
-                    call.ret_i64(slots::RET_0, h as i64);
-                    write_nil_error(call, slots::RET_1);
-                }
-                Err(e) => {
-                    call.ret_i64(slots::RET_0, 0);
-                    write_io_error(call, slots::RET_1, e);
-                }
+        "udp" | "udp4" | "udp6" => match UdpSocket::bind(address) {
+            Ok(socket) => {
+                let h = register_udp_conn(socket);
+                call.ret_i64(slots::RET_0, h as i64);
+                write_nil_error(call, slots::RET_1);
             }
-        }
+            Err(e) => {
+                call.ret_i64(slots::RET_0, 0);
+                write_io_error(call, slots::RET_1, e);
+            }
+        },
         _ => {
             call.ret_i64(slots::RET_0, 0);
             write_error_to(call, slots::RET_1, &format!("unknown network: {}", network));
@@ -70,9 +68,19 @@ pub fn net_udp_conn_read_from(call: &mut ExternCallContext) -> ExternResult {
     let token = match resume_token {
         Some(token) => token,
         None => {
-            let token = call.io_mut().submit_recv_from(fd as IoHandle, buf_ptr, buf_len);
+            let token = call
+                .io_mut()
+                .submit_recv_from(fd as IoHandle, buf_ptr, buf_len);
             match call.io_mut().try_take_completion(token) {
-                Some(c) => return handle_recv_from_completion(call, c, slots::RET_0, slots::RET_1, slots::RET_2),
+                Some(c) => {
+                    return handle_recv_from_completion(
+                        call,
+                        c,
+                        slots::RET_0,
+                        slots::RET_1,
+                        slots::RET_2,
+                    )
+                }
                 None => return ExternResult::WaitIo { token },
             }
         }
@@ -147,7 +155,9 @@ pub fn net_udp_conn_write_to(call: &mut ExternCallContext) -> ExternResult {
     let token = match resume_token {
         Some(token) => token,
         None => {
-            let token = call.io_mut().submit_send_to(fd as IoHandle, buf_ptr, buf_len, dest_addr);
+            let token = call
+                .io_mut()
+                .submit_send_to(fd as IoHandle, buf_ptr, buf_len, dest_addr);
             match call.io_mut().try_take_completion(token) {
                 Some(c) => return handle_send_to_completion(call, c, slots::RET_0, slots::RET_1),
                 None => return ExternResult::WaitIo { token },
@@ -182,7 +192,7 @@ fn handle_send_to_completion(
 #[vostd_fn("net", "udpConnClose", std)]
 pub fn net_udp_conn_close(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
-    
+
     if UDP_CONN_HANDLES.lock().unwrap().remove(&handle).is_some() {
         write_nil_error(call, slots::RET_0);
     } else {
@@ -194,7 +204,7 @@ pub fn net_udp_conn_close(call: &mut ExternCallContext) -> ExternResult {
 #[vostd_fn("net", "udpConnLocalAddr", std)]
 pub fn net_udp_conn_local_addr(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
-    
+
     let handles = UDP_CONN_HANDLES.lock().unwrap();
     let addr_str = if let Some(conn) = handles.get(&handle) {
         conn.local_addr().map(|a| a.to_string()).unwrap_or_default()
@@ -206,7 +216,12 @@ pub fn net_udp_conn_local_addr(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-fn set_udp_deadline(conn: &UdpSocket, deadline_ns: i64, read: bool, write: bool) -> std::io::Result<()> {
+fn set_udp_deadline(
+    conn: &UdpSocket,
+    deadline_ns: i64,
+    read: bool,
+    write: bool,
+) -> std::io::Result<()> {
     let timeout = super::deadline_to_timeout(deadline_ns);
     if read {
         conn.set_read_timeout(timeout)?;
@@ -221,7 +236,7 @@ fn set_udp_deadline(conn: &UdpSocket, deadline_ns: i64, read: bool, write: bool)
 pub fn net_udp_conn_set_deadline(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let deadline_ns = call.arg_i64(slots::ARG_DEADLINE_NS);
-    
+
     let handles = UDP_CONN_HANDLES.lock().unwrap();
     if let Some(conn) = handles.get(&handle) {
         match set_udp_deadline(conn, deadline_ns, true, true) {
@@ -238,7 +253,7 @@ pub fn net_udp_conn_set_deadline(call: &mut ExternCallContext) -> ExternResult {
 pub fn net_udp_conn_set_read_deadline(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let deadline_ns = call.arg_i64(slots::ARG_DEADLINE_NS);
-    
+
     let handles = UDP_CONN_HANDLES.lock().unwrap();
     if let Some(conn) = handles.get(&handle) {
         match set_udp_deadline(conn, deadline_ns, true, false) {
@@ -255,7 +270,7 @@ pub fn net_udp_conn_set_read_deadline(call: &mut ExternCallContext) -> ExternRes
 pub fn net_udp_conn_set_write_deadline(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let deadline_ns = call.arg_i64(slots::ARG_DEADLINE_NS);
-    
+
     let handles = UDP_CONN_HANDLES.lock().unwrap();
     if let Some(conn) = handles.get(&handle) {
         match set_udp_deadline(conn, deadline_ns, false, true) {

@@ -24,7 +24,11 @@ func main() {
 }
 "#;
     let result = vo_web::compile(source, None);
-    assert!(result.success(), "compile failed: {:?}", result.error_message());
+    assert!(
+        result.success(),
+        "compile failed: {:?}",
+        result.error_message()
+    );
     assert!(result.bytecode().is_some());
 }
 
@@ -43,6 +47,10 @@ func main() {
 }
 "#;
     let result = vo_web::compile(source, None);
-    assert!(result.success(), "compile failed: {:?}", result.error_message());
+    assert!(
+        result.success(),
+        "compile failed: {:?}",
+        result.error_message()
+    );
     assert!(result.bytecode().is_some());
 }

@@ -11,7 +11,12 @@ fn main() {
 
     // Collect only .vo files, skip js/ and rust/ directories
     let mut entries: Vec<(String, String)> = Vec::new();
-    collect_vo_files(&vogui_root, &vogui_root, "github.com/vo-lang/vogui", &mut entries);
+    collect_vo_files(
+        &vogui_root,
+        &vogui_root,
+        "github.com/vo-lang/vogui",
+        &mut entries,
+    );
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Watch the directory for added/deleted files
@@ -23,25 +28,31 @@ fn main() {
 
     writeln!(out, "static VOGUI_FILES: &[(&str, &[u8])] = &[").unwrap();
     for (vfs_path, abs_path) in &entries {
-        writeln!(
-            out,
-            "    ({:?}, include_bytes!({:?})),",
-            vfs_path, abs_path
-        )
-        .unwrap();
+        writeln!(out, "    ({:?}, include_bytes!({:?})),", vfs_path, abs_path).unwrap();
     }
     writeln!(out, "];").unwrap();
 }
 
 fn collect_vo_files(root: &Path, dir: &Path, vfs_prefix: &str, out: &mut Vec<(String, String)>) {
-    let skip_dirs = ["js", "rust", ".vo-cache", "target", "node_modules", "examples"];
+    let skip_dirs = [
+        "js",
+        "rust",
+        ".vo-cache",
+        "target",
+        "node_modules",
+        "examples",
+    ];
     let rd = match std::fs::read_dir(dir) {
         Ok(r) => r,
         Err(_) => return,
     };
     for entry in rd.flatten() {
         let path = entry.path();
-        let name = path.file_name().unwrap_or_default().to_str().unwrap_or_default();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or_default();
         if path.is_dir() {
             if skip_dirs.contains(&name) {
                 continue;

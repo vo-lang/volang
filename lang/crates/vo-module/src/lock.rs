@@ -131,7 +131,6 @@ pub fn verify_graph_completeness(mod_file: &ModFile, lock_file: &LockFile) -> Re
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,13 +1,15 @@
 //! Copy instructions: CopyN, SlotGet, SlotSet, SlotGetN, SlotSetN
 
-use vo_runtime::slot::Slot;
 use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
+use vo_runtime::slot::Slot;
 
 #[inline]
 pub fn exec_copy_n(stack: *mut Slot, bp: usize, inst: &Instruction) {
     let count = inst.c as usize;
-    if count == 0 { return; }
+    if count == 0 {
+        return;
+    }
     let src_start = bp + inst.b as usize;
     let dst_start = bp + inst.a as usize;
 
@@ -32,7 +34,9 @@ pub fn exec_slot_set(stack: *mut Slot, bp: usize, inst: &Instruction) {
 #[inline]
 pub fn exec_slot_get_n(stack: *mut Slot, bp: usize, inst: &Instruction) {
     let elem_slots = inst.flags as usize;
-    if elem_slots == 0 { return; }
+    if elem_slots == 0 {
+        return;
+    }
     let idx = stack_get(stack, bp + inst.c as usize) as usize;
     let src_start = bp + inst.b as usize + idx * elem_slots;
     let dst_start = bp + inst.a as usize;
@@ -43,7 +47,9 @@ pub fn exec_slot_get_n(stack: *mut Slot, bp: usize, inst: &Instruction) {
 #[inline]
 pub fn exec_slot_set_n(stack: *mut Slot, bp: usize, inst: &Instruction) {
     let elem_slots = inst.flags as usize;
-    if elem_slots == 0 { return; }
+    if elem_slots == 0 {
+        return;
+    }
     let idx = stack_get(stack, bp + inst.b as usize) as usize;
     let dst_start = bp + inst.a as usize + idx * elem_slots;
     let src_start = bp + inst.c as usize;

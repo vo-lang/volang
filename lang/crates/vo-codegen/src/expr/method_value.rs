@@ -64,14 +64,25 @@ pub fn compile_method_value(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let recv_type = info.expr_type(sel.expr.id);
-    let method_name = info.project.interner.resolve(sel.sel.symbol)
+    let method_name = info
+        .project
+        .interner
+        .resolve(sel.sel.symbol)
         .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
-    
+
     // Interface method value: capture interface, use CallIface in wrapper
     if info.is_interface(recv_type) {
-        if let Some(target) = crate::expr::call::resolve_monomorphic_iface_target(&sel.expr, sel.sel.symbol, ctx, info)? {
+        if let Some(target) = crate::expr::call::resolve_monomorphic_iface_target(
+            &sel.expr,
+            sel.sel.symbol,
+            ctx,
+            info,
+        )? {
             match target.call_info.dispatch {
-                crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => {
+                crate::embed::MethodDispatch::Static {
+                    func_id,
+                    expects_ptr_recv,
+                } => {
                     return compile_method_value_static(
                         target.recv_expr,
                         target.recv_type,
@@ -98,13 +109,16 @@ pub fn compile_method_value(
                     );
                 }
                 crate::embed::MethodDispatch::Interface { .. } => {
-                    return Err(CodegenError::Internal("unexpected interface dispatch after monomorphic interface resolution".to_string()));
+                    return Err(CodegenError::Internal(
+                        "unexpected interface dispatch after monomorphic interface resolution"
+                            .to_string(),
+                    ));
                 }
             }
         }
         return compile_interface_method_value(sel, recv_type, method_name, dst, ctx, func, info);
     }
-    
+
     // Use resolve_method_call - same as method call compilation
     let call_info = crate::embed::resolve_method_call(
         recv_type,
@@ -115,11 +129,20 @@ pub fn compile_method_value(
         ctx,
         &info.project.tc_objs,
         &info.project.interner,
-    ).ok_or_else(|| CodegenError::Internal(format!("method {} not found on type {:?}", method_name, recv_type)))?;
-    
+    )
+    .ok_or_else(|| {
+        CodegenError::Internal(format!(
+            "method {} not found on type {:?}",
+            method_name, recv_type
+        ))
+    })?;
+
     // Handle different dispatch types
     match call_info.dispatch {
-        crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => {
+        crate::embed::MethodDispatch::Static {
+            func_id,
+            expects_ptr_recv,
+        } => {
             return compile_method_value_static(
                 &sel.expr,
                 recv_type,
@@ -135,11 +158,20 @@ pub fn compile_method_value(
         }
         crate::embed::MethodDispatch::EmbeddedInterface { .. } => {
             return compile_method_value_embedded_iface(
-                &sel.expr, recv_type, &call_info, method_name, dst, ctx, func, info
+                &sel.expr,
+                recv_type,
+                &call_info,
+                method_name,
+                dst,
+                ctx,
+                func,
+                info,
             );
         }
         crate::embed::MethodDispatch::Interface { .. } => {
-            return Err(CodegenError::Internal("unexpected interface dispatch in method value".to_string()));
+            return Err(CodegenError::Internal(
+                "unexpected interface dispatch in method value".to_string(),
+            ));
         }
     }
 }
@@ -164,7 +196,7 @@ fn emit_box_value(
 }
 
 /// Compile method value for static dispatch (direct or promoted method).
-/// 
+///
 /// Method values capture the receiver in a closure. The capture strategy depends on
 /// whether the method expects a pointer or value receiver:
 /// - Pointer receiver: capture the pointer directly
@@ -181,32 +213,46 @@ fn compile_method_value_static(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    let method_type = info.project.tc_objs.lobjs[method_obj].typ()
+    let method_type = info.project.tc_objs.lobjs[method_obj]
+        .typ()
         .ok_or_else(|| CodegenError::Internal("method type missing".to_string()))?;
-    let method_recv_type = info.method_receiver_type(method_obj)
+    let method_recv_type = info
+        .method_receiver_type(method_obj)
         .ok_or_else(|| CodegenError::Internal("method receiver type missing".to_string()))?;
     let param_type_keys = info.func_param_types(method_type);
-    let ret_type_keys = info.method_result_types(method_obj)
+    let ret_type_keys = info
+        .method_result_types(method_obj)
         .ok_or_else(|| CodegenError::Internal("method result types missing".to_string()))?;
     let recv_slot_types = info.type_slot_types(method_recv_type);
-    let param_slot_types: Vec<Vec<SlotType>> = param_type_keys.iter()
+    let param_slot_types: Vec<Vec<SlotType>> = param_type_keys
+        .iter()
         .map(|&type_key| info.type_slot_types(type_key))
         .collect();
     let param_transfer_types = param_transfer_types(&param_type_keys, ctx, info);
     let ret_slot_types = flatten_type_slot_types(&ret_type_keys, info);
-    let recv = crate::embed::extract_receiver(recv_expr, recv_type, embed_path, expects_ptr_recv, ctx, func, info)?;
-    
+    let recv = crate::embed::extract_receiver(
+        recv_expr,
+        recv_type,
+        embed_path,
+        expects_ptr_recv,
+        ctx,
+        func,
+        info,
+    )?;
+
     let capture_box = match recv {
         crate::embed::ReceiverValue::Pointer { reg, .. } if expects_ptr_recv => {
             emit_box_value(reg, 1, method_recv_type, ctx, func, info)
         }
         crate::embed::ReceiverValue::Pointer { reg, .. } => reg,
-        crate::embed::ReceiverValue::Value { reg, value_type, slots } => {
-            emit_box_value(reg, slots, value_type, ctx, func, info)
-        }
+        crate::embed::ReceiverValue::Value {
+            reg,
+            value_type,
+            slots,
+        } => emit_box_value(reg, slots, value_type, ctx, func, info),
     };
     let capture_transfer_type = transfer_type_for_type(method_recv_type, ctx, info);
-    
+
     let wrapper_id = ctx.get_or_create_method_value_wrapper(
         method_recv_type,
         method_func_id,
@@ -217,7 +263,7 @@ fn compile_method_value_static(
         ret_slot_types,
         capture_transfer_type,
     )?;
-    
+
     func.emit_closure_new(dst, wrapper_id, 1);
     func.emit_ptr_set_with_barrier(dst, 1, capture_box, 1, true);
     Ok(())
@@ -241,12 +287,13 @@ fn emit_iface_method_value_closure(
         info,
     );
     let transfer_types = param_transfer_types(&param_types, ctx, info);
-    let param_slot_types = param_types.iter()
+    let param_slot_types = param_types
+        .iter()
         .map(|&type_key| info.type_slot_types(type_key))
         .collect();
     let capture_box = emit_box_value(iface_reg, 2, iface_type, ctx, func, info);
     let capture_transfer_type = transfer_type_for_type(iface_type, ctx, info);
-    
+
     let wrapper_id = ctx.get_or_create_method_value_wrapper_iface(
         iface_type,
         method_idx,
@@ -256,7 +303,7 @@ fn emit_iface_method_value_closure(
         transfer_types,
         capture_transfer_type,
     )?;
-    
+
     func.emit_closure_new(dst, wrapper_id, 1);
     func.emit_ptr_set_with_barrier(dst, 1, capture_box, 1, true);
     Ok(())
@@ -274,17 +321,33 @@ fn compile_method_value_embedded_iface(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let (iface_type, method_idx) = match &call_info.dispatch {
-        crate::embed::MethodDispatch::EmbeddedInterface { iface_type, method_idx } => (*iface_type, *method_idx),
-        _ => return Err(CodegenError::Internal("expected EmbeddedInterface dispatch".to_string())),
+        crate::embed::MethodDispatch::EmbeddedInterface {
+            iface_type,
+            method_idx,
+        } => (*iface_type, *method_idx),
+        _ => {
+            return Err(CodegenError::Internal(
+                "expected EmbeddedInterface dispatch".to_string(),
+            ))
+        }
     };
-    
+
     let recv_is_ptr = info.is_pointer(recv_type);
     let recv_reg = compile_expr(recv_expr, ctx, func, info)?;
     let iface_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
     let start = crate::embed::TraverseStart::new(recv_reg, recv_is_ptr);
     call_info.emit_target(func, start, iface_reg);
-    
-    emit_iface_method_value_closure(iface_type, method_idx, method_name, iface_reg, dst, ctx, func, info)
+
+    emit_iface_method_value_closure(
+        iface_type,
+        method_idx,
+        method_name,
+        iface_reg,
+        dst,
+        ctx,
+        func,
+        info,
+    )
 }
 
 /// Compile interface method value: iface.Method
@@ -298,13 +361,25 @@ fn compile_interface_method_value(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let method_idx = ctx.get_interface_method_index(
-        recv_type, method_name, &info.project.tc_objs, &info.project.interner
+        recv_type,
+        method_name,
+        &info.project.tc_objs,
+        &info.project.interner,
     );
-    
+
     let iface_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
     compile_expr_to(&sel.expr, iface_reg, ctx, func, info)?;
-    
-    emit_iface_method_value_closure(recv_type, method_idx, method_name, iface_reg, dst, ctx, func, info)
+
+    emit_iface_method_value_closure(
+        recv_type,
+        method_idx,
+        method_name,
+        iface_reg,
+        dst,
+        ctx,
+        func,
+        info,
+    )
 }
 
 /// Compile method expression (T.M or (*T).M).
@@ -322,15 +397,18 @@ pub fn compile_method_expr(
     let recv_type = selection.recv().ok_or_else(|| {
         CodegenError::Internal("method expression has no receiver type".to_string())
     })?;
-    let method_name = info.project.interner.resolve(sel.sel.symbol)
+    let method_name = info
+        .project
+        .interner
+        .resolve(sel.sel.symbol)
         .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
-    
+
     // Handle method expression on interface type (e.g., Reader.Read)
     // This is valid Go syntax: returns func(Reader) ReturnType
     if info.is_interface(recv_type) {
         return compile_interface_method_expr(recv_type, method_name, dst, ctx, func, info);
     }
-    
+
     let call_info = crate::embed::resolve_method_call(
         recv_type,
         method_name,
@@ -340,10 +418,14 @@ pub fn compile_method_expr(
         ctx,
         &info.project.tc_objs,
         &info.project.interner,
-    ).ok_or_else(|| CodegenError::Internal(format!(
-        "method {} not found on type {:?}", method_name, recv_type
-    )))?;
-    
+    )
+    .ok_or_else(|| {
+        CodegenError::Internal(format!(
+            "method {} not found on type {:?}",
+            method_name, recv_type
+        ))
+    })?;
+
     // Get the base type (strip pointer if recv_type is *T)
     let base_type = if vo_analysis::check::type_info::is_pointer(recv_type, &info.project.tc_objs) {
         let underlying = vo_analysis::typ::underlying_type(recv_type, &info.project.tc_objs);
@@ -355,9 +437,12 @@ pub fn compile_method_expr(
     } else {
         recv_type
     };
-    
+
     let final_func_id = match call_info.dispatch {
-        crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => {
+        crate::embed::MethodDispatch::Static {
+            func_id,
+            expects_ptr_recv,
+        } => {
             // For promoted methods (embedding path is not empty), generate a wrapper
             if !call_info.embed_path.steps.is_empty() {
                 crate::wrapper::generate_method_expr_promoted_wrapper(
@@ -380,11 +465,15 @@ pub fn compile_method_expr(
         crate::embed::MethodDispatch::EmbeddedInterface { iface_type, .. } => {
             // Method expression on embedded interface - generate wrapper
             // Get the method obj from interface type
-            let method_obj = get_interface_method_obj(iface_type, method_name, &info.project.tc_objs)
-                .ok_or_else(|| CodegenError::Internal(format!(
-                    "method {} not found in embedded interface", method_name
-                )))?;
-            
+            let method_obj =
+                get_interface_method_obj(iface_type, method_name, &info.project.tc_objs)
+                    .ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "method {} not found in embedded interface",
+                            method_name
+                        ))
+                    })?;
+
             crate::wrapper::generate_method_expr_embedded_iface_wrapper(
                 ctx,
                 recv_type,
@@ -401,10 +490,12 @@ pub fn compile_method_expr(
         }
         crate::embed::MethodDispatch::Interface { .. } => {
             // This shouldn't happen as we handle interface recv_type above
-            return Err(CodegenError::Internal("unexpected interface dispatch in method expression".to_string()));
+            return Err(CodegenError::Internal(
+                "unexpected interface dispatch in method expression".to_string(),
+            ));
         }
     };
-    
+
     func.emit_closure_new(dst, final_func_id, 0);
     Ok(())
 }
@@ -420,18 +511,31 @@ fn compile_interface_method_expr(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let method_idx = ctx.get_interface_method_index(
-        iface_type, method_name, &info.project.tc_objs, &info.project.interner
+        iface_type,
+        method_name,
+        &info.project.tc_objs,
+        &info.project.interner,
     );
-    
-    let (param_slots, ret_slots) = info.get_interface_method_slots(iface_type, method_name)
-        .ok_or_else(|| CodegenError::Internal(format!(
-            "method {} not found on interface {:?}", method_name, iface_type
-        )))?;
-    
+
+    let (param_slots, ret_slots) = info
+        .get_interface_method_slots(iface_type, method_name)
+        .ok_or_else(|| {
+            CodegenError::Internal(format!(
+                "method {} not found on interface {:?}",
+                method_name, iface_type
+            ))
+        })?;
+
     let wrapper_id = crate::wrapper::generate_method_expr_iface_wrapper(
-        ctx, iface_type, method_idx, param_slots, ret_slots, method_name, info,
+        ctx,
+        iface_type,
+        method_idx,
+        param_slots,
+        ret_slots,
+        method_name,
+        info,
     );
-    
+
     func.emit_closure_new(dst, wrapper_id, 0);
     Ok(())
 }
@@ -445,7 +549,10 @@ pub fn get_interface_method_obj(
     let underlying = vo_analysis::typ::underlying_type(iface_type, tc_objs);
     if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying] {
         let all_methods = iface.all_methods();
-        let methods = all_methods.as_ref().map(|v| v.as_slice()).unwrap_or(iface.methods());
+        let methods = all_methods
+            .as_ref()
+            .map(|v| v.as_slice())
+            .unwrap_or(iface.methods());
         for &method in methods {
             if tc_objs.lobjs[method].name() == method_name {
                 return Some(method);

@@ -27,14 +27,14 @@ use alloc::vec::Vec;
 use crate::types::{ValueKind, ValueRttid};
 
 /// Runtime type representation for type identity checking.
-/// 
+///
 /// All nested types store ValueRttid = (rttid << 8) | value_kind
 /// to enable O(1) type and value_kind lookup at runtime without table queries.
 #[derive(Debug, Clone)]
 pub enum RuntimeType {
     /// Basic types: int, string, bool, float64, etc.
     Basic(ValueKind),
-    
+
     /// Named type, identified by named_type_id.
     /// Named types are always different from any other type.
     /// `struct_meta_id` is set if underlying type is a struct (for dynamic access).
@@ -42,25 +42,25 @@ pub enum RuntimeType {
         id: u32,
         struct_meta_id: Option<u32>,
     },
-    
+
     /// Pointer type: *T
     Pointer(ValueRttid),
-    
+
     /// Array type: [N]T
     Array {
         len: u64,
         elem: ValueRttid,
     },
-    
+
     /// Slice type: []T
     Slice(ValueRttid),
-    
+
     /// Map type: map[K]V
     Map {
         key: ValueRttid,
         val: ValueRttid,
     },
-    
+
     /// Channel type: chan T, chan<- T, <-chan T
     Chan {
         dir: ChanDir,
@@ -71,31 +71,31 @@ pub enum RuntimeType {
         dir: ChanDir,
         elem: ValueRttid,
     },
-    
+
     /// Function type: func(params) results
     Func {
         params: Vec<ValueRttid>,
         results: Vec<ValueRttid>,
         variadic: bool,
     },
-    
+
     /// Anonymous struct type
     /// `meta_id` is the struct_meta index for dynamic access.
     Struct {
         fields: Vec<StructField>,
         meta_id: u32,
     },
-    
+
     /// Anonymous interface type
     /// `meta_id` is the interface_meta index for dynamic access.
     Interface {
         methods: Vec<InterfaceMethod>,
         meta_id: u32,
     },
-    
+
     /// Tuple type (for function multi-value returns)
     Tuple(Vec<ValueRttid>),
-    
+
     /// Island type: represents a VM instance
     Island,
 }
@@ -143,7 +143,7 @@ impl RuntimeType {
     pub fn is_named(&self) -> bool {
         matches!(self, RuntimeType::Named { .. })
     }
-    
+
     /// If this is a Named type, returns the named_type_id.
     #[inline]
     pub fn as_named(&self) -> Option<u32> {
@@ -152,7 +152,7 @@ impl RuntimeType {
             _ => None,
         }
     }
-    
+
     /// Get struct_meta_id for dynamic access.
     /// Works for Named types with struct underlying, and anonymous Struct types.
     #[inline]
@@ -163,7 +163,7 @@ impl RuntimeType {
             _ => None,
         }
     }
-    
+
     /// Get interface_meta_id for dynamic access.
     #[inline]
     pub fn interface_meta_id(&self) -> Option<u32> {
@@ -183,7 +183,13 @@ impl RuntimeType {
 impl StructField {
     /// Creates a new struct field.
     pub fn new(name: String, typ: ValueRttid, tag: String, embedded: bool, pkg: String) -> Self {
-        Self { name, typ, tag, embedded, pkg }
+        Self {
+            name,
+            typ,
+            tag,
+            embedded,
+            pkg,
+        }
     }
 }
 
@@ -202,14 +208,31 @@ impl PartialEq for RuntimeType {
             (Self::Basic(a), Self::Basic(b)) => a == b,
             (Self::Named { id: a, .. }, Self::Named { id: b, .. }) => a == b,
             (Self::Pointer(a), Self::Pointer(b)) => a == b,
-            (Self::Array { len: l1, elem: e1 }, Self::Array { len: l2, elem: e2 }) => l1 == l2 && e1 == e2,
-            (Self::Slice(a), Self::Slice(b)) => a == b,
-            (Self::Map { key: k1, val: v1 }, Self::Map { key: k2, val: v2 }) => k1 == k2 && v1 == v2,
-            (Self::Chan { dir: d1, elem: e1 }, Self::Chan { dir: d2, elem: e2 }) => d1 == d2 && e1 == e2,
-            (Self::Port { dir: d1, elem: e1 }, Self::Port { dir: d2, elem: e2 }) => d1 == d2 && e1 == e2,
-            (Self::Func { params: p1, results: r1, variadic: v1 }, Self::Func { params: p2, results: r2, variadic: v2 }) => {
-                p1 == p2 && r1 == r2 && v1 == v2
+            (Self::Array { len: l1, elem: e1 }, Self::Array { len: l2, elem: e2 }) => {
+                l1 == l2 && e1 == e2
             }
+            (Self::Slice(a), Self::Slice(b)) => a == b,
+            (Self::Map { key: k1, val: v1 }, Self::Map { key: k2, val: v2 }) => {
+                k1 == k2 && v1 == v2
+            }
+            (Self::Chan { dir: d1, elem: e1 }, Self::Chan { dir: d2, elem: e2 }) => {
+                d1 == d2 && e1 == e2
+            }
+            (Self::Port { dir: d1, elem: e1 }, Self::Port { dir: d2, elem: e2 }) => {
+                d1 == d2 && e1 == e2
+            }
+            (
+                Self::Func {
+                    params: p1,
+                    results: r1,
+                    variadic: v1,
+                },
+                Self::Func {
+                    params: p2,
+                    results: r2,
+                    variadic: v2,
+                },
+            ) => p1 == p2 && r1 == r2 && v1 == v2,
             (Self::Struct { fields: f1, .. }, Self::Struct { fields: f2, .. }) => f1 == f2,
             (Self::Interface { methods: m1, .. }, Self::Interface { methods: m2, .. }) => {
                 // Interface equality: same method set (order-independent)
@@ -232,7 +255,9 @@ impl Eq for RuntimeType {}
 struct SimpleHasher(u64);
 
 impl core::hash::Hasher for SimpleHasher {
-    fn finish(&self) -> u64 { self.0 }
+    fn finish(&self) -> u64 {
+        self.0
+    }
     fn write(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.0 = self.0.wrapping_mul(31).wrapping_add(b as u64);
@@ -247,13 +272,31 @@ impl core::hash::Hash for RuntimeType {
             Self::Basic(vk) => vk.hash(state),
             Self::Named { id, .. } => id.hash(state),
             Self::Pointer(elem) => elem.hash(state),
-            Self::Array { len, elem } => { len.hash(state); elem.hash(state); }
+            Self::Array { len, elem } => {
+                len.hash(state);
+                elem.hash(state);
+            }
             Self::Slice(elem) => elem.hash(state),
-            Self::Map { key, val } => { key.hash(state); val.hash(state); }
-            Self::Chan { dir, elem } => { dir.hash(state); elem.hash(state); }
-            Self::Port { dir, elem } => { dir.hash(state); elem.hash(state); }
-            Self::Func { params, results, variadic } => {
-                params.hash(state); results.hash(state); variadic.hash(state);
+            Self::Map { key, val } => {
+                key.hash(state);
+                val.hash(state);
+            }
+            Self::Chan { dir, elem } => {
+                dir.hash(state);
+                elem.hash(state);
+            }
+            Self::Port { dir, elem } => {
+                dir.hash(state);
+                elem.hash(state);
+            }
+            Self::Func {
+                params,
+                results,
+                variadic,
+            } => {
+                params.hash(state);
+                results.hash(state);
+                variadic.hash(state);
             }
             Self::Struct { fields, .. } => fields.hash(state),
             Self::Interface { methods, .. } => {

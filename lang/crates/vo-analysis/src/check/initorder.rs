@@ -3,7 +3,6 @@
 //! This module computes the order in which package-level variables
 //! must be initialized, detecting and reporting initialization cycles.
 
-
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -212,14 +211,30 @@ impl Checker {
         }
         let first = cycle[0];
         let o = self.lobj(first);
-        self.error_code_msg(TypeError::InitCycle, self.obj_span(first), format!("initialization cycle for {}", o.name()));
-        self.error_code_msg(TypeError::RefersTo, self.obj_span(first), format!("\t{} refers to", o.name()));
+        self.error_code_msg(
+            TypeError::InitCycle,
+            self.obj_span(first),
+            format!("initialization cycle for {}", o.name()),
+        );
+        self.error_code_msg(
+            TypeError::RefersTo,
+            self.obj_span(first),
+            format!("\t{} refers to", o.name()),
+        );
         for okey in cycle[1..].iter().rev() {
             let o = self.lobj(*okey);
-            self.error_code_msg(TypeError::RefersTo, self.obj_span(*okey), format!("\t{} refers to", o.name()));
+            self.error_code_msg(
+                TypeError::RefersTo,
+                self.obj_span(*okey),
+                format!("\t{} refers to", o.name()),
+            );
         }
         let o = self.lobj(first);
-        self.error_code_msg(TypeError::RefersTo, self.obj_span(first), format!("\t{}", o.name()));
+        self.error_code_msg(
+            TypeError::RefersTo,
+            self.obj_span(first),
+            format!("\t{}", o.name()),
+        );
     }
 }
 

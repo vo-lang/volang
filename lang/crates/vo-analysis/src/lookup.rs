@@ -3,7 +3,6 @@
 //! This module provides functions for looking up fields and methods
 //! in types, including embedded fields.
 
-
 use crate::check::Checker;
 use crate::obj::LangObj;
 use crate::objects::{ObjKey, PackageKey, TCObjects, TypeKey};
@@ -46,7 +45,7 @@ impl MethodSet {
     pub fn new(t: &TypeKey, objs: &mut TCObjects) -> MethodSet {
         let mut mset_base: HashMap<String, MethodCollision> = HashMap::new();
         let (tkey, is_ptr) = try_deref(*t, objs);
-        
+
         // *typ where typ is an interface has no methods
         if is_ptr && objs.types[tkey].try_as_interface().is_some() {
             return MethodSet { list: vec![] };
@@ -54,12 +53,12 @@ impl MethodSet {
 
         let mut current = vec![EmbeddedType::new(tkey, None, is_ptr, false)];
         let mut seen: Option<HashSet<TypeKey>> = None;
-        
+
         while !current.is_empty() {
             let mut next = vec![];
             let mut fset: HashMap<String, FieldCollision> = HashMap::new();
             let mut mset: HashMap<String, MethodCollision> = HashMap::new();
-            
+
             for et in current.iter() {
                 let mut tobj = &objs.types[et.typ];
                 if let typ::Type::Named(detail) = tobj {
@@ -110,7 +109,7 @@ impl MethodSet {
                     _ => {}
                 }
             }
-            
+
             for (k, m) in mset.iter() {
                 if !mset_base.contains_key(k) {
                     mset_base.insert(
@@ -123,16 +122,16 @@ impl MethodSet {
                     );
                 }
             }
-            
+
             for (k, f) in fset.iter() {
                 if *f == FieldCollision::Collision && !mset_base.contains_key(k) {
                     mset_base.insert(k.clone(), MethodCollision::Collision);
                 }
             }
-            
+
             current = consolidate_multiples(next, objs);
         }
-        
+
         let mut list: Vec<Selection> = mset_base
             .into_iter()
             .filter_map(|(_, m)| match m {
@@ -210,13 +209,13 @@ fn lookup_field_or_method_impl(
     if is_ptr && typ::is_interface(tkey, objs) {
         return LookupResult::NotFound;
     }
-    
+
     let mut current = vec![EmbeddedType::new(tkey, None, is_ptr, false)];
     let mut indices = None;
     let mut target = None;
     let mut indirect = false;
     let mut seen: Option<HashSet<TypeKey>> = None;
-    
+
     while !current.is_empty() {
         let mut next = vec![];
         for et in current.iter() {
@@ -379,7 +378,12 @@ struct EmbeddedType {
 
 impl EmbeddedType {
     fn new(typ: TypeKey, indices: Option<Vec<usize>>, indirect: bool, multiples: bool) -> Self {
-        EmbeddedType { typ, indices, indirect, multiples }
+        EmbeddedType {
+            typ,
+            indices,
+            indirect,
+            multiples,
+        }
     }
 }
 
@@ -423,7 +427,10 @@ fn add_to_field_set(
 ) {
     let key = objs.lobjs[*f].id(objs);
     if !multiples {
-        if set.insert(key.to_string(), FieldCollision::Var(*f)).is_none() {
+        if set
+            .insert(key.to_string(), FieldCollision::Var(*f))
+            .is_none()
+        {
             return;
         }
     }
@@ -505,11 +512,20 @@ pub fn missing_method(
         let t_methods: Vec<ObjKey> = {
             let tval = checker.tc_objs.types[t].underlying_val(&checker.tc_objs);
             let detail = tval.try_as_interface().unwrap();
-            detail.all_methods().as_ref().map(|v| v.clone()).unwrap_or_default()
+            detail
+                .all_methods()
+                .as_ref()
+                .map(|v| v.clone())
+                .unwrap_or_default()
         };
         let i_methods: Vec<ObjKey> = {
-            let ival = checker.tc_objs.types[intf_underlying].try_as_interface().unwrap();
-            ival.all_methods().as_ref().map(|v| v.clone()).unwrap_or_default()
+            let ival = checker.tc_objs.types[intf_underlying]
+                .try_as_interface()
+                .unwrap();
+            ival.all_methods()
+                .as_ref()
+                .map(|v| v.clone())
+                .unwrap_or_default()
         };
 
         for fkey in i_methods {
@@ -531,8 +547,13 @@ pub fn missing_method(
 
     // A concrete type implements 'intf' if it implements all methods of 'intf'.
     let all_methods: Vec<ObjKey> = {
-        let ival = checker.tc_objs.types[intf_underlying].try_as_interface().unwrap();
-        ival.all_methods().as_ref().map(|v| v.clone()).unwrap_or_default()
+        let ival = checker.tc_objs.types[intf_underlying]
+            .try_as_interface()
+            .unwrap();
+        ival.all_methods()
+            .as_ref()
+            .map(|v| v.clone())
+            .unwrap_or_default()
     };
 
     for fkey in all_methods {
@@ -560,11 +581,7 @@ pub fn missing_method(
 
 /// assertable_to reports whether a value of type iface can be asserted to have type t.
 /// It returns None as affirmative answer. See docs for missing_method for more info.
-pub fn assertable_to(
-    iface: TypeKey,
-    t: TypeKey,
-    checker: &mut Checker,
-) -> Option<(ObjKey, bool)> {
+pub fn assertable_to(iface: TypeKey, t: TypeKey, checker: &mut Checker) -> Option<(ObjKey, bool)> {
     let strict = true;
     if !strict && checker.tc_objs.types[t].is_interface(&checker.tc_objs) {
         return None;

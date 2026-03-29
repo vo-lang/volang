@@ -89,7 +89,10 @@ impl Checker {
     /// Returns true if the last non-empty statement in the list terminates.
     pub(crate) fn is_terminating_list(&self, stmts: &[Stmt], label: Option<&str>) -> bool {
         // Find the last non-empty statement
-        let last_non_empty = stmts.iter().rev().find(|s| !matches!(s.kind, StmtKind::Empty));
+        let last_non_empty = stmts
+            .iter()
+            .rev()
+            .find(|s| !matches!(s.kind, StmtKind::Empty));
 
         if let Some(stmt) = last_non_empty {
             self.is_terminating_impl(stmt, label)
@@ -99,11 +102,7 @@ impl Checker {
     }
 
     /// Returns true if a switch statement terminates.
-    fn is_terminating_switch(
-        &self,
-        cases: &[CaseClause],
-        label: Option<&str>,
-    ) -> bool {
+    fn is_terminating_switch(&self, cases: &[CaseClause], label: Option<&str>) -> bool {
         let mut has_default = false;
 
         for case in cases {
@@ -122,11 +121,7 @@ impl Checker {
     }
 
     /// Returns true if a type switch statement terminates.
-    fn is_terminating_type_switch(
-        &self,
-        cases: &[TypeCaseClause],
-        label: Option<&str>,
-    ) -> bool {
+    fn is_terminating_type_switch(&self, cases: &[TypeCaseClause], label: Option<&str>) -> bool {
         let mut has_default = false;
 
         for case in cases {
@@ -144,11 +139,7 @@ impl Checker {
     }
 
     /// Returns true if a select statement terminates.
-    fn is_terminating_select(
-        &self,
-        cases: &[SelectCase],
-        label: Option<&str>,
-    ) -> bool {
+    fn is_terminating_select(&self, cases: &[SelectCase], label: Option<&str>) -> bool {
         for case in cases {
             if !self.is_terminating_list(&case.body, None)
                 || self.has_break_list(&case.body, label, true)

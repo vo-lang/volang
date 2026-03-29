@@ -24,7 +24,7 @@ impl CallSigInfo {
             is_variadic: info.is_variadic(func_type),
         }
     }
-    
+
     fn calc_arg_slot_types(
         &self,
         call_expr: &vo_syntax::ast::CallExpr,
@@ -32,7 +32,7 @@ impl CallSigInfo {
     ) -> Vec<SlotType> {
         crate::expr::call::calc_arg_slot_types(call_expr, &self.param_types, self.is_variadic, info)
     }
-    
+
     fn compile_args(
         &self,
         call_expr: &vo_syntax::ast::CallExpr,
@@ -42,7 +42,13 @@ impl CallSigInfo {
         info: &TypeInfoWrapper,
     ) -> Result<(), CodegenError> {
         crate::expr::call::compile_method_args(
-            call_expr, &self.param_types, self.is_variadic, args_start, ctx, func, info
+            call_expr,
+            &self.param_types,
+            self.is_variadic,
+            args_start,
+            ctx,
+            func,
+            info,
         )?;
         Ok(())
     }
@@ -81,20 +87,31 @@ fn compile_defer_impl(
     is_errdefer: bool,
 ) -> Result<(), CodegenError> {
     use vo_syntax::ast::ExprKind;
-    
-    let opcode = if is_errdefer { Opcode::ErrDeferPush } else { Opcode::DeferPush };
-    
+
+    let opcode = if is_errdefer {
+        Opcode::ErrDeferPush
+    } else {
+        Opcode::DeferPush
+    };
+
     let ExprKind::Call(call_expr) = &call.kind else {
-        return Err(CodegenError::UnsupportedStmt("defer requires a call expression".to_string()));
+        return Err(CodegenError::UnsupportedStmt(
+            "defer requires a call expression".to_string(),
+        ));
     };
     let callee_expr = crate::expr::call::strip_paren_expr(&call_expr.func);
-    
+
     // Check for package-qualified function call (e.g., fmt.Println, bytes.Contains)
     // Must check before treating as method call
     if let ExprKind::Selector(sel) = &callee_expr.kind {
         if let Some(selection) = info.get_selection(callee_expr.id) {
-            if matches!(selection.kind(), vo_analysis::selection::SelectionKind::MethodExpr) {
-                return compile_defer_method_expr_call(call_expr, sel, selection, opcode, ctx, func, info);
+            if matches!(
+                selection.kind(),
+                vo_analysis::selection::SelectionKind::MethodExpr
+            ) {
+                return compile_defer_method_expr_call(
+                    call_expr, sel, selection, opcode, ctx, func, info,
+                );
             }
         }
         if let ExprKind::Ident(pkg_ident) = &sel.expr.kind {
@@ -106,14 +123,15 @@ fn compile_defer_impl(
         // Method call (e.g., res.close())
         return compile_defer_method_call(call_expr, callee_expr, sel, opcode, ctx, func, info);
     }
-    
+
     let sig = CallSigInfo::from_call(call_expr, info);
-    
+
     // Regular function call
     if let ExprKind::Ident(ident) = &callee_expr.kind {
         let obj_key = info.get_use(ident);
         if let Some(func_idx) = ctx.get_func_by_objkey(obj_key) {
-            let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
+            let (args_start, total_arg_slots) =
+                compile_call_args(call_expr, &sig, ctx, func, info)?;
             emit_defer_func(opcode, func_idx, args_start, total_arg_slots, func);
             return Ok(());
         }
@@ -121,14 +139,19 @@ fn compile_defer_impl(
 
     if let ExprKind::FuncLit(func_lit) = &callee_expr.kind {
         if info.closure_captures(callee_expr.id).is_empty() {
-            let (func_id, captures) = crate::expr::literal::lower_func_lit(callee_expr, func_lit, ctx, info)?;
-            assert!(captures.is_empty(), "zero-capture func literal lowering returned captures");
-            let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
+            let (func_id, captures) =
+                crate::expr::literal::lower_func_lit(callee_expr, func_lit, ctx, info)?;
+            assert!(
+                captures.is_empty(),
+                "zero-capture func literal lowering returned captures"
+            );
+            let (args_start, total_arg_slots) =
+                compile_call_args(call_expr, &sig, ctx, func, info)?;
             emit_defer_func(opcode, func_id, args_start, total_arg_slots, func);
             return Ok(());
         }
     }
-    
+
     // Closure call (local variable or generic expression)
     let closure_reg = crate::expr::compile_expr(callee_expr, ctx, func, info)?;
     let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
@@ -153,14 +176,26 @@ fn compile_go_method_expr_call(
         CodegenError::Internal("method expression call missing receiver argument".to_string())
     })?;
     let forwarded_args = &call_expr.args[1..];
-    let method_name = info.project.interner.resolve(sel.sel.symbol)
+    let method_name = info
+        .project
+        .interner
+        .resolve(sel.sel.symbol)
         .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
 
     if info.is_interface(recv_type) {
-        if let Some(target) = crate::expr::call::resolve_monomorphic_iface_target(recv_arg, sel.sel.symbol, ctx, info)? {
+        if let Some(target) = crate::expr::call::resolve_monomorphic_iface_target(
+            recv_arg,
+            sel.sel.symbol,
+            ctx,
+            info,
+        )? {
             match &target.call_info.dispatch {
-                MethodDispatch::Static { func_id, expects_ptr_recv } => {
-                    let method_type = info.project.tc_objs.lobjs[target.method_obj].typ()
+                MethodDispatch::Static {
+                    func_id,
+                    expects_ptr_recv,
+                } => {
+                    let method_type = info.project.tc_objs.lobjs[target.method_obj]
+                        .typ()
                         .ok_or_else(|| CodegenError::Internal("method type missing".to_string()))?;
                     let param_types = info.func_param_types(method_type);
                     let is_variadic = info.is_variadic(method_type);
@@ -180,13 +215,20 @@ fn compile_go_method_expr_call(
                         info,
                     );
                 }
-                MethodDispatch::EmbeddedInterface { iface_type, method_idx } => {
-                    let (param_types, is_variadic) = info.get_interface_method_signature(*iface_type, method_name);
+                MethodDispatch::EmbeddedInterface {
+                    iface_type,
+                    method_idx,
+                } => {
+                    let (param_types, is_variadic) =
+                        info.get_interface_method_signature(*iface_type, method_name);
                     let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
                         ctx,
                         method_name,
                         *method_idx as usize,
-                        param_types.iter().map(|&type_key| info.type_slot_types(type_key)).collect(),
+                        param_types
+                            .iter()
+                            .map(|&type_key| info.type_slot_types(type_key))
+                            .collect(),
                     );
                     return compile_scheduled_iface_method_expr_call(
                         target.recv_expr,
@@ -205,7 +247,10 @@ fn compile_go_method_expr_call(
                     );
                 }
                 MethodDispatch::Interface { .. } => {
-                    return Err(CodegenError::Internal("unexpected interface dispatch after monomorphic interface resolution".to_string()));
+                    return Err(CodegenError::Internal(
+                        "unexpected interface dispatch after monomorphic interface resolution"
+                            .to_string(),
+                    ));
                 }
             }
         }
@@ -221,11 +266,16 @@ fn compile_go_method_expr_call(
         ctx,
         &info.project.tc_objs,
         &info.project.interner,
-    ).ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} not found", method_name)))?;
+    )
+    .ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} not found", method_name)))?;
 
     match &call_info.dispatch {
-        MethodDispatch::Static { func_id, expects_ptr_recv } => {
-            let method_type = info.project.tc_objs.lobjs[selection.obj()].typ()
+        MethodDispatch::Static {
+            func_id,
+            expects_ptr_recv,
+        } => {
+            let method_type = info.project.tc_objs.lobjs[selection.obj()]
+                .typ()
                 .ok_or_else(|| CodegenError::Internal("method type missing".to_string()))?;
             let param_types = info.func_param_types(method_type);
             let is_variadic = info.is_variadic(method_type);
@@ -246,12 +296,16 @@ fn compile_go_method_expr_call(
             )
         }
         MethodDispatch::Interface { method_idx } => {
-            let (param_types, is_variadic) = info.get_interface_method_signature(recv_type, method_name);
+            let (param_types, is_variadic) =
+                info.get_interface_method_signature(recv_type, method_name);
             let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
                 ctx,
                 method_name,
                 *method_idx as usize,
-                param_types.iter().map(|&type_key| info.type_slot_types(type_key)).collect(),
+                param_types
+                    .iter()
+                    .map(|&type_key| info.type_slot_types(type_key))
+                    .collect(),
             );
             compile_scheduled_iface_method_expr_call(
                 recv_arg,
@@ -269,13 +323,20 @@ fn compile_go_method_expr_call(
                 info,
             )
         }
-        MethodDispatch::EmbeddedInterface { iface_type, method_idx } => {
-            let (param_types, is_variadic) = info.get_interface_method_signature(*iface_type, method_name);
+        MethodDispatch::EmbeddedInterface {
+            iface_type,
+            method_idx,
+        } => {
+            let (param_types, is_variadic) =
+                info.get_interface_method_signature(*iface_type, method_name);
             let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
                 ctx,
                 method_name,
                 *method_idx as usize,
-                param_types.iter().map(|&type_key| info.type_slot_types(type_key)).collect(),
+                param_types
+                    .iter()
+                    .map(|&type_key| info.type_slot_types(type_key))
+                    .collect(),
             );
             compile_scheduled_iface_method_expr_call(
                 recv_arg,
@@ -312,13 +373,31 @@ fn compile_call_args(
 }
 
 #[inline]
-fn emit_defer_func(opcode: Opcode, func_idx: u32, args_start: u16, arg_slots: u16, func: &mut FuncBuilder) {
+fn emit_defer_func(
+    opcode: Opcode,
+    func_idx: u32,
+    args_start: u16,
+    arg_slots: u16,
+    func: &mut FuncBuilder,
+) {
     let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_idx);
-    func.emit_with_flags(opcode, func_id_high << 1, func_id_low, args_start, arg_slots);
+    func.emit_with_flags(
+        opcode,
+        func_id_high << 1,
+        func_id_low,
+        args_start,
+        arg_slots,
+    );
 }
 
 #[inline]
-fn emit_defer_closure(opcode: Opcode, closure_reg: u16, args_start: u16, arg_slots: u16, func: &mut FuncBuilder) {
+fn emit_defer_closure(
+    opcode: Opcode,
+    closure_reg: u16,
+    args_start: u16,
+    arg_slots: u16,
+    func: &mut FuncBuilder,
+) {
     func.emit_with_flags(opcode, 1, closure_reg, args_start, arg_slots);
 }
 
@@ -339,7 +418,11 @@ where
 {
     use vo_syntax::ast::ExprKind;
 
-    let base_type = if call_info.recv_is_pointer { info.pointer_base(recv_type) } else { recv_type };
+    let base_type = if call_info.recv_is_pointer {
+        info.pointer_base(recv_type)
+    } else {
+        recv_type
+    };
     let actual_recv_type = call_info.actual_recv_type(base_type);
     let recv_storage = match &recv_expr.kind {
         ExprKind::Ident(ident) => func.lookup_local(ident.symbol).map(|local| local.storage),
@@ -347,7 +430,11 @@ where
     };
 
     let sig = CallSigInfo::from_call(call_expr, info);
-    let recv_slots = if expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
+    let recv_slots = if expects_ptr_recv {
+        1
+    } else {
+        info.type_slot_count(actual_recv_type)
+    };
     let mut arg_slot_types = if expects_ptr_recv {
         vec![SlotType::GcRef]
     } else {
@@ -430,19 +517,33 @@ where
 {
     use vo_syntax::ast::ExprKind;
 
-    let base_type = if call_info.recv_is_pointer { info.pointer_base(recv_type) } else { recv_type };
+    let base_type = if call_info.recv_is_pointer {
+        info.pointer_base(recv_type)
+    } else {
+        recv_type
+    };
     let actual_recv_type = call_info.actual_recv_type(base_type);
     let recv_storage = match &recv_expr.kind {
         ExprKind::Ident(ident) => func.lookup_local(ident.symbol).map(|local| local.storage),
         _ => None,
     };
-    let recv_slots = if expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
+    let recv_slots = if expects_ptr_recv {
+        1
+    } else {
+        info.type_slot_count(actual_recv_type)
+    };
     let mut arg_slot_types = if expects_ptr_recv {
         vec![SlotType::GcRef]
     } else {
         info.type_slot_types(actual_recv_type)
     };
-    arg_slot_types.extend(crate::expr::call::calc_arg_slot_types_for_args(args, spread, param_types, is_variadic, info));
+    arg_slot_types.extend(crate::expr::call::calc_arg_slot_types_for_args(
+        args,
+        spread,
+        param_types,
+        is_variadic,
+        info,
+    ));
     let total_arg_slots = arg_slot_types.len() as u16;
     let args_start = func.alloc_args_typed(&arg_slot_types);
 
@@ -489,7 +590,13 @@ fn compile_scheduled_iface_method_expr_call<F>(
 where
     F: FnOnce(u32, u16, u16, &mut FuncBuilder),
 {
-    let arg_slot_types = crate::expr::call::calc_arg_slot_types_for_args(args, spread, param_types, is_variadic, info);
+    let arg_slot_types = crate::expr::call::calc_arg_slot_types_for_args(
+        args,
+        spread,
+        param_types,
+        is_variadic,
+        info,
+    );
     let mut total_arg_slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     total_arg_slot_types.extend(arg_slot_types);
     let total_arg_slots = total_arg_slot_types.len() as u16;
@@ -529,29 +636,35 @@ fn compile_defer_pkg_func_call(
 ) -> Result<(), CodegenError> {
     let obj_key = info.get_use(&sel.sel);
     let obj = &info.project.tc_objs.lobjs[obj_key];
-    
+
     if obj.entity_type().func_has_body() {
         // Vo function - use DeferPush with func_id
-        let func_idx = ctx.get_func_by_objkey(obj_key)
-            .ok_or_else(|| CodegenError::Internal(format!("pkg func not registered: {:?}", sel.sel.symbol)))?;
+        let func_idx = ctx.get_func_by_objkey(obj_key).ok_or_else(|| {
+            CodegenError::Internal(format!("pkg func not registered: {:?}", sel.sel.symbol))
+        })?;
         let sig = CallSigInfo::from_call(call_expr, info);
         let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
         emit_defer_func(opcode, func_idx, args_start, total_arg_slots, func);
         return Ok(());
     }
-    
+
     // Extern function (builtin like fmt.Println)
     // For extern functions, we need to generate a wrapper closure that calls the extern
     // and defer that wrapper
     let extern_name = crate::expr::call::get_extern_name(sel, info)?;
-    
+
     // Get return slot count from function signature
     let func_type = info.expr_type(call_expr.func.id);
     let sig = info.as_signature(func_type);
     let ret_slots = info.type_slot_count(sig.results()) as u16;
-    
-    let wrapper_id = crate::wrapper::generate_defer_extern_wrapper(ctx, &extern_name, call_expr.args.len(), ret_slots);
-    
+
+    let wrapper_id = crate::wrapper::generate_defer_extern_wrapper(
+        ctx,
+        &extern_name,
+        call_expr.args.len(),
+        ret_slots,
+    );
+
     // Compile args as interface values for print/println/assert style functions
     let any_type = info.any_type();
     let total_arg_slots = call_expr.args.len() as u16 * 2; // each arg is interface (2 slots)
@@ -561,12 +674,19 @@ fn compile_defer_pkg_func_call(
         arg_slot_types.push(SlotType::Interface1);
     }
     let args_start = func.alloc_args_typed(&arg_slot_types);
-    
+
     for (i, arg) in call_expr.args.iter().enumerate() {
         let dst = args_start + (i as u16 * 2);
-        crate::assign::emit_assign(dst, crate::assign::AssignSource::Expr(arg), any_type, ctx, func, info)?;
+        crate::assign::emit_assign(
+            dst,
+            crate::assign::AssignSource::Expr(arg),
+            any_type,
+            ctx,
+            func,
+            info,
+        )?;
     }
-    
+
     emit_defer_func(opcode, wrapper_id, args_start, total_arg_slots, func);
     Ok(())
 }
@@ -589,14 +709,26 @@ fn compile_defer_method_expr_call(
         CodegenError::Internal("method expression call missing receiver argument".to_string())
     })?;
     let forwarded_args = &call_expr.args[1..];
-    let method_name = info.project.interner.resolve(sel.sel.symbol)
+    let method_name = info
+        .project
+        .interner
+        .resolve(sel.sel.symbol)
         .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
 
     if info.is_interface(recv_type) {
-        if let Some(target) = crate::expr::call::resolve_monomorphic_iface_target(recv_arg, sel.sel.symbol, ctx, info)? {
+        if let Some(target) = crate::expr::call::resolve_monomorphic_iface_target(
+            recv_arg,
+            sel.sel.symbol,
+            ctx,
+            info,
+        )? {
             match &target.call_info.dispatch {
-                MethodDispatch::Static { func_id, expects_ptr_recv } => {
-                    let method_type = info.project.tc_objs.lobjs[target.method_obj].typ()
+                MethodDispatch::Static {
+                    func_id,
+                    expects_ptr_recv,
+                } => {
+                    let method_type = info.project.tc_objs.lobjs[target.method_obj]
+                        .typ()
                         .ok_or_else(|| CodegenError::Internal("method type missing".to_string()))?;
                     let param_types = info.func_param_types(method_type);
                     let is_variadic = info.is_variadic(method_type);
@@ -618,13 +750,20 @@ fn compile_defer_method_expr_call(
                         info,
                     );
                 }
-                MethodDispatch::EmbeddedInterface { iface_type, method_idx } => {
-                    let (param_types, is_variadic) = info.get_interface_method_signature(*iface_type, method_name);
+                MethodDispatch::EmbeddedInterface {
+                    iface_type,
+                    method_idx,
+                } => {
+                    let (param_types, is_variadic) =
+                        info.get_interface_method_signature(*iface_type, method_name);
                     let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
                         ctx,
                         method_name,
                         *method_idx as usize,
-                        param_types.iter().map(|&type_key| info.type_slot_types(type_key)).collect(),
+                        param_types
+                            .iter()
+                            .map(|&type_key| info.type_slot_types(type_key))
+                            .collect(),
                     );
                     return compile_scheduled_iface_method_expr_call(
                         target.recv_expr,
@@ -645,7 +784,10 @@ fn compile_defer_method_expr_call(
                     );
                 }
                 MethodDispatch::Interface { .. } => {
-                    return Err(CodegenError::Internal("unexpected interface dispatch after monomorphic interface resolution".to_string()));
+                    return Err(CodegenError::Internal(
+                        "unexpected interface dispatch after monomorphic interface resolution"
+                            .to_string(),
+                    ));
                 }
             }
         }
@@ -661,11 +803,16 @@ fn compile_defer_method_expr_call(
         ctx,
         &info.project.tc_objs,
         &info.project.interner,
-    ).ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} not found", method_name)))?;
+    )
+    .ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} not found", method_name)))?;
 
     match &call_info.dispatch {
-        MethodDispatch::Static { func_id, expects_ptr_recv } => {
-            let method_type = info.project.tc_objs.lobjs[selection.obj()].typ()
+        MethodDispatch::Static {
+            func_id,
+            expects_ptr_recv,
+        } => {
+            let method_type = info.project.tc_objs.lobjs[selection.obj()]
+                .typ()
                 .ok_or_else(|| CodegenError::Internal("method type missing".to_string()))?;
             let param_types = info.func_param_types(method_type);
             let is_variadic = info.is_variadic(method_type);
@@ -688,12 +835,16 @@ fn compile_defer_method_expr_call(
             )
         }
         MethodDispatch::Interface { method_idx } => {
-            let (param_types, is_variadic) = info.get_interface_method_signature(recv_type, method_name);
+            let (param_types, is_variadic) =
+                info.get_interface_method_signature(recv_type, method_name);
             let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
                 ctx,
                 method_name,
                 *method_idx as usize,
-                param_types.iter().map(|&type_key| info.type_slot_types(type_key)).collect(),
+                param_types
+                    .iter()
+                    .map(|&type_key| info.type_slot_types(type_key))
+                    .collect(),
             );
             compile_scheduled_iface_method_expr_call(
                 recv_arg,
@@ -713,13 +864,20 @@ fn compile_defer_method_expr_call(
                 info,
             )
         }
-        MethodDispatch::EmbeddedInterface { iface_type, method_idx } => {
-            let (param_types, is_variadic) = info.get_interface_method_signature(*iface_type, method_name);
+        MethodDispatch::EmbeddedInterface {
+            iface_type,
+            method_idx,
+        } => {
+            let (param_types, is_variadic) =
+                info.get_interface_method_signature(*iface_type, method_name);
             let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
                 ctx,
                 method_name,
                 *method_idx as usize,
-                param_types.iter().map(|&type_key| info.type_slot_types(type_key)).collect(),
+                param_types
+                    .iter()
+                    .map(|&type_key| info.type_slot_types(type_key))
+                    .collect(),
             );
             compile_scheduled_iface_method_expr_call(
                 recv_arg,
@@ -752,15 +910,20 @@ fn compile_defer_method_call(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use crate::embed::MethodDispatch;
-    
+
     let recv_type = info.expr_type(sel.expr.id);
-    let method_name = info.project.interner.resolve(sel.sel.symbol)
+    let method_name = info
+        .project
+        .interner
+        .resolve(sel.sel.symbol)
         .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
     let method_sym = sel.sel.symbol;
-    
+
     let selection = info.get_selection(callee_expr.id);
     let (recv_expr, recv_type, call_info) = if info.is_interface(recv_type) {
-        if let Some(target) = crate::expr::call::resolve_monomorphic_iface_target(&sel.expr, method_sym, ctx, info)? {
+        if let Some(target) =
+            crate::expr::call::resolve_monomorphic_iface_target(&sel.expr, method_sym, ctx, info)?
+        {
             (target.recv_expr, target.recv_type, target.call_info)
         } else {
             let call_info = crate::embed::resolve_method_call(
@@ -772,7 +935,10 @@ fn compile_defer_method_call(
                 ctx,
                 &info.project.tc_objs,
                 &info.project.interner,
-            ).ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} not found", method_name)))?;
+            )
+            .ok_or_else(|| {
+                CodegenError::UnsupportedExpr(format!("method {} not found", method_name))
+            })?;
             (&sel.expr, recv_type, call_info)
         }
     } else {
@@ -785,12 +951,18 @@ fn compile_defer_method_call(
             ctx,
             &info.project.tc_objs,
             &info.project.interner,
-        ).ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} not found", method_name)))?;
+        )
+        .ok_or_else(|| {
+            CodegenError::UnsupportedExpr(format!("method {} not found", method_name))
+        })?;
         (&sel.expr, recv_type, call_info)
     };
-    
+
     match &call_info.dispatch {
-        MethodDispatch::Static { func_id, expects_ptr_recv } => {
+        MethodDispatch::Static {
+            func_id,
+            expects_ptr_recv,
+        } => {
             compile_scheduled_static_method_call(
                 call_expr,
                 recv_expr,
@@ -867,7 +1039,13 @@ fn compile_defer_method_call(
 #[inline]
 fn emit_go_func(func_idx: u32, args_start: u16, arg_slots: u16, func: &mut FuncBuilder) {
     let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_idx);
-    func.emit_with_flags(Opcode::GoStart, func_id_high << 1, func_id_low, args_start, arg_slots);
+    func.emit_with_flags(
+        Opcode::GoStart,
+        func_id_high << 1,
+        func_id_low,
+        args_start,
+        arg_slots,
+    );
 }
 
 #[inline]
@@ -886,36 +1064,50 @@ pub(crate) fn compile_go(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use vo_syntax::ast::ExprKind;
-    
+
     let ExprKind::Call(call_expr) = &call.kind else {
-        return Err(CodegenError::UnsupportedStmt("go requires a call expression".to_string()));
+        return Err(CodegenError::UnsupportedStmt(
+            "go requires a call expression".to_string(),
+        ));
     };
-    
+
     // go @(island) - cross-island goroutine
     if let Some(island_expr) = target_island {
         // Compile island expression
         let island_reg = crate::expr::compile_expr(island_expr, ctx, func, info)?;
-        
+
         // The call must be a closure literal for go @(island)
         // go @(i) func(args...) { ... }(values...)
         let closure_reg = crate::expr::compile_expr(&call_expr.func, ctx, func, info)?;
-        
+
         // Compile call arguments
         let sig = CallSigInfo::from_call(call_expr, info);
         let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
-        
+
         // GoIsland: a=island, b=closure, c=args_start, flags=arg_slots (max 255)
-        assert!(total_arg_slots <= 255, "go @(island) call has too many argument slots (max 255)");
-        func.emit_with_flags(Opcode::GoIsland, total_arg_slots as u8, island_reg, closure_reg, args_start);
+        assert!(
+            total_arg_slots <= 255,
+            "go @(island) call has too many argument slots (max 255)"
+        );
+        func.emit_with_flags(
+            Opcode::GoIsland,
+            total_arg_slots as u8,
+            island_reg,
+            closure_reg,
+            args_start,
+        );
         return Ok(());
     }
-    
+
     // Regular go (same island)
     let callee_expr = crate::expr::call::strip_paren_expr(&call_expr.func);
 
     if let ExprKind::Selector(sel) = &callee_expr.kind {
         if let Some(selection) = info.get_selection(callee_expr.id) {
-            if matches!(selection.kind(), vo_analysis::selection::SelectionKind::MethodExpr) {
+            if matches!(
+                selection.kind(),
+                vo_analysis::selection::SelectionKind::MethodExpr
+            ) {
                 return compile_go_method_expr_call(call_expr, sel, selection, ctx, func, info);
             }
         }
@@ -928,12 +1120,13 @@ pub(crate) fn compile_go(
     }
 
     let sig = CallSigInfo::from_call(call_expr, info);
-    
+
     // Regular function call
     if let ExprKind::Ident(ident) = &callee_expr.kind {
         let obj_key = info.get_use(ident);
         if let Some(func_idx) = ctx.get_func_by_objkey(obj_key) {
-            let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
+            let (args_start, total_arg_slots) =
+                compile_call_args(call_expr, &sig, ctx, func, info)?;
             emit_go_func(func_idx, args_start, total_arg_slots, func);
             return Ok(());
         }
@@ -941,14 +1134,19 @@ pub(crate) fn compile_go(
 
     if let ExprKind::FuncLit(func_lit) = &callee_expr.kind {
         if info.closure_captures(callee_expr.id).is_empty() {
-            let (func_id, captures) = crate::expr::literal::lower_func_lit(callee_expr, func_lit, ctx, info)?;
-            assert!(captures.is_empty(), "zero-capture func literal lowering returned captures");
-            let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
+            let (func_id, captures) =
+                crate::expr::literal::lower_func_lit(callee_expr, func_lit, ctx, info)?;
+            assert!(
+                captures.is_empty(),
+                "zero-capture func literal lowering returned captures"
+            );
+            let (args_start, total_arg_slots) =
+                compile_call_args(call_expr, &sig, ctx, func, info)?;
             emit_go_func(func_id, args_start, total_arg_slots, func);
             return Ok(());
         }
     }
-    
+
     // Closure call (local variable or generic expression)
     let closure_reg = crate::expr::compile_expr(callee_expr, ctx, func, info)?;
     let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
@@ -967,8 +1165,9 @@ fn compile_go_pkg_func_call(
     let obj = &info.project.tc_objs.lobjs[obj_key];
 
     if obj.entity_type().func_has_body() {
-        let func_idx = ctx.get_func_by_objkey(obj_key)
-            .ok_or_else(|| CodegenError::Internal(format!("pkg func not registered: {:?}", sel.sel.symbol)))?;
+        let func_idx = ctx.get_func_by_objkey(obj_key).ok_or_else(|| {
+            CodegenError::Internal(format!("pkg func not registered: {:?}", sel.sel.symbol))
+        })?;
         let sig = CallSigInfo::from_call(call_expr, info);
         let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
         emit_go_func(func_idx, args_start, total_arg_slots, func);
@@ -979,7 +1178,12 @@ fn compile_go_pkg_func_call(
     let func_type = info.expr_type(call_expr.func.id);
     let sig = info.as_signature(func_type);
     let ret_slots = info.type_slot_count(sig.results()) as u16;
-    let wrapper_id = crate::wrapper::generate_defer_extern_wrapper(ctx, &extern_name, call_expr.args.len(), ret_slots);
+    let wrapper_id = crate::wrapper::generate_defer_extern_wrapper(
+        ctx,
+        &extern_name,
+        call_expr.args.len(),
+        ret_slots,
+    );
 
     let any_type = info.any_type();
     let total_arg_slots = call_expr.args.len() as u16 * 2;
@@ -992,7 +1196,14 @@ fn compile_go_pkg_func_call(
 
     for (i, arg) in call_expr.args.iter().enumerate() {
         let dst = args_start + (i as u16 * 2);
-        crate::assign::emit_assign(dst, crate::assign::AssignSource::Expr(arg), any_type, ctx, func, info)?;
+        crate::assign::emit_assign(
+            dst,
+            crate::assign::AssignSource::Expr(arg),
+            any_type,
+            ctx,
+            func,
+            info,
+        )?;
     }
 
     emit_go_func(wrapper_id, args_start, total_arg_slots, func);
@@ -1010,13 +1221,18 @@ fn compile_go_method_call(
     use crate::embed::MethodDispatch;
 
     let recv_type = info.expr_type(sel.expr.id);
-    let method_name = info.project.interner.resolve(sel.sel.symbol)
+    let method_name = info
+        .project
+        .interner
+        .resolve(sel.sel.symbol)
         .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
     let method_sym = sel.sel.symbol;
     let selection = info.get_selection(callee_expr.id);
 
     let (recv_expr, recv_type, call_info) = if info.is_interface(recv_type) {
-        if let Some(target) = crate::expr::call::resolve_monomorphic_iface_target(&sel.expr, method_sym, ctx, info)? {
+        if let Some(target) =
+            crate::expr::call::resolve_monomorphic_iface_target(&sel.expr, method_sym, ctx, info)?
+        {
             (target.recv_expr, target.recv_type, target.call_info)
         } else {
             let call_info = crate::embed::resolve_method_call(
@@ -1028,7 +1244,10 @@ fn compile_go_method_call(
                 ctx,
                 &info.project.tc_objs,
                 &info.project.interner,
-            ).ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} not found", method_name)))?;
+            )
+            .ok_or_else(|| {
+                CodegenError::UnsupportedExpr(format!("method {} not found", method_name))
+            })?;
             (&sel.expr, recv_type, call_info)
         }
     } else {
@@ -1041,12 +1260,18 @@ fn compile_go_method_call(
             ctx,
             &info.project.tc_objs,
             &info.project.interner,
-        ).ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} not found", method_name)))?;
+        )
+        .ok_or_else(|| {
+            CodegenError::UnsupportedExpr(format!("method {} not found", method_name))
+        })?;
         (&sel.expr, recv_type, call_info)
     };
 
     match &call_info.dispatch {
-        MethodDispatch::Static { func_id, expects_ptr_recv } => {
+        MethodDispatch::Static {
+            func_id,
+            expects_ptr_recv,
+        } => {
             compile_scheduled_static_method_call(
                 call_expr,
                 recv_expr,

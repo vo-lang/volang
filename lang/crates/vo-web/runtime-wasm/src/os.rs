@@ -1,10 +1,10 @@
 //! os package WASM implementation backed by JS VirtualFS.
 
+use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 use vo_runtime::bytecode::ExternDef;
+use vo_runtime::core_types::{ValueKind, ValueMeta};
 use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
 use vo_runtime::objects::{array, slice, string};
-use vo_runtime::core_types::{ValueKind, ValueMeta};
-use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 use vo_runtime::slot::SLOT_BYTES;
 
 use crate::vfs;
@@ -38,7 +38,7 @@ fn os_get_errors(call: &mut ExternCallContext) -> ExternResult {
         "not a directory",
         "is a directory",
     ];
-    
+
     for (i, msg) in errors.iter().enumerate() {
         let str_ref = string::from_rust_str(call.gc(), msg);
         call.ret_u64((i * 2) as u16, ValueKind::String as u64);
@@ -48,13 +48,13 @@ fn os_get_errors(call: &mut ExternCallContext) -> ExternResult {
 }
 
 fn os_get_consts(call: &mut ExternCallContext) -> ExternResult {
-    call.ret_i64(0, 0);   // O_RDONLY
-    call.ret_i64(1, 1);   // O_WRONLY
-    call.ret_i64(2, 2);   // O_RDWR
-    call.ret_i64(3, 8);   // O_APPEND
-    call.ret_i64(4, 16);  // O_CREATE
-    call.ret_i64(5, 32);  // O_EXCL
-    call.ret_i64(6, 64);  // O_SYNC
+    call.ret_i64(0, 0); // O_RDONLY
+    call.ret_i64(1, 1); // O_WRONLY
+    call.ret_i64(2, 2); // O_RDWR
+    call.ret_i64(3, 8); // O_APPEND
+    call.ret_i64(4, 16); // O_CREATE
+    call.ret_i64(5, 32); // O_EXCL
+    call.ret_i64(6, 64); // O_SYNC
     call.ret_i64(7, 128); // O_TRUNC
     ExternResult::Ok
 }
@@ -67,9 +67,9 @@ fn open_file(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(0);
     let flag = call.arg_i64(1) as i32;
     let perm = call.arg_u64(2) as u32;
-    
+
     let (fd, err) = vfs::open_file(name, flag, perm);
-    
+
     if let Some(msg) = err {
         call.ret_i64(0, -1);
         write_error_to(call, 1, &msg);
@@ -84,9 +84,9 @@ fn file_read(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(0) as i32;
     let buf_ref = call.arg_ref(1);
     let buf_len = slice::len(buf_ref);
-    
+
     let (data, err) = vfs::read(fd, buf_len as u32);
-    
+
     if let Some(msg) = err {
         call.ret_i64(0, 0);
         write_error_to(call, 1, &msg);
@@ -112,9 +112,9 @@ fn file_write(call: &mut ExternCallContext) -> ExternResult {
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
     let data = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
-    
+
     let (n, err) = vfs::write(fd, data);
-    
+
     if let Some(msg) = err {
         call.ret_i64(0, 0);
         write_error_to(call, 1, &msg);
@@ -130,9 +130,9 @@ fn file_read_at(call: &mut ExternCallContext) -> ExternResult {
     let buf_ref = call.arg_ref(1);
     let offset = call.arg_i64(2);
     let buf_len = slice::len(buf_ref);
-    
+
     let (data, err) = vfs::read_at(fd, buf_len as u32, offset);
-    
+
     if let Some(msg) = err {
         call.ret_i64(0, 0);
         write_error_to(call, 1, &msg);
@@ -159,9 +159,9 @@ fn file_write_at(call: &mut ExternCallContext) -> ExternResult {
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
     let data = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
-    
+
     let (n, err) = vfs::write_at(fd, data, offset);
-    
+
     if let Some(msg) = err {
         call.ret_i64(0, 0);
         write_error_to(call, 1, &msg);
@@ -176,9 +176,9 @@ fn file_seek(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(0) as i32;
     let offset = call.arg_i64(1);
     let whence = call.arg_i64(2) as i32;
-    
+
     let (pos, err) = vfs::seek(fd, offset, whence);
-    
+
     if let Some(msg) = err {
         call.ret_i64(0, 0);
         write_error_to(call, 1, &msg);
@@ -191,13 +191,13 @@ fn file_seek(call: &mut ExternCallContext) -> ExternResult {
 
 fn file_close(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(0) as i32;
-    
+
     // Allow closing stdin/stdout/stderr without error
     if fd <= 2 {
         write_nil_error(call, 0);
         return ExternResult::Ok;
     }
-    
+
     if let Some(msg) = vfs::close(fd) {
         write_error_to(call, 0, &msg);
     } else {
@@ -208,7 +208,7 @@ fn file_close(call: &mut ExternCallContext) -> ExternResult {
 
 fn file_sync(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(0) as i32;
-    
+
     if let Some(msg) = vfs::sync(fd) {
         write_error_to(call, 0, &msg);
     } else {
@@ -219,17 +219,21 @@ fn file_sync(call: &mut ExternCallContext) -> ExternResult {
 
 fn file_stat(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(0) as i32;
-    
+
     let (size, mode, mod_time, is_dir, err) = vfs::fstat(fd);
-    
+
     if let Some(msg) = err {
-        for i in 0..5 { call.ret_u64(i, 0); }
+        for i in 0..5 {
+            call.ret_u64(i, 0);
+        }
         write_error_to(call, 5, &msg);
     } else {
         let name_ref = string::from_rust_str(call.gc(), "");
         let mut mode_val = mode;
-        if is_dir { mode_val |= MODE_DIR; }
-        
+        if is_dir {
+            mode_val |= MODE_DIR;
+        }
+
         call.ret_ref(0, name_ref);
         call.ret_i64(1, size);
         call.ret_u64(2, mode_val as u64);
@@ -243,7 +247,7 @@ fn file_stat(call: &mut ExternCallContext) -> ExternResult {
 fn file_truncate(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(0) as i32;
     let size = call.arg_i64(1);
-    
+
     if let Some(msg) = vfs::ftruncate(fd, size) {
         write_error_to(call, 0, &msg);
     } else {
@@ -259,7 +263,7 @@ fn file_truncate(call: &mut ExternCallContext) -> ExternResult {
 fn native_mkdir(call: &mut ExternCallContext) -> ExternResult {
     let path = call.arg_str(0);
     let perm = call.arg_u64(1) as u32;
-    
+
     if let Some(msg) = vfs::mkdir(path, perm) {
         write_error_to(call, 0, &msg);
     } else {
@@ -271,7 +275,7 @@ fn native_mkdir(call: &mut ExternCallContext) -> ExternResult {
 fn native_mkdir_all(call: &mut ExternCallContext) -> ExternResult {
     let path = call.arg_str(0);
     let perm = call.arg_u64(1) as u32;
-    
+
     if let Some(msg) = vfs::mkdir_all(path, perm) {
         write_error_to(call, 0, &msg);
     } else {
@@ -282,7 +286,7 @@ fn native_mkdir_all(call: &mut ExternCallContext) -> ExternResult {
 
 fn native_remove(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(0);
-    
+
     if let Some(msg) = vfs::remove(name) {
         write_error_to(call, 0, &msg);
     } else {
@@ -293,7 +297,7 @@ fn native_remove(call: &mut ExternCallContext) -> ExternResult {
 
 fn native_remove_all(call: &mut ExternCallContext) -> ExternResult {
     let path = call.arg_str(0);
-    
+
     if let Some(msg) = vfs::remove_all(path) {
         write_error_to(call, 0, &msg);
     } else {
@@ -305,7 +309,7 @@ fn native_remove_all(call: &mut ExternCallContext) -> ExternResult {
 fn native_rename(call: &mut ExternCallContext) -> ExternResult {
     let oldpath = call.arg_str(0);
     let newpath = call.arg_str(1);
-    
+
     if let Some(msg) = vfs::rename(oldpath, newpath) {
         write_error_to(call, 0, &msg);
     } else {
@@ -316,17 +320,21 @@ fn native_rename(call: &mut ExternCallContext) -> ExternResult {
 
 fn native_stat(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(0);
-    
+
     let (basename, size, mode, mod_time, is_dir, err) = vfs::stat(name);
-    
+
     if let Some(msg) = err {
-        for i in 0..5 { call.ret_u64(i, 0); }
+        for i in 0..5 {
+            call.ret_u64(i, 0);
+        }
         write_error_to(call, 5, &msg);
     } else {
         let name_ref = string::from_rust_str(call.gc(), &basename);
         let mut mode_val = mode;
-        if is_dir { mode_val |= MODE_DIR; }
-        
+        if is_dir {
+            mode_val |= MODE_DIR;
+        }
+
         call.ret_ref(0, name_ref);
         call.ret_i64(1, size);
         call.ret_u64(2, mode_val as u64);
@@ -344,9 +352,9 @@ fn native_lstat(call: &mut ExternCallContext) -> ExternResult {
 
 fn native_read_dir(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(0);
-    
+
     let (entries, err) = vfs::read_dir(name);
-    
+
     if let Some(msg) = err {
         call.ret_nil(0);
         write_error_to(call, 1, &msg);
@@ -356,11 +364,13 @@ fn native_read_dir(call: &mut ExternCallContext) -> ExternResult {
         let elem_slots = 3;
         let elem_meta = vo_runtime::ValueMeta::new(0, ValueKind::Struct);
         let result = slice::create(gc, elem_meta, elem_slots * SLOT_BYTES, len, len);
-        
+
         for (i, (entry_name, is_dir, mode)) in entries.iter().enumerate() {
             let name_ref = string::from_rust_str(gc, entry_name);
             let mut mode_val = *mode;
-            if *is_dir { mode_val |= MODE_DIR; }
+            if *is_dir {
+                mode_val |= MODE_DIR;
+            }
             let base = i * elem_slots;
             slice::set(result, base, name_ref as u64, SLOT_BYTES);
             slice::set(result, base + 1, if *is_dir { 1 } else { 0 }, SLOT_BYTES);
@@ -375,7 +385,7 @@ fn native_read_dir(call: &mut ExternCallContext) -> ExternResult {
 fn native_chmod(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(0);
     let mode = call.arg_u64(1) as u32;
-    
+
     if let Some(msg) = vfs::chmod(name, mode) {
         write_error_to(call, 0, &msg);
     } else {
@@ -387,7 +397,7 @@ fn native_chmod(call: &mut ExternCallContext) -> ExternResult {
 fn native_truncate(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(0);
     let size = call.arg_i64(1);
-    
+
     if let Some(msg) = vfs::truncate(name, size) {
         write_error_to(call, 0, &msg);
     } else {
@@ -398,9 +408,9 @@ fn native_truncate(call: &mut ExternCallContext) -> ExternResult {
 
 fn native_read_file(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(0);
-    
+
     let (data, err) = vfs::read_file(name);
-    
+
     if let Some(msg) = err {
         let gc = call.gc();
         let elem_meta = ValueMeta::new(0, ValueKind::Uint8);
@@ -419,7 +429,7 @@ fn native_write_file(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(0);
     let data = call.arg_bytes(1);
     let perm = call.arg_u64(2) as u32;
-    
+
     if let Some(msg) = vfs::write_file(name, data, perm) {
         write_error_to(call, 0, &msg);
     } else {
@@ -624,16 +634,20 @@ fn native_executable(call: &mut ExternCallContext) -> ExternResult {
 fn native_create_temp(call: &mut ExternCallContext) -> ExternResult {
     let dir = call.arg_str(0);
     let pattern = call.arg_str(1);
-    
+
     let dir = if dir.is_empty() { "/tmp" } else { dir };
-    let name = format!("{}{:016x}", pattern.replace('*', ""), js_sys::Math::random().to_bits());
+    let name = format!(
+        "{}{:016x}",
+        pattern.replace('*', ""),
+        js_sys::Math::random().to_bits()
+    );
     let path = format!("{}/{}", dir, name);
-    
+
     // Create parent if needed
     let _ = vfs::mkdir_all(dir, 0o755);
-    
+
     let (fd, err) = vfs::open_file(&path, 16 | 32, 0o600); // O_CREATE | O_EXCL
-    
+
     if let Some(msg) = err {
         call.ret_i64(0, -1);
         let str_ref = string::from_rust_str(call.gc(), "");
@@ -651,14 +665,18 @@ fn native_create_temp(call: &mut ExternCallContext) -> ExternResult {
 fn native_mkdir_temp(call: &mut ExternCallContext) -> ExternResult {
     let dir = call.arg_str(0);
     let pattern = call.arg_str(1);
-    
+
     let dir = if dir.is_empty() { "/tmp" } else { dir };
-    let name = format!("{}{:016x}", pattern.replace('*', ""), js_sys::Math::random().to_bits());
+    let name = format!(
+        "{}{:016x}",
+        pattern.replace('*', ""),
+        js_sys::Math::random().to_bits()
+    );
     let path = format!("{}/{}", dir, name);
-    
+
     // Create parent if needed
     let _ = vfs::mkdir_all(dir, 0o755);
-    
+
     if let Some(msg) = vfs::mkdir(&path, 0o755) {
         let str_ref = string::from_rust_str(call.gc(), "");
         call.ret_ref(0, str_ref);

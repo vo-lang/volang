@@ -130,7 +130,11 @@ impl SlotType {
 
     /// Generate an expression that reads this type from an arg slot.
     pub fn arg_read(self, slot: u16, original_ty: &Type) -> TokenStream2 {
-        debug_assert!(self.is_valid_arg(), "SlotType::{:?} is not valid as argument", self);
+        debug_assert!(
+            self.is_valid_arg(),
+            "SlotType::{:?} is not valid as argument",
+            self
+        );
         match self {
             Self::I64 => quote! { call.arg_i64(#slot) as #original_ty },
             Self::U64 => quote! { call.arg_u64(#slot) as #original_ty },
@@ -148,7 +152,11 @@ impl SlotType {
 
     /// Generate a statement that writes a value to a return slot.
     pub fn ret_write(self, slot: u16, val: TokenStream2) -> TokenStream2 {
-        debug_assert!(self.is_valid_ret(), "SlotType::{:?} is not valid as return", self);
+        debug_assert!(
+            self.is_valid_ret(),
+            "SlotType::{:?} is not valid as return",
+            self
+        );
         match self {
             Self::I64 => quote! { call.ret_i64(#slot, #val as i64); },
             Self::U64 => quote! { call.ret_u64(#slot, #val as u64); },
@@ -167,7 +175,11 @@ impl SlotType {
 
     /// Generate a statement that writes the zero/default value to a return slot.
     pub fn ret_zero(self, slot: u16) -> TokenStream2 {
-        debug_assert!(self.is_valid_ret(), "SlotType::{:?} is not valid as return", self);
+        debug_assert!(
+            self.is_valid_ret(),
+            "SlotType::{:?} is not valid as return",
+            self
+        );
         match self {
             Self::I64 => quote! { call.ret_i64(#slot, 0); },
             Self::U64 => quote! { call.ret_u64(#slot, 0); },
@@ -230,9 +242,8 @@ pub fn parse_fn_args(func: &syn::ItemFn) -> syn::Result<(Vec<TokenStream2>, Vec<
                 };
 
                 let ty = &*pat_type.ty;
-                let slot_type = SlotType::from_syn_type(ty).ok_or_else(|| {
-                    syn::Error::new_spanned(ty, "unsupported parameter type")
-                })?;
+                let slot_type = SlotType::from_syn_type(ty)
+                    .ok_or_else(|| syn::Error::new_spanned(ty, "unsupported parameter type"))?;
 
                 let read_expr = slot_type.arg_read(slot_idx, ty);
                 arg_reads.push(quote! { let #param_name = #read_expr; });
@@ -252,16 +263,14 @@ pub fn parse_fn_args(func: &syn::ItemFn) -> syn::Result<(Vec<TokenStream2>, Vec<
 pub fn generate_ret_write(ret: &syn::ReturnType) -> syn::Result<TokenStream2> {
     match ret {
         syn::ReturnType::Default => Ok(quote! {}),
-        syn::ReturnType::Type(_, ty) => {
-            match &**ty {
-                Type::Path(type_path) => {
-                    let st = resolve_slot_type_from_path(type_path)?;
-                    Ok(st.ret_write(0, quote! { __result }))
-                }
-                Type::Tuple(tuple) => generate_tuple_ret_writes(tuple),
-                _ => Err(syn::Error::new_spanned(ty, "unsupported return type")),
+        syn::ReturnType::Type(_, ty) => match &**ty {
+            Type::Path(type_path) => {
+                let st = resolve_slot_type_from_path(type_path)?;
+                Ok(st.ret_write(0, quote! { __result }))
             }
-        }
+            Type::Tuple(tuple) => generate_tuple_ret_writes(tuple),
+            _ => Err(syn::Error::new_spanned(ty, "unsupported return type")),
+        },
     }
 }
 
@@ -279,7 +288,10 @@ fn generate_tuple_ret_writes(tuple: &syn::TypeTuple) -> syn::Result<TokenStream2
             writes.push(st.ret_write(current_slot, val));
             current_slot += st.slot_count();
         } else {
-            return Err(syn::Error::new_spanned(elem, "unsupported tuple element type"));
+            return Err(syn::Error::new_spanned(
+                elem,
+                "unsupported tuple element type",
+            ));
         }
     }
     Ok(quote! { #(#writes)* })
@@ -287,12 +299,12 @@ fn generate_tuple_ret_writes(tuple: &syn::TypeTuple) -> syn::Result<TokenStream2
 
 /// Generate the Ok-path writes, Err-path zero-value writes, and the error slot index
 /// for Result mode.
-pub fn generate_result_ret_writes(inner_ty: &Type) -> syn::Result<(TokenStream2, TokenStream2, u16)> {
+pub fn generate_result_ret_writes(
+    inner_ty: &Type,
+) -> syn::Result<(TokenStream2, TokenStream2, u16)> {
     match inner_ty {
         // Result<(), String> → error-only
-        Type::Tuple(tuple) if tuple.elems.is_empty() => {
-            Ok((quote! {}, quote! {}, 0))
-        }
+        Type::Tuple(tuple) if tuple.elems.is_empty() => Ok((quote! {}, quote! {}, 0)),
         // Result<single_type, String>
         Type::Path(type_path) => {
             let st = resolve_slot_type_from_path(type_path)?;
@@ -314,7 +326,10 @@ pub fn generate_result_ret_writes(inner_ty: &Type) -> syn::Result<(TokenStream2,
                     zero_writes.push(st.ret_zero(current_slot));
                     current_slot += st.slot_count();
                 } else {
-                    return Err(syn::Error::new_spanned(elem, "unsupported tuple element type in Result mode"));
+                    return Err(syn::Error::new_spanned(
+                        elem,
+                        "unsupported tuple element type in Result mode",
+                    ));
                 }
             }
 
@@ -324,15 +339,22 @@ pub fn generate_result_ret_writes(inner_ty: &Type) -> syn::Result<(TokenStream2,
                 current_slot,
             ))
         }
-        _ => Err(syn::Error::new_spanned(inner_ty, "unsupported Result inner type")),
+        _ => Err(syn::Error::new_spanned(
+            inner_ty,
+            "unsupported Result inner type",
+        )),
     }
 }
 
 /// Resolve a TypePath to SlotType, returning a syn::Error on failure.
 fn resolve_slot_type_from_path(type_path: &syn::TypePath) -> syn::Result<SlotType> {
     SlotType::from_type_path_with_generics(type_path).ok_or_else(|| {
-        let ident = type_path.path.segments.last()
-            .map(|s| s.ident.to_string()).unwrap_or_default();
+        let ident = type_path
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
         syn::Error::new_spanned(type_path, format!("unsupported type: {}", ident))
     })
 }

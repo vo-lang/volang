@@ -44,27 +44,47 @@ fn leading_zeros64(x: u64) -> i64 {
 #[vostd_fn("math/bits", "TrailingZeros")]
 fn trailing_zeros(x: u64) -> i64 {
     let v = x as usize;
-    if v == 0 { (core::mem::size_of::<usize>() * 8) as i64 } else { v.trailing_zeros() as i64 }
+    if v == 0 {
+        (core::mem::size_of::<usize>() * 8) as i64
+    } else {
+        v.trailing_zeros() as i64
+    }
 }
 
 #[vostd_fn("math/bits", "TrailingZeros8")]
 fn trailing_zeros8(x: u8) -> i64 {
-    if x == 0 { 8 } else { x.trailing_zeros() as i64 }
+    if x == 0 {
+        8
+    } else {
+        x.trailing_zeros() as i64
+    }
 }
 
 #[vostd_fn("math/bits", "TrailingZeros16")]
 fn trailing_zeros16(x: u16) -> i64 {
-    if x == 0 { 16 } else { x.trailing_zeros() as i64 }
+    if x == 0 {
+        16
+    } else {
+        x.trailing_zeros() as i64
+    }
 }
 
 #[vostd_fn("math/bits", "TrailingZeros32")]
 fn trailing_zeros32(x: u32) -> i64 {
-    if x == 0 { 32 } else { x.trailing_zeros() as i64 }
+    if x == 0 {
+        32
+    } else {
+        x.trailing_zeros() as i64
+    }
 }
 
 #[vostd_fn("math/bits", "TrailingZeros64")]
 fn trailing_zeros64(x: u64) -> i64 {
-    if x == 0 { 64 } else { x.trailing_zeros() as i64 }
+    if x == 0 {
+        64
+    } else {
+        x.trailing_zeros() as i64
+    }
 }
 
 // ==================== Population count (POPCNT instruction) ====================

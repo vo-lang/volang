@@ -184,7 +184,11 @@ fn cmd_build(args: &[String]) -> i32 {
 
     if output_path.is_empty() {
         let name = &output.module.name;
-        let base = if name.is_empty() { "out" } else { name.as_str() };
+        let base = if name.is_empty() {
+            "out"
+        } else {
+            name.as_str()
+        };
         output_path = format!("{}.vob", base);
     }
 
@@ -483,15 +487,23 @@ fn print_mod_usage() {
     println!("Usage: vo mod <subcommand> [arguments]");
     println!();
     println!("Subcommands:");
-    println!("  download [path]            Fetch dependencies pinned by vo.lock into the module cache");
+    println!(
+        "  download [path]            Fetch dependencies pinned by vo.lock into the module cache"
+    );
     println!("  add <module[@constraint]>  Add or update a direct dependency and refresh vo.lock");
     println!("  update [module]            Re-solve dependency constraints and refresh vo.lock");
     println!("  sync [path]                Recompute the full dependency graph and write vo.lock");
-    println!("  verify [path]              Verify that vo.lock exactly matches the current vo.mod graph");
+    println!(
+        "  verify [path]              Verify that vo.lock exactly matches the current vo.mod graph"
+    );
     println!("  remove <module>            Remove a direct dependency and refresh vo.lock");
-    println!("  tidy [path]                Add missing and remove unused dependencies based on imports");
+    println!(
+        "  tidy [path]                Add missing and remove unused dependencies based on imports"
+    );
     println!("  why <module>               Show why a module is in the dependency graph");
-    println!("  clean [--all]              Remove unused cached modules (--all removes everything)");
+    println!(
+        "  clean [--all]              Remove unused cached modules (--all removes everything)"
+    );
 }
 
 fn cmd_mod_download(args: &[String]) -> i32 {
@@ -530,7 +542,14 @@ fn cmd_mod_add(args: &[String]) -> i32 {
     };
     let registry = vo_module::github_registry::GitHubRegistry::new();
     let cache_root = vo_engine::default_mod_cache_root();
-    match vo_module::ops::mod_add(&project_root, dep_path, constraint, &cache_root, &registry, "vo mod add") {
+    match vo_module::ops::mod_add(
+        &project_root,
+        dep_path,
+        constraint,
+        &cache_root,
+        &registry,
+        "vo mod add",
+    ) {
         Ok(()) => {
             println!("added {}", dep_path);
             print_lock_summary(&project_root);
@@ -555,7 +574,13 @@ fn cmd_mod_update(args: &[String]) -> i32 {
     let target = args.first().map(|value| value.as_str());
     let registry = vo_module::github_registry::GitHubRegistry::new();
     let cache_root = vo_engine::default_mod_cache_root();
-    match vo_module::ops::mod_update(&project_root, target, &cache_root, &registry, "vo mod update") {
+    match vo_module::ops::mod_update(
+        &project_root,
+        target,
+        &cache_root,
+        &registry,
+        "vo mod update",
+    ) {
         Ok(()) => {
             if let Some(t) = target {
                 println!("updated {}", t);
@@ -632,7 +657,13 @@ fn cmd_mod_remove(args: &[String]) -> i32 {
     };
     let registry = vo_module::github_registry::GitHubRegistry::new();
     let cache_root = vo_engine::default_mod_cache_root();
-    match vo_module::ops::mod_remove(&project_root, &args[0], &cache_root, &registry, "vo mod remove") {
+    match vo_module::ops::mod_remove(
+        &project_root,
+        &args[0],
+        &cache_root,
+        &registry,
+        "vo mod remove",
+    ) {
         Ok(()) => {
             println!("removed {}", args[0]);
             print_lock_summary(&project_root);
@@ -788,7 +819,10 @@ fn cmd_release_stage(args: &[String]) -> i32 {
     let cwd = match env::current_dir() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("[VO:RELEASE:STAGE] failed to read current directory: {}", error);
+            eprintln!(
+                "[VO:RELEASE:STAGE] failed to read current directory: {}",
+                error
+            );
             return 1;
         }
     };
@@ -889,11 +923,12 @@ fn cmd_get(args: &[String]) -> i32 {
     let _ = args;
     eprintln!("[VO:GET] `vo get` has been removed");
     eprintln!("[VO:GET] use `vo mod add <module[@constraint]>` to change direct dependencies");
-    eprintln!("[VO:GET] use `vo mod sync` to refresh vo.lock and `vo mod download` to fill the cache");
+    eprintln!(
+        "[VO:GET] use `vo mod sync` to refresh vo.lock and `vo mod download` to fill the cache"
+    );
     eprintln!("[VO:GET] dependency lifecycle now lives under `vo mod ...`");
     1
 }
-
 
 fn require_module_root_from_path(path: &str, scope: &str) -> Result<PathBuf, i32> {
     module_root_from_path(path).map_err(|error| {
@@ -914,7 +949,10 @@ fn resolve_cli_path(cwd: &Path, value: &str) -> PathBuf {
 fn print_lock_summary(project_root: &Path) {
     match vo_module::ops::read_lock_file(project_root) {
         Ok(lock) => {
-            println!("wrote vo.lock with {} resolved modules", lock.resolved.len());
+            println!(
+                "wrote vo.lock with {} resolved modules",
+                lock.resolved.len()
+            );
             for module in &lock.resolved {
                 println!("locked {}@{}", module.path, module.version);
             }
@@ -941,12 +979,7 @@ fn module_root_from_path(path: &str) -> Result<PathBuf, String> {
         }
         match current.parent() {
             Some(parent) => current = parent,
-            None => {
-                return Err(format!(
-                    "no vo.mod found from {}",
-                    search_start.display(),
-                ))
-            }
+            None => return Err(format!("no vo.mod found from {}", search_start.display(),)),
         }
     }
 }
@@ -970,7 +1003,11 @@ mod tests {
         let root = unique_temp_dir("module-root");
         let nested = root.join("src/bin");
         fs::create_dir_all(&nested).unwrap();
-        fs::write(root.join("vo.mod"), "module github.com/acme/app\n\nvo 0.1\n").unwrap();
+        fs::write(
+            root.join("vo.mod"),
+            "module github.com/acme/app\n\nvo 0.1\n",
+        )
+        .unwrap();
 
         let resolved = module_root_from_path(nested.join("main.vo").to_str().unwrap()).unwrap();
         assert_eq!(resolved, root.canonicalize().unwrap());

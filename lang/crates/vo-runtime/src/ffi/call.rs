@@ -9,11 +9,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::gc::Gc;
+#[cfg(feature = "std")]
+use crate::io::{IoRuntime, IoToken};
 use crate::itab::ItabCache;
 use crate::output::OutputSink;
 use vo_common_core::bytecode::Module;
-#[cfg(feature = "std")]
-use crate::io::{IoRuntime, IoToken};
 
 use super::SentinelErrorCache;
 

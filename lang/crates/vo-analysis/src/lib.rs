@@ -3,7 +3,6 @@
 //! This crate provides type checking for Vo source code, producing type information
 //! needed for code generation.
 
-
 #[macro_use]
 pub mod arena;
 pub mod check;
@@ -28,7 +27,9 @@ pub use obj::{Builtin, ConstValue, EntityType, LangObj};
 pub use objects::*;
 pub use operand::*;
 pub use package::Package;
-pub use project::{analyze_project, analyze_project_with_options, AnalysisError, AnalysisOptions, Project};
+pub use project::{
+    analyze_project, analyze_project_with_options, AnalysisError, AnalysisOptions, Project,
+};
 pub use scope::Scope;
 pub use selection::*;
 pub use typ::*;

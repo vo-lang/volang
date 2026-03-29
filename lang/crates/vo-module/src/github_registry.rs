@@ -5,9 +5,9 @@ use std::sync::Mutex;
 use serde::Deserialize;
 
 use crate::identity::ModulePath;
-use crate::version::ExactVersion;
-use crate::registry::{repository_id, release_download_url, validate_manifest, Registry};
+use crate::registry::{release_download_url, repository_id, validate_manifest, Registry};
 use crate::schema::manifest::ReleaseManifest;
+use crate::version::ExactVersion;
 use crate::Error;
 
 /// Concrete `Registry` implementation backed by the GitHub Releases API.
@@ -58,13 +58,12 @@ impl GitHubRegistry {
                 rid.owner, rid.repo, page_size, page,
             );
             let body = self.fetch_bytes(&url)?;
-            let releases: Vec<GitHubReleaseEntry> =
-                serde_json::from_slice(&body).map_err(|e| {
-                    Error::RegistryError(format!(
-                        "invalid GitHub releases response for {}: {}",
-                        module, e
-                    ))
-                })?;
+            let releases: Vec<GitHubReleaseEntry> = serde_json::from_slice(&body).map_err(|e| {
+                Error::RegistryError(format!(
+                    "invalid GitHub releases response for {}: {}",
+                    module, e
+                ))
+            })?;
             let release_count = releases.len();
             for entry in &releases {
                 if entry.draft {
@@ -156,7 +155,9 @@ impl Registry for GitHubRegistry {
 
     fn probe_module_path(&self, module: &ModulePath) -> Result<bool, Error> {
         match self.list_versions(module) {
-            Ok(versions) => Ok(!crate::registry::filter_compatible_versions(module, &versions).is_empty()),
+            Ok(versions) => {
+                Ok(!crate::registry::filter_compatible_versions(module, &versions).is_empty())
+            }
             Err(Error::RegistryError(message)) if message.contains(": 404 ") => Ok(false),
             Err(error) => Err(error),
         }

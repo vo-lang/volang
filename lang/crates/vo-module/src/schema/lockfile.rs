@@ -62,19 +62,17 @@ impl LockFile {
             .and_then(|v| v.as_table())
             .ok_or_else(|| Error::LockFileParse("missing [root] table".into()))?;
         let root = LockRoot {
-            module: ModulePath::parse(get_str(root_table, "module")?).map_err(|e| {
-                Error::LockFileParse(format!("root.module: {e}"))
-            })?,
-            vo: ToolchainConstraint::parse(get_str(root_table, "vo")?).map_err(|e| {
-                Error::LockFileParse(format!("root.vo: {e}"))
-            })?,
+            module: ModulePath::parse(get_str(root_table, "module")?)
+                .map_err(|e| Error::LockFileParse(format!("root.module: {e}")))?,
+            vo: ToolchainConstraint::parse(get_str(root_table, "vo")?)
+                .map_err(|e| Error::LockFileParse(format!("root.vo: {e}")))?,
         };
 
         let mut resolved = Vec::new();
         if let Some(arr) = table.get("resolved") {
-            let entries = arr
-                .as_array()
-                .ok_or_else(|| Error::LockFileParse("'resolved' must be an array of tables".into()))?;
+            let entries = arr.as_array().ok_or_else(|| {
+                Error::LockFileParse("'resolved' must be an array of tables".into())
+            })?;
             for (i, entry) in entries.iter().enumerate() {
                 let t = entry.as_table().ok_or_else(|| {
                     Error::LockFileParse(format!("resolved[{i}]: expected table"))
@@ -94,7 +92,12 @@ impl LockFile {
             }
         }
 
-        Ok(LockFile { version, created_by, root, resolved })
+        Ok(LockFile {
+            version,
+            created_by,
+            root,
+            resolved,
+        })
     }
 
     /// Render the lock file as canonical TOML.
@@ -115,7 +118,10 @@ impl LockFile {
             out.push_str(&format!("version = {:?}\n", lm.version.to_string()));
             out.push_str(&format!("vo = {:?}\n", lm.vo.to_string()));
             out.push_str(&format!("commit = {:?}\n", lm.commit));
-            out.push_str(&format!("release_manifest = {:?}\n", lm.release_manifest.as_str()));
+            out.push_str(&format!(
+                "release_manifest = {:?}\n",
+                lm.release_manifest.as_str()
+            ));
             out.push_str(&format!("source = {:?}\n", lm.source.as_str()));
 
             // deps: sorted
@@ -153,26 +159,20 @@ impl LockFile {
 
 fn parse_locked_module(t: &toml::value::Table, idx: usize) -> Result<LockedModule, Error> {
     let ctx = format!("resolved[{idx}]");
-    let path = ModulePath::parse(get_str(t, "path")?).map_err(|e| {
-        Error::LockFileParse(format!("{ctx}.path: {e}"))
-    })?;
-    let version = ExactVersion::parse(get_str(t, "version")?).map_err(|e| {
-        Error::LockFileParse(format!("{ctx}.version: {e}"))
-    })?;
-    let vo = ToolchainConstraint::parse(get_str(t, "vo")?).map_err(|e| {
-        Error::LockFileParse(format!("{ctx}.vo: {e}"))
-    })?;
+    let path = ModulePath::parse(get_str(t, "path")?)
+        .map_err(|e| Error::LockFileParse(format!("{ctx}.path: {e}")))?;
+    let version = ExactVersion::parse(get_str(t, "version")?)
+        .map_err(|e| Error::LockFileParse(format!("{ctx}.version: {e}")))?;
+    let vo = ToolchainConstraint::parse(get_str(t, "vo")?)
+        .map_err(|e| Error::LockFileParse(format!("{ctx}.vo: {e}")))?;
     let commit = get_str(t, "commit")?.to_string();
-    super::validate_commit_hash(&commit).map_err(|e| {
-        Error::LockFileParse(format!("{ctx}.commit: {e}"))
-    })?;
+    super::validate_commit_hash(&commit)
+        .map_err(|e| Error::LockFileParse(format!("{ctx}.commit: {e}")))?;
 
-    let release_manifest = Digest::parse(get_str(t, "release_manifest")?).map_err(|e| {
-        Error::LockFileParse(format!("{ctx}.release_manifest: {e}"))
-    })?;
-    let source = Digest::parse(get_str(t, "source")?).map_err(|e| {
-        Error::LockFileParse(format!("{ctx}.source: {e}"))
-    })?;
+    let release_manifest = Digest::parse(get_str(t, "release_manifest")?)
+        .map_err(|e| Error::LockFileParse(format!("{ctx}.release_manifest: {e}")))?;
+    let source = Digest::parse(get_str(t, "source")?)
+        .map_err(|e| Error::LockFileParse(format!("{ctx}.source: {e}")))?;
 
     let deps_arr = t
         .get("deps")
@@ -180,12 +180,13 @@ fn parse_locked_module(t: &toml::value::Table, idx: usize) -> Result<LockedModul
         .ok_or_else(|| Error::LockFileParse(format!("{ctx}: missing 'deps' array")))?;
     let mut deps = Vec::new();
     for (j, d) in deps_arr.iter().enumerate() {
-        let s = d.as_str().ok_or_else(|| {
-            Error::LockFileParse(format!("{ctx}.deps[{j}]: expected string"))
-        })?;
-        deps.push(ModulePath::parse(s).map_err(|e| {
-            Error::LockFileParse(format!("{ctx}.deps[{j}]: {e}"))
-        })?);
+        let s = d
+            .as_str()
+            .ok_or_else(|| Error::LockFileParse(format!("{ctx}.deps[{j}]: expected string")))?;
+        deps.push(
+            ModulePath::parse(s)
+                .map_err(|e| Error::LockFileParse(format!("{ctx}.deps[{j}]: {e}")))?,
+        );
     }
     // Validate sorted and unique
     for w in deps.windows(2) {
@@ -199,9 +200,9 @@ fn parse_locked_module(t: &toml::value::Table, idx: usize) -> Result<LockedModul
 
     let mut artifacts = Vec::new();
     if let Some(art_val) = t.get("artifact") {
-        let art_arr = art_val.as_array().ok_or_else(|| {
-            Error::LockFileParse(format!("{ctx}: 'artifact' must be an array"))
-        })?;
+        let art_arr = art_val
+            .as_array()
+            .ok_or_else(|| Error::LockFileParse(format!("{ctx}: 'artifact' must be an array")))?;
         for (j, a) in art_arr.iter().enumerate() {
             let at = a.as_table().ok_or_else(|| {
                 Error::LockFileParse(format!("{ctx}.artifact[{j}]: expected table"))
@@ -212,9 +213,8 @@ fn parse_locked_module(t: &toml::value::Table, idx: usize) -> Result<LockedModul
                 name: get_str(at, "name")?.to_string(),
             };
             let size = get_u64(at, "size")?;
-            let digest = Digest::parse(get_str(at, "digest")?).map_err(|e| {
-                Error::LockFileParse(format!("{ctx}.artifact[{j}].digest: {e}"))
-            })?;
+            let digest = Digest::parse(get_str(at, "digest")?)
+                .map_err(|e| Error::LockFileParse(format!("{ctx}.artifact[{j}].digest: {e}")))?;
             artifacts.push(LockedArtifact { id, size, digest });
         }
         // Validate sorted and unique
@@ -227,9 +227,17 @@ fn parse_locked_module(t: &toml::value::Table, idx: usize) -> Result<LockedModul
         }
     }
 
-    Ok(LockedModule { path, version, vo, commit, release_manifest, source, deps, artifacts })
+    Ok(LockedModule {
+        path,
+        version,
+        vo,
+        commit,
+        release_manifest,
+        source,
+        deps,
+        artifacts,
+    })
 }
-
 
 fn get_str<'a>(t: &'a toml::value::Table, key: &str) -> Result<&'a str, Error> {
     t.get(key)
@@ -238,7 +246,8 @@ fn get_str<'a>(t: &'a toml::value::Table, key: &str) -> Result<&'a str, Error> {
 }
 
 fn get_u64(t: &toml::value::Table, key: &str) -> Result<u64, Error> {
-    let v = t.get(key)
+    let v = t
+        .get(key)
         .and_then(|v| v.as_integer())
         .ok_or_else(|| Error::LockFileParse(format!("missing or non-integer field: {key}")))?;
     if v < 0 {

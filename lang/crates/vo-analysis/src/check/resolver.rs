@@ -3,7 +3,6 @@
 //! This module handles the first pass of type checking: collecting all
 //! package-level declarations and organizing them for later type checking.
 
-
 use std::collections::HashSet;
 
 use vo_common::span::Span;
@@ -13,7 +12,7 @@ use crate::objects::{ObjKey, PackageKey, ScopeKey};
 
 use super::checker::Checker;
 use super::errors::TypeError;
-use crate::importer::{Importer, validate_import_path};
+use crate::importer::{validate_import_path, Importer};
 
 /// DeclInfo for const declarations.
 #[derive(Debug, Clone)]
@@ -144,18 +143,18 @@ impl DeclInfo {
 impl Checker {
     /// Collects all package-level declarations from the files.
     /// This is the first pass of type checking.
-    pub(crate) fn collect_objects(&mut self, files: &[vo_syntax::ast::File], importer: Option<&mut dyn Importer>) {
+    pub(crate) fn collect_objects(
+        &mut self,
+        files: &[vo_syntax::ast::File],
+        importer: Option<&mut dyn Importer>,
+    ) {
         // Track all imported packages
-        let mut all_imported: HashSet<PackageKey> = self
-            .package(self.pkg)
-            .imports()
-            .iter()
-            .copied()
-            .collect();
+        let mut all_imported: HashSet<PackageKey> =
+            self.package(self.pkg).imports().iter().copied().collect();
 
         // List of methods with non-blank names: (method_key, receiver_type_name, is_pointer)
         let mut methods: Vec<(ObjKey, String, bool)> = Vec::new();
-        
+
         // We need to reborrow importer for each import, so collect import info first
         let mut import_infos: Vec<(usize, ScopeKey, vo_syntax::ast::ImportDecl)> = Vec::new();
 
@@ -198,7 +197,8 @@ impl Checker {
                 let pkg_scope = self.scope(pkg_scope_key);
                 if let Some(alt) = pkg_scope.lookup(obj_val.name()) {
                     let alt_val = self.lobj(alt);
-                    if let crate::obj::EntityType::PkgName { imported, .. } = obj_val.entity_type() {
+                    if let crate::obj::EntityType::PkgName { imported, .. } = obj_val.entity_type()
+                    {
                         let pkg_val = self.package(*imported);
                         self.error_code_msg(
                             TypeError::Redeclared,
@@ -249,7 +249,7 @@ impl Checker {
         importer: &mut Option<&mut dyn Importer>,
     ) {
         let path = &import.path.value;
-        
+
         // Import the package using importer if available
         let imp = if let Some(importer) = importer.as_mut() {
             use crate::importer::{ImportKey as ImpKey, ImportResult};
@@ -261,7 +261,11 @@ impl Checker {
                     return;
                 }
                 ImportResult::Cycle => {
-                    self.error_code_msg(TypeError::ImportCycle, import.span, format!("import cycle not allowed: {}", path));
+                    self.error_code_msg(
+                        TypeError::ImportCycle,
+                        import.span,
+                        format!("import cycle not allowed: {}", path),
+                    );
                     return;
                 }
             }
@@ -285,16 +289,16 @@ impl Checker {
             alias_name.to_string()
         } else {
             // Use package name
-            self.package(imp).name().clone().unwrap_or_else(|| path.clone())
+            self.package(imp)
+                .name()
+                .clone()
+                .unwrap_or_else(|| path.clone())
         };
 
         // Create package name object
-        let pkg_name_obj = self.tc_objs.new_pkg_name(
-            import.span,
-            Some(self.pkg),
-            name.clone(),
-            imp,
-        );
+        let pkg_name_obj =
+            self.tc_objs
+                .new_pkg_name(import.span, Some(self.pkg), name.clone(), imp);
 
         // Record definition
         if let Some(alias) = &import.alias {
@@ -384,12 +388,8 @@ impl Checker {
                         .iter()
                         .map(|name| {
                             let name_str = self.resolve_ident(name).to_string();
-                            self.tc_objs.new_var(
-                                name.span,
-                                Some(self.pkg),
-                                name_str,
-                                None,
-                            )
+                            self.tc_objs
+                                .new_var(name.span, Some(self.pkg), name_str, None)
                         })
                         .collect();
 
@@ -476,17 +476,17 @@ impl Checker {
                     let recv = func_decl.receiver.as_ref().unwrap();
                     let recv_type_name = self.resolve_ident(&recv.ty).to_string();
                     let is_pointer = recv.is_pointer;
-                    
+
                     if name_str != "_" {
                         methods.push((okey, recv_type_name, is_pointer));
                     }
                     self.result.record_def(func_decl.name.clone(), Some(okey));
                 }
 
-                let di = self.tc_objs.decls.insert(DeclInfo::new_func(
-                    file_scope,
-                    func_decl.clone(),
-                ));
+                let di = self
+                    .tc_objs
+                    .decls
+                    .insert(DeclInfo::new_func(file_scope, func_decl.clone()));
                 self.obj_map.insert(okey, di);
                 let order = self.obj_map.len() as u32;
                 self.lobj_mut(okey).set_order(order);
@@ -600,7 +600,11 @@ impl Checker {
     fn import_package(&mut self, path: &str, span: Span) -> PackageKey {
         // Validate import path
         if let Err(e) = self.valid_import_path(path) {
-            self.error_code_msg(TypeError::InvalidImportPath, span, format!("invalid import path ({})", e));
+            self.error_code_msg(
+                TypeError::InvalidImportPath,
+                span,
+                format!("invalid import path ({})", e),
+            );
         }
 
         let key = super::checker::ImportKey::new(path);

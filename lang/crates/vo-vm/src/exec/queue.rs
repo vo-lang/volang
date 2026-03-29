@@ -5,22 +5,22 @@
 //!
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, string::String, vec::Vec, format};
+use alloc::{boxed::Box, format, string::String, vec::Vec};
 #[cfg(feature = "std")]
 use std::{boxed::Box, vec::Vec};
 
 use vo_common_core::bytecode::StructMeta;
 use vo_common_core::instruction::QUEUE_KIND_PORT_FLAG;
 use vo_common_core::RuntimeType;
-use vo_runtime::{ValueMeta, ValueRttid};
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::queue::{self, RecvResult};
 use vo_runtime::objects::queue_state::{self, QueueKind, QueueWaiter};
 use vo_runtime::slot::Slot;
+use vo_runtime::{ValueMeta, ValueRttid};
 
 use crate::instruction::Instruction;
-use crate::vm::RuntimeTrapKind;
 use crate::vm::helpers::{stack_get, stack_set};
+use crate::vm::RuntimeTrapKind;
 
 pub enum QueueAction {
     Continue,
@@ -56,10 +56,16 @@ pub enum QueueAction {
 pub type QueueExecResult = QueueAction;
 
 pub enum QueueRecvCoreResult {
-    Success { data: Box<[u64]>, wake_sender: Option<QueueWaiter> },
+    Success {
+        data: Box<[u64]>,
+        wake_sender: Option<QueueWaiter>,
+    },
     WouldBlock,
     Closed,
-    Remote { endpoint_id: u64, home_island: u32 },
+    Remote {
+        endpoint_id: u64,
+        home_island: u32,
+    },
     Trap(RuntimeTrapKind),
 }
 
@@ -221,19 +227,21 @@ pub fn queue_send_core(
     // REMOTE channel — send via message passing
     if queue::is_remote(ch) {
         let proxy = queue::remote_proxy(ch);
-        if proxy.closed { return QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel); }
-        super::prepare_remote_send_value_if_needed(
-            ch,
-            src,
-            struct_metas,
-            runtime_types,
-            state,
-        );
+        if proxy.closed {
+            return QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel);
+        }
+        super::prepare_remote_send_value_if_needed(ch, src, struct_metas, runtime_types, state);
         let elem_meta = queue_state::elem_meta(ch);
         let result = QueueExecResult::RemoteSend {
             endpoint_id: proxy.endpoint_id,
             home_island: proxy.home_island,
-            data: super::transport::pack_transport_message(&state.gc, src, elem_meta, struct_metas, runtime_types),
+            data: super::transport::pack_transport_message(
+                &state.gc,
+                src,
+                elem_meta,
+                struct_metas,
+                runtime_types,
+            ),
         };
 
         return result;
@@ -251,7 +259,10 @@ pub fn queue_send_core(
     let waiter = QueueWaiter::simple(island_id, fiber_id);
     match queue::send_or_block_resolved(ch, value, waiter, island_id) {
         queue::ResolvedSendResult::Wake(receiver) => QueueExecResult::Wake(receiver),
-        queue::ResolvedSendResult::RemoteDirect { receiver, payload: value } => {
+        queue::ResolvedSendResult::RemoteDirect {
+            receiver,
+            payload: value,
+        } => {
             if em.value_kind().may_contain_gc_refs() {
                 super::prepare_value_queue_handles_for_transfer(
                     value.as_ref(),
@@ -281,7 +292,9 @@ pub fn queue_send_core(
         }
         queue::ResolvedSendResult::Buffered => QueueExecResult::Continue,
         queue::ResolvedSendResult::Blocked => QueueExecResult::Block,
-        queue::ResolvedSendResult::Closed => QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel),
+        queue::ResolvedSendResult::Closed => {
+            QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel)
+        }
     }
 }
 
@@ -308,7 +321,10 @@ pub fn queue_recv_core(ch: GcRef, island_id: u32, fiber_id: u64) -> QueueRecvCor
     match result {
         RecvResult::Success(woke_sender) => {
             let data = value_opt.expect("channel recv: success without payload");
-            QueueRecvCoreResult::Success { data, wake_sender: woke_sender }
+            QueueRecvCoreResult::Success {
+                data,
+                wake_sender: woke_sender,
+            }
         }
         RecvResult::Blocked => QueueRecvCoreResult::WouldBlock,
         RecvResult::WouldBlock => unreachable!("recv_or_block never returns WouldBlock"),
@@ -316,7 +332,13 @@ pub fn queue_recv_core(ch: GcRef, island_id: u32, fiber_id: u64) -> QueueRecvCor
     }
 }
 
-pub fn exec_queue_recv(stack: *mut Slot, bp: usize, island_id: u32, fiber_id: u32, inst: &Instruction) -> QueueExecResult {
+pub fn exec_queue_recv(
+    stack: *mut Slot,
+    bp: usize,
+    island_id: u32,
+    fiber_id: u32,
+    inst: &Instruction,
+) -> QueueExecResult {
     let ch = stack_get(stack, bp + inst.b as usize) as GcRef;
     let elem_slots = ((inst.flags >> 1) & 0x7F) as usize;
     let has_ok = (inst.flags & 1) != 0;
@@ -331,9 +353,13 @@ pub fn exec_queue_recv(stack: *mut Slot, bp: usize, island_id: u32, fiber_id: u3
         Ok(Some(sender)) => QueueExecResult::Wake(sender),
         Ok(None) => QueueExecResult::Continue,
         Err(QueueRecvCoreResult::WouldBlock) => QueueExecResult::ReplayThenBlock,
-        Err(QueueRecvCoreResult::Remote { endpoint_id, home_island }) => {
-            QueueExecResult::RemoteRecv { endpoint_id, home_island }
-        }
+        Err(QueueRecvCoreResult::Remote {
+            endpoint_id,
+            home_island,
+        }) => QueueExecResult::RemoteRecv {
+            endpoint_id,
+            home_island,
+        },
         Err(QueueRecvCoreResult::Trap(kind)) => QueueExecResult::Trap(kind),
         Err(QueueRecvCoreResult::Success { .. } | QueueRecvCoreResult::Closed) => {
             unreachable!("complete_queue_recv returned terminal recv result as Err")
@@ -351,7 +377,9 @@ pub fn queue_len(ch: GcRef) -> usize {
 
 #[inline]
 pub fn exec_queue_get<F>(stack: *mut Slot, bp: usize, inst: &Instruction, get: F)
-where F: FnOnce(GcRef) -> usize {
+where
+    F: FnOnce(GcRef) -> usize,
+{
     let obj = stack_get(stack, bp + inst.b as usize) as GcRef;
     let val = if obj.is_null() { 0 } else { get(obj) };
     stack_set(stack, bp + inst.a as usize, val as u64);
@@ -365,11 +393,16 @@ pub fn queue_close_core(ch: GcRef) -> QueueExecResult {
     // REMOTE channel close — send message to home island
     if queue::is_remote(ch) {
         let proxy = queue::remote_proxy(ch);
-        if proxy.closed { return QueueExecResult::Continue; }
+        if proxy.closed {
+            return QueueExecResult::Continue;
+        }
         let endpoint_id = proxy.endpoint_id;
         let home_island = proxy.home_island;
         queue::mark_remote_closed(ch);
-        return QueueExecResult::RemoteClose { endpoint_id, home_island };
+        return QueueExecResult::RemoteClose {
+            endpoint_id,
+            home_island,
+        };
     }
 
     if queue::is_closed(ch) {
@@ -377,16 +410,15 @@ pub fn queue_close_core(ch: GcRef) -> QueueExecResult {
     }
     queue::close(ch);
     let mut waiters: Vec<QueueWaiter> = queue::take_waiting_receivers(ch);
-    waiters.extend(
-        queue::take_waiting_senders(ch)
-            .into_iter()
-            .map(|(w, _)| w)
-    );
+    waiters.extend(queue::take_waiting_senders(ch).into_iter().map(|(w, _)| w));
     let endpoint_id = queue::home_info(ch).map(|info| info.endpoint_id);
     if waiters.is_empty() && endpoint_id.is_none() {
         QueueExecResult::Continue
     } else {
-        QueueExecResult::Close { waiters, endpoint_id }
+        QueueExecResult::Close {
+            waiters,
+            endpoint_id,
+        }
     }
 }
 
@@ -405,7 +437,13 @@ mod tests {
     use vo_runtime::ValueKind;
 
     fn make_byte_slice(gc: &mut Gc, bytes: &[u8]) -> GcRef {
-        let slice_ref = slice::create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, bytes.len(), bytes.len());
+        let slice_ref = slice::create(
+            gc,
+            ValueMeta::new(0, ValueKind::Uint8),
+            1,
+            bytes.len(),
+            bytes.len(),
+        );
         for (i, &byte) in bytes.iter().enumerate() {
             slice::set(slice_ref, i, byte as u64, 1);
         }

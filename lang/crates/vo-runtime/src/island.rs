@@ -18,7 +18,7 @@ use vo_common_core::types::{ValueKind, ValueMeta};
 
 /// GC object layout for island handle.
 /// This is what Vo code sees as `island` type.
-/// 
+///
 /// Note: Command channels are managed by VM, not stored in GC objects.
 #[repr(C)]
 pub struct IslandData {
@@ -37,9 +37,7 @@ impl_gc_object!(IslandData);
 #[derive(Debug)]
 pub enum IslandCommand {
     /// Spawn a new fiber with packed closure data
-    SpawnFiber {
-        closure_data: PackedValue,
-    },
+    SpawnFiber { closure_data: PackedValue },
     /// Wake a blocked fiber (no PC modification - blocker sets resume PC)
     WakeFiber { fiber_id: u32 },
     /// Request island shutdown

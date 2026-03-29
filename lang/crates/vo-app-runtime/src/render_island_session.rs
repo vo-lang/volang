@@ -51,10 +51,7 @@ impl RenderIslandSession {
 
     // ── Island frame management ─────────────────────────────────────────
 
-    pub fn push_inbound_island_frame(
-        &mut self,
-        data: &[u8],
-    ) -> Result<(), SessionError> {
+    pub fn push_inbound_island_frame(&mut self, data: &[u8]) -> Result<(), SessionError> {
         self.session.push_inbound_island_frame(data)
     }
 

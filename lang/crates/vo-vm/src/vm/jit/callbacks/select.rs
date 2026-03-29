@@ -16,7 +16,7 @@ use super::helpers::{extract_context, set_jit_panic};
 // =============================================================================
 
 /// Initialize a new select statement.
-/// 
+///
 /// Arguments:
 /// - case_count: number of cases in the select
 /// - has_default: 1 if select has a default case, 0 otherwise
@@ -93,15 +93,12 @@ pub extern "C" fn jit_select_recv(
 /// - JitResult::Ok if select completed (result_reg contains case index)
 /// - JitResult::WaitQueue if select blocked (fiber registered on channels)
 /// - JitResult::Panic if send on closed channel
-pub extern "C" fn jit_select_exec(
-    ctx: *mut JitContext,
-    result_reg: u32,
-) -> JitResult {
+pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitResult {
     let (vm, fiber) = unsafe { extract_context(ctx) };
-    
+
     let stack = fiber.stack.as_mut_ptr() as *mut Slot;
     let bp = unsafe { (*ctx).jit_bp as usize };
-    
+
     match exec::exec_select_exec(
         stack,
         bp,
@@ -115,9 +112,11 @@ pub extern "C" fn jit_select_exec(
         SelectResult::SendOnClosed => {
             set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED)
         }
-        SelectResult::UnsupportedRemotePort => {
-            set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SELECT_REMOTE_UNSUPPORTED)
-        }
+        SelectResult::UnsupportedRemotePort => set_jit_panic(
+            &mut vm.state.gc,
+            fiber,
+            helpers::ERR_SELECT_REMOTE_UNSUPPORTED,
+        ),
         SelectResult::Wake(waiter) => {
             vm.state.wake_waiter(&waiter, &mut vm.scheduler);
             JitResult::Ok

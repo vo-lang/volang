@@ -9,9 +9,9 @@ use vo_common::symbol::{Symbol, SymbolInterner};
 use crate::ast::{
     AssignOp, BinaryOp, Block, CaseClause, ChanDir, CommClause, CompositeLitKey, ConstDecl,
     ConstSpec, Decl, DynAccessOp, Expr, ExprKind, File, ForClause, FuncDecl, FuncSig, FuncType,
-    Ident, IfStmt, ImportDecl, InterfaceElem, InterfaceType, Param, PortType,
-    Receiver, ResultParam, SelectCase, SelectStmt, Stmt, StmtKind, StructType, SwitchStmt,
-    TypeCaseClause, TypeDecl, TypeExpr, TypeExprKind, TypeSwitchStmt, UnaryOp, VarDecl, VarSpec,
+    Ident, IfStmt, ImportDecl, InterfaceElem, InterfaceType, Param, PortType, Receiver,
+    ResultParam, SelectCase, SelectStmt, Stmt, StmtKind, StructType, SwitchStmt, TypeCaseClause,
+    TypeDecl, TypeExpr, TypeExprKind, TypeSwitchStmt, UnaryOp, VarDecl, VarSpec,
 };
 
 pub fn format_file(file: &File, interner: &SymbolInterner) -> String {
@@ -28,7 +28,11 @@ pub fn fmt_expr(expr: &Expr, f: &mut fmt::Formatter<'_>, interner: &SymbolIntern
 }
 
 /// Formats a type expression to a string representation.
-pub fn fmt_type_expr(ty: &TypeExpr, f: &mut fmt::Formatter<'_>, interner: &SymbolInterner) -> fmt::Result {
+pub fn fmt_type_expr(
+    ty: &TypeExpr,
+    f: &mut fmt::Formatter<'_>,
+    interner: &SymbolInterner,
+) -> fmt::Result {
     let mut printer = SourcePrinter::new(interner);
     printer.write_type_expr(ty);
     f.write_str(&printer.finish())
@@ -408,7 +412,12 @@ impl<'a> SourcePrinter<'a> {
                     self.write_stmt_inline(post);
                 }
             }
-            ForClause::Range { key, value, define, expr } => {
+            ForClause::Range {
+                key,
+                value,
+                define,
+                expr,
+            } => {
                 self.write_char(' ');
                 if let Some(key) = key {
                     self.write_expr(key);
@@ -469,7 +478,10 @@ impl<'a> SourcePrinter<'a> {
 
     fn write_type_switch_stmt(&mut self, stmt: &TypeSwitchStmt) {
         self.write_str("switch");
-        if stmt.init.is_some() || stmt.assign.is_some() || !matches!(stmt.expr.kind, ExprKind::TypeAssert(_)) {
+        if stmt.init.is_some()
+            || stmt.assign.is_some()
+            || !matches!(stmt.expr.kind, ExprKind::TypeAssert(_))
+        {
             self.write_char(' ');
             if let Some(init) = &stmt.init {
                 self.write_stmt_inline(init);
@@ -561,7 +573,10 @@ impl<'a> SourcePrinter<'a> {
     }
 
     fn write_block(&mut self, block: &Block) {
-        let has_non_empty = block.stmts.iter().any(|stmt| !matches!(stmt.kind, StmtKind::Empty));
+        let has_non_empty = block
+            .stmts
+            .iter()
+            .any(|stmt| !matches!(stmt.kind, StmtKind::Empty));
         if !has_non_empty {
             self.write_str("{}");
             return;
@@ -892,7 +907,11 @@ impl<'a> SourcePrinter<'a> {
                         self.write_char(']');
                     }
                     DynAccessOp::Call { args, spread } => self.write_call_args(args, *spread),
-                    DynAccessOp::MethodCall { method, args, spread } => {
+                    DynAccessOp::MethodCall {
+                        method,
+                        args,
+                        spread,
+                    } => {
                         self.write_ident(method);
                         self.write_call_args(args, *spread);
                     }

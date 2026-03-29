@@ -7,14 +7,14 @@
 //! - Abstract Syntax Tree definitions
 //! - Recursive descent parser with Pratt expression parsing
 
-pub mod token;
-pub mod lexer;
 pub mod ast;
-pub mod parser;
-pub mod errors;
 pub mod display;
+pub mod errors;
+pub mod lexer;
+pub mod parser;
+pub mod token;
 
-pub use token::{Token, TokenKind};
-pub use lexer::Lexer;
 pub use ast::*;
-pub use parser::{Parser, parse, parse_with_interner};
+pub use lexer::Lexer;
+pub use parser::{parse, parse_with_interner, Parser};
+pub use token::{Token, TokenKind};

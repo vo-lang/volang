@@ -3,8 +3,8 @@
 //! Uses vo-syntax for proper parsing of .vo files.
 
 use std::path::Path;
-use vo_syntax::{self, ast, TypeExprKind};
 use vo_common::symbol::SymbolInterner;
+use vo_syntax::{self, ast, TypeExprKind};
 
 /// A parsed Vo function signature.
 #[derive(Debug, Clone)]
@@ -13,7 +13,6 @@ pub struct VoFuncSig {
     pub params: Vec<VoParam>,
     pub results: Vec<VoType>,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct VoImport {
@@ -97,24 +96,22 @@ impl std::fmt::Display for VoType {
             VoType::Slice(inner) => write!(f, "[]{}", inner),
             VoType::Array(len, inner) => write!(f, "[{}]{}", len, inner),
             VoType::Map(k, v) => write!(f, "map[{}]{}", k, v),
-            VoType::Chan(dir, inner) => {
-                match dir {
-                    ChanDir::Both => write!(f, "chan {}", inner),
-                    ChanDir::Send => write!(f, "chan<- {}", inner),
-                    ChanDir::Recv => write!(f, "<-chan {}", inner),
-                }
-            }
-            VoType::Port(dir, inner) => {
-                match dir {
-                    ChanDir::Both => write!(f, "port {}", inner),
-                    ChanDir::Send => write!(f, "port<- {}", inner),
-                    ChanDir::Recv => write!(f, "<-port {}", inner),
-                }
-            }
+            VoType::Chan(dir, inner) => match dir {
+                ChanDir::Both => write!(f, "chan {}", inner),
+                ChanDir::Send => write!(f, "chan<- {}", inner),
+                ChanDir::Recv => write!(f, "<-chan {}", inner),
+            },
+            VoType::Port(dir, inner) => match dir {
+                ChanDir::Both => write!(f, "port {}", inner),
+                ChanDir::Send => write!(f, "port<- {}", inner),
+                ChanDir::Recv => write!(f, "<-port {}", inner),
+            },
             VoType::Func(params, results) => {
                 write!(f, "func(")?;
                 for (i, p) in params.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", p)?;
                 }
                 write!(f, ")")?;
@@ -124,7 +121,9 @@ impl std::fmt::Display for VoType {
                     } else {
                         write!(f, " (")?;
                         for (i, r) in results.iter().enumerate() {
-                            if i > 0 { write!(f, ", ")?; }
+                            if i > 0 {
+                                write!(f, ", ")?;
+                            }
                             write!(f, "{}", r)?;
                         }
                         write!(f, ")")?;
@@ -144,23 +143,39 @@ impl VoType {
     pub fn slot_count(&self, type_aliases: &std::collections::HashMap<String, VoType>) -> u16 {
         match self {
             // Primitive types: 1 slot each
-            VoType::Int | VoType::Int8 | VoType::Int16 | VoType::Int32 | VoType::Int64 |
-            VoType::Uint | VoType::Uint8 | VoType::Uint16 | VoType::Uint32 | VoType::Uint64 |
-            VoType::Float32 | VoType::Float64 | VoType::Bool | VoType::String => 1,
-            
+            VoType::Int
+            | VoType::Int8
+            | VoType::Int16
+            | VoType::Int32
+            | VoType::Int64
+            | VoType::Uint
+            | VoType::Uint8
+            | VoType::Uint16
+            | VoType::Uint32
+            | VoType::Uint64
+            | VoType::Float32
+            | VoType::Float64
+            | VoType::Bool
+            | VoType::String => 1,
+
             // Any/interface: 2 slots (slot0=metadata, slot1=data)
             VoType::Any => 2,
-            
+
             // Reference types: 1 slot (GcRef)
-            VoType::Pointer(_) | VoType::Slice(_) | VoType::Map(_, _) | 
-            VoType::Chan(_, _) | VoType::Port(_, _) | VoType::Island | VoType::Func(_, _) => 1,
-            
+            VoType::Pointer(_)
+            | VoType::Slice(_)
+            | VoType::Map(_, _)
+            | VoType::Chan(_, _)
+            | VoType::Port(_, _)
+            | VoType::Island
+            | VoType::Func(_, _) => 1,
+
             // Array: elem_slots * length
             VoType::Array(len, elem) => {
                 let elem_slots = elem.slot_count(type_aliases);
                 elem_slots * (*len as u16)
             }
-            
+
             // Named type: resolve alias
             VoType::Named(name) => {
                 // Try to resolve type alias
@@ -172,14 +187,12 @@ impl VoType {
                     1
                 }
             }
-            
+
             // Variadic: treated as slice (1 slot)
             VoType::Variadic(_) => 1,
-            
+
             // Struct: sum of all field slots
-            VoType::Struct(fields) => {
-                fields.iter().map(|f| f.slot_count(type_aliases)).sum()
-            }
+            VoType::Struct(fields) => fields.iter().map(|f| f.slot_count(type_aliases)).sum(),
         }
     }
 
@@ -190,17 +203,29 @@ impl VoType {
     pub fn to_slot_type(&self) -> Option<crate::codegen::SlotType> {
         use crate::codegen::SlotType;
         match self {
-            VoType::Int | VoType::Int8 | VoType::Int16 | VoType::Int32 | VoType::Int64 => Some(SlotType::I64),
-            VoType::Uint | VoType::Uint8 | VoType::Uint16 | VoType::Uint32 | VoType::Uint64 => Some(SlotType::U64),
+            VoType::Int | VoType::Int8 | VoType::Int16 | VoType::Int32 | VoType::Int64 => {
+                Some(SlotType::I64)
+            }
+            VoType::Uint | VoType::Uint8 | VoType::Uint16 | VoType::Uint32 | VoType::Uint64 => {
+                Some(SlotType::U64)
+            }
             VoType::Float32 => Some(SlotType::F32),
             VoType::Float64 => Some(SlotType::F64),
             VoType::Bool => Some(SlotType::Bool),
             VoType::String => Some(SlotType::Str),
-            VoType::Slice(inner) if matches!(inner.as_ref(), VoType::Uint8) => Some(SlotType::Bytes),
+            VoType::Slice(inner) if matches!(inner.as_ref(), VoType::Uint8) => {
+                Some(SlotType::Bytes)
+            }
             VoType::Any => Some(SlotType::Any),
-            VoType::Pointer(_) | VoType::Slice(_) | VoType::Array(_, _) |
-            VoType::Map(_, _) | VoType::Chan(_, _) | VoType::Port(_, _) |
-            VoType::Island | VoType::Func(_, _) | VoType::Named(_) => Some(SlotType::GcRef),
+            VoType::Pointer(_)
+            | VoType::Slice(_)
+            | VoType::Array(_, _)
+            | VoType::Map(_, _)
+            | VoType::Chan(_, _)
+            | VoType::Port(_, _)
+            | VoType::Island
+            | VoType::Func(_, _)
+            | VoType::Named(_) => Some(SlotType::GcRef),
             VoType::Variadic(_) | VoType::Struct(_) => None,
         }
     }
@@ -221,11 +246,10 @@ impl VoType {
 
 /// Iterate over all `.vo` files in a directory, parsing each one and calling the
 /// visitor with the AST and interner. Skips files that fail to read.
-fn for_each_parsed_vo_file(
-    pkg_dir: &Path,
-    mut visitor: impl FnMut(&ast::File, &SymbolInterner),
-) {
-    let Ok(entries) = std::fs::read_dir(pkg_dir) else { return };
+fn for_each_parsed_vo_file(pkg_dir: &Path, mut visitor: impl FnMut(&ast::File, &SymbolInterner)) {
+    let Ok(entries) = std::fs::read_dir(pkg_dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().map(|e| e == "vo").unwrap_or(false) {
@@ -248,7 +272,11 @@ pub fn parse_type_aliases(pkg_dir: &Path) -> std::collections::HashMap<String, V
 }
 
 /// Parse type aliases from AST using vo-syntax parser.
-fn parse_type_aliases_from_ast(file: &ast::File, aliases: &mut std::collections::HashMap<String, VoType>, interner: &SymbolInterner) {
+fn parse_type_aliases_from_ast(
+    file: &ast::File,
+    aliases: &mut std::collections::HashMap<String, VoType>,
+    interner: &SymbolInterner,
+) {
     for decl in &file.decls {
         if let ast::Decl::Type(type_decl) = decl {
             if let Some(name) = interner.resolve(type_decl.name.symbol) {
@@ -294,7 +322,10 @@ fn type_expr_to_vo_type(type_expr: &ast::TypeExpr, interner: &SymbolInterner) ->
             let len = match &arr.len.kind {
                 ast::ExprKind::IntLit(n) => {
                     // Parse the raw int literal string to get the value
-                    interner.resolve(n.raw).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0)
+                    interner
+                        .resolve(n.raw)
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(0)
                 }
                 _ => 0,
             };
@@ -329,7 +360,9 @@ fn type_expr_to_vo_type(type_expr: &ast::TypeExpr, interner: &SymbolInterner) ->
             VoType::Port(dir, Box::new(elem))
         }
         TypeExprKind::Func(func) => {
-            let params: Vec<VoType> = func.params.iter()
+            let params: Vec<VoType> = func
+                .params
+                .iter()
                 .flat_map(|p| {
                     let ty = type_expr_to_vo_type(&p.ty, interner);
                     // Each named param gets its own slot
@@ -337,13 +370,17 @@ fn type_expr_to_vo_type(type_expr: &ast::TypeExpr, interner: &SymbolInterner) ->
                     std::iter::repeat(ty).take(count)
                 })
                 .collect();
-            let results: Vec<VoType> = func.results.iter()
+            let results: Vec<VoType> = func
+                .results
+                .iter()
                 .map(|r| type_expr_to_vo_type(&r.ty, interner))
                 .collect();
             VoType::Func(params, results)
         }
         TypeExprKind::Struct(struct_type) => {
-            let field_types: Vec<VoType> = struct_type.fields.iter()
+            let field_types: Vec<VoType> = struct_type
+                .fields
+                .iter()
                 .flat_map(|field| {
                     let ty = type_expr_to_vo_type(&field.ty, interner);
                     // Each named field gets its own slot, embedded field is 1
@@ -366,7 +403,9 @@ fn type_expr_to_vo_type(type_expr: &ast::TypeExpr, interner: &SymbolInterner) ->
 pub fn find_extern_func(pkg_dir: &Path, func_name: &str) -> Result<VoFuncSig, String> {
     let mut result = None;
     for_each_parsed_vo_file(pkg_dir, |file, interner| {
-        if result.is_some() { return; }
+        if result.is_some() {
+            return;
+        }
         for decl in &file.decls {
             if let ast::Decl::Func(func_decl) = decl {
                 let name = interner.resolve(func_decl.name.symbol).unwrap_or("");
@@ -382,22 +421,35 @@ pub fn find_extern_func(pkg_dir: &Path, func_name: &str) -> Result<VoFuncSig, St
 
 /// Convert vo-syntax FuncDecl to VoFuncSig.
 fn func_decl_to_vo_sig(func_decl: &ast::FuncDecl, interner: &SymbolInterner) -> VoFuncSig {
-    let name = interner.resolve(func_decl.name.symbol).unwrap_or("").to_string();
-    
-    let params: Vec<VoParam> = func_decl.sig.params.iter()
+    let name = interner
+        .resolve(func_decl.name.symbol)
+        .unwrap_or("")
+        .to_string();
+
+    let params: Vec<VoParam> = func_decl
+        .sig
+        .params
+        .iter()
         .flat_map(|param| {
             let ty = type_expr_to_vo_type(&param.ty, interner);
             if param.names.is_empty() {
-                vec![VoParam { name: String::new(), ty }]
+                vec![VoParam {
+                    name: String::new(),
+                    ty,
+                }]
             } else {
-                param.names.iter().map(|n| VoParam {
-                    name: interner.resolve(n.symbol).unwrap_or("").to_string(),
-                    ty: ty.clone(),
-                }).collect()
+                param
+                    .names
+                    .iter()
+                    .map(|n| VoParam {
+                        name: interner.resolve(n.symbol).unwrap_or("").to_string(),
+                        ty: ty.clone(),
+                    })
+                    .collect()
             }
         })
         .collect();
-    
+
     // Handle variadic: wrap last param type in Variadic
     let params = if func_decl.sig.variadic && !params.is_empty() {
         let mut params = params;
@@ -408,12 +460,19 @@ fn func_decl_to_vo_sig(func_decl: &ast::FuncDecl, interner: &SymbolInterner) -> 
     } else {
         params
     };
-    
-    let results: Vec<VoType> = func_decl.sig.results.iter()
+
+    let results: Vec<VoType> = func_decl
+        .sig
+        .results
+        .iter()
         .map(|r| type_expr_to_vo_type(&r.ty, interner))
         .collect();
-    
-    VoFuncSig { name, params, results }
+
+    VoFuncSig {
+        name,
+        params,
+        results,
+    }
 }
 
 /// Parse imports from a package directory using vo-syntax parser.
@@ -422,8 +481,14 @@ pub fn parse_imports(pkg_dir: &Path) -> Vec<VoImport> {
     for_each_parsed_vo_file(pkg_dir, |file, interner| {
         for import in &file.imports {
             let path_str = import.path.value.clone();
-            let alias = import.alias.as_ref().map(|a| interner.resolve(a.symbol).unwrap_or("").to_string());
-            imports.push(VoImport { alias, path: path_str });
+            let alias = import
+                .alias
+                .as_ref()
+                .map(|a| interner.resolve(a.symbol).unwrap_or("").to_string());
+            imports.push(VoImport {
+                alias,
+                path: path_str,
+            });
         }
     });
     imports
@@ -433,7 +498,9 @@ pub fn parse_imports(pkg_dir: &Path) -> Vec<VoImport> {
 pub fn find_package_name(pkg_dir: &Path) -> Option<String> {
     let mut result = None;
     for_each_parsed_vo_file(pkg_dir, |file, interner| {
-        if result.is_some() { return; }
+        if result.is_some() {
+            return;
+        }
         if let Some(pkg) = &file.package {
             if let Some(name) = interner.resolve(pkg.symbol) {
                 result = Some(name.to_string());

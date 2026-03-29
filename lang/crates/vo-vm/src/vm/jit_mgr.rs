@@ -14,8 +14,8 @@ use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 
 use std::collections::HashMap;
 
-use vo_jit::{JitCompiler, JitError, JitFunc, LoopFunc, LoopInfo};
 use vo_jit::loop_analysis::analyze_loops;
+use vo_jit::{JitCompiler, JitError, JitFunc, LoopFunc, LoopInfo};
 
 // =============================================================================
 // Configuration
@@ -65,19 +65,19 @@ pub enum CompileState {
 pub struct FunctionJitInfo {
     /// Compilation state.
     pub state: CompileState,
-    
+
     /// Full function JIT entry.
     pub full_entry: Option<JitFunc>,
-    
+
     /// Call count (for triggering full compilation).
     pub call_count: u32,
-    
+
     /// Loop backedge counts: (begin_pc) -> count.
     pub loop_counts: HashMap<usize, u32>,
-    
+
     /// Analyzed loops (lazily populated).
     pub loops: Option<Vec<LoopInfo>>,
-    
+
     /// Loops that failed compilation (never retry).
     pub failed_loops: std::collections::HashSet<usize>,
 }
@@ -103,19 +103,19 @@ impl FunctionJitInfo {
 pub struct JitManager {
     /// Per-function JIT info.
     funcs: Vec<FunctionJitInfo>,
-    
+
     /// Fast dispatch table: func_id -> full_entry pointer (null = use VM).
     /// Used by JIT code for direct JIT-to-JIT calls.
     func_table: Vec<*const u8>,
-    
+
     /// Direct call table: only populated for functions that pass can_direct_jit_call
     /// (no CallClosure/CallIface). Used by prepare_closure_call / prepare_iface_call
     /// to decide if JIT-to-JIT direct call is safe from the fast path.
     direct_call_table: Vec<*const u8>,
-    
+
     /// Cranelift compiler.
     compiler: JitCompiler,
-    
+
     /// Configuration.
     config: JitConfig,
 
@@ -139,7 +139,7 @@ impl JitManager {
             available_direct_callees_buf: Vec::new(),
         })
     }
-    
+
     /// Create a new JIT manager with custom config.
     pub fn with_config(config: JitConfig) -> Result<Self, JitError> {
         let compiler = JitCompiler::with_debug(config.debug_ir)?;
@@ -152,41 +152,39 @@ impl JitManager {
             available_direct_callees_buf: Vec::new(),
         })
     }
-    
+
     /// Initialize for a module (call after module load).
     pub fn init(&mut self, func_count: usize) {
-        self.funcs = (0..func_count)
-            .map(|_| FunctionJitInfo::new())
-            .collect();
+        self.funcs = (0..func_count).map(|_| FunctionJitInfo::new()).collect();
         self.func_table = vec![std::ptr::null(); func_count];
         self.direct_call_table = vec![std::ptr::null(); func_count];
     }
-    
+
     /// Get function table pointer for JIT code.
     #[inline]
     pub fn func_table_ptr(&self) -> *const *const u8 {
         self.func_table.as_ptr()
     }
-    
+
     /// Get function table length.
     #[inline]
     pub fn func_table_len(&self) -> usize {
         self.func_table.len()
     }
-    
+
     /// Get direct call table pointer for JIT code.
     /// Only contains entries for functions safe for JIT-to-JIT direct calls (no CallClosure/CallIface).
     #[inline]
     pub fn direct_call_table_ptr(&self) -> *const *const u8 {
         self.direct_call_table.as_ptr()
     }
-    
+
     /// Get direct call table length.
     #[inline]
     pub fn direct_call_table_len(&self) -> usize {
         self.direct_call_table.len()
     }
-    
+
     /// Get JIT configuration (for passing to island threads).
     #[inline]
     pub fn config(&self) -> &JitConfig {
@@ -203,11 +201,11 @@ impl JitManager {
             }
         }
     }
-    
+
     // =========================================================================
     // Query API
     // =========================================================================
-    
+
     /// Get full function JIT entry for dispatch (O(1)).
     /// Returns None if should use VM.
     #[inline]
@@ -219,31 +217,36 @@ impl JitManager {
             Some(unsafe { std::mem::transmute(*ptr) })
         }
     }
-    
+
     /// Resolve which version to use for a function call.
     /// Returns Some(jit_func) if JIT version available, None for VM fallback.
     /// Also handles hot tracking and triggers compilation when threshold reached.
-    pub fn resolve_call(&mut self, func_id: u32, func_def: &FunctionDef, module: &VoModule) -> Option<JitFunc> {
+    pub fn resolve_call(
+        &mut self,
+        func_id: u32,
+        func_def: &FunctionDef,
+        module: &VoModule,
+    ) -> Option<JitFunc> {
         // 1. Already have JIT version?
         if let Some(jit_func) = self.get_entry(func_id) {
             return Some(jit_func);
         }
-        
+
         // 2. Record call, compile if hot
         if self.record_call(func_id) {
             if self.compile_full(func_id, func_def, module).is_ok() {
                 return self.get_entry(func_id);
             }
         }
-        
+
         // 3. Fall back to VM
         None
     }
-    
+
     // =========================================================================
     // Recording API
     // =========================================================================
-    
+
     /// Record a function call. Returns true if the function should be compiled.
     pub fn record_call(&mut self, func_id: u32) -> bool {
         let id = func_id as usize;
@@ -254,45 +257,50 @@ impl JitManager {
         info.call_count += 1;
         info.call_count >= self.config.call_threshold && info.state == CompileState::Interpreted
     }
-    
+
     /// Record a loop backedge hit. Returns true if loop OSR should be triggered.
     pub fn record_backedge(&mut self, func_id: u32, loop_begin_pc: usize) -> bool {
         let id = func_id as usize;
-        let info = &mut self.funcs[id];  // Panic if out of range - same as record_call
-        
+        let info = &mut self.funcs[id]; // Panic if out of range - same as record_call
+
         let count = info.loop_counts.entry(loop_begin_pc).or_insert(0);
         *count += 1;
         *count >= self.config.loop_threshold
     }
-    
+
     /// Get or analyze loops for a function.
     pub fn get_loops(&mut self, func_id: u32, func_def: &FunctionDef) -> &[LoopInfo] {
         let id = func_id as usize;
         let info = &mut self.funcs[id];
-        
+
         if info.loops.is_none() {
             info.loops = Some(analyze_loops(func_def));
         }
-        
+
         info.loops.as_ref().unwrap()
     }
-    
+
     /// Find loop info by begin_pc.
-    pub fn find_loop(&mut self, func_id: u32, func_def: &FunctionDef, begin_pc: usize) -> Option<LoopInfo> {
+    pub fn find_loop(
+        &mut self,
+        func_id: u32,
+        func_def: &FunctionDef,
+        begin_pc: usize,
+    ) -> Option<LoopInfo> {
         let loops = self.get_loops(func_id, func_def);
         loops.iter().find(|l| l.begin_pc == begin_pc).cloned()
     }
-    
+
     // =========================================================================
     // Compilation API
     // =========================================================================
-    
+
     /// Compile full function version.
     pub fn compile_full(
-        &mut self, 
-        func_id: u32, 
-        func_def: &FunctionDef, 
-        module: &VoModule
+        &mut self,
+        func_id: u32,
+        func_def: &FunctionDef,
+        module: &VoModule,
     ) -> Result<(), JitError> {
         let idx = func_id as usize;
         let current_state = match self.funcs.get(idx) {
@@ -304,16 +312,16 @@ impl JitManager {
         if current_state == CompileState::FullyCompiled {
             return Ok(());
         }
-        
+
         // Build a snapshot of currently compiled functions so codegen can emit
         // direct FuncRef calls for non-self static callees when possible.
         let mut available_direct_callees = std::mem::take(&mut self.available_direct_callees_buf);
         self.rebuild_available_direct_callees(&mut available_direct_callees);
 
         // Compile
-        let compile_result = self
-            .compiler
-            .compile(func_id, func_def, module, &available_direct_callees);
+        let compile_result =
+            self.compiler
+                .compile(func_id, func_def, module, &available_direct_callees);
         self.available_direct_callees_buf = available_direct_callees;
         if let Err(e) = compile_result {
             if let Some(info) = self.funcs.get_mut(idx) {
@@ -321,49 +329,51 @@ impl JitManager {
             }
             return Err(e);
         }
-        
+
         // Get function pointer
         let ptr = unsafe { self.compiler.get_func_ptr(func_id) }
             .ok_or_else(|| JitError::Internal("compiled but no pointer".into()))?;
-        
+
         // Update state
         if let Some(info) = self.funcs.get_mut(idx) {
             info.full_entry = Some(ptr);
             info.state = CompileState::FullyCompiled;
         }
         self.func_table[idx] = ptr as *const u8;
-        
+
         // Only populate direct_call_table if function is safe for JIT-to-JIT direct calls
         // from prepare callbacks. Functions with CallClosure/CallIface can return JitResult::Call
         // which the fast path non-OK handler cannot handle.
         if vo_jit::can_direct_jit_call(func_def) {
             self.direct_call_table[idx] = ptr as *const u8;
         }
-        
+
         Ok(())
     }
-    
+
     /// Check if function is already compiled.
     pub fn is_compiled(&self, func_id: u32) -> bool {
-        self.funcs.get(func_id as usize)
+        self.funcs
+            .get(func_id as usize)
             .map(|info| info.state == CompileState::FullyCompiled)
             .unwrap_or(false)
     }
-    
+
     /// Check if function is marked as unsupported.
     pub fn is_unsupported(&self, func_id: u32) -> bool {
-        self.funcs.get(func_id as usize)
+        self.funcs
+            .get(func_id as usize)
             .map(|info| info.state == CompileState::Unsupported)
             .unwrap_or(false)
     }
-    
+
     /// Mark function as unsupported.
     pub fn mark_unsupported(&mut self, func_id: u32) {
         if let Some(info) = self.funcs.get_mut(func_id as usize) {
             info.state = CompileState::Unsupported;
         }
     }
-    
+
     /// Compile function (alias for compile_full).
     pub fn compile_function(
         &mut self,
@@ -373,21 +383,22 @@ impl JitManager {
     ) -> Result<(), JitError> {
         self.compile_full(func_id, func_def, module)
     }
-    
+
     /// Check if a loop has failed compilation.
     pub fn is_loop_failed(&self, func_id: u32, begin_pc: usize) -> bool {
-        self.funcs.get(func_id as usize)
+        self.funcs
+            .get(func_id as usize)
             .map(|info| info.failed_loops.contains(&begin_pc))
             .unwrap_or(false)
     }
-    
+
     /// Mark a loop as failed (never retry).
     pub fn mark_loop_failed(&mut self, func_id: u32, begin_pc: usize) {
         if let Some(info) = self.funcs.get_mut(func_id as usize) {
             info.failed_loops.insert(begin_pc);
         }
     }
-    
+
     /// Compile a loop for OSR.
     pub fn compile_loop(
         &mut self,
@@ -398,16 +409,19 @@ impl JitManager {
     ) -> Result<(), JitError> {
         let mut available_direct_callees = std::mem::take(&mut self.available_direct_callees_buf);
         self.rebuild_available_direct_callees(&mut available_direct_callees);
-        let compile_result = self.compiler
-            .compile_loop(func_id, func_def, module, loop_info, &available_direct_callees)
-        ;
+        let compile_result = self.compiler.compile_loop(
+            func_id,
+            func_def,
+            module,
+            loop_info,
+            &available_direct_callees,
+        );
         self.available_direct_callees_buf = available_direct_callees;
         compile_result
     }
-    
+
     /// Get loop function pointer.
     pub unsafe fn get_loop_func(&self, func_id: u32, begin_pc: usize) -> Option<LoopFunc> {
         self.compiler.get_loop_func_ptr(func_id, begin_pc)
     }
-    
 }

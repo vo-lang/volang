@@ -13,12 +13,7 @@ use crate::type_info::TypeInfoWrapper;
 
 use super::{compile_expr, compile_expr_to, get_gcref_slot, traverse_indirect_field};
 
-fn emit_ptr_with_slot_offset(
-    src_ptr: u16,
-    offset_slots: u16,
-    dst: u16,
-    func: &mut FuncBuilder,
-) {
+fn emit_ptr_with_slot_offset(src_ptr: u16, offset_slots: u16, dst: u16, func: &mut FuncBuilder) {
     if offset_slots == 0 {
         func.emit_copy(dst, src_ptr, 1);
         return;
@@ -30,13 +25,13 @@ fn emit_ptr_with_slot_offset(
 }
 
 /// Get the GcRef and offset for an addressable expression.
-/// 
+///
 /// Returns (gcref_slot, total_offset) if the expression is addressable and on heap.
 /// Used for:
 /// - Taking address of variables: &x
 /// - Taking address of struct fields: &outer.field
 /// - Passing pointer receiver to methods: x.Method() where Method has *T receiver
-/// 
+///
 /// Handles: Ident, Selector (nested field access)
 pub fn get_addressable_gcref(
     expr: &Expr,
@@ -79,7 +74,7 @@ pub fn get_addressable_gcref(
 /// Get pointer to an expression. Unified handler for:
 /// - Method receiver when expects_ptr_recv=true
 /// - Address-of operator (&x)
-/// 
+///
 /// Handles all cases where we need a pointer to an expression's value.
 pub fn compile_expr_to_ptr(
     expr: &Expr,
@@ -89,22 +84,29 @@ pub fn compile_expr_to_ptr(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let expr_type = info.expr_type(expr.id);
-    
+
     // Case 1: Expression is already pointer type → just compile it
     if info.is_pointer(expr_type) {
         let reg = compile_expr(expr, ctx, func, info)?;
         func.emit_copy(dst, reg, 1);
         return Ok(());
     }
-    
+
     // Case 2: Index expression → get element address
     if let ExprKind::Index(index_expr) = &expr.kind {
         let container_type = info.expr_type(index_expr.expr.id);
         if info.is_slice(container_type) || info.is_array(container_type) {
-            return crate::lvalue::compile_index_addr(&index_expr.expr, &index_expr.index, dst, ctx, func, info);
+            return crate::lvalue::compile_index_addr(
+                &index_expr.expr,
+                &index_expr.index,
+                dst,
+                ctx,
+                func,
+                info,
+            );
         }
     }
-    
+
     // Case 3: Selector - recursively get base pointer, then apply field offset.
     // Supports both pointer-base selectors and heap-boxed value selectors.
     if let ExprKind::Selector(sel) = &expr.kind {
@@ -117,7 +119,8 @@ pub fn compile_expr_to_ptr(
                 }
 
                 if selection.indirect() {
-                    let resolved = traverse_indirect_field(sel, selection.indices(), ctx, func, info)?;
+                    let resolved =
+                        traverse_indirect_field(sel, selection.indices(), ctx, func, info)?;
                     if resolved.is_ptr {
                         emit_ptr_with_slot_offset(resolved.base_reg, resolved.offset, dst, func);
                         return Ok(());
@@ -134,7 +137,10 @@ pub fn compile_expr_to_ptr(
             } else {
                 recv_type
             };
-            let field_name = info.project.interner.resolve(sel.sel.symbol)
+            let field_name = info
+                .project
+                .interner
+                .resolve(sel.sel.symbol)
                 .ok_or_else(|| CodegenError::Internal("cannot resolve field name".to_string()))?;
             let (field_offset, _) = info.selector_field_offset(expr.id, base_type, field_name);
 
@@ -144,7 +150,7 @@ pub fn compile_expr_to_ptr(
             return Ok(());
         }
     }
-    
+
     // Case 4: Captured variable in closure → get GcRef via ClosureGet
     if let ExprKind::Ident(ident) = &expr.kind {
         if let Some(capture) = func.lookup_capture(ident.symbol) {
@@ -154,16 +160,16 @@ pub fn compile_expr_to_ptr(
             return Ok(());
         }
     }
-    
+
     // Case 5: Addressable on heap (variable or field with static offset)
     if let Some((gcref_slot, offset)) = get_addressable_gcref(expr, func, info) {
         emit_ptr_with_slot_offset(gcref_slot, offset, dst, func);
         return Ok(());
     }
-    
-    Err(CodegenError::UnsupportedExpr(
-        format!("cannot get pointer to expression")
-    ))
+
+    Err(CodegenError::UnsupportedExpr(format!(
+        "cannot get pointer to expression"
+    )))
 }
 
 /// Compile address-of operator (&x).
@@ -183,12 +189,17 @@ pub fn compile_addr_of(
         let meta_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         func.emit_with_flags(Opcode::PtrNew, slots as u8, dst, meta_reg, 0);
-        
+
         for (i, elem) in lit.elems.iter().enumerate() {
             let (offset, field_slots, field_type) = if let Some(key) = &elem.key {
                 if let vo_syntax::ast::CompositeLitKey::Ident(field_ident) = key {
-                    let field_name = info.project.interner.resolve(field_ident.symbol)
-                        .ok_or_else(|| CodegenError::Internal("cannot resolve field name".to_string()))?;
+                    let field_name = info
+                        .project
+                        .interner
+                        .resolve(field_ident.symbol)
+                        .ok_or_else(|| {
+                            CodegenError::Internal("cannot resolve field name".to_string())
+                        })?;
                     info.struct_field_offset_with_type(type_key, field_name)
                 } else {
                     continue;
@@ -196,11 +207,18 @@ pub fn compile_addr_of(
             } else {
                 info.struct_field_offset_by_index_with_type(type_key, i)
             };
-            
+
             if info.is_interface(field_type) {
                 let field_slot_types = info.type_slot_types(field_type);
                 let tmp = func.alloc_slots(&field_slot_types);
-                crate::assign::emit_assign(tmp, crate::assign::AssignSource::Expr(&elem.value), field_type, ctx, func, info)?;
+                crate::assign::emit_assign(
+                    tmp,
+                    crate::assign::AssignSource::Expr(&elem.value),
+                    field_type,
+                    ctx,
+                    func,
+                    info,
+                )?;
                 func.emit_ptr_set_with_barrier(dst, offset, tmp, field_slots, true);
             } else {
                 let may_gc_ref = info.type_value_kind(field_type).may_contain_gc_refs();
@@ -212,7 +230,7 @@ pub fn compile_addr_of(
         }
         return Ok(());
     }
-    
+
     // All other cases: delegate to compile_expr_to_ptr
     compile_expr_to_ptr(operand, dst, ctx, func, info)
 }
@@ -231,4 +249,3 @@ pub fn compile_deref(
     func.emit_ptr_get(dst, ptr_reg, 0, elem_slots);
     Ok(())
 }
-

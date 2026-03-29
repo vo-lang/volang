@@ -4,10 +4,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use vo_runtime::bytecode::Module;
-use vo_runtime::ValueMeta;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::map;
 use vo_runtime::slot::Slot;
+use vo_runtime::ValueMeta;
 
 use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
@@ -47,7 +47,9 @@ pub fn exec_map_get(stack: *mut Slot, bp: usize, inst: &Instruction, module: Opt
     }
 
     let key_start = bp + inst.c as usize + 1;
-    let key: Vec<u64> = (0..key_slots).map(|i| stack_get(stack, key_start + i)).collect();
+    let key: Vec<u64> = (0..key_slots)
+        .map(|i| stack_get(stack, key_start + i))
+        .collect();
 
     let (val_opt, ok) = map::get_with_ok(m, &key, module);
     if let Some(val) = val_opt {
@@ -69,7 +71,13 @@ pub fn exec_map_get(stack: *mut Slot, bp: usize, inst: &Instruction, module: Opt
 /// flags: bit0 = key may contain GcRef, bit1 = val may contain GcRef
 /// Returns true if successful, false if interface key has uncomparable type (should panic)
 #[inline]
-pub fn exec_map_set(stack: *const Slot, bp: usize, inst: &Instruction, gc: &mut Gc, module: Option<&Module>) -> bool {
+pub fn exec_map_set(
+    stack: *const Slot,
+    bp: usize,
+    inst: &Instruction,
+    gc: &mut Gc,
+    module: Option<&Module>,
+) -> bool {
     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
     let meta = stack_get(stack, bp + inst.b as usize);
     let key_slots = ((meta >> 8) & 0xFF) as usize;
@@ -78,8 +86,12 @@ pub fn exec_map_set(stack: *const Slot, bp: usize, inst: &Instruction, gc: &mut 
     let key_start = bp + inst.b as usize + 1;
     let val_start = bp + inst.c as usize;
 
-    let key: Vec<u64> = (0..key_slots).map(|i| stack_get(stack, key_start + i)).collect();
-    let val: Vec<u64> = (0..val_slots).map(|i| stack_get(stack, val_start + i)).collect();
+    let key: Vec<u64> = (0..key_slots)
+        .map(|i| stack_get(stack, key_start + i))
+        .collect();
+    let val: Vec<u64> = (0..val_slots)
+        .map(|i| stack_get(stack, val_start + i))
+        .collect();
 
     // Check if key is interface (2 slots) with uncomparable underlying type
     if key_slots == 2 {
@@ -89,9 +101,9 @@ pub fn exec_map_set(stack: *const Slot, bp: usize, inst: &Instruction, gc: &mut 
             let slot0 = key[0];
             let inner_vk = vo_runtime::objects::interface::unpack_value_kind(slot0);
             match inner_vk {
-                vo_runtime::ValueKind::Slice | 
-                vo_runtime::ValueKind::Map | 
-                vo_runtime::ValueKind::Closure => {
+                vo_runtime::ValueKind::Slice
+                | vo_runtime::ValueKind::Map
+                | vo_runtime::ValueKind::Closure => {
                     return false; // Uncomparable type - should panic
                 }
                 _ => {}
@@ -100,7 +112,7 @@ pub fn exec_map_set(stack: *const Slot, bp: usize, inst: &Instruction, gc: &mut 
     }
 
     map::set(m, &key, &val, module);
-    
+
     // Write barrier: only barrier slots that are actually GcRefs.
     // Uses typed_write_barrier_by_meta to avoid UB on mixed-slot types
     // (e.g., struct with int + pointer fields) where write_barrier would
@@ -122,7 +134,9 @@ pub fn exec_map_delete(stack: *const Slot, bp: usize, inst: &Instruction, module
 
     let key_start = bp + inst.b as usize + 1;
 
-    let key: Vec<u64> = (0..key_slots).map(|i| stack_get(stack, key_start + i)).collect();
+    let key: Vec<u64> = (0..key_slots)
+        .map(|i| stack_get(stack, key_start + i))
+        .collect();
 
     map::delete(m, &key, module);
 }
@@ -140,7 +154,7 @@ pub fn exec_map_len(stack: *mut Slot, bp: usize, inst: &Instruction) {
 pub fn exec_map_iter_init(stack: *mut Slot, bp: usize, inst: &Instruction) {
     let m = stack_get(stack, bp + inst.b as usize) as GcRef;
     let iter = map::iter_init(m);
-    
+
     let iter_slot = bp + inst.a as usize;
     const SLOTS: usize = map::MAP_ITER_SLOTS;
     const _: () = assert!(SLOTS == 7); // Verify assumption matches codegen
@@ -161,17 +175,15 @@ pub fn exec_map_iter_next(stack: *mut Slot, bp: usize, inst: &Instruction) {
     let ok_slot = bp + inst.c as usize;
     let key_slots = (inst.flags & 0x0F) as usize;
     let val_slots = ((inst.flags >> 4) & 0x0F) as usize;
-    
+
     // Get mutable reference to iterator on stack
-    let iter = unsafe {
-        &mut *(stack.add(iter_slot) as *mut map::MapIterator)
-    };
-    
+    let iter = unsafe { &mut *(stack.add(iter_slot) as *mut map::MapIterator) };
+
     match map::iter_next(iter) {
         Some((key, val)) => {
             let key_dst = bp + inst.a as usize;
             let val_dst = key_dst + key_slots;
-            
+
             for i in 0..key_slots.min(key.len()) {
                 stack_set(stack, key_dst + i, key[i]);
             }

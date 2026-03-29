@@ -1,14 +1,14 @@
 //! Centralized diagnostic definitions for the Vo parser.
 //!
 //! All parser error codes are defined here for easy reference and testing.
-//! 
+//!
 //! With global position space, all error reporting methods use `Span` directly
 //! without requiring a separate `FileId`.
 
 use vo_common::{Diagnostic, Label, Span};
 
 /// Parser error codes (1xxx range).
-/// 
+///
 /// Error code ranges:
 /// - 1000-1099: Lexer errors (literals, comments)
 /// - 1100-1199: Parser errors (syntax)

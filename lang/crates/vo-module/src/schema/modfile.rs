@@ -33,85 +33,100 @@ impl ModFile {
             match directive {
                 "module" => {
                     if module.is_some() {
-                        return Err(Error::ModFileParse(
-                            format!("line {}: duplicate 'module' directive", line_num + 1),
-                        ));
+                        return Err(Error::ModFileParse(format!(
+                            "line {}: duplicate 'module' directive",
+                            line_num + 1
+                        )));
                     }
                     if parts.len() < 2 {
-                        return Err(Error::ModFileParse(
-                            format!("line {}: 'module' requires a path argument", line_num + 1),
-                        ));
+                        return Err(Error::ModFileParse(format!(
+                            "line {}: 'module' requires a path argument",
+                            line_num + 1
+                        )));
                     }
                     if parts.len() > 2 {
-                        return Err(Error::ModFileParse(
-                            format!("line {}: unexpected tokens after module path", line_num + 1),
-                        ));
+                        return Err(Error::ModFileParse(format!(
+                            "line {}: unexpected tokens after module path",
+                            line_num + 1
+                        )));
                     }
-                    module = Some(ModulePath::parse(parts[1]).map_err(|e| {
-                        Error::ModFileParse(format!("line {}: {e}", line_num + 1))
-                    })?);
+                    module =
+                        Some(ModulePath::parse(parts[1]).map_err(|e| {
+                            Error::ModFileParse(format!("line {}: {e}", line_num + 1))
+                        })?);
                 }
                 "vo" => {
                     if vo.is_some() {
-                        return Err(Error::ModFileParse(
-                            format!("line {}: duplicate 'vo' directive", line_num + 1),
-                        ));
+                        return Err(Error::ModFileParse(format!(
+                            "line {}: duplicate 'vo' directive",
+                            line_num + 1
+                        )));
                     }
                     if parts.len() < 2 {
-                        return Err(Error::ModFileParse(
-                            format!("line {}: 'vo' requires a constraint argument", line_num + 1),
-                        ));
+                        return Err(Error::ModFileParse(format!(
+                            "line {}: 'vo' requires a constraint argument",
+                            line_num + 1
+                        )));
                     }
                     if parts.len() > 2 {
-                        return Err(Error::ModFileParse(
-                            format!("line {}: unexpected tokens after vo constraint", line_num + 1),
-                        ));
+                        return Err(Error::ModFileParse(format!(
+                            "line {}: unexpected tokens after vo constraint",
+                            line_num + 1
+                        )));
                     }
-                    vo = Some(ToolchainConstraint::parse(parts[1]).map_err(|e| {
-                        Error::ModFileParse(format!("line {}: {e}", line_num + 1))
-                    })?);
+                    vo =
+                        Some(ToolchainConstraint::parse(parts[1]).map_err(|e| {
+                            Error::ModFileParse(format!("line {}: {e}", line_num + 1))
+                        })?);
                 }
                 "require" => {
                     if parts.len() < 3 {
-                        return Err(Error::ModFileParse(
-                            format!("line {}: 'require' needs <module-path> <constraint>", line_num + 1),
-                        ));
+                        return Err(Error::ModFileParse(format!(
+                            "line {}: 'require' needs <module-path> <constraint>",
+                            line_num + 1
+                        )));
                     }
-                    let mp = ModulePath::parse(parts[1]).map_err(|e| {
-                        Error::ModFileParse(format!("line {}: {e}", line_num + 1))
-                    })?;
-                    let constraint = DepConstraint::parse(parts[2]).map_err(|e| {
-                        Error::ModFileParse(format!("line {}: {e}", line_num + 1))
-                    })?;
+                    let mp = ModulePath::parse(parts[1])
+                        .map_err(|e| Error::ModFileParse(format!("line {}: {e}", line_num + 1)))?;
+                    let constraint = DepConstraint::parse(parts[2])
+                        .map_err(|e| Error::ModFileParse(format!("line {}: {e}", line_num + 1)))?;
                     // Check for duplicate module path
                     if require.iter().any(|r| r.module == mp) {
-                        return Err(Error::ModFileParse(
-                            format!("line {}: duplicate require for {}", line_num + 1, mp),
-                        ));
+                        return Err(Error::ModFileParse(format!(
+                            "line {}: duplicate require for {}",
+                            line_num + 1,
+                            mp
+                        )));
                     }
-                    require.push(Require { module: mp, constraint });
+                    require.push(Require {
+                        module: mp,
+                        constraint,
+                    });
                 }
                 "replace" => {
-                    return Err(Error::ModFileParse(
-                        format!("line {}: 'replace' directive is not supported in vo.mod", line_num + 1),
-                    ));
+                    return Err(Error::ModFileParse(format!(
+                        "line {}: 'replace' directive is not supported in vo.mod",
+                        line_num + 1
+                    )));
                 }
                 _ => {
-                    return Err(Error::ModFileParse(
-                        format!("line {}: unknown directive '{directive}'", line_num + 1),
-                    ));
+                    return Err(Error::ModFileParse(format!(
+                        "line {}: unknown directive '{directive}'",
+                        line_num + 1
+                    )));
                 }
             }
         }
 
-        let module = module.ok_or_else(|| {
-            Error::ModFileParse("missing 'module' directive".to_string())
-        })?;
-        let vo = vo.ok_or_else(|| {
-            Error::ModFileParse("missing 'vo' directive".to_string())
-        })?;
+        let module =
+            module.ok_or_else(|| Error::ModFileParse("missing 'module' directive".to_string()))?;
+        let vo = vo.ok_or_else(|| Error::ModFileParse("missing 'vo' directive".to_string()))?;
 
-        Ok(ModFile { module, vo, require })
+        Ok(ModFile {
+            module,
+            vo,
+            require,
+        })
     }
 
     /// Render the canonical `vo.mod` text.
@@ -220,8 +235,14 @@ require github.com/vo-lang/vogui ^0.4.0
         let reparsed = ModFile::parse(&rendered).unwrap();
         // Check sorted order
         assert_eq!(reparsed.require[0].module.as_str(), "github.com/acme/http");
-        assert_eq!(reparsed.require[1].module.as_str(), "github.com/vo-lang/vogui");
-        assert_eq!(reparsed.require[2].module.as_str(), "github.com/vo-lang/voplay");
+        assert_eq!(
+            reparsed.require[1].module.as_str(),
+            "github.com/vo-lang/vogui"
+        );
+        assert_eq!(
+            reparsed.require[2].module.as_str(),
+            "github.com/vo-lang/voplay"
+        );
     }
 
     #[test]

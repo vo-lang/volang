@@ -5,19 +5,20 @@ use alloc::collections::VecDeque;
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-#[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use vo_runtime::gc::Gc;
 use vo_runtime::gc::GcRef;
-use vo_runtime::output::{OutputSink, default_sink};
+use vo_runtime::output::{default_sink, OutputSink};
 use vo_runtime::SentinelErrorCache;
 
 use vo_runtime::ffi::ExternRegistry;
-use vo_runtime::itab::ItabCache;
 use vo_runtime::island::{EndpointRequestKind, EndpointResponseKind, IslandCommand};
+use vo_runtime::itab::ItabCache;
 
+use hashbrown::HashMap as HbHashMap;
 #[cfg(feature = "std")]
 use std::collections::{HashMap as StdHashMap, VecDeque};
 #[cfg(feature = "std")]
@@ -28,7 +29,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 #[cfg(feature = "std")]
 use vo_runtime::island_transport::{IslandSender, IslandTransport, TransportError};
-use hashbrown::HashMap as HbHashMap;
 
 /// Shared registry of island senders.
 /// Island VMs use this shared map as their command-routing source.
@@ -38,9 +38,16 @@ pub type IslandRegistry = Arc<Mutex<StdHashMap<u32, Arc<dyn IslandSender>>>>;
 #[cfg(feature = "std")]
 #[derive(Debug)]
 pub enum IslandRouteError {
-    MissingSender { island_id: u32 },
-    RegistryPoisoned { island_id: u32 },
-    Transport { island_id: u32, error: TransportError },
+    MissingSender {
+        island_id: u32,
+    },
+    RegistryPoisoned {
+        island_id: u32,
+    },
+    Transport {
+        island_id: u32,
+        error: TransportError,
+    },
 }
 
 // =============================================================================
@@ -84,7 +91,9 @@ impl EndpointRegistry {
 
     /// Ensure endpoint is registered as live (idempotent).
     pub fn ensure_live(&mut self, endpoint_id: u64, ch: GcRef) {
-        self.entries.entry(endpoint_id).or_insert(EndpointEntry::Live(ch));
+        self.entries
+            .entry(endpoint_id)
+            .or_insert(EndpointEntry::Live(ch));
     }
 
     /// Get a live channel by endpoint ID. Returns None for tombstones and missing.
@@ -107,7 +116,10 @@ impl EndpointRegistry {
 
     /// Check if an endpoint is tombstoned.
     pub fn is_tombstone(&self, endpoint_id: u64) -> bool {
-        matches!(self.entries.get(&endpoint_id), Some(EndpointEntry::Tombstone))
+        matches!(
+            self.entries.get(&endpoint_id),
+            Some(EndpointEntry::Tombstone)
+        )
     }
 
     /// Clear all tombstones (called periodically or on shutdown).
@@ -115,7 +127,8 @@ impl EndpointRegistry {
         if self.tombstone_count == 0 {
             return;
         }
-        self.entries.retain(|_, v| matches!(v, EndpointEntry::Live(_)));
+        self.entries
+            .retain(|_, v| matches!(v, EndpointEntry::Live(_)));
         self.tombstone_count = 0;
     }
 
@@ -175,27 +188,27 @@ pub struct ErrorLocation {
     pub pc: u32,
 }
 
- #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
- pub enum RuntimeTrapKind {
-     NilPointerDereference,
-     NilMapWrite,
-     UnhashableType,
-     UncomparableType,
-     NegativeShift,
-     NilFuncCall,
-     TypeAssertionFailed,
-     DivisionByZero,
-     IndexOutOfBounds,
-     SliceBoundsOutOfRange,
-     MakeSlice,
-     MakeChan,
-     MakePort,
-     SendOnClosedChannel,
-     SendOnNilChannel,
-     RecvOnNilChannel,
-     CloseNilChannel,
-     CloseClosedChannel,
- }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeTrapKind {
+    NilPointerDereference,
+    NilMapWrite,
+    UnhashableType,
+    UncomparableType,
+    NegativeShift,
+    NilFuncCall,
+    TypeAssertionFailed,
+    DivisionByZero,
+    IndexOutOfBounds,
+    SliceBoundsOutOfRange,
+    MakeSlice,
+    MakeChan,
+    MakePort,
+    SendOnClosedChannel,
+    SendOnNilChannel,
+    RecvOnNilChannel,
+    CloseNilChannel,
+    CloseClosedChannel,
+}
 
 /// Scheduling loop outcome - separates scheduling from deadlock handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,7 +240,10 @@ pub enum VmError {
         msg: String,
         loc: Option<ErrorLocation>,
     },
-    PanicUnwound { msg: Option<String>, loc: Option<ErrorLocation> },
+    PanicUnwound {
+        msg: Option<String>,
+        loc: Option<ErrorLocation>,
+    },
     Deadlock(String),
 }
 
@@ -320,7 +336,7 @@ impl VmState {
             pending_island_responses: 0,
         }
     }
-    
+
     /// Send wake command to an island.
     /// Delegates to send_to_island so both main VM and island threads work.
     pub fn send_wake_to_island(&mut self, island_id: u32, fiber_id: u32) {
@@ -330,7 +346,11 @@ impl VmState {
     /// Send any command to an island.
     /// Main VM uses `island_senders`; island VMs use the shared in-thread registry.
     #[cfg(feature = "std")]
-    pub fn try_send_to_island(&self, island_id: u32, cmd: IslandCommand) -> Result<(), IslandRouteError> {
+    pub fn try_send_to_island(
+        &self,
+        island_id: u32,
+        cmd: IslandCommand,
+    ) -> Result<(), IslandRouteError> {
         if let Some(sender) = self.island_senders.get(&island_id) {
             return sender
                 .send_command(cmd)
@@ -358,9 +378,13 @@ impl VmState {
                 self.outbound_commands.push_back((island_id, cmd));
                 return;
             }
-            self.try_send_to_island(island_id, cmd).unwrap_or_else(|error| {
-                panic!("send_to_island failed for island {}: {:?}", island_id, error)
-            });
+            self.try_send_to_island(island_id, cmd)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "send_to_island failed for island {}: {:?}",
+                        island_id, error
+                    )
+                });
             return;
         }
         #[cfg(not(feature = "std"))]
@@ -369,7 +393,11 @@ impl VmState {
         }
     }
 
-    pub fn send_spawn_fiber_to_island(&mut self, island_id: u32, closure_data: vo_runtime::pack::PackedValue) {
+    pub fn send_spawn_fiber_to_island(
+        &mut self,
+        island_id: u32,
+        closure_data: vo_runtime::pack::PackedValue,
+    ) {
         self.send_to_island(island_id, IslandCommand::SpawnFiber { closure_data });
     }
 
@@ -381,12 +409,15 @@ impl VmState {
         from_island: u32,
         fiber_id: u64,
     ) {
-        self.send_to_island(island_id, IslandCommand::EndpointRequest {
-            endpoint_id,
-            kind,
-            from_island,
-            fiber_id,
-        });
+        self.send_to_island(
+            island_id,
+            IslandCommand::EndpointRequest {
+                endpoint_id,
+                kind,
+                from_island,
+                fiber_id,
+            },
+        );
     }
 
     pub fn send_endpoint_send_request(
@@ -434,11 +465,14 @@ impl VmState {
         kind: EndpointResponseKind,
         fiber_id: u64,
     ) {
-        self.send_to_island(island_id, IslandCommand::EndpointResponse {
-            endpoint_id,
-            kind,
-            fiber_id,
-        });
+        self.send_to_island(
+            island_id,
+            IslandCommand::EndpointResponse {
+                endpoint_id,
+                kind,
+                fiber_id,
+            },
+        );
     }
 
     pub fn send_endpoint_recv_data_response(
@@ -451,7 +485,10 @@ impl VmState {
         self.send_endpoint_response(
             island_id,
             endpoint_id,
-            EndpointResponseKind::RecvData { data, closed: false },
+            EndpointResponseKind::RecvData {
+                data,
+                closed: false,
+            },
             fiber_id,
         );
     }
@@ -479,7 +516,11 @@ impl VmState {
     }
 
     /// Wake a waiter (local or remote). No PC modification - blocker sets resume PC.
-    pub fn wake_waiter(&mut self, waiter: &vo_runtime::objects::queue_state::QueueWaiter, scheduler: &mut crate::scheduler::Scheduler) {
+    pub fn wake_waiter(
+        &mut self,
+        waiter: &vo_runtime::objects::queue_state::QueueWaiter,
+        scheduler: &mut crate::scheduler::Scheduler,
+    ) {
         if waiter.island_id == self.current_island_id {
             scheduler.wake_queue_waiter(waiter);
         } else {

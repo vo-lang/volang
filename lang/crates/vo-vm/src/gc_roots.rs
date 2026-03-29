@@ -5,8 +5,8 @@ use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use vo_runtime::gc::{scan_slots_by_types, Gc, GcRef};
 use vo_runtime::ffi::SentinelErrorCache;
+use vo_runtime::gc::{scan_slots_by_types, Gc, GcRef};
 
 use crate::bytecode::{FunctionDef, GlobalDef};
 use crate::fiber::{DeferEntry, Fiber, PanicState};
@@ -46,9 +46,8 @@ fn scan_defer_entry(gc: &mut Gc, entry: &DeferEntry, functions: &[FunctionDef]) 
         let arg_slots = entry.arg_slots as usize;
         if arg_slots > 0 {
             if let Some(func) = functions.get(func_id as usize) {
-                let args_data = unsafe {
-                    core::slice::from_raw_parts(entry.args as *const u64, arg_slots)
-                };
+                let args_data =
+                    unsafe { core::slice::from_raw_parts(entry.args as *const u64, arg_slots) };
                 let slot_types = &func.slot_types[..arg_slots.min(func.slot_types.len())];
                 scan_slots_by_types(gc, args_data, slot_types);
             }
@@ -64,7 +63,11 @@ impl Vm {
 
         let module = self.module.as_ref().unwrap();
         scan_globals(&mut self.state.gc, &self.state.globals, &module.globals);
-        scan_fibers(&mut self.state.gc, &self.scheduler.fibers, &module.functions);
+        scan_fibers(
+            &mut self.state.gc,
+            &self.scheduler.fibers,
+            &module.functions,
+        );
         scan_sentinel_errors(&mut self.state.gc, &self.state.sentinel_errors);
     }
 
@@ -95,7 +98,9 @@ impl Vm {
 
         // Collect capture_slot_types for closure scanning.
         // Each entry is indexed by func_id — used by scan_closure to get capture types.
-        let func_capture_slot_types: Vec<&[vo_runtime::SlotType]> = module_ref.functions.iter()
+        let func_capture_slot_types: Vec<&[vo_runtime::SlotType]> = module_ref
+            .functions
+            .iter()
             .map(|f| f.capture_slot_types.as_slice())
             .collect();
 
@@ -112,7 +117,12 @@ impl Vm {
                 }
             },
             |gc, obj| {
-                vo_runtime::gc_types::scan_object(gc, obj, &module_ref.struct_metas, &func_capture_slot_types);
+                vo_runtime::gc_types::scan_object(
+                    gc,
+                    obj,
+                    &module_ref.struct_metas,
+                    &func_capture_slot_types,
+                );
             },
             |obj| {
                 vo_runtime::gc_types::finalize_object(obj);
@@ -145,7 +155,9 @@ fn scan_fibers(gc: &mut Gc, fibers: &[Box<Fiber>], functions: &[FunctionDef]) {
     for fiber in fibers {
         // Dead fibers are waiting for slot reuse — their stack may contain stale GcRefs
         // that would incorrectly keep objects alive. Skip them.
-        if fiber.state.is_dead() { continue; }
+        if fiber.state.is_dead() {
+            continue;
+        }
 
         // Scan stack frames (VM frames)
         // Note: resume_stack (JIT shadow frames) doesn't need scanning because
@@ -215,7 +227,9 @@ fn scan_fibers(gc: &mut Gc, fibers: &[Box<Fiber>], functions: &[FunctionDef]) {
         // Scan select state — registered_channels holds channel GcRefs while blocked in select.
         if let Some(ref ss) = fiber.select_state {
             for &ch in &ss.registered_queues {
-                if !ch.is_null() { gc.mark_gray(ch); }
+                if !ch.is_null() {
+                    gc.mark_gray(ch);
+                }
             }
         }
 

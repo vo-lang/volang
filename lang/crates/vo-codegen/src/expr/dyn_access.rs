@@ -16,7 +16,7 @@ use super::compile_expr_to;
 /// Args layout: (base[2], args_slice_ref[1], expected_ret_count[1], expected_metas[N], is_any_flags[N])
 /// Returns: (result_slots..., error[2])
 fn compile_dyn_call_unified(
-    base_reg: u16,  // any[2] containing callable
+    base_reg: u16, // any[2] containing callable
     args: &[Expr],
     spread: bool,
     dst: u16,
@@ -28,7 +28,7 @@ fn compile_dyn_call_unified(
     let expected_ret_count = ret_types.len() as u16;
     let any_type = info.any_type();
     let arg_count = args.len();
-    
+
     // Step 1: Pack args into []any slice via dyn_pack_any_slice
     let pack_extern = ctx.get_or_register_extern("dyn_pack_any_slice");
     let mut pack_arg_types = vec![SlotType::Value, SlotType::Value];
@@ -37,30 +37,54 @@ fn compile_dyn_call_unified(
         pack_arg_types.push(SlotType::Interface1);
     }
     let pack_args = func.alloc_slots(&pack_arg_types);
-    func.emit_op(Opcode::LoadInt, pack_args, arg_count as u16, (arg_count >> 16) as u16);
-    func.emit_op(Opcode::LoadInt, pack_args + 1, if spread { 1 } else { 0 }, 0);
-    
+    func.emit_op(
+        Opcode::LoadInt,
+        pack_args,
+        arg_count as u16,
+        (arg_count >> 16) as u16,
+    );
+    func.emit_op(
+        Opcode::LoadInt,
+        pack_args + 1,
+        if spread { 1 } else { 0 },
+        0,
+    );
+
     for (i, arg) in args.iter().enumerate() {
         let dst_slot = pack_args + 2 + (i as u16) * 2;
         let arg_type = info.expr_type(arg.id);
         if info.is_interface(arg_type) {
             compile_expr_to(arg, dst_slot, ctx, func, info)?;
         } else {
-            crate::assign::emit_assign(dst_slot, crate::assign::AssignSource::Expr(arg), any_type, ctx, func, info)?;
+            crate::assign::emit_assign(
+                dst_slot,
+                crate::assign::AssignSource::Expr(arg),
+                any_type,
+                ctx,
+                func,
+                info,
+            )?;
         }
     }
-    
-    let pack_result = func.alloc_slots(&[SlotType::GcRef, SlotType::Interface0, SlotType::Interface1]);
+
+    let pack_result =
+        func.alloc_slots(&[SlotType::GcRef, SlotType::Interface0, SlotType::Interface1]);
     let pack_arg_count = (2 + arg_count * 2) as u8;
-    func.emit_with_flags(Opcode::CallExtern, pack_arg_count, pack_result, pack_extern as u16, pack_args);
-    
+    func.emit_with_flags(
+        Opcode::CallExtern,
+        pack_arg_count,
+        pack_result,
+        pack_extern as u16,
+        pack_args,
+    );
+
     // Check pack error
     let expected_dst_slots = info.dyn_access_dst_slots(ret_types);
     let skip_pack_error = func.emit_jump(Opcode::JumpIfNot, pack_result + 1);
     let pack_error_done = func.emit_error_propagation(pack_result + 1, dst, expected_dst_slots);
     func.patch_jump(skip_pack_error, func.current_pc());
     let slice_ref_reg = pack_result;
-    
+
     // Step 2: Build expected metas and is_any flags for return types
     let mut metas = Vec::with_capacity(ret_types.len());
     let mut is_any_flags = Vec::with_capacity(ret_types.len());
@@ -69,55 +93,70 @@ fn compile_dyn_call_unified(
         let vk = info.type_value_kind(ret_type);
         let meta = ((rttid as u64) << 8) | (vk as u64);
         metas.push(meta);
-        is_any_flags.push(if info.is_any_type(ret_type) { 1u64 } else { 0u64 });
+        is_any_flags.push(if info.is_any_type(ret_type) {
+            1u64
+        } else {
+            0u64
+        });
     }
-    
+
     // Step 3: Call dyn_call extern
     // Args: (base[2], args_slice_ref[1], expected_ret_count[1], expected_metas[N], is_any_flags[N])
     let (call_ret_slots, call_error_offset) = call_result_types_len(ret_types, info);
     let call_extern_id = ctx.get_or_register_extern_with_ret_slots("dyn_call", call_ret_slots);
-    
-    let call_arg_count = 2 + 1 + 1 + expected_ret_count * 2;  // base[2] + slice[1] + ret_count[1] + metas[N] + is_any[N]
+
+    let call_arg_count = 2 + 1 + 1 + expected_ret_count * 2; // base[2] + slice[1] + ret_count[1] + metas[N] + is_any[N]
     let mut call_arg_types = vec![
-        SlotType::Interface0, SlotType::Interface1,  // base
-        SlotType::GcRef,                              // args_slice_ref
-        SlotType::Value,                              // expected_ret_count
+        SlotType::Interface0,
+        SlotType::Interface1, // base
+        SlotType::GcRef,      // args_slice_ref
+        SlotType::Value,      // expected_ret_count
     ];
     for _ in 0..expected_ret_count {
-        call_arg_types.push(SlotType::Value);  // metas
+        call_arg_types.push(SlotType::Value); // metas
     }
     for _ in 0..expected_ret_count {
-        call_arg_types.push(SlotType::Value);  // is_any flags
+        call_arg_types.push(SlotType::Value); // is_any flags
     }
     let call_args = func.alloc_slots(&call_arg_types);
-    
+
     // Set args
     func.emit_op(Opcode::Copy, call_args, base_reg, 0);
     func.emit_op(Opcode::Copy, call_args + 1, base_reg + 1, 0);
     func.emit_op(Opcode::Copy, call_args + 2, slice_ref_reg, 0);
     let (b, c) = encode_i32(expected_ret_count as i32);
     func.emit_op(Opcode::LoadInt, call_args + 3, b, c);
-    
+
     // Set metas
     let metas_offset = 4u16;
     for (i, &meta) in metas.iter().enumerate() {
         let meta_const = ctx.const_int(meta as i64);
-        func.emit_op(Opcode::LoadConst, call_args + metas_offset + i as u16, meta_const, 0);
+        func.emit_op(
+            Opcode::LoadConst,
+            call_args + metas_offset + i as u16,
+            meta_const,
+            0,
+        );
     }
-    
+
     // Set is_any flags
     let is_any_offset = metas_offset + expected_ret_count;
     for (i, &flag) in is_any_flags.iter().enumerate() {
-        func.emit_op(Opcode::LoadInt, call_args + is_any_offset + i as u16, flag as u16, 0);
+        func.emit_op(
+            Opcode::LoadInt,
+            call_args + is_any_offset + i as u16,
+            flag as u16,
+            0,
+        );
     }
-    
+
     // Build result types based on LHS
     let mut call_result_types = Vec::new();
     for &ret_type in ret_types {
         let is_any = info.is_any_type(ret_type);
         let slots = info.type_slot_count(ret_type);
         let vk = info.type_value_kind(ret_type);
-        
+
         if is_any {
             call_result_types.push(SlotType::Interface0);
             call_result_types.push(SlotType::Interface1);
@@ -146,7 +185,7 @@ fn compile_dyn_call_unified(
     }
     call_result_types.push(SlotType::Interface0);
     call_result_types.push(SlotType::Interface1);
-    
+
     let call_result = func.alloc_slots(&call_result_types);
     let call_error_slot = call_result + call_error_offset;
     func.emit_with_flags(
@@ -156,19 +195,24 @@ fn compile_dyn_call_unified(
         call_extern_id as u16,
         call_args,
     );
-    
+
     // Step 4: Copy results to dst
     let mut dst_off = 0u16;
     let mut src_off = 0u16;
-    
+
     for &ret_type in ret_types {
         let is_any = info.is_any_type(ret_type);
         let slots = info.type_slot_count(ret_type);
         let vk = info.type_value_kind(ret_type);
-        
+
         if is_any {
             func.emit_op(Opcode::Copy, dst + dst_off, call_result + src_off, 0);
-            func.emit_op(Opcode::Copy, dst + dst_off + 1, call_result + src_off + 1, 0);
+            func.emit_op(
+                Opcode::Copy,
+                dst + dst_off + 1,
+                call_result + src_off + 1,
+                0,
+            );
             src_off += 2;
             dst_off += 2;
         } else if slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array) {
@@ -181,18 +225,23 @@ fn compile_dyn_call_unified(
             dst_off += 1;
         } else {
             func.emit_op(Opcode::Copy, dst + dst_off, call_result + src_off, 0);
-            func.emit_op(Opcode::Copy, dst + dst_off + 1, call_result + src_off + 1, 0);
+            func.emit_op(
+                Opcode::Copy,
+                dst + dst_off + 1,
+                call_result + src_off + 1,
+                0,
+            );
             src_off += 2;
             dst_off += 2;
         }
     }
-    
+
     // Copy error
     func.emit_op(Opcode::Copy, dst + dst_off, call_error_slot, 0);
     func.emit_op(Opcode::Copy, dst + dst_off + 1, call_error_slot + 1, 0);
-    
+
     func.patch_jump(pack_error_done, func.current_pc());
-    
+
     Ok(())
 }
 
@@ -204,11 +253,11 @@ fn call_result_types_len(ret_types: &[vo_analysis::TypeKey], info: &TypeInfoWrap
         let is_any = info.is_any_type(ret_type);
         let slots = info.type_slot_count(ret_type);
         let vk = info.type_value_kind(ret_type);
-        
+
         if is_any {
             total += 2;
         } else if slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array) {
-            total += 2;  // (0, GcRef) format for large structs
+            total += 2; // (0, GcRef) format for large structs
         } else if slots == 1 {
             total += 1;
         } else {
@@ -216,11 +265,11 @@ fn call_result_types_len(ret_types: &[vo_analysis::TypeKey], info: &TypeInfoWrap
         }
     }
     let error_offset = total;
-    (total + 2, error_offset)  // +2 for error[2]
+    (total + 2, error_offset) // +2 for error[2]
 }
 
 /// Copy dyn_field result from extern format to dst.
-/// 
+///
 /// dyn_field returns (value[2], error[2]) in a fixed format:
 /// - Interface (any): slot0, slot1 = interface format
 /// - 1-slot types: slot0 = value, slot1 = 0
@@ -265,35 +314,35 @@ pub fn compile_dyn_access(
     // Expression type is a tuple: (T1, T2, ..., error) where last is error
     let expr_type = info.expr_type(expr.id);
     let ret_types = info.get_dyn_access_ret_types(expr_type);
-    
+
     // Compile base expression
     let base_type = info.expr_type(dyn_access.base.id);
     // Base is typically an interface (any), so use proper slot types for GC tracking
     let base_slot_types = info.type_slot_types(base_type);
     let base_reg = func.alloc_slots(&base_slot_types);
     compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
-    
+
     // Check if base is (any, error) tuple - need short-circuit
     let is_tuple_any_error = info.is_tuple_any_error(base_type);
-    
+
     // Record debug info
     let pc = func.current_pc() as u32;
     ctx.record_debug_loc(pc, expr.span, &info.project.source_map);
-    
+
     if is_tuple_any_error {
         // Short-circuit: if error slot is not nil, propagate error
         // base_reg+2, base_reg+3 = error (interface[2])
         // Check if error is nil (slot0 == 0) - JumpIfNot skips when false (i.e., nil)
         let skip_error_jump = func.emit_jump(Opcode::JumpIfNot, base_reg + 2);
-        
+
         // Error is set - use helper to propagate error
         let result_slots = info.dyn_access_dst_slots(&ret_types);
         let done_jump = func.emit_error_propagation(base_reg + 2, dst, result_slots);
-        
+
         // No error - continue with base value (first 2 slots)
         func.patch_jump(skip_error_jump, func.current_pc());
         compile_dyn_op(&dyn_access.op, base_reg, dst, &ret_types, ctx, func, info)?;
-        
+
         func.patch_jump(done_jump, func.current_pc());
     } else if info.is_interface(base_type) {
         // Dynamic dispatch: base is interface (any or other interface)
@@ -303,11 +352,18 @@ pub fn compile_dyn_access(
         // Box to any and use protocol dispatch
         // TODO: optimize to direct static call in the future
         let any_type = info.any_type();
-        let any_reg = func.alloc_interface();  // any is interface type
-        crate::assign::emit_assign(any_reg, crate::assign::AssignSource::Expr(&dyn_access.base), any_type, ctx, func, info)?;
+        let any_reg = func.alloc_interface(); // any is interface type
+        crate::assign::emit_assign(
+            any_reg,
+            crate::assign::AssignSource::Expr(&dyn_access.base),
+            any_type,
+            ctx,
+            func,
+            info,
+        )?;
         compile_dyn_op(&dyn_access.op, any_reg, dst, &ret_types, ctx, func, info)?;
     }
-    
+
     Ok(())
 }
 
@@ -325,11 +381,14 @@ fn compile_dyn_op(
         DynAccessOp::Field(ident) => {
             // Unified dyn_field extern: reflection + type assertion in one call
             let field_name = info.project.interner.resolve(ident.symbol).unwrap_or("");
-            let ret_type = ret_types.first().copied().unwrap_or_else(|| info.any_type());
+            let ret_type = ret_types
+                .first()
+                .copied()
+                .unwrap_or_else(|| info.any_type());
             let ret_slots = info.type_slot_count(ret_type);
             let ret_vk = info.type_value_kind(ret_type);
             let error_slot = dst + ret_slots;
-            
+
             // Get expected rttid (0 for any type)
             let expected_rttid = if info.is_any_type(ret_type) {
                 0
@@ -337,13 +396,14 @@ fn compile_dyn_op(
                 let rt = info.type_to_runtime_type(ret_type, ctx);
                 ctx.intern_rttid(rt)
             };
-            
+
             // Args: (base[2], field_name[1], expected_rttid[1], expected_vk[1]) = 5 slots
             let args = func.alloc_slots(&[
-                SlotType::Interface0, SlotType::Interface1,  // base
-                SlotType::GcRef,  // field_name string
-                SlotType::Value,  // expected_rttid
-                SlotType::Value,  // expected_vk
+                SlotType::Interface0,
+                SlotType::Interface1, // base
+                SlotType::GcRef,      // field_name string
+                SlotType::Value,      // expected_rttid
+                SlotType::Value,      // expected_vk
             ]);
             func.emit_copy(args, base_reg, 2);
             let name_idx = ctx.const_string(field_name);
@@ -351,18 +411,20 @@ fn compile_dyn_op(
             let rttid_const = ctx.const_int(expected_rttid as i64);
             func.emit_op(Opcode::LoadConst, args + 3, rttid_const, 0);
             func.emit_op(Opcode::LoadInt, args + 4, ret_vk as u16, 0);
-            
+
             // Result: (value[2], error[2]) = 4 slots fixed
             let result = func.alloc_slots(&[
-                SlotType::Value, SlotType::Value,  // value (format depends on ret_type)
-                SlotType::Interface0, SlotType::Interface1,  // error
+                SlotType::Value,
+                SlotType::Value, // value (format depends on ret_type)
+                SlotType::Interface0,
+                SlotType::Interface1, // error
             ]);
             let extern_id = ctx.get_or_register_extern("dyn_field");
             func.emit_with_flags(Opcode::CallExtern, 5, result, extern_id as u16, args);
-            
+
             // Copy result to dst based on ret_type
             emit_copy_dyn_field_result(ret_type, ret_slots, ret_vk, dst, result, func, info);
-            
+
             // Copy error
             func.emit_op(Opcode::Copy, error_slot, result + 2, 0);
             func.emit_op(Opcode::Copy, error_slot + 1, result + 3, 0);
@@ -371,24 +433,29 @@ fn compile_dyn_op(
             // Unified dyn_index extern: handles protocol + reflection in one call
             // Args: (base[2], key[2], expected_rttid[1], expected_vk[1]) = 6 slots
             // Returns: (value[2], error[2]) = 4 slots
-            let ret_type = ret_types.first().copied().unwrap_or_else(|| info.any_type());
+            let ret_type = ret_types
+                .first()
+                .copied()
+                .unwrap_or_else(|| info.any_type());
             let ret_slots = info.type_slot_count(ret_type);
             let error_slot = dst + ret_slots;
-            
+
             let extern_id = ctx.get_or_register_extern("dyn_index");
-            
+
             // Prepare args
             let args = func.alloc_slots(&[
-                SlotType::Interface0, SlotType::Interface1,  // base
-                SlotType::Interface0, SlotType::Interface1,  // key
-                SlotType::Value,  // expected_rttid
-                SlotType::Value,  // expected_vk
+                SlotType::Interface0,
+                SlotType::Interface1, // base
+                SlotType::Interface0,
+                SlotType::Interface1, // key
+                SlotType::Value,      // expected_rttid
+                SlotType::Value,      // expected_vk
             ]);
-            
+
             // Copy base
             func.emit_op(Opcode::Copy, args, base_reg, 0);
             func.emit_op(Opcode::Copy, args + 1, base_reg + 1, 0);
-            
+
             // Box key to any
             let any_type = info.any_type();
             let key_type = info.expr_type(index_expr.id);
@@ -396,13 +463,20 @@ fn compile_dyn_op(
             if key_slots == 2 && info.is_interface(key_type) {
                 compile_expr_to(index_expr, args + 2, ctx, func, info)?;
             } else {
-                crate::assign::emit_assign(args + 2, crate::assign::AssignSource::Expr(index_expr), any_type, ctx, func, info)?;
+                crate::assign::emit_assign(
+                    args + 2,
+                    crate::assign::AssignSource::Expr(index_expr),
+                    any_type,
+                    ctx,
+                    func,
+                    info,
+                )?;
             }
-            
+
             // Set expected type info
             // For dyn_index we need (rttid, vk), not (assert_kind, target_id)
             let expected_rttid = if info.is_interface(ret_type) {
-                0  // any type - no unboxing
+                0 // any type - no unboxing
             } else {
                 let rt = info.type_to_runtime_type(ret_type, ctx);
                 ctx.intern_rttid(rt)
@@ -412,18 +486,20 @@ fn compile_dyn_op(
             let rttid_hi = (expected_rttid >> 16) as u16;
             func.emit_op(Opcode::LoadInt, args + 4, rttid_lo, rttid_hi);
             func.emit_op(Opcode::LoadInt, args + 5, expected_vk as u16, 0);
-            
+
             // Call dyn_index: 6 arg slots, 4 ret slots
             let result = func.alloc_slots(&[
-                SlotType::Interface0, SlotType::Interface1,
-                SlotType::Interface0, SlotType::Interface1,
+                SlotType::Interface0,
+                SlotType::Interface1,
+                SlotType::Interface0,
+                SlotType::Interface1,
             ]);
             func.emit_with_flags(Opcode::CallExtern, 6, result, extern_id as u16, args);
-            
+
             // Copy result to destination
             let ret_vk = info.type_value_kind(ret_type);
             emit_copy_dyn_field_result(ret_type, ret_slots, ret_vk, dst, result, func, info);
-            
+
             // Copy error
             func.emit_op(Opcode::Copy, error_slot, result + 2, 0);
             func.emit_op(Opcode::Copy, error_slot + 1, result + 3, 0);
@@ -432,10 +508,24 @@ fn compile_dyn_op(
             // Unified dyn_call: handles both CallObject protocol and closure fallback
             compile_dyn_call_unified(base_reg, args, *spread, dst, ret_types, ctx, func, info)?;
         }
-        DynAccessOp::MethodCall { method, args, spread } => {
+        DynAccessOp::MethodCall {
+            method,
+            args,
+            spread,
+        } => {
             // Unified dyn_method: handles both AttrObject protocol and reflection in one extern
             let method_name = info.project.interner.resolve(method.symbol).unwrap_or("");
-            compile_dyn_method_unified(base_reg, method_name, args, *spread, dst, ret_types, ctx, func, info)?;
+            compile_dyn_method_unified(
+                base_reg,
+                method_name,
+                args,
+                *spread,
+                dst,
+                ret_types,
+                ctx,
+                func,
+                info,
+            )?;
         }
     }
     Ok(())
@@ -445,7 +535,7 @@ fn compile_dyn_op(
 /// Args layout: (base[2], method_name[1], args_slice[1], expected_ret_count[1], expected_metas[N], is_any_flags[N])
 /// Returns: (result_slots..., error[2])
 fn compile_dyn_method_unified(
-    base_reg: u16,  // any[2] containing receiver
+    base_reg: u16, // any[2] containing receiver
     method_name: &str,
     args: &[Expr],
     spread: bool,
@@ -458,7 +548,7 @@ fn compile_dyn_method_unified(
     let expected_ret_count = ret_types.len() as u16;
     let any_type = info.any_type();
     let arg_count = args.len();
-    
+
     // Step 1: Pack args into []any slice via dyn_pack_any_slice
     let pack_extern = ctx.get_or_register_extern("dyn_pack_any_slice");
     let mut pack_arg_types = vec![SlotType::Value, SlotType::Value];
@@ -467,30 +557,54 @@ fn compile_dyn_method_unified(
         pack_arg_types.push(SlotType::Interface1);
     }
     let pack_args = func.alloc_slots(&pack_arg_types);
-    func.emit_op(Opcode::LoadInt, pack_args, arg_count as u16, (arg_count >> 16) as u16);
-    func.emit_op(Opcode::LoadInt, pack_args + 1, if spread { 1 } else { 0 }, 0);
-    
+    func.emit_op(
+        Opcode::LoadInt,
+        pack_args,
+        arg_count as u16,
+        (arg_count >> 16) as u16,
+    );
+    func.emit_op(
+        Opcode::LoadInt,
+        pack_args + 1,
+        if spread { 1 } else { 0 },
+        0,
+    );
+
     for (i, arg) in args.iter().enumerate() {
         let dst_slot = pack_args + 2 + (i as u16) * 2;
         let arg_type = info.expr_type(arg.id);
         if info.is_interface(arg_type) {
             compile_expr_to(arg, dst_slot, ctx, func, info)?;
         } else {
-            crate::assign::emit_assign(dst_slot, crate::assign::AssignSource::Expr(arg), any_type, ctx, func, info)?;
+            crate::assign::emit_assign(
+                dst_slot,
+                crate::assign::AssignSource::Expr(arg),
+                any_type,
+                ctx,
+                func,
+                info,
+            )?;
         }
     }
-    
-    let pack_result = func.alloc_slots(&[SlotType::GcRef, SlotType::Interface0, SlotType::Interface1]);
+
+    let pack_result =
+        func.alloc_slots(&[SlotType::GcRef, SlotType::Interface0, SlotType::Interface1]);
     let pack_arg_count = (2 + arg_count * 2) as u8;
-    func.emit_with_flags(Opcode::CallExtern, pack_arg_count, pack_result, pack_extern as u16, pack_args);
-    
+    func.emit_with_flags(
+        Opcode::CallExtern,
+        pack_arg_count,
+        pack_result,
+        pack_extern as u16,
+        pack_args,
+    );
+
     // Check pack error
     let expected_dst_slots = info.dyn_access_dst_slots(ret_types);
     let skip_pack_error = func.emit_jump(Opcode::JumpIfNot, pack_result + 1);
     let pack_error_done = func.emit_error_propagation(pack_result + 1, dst, expected_dst_slots);
     func.patch_jump(skip_pack_error, func.current_pc());
     let slice_ref_reg = pack_result;
-    
+
     // Step 2: Build expected metas and is_any flags for return types
     let mut metas = Vec::with_capacity(ret_types.len());
     let mut is_any_flags = Vec::with_capacity(ret_types.len());
@@ -499,29 +613,34 @@ fn compile_dyn_method_unified(
         let vk = info.type_value_kind(ret_type);
         let meta = ((rttid as u64) << 8) | (vk as u64);
         metas.push(meta);
-        is_any_flags.push(if info.is_any_type(ret_type) { 1u64 } else { 0u64 });
+        is_any_flags.push(if info.is_any_type(ret_type) {
+            1u64
+        } else {
+            0u64
+        });
     }
-    
+
     // Step 3: Call dyn_method extern
     // Args: (base[2], method_name[1], args_slice[1], expected_ret_count[1], expected_metas[N], is_any_flags[N])
     let (call_ret_slots, call_error_offset) = call_result_types_len(ret_types, info);
     let call_extern_id = ctx.get_or_register_extern_with_ret_slots("dyn_method", call_ret_slots);
-    
-    let call_arg_count = 2 + 1 + 1 + 1 + expected_ret_count * 2;  // base[2] + name[1] + slice[1] + ret_count[1] + metas[N] + is_any[N]
+
+    let call_arg_count = 2 + 1 + 1 + 1 + expected_ret_count * 2; // base[2] + name[1] + slice[1] + ret_count[1] + metas[N] + is_any[N]
     let mut call_arg_types = vec![
-        SlotType::Interface0, SlotType::Interface1,  // base
-        SlotType::GcRef,                              // method_name
-        SlotType::GcRef,                              // args_slice_ref
-        SlotType::Value,                              // expected_ret_count
+        SlotType::Interface0,
+        SlotType::Interface1, // base
+        SlotType::GcRef,      // method_name
+        SlotType::GcRef,      // args_slice_ref
+        SlotType::Value,      // expected_ret_count
     ];
     for _ in 0..expected_ret_count {
-        call_arg_types.push(SlotType::Value);  // metas
+        call_arg_types.push(SlotType::Value); // metas
     }
     for _ in 0..expected_ret_count {
-        call_arg_types.push(SlotType::Value);  // is_any flags
+        call_arg_types.push(SlotType::Value); // is_any flags
     }
     let call_args = func.alloc_slots(&call_arg_types);
-    
+
     // Set args
     func.emit_op(Opcode::Copy, call_args, base_reg, 0);
     func.emit_op(Opcode::Copy, call_args + 1, base_reg + 1, 0);
@@ -530,27 +649,37 @@ fn compile_dyn_method_unified(
     func.emit_op(Opcode::Copy, call_args + 3, slice_ref_reg, 0);
     let (b, c) = encode_i32(expected_ret_count as i32);
     func.emit_op(Opcode::LoadInt, call_args + 4, b, c);
-    
+
     // Set metas
     let metas_offset = 5u16;
     for (i, &meta) in metas.iter().enumerate() {
         let meta_const = ctx.const_int(meta as i64);
-        func.emit_op(Opcode::LoadConst, call_args + metas_offset + i as u16, meta_const, 0);
+        func.emit_op(
+            Opcode::LoadConst,
+            call_args + metas_offset + i as u16,
+            meta_const,
+            0,
+        );
     }
-    
+
     // Set is_any flags
     let is_any_offset = metas_offset + expected_ret_count;
     for (i, &flag) in is_any_flags.iter().enumerate() {
-        func.emit_op(Opcode::LoadInt, call_args + is_any_offset + i as u16, flag as u16, 0);
+        func.emit_op(
+            Opcode::LoadInt,
+            call_args + is_any_offset + i as u16,
+            flag as u16,
+            0,
+        );
     }
-    
+
     // Build result types based on LHS
     let mut call_result_types = Vec::new();
     for &ret_type in ret_types {
         let is_any = info.is_any_type(ret_type);
         let slots = info.type_slot_count(ret_type);
         let vk = info.type_value_kind(ret_type);
-        
+
         if is_any {
             call_result_types.push(SlotType::Interface0);
             call_result_types.push(SlotType::Interface1);
@@ -579,7 +708,7 @@ fn compile_dyn_method_unified(
     }
     call_result_types.push(SlotType::Interface0);
     call_result_types.push(SlotType::Interface1);
-    
+
     let call_result = func.alloc_slots(&call_result_types);
     let call_error_slot = call_result + call_error_offset;
     func.emit_with_flags(
@@ -589,19 +718,24 @@ fn compile_dyn_method_unified(
         call_extern_id as u16,
         call_args,
     );
-    
+
     // Step 4: Copy results to dst
     let mut dst_off = 0u16;
     let mut src_off = 0u16;
-    
+
     for &ret_type in ret_types {
         let is_any = info.is_any_type(ret_type);
         let slots = info.type_slot_count(ret_type);
         let vk = info.type_value_kind(ret_type);
-        
+
         if is_any {
             func.emit_op(Opcode::Copy, dst + dst_off, call_result + src_off, 0);
-            func.emit_op(Opcode::Copy, dst + dst_off + 1, call_result + src_off + 1, 0);
+            func.emit_op(
+                Opcode::Copy,
+                dst + dst_off + 1,
+                call_result + src_off + 1,
+                0,
+            );
             src_off += 2;
             dst_off += 2;
         } else if slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array) {
@@ -614,17 +748,22 @@ fn compile_dyn_method_unified(
             dst_off += 1;
         } else {
             func.emit_op(Opcode::Copy, dst + dst_off, call_result + src_off, 0);
-            func.emit_op(Opcode::Copy, dst + dst_off + 1, call_result + src_off + 1, 0);
+            func.emit_op(
+                Opcode::Copy,
+                dst + dst_off + 1,
+                call_result + src_off + 1,
+                0,
+            );
             src_off += 2;
             dst_off += 2;
         }
     }
-    
+
     // Copy error
     func.emit_op(Opcode::Copy, dst + dst_off, call_error_slot, 0);
     func.emit_op(Opcode::Copy, dst + dst_off + 1, call_error_slot + 1, 0);
-    
+
     func.patch_jump(pack_error_done, func.current_pc());
-    
+
     Ok(())
 }

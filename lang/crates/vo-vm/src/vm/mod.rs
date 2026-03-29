@@ -3,13 +3,13 @@
 #[cfg(not(feature = "std"))]
 use alloc::collections::VecDeque;
 #[cfg(not(feature = "std"))]
-use alloc::string::{String, ToString};
+use alloc::format;
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 #[cfg(not(feature = "std"))]
-use alloc::format;
+use alloc::vec::Vec;
 
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
@@ -23,20 +23,25 @@ use vo_runtime::gc::GcRef;
 use vo_runtime::objects::{array, string};
 
 pub mod helpers;
-mod types;
 mod island_shared;
 #[cfg(feature = "std")]
 pub mod island_thread;
 #[cfg(feature = "jit")]
 mod jit;
+mod types;
 
 pub use helpers::{stack_get, stack_set};
-pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE, SchedulingOutcome, RuntimeTrapKind};
+pub use types::EndpointRegistry;
 #[cfg(feature = "std")]
 pub use types::IslandThread;
-pub use types::EndpointRegistry;
+pub use types::{
+    ErrorLocation, ExecResult, RuntimeTrapKind, SchedulingOutcome, VmError, VmState, TIME_SLICE,
+};
 
-use helpers::{slice_data_ptr, slice_len, slice_cap, string_len, string_index, runtime_panic, runtime_panic_msg, runtime_trap, user_panic};
+use helpers::{
+    runtime_panic, runtime_panic_msg, runtime_trap, slice_cap, slice_data_ptr, slice_len,
+    string_index, string_len, user_panic,
+};
 
 use crate::bytecode::Module;
 use crate::exec;
@@ -68,7 +73,7 @@ use vo_runtime::itab::ItabCache;
 pub mod jit_mgr;
 
 #[cfg(feature = "jit")]
-pub use jit_mgr::{JitManager, JitConfig};
+pub use jit_mgr::{JitConfig, JitManager};
 
 pub struct Vm {
     /// JIT manager (only available with "jit" feature).
@@ -89,7 +94,10 @@ pub struct Vm {
 }
 
 #[cfg(feature = "std")]
-fn validate_externs_registered(registry: &vo_runtime::ExternRegistry, externs: &[vo_runtime::bytecode::ExternDef]) {
+fn validate_externs_registered(
+    registry: &vo_runtime::ExternRegistry,
+    externs: &[vo_runtime::bytecode::ExternDef],
+) {
     let mut missing: Vec<(usize, &str)> = Vec::new();
     for (id, def) in externs.iter().enumerate() {
         if !registry.has(id as u32) {
@@ -127,7 +135,7 @@ impl Vm {
     pub fn enable_external_island_transport(&mut self) {
         self.state.external_island_transport = true;
     }
-    
+
     /// Create a VM with custom JIT thresholds.
     ///
     /// Note: thresholds currently affect compilation bookkeeping only.
@@ -139,12 +147,12 @@ impl Vm {
             ..Default::default()
         })
     }
-    
+
     #[cfg(not(feature = "jit"))]
     pub fn with_jit_thresholds(_call_threshold: u32, _loop_threshold: u32) -> Self {
         Self::new()
     }
-    
+
     /// Create a VM with custom JIT configuration.
     #[cfg(feature = "jit")]
     pub fn with_jit_config(config: JitConfig) -> Self {
@@ -154,7 +162,6 @@ impl Vm {
         }
         vm
     }
-    
 
     /// Initialize JIT compiler (if jit feature is enabled).
     ///
@@ -189,7 +196,10 @@ impl Vm {
     }
 
     #[cfg(feature = "std")]
-    pub fn set_interrupt_flag(&mut self, interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    pub fn set_interrupt_flag(
+        &mut self,
+        interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
         self.state.interrupt_flag = Some(interrupt_flag);
     }
 
@@ -212,7 +222,7 @@ impl Vm {
     pub fn module(&self) -> Option<&Module> {
         self.module.as_ref()
     }
-    
+
     pub fn set_program_args(&mut self, args: Vec<String>) {
         self.state.program_args = args;
     }
@@ -221,7 +231,7 @@ impl Vm {
     pub fn load(&mut self, module: Module) {
         self.load_with_extensions(module, None);
     }
-    
+
     #[cfg(not(feature = "std"))]
     pub fn load(&mut self, module: Module) {
         vo_stdlib::register_externs(&mut self.state.extern_registry, &module.externs);
@@ -242,23 +252,27 @@ impl Vm {
         }
 
         // Register extern functions from linkme distributed slices
-        self.state.extern_registry.register_from_linkme(&module.externs);
+        self.state
+            .extern_registry
+            .register_from_linkme(&module.externs);
 
         // Register extern functions from extension loader (if provided)
         if let Some(loader) = ext_loader.as_ref() {
-            self.state.extern_registry.register_from_extension_loader(loader, &module.externs);
+            self.state
+                .extern_registry
+                .register_from_extension_loader(loader, &module.externs);
         }
 
         validate_externs_registered(&self.state.extern_registry, &module.externs);
-        
+
         self.extension_manifests = ext_loader
             .as_ref()
             .map(|loader| loader.manifests().to_vec());
         self.extension_loader = ext_loader;
-        
+
         self.finish_load(module);
     }
-    
+
     /// Broadcast a host bridge pointer to all loaded extension dylibs.
     ///
     /// Each dylib that exports `vo_ext_set_host_bridge` will receive the
@@ -291,16 +305,16 @@ impl Vm {
         self.state.itab_cache = ItabCache::from_module_itabs(module.itabs.clone());
         // Reset sentinel error cache for new module (prevents cross-module corruption)
         self.state.sentinel_errors = vo_runtime::SentinelErrorCache::new();
-        
+
         // Initialize JIT manager state for this module
         #[cfg(feature = "jit")]
         if let Some(jit_mgr) = self.jit_mgr.as_mut() {
             jit_mgr.init(module.functions.len());
         }
-        
+
         self.module = Some(module);
     }
-    
+
     /// Create a new island - shared by VM interpreter and JIT callbacks.
     /// Returns the island handle (GcRef).
     #[cfg(feature = "std")]
@@ -313,13 +327,16 @@ impl Vm {
 
         use vo_runtime::island_transport::{InThreadTransport, IslandSender};
 
-        let module = self.module.as_ref().expect("module required for create_island");
-        
+        let module = self
+            .module
+            .as_ref()
+            .expect("module required for create_island");
+
         // Create transport pair for the new island
         let (island_sender, island_transport) = InThreadTransport::new();
         let island_sender: std::sync::Arc<dyn IslandSender> = std::sync::Arc::new(island_sender);
         let handle = vo_runtime::island::create(&mut self.state.gc, next_id);
-        
+
         // Initialize registry and main transport if first island
         if self.state.island_registry.is_none() {
             let (main_sender, main_transport) = InThreadTransport::new();
@@ -331,13 +348,18 @@ impl Vm {
             // Also register main island in island_senders
             self.state.island_senders.insert(0, main_sender);
         }
-        
+
         // Register this island's sender in the shared registry
         let registry = self.state.island_registry.as_ref().unwrap().clone();
-        { let mut guard = registry.lock().unwrap(); guard.insert(next_id, island_sender.clone()); }
+        {
+            let mut guard = registry.lock().unwrap();
+            guard.insert(next_id, island_sender.clone());
+        }
         // Also register in island_senders
-        self.state.island_senders.insert(next_id, island_sender.clone());
-        
+        self.state
+            .island_senders
+            .insert(next_id, island_sender.clone());
+
         // Spawn island thread with JIT config from main VM
         let module_arc = std::sync::Arc::new(module.clone());
         let registry_clone = registry.clone();
@@ -363,13 +385,13 @@ impl Vm {
                 extension_manifests,
             );
         });
-        
+
         // Save thread handle
         self.state.island_threads.push(IslandThread {
             island_id: next_id,
             join_handle: Some(join_handle),
         });
-        
+
         handle
     }
 
@@ -429,9 +451,7 @@ impl Vm {
         self.state.command_queue.push_back(cmd);
     }
 
-    pub fn take_outbound_commands(
-        &mut self,
-    ) -> VecDeque<(u32, vo_runtime::island::IslandCommand)> {
+    pub fn take_outbound_commands(&mut self) -> VecDeque<(u32, vo_runtime::island::IslandCommand)> {
         core::mem::take(&mut self.state.outbound_commands)
     }
 
@@ -456,9 +476,12 @@ impl Vm {
 
     /// Core scheduling loop - runs fibers until all block or limit reached.
     /// Returns outcome without handling deadlock - caller decides the appropriate response.
-    fn run_scheduling_loop(&mut self, max_iterations: Option<usize>) -> Result<SchedulingOutcome, VmError> {
+    fn run_scheduling_loop(
+        &mut self,
+        max_iterations: Option<usize>,
+    ) -> Result<SchedulingOutcome, VmError> {
         let mut iterations = 0;
-        
+
         loop {
             if self.interrupt_requested() {
                 return Err(VmError::Interrupted);
@@ -470,9 +493,9 @@ impl Vm {
                     break;
                 }
             }
-            
+
             self.process_island_commands();
-            
+
             if !self.scheduler.has_work() {
                 match self.wait_for_work() {
                     WaitResult::Retry => continue,
@@ -481,12 +504,14 @@ impl Vm {
                     WaitResult::Interrupted => return Err(VmError::Interrupted),
                     WaitResult::Blocked => return Ok(SchedulingOutcome::Blocked),
                     WaitResult::Suspended => return Ok(SchedulingOutcome::Suspended),
-                    WaitResult::SuspendedForHostEvents => return Ok(SchedulingOutcome::SuspendedForHostEvents),
+                    WaitResult::SuspendedForHostEvents => {
+                        return Ok(SchedulingOutcome::SuspendedForHostEvents)
+                    }
                     #[cfg(feature = "std")]
                     WaitResult::Break => break,
                 }
             }
-            
+
             let fiber_id = match self.scheduler.schedule_next() {
                 Some(id) => id,
                 None => break,
@@ -505,7 +530,7 @@ impl Vm {
 
         Ok(SchedulingOutcome::Completed)
     }
-    
+
     /// Process commands from other island threads (non-blocking).
     #[inline]
     fn process_island_commands(&mut self) {
@@ -533,18 +558,34 @@ impl Vm {
                 island_shared::handle_spawn_fiber(self, closure_data.data());
             }
             IslandCommand::WakeFiber { fiber_id } => {
-                self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
+                self.scheduler
+                    .wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
             }
-            IslandCommand::EndpointRequest { endpoint_id, kind, from_island, fiber_id } => {
-                island_shared::handle_endpoint_request_command(self, endpoint_id, kind, from_island, fiber_id);
+            IslandCommand::EndpointRequest {
+                endpoint_id,
+                kind,
+                from_island,
+                fiber_id,
+            } => {
+                island_shared::handle_endpoint_request_command(
+                    self,
+                    endpoint_id,
+                    kind,
+                    from_island,
+                    fiber_id,
+                );
             }
-            IslandCommand::EndpointResponse { endpoint_id, kind, fiber_id } => {
+            IslandCommand::EndpointResponse {
+                endpoint_id,
+                kind,
+                fiber_id,
+            } => {
                 island_shared::handle_endpoint_response_command(self, endpoint_id, kind, fiber_id);
             }
             IslandCommand::Shutdown => {}
         }
     }
-    
+
     /// When no fibers are runnable, try to make progress via I/O polling or
     /// island command waiting. Returns what the scheduling loop should do next.
     fn wait_for_work(&mut self) -> WaitResult {
@@ -563,7 +604,7 @@ impl Vm {
         if !self.state.command_queue.is_empty() {
             return WaitResult::Retry;
         }
-        
+
         // Try waiting for island commands
         #[cfg(feature = "std")]
         if self.scheduler.has_blocked() && self.state.main_transport.is_some() {
@@ -675,27 +716,25 @@ impl Vm {
             ExecResult::Interrupted => {
                 return Some(Err(VmError::Interrupted));
             }
-            ExecResult::Block(reason) => {
-                match reason {
-                    crate::fiber::BlockReason::Queue => {
-                        self.scheduler.block_for_queue();
-                    }
-                    crate::fiber::BlockReason::HostEvent { token, delay_ms } => {
-                        self.scheduler.block_for_host_event(token, delay_ms);
-                    }
-                    crate::fiber::BlockReason::HostEventReplay(token) => {
-                        let fiber = self.scheduler.current_fiber_mut().unwrap();
-                        fiber.current_frame_mut().unwrap().pc -= 1;
-                        self.scheduler.block_for_host_event_replay(token);
-                    }
-                    #[cfg(feature = "std")]
-                    crate::fiber::BlockReason::Io(token) => {
-                        let fiber = self.scheduler.current_fiber_mut().unwrap();
-                        fiber.current_frame_mut().unwrap().pc -= 1;
-                        self.scheduler.block_for_io(token);
-                    }
+            ExecResult::Block(reason) => match reason {
+                crate::fiber::BlockReason::Queue => {
+                    self.scheduler.block_for_queue();
                 }
-            }
+                crate::fiber::BlockReason::HostEvent { token, delay_ms } => {
+                    self.scheduler.block_for_host_event(token, delay_ms);
+                }
+                crate::fiber::BlockReason::HostEventReplay(token) => {
+                    let fiber = self.scheduler.current_fiber_mut().unwrap();
+                    fiber.current_frame_mut().unwrap().pc -= 1;
+                    self.scheduler.block_for_host_event_replay(token);
+                }
+                #[cfg(feature = "std")]
+                crate::fiber::BlockReason::Io(token) => {
+                    let fiber = self.scheduler.current_fiber_mut().unwrap();
+                    fiber.current_frame_mut().unwrap().pc -= 1;
+                    self.scheduler.block_for_io(token);
+                }
+            },
             ExecResult::Done => {
                 let _ = self.scheduler.kill_current();
             }
@@ -713,13 +752,17 @@ impl Vm {
                 }
             }
             ExecResult::FrameChanged | ExecResult::CallClosure { .. } => {
-                debug_assert!(false, "internal ExecResult leaked to scheduling loop: {:?}", result);
+                debug_assert!(
+                    false,
+                    "internal ExecResult leaked to scheduling loop: {:?}",
+                    result
+                );
                 self.scheduler.yield_current();
             }
         }
         None
     }
-    
+
     /// Report deadlock with detailed fiber state.
     fn report_deadlock(&self) -> Result<(), VmError> {
         if let Some(module) = self.module.as_ref() {
@@ -738,7 +781,10 @@ impl Vm {
                     if let Some(inst) = code.get(prev_pc) {
                         msg.push_str(&format!(
                             "    at func={} pc={} inst@{}={:?}\n",
-                            frame.func_id, pc, prev_pc, inst.opcode()
+                            frame.func_id,
+                            pc,
+                            prev_pc,
+                            inst.opcode()
                         ));
                     }
                     if let Some(inst) = code.get(pc) {
@@ -748,7 +794,9 @@ impl Vm {
             }
             return Err(VmError::Deadlock(msg));
         } else {
-            return Err(VmError::Deadlock("vm deadlock: all fibers blocked".to_string()));
+            return Err(VmError::Deadlock(
+                "vm deadlock: all fibers blocked".to_string(),
+            ));
         }
     }
 
@@ -816,7 +864,8 @@ impl Vm {
         #[cfg(feature = "jit")]
         macro_rules! handle_loop_osr {
             ($target_pc:expr) => {{
-                if let Some(osr_result) = jit::try_loop_osr(self, fiber_id, func_id, $target_pc, bp) {
+                if let Some(osr_result) = jit::try_loop_osr(self, fiber_id, func_id, $target_pc, bp)
+                {
                     match osr_result {
                         jit::OsrResult::FrameChanged => {
                             let fiber = self.scheduler.get_fiber_mut(fiber_id);
@@ -827,7 +876,8 @@ impl Vm {
                         #[cfg(feature = "std")]
                         jit::OsrResult::WaitIo => {
                             let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                            let token = fiber.resume_io_token
+                            let token = fiber
+                                .resume_io_token
                                 .expect("OsrResult::WaitIo but resume_io_token is None");
                             return ExecResult::Block(crate::fiber::BlockReason::Io(token));
                         }
@@ -854,7 +904,9 @@ impl Vm {
         macro_rules! handle_queue_action {
             ($action:expr) => {
                 match $action {
-                    exec::QueueAction::Continue => { refetch!(); }
+                    exec::QueueAction::Continue => {
+                        refetch!();
+                    }
                     exec::QueueAction::Block => {
                         return ExecResult::Block(crate::fiber::BlockReason::Queue);
                     }
@@ -863,13 +915,22 @@ impl Vm {
                         return ExecResult::Block(crate::fiber::BlockReason::Queue);
                     }
                     exec::QueueAction::Trap(kind) => {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, kind));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            kind
+                        ));
                     }
                     exec::QueueAction::Wake(waiter) => {
                         self.state.wake_waiter(&waiter, &mut self.scheduler);
                         return ExecResult::TimesliceExpired;
                     }
-                    exec::QueueAction::Close { waiters, endpoint_id } => {
+                    exec::QueueAction::Close {
+                        waiters,
+                        endpoint_id,
+                    } => {
                         for waiter in &waiters {
                             self.state.wake_waiter(waiter, &mut self.scheduler);
                         }
@@ -878,7 +939,11 @@ impl Vm {
                         }
                         return ExecResult::TimesliceExpired;
                     }
-                    exec::QueueAction::RemoteSend { endpoint_id, home_island, data } => {
+                    exec::QueueAction::RemoteSend {
+                        endpoint_id,
+                        home_island,
+                        data,
+                    } => {
                         self.state.send_endpoint_send_request(
                             home_island,
                             endpoint_id,
@@ -887,7 +952,10 @@ impl Vm {
                         );
                         return ExecResult::Block(crate::fiber::BlockReason::Queue);
                     }
-                    exec::QueueAction::RemoteRecv { endpoint_id, home_island } => {
+                    exec::QueueAction::RemoteRecv {
+                        endpoint_id,
+                        home_island,
+                    } => {
                         fiber.current_frame_mut().unwrap().pc -= 1;
                         self.state.send_endpoint_recv_request(
                             home_island,
@@ -896,7 +964,12 @@ impl Vm {
                         );
                         return ExecResult::Block(crate::fiber::BlockReason::Queue);
                     }
-                    exec::QueueAction::RemoteRecvData { endpoint_id, target_island, fiber_id, data } => {
+                    exec::QueueAction::RemoteRecvData {
+                        endpoint_id,
+                        target_island,
+                        fiber_id,
+                        data,
+                    } => {
                         self.state.send_endpoint_recv_data_response(
                             target_island,
                             endpoint_id,
@@ -905,8 +978,12 @@ impl Vm {
                         );
                         return ExecResult::TimesliceExpired;
                     }
-                    exec::QueueAction::RemoteClose { endpoint_id, home_island } => {
-                        self.state.send_endpoint_close_request(home_island, endpoint_id);
+                    exec::QueueAction::RemoteClose {
+                        endpoint_id,
+                        home_island,
+                    } => {
+                        self.state
+                            .send_endpoint_close_request(home_island, endpoint_id);
                         self.state.endpoint_registry.mark_tombstone(endpoint_id);
                         refetch!();
                     }
@@ -976,22 +1053,46 @@ impl Vm {
                 }
                 Opcode::PtrGet => {
                     if !exec::exec_ptr_get(stack, bp, &inst) {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::NilPointerDereference
+                        ));
                     }
                 }
                 Opcode::PtrSet => {
                     if !exec::exec_ptr_set(stack, bp, &inst, &mut self.state.gc) {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::NilPointerDereference
+                        ));
                     }
                 }
                 Opcode::PtrGetN => {
                     if !exec::exec_ptr_get_n(stack, bp, &inst) {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::NilPointerDereference
+                        ));
                     }
                 }
                 Opcode::PtrSetN => {
                     if !exec::exec_ptr_set_n(stack, bp, &inst) {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::NilPointerDereference
+                        ));
                     }
                 }
                 Opcode::PtrAdd => {
@@ -1021,7 +1122,13 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b == 0 {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::DivisionByZero
+                        ));
                     }
                     stack_set(stack, bp + inst.a as usize, a.wrapping_div(b) as u64);
                 }
@@ -1029,7 +1136,13 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b == 0 {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::DivisionByZero
+                        ));
                     }
                     stack_set(stack, bp + inst.a as usize, a.wrapping_rem(b) as u64);
                 }
@@ -1037,7 +1150,13 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     if b == 0 {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::DivisionByZero
+                        ));
                     }
                     stack_set(stack, bp + inst.a as usize, a.wrapping_div(b));
                 }
@@ -1045,7 +1164,13 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     if b == 0 {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::DivisionByZero
+                        ));
                     }
                     stack_set(stack, bp + inst.a as usize, a.wrapping_rem(b));
                 }
@@ -1111,7 +1236,7 @@ impl Vm {
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     stack_set(stack, bp + inst.a as usize, (a >= b) as u64);
                 }
-                
+
                 // Unsigned integer comparison
                 Opcode::LtU => {
                     let a = stack_get(stack, bp + inst.b as usize);
@@ -1195,7 +1320,13 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b < 0 {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NegativeShift));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::NegativeShift
+                        ));
                     }
                     let result = if b >= 64 { 0 } else { a.wrapping_shl(b as u32) };
                     stack_set(stack, bp + inst.a as usize, result);
@@ -1204,16 +1335,36 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b < 0 {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NegativeShift));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::NegativeShift
+                        ));
                     }
-                    let result = if b >= 64 { if a < 0 { -1i64 } else { 0i64 } } else { a.wrapping_shr(b as u32) };
+                    let result = if b >= 64 {
+                        if a < 0 {
+                            -1i64
+                        } else {
+                            0i64
+                        }
+                    } else {
+                        a.wrapping_shr(b as u32)
+                    };
                     stack_set(stack, bp + inst.a as usize, result as u64);
                 }
                 Opcode::ShrU => {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b < 0 {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NegativeShift));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::NegativeShift
+                        ));
                     }
                     let result = if b >= 64 { 0 } else { a.wrapping_shr(b as u32) };
                     stack_set(stack, bp + inst.a as usize, result);
@@ -1227,12 +1378,12 @@ impl Vm {
                 Opcode::Jump => {
                     let offset = inst.imm32();
                     let target_pc = (frame.pc as i64 + offset as i64 - 1) as usize;
-                    
+
                     #[cfg(feature = "jit")]
                     if offset < 0 {
                         handle_loop_osr!(target_pc);
                     }
-                    
+
                     frame.pc = target_pc;
                 }
                 Opcode::JumpIf => {
@@ -1249,7 +1400,7 @@ impl Vm {
                         frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
                     }
                 }
-                
+
                 // ForLoop: idx++; if idx < limit goto offset
                 // flags: bit0=unsigned, bit1=decrement, bit2=inclusive
                 Opcode::ForLoop => {
@@ -1257,7 +1408,7 @@ impl Vm {
                     let limit = stack_get(stack, bp + inst.b as usize);
                     let offset = inst.c as i16;
                     let flags = inst.flags;
-                    
+
                     // Increment or decrement
                     let decrement = (flags & 0x02) != 0;
                     let next_idx = if decrement {
@@ -1266,7 +1417,7 @@ impl Vm {
                         idx.wrapping_add(1)
                     };
                     stack_set(stack, bp + inst.a as usize, next_idx);
-                    
+
                     // Compare: flags bit0=unsigned, bit2=inclusive
                     let unsigned = (flags & 0x01) != 0;
                     let inclusive = (flags & 0x04) != 0;
@@ -1274,22 +1425,22 @@ impl Vm {
                     let continue_loop = match (decrement, unsigned, inclusive) {
                         // Increment: i < limit or i <= limit
                         (false, false, false) => ni < li,
-                        (false, false, true)  => ni <= li,
-                        (false, true, false)  => next_idx < limit,
-                        (false, true, true)   => next_idx <= limit,
+                        (false, false, true) => ni <= li,
+                        (false, true, false) => next_idx < limit,
+                        (false, true, true) => next_idx <= limit,
                         // Decrement: i > limit or i >= limit
-                        (true, false, false)  => ni > li,
-                        (true, false, true)   => ni >= li,
-                        (true, true, false)   => next_idx > limit,
-                        (true, true, true)    => next_idx >= limit,
+                        (true, false, false) => ni > li,
+                        (true, false, true) => ni >= li,
+                        (true, true, false) => next_idx > limit,
+                        (true, true, true) => next_idx >= limit,
                     };
-                    
+
                     if continue_loop {
                         let target_pc = (frame.pc as i64 + offset as i64) as usize;
-                        
+
                         #[cfg(feature = "jit")]
                         handle_loop_osr!(target_pc);
-                        
+
                         frame.pc = target_pc;
                     }
                     // else: fall through (loop exit)
@@ -1302,10 +1453,17 @@ impl Vm {
                         let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
                         if let Some(jit_mgr) = self.jit_mgr.as_mut() {
                             let target_func = &module.functions[target_func_id as usize];
-                            if let Some(jit_func) = jit_mgr.resolve_call(target_func_id, target_func, module) {
+                            if let Some(jit_func) =
+                                jit_mgr.resolve_call(target_func_id, target_func, module)
+                            {
                                 // Execute via JIT
                                 let result = jit::dispatch_jit_call(
-                                    self, fiber, &inst, module, jit_func, target_func_id
+                                    self,
+                                    fiber,
+                                    &inst,
+                                    module,
+                                    jit_func,
+                                    target_func_id,
                                 );
                                 stack = fiber.stack_ptr();
                                 match result {
@@ -1321,11 +1479,13 @@ impl Vm {
                     }
                     // VM fallback path
                     exec::exec_call(fiber, &inst, module);
-                    stack = fiber.stack_ptr();  // Re-fetch after potential stack growth
+                    stack = fiber.stack_ptr(); // Re-fetch after potential stack growth
                     refetch!();
                 }
                 Opcode::CallExtern => {
-                    use vo_runtime::ffi::{ExternResult, ExternInvoke, ExternWorld, ExternFiberInputs};
+                    use vo_runtime::ffi::{
+                        ExternFiberInputs, ExternInvoke, ExternResult, ExternWorld,
+                    };
                     // CallExtern: a=dst, b=extern_id, c=args_start, flags=arg_count
                     let extern_id = inst.b as u32;
                     let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
@@ -1335,7 +1495,8 @@ impl Vm {
                     let resume_host_event_token = fiber.resume_host_event_token.take();
                     let resume_host_event_data = fiber.resume_host_event_data.take();
 
-                    let (closure_replay_results, closure_replay_panic_message) = fiber.closure_replay.take_for_extern();
+                    let (closure_replay_results, closure_replay_panic_message) =
+                        fiber.closure_replay.take_for_extern();
                     let invoke = ExternInvoke {
                         extern_id,
                         bp: bp as u32,
@@ -1366,27 +1527,52 @@ impl Vm {
                         replay_panic_message: closure_replay_panic_message,
                     };
                     let extern_result = self.state.extern_registry.call(
-                        &mut fiber.stack, invoke, world, fiber_inputs,
+                        &mut fiber.stack,
+                        invoke,
+                        world,
+                        fiber_inputs,
                     );
                     match extern_result {
-                        ExternResult::Ok => { refetch!(); }
+                        ExternResult::Ok => {
+                            refetch!();
+                        }
                         ExternResult::Panic(msg) => {
-                            let r = runtime_panic_msg(&mut self.state.gc, fiber, stack, module, msg);
-                            if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
+                            let r =
+                                runtime_panic_msg(&mut self.state.gc, fiber, stack, module, msg);
+                            if matches!(r, ExecResult::FrameChanged) {
+                                refetch!();
+                            } else {
+                                return r;
+                            }
                         }
                         ExternResult::NotRegistered(id) => {
                             let name = &module.externs[extern_id as usize].name;
-                            let msg = format!("extern function '{}' (id={}) not registered", name, id);
-                            let r = runtime_panic_msg(&mut self.state.gc, fiber, stack, module, msg);
-                            if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
+                            let msg =
+                                format!("extern function '{}' (id={}) not registered", name, id);
+                            let r =
+                                runtime_panic_msg(&mut self.state.gc, fiber, stack, module, msg);
+                            if matches!(r, ExecResult::FrameChanged) {
+                                refetch!();
+                            } else {
+                                return r;
+                            }
                         }
-                        ExternResult::Yield => { return ExecResult::TimesliceExpired; }
-                        ExternResult::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
+                        ExternResult::Yield => {
+                            return ExecResult::TimesliceExpired;
+                        }
+                        ExternResult::Block => {
+                            return ExecResult::Block(crate::fiber::BlockReason::Queue);
+                        }
                         ExternResult::HostEventWait { token, delay_ms } => {
-                            return ExecResult::Block(crate::fiber::BlockReason::HostEvent { token, delay_ms });
+                            return ExecResult::Block(crate::fiber::BlockReason::HostEvent {
+                                token,
+                                delay_ms,
+                            });
                         }
                         ExternResult::HostEventWaitAndReplay { token } => {
-                            return ExecResult::Block(crate::fiber::BlockReason::HostEventReplay(token));
+                            return ExecResult::Block(crate::fiber::BlockReason::HostEventReplay(
+                                token,
+                            ));
                         }
                         #[cfg(feature = "std")]
                         ExternResult::WaitIo { token } => {
@@ -1396,15 +1582,16 @@ impl Vm {
                             // Undo PC pre-increment so extern replays on return
                             let frame = fiber.current_frame_mut().unwrap();
                             frame.pc -= 1;
-                            
+
                             // Push closure frame on current fiber using same layout as exec_call_closure
-                            let closure_func_id = vo_runtime::objects::closure::func_id(closure_ref);
+                            let closure_func_id =
+                                vo_runtime::objects::closure::func_id(closure_ref);
                             let func_def = &module.functions[closure_func_id as usize];
-                            
+
                             let new_bp = fiber.sp;
                             let local_slots = func_def.local_slots as usize;
                             fiber.reserve_slots_at(new_bp, local_slots);
-                            
+
                             // Use call_layout for correct slot placement (matches exec_call_closure)
                             let layout = vo_runtime::objects::closure::call_layout(
                                 closure_ref as u64,
@@ -1416,15 +1603,19 @@ impl Vm {
                             if layout.slot0.is_some() && layout.arg_offset > 1 {
                                 fiber.zero_slots_at(new_bp + 1, layout.arg_offset - 1);
                             }
-                            fiber.zero_slots_tail_at(new_bp, func_def.gc_scan_slots as usize, layout.arg_offset + args.len());
-                            
+                            fiber.zero_slots_tail_at(
+                                new_bp,
+                                func_def.gc_scan_slots as usize,
+                                layout.arg_offset + args.len(),
+                            );
+
                             let fstack = fiber.stack_ptr();
                             if let Some(slot0_val) = layout.slot0 {
                                 helpers::stack_set(fstack, new_bp, slot0_val);
                             }
-                            
+
                             fiber.copy_slots_from_slice(new_bp + layout.arg_offset, &args);
-                            
+
                             fiber.push_call_frame(
                                 closure_func_id,
                                 new_bp,
@@ -1432,28 +1623,35 @@ impl Vm {
                                 func_def.ret_slots,
                                 func_def.gc_scan_slots,
                             );
-                            
+
                             // Mark replay depth so return path knows to cache results.
                             // Push previous depth so nested CallExterns don't clobber it.
                             fiber.closure_replay.push_depth(fiber.frames.len());
-                            
+
                             stack = fiber.stack_ptr();
                             refetch!();
                         }
                     }
                 }
                 Opcode::CallClosure => {
-                    let closure_ref = stack_get(stack, bp + inst.a as usize) as vo_runtime::gc::GcRef;
+                    let closure_ref =
+                        stack_get(stack, bp + inst.a as usize) as vo_runtime::gc::GcRef;
                     if closure_ref.is_null() {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilFuncCall));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::NilFuncCall
+                        ));
                     }
                     exec::exec_call_closure(fiber, &inst, module);
-                    stack = fiber.stack_ptr();  // Re-fetch after potential stack growth
+                    stack = fiber.stack_ptr(); // Re-fetch after potential stack growth
                     refetch!();
                 }
                 Opcode::CallIface => {
                     exec::exec_call_iface(fiber, &inst, module, &self.state.itab_cache);
-                    stack = fiber.stack_ptr();  // Re-fetch after potential stack growth
+                    stack = fiber.stack_ptr(); // Re-fetch after potential stack growth
                     refetch!();
                 }
                 Opcode::Return => {
@@ -1465,7 +1663,9 @@ impl Vm {
                         exec::handle_return(fiber, &inst, func, module, is_error_return)
                     };
                     stack = fiber.stack_ptr();
-                    if !matches!(result, ExecResult::FrameChanged) { return result; }
+                    if !matches!(result, ExecResult::FrameChanged) {
+                        return result;
+                    }
                     refetch!();
                 }
 
@@ -1484,8 +1684,15 @@ impl Vm {
                     let len = if s.is_null() { 0 } else { string_len(s) };
                     if idx >= len {
                         handle_panic_result!(runtime_panic(
-                            &mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
-                            format!("runtime error: index out of range [{}] with length {}", idx, len)
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::IndexOutOfBounds,
+                            format!(
+                                "runtime error: index out of range [{}] with length {}",
+                                idx, len
+                            )
                         ));
                     }
                     let byte = string_index(s, idx);
@@ -1544,8 +1751,17 @@ impl Vm {
                     let idx = stack_get(stack, bp + inst.c as usize) as usize;
                     let len = array::len(arr);
                     if idx >= len {
-                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
-                            format!("runtime error: index out of range [{}] with length {}", idx, len)));
+                        handle_panic_result!(runtime_panic(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::IndexOutOfBounds,
+                            format!(
+                                "runtime error: index out of range [{}] with length {}",
+                                idx, len
+                            )
+                        ));
                     }
                     let dst = bp + inst.a as usize;
                     let off = idx as isize;
@@ -1562,7 +1778,8 @@ impl Vm {
                         0 => {
                             let elem_bytes = stack_get(stack, bp + inst.c as usize + 1) as usize;
                             for i in 0..(elem_bytes + 7) / 8 {
-                                let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
+                                let ptr =
+                                    unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                 stack_set(stack, dst + i, unsafe { *ptr });
                             }
                             continue;
@@ -1570,7 +1787,8 @@ impl Vm {
                         _ => {
                             let elem_bytes = inst.flags as usize;
                             for i in 0..(elem_bytes + 7) / 8 {
-                                let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
+                                let ptr =
+                                    unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                 stack_set(stack, dst + i, unsafe { *ptr });
                             }
                             continue;
@@ -1583,8 +1801,17 @@ impl Vm {
                     let idx = stack_get(stack, bp + inst.b as usize) as usize;
                     let len = array::len(arr);
                     if idx >= len {
-                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
-                            format!("runtime error: index out of range [{}] with length {}", idx, len)));
+                        handle_panic_result!(runtime_panic(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::IndexOutOfBounds,
+                            format!(
+                                "runtime error: index out of range [{}] with length {}",
+                                idx, len
+                            )
+                        ));
                     }
                     let src = bp + inst.c as usize;
                     let off = idx as isize;
@@ -1613,9 +1840,15 @@ impl Vm {
                             // Write barrier for multi-slot elements that may contain GcRefs
                             let em = array::elem_meta(arr);
                             if em.value_kind().may_contain_gc_refs() {
-                                let vals: Vec<u64> = (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
+                                let vals: Vec<u64> =
+                                    (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
                                 vo_runtime::gc_types::typed_write_barrier_by_meta(
-                                    &mut self.state.gc, arr, &vals, em, Some(module));
+                                    &mut self.state.gc,
+                                    arr,
+                                    &vals,
+                                    em,
+                                    Some(module),
+                                );
                             }
                         }
                         _ => {
@@ -1629,9 +1862,16 @@ impl Vm {
                             if elem_bytes >= 8 {
                                 let em = array::elem_meta(arr);
                                 if em.value_kind().may_contain_gc_refs() {
-                                    let vals: Vec<u64> = (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
+                                    let vals: Vec<u64> = (0..elem_slots)
+                                        .map(|i| stack_get(stack, src + i))
+                                        .collect();
                                     vo_runtime::gc_types::typed_write_barrier_by_meta(
-                                        &mut self.state.gc, arr, &vals, em, Some(module));
+                                        &mut self.state.gc,
+                                        arr,
+                                        &vals,
+                                        em,
+                                        Some(module),
+                                    );
                                 }
                             }
                         }
@@ -1664,8 +1904,17 @@ impl Vm {
                     let idx = stack_get(stack, bp + inst.c as usize) as usize;
                     let len = if s.is_null() { 0 } else { slice_len(s) };
                     if idx >= len {
-                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
-                            format!("runtime error: index out of range [{}] with length {}", idx, len)));
+                        handle_panic_result!(runtime_panic(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::IndexOutOfBounds,
+                            format!(
+                                "runtime error: index out of range [{}] with length {}",
+                                idx, len
+                            )
+                        ));
                     }
                     let base = slice_data_ptr(s);
                     let dst = bp + inst.a as usize;
@@ -1681,7 +1930,8 @@ impl Vm {
                         0 => {
                             let elem_bytes = stack_get(stack, bp + inst.c as usize + 1) as usize;
                             for i in 0..(elem_bytes + 7) / 8 {
-                                let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
+                                let ptr =
+                                    unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                 stack_set(stack, dst + i, unsafe { *ptr });
                             }
                             continue;
@@ -1689,7 +1939,8 @@ impl Vm {
                         _ => {
                             let elem_bytes = inst.flags as usize;
                             for i in 0..(elem_bytes + 7) / 8 {
-                                let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
+                                let ptr =
+                                    unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                 stack_set(stack, dst + i, unsafe { *ptr });
                             }
                             continue;
@@ -1702,8 +1953,17 @@ impl Vm {
                     let idx = stack_get(stack, bp + inst.b as usize) as usize;
                     let len = if s.is_null() { 0 } else { slice_len(s) };
                     if idx >= len {
-                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
-                            format!("runtime error: index out of range [{}] with length {}", idx, len)));
+                        handle_panic_result!(runtime_panic(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::IndexOutOfBounds,
+                            format!(
+                                "runtime error: index out of range [{}] with length {}",
+                                idx, len
+                            )
+                        ));
                     }
                     let base = slice_data_ptr(s);
                     let src = bp + inst.c as usize;
@@ -1736,9 +1996,16 @@ impl Vm {
                             if !arr_ref.is_null() {
                                 let em = array::elem_meta(arr_ref);
                                 if em.value_kind().may_contain_gc_refs() {
-                                    let vals: Vec<u64> = (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
+                                    let vals: Vec<u64> = (0..elem_slots)
+                                        .map(|i| stack_get(stack, src + i))
+                                        .collect();
                                     vo_runtime::gc_types::typed_write_barrier_by_meta(
-                                        &mut self.state.gc, arr_ref, &vals, em, Some(module));
+                                        &mut self.state.gc,
+                                        arr_ref,
+                                        &vals,
+                                        em,
+                                        Some(module),
+                                    );
                                 }
                             }
                         }
@@ -1755,9 +2022,16 @@ impl Vm {
                                 if !arr_ref.is_null() {
                                     let em = array::elem_meta(arr_ref);
                                     if em.value_kind().may_contain_gc_refs() {
-                                        let vals: Vec<u64> = (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
+                                        let vals: Vec<u64> = (0..elem_slots)
+                                            .map(|i| stack_get(stack, src + i))
+                                            .collect();
                                         vo_runtime::gc_types::typed_write_barrier_by_meta(
-                                            &mut self.state.gc, arr_ref, &vals, em, Some(module));
+                                            &mut self.state.gc,
+                                            arr_ref,
+                                            &vals,
+                                            em,
+                                            Some(module),
+                                        );
                                     }
                                 }
                             }
@@ -1778,8 +2052,14 @@ impl Vm {
                     if !exec::exec_slice_slice(stack, bp, &inst, &mut self.state.gc) {
                         let lo = stack_get(stack, bp + inst.c as usize);
                         let hi = stack_get(stack, bp + inst.c as usize + 1);
-                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SliceBoundsOutOfRange,
-                            format!("runtime error: slice bounds out of range [{}:{}]", lo, hi)));
+                        handle_panic_result!(runtime_panic(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::SliceBoundsOutOfRange,
+                            format!("runtime error: slice bounds out of range [{}:{}]", lo, hi)
+                        ));
                     }
                 }
                 Opcode::SliceAppend => {
@@ -1804,10 +2084,22 @@ impl Vm {
                 Opcode::MapSet => {
                     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
                     if m.is_null() {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilMapWrite));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::NilMapWrite
+                        ));
                     }
                     if !exec::exec_map_set(stack, bp, &inst, &mut self.state.gc, Some(module)) {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::UnhashableType));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::UnhashableType
+                        ));
                     }
                 }
                 Opcode::MapDelete => {
@@ -1899,7 +2191,12 @@ impl Vm {
                     exec::exec_queue_get(stack, bp, &inst, exec::queue_len);
                 }
                 Opcode::QueueCap => {
-                    exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::queue_state::capacity);
+                    exec::exec_queue_get(
+                        stack,
+                        bp,
+                        &inst,
+                        vo_runtime::objects::queue_state::capacity,
+                    );
                 }
 
                 // Select operations
@@ -1936,7 +2233,13 @@ impl Vm {
                             return ExecResult::Block(crate::fiber::BlockReason::Queue);
                         }
                         exec::SelectResult::SendOnClosed => {
-                            handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel));
+                            handle_panic_result!(runtime_trap(
+                                &mut self.state.gc,
+                                fiber,
+                                stack,
+                                module,
+                                RuntimeTrapKind::SendOnClosedChannel
+                            ));
                         }
                         exec::SelectResult::UnsupportedRemotePort => {
                             handle_panic_result!(runtime_panic_msg(
@@ -1965,22 +2268,43 @@ impl Vm {
                 // Goroutine - spawn new fiber
                 Opcode::GoStart => {
                     let next_id = self.scheduler.fibers.len() as u32;
-                    let go_result = exec::exec_go_start(stack, bp, &inst, &module.functions, next_id);
+                    let go_result =
+                        exec::exec_go_start(stack, bp, &inst, &module.functions, next_id);
                     self.scheduler.spawn(go_result.new_fiber);
                 }
 
                 // Defer and error handling
                 Opcode::DeferPush => {
                     let generation = fiber.effective_defer_generation();
-                    exec::exec_defer_push(stack, bp, &fiber.frames, &mut fiber.defer_stack, &inst, &mut self.state.gc, generation);
+                    exec::exec_defer_push(
+                        stack,
+                        bp,
+                        &fiber.frames,
+                        &mut fiber.defer_stack,
+                        &inst,
+                        &mut self.state.gc,
+                        generation,
+                    );
                 }
                 Opcode::ErrDeferPush => {
                     let generation = fiber.effective_defer_generation();
-                    exec::exec_err_defer_push(stack, bp, &fiber.frames, &mut fiber.defer_stack, &inst, &mut self.state.gc, generation);
+                    exec::exec_err_defer_push(
+                        stack,
+                        bp,
+                        &fiber.frames,
+                        &mut fiber.defer_stack,
+                        &inst,
+                        &mut self.state.gc,
+                        generation,
+                    );
                 }
                 Opcode::Panic => {
                     let result = user_panic(fiber, stack, bp, inst.a, module);
-                    if matches!(result, ExecResult::FrameChanged) { refetch!(); } else { return result; }
+                    if matches!(result, ExecResult::FrameChanged) {
+                        refetch!();
+                    } else {
+                        return result;
+                    }
                 }
                 Opcode::Recover => {
                     exec::exec_recover(stack, bp, fiber, &inst);
@@ -1988,18 +2312,43 @@ impl Vm {
 
                 // Interface operations
                 Opcode::IfaceAssign => {
-                    exec::exec_iface_assign(stack, bp, &inst, &mut self.state.gc, &mut self.state.itab_cache, module);
+                    exec::exec_iface_assign(
+                        stack,
+                        bp,
+                        &inst,
+                        &mut self.state.gc,
+                        &mut self.state.itab_cache,
+                        module,
+                    );
                 }
                 Opcode::IfaceAssert => {
-                    let result = exec::exec_iface_assert(stack, bp, &inst, &mut self.state.itab_cache, module);
+                    let result = exec::exec_iface_assert(
+                        stack,
+                        bp,
+                        &inst,
+                        &mut self.state.itab_cache,
+                        module,
+                    );
                     if matches!(result, ExecResult::Panic) {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::TypeAssertionFailed));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::TypeAssertionFailed
+                        ));
                     }
                 }
                 Opcode::IfaceEq => {
                     let result = exec::exec_iface_eq(stack, bp, &inst, module);
                     if matches!(result, ExecResult::Panic) {
-                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::UncomparableType));
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::UncomparableType
+                        ));
                     }
                 }
 
@@ -2041,8 +2390,17 @@ impl Vm {
                     let idx = stack_get(stack, bp + inst.a as usize) as usize;
                     let len = stack_get(stack, bp + inst.b as usize) as usize;
                     if idx >= len {
-                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
-                            format!("runtime error: index out of range [{}] with length {}", idx, len)));
+                        handle_panic_result!(runtime_panic(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::IndexOutOfBounds,
+                            format!(
+                                "runtime error: index out of range [{}] with length {}",
+                                idx, len
+                            )
+                        ));
                     }
                 }
 
@@ -2063,7 +2421,8 @@ impl Vm {
                     let island_id = vo_runtime::island::id(result.island);
 
                     if island_id == self.state.current_island_id {
-                        let closure_ref = stack_get(stack, bp + inst.b as usize) as vo_runtime::gc::GcRef;
+                        let closure_ref =
+                            stack_get(stack, bp + inst.b as usize) as vo_runtime::gc::GcRef;
                         let new_fiber = unsafe {
                             helpers::build_closure_fiber_from_args_ptr(
                                 &module.functions,
@@ -2094,7 +2453,8 @@ impl Vm {
                             &module.runtime_types,
                         );
                         let closure_data = vo_runtime::pack::PackedValue::from_data(data);
-                        self.state.send_spawn_fiber_to_island(island_id, closure_data);
+                        self.state
+                            .send_spawn_fiber_to_island(island_id, closure_data);
                     }
                 }
 
@@ -2140,9 +2500,9 @@ mod tests {
     use super::*;
     use crate::fiber::Fiber;
     #[cfg(feature = "std")]
-    use std::sync::Arc;
-    #[cfg(feature = "std")]
     use std::sync::atomic::AtomicBool;
+    #[cfg(feature = "std")]
+    use std::sync::Arc;
     use vo_runtime::island::{EndpointResponseKind, IslandCommand};
 
     #[test]
@@ -2187,7 +2547,10 @@ mod tests {
         assert!(fiber.consume_remote_send_closed());
         assert_eq!(fiber.current_frame().unwrap().pc, 0);
         assert_eq!(vm.state.pending_island_responses, 0);
-        assert_eq!(vm.scheduler.get_fiber(fid).state, crate::fiber::FiberState::Runnable);
+        assert_eq!(
+            vm.scheduler.get_fiber(fid).state,
+            crate::fiber::FiberState::Runnable
+        );
     }
 
     #[cfg(feature = "std")]

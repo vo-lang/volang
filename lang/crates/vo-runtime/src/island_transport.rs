@@ -113,12 +113,10 @@ impl IslandTransport for InThreadTransport {
     }
 
     fn recv_timeout(&self, timeout: Duration) -> Result<IslandCommand, TransportError> {
-        self.rx
-            .recv_timeout(timeout)
-            .map_err(|e| match e {
-                std::sync::mpsc::RecvTimeoutError::Timeout => TransportError::Timeout,
-                std::sync::mpsc::RecvTimeoutError::Disconnected => TransportError::Disconnected,
-            })
+        self.rx.recv_timeout(timeout).map_err(|e| match e {
+            std::sync::mpsc::RecvTimeoutError::Timeout => TransportError::Timeout,
+            std::sync::mpsc::RecvTimeoutError::Disconnected => TransportError::Disconnected,
+        })
     }
 
     fn recv(&self) -> Result<IslandCommand, TransportError> {

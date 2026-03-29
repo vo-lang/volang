@@ -35,7 +35,12 @@ pub struct UnixDriver {
     #[cfg(target_os = "linux")]
     epoll_fd: i32,
 
-    #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
     kqueue_fd: i32,
 }
 
@@ -54,7 +59,12 @@ impl UnixDriver {
             });
         }
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
         {
             let kqueue_fd = unsafe { libc::kqueue() };
             if kqueue_fd < 0 {
@@ -85,13 +95,19 @@ impl UnixDriver {
     /// Submit an operation. Returns Completed if it finished immediately, Pending otherwise.
     pub fn submit(&mut self, op: PendingOp) -> SubmitResult {
         let fd = op.handle as i32;
-        let is_read = matches!(op.kind, OpKind::Read | OpKind::Accept | OpKind::Connect | OpKind::RecvFrom);
+        let is_read = matches!(
+            op.kind,
+            OpKind::Read | OpKind::Accept | OpKind::Connect | OpKind::RecvFrom
+        );
 
         // Check for concurrent operation on same direction
         if let Some(state) = self.fd_states.get(&fd) {
             if is_read && state.read.is_some() {
                 let existing = state.read.as_ref().unwrap();
-                panic!("concurrent read on fd {}: existing token={}, new token={}", fd, existing.token, op.token);
+                panic!(
+                    "concurrent read on fd {}: existing token={}, new token={}",
+                    fd, existing.token, op.token
+                );
             }
             if !is_read && state.write.is_some() {
                 panic!("concurrent write operation on fd {}", fd);
@@ -140,7 +156,10 @@ impl UnixDriver {
         {
             // Create timerfd
             let timerfd = unsafe {
-                libc::timerfd_create(libc::CLOCK_MONOTONIC, libc::TFD_NONBLOCK | libc::TFD_CLOEXEC)
+                libc::timerfd_create(
+                    libc::CLOCK_MONOTONIC,
+                    libc::TFD_NONBLOCK | libc::TFD_CLOEXEC,
+                )
             };
             if timerfd < 0 {
                 return SubmitResult::Completed(Completion {
@@ -153,8 +172,14 @@ impl UnixDriver {
             let secs = duration_ns / 1_000_000_000;
             let nsecs = duration_ns % 1_000_000_000;
             let its = libc::itimerspec {
-                it_interval: libc::timespec { tv_sec: 0, tv_nsec: 0 },
-                it_value: libc::timespec { tv_sec: secs as i64, tv_nsec: nsecs as i64 },
+                it_interval: libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                it_value: libc::timespec {
+                    tv_sec: secs as i64,
+                    tv_nsec: nsecs as i64,
+                },
             };
             let ret = unsafe { libc::timerfd_settime(timerfd, 0, &its, std::ptr::null_mut()) };
             if ret < 0 {
@@ -170,7 +195,8 @@ impl UnixDriver {
                 events: libc::EPOLLIN as u32,
                 u64: timerfd as u64,
             };
-            let ret = unsafe { libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_ADD, timerfd, &mut ev) };
+            let ret =
+                unsafe { libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_ADD, timerfd, &mut ev) };
             if ret < 0 {
                 unsafe { libc::close(timerfd) };
                 return SubmitResult::Completed(Completion {
@@ -183,7 +209,12 @@ impl UnixDriver {
             return SubmitResult::Pending;
         }
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
         {
             // Use kqueue EVFILT_TIMER
             let ms = (duration_ns / 1_000_000).max(1) as isize;
@@ -195,7 +226,16 @@ impl UnixDriver {
                 data: ms,
                 udata: std::ptr::null_mut(),
             };
-            let ret = unsafe { libc::kevent(self.kqueue_fd, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+            let ret = unsafe {
+                libc::kevent(
+                    self.kqueue_fd,
+                    &ev,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                )
+            };
             if ret < 0 {
                 return SubmitResult::Completed(Completion {
                     token,
@@ -258,10 +298,16 @@ impl UnixDriver {
                 if let Some(op) = state.read.take() {
                     match try_complete(&op) {
                         TryResult::Done(data) => {
-                            completed.push(Completion { token: op.token, result: Ok(data) });
+                            completed.push(Completion {
+                                token: op.token,
+                                result: Ok(data),
+                            });
                         }
                         TryResult::Error(e) => {
-                            completed.push(Completion { token: op.token, result: Err(e) });
+                            completed.push(Completion {
+                                token: op.token,
+                                result: Err(e),
+                            });
                         }
                         TryResult::WouldBlock => {
                             state.read = Some(op);
@@ -275,10 +321,16 @@ impl UnixDriver {
                 if let Some(op) = state.write.take() {
                     match try_complete(&op) {
                         TryResult::Done(data) => {
-                            completed.push(Completion { token: op.token, result: Ok(data) });
+                            completed.push(Completion {
+                                token: op.token,
+                                result: Ok(data),
+                            });
                         }
                         TryResult::Error(e) => {
-                            completed.push(Completion { token: op.token, result: Err(e) });
+                            completed.push(Completion {
+                                token: op.token,
+                                result: Err(e),
+                            });
                         }
                         TryResult::WouldBlock => {
                             state.write = Some(op);
@@ -347,7 +399,9 @@ impl UnixDriver {
         #[cfg(target_os = "linux")]
         {
             // Build timerfd -> token map for lookup
-            let timerfd_to_token: HashMap<i32, IoToken> = self.timers.iter()
+            let timerfd_to_token: HashMap<i32, IoToken> = self
+                .timers
+                .iter()
                 .map(|(token, state)| (state.timerfd, *token))
                 .collect();
 
@@ -361,18 +415,28 @@ impl UnixDriver {
                         ready_timers.push(token);
                     } else {
                         let ev = events[i].events;
-                        let readable = (ev & libc::EPOLLIN as u32) != 0 || (ev & libc::EPOLLERR as u32) != 0;
-                        let writable = (ev & libc::EPOLLOUT as u32) != 0 || (ev & libc::EPOLLERR as u32) != 0;
+                        let readable =
+                            (ev & libc::EPOLLIN as u32) != 0 || (ev & libc::EPOLLERR as u32) != 0;
+                        let writable =
+                            (ev & libc::EPOLLOUT as u32) != 0 || (ev & libc::EPOLLERR as u32) != 0;
                         ready.push((fd, readable, writable));
                     }
                 }
             }
         }
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
         {
             let mut events: [libc::kevent; 64] = unsafe { std::mem::zeroed() };
-            let timeout = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            let timeout = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             let n = unsafe {
                 libc::kevent(
                     self.kqueue_fd,
@@ -437,14 +501,15 @@ impl UnixDriver {
             if want_write {
                 events |= libc::EPOLLOUT as u32;
             }
-            
+
             let mut event = libc::epoll_event {
                 events,
                 u64: fd as u64,
             };
 
             // Try ADD first (most common case for new fd)
-            let ret = unsafe { libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut event) };
+            let ret =
+                unsafe { libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut event) };
             if ret < 0 {
                 let err = io::Error::last_os_error();
                 if err.raw_os_error() == Some(libc::EEXIST) {
@@ -454,16 +519,30 @@ impl UnixDriver {
             }
         }
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
         {
             self.kqueue_update_filter(fd, libc::EVFILT_READ, want_read);
             self.kqueue_update_filter(fd, libc::EVFILT_WRITE, want_write);
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
     fn kqueue_update_filter(&self, fd: i32, filter: i16, enable: bool) {
-        let flags = if enable { libc::EV_ADD | libc::EV_ONESHOT } else { libc::EV_DELETE };
+        let flags = if enable {
+            libc::EV_ADD | libc::EV_ONESHOT
+        } else {
+            libc::EV_DELETE
+        };
         let event = libc::kevent {
             ident: fd as usize,
             filter,
@@ -473,7 +552,14 @@ impl UnixDriver {
             udata: std::ptr::null_mut(),
         };
         unsafe {
-            libc::kevent(self.kqueue_fd, &event, 1, std::ptr::null_mut(), 0, std::ptr::null());
+            libc::kevent(
+                self.kqueue_fd,
+                &event,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            );
         }
     }
 
@@ -483,7 +569,12 @@ impl UnixDriver {
             libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_DEL, fd, std::ptr::null_mut());
         }
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
         {
             self.kqueue_update_filter(fd, libc::EVFILT_READ, false);
             self.kqueue_update_filter(fd, libc::EVFILT_WRITE, false);
@@ -498,7 +589,12 @@ impl Drop for UnixDriver {
             libc::close(self.epoll_fd);
         }
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
         unsafe {
             libc::close(self.kqueue_fd);
         }
@@ -611,7 +707,8 @@ fn try_complete(op: &PendingOp) -> TryResult {
 
         OpKind::RecvFrom => {
             let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-            let mut addr_len: libc::socklen_t = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            let mut addr_len: libc::socklen_t =
+                std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
             let n = unsafe {
                 libc::recvfrom(
                     fd,
@@ -670,14 +767,18 @@ fn try_complete(op: &PendingOp) -> TryResult {
 
 fn sockaddr_to_std(addr: &libc::sockaddr_storage, len: libc::socklen_t) -> std::net::SocketAddr {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-    
+
     unsafe {
-        if addr.ss_family as i32 == libc::AF_INET && len as usize >= std::mem::size_of::<libc::sockaddr_in>() {
+        if addr.ss_family as i32 == libc::AF_INET
+            && len as usize >= std::mem::size_of::<libc::sockaddr_in>()
+        {
             let addr_in = &*(addr as *const _ as *const libc::sockaddr_in);
             let ip = Ipv4Addr::from(u32::from_be(addr_in.sin_addr.s_addr));
             let port = u16::from_be(addr_in.sin_port);
             SocketAddr::V4(SocketAddrV4::new(ip, port))
-        } else if addr.ss_family as i32 == libc::AF_INET6 && len as usize >= std::mem::size_of::<libc::sockaddr_in6>() {
+        } else if addr.ss_family as i32 == libc::AF_INET6
+            && len as usize >= std::mem::size_of::<libc::sockaddr_in6>()
+        {
             let addr_in6 = &*(addr as *const _ as *const libc::sockaddr_in6);
             let ip = Ipv6Addr::from(addr_in6.sin6_addr.s6_addr);
             let port = u16::from_be(addr_in6.sin6_port);
@@ -691,23 +792,29 @@ fn sockaddr_to_std(addr: &libc::sockaddr_storage, len: libc::socklen_t) -> std::
 
 fn std_to_sockaddr(addr: &std::net::SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
     use std::net::SocketAddr;
-    
+
     let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-    
+
     match addr {
         SocketAddr::V4(v4) => {
             let addr_in = unsafe { &mut *(&mut storage as *mut _ as *mut libc::sockaddr_in) };
             addr_in.sin_family = libc::AF_INET as libc::sa_family_t;
             addr_in.sin_port = v4.port().to_be();
             addr_in.sin_addr.s_addr = u32::from(*v4.ip()).to_be();
-            (storage, std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t)
+            (
+                storage,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
         }
         SocketAddr::V6(v6) => {
             let addr_in6 = unsafe { &mut *(&mut storage as *mut _ as *mut libc::sockaddr_in6) };
             addr_in6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
             addr_in6.sin6_port = v6.port().to_be();
             addr_in6.sin6_addr.s6_addr = v6.ip().octets();
-            (storage, std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t)
+            (
+                storage,
+                std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+            )
         }
     }
 }

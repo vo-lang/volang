@@ -15,10 +15,16 @@ pub enum SessionError {
     Panicked(&'static str),
     VmRunFailed(String),
     MissingRenderOutput(&'static str),
-    UnexpectedSessionKind { expected: &'static str, have: &'static str },
+    UnexpectedSessionKind {
+        expected: &'static str,
+        have: &'static str,
+    },
     NotWaitingForEvents,
     InvalidIslandTransportFrame(String),
-    IslandIdMismatch { have: u32, got: u32 },
+    IslandIdMismatch {
+        have: u32,
+        got: u32,
+    },
 }
 
 impl fmt::Display for SessionError {
@@ -49,7 +55,9 @@ pub fn validate_scheduling_outcome(
         SchedulingOutcome::Completed
         | SchedulingOutcome::Suspended
         | SchedulingOutcome::SuspendedForHostEvents => Ok(()),
-        SchedulingOutcome::Blocked => Err(SessionError::Deadlock(format!("{:?}", vm.deadlock_err()))),
+        SchedulingOutcome::Blocked => {
+            Err(SessionError::Deadlock(format!("{:?}", vm.deadlock_err())))
+        }
         SchedulingOutcome::Panicked => Err(SessionError::Panicked(panic_message)),
     }
 }
@@ -100,12 +108,12 @@ pub fn advance_session(
     Ok(())
 }
 
-pub fn push_targeted_inbound_island_frame(
-    vm: &mut Vm,
-    data: &[u8],
-) -> Result<(), SessionError> {
+pub fn push_targeted_inbound_island_frame(vm: &mut Vm, data: &[u8]) -> Result<(), SessionError> {
     let (target_island_id, cmd) = decode_island_transport_frame(data).map_err(|error| {
-        SessionError::InvalidIslandTransportFrame(format!("invalid island transport frame: {:?}", error))
+        SessionError::InvalidIslandTransportFrame(format!(
+            "invalid island transport frame: {:?}",
+            error
+        ))
     })?;
     let current_island_id = vm.current_island_id();
     if current_island_id == 0 {

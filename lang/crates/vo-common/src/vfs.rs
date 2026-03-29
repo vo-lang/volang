@@ -12,13 +12,13 @@ use vo_common_core::SourceProvider;
 pub trait FileSystem: Send + Sync {
     /// Read file contents as a string.
     fn read_file(&self, path: &Path) -> io::Result<String>;
-    
+
     /// List entries in a directory.
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>>;
-    
+
     /// Check if a path exists.
     fn exists(&self, path: &Path) -> bool;
-    
+
     /// Check if a path is a directory.
     fn is_dir(&self, path: &Path) -> bool;
 
@@ -29,7 +29,7 @@ pub trait FileSystem: Send + Sync {
 }
 
 /// Real file system implementation.
-/// 
+///
 /// All operations are relative to `root`. Both `FileSystem` and `SourceProvider`
 /// traits use the same path resolution: `root.join(path)`.
 #[derive(Debug, Clone)]
@@ -44,7 +44,7 @@ impl RealFs {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
-    
+
     /// Get the root directory.
     pub fn root(&self) -> &Path {
         &self.root
@@ -55,7 +55,7 @@ impl FileSystem for RealFs {
     fn read_file(&self, path: &Path) -> io::Result<String> {
         std::fs::read_to_string(self.root.join(path))
     }
-    
+
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         let full_path = self.root.join(path);
         let mut entries = Vec::new();
@@ -70,11 +70,11 @@ impl FileSystem for RealFs {
         }
         Ok(entries)
     }
-    
+
     fn exists(&self, path: &Path) -> bool {
         self.root.join(path).exists()
     }
-    
+
     fn is_dir(&self, path: &Path) -> bool {
         self.root.join(path).is_dir()
     }
@@ -98,19 +98,24 @@ pub struct MemoryFs {
 
 impl MemoryFs {
     pub fn new() -> Self {
-        Self { files: HashMap::new() }
+        Self {
+            files: HashMap::new(),
+        }
     }
-    
+
     pub fn add_file(&mut self, path: impl Into<PathBuf>, content: impl Into<String>) {
         self.files.insert(path.into(), content.into());
     }
-    
+
     pub fn with_file(mut self, path: impl Into<PathBuf>, content: impl Into<String>) -> Self {
         self.add_file(path, content);
         self
     }
-    
-    pub fn with_files(mut self, files: impl IntoIterator<Item = (impl Into<PathBuf>, impl Into<String>)>) -> Self {
+
+    pub fn with_files(
+        mut self,
+        files: impl IntoIterator<Item = (impl Into<PathBuf>, impl Into<String>)>,
+    ) -> Self {
         for (path, content) in files {
             self.add_file(path, content);
         }
@@ -120,15 +125,19 @@ impl MemoryFs {
 
 impl FileSystem for MemoryFs {
     fn read_file(&self, path: &Path) -> io::Result<String> {
-        self.files.get(path)
-            .cloned()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("file not found: {:?}", path)))
+        self.files.get(path).cloned().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("file not found: {:?}", path),
+            )
+        })
     }
-    
+
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         let mut entries = Vec::new();
-        let is_root = path == Path::new(".") || path == Path::new("") || path.as_os_str().is_empty();
-        
+        let is_root =
+            path == Path::new(".") || path == Path::new("") || path.as_os_str().is_empty();
+
         for file_path in self.files.keys() {
             if is_root {
                 // Root directory - get top-level entries
@@ -163,10 +172,10 @@ impl FileSystem for MemoryFs {
                 }
             }
         }
-        
+
         Ok(entries)
     }
-    
+
     fn exists(&self, path: &Path) -> bool {
         if self.files.contains_key(path) {
             return true;
@@ -178,12 +187,12 @@ impl FileSystem for MemoryFs {
         let path_str = path.to_string_lossy();
         self.files.keys().any(|p| {
             let p_str = p.to_string_lossy();
-            p_str.starts_with(&*path_str) && 
-            p_str.len() > path_str.len() &&
-            p_str.chars().nth(path_str.len()) == Some('/')
+            p_str.starts_with(&*path_str)
+                && p_str.len() > path_str.len()
+                && p_str.chars().nth(path_str.len()) == Some('/')
         })
     }
-    
+
     fn is_dir(&self, path: &Path) -> bool {
         !self.files.contains_key(path) && self.exists(path)
     }
@@ -200,7 +209,7 @@ impl SourceProvider for MemoryFs {
 }
 
 /// Zip file system implementation.
-/// 
+///
 /// All files are loaded into memory on creation. Paths are relative to `root`.
 /// Both `FileSystem` and `SourceProvider` traits use the same path resolution.
 #[cfg(feature = "zip")]
@@ -219,32 +228,36 @@ impl ZipFs {
         let file = std::fs::File::open(path)?;
         Self::from_reader(file)
     }
-    
+
     /// Create a ZipFs with a specific root directory within the zip.
-    /// 
-    /// Example: `ZipFs::from_path_with_root("project.zip", "src/")` 
+    ///
+    /// Example: `ZipFs::from_path_with_root("project.zip", "src/")`
     /// will treat `src/` as the project root.
     pub fn from_path_with_root(path: &Path, root: impl Into<PathBuf>) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
         Self::from_reader_with_root(file, root)
     }
-    
+
     /// Create a ZipFs from any Read + Seek source (file, bytes, etc).
     pub fn from_reader<R: Read + Seek>(reader: R) -> io::Result<Self> {
         Self::from_reader_with_root(reader, PathBuf::new())
     }
-    
+
     /// Create a ZipFs from reader with a specific root directory.
-    pub fn from_reader_with_root<R: Read + Seek>(reader: R, root: impl Into<PathBuf>) -> io::Result<Self> {
+    pub fn from_reader_with_root<R: Read + Seek>(
+        reader: R,
+        root: impl Into<PathBuf>,
+    ) -> io::Result<Self> {
         let mut archive = zip::ZipArchive::new(reader)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        
+
         let mut files = HashMap::new();
-        
+
         for i in 0..archive.len() {
-            let mut file = archive.by_index(i)
+            let mut file = archive
+                .by_index(i)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            
+
             if !file.is_dir() {
                 let path = PathBuf::from(file.name());
                 let mut content = String::new();
@@ -253,15 +266,18 @@ impl ZipFs {
                 }
             }
         }
-        
-        Ok(Self { files, root: root.into() })
+
+        Ok(Self {
+            files,
+            root: root.into(),
+        })
     }
-    
+
     /// Create a ZipFs from in-memory bytes.
     pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
         Self::from_reader(std::io::Cursor::new(bytes))
     }
-    
+
     /// Resolve a path relative to the root.
     fn resolve(&self, path: &Path) -> PathBuf {
         if self.root.as_os_str().is_empty() {
@@ -278,20 +294,23 @@ impl ZipFs {
 impl FileSystem for ZipFs {
     fn read_file(&self, path: &Path) -> io::Result<String> {
         let full_path = self.resolve(path);
-        self.files.get(&full_path)
-            .cloned()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("file not found: {:?}", full_path)))
+        self.files.get(&full_path).cloned().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("file not found: {:?}", full_path),
+            )
+        })
     }
-    
+
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         let full_path = self.resolve(path);
         let mut entries = Vec::new();
-        
+
         // Check if we're at the root
-        let is_root = full_path.as_os_str().is_empty() 
-            || full_path == Path::new(".") 
+        let is_root = full_path.as_os_str().is_empty()
+            || full_path == Path::new(".")
             || full_path == Path::new("");
-        
+
         // Build the prefix string for matching
         let prefix = if is_root {
             String::new()
@@ -302,10 +321,10 @@ impl FileSystem for ZipFs {
             }
             s
         };
-        
+
         for file_path in self.files.keys() {
             let file_str = file_path.to_string_lossy();
-            
+
             if prefix.is_empty() {
                 // Root directory - get top-level entries
                 if let Some(first_component) = file_path.components().next() {
@@ -329,10 +348,10 @@ impl FileSystem for ZipFs {
                 }
             }
         }
-        
+
         Ok(entries)
     }
-    
+
     fn exists(&self, path: &Path) -> bool {
         let full_path = self.resolve(path);
         if self.files.contains_key(&full_path) {
@@ -342,12 +361,11 @@ impl FileSystem for ZipFs {
         let path_str = full_path.to_string_lossy();
         self.files.keys().any(|p| {
             let p_str = p.to_string_lossy();
-            p_str.starts_with(&*path_str) && 
-            (p_str.len() > path_str.len() && 
-             p_str.chars().nth(path_str.len()) == Some('/'))
+            p_str.starts_with(&*path_str)
+                && (p_str.len() > path_str.len() && p_str.chars().nth(path_str.len()) == Some('/'))
         })
     }
-    
+
     fn is_dir(&self, path: &Path) -> bool {
         let full_path = self.resolve(path);
         !self.files.contains_key(&full_path) && self.exists(path)
@@ -382,16 +400,16 @@ impl FileSet {
             root,
         }
     }
-    
+
     /// Collect .vo files from a directory (non-recursive).
     /// Subdirectories are treated as separate packages and loaded via import.
-    /// 
+    ///
     /// `fs` - FileSystem to read from (paths are relative to fs.root)
     /// `dir` - Directory to collect from (relative to fs.root, use "." for root)
     /// `abs_root` - Absolute root path for the FileSet (used for source map)
     pub fn collect<F: FileSystem>(fs: &F, dir: &Path, abs_root: PathBuf) -> io::Result<Self> {
         let mut file_set = Self::new(abs_root);
-        
+
         // Only collect .vo files in the directory (not subdirectories)
         for entry in fs.read_dir(dir)? {
             if !fs.is_dir(&entry) && entry.extension().is_some_and(|e| e == "vo") {
@@ -399,37 +417,41 @@ impl FileSet {
                 file_set.files.insert(entry, content);
             }
         }
-        
+
         Ok(file_set)
     }
-    
+
     /// Create a FileSet from a single source file.
-    /// 
+    ///
     /// `fs` - FileSystem to read from
     /// `file_path` - Path to the file (relative to fs.root)
     /// `abs_root` - Absolute root path for the FileSet
-    pub fn from_file<F: FileSystem>(fs: &F, file_path: &Path, abs_root: PathBuf) -> io::Result<Self> {
+    pub fn from_file<F: FileSystem>(
+        fs: &F,
+        file_path: &Path,
+        abs_root: PathBuf,
+    ) -> io::Result<Self> {
         let mut file_set = Self::new(abs_root);
         let content = fs.read_file(file_path)?;
         file_set.files.insert(file_path.to_path_buf(), content);
         Ok(file_set)
     }
-    
+
     /// Get files grouped by their parent directory (package).
     pub fn files_by_package(&self) -> HashMap<PathBuf, Vec<(&PathBuf, &String)>> {
         let mut packages: HashMap<PathBuf, Vec<(&PathBuf, &String)>> = HashMap::new();
-        
+
         for (path, content) in &self.files {
             let pkg_dir = path.parent().unwrap_or(Path::new("")).to_path_buf();
             packages.entry(pkg_dir).or_default().push((path, content));
         }
-        
+
         packages
     }
 }
 
 /// Overlay file system that combines two file systems.
-/// 
+///
 /// Tries the primary file system first, falls back to secondary if not found.
 /// This is useful for combining a zip file (project files) with real fs (stdlib).
 #[derive(Debug, Clone)]
@@ -449,10 +471,11 @@ impl<P: FileSystem, S: FileSystem> OverlayFs<P, S> {
 
 impl<P: FileSystem, S: FileSystem> FileSystem for OverlayFs<P, S> {
     fn read_file(&self, path: &Path) -> io::Result<String> {
-        self.primary.read_file(path)
+        self.primary
+            .read_file(path)
             .or_else(|_| self.secondary.read_file(path))
     }
-    
+
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         // Merge entries from both file systems
         let mut entries = self.primary.read_dir(path).unwrap_or_default();
@@ -464,16 +487,19 @@ impl<P: FileSystem, S: FileSystem> FileSystem for OverlayFs<P, S> {
             }
         }
         if entries.is_empty() {
-            Err(io::Error::new(io::ErrorKind::NotFound, "directory not found"))
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "directory not found",
+            ))
         } else {
             Ok(entries)
         }
     }
-    
+
     fn exists(&self, path: &Path) -> bool {
         self.primary.exists(path) || self.secondary.exists(path)
     }
-    
+
     fn is_dir(&self, path: &Path) -> bool {
         self.primary.is_dir(path) || self.secondary.is_dir(path)
     }
@@ -492,38 +518,38 @@ impl<P: FileSystem, S: FileSystem> SourceProvider for OverlayFs<P, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_memory_fs() {
         let fs = MemoryFs::new()
             .with_file("/project/main.vo", "package main")
             .with_file("/project/lib/util.vo", "package lib");
-        
+
         assert!(fs.exists(Path::new("/project/main.vo")));
         assert!(fs.exists(Path::new("/project/lib")));
         assert!(fs.is_dir(Path::new("/project/lib")));
         assert!(!fs.is_dir(Path::new("/project/main.vo")));
-        
+
         let content = fs.read_file(Path::new("/project/main.vo")).unwrap();
         assert_eq!(content, "package main");
     }
-    
+
     #[test]
     fn test_file_set_collect() {
         let fs = MemoryFs::new()
             .with_file("main.vo", "package main")
             .with_file("lib/util.vo", "package lib")
             .with_file("readme.md", "# Readme");
-        
+
         let file_set = FileSet::collect(&fs, Path::new("."), PathBuf::from(".")).unwrap();
-        
+
         // Should only collect .vo files in root (not subdirectories)
         assert_eq!(file_set.files.len(), 1);
         assert!(file_set.files.contains_key(Path::new("main.vo")));
         assert!(!file_set.files.contains_key(Path::new("lib/util.vo"))); // subdirectory
         assert!(!file_set.files.contains_key(Path::new("readme.md")));
     }
-    
+
     #[test]
     #[cfg(feature = "zip")]
     fn test_zip_fs_read_dir() {
@@ -538,19 +564,19 @@ mod tests {
             std::io::Write::write_all(&mut zip, b"package math").unwrap();
             zip.finish().unwrap();
         }
-        
+
         zip_buffer.set_position(0);
         let zip_fs = ZipFs::from_reader(zip_buffer).unwrap();
-        
+
         // Test read_dir at root
         let entries = zip_fs.read_dir(Path::new(".")).unwrap();
         assert!(entries.contains(&PathBuf::from("main.vo")));
         assert!(entries.contains(&PathBuf::from("math")));
-        
+
         // Test is_dir
         assert!(!zip_fs.is_dir(Path::new("main.vo")));
         assert!(zip_fs.is_dir(Path::new("math")));
-        
+
         // Test read_file
         let content = zip_fs.read_file(Path::new("main.vo")).unwrap();
         assert_eq!(content, "package main");

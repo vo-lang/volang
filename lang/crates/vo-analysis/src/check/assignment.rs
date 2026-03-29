@@ -3,10 +3,9 @@
 //! This module implements assignment compatibility checking, variable
 //! initialization, and short variable declarations.
 
-
 use vo_common::span::Span;
-use vo_syntax::ast::Ident;
 use vo_syntax::ast::Expr;
+use vo_syntax::ast::Ident;
 
 use crate::objects::{ObjKey, TypeKey};
 use crate::operand::{Operand, OperandMode};
@@ -37,7 +36,7 @@ struct ExtractedDynAccess<'a> {
 /// Returns Some if expr is DynAccess or TryUnwrap(DynAccess).
 fn extract_dyn_access(expr: &Expr) -> Option<ExtractedDynAccess<'_>> {
     use vo_syntax::ast::ExprKind;
-    
+
     match &expr.kind {
         ExprKind::DynAccess(dyn_access) => Some(ExtractedDynAccess {
             dyn_access,
@@ -72,9 +71,9 @@ impl<'a> DynAccessLhs<'a> {
     /// For Init: use declared type if available, otherwise default_type (any)
     fn get_elem_type(&self, i: usize, checker: &mut Checker, default_type: TypeKey) -> TypeKey {
         match self {
-            DynAccessLhs::Assign(exprs) => {
-                checker.get_lhs_type_for_dyn(&exprs[i]).unwrap_or(default_type)
-            }
+            DynAccessLhs::Assign(exprs) => checker
+                .get_lhs_type_for_dyn(&exprs[i])
+                .unwrap_or(default_type),
             DynAccessLhs::Init(objs) => {
                 // For return statements, objs are function return parameters with declared types
                 objs.get(i)
@@ -152,7 +151,11 @@ impl Checker {
 
         if typ::is_untyped(xt, self.objs()) {
             if t.is_none() && xt == self.basic_type(BasicType::UntypedNil) {
-                self.error_code_msg(TypeError::UseOfUntypedNil, x.pos(), format!("use of untyped nil in {}", note));
+                self.error_code_msg(
+                    TypeError::UseOfUntypedNil,
+                    x.pos(),
+                    format!("use of untyped nil in {}", note),
+                );
                 x.mode = OperandMode::Invalid;
                 return;
             }
@@ -181,9 +184,17 @@ impl Checker {
         let mut reason = String::new();
         if !self.assignable_to(x, t.unwrap(), &mut reason) {
             if reason.is_empty() {
-                self.error_code_msg(TypeError::CannotAssign, x.pos(), format!("cannot use value as type in {}", note));
+                self.error_code_msg(
+                    TypeError::CannotAssign,
+                    x.pos(),
+                    format!("cannot use value as type in {}", note),
+                );
             } else {
-                self.error_code_msg(TypeError::CannotAssign, x.pos(), format!("cannot use value as type in {}: {}", note, reason));
+                self.error_code_msg(
+                    TypeError::CannotAssign,
+                    x.pos(),
+                    format!("cannot use value as type in {}: {}", note, reason),
+                );
             }
             x.mode = OperandMode::Invalid;
         }
@@ -192,12 +203,12 @@ impl Checker {
     /// Initializes a constant with value x.
     pub(crate) fn init_const(&mut self, lhs: ObjKey, x: &mut Operand) {
         let invalid_type = self.invalid_type();
-        
+
         if x.invalid() || x.typ == Some(invalid_type) {
             self.lobj_mut(lhs).set_type(Some(invalid_type));
             return;
         }
-        
+
         if self.lobj(lhs).typ() == Some(invalid_type) {
             return;
         }
@@ -224,14 +235,14 @@ impl Checker {
     /// Initializes a variable with value x.
     pub(crate) fn init_var(&mut self, lhs: ObjKey, x: &mut Operand, msg: &str) -> Option<TypeKey> {
         let invalid_type = self.invalid_type();
-        
+
         if x.invalid() || x.typ == Some(invalid_type) {
             if self.lobj(lhs).typ().is_none() {
                 self.lobj_mut(lhs).set_type(Some(invalid_type));
             }
             return None;
         }
-        
+
         if self.lobj(lhs).typ() == Some(invalid_type) {
             return None;
         }
@@ -242,7 +253,11 @@ impl Checker {
             let lhs_type = if typ::is_untyped(xt, self.objs()) {
                 // convert untyped types to default types
                 if xt == self.basic_type(BasicType::UntypedNil) {
-                    self.error_code_msg(TypeError::UseOfUntypedNil, x.pos(), format!("use of untyped nil in {}", msg));
+                    self.error_code_msg(
+                        TypeError::UseOfUntypedNil,
+                        x.pos(),
+                        format!("use of untyped nil in {}", msg),
+                    );
                     invalid_type
                 } else {
                     typ::untyped_default_type(xt, self.objs())
@@ -275,7 +290,7 @@ impl Checker {
 
         let mut v: Option<ObjKey> = None;
         let mut v_used = false;
-        
+
         // determine if the lhs is a (possibly parenthesized) identifier.
         if let Some(ident) = self.expr_as_ident(lhs) {
             let name = self.resolve_ident(&ident);
@@ -308,7 +323,7 @@ impl Checker {
         // Evaluate lhs
         let mut z = Operand::new();
         self.expr(&mut z, lhs);
-        
+
         // restore v.used
         if let Some(okey) = v {
             if let crate::obj::EntityType::Var(prop) = self.lobj_mut(okey).entity_type_mut() {
@@ -351,25 +366,31 @@ impl Checker {
     /// Aligned with goscript/types/src/check/assignment.rs::init_vars
     /// If return_pos is Some, init_vars is called to type-check return expressions.
     pub(crate) fn init_vars(&mut self, lhs: &[ObjKey], rhs: &[Expr], return_pos: Option<Span>) {
-        use std::cmp::Ordering;
         use super::util::UnpackResult;
-        
+        use std::cmp::Ordering;
+
         let invalid_type = self.invalid_type();
         let ll = lhs.len();
-        
+
         // Special handling for DynAccess (including TryUnwrap(DynAccess)): generate return type based on lhs types
         // Works for both assignment (`v := a~>Method()`) and return (`return a~>Method()`)
         if rhs.len() == 1 {
             if let Some(extracted) = extract_dyn_access(&rhs[0]) {
-                self.init_vars_dyn_access_with_unwrap(lhs, &rhs[0], extracted.dyn_access, extracted.dyn_access_expr, extracted.has_try_unwrap);
+                self.init_vars_dyn_access_with_unwrap(
+                    lhs,
+                    &rhs[0],
+                    extracted.dyn_access,
+                    extracted.dyn_access_expr,
+                    extracted.has_try_unwrap,
+                );
                 return;
             }
         }
-        
+
         // Use unpack to handle all cases uniformly
         // requires return_pos.is_none for comma-ok handling
         let result = self.unpack(rhs, ll, ll == 2 && return_pos.is_none(), false);
-        
+
         let mut invalidate_lhs = || {
             for &okey in lhs.iter() {
                 if self.lobj(okey).typ().is_none() {
@@ -377,7 +398,7 @@ impl Checker {
                 }
             }
         };
-        
+
         match &result {
             UnpackResult::Error => invalidate_lhs(),
             UnpackResult::Tuple(_, _, _)
@@ -395,20 +416,30 @@ impl Checker {
                                 self.error_code_msg(
                                     TypeError::AssignmentMismatch,
                                     pos,
-                                    format!("wrong number of return values (want {}, got {})", ll, count),
+                                    format!(
+                                        "wrong number of return values (want {}, got {})",
+                                        ll, count
+                                    ),
                                 );
                             } else {
                                 self.error_code_msg(
                                     TypeError::AssignmentMismatch,
                                     rhs[0].span,
-                                    format!("cannot initialize {} variables with {} values", ll, count),
+                                    format!(
+                                        "cannot initialize {} variables with {} values",
+                                        ll, count
+                                    ),
                                 );
                             }
                         }
                         return;
                     }
                     Ordering::Equal => {
-                        let context = if return_pos.is_some() { "return statement" } else { "assignment" };
+                        let context = if return_pos.is_some() {
+                            "return statement"
+                        } else {
+                            "assignment"
+                        };
                         for (i, &l) in lhs.iter().enumerate() {
                             let mut x = Operand::new();
                             result.get(self, &mut x, i);
@@ -420,7 +451,8 @@ impl Checker {
         }
         if let UnpackResult::CommaOk(e, types) = result {
             if let Some(expr) = e {
-                self.result.record_comma_ok_types(expr, &types, &mut self.tc_objs, self.pkg);
+                self.result
+                    .record_comma_ok_types(expr, &types, &mut self.tc_objs, self.pkg);
             }
         }
     }
@@ -428,21 +460,27 @@ impl Checker {
     /// Assigns multiple values to multiple variables.
     /// Aligned with goscript/types/src/check/assignment.rs::assign_vars
     pub(crate) fn assign_vars(&mut self, lhs: &[Expr], rhs: &[Expr]) {
-        use std::cmp::Ordering;
         use super::util::UnpackResult;
-        
+        use std::cmp::Ordering;
+
         let ll = lhs.len();
-        
+
         // Special handling for DynAccess (including TryUnwrap(DynAccess)): generate return type based on lhs types
         if rhs.len() == 1 {
             if let Some(extracted) = extract_dyn_access(&rhs[0]) {
-                self.assign_vars_dyn_access_with_unwrap(lhs, &rhs[0], extracted.dyn_access, extracted.dyn_access_expr, extracted.has_try_unwrap);
+                self.assign_vars_dyn_access_with_unwrap(
+                    lhs,
+                    &rhs[0],
+                    extracted.dyn_access,
+                    extracted.dyn_access_expr,
+                    extracted.has_try_unwrap,
+                );
                 return;
             }
         }
-        
+
         let result = self.unpack(rhs, ll, ll == 2, false);
-        
+
         match &result {
             UnpackResult::Error => self.use_lhs(lhs),
             UnpackResult::Tuple(_, _, _)
@@ -475,12 +513,13 @@ impl Checker {
         }
         if let UnpackResult::CommaOk(e, types) = result {
             if let Some(expr) = e {
-                self.result.record_comma_ok_types(expr, &types, &mut self.tc_objs, self.pkg);
+                self.result
+                    .record_comma_ok_types(expr, &types, &mut self.tc_objs, self.pkg);
             }
         }
     }
 
-    /// Handle DynAccess assignment with optional TryUnwrap: 
+    /// Handle DynAccess assignment with optional TryUnwrap:
     /// - `v1, v2, err = obj~>Method()` (has_try_unwrap = false)
     /// - `v1, v2 = obj~>Method()?` (has_try_unwrap = true)
     fn assign_vars_dyn_access_with_unwrap(
@@ -491,7 +530,13 @@ impl Checker {
         dyn_access_expr: &Expr,
         has_try_unwrap: bool,
     ) {
-        self.check_dyn_access_lhs(DynAccessLhs::Assign(lhs), rhs_expr, dyn_access, dyn_access_expr, has_try_unwrap);
+        self.check_dyn_access_lhs(
+            DynAccessLhs::Assign(lhs),
+            rhs_expr,
+            dyn_access,
+            dyn_access_expr,
+            has_try_unwrap,
+        );
     }
 
     /// Handle DynAccess initialization with optional TryUnwrap:
@@ -505,7 +550,13 @@ impl Checker {
         dyn_access_expr: &Expr,
         has_try_unwrap: bool,
     ) {
-        self.check_dyn_access_lhs(DynAccessLhs::Init(lhs), rhs_expr, dyn_access, dyn_access_expr, has_try_unwrap);
+        self.check_dyn_access_lhs(
+            DynAccessLhs::Init(lhs),
+            rhs_expr,
+            dyn_access,
+            dyn_access_expr,
+            has_try_unwrap,
+        );
     }
 
     /// Unified handler for dynamic access type checking.
@@ -514,7 +565,7 @@ impl Checker {
     /// The LHS determines the expected return types:
     /// - For Init: all values default to `any`, last is `error`
     /// - For Assign: values use their declared types, last is `error`
-    /// 
+    ///
     /// When `has_try_unwrap` is true (i.e., `x = a~>field?`):
     /// - The error is consumed by `?`, so LHS doesn't need to include error
     /// - The dyn operation still returns `(T..., error)` but we only assign `T...` to LHS
@@ -534,7 +585,7 @@ impl Checker {
         // When has_try_unwrap, error is consumed by ?, so dyn returns ll+1 values (ll values + error)
         // When !has_try_unwrap, LHS must include error, so dyn returns ll values
         let dyn_ret_count = if has_try_unwrap { ll + 1 } else { ll };
-        
+
         if dyn_ret_count < 1 {
             self.error_code_msg(
                 TypeError::AssignmentMismatch,
@@ -575,14 +626,16 @@ impl Checker {
         }
 
         // Resolve protocol method for static dispatch
-        let dyn_resolve = match self.resolve_dyn_access_method(base_type, &dyn_access.op, dyn_access_expr.span) {
-            Ok(resolve) => resolve,
-            Err(()) => {
-                self.set_lhs_invalid_types(&lhs);
-                return;
-            }
-        };
-        self.result.record_dyn_access(dyn_access_expr.id, dyn_resolve);
+        let dyn_resolve =
+            match self.resolve_dyn_access_method(base_type, &dyn_access.op, dyn_access_expr.span) {
+                Ok(resolve) => resolve,
+                Err(()) => {
+                    self.set_lhs_invalid_types(&lhs);
+                    return;
+                }
+            };
+        self.result
+            .record_dyn_access(dyn_access_expr.id, dyn_resolve);
 
         // Build return type and assign to LHS
         let error_type = self.universe().error_type();
@@ -590,10 +643,12 @@ impl Checker {
         if dyn_ret_count == 1 {
             // No return values, only error (e.g., `err = a~>Do()` or `a~>Do()?`)
             // Record type for dyn_access_expr (the DynAccess returns just error)
-            self.result.record_type_and_value(dyn_access_expr.id, OperandMode::Value, error_type);
+            self.result
+                .record_type_and_value(dyn_access_expr.id, OperandMode::Value, error_type);
             if has_try_unwrap {
                 // TryUnwrap of error produces NoValue
-                self.result.record_type_and_value(rhs_expr.id, OperandMode::NoValue, error_type);
+                self.result
+                    .record_type_and_value(rhs_expr.id, OperandMode::NoValue, error_type);
             } else {
                 // Only assign error to LHS when not using ?
                 self.finish_dyn_access_lhs(&lhs, rhs_expr, &[error_type]);
@@ -604,7 +659,7 @@ impl Checker {
             // When has_try_unwrap: ll values from LHS + 1 error = dyn_ret_count
             // When !has_try_unwrap: ll-1 values from LHS + 1 error = ll = dyn_ret_count
             let value_count = dyn_ret_count - 1; // Number of non-error values
-            
+
             let elem_types: Vec<TypeKey> = (0..dyn_ret_count)
                 .map(|i| {
                     if i == dyn_ret_count - 1 {
@@ -626,11 +681,13 @@ impl Checker {
             // Record type for the DynAccess expression (tuple_type includes error)
             // When has_try_unwrap, dyn_access_expr is the inner DynAccess, rhs_expr is TryUnwrap
             // When !has_try_unwrap, dyn_access_expr == rhs_expr
-            self.result.record_type_and_value(dyn_access_expr.id, OperandMode::Value, tuple_type);
+            self.result
+                .record_type_and_value(dyn_access_expr.id, OperandMode::Value, tuple_type);
             if has_try_unwrap {
                 // For TryUnwrap, record the unwrapped type (without error)
                 let unwrapped_type = self.make_result_type(&elem_types[..value_count]);
-                self.result.record_type_and_value(rhs_expr.id, OperandMode::Value, unwrapped_type);
+                self.result
+                    .record_type_and_value(rhs_expr.id, OperandMode::Value, unwrapped_type);
                 self.finish_dyn_access_lhs(&lhs, rhs_expr, &elem_types[..value_count]);
             } else {
                 self.finish_dyn_access_lhs(&lhs, rhs_expr, &elem_types);
@@ -652,12 +709,7 @@ impl Checker {
     }
 
     /// Finish dynamic access by assigning types to LHS.
-    fn finish_dyn_access_lhs(
-        &mut self,
-        lhs: &DynAccessLhs,
-        rhs_expr: &Expr,
-        types: &[TypeKey],
-    ) {
+    fn finish_dyn_access_lhs(&mut self, lhs: &DynAccessLhs, rhs_expr: &Expr, types: &[TypeKey]) {
         match lhs {
             DynAccessLhs::Assign(exprs) => {
                 for (i, expr) in exprs.iter().enumerate() {
@@ -714,7 +766,12 @@ impl Checker {
                     // untyped nil or empty interface
                     return x.is_nil(self.objs()) || detail.is_empty();
                 }
-                Type::Pointer(_) | Type::Signature(_) | Type::Slice(_) | Type::Map(_) | Type::Chan(_) | Type::Port(_) => {
+                Type::Pointer(_)
+                | Type::Signature(_)
+                | Type::Slice(_)
+                | Type::Map(_)
+                | Type::Chan(_)
+                | Type::Port(_) => {
                     return x.is_nil(self.objs());
                 }
                 _ => {}

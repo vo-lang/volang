@@ -3,6 +3,8 @@
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
+use vo_common_core::bytecode::StructMeta;
+use vo_common_core::RuntimeType;
 use vo_runtime::gc::Gc;
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::queue_state::QueueMessage;
@@ -10,8 +12,6 @@ use vo_runtime::pack::{
     pack_slots, unpack_slots_with_queue_handle_resolver, PackedValue, QueueHandleInfo,
 };
 use vo_runtime::ValueMeta;
-use vo_common_core::bytecode::StructMeta;
-use vo_common_core::RuntimeType;
 
 pub fn pack_transport_message(
     gc: &Gc,

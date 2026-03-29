@@ -1,10 +1,10 @@
 //! Embedding path analysis and traversal for method resolution.
 //!
 //! # Overview
-//! 
+//!
 //! When a struct embeds another type, methods are "promoted" and can be called
 //! on the outer type. This module handles:
-//! 
+//!
 //! 1. **Path Analysis** - Analyze embedding indices to build `EmbedPathInfo`
 //! 2. **Method Resolution** - Determine dispatch strategy (`MethodDispatch`)
 //! 3. **Code Generation** - Emit instructions to traverse the path (`emit_embed_path_traversal`)
@@ -22,8 +22,8 @@
 //! - If no pointer steps: use `total_offset` directly (fast path)
 //! - If has pointer steps: traverse step by step, dereference pointers
 
-use vo_analysis::objects::{TCObjects, TypeKey};
 use vo_analysis::check::type_info as layout;
+use vo_analysis::objects::{TCObjects, TypeKey};
 use vo_analysis::typ::{self, Type};
 
 /// Result of analyzing an embedding path.
@@ -91,7 +91,7 @@ fn analyze_embed_path_impl(
 ) -> EmbedPathInfo {
     let mut steps = Vec::new();
     let mut current_type = recv_type;
-    
+
     // Strip pointer from receiver if needed
     if layout::is_pointer(current_type, tc_objs) {
         let underlying = typ::underlying_type(current_type, tc_objs);
@@ -99,16 +99,20 @@ fn analyze_embed_path_impl(
             current_type = p.base();
         }
     }
-    
+
     for &idx in indices {
-        let (field_offset, _slots) = layout::struct_field_offset_by_index(current_type, idx, tc_objs);
+        let (field_offset, _slots) =
+            layout::struct_field_offset_by_index(current_type, idx, tc_objs);
         let field_type = layout::struct_field_type_by_index(current_type, idx, tc_objs);
-        
+
         let is_pointer = layout::is_pointer(field_type, tc_objs);
         let is_interface = layout::is_interface(field_type, tc_objs);
-        
-        steps.push(EmbedStep { is_pointer, offset: field_offset });
-        
+
+        steps.push(EmbedStep {
+            is_pointer,
+            offset: field_offset,
+        });
+
         if is_interface {
             // For embedded interface, calculate total offset from steps
             let total_offset: u16 = steps.iter().map(|s| s.offset).sum();
@@ -118,11 +122,11 @@ fn analyze_embed_path_impl(
                 final_type: field_type,
                 total_offset,
                 has_pointer_step,
-                final_slots: 2,  // interface is always 2 slots
+                final_slots: 2, // interface is always 2 slots
                 embedded_iface_type: Some(field_type),
             };
         }
-        
+
         if is_pointer {
             let underlying = typ::underlying_type(field_type, tc_objs);
             if let Type::Pointer(p) = &tc_objs.types[underlying] {
@@ -132,11 +136,11 @@ fn analyze_embed_path_impl(
             current_type = field_type;
         }
     }
-    
+
     let total_offset = steps.iter().map(|s| s.offset).sum();
     let has_pointer_step = steps.iter().any(|s| s.is_pointer);
     let final_slots = layout::type_slot_count(current_type, tc_objs);
-    
+
     EmbedPathInfo {
         steps,
         final_type: current_type,
@@ -160,9 +164,7 @@ pub enum MethodDispatch {
         expects_ptr_recv: bool,
     },
     /// Interface dispatch - lookup method at runtime via itab
-    Interface {
-        method_idx: u32,
-    },
+    Interface { method_idx: u32 },
     /// Embedded interface - load interface from struct field, then dispatch
     /// Note: offset info is in EmbedPathInfo, not here
     EmbeddedInterface {
@@ -186,11 +188,13 @@ impl MethodCallInfo {
     /// Whether method expects pointer receiver
     pub fn expects_ptr_recv(&self) -> bool {
         match &self.dispatch {
-            MethodDispatch::Static { expects_ptr_recv, .. } => *expects_ptr_recv,
+            MethodDispatch::Static {
+                expects_ptr_recv, ..
+            } => *expects_ptr_recv,
             _ => false,
         }
     }
-    
+
     /// Get actual receiver type (after following embedding path)
     pub fn actual_recv_type(&self, base_type: TypeKey) -> TypeKey {
         if self.embed_path.steps.is_empty() {
@@ -199,33 +203,35 @@ impl MethodCallInfo {
             self.embed_path.final_type
         }
     }
-    
+
     /// Emit code to extract the target (receiver or interface) for this method call.
-    /// 
+    ///
     /// This is the unified entry point for target extraction, handling all dispatch types:
     /// - Static: extract receiver (value or pointer based on method signature)
     /// - Interface: copy interface directly (no embedding)
     /// - EmbeddedInterface: traverse path and extract interface
-    pub fn emit_target(
-        &self,
-        builder: &mut FuncBuilder,
-        start: TraverseStart,
-        dst: u16,
-    ) {
+    pub fn emit_target(&self, builder: &mut FuncBuilder, start: TraverseStart, dst: u16) {
         let (expects_ptr, slots) = match &self.dispatch {
-            MethodDispatch::Static { expects_ptr_recv, .. } => {
-                (*expects_ptr_recv, self.embed_path.final_slots)
-            }
+            MethodDispatch::Static {
+                expects_ptr_recv, ..
+            } => (*expects_ptr_recv, self.embed_path.final_slots),
             MethodDispatch::EmbeddedInterface { .. } | MethodDispatch::Interface { .. } => {
-                (false, 2)  // interface is always value type, 2 slots
+                (false, 2) // interface is always value type, 2 slots
             }
         };
-        emit_embed_path_traversal(builder, start, &self.embed_path.steps, expects_ptr, slots, dst);
+        emit_embed_path_traversal(
+            builder,
+            start,
+            &self.embed_path.steps,
+            expects_ptr,
+            slots,
+            dst,
+        );
     }
 }
 
 /// Resolve a method call from Selection info.
-/// 
+///
 /// This is the unified entry point for method call resolution.
 /// It handles all cases:
 /// - Direct method on type
@@ -253,7 +259,7 @@ pub fn resolve_method_call(
     } else {
         recv_type
     };
-    
+
     // Case 1: Interface receiver - use interface dispatch
     if is_interface_recv {
         let method_idx = ctx.get_interface_method_index(recv_type, method_name, tc_objs, interner);
@@ -270,13 +276,13 @@ pub fn resolve_method_call(
             recv_is_pointer,
         });
     }
-    
+
     // Get indices from selection
     let indices = selection.map(|s| s.indices()).unwrap_or(&[]);
-    
+
     // Analyze embedding path
     let embed_path = analyze_embed_path(base_type, indices, tc_objs);
-    
+
     // Case 2: Embedded interface - method comes from interface field
     if let Some(iface_type) = embed_path.embedded_iface_type {
         let method_idx = ctx.get_interface_method_index(iface_type, method_name, tc_objs, interner);
@@ -289,7 +295,7 @@ pub fn resolve_method_call(
             recv_is_pointer,
         });
     }
-    
+
     // Case 3: Concrete method (direct or promoted)
     // Try to find method on final_type (after following embedding path)
     let search_type = if embed_path.steps.is_empty() {
@@ -297,25 +303,31 @@ pub fn resolve_method_call(
     } else {
         embed_path.final_type
     };
-    
+
     // Try value receiver
     if let Some(func_id) = ctx.get_func_index(Some(search_type), false, method_sym) {
         return Some(MethodCallInfo {
-            dispatch: MethodDispatch::Static { func_id, expects_ptr_recv: false },
+            dispatch: MethodDispatch::Static {
+                func_id,
+                expects_ptr_recv: false,
+            },
             embed_path,
             recv_is_pointer,
         });
     }
-    
+
     // Try pointer receiver
     if let Some(func_id) = ctx.get_func_index(Some(search_type), true, method_sym) {
         return Some(MethodCallInfo {
-            dispatch: MethodDispatch::Static { func_id, expects_ptr_recv: true },
+            dispatch: MethodDispatch::Static {
+                func_id,
+                expects_ptr_recv: true,
+            },
             embed_path,
             recv_is_pointer,
         });
     }
-    
+
     None
 }
 
@@ -340,12 +352,20 @@ pub struct TraverseStart {
 impl TraverseStart {
     /// Create a TraverseStart with no base offset (most common case)
     pub fn new(reg: u16, is_pointer: bool) -> Self {
-        Self { reg, is_pointer, base_offset: 0 }
+        Self {
+            reg,
+            is_pointer,
+            base_offset: 0,
+        }
     }
-    
+
     /// Create a TraverseStart with a base offset (e.g., for HeapArray)
     pub fn with_base_offset(reg: u16, is_pointer: bool, base_offset: u16) -> Self {
-        Self { reg, is_pointer, base_offset }
+        Self {
+            reg,
+            is_pointer,
+            base_offset,
+        }
     }
 }
 
@@ -376,30 +396,46 @@ pub fn emit_embed_path_traversal(
 ) {
     // Include base_offset in calculations
     let base_offset = start.base_offset;
-    
+
     // Empty path - no embedding
     if steps.is_empty() {
-        emit_final_receiver(builder, start.reg, start.is_pointer, base_offset, expects_ptr_recv, recv_slots, dst);
+        emit_final_receiver(
+            builder,
+            start.reg,
+            start.is_pointer,
+            base_offset,
+            expects_ptr_recv,
+            recv_slots,
+            dst,
+        );
         return;
     }
-    
+
     let has_pointer = steps.iter().any(|s| s.is_pointer);
     let total_offset: u16 = base_offset + steps.iter().map(|s| s.offset).sum::<u16>();
-    
+
     // Fast path: no pointer steps
     if !has_pointer {
-        emit_final_receiver(builder, start.reg, start.is_pointer, total_offset, expects_ptr_recv, recv_slots, dst);
+        emit_final_receiver(
+            builder,
+            start.reg,
+            start.is_pointer,
+            total_offset,
+            expects_ptr_recv,
+            recv_slots,
+            dst,
+        );
         return;
     }
-    
+
     // General case: traverse pointer chain
     let mut current_is_ptr = start.is_pointer;
     let mut current_reg = start.reg;
     let mut accumulated_offset: u16 = base_offset;
-    
+
     for (i, step) in steps.iter().enumerate() {
         accumulated_offset += step.offset;
-        
+
         if step.is_pointer {
             // Read the pointer field
             let temp_ptr = builder.alloc_slots(&[SlotType::GcRef]);
@@ -412,10 +448,18 @@ pub fn emit_embed_path_traversal(
             current_is_ptr = true;
             accumulated_offset = 0;
         }
-        
+
         // Emit final receiver at the last step
         if i == steps.len() - 1 {
-            emit_final_receiver(builder, current_reg, current_is_ptr, accumulated_offset, expects_ptr_recv, recv_slots, dst);
+            emit_final_receiver(
+                builder,
+                current_reg,
+                current_is_ptr,
+                accumulated_offset,
+                expects_ptr_recv,
+                recv_slots,
+                dst,
+            );
         }
     }
 }
@@ -461,15 +505,19 @@ fn emit_final_receiver(
 // High-Level Receiver Extraction API
 // =============================================================================
 
-use crate::type_info::TypeInfoWrapper;
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
+use crate::type_info::TypeInfoWrapper;
 
 /// Result of extracting a method receiver - unified representation
 #[derive(Debug, Clone, Copy)]
 pub enum ReceiverValue {
     /// Value in register(s), ready to use
-    Value { reg: u16, value_type: TypeKey, slots: u16 },
+    Value {
+        reg: u16,
+        value_type: TypeKey,
+        slots: u16,
+    },
     /// Pointer to value in register
     Pointer { reg: u16 },
 }
@@ -495,7 +543,7 @@ pub fn extract_receiver(
     info: &TypeInfoWrapper,
 ) -> Result<ReceiverValue, CodegenError> {
     use crate::func::{ExprSource, StorageKind};
-    
+
     let expr_is_ptr = info.is_pointer(recv_type);
     let has_embedding = !embed_path.steps.is_empty();
     let capture_by_ref = !need_pointer && (expr_is_ptr || embed_path.has_pointer_step);
@@ -505,8 +553,16 @@ pub fn extract_receiver(
         let start = if expr_is_ptr {
             let base_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
             TraverseStart::new(base_reg, true)
-        } else if let ExprSource::Location(StorageKind::HeapBoxed { gcref_slot, stores_pointer, .. }) = expr_source {
-            debug_assert!(!stores_pointer, "HeapBoxed with stores_pointer in non-pointer context");
+        } else if let ExprSource::Location(StorageKind::HeapBoxed {
+            gcref_slot,
+            stores_pointer,
+            ..
+        }) = expr_source
+        {
+            debug_assert!(
+                !stores_pointer,
+                "HeapBoxed with stores_pointer in non-pointer context"
+            );
             TraverseStart::new(gcref_slot, true)
         } else if need_pointer {
             let base_ptr = func.alloc_slots(&[SlotType::GcRef]);
@@ -528,8 +584,16 @@ pub fn extract_receiver(
 
     if has_embedding {
         let expr_source = crate::expr::get_expr_source(expr, ctx, func, info);
-        let start = if let ExprSource::Location(StorageKind::HeapBoxed { gcref_slot, stores_pointer, .. }) = expr_source {
-            debug_assert!(!stores_pointer, "HeapBoxed with stores_pointer in non-pointer context");
+        let start = if let ExprSource::Location(StorageKind::HeapBoxed {
+            gcref_slot,
+            stores_pointer,
+            ..
+        }) = expr_source
+        {
+            debug_assert!(
+                !stores_pointer,
+                "HeapBoxed with stores_pointer in non-pointer context"
+            );
             TraverseStart::new(gcref_slot, true)
         } else {
             let base_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
@@ -539,7 +603,14 @@ pub fn extract_receiver(
         let value_slots = info.type_slot_count(embed_path.final_type);
         let value_slot_types = info.type_slot_types(embed_path.final_type);
         let value_reg = func.alloc_slots(&value_slot_types);
-        emit_embed_path_traversal(func, start, &embed_path.steps, false, value_slots, value_reg);
+        emit_embed_path_traversal(
+            func,
+            start,
+            &embed_path.steps,
+            false,
+            value_slots,
+            value_reg,
+        );
         return Ok(ReceiverValue::Value {
             reg: value_reg,
             value_type: embed_path.final_type,
@@ -553,8 +624,16 @@ pub fn extract_receiver(
     }
 
     let expr_source = crate::expr::get_expr_source(expr, ctx, func, info);
-    if let ExprSource::Location(StorageKind::HeapBoxed { gcref_slot, stores_pointer, .. }) = expr_source {
-        debug_assert!(!stores_pointer, "HeapBoxed with stores_pointer in non-pointer context");
+    if let ExprSource::Location(StorageKind::HeapBoxed {
+        gcref_slot,
+        stores_pointer,
+        ..
+    }) = expr_source
+    {
+        debug_assert!(
+            !stores_pointer,
+            "HeapBoxed with stores_pointer in non-pointer context"
+        );
         let recv_slots = info.type_slot_count(recv_type);
         let recv_slot_types = info.type_slot_types(recv_type);
         let recv_reg = func.alloc_slots(&recv_slot_types);

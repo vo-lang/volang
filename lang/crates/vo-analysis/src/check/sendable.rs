@@ -34,7 +34,9 @@ impl Sendability {
         match (&self, &other) {
             (Sendability::NotSendable(_), _) => self,
             (_, Sendability::NotSendable(_)) => other,
-            (Sendability::RuntimeCheck, _) | (_, Sendability::RuntimeCheck) => Sendability::RuntimeCheck,
+            (Sendability::RuntimeCheck, _) | (_, Sendability::RuntimeCheck) => {
+                Sendability::RuntimeCheck
+            }
             _ => Sendability::Static,
         }
     }
@@ -92,7 +94,9 @@ fn check_sendable_impl(
                     let result = check_sendable_impl(field_type, objs, visited);
                     if let Sendability::NotSendable(reason) = &result {
                         return Sendability::NotSendable(format!(
-                            "field '{}': {}", field_obj.name(), reason
+                            "field '{}': {}",
+                            field_obj.name(),
+                            reason
                         ));
                     }
                     combined = combined.merge(result);
@@ -125,7 +129,9 @@ fn check_sendable_impl(
         }
         Type::Island => Sendability::NotSendable("island represents a VM instance".into()),
         Type::Interface(_) => Sendability::RuntimeCheck,
-        Type::Signature(_) => Sendability::NotSendable("func may capture island-local state".into()),
+        Type::Signature(_) => {
+            Sendability::NotSendable("func may capture island-local state".into())
+        }
         Type::Tuple(_) => Sendability::NotSendable("tuple is not sendable".into()),
         Type::Named(_) => unreachable!("Named type should have been resolved"),
     }
@@ -137,8 +143,14 @@ mod tests {
 
     #[test]
     fn test_sendability_merge() {
-        assert_eq!(Sendability::Static.merge(Sendability::Static), Sendability::Static);
-        assert_eq!(Sendability::Static.merge(Sendability::RuntimeCheck), Sendability::RuntimeCheck);
+        assert_eq!(
+            Sendability::Static.merge(Sendability::Static),
+            Sendability::Static
+        );
+        assert_eq!(
+            Sendability::Static.merge(Sendability::RuntimeCheck),
+            Sendability::RuntimeCheck
+        );
         assert!(matches!(
             Sendability::Static.merge(Sendability::NotSendable("x".into())),
             Sendability::NotSendable(_)

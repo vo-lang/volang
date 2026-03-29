@@ -72,11 +72,11 @@ fn replace(s: &[u8], old: &[u8], new: &[u8], n: i64) -> Vec<u8> {
     if old.is_empty() || n == 0 {
         return s.to_vec();
     }
-    
+
     let mut result = Vec::new();
     let mut start = 0;
     let mut count = 0i64;
-    
+
     while start <= s.len() {
         if n >= 0 && count >= n {
             result.extend_from_slice(&s[start..]);

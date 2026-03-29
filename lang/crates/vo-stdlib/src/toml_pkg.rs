@@ -6,12 +6,15 @@ use alloc::string::ToString;
 
 use vo_common_core::types::ValueKind;
 
+use super::serde::{
+    get_pointed_type_rttid, marshal_any_value, marshal_struct_value, unmarshal_struct,
+    FormatWriter as _,
+};
+use super::serde_toml::{TomlReader, TomlWriter};
+use vo_runtime::builtins::error_helper::write_error_to;
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::interface;
-use vo_runtime::builtins::error_helper::write_error_to;
-use super::serde::{marshal_struct_value, marshal_any_value, unmarshal_struct, get_pointed_type_rttid, FormatWriter as _};
-use super::serde_toml::{TomlWriter, TomlReader};
 
 use vo_ffi_macro::vostd_fn;
 
@@ -19,12 +22,12 @@ use vo_ffi_macro::vostd_fn;
 fn marshal_any(call: &mut ExternCallContext) -> ExternResult {
     let v_slot0 = call.arg_u64(0);
     let v_slot1 = call.arg_u64(1);
-    
+
     let vk = interface::unpack_value_kind(v_slot0);
     let rttid = interface::unpack_rttid(v_slot0);
-    
+
     let mut writer = TomlWriter::new();
-    
+
     let result = match vk {
         ValueKind::Struct => marshal_struct_value(call, v_slot1 as GcRef, rttid, &mut writer),
         ValueKind::Pointer => {
@@ -34,7 +37,7 @@ fn marshal_any(call: &mut ExternCallContext) -> ExternResult {
         }
         _ => marshal_any_value(call, v_slot0, v_slot1, &mut writer),
     };
-    
+
     match result {
         Ok(()) => {
             let buf = writer.into_bytes();
@@ -68,28 +71,31 @@ fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
             }
         }
     };
-    
+
     let v_slot0 = call.arg_u64(1);
     let v_slot1 = call.arg_u64(2);
-    
+
     let vk = interface::unpack_value_kind(v_slot0);
     let rttid = interface::unpack_rttid(v_slot0);
-    
+
     if vk != ValueKind::Pointer {
         write_error_to(call, 0, "target must be pointer");
         return ExternResult::Ok;
     }
-    
+
     let ptr = v_slot1 as GcRef;
     if ptr.is_null() {
         write_error_to(call, 0, "nil pointer");
         return ExternResult::Ok;
     }
-    
+
     let pointed_rttid = get_pointed_type_rttid(call, rttid);
-    
+
     match unmarshal_struct::<TomlReader>(call, ptr, pointed_rttid, toml_str.trim()) {
-        Ok(()) => { call.ret_nil(0); call.ret_nil(1); }
+        Ok(()) => {
+            call.ret_nil(0);
+            call.ret_nil(1);
+        }
         Err(msg) => write_error_to(call, 0, msg),
     }
     ExternResult::Ok

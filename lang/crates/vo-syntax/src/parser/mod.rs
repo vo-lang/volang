@@ -12,10 +12,10 @@ mod expr;
 mod stmt;
 mod types;
 
+use crate::ast::{ExprId, Ident, IdentId, TypeExprId};
 use vo_common::diagnostics::DiagnosticSink;
 use vo_common::span::{BytePos, Span};
 use vo_common::symbol::SymbolInterner;
-use crate::ast::{Ident, ExprId, IdentId, TypeExprId};
 
 use crate::ast::*;
 use crate::errors::SyntaxError;
@@ -57,7 +57,7 @@ pub struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     /// Creates a new parser from source code with a base offset.
-    /// 
+    ///
     /// The base offset should come from `SourceMap::file_base()` to ensure
     /// all positions are globally unique.
     pub fn new(source: &'a str, base: u32) -> Self {
@@ -84,7 +84,12 @@ impl<'a> Parser<'a> {
     }
 
     /// Creates a new parser with shared interner and ID state (for multi-file packages).
-    pub fn with_interner_and_ids(source: &'a str, base: u32, interner: SymbolInterner, ids: IdState) -> Self {
+    pub fn with_interner_and_ids(
+        source: &'a str,
+        base: u32,
+        interner: SymbolInterner,
+        ids: IdState,
+    ) -> Self {
         let mut lexer = Lexer::new(source, base);
         let current = lexer.next_token();
         let peek = lexer.next_token();
@@ -239,13 +244,11 @@ impl<'a> Parser<'a> {
         //   import . "path"         - dot import
         //   import _ "path"         - blank import
         let alias = if self.at(TokenKind::Ident)
-            && (self.peek_is(TokenKind::StringLit)
-                || self.peek_is(TokenKind::RawStringLit))
+            && (self.peek_is(TokenKind::StringLit) || self.peek_is(TokenKind::RawStringLit))
         {
             Some(self.parse_ident()?)
         } else if self.at(TokenKind::Dot)
-            && (self.peek_is(TokenKind::StringLit)
-                || self.peek_is(TokenKind::RawStringLit))
+            && (self.peek_is(TokenKind::StringLit) || self.peek_is(TokenKind::RawStringLit))
         {
             // Dot import: import . "path"
             let dot_span = self.current.span;
@@ -261,7 +264,9 @@ impl<'a> Parser<'a> {
         };
 
         if self.eat(TokenKind::At) {
-            self.error("`import @\"...\"` is no longer supported; use the canonical import path directly");
+            self.error(
+                "`import @\"...\"` is no longer supported; use the canonical import path directly",
+            );
         }
 
         let path = self.parse_string_lit()?;
@@ -430,10 +435,11 @@ impl<'a> Parser<'a> {
             // Give a more helpful error when a keyword is used as an identifier
             let keyword = self.current.kind.as_str();
             let span = self.current.span;
-            self.diagnostics.emit(
-                crate::errors::SyntaxError::KeywordAsIdent
-                    .at_with_message(span, format!("cannot use keyword '{}' as identifier", keyword))
-            );
+            self.diagnostics
+                .emit(crate::errors::SyntaxError::KeywordAsIdent.at_with_message(
+                    span,
+                    format!("cannot use keyword '{}' as identifier", keyword),
+                ));
             Err(())
         } else {
             self.error_expected("identifier");
@@ -456,14 +462,22 @@ impl<'a> Parser<'a> {
             let raw = self.interner.intern(text);
             // Parse the string value (strip quotes and process escapes)
             let value = parse_string_value(text);
-            Ok(StringLit { raw, value, is_raw: false })
+            Ok(StringLit {
+                raw,
+                value,
+                is_raw: false,
+            })
         } else if self.at(TokenKind::RawStringLit) {
             let token = self.advance();
             let text = &self.source[self.span_to_local_range(token.span)];
             let raw = self.interner.intern(text);
             // Raw strings: just strip the backticks
-            let value = text[1..text.len()-1].to_string();
-            Ok(StringLit { raw, value, is_raw: true })
+            let value = text[1..text.len() - 1].to_string();
+            Ok(StringLit {
+                raw,
+                value,
+                is_raw: true,
+            })
         } else {
             self.error_expected("string literal");
             Err(())
@@ -499,10 +513,10 @@ impl<'a> Parser<'a> {
 /// Parse a string literal value, processing escape sequences.
 /// The input includes the surrounding quotes.
 fn parse_string_value(text: &str) -> String {
-    let inner = &text[1..text.len()-1]; // strip quotes
+    let inner = &text[1..text.len() - 1]; // strip quotes
     let mut result = String::with_capacity(inner.len());
     let mut chars = inner.chars().peekable();
-    
+
     while let Some(c) = chars.next() {
         if c == '\\' {
             if let Some(escaped) = parse_escape_char(&mut chars) {
@@ -512,16 +526,16 @@ fn parse_string_value(text: &str) -> String {
             result.push(c);
         }
     }
-    
+
     result
 }
 
 /// Parse a rune literal value.
 /// The input includes the surrounding single quotes.
 fn parse_rune_value(text: &str) -> char {
-    let inner = &text[1..text.len()-1]; // strip quotes
+    let inner = &text[1..text.len() - 1]; // strip quotes
     let mut chars = inner.chars().peekable();
-    
+
     if let Some(c) = chars.next() {
         if c == '\\' {
             parse_escape_char(&mut chars).unwrap_or('\0')
@@ -536,13 +550,13 @@ fn parse_rune_value(text: &str) -> char {
 /// Parse a single escape sequence and return the resulting character.
 fn parse_escape_char(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<char> {
     match chars.next()? {
-        'a' => Some('\x07'),  // alert/bell
-        'b' => Some('\x08'),  // backspace
-        'f' => Some('\x0C'),  // form feed
+        'a' => Some('\x07'), // alert/bell
+        'b' => Some('\x08'), // backspace
+        'f' => Some('\x0C'), // form feed
         'n' => Some('\n'),
         'r' => Some('\r'),
         't' => Some('\t'),
-        'v' => Some('\x0B'),  // vertical tab
+        'v' => Some('\x0B'), // vertical tab
         '\\' => Some('\\'),
         '\'' => Some('\''),
         '"' => Some('"'),
@@ -596,7 +610,7 @@ fn parse_escape_char(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option
 }
 
 /// Parses source code and returns the AST.
-/// 
+///
 /// # Arguments
 /// * `source` - The source code text
 /// * `base` - Base offset for global positions (from SourceMap::file_base)
@@ -673,7 +687,9 @@ mod tests {
         let (_, diags) = parse_str(r#"import @"github.com/vo-lang/zip""#);
         assert!(diags.has_errors());
         let messages: Vec<_> = diags.iter().map(|diag| diag.message.as_str()).collect();
-        assert!(messages.iter().any(|msg| msg.contains("no longer supported")));
+        assert!(messages
+            .iter()
+            .any(|msg| msg.contains("no longer supported")));
     }
 
     // =========================================================================
@@ -932,14 +948,12 @@ mod tests {
         "#,
         );
         match &file.decls[0] {
-            Decl::Type(t) => {
-                match &t.ty.kind {
-                    TypeExprKind::Interface(i) => {
-                        assert_eq!(i.elems.len(), 1);
-                    }
-                    _ => panic!("expected interface type"),
+            Decl::Type(t) => match &t.ty.kind {
+                TypeExprKind::Interface(i) => {
+                    assert_eq!(i.elems.len(), 1);
                 }
-            }
+                _ => panic!("expected interface type"),
+            },
             _ => panic!("expected type decl"),
         }
     }
@@ -1485,7 +1499,7 @@ mod tests {
     fn test_global_positions() {
         // Parse with a base offset of 100
         let (file, _, _) = parse("var x int", 100);
-        
+
         // Check that spans have been offset
         assert!(file.span.start.0 >= 100);
     }
@@ -1658,11 +1672,21 @@ mod tests {
             Decl::Func(f) => {
                 let body = f.body.as_ref().unwrap();
                 // Should have multiple statements including TryUnwrap, Defer, ErrDefer, Fail
-                let has_errdefer = body.stmts.iter().any(|s| matches!(s.kind, StmtKind::ErrDefer(_)));
-                let has_defer = body.stmts.iter().any(|s| matches!(s.kind, StmtKind::Defer(_)));
+                let has_errdefer = body
+                    .stmts
+                    .iter()
+                    .any(|s| matches!(s.kind, StmtKind::ErrDefer(_)));
+                let has_defer = body
+                    .stmts
+                    .iter()
+                    .any(|s| matches!(s.kind, StmtKind::Defer(_)));
                 let has_fail = body.stmts.iter().any(|s| {
                     if let StmtKind::If(if_stmt) = &s.kind {
-                        if_stmt.then.stmts.iter().any(|s| matches!(s.kind, StmtKind::Fail(_)))
+                        if_stmt
+                            .then
+                            .stmts
+                            .iter()
+                            .any(|s| matches!(s.kind, StmtKind::Fail(_)))
                     } else {
                         false
                     }

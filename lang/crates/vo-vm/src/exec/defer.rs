@@ -26,7 +26,16 @@ pub fn exec_defer_push(
     gc: &mut Gc,
     panic_generation: u64,
 ) {
-    push_defer_entry(stack, bp, frames, defer_stack, inst, gc, false, panic_generation);
+    push_defer_entry(
+        stack,
+        bp,
+        frames,
+        defer_stack,
+        inst,
+        gc,
+        false,
+        panic_generation,
+    );
 }
 
 #[inline]
@@ -39,7 +48,16 @@ pub fn exec_err_defer_push(
     gc: &mut Gc,
     panic_generation: u64,
 ) {
-    push_defer_entry(stack, bp, frames, defer_stack, inst, gc, true, panic_generation);
+    push_defer_entry(
+        stack,
+        bp,
+        frames,
+        defer_stack,
+        inst,
+        gc,
+        true,
+        panic_generation,
+    );
 }
 
 fn push_defer_entry(
@@ -100,9 +118,14 @@ fn push_defer_entry(
 /// This is critical: without this change, nested calls within the defer function
 /// would incorrectly trigger panic_unwind when they return.
 #[inline]
-pub fn exec_recover(stack: *mut Slot, bp: usize, fiber: &mut crate::fiber::Fiber, inst: &Instruction) {
+pub fn exec_recover(
+    stack: *mut Slot,
+    bp: usize,
+    fiber: &mut crate::fiber::Fiber,
+    inst: &Instruction,
+) {
     use vo_runtime::InterfaceSlot;
-    
+
     if !fiber.is_direct_defer_context() {
         // Not in direct defer context - return nil without consuming panic
         stack_set(stack, bp + inst.a as usize, 0);
@@ -114,7 +137,7 @@ pub fn exec_recover(stack: *mut Slot, bp: usize, fiber: &mut crate::fiber::Fiber
     let val = recovered.unwrap_or(InterfaceSlot::nil());
     stack_set(stack, bp + inst.a as usize, val.slot0);
     stack_set(stack, bp + inst.a as usize + 1, val.slot1);
-    
+
     // If recover succeeded, switch unwinding mode from Panic to Return
     // so nested calls don't trigger panic_unwind.
     if recovered.is_some() {

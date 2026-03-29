@@ -8,7 +8,6 @@ use crate::gc::{Gc, GcRef};
 use crate::slot::{Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta};
 
-
 #[repr(C)]
 pub struct ClosureHeader {
     pub func_id: u32,
@@ -30,9 +29,13 @@ pub fn create(gc: &mut Gc, func_id: u32, capture_count: usize) -> GcRef {
 }
 
 #[inline]
-pub fn func_id(c: GcRef) -> u32 { ClosureHeader::as_ref(c).func_id }
+pub fn func_id(c: GcRef) -> u32 {
+    ClosureHeader::as_ref(c).func_id
+}
 #[inline]
-pub fn capture_count(c: GcRef) -> usize { ClosureHeader::as_ref(c).capture_count as usize }
+pub fn capture_count(c: GcRef) -> usize {
+    ClosureHeader::as_ref(c).capture_count as usize
+}
 
 #[inline]
 fn captures_ptr(c: GcRef) -> *mut Slot {
@@ -52,7 +55,7 @@ pub fn set_capture(c: GcRef, idx: usize, val: Slot) {
 }
 
 /// Closure call layout info: what goes in slot0 and where args start.
-/// 
+///
 /// Three cases:
 /// 1. Method closure (recv_slots > 0 && capture_count > 0): receiver from captures[0]
 /// 2. Closure with captures or anonymous: closure ref
@@ -74,7 +77,7 @@ pub fn call_layout(
     is_closure: bool,
 ) -> ClosureCallLayout {
     let cap_count = capture_count(closure_gcref);
-    
+
     if recv_slots > 0 && cap_count > 0 {
         // Method closure: receiver from captures goes to slot 0
         ClosureCallLayout {

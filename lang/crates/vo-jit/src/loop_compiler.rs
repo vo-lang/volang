@@ -2,17 +2,17 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cranelift_codegen::ir::{types, Block, FuncRef, Function, InstBuilder, MemFlags, Value};
 use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, Block, FuncRef, Function, InstBuilder, MemFlags, Value};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 
-use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
-use vo_runtime::instruction::{Instruction, Opcode};
-use vo_runtime::jit_api::{JitContext, JitResult};
 use crate::loop_analysis::LoopInfo;
 use crate::translate::translate_inst;
 use crate::translator::{HelperFuncs, IrEmitter, TranslateResult};
 use crate::JitError;
+use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
+use vo_runtime::instruction::{Instruction, Opcode};
+use vo_runtime::jit_api::{JitContext, JitResult};
 
 /// Loop function signature. Returns JitResult like function JIT.
 /// On Ok, loop_exit_pc in JitContext contains the PC to resume at.
@@ -63,7 +63,7 @@ impl<'a> LoopCompiler<'a> {
         let entry_block = builder.create_block();
         let exit_block = builder.create_block();
         builder.append_block_params_for_function_params(entry_block);
-        
+
         Self {
             builder,
             func_id,
@@ -87,22 +87,22 @@ impl<'a> LoopCompiler<'a> {
 
     pub fn compile(mut self) -> Result<(), JitError> {
         self.memory_only_start = crate::translator::compute_memory_only_start(
-            &self.func_def.code[self.loop_info.begin_pc..=self.loop_info.end_pc]
+            &self.func_def.code[self.loop_info.begin_pc..=self.loop_info.end_pc],
         );
         self.declare_variables();
         self.scan_jump_targets();
-        
+
         // Exactly like func_compiler: entry_block -> prologue -> sequential compile
         self.builder.switch_to_block(self.entry_block);
         self.emit_prologue();
-        
+
         let mut block_terminated = false;
-        
+
         // Compile from loop_start (begin_pc) to after back-edge Jump (end_pc + 1)
         // Note: begin_pc is now loop_start (condition check), not HINT position
         for pc in self.loop_info.begin_pc..(self.loop_info.end_pc + 1) {
             self.current_pc = pc;
-            
+
             if let Some(&block) = self.blocks.get(&pc) {
                 if !block_terminated {
                     self.builder.ins().jump(block, &[]);
@@ -116,29 +116,32 @@ impl<'a> LoopCompiler<'a> {
                 self.builder.switch_to_block(dummy);
                 block_terminated = false;
             }
-            
+
             let inst = &self.func_def.code[pc];
             if inst.opcode() == Opcode::Hint {
                 continue;
             }
-            
+
             block_terminated = self.translate_instruction(inst)?;
         }
-        
+
         // If last instruction didn't terminate, jump to exit
         if !block_terminated {
             self.builder.ins().jump(self.exit_block, &[]);
         }
-        
+
         // Exit block: store vars back to memory, then return exit_pc
         self.builder.switch_to_block(self.exit_block);
         self.store_vars_to_memory();
-        let exit_pc = self.builder.ins().iconst(types::I32, self.loop_info.exit_pc as i64);
+        let exit_pc = self
+            .builder
+            .ins()
+            .iconst(types::I32, self.loop_info.exit_pc as i64);
         self.builder.ins().return_(&[exit_pc]);
-        
+
         self.builder.seal_all_blocks();
         self.builder.finalize();
-        
+
         Ok(())
     }
 
@@ -157,10 +160,10 @@ impl<'a> LoopCompiler<'a> {
 
     fn scan_jump_targets(&mut self) {
         let loop_end = self.loop_info.end_pc + 1;
-        
+
         // Always create block for loop header (begin_pc = loop_start)
         self.ensure_block(self.loop_info.begin_pc);
-        
+
         for pc in self.loop_info.begin_pc..loop_end {
             let inst = &self.func_def.code[pc];
             match inst.opcode() {
@@ -196,27 +199,30 @@ impl<'a> LoopCompiler<'a> {
     fn emit_prologue(&mut self) {
         // entry_block has no predecessors
         self.builder.seal_block(self.entry_block);
-        
+
         let params = self.builder.block_params(self.entry_block);
         self.ctx_ptr = params[0];
         let locals_ptr_init = params[1];
-        
+
         // Wrap locals_ptr in a Variable so refresh_stack_base_after_reallocation can redefine
         // it after any call that may have triggered fiber.stack reallocation.
         let locals_ptr_var = Variable::from_u32((self.vars.len() + 1000) as u32);
         self.builder.declare_var(locals_ptr_var, types::I64);
         self.builder.def_var(locals_ptr_var, locals_ptr_init);
         self.locals_ptr_var = Some(locals_ptr_var);
-        
+
         // Normal entry: load all variables from memory
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
             let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
-            let val = self.builder.ins().load(ty, MemFlags::trusted(), locals_ptr_init, offset);
+            let val = self
+                .builder
+                .ins()
+                .load(ty, MemFlags::trusted(), locals_ptr_init, offset);
             self.builder.def_var(self.vars[i], val);
         }
     }
-    
+
     fn store_vars_to_memory(&mut self) {
         // Spill SSA-only slots (< memory_only_start) to locals_ptr.
         // Memory-aliased slots (>= memory_only_start) are already up-to-date in memory.
@@ -225,14 +231,18 @@ impl<'a> LoopCompiler<'a> {
         for i in 0..spill_count {
             let offset = (i * 8) as i32;
             let val = self.builder.use_var(self.vars[i]);
-            self.builder.ins().store(MemFlags::trusted(), val, locals_ptr, offset);
+            self.builder
+                .ins()
+                .store(MemFlags::trusted(), val, locals_ptr, offset);
         }
     }
 
     fn load_var_from_memory(&mut self, slot: u16) -> Value {
         let offset = (slot as i32) * 8;
         let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
-        self.builder.ins().load(types::I64, MemFlags::trusted(), locals_ptr, offset)
+        self.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), locals_ptr, offset)
     }
 
     fn translate_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
@@ -241,19 +251,38 @@ impl<'a> LoopCompiler<'a> {
             TranslateResult::Terminated => return Ok(true),
             TranslateResult::Unhandled => {}
         }
-        
+
         match inst.opcode() {
-            Opcode::Jump => { self.jump(inst); Ok(true) }
-            Opcode::JumpIf => { self.jump_if(inst); Ok(false) }
-            Opcode::JumpIfNot => { self.jump_if_not(inst); Ok(false) }
+            Opcode::Jump => {
+                self.jump(inst);
+                Ok(true)
+            }
+            Opcode::JumpIf => {
+                self.jump_if(inst);
+                Ok(false)
+            }
+            Opcode::JumpIfNot => {
+                self.jump_if_not(inst);
+                Ok(false)
+            }
             Opcode::ForLoop => Ok(self.forloop(inst)),
-            Opcode::Return => { self.ret(inst); Ok(true) }
-            Opcode::Panic => { self.panic(inst); Ok(true) }
-            Opcode::Call => { Ok(self.call(inst)) }
+            Opcode::Return => {
+                self.ret(inst);
+                Ok(true)
+            }
+            Opcode::Panic => {
+                self.panic(inst);
+                Ok(true)
+            }
+            Opcode::Call => Ok(self.call(inst)),
             Opcode::CallExtern => {
-                crate::call_helpers::emit_call_extern(self, inst, crate::call_helpers::CallExternConfig {
-                    current_pc: self.current_pc,
-                });
+                crate::call_helpers::emit_call_extern(
+                    self,
+                    inst,
+                    crate::call_helpers::CallExternConfig {
+                        current_pc: self.current_pc,
+                    },
+                );
                 Ok(false)
             }
             Opcode::CallClosure => {
@@ -277,7 +306,7 @@ impl<'a> LoopCompiler<'a> {
         let offset = inst.imm32();
         let raw_target = (self.current_pc as i32 + offset) as usize;
         let loop_end = self.loop_info.end_pc + 1;
-        
+
         // Back-edge: jump to loop header (begin_pc = loop_start)
         if raw_target == self.loop_info.begin_pc {
             let loop_header = self.blocks[&self.loop_info.begin_pc];
@@ -304,15 +333,17 @@ impl<'a> LoopCompiler<'a> {
     fn conditional_jump(&mut self, inst: &Instruction, cmp_cond: IntCC) {
         let cond = self.read_var(inst.a);
         let target = (self.current_pc as i32 + inst.imm32()) as usize;
-        
+
         let fall_through = self.builder.create_block();
         let zero = self.builder.ins().iconst(types::I64, 0);
         let cmp = self.builder.ins().icmp(cmp_cond, cond, zero);
-        
+
         if target < self.loop_info.begin_pc || target > self.loop_info.end_pc {
             // Target outside loop - exit to VM
             let exit_block = self.builder.create_block();
-            self.builder.ins().brif(cmp, exit_block, &[], fall_through, &[]);
+            self.builder
+                .ins()
+                .brif(cmp, exit_block, &[], fall_through, &[]);
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
             self.store_vars_to_memory();
@@ -320,9 +351,11 @@ impl<'a> LoopCompiler<'a> {
         } else {
             // Target within loop - stay in JIT
             let target_block = self.blocks[&target];
-            self.builder.ins().brif(cmp, target_block, &[], fall_through, &[]);
+            self.builder
+                .ins()
+                .brif(cmp, target_block, &[], fall_through, &[]);
         }
-        
+
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
     }
@@ -332,27 +365,36 @@ impl<'a> LoopCompiler<'a> {
         let idx = self.read_var(inst.a);
         let limit = self.read_var(inst.b);
         let (is_decrement, is_unsigned, is_inclusive) = inst.forloop_flags();
-        
+
         let (next_idx, continue_loop) = crate::translate::emit_forloop_step(
-            &mut self.builder, idx, limit, is_decrement, is_unsigned, is_inclusive
+            &mut self.builder,
+            idx,
+            limit,
+            is_decrement,
+            is_unsigned,
+            is_inclusive,
         );
         self.write_var(inst.a, next_idx);
-        
+
         let target_block = self.blocks[&inst.forloop_target(self.current_pc)];
         let exit_pc = self.current_pc + 1;
-        
+
         // Check if exit_pc is within JIT compilation range
         if exit_pc >= self.loop_info.begin_pc && exit_pc <= self.loop_info.end_pc {
             // Exit within loop - continue in JIT
             let fall_through = self.builder.create_block();
-            self.builder.ins().brif(continue_loop, target_block, &[], fall_through, &[]);
+            self.builder
+                .ins()
+                .brif(continue_loop, target_block, &[], fall_through, &[]);
             self.builder.switch_to_block(fall_through);
             self.builder.seal_block(fall_through);
             false
         } else {
             // Exit outside loop - return to VM
             let exit_block = self.builder.create_block();
-            self.builder.ins().brif(continue_loop, target_block, &[], exit_block, &[]);
+            self.builder
+                .ins()
+                .brif(continue_loop, target_block, &[], exit_block, &[]);
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
             self.store_vars_to_memory();
@@ -366,13 +408,18 @@ impl<'a> LoopCompiler<'a> {
         self.store_vars_to_memory();
         self.emit_loop_exit(self.current_pc as u32);
     }
-    
+
     /// Emit code to exit loop normally with given exit_pc.
     /// Stores exit_pc to ctx.loop_exit_pc and returns JitResult::Ok.
     fn emit_loop_exit(&mut self, exit_pc: u32) {
         let ctx = self.ctx_ptr;
         let exit_pc_val = self.builder.ins().iconst(types::I32, exit_pc as i64);
-        self.builder.ins().store(MemFlags::trusted(), exit_pc_val, ctx, JitContext::OFFSET_LOOP_EXIT_PC);
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            exit_pc_val,
+            ctx,
+            JitContext::OFFSET_LOOP_EXIT_PC,
+        );
         let ok_val = self.builder.ins().iconst(types::I32, JitResult::Ok as i64);
         self.builder.ins().return_(&[ok_val]);
     }
@@ -386,7 +433,10 @@ impl<'a> LoopCompiler<'a> {
             let msg_slot1 = self.read_var(inst.a + 1);
             crate::translator::emit_funcref_call(self, panic_func, &[ctx, msg_slot0, msg_slot1]);
         }
-        let panic_val = self.builder.ins().iconst(types::I32, JitResult::Panic as i64);
+        let panic_val = self
+            .builder
+            .ins()
+            .iconst(types::I32, JitResult::Panic as i64);
         self.builder.ins().return_(&[panic_val]);
     }
 
@@ -397,7 +447,7 @@ impl<'a> LoopCompiler<'a> {
         let arg_start = inst.b as usize;
         let arg_slots = (inst.c >> 8) as usize;
         let call_ret_slots = (inst.c & 0xFF) as usize;
-        
+
         // Get target function info
         let target_func = &self.vo_module.functions[func_id as usize];
         // has_defer callees need VM execution (defer requires real CallFrame in fiber.frames).
@@ -410,40 +460,47 @@ impl<'a> LoopCompiler<'a> {
                 .flatten();
 
             // JIT-to-JIT direct call with fallback to VM
-            crate::call_helpers::emit_jit_call_with_fallback(self, crate::call_helpers::JitCallWithFallbackConfig {
-                func_id,
-                arg_start,
-                ret_reg: arg_start + arg_slots,
-                arg_slots,
-                call_ret_slots,
-                func_ret_slots: target_func.ret_slots as usize,
-                callee_local_slots: target_func.local_slots as usize,
-                callee_func_ref,
-            });
+            crate::call_helpers::emit_jit_call_with_fallback(
+                self,
+                crate::call_helpers::JitCallWithFallbackConfig {
+                    func_id,
+                    arg_start,
+                    ret_reg: arg_start + arg_slots,
+                    arg_slots,
+                    call_ret_slots,
+                    func_ret_slots: target_func.ret_slots as usize,
+                    callee_local_slots: target_func.local_slots as usize,
+                    callee_func_ref,
+                },
+            );
             false // Block not terminated - we have a merge block
         } else {
             // Callee has defer or no call_vm helper - use Call request mechanism
-            crate::call_helpers::emit_call_via_vm(self, crate::call_helpers::CallViaVmConfig {
-                func_id,
-                arg_start,
-                ret_reg: arg_start + arg_slots,
-                resume_pc: self.current_pc + 1,
-                ret_slots: call_ret_slots,
-            });
+            crate::call_helpers::emit_call_via_vm(
+                self,
+                crate::call_helpers::CallViaVmConfig {
+                    func_id,
+                    arg_start,
+                    ret_reg: arg_start + arg_slots,
+                    resume_pc: self.current_pc + 1,
+                    ret_slots: call_ret_slots,
+                },
+            );
             true // Block terminated with return
         }
     }
-    
+
     /// Emit code to spill all SSA variables to fiber.stack.
     /// Called before returning Call so VM can see/restore state.
     fn emit_variable_spill(&mut self) {
         self.store_vars_to_memory();
     }
-    
 }
 
 impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
-    fn builder(&mut self) -> &mut FunctionBuilder<'a> { &mut self.builder }
+    fn builder(&mut self) -> &mut FunctionBuilder<'a> {
+        &mut self.builder
+    }
     fn read_var(&mut self, slot: u16) -> Value {
         if slot < self.memory_only_start {
             let val = self.builder.use_var(self.vars[slot as usize]);
@@ -466,23 +523,43 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         if slot >= self.memory_only_start {
             let offset = (slot as i32) * 8;
             let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
-            self.builder.ins().store(MemFlags::trusted(), val, locals_ptr, offset);
+            self.builder
+                .ins()
+                .store(MemFlags::trusted(), val, locals_ptr, offset);
         }
         self.checked_non_nil.remove(&slot);
     }
-    fn ctx_param(&mut self) -> Value { self.ctx_ptr }
+    fn ctx_param(&mut self) -> Value {
+        self.ctx_ptr
+    }
     fn gc_ptr(&mut self) -> Value {
-        self.builder.ins().load(types::I64, MemFlags::trusted(), self.ctx_ptr, 0)
+        self.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), self.ctx_ptr, 0)
     }
     fn globals_ptr(&mut self) -> Value {
-        self.builder.ins().load(types::I64, MemFlags::trusted(), self.ctx_ptr, 8)
+        self.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), self.ctx_ptr, 8)
     }
-    fn vo_module(&self) -> &VoModule { self.vo_module }
-    fn current_pc(&self) -> usize { self.current_pc }
-    fn helpers(&self) -> &HelperFuncs { &self.helpers }
-    fn set_reg_const(&mut self, reg: u16, val: i64) { self.reg_consts.insert(reg, val); }
-    fn get_reg_const(&self, reg: u16) -> Option<i64> { self.reg_consts.get(&reg).copied() }
-    fn panic_return_value(&self) -> i32 { JitResult::Panic as i32 }
+    fn vo_module(&self) -> &VoModule {
+        self.vo_module
+    }
+    fn current_pc(&self) -> usize {
+        self.current_pc
+    }
+    fn helpers(&self) -> &HelperFuncs {
+        &self.helpers
+    }
+    fn set_reg_const(&mut self, reg: u16, val: i64) {
+        self.reg_consts.insert(reg, val);
+    }
+    fn get_reg_const(&self, reg: u16) -> Option<i64> {
+        self.reg_consts.get(&reg).copied()
+    }
+    fn panic_return_value(&self) -> i32 {
+        JitResult::Panic as i32
+    }
     fn var_addr(&mut self, slot: u16) -> Value {
         let offset = (slot as i64) * 8;
         let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
@@ -505,7 +582,9 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         for slot in start_slot..spill_end {
             let offset = (slot as i32) * 8;
             let val = self.builder.use_var(self.vars[slot as usize]);
-            self.builder.ins().store(MemFlags::trusted(), val, locals_ptr, offset);
+            self.builder
+                .ins()
+                .store(MemFlags::trusted(), val, locals_ptr, offset);
         }
     }
     fn local_slot_count(&self) -> usize {
@@ -515,7 +594,11 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         self.func_id
     }
     fn slot_type(&self, slot: u16) -> vo_runtime::SlotType {
-        self.func_def.slot_types.get(slot as usize).copied().unwrap_or_default()
+        self.func_def
+            .slot_types
+            .get(slot as usize)
+            .copied()
+            .unwrap_or_default()
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
         if slot < self.memory_only_start {
@@ -528,7 +611,9 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         } else {
             let offset = (slot as i32) * 8;
             let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
-            self.builder.ins().load(types::F64, MemFlags::trusted(), locals_ptr, offset)
+            self.builder
+                .ins()
+                .load(types::F64, MemFlags::trusted(), locals_ptr, offset)
         }
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
@@ -541,7 +626,9 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         if slot >= self.memory_only_start {
             let offset = (slot as i32) * 8;
             let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
-            self.builder.ins().store(MemFlags::trusted(), val, locals_ptr, offset);
+            self.builder
+                .ins()
+                .store(MemFlags::trusted(), val, locals_ptr, offset);
         }
         self.checked_non_nil.remove(&slot);
     }
@@ -550,7 +637,10 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
             let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
-            let val = self.builder.ins().load(ty, MemFlags::trusted(), locals_ptr, offset);
+            let val = self
+                .builder
+                .ins()
+                .load(ty, MemFlags::trusted(), locals_ptr, offset);
             self.builder.def_var(self.vars[i], val);
         }
     }
@@ -562,10 +652,16 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         for slot in start_slot..start_slot + slot_count {
             let offset = (slot as i32) * 8;
             if self.is_float_slot(slot) {
-                let val = self.builder.ins().load(types::F64, MemFlags::trusted(), locals_ptr, offset);
+                let val =
+                    self.builder
+                        .ins()
+                        .load(types::F64, MemFlags::trusted(), locals_ptr, offset);
                 self.write_var_f64(slot, val);
             } else {
-                let val = self.builder.ins().load(types::I64, MemFlags::trusted(), locals_ptr, offset);
+                let val =
+                    self.builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), locals_ptr, offset);
                 self.write_var(slot, val);
             }
         }
@@ -578,14 +674,21 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     }
     fn refresh_stack_base_after_reallocation(&mut self) {
         let stack_ptr = self.builder.ins().load(
-            types::I64, MemFlags::trusted(), self.ctx_ptr, JitContext::OFFSET_STACK_PTR
+            types::I64,
+            MemFlags::trusted(),
+            self.ctx_ptr,
+            JitContext::OFFSET_STACK_PTR,
         );
         let jit_bp_i32 = self.builder.ins().load(
-            types::I32, MemFlags::trusted(), self.ctx_ptr, JitContext::OFFSET_JIT_BP
+            types::I32,
+            MemFlags::trusted(),
+            self.ctx_ptr,
+            JitContext::OFFSET_JIT_BP,
         );
         let jit_bp_i64 = self.builder.ins().uextend(types::I64, jit_bp_i32);
         let bp_offset = self.builder.ins().imul_imm(jit_bp_i64, 8);
         let refreshed = self.builder.ins().iadd(stack_ptr, bp_offset);
-        self.builder.def_var(self.locals_ptr_var.unwrap(), refreshed);
+        self.builder
+            .def_var(self.locals_ptr_var.unwrap(), refreshed);
     }
 }

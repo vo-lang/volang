@@ -10,13 +10,13 @@ use sha2::{Digest, Sha256};
 use tar::{Builder, Header};
 use vo_module::digest::Digest as ModDigest;
 use vo_module::identity::ArtifactId;
-use vo_module::version::ExactVersion;
+use vo_module::lock;
 use vo_module::schema::lockfile::LockFile;
 use vo_module::schema::manifest::{
     ManifestArtifact, ManifestRequire, ManifestSource, ReleaseManifest,
 };
 use vo_module::schema::modfile::ModFile;
-use vo_module::lock;
+use vo_module::version::ExactVersion;
 
 use crate::{ReleaseError, ReleaseResult};
 
@@ -114,7 +114,10 @@ pub fn verify_repo(repo_root: &Path) -> ReleaseResult<()> {
     Ok(())
 }
 
-pub fn stage_release(repo_root: &Path, options: &StageReleaseOptions) -> ReleaseResult<StagedRelease> {
+pub fn stage_release(
+    repo_root: &Path,
+    options: &StageReleaseOptions,
+) -> ReleaseResult<StagedRelease> {
     let repo_root = canonical_repo_root(repo_root)?;
     verify_repo(&repo_root)?;
 
@@ -125,20 +128,22 @@ pub fn stage_release(repo_root: &Path, options: &StageReleaseOptions) -> Release
         None => infer_commit(&repo_root)?,
     };
     let module_str = mod_file.module.as_str();
-    let source_top_dir = source_package_base_name(module_str)
-        .ok_or_else(|| ReleaseError::IoError(repo_root.clone(), format!("invalid module path: {}", module_str)))?;
+    let source_top_dir = source_package_base_name(module_str).ok_or_else(|| {
+        ReleaseError::IoError(
+            repo_root.clone(),
+            format!("invalid module path: {}", module_str),
+        )
+    })?;
     let source_name = format!("{}-{}.tar.gz", source_top_dir, options.version);
     let source_bytes = build_source_package(&repo_root, source_top_dir, &out_dir)?;
     let source_size = source_bytes.len() as u64;
     let source_digest = sha256_digest(&source_bytes);
     let prepared_artifacts = prepare_artifacts(&options.artifacts, &out_dir)?;
 
-    let version = ExactVersion::parse(&options.version).map_err(|e| {
-        ReleaseError::ManifestSerialize(format!("invalid version: {e}"))
-    })?;
-    let source_digest_typed = ModDigest::parse(&source_digest).map_err(|e| {
-        ReleaseError::ManifestSerialize(format!("invalid source digest: {e}"))
-    })?;
+    let version = ExactVersion::parse(&options.version)
+        .map_err(|e| ReleaseError::ManifestSerialize(format!("invalid version: {e}")))?;
+    let source_digest_typed = ModDigest::parse(&source_digest)
+        .map_err(|e| ReleaseError::ManifestSerialize(format!("invalid source digest: {e}")))?;
 
     let manifest = ReleaseManifest {
         schema_version: 1,
@@ -160,7 +165,10 @@ pub fn stage_release(repo_root: &Path, options: &StageReleaseOptions) -> Release
             size: source_size,
             digest: source_digest_typed,
         },
-        artifacts: prepared_artifacts.iter().map(|a| a.manifest_artifact.clone()).collect(),
+        artifacts: prepared_artifacts
+            .iter()
+            .map(|a| a.manifest_artifact.clone())
+            .collect(),
     };
     let manifest_json = manifest.render() + "\n";
     let manifest_digest = sha256_digest(manifest_json.as_bytes());
@@ -194,7 +202,10 @@ pub fn stage_release(repo_root: &Path, options: &StageReleaseOptions) -> Release
         manifest_path,
         manifest_digest,
         manifest_json,
-        artifacts: prepared_artifacts.into_iter().map(|artifact| artifact.staged).collect(),
+        artifacts: prepared_artifacts
+            .into_iter()
+            .map(|artifact| artifact.staged)
+            .collect(),
     })
 }
 
@@ -216,14 +227,20 @@ fn resolve_output_dir(repo_root: &Path, out_dir: &Path) -> ReleaseResult<PathBuf
         return fs::canonicalize(&raw)
             .map_err(|error| ReleaseError::IoError(raw.clone(), error.to_string()));
     }
-    let parent = raw
-        .parent()
-        .ok_or_else(|| ReleaseError::IoError(raw.clone(), "output directory must have a parent".to_string()))?;
+    let parent = raw.parent().ok_or_else(|| {
+        ReleaseError::IoError(
+            raw.clone(),
+            "output directory must have a parent".to_string(),
+        )
+    })?;
     let parent = fs::canonicalize(parent)
         .map_err(|error| ReleaseError::IoError(parent.to_path_buf(), error.to_string()))?;
-    let file_name = raw
-        .file_name()
-        .ok_or_else(|| ReleaseError::IoError(raw.clone(), "output directory must end in a normal directory name".to_string()))?;
+    let file_name = raw.file_name().ok_or_else(|| {
+        ReleaseError::IoError(
+            raw.clone(),
+            "output directory must end in a normal directory name".to_string(),
+        )
+    })?;
     Ok(parent.join(file_name))
 }
 
@@ -254,7 +271,10 @@ fn infer_commit(repo_root: &Path) -> ReleaseResult<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn prepare_artifacts(inputs: &[ArtifactInput], out_dir: &Path) -> ReleaseResult<Vec<PreparedArtifact>> {
+fn prepare_artifacts(
+    inputs: &[ArtifactInput],
+    out_dir: &Path,
+) -> ReleaseResult<Vec<PreparedArtifact>> {
     let mut seen_names = HashSet::new();
     let mut prepared = Vec::with_capacity(inputs.len());
     for input in inputs {
@@ -299,7 +319,9 @@ fn prepare_artifacts(inputs: &[ArtifactInput], out_dir: &Path) -> ReleaseResult<
 
 fn build_source_package(repo_root: &Path, top_dir: &str, out_dir: &Path) -> ReleaseResult<Vec<u8>> {
     let files = collect_source_files(repo_root, repo_root, out_dir)?;
-    let encoder = GzBuilder::new().mtime(0).write(Vec::new(), Compression::default());
+    let encoder = GzBuilder::new()
+        .mtime(0)
+        .write(Vec::new(), Compression::default());
     let mut builder = Builder::new(encoder);
     for path in files {
         let rel = path
@@ -316,7 +338,11 @@ fn build_source_package(repo_root: &Path, top_dir: &str, out_dir: &Path) -> Rele
         header.set_cksum();
         let rel = rel.to_string_lossy().replace('\\', "/");
         builder
-            .append_data(&mut header, format!("{}/{}", top_dir, rel), Cursor::new(data))
+            .append_data(
+                &mut header,
+                format!("{}/{}", top_dir, rel),
+                Cursor::new(data),
+            )
             .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
     }
     let encoder = builder
@@ -357,7 +383,11 @@ fn find_named_files(repo_root: &Path, file_name: &str) -> ReleaseResult<Vec<Path
     find_named_files_inner(repo_root, repo_root, file_name)
 }
 
-fn find_named_files_inner(repo_root: &Path, dir: &Path, file_name: &str) -> ReleaseResult<Vec<PathBuf>> {
+fn find_named_files_inner(
+    repo_root: &Path,
+    dir: &Path,
+    file_name: &str,
+) -> ReleaseResult<Vec<PathBuf>> {
     let mut matches = Vec::new();
     let mut entries = fs::read_dir(dir)
         .map_err(|error| ReleaseError::IoError(dir.to_path_buf(), error.to_string()))?
@@ -433,7 +463,10 @@ fn find_alias_imports_inner(repo_root: &Path, dir: &Path) -> ReleaseResult<Vec<S
             if let Some(block_rest) = spec.strip_prefix('(') {
                 in_import_block = true;
                 let block_spec = block_rest.trim_start();
-                if !block_spec.is_empty() && !block_spec.starts_with("//") && contains_legacy_alias_import_spec(block_spec) {
+                if !block_spec.is_empty()
+                    && !block_spec.starts_with("//")
+                    && contains_legacy_alias_import_spec(block_spec)
+                {
                     violations.push(format!("{}:{}: {}", rel.display(), index + 1, trimmed));
                 }
                 continue;
@@ -449,7 +482,12 @@ fn find_alias_imports_inner(repo_root: &Path, dir: &Path) -> ReleaseResult<Vec<S
 fn import_spec_from_line(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
     let rest = trimmed.strip_prefix("import")?;
-    if !rest.chars().next().map(char::is_whitespace).unwrap_or(false) {
+    if !rest
+        .chars()
+        .next()
+        .map(char::is_whitespace)
+        .unwrap_or(false)
+    {
         return None;
     }
     Some(rest.trim_start())
@@ -468,7 +506,10 @@ fn contains_legacy_alias_import_spec(spec: &str) -> bool {
         return false;
     };
     if first == "." || first == "_" || is_import_alias_token(first) {
-        return parts.next().map(|value| value.starts_with("@\"")).unwrap_or(false);
+        return parts
+            .next()
+            .map(|value| value.starts_with("@\""))
+            .unwrap_or(false);
     }
     false
 }
@@ -478,7 +519,8 @@ fn is_import_alias_token(token: &str) -> bool {
     let Some(first) = chars.next() else {
         return false;
     };
-    (first == '_' || first.is_ascii_alphabetic()) && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn should_include_source_file(repo_root: &Path, path: &Path) -> bool {
@@ -490,7 +532,11 @@ fn should_include_source_file(repo_root: &Path, path: &Path) -> bool {
     };
     if rel
         .parent()
-        .map(|parent| parent.components().any(|component| IGNORED_DIR_NAMES.contains(&component.as_os_str().to_string_lossy().as_ref())))
+        .map(|parent| {
+            parent.components().any(|component| {
+                IGNORED_DIR_NAMES.contains(&component.as_os_str().to_string_lossy().as_ref())
+            })
+        })
         .unwrap_or(false)
     {
         return false;
@@ -501,7 +547,9 @@ fn should_include_source_file(repo_root: &Path, path: &Path) -> bool {
     if IGNORED_FILE_NAMES.contains(&file_name) {
         return false;
     }
-    !IGNORED_SUFFIXES.iter().any(|suffix| file_name.ends_with(suffix))
+    !IGNORED_SUFFIXES
+        .iter()
+        .any(|suffix| file_name.ends_with(suffix))
 }
 
 fn is_ignored_dir(path: &Path) -> bool {

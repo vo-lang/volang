@@ -1,17 +1,17 @@
-pub mod version;
-pub mod identity;
-pub mod digest;
-pub mod schema;
-pub mod registry;
-pub mod solver;
-pub mod lock;
-pub mod materialize;
-pub mod workspace;
-pub mod ops;
-pub mod ext_manifest;
 pub mod compat;
+pub mod digest;
+pub mod ext_manifest;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod github_registry;
+pub mod identity;
+pub mod lock;
+pub mod materialize;
+pub mod ops;
+pub mod registry;
+pub mod schema;
+pub mod solver;
+pub mod version;
+pub mod workspace;
 
 use std::fmt;
 
@@ -37,22 +37,56 @@ pub enum Error {
     InvalidReleaseMetadata(String),
 
     // Solver
-    NoSatisfyingVersion { module: String, detail: String },
-    ConflictingConstraints { module: String, detail: String },
-    DependencyToolchainMismatch { module: String, project_constraint: String, dependency_constraint: String },
+    NoSatisfyingVersion {
+        module: String,
+        detail: String,
+    },
+    ConflictingConstraints {
+        module: String,
+        detail: String,
+    },
+    DependencyToolchainMismatch {
+        module: String,
+        project_constraint: String,
+        dependency_constraint: String,
+    },
 
     // Lock authority
-    RootMismatch { field: String, mod_value: String, lock_value: String },
-    LockedModuleMismatch { module: String, field: String, expected: String, found: String },
+    RootMismatch {
+        field: String,
+        mod_value: String,
+        lock_value: String,
+    },
+    LockedModuleMismatch {
+        module: String,
+        field: String,
+        expected: String,
+        found: String,
+    },
 
     // Materialization
-    DigestMismatch { context: String, expected: String, found: String },
+    DigestMismatch {
+        context: String,
+        expected: String,
+        found: String,
+    },
     MissingLockFile,
-    MissingArtifact { module: String, version: String, detail: String },
+    MissingArtifact {
+        module: String,
+        version: String,
+        detail: String,
+    },
 
     // Workspace
-    WorkspaceIdentityMismatch { expected: String, found: String, path: String },
-    OverrideUnlockedDep { importer: String, import_path: String },
+    WorkspaceIdentityMismatch {
+        expected: String,
+        found: String,
+        path: String,
+    },
+    OverrideUnlockedDep {
+        importer: String,
+        import_path: String,
+    },
     SelfOverride,
 
     // IO
@@ -79,33 +113,67 @@ impl fmt::Display for Error {
             Self::RegistryError(msg) => write!(f, "registry error: {msg}"),
             Self::InvalidReleaseMetadata(msg) => write!(f, "invalid release metadata: {msg}"),
             Self::NoSatisfyingVersion { module, detail } => {
-                write!(f, "no version of {module} satisfies all constraints: {detail}")
+                write!(
+                    f,
+                    "no version of {module} satisfies all constraints: {detail}"
+                )
             }
             Self::ConflictingConstraints { module, detail } => {
                 write!(f, "conflicting constraints for {module}: {detail}")
             }
-            Self::DependencyToolchainMismatch { module, project_constraint, dependency_constraint } => {
+            Self::DependencyToolchainMismatch {
+                module,
+                project_constraint,
+                dependency_constraint,
+            } => {
                 write!(f, "dependency {module} requires toolchain {dependency_constraint} which is incompatible with project constraint {project_constraint}")
             }
-            Self::RootMismatch { field, mod_value, lock_value } => {
+            Self::RootMismatch {
+                field,
+                mod_value,
+                lock_value,
+            } => {
                 write!(f, "root vo.mod vs vo.lock mismatch on {field}: vo.mod has {mod_value}, vo.lock has {lock_value}")
             }
-            Self::LockedModuleMismatch { module, field, expected, found } => {
+            Self::LockedModuleMismatch {
+                module,
+                field,
+                expected,
+                found,
+            } => {
                 write!(f, "vo.lock entry for {module} does not match published release manifest: {field}: expected {expected}, found {found}")
             }
-            Self::DigestMismatch { context, expected, found } => {
-                write!(f, "digest mismatch for {context}: expected {expected}, found {found}")
+            Self::DigestMismatch {
+                context,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "digest mismatch for {context}: expected {expected}, found {found}"
+                )
             }
             Self::MissingLockFile => {
                 write!(f, "this build imports external modules but vo.lock is missing\n  run: vo mod sync")
             }
-            Self::MissingArtifact { module, version, detail } => {
+            Self::MissingArtifact {
+                module,
+                version,
+                detail,
+            } => {
                 write!(f, "required locked artifact is missing from cache: {module} {version}: {detail}\n  run: vo mod download")
             }
-            Self::WorkspaceIdentityMismatch { expected, found, path } => {
+            Self::WorkspaceIdentityMismatch {
+                expected,
+                found,
+                path,
+            } => {
                 write!(f, "workspace override identity mismatch at {path}: expected module {expected}, found {found}")
             }
-            Self::OverrideUnlockedDep { importer, import_path } => {
+            Self::OverrideUnlockedDep {
+                importer,
+                import_path,
+            } => {
                 write!(f, "workspace override imports an external module not in root lockfile: {importer} imports {import_path}\n  run: vo mod sync or disable vo.work")
             }
             Self::SelfOverride => {

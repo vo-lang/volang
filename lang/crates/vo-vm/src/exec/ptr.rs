@@ -1,8 +1,8 @@
 //! Pointer instructions: PtrNew, PtrGet, PtrSet, PtrGetN, PtrSetN
 
-use vo_runtime::ValueMeta;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::slot::Slot;
+use vo_runtime::ValueMeta;
 
 use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
@@ -26,7 +26,12 @@ pub fn exec_ptr_get(stack: *mut Slot, bp: usize, inst: &Instruction) -> bool {
     debug_assert!(
         (ptr as usize) & 7 == 0,
         "exec_ptr_get: misaligned ptr={:#x} bp={} a={} b={} c={} flags={}",
-        ptr as usize, bp, inst.a, inst.b, inst.c, inst.flags,
+        ptr as usize,
+        bp,
+        inst.a,
+        inst.b,
+        inst.c,
+        inst.flags,
     );
     let offset = inst.c as usize;
     let val = unsafe { Gc::read_slot(ptr, offset) };

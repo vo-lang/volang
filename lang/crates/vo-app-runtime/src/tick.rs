@@ -147,7 +147,12 @@ impl NativeTickProvider {
 impl vo_ext::host::tick::TickProvider for NativeTickProvider {
     fn start_tick_loop(&self, id: i32) {
         let control = Arc::new(TickLoopControl::new());
-        if let Some(existing) = self.loop_controls.lock().unwrap().insert(id, Arc::clone(&control)) {
+        if let Some(existing) = self
+            .loop_controls
+            .lock()
+            .unwrap()
+            .insert(id, Arc::clone(&control))
+        {
             existing.request_stop();
         }
         let provider = self.clone();
@@ -156,7 +161,9 @@ impl vo_ext::host::tick::TickProvider for NativeTickProvider {
             let mut last = Instant::now();
             loop {
                 std::thread::sleep(frame_dur);
-                if control.should_stop() { break; }
+                if control.should_stop() {
+                    break;
+                }
                 let now = Instant::now();
                 let dt_ms = now.duration_since(last).as_secs_f64() * 1000.0;
                 last = now;

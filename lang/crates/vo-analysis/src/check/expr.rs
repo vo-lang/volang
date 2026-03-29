@@ -22,12 +22,14 @@
 //! The update_expr_type method is used to record this final type and update
 //! the recorded types.
 
-
 use vo_common::span::Span;
 use vo_syntax::ast::ExprId;
 use vo_syntax::ast::{BinaryOp, CompositeLitKey, Expr, ExprKind, UnaryOp};
 
-use crate::constant::{Value, int_from_literal, float_from_literal, make_int64, make_string, make_bool, unary_op, binary_op, shift, compare};
+use crate::constant::{
+    binary_op, compare, float_from_literal, int_from_literal, make_bool, make_int64, make_string,
+    shift, unary_op, Value,
+};
 use crate::objects::TypeKey;
 use crate::operand::{Operand, OperandMode};
 use crate::typ::{self, BasicType, Type};
@@ -76,7 +78,11 @@ impl Checker {
             if !ok {
                 self.invalid_op(
                     x.pos(),
-                    &format!("operator {:?} not defined for {}", op, self.type_str(x.typ.unwrap())),
+                    &format!(
+                        "operator {:?} not defined for {}",
+                        op,
+                        self.type_str(x.typ.unwrap())
+                    ),
                 );
             }
             ok
@@ -102,7 +108,11 @@ impl Checker {
             if !ok {
                 self.invalid_op(
                     x.pos(),
-                    &format!("operator {:?} not defined for {}", op, self.type_str(x.typ.unwrap())),
+                    &format!(
+                        "operator {:?} not defined for {}",
+                        op,
+                        self.type_str(x.typ.unwrap())
+                    ),
                 );
             }
             ok
@@ -113,13 +123,7 @@ impl Checker {
 
     /// Type-checks a unary expression.
     /// The expression e may be None. It's passed in for better error messages only.
-    fn unary(
-        &mut self,
-        x: &mut Operand,
-        e: Option<&Expr>,
-        op: UnaryOp,
-        operand_expr: &Expr,
-    ) {
+    fn unary(&mut self, x: &mut Operand, e: Option<&Expr>, op: UnaryOp, operand_expr: &Expr) {
         match op {
             UnaryOp::Addr => {
                 // spec: "As an exception to the addressability requirement
@@ -134,7 +138,7 @@ impl Checker {
                         }
                     }
                 }
-                
+
                 // Spec: &x is only valid when x is a struct type
                 let xtype = x.typ.unwrap();
                 let underlying = typ::underlying_type(xtype, self.objs());
@@ -142,12 +146,15 @@ impl Checker {
                     self.error_code_msg(
                         TypeError::AddrOfNonStruct,
                         operand_expr.span,
-                        format!("cannot take address of {} (only struct types allowed)", self.type_str(xtype)),
+                        format!(
+                            "cannot take address of {} (only struct types allowed)",
+                            self.type_str(xtype)
+                        ),
                     );
                     x.mode = OperandMode::Invalid;
                     return;
                 }
-                
+
                 x.mode = OperandMode::Value;
                 x.typ = Some(self.new_t_pointer(xtype));
             }
@@ -157,7 +164,10 @@ impl Checker {
                     x.mode = OperandMode::Variable;
                     x.typ = Some(ptr.base());
                 } else {
-                    self.invalid_op(x.pos(), &format!("cannot dereference {}", self.type_str(x.typ.unwrap())));
+                    self.invalid_op(
+                        x.pos(),
+                        &format!("cannot dereference {}", self.type_str(x.typ.unwrap())),
+                    );
                     x.mode = OperandMode::Invalid;
                 }
             }
@@ -205,7 +215,12 @@ impl Checker {
     fn is_comparison(op: BinaryOp) -> bool {
         matches!(
             op,
-            BinaryOp::Eq | BinaryOp::NotEq | BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq
+            BinaryOp::Eq
+                | BinaryOp::NotEq
+                | BinaryOp::Lt
+                | BinaryOp::LtEq
+                | BinaryOp::Gt
+                | BinaryOp::GtEq
         )
     }
 
@@ -253,12 +268,7 @@ impl Checker {
     /// updates the recorded untyped type for x and possibly its operands.
     /// Otherwise (typ is not untyped anymore, or it is the final type for x),
     /// the type and value are recorded.
-    pub fn update_expr_type(
-        &mut self,
-        expr_id: ExprId,
-        t: TypeKey,
-        final_: bool,
-    ) {
+    pub fn update_expr_type(&mut self, expr_id: ExprId, t: TypeKey, final_: bool) {
         let info = match self.untyped.get(&expr_id) {
             Some(i) => i.clone(),
             None => return, // nothing to do
@@ -349,7 +359,8 @@ impl Checker {
         }
 
         // Everything's fine, record final type and value for x.
-        self.result.record_type_and_value(expr_id, info.mode.clone(), t);
+        self.result
+            .record_type_and_value(expr_id, info.mode.clone(), t);
     }
 
     /// Updates the value of x to val in the untyped map.
@@ -362,12 +373,11 @@ impl Checker {
     }
 
     /// Attempts to set the type of an untyped value to the target type.
-    pub fn convert_untyped(
-        &mut self,
-        x: &mut Operand,
-        target: TypeKey,
-    ) {
-        if x.invalid() || typ::is_typed(x.typ.unwrap(), self.objs()) || target == self.invalid_type() {
+    pub fn convert_untyped(&mut self, x: &mut Operand, target: TypeKey) {
+        if x.invalid()
+            || typ::is_typed(x.typ.unwrap(), self.objs())
+            || target == self.invalid_type()
+        {
             return;
         }
 
@@ -396,7 +406,11 @@ impl Checker {
                 } else {
                     let from_type = self.type_str(x.typ.unwrap());
                     let to_type = self.type_str(target);
-                    self.error_code_msg(TypeError::TypeMismatch, x.pos(), format!("cannot convert {} to {}", from_type, to_type));
+                    self.error_code_msg(
+                        TypeError::TypeMismatch,
+                        x.pos(),
+                        format!("cannot convert {} to {}", from_type, to_type),
+                    );
                     x.mode = OperandMode::Invalid;
                     return;
                 }
@@ -434,7 +448,11 @@ impl Checker {
                         BasicType::UntypedNil => typ::has_nil(t, self.objs()),
                         _ => false,
                     };
-                    if ok { Some(target) } else { None }
+                    if ok {
+                        Some(target)
+                    } else {
+                        None
+                    }
                 }
             }
             Type::Interface(detail) => {
@@ -446,7 +464,12 @@ impl Checker {
                     None
                 }
             }
-            Type::Pointer(_) | Type::Signature(_) | Type::Slice(_) | Type::Map(_) | Type::Chan(_) | Type::Port(_) => {
+            Type::Pointer(_)
+            | Type::Signature(_)
+            | Type::Slice(_)
+            | Type::Map(_)
+            | Type::Chan(_)
+            | Type::Port(_) => {
                 if x.is_nil(self.objs()) {
                     Some(self.basic_type(BasicType::UntypedNil))
                 } else {
@@ -472,18 +495,13 @@ impl Checker {
     // =========================================================================
 
     /// Type-checks a comparison operation.
-    pub fn comparison(
-        &mut self,
-        x: &mut Operand,
-        y: &Operand,
-        op: BinaryOp,
-    ) {
+    pub fn comparison(&mut self, x: &mut Operand, y: &Operand, op: BinaryOp) {
         // spec: "In any comparison, the first operand must be assignable
         // to the type of the second operand, or vice versa."
         let (xtype, ytype) = (x.typ.unwrap(), y.typ.unwrap());
         let mut reason = String::new();
-        let assignable = self.assignable_to(x, ytype, &mut reason)
-            || self.assignable_to(y, xtype, &mut reason);
+        let assignable =
+            self.assignable_to(x, ytype, &mut reason) || self.assignable_to(y, xtype, &mut reason);
 
         let emsg = if assignable {
             let (xtval, ytval) = (self.otype(xtype), self.otype(ytype));
@@ -508,7 +526,11 @@ impl Checker {
         };
 
         if let Some(m) = emsg {
-            self.error_code_msg(TypeError::InvalidOp, x.pos(), format!("cannot compare: {}", m));
+            self.error_code_msg(
+                TypeError::InvalidOp,
+                x.pos(),
+                format!("cannot compare: {}", m),
+            );
             x.mode = OperandMode::Invalid;
             return;
         }
@@ -540,20 +562,15 @@ impl Checker {
     // =========================================================================
 
     /// Type-checks a shift operation.
-    fn shift(
-        &mut self,
-        x: &mut Operand,
-        y: &mut Operand,
-        op: BinaryOp,
-        e: Option<&Expr>,
-    ) {
+    fn shift(&mut self, x: &mut Operand, y: &mut Operand, op: BinaryOp, e: Option<&Expr>) {
         let xtval = self.otype(x.typ.unwrap());
         let xt_untyped = xtval.is_untyped(self.objs());
         let xt_integer = xtval.is_integer(self.objs());
         let x_const = x.mode.constant_val().map(|v| v.to_int().into_owned());
 
         // The lhs is of integer type or an untyped constant representable as an integer
-        let lhs_ok = xt_integer || (xt_untyped && x_const.is_some() && x_const.as_ref().unwrap().is_int());
+        let lhs_ok =
+            xt_integer || (xt_untyped && x_const.is_some() && x_const.as_ref().unwrap().is_int());
         if !lhs_ok {
             self.invalid_op(x.pos(), "shifted operand must be integer");
             x.mode = OperandMode::Invalid;
@@ -688,7 +705,10 @@ impl Checker {
         if !typ::identical_o(x.typ, y.typ, self.objs()) {
             let invalid = Some(self.invalid_type());
             if x.typ != invalid && y.typ != invalid {
-                self.invalid_op(e.map(|e| e.span).unwrap_or_else(|| x.pos()), "mismatched types");
+                self.invalid_op(
+                    e.map(|e| e.span).unwrap_or_else(|| x.pos()),
+                    "mismatched types",
+                );
             }
             x.mode = OperandMode::Invalid;
             return;
@@ -737,22 +757,14 @@ impl Checker {
     /// Checks an index expression for validity.
     /// max is the upper bound for index (exclusive: index must be < max).
     /// Returns the value of the index when it's a constant, returns None if it's not.
-    pub fn index(
-        &mut self,
-        index: &Expr,
-        max: Option<u64>,
-    ) -> Result<Option<u64>, ()> {
+    pub fn index(&mut self, index: &Expr, max: Option<u64>) -> Result<Option<u64>, ()> {
         self.check_int_index(index, max, false)
     }
 
     /// Checks a slice bound expression for validity.
     /// max is the upper bound for the slice bound (inclusive: bound must be <= max).
     /// Returns the value when it's a constant, returns None if it's not.
-    pub fn slice_bound(
-        &mut self,
-        bound: &Expr,
-        max: Option<u64>,
-    ) -> Result<Option<u64>, ()> {
+    pub fn slice_bound(&mut self, bound: &Expr, max: Option<u64>) -> Result<Option<u64>, ()> {
         self.check_int_index(bound, max, true)
     }
 
@@ -790,9 +802,9 @@ impl Checker {
             }
             let (i, valid) = v.to_int().int_as_u64();
             let out_of_bounds = if inclusive {
-                max.map_or(false, |m| i > m)  // slice bound: i <= max
+                max.map_or(false, |m| i > m) // slice bound: i <= max
             } else {
-                max.map_or(false, |m| i >= m)  // array index: i < max
+                max.map_or(false, |m| i >= m) // array index: i < max
             };
             if !valid || out_of_bounds {
                 self.invalid_arg(index.span, "index out of bounds");
@@ -827,7 +839,11 @@ impl Checker {
                         if let Ok(Some(idx)) = i {
                             Some(idx)
                         } else if i.is_ok() {
-                            self.error_code_msg(TypeError::InvalidOp, key_expr.span, "index must be integer constant");
+                            self.error_code_msg(
+                                TypeError::InvalidOp,
+                                key_expr.span,
+                                "index must be integer constant",
+                            );
                             None
                         } else {
                             None
@@ -875,12 +891,7 @@ impl Checker {
     }
 
     /// Type-checks an expression with a type hint (for composite literal elements).
-    pub fn expr_with_hint(
-        &mut self,
-        x: &mut Operand,
-        e: &Expr,
-        hint: Option<TypeKey>,
-    ) {
+    pub fn expr_with_hint(&mut self, x: &mut Operand, e: &Expr, hint: Option<TypeKey>) {
         self.raw_expr(x, e, hint);
     }
 
@@ -892,12 +903,7 @@ impl Checker {
     /// Typechecks expression e and initializes x with the expression value or type.
     /// If an error occurred, x.mode is set to invalid.
     /// If hint is Some, it is the type of a composite literal element.
-    pub fn raw_expr_impl(
-        &mut self,
-        x: &mut Operand,
-        e: &Expr,
-        hint: Option<TypeKey>,
-    ) {
+    pub fn raw_expr_impl(&mut self, x: &mut Operand, e: &Expr, hint: Option<TypeKey>) {
         if self.trace() {
             self.trace_expr(e);
         }
@@ -931,12 +937,7 @@ impl Checker {
     }
 
     /// Core expression type-checking. Must only be called by raw_expr_impl.
-    fn raw_internal(
-        &mut self,
-        x: &mut Operand,
-        e: &Expr,
-        hint: Option<TypeKey>,
-    ) {
+    fn raw_internal(&mut self, x: &mut Operand, e: &Expr, hint: Option<TypeKey>) {
         // Make sure x has a valid state in case of bailout
         x.mode = OperandMode::Invalid;
         x.typ = Some(self.invalid_type());
@@ -1024,7 +1025,11 @@ impl Checker {
                     }
                     Type::Pointer(ptr) => {
                         // Pointer to array
-                        if let Some(arr) = self.otype(ptr.base()).underlying_val(self.objs()).try_as_array() {
+                        if let Some(arr) = self
+                            .otype(ptr.base())
+                            .underlying_val(self.objs())
+                            .try_as_array()
+                        {
                             x.mode = OperandMode::Variable;
                             x.typ = Some(arr.elem());
                             (true, arr.len())
@@ -1070,16 +1075,26 @@ impl Checker {
                 }
 
                 let utype = typ::underlying_type(x.typ.unwrap(), self.objs());
-                
+
                 // Extract type info first to avoid borrow conflicts
                 enum SliceInfo {
-                    String { len: Option<u64>, is_untyped: bool },
-                    Array { elem: TypeKey, len: Option<u64>, addressable: bool },
-                    PointerArray { elem: TypeKey, len: Option<u64> },
+                    String {
+                        len: Option<u64>,
+                        is_untyped: bool,
+                    },
+                    Array {
+                        elem: TypeKey,
+                        len: Option<u64>,
+                        addressable: bool,
+                    },
+                    PointerArray {
+                        elem: TypeKey,
+                        len: Option<u64>,
+                    },
                     Slice,
                     Invalid,
                 }
-                
+
                 let info = {
                     let utype_val = self.otype(utype);
                     match utype_val {
@@ -1089,18 +1104,26 @@ impl Checker {
                             } else {
                                 None
                             };
-                            SliceInfo::String { len, is_untyped: typ::is_untyped(utype, self.objs()) }
-                        }
-                        Type::Array(arr) => {
-                            SliceInfo::Array { 
-                                elem: arr.elem(), 
-                                len: arr.len(),
-                                addressable: x.mode == OperandMode::Variable 
+                            SliceInfo::String {
+                                len,
+                                is_untyped: typ::is_untyped(utype, self.objs()),
                             }
                         }
+                        Type::Array(arr) => SliceInfo::Array {
+                            elem: arr.elem(),
+                            len: arr.len(),
+                            addressable: x.mode == OperandMode::Variable,
+                        },
                         Type::Pointer(ptr) => {
-                            if let Some(arr) = self.otype(ptr.base()).underlying_val(self.objs()).try_as_array() {
-                                SliceInfo::PointerArray { elem: arr.elem(), len: arr.len() }
+                            if let Some(arr) = self
+                                .otype(ptr.base())
+                                .underlying_val(self.objs())
+                                .try_as_array()
+                            {
+                                SliceInfo::PointerArray {
+                                    elem: arr.elem(),
+                                    len: arr.len(),
+                                }
                             } else {
                                 SliceInfo::Invalid
                             }
@@ -1109,7 +1132,7 @@ impl Checker {
                         _ => SliceInfo::Invalid,
                     }
                 };
-                
+
                 let (valid, length) = match info {
                     SliceInfo::String { len, is_untyped } => {
                         if is_untyped {
@@ -1117,9 +1140,16 @@ impl Checker {
                         }
                         (true, len)
                     }
-                    SliceInfo::Array { elem, len, addressable } => {
+                    SliceInfo::Array {
+                        elem,
+                        len,
+                        addressable,
+                    } => {
                         if !addressable {
-                            self.invalid_op(sl.expr.span, "cannot slice array (value not addressable)");
+                            self.invalid_op(
+                                sl.expr.span,
+                                "cannot slice array (value not addressable)",
+                            );
                             x.mode = OperandMode::Invalid;
                             return;
                         }
@@ -1140,14 +1170,14 @@ impl Checker {
                     x.mode = OperandMode::Invalid;
                     return;
                 }
-                
+
                 // Three-index slice is not allowed for strings
                 if sl.max.is_some() && matches!(info, SliceInfo::String { .. }) {
                     self.invalid_op(sl.expr.span, "3-index slice of string");
                     x.mode = OperandMode::Invalid;
                     return;
                 }
-                
+
                 x.mode = OperandMode::Value;
 
                 // Check slice indices: 0 <= low <= high <= max <= cap (inclusive bounds)
@@ -1169,7 +1199,7 @@ impl Checker {
                 if x.invalid() {
                     return;
                 }
-                
+
                 // Check that x is an interface type
                 let xtype = typ::underlying_type(x.typ.unwrap(), self.objs());
                 if self.otype(xtype).try_as_interface().is_none() {
@@ -1177,20 +1207,20 @@ impl Checker {
                     x.mode = OperandMode::Invalid;
                     return;
                 }
-                
+
                 // x.(type) expressions are handled in type switches
                 if ta.ty.is_none() {
                     self.invalid_op(e.span, "use of .(type) outside type switch");
                     x.mode = OperandMode::Invalid;
                     return;
                 }
-                
+
                 let target = self.type_expr(ta.ty.as_ref().unwrap());
                 if target == self.invalid_type() {
                     x.mode = OperandMode::Invalid;
                     return;
                 }
-                
+
                 // Check type assertion validity
                 self.type_assertion(x, xtype, target, e.span);
                 x.mode = OperandMode::CommaOk;
@@ -1217,15 +1247,19 @@ impl Checker {
                             h
                         }
                     } else {
-                        self.error_code_msg(TypeError::InvalidOp, e.span, "missing type in composite literal");
+                        self.error_code_msg(
+                            TypeError::InvalidOp,
+                            e.span,
+                            "missing type in composite literal",
+                        );
                         x.mode = OperandMode::Invalid;
                         return;
                     }
                 };
-                
+
                 let utype = typ::underlying_type(ty, self.objs());
                 let utype_val = self.otype(utype);
-                
+
                 match &utype_val {
                     Type::Struct(detail) => {
                         let fields = detail.fields().clone();
@@ -1236,7 +1270,7 @@ impl Checker {
                             if val.invalid() {
                                 continue;
                             }
-                            
+
                             // Get field type
                             let field_type = if let Some(ref key) = elem.key {
                                 // Keyed element: field:value
@@ -1258,7 +1292,7 @@ impl Checker {
                                 // Positional element
                                 fields.get(i).and_then(|&f| self.lobj(f).typ())
                             };
-                            
+
                             if let Some(ft) = field_type {
                                 self.assignment(&mut val, Some(ft), "struct literal");
                             }
@@ -1289,7 +1323,11 @@ impl Checker {
                                     let mut key_op = Operand::new();
                                     self.expr(&mut key_op, key_expr);
                                     if !key_op.invalid() {
-                                        self.assignment(&mut key_op, Some(key_type), "map literal key");
+                                        self.assignment(
+                                            &mut key_op,
+                                            Some(key_type),
+                                            "map literal key",
+                                        );
                                     }
                                 }
                             }
@@ -1307,7 +1345,7 @@ impl Checker {
                         return;
                     }
                 }
-                
+
                 x.mode = OperandMode::Value;
                 x.typ = Some(ty);
             }
@@ -1373,7 +1411,7 @@ impl Checker {
                 // If function returns error: propagate (return) the error.
                 // If function doesn't return error: panic on error.
                 // If error == nil, the result is the value(s) without the error part.
-                
+
                 self.multi_expr(x, inner);
                 if x.invalid() {
                     return;
@@ -1386,7 +1424,11 @@ impl Checker {
                 if let Some(tuple) = self.otype(inner_type).try_as_tuple() {
                     let vars = tuple.vars();
                     if vars.is_empty() {
-                        self.error_code_msg(TypeError::InvalidOp, e.span, "? operator requires expression returning error");
+                        self.error_code_msg(
+                            TypeError::InvalidOp,
+                            e.span,
+                            "? operator requires expression returning error",
+                        );
                         x.mode = OperandMode::Invalid;
                         return;
                     }
@@ -1395,7 +1437,11 @@ impl Checker {
                     let last_var = vars.last().unwrap();
                     let last_type = self.lobj(*last_var).typ().unwrap_or(self.invalid_type());
                     if !typ::identical(last_type, error_type, self.objs()) {
-                        self.error_code_msg(TypeError::InvalidOp, e.span, "? operator requires expression with error as last return value");
+                        self.error_code_msg(
+                            TypeError::InvalidOp,
+                            e.span,
+                            "? operator requires expression with error as last return value",
+                        );
                         x.mode = OperandMode::Invalid;
                         return;
                     }
@@ -1425,14 +1471,20 @@ impl Checker {
                     x.mode = OperandMode::NoValue;
                     x.typ = None;
                 } else {
-                    self.error_code_msg(TypeError::InvalidOp, e.span, "? operator requires expression returning error type");
+                    self.error_code_msg(
+                        TypeError::InvalidOp,
+                        e.span,
+                        "? operator requires expression returning error type",
+                    );
                     x.mode = OperandMode::Invalid;
                 }
             }
             ExprKind::DynAccess(dyn_access) => {
                 // Use multi_expr to allow (any, error) tuple as base for chaining
                 self.multi_expr(x, &dyn_access.base);
-                if x.invalid() { return }
+                if x.invalid() {
+                    return;
+                }
 
                 let base_type = x.typ.unwrap_or(self.invalid_type());
 
@@ -1456,14 +1508,15 @@ impl Checker {
                 }
 
                 // Resolve protocol method for static dispatch
-                let dyn_resolve = match self.resolve_dyn_access_method(base_type, &dyn_access.op, e.span) {
-                    Ok(resolve) => resolve,
-                    Err(()) => {
-                        // Error already reported
-                        x.mode = OperandMode::Invalid;
-                        return;
-                    }
-                };
+                let dyn_resolve =
+                    match self.resolve_dyn_access_method(base_type, &dyn_access.op, e.span) {
+                        Ok(resolve) => resolve,
+                        Err(()) => {
+                            // Error already reported
+                            x.mode = OperandMode::Invalid;
+                            return;
+                        }
+                    };
                 self.result.record_dyn_access(e.id, dyn_resolve);
 
                 // Result is (any, error)
@@ -1480,7 +1533,7 @@ impl Checker {
                 x.mode = OperandMode::Invalid;
             }
         }
-        
+
         // Ensure x.expr points to the current expression (not a sub-expression)
         x.set_expr(e);
     }
@@ -1490,7 +1543,7 @@ impl Checker {
     // =========================================================================
 
     /// Resolve protocol method for dynamic access operation.
-    /// 
+    ///
     /// Returns:
     /// - `Ok(None)` if base is interface/any (dynamic dispatch at runtime)
     /// - `Ok(Some(DynAccessResolve))` if base is concrete type with matching protocol method
@@ -1502,7 +1555,7 @@ impl Checker {
         span: Span,
     ) -> Result<Option<crate::check::type_info::DynAccessResolve>, ()> {
         use vo_syntax::ast::DynAccessOp;
-        
+
         // Get the actual base type (unwrap tuple for chaining case)
         let actual_base_type = if self.is_tuple_any_error(base_type) {
             // For (any, error) tuple, the first element is the actual base
@@ -1519,29 +1572,29 @@ impl Checker {
         } else {
             base_type
         };
-        
+
         // If base is interface, use dynamic dispatch (check underlying for Named types like error)
         if crate::typ::is_interface(actual_base_type, self.objs()) {
             return Ok(None);
         }
-        
+
         // Determine protocol method name based on operation
         let method_name = match op {
             DynAccessOp::Field(_) | DynAccessOp::MethodCall { .. } => "DynAttr",
             DynAccessOp::Index(_) => "DynIndex",
             DynAccessOp::Call { .. } => "DynCall",
         };
-        
+
         // Lookup method on concrete type
         let pkg = self.pkg;
         let result = crate::lookup::lookup_field_or_method(
             actual_base_type,
-            true,  // addressable
+            true, // addressable
             Some(pkg),
             method_name,
             self.objs(),
         );
-        
+
         match result {
             crate::lookup::LookupResult::Entry(method_key, indices, indirect) => {
                 Ok(Some(crate::check::type_info::DynAccessResolve {
@@ -1555,7 +1608,10 @@ impl Checker {
                 self.error_code_msg(
                     TypeError::InvalidOp,
                     span,
-                    format!("type {} does not implement protocol method {}", type_name, method_name),
+                    format!(
+                        "type {} does not implement protocol method {}",
+                        type_name, method_name
+                    ),
                 );
                 Err(())
             }
@@ -1579,7 +1635,7 @@ impl Checker {
     }
 
     /// Resolve protocol method for dynamic set operation (assignment LHS).
-    /// 
+    ///
     /// Returns:
     /// - `Ok(None)` if base is interface/any (dynamic dispatch at runtime)
     /// - `Ok(Some(DynAccessResolve))` if base is concrete type with matching protocol method
@@ -1591,7 +1647,7 @@ impl Checker {
         span: Span,
     ) -> Result<Option<crate::check::type_info::DynAccessResolve>, ()> {
         use vo_syntax::ast::DynAccessOp;
-        
+
         // Get the actual base type (unwrap tuple for chaining case)
         let actual_base_type = if self.is_tuple_any_error(base_type) {
             if let Some(tuple) = self.otype(base_type).try_as_tuple() {
@@ -1607,29 +1663,29 @@ impl Checker {
         } else {
             base_type
         };
-        
+
         // If base is interface, use dynamic dispatch (check underlying for Named types like error)
         if crate::typ::is_interface(actual_base_type, self.objs()) {
             return Ok(None);
         }
-        
+
         // Determine protocol method name based on operation
         let method_name = match op {
             DynAccessOp::Field(_) => "DynSetAttr",
             DynAccessOp::Index(_) => "DynSetIndex",
             _ => return Ok(None), // Call operations not applicable for set
         };
-        
+
         // Lookup method on concrete type
         let pkg = self.pkg;
         let result = crate::lookup::lookup_field_or_method(
             actual_base_type,
-            true,  // addressable
+            true, // addressable
             Some(pkg),
             method_name,
             self.objs(),
         );
-        
+
         match result {
             crate::lookup::LookupResult::Entry(method_key, indices, indirect) => {
                 Ok(Some(crate::check::type_info::DynAccessResolve {
@@ -1643,7 +1699,10 @@ impl Checker {
                 self.error_code_msg(
                     TypeError::InvalidOp,
                     span,
-                    format!("type {} does not implement protocol method {}", type_name, method_name),
+                    format!(
+                        "type {} does not implement protocol method {}",
+                        type_name, method_name
+                    ),
                 );
                 Err(())
             }
@@ -1688,20 +1747,14 @@ impl Checker {
     // =========================================================================
 
     /// Checks that x.(T) is legal; xtype must be the type of x.
-    pub fn type_assertion(
-        &mut self,
-        x: &mut Operand,
-        xtype: TypeKey,
-        t: TypeKey,
-        span: Span,
-    ) {
+    pub fn type_assertion(&mut self, x: &mut Operand, xtype: TypeKey, t: TypeKey, span: Span) {
         // Check that xtype is an interface type
         if self.otype(xtype).try_as_interface().is_none() {
             self.error_code(TypeError::TypeAssertNotInterface, span);
             x.mode = OperandMode::Invalid;
             return;
         }
-        
+
         // Check that t can satisfy the interface
         if let Some((missing, wrong_type)) = crate::lookup::assertable_to(xtype, t, self) {
             let method_name = self.lobj(missing).name();
@@ -1709,7 +1762,10 @@ impl Checker {
                 self.error_code_msg(
                     TypeError::TypeMismatch,
                     span,
-                    format!("impossible type assertion: method {} has wrong type", method_name),
+                    format!(
+                        "impossible type assertion: method {} has wrong type",
+                        method_name
+                    ),
                 );
             } else {
                 self.error_code_msg(
@@ -1719,7 +1775,7 @@ impl Checker {
                 );
             }
         }
-        
+
         x.typ = Some(t);
         x.mode = OperandMode::CommaOk;
     }
@@ -1782,7 +1838,11 @@ impl Checker {
         self.raw_expr(x, e, None);
         self.single_value(x);
         if x.mode == OperandMode::NoValue {
-            self.error_code_msg(TypeError::InvalidOp, x.pos(), "expression used as value or type");
+            self.error_code_msg(
+                TypeError::InvalidOp,
+                x.pos(),
+                "expression used as value or type",
+            );
             x.mode = OperandMode::Invalid;
         }
     }
@@ -1809,7 +1869,9 @@ impl Checker {
                     debug_assert_eq!(self.pkg, lobj_pkg.unwrap());
                     self.result.record_use(ident.clone(), okey);
                     // Mark package as used
-                    if let crate::obj::EntityType::PkgName { used, .. } = self.lobj_mut(okey).entity_type_mut() {
+                    if let crate::obj::EntityType::PkgName { used, .. } =
+                        self.lobj_mut(okey).entity_type_mut()
+                    {
                         *used = true;
                     }
 
@@ -1881,10 +1943,14 @@ impl Checker {
         );
 
         let (okey, indices, indirect) = match result {
-            crate::lookup::LookupResult::Entry(okey, indices, indirect) => (okey, indices, indirect),
+            crate::lookup::LookupResult::Entry(okey, indices, indirect) => {
+                (okey, indices, indirect)
+            }
             _ => {
                 let msg = match &result {
-                    crate::lookup::LookupResult::Ambiguous(_) => format!("ambiguous selector {}", sel_name),
+                    crate::lookup::LookupResult::Ambiguous(_) => {
+                        format!("ambiguous selector {}", sel_name)
+                    }
                     crate::lookup::LookupResult::NotFound => {
                         format!(
                             "{} undefined (type has no field or method {})",
@@ -1923,9 +1989,9 @@ impl Checker {
 
                 // the receiver type becomes the type of the first function
                 // argument of the method expression's function type
-                let var = self
-                    .tc_objs
-                    .new_var(Span::default(), Some(self.pkg), "".to_string(), x.typ);
+                let var =
+                    self.tc_objs
+                        .new_var(Span::default(), Some(self.pkg), "".to_string(), x.typ);
                 let lobj = self.lobj(okey);
                 let sig = self.otype(lobj.typ().unwrap()).try_as_signature().unwrap();
                 let (p, r, v) = (sig.params(), sig.results(), sig.variadic());
@@ -1939,10 +2005,7 @@ impl Checker {
 
                 self.add_decl_dep(okey);
             } else {
-                let msg = format!(
-                    "{} undefined (type has no method {})",
-                    sel_name, sel_name
-                );
+                let msg = format!("{} undefined (type has no method {})", sel_name, sel_name);
                 self.error_code_msg(TypeError::Undeclared, sel.sel.span, msg);
                 x.mode = OperandMode::Invalid;
                 x.set_expr(&sel.expr);

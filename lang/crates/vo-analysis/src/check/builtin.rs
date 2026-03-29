@@ -5,7 +5,6 @@
 //! - No complex types (complex64/128, real, imag)
 //! - No unsafe package (Alignof, Offsetof, Sizeof)
 
-
 use std::cmp::Ordering;
 
 use vo_common::span::Span;
@@ -26,7 +25,9 @@ impl Checker {
     /// Returns true if the call is valid, with *x holding the result.
     /// x.expr_id is not set. If the call is invalid, returns false and *x is undefined.
     pub(crate) fn builtin(&mut self, x: &mut Operand, e: &Expr, id: Builtin) -> bool {
-        let AstExprKind::Call(call) = &e.kind else { unreachable!() };
+        let AstExprKind::Call(call) = &e.kind else {
+            unreachable!()
+        };
         let call_span = e.span;
         let call_expr_id = e.id;
         let binfo = self.universe().builtins()[&id];
@@ -98,10 +99,13 @@ impl Checker {
         };
 
         // Record builtin type signature helper
-        let record_sig = |checker: &mut Checker, res: Option<TypeKey>, args: &[TypeKey], variadic: bool| {
-            let sig = make_sig(&mut checker.tc_objs, res, args, variadic);
-            checker.result.record_builtin_type(&OperandMode::Builtin(id), &call.func, sig);
-        };
+        let record_sig =
+            |checker: &mut Checker, res: Option<TypeKey>, args: &[TypeKey], variadic: bool| {
+                let sig = make_sig(&mut checker.tc_objs, res, args, variadic);
+                checker
+                    .result
+                    .record_builtin_type(&OperandMode::Builtin(id), &call.func, sig);
+            };
 
         let result = match id {
             Builtin::Append => {
@@ -109,7 +113,10 @@ impl Checker {
                 if ok {
                     // append(s S, x ...T) S
                     let slice = x.typ.unwrap();
-                    if let Some(detail) = self.otype(typ::underlying_type(slice, self.objs())).try_as_slice() {
+                    if let Some(detail) = self
+                        .otype(typ::underlying_type(slice, self.objs()))
+                        .try_as_slice()
+                    {
                         let tslice = self.new_t_slice(detail.elem());
                         record_sig(self, Some(slice), &[slice, tslice], true);
                     }
@@ -145,7 +152,12 @@ impl Checker {
                 let (ok, src_type) = self.builtin_copy(x, call, call_span);
                 if ok {
                     // copy(dst, src []T) int
-                    record_sig(self, Some(self.basic_type(BasicType::Int)), &[dst_type, src_type], false);
+                    record_sig(
+                        self,
+                        Some(self.basic_type(BasicType::Int)),
+                        &[dst_type, src_type],
+                        false,
+                    );
                 }
                 ok
             }
@@ -154,7 +166,11 @@ impl Checker {
                 let ok = self.builtin_delete(x, call, call_span);
                 if ok {
                     // delete(m, k)
-                    if let Some(detail) = self.otype(map_type).underlying_val(self.objs()).try_as_map() {
+                    if let Some(detail) = self
+                        .otype(map_type)
+                        .underlying_val(self.objs())
+                        .try_as_map()
+                    {
                         record_sig(self, None, &[map_type, detail.key()], false);
                     }
                 }
@@ -225,12 +241,7 @@ impl Checker {
     }
 
     /// append(s S, x ...T) S
-    fn builtin_append(
-        &mut self,
-        x: &mut Operand,
-        call: &CallExpr,
-        call_span: Span,
-    ) -> bool {
+    fn builtin_append(&mut self, x: &mut Operand, call: &CallExpr, call_span: Span) -> bool {
         let slice = match x.typ {
             Some(t) => t,
             None => return false,
@@ -301,12 +312,7 @@ impl Checker {
     }
 
     /// cap(x) int / len(x) int
-    fn builtin_len_cap(
-        &mut self,
-        x: &mut Operand,
-        id: Builtin,
-        has_call_or_recv: bool,
-    ) -> bool {
+    fn builtin_len_cap(&mut self, x: &mut Operand, id: Builtin, has_call_or_recv: bool) -> bool {
         let ty = typ::underlying_type(x.typ.unwrap(), self.objs());
         let ty = implicit_array_deref(ty, self.objs());
 
@@ -314,7 +320,9 @@ impl Checker {
             Type::Basic(detail) => {
                 if detail.info() == BasicInfo::IsString {
                     if let OperandMode::Constant(v) = &x.mode {
-                        OperandMode::Constant(crate::constant::make_uint64(v.str_as_string().len() as u64))
+                        OperandMode::Constant(crate::constant::make_uint64(
+                            v.str_as_string().len() as u64
+                        ))
                     } else {
                         OperandMode::Value
                     }
@@ -358,7 +366,15 @@ impl Checker {
         let invalid_type = self.invalid_type();
         if mode == OperandMode::Invalid && ty != invalid_type {
             let name = if id == Builtin::Len { "len" } else { "cap" };
-            self.error_code_msg(TypeError::InvalidLenCapArg, x.pos(), format!("invalid argument {} for {}", self.type_str(x.typ.unwrap()), name));
+            self.error_code_msg(
+                TypeError::InvalidLenCapArg,
+                x.pos(),
+                format!(
+                    "invalid argument {} for {}",
+                    self.type_str(x.typ.unwrap()),
+                    name
+                ),
+            );
             return false;
         }
 
@@ -381,14 +397,22 @@ impl Checker {
             }
             Type::Port(detail) => {
                 if detail.dir() != typ::ChanDir::SendRecv {
-                    self.error_code_msg(TypeError::InvalidOp, x.pos(), "cannot close non-owner port");
+                    self.error_code_msg(
+                        TypeError::InvalidOp,
+                        x.pos(),
+                        "cannot close non-owner port",
+                    );
                     return false;
                 }
                 x.mode = OperandMode::NoValue;
                 true
             }
             _ => {
-                self.error_code_msg(TypeError::CloseNotChan, x.pos(), "argument to close must be channel or port");
+                self.error_code_msg(
+                    TypeError::CloseNotChan,
+                    x.pos(),
+                    "argument to close must be channel or port",
+                );
                 false
             }
         }
@@ -403,7 +427,7 @@ impl Checker {
         call_span: Span,
     ) -> (bool, TypeKey) {
         let invalid_type = self.invalid_type();
-        
+
         // dst element type
         let dst = match self.otype(x.typ.unwrap()).underlying_val(self.objs()) {
             Type::Slice(detail) => Some(detail.elem()),
@@ -443,30 +467,25 @@ impl Checker {
     }
 
     /// delete(m, k)
-    fn builtin_delete(
-        &mut self,
-        x: &mut Operand,
-        call: &CallExpr,
-        call_span: Span,
-    ) -> bool {
+    fn builtin_delete(&mut self, x: &mut Operand, call: &CallExpr, call_span: Span) -> bool {
         let mtype = x.typ.unwrap();
         match self.otype(mtype).underlying_val(self.objs()) {
             Type::Map(detail) => {
                 let key = detail.key();
-                
+
                 // Evaluate key argument
                 let mut k = Operand::new();
                 self.multi_expr(&mut k, &call.args[1]);
                 if k.invalid() {
                     return false;
                 }
-                
+
                 let mut reason = String::new();
                 if !self.assignable_to(&k, key, &mut reason) {
                     self.error_code(TypeError::DeleteKeyMismatch, call.args[1].span);
                     return false;
                 }
-                
+
                 x.mode = OperandMode::NoValue;
                 true
             }
@@ -478,14 +497,9 @@ impl Checker {
     }
 
     /// make(T, n) or make(T, n, m)
-    fn builtin_make(
-        &mut self,
-        x: &mut Operand,
-        call: &CallExpr,
-        call_span: Span,
-    ) -> bool {
+    fn builtin_make(&mut self, x: &mut Operand, call: &CallExpr, call_span: Span) -> bool {
         let nargs = call.args.len();
-        
+
         // First argument is a type
         let arg0t = self.type_expr_from_expr(&call.args[0]);
         let invalid_type = self.invalid_type();
@@ -527,7 +541,11 @@ impl Checker {
             if let OperandMode::Constant(cap_val) = &cap_op.mode {
                 let (cap, cap_exact) = cap_val.int_as_i64();
                 if cap_exact && cap <= 0 {
-                    self.error_code_msg(TypeError::InvalidOp, call.args[1].span, "port capacity must be positive");
+                    self.error_code_msg(
+                        TypeError::InvalidOp,
+                        call.args[1].span,
+                        "port capacity must be positive",
+                    );
                     return false;
                 }
             }
@@ -539,11 +557,17 @@ impl Checker {
             let mut cap_op = Operand::new();
             self.expr(&mut len_op, &call.args[1]);
             self.expr(&mut cap_op, &call.args[2]);
-            if let (OperandMode::Constant(len_val), OperandMode::Constant(cap_val)) = (&len_op.mode, &cap_op.mode) {
+            if let (OperandMode::Constant(len_val), OperandMode::Constant(cap_val)) =
+                (&len_op.mode, &cap_op.mode)
+            {
                 let (len, len_exact) = len_val.int_as_i64();
                 let (cap, cap_exact) = cap_val.int_as_i64();
                 if len_exact && cap_exact && len > cap {
-                    self.error_code_msg(TypeError::MakeLenGtCap, call_span, format!("length ({}) larger than capacity ({})", len, cap));
+                    self.error_code_msg(
+                        TypeError::MakeLenGtCap,
+                        call_span,
+                        format!("length ({}) larger than capacity ({})", len, cap),
+                    );
                 }
             }
         }
@@ -554,12 +578,7 @@ impl Checker {
     }
 
     /// new(T) *T
-    fn builtin_new(
-        &mut self,
-        x: &mut Operand,
-        call: &CallExpr,
-        _call_span: Span,
-    ) -> bool {
+    fn builtin_new(&mut self, x: &mut Operand, call: &CallExpr, _call_span: Span) -> bool {
         let arg0t = self.type_expr_from_expr(&call.args[0]);
         let invalid_type = self.invalid_type();
         if arg0t == invalid_type {
@@ -612,7 +631,11 @@ impl Checker {
         nargs: usize,
         id: Builtin,
     ) -> (bool, Vec<TypeKey>) {
-        let name = if id == Builtin::Print { "print" } else { "println" };
+        let name = if id == Builtin::Print {
+            "print"
+        } else {
+            "println"
+        };
         let mut params = Vec::with_capacity(nargs);
 
         for i in 0..nargs {
@@ -653,18 +676,18 @@ impl Checker {
         call_span: Span,
     ) -> (bool, Vec<TypeKey>) {
         let mut params = Vec::with_capacity(nargs);
-        
+
         // First argument: condition (already in x)
         self.assignment(x, None, "argument to assert");
         if x.invalid() {
             return (false, vec![]);
         }
-        
+
         if !typ::is_boolean(x.typ.unwrap_or(self.invalid_type()), self.objs()) {
             self.error_code(TypeError::AssertNotBool, call_span);
             return (false, vec![]);
         }
-        
+
         // Collect first arg type if not constant
         let is_constant = matches!(x.mode, OperandMode::Constant(_));
         if !is_constant {
@@ -678,7 +701,7 @@ impl Checker {
             self.error_code(TypeError::AssertFailed, call_span);
             // Safe to continue - compile-time assertion failure
         }
-        
+
         // Process message arguments using unpack result
         for i in 1..nargs {
             re.get(self, x, i);
@@ -702,7 +725,14 @@ impl Checker {
         } else {
             "too many"
         };
-        self.error_code_msg(TypeError::BuiltinArgCount, call_span, format!("{} arguments for {} (expected {}, found {})", msg, name, expected, got));
+        self.error_code_msg(
+            TypeError::BuiltinArgCount,
+            call_span,
+            format!(
+                "{} arguments for {} (expected {}, found {})",
+                msg, name, expected, got
+            ),
+        );
     }
 
     // index function moved to expr.rs
@@ -712,7 +742,7 @@ impl Checker {
     /// Aligned with goscript's type_internal for Expr.
     fn type_expr_from_expr(&mut self, e: &Expr) -> TypeKey {
         use vo_syntax::ast::ExprKind;
-        
+
         match &e.kind {
             // Type wrapped as expression (e.g., chan int, []int, map[K]V)
             ExprKind::TypeAsExpr(ty) => self.type_expr(ty),

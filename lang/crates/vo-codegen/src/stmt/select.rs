@@ -26,19 +26,25 @@ pub(crate) fn compile_select(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use vo_syntax::ast::CommClause;
-    
+
     let case_count = select_stmt.cases.len();
     let has_default = select_stmt.cases.iter().any(|c| c.comm.is_none());
-    
+
     // SelectBegin: a=case_count, flags=has_default
-    func.emit_with_flags(Opcode::SelectBegin, has_default as u8, case_count as u16, 0, 0);
-    
+    func.emit_with_flags(
+        Opcode::SelectBegin,
+        has_default as u8,
+        case_count as u16,
+        0,
+        0,
+    );
+
     // Enter breakable context for break support
     func.enter_breakable(label);
-    
+
     // Phase 1: Emit SelectSend/SelectRecv for each case
     let mut recv_infos: Vec<Option<RecvCaseInfo>> = Vec::with_capacity(case_count);
-    
+
     for (case_idx, case) in select_stmt.cases.iter().enumerate() {
         match &case.comm {
             None => {
@@ -48,9 +54,16 @@ pub(crate) fn compile_select(
                 let queue_reg = crate::expr::compile_expr(&send.chan, ctx, func, info)?;
                 let queue_type = info.expr_type(send.chan.id);
                 let elem_type = info.queue_elem_type(queue_type);
-                let val_reg = crate::expr::compile_expr_to_type(&send.value, elem_type, ctx, func, info)?;
+                let val_reg =
+                    crate::expr::compile_expr_to_type(&send.value, elem_type, ctx, func, info)?;
                 let elem_slots = info.queue_elem_slots(queue_type) as u8;
-                func.emit_with_flags(Opcode::SelectSend, elem_slots, queue_reg, val_reg, case_idx as u16);
+                func.emit_with_flags(
+                    Opcode::SelectSend,
+                    elem_slots,
+                    queue_reg,
+                    val_reg,
+                    case_idx as u16,
+                );
                 recv_infos.push(None);
             }
             Some(CommClause::Recv(recv)) => {
@@ -58,7 +71,7 @@ pub(crate) fn compile_select(
                 let queue_type = info.expr_type(recv.expr.id);
                 let elem_slots = info.queue_elem_slots(queue_type);
                 let has_ok = recv.lhs.len() > 1;
-                
+
                 // Allocate destination with correct slot types for GC scanning
                 let elem_type = info.queue_elem_type(queue_type);
                 let mut recv_types = info.type_slot_types(elem_type);
@@ -66,62 +79,77 @@ pub(crate) fn compile_select(
                     recv_types.push(SlotType::Value); // ok bool
                 }
                 let dst_reg = func.alloc_slots(&recv_types);
-                
+
                 let flags = ((elem_slots as u8) << 1) | (has_ok as u8);
-                func.emit_with_flags(Opcode::SelectRecv, flags, dst_reg, queue_reg, case_idx as u16);
-                recv_infos.push(Some(RecvCaseInfo { dst_reg, elem_slots, has_ok, queue_type }));
+                func.emit_with_flags(
+                    Opcode::SelectRecv,
+                    flags,
+                    dst_reg,
+                    queue_reg,
+                    case_idx as u16,
+                );
+                recv_infos.push(Some(RecvCaseInfo {
+                    dst_reg,
+                    elem_slots,
+                    has_ok,
+                    queue_type,
+                }));
             }
         }
     }
-    
+
     // SelectExec: returns chosen case index (-1 for default)
     let result_reg = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::SelectExec, result_reg, 0, 0);
-    
+
     // Phase 2: Generate dispatch jumps
     let mut case_jumps: Vec<usize> = Vec::with_capacity(case_count);
     let cmp_tmp = func.alloc_slots(&[SlotType::Value]);
-    
+
     for (case_idx, case) in select_stmt.cases.iter().enumerate() {
-        let target_idx = if case.comm.is_none() { -1i32 } else { case_idx as i32 };
+        let target_idx = if case.comm.is_none() {
+            -1i32
+        } else {
+            case_idx as i32
+        };
         let (b, c) = encode_i32(target_idx);
         func.emit_op(Opcode::LoadInt, cmp_tmp, b, c);
         func.emit_op(Opcode::EqI, cmp_tmp, result_reg, cmp_tmp);
         case_jumps.push(func.emit_jump(Opcode::JumpIf, cmp_tmp));
     }
-    
+
     let fallthrough_jump = func.emit_jump(Opcode::Jump, 0);
-    
+
     // Phase 3: Compile case bodies
     let mut end_jumps: Vec<usize> = Vec::with_capacity(case_count);
-    
+
     for (case_idx, case) in select_stmt.cases.iter().enumerate() {
         func.patch_jump(case_jumps[case_idx], func.current_pc());
-        
+
         // Bind recv variables
         if let Some(vo_syntax::ast::CommClause::Recv(recv)) = &case.comm {
             if let Some(ref recv_info) = recv_infos[case_idx] {
                 bind_recv_variables(ctx, func, info, recv, recv_info)?;
             }
         }
-        
+
         for stmt in &case.body {
             super::compile_stmt(stmt, ctx, func, info)?;
         }
-        
+
         end_jumps.push(func.emit_jump(Opcode::Jump, 0));
     }
-    
+
     // Exit breakable context and get break patches
     let break_patches = func.exit_breakable();
-    
+
     // Patch all end jumps (implicit break at end of case) and explicit breaks
     let end_pc = func.current_pc();
     func.patch_jump(fallthrough_jump, end_pc);
     for jump_pc in end_jumps.into_iter().chain(break_patches) {
         func.patch_jump(jump_pc, end_pc);
     }
-    
+
     Ok(())
 }
 
@@ -133,9 +161,9 @@ fn store_recv_ident(
     src_slot: u16,
     src_type: TypeKey,
 ) -> Result<(), CodegenError> {
-    let lhs_type = info
-        .ident_type(ident)
-        .ok_or_else(|| CodegenError::Internal(format!("recv lhs has no type: {:?}", ident.symbol)))?;
+    let lhs_type = info.ident_type(ident).ok_or_else(|| {
+        CodegenError::Internal(format!("recv lhs has no type: {:?}", ident.symbol))
+    })?;
 
     if let Some(local) = func.lookup_local(ident.symbol) {
         return crate::assign::emit_store_to_storage(
@@ -161,13 +189,7 @@ fn store_recv_ident(
             slots,
         };
         return crate::assign::emit_store_to_storage(
-            storage,
-            src_slot,
-            src_type,
-            lhs_type,
-            ctx,
-            func,
-            info,
+            storage, src_slot, src_type, lhs_type, ctx, func, info,
         );
     }
 
@@ -215,9 +237,9 @@ fn bind_recv_variables(
     if recv.lhs.is_empty() {
         return Ok(());
     }
-    
+
     let elem_type = info.queue_elem_type(recv_info.queue_type);
-    
+
     // First variable: received value
     let first = &recv.lhs[0];
     if recv.define {
@@ -225,7 +247,7 @@ fn bind_recv_variables(
     } else {
         store_recv_ident(ctx, func, info, first, recv_info.dst_reg, elem_type)?;
     }
-    
+
     // Second variable: ok bool (if present)
     if recv_info.has_ok && recv.lhs.len() > 1 {
         let second = &recv.lhs[1];

@@ -4,9 +4,9 @@
 //! Uses pack_slots/unpack_slots for proper deep copying of all sendable types.
 
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-#[cfg(not(feature = "std"))]
 use alloc::vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use crate::gc::{Gc, GcRef};
 use crate::island::{EndpointRequestKind, EndpointResponseKind, IslandCommand};
@@ -14,11 +14,11 @@ use crate::pack::{
     pack_slots, unpack_slots_with_queue_handle_resolver_and_cache, PackedValue, QueueHandleInfo,
 };
 use crate::slot::Slot;
-use crate::ValueMeta;
 use crate::ValueKind;
+use crate::ValueMeta;
 use vo_common_core::bytecode::StructMeta;
-use vo_common_core::TransferType;
 use vo_common_core::RuntimeType;
+use vo_common_core::TransferType;
 
 /// Read little-endian integers from byte slice at offset.
 #[inline]
@@ -82,7 +82,11 @@ fn read_u64_checked(data: &[u8], offset: &mut usize) -> Result<u64, IslandComman
     Ok(value)
 }
 
-fn read_bytes(data: &[u8], offset: &mut usize, len: usize) -> Result<Vec<u8>, IslandCommandDecodeError> {
+fn read_bytes(
+    data: &[u8],
+    offset: &mut usize,
+    len: usize,
+) -> Result<Vec<u8>, IslandCommandDecodeError> {
     if data.len() < *offset + len {
         return Err(IslandCommandDecodeError::UnexpectedEof);
     }
@@ -184,7 +188,10 @@ pub struct SpawnPayload {
 }
 
 pub fn decode_spawn_header(data: &[u8]) -> SpawnPayload {
-    assert!(data.len() >= HEADER_SIZE, "island spawn: invalid data length");
+    assert!(
+        data.len() >= HEADER_SIZE,
+        "island spawn: invalid data length"
+    );
 
     let func_id = read_u32(data, 0);
     let num_captures = read_u16(data, 4);
@@ -248,7 +255,9 @@ where
 
         let box_ref = gc.alloc(capture_box_meta(value_meta), transfer_type.slots);
         for j in 0..transfer_type.slots as usize {
-            unsafe { Gc::write_slot(box_ref, j, value_slots[j]); }
+            unsafe {
+                Gc::write_slot(box_ref, j, value_slots[j]);
+            }
         }
         captures.push(box_ref);
     }
@@ -305,14 +314,23 @@ pub fn encode_island_command(cmd: &IslandCommand) -> Vec<u8> {
         IslandCommand::Shutdown => {
             buf.push(2);
         }
-        IslandCommand::EndpointRequest { endpoint_id, kind, from_island, fiber_id } => {
+        IslandCommand::EndpointRequest {
+            endpoint_id,
+            kind,
+            from_island,
+            fiber_id,
+        } => {
             buf.push(3);
             buf.extend_from_slice(&endpoint_id.to_le_bytes());
             encode_endpoint_request_kind(&mut buf, kind);
             buf.extend_from_slice(&from_island.to_le_bytes());
             buf.extend_from_slice(&fiber_id.to_le_bytes());
         }
-        IslandCommand::EndpointResponse { endpoint_id, kind, fiber_id } => {
+        IslandCommand::EndpointResponse {
+            endpoint_id,
+            kind,
+            fiber_id,
+        } => {
             buf.push(4);
             buf.extend_from_slice(&endpoint_id.to_le_bytes());
             encode_endpoint_response_kind(&mut buf, kind);
@@ -465,11 +483,24 @@ mod tests {
                 IslandCommand::SpawnFiber { closure_data: a },
                 IslandCommand::SpawnFiber { closure_data: b },
             ) => assert_eq!(a.data(), b.data()),
-            (IslandCommand::WakeFiber { fiber_id: a }, IslandCommand::WakeFiber { fiber_id: b }) => assert_eq!(a, b),
+            (
+                IslandCommand::WakeFiber { fiber_id: a },
+                IslandCommand::WakeFiber { fiber_id: b },
+            ) => assert_eq!(a, b),
             (IslandCommand::Shutdown, IslandCommand::Shutdown) => {}
             (
-                IslandCommand::EndpointRequest { endpoint_id: ae, kind: ak, from_island: af, fiber_id: afi },
-                IslandCommand::EndpointRequest { endpoint_id: be, kind: bk, from_island: bf, fiber_id: bfi },
+                IslandCommand::EndpointRequest {
+                    endpoint_id: ae,
+                    kind: ak,
+                    from_island: af,
+                    fiber_id: afi,
+                },
+                IslandCommand::EndpointRequest {
+                    endpoint_id: be,
+                    kind: bk,
+                    from_island: bf,
+                    fiber_id: bfi,
+                },
             ) => {
                 assert_eq!(ae, be);
                 assert_eq!(af, bf);
@@ -477,8 +508,16 @@ mod tests {
                 assert_request_kind_eq(&ak, &bk);
             }
             (
-                IslandCommand::EndpointResponse { endpoint_id: ae, kind: ak, fiber_id: afi },
-                IslandCommand::EndpointResponse { endpoint_id: be, kind: bk, fiber_id: bfi },
+                IslandCommand::EndpointResponse {
+                    endpoint_id: ae,
+                    kind: ak,
+                    fiber_id: afi,
+                },
+                IslandCommand::EndpointResponse {
+                    endpoint_id: be,
+                    kind: bk,
+                    fiber_id: bfi,
+                },
             ) => {
                 assert_eq!(ae, be);
                 assert_eq!(afi, bfi);
@@ -497,11 +536,24 @@ mod tests {
                 IslandCommand::SpawnFiber { closure_data: a },
                 IslandCommand::SpawnFiber { closure_data: b },
             ) => assert_eq!(a.data(), b.data()),
-            (IslandCommand::WakeFiber { fiber_id: a }, IslandCommand::WakeFiber { fiber_id: b }) => assert_eq!(a, b),
+            (
+                IslandCommand::WakeFiber { fiber_id: a },
+                IslandCommand::WakeFiber { fiber_id: b },
+            ) => assert_eq!(a, b),
             (IslandCommand::Shutdown, IslandCommand::Shutdown) => {}
             (
-                IslandCommand::EndpointRequest { endpoint_id: ae, kind: ak, from_island: af, fiber_id: afi },
-                IslandCommand::EndpointRequest { endpoint_id: be, kind: bk, from_island: bf, fiber_id: bfi },
+                IslandCommand::EndpointRequest {
+                    endpoint_id: ae,
+                    kind: ak,
+                    from_island: af,
+                    fiber_id: afi,
+                },
+                IslandCommand::EndpointRequest {
+                    endpoint_id: be,
+                    kind: bk,
+                    from_island: bf,
+                    fiber_id: bfi,
+                },
             ) => {
                 assert_eq!(ae, be);
                 assert_eq!(af, bf);
@@ -509,8 +561,16 @@ mod tests {
                 assert_request_kind_eq(&ak, &bk);
             }
             (
-                IslandCommand::EndpointResponse { endpoint_id: ae, kind: ak, fiber_id: afi },
-                IslandCommand::EndpointResponse { endpoint_id: be, kind: bk, fiber_id: bfi },
+                IslandCommand::EndpointResponse {
+                    endpoint_id: ae,
+                    kind: ak,
+                    fiber_id: afi,
+                },
+                IslandCommand::EndpointResponse {
+                    endpoint_id: be,
+                    kind: bk,
+                    fiber_id: bfi,
+                },
             ) => {
                 assert_eq!(ae, be);
                 assert_eq!(afi, bfi);
@@ -522,20 +582,34 @@ mod tests {
 
     fn assert_request_kind_eq(a: &EndpointRequestKind, b: &EndpointRequestKind) {
         match (a, b) {
-            (EndpointRequestKind::Send { data: ad }, EndpointRequestKind::Send { data: bd }) => assert_eq!(ad, bd),
+            (EndpointRequestKind::Send { data: ad }, EndpointRequestKind::Send { data: bd }) => {
+                assert_eq!(ad, bd)
+            }
             (EndpointRequestKind::Recv, EndpointRequestKind::Recv) => {}
             (EndpointRequestKind::Close, EndpointRequestKind::Close) => {}
-            (EndpointRequestKind::Transfer { new_peer: a }, EndpointRequestKind::Transfer { new_peer: b }) => assert_eq!(a, b),
+            (
+                EndpointRequestKind::Transfer { new_peer: a },
+                EndpointRequestKind::Transfer { new_peer: b },
+            ) => assert_eq!(a, b),
             _ => panic!("request kind mismatch"),
         }
     }
 
     fn assert_response_kind_eq(a: &EndpointResponseKind, b: &EndpointResponseKind) {
         match (a, b) {
-            (EndpointResponseKind::SendAck { closed: a }, EndpointResponseKind::SendAck { closed: b }) => assert_eq!(a, b),
             (
-                EndpointResponseKind::RecvData { data: ad, closed: ac },
-                EndpointResponseKind::RecvData { data: bd, closed: bc },
+                EndpointResponseKind::SendAck { closed: a },
+                EndpointResponseKind::SendAck { closed: b },
+            ) => assert_eq!(a, b),
+            (
+                EndpointResponseKind::RecvData {
+                    data: ad,
+                    closed: ac,
+                },
+                EndpointResponseKind::RecvData {
+                    data: bd,
+                    closed: bc,
+                },
             ) => {
                 assert_eq!(ad, bd);
                 assert_eq!(ac, bc);
@@ -554,7 +628,9 @@ mod tests {
         roundtrip(IslandCommand::Shutdown);
         roundtrip(IslandCommand::EndpointRequest {
             endpoint_id: 99,
-            kind: EndpointRequestKind::Send { data: vec![7, 8, 9] },
+            kind: EndpointRequestKind::Send {
+                data: vec![7, 8, 9],
+            },
             from_island: 3,
             fiber_id: 1234,
         });
@@ -583,7 +659,10 @@ mod tests {
         });
         roundtrip(IslandCommand::EndpointResponse {
             endpoint_id: 104,
-            kind: EndpointResponseKind::RecvData { data: vec![10, 11], closed: false },
+            kind: EndpointResponseKind::RecvData {
+                data: vec![10, 11],
+                closed: false,
+            },
             fiber_id: 2235,
         });
         roundtrip(IslandCommand::EndpointResponse {

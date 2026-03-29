@@ -5,7 +5,6 @@
 //! - No complex types (complex64/128)
 //! - Pointer only valid for struct types
 
-
 use crate::objects::{ObjKey, ScopeKey, TCObjects, TypeKey};
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashSet;
@@ -303,8 +302,11 @@ impl Type {
     pub fn comparable(&self, objs: &TCObjects) -> bool {
         match self.underlying_val(objs) {
             Type::Basic(b) => b.typ() != BasicType::UntypedNil,
-            Type::Pointer(_) | Type::Interface(_) | Type::Chan(_) | Type::Port(_)
-                | Type::Island => true,
+            Type::Pointer(_)
+            | Type::Interface(_)
+            | Type::Chan(_)
+            | Type::Port(_)
+            | Type::Island => true,
             Type::Struct(s) => s
                 .fields()
                 .iter()
@@ -612,11 +614,7 @@ impl SignatureDetail {
     }
 
     pub fn params_count(&self, objs: &TCObjects) -> usize {
-        let l = objs.types[self.params]
-            .try_as_tuple()
-            .unwrap()
-            .vars()
-            .len();
+        let l = objs.types[self.params].try_as_tuple().unwrap().vars().len();
         if self.variadic {
             l - 1
         } else {
@@ -692,9 +690,7 @@ impl InterfaceDetail {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.all_methods()
-            .as_ref()
-            .map_or(true, |m| m.is_empty())
+        self.all_methods().as_ref().map_or(true, |m| m.is_empty())
     }
 
     pub fn is_complete(&self) -> bool {

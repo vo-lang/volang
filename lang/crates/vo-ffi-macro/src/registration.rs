@@ -4,7 +4,7 @@
 //! and generates the appropriate linkme, trampoline, and StdlibEntry code.
 
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{quote, format_ident};
+use quote::{format_ident, quote};
 use vo_common::abi::abi_lookup_name;
 
 use crate::RegistrationFlavor;
@@ -24,7 +24,10 @@ pub fn make_wrapper_ident(pkg_path: &str, func_name: &str) -> syn::Ident {
 /// Replaces `/`, `.`, and `-` with `_`. Used to derive stable Rust symbol names
 /// from the short package name (e.g. "vogui" → "vogui", "encoding/hex" → "encoding_hex").
 fn normalize_raw_pkg(raw_pkg: &str) -> String {
-    raw_pkg.replace('/', "_").replace('.', "_").replace('-', "_")
+    raw_pkg
+        .replace('/', "_")
+        .replace('.', "_")
+        .replace('-', "_")
 }
 
 /// Derive the Rust constant name for a stdlib/internal entry: `__STDLIB_<pkg>_<func>`.
@@ -117,7 +120,10 @@ pub fn emit_registration(
             }
         }
         RegistrationFlavor::Extension => {
-            let entry_name = format_ident!("__VO_EXT_ENTRY_{}", lookup_name.to_uppercase().replace('/', "_"));
+            let entry_name = format_ident!(
+                "__VO_EXT_ENTRY_{}",
+                lookup_name.to_uppercase().replace('/', "_")
+            );
             let trampoline_name = format_ident!("__vo_ext_trampoline_{}", lookup_name);
             let trampoline = generate_ext_trampoline(&trampoline_name, entry_fn);
 

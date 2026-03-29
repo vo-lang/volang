@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::identity::ModulePath;
-use crate::version::{DepConstraint, ExactVersion, ToolchainConstraint};
 use crate::registry::Registry;
 use crate::schema::manifest::ReleaseManifest;
+use crate::version::{DepConstraint, ExactVersion, ToolchainConstraint};
 use crate::Error;
 
 /// The output of dependency resolution: a complete module graph.
@@ -71,7 +71,9 @@ fn solve_search(
     resolved: BTreeMap<ModulePath, ResolvedModule>,
     constraints: BTreeMap<ModulePath, Vec<(String, DepConstraint)>>,
 ) -> Result<ResolvedGraph, Error> {
-    let Some((module, candidates)) = pick_next_module(root_vo, registry, prefs, &resolved, &constraints)? else {
+    let Some((module, candidates)) =
+        pick_next_module(root_vo, registry, prefs, &resolved, &constraints)?
+    else {
         validate_resolved_graph(&resolved, &constraints)?;
         return Ok(ResolvedGraph { modules: resolved });
     };
@@ -101,9 +103,7 @@ fn solve_search(
                         module: dep_mp.as_str().to_string(),
                         detail: format!(
                             "selected {} but {} requires {}",
-                            selected_version,
-                            module,
-                            req.constraint,
+                            selected_version, module, req.constraint,
                         ),
                     });
                     break;
@@ -173,7 +173,8 @@ fn candidate_modules(
     prefs: &SolvePreferences,
 ) -> Result<Vec<ResolvedModule>, Error> {
     let all_versions = registry.list_versions(mp)?;
-    let compatible: Vec<ExactVersion> = crate::registry::filter_compatible_versions(mp, &all_versions);
+    let compatible: Vec<ExactVersion> =
+        crate::registry::filter_compatible_versions(mp, &all_versions);
     if compatible.is_empty() {
         return Err(Error::NoSatisfyingVersion {
             module: mp.as_str().to_string(),
@@ -183,7 +184,11 @@ fn candidate_modules(
 
     let satisfying: Vec<ExactVersion> = compatible
         .into_iter()
-        .filter(|version| constraints.iter().all(|(_, constraint)| constraint.satisfies(version)))
+        .filter(|version| {
+            constraints
+                .iter()
+                .all(|(_, constraint)| constraint.satisfies(version))
+        })
         .collect();
     if satisfying.is_empty() {
         return Err(no_satisfying_version_error(mp, constraints));
@@ -214,7 +219,11 @@ fn candidate_modules(
             }
             continue;
         }
-        candidates.push(ResolvedModule { version, manifest, manifest_raw });
+        candidates.push(ResolvedModule {
+            version,
+            manifest,
+            manifest_raw,
+        });
     }
 
     if candidates.is_empty() {
@@ -234,7 +243,10 @@ fn candidate_modules(
     candidates.sort_by(|left, right| right.version.cmp(&left.version));
     if should_prefer_locked(mp, prefs) {
         if let Some(locked_version) = prefs.locked.get(mp) {
-            if let Some(index) = candidates.iter().position(|candidate| candidate.version == *locked_version) {
+            if let Some(index) = candidates
+                .iter()
+                .position(|candidate| candidate.version == *locked_version)
+            {
                 if index != 0 {
                     let locked_candidate = candidates.remove(index);
                     candidates.insert(0, locked_candidate);
@@ -253,10 +265,7 @@ fn should_prefer_locked(mp: &ModulePath, prefs: &SolvePreferences) -> bool {
     }
 }
 
-fn no_satisfying_version_error(
-    mp: &ModulePath,
-    constraints: &[(String, DepConstraint)],
-) -> Error {
+fn no_satisfying_version_error(mp: &ModulePath, constraints: &[(String, DepConstraint)]) -> Error {
     let detail = constraints
         .iter()
         .map(|(source, constraint)| format!("  {source} requires: {constraint}"))
@@ -283,9 +292,7 @@ fn validate_resolved_graph(
                     module: mp.as_str().to_string(),
                     detail: format!(
                         "selected {} but {} requires {}",
-                        resolved_module.version,
-                        source,
-                        constraint,
+                        resolved_module.version, source, constraint,
                     ),
                 });
             }
@@ -512,7 +519,10 @@ mod tests {
         let result = solve(&root, &root_vo, &reqs, &reg, &SolvePreferences::default());
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("toolchain"), "expected toolchain error, got: {msg}");
+        assert!(
+            msg.contains("toolchain"),
+            "expected toolchain error, got: {msg}"
+        );
     }
 
     #[test]
@@ -545,16 +555,24 @@ mod tests {
         // C=v1.2.0 violates ~1.1.0. Backtrack excludes C=v1.2.0.
         // Retry picks C=v1.1.0 which satisfies both ^1.0.0 and ~1.1.0.
         let mut reg = MockRegistry::new();
-        reg.add_module("github.com/acme/a", "v1.0.0", &[
-            ("github.com/acme/b", "^1.0.0"),
-            ("github.com/acme/c", "^1.0.0"),
-        ]);
-        reg.add_module("github.com/acme/b", "v1.0.0", &[
-            ("github.com/acme/c", "^1.0.0"),
-        ]);
-        reg.add_module("github.com/acme/b", "v1.1.0", &[
-            ("github.com/acme/c", "~1.1.0"),
-        ]);
+        reg.add_module(
+            "github.com/acme/a",
+            "v1.0.0",
+            &[
+                ("github.com/acme/b", "^1.0.0"),
+                ("github.com/acme/c", "^1.0.0"),
+            ],
+        );
+        reg.add_module(
+            "github.com/acme/b",
+            "v1.0.0",
+            &[("github.com/acme/c", "^1.0.0")],
+        );
+        reg.add_module(
+            "github.com/acme/b",
+            "v1.1.0",
+            &[("github.com/acme/c", "~1.1.0")],
+        );
         reg.add_module("github.com/acme/c", "v1.0.0", &[]);
         reg.add_module("github.com/acme/c", "v1.1.0", &[]);
         reg.add_module("github.com/acme/c", "v1.2.0", &[]);

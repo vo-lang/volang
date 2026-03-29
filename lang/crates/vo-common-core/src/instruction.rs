@@ -71,7 +71,7 @@ impl Instruction {
     }
 
     /// ForLoop target PC calculation.
-    /// 
+    ///
     /// ForLoop stores offset relative to (pc+1), so target = pc + 1 + offset.
     /// This matches the VM where frame.pc is incremented before dispatch.
     #[inline]
@@ -124,7 +124,7 @@ pub enum Opcode {
     PtrSet,
     PtrGetN,
     PtrSetN,
-    PtrAdd,  // a=dst, b=ptr, c=offset_slots (ptr arithmetic: dst = ptr + offset * 8)
+    PtrAdd, // a=dst, b=ptr, c=offset_slots (ptr arithmetic: dst = ptr + offset * 8)
 
     // === ARITH: Integer arithmetic ===
     AddI,
@@ -167,7 +167,7 @@ pub enum Opcode {
     And,
     Or,
     Xor,
-    AndNot,  // a &^ b = a & (^b)
+    AndNot, // a &^ b = a & (^b)
     Not,
     Shl,
     ShrS,
@@ -200,7 +200,7 @@ pub enum Opcode {
     StrLe,
     StrGt,
     StrGe,
-    StrDecodeRune,  // Decode UTF-8 rune at position: (rune, width) = decode(str, pos)
+    StrDecodeRune, // Decode UTF-8 rune at position: (rune, width) = decode(str, pos)
 
     // === ARRAY: Heap array operations ===
     ArrayNew,
@@ -247,7 +247,6 @@ pub enum Opcode {
     SelectSend,
     SelectRecv,
     SelectExec,
-
 
     // === CLOSURE: Closure operations ===
     ClosureNew,
@@ -312,7 +311,7 @@ impl Opcode {
     pub fn from_u8(v: u8) -> Self {
         if v <= Self::MAX_VALID {
             // SAFETY: Opcode is #[repr(u8)] and v is within valid range
-            unsafe { core::mem::transmute(v) }
+            unsafe { core::mem::transmute::<u8, Opcode>(v) }
         } else {
             Self::Invalid
         }

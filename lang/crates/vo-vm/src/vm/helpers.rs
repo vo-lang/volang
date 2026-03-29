@@ -4,15 +4,15 @@
 use alloc::string::String;
 
 use vo_runtime::gc::{Gc, GcRef};
-use vo_runtime::InterfaceSlot;
 use vo_runtime::objects::{closure, slice, string};
-use vo_runtime::slot::{Slot, slot_to_ptr, slot_to_usize};
+use vo_runtime::slot::{slot_to_ptr, slot_to_usize, Slot};
+use vo_runtime::InterfaceSlot;
 
-use crate::bytecode::{FunctionDef, Module};
-use crate::fiber::Fiber;
-use crate::exec;
 use super::types::ExecResult;
 use super::types::RuntimeTrapKind;
+use crate::bytecode::{FunctionDef, Module};
+use crate::exec;
+use crate::fiber::Fiber;
 
 // String and slice have identical layout - use slice constants for both
 const FIELD_DATA_PTR: usize = slice::FIELD_DATA_PTR;
@@ -79,7 +79,8 @@ pub fn string_index(s: GcRef, idx: usize) -> u8 {
 pub const ERR_NIL_POINTER: &str = "runtime error: nil pointer dereference";
 pub const ERR_NIL_MAP_WRITE: &str = "runtime error: assignment to entry in nil map";
 pub const ERR_UNHASHABLE_TYPE: &str = "runtime error: hash of unhashable type";
-pub const ERR_UNCOMPARABLE_TYPE: &str = "runtime error: comparing uncomparable type in interface value";
+pub const ERR_UNCOMPARABLE_TYPE: &str =
+    "runtime error: comparing uncomparable type in interface value";
 pub const ERR_NEGATIVE_SHIFT: &str = "runtime error: negative shift amount";
 pub const ERR_NIL_FUNC_CALL: &str = "runtime error: call of nil function";
 pub const ERR_TYPE_ASSERTION: &str = "runtime error: interface conversion: interface is nil, not";
@@ -141,7 +142,14 @@ pub fn runtime_trap(
     module: &Module,
     kind: RuntimeTrapKind,
 ) -> ExecResult {
-    runtime_panic(gc, fiber, stack, module, kind, String::from(runtime_trap_message(kind)))
+    runtime_panic(
+        gc,
+        fiber,
+        stack,
+        module,
+        kind,
+        String::from(runtime_trap_message(kind)),
+    )
 }
 
 #[inline]
@@ -191,7 +199,7 @@ pub fn user_panic(
 use alloc::vec::Vec;
 
 // Re-export from vo-runtime for convenience
-pub use vo_runtime::objects::closure::{ClosureCallLayout, call_layout as closure_call_layout};
+pub use vo_runtime::objects::closure::{call_layout as closure_call_layout, ClosureCallLayout};
 
 pub unsafe fn build_closure_fiber_from_args_ptr(
     functions: &[FunctionDef],
@@ -238,7 +246,7 @@ pub fn build_closure_args(
         func_def.recv_slots as usize,
         func_def.is_closure,
     );
-    
+
     let mut full_args = Vec::with_capacity(layout.slot0.is_some() as usize + arg_count as usize);
     full_args.extend(layout.slot0);
     for i in 0..arg_count {

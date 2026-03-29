@@ -1,14 +1,13 @@
 //! Type information produced by type checking.
 
-
 use crate::obj;
 use crate::objects::{ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
 use crate::operand::OperandMode;
 use crate::selection::Selection;
-use vo_syntax::ast::{Ident, IdentId, ExprId, TypeExprId};
+use std::collections::{HashMap, HashSet};
 use vo_common::Span;
 use vo_syntax::ast::Expr;
-use std::collections::{HashMap, HashSet};
+use vo_syntax::ast::{ExprId, Ident, IdentId, TypeExprId};
 
 /// TypeAndValue reports the type and value (for constants) of an expression.
 #[derive(Debug, Clone)]
@@ -18,7 +17,7 @@ pub struct TypeAndValue {
 }
 
 /// Resolved dynamic access method for static dispatch.
-/// 
+///
 /// When a `~>` operation is used on a concrete type (not any/interface),
 /// the checker resolves the protocol method at compile time.
 #[derive(Debug, Clone)]
@@ -103,7 +102,12 @@ impl TypeInfo {
     }
 
     /// Records a type and value for an expression (alias for record_type).
-    pub(crate) fn record_type_and_value(&mut self, expr_id: ExprId, mode: OperandMode, typ: TypeKey) {
+    pub(crate) fn record_type_and_value(
+        &mut self,
+        expr_id: ExprId,
+        mode: OperandMode,
+        typ: TypeKey,
+    ) {
         self.record_type(expr_id, mode, typ);
     }
 
@@ -157,7 +161,7 @@ impl TypeInfo {
         sig: TypeKey,
     ) {
         use vo_syntax::ast::ExprKind;
-        
+
         let mut e = expr;
         loop {
             self.record_type_and_value(e.id, mode.clone(), sig);
@@ -179,14 +183,24 @@ impl TypeInfo {
         pkg: PackageKey,
     ) {
         use vo_syntax::ast::ExprKind;
-        
+
         let span = expr.span;
         let mut e = expr;
         loop {
             let tv = self.types.get_mut(&e.id).unwrap();
             let vars = vec![
-                tc_objs.lobjs.insert(obj::LangObj::new_var(span, Some(pkg), String::new(), Some(t[0]))),
-                tc_objs.lobjs.insert(obj::LangObj::new_var(span, Some(pkg), String::new(), Some(t[1]))),
+                tc_objs.lobjs.insert(obj::LangObj::new_var(
+                    span,
+                    Some(pkg),
+                    String::new(),
+                    Some(t[0]),
+                )),
+                tc_objs.lobjs.insert(obj::LangObj::new_var(
+                    span,
+                    Some(pkg),
+                    String::new(),
+                    Some(t[1]),
+                )),
             ];
             tv.typ = tc_objs.new_t_tuple(vars);
             match &e.kind {
@@ -236,7 +250,7 @@ impl TypeInfo {
 // These functions compute type layout information (slot counts, slot types, etc.)
 // They only depend on TCObjects and can be used by both codegen and other consumers.
 
-use crate::typ::{self, Type, BasicType};
+use crate::typ::{self, BasicType, Type};
 use vo_common_core::types::{SlotType, ValueKind};
 
 /// Compute the number of slots a type occupies.
@@ -266,7 +280,7 @@ pub fn type_slot_count(type_key: TypeKey, tc_objs: &TCObjects) -> u16 {
             let len = a.len().unwrap_or(0) as u16;
             elem_slots * len
         }
-        Type::Island => 1,   // island is GcRef
+        Type::Island => 1, // island is GcRef
         Type::Named(n) => type_slot_count(n.underlying(), tc_objs),
         Type::Tuple(t) => {
             let mut total = 0u16;
@@ -287,7 +301,10 @@ pub fn type_slot_types(type_key: TypeKey, tc_objs: &TCObjects) -> Vec<SlotType> 
         Type::Basic(b) => {
             if matches!(b.typ(), typ::BasicType::Str | typ::BasicType::UntypedString) {
                 vec![SlotType::GcRef]
-            } else if matches!(b.typ(), typ::BasicType::Float64 | typ::BasicType::Float32 | typ::BasicType::UntypedFloat) {
+            } else if matches!(
+                b.typ(),
+                typ::BasicType::Float64 | typ::BasicType::Float32 | typ::BasicType::UntypedFloat
+            ) {
                 vec![SlotType::Float]
             } else {
                 vec![SlotType::Value]
@@ -375,26 +392,24 @@ fn struct_actual_bytes(type_key: TypeKey, tc_objs: &TCObjects) -> usize {
 pub fn type_value_kind(type_key: TypeKey, tc_objs: &TCObjects) -> ValueKind {
     let underlying = typ::underlying_type(type_key, tc_objs);
     match &tc_objs.types[underlying] {
-        Type::Basic(b) => {
-            match b.typ() {
-                BasicType::Bool | BasicType::UntypedBool => ValueKind::Bool,
-                BasicType::Int | BasicType::UntypedInt => ValueKind::Int,
-                BasicType::Int8 => ValueKind::Int8,
-                BasicType::Int16 => ValueKind::Int16,
-                BasicType::Int32 | BasicType::UntypedRune | BasicType::Rune => ValueKind::Int32,
-                BasicType::Int64 => ValueKind::Int64,
-                BasicType::Uint => ValueKind::Uint,
-                BasicType::Uint8 | BasicType::Byte => ValueKind::Uint8,
-                BasicType::Uint16 => ValueKind::Uint16,
-                BasicType::Uint32 => ValueKind::Uint32,
-                BasicType::Uint64 | BasicType::Uintptr => ValueKind::Uint64,
-                BasicType::Float32 => ValueKind::Float32,
-                BasicType::Float64 | BasicType::UntypedFloat => ValueKind::Float64,
-                BasicType::Str | BasicType::UntypedString => ValueKind::String,
-                BasicType::UntypedNil => ValueKind::Void,
-                other => panic!("type_value_kind: unhandled BasicType {:?}", other),
-            }
-        }
+        Type::Basic(b) => match b.typ() {
+            BasicType::Bool | BasicType::UntypedBool => ValueKind::Bool,
+            BasicType::Int | BasicType::UntypedInt => ValueKind::Int,
+            BasicType::Int8 => ValueKind::Int8,
+            BasicType::Int16 => ValueKind::Int16,
+            BasicType::Int32 | BasicType::UntypedRune | BasicType::Rune => ValueKind::Int32,
+            BasicType::Int64 => ValueKind::Int64,
+            BasicType::Uint => ValueKind::Uint,
+            BasicType::Uint8 | BasicType::Byte => ValueKind::Uint8,
+            BasicType::Uint16 => ValueKind::Uint16,
+            BasicType::Uint32 => ValueKind::Uint32,
+            BasicType::Uint64 | BasicType::Uintptr => ValueKind::Uint64,
+            BasicType::Float32 => ValueKind::Float32,
+            BasicType::Float64 | BasicType::UntypedFloat => ValueKind::Float64,
+            BasicType::Str | BasicType::UntypedString => ValueKind::String,
+            BasicType::UntypedNil => ValueKind::Void,
+            other => panic!("type_value_kind: unhandled BasicType {:?}", other),
+        },
         Type::Pointer(_) => ValueKind::Pointer,
         Type::Array(_) => ValueKind::Array,
         Type::Slice(_) => ValueKind::Slice,
@@ -485,7 +500,10 @@ pub fn is_float(type_key: TypeKey, tc_objs: &TCObjects) -> bool {
     use crate::typ::BasicType;
     let underlying = typ::underlying_type(type_key, tc_objs);
     if let Type::Basic(b) = &tc_objs.types[underlying] {
-        matches!(b.typ(), BasicType::Float32 | BasicType::Float64 | BasicType::UntypedFloat)
+        matches!(
+            b.typ(),
+            BasicType::Float32 | BasicType::Float64 | BasicType::UntypedFloat
+        )
     } else {
         false
     }
@@ -552,7 +570,11 @@ pub fn struct_field_offset(type_key: TypeKey, field_name: &str, tc_objs: &TCObje
 }
 
 /// Get struct field offset and slot count by field index.
-pub fn struct_field_offset_by_index(type_key: TypeKey, field_index: usize, tc_objs: &TCObjects) -> (u16, u16) {
+pub fn struct_field_offset_by_index(
+    type_key: TypeKey,
+    field_index: usize,
+    tc_objs: &TCObjects,
+) -> (u16, u16) {
     let underlying = typ::underlying_type(type_key, tc_objs);
     if let Type::Struct(s) = &tc_objs.types[underlying] {
         let mut offset = 0u16;
@@ -570,7 +592,11 @@ pub fn struct_field_offset_by_index(type_key: TypeKey, field_index: usize, tc_ob
 }
 
 /// Get struct field type by index.
-pub fn struct_field_type_by_index(type_key: TypeKey, field_index: usize, tc_objs: &TCObjects) -> TypeKey {
+pub fn struct_field_type_by_index(
+    type_key: TypeKey,
+    field_index: usize,
+    tc_objs: &TCObjects,
+) -> TypeKey {
     let underlying = typ::underlying_type(type_key, tc_objs);
     if let Type::Struct(s) = &tc_objs.types[underlying] {
         if let Some(&field_obj) = s.fields().get(field_index) {
@@ -599,25 +625,29 @@ pub fn struct_field_type(type_key: TypeKey, field_name: &str, tc_objs: &TCObject
 }
 
 /// Compute field offset using selection indices.
-pub fn compute_field_offset_from_indices(base_type: TypeKey, indices: &[usize], tc_objs: &TCObjects) -> (u16, u16) {
+pub fn compute_field_offset_from_indices(
+    base_type: TypeKey,
+    indices: &[usize],
+    tc_objs: &TCObjects,
+) -> (u16, u16) {
     if indices.is_empty() {
         panic!("compute_field_offset_from_indices: empty indices");
     }
-    
+
     let mut offset = 0u16;
     let mut current_type = base_type;
     let mut final_slots = 1u16;
-    
+
     for (i, &idx) in indices.iter().enumerate() {
         let (field_offset, field_slots) = struct_field_offset_by_index(current_type, idx, tc_objs);
         offset += field_offset;
-        
+
         if i == indices.len() - 1 {
             final_slots = field_slots;
         } else {
             current_type = struct_field_type_by_index(current_type, idx, tc_objs);
         }
     }
-    
+
     (offset, final_slots)
 }

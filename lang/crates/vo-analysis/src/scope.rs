@@ -3,7 +3,6 @@
 //! A Scope maintains the set of named language entities declared in the scope
 //! and a link to the immediately surrounding (outer) scope.
 
-
 use crate::obj::Pos;
 use crate::objects::{ObjKey, ScopeKey, TCObjects};
 use std::collections::HashMap;
@@ -120,30 +119,26 @@ impl Scope {
     pub fn insert(self_key: ScopeKey, okey: ObjKey, objs: &mut TCObjects) -> Option<ObjKey> {
         let lang_obj = &objs.lobjs[okey];
         let name = lang_obj.name().to_string();
-        
+
         let scope = &objs.scopes[self_key];
         if let Some(&existing) = scope.elems.get(&name) {
             return Some(existing);
         }
-        
+
         // Insert into scope
         objs.scopes[self_key].elems.insert(name, okey);
-        
+
         // Set parent if not already set
         if objs.lobjs[okey].parent().is_none() {
             objs.lobjs[okey].set_parent(Some(self_key));
         }
-        
+
         None
     }
 }
 
 /// Looks up a name starting from a given scope, traversing parent scopes.
-pub fn lookup_parent(
-    start: ScopeKey,
-    name: &str,
-    objs: &TCObjects,
-) -> Option<(ScopeKey, ObjKey)> {
+pub fn lookup_parent(start: ScopeKey, name: &str, objs: &TCObjects) -> Option<(ScopeKey, ObjKey)> {
     let mut current = Some(start);
     while let Some(scope_key) = current {
         let scope = &objs.scopes[scope_key];

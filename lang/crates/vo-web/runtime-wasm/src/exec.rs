@@ -4,9 +4,9 @@
 //! proper errors so Vo handler programs that call os/exec in WASM fail
 //! gracefully instead of panicking with NotRegistered.
 
+use vo_runtime::builtins::error_helper::write_error_to;
 use vo_runtime::bytecode::ExternDef;
 use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
-use vo_runtime::builtins::error_helper::write_error_to;
 
 const ERR: &str = "operation not supported on wasm";
 
@@ -40,9 +40,9 @@ fn exec_run_capture_output(call: &mut ExternCallContext) -> ExternResult {
 pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     for (id, def) in externs.iter().enumerate() {
         match def.name.as_str() {
-            "os_exec_startProcess"      => registry.register(id as u32, exec_start_process),
-            "os_exec_waitProcess"       => registry.register(id as u32, exec_wait_process),
-            "os_exec_runCaptureOutput"  => registry.register(id as u32, exec_run_capture_output),
+            "os_exec_startProcess" => registry.register(id as u32, exec_start_process),
+            "os_exec_waitProcess" => registry.register(id as u32, exec_wait_process),
+            "os_exec_runCaptureOutput" => registry.register(id as u32, exec_run_capture_output),
             _ => {}
         }
     }

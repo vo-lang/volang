@@ -4,13 +4,7 @@ use alloc::vec::Vec;
 
 use vo_vm::vm::Vm;
 
-use crate::{
-    GuiAppSession,
-    PendingHostEvent,
-    RenderIslandSession,
-    SessionError,
-    StepResult,
-};
+use crate::{GuiAppSession, PendingHostEvent, RenderIslandSession, SessionError, StepResult};
 
 const GUI_APP_SESSION_KIND: &str = "gui-app";
 const RENDER_ISLAND_SESSION_KIND: &str = "render-island";

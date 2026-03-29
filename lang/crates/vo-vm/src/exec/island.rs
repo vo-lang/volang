@@ -1,10 +1,10 @@
 //! Island instructions: IslandNew, GoIsland
 
+use vo_common_core::TransferType;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::island;
 use vo_runtime::objects::closure;
 use vo_runtime::slot::Slot;
-use vo_common_core::TransferType;
 
 use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
@@ -13,9 +13,8 @@ use crate::vm::helpers::{stack_get, stack_set};
 use alloc::{vec, vec::Vec};
 use hashbrown::HashSet;
 
-
 /// Result of go @(island) - spawn fiber on remote island.
-/// 
+///
 /// Contains raw capture and argument data. The VM coordinator will pack these
 /// with proper type metadata from FunctionDef before sending.
 pub struct GoIslandResult {
@@ -40,19 +39,15 @@ pub fn exec_island_new(
 }
 
 /// Start a goroutine on a specific island.
-/// 
+///
 /// GoIsland instruction: a=island, b=closure, c=args_start, flags=arg_slots
-/// 
+///
 /// Note: Closures themselves are NOT sendable. This function:
 /// 1. Extracts func_id from the closure
 /// 2. Reads raw capture slots (GcRefs to escaped variables)
 /// 3. Reads raw argument slots from stack
 /// 4. Returns data for VM coordinator to handle packing with proper type info
-pub fn exec_go_island(
-    stack: *const Slot,
-    bp: usize,
-    inst: &Instruction,
-) -> GoIslandResult {
+pub fn exec_go_island(stack: *const Slot, bp: usize, inst: &Instruction) -> GoIslandResult {
     let island_handle = stack_get(stack, bp + inst.a as usize) as GcRef;
     let closure_ref = stack_get(stack, bp + inst.b as usize) as GcRef;
     let args_start = bp + inst.c as usize;
@@ -61,13 +56,13 @@ pub fn exec_go_island(
     // Extract function ID and capture count from closure itself
     let func_id = closure::func_id(closure_ref);
     let capture_count = closure::capture_count(closure_ref);
-    
+
     // Read raw capture slots
     let mut capture_data = Vec::with_capacity(capture_count);
     for i in 0..capture_count {
         capture_data.push(closure::get_capture(closure_ref, i));
     }
-    
+
     // Read raw argument slots
     let mut arg_data = Vec::with_capacity(arg_slots);
     for i in 0..arg_slots {
@@ -180,29 +175,38 @@ fn prepare_value_queue_handles_for_transfer_inner(
     state: &mut crate::vm::VmState,
     notified_remote_endpoints: &mut HashSet<u64>,
 ) {
-    use vo_runtime::ValueKind;
     use vo_runtime::gc::{Gc, GcRef};
+    use vo_runtime::ValueKind;
 
     let vk = value_meta.value_kind();
     match vk {
         kind if kind.is_queue() => {
             let chan_ref = slots[0] as GcRef;
-            if chan_ref.is_null() { return; }
+            if chan_ref.is_null() {
+                return;
+            }
             prepare_single_queue_handle(chan_ref, target_island, state, notified_remote_endpoints);
         }
 
         ValueKind::Struct => {
             let meta_id = value_meta.meta_id() as usize;
-            if meta_id >= struct_metas.len() { return; }
+            if meta_id >= struct_metas.len() {
+                return;
+            }
             let meta = &struct_metas[meta_id];
             for field in &meta.fields {
                 let fvk = field.type_info.value_kind();
-                if !may_contain_queue_handle(fvk) { continue; }
+                if !may_contain_queue_handle(fvk) {
+                    continue;
+                }
                 let offset = field.offset as usize;
                 let fslots = field.slot_count as usize;
-                if offset + fslots > slots.len() { continue; }
+                if offset + fslots > slots.len() {
+                    continue;
+                }
                 let field_meta = if fvk == ValueKind::Struct {
-                    let nested_meta_id = lookup_struct_meta_id_safe(field.type_info.rttid(), runtime_types);
+                    let nested_meta_id =
+                        lookup_struct_meta_id_safe(field.type_info.rttid(), runtime_types);
                     vo_runtime::ValueMeta::new(nested_meta_id, fvk)
                 } else {
                     vo_runtime::ValueMeta::new(0, fvk)
@@ -221,10 +225,16 @@ fn prepare_value_queue_handles_for_transfer_inner(
 
         ValueKind::Pointer => {
             let ptr_ref = slots[0] as GcRef;
-            if ptr_ref.is_null() { return; }
-            let Some(_) = state.gc.canonicalize_ref(ptr_ref) else { return; };
+            if ptr_ref.is_null() {
+                return;
+            }
+            let Some(_) = state.gc.canonicalize_ref(ptr_ref) else {
+                return;
+            };
             let meta_id = value_meta.meta_id() as usize;
-            if meta_id >= struct_metas.len() { return; }
+            if meta_id >= struct_metas.len() {
+                return;
+            }
             let obj_meta = vo_runtime::ValueMeta::new(value_meta.meta_id(), ValueKind::Struct);
             let obj_slots_count = struct_metas[meta_id].slot_types.len();
             let mut obj_slots = vec![0u64; obj_slots_count];
@@ -244,52 +254,78 @@ fn prepare_value_queue_handles_for_transfer_inner(
 
         ValueKind::Slice => {
             let slice_ref = slots[0] as GcRef;
-            if slice_ref.is_null() { return; }
+            if slice_ref.is_null() {
+                return;
+            }
             let elem_meta = vo_runtime::objects::slice::elem_meta(slice_ref);
-            if !may_contain_queue_handle(elem_meta.value_kind()) { return; }
+            if !may_contain_queue_handle(elem_meta.value_kind()) {
+                return;
+            }
             let length = vo_runtime::objects::slice::len(slice_ref);
             let elem_bytes = vo_runtime::objects::array::elem_bytes(
                 vo_runtime::objects::slice::array_ref(slice_ref),
             );
-            if elem_bytes == 0 { return; }
+            if elem_bytes == 0 {
+                return;
+            }
             let elem_slot_count = (elem_bytes + 7) / 8;
             let data_ptr = vo_runtime::objects::slice::data_ptr(slice_ref);
             let mut elem_buf = vec![0u64; elem_slot_count];
             for i in 0..length {
                 read_element_raw(data_ptr, i, elem_bytes, &mut elem_buf);
                 prepare_value_queue_handles_for_transfer(
-                    &elem_buf, elem_meta, target_island, struct_metas, runtime_types, state,
+                    &elem_buf,
+                    elem_meta,
+                    target_island,
+                    struct_metas,
+                    runtime_types,
+                    state,
                 );
             }
         }
 
         ValueKind::Array => {
             let arr_ref = slots[0] as GcRef;
-            if arr_ref.is_null() { return; }
+            if arr_ref.is_null() {
+                return;
+            }
             let elem_meta = vo_runtime::objects::array::elem_meta(arr_ref);
-            if !may_contain_queue_handle(elem_meta.value_kind()) { return; }
+            if !may_contain_queue_handle(elem_meta.value_kind()) {
+                return;
+            }
             let length = vo_runtime::objects::array::len(arr_ref);
             let elem_bytes = vo_runtime::objects::array::elem_bytes(arr_ref);
-            if elem_bytes == 0 { return; }
+            if elem_bytes == 0 {
+                return;
+            }
             let elem_slot_count = (elem_bytes + 7) / 8;
             let data_ptr = vo_runtime::objects::array::data_ptr_bytes(arr_ref);
             let mut elem_buf = vec![0u64; elem_slot_count];
             for i in 0..length {
                 read_element_raw(data_ptr, i, elem_bytes, &mut elem_buf);
                 prepare_value_queue_handles_for_transfer(
-                    &elem_buf, elem_meta, target_island, struct_metas, runtime_types, state,
+                    &elem_buf,
+                    elem_meta,
+                    target_island,
+                    struct_metas,
+                    runtime_types,
+                    state,
                 );
             }
         }
 
         ValueKind::Map => {
             let map_ref = slots[0] as GcRef;
-            if map_ref.is_null() { return; }
+            if map_ref.is_null() {
+                return;
+            }
             let key_meta = vo_runtime::objects::map::key_meta(map_ref);
             let val_meta = vo_runtime::objects::map::val_meta(map_ref);
             let scan_keys = may_contain_queue_handle(key_meta.value_kind());
             let scan_vals = may_contain_queue_handle(val_meta.value_kind());
-            if !scan_keys && !scan_vals { return; }
+            if !scan_keys && !scan_vals {
+                return;
+            }
             let mut iter = vo_runtime::objects::map::iter_init(map_ref);
             while let Some((k, v)) = vo_runtime::objects::map::iter_next(&mut iter) {
                 if scan_keys {
@@ -353,9 +389,9 @@ fn prepare_single_queue_handle(
     state: &mut crate::vm::VmState,
     notified_remote_endpoints: &mut HashSet<u64>,
 ) {
+    use vo_runtime::island::{EndpointRequestKind, IslandCommand};
     use vo_runtime::objects::queue;
     use vo_runtime::objects::queue_state::QueueBacking;
-    use vo_runtime::island::{EndpointRequestKind, IslandCommand};
 
     match vo_runtime::objects::queue_state::backing(chan_ref) {
         QueueBacking::Local => {
@@ -369,27 +405,33 @@ fn prepare_single_queue_handle(
         QueueBacking::Remote => {
             let proxy = queue::remote_proxy(chan_ref);
             if notified_remote_endpoints.insert(proxy.endpoint_id) {
-                state.send_to_island(proxy.home_island, IslandCommand::EndpointRequest {
-                    endpoint_id: proxy.endpoint_id,
-                    kind: EndpointRequestKind::Transfer { new_peer: target_island },
-                    from_island: state.current_island_id,
-                    fiber_id: 0,
-                });
+                state.send_to_island(
+                    proxy.home_island,
+                    IslandCommand::EndpointRequest {
+                        endpoint_id: proxy.endpoint_id,
+                        kind: EndpointRequestKind::Transfer {
+                            new_peer: target_island,
+                        },
+                        from_island: state.current_island_id,
+                        fiber_id: 0,
+                    },
+                );
             }
         }
     }
 }
 
 fn may_contain_queue_handle(vk: vo_runtime::ValueKind) -> bool {
-    matches!(vk,
+    matches!(
+        vk,
         vo_runtime::ValueKind::Channel
-        | vo_runtime::ValueKind::Port
-        | vo_runtime::ValueKind::Struct
-        | vo_runtime::ValueKind::Pointer
-        | vo_runtime::ValueKind::Slice
-        | vo_runtime::ValueKind::Array
-        | vo_runtime::ValueKind::Map
-        | vo_runtime::ValueKind::Interface
+            | vo_runtime::ValueKind::Port
+            | vo_runtime::ValueKind::Struct
+            | vo_runtime::ValueKind::Pointer
+            | vo_runtime::ValueKind::Slice
+            | vo_runtime::ValueKind::Array
+            | vo_runtime::ValueKind::Map
+            | vo_runtime::ValueKind::Interface
     )
 }
 

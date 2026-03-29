@@ -2,7 +2,6 @@
 //!
 //! A Selection describes a selector expression x.f.
 
-
 use crate::objects::{ObjKey, TCObjects, TypeKey};
 use crate::typ;
 use std::fmt::{self, Write};
@@ -132,7 +131,9 @@ impl Selection {
                 let mut params = vec![arg0key];
                 let tup = objs.types[sig.params()].try_as_tuple_mut().unwrap();
                 params.append(&mut tup.vars().clone());
-                let params_key = objs.types.insert(typ::Type::Tuple(typ::TupleDetail::new(params)));
+                let params_key = objs
+                    .types
+                    .insert(typ::Type::Tuple(typ::TupleDetail::new(params)));
                 sig.set_params(params_key);
                 objs.types.insert(typ::Type::Signature(sig))
             }

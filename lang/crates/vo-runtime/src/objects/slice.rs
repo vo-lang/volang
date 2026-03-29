@@ -4,18 +4,17 @@
 //! Slice references an underlying array with start offset.
 
 use crate::gc::{Gc, GcRef};
-use crate::objects::array;
 use crate::objects::alloc_error;
+use crate::objects::array;
 use crate::slot::{ptr_to_slot, slot_to_ptr, slot_to_usize, Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta};
-
 
 #[repr(C)]
 pub struct SliceData {
     pub array: Slot,
-    pub data_ptr: Slot,  // Direct pointer to first element
+    pub data_ptr: Slot, // Direct pointer to first element
     pub len: Slot,
-    pub cap: Slot,         // Required for 3-index slice semantics
+    pub cap: Slot, // Required for 3-index slice semantics
 }
 
 pub const DATA_SLOTS: u16 = 4;
@@ -30,37 +29,61 @@ impl_gc_object!(SliceData);
 
 /// Create a new slice with packed element storage.
 /// elem_bytes: actual byte size per element (1/2/4/8 for packed, slots*8 for slot-based)
-pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_bytes: usize, length: usize, capacity: usize) -> GcRef {
+pub fn create(
+    gc: &mut Gc,
+    elem_meta: ValueMeta,
+    elem_bytes: usize,
+    length: usize,
+    capacity: usize,
+) -> GcRef {
     let arr = array::create(gc, elem_meta, elem_bytes, capacity);
     from_array_range(gc, arr, 0, length)
 }
 
 /// Create a new slice with validation (unified logic for VM and JIT).
-/// 
+///
 /// Validates:
 /// - len >= 0
 /// - cap >= 0
 /// - len <= cap
 /// - cap * elem_bytes <= isize::MAX (overflow check)
-/// 
+///
 /// Returns Ok(GcRef) on success, Err(error_code) on failure.
-pub fn create_checked(gc: &mut Gc, elem_meta: u32, elem_bytes: usize, len: i64, cap: i64) -> Result<GcRef, i32> {
+pub fn create_checked(
+    gc: &mut Gc,
+    elem_meta: u32,
+    elem_bytes: usize,
+    len: i64,
+    cap: i64,
+) -> Result<GcRef, i32> {
     // Unified validation logic
-    if len < 0 { return Err(alloc_error::NEGATIVE_LEN); }
-    if cap < 0 { return Err(alloc_error::NEGATIVE_CAP); }
-    if len > cap { return Err(alloc_error::LEN_GT_CAP); }
-    
+    if len < 0 {
+        return Err(alloc_error::NEGATIVE_LEN);
+    }
+    if cap < 0 {
+        return Err(alloc_error::NEGATIVE_CAP);
+    }
+    if len > cap {
+        return Err(alloc_error::LEN_GT_CAP);
+    }
+
     let len_usize = len as usize;
     let cap_usize = cap as usize;
-    
+
     // Overflow check
     match cap_usize.checked_mul(elem_bytes) {
         Some(total) if total <= isize::MAX as usize => {}
         _ => return Err(alloc_error::OVERFLOW),
     }
-    
+
     // Allocation
-    let result = create(gc, ValueMeta::from_raw(elem_meta), elem_bytes, len_usize, cap_usize);
+    let result = create(
+        gc,
+        ValueMeta::from_raw(elem_meta),
+        elem_bytes,
+        len_usize,
+        cap_usize,
+    );
     if result.is_null() {
         return Err(alloc_error::OVERFLOW); // OOM treated as overflow
     }
@@ -73,7 +96,13 @@ pub fn from_array_range(gc: &mut Gc, arr: GcRef, start_off: usize, length: usize
     from_array_range_with_cap(gc, arr, start_off, length, cap)
 }
 
-pub fn from_array_range_with_cap(gc: &mut Gc, arr: GcRef, start_off: usize, length: usize, capacity: usize) -> GcRef {
+pub fn from_array_range_with_cap(
+    gc: &mut Gc,
+    arr: GcRef,
+    start_off: usize,
+    length: usize,
+    capacity: usize,
+) -> GcRef {
     let elem_bytes = array::elem_bytes(arr);
     let s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
     let data = SliceData::as_mut(s);
@@ -96,7 +125,13 @@ pub fn array_slice(gc: &mut Gc, arr: GcRef, lo: usize, hi: usize) -> Option<GcRe
 
 /// Three-index array slice: arr[lo:hi:max].
 /// Returns None on bounds error (lo > hi or hi > max or max > arr_len).
-pub fn array_slice_with_cap(gc: &mut Gc, arr: GcRef, lo: usize, hi: usize, max: usize) -> Option<GcRef> {
+pub fn array_slice_with_cap(
+    gc: &mut Gc,
+    arr: GcRef,
+    lo: usize,
+    hi: usize,
+    max: usize,
+) -> Option<GcRef> {
     let arr_len = array::len(arr);
     if lo > hi || hi > max || max > arr_len {
         return None;
@@ -110,34 +145,50 @@ pub fn from_array(gc: &mut Gc, arr: GcRef) -> GcRef {
 }
 
 #[inline]
-pub fn is_nil(s: GcRef) -> bool { s.is_null() }
+pub fn is_nil(s: GcRef) -> bool {
+    s.is_null()
+}
 
 #[inline]
 pub fn array_ref(s: GcRef) -> GcRef {
-    if s.is_null() { return core::ptr::null_mut(); }
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
     slot_to_ptr(SliceData::as_ref(s).array)
 }
 #[inline]
 pub fn data_ptr(s: GcRef) -> *mut u8 {
-    if s.is_null() { return core::ptr::null_mut(); }
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
     slot_to_ptr(SliceData::as_ref(s).data_ptr)
 }
 #[inline]
 pub fn len(s: GcRef) -> usize {
-    if s.is_null() { return 0; }
+    if s.is_null() {
+        return 0;
+    }
     slot_to_usize(SliceData::as_ref(s).len)
 }
 #[inline]
 pub fn cap(s: GcRef) -> usize {
-    if s.is_null() { return 0; }
+    if s.is_null() {
+        return 0;
+    }
     slot_to_usize(SliceData::as_ref(s).cap)
 }
 #[inline]
-pub fn elem_kind(s: GcRef) -> ValueKind { array::elem_kind(array_ref(s)) }
+pub fn elem_kind(s: GcRef) -> ValueKind {
+    array::elem_kind(array_ref(s))
+}
 #[inline]
-pub fn elem_meta_id(s: GcRef) -> u32 { array::elem_meta_id(array_ref(s)) }
+pub fn elem_meta_id(s: GcRef) -> u32 {
+    array::elem_meta_id(array_ref(s))
+}
 #[inline]
-pub fn elem_meta(s: GcRef) -> ValueMeta { array::elem_meta(array_ref(s)) }
+pub fn elem_meta(s: GcRef) -> ValueMeta {
+    array::elem_meta(array_ref(s))
+}
 
 #[inline]
 pub fn get(s: GcRef, idx: usize, elem_bytes: usize) -> u64 {
@@ -169,7 +220,7 @@ pub fn get_auto(base_ptr: *mut u8, idx: usize, elem_bytes: usize, elem_kind: Val
                 2 => *(ptr as *const u16) as u64,
                 4 => *(ptr as *const u32) as u64,
                 _ => *(ptr as *const u64),
-            }
+            },
         }
     }
 }
@@ -201,7 +252,7 @@ pub fn set_auto(base_ptr: *mut u8, idx: usize, val: u64, elem_bytes: usize, elem
                 2 => *(ptr as *mut u16) = val as u16,
                 4 => *(ptr as *mut u32) = val as u32,
                 _ => *(ptr as *mut u64) = val,
-            }
+            },
         }
     }
 }
@@ -287,7 +338,14 @@ pub fn with_new_len(gc: &mut Gc, s: GcRef, new_len: usize) -> GcRef {
 
 /// Append single element to slice.
 /// elem_bytes: actual byte size per element
-pub fn append(gc: &mut Gc, em: ValueMeta, elem_bytes: usize, s: GcRef, val: &[u64], module: Option<&vo_common_core::bytecode::Module>) -> GcRef {
+pub fn append(
+    gc: &mut Gc,
+    em: ValueMeta,
+    elem_bytes: usize,
+    s: GcRef,
+    val: &[u64],
+    module: Option<&vo_common_core::bytecode::Module>,
+) -> GcRef {
     if s.is_null() {
         let new_arr = array::create(gc, em, elem_bytes, 4);
         array::set_n(new_arr, 0, val, elem_bytes);

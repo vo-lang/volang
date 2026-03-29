@@ -8,10 +8,10 @@ use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use core::marker::PhantomData;
-use crate::gc::GcRef;
-use crate::objects::{slice, map, string};
 use super::ExternCallContext;
+use crate::gc::GcRef;
+use crate::objects::{map, slice, string};
+use core::marker::PhantomData;
 
 // ==================== VoElem Trait ====================
 
@@ -25,7 +25,7 @@ pub trait VoElem {
     const ELEM_BYTES: usize;
     /// Whether this type needs GC scanning.
     const NEEDS_GC: bool;
-    
+
     /// Read from a slice at given index.
     fn read_from_slice(s: GcRef, idx: usize) -> Self::Owned;
     /// Write to a slice at given index.
@@ -38,7 +38,7 @@ impl VoElem for i64 {
     const SLOTS: u16 = 1;
     const ELEM_BYTES: usize = 8;
     const NEEDS_GC: bool = false;
-    
+
     fn read_from_slice(s: GcRef, idx: usize) -> i64 {
         slice::get(s, idx, 8) as i64
     }
@@ -52,7 +52,7 @@ impl VoElem for u64 {
     const SLOTS: u16 = 1;
     const ELEM_BYTES: usize = 8;
     const NEEDS_GC: bool = false;
-    
+
     fn read_from_slice(s: GcRef, idx: usize) -> u64 {
         slice::get(s, idx, 8)
     }
@@ -66,7 +66,7 @@ impl VoElem for f64 {
     const SLOTS: u16 = 1;
     const ELEM_BYTES: usize = 8;
     const NEEDS_GC: bool = false;
-    
+
     fn read_from_slice(s: GcRef, idx: usize) -> f64 {
         f64::from_bits(slice::get(s, idx, 8))
     }
@@ -80,7 +80,7 @@ impl VoElem for bool {
     const SLOTS: u16 = 1;
     const ELEM_BYTES: usize = 8;
     const NEEDS_GC: bool = false;
-    
+
     fn read_from_slice(s: GcRef, idx: usize) -> bool {
         slice::get(s, idx, 8) != 0
     }
@@ -94,7 +94,7 @@ impl VoElem for GcRef {
     const SLOTS: u16 = 1;
     const ELEM_BYTES: usize = 8;
     const NEEDS_GC: bool = true;
-    
+
     fn read_from_slice(s: GcRef, idx: usize) -> GcRef {
         slice::get(s, idx, 8) as GcRef
     }
@@ -111,7 +111,7 @@ impl VoElem for VoStringElem {
     const SLOTS: u16 = 1;
     const ELEM_BYTES: usize = 8;
     const NEEDS_GC: bool = true;
-    
+
     fn read_from_slice(s: GcRef, idx: usize) -> String {
         let str_ref = slice::get(s, idx, 8) as GcRef;
         string::as_str(str_ref).to_string()
@@ -131,7 +131,10 @@ pub struct VoSlice<T> {
 
 impl<T> Clone for VoSlice<T> {
     fn clone(&self) -> Self {
-        Self { ptr: self.ptr, _marker: PhantomData }
+        Self {
+            ptr: self.ptr,
+            _marker: PhantomData,
+        }
     }
 }
 impl<T> Copy for VoSlice<T> {}
@@ -140,39 +143,42 @@ impl<T: VoElem> VoSlice<T> {
     /// Create accessor from GcRef.
     #[inline]
     pub fn from_ref(ptr: GcRef) -> Self {
-        Self { ptr, _marker: PhantomData }
+        Self {
+            ptr,
+            _marker: PhantomData,
+        }
     }
-    
+
     /// Get the underlying GcRef.
     #[inline]
     pub fn as_ref(&self) -> GcRef {
         self.ptr
     }
-    
+
     /// Get slice length.
     #[inline]
     pub fn len(&self) -> usize {
         slice::len(self.ptr)
     }
-    
+
     /// Check if empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    
+
     /// Get element at index.
     #[inline]
     pub fn get(&self, idx: usize) -> T::Owned {
         T::read_from_slice(self.ptr, idx)
     }
-    
+
     /// Set element at index.
     #[inline]
     pub fn set(&self, idx: usize, val: T::Owned) {
         T::write_to_slice(self.ptr, idx, val);
     }
-    
+
     /// Create a cursor for iteration.
     #[inline]
     pub fn cursor(&self) -> VoSliceCursor<T> {
@@ -204,7 +210,7 @@ impl<T: VoElem> VoSliceCursor<T> {
         self.idx += 1;
         Some((idx, val))
     }
-    
+
     /// Reset cursor to beginning.
     #[inline]
     pub fn reset(&mut self) {
@@ -215,7 +221,7 @@ impl<T: VoElem> VoSliceCursor<T> {
 // ==================== VoMap ====================
 
 /// Accessor for Vo map type `map[K]V`.
-/// 
+///
 /// Use type aliases for common map types:
 /// - `VoMap<String, String>` for `map[string]string`
 /// - `VoMap<String, i64>` for `map[string]int`
@@ -227,7 +233,10 @@ pub struct VoMap<K, V> {
 
 impl<K, V> Clone for VoMap<K, V> {
     fn clone(&self) -> Self {
-        Self { ptr: self.ptr, _marker: PhantomData }
+        Self {
+            ptr: self.ptr,
+            _marker: PhantomData,
+        }
     }
 }
 impl<K, V> Copy for VoMap<K, V> {}
@@ -236,27 +245,30 @@ impl<K, V> VoMap<K, V> {
     /// Create accessor from GcRef.
     #[inline]
     pub fn from_ref(ptr: GcRef) -> Self {
-        Self { ptr, _marker: PhantomData }
+        Self {
+            ptr,
+            _marker: PhantomData,
+        }
     }
-    
+
     /// Get the underlying GcRef.
     #[inline]
     pub fn as_ref(&self) -> GcRef {
         self.ptr
     }
-    
+
     /// Get map length.
     #[inline]
     pub fn len(&self) -> usize {
         map::len(self.ptr)
     }
-    
+
     /// Check if empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    
+
     /// Create cursor for iteration.
     #[inline]
     pub fn cursor(&self) -> VoMapCursor<K, V> {
@@ -276,7 +288,7 @@ impl<V> VoMap<String, V> {
         let key = [key_ref as u64];
         map::get(self.ptr, &key, None).map(|v| v[0])
     }
-    
+
     /// Set value by string key (raw u64).
     #[inline]
     pub fn set_raw(&self, key_ref: GcRef, val: u64) {
@@ -284,7 +296,7 @@ impl<V> VoMap<String, V> {
         let val = [val];
         map::set(self.ptr, &key, &val, None);
     }
-    
+
     /// Delete by string key.
     #[inline]
     pub fn delete_raw(&self, key_ref: GcRef) {
@@ -298,16 +310,17 @@ impl VoMap<String, String> {
     /// Get value by key.
     pub fn get(&self, ctx: &mut ExternCallContext, key: &str) -> Option<String> {
         let key_ref = ctx.alloc_str(key);
-        self.get_raw(key_ref).map(|v| string::as_str(v as GcRef).to_string())
+        self.get_raw(key_ref)
+            .map(|v| string::as_str(v as GcRef).to_string())
     }
-    
+
     /// Set value by key.
     pub fn set(&self, ctx: &mut ExternCallContext, key: &str, val: &str) {
         let key_ref = ctx.alloc_str(key);
         let val_ref = ctx.alloc_str(val);
         self.set_raw(key_ref, val_ref as u64);
     }
-    
+
     /// Delete key.
     pub fn delete(&self, ctx: &mut ExternCallContext, key: &str) {
         let key_ref = ctx.alloc_str(key);
@@ -322,13 +335,13 @@ impl VoMap<String, i64> {
         let key_ref = ctx.alloc_str(key);
         self.get_raw(key_ref).map(|v| v as i64)
     }
-    
+
     /// Set value by key.
     pub fn set(&self, ctx: &mut ExternCallContext, key: &str, val: i64) {
         let key_ref = ctx.alloc_str(key);
         self.set_raw(key_ref, val as u64);
     }
-    
+
     /// Delete key.
     pub fn delete(&self, ctx: &mut ExternCallContext, key: &str) {
         let key_ref = ctx.alloc_str(key);
@@ -343,13 +356,13 @@ impl VoMap<String, GcRef> {
         let key_ref = ctx.alloc_str(key);
         self.get_raw(key_ref).map(|v| v as GcRef)
     }
-    
+
     /// Set value by key.
     pub fn set(&self, ctx: &mut ExternCallContext, key: &str, val: GcRef) {
         let key_ref = ctx.alloc_str(key);
         self.set_raw(key_ref, val as u64);
     }
-    
+
     /// Delete key.
     pub fn delete(&self, ctx: &mut ExternCallContext, key: &str) {
         let key_ref = ctx.alloc_str(key);
@@ -360,7 +373,7 @@ impl VoMap<String, GcRef> {
 /// Cursor for iterating over VoMap.
 pub struct VoMapCursor<K, V> {
     ptr: GcRef,
-    iter: map::MapIterator,  // Uses MapIterator from map module
+    iter: map::MapIterator, // Uses MapIterator from map module
     _marker: PhantomData<(K, V)>,
 }
 
@@ -422,31 +435,31 @@ impl VoString {
     pub fn from_ref(ptr: GcRef) -> Self {
         Self { ptr }
     }
-    
+
     /// Get the underlying GcRef.
     #[inline]
     pub fn as_ref(&self) -> GcRef {
         self.ptr
     }
-    
+
     /// Get string length in bytes.
     #[inline]
     pub fn len(&self) -> usize {
         string::len(self.ptr)
     }
-    
+
     /// Check if empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    
+
     /// Get as &str (zero-copy).
     #[inline]
     pub fn as_str(&self) -> &'static str {
         string::as_str(self.ptr)
     }
-    
+
     /// Convert to owned String.
     #[inline]
     pub fn to_owned(&self) -> String {
@@ -468,25 +481,25 @@ impl VoBytes {
     pub fn from_ref(ptr: GcRef) -> Self {
         Self { ptr }
     }
-    
+
     /// Get the underlying GcRef.
     #[inline]
     pub fn as_ref(&self) -> GcRef {
         self.ptr
     }
-    
+
     /// Get byte slice length.
     #[inline]
     pub fn len(&self) -> usize {
         slice::len(self.ptr)
     }
-    
+
     /// Check if empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    
+
     /// Get as &[u8] (zero-copy).
     #[inline]
     pub fn as_slice(&self) -> &'static [u8] {
@@ -495,7 +508,7 @@ impl VoBytes {
         }
         unsafe { core::slice::from_raw_parts(slice::data_ptr(self.ptr), slice::len(self.ptr)) }
     }
-    
+
     /// Convert to owned Vec<u8>.
     #[inline]
     pub fn to_vec(&self) -> Vec<u8> {
@@ -513,7 +526,10 @@ pub struct VoArray<T, const N: usize> {
 
 impl<T, const N: usize> Clone for VoArray<T, N> {
     fn clone(&self) -> Self {
-        Self { ptr: self.ptr, _marker: PhantomData }
+        Self {
+            ptr: self.ptr,
+            _marker: PhantomData,
+        }
     }
 }
 impl<T, const N: usize> Copy for VoArray<T, N> {}
@@ -522,41 +538,44 @@ impl<T: VoElem, const N: usize> VoArray<T, N> {
     /// Create accessor from GcRef.
     #[inline]
     pub fn from_ref(ptr: GcRef) -> Self {
-        Self { ptr, _marker: PhantomData }
+        Self {
+            ptr,
+            _marker: PhantomData,
+        }
     }
-    
+
     /// Get the underlying GcRef.
     #[inline]
     pub fn as_ref(&self) -> GcRef {
         self.ptr
     }
-    
+
     /// Get array length (compile-time constant).
     #[inline]
     pub fn len(&self) -> usize {
         N
     }
-    
+
     /// Check if empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
         N == 0
     }
-    
+
     /// Get element at index.
     #[inline]
     pub fn get(&self, idx: usize) -> T::Owned {
         debug_assert!(idx < N, "array index out of bounds");
         T::read_from_slice(self.ptr, idx)
     }
-    
+
     /// Set element at index.
     #[inline]
     pub fn set(&self, idx: usize, val: T::Owned) {
         debug_assert!(idx < N, "array index out of bounds");
         T::write_to_slice(self.ptr, idx, val);
     }
-    
+
     /// Create a cursor for iteration.
     #[inline]
     pub fn cursor(&self) -> VoArrayCursor<T, N> {
@@ -587,7 +606,7 @@ impl<T: VoElem, const N: usize> VoArrayCursor<T, N> {
         self.idx += 1;
         Some((idx, val))
     }
-    
+
     /// Reset cursor to beginning.
     #[inline]
     pub fn reset(&mut self) {
@@ -605,7 +624,10 @@ pub struct VoPtr<T> {
 
 impl<T> Clone for VoPtr<T> {
     fn clone(&self) -> Self {
-        Self { ptr: self.ptr, _marker: PhantomData }
+        Self {
+            ptr: self.ptr,
+            _marker: PhantomData,
+        }
     }
 }
 impl<T> Copy for VoPtr<T> {}
@@ -614,15 +636,18 @@ impl<T> VoPtr<T> {
     /// Create from GcRef.
     #[inline]
     pub fn from_ref(ptr: GcRef) -> Self {
-        Self { ptr, _marker: PhantomData }
+        Self {
+            ptr,
+            _marker: PhantomData,
+        }
     }
-    
+
     /// Get underlying GcRef.
     #[inline]
     pub fn as_ref(&self) -> GcRef {
         self.ptr
     }
-    
+
     /// Check if null.
     #[inline]
     pub fn is_null(&self) -> bool {
@@ -644,13 +669,13 @@ impl VoClosure {
     pub fn from_ref(ptr: GcRef) -> Self {
         Self { ptr }
     }
-    
+
     /// Get underlying GcRef.
     #[inline]
     pub fn as_ref(&self) -> GcRef {
         self.ptr
     }
-    
+
     /// Check if null.
     #[inline]
     pub fn is_null(&self) -> bool {

@@ -3,31 +3,31 @@
 //! This module requires std for network operations.
 
 #[cfg(feature = "std")]
+mod dns;
+pub mod http;
+#[cfg(feature = "std")]
 mod tcp;
 #[cfg(feature = "std")]
 mod udp;
 #[cfg(feature = "std")]
 mod unix;
-#[cfg(feature = "std")]
-mod dns;
-pub mod http;
 
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 #[cfg(feature = "std")]
-use std::sync::Mutex;
-#[cfg(feature = "std")]
-use std::net::{TcpStream, TcpListener, UdpSocket};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 #[cfg(all(feature = "std", unix))]
-use std::os::unix::net::{UnixStream, UnixListener};
+use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(feature = "std")]
+use std::sync::Mutex;
 
 #[cfg(feature = "std")]
 use vo_ffi_macro::vostd_errors;
-use vo_runtime::ffi::ExternRegistry;
-#[cfg(feature = "std")]
-use vo_runtime::ffi::ExternCallContext;
 #[cfg(feature = "std")]
 use vo_runtime::builtins::error_helper::write_error_to;
+#[cfg(feature = "std")]
+use vo_runtime::ffi::ExternCallContext;
+use vo_runtime::ffi::ExternRegistry;
 
 #[cfg(feature = "std")]
 lazy_static::lazy_static! {
@@ -97,7 +97,7 @@ fn write_io_error(call: &mut ExternCallContext, ret_slot: u16, err: std::io::Err
         ErrorKind::NotConnected => Some(NetErrorKind::Closed),
         _ => None,
     };
-    
+
     if let Some(k) = kind {
         let pair = net_sentinel_error(call, k);
         call.ret_interface_pair(ret_slot, pair);
@@ -107,7 +107,10 @@ fn write_io_error(call: &mut ExternCallContext, ret_slot: u16, err: std::io::Err
 }
 
 #[cfg(feature = "std")]
-pub fn register_externs(registry: &mut ExternRegistry, externs: &[vo_runtime::bytecode::ExternDef]) {
+pub fn register_externs(
+    registry: &mut ExternRegistry,
+    externs: &[vo_runtime::bytecode::ExternDef],
+) {
     for (id, def) in externs.iter().enumerate() {
         let id = id as u32;
         match def.name.as_str() {
@@ -120,8 +123,12 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[vo_runtime::by
             "net_tcpConnLocalAddr" => registry.register(id, tcp::net_tcp_conn_local_addr),
             "net_tcpConnRemoteAddr" => registry.register(id, tcp::net_tcp_conn_remote_addr),
             "net_tcpConnSetDeadline" => registry.register(id, tcp::net_tcp_conn_set_deadline),
-            "net_tcpConnSetReadDeadline" => registry.register(id, tcp::net_tcp_conn_set_read_deadline),
-            "net_tcpConnSetWriteDeadline" => registry.register(id, tcp::net_tcp_conn_set_write_deadline),
+            "net_tcpConnSetReadDeadline" => {
+                registry.register(id, tcp::net_tcp_conn_set_read_deadline)
+            }
+            "net_tcpConnSetWriteDeadline" => {
+                registry.register(id, tcp::net_tcp_conn_set_write_deadline)
+            }
             "net_blocking_tcpListenerAccept" => registry.register(id, tcp::net_tcp_listener_accept),
             "net_tcpListenerClose" => registry.register(id, tcp::net_tcp_listener_close),
             "net_tcpListenerAddr" => registry.register(id, tcp::net_tcp_listener_addr),
@@ -132,8 +139,12 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[vo_runtime::by
             "net_udpConnClose" => registry.register(id, udp::net_udp_conn_close),
             "net_udpConnLocalAddr" => registry.register(id, udp::net_udp_conn_local_addr),
             "net_udpConnSetDeadline" => registry.register(id, udp::net_udp_conn_set_deadline),
-            "net_udpConnSetReadDeadline" => registry.register(id, udp::net_udp_conn_set_read_deadline),
-            "net_udpConnSetWriteDeadline" => registry.register(id, udp::net_udp_conn_set_write_deadline),
+            "net_udpConnSetReadDeadline" => {
+                registry.register(id, udp::net_udp_conn_set_read_deadline)
+            }
+            "net_udpConnSetWriteDeadline" => {
+                registry.register(id, udp::net_udp_conn_set_write_deadline)
+            }
             // Unix (cfg(unix) only, async)
             #[cfg(unix)]
             "net_unixDial" => registry.register(id, unix::net_unix_dial),
@@ -146,13 +157,19 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[vo_runtime::by
             #[cfg(unix)]
             "net_unixConnSetDeadline" => registry.register(id, unix::net_unix_conn_set_deadline),
             #[cfg(unix)]
-            "net_unixConnSetReadDeadline" => registry.register(id, unix::net_unix_conn_set_read_deadline),
+            "net_unixConnSetReadDeadline" => {
+                registry.register(id, unix::net_unix_conn_set_read_deadline)
+            }
             #[cfg(unix)]
-            "net_unixConnSetWriteDeadline" => registry.register(id, unix::net_unix_conn_set_write_deadline),
+            "net_unixConnSetWriteDeadline" => {
+                registry.register(id, unix::net_unix_conn_set_write_deadline)
+            }
             #[cfg(unix)]
             "net_unixConnClose" => registry.register(id, unix::net_unix_conn_close),
             #[cfg(unix)]
-            "net_blocking_unixListenerAccept" => registry.register(id, unix::net_unix_listener_accept),
+            "net_blocking_unixListenerAccept" => {
+                registry.register(id, unix::net_unix_listener_accept)
+            }
             #[cfg(unix)]
             "net_unixListenerClose" => registry.register(id, unix::net_unix_listener_close),
             // DNS

@@ -1,8 +1,8 @@
 //! Global variable instructions: GlobalGet, GlobalGetN, GlobalSet, GlobalSetN
 
-use vo_runtime::slot::Slot;
 use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
+use vo_runtime::slot::Slot;
 
 #[inline]
 pub fn exec_global_get(stack: *mut Slot, bp: usize, inst: &Instruction, globals: &[u64]) {

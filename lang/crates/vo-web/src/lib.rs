@@ -9,8 +9,8 @@
 //! - No features: Bytecode execution only
 
 use core::cell::Cell;
-use wasm_bindgen::prelude::*;
 use vo_vm::vm::SchedulingOutcome;
+use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "compiler")]
 use std::path::{Path, PathBuf};
@@ -27,8 +27,9 @@ pub use wasm_vfs::WasmVfs;
 mod module_install;
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use module_install::{
-    ensure_vfs_deps, ensure_vfs_deps_from_fs, ensure_vfs_versioned_imports, install_module_to_vfs, prepare_github_modules,
-    resolve_and_install_module, build_synthetic_project_files, discover_vfs_installed_version,
+    build_synthetic_project_files, discover_vfs_installed_version, ensure_vfs_deps,
+    ensure_vfs_deps_from_fs, ensure_vfs_versioned_imports, install_module_to_vfs,
+    prepare_github_modules, resolve_and_install_module,
 };
 
 /// Initialize panic hook for better error messages in console.
@@ -56,7 +57,11 @@ pub struct HostLogRecord {
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 impl HostLogRecord {
-    pub fn new(source: impl Into<String>, code: impl Into<String>, level: impl Into<String>) -> Self {
+    pub fn new(
+        source: impl Into<String>,
+        code: impl Into<String>,
+        level: impl Into<String>,
+    ) -> Self {
         Self {
             source: source.into(),
             code: code.into(),
@@ -110,19 +115,25 @@ pub fn emit_host_log(record: HostLogRecord) {
 
     fn set_optional_string(object: &js_sys::Object, key: &str, value: Option<&str>) {
         if let Some(value) = value {
-            let _ = js_sys::Reflect::set(object, &JsValue::from_str(key), &JsValue::from_str(value));
+            let _ =
+                js_sys::Reflect::set(object, &JsValue::from_str(key), &JsValue::from_str(value));
         }
     }
 
     fn set_optional_u64(object: &js_sys::Object, key: &str, value: Option<u64>) {
         if let Some(value) = value {
-            let _ = js_sys::Reflect::set(object, &JsValue::from_str(key), &JsValue::from_f64(value as f64));
+            let _ = js_sys::Reflect::set(
+                object,
+                &JsValue::from_str(key),
+                &JsValue::from_f64(value as f64),
+            );
         }
     }
 
     fn set_optional_bool(object: &js_sys::Object, key: &str, value: Option<bool>) {
         if let Some(value) = value {
-            let _ = js_sys::Reflect::set(object, &JsValue::from_str(key), &JsValue::from_bool(value));
+            let _ =
+                js_sys::Reflect::set(object, &JsValue::from_str(key), &JsValue::from_bool(value));
         }
     }
 
@@ -222,7 +233,7 @@ impl RunResult {
 #[wasm_bindgen]
 pub fn compile(source: &str, filename: Option<String>) -> CompileResult {
     let filename = filename.unwrap_or_else(|| "main.vo".to_string());
-    
+
     match compile_source_with_std_fs(source, &filename, build_stdlib_fs()) {
         Ok(bytecode) => CompileResult {
             success: true,
@@ -249,7 +260,7 @@ pub use vo_stdlib::EmbeddedStdlib;
 pub fn build_stdlib_fs() -> MemoryFs {
     let stdlib = vo_stdlib::EmbeddedStdlib::new();
     let mut fs = MemoryFs::new();
-    
+
     fn add_dir_recursive(stdlib: &vo_stdlib::EmbeddedStdlib, fs: &mut MemoryFs, path: &Path) {
         use vo_common::vfs::FileSystem;
         if let Ok(entries) = stdlib.read_dir(path) {
@@ -264,7 +275,7 @@ pub fn build_stdlib_fs() -> MemoryFs {
             }
         }
     }
-    
+
     add_dir_recursive(&stdlib, &mut fs, Path::new("."));
     fs
 }
@@ -288,7 +299,9 @@ fn read_allowed_external_modules<F: FileSystem>(fs: &F) -> Result<Option<Vec<Str
 }
 
 #[cfg(feature = "compiler")]
-fn read_locked_external_modules<F: FileSystem>(fs: &F) -> Result<Option<Vec<vo_module::schema::lockfile::LockedModule>>, String> {
+fn read_locked_external_modules<F: FileSystem>(
+    fs: &F,
+) -> Result<Option<Vec<vo_module::schema::lockfile::LockedModule>>, String> {
     let vomod_path = Path::new("vo.mod");
     let mod_content = match fs.read_file(vomod_path) {
         Ok(content) => content,
@@ -332,7 +345,10 @@ fn read_current_module_near<F: FileSystem>(fs: &F, dir: &Path) -> Option<String>
 /// Like `read_locked_external_modules` but searches for `vo.mod`/`vo.lock`
 /// at `dir/` first, then falls back to the filesystem root.
 #[cfg(feature = "compiler")]
-fn read_locked_external_modules_near<F: FileSystem>(fs: &F, dir: &Path) -> Result<Option<Vec<vo_module::schema::lockfile::LockedModule>>, String> {
+fn read_locked_external_modules_near<F: FileSystem>(
+    fs: &F,
+    dir: &Path,
+) -> Result<Option<Vec<vo_module::schema::lockfile::LockedModule>>, String> {
     let mod_candidates = [dir.join("vo.mod"), PathBuf::from("vo.mod")];
     let lock_candidates = [dir.join("vo.lock"), PathBuf::from("vo.lock")];
 
@@ -424,7 +440,11 @@ pub fn reject_single_file_external_imports(source: &str) -> Result<(), String> {
 /// Compile source with a custom stdlib filesystem.
 /// Exported for libraries (like vogui) that need to add extra packages.
 #[cfg(feature = "compiler")]
-pub fn compile_source_with_std_fs(source: &str, filename: &str, std_fs: MemoryFs) -> Result<Vec<u8>, String> {
+pub fn compile_source_with_std_fs(
+    source: &str,
+    filename: &str,
+    std_fs: MemoryFs,
+) -> Result<Vec<u8>, String> {
     compile_source_with_mod_fs(source, filename, std_fs, MemoryFs::new())
 }
 
@@ -440,19 +460,19 @@ pub fn compile_source_with_mod_fs(
     mod_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
     use vo_analysis::analyze_project;
+    use vo_analysis::vfs::{CurrentModuleResolver, ModSource, PackageResolver, StdSource};
     use vo_codegen::compile_project;
-    use vo_analysis::vfs::{CurrentModuleResolver, PackageResolver, StdSource, ModSource};
 
     reject_single_file_external_imports(source)?;
-    
+
     // Create virtual file system with the source
     let mut fs = MemoryFs::new();
     fs.add_file(PathBuf::from(filename), source.to_string());
-    
+
     // Create FileSet
     let file_set = FileSet::from_file(&fs, Path::new(filename), PathBuf::from("."))
         .map_err(|e| format!("Failed to read file: {}", e))?;
-    
+
     let current_module = read_current_module(&fs);
     let resolver = CurrentModuleResolver::new(
         PackageResolver {
@@ -462,15 +482,13 @@ pub fn compile_source_with_mod_fs(
         fs,
         current_module,
     );
-    
+
     // Analyze project
-    let project = analyze_project(file_set, &resolver)
-        .map_err(|e| format!("{}", e))?;
-    
+    let project = analyze_project(file_set, &resolver).map_err(|e| format!("{}", e))?;
+
     // Compile to bytecode
-    let module = compile_project(&project)
-        .map_err(|e| format!("{}", e))?;
-    
+    let module = compile_project(&project).map_err(|e| format!("{}", e))?;
+
     // Serialize to bytes
     Ok(module.serialize())
 }
@@ -483,7 +501,11 @@ pub fn compile_source_with_mod_fs(
 /// Third-party modules (imports containing `.`) are not resolved by this variant;
 /// use `compile_entry_with_mod_fs` if the package has external module dependencies.
 #[cfg(feature = "compiler")]
-pub fn compile_entry_with_std_fs(entry: &str, local_fs: MemoryFs, std_fs: MemoryFs) -> Result<Vec<u8>, String> {
+pub fn compile_entry_with_std_fs(
+    entry: &str,
+    local_fs: MemoryFs,
+    std_fs: MemoryFs,
+) -> Result<Vec<u8>, String> {
     compile_entry_with_mod_fs(entry, local_fs, std_fs, MemoryFs::new())
 }
 
@@ -495,10 +517,15 @@ pub fn compile_entry_with_std_fs(entry: &str, local_fs: MemoryFs, std_fs: Memory
 /// (e.g. `github.com/vo-lang/vogui/app.vo`). Imports containing `.` are
 /// resolved from `mod_fs`.
 #[cfg(feature = "compiler")]
-pub fn compile_entry_with_mod_fs(entry: &str, local_fs: MemoryFs, std_fs: MemoryFs, mod_fs: MemoryFs) -> Result<Vec<u8>, String> {
+pub fn compile_entry_with_mod_fs(
+    entry: &str,
+    local_fs: MemoryFs,
+    std_fs: MemoryFs,
+    mod_fs: MemoryFs,
+) -> Result<Vec<u8>, String> {
     use vo_analysis::analyze_project;
+    use vo_analysis::vfs::{CurrentModuleResolver, ModSource, PackageResolver, StdSource};
     use vo_codegen::compile_project;
-    use vo_analysis::vfs::{CurrentModuleResolver, PackageResolver, StdSource, ModSource};
 
     let pkg_dir = Path::new(entry).parent().unwrap_or(Path::new("."));
     let file_set = FileSet::collect(&local_fs, pkg_dir, PathBuf::from("."))
@@ -519,11 +546,9 @@ pub fn compile_entry_with_mod_fs(entry: &str, local_fs: MemoryFs, std_fs: Memory
         current_module,
     );
 
-    let project = analyze_project(file_set, &resolver)
-        .map_err(|e| format!("{}", e))?;
+    let project = analyze_project(file_set, &resolver).map_err(|e| format!("{}", e))?;
 
-    let module = compile_project(&project)
-        .map_err(|e| format!("{}", e))?;
+    let module = compile_project(&project).map_err(|e| format!("{}", e))?;
 
     Ok(module.serialize())
 }
@@ -536,10 +561,14 @@ pub fn compile_entry_with_mod_fs(entry: &str, local_fs: MemoryFs, std_fs: Memory
 ///
 /// Modules must be installed into the VFS beforehand (via `install_module_to_vfs`).
 #[cfg(feature = "compiler")]
-pub fn compile_entry_with_vfs(entry: &str, local_fs: MemoryFs, vfs_mod_root: &str) -> Result<Vec<u8>, String> {
+pub fn compile_entry_with_vfs(
+    entry: &str,
+    local_fs: MemoryFs,
+    vfs_mod_root: &str,
+) -> Result<Vec<u8>, String> {
     use vo_analysis::analyze_project;
+    use vo_analysis::vfs::{CurrentModuleResolver, ModSource, PackageResolverMixed, StdSource};
     use vo_codegen::compile_project;
-    use vo_analysis::vfs::{CurrentModuleResolver, PackageResolverMixed, StdSource, ModSource};
 
     let pkg_dir = Path::new(entry).parent().unwrap_or(Path::new("."));
     let file_set = FileSet::collect(&local_fs, pkg_dir, PathBuf::from("."))
@@ -558,14 +587,14 @@ pub fn compile_entry_with_vfs(entry: &str, local_fs: MemoryFs, vfs_mod_root: &st
                 .collect::<Vec<_>>();
             ModSource::with_fs(WasmVfs::new(vfs_mod_root))
                 .with_allowed_modules(allowed_modules)
-                .with_module_roots(
-                    locked_modules
-                        .iter()
-                        .map(|module| {
-                            let rel = vo_module::materialize::cache_dir(Path::new(""), &module.path, &module.version);
-                            (module.path.as_str().to_string(), rel)
-                        }),
-                )
+                .with_module_roots(locked_modules.iter().map(|module| {
+                    let rel = vo_module::materialize::cache_dir(
+                        Path::new(""),
+                        &module.path,
+                        &module.version,
+                    );
+                    (module.path.as_str().to_string(), rel)
+                }))
         }
         None => ModSource::with_fs(WasmVfs::new(vfs_mod_root)),
     };
@@ -578,21 +607,23 @@ pub fn compile_entry_with_vfs(entry: &str, local_fs: MemoryFs, vfs_mod_root: &st
         current_module,
     );
 
-    let project = analyze_project(file_set, &resolver)
-        .map_err(|e| format!("{}", e))?;
+    let project = analyze_project(file_set, &resolver).map_err(|e| format!("{}", e))?;
 
-    let module = compile_project(&project)
-        .map_err(|e| format!("{}", e))?;
+    let module = compile_project(&project).map_err(|e| format!("{}", e))?;
 
     Ok(module.serialize())
 }
 
 /// Compile a single-file Vo source, resolving third-party modules from the JS VFS.
 #[cfg(feature = "compiler")]
-pub fn compile_source_with_vfs(source: &str, filename: &str, vfs_mod_root: &str) -> Result<Vec<u8>, String> {
+pub fn compile_source_with_vfs(
+    source: &str,
+    filename: &str,
+    vfs_mod_root: &str,
+) -> Result<Vec<u8>, String> {
     use vo_analysis::analyze_project;
+    use vo_analysis::vfs::{CurrentModuleResolver, ModSource, PackageResolverMixed, StdSource};
     use vo_codegen::compile_project;
-    use vo_analysis::vfs::{CurrentModuleResolver, PackageResolverMixed, StdSource, ModSource};
 
     reject_single_file_external_imports(source)?;
 
@@ -612,11 +643,9 @@ pub fn compile_source_with_vfs(source: &str, filename: &str, vfs_mod_root: &str)
         current_module,
     );
 
-    let project = analyze_project(file_set, &resolver)
-        .map_err(|e| format!("{}", e))?;
+    let project = analyze_project(file_set, &resolver).map_err(|e| format!("{}", e))?;
 
-    let module = compile_project(&project)
-        .map_err(|e| format!("{}", e))?;
+    let module = compile_project(&project).map_err(|e| format!("{}", e))?;
 
     Ok(module.serialize())
 }
@@ -666,13 +695,13 @@ mod tests {
             ),
         );
 
-        mod_fs.add_file("github.com/acme/lib/vo.mod", "module github.com/acme/lib\n\nvo 0.1.0\n");
+        mod_fs.add_file(
+            "github.com/acme/lib/vo.mod",
+            "module github.com/acme/lib\n\nvo 0.1.0\n",
+        );
         mod_fs.add_file(
             "github.com/acme/lib/lib.vo",
-            concat!(
-                "package lib\n",
-                "func Hello() {}\n",
-            ),
+            concat!("package lib\n", "func Hello() {}\n",),
         );
 
         let result = compile_entry_with_mod_fs("app/main.vo", local_fs, std_fs, mod_fs);
@@ -699,13 +728,11 @@ mod tests {
         );
         local_fs.add_file(
             "util/util.vo",
-            concat!(
-                "package util\n",
-                "func Hello() {}\n",
-            ),
+            concat!("package util\n", "func Hello() {}\n",),
         );
 
-        let result = compile_entry_with_mod_fs("main.vo", local_fs, build_stdlib_fs(), MemoryFs::new());
+        let result =
+            compile_entry_with_mod_fs("main.vo", local_fs, build_stdlib_fs(), MemoryFs::new());
         match &result {
             Err(e) => panic!("compile_entry_with_mod_fs failed: {}", e),
             Ok(bytes) => assert!(!bytes.is_empty(), "empty bytecode"),
@@ -724,19 +751,22 @@ mod tests {
         );
         let std_fs = build_stdlib_fs();
         let mod_fs = MemoryFs::new()
-            .with_file("github.com/acme/lib/vo.mod", "module github.com/acme/lib\n\nvo 0.1.0\n")
+            .with_file(
+                "github.com/acme/lib/vo.mod",
+                "module github.com/acme/lib\n\nvo 0.1.0\n",
+            )
             .with_file(
                 "github.com/acme/lib/lib.vo",
-                concat!(
-                    "package lib\n",
-                    "func Hello() {}\n",
-                ),
+                concat!("package lib\n", "func Hello() {}\n",),
             );
 
         let result = compile_source_with_mod_fs(source, "main.vo", std_fs, mod_fs);
         match result {
             Err(message) => {
-                assert!(message.contains("requires a project with vo.mod and vo.lock"), "{message}");
+                assert!(
+                    message.contains("requires a project with vo.mod and vo.lock"),
+                    "{message}"
+                );
                 assert!(message.contains("github.com/acme/lib"), "{message}");
             }
             Ok(_) => panic!("expected single-file external import rejection"),
@@ -758,7 +788,6 @@ pub fn compile_and_run_with_modules(source: &str) -> js_sys::Promise {
     })
 }
 
-
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 async fn run_with_modules_inner(source: &str) -> (String, String, String) {
     let std_fs = build_stdlib_fs();
@@ -777,7 +806,11 @@ async fn run_with_modules_inner(source: &str) -> (String, String, String) {
 ///
 /// `module_path` is the Go-style module path, e.g. `"github.com/vo-lang/zip"`.
 #[wasm_bindgen(js_name = "preloadExtModule")]
-pub fn preload_ext_module(module_path: &str, bytes: &[u8], js_glue_url: Option<String>) -> js_sys::Promise {
+pub fn preload_ext_module(
+    module_path: &str,
+    bytes: &[u8],
+    js_glue_url: Option<String>,
+) -> js_sys::Promise {
     let module_path = module_path.to_string();
     let bytes = bytes.to_vec();
     let js_glue_url = js_glue_url.unwrap_or_default();
@@ -810,10 +843,7 @@ pub fn run(bytecode: &[u8]) -> RunResult {
 /// `args` must be a JS `Array<string>`. The args are visible to the program as `os.Args`.
 #[wasm_bindgen(js_name = "runWithArgs")]
 pub fn run_with_args(bytecode: &[u8], args: js_sys::Array) -> RunResult {
-    let args_vec: Vec<String> = args
-        .iter()
-        .filter_map(|v| v.as_string())
-        .collect();
+    let args_vec: Vec<String> = args.iter().filter_map(|v| v.as_string()).collect();
 
     vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
         *cell.borrow_mut() = Some(args_vec);
@@ -846,7 +876,11 @@ pub fn compile_and_run(source: &str, filename: Option<String>) -> js_sys::Promis
     let source = source.to_string();
     let result = compile(&source, filename);
     if !result.success {
-        let obj = make_run_result_obj("compile_error", "", &result.error_message.unwrap_or_default());
+        let obj = make_run_result_obj(
+            "compile_error",
+            "",
+            &result.error_message.unwrap_or_default(),
+        );
         return js_sys::Promise::resolve(&obj);
     }
     let bytecode = result.bytecode.unwrap();
@@ -862,9 +896,24 @@ pub fn make_run_result_js(status: &str, stdout: &str, stderr: &str) -> JsValue {
 
 fn make_run_result_obj(status: &str, stdout: &str, stderr: &str) -> JsValue {
     let obj = js_sys::Object::new();
-    js_sys::Reflect::set(&obj, &JsValue::from_str("status"), &JsValue::from_str(status)).unwrap();
-    js_sys::Reflect::set(&obj, &JsValue::from_str("stdout"), &JsValue::from_str(stdout)).unwrap();
-    js_sys::Reflect::set(&obj, &JsValue::from_str("stderr"), &JsValue::from_str(stderr)).unwrap();
+    js_sys::Reflect::set(
+        &obj,
+        &JsValue::from_str("status"),
+        &JsValue::from_str(status),
+    )
+    .unwrap();
+    js_sys::Reflect::set(
+        &obj,
+        &JsValue::from_str("stdout"),
+        &JsValue::from_str(stdout),
+    )
+    .unwrap();
+    js_sys::Reflect::set(
+        &obj,
+        &JsValue::from_str("stderr"),
+        &JsValue::from_str(stderr),
+    )
+    .unwrap();
     obj.into()
 }
 
@@ -874,7 +923,13 @@ async fn run_vm_async(bytecode: &[u8]) -> (String, String, String) {
     vo_runtime::output::clear_output();
     let module = match vo_vm::bytecode::Module::deserialize(bytecode) {
         Ok(m) => m,
-        Err(e) => return ("error".into(), String::new(), format!("Failed to load bytecode: {:?}", e)),
+        Err(e) => {
+            return (
+                "error".into(),
+                String::new(),
+                format!("Failed to load bytecode: {:?}", e),
+            )
+        }
     };
 
     let mut vm = vo_vm::vm::Vm::new();
@@ -924,7 +979,10 @@ fn validate_sync_outcome(vm: &vo_vm::vm::Vm, outcome: SchedulingOutcome) -> Resu
     }
 }
 
-fn finish_async_outcome(vm: &vo_vm::vm::Vm, outcome: SchedulingOutcome) -> (String, String, String) {
+fn finish_async_outcome(
+    vm: &vo_vm::vm::Vm,
+    outcome: SchedulingOutcome,
+) -> (String, String, String) {
     let stdout = vo_runtime::output::take_output();
     match outcome {
         SchedulingOutcome::Completed => ("ok".into(), stdout, String::new()),
@@ -936,7 +994,9 @@ fn finish_async_outcome(vm: &vo_vm::vm::Vm, outcome: SchedulingOutcome) -> (Stri
         SchedulingOutcome::SuspendedForHostEvents => (
             "suspended".into(),
             stdout,
-            String::from("vm suspended waiting for host events, but the async runner had no event to drive"),
+            String::from(
+                "vm suspended waiting for host events, but the async runner had no event to drive",
+            ),
         ),
         SchedulingOutcome::Blocked => ("error".into(), stdout, format!("{:?}", vm.deadlock_err())),
         SchedulingOutcome::Panicked => (
@@ -1015,10 +1075,10 @@ async fn wasm_callback_sleep_ms(ms: u32) {
 // Generic VM Management API (for event-driven apps)
 // =============================================================================
 
-pub use vo_vm::vm::Vm;
-pub use vo_vm::bytecode::{Module, ExternDef};
-pub use vo_runtime::ffi::{ExternRegistry, ExternCallContext, ExternResult};
+pub use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
 pub use vo_runtime::gc::GcRef;
+pub use vo_vm::bytecode::{ExternDef, Module};
+pub use vo_vm::vm::Vm;
 
 /// Generic WASM extension bridge. Use this to load ext modules and auto-register
 /// their externs without any per-module hardcoding.
@@ -1029,9 +1089,9 @@ pub type ExternRegistrar = fn(&mut ExternRegistry, &[ExternDef]);
 
 /// Create a VM from bytecode, register externs, and run initialization.
 pub fn create_vm(bytecode: &[u8], register_externs: ExternRegistrar) -> Result<Vm, String> {
-    let module = Module::deserialize(bytecode)
-        .map_err(|e| format!("Failed to load bytecode: {:?}", e))?;
-    
+    let module =
+        Module::deserialize(bytecode).map_err(|e| format!("Failed to load bytecode: {:?}", e))?;
+
     create_vm_from_module(module, register_externs)
 }
 
@@ -1043,7 +1103,10 @@ fn wasm_write_hook(s: &str) {
 }
 
 /// Create a VM from a pre-deserialized module.
-pub fn create_vm_from_module(module: Module, register_externs: ExternRegistrar) -> Result<Vm, String> {
+pub fn create_vm_from_module(
+    module: Module,
+    register_externs: ExternRegistrar,
+) -> Result<Vm, String> {
     let mut vm = create_loaded_vm_from_module(module, register_externs)?;
     let outcome = vm.run().map_err(|e| format!("{:?}", e))?;
     validate_sync_outcome(&vm, outcome)?;
@@ -1051,33 +1114,36 @@ pub fn create_vm_from_module(module: Module, register_externs: ExternRegistrar) 
 }
 
 pub fn create_loaded_vm(bytecode: &[u8], register_externs: ExternRegistrar) -> Result<Vm, String> {
-    let module = Module::deserialize(bytecode)
-        .map_err(|e| format!("Failed to load bytecode: {:?}", e))?;
+    let module =
+        Module::deserialize(bytecode).map_err(|e| format!("Failed to load bytecode: {:?}", e))?;
     create_loaded_vm_from_module(module, register_externs)
 }
 
-pub fn create_loaded_vm_from_module(module: Module, register_externs: ExternRegistrar) -> Result<Vm, String> {
+pub fn create_loaded_vm_from_module(
+    module: Module,
+    register_externs: ExternRegistrar,
+) -> Result<Vm, String> {
     #[cfg(target_arch = "wasm32")]
     vo_runtime::output::set_write_hook(wasm_write_hook);
     vo_runtime::output::clear_output();
-    
+
     let mut vm = Vm::new();
     let reg = &mut vm.state.extern_registry;
     let exts = &module.externs;
-    
+
     // stdlib (cross-platform)
     vo_stdlib::register_externs(reg, exts);
-    
+
     // wasm platform
     vo_web_runtime_wasm::os::register_externs(reg, exts);
     vo_web_runtime_wasm::exec::register_externs(reg, exts);
     vo_web_runtime_wasm::time::register_externs(reg, exts);
     vo_web_runtime_wasm::filepath::register_externs(reg, exts);
     vo_web_runtime_wasm::net_http::register_externs(reg, exts);
-    
+
     // caller
     register_externs(reg, exts);
-    
+
     vm.load(module);
     Ok(vm)
 }
@@ -1085,12 +1151,12 @@ pub fn create_loaded_vm_from_module(module: Module, register_externs: ExternRegi
 /// Call a closure in the VM (for handling external events).
 pub fn call_closure(vm: &mut Vm, closure: GcRef, args: &[u64]) -> Result<(), String> {
     vo_runtime::output::clear_output();
-    
+
     use vo_runtime::objects::closure;
     let func_id = closure::func_id(closure);
     let module = vm.module().expect("module not set");
     let func_def = &module.functions[func_id as usize];
-    
+
     let full_args = vo_vm::vm::helpers::build_closure_args(
         closure as u64,
         closure,
@@ -1098,11 +1164,11 @@ pub fn call_closure(vm: &mut Vm, closure: GcRef, args: &[u64]) -> Result<(), Str
         args.as_ptr(),
         args.len() as u32,
     );
-    
+
     vm.spawn_call(func_id, &full_args);
     let outcome = vm.run_scheduled().map_err(|e| format!("{:?}", e))?;
     validate_sync_outcome(vm, outcome)?;
-    
+
     Ok(())
 }
 
@@ -1128,7 +1194,13 @@ pub async fn run_bytecode_async_with_externs(
     vo_runtime::output::clear_output();
     let module = match Module::deserialize(bytecode) {
         Ok(m) => m,
-        Err(e) => return ("error".into(), String::new(), format!("Failed to load bytecode: {:?}", e)),
+        Err(e) => {
+            return (
+                "error".into(),
+                String::new(),
+                format!("Failed to load bytecode: {:?}", e),
+            )
+        }
     };
 
     let mut vm = vo_vm::vm::Vm::new();
@@ -1151,27 +1223,47 @@ pub async fn run_bytecode_async_with_externs(
 async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, String, String) {
     let mut outcome = match vm.run() {
         Ok(o) => o,
-        Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
+        Err(e) => {
+            return (
+                "error".into(),
+                vo_runtime::output::take_output(),
+                format!("{:?}", e),
+            )
+        }
     };
 
     'host_event_loop: while outcome == SchedulingOutcome::SuspendedForHostEvents {
         loop {
             let fetches = vo_web_runtime_wasm::net_http::take_pending_fetch_promises();
-            if fetches.is_empty() { break; }
+            if fetches.is_empty() {
+                break;
+            }
             for (token, promise) in fetches {
                 outcome = match await_fetch(vm, token, promise).await {
                     Ok(o) => o,
-                    Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
+                    Err(e) => {
+                        return (
+                            "error".into(),
+                            vo_runtime::output::take_output(),
+                            format!("{:?}", e),
+                        )
+                    }
                 };
-                if outcome != SchedulingOutcome::SuspendedForHostEvents { break 'host_event_loop; }
+                if outcome != SchedulingOutcome::SuspendedForHostEvents {
+                    break 'host_event_loop;
+                }
             }
         }
 
-        let mut timer_events: Vec<_> = vm.scheduler.take_pending_host_events()
+        let mut timer_events: Vec<_> = vm
+            .scheduler
+            .take_pending_host_events()
             .into_iter()
             .filter(|e| !e.replay)
             .collect();
-        if timer_events.is_empty() { break; }
+        if timer_events.is_empty() {
+            break;
+        }
         timer_events.sort_unstable_by_key(|e| e.delay_ms);
         let batch_start_ms = js_now_ms();
         for ev in timer_events {
@@ -1183,16 +1275,32 @@ async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, String, String) 
             vm.wake_host_event(ev.token);
             outcome = match vm.run_scheduled() {
                 Ok(o) => o,
-                Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
+                Err(e) => {
+                    return (
+                        "error".into(),
+                        vo_runtime::output::take_output(),
+                        format!("{:?}", e),
+                    )
+                }
             };
-            if outcome != SchedulingOutcome::SuspendedForHostEvents { break 'host_event_loop; }
+            if outcome != SchedulingOutcome::SuspendedForHostEvents {
+                break 'host_event_loop;
+            }
 
             for (ft, fp) in vo_web_runtime_wasm::net_http::take_pending_fetch_promises() {
                 outcome = match await_fetch(vm, ft, fp).await {
                     Ok(o) => o,
-                    Err(e) => return ("error".into(), vo_runtime::output::take_output(), format!("{:?}", e)),
+                    Err(e) => {
+                        return (
+                            "error".into(),
+                            vo_runtime::output::take_output(),
+                            format!("{:?}", e),
+                        )
+                    }
                 };
-                if outcome != SchedulingOutcome::SuspendedForHostEvents { break 'host_event_loop; }
+                if outcome != SchedulingOutcome::SuspendedForHostEvents {
+                    break 'host_event_loop;
+                }
             }
         }
     }
@@ -1204,7 +1312,7 @@ async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, String, String) 
 // Island Transport VM API (for render islands in WebView)
 // =============================================================================
 
-use vo_runtime::island_msg::{encode_island_transport_frame, decode_island_transport_frame};
+use vo_runtime::island_msg::{decode_island_transport_frame, encode_island_transport_frame};
 
 /// A VM instance for JS interop with island transport support.
 /// Used by render islands to communicate with native logic islands.
@@ -1220,8 +1328,7 @@ impl VoVm {
     /// Does NOT run initialization — call `run` after setup.
     #[wasm_bindgen(constructor)]
     pub fn new(bytecode: &[u8]) -> Result<VoVm, JsValue> {
-        let vm = create_loaded_vm(bytecode, |_, _| {})
-            .map_err(|e| JsValue::from_str(&e))?;
+        let vm = create_loaded_vm(bytecode, |_, _| {}).map_err(|e| JsValue::from_str(&e))?;
         Ok(VoVm { inner: vm })
     }
 
@@ -1264,8 +1371,7 @@ impl VoVm {
         } else if current_island_id != target_island_id {
             return Err(JsValue::from_str(&format!(
                 "render island id mismatch: have {}, got {}",
-                current_island_id,
-                target_island_id
+                current_island_id, target_island_id
             )));
         }
         self.inner.push_island_command(cmd);

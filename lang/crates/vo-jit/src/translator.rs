@@ -84,7 +84,11 @@ pub enum SelectSyncCase {
     },
 }
 
-pub fn emit_funcref_call<'a>(emitter: &mut impl IrEmitter<'a>, func_ref: FuncRef, args: &[Value]) -> Inst {
+pub fn emit_funcref_call<'a>(
+    emitter: &mut impl IrEmitter<'a>,
+    func_ref: FuncRef,
+    args: &[Value],
+) -> Inst {
     // TODO(jit): This unconditional spill is a conservative correctness barrier for helper calls.
     // Today some imported/runtime helpers may trigger GC, suspend into the VM, return non-OK,
     // reallocate fiber.stack, or otherwise observe the caller frame through fiber.stack materialization.
@@ -99,7 +103,11 @@ pub fn emit_funcref_call<'a>(emitter: &mut impl IrEmitter<'a>, func_ref: FuncRef
     emit_funcref_call_raw(emitter, func_ref, args)
 }
 
-pub fn emit_funcref_call_raw<'a>(emitter: &mut impl IrEmitter<'a>, func_ref: FuncRef, args: &[Value]) -> Inst {
+pub fn emit_funcref_call_raw<'a>(
+    emitter: &mut impl IrEmitter<'a>,
+    func_ref: FuncRef,
+    args: &[Value],
+) -> Inst {
     if cfg!(target_arch = "aarch64") {
         let sig = emitter.builder().func.dfg.ext_funcs[func_ref].signature;
         let func_addr = emitter.builder().ins().func_addr(types::I64, func_ref);
@@ -113,69 +121,69 @@ pub fn emit_funcref_call_raw<'a>(emitter: &mut impl IrEmitter<'a>, func_ref: Fun
 pub trait IrEmitter<'a> {
     /// Get FunctionBuilder
     fn builder(&mut self) -> &mut FunctionBuilder<'a>;
-    
+
     /// Read variable
     fn read_var(&mut self, slot: u16) -> Value;
-    
+
     /// Write variable
     fn write_var(&mut self, slot: u16, val: Value);
-    
+
     /// Get ctx parameter
     fn ctx_param(&mut self) -> Value;
-    
+
     /// Load GC pointer
     fn gc_ptr(&mut self) -> Value;
-    
+
     /// Load globals pointer
     fn globals_ptr(&mut self) -> Value;
-    
+
     /// Get Vo module
     fn vo_module(&self) -> &VoModule;
-    
+
     /// Get current PC
     fn current_pc(&self) -> usize;
-    
+
     /// Get helper function references
     fn helpers(&self) -> &HelperFuncs;
-    
+
     /// Set register constant (for optimization)
     fn set_reg_const(&mut self, reg: u16, val: i64);
-    
+
     /// Get register constant
     fn get_reg_const(&self, reg: u16) -> Option<i64>;
-    
+
     /// Panic return value (FunctionCompiler=1, LoopCompiler=LOOP_RESULT_PANIC)
     fn panic_return_value(&self) -> i32;
-    
+
     /// Get memory address of a variable slot.
     /// Used by SlotGet/SlotSet for stack array access.
     fn var_addr(&mut self, slot: u16) -> Value;
-    
+
     /// Spill all SSA variables to memory.
     /// Called before returning non-Ok JitResult so VM can see/restore state.
     fn spill_all_vars(&mut self);
-    
+
     fn sync_slots_to_memory(&mut self, start_slot: u16, slot_count: u16) {
         let _ = start_slot;
         let _ = slot_count;
         self.spill_all_vars();
     }
-    
+
     /// Get the number of local variable slots.
     fn local_slot_count(&self) -> usize;
-    
+
     /// Get the function ID being compiled.
     fn func_id(&self) -> u32;
-    
+
     /// Get slot type for a variable.
     fn slot_type(&self, slot: u16) -> SlotType;
-    
+
     /// Read variable as F64. Load F64 directly from memory.
     fn read_var_f64(&mut self, slot: u16) -> Value;
-    
+
     /// Write variable as F64. Store F64 directly to memory.
     fn write_var_f64(&mut self, slot: u16, val: Value);
-    
+
     /// Reload all SSA variables from memory.
     /// Called after external callbacks that may write to locals memory without updating SSA
     /// (e.g., select_exec writes recv results to fiber.stack via callback).
@@ -201,15 +209,19 @@ pub trait IrEmitter<'a> {
 
     /// Check if a slot has been verified non-nil in the current basic block.
     fn is_checked_non_nil(&self, slot: u16) -> bool;
-    
+
     /// Mark a slot as verified non-nil (after nil check passed).
     fn mark_checked_non_nil(&mut self, slot: u16);
 
     /// Prologue-saved ctx.jit_bp (i32). Reused by call sites to avoid redundant loads.
-    fn prologue_caller_bp(&self) -> Option<Value> { None }
-    
+    fn prologue_caller_bp(&self) -> Option<Value> {
+        None
+    }
+
     /// Prologue-saved ctx.fiber_sp (i32). Reused by call sites to avoid redundant loads.
-    fn prologue_fiber_sp(&self) -> Option<Value> { None }
+    fn prologue_fiber_sp(&self) -> Option<Value> {
+        None
+    }
 
     /// Refresh the cached fiber.stack base pointer after a call that may have triggered
     /// fiber.stack reallocation (via jit_push_frame inside prepare_closure_call, etc.).
@@ -226,19 +238,31 @@ pub fn compute_memory_only_start(code: &[Instruction]) -> u16 {
     for inst in code {
         match inst.opcode() {
             // Dynamic indexed memory access (SlotGet reads, SlotSet writes)
-            Opcode::SlotSet | Opcode::SlotSetN => { min_base = min_base.min(inst.a); }
-            Opcode::SlotGet | Opcode::SlotGetN => { min_base = min_base.min(inst.b); }
+            Opcode::SlotSet | Opcode::SlotSetN => {
+                min_base = min_base.min(inst.a);
+            }
+            Opcode::SlotGet | Opcode::SlotGetN => {
+                min_base = min_base.min(inst.b);
+            }
             // Callbacks that read from var_addr pointers
-            Opcode::QueueSend => { min_base = min_base.min(inst.b); }
-            Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => { min_base = min_base.min(inst.b); }
-            Opcode::GoIsland => { min_base = min_base.min(inst.c); }
+            Opcode::QueueSend => {
+                min_base = min_base.min(inst.b);
+            }
+            Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => {
+                min_base = min_base.min(inst.b);
+            }
+            Opcode::GoIsland => {
+                min_base = min_base.min(inst.c);
+            }
             Opcode::SliceAppend => {
                 let elem_slot = inst.c + if inst.flags == 0 { 2 } else { 1 };
                 min_base = min_base.min(elem_slot);
             }
             // Select callbacks read/write fiber.stack directly via register numbers —
             // all slots must be memory-synced
-            Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => { return 0; }
+            Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => {
+                return 0;
+            }
             _ => {}
         }
     }
@@ -253,7 +277,11 @@ pub fn is_float_slot(slot_types: &[SlotType], slot: u16) -> bool {
 /// Cranelift IR type for a variable slot: F64 for Float slots, I64 for everything else.
 #[inline]
 pub fn slot_ir_type(slot_types: &[SlotType], slot: u16) -> cranelift_codegen::ir::Type {
-    if is_float_slot(slot_types, slot) { types::F64 } else { types::I64 }
+    if is_float_slot(slot_types, slot) {
+        types::F64
+    } else {
+        types::I64
+    }
 }
 
 /// Declare SSA variables for all local slots, using F64 for Float slots.

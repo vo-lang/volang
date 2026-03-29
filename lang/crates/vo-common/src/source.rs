@@ -128,11 +128,16 @@ pub struct SourceFile {
 
 impl SourceFile {
     /// Creates a new source file with a base offset.
-    pub fn new(id: FileId, name: impl Into<Arc<str>>, source: impl Into<Arc<str>>, base: u32) -> Self {
+    pub fn new(
+        id: FileId,
+        name: impl Into<Arc<str>>,
+        source: impl Into<Arc<str>>,
+        base: u32,
+    ) -> Self {
         let name = name.into();
         let source = source.into();
         let line_starts = Self::compute_line_starts(&source);
-        
+
         Self {
             id,
             name,
@@ -233,7 +238,7 @@ impl SourceFile {
         if line >= self.line_starts.len() {
             return None;
         }
-        
+
         if line + 1 < self.line_starts.len() {
             // End is start of next line minus the newline character
             Some(self.line_starts[line + 1] - 1)
@@ -278,16 +283,16 @@ impl SourceFile {
     /// Converts a global byte position to line/column.
     pub fn line_col(&self, pos: BytePos) -> LineCol {
         let offset = self.local_offset(pos);
-        
+
         // Binary search for the line containing this offset
         let line = match self.line_starts.binary_search(&offset) {
             Ok(line) => line,
             Err(line) => line.saturating_sub(1),
         };
-        
+
         let line_start = self.line_starts[line];
         let column = offset.saturating_sub(line_start) + 1;
-        
+
         LineCol {
             line: (line + 1) as u32,
             column,
@@ -340,7 +345,7 @@ pub struct SourceMap {
 impl SourceMap {
     /// Creates a new empty source map.
     pub fn new() -> Self {
-        Self { 
+        Self {
             files: Vec::new(),
             next_base: 0,
         }
@@ -352,10 +357,10 @@ impl SourceMap {
         let source = source.into();
         let id = FileId::new(self.files.len() as u32);
         let base = self.next_base;
-        
+
         // Reserve space for this file plus a gap of 1 (to ensure spans don't overlap)
         self.next_base = base + source.len() as u32 + 1;
-        
+
         let file = SourceFile::new(id, name, source, base);
         self.files.push(file);
         id
@@ -371,9 +376,9 @@ impl SourceMap {
         let source = source.into();
         let id = FileId::new(self.files.len() as u32);
         let base = self.next_base;
-        
+
         self.next_base = base + source.len() as u32 + 1;
-        
+
         let file = SourceFile::with_path(id, name, path, source, base);
         self.files.push(file);
         id
@@ -383,10 +388,11 @@ impl SourceMap {
     pub fn load_file(&mut self, path: impl AsRef<Path>) -> std::io::Result<FileId> {
         let path = path.as_ref();
         let source = std::fs::read_to_string(path)?;
-        let name = path.file_name()
+        let name = path
+            .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
-        
+
         Ok(self.add_file_with_path(name, path.to_path_buf(), source))
     }
 
@@ -485,14 +491,15 @@ impl fmt::Debug for SourceMap {
 
 impl SourceProvider for SourceMap {
     fn read_source(&self, path: &str) -> Option<String> {
-        self.files.iter()
+        self.files
+            .iter()
             .find(|f| f.name() == path)
             .map(|f| f.source().to_string())
     }
 }
 
 /// A location in a source file, combining file ID and span.
-/// 
+///
 /// Note: With global position space, Span alone is usually sufficient.
 /// This type is kept for backward compatibility.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -527,7 +534,10 @@ impl SourceLocation {
 
     /// Merges two locations, assuming they are in the same file.
     pub fn merge(self, other: SourceLocation) -> SourceLocation {
-        debug_assert_eq!(self.file, other.file, "Cannot merge locations from different files");
+        debug_assert_eq!(
+            self.file, other.file,
+            "Cannot merge locations from different files"
+        );
         SourceLocation {
             file: self.file,
             span: self.span.merge(other.span),
@@ -565,15 +575,15 @@ mod tests {
     #[test]
     fn test_source_map_global_positions() {
         let mut map = SourceMap::new();
-        
+
         // Add first file: 12 bytes, base = 0
         let id1 = map.add_file("file1.vo", "hello\nworld\n");
         // Add second file: 8 bytes, base = 13 (12 + 1 gap)
         let id2 = map.add_file("file2.vo", "content2");
-        
+
         let file1 = map.get_file(id1).unwrap();
         let file2 = map.get_file(id2).unwrap();
-        
+
         assert_eq!(file1.base(), 0);
         assert_eq!(file1.end_pos(), 12);
         assert_eq!(file2.base(), 13);
@@ -583,18 +593,18 @@ mod tests {
     #[test]
     fn test_lookup_file() {
         let mut map = SourceMap::new();
-        
+
         let id1 = map.add_file("file1.vo", "abcde"); // base=0, end=5
         let id2 = map.add_file("file2.vo", "fghij"); // base=6, end=11
-        
+
         // Position 0-4 should be in file1
         assert_eq!(map.lookup_file(BytePos::new(0)).unwrap().id(), id1);
         assert_eq!(map.lookup_file(BytePos::new(4)).unwrap().id(), id1);
-        
+
         // Position 6-10 should be in file2
         assert_eq!(map.lookup_file(BytePos::new(6)).unwrap().id(), id2);
         assert_eq!(map.lookup_file(BytePos::new(10)).unwrap().id(), id2);
-        
+
         // Position 5 is in the gap
         assert!(map.lookup_file(BytePos::new(5)).is_none());
     }
@@ -602,12 +612,12 @@ mod tests {
     #[test]
     fn test_global_line_col() {
         let mut map = SourceMap::new();
-        
+
         let _id1 = map.add_file("file1.vo", "abc\ndef"); // base=0
         let id2 = map.add_file("file2.vo", "xyz\n123"); // base=8
-        
+
         let file2 = map.get_file(id2).unwrap();
-        
+
         // In file2, position 8 is 'x' (line 1, col 1)
         assert_eq!(file2.line_col(BytePos::new(8)), LineCol::new(1, 1));
         // Position 12 is '1' (line 2, col 1)
@@ -617,13 +627,13 @@ mod tests {
     #[test]
     fn test_span_text_global() {
         let mut map = SourceMap::new();
-        
+
         let _id1 = map.add_file("file1.vo", "hello"); // base=0
         let _id2 = map.add_file("file2.vo", "world"); // base=6
-        
+
         // Get text from file1
         assert_eq!(map.span_text(Span::from_u32(0, 5)), Some("hello"));
-        
+
         // Get text from file2
         assert_eq!(map.span_text(Span::from_u32(6, 11)), Some("world"));
     }
@@ -631,9 +641,9 @@ mod tests {
     #[test]
     fn test_format_pos() {
         let mut map = SourceMap::new();
-        
+
         map.add_file("test.vo", "line1\nline2\nline3");
-        
+
         assert_eq!(map.format_pos(BytePos::new(0)), "test.vo:1:1");
         assert_eq!(map.format_pos(BytePos::new(6)), "test.vo:2:1");
         assert_eq!(map.format_pos(BytePos::new(12)), "test.vo:3:1");
@@ -642,7 +652,7 @@ mod tests {
     #[test]
     fn test_source_file_basic() {
         let file = SourceFile::new(FileId::new(0), "test.vo", "hello\nworld\n", 0);
-        
+
         assert_eq!(file.name(), "test.vo");
         assert_eq!(file.source(), "hello\nworld\n");
         assert_eq!(file.len(), 12);
@@ -654,7 +664,7 @@ mod tests {
     #[test]
     fn test_source_file_lines() {
         let file = SourceFile::new(FileId::new(0), "test.vo", "line1\nline2\nline3", 0);
-        
+
         assert_eq!(file.line_count(), 3);
         assert_eq!(file.line_start(0), Some(0));
         assert_eq!(file.line_start(1), Some(6));
@@ -670,15 +680,15 @@ mod tests {
     #[test]
     fn test_source_file_line_col() {
         let file = SourceFile::new(FileId::new(0), "test.vo", "abc\ndefgh\nij", 100);
-        
+
         // First line (with base offset 100)
         assert_eq!(file.line_col(BytePos(100)), LineCol::new(1, 1));
         assert_eq!(file.line_col(BytePos(102)), LineCol::new(1, 3));
-        
+
         // Second line
         assert_eq!(file.line_col(BytePos(104)), LineCol::new(2, 1));
         assert_eq!(file.line_col(BytePos(107)), LineCol::new(2, 4));
-        
+
         // Third line
         assert_eq!(file.line_col(BytePos(110)), LineCol::new(3, 1));
         assert_eq!(file.line_col(BytePos(111)), LineCol::new(3, 2));
@@ -687,7 +697,7 @@ mod tests {
     #[test]
     fn test_source_file_span_text() {
         let file = SourceFile::new(FileId::new(0), "test.vo", "hello world", 50);
-        
+
         assert_eq!(file.span_text(Span::from_u32(50, 55)), "hello");
         assert_eq!(file.span_text(Span::from_u32(56, 61)), "world");
         assert_eq!(file.span_text(Span::from_u32(50, 61)), "hello world");
@@ -696,7 +706,7 @@ mod tests {
     #[test]
     fn test_empty_file() {
         let file = SourceFile::new(FileId::new(0), "empty.vo", "", 0);
-        
+
         assert!(file.is_empty());
         assert_eq!(file.line_count(), 1);
         assert_eq!(file.line_content(0), Some(""));
@@ -705,7 +715,7 @@ mod tests {
     #[test]
     fn test_single_line_no_newline() {
         let file = SourceFile::new(FileId::new(0), "test.vo", "single line", 0);
-        
+
         assert_eq!(file.line_count(), 1);
         assert_eq!(file.line_content(0), Some("single line"));
     }
@@ -713,7 +723,7 @@ mod tests {
     #[test]
     fn test_trailing_newline() {
         let file = SourceFile::new(FileId::new(0), "test.vo", "line1\nline2\n", 0);
-        
+
         assert_eq!(file.line_count(), 3);
         assert_eq!(file.line_content(0), Some("line1"));
         assert_eq!(file.line_content(1), Some("line2"));
@@ -724,7 +734,7 @@ mod tests {
     fn test_source_location() {
         let loc = SourceLocation::new(FileId::new(0), Span::from_u32(10, 20));
         assert!(!loc.is_dummy());
-        
+
         let dummy = SourceLocation::dummy();
         assert!(dummy.is_dummy());
     }
@@ -734,7 +744,7 @@ mod tests {
         let loc1 = SourceLocation::new(FileId::new(0), Span::from_u32(10, 20));
         let loc2 = SourceLocation::new(FileId::new(0), Span::from_u32(15, 30));
         let merged = loc1.merge(loc2);
-        
+
         assert_eq!(merged.span.start.0, 10);
         assert_eq!(merged.span.end.0, 30);
     }

@@ -7,14 +7,14 @@
 //! All args are uniformly boxed as interface by codegen.
 
 #[cfg(not(feature = "std"))]
-use alloc::string::{String, ToString};
-#[cfg(not(feature = "std"))]
 use alloc::format;
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
 
 use vo_common_core::types::ValueKind;
 
-use crate::ffi::{ExternCallContext, ExternResult};
 use super::format::format_interface_with_ctx;
+use crate::ffi::{ExternCallContext, ExternResult};
 
 /// Format all interface{} args starting from `start_slot` into a space-separated string.
 /// Each arg is 2 slots: [slot0 = packed_info, slot1 = data]
@@ -22,7 +22,7 @@ fn format_args(call: &ExternCallContext, start_slot: u16) -> String {
     let arg_count = call.arg_count();
     let mut result = String::new();
     let mut slot = start_slot;
-    
+
     while slot + 2 <= arg_count {
         if !result.is_empty() {
             result.push(' ');
@@ -32,7 +32,7 @@ fn format_args(call: &ExternCallContext, start_slot: u16) -> String {
         result.push_str(&format_interface_with_ctx(slot0, slot1, Some(call)));
         slot += 2;
     }
-    
+
     result
 }
 
@@ -68,19 +68,19 @@ fn builtin_assert(call: &mut ExternCallContext) -> ExternResult {
 
 fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
     use crate::gc::Gc;
-    use crate::objects::{slice, array, string as str_obj};
+    use crate::objects::{array, slice, string as str_obj};
     use vo_common_core::types::ValueKind;
-    
+
     let dst = call.arg_ref(0);
     let src = call.arg_ref(1);
-    
+
     if dst.is_null() || src.is_null() {
         call.ret_i64(0, 0);
         return ExternResult::Ok;
     }
-    
+
     let dst_len = slice::len(dst);
-    
+
     // Check if src is a string (copy([]byte, string) case)
     let src_kind = Gc::header(src).value_meta.value_kind();
     let (src_len, src_ptr) = if src_kind == ValueKind::String {
@@ -90,21 +90,21 @@ fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
     } else {
         (slice::len(src), slice::data_ptr(src))
     };
-    
+
     let copy_len = dst_len.min(src_len);
-    
+
     if copy_len == 0 {
         call.ret_i64(0, 0);
         return ExternResult::Ok;
     }
-    
+
     let dst_arr = slice::array_ref(dst);
     let elem_bytes = array::elem_bytes(dst_arr);
     let dst_ptr = slice::data_ptr(dst);
-    
+
     // Use copy (not copy_nonoverlapping) to support overlapping regions (Go semantics)
     unsafe { core::ptr::copy(src_ptr, dst_ptr, copy_len * elem_bytes) };
-    
+
     call.ret_i64(0, copy_len as i64);
     ExternResult::Ok
 }
@@ -112,32 +112,32 @@ fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
 /// append(slice, other...) - append all elements from other slice/string
 /// Works for both slice and string sources since they have identical memory layout.
 fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
-    use crate::objects::{slice, array};
+    use crate::objects::{array, slice};
     use vo_common_core::types::ValueMeta;
-    
+
     let dst = call.arg_ref(0);
     let src = call.arg_ref(1);
     let elem_meta = ValueMeta::from_raw(call.arg_u64(2) as u32);
-    
+
     // Handle nil src
     if src.is_null() {
         call.ret_ref(0, dst);
         return ExternResult::Ok;
     }
-    
+
     // String and slice have identical layout, so we can use slice:: functions for both
     let src_len = slice::len(src);
     if src_len == 0 {
         call.ret_ref(0, dst);
         return ExternResult::Ok;
     }
-    
+
     let elem_bytes = if dst.is_null() {
         array::elem_bytes(slice::array_ref(src))
     } else {
         array::elem_bytes(slice::array_ref(dst))
     };
-    
+
     // Handle nil dst
     if dst.is_null() {
         let new_cap = src_len.max(4);
@@ -149,11 +149,11 @@ fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
         call.ret_ref(0, result);
         return ExternResult::Ok;
     }
-    
+
     let dst_len = slice::len(dst);
     let dst_cap = slice::cap(dst);
     let new_len = dst_len + src_len;
-    
+
     if new_len <= dst_cap {
         // Enough capacity - write to existing backing array, return new slice header
         let dst_ptr = slice::data_ptr(dst);
@@ -174,12 +174,16 @@ fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
         let src_ptr = slice::data_ptr(src);
         unsafe {
             core::ptr::copy_nonoverlapping(dst_ptr, new_arr_ptr, dst_len * elem_bytes);
-            core::ptr::copy_nonoverlapping(src_ptr, new_arr_ptr.add(dst_len * elem_bytes), src_len * elem_bytes);
+            core::ptr::copy_nonoverlapping(
+                src_ptr,
+                new_arr_ptr.add(dst_len * elem_bytes),
+                src_len * elem_bytes,
+            );
         }
         let result = slice::from_array_range(call.gc(), new_arr, 0, new_len);
         call.ret_ref(0, result);
     }
-    
+
     ExternResult::Ok
 }
 
@@ -188,31 +192,45 @@ fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
 /// Returns: bool (1 if equal, 0 if not)
 fn builtin_iface_eq(call: &mut ExternCallContext) -> ExternResult {
     use crate::objects::string as str_obj;
-    
+
     let left_slot0 = call.arg_u64(0);
     let left_slot1 = call.arg_u64(1);
     let right_slot0 = call.arg_u64(2);
     let right_slot1 = call.arg_u64(3);
-    
+
     // slot0 format: [itab_id:32 | rttid:24 | value_kind:8]
     let left_vk = ValueKind::from_u8((left_slot0 & 0xFF) as u8);
     let right_vk = ValueKind::from_u8((right_slot0 & 0xFF) as u8);
-    
+
     // If value_kinds differ, not equal (different dynamic types)
     if left_vk != right_vk {
         call.ret_bool(0, false);
         return ExternResult::Ok;
     }
-    
+
     // Compare based on value_kind
     let equal = match left_vk {
         ValueKind::Void => true, // both nil
-        ValueKind::Bool | ValueKind::Int | ValueKind::Int8 | ValueKind::Int16 | 
-        ValueKind::Int32 | ValueKind::Int64 | ValueKind::Uint | ValueKind::Uint8 | 
-        ValueKind::Uint16 | ValueKind::Uint32 | ValueKind::Uint64 |
-        ValueKind::Float32 | ValueKind::Float64 | ValueKind::Pointer | 
-        ValueKind::Slice | ValueKind::Map | ValueKind::Channel | ValueKind::Port | ValueKind::Closure |
-        ValueKind::Island => {
+        ValueKind::Bool
+        | ValueKind::Int
+        | ValueKind::Int8
+        | ValueKind::Int16
+        | ValueKind::Int32
+        | ValueKind::Int64
+        | ValueKind::Uint
+        | ValueKind::Uint8
+        | ValueKind::Uint16
+        | ValueKind::Uint32
+        | ValueKind::Uint64
+        | ValueKind::Float32
+        | ValueKind::Float64
+        | ValueKind::Pointer
+        | ValueKind::Slice
+        | ValueKind::Map
+        | ValueKind::Channel
+        | ValueKind::Port
+        | ValueKind::Closure
+        | ValueKind::Island => {
             // Immediate or reference identity comparison
             left_slot1 == right_slot1
         }
@@ -247,7 +265,7 @@ fn builtin_iface_eq(call: &mut ExternCallContext) -> ExternResult {
             left_slot0 == right_slot0 && left_slot1 == right_slot1
         }
     };
-    
+
     call.ret_bool(0, equal);
     ExternResult::Ok
 }
@@ -305,19 +323,21 @@ fn conv_str_runes(call: &mut ExternCallContext) -> ExternResult {
 fn panic_with_error(call: &mut ExternCallContext) -> ExternResult {
     let error_slot0 = call.arg_u64(0);
     let error_data = call.arg_u64(1);
-    
+
     // Use format_interface_with_ctx to properly extract error message
     let error_str = format_interface_with_ctx(error_slot0, error_data, Some(call));
     let msg = format!("panic: {}", error_str);
-    
+
     ExternResult::Panic(msg)
 }
 
-
 /// Register builtin extern functions (for no_std mode).
-pub fn register_externs(registry: &mut crate::ffi::ExternRegistry, externs: &[crate::bytecode::ExternDef]) {
+pub fn register_externs(
+    registry: &mut crate::ffi::ExternRegistry,
+    externs: &[crate::bytecode::ExternDef],
+) {
     use crate::ffi::ExternFn;
-    
+
     const TABLE: &[(&str, ExternFn)] = &[
         ("vo_print", builtin_print),
         ("vo_println", builtin_println),
@@ -332,7 +352,7 @@ pub fn register_externs(registry: &mut crate::ffi::ExternRegistry, externs: &[cr
         ("vo_conv_str_runes", conv_str_runes),
         ("panic_with_error", panic_with_error),
     ];
-    
+
     for (id, def) in externs.iter().enumerate() {
         for (name, func) in TABLE {
             if def.name == *name {

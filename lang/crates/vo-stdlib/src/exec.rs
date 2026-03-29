@@ -1,28 +1,28 @@
 //! os/exec package native function implementations.
 
 #[cfg(feature = "std")]
-use std::process::{Command, Stdio};
-#[cfg(all(feature = "std", unix))]
-use std::io::Read;
-#[cfg(feature = "std")]
 use std::collections::HashMap;
-#[cfg(feature = "std")]
-use std::sync::Mutex;
-#[cfg(all(feature = "std", unix))]
-use std::os::fd::{FromRawFd, IntoRawFd};
 #[cfg(all(feature = "std", unix))]
 use std::fs::File;
+#[cfg(all(feature = "std", unix))]
+use std::io::Read;
+#[cfg(all(feature = "std", unix))]
+use std::os::fd::{FromRawFd, IntoRawFd};
+#[cfg(feature = "std")]
+use std::process::{Command, Stdio};
+#[cfg(feature = "std")]
+use std::sync::Mutex;
 
 #[cfg(feature = "std")]
 use vo_ffi_macro::vostd_fn;
+#[cfg(feature = "std")]
+use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 #[cfg(feature = "std")]
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 #[cfg(feature = "std")]
 use vo_runtime::gc::{Gc, GcRef};
 #[cfg(feature = "std")]
 use vo_runtime::objects::slice;
-#[cfg(feature = "std")]
-use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 #[cfg(feature = "std")]
 use vo_runtime::slot::slot_to_ptr;
 
@@ -36,7 +36,10 @@ fn register_child(child: std::process::Child) -> i32 {
     let pid = child.id() as i32;
     let mut processes = CHILD_PROCESSES.lock().unwrap();
     let prev = processes.insert(pid, child);
-    assert!(prev.is_none(), "duplicate child pid in process table: {pid}");
+    assert!(
+        prev.is_none(),
+        "duplicate child pid in process table: {pid}"
+    );
     pid
 }
 
@@ -57,7 +60,11 @@ fn exec_start_process(call: &mut ExternCallContext) -> ExternResult {
     let stderr_fd = call.arg_i64(slots::ARG_STDERR) as i32;
 
     let args = read_string_slice(args_ref);
-    let env = if env_ref.is_null() { None } else { Some(read_string_slice(env_ref)) };
+    let env = if env_ref.is_null() {
+        None
+    } else {
+        Some(read_string_slice(env_ref))
+    };
 
     let mut cmd = Command::new(&path);
     if let Err(e) = configure_command(&mut cmd, &args, &dir, env.as_deref()) {
@@ -110,7 +117,12 @@ fn configure_command(
 }
 
 #[cfg(feature = "std")]
-fn configure_stdio(cmd: &mut Command, stdin_fd: i32, stdout_fd: i32, stderr_fd: i32) -> std::io::Result<()> {
+fn configure_stdio(
+    cmd: &mut Command,
+    stdin_fd: i32,
+    stdout_fd: i32,
+    stderr_fd: i32,
+) -> std::io::Result<()> {
     cmd.stdin(fd_to_stdio(stdin_fd)?);
     cmd.stdout(fd_to_stdio(stdout_fd)?);
     cmd.stderr(fd_to_stdio(stderr_fd)?);
@@ -201,11 +213,19 @@ fn write_process_state(
     unsafe {
         Gc::write_slot(state, PS_PID, pid as u64);
         Gc::write_slot(state, PS_EXIT_CODE, status.code().unwrap_or(-1) as u64);
-        Gc::write_slot(state, PS_EXITED, if status.code().is_some() { 1 } else { 0 });
+        Gc::write_slot(
+            state,
+            PS_EXITED,
+            if status.code().is_some() { 1 } else { 0 },
+        );
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
-            Gc::write_slot(state, PS_SIGNALED, if status.signal().is_some() { 1 } else { 0 });
+            Gc::write_slot(
+                state,
+                PS_SIGNALED,
+                if status.signal().is_some() { 1 } else { 0 },
+            );
             Gc::write_slot(state, PS_SIGNAL, status.signal().unwrap_or(0) as u64);
         }
         #[cfg(not(unix))]
@@ -253,7 +273,11 @@ fn exec_run_capture_output(call: &mut ExternCallContext) -> ExternResult {
     let combined = call.arg_i64(slots::ARG_COMBINED) != 0;
 
     let args = read_string_slice(args_ref);
-    let env = if env_ref.is_null() { None } else { Some(read_string_slice(env_ref)) };
+    let env = if env_ref.is_null() {
+        None
+    } else {
+        Some(read_string_slice(env_ref))
+    };
 
     let mut cmd = Command::new(&path);
     if let Err(e) = configure_command(&mut cmd, &args, &dir, env.as_deref()) {
@@ -286,7 +310,11 @@ fn exec_run_capture_output(call: &mut ExternCallContext) -> ExternResult {
             if status.success() {
                 write_nil_error(call, 3);
             } else {
-                write_error_to(call, 3, &format!("exit status {}", status.code().unwrap_or(-1)));
+                write_error_to(
+                    call,
+                    3,
+                    &format!("exit status {}", status.code().unwrap_or(-1)),
+                );
             }
         }
         Err(e) => {
@@ -300,7 +328,9 @@ fn exec_run_capture_output(call: &mut ExternCallContext) -> ExternResult {
 }
 
 #[cfg(all(feature = "std", unix))]
-fn run_combined_output(mut cmd: Command) -> std::io::Result<(Vec<u8>, std::process::ExitStatus, u32)> {
+fn run_combined_output(
+    mut cmd: Command,
+) -> std::io::Result<(Vec<u8>, std::process::ExitStatus, u32)> {
     let (read_fd, write_fd) = nix::unistd::pipe()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
@@ -340,14 +370,19 @@ fn run_combined_output(mut cmd: Command) -> std::io::Result<(Vec<u8>, std::proce
 }
 
 #[cfg(all(feature = "std", not(unix)))]
-fn run_combined_output(mut cmd: Command) -> std::io::Result<(Vec<u8>, std::process::ExitStatus, u32)> {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().and_then(|child| {
-        let pid = child.id();
-        let output = child.wait_with_output()?;
-        let mut data = output.stdout;
-        data.extend(output.stderr);
-        Ok((data, output.status, pid))
-    })
+fn run_combined_output(
+    mut cmd: Command,
+) -> std::io::Result<(Vec<u8>, std::process::ExitStatus, u32)> {
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|child| {
+            let pid = child.id();
+            let output = child.wait_with_output()?;
+            let mut data = output.stdout;
+            data.extend(output.stderr);
+            Ok((data, output.status, pid))
+        })
 }
 
 #[cfg(feature = "std")]

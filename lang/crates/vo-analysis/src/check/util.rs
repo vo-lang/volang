@@ -3,7 +3,6 @@
 //! This module provides utility types, macros, and functions used throughout
 //! the type checking process.
 
-
 use std::cmp::Ordering;
 
 use vo_common::span::Span;
@@ -41,12 +40,7 @@ pub enum UnpackResult<'a> {
 
 impl<'a> UnpackResult<'a> {
     /// Get the i-th value from the unpacked result.
-    pub(crate) fn get(
-        &self,
-        checker: &mut Checker,
-        x: &mut Operand,
-        i: usize,
-    ) {
+    pub(crate) fn get(&self, checker: &mut Checker, x: &mut Operand, i: usize) {
         match self {
             UnpackResult::Tuple(expr, types, _) => {
                 x.mode = OperandMode::Value;
@@ -88,11 +82,7 @@ impl<'a> UnpackResult<'a> {
     }
 
     /// Use (type-check) remaining expressions starting from index `from`.
-    pub(crate) fn use_(
-        &self,
-        checker: &mut Checker,
-        from: usize,
-    ) {
+    pub(crate) fn use_(&self, checker: &mut Checker, from: usize) {
         let exprs = match self {
             UnpackResult::Multiple(exprs, _) => exprs,
             _ => return,
@@ -103,7 +93,6 @@ impl<'a> UnpackResult<'a> {
             checker.multi_expr(&mut x, &exprs[i]);
         }
     }
-
 }
 
 /// Wrapper for UnpackResult with consumed operands.
@@ -131,12 +120,7 @@ impl<'a> UnpackedResultLeftovers<'a> {
     }
 
     /// Get the i-th value, considering already consumed operands.
-    pub(crate) fn get(
-        &self,
-        checker: &mut Checker,
-        x: &mut Operand,
-        i: usize,
-    ) {
+    pub(crate) fn get(&self, checker: &mut Checker, x: &mut Operand, i: usize) {
         if let Some(consumed) = self.consumed {
             if i < consumed.len() {
                 let c = &consumed[i];
@@ -170,12 +154,20 @@ impl Checker {
 
     /// Report an invalid argument error.
     pub(crate) fn invalid_arg(&self, span: Span, err: &str) {
-        self.error_code_msg(TypeError::InvalidOp, span, format!("invalid argument: {}", err));
+        self.error_code_msg(
+            TypeError::InvalidOp,
+            span,
+            format!("invalid argument: {}", err),
+        );
     }
 
     /// Report an invalid operation error.
     pub(crate) fn invalid_op(&self, span: Span, err: &str) {
-        self.error_code_msg(TypeError::InvalidOp, span, format!("invalid operation: {}", err));
+        self.error_code_msg(
+            TypeError::InvalidOp,
+            span,
+            format!("invalid operation: {}", err),
+        );
     }
 
     /// Check if obj appears in path (cycle detection).
@@ -185,7 +177,10 @@ impl Checker {
             if report {
                 let obj_val = self.lobj(okey);
                 let pos = obj_val.pos();
-                let span = Span::new(vo_common::BytePos(pos as u32), vo_common::BytePos(pos as u32));
+                let span = Span::new(
+                    vo_common::BytePos(pos as u32),
+                    vo_common::BytePos(pos as u32),
+                );
                 self.error_code_msg(
                     TypeError::IllegalCycle,
                     span,
@@ -195,11 +190,21 @@ impl Checker {
                 for o in path[i..].iter() {
                     let oval = self.lobj(*o);
                     let pos = oval.pos();
-                    let span = Span::new(vo_common::BytePos(pos as u32), vo_common::BytePos(pos as u32));
-                    self.error_code_msg(TypeError::RefersTo, span, format!("\t{} refers to", oval.name()));
+                    let span = Span::new(
+                        vo_common::BytePos(pos as u32),
+                        vo_common::BytePos(pos as u32),
+                    );
+                    self.error_code_msg(
+                        TypeError::RefersTo,
+                        span,
+                        format!("\t{} refers to", oval.name()),
+                    );
                 }
                 let pos = obj_val.pos();
-                let span = Span::new(vo_common::BytePos(pos as u32), vo_common::BytePos(pos as u32));
+                let span = Span::new(
+                    vo_common::BytePos(pos as u32),
+                    vo_common::BytePos(pos as u32),
+                );
                 self.error_code_msg(TypeError::RefersTo, span, format!("\t{}", obj_val.name()));
             }
             return true;
@@ -269,7 +274,10 @@ impl Checker {
         let mut x = Operand::new();
         for e in lhs.iter() {
             let v: Option<(ObjKey, bool)> = match Self::unparen(e) {
-                Expr { kind: ExprKind::Ident(ident), .. } => {
+                Expr {
+                    kind: ExprKind::Ident(ident),
+                    ..
+                } => {
                     if ident.symbol.is_dummy() {
                         continue;
                     }
@@ -356,76 +364,122 @@ impl Checker {
     pub(crate) fn invalid_type(&self) -> TypeKey {
         self.basic_type(BasicType::Invalid)
     }
-    
+
     // =========================================================================
     // TCObjects access helpers
     // =========================================================================
-    
+
     /// Get a reference to the TCObjects.
     #[inline]
     pub(crate) fn objs(&self) -> &TCObjects {
         &self.tc_objs
     }
-    
+
     // Factory method wrappers
-    
+
     #[inline]
-    pub(crate) fn new_scope(&mut self, parent: Option<ScopeKey>, pos: usize, end: usize, comment: &str, is_func: bool) -> ScopeKey {
+    pub(crate) fn new_scope(
+        &mut self,
+        parent: Option<ScopeKey>,
+        pos: usize,
+        end: usize,
+        comment: &str,
+        is_func: bool,
+    ) -> ScopeKey {
         self.tc_objs.new_scope(parent, pos, end, comment, is_func)
     }
-    
+
     #[inline]
     pub(crate) fn new_package(&mut self, path: String, abi_path: String) -> PackageKey {
         self.tc_objs.new_package(path, abi_path)
     }
-    
+
     #[inline]
-    pub(crate) fn new_const(&mut self, span: Span, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>, val: crate::constant::Value) -> ObjKey {
+    pub(crate) fn new_const(
+        &mut self,
+        span: Span,
+        pkg: Option<PackageKey>,
+        name: String,
+        typ: Option<TypeKey>,
+        val: crate::constant::Value,
+    ) -> ObjKey {
         self.tc_objs.new_const(span, pkg, name, typ, val)
     }
-    
+
     #[inline]
-    pub(crate) fn new_var(&mut self, span: Span, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
+    pub(crate) fn new_var(
+        &mut self,
+        span: Span,
+        pkg: Option<PackageKey>,
+        name: String,
+        typ: Option<TypeKey>,
+    ) -> ObjKey {
         self.tc_objs.new_var(span, pkg, name, typ)
     }
-    
+
     #[inline]
-    pub(crate) fn new_param_var(&mut self, span: Span, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
+    pub(crate) fn new_param_var(
+        &mut self,
+        span: Span,
+        pkg: Option<PackageKey>,
+        name: String,
+        typ: Option<TypeKey>,
+    ) -> ObjKey {
         self.tc_objs.new_param_var(span, pkg, name, typ)
     }
-    
+
     #[inline]
-    pub(crate) fn new_field(&mut self, span: Span, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>, embedded: bool) -> ObjKey {
+    pub(crate) fn new_field(
+        &mut self,
+        span: Span,
+        pkg: Option<PackageKey>,
+        name: String,
+        typ: Option<TypeKey>,
+        embedded: bool,
+    ) -> ObjKey {
         self.tc_objs.new_field(span, pkg, name, typ, embedded)
     }
-    
+
     #[inline]
-    pub(crate) fn new_func(&mut self, span: Span, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>, has_body: bool) -> ObjKey {
+    pub(crate) fn new_func(
+        &mut self,
+        span: Span,
+        pkg: Option<PackageKey>,
+        name: String,
+        typ: Option<TypeKey>,
+        has_body: bool,
+    ) -> ObjKey {
         self.tc_objs.new_func(span, pkg, name, typ, has_body)
     }
-    
+
     #[inline]
-    pub(crate) fn new_type_name(&mut self, span: Span, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
+    pub(crate) fn new_type_name(
+        &mut self,
+        span: Span,
+        pkg: Option<PackageKey>,
+        name: String,
+        typ: Option<TypeKey>,
+    ) -> ObjKey {
         self.tc_objs.new_type_name(span, pkg, name, typ)
     }
-    
+
     // Type creation wrappers
-    
+
     #[inline]
     pub(crate) fn new_t_array(&mut self, elem: TypeKey, len: Option<u64>) -> TypeKey {
         self.tc_objs.new_t_array(elem, len)
     }
-    
+
     #[inline]
     pub(crate) fn new_t_slice(&mut self, elem: TypeKey) -> TypeKey {
         self.tc_objs.new_t_slice(elem)
     }
-    
+
     #[inline]
     pub(crate) fn new_t_map(&mut self, key: TypeKey, value: TypeKey) -> TypeKey {
         self.tc_objs.new_t_map(key, value)
     }
-    
+
     #[inline]
     pub(crate) fn new_t_chan(&mut self, dir: typ::ChanDir, elem: TypeKey) -> TypeKey {
         self.tc_objs.new_t_chan(dir, elem)
@@ -444,20 +498,24 @@ impl Checker {
             ast::ChanDir::Recv => typ::ChanDir::RecvOnly,
         }
     }
-    
+
     #[inline]
     pub(crate) fn new_t_island(&mut self) -> TypeKey {
         self.tc_objs.new_t_island()
     }
-    
+
     #[inline]
     pub(crate) fn new_t_pointer(&mut self, base: TypeKey) -> TypeKey {
         self.tc_objs.new_t_pointer(base)
     }
-    
+
     /// Create pointer type with validation that base is struct.
     /// Returns invalid_type and reports error if base is not struct.
-    pub(crate) fn new_t_pointer_checked(&mut self, base: TypeKey, span: vo_common::span::Span) -> TypeKey {
+    pub(crate) fn new_t_pointer_checked(
+        &mut self,
+        base: TypeKey,
+        span: vo_common::span::Span,
+    ) -> TypeKey {
         let invalid_type = self.invalid_type();
         if base == invalid_type {
             return invalid_type;
@@ -476,17 +534,21 @@ impl Checker {
         }
         self.tc_objs.new_t_pointer(base)
     }
-    
+
     #[inline]
     pub(crate) fn new_t_tuple(&mut self, vars: Vec<ObjKey>) -> TypeKey {
         self.tc_objs.new_t_tuple(vars)
     }
-    
+
     #[inline]
-    pub(crate) fn new_t_struct(&mut self, fields: Vec<ObjKey>, tags: Option<Vec<Option<String>>>) -> TypeKey {
+    pub(crate) fn new_t_struct(
+        &mut self,
+        fields: Vec<ObjKey>,
+        tags: Option<Vec<Option<String>>>,
+    ) -> TypeKey {
         self.tc_objs.new_t_struct(fields, tags)
     }
-    
+
     #[inline]
     pub(crate) fn new_t_signature(
         &mut self,
@@ -496,29 +558,39 @@ impl Checker {
         results: TypeKey,
         variadic: bool,
     ) -> TypeKey {
-        self.tc_objs.new_t_signature(scope, recv, params, results, variadic)
+        self.tc_objs
+            .new_t_signature(scope, recv, params, results, variadic)
     }
-    
+
     #[inline]
-    pub(crate) fn new_t_interface(&mut self, methods: Vec<ObjKey>, embeddeds: Vec<TypeKey>) -> TypeKey {
+    pub(crate) fn new_t_interface(
+        &mut self,
+        methods: Vec<ObjKey>,
+        embeddeds: Vec<TypeKey>,
+    ) -> TypeKey {
         self.tc_objs.new_t_interface(methods, embeddeds)
     }
-    
+
     #[inline]
     pub(crate) fn new_t_empty_interface(&mut self) -> TypeKey {
         self.tc_objs.new_t_empty_interface()
     }
-    
+
     #[inline]
-    pub(crate) fn new_t_named(&mut self, obj: Option<ObjKey>, underlying: Option<TypeKey>, methods: Vec<ObjKey>) -> TypeKey {
+    pub(crate) fn new_t_named(
+        &mut self,
+        obj: Option<ObjKey>,
+        underlying: Option<TypeKey>,
+        methods: Vec<ObjKey>,
+    ) -> TypeKey {
         self.tc_objs.new_t_named(obj, underlying, methods)
     }
-    
+
     /// Format a type as a string for error messages.
     pub(crate) fn type_str(&self, t: TypeKey) -> String {
         crate::display::type_string(t, &self.tc_objs)
     }
-    
+
     /// Get span from an object.
     pub(crate) fn obj_span(&self, okey: ObjKey) -> Span {
         self.lobj(okey).span()

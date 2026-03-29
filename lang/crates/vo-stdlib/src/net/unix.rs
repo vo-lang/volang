@@ -1,15 +1,15 @@
 //! Unix domain socket implementations.
 
-use std::os::unix::net::{UnixStream, UnixListener};
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::net::{UnixListener, UnixStream};
 
 use vo_ffi_macro::vostd_fn;
-use vo_runtime::ffi::{ExternCallContext, ExternResult};
-use vo_runtime::io::{IoHandle, CompletionData, Completion};
-use vo_runtime::objects::slice;
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
+use vo_runtime::ffi::{ExternCallContext, ExternResult};
+use vo_runtime::io::{Completion, CompletionData, IoHandle};
+use vo_runtime::objects::slice;
 
-use super::{UNIX_CONN_HANDLES, UNIX_LISTENER_HANDLES, next_handle, write_io_error};
+use super::{next_handle, write_io_error, UNIX_CONN_HANDLES, UNIX_LISTENER_HANDLES};
 
 fn register_unix_conn(conn: UnixStream) -> i32 {
     // Set non-blocking for async I/O
@@ -19,7 +19,12 @@ fn register_unix_conn(conn: UnixStream) -> i32 {
     h
 }
 
-fn set_deadline(conn: &UnixStream, deadline_ns: i64, read: bool, write: bool) -> std::io::Result<()> {
+fn set_deadline(
+    conn: &UnixStream,
+    deadline_ns: i64,
+    read: bool,
+    write: bool,
+) -> std::io::Result<()> {
     let timeout = super::deadline_to_timeout(deadline_ns);
     if read {
         conn.set_read_timeout(timeout)?;
@@ -66,7 +71,7 @@ fn handle_rw_completion(
 #[vostd_fn("net", "unixDial", std)]
 pub fn net_unix_dial(call: &mut ExternCallContext) -> ExternResult {
     let address = call.arg_str(slots::ARG_ADDRESS).to_string();
-    
+
     match UnixStream::connect(&address) {
         Ok(stream) => {
             let h = register_unix_conn(stream);
@@ -84,7 +89,7 @@ pub fn net_unix_dial(call: &mut ExternCallContext) -> ExternResult {
 #[vostd_fn("net", "unixListen", std)]
 pub fn net_unix_listen(call: &mut ExternCallContext) -> ExternResult {
     let address = call.arg_str(slots::ARG_ADDRESS).to_string();
-    
+
     match UnixListener::bind(&address) {
         Ok(listener) => {
             let h = register_unix_listener(listener);
@@ -169,7 +174,14 @@ pub fn net_unix_conn_write(call: &mut ExternCallContext) -> ExternResult {
     handle_rw_completion(call, c, slots::RET_0, slots::RET_1, false)
 }
 
-fn do_set_deadline(call: &mut ExternCallContext, handle: i32, deadline_ns: i64, ret_slot: u16, read: bool, write: bool) -> ExternResult {
+fn do_set_deadline(
+    call: &mut ExternCallContext,
+    handle: i32,
+    deadline_ns: i64,
+    ret_slot: u16,
+    read: bool,
+    write: bool,
+) -> ExternResult {
     let handles = UNIX_CONN_HANDLES.lock().unwrap();
     if let Some(conn) = handles.get(&handle) {
         match set_deadline(conn, deadline_ns, read, write) {
@@ -206,7 +218,7 @@ pub fn net_unix_conn_set_write_deadline(call: &mut ExternCallContext) -> ExternR
 #[vostd_fn("net", "unixConnClose", std)]
 pub fn net_unix_conn_close(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
-    
+
     if UNIX_CONN_HANDLES.lock().unwrap().remove(&handle).is_some() {
         write_nil_error(call, slots::RET_0);
     } else {
@@ -219,7 +231,7 @@ pub fn net_unix_conn_close(call: &mut ExternCallContext) -> ExternResult {
 pub fn net_unix_listener_accept(call: &mut ExternCallContext) -> ExternResult {
     let resume_token = call.take_resume_io_token();
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
-    
+
     let fd = {
         let handles = UNIX_LISTENER_HANDLES.lock().unwrap();
         match handles.get(&handle) {
@@ -272,8 +284,13 @@ fn handle_accept_completion(
 #[vostd_fn("net", "unixListenerClose", std)]
 pub fn net_unix_listener_close(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
-    
-    if UNIX_LISTENER_HANDLES.lock().unwrap().remove(&handle).is_some() {
+
+    if UNIX_LISTENER_HANDLES
+        .lock()
+        .unwrap()
+        .remove(&handle)
+        .is_some()
+    {
         write_nil_error(call, slots::RET_0);
     } else {
         write_error_to(call, slots::RET_0, "use of closed network connection");

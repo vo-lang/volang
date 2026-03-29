@@ -1,36 +1,39 @@
 //! Integration tests: parse → check → codegen → VM
 
-use vo_analysis::{Checker, Project, AnalysisError};
-use vo_analysis::importer::NullImporter;
-use vo_codegen::compile_project;
-use vo_syntax::parser;
-use vo_common::SourceMap;
-use vo_vm::vm::Vm;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use vo_analysis::importer::NullImporter;
+use vo_analysis::{AnalysisError, Checker, Project};
+use vo_codegen::compile_project;
+use vo_common::SourceMap;
+use vo_syntax::parser;
+use vo_vm::vm::Vm;
 
 /// Helper: analyze a single source string (no imports) for tests
 fn analyze_source(source: &str) -> Result<Project, AnalysisError> {
     use vo_analysis::arena::ArenaKey;
     use vo_analysis::objects::PackageKey;
-    
+
     let (file, diags, interner) = parser::parse(source, 0);
     if diags.has_errors() {
         return Err(AnalysisError::Parse(diags, SourceMap::new()));
     }
-    
+
     let mut checker = Checker::new_with_trace(PackageKey::null(), interner.clone(), false);
     let main_pkg_key = checker
         .tc_objs
         .new_package("main".to_string(), "main".to_string());
     checker.pkg = main_pkg_key;
-    
+
     let mut importer = NullImporter::new(PathBuf::from("."));
-    if checker.check_with_importer(&[file.clone()], &mut importer).is_err() {
+    if checker
+        .check_with_importer(&[file.clone()], &mut importer)
+        .is_err()
+    {
         let diags = checker.diagnostics.take();
         return Err(AnalysisError::Check(diags, SourceMap::new()));
     }
-    
+
     Ok(Project {
         tc_objs: checker.tc_objs,
         interner,
@@ -54,16 +57,16 @@ fn compile_source(source: &str) -> vo_vm::bytecode::Module {
 /// Helper: compile and run, verify execution completes
 fn compile_and_run(source: &str) {
     let module = compile_source(source);
-    
+
     println!("Running VM with {} functions", module.functions.len());
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
     }
-    
+
     let mut vm = Vm::new();
     vm.load(module);
     vm.run().expect("VM execution failed");
-    
+
     println!("✓ VM execution completed");
 }
 
@@ -76,12 +79,15 @@ func main() int {
     return 42
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     // Verify module structure
-    assert!(!module.functions.is_empty(), "should have at least one function");
-    
+    assert!(
+        !module.functions.is_empty(),
+        "should have at least one function"
+    );
+
     println!("✓ Compiled simple int literal");
     println!("  Functions: {}", module.functions.len());
     for (i, f) in module.functions.iter().enumerate() {
@@ -99,9 +105,9 @@ func main() int {
     return x
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled simple arithmetic");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -122,9 +128,9 @@ func main() int {
     return x + y
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled variable declaration");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -144,9 +150,9 @@ func main() int {
     return 0
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled if statement");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -169,9 +175,9 @@ func main() int {
     return sum
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled for loop");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -193,9 +199,9 @@ func main() int {
     return p.x + p.y
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled struct field access");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -215,9 +221,9 @@ func main() int {
     return arr[0] + arr[1] + arr[2]
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled array index");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -239,11 +245,21 @@ func main() {
 "#;
 
     let module = compile_source(source);
-    let worker = module.functions.iter().find(|f| f.name == "worker")
+    let worker = module
+        .functions
+        .iter()
+        .find(|f| f.name == "worker")
         .expect("worker function should be compiled");
 
-    assert_eq!(worker.param_types.len(), 1, "worker should record one transfer param");
-    assert_eq!(worker.param_types[0].slots, 1, "string param should occupy one transfer slot");
+    assert_eq!(
+        worker.param_types.len(),
+        1,
+        "worker should record one transfer param"
+    );
+    assert_eq!(
+        worker.param_types[0].slots, 1,
+        "string param should occupy one transfer slot"
+    );
 }
 
 #[test]
@@ -266,16 +282,29 @@ func main() {
 "#;
 
     let module = compile_source(source);
-    let wrappers: Vec<_> = module.functions.iter()
+    let wrappers: Vec<_> = module
+        .functions
+        .iter()
         .filter(|f| f.name.starts_with("__method_value_iface_Read_0_t"))
         .collect();
 
-    assert_eq!(wrappers.len(), 2, "distinct interface method values must get distinct wrappers");
-    assert_eq!(wrappers[0].param_types.len(), 1, "method value wrapper transfer params exclude captured receiver");
-    assert_eq!(wrappers[1].param_types.len(), 1, "method value wrapper transfer params exclude captured receiver");
+    assert_eq!(
+        wrappers.len(),
+        2,
+        "distinct interface method values must get distinct wrappers"
+    );
+    assert_eq!(
+        wrappers[0].param_types.len(),
+        1,
+        "method value wrapper transfer params exclude captured receiver"
+    );
+    assert_eq!(
+        wrappers[1].param_types.len(),
+        1,
+        "method value wrapper transfer params exclude captured receiver"
+    );
     assert_ne!(
-        wrappers[0].param_types[0].rttid_raw,
-        wrappers[1].param_types[0].rttid_raw,
+        wrappers[0].param_types[0].rttid_raw, wrappers[1].param_types[0].rttid_raw,
         "different interface method params must preserve distinct transfer metadata",
     );
 }
@@ -300,21 +329,33 @@ func main() {
 "#;
 
     let module = compile_source(source);
-    let wrappers: Vec<_> = module.functions.iter()
+    let wrappers: Vec<_> = module
+        .functions
+        .iter()
         .filter(|f| f.name.starts_with("Read$mexpr_iface_0_t"))
         .collect();
 
-    assert_eq!(wrappers.len(), 2, "distinct interface method expressions must get distinct wrappers");
-    assert_eq!(wrappers[0].param_types.len(), 2, "method expression wrapper transfer params include receiver plus declared params");
-    assert_eq!(wrappers[1].param_types.len(), 2, "method expression wrapper transfer params include receiver plus declared params");
+    assert_eq!(
+        wrappers.len(),
+        2,
+        "distinct interface method expressions must get distinct wrappers"
+    );
+    assert_eq!(
+        wrappers[0].param_types.len(),
+        2,
+        "method expression wrapper transfer params include receiver plus declared params"
+    );
+    assert_eq!(
+        wrappers[1].param_types.len(),
+        2,
+        "method expression wrapper transfer params include receiver plus declared params"
+    );
     assert_ne!(
-        wrappers[0].param_types[0].rttid_raw,
-        wrappers[1].param_types[0].rttid_raw,
+        wrappers[0].param_types[0].rttid_raw, wrappers[1].param_types[0].rttid_raw,
         "different interface receivers must preserve distinct transfer metadata",
     );
     assert_ne!(
-        wrappers[0].param_types[1].rttid_raw,
-        wrappers[1].param_types[1].rttid_raw,
+        wrappers[0].param_types[1].rttid_raw, wrappers[1].param_types[1].rttid_raw,
         "different interface method params must preserve distinct transfer metadata",
     );
 }
@@ -339,16 +380,36 @@ func main() {
 "#;
 
     let module = compile_source(source);
-    let wrappers: Vec<_> = module.functions.iter()
+    let wrappers: Vec<_> = module
+        .functions
+        .iter()
         .filter(|f| f.name.starts_with("__method_value_") && !f.name.contains("iface"))
         .collect();
 
-    assert_eq!(wrappers.len(), 1, "expected exactly one static method value wrapper");
+    assert_eq!(
+        wrappers.len(),
+        1,
+        "expected exactly one static method value wrapper"
+    );
     let wrapper = wrappers[0];
-    assert_eq!(wrapper.capture_slot_types, vec![vo_runtime::SlotType::GcRef]);
-    assert_eq!(wrapper.capture_types.len(), 1, "method value wrapper should record captured receiver transfer type");
-    assert_eq!(wrapper.capture_types[0].slots, 2, "boxed value receiver should preserve full receiver slot count");
-    assert_eq!(wrapper.param_types.len(), 1, "wrapper transfer params exclude captured receiver");
+    assert_eq!(
+        wrapper.capture_slot_types,
+        vec![vo_runtime::SlotType::GcRef]
+    );
+    assert_eq!(
+        wrapper.capture_types.len(),
+        1,
+        "method value wrapper should record captured receiver transfer type"
+    );
+    assert_eq!(
+        wrapper.capture_types[0].slots, 2,
+        "boxed value receiver should preserve full receiver slot count"
+    );
+    assert_eq!(
+        wrapper.param_types.len(),
+        1,
+        "wrapper transfer params exclude captured receiver"
+    );
     assert_eq!(
         wrapper.slot_types,
         vec![
@@ -382,16 +443,36 @@ func main() {
 "#;
 
     let module = compile_source(source);
-    let wrappers: Vec<_> = module.functions.iter()
+    let wrappers: Vec<_> = module
+        .functions
+        .iter()
         .filter(|f| f.name.starts_with("__method_value_iface_Read_0_t"))
         .collect();
 
-    assert_eq!(wrappers.len(), 1, "expected exactly one interface method value wrapper");
+    assert_eq!(
+        wrappers.len(),
+        1,
+        "expected exactly one interface method value wrapper"
+    );
     let wrapper = wrappers[0];
-    assert_eq!(wrapper.capture_slot_types, vec![vo_runtime::SlotType::GcRef]);
-    assert_eq!(wrapper.capture_types.len(), 1, "interface method value wrapper should capture one interface box");
-    assert_eq!(wrapper.capture_types[0].slots, 2, "interface capture box must preserve both interface slots");
-    assert_eq!(wrapper.param_types.len(), 1, "wrapper transfer params exclude captured receiver");
+    assert_eq!(
+        wrapper.capture_slot_types,
+        vec![vo_runtime::SlotType::GcRef]
+    );
+    assert_eq!(
+        wrapper.capture_types.len(),
+        1,
+        "interface method value wrapper should capture one interface box"
+    );
+    assert_eq!(
+        wrapper.capture_types[0].slots, 2,
+        "interface capture box must preserve both interface slots"
+    );
+    assert_eq!(
+        wrapper.param_types.len(),
+        1,
+        "wrapper transfer params exclude captured receiver"
+    );
     assert_eq!(
         wrapper.slot_types,
         vec![
@@ -423,11 +504,17 @@ func main() {
 "#;
 
     let module = compile_source(source);
-    let wrappers: Vec<_> = module.functions.iter()
+    let wrappers: Vec<_> = module
+        .functions
+        .iter()
         .filter(|f| f.name == "Read$defer_iface_0")
         .collect();
 
-    assert_eq!(wrappers.len(), 1, "expected exactly one defer interface wrapper");
+    assert_eq!(
+        wrappers.len(),
+        1,
+        "expected exactly one defer interface wrapper"
+    );
     let wrapper = wrappers[0];
     assert_eq!(
         wrapper.slot_types,
@@ -454,9 +541,9 @@ func main() int {
     return add(10, 20)
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled function call");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -476,9 +563,9 @@ func main() int {
     return len(arr)
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled builtin len");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -542,9 +629,9 @@ func main() int {
     return x
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled non-escaped int (stack allocation)");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -552,7 +639,7 @@ func main() int {
             println!("    [{j}] {:?}", inst);
         }
     }
-    
+
     // Should use Copy/LoadInt, not PtrNew/PtrGet
     let main_fn = &module.functions[0];
     let has_ptr_new = main_fn.code.iter().any(|i| i.op == 18); // PtrNew = 18
@@ -575,9 +662,9 @@ func main() int {
     return p.x + p.y
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled non-escaped struct (stack allocation)");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -618,9 +705,9 @@ func main() int {
     return p.x
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled escaped struct with value semantics");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -628,7 +715,7 @@ func main() int {
             println!("    [{j}] {:?}", inst);
         }
     }
-    
+
     // p escapes because &p is taken
     // p2 = p should use PtrClone (deep copy), not Copy (shallow)
     // This ensures value semantics for escaped struct
@@ -648,9 +735,9 @@ func main() int {
     return f()
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled escaped int (closure capture)");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -658,7 +745,7 @@ func main() int {
             println!("    [{j}] {:?}", inst);
         }
     }
-    
+
     // x should escape because it's captured by closure
 }
 
@@ -688,9 +775,9 @@ func main() int {
     return ptr.x
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled pointer with reference semantics");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -698,7 +785,7 @@ func main() int {
             println!("    [{j}] {:?}", inst);
         }
     }
-    
+
     // ptr2 = ptr should use Copy (shallow), not PtrClone
     // Both pointers reference the same heap object
 }
@@ -721,9 +808,9 @@ func main() int {
     return p1.x
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled struct value copy");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -731,7 +818,7 @@ func main() int {
             println!("    [{j}] {:?}", inst);
         }
     }
-    
+
     // p1.x should still be 10 (value semantics)
 }
 
@@ -752,9 +839,9 @@ func main() int {
     return 0
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled empty interface assign struct");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -762,7 +849,7 @@ func main() int {
             println!("    [{j}] {:?}", inst);
         }
     }
-    
+
     // Should see IfaceAssign instruction
 }
 
@@ -791,9 +878,9 @@ func main() int {
     return a.Add()
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled interface method call");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -801,7 +888,7 @@ func main() int {
             println!("    [{j}] {:?}", inst);
         }
     }
-    
+
     // Should see:
     // 1. IfaceAssign to assign struct to interface
     // 2. CallIface to call interface method
@@ -822,9 +909,9 @@ func main() int {
     return sum
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled stack array iteration");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -832,7 +919,7 @@ func main() int {
             println!("    [{j}] {:?}", inst);
         }
     }
-    
+
     // Should see:
     // 1. IterNew (StackArray) to create iterator
     // 2. IterNext to get next element
@@ -851,9 +938,9 @@ func main() int {
     return arr[2]
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled stack array index assignment");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -861,7 +948,7 @@ func main() int {
             println!("    [{j}] {:?}", inst);
         }
     }
-    
+
     // Should see SlotSet for arr[2] = 100
 }
 
@@ -877,9 +964,9 @@ func main() int {
     return 0
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled empty interface with int");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -887,7 +974,7 @@ func main() int {
             println!("    [{j}] {:?}", inst);
         }
     }
-    
+
     // int -> interface{} should NOT allocate (inline in data slot)
 }
 
@@ -911,9 +998,9 @@ func main() int {
     return ptr.inner.val
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled nested struct (escaped)");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -941,9 +1028,9 @@ func main() int {
     return r.x + r.y + r.w + r.h
 }
 "#;
-    
+
     let module = compile_source(source);
-    
+
     println!("✓ Compiled multi-slot stack struct");
     for (i, f) in module.functions.iter().enumerate() {
         println!("  [{i}] {}: {} instructions", f.name, f.code.len());
@@ -951,11 +1038,14 @@ func main() int {
             println!("    [{j}] {:?}", inst);
         }
     }
-    
+
     // Should use CopyN for struct copy, not PtrNew
     let main_fn = module.functions.iter().find(|f| f.name == "main").unwrap();
     let has_ptr_new = main_fn.code.iter().any(|i| i.op == 13); // PtrNew opcode = 13
-    assert!(!has_ptr_new, "non-escaped multi-slot struct should NOT use PtrNew");
+    assert!(
+        !has_ptr_new,
+        "non-escaped multi-slot struct should NOT use PtrNew"
+    );
 }
 
 #[test]

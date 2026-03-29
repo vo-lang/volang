@@ -8,7 +8,6 @@
 //!
 //! Adapted from goscript with Vo-specific modifications.
 
-
 use vo_syntax::ast::{Expr, TypeExpr};
 
 use crate::constant::Value as ConstValue;
@@ -26,13 +25,17 @@ impl Checker {
     /// Reports the location of an alternative declaration.
     pub(crate) fn report_alt_decl(&self, okey: ObjKey) {
         let lobj = self.lobj(okey);
-        self.error_code_msg(TypeError::OtherDeclaration, self.obj_span(okey), format!("\tother declaration of {}", lobj.name()));
+        self.error_code_msg(
+            TypeError::OtherDeclaration,
+            self.obj_span(okey),
+            format!("\tother declaration of {}", lobj.name()),
+        );
     }
 
     /// Declares an object in a scope at the given position.
     /// The scope_pos determines when the variable becomes visible in the scope.
     /// Returns error if name already exists (except for blank identifier "_").
-    /// 
+    ///
     /// spec: "The scope of a constant or variable identifier declared inside
     /// a function begins at the end of the ConstSpec or VarSpec (ShortVarDecl
     /// for short variable declarations) and ends at the end of the innermost
@@ -101,7 +104,8 @@ impl Checker {
                     EntityType::Var { .. } => {
                         self.octx.decl = Some(dkey);
                         if let DeclInfo::Var(vd) = self.decl_info(dkey) {
-                            let (lhs, typ, init) = (vd.lhs.clone(), vd.typ.clone(), vd.init.clone());
+                            let (lhs, typ, init) =
+                                (vd.lhs.clone(), vd.typ.clone(), vd.init.clone());
                             self.var_decl(okey, lhs.as_ref(), &typ, &init);
                         }
                     }
@@ -201,7 +205,7 @@ impl Checker {
                     }
                 }
                 EntityType::Func { .. } => {} // ignored for now
-                _ => unreachable!()
+                _ => unreachable!(),
             }
         }
 
@@ -229,20 +233,23 @@ impl Checker {
             if self.universe().indir() == *o {
                 continue;
             }
-            self.error_code_msg(TypeError::RefersTo, self.obj_span(*o), format!("\t{} refers to", self.lobj(*o).name()));
+            self.error_code_msg(
+                TypeError::RefersTo,
+                self.obj_span(*o),
+                format!("\t{} refers to", self.lobj(*o).name()),
+            );
         }
-        self.error_code_msg(TypeError::RefersTo, okey_span, format!("\t{} refers to", lobj.name()));
+        self.error_code_msg(
+            TypeError::RefersTo,
+            okey_span,
+            format!("\t{} refers to", lobj.name()),
+        );
 
         true
     }
 
     /// Type-checks a constant declaration.
-    pub(crate) fn const_decl(
-        &mut self,
-        okey: ObjKey,
-        typ: &Option<TypeExpr>,
-        init: &Option<Expr>,
-    ) {
+    pub(crate) fn const_decl(&mut self, okey: ObjKey, typ: &Option<TypeExpr>, init: &Option<Expr>) {
         debug_assert!(self.lobj(okey).typ().is_none());
 
         // Set iota value
@@ -506,10 +513,8 @@ impl Checker {
                                 crate::constant::make_int64(iota as i64),
                             );
 
-                            let init = current_spec
-                                .and_then(|s| s.values.get(i).cloned());
-                            let typ = current_spec
-                                .and_then(|s| s.ty.clone());
+                            let init = current_spec.and_then(|s| s.values.get(i).cloned());
+                            let typ = current_spec.and_then(|s| s.ty.clone());
 
                             self.const_decl(okey, &typ, &init);
                             self.result.record_def(name.clone(), Some(okey));
@@ -528,7 +533,12 @@ impl Checker {
                         let scope_pos = current_spec
                             .and_then(|s| s.values.last())
                             .map(|e| e.span.end.to_usize())
-                            .unwrap_or_else(|| spec.names.last().map(|n| n.span.end.to_usize()).unwrap_or(0));
+                            .unwrap_or_else(|| {
+                                spec.names
+                                    .last()
+                                    .map(|n| n.span.end.to_usize())
+                                    .unwrap_or(0)
+                            });
                         for okey in lhs {
                             self.declare(scope, okey, scope_pos);
                         }
@@ -569,12 +579,7 @@ impl Checker {
                     } else {
                         // 1-to-1 or no init
                         for (i, &okey) in vars.iter().enumerate() {
-                            self.var_decl(
-                                okey,
-                                None,
-                                &spec.ty,
-                                &spec.values.get(i).cloned(),
-                            );
+                            self.var_decl(okey, None, &spec.ty, &spec.values.get(i).cloned());
                         }
                     }
 
@@ -586,10 +591,17 @@ impl Checker {
                     // Declare variables in current scope
                     // scope_pos is the end of the declaration
                     if let Some(scope) = self.octx.scope {
-                        let scope_pos = spec.values.last()
+                        let scope_pos = spec
+                            .values
+                            .last()
                             .map(|e| e.span.end.to_usize())
                             .or_else(|| spec.ty.as_ref().map(|t| t.span.end.to_usize()))
-                            .unwrap_or_else(|| spec.names.last().map(|n| n.span.end.to_usize()).unwrap_or(0));
+                            .unwrap_or_else(|| {
+                                spec.names
+                                    .last()
+                                    .map(|n| n.span.end.to_usize())
+                                    .unwrap_or(0)
+                            });
                         for okey in vars {
                             self.declare(scope, okey, scope_pos);
                         }
@@ -643,11 +655,22 @@ impl Checker {
             if l < spec.values.len() {
                 self.error_code(TypeError::ExtraInitExpr, spec.values[l].span);
             } else if let Some(_is) = init_spec {
-                self.error_code_msg(TypeError::ExtraInitExpr, spec.span, "extra init expr from previous spec");
+                self.error_code_msg(
+                    TypeError::ExtraInitExpr,
+                    spec.span,
+                    "extra init expr from previous spec",
+                );
             }
         } else if l > r {
             // More names than values
-            self.error_code_msg(TypeError::MissingInitExpr, spec.span, format!("missing init expr for {}", self.resolve_ident(&spec.names[r])));
+            self.error_code_msg(
+                TypeError::MissingInitExpr,
+                spec.span,
+                format!(
+                    "missing init expr for {}",
+                    self.resolve_ident(&spec.names[r])
+                ),
+            );
         }
     }
 
@@ -666,7 +689,11 @@ impl Checker {
             self.error_code(TypeError::ExtraInitExpr, spec.values[l].span);
         } else if l > r && r != 1 {
             // More names than values (unless it's N-to-1 assignment)
-            self.error_code_msg(TypeError::AssignmentMismatch, spec.span, format!("assignment mismatch: {} variables but {} values", l, r));
+            self.error_code_msg(
+                TypeError::AssignmentMismatch,
+                spec.span,
+                format!("assignment mismatch: {} variables but {} values", l, r),
+            );
         }
     }
 }

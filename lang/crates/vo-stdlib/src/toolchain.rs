@@ -27,7 +27,11 @@ pub trait ToolchainHost: Send + Sync {
     fn compile_dir(&self, path: &str) -> Result<ToolchainModule, String>;
     fn compile_string(&self, code: &str) -> Result<ToolchainModule, String>;
     fn run(&self, module: &ToolchainModule, mode: ToolchainRunMode) -> Result<(), String>;
-    fn run_capture(&self, module: &ToolchainModule, mode: ToolchainRunMode) -> Result<String, String>;
+    fn run_capture(
+        &self,
+        module: &ToolchainModule,
+        mode: ToolchainRunMode,
+    ) -> Result<String, String>;
     fn parse_file(&self, path: &str) -> Result<String, String>;
     fn parse_string(&self, code: &str) -> Result<String, String>;
     fn format_source(&self, code: &str) -> Result<String, String>;
@@ -300,7 +304,9 @@ fn toolchain_free_ast(call: &mut ExternCallContext) -> ExternResult {
 }
 
 fn toolchain_name(call: &mut ExternCallContext) -> ExternResult {
-    let name = unwrap_toolchain_result(require_module(call.arg_any_as_i64(0))).module.name;
+    let name = unwrap_toolchain_result(require_module(call.arg_any_as_i64(0)))
+        .module
+        .name;
     call.ret_str(0, &name);
     ExternResult::Ok
 }

@@ -277,7 +277,7 @@ pub fn stat(path: &str) -> (String, i64, u32, i64, bool, Option<String>) {
 pub fn read_dir(path: &str) -> (Vec<(String, bool, u32)>, Option<String>) {
     let result = js_read_dir(path);
     let err = get_js_error(&result, 1);
-    
+
     let mut entries = Vec::new();
     if err.is_none() {
         if let Ok(arr) = js_sys::Reflect::get_u32(&result, 0) {
@@ -293,7 +293,7 @@ pub fn read_dir(path: &str) -> (Vec<(String, bool, u32)>, Option<String>) {
             }
         }
     }
-    
+
     (entries, err)
 }
 

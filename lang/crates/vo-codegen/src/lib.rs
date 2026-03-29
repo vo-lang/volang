@@ -18,7 +18,7 @@ pub use context::CodegenContext;
 pub use error::CodegenError;
 pub use func::FuncBuilder;
 pub use type_info::TypeInfoWrapper;
-pub use type_interner::{TypeInterner, intern_type_key};
+pub use type_interner::{intern_type_key, TypeInterner};
 
 use vo_analysis::Project;
 use vo_syntax::ast::Decl;
@@ -29,39 +29,39 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     let info = TypeInfoWrapper::for_main_package(project);
     let pkg_name = project.main_pkg().name().as_deref().unwrap_or("main");
     let mut ctx = CodegenContext::new(pkg_name);
-    
+
     // 1. Register types (StructMeta, InterfaceMeta)
     register_types(project, &mut ctx, &info)?;
-    
+
     // 2. Collect declarations (functions, globals, externs)
     collect_declarations(project, &mut ctx, &info)?;
-    
+
     // 3. Compile functions
     compile_functions(project, &mut ctx, &info)?;
-    
+
     // 4. Generate __init__ and __entry__
     compile_init_and_entry(project, &mut ctx, &info)?;
-    
+
     // 5. Collect promoted methods from embedded interfaces
     // This must happen after compile_functions (direct methods registered)
     // and before finalize_itabs (itabs need complete method set)
     collect_promoted_methods(project, &mut ctx, &info);
-    
+
     // 6. Build all pending itabs (from functions + __init__)
     ctx.finalize_itabs(&info.project.tc_objs, &info.project.interner);
-    
+
     // 7. Build runtime_types after all codegen (all types have been assigned rttid)
     build_runtime_types(project, &mut ctx, &info);
-    
+
     // 8. Fill WellKnownTypes for fast error creation
     ctx.fill_well_known_types();
-    
+
     // 9. Finalize debug info (sort entries by PC)
     ctx.finalize_debug_info();
-    
+
     // 10. Final check: all IDs within 24-bit limit
     ctx.check_id_limits().map_err(CodegenError::Internal)?;
-    
+
     Ok(ctx.finish())
 }
 
@@ -71,8 +71,6 @@ fn register_types(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use vo_vm::bytecode::InterfaceMeta;
-    
-    
 
     fn register_pkg_types(
         pkg_path: &str,
@@ -81,10 +79,10 @@ fn register_types(
         ctx: &mut CodegenContext,
         info: &TypeInfoWrapper,
     ) -> Result<(), CodegenError> {
-        use vo_syntax::ast::{Decl, TypeExprKind};
-        use vo_vm::bytecode::{StructMeta, InterfaceMeta, NamedTypeMeta};
-        use vo_runtime::ValueMeta;
         use std::collections::BTreeMap;
+        use vo_runtime::ValueMeta;
+        use vo_syntax::ast::{Decl, TypeExprKind};
+        use vo_vm::bytecode::{InterfaceMeta, NamedTypeMeta, StructMeta};
 
         // Collect all type declarations (including those inside functions)
         let mut type_decls = Vec::new();
@@ -135,7 +133,7 @@ fn register_types(
                         let field_vk = info.type_value_kind(field_type);
                         let field_rttid = ctx.intern_type_key(field_type, info);
                         let mut tag = field.tag.as_ref().map(|t| t.value.clone());
-                        
+
                         if field.names.is_empty() {
                             // Embedded field: name comes from the type
                             let field_name = info.get_type_name(field_type);
@@ -153,7 +151,11 @@ fn register_types(
                             // Named field(s) - tag is shared among all names
                             let names_count = field.names.len();
                             for (i, name) in field.names.iter().enumerate() {
-                                let field_name = project.interner.resolve(name.symbol).unwrap_or("?").to_string();
+                                let field_name = project
+                                    .interner
+                                    .resolve(name.symbol)
+                                    .unwrap_or("?")
+                                    .to_string();
                                 slot_types.extend(slot_type_list.clone());
                                 fields.push(vo_vm::bytecode::FieldMeta {
                                     name: field_name,
@@ -161,7 +163,11 @@ fn register_types(
                                     slot_count,
                                     type_info: vo_runtime::ValueRttid::new(field_rttid, field_vk),
                                     embedded: false,
-                                    tag: if i == names_count - 1 { tag.take() } else { tag.clone() },
+                                    tag: if i == names_count - 1 {
+                                        tag.take()
+                                    } else {
+                                        tag.clone()
+                                    },
                                 });
                                 offset += slot_count;
                             }
@@ -172,11 +178,16 @@ fn register_types(
                     if slot_types.is_empty() {
                         slot_types.push(vo_runtime::SlotType::Value);
                     }
-                    let field_index: std::collections::HashMap<String, usize> = fields.iter()
+                    let field_index: std::collections::HashMap<String, usize> = fields
+                        .iter()
                         .enumerate()
                         .map(|(i, f)| (f.name.clone(), i))
                         .collect();
-                    let meta = StructMeta { slot_types, fields, field_index };
+                    let meta = StructMeta {
+                        slot_types,
+                        fields,
+                        field_index,
+                    };
                     let struct_meta_id = ctx.register_struct_meta(underlying_key, meta);
                     ctx.alias_struct_meta_id(named_key, struct_meta_id);
                     ValueMeta::new(struct_meta_id as u32, vo_runtime::ValueKind::Struct)
@@ -184,44 +195,48 @@ fn register_types(
                 TypeExprKind::Interface(_) => {
                     // Build InterfaceMeta
                     let tc_objs = &info.project.tc_objs;
-                    let (method_names, methods) =
-                        if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying_key] {
-                            let all_methods_ref = iface.all_methods();
-                            let method_objs: Vec<vo_analysis::objects::ObjKey> =
-                                if let Some(methods) = all_methods_ref.as_ref() {
-                                    methods.iter().cloned().collect()
+                    let (method_names, methods) = if let vo_analysis::typ::Type::Interface(iface) =
+                        &tc_objs.types[underlying_key]
+                    {
+                        let all_methods_ref = iface.all_methods();
+                        let method_objs: Vec<vo_analysis::objects::ObjKey> =
+                            if let Some(methods) = all_methods_ref.as_ref() {
+                                methods.iter().cloned().collect()
+                            } else {
+                                iface.methods().iter().cloned().collect()
+                            };
+
+                        let names: Vec<String> = method_objs
+                            .iter()
+                            .map(|m| tc_objs.lobjs[*m].name().to_string())
+                            .collect();
+
+                        let metas: Vec<vo_vm::bytecode::InterfaceMethodMeta> = method_objs
+                            .iter()
+                            .map(|&m| {
+                                let obj = &tc_objs.lobjs[m];
+                                let name = obj.name().to_string();
+                                let sig = if let Some(sig_type) = obj.typ() {
+                                    signature_type_to_runtime_type(sig_type, tc_objs, info, ctx)
                                 } else {
-                                    iface.methods().iter().cloned().collect()
+                                    vo_runtime::RuntimeType::Func {
+                                        params: Vec::new(),
+                                        results: Vec::new(),
+                                        variadic: false,
+                                    }
                                 };
+                                let signature_rttid = ctx.intern_rttid(sig);
+                                vo_vm::bytecode::InterfaceMethodMeta {
+                                    name,
+                                    signature_rttid,
+                                }
+                            })
+                            .collect();
 
-                            let names: Vec<String> = method_objs
-                                .iter()
-                                .map(|m| tc_objs.lobjs[*m].name().to_string())
-                                .collect();
-
-                            let metas: Vec<vo_vm::bytecode::InterfaceMethodMeta> = method_objs
-                                .iter()
-                                .map(|&m| {
-                                    let obj = &tc_objs.lobjs[m];
-                                    let name = obj.name().to_string();
-                                    let sig = if let Some(sig_type) = obj.typ() {
-                                        signature_type_to_runtime_type(sig_type, tc_objs, info, ctx)
-                                    } else {
-                                        vo_runtime::RuntimeType::Func {
-                                            params: Vec::new(),
-                                            results: Vec::new(),
-                                            variadic: false,
-                                        }
-                                    };
-                                    let signature_rttid = ctx.intern_rttid(sig);
-                                    vo_vm::bytecode::InterfaceMethodMeta { name, signature_rttid }
-                                })
-                                .collect();
-
-                            (names, metas)
-                        } else {
-                            (Vec::new(), Vec::new())
-                        };
+                        (names, metas)
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
 
                     let meta = InterfaceMeta {
                         name: qualified_type_name.to_string(),
@@ -267,36 +282,47 @@ fn register_types(
         let error_type = tc_objs.universe().error_type();
         let underlying = typ::underlying_type(error_type, tc_objs);
         if ctx.get_interface_meta_id(underlying).is_none() {
-            let (method_names, methods) = if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying] {
-                let all_methods_ref = iface.all_methods();
-                let method_objs: Vec<vo_analysis::objects::ObjKey> = if let Some(methods) = all_methods_ref.as_ref() {
-                    methods.iter().cloned().collect()
-                } else {
-                    iface.methods().iter().cloned().collect()
-                };
-
-                let names: Vec<String> = method_objs.iter()
-                    .map(|m| tc_objs.lobjs[*m].name().to_string())
-                    .collect();
-
-                let metas: Vec<vo_vm::bytecode::InterfaceMethodMeta> = method_objs.iter()
-                    .map(|&m| {
-                        let obj = &tc_objs.lobjs[m];
-                        let name = obj.name().to_string();
-                        let sig = if let Some(sig_type) = obj.typ() {
-                            signature_type_to_runtime_type(sig_type, tc_objs, info, ctx)
+            let (method_names, methods) =
+                if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying] {
+                    let all_methods_ref = iface.all_methods();
+                    let method_objs: Vec<vo_analysis::objects::ObjKey> =
+                        if let Some(methods) = all_methods_ref.as_ref() {
+                            methods.iter().cloned().collect()
                         } else {
-                            vo_runtime::RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false }
+                            iface.methods().iter().cloned().collect()
                         };
-                        let signature_rttid = ctx.intern_rttid(sig);
-                        vo_vm::bytecode::InterfaceMethodMeta { name, signature_rttid }
-                    })
-                    .collect();
 
-                (names, metas)
-            } else {
-                (Vec::new(), Vec::new())
-            };
+                    let names: Vec<String> = method_objs
+                        .iter()
+                        .map(|m| tc_objs.lobjs[*m].name().to_string())
+                        .collect();
+
+                    let metas: Vec<vo_vm::bytecode::InterfaceMethodMeta> = method_objs
+                        .iter()
+                        .map(|&m| {
+                            let obj = &tc_objs.lobjs[m];
+                            let name = obj.name().to_string();
+                            let sig = if let Some(sig_type) = obj.typ() {
+                                signature_type_to_runtime_type(sig_type, tc_objs, info, ctx)
+                            } else {
+                                vo_runtime::RuntimeType::Func {
+                                    params: Vec::new(),
+                                    results: Vec::new(),
+                                    variadic: false,
+                                }
+                            };
+                            let signature_rttid = ctx.intern_rttid(sig);
+                            vo_vm::bytecode::InterfaceMethodMeta {
+                                name,
+                                signature_rttid,
+                            }
+                        })
+                        .collect();
+
+                    (names, metas)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
 
             let meta = InterfaceMeta {
                 name: "error".to_string(),
@@ -306,17 +332,24 @@ fn register_types(
             ctx.register_interface_meta(underlying, meta);
         }
     }
-    
+
     // Register builtin protocol interfaces (DynAttr, DynSetAttr, etc.)
     // These don't depend on user imports - they're language-level semantics.
     register_builtin_protocols(project, ctx, info);
-    
+
     register_pkg_types("main", &project.files, project, ctx, info)?;
 
     for (pkg_path, files) in &project.imported_files {
         if let Some(pkg_type_info) = project.imported_type_infos.get(pkg_path) {
-            let pkg = project.tc_objs.find_package_by_path(pkg_path)
-                .unwrap_or_else(|| panic!("imported package not found during type registration: {}", pkg_path));
+            let pkg = project
+                .tc_objs
+                .find_package_by_path(pkg_path)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "imported package not found during type registration: {}",
+                        pkg_path
+                    )
+                });
             let pkg_info = TypeInfoWrapper::for_package(project, pkg, pkg_type_info);
             register_pkg_types(pkg_path, files, project, ctx, &pkg_info)?;
         }
@@ -327,37 +360,42 @@ fn register_types(
 
 /// Register builtin protocol interfaces (DynAttr, DynSetAttr, etc.)
 /// These enable protocol dispatch for ~> operator without requiring import "dyn".
-fn register_builtin_protocols(
-    project: &Project,
-    ctx: &mut CodegenContext,
-    info: &TypeInfoWrapper,
-) {
+fn register_builtin_protocols(project: &Project, ctx: &mut CodegenContext, info: &TypeInfoWrapper) {
     use vo_runtime::{RuntimeType, ValueKind, ValueRttid};
     use vo_vm::bytecode::{InterfaceMeta, InterfaceMethodMeta};
-    
+
     let tc_objs = &project.tc_objs;
-    
+
     // Get ValueRttid for basic types
     let string_rttid = ValueRttid::new(ValueKind::String as u32, ValueKind::String);
-    
+
     // Get any type (empty interface) from universe and intern it
     let any_type = tc_objs.universe().any_type();
     let any_value_rttid = ctx.intern_type_key(any_type, info);
     let any_rttid = ValueRttid::new(any_value_rttid, ValueKind::Interface);
-    
+
     // Get error type from universe and intern it properly
     let error_type = tc_objs.universe().error_type();
     let error_value_rttid = ctx.intern_type_key(error_type, info);
     let error_rttid = ValueRttid::new(error_value_rttid, ValueKind::Interface);
-    
+
     // Helper to create signature rttid
-    let make_sig_rttid = |ctx: &mut CodegenContext, params: Vec<ValueRttid>, results: Vec<ValueRttid>, variadic: bool| -> u32 {
-        let rt = RuntimeType::Func { params, results, variadic };
+    let make_sig_rttid = |ctx: &mut CodegenContext,
+                          params: Vec<ValueRttid>,
+                          results: Vec<ValueRttid>,
+                          variadic: bool|
+     -> u32 {
+        let rt = RuntimeType::Func {
+            params,
+            results,
+            variadic,
+        };
         ctx.intern_rttid(rt)
     };
-    
+
     // 1. AttrObject: DynAttr(name string) (any, error)
-    let attr_sig_rttid = make_sig_rttid(ctx, vec![string_rttid], vec![any_rttid, error_rttid], false);
+    let attr_sig_rttid =
+        make_sig_rttid(ctx, vec![string_rttid], vec![any_rttid, error_rttid], false);
     let attr_meta = InterfaceMeta {
         name: "AttrObject".to_string(),
         method_names: vec!["DynAttr".to_string()],
@@ -367,9 +405,10 @@ fn register_builtin_protocols(
         }],
     };
     ctx.register_builtin_protocol("AttrObject", attr_meta);
-    
+
     // 2. SetAttrObject: DynSetAttr(name string, value any) error
-    let set_attr_sig_rttid = make_sig_rttid(ctx, vec![string_rttid, any_rttid], vec![error_rttid], false);
+    let set_attr_sig_rttid =
+        make_sig_rttid(ctx, vec![string_rttid, any_rttid], vec![error_rttid], false);
     let set_attr_meta = InterfaceMeta {
         name: "SetAttrObject".to_string(),
         method_names: vec!["DynSetAttr".to_string()],
@@ -379,7 +418,7 @@ fn register_builtin_protocols(
         }],
     };
     ctx.register_builtin_protocol("SetAttrObject", set_attr_meta);
-    
+
     // 3. IndexObject: DynIndex(key any) (any, error)
     let index_sig_rttid = make_sig_rttid(ctx, vec![any_rttid], vec![any_rttid, error_rttid], false);
     let index_meta = InterfaceMeta {
@@ -391,9 +430,10 @@ fn register_builtin_protocols(
         }],
     };
     ctx.register_builtin_protocol("IndexObject", index_meta);
-    
+
     // 4. SetIndexObject: DynSetIndex(key any, value any) error
-    let set_index_sig_rttid = make_sig_rttid(ctx, vec![any_rttid, any_rttid], vec![error_rttid], false);
+    let set_index_sig_rttid =
+        make_sig_rttid(ctx, vec![any_rttid, any_rttid], vec![error_rttid], false);
     let set_index_meta = InterfaceMeta {
         name: "SetIndexObject".to_string(),
         method_names: vec!["DynSetIndex".to_string()],
@@ -403,12 +443,17 @@ fn register_builtin_protocols(
         }],
     };
     ctx.register_builtin_protocol("SetIndexObject", set_index_meta);
-    
+
     // 5. CallObject: DynCall(args ...any) (any, error)
     // Variadic signature: the param is []any (slice of any), not any itself
     let slice_any_rttid_value = ctx.intern_rttid(RuntimeType::Slice(any_rttid));
     let slice_any_rttid = ValueRttid::new(slice_any_rttid_value, ValueKind::Slice);
-    let call_sig_rttid = make_sig_rttid(ctx, vec![slice_any_rttid], vec![any_rttid, error_rttid], true);
+    let call_sig_rttid = make_sig_rttid(
+        ctx,
+        vec![slice_any_rttid],
+        vec![any_rttid, error_rttid],
+        true,
+    );
     let call_meta = InterfaceMeta {
         name: "CallObject".to_string(),
         method_names: vec!["DynCall".to_string()],
@@ -421,7 +466,10 @@ fn register_builtin_protocols(
 }
 
 /// Recursively collect type declarations from statements
-fn collect_type_decls_from_stmts(stmts: &[vo_syntax::ast::Stmt], out: &mut Vec<vo_syntax::ast::TypeDecl>) {
+fn collect_type_decls_from_stmts(
+    stmts: &[vo_syntax::ast::Stmt],
+    out: &mut Vec<vo_syntax::ast::TypeDecl>,
+) {
     use vo_syntax::ast::StmtKind;
     for stmt in stmts {
         match &stmt.kind {
@@ -460,11 +508,7 @@ fn collect_type_decls_from_stmts(stmts: &[vo_syntax::ast::Stmt], out: &mut Vec<v
     }
 }
 
-fn build_runtime_types(
-    _project: &Project,
-    ctx: &mut CodegenContext,
-    _info: &TypeInfoWrapper,
-) {
+fn build_runtime_types(_project: &Project, ctx: &mut CodegenContext, _info: &TypeInfoWrapper) {
     // RuntimeTypes are now built during codegen via intern_rttid()
     // Just transfer them from TypeInterner to module
     let runtime_types = ctx.runtime_types();
@@ -480,12 +524,19 @@ fn collect_declarations(
     for file in &project.files {
         collect_file_declarations(file, project, ctx, info)?;
     }
-    
+
     // Then collect imported package declarations (using their respective type_info)
     for (pkg_path, files) in &project.imported_files {
         if let Some(pkg_type_info) = project.imported_type_infos.get(pkg_path) {
-            let pkg = project.tc_objs.find_package_by_path(pkg_path)
-                .unwrap_or_else(|| panic!("imported package not found during declaration collection: {}", pkg_path));
+            let pkg = project
+                .tc_objs
+                .find_package_by_path(pkg_path)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "imported package not found during declaration collection: {}",
+                        pkg_path
+                    )
+                });
             let pkg_info = TypeInfoWrapper::for_package(project, pkg, pkg_type_info);
             for file in files {
                 collect_file_declarations(file, project, ctx, &pkg_info)?;
@@ -508,25 +559,35 @@ fn collect_file_declarations(
                 if func_decl.body.is_none() {
                     continue;
                 }
-                
+
                 // Skip init() functions - they can have multiple declarations with same name
                 // and will be handled specially during compilation
-                let func_name = project.interner.resolve(func_decl.name.symbol).unwrap_or("");
+                let func_name = project
+                    .interner
+                    .resolve(func_decl.name.symbol)
+                    .unwrap_or("");
                 if func_decl.receiver.is_none() && func_name == "init" {
                     continue;
                 }
-                
+
                 // Check if this is a method (has receiver)
                 let (recv_type, is_pointer_recv) = if let Some(recv) = &func_decl.receiver {
-                    let base_type = info.method_receiver_base_type(func_decl)
+                    let base_type = info
+                        .method_receiver_base_type(func_decl)
                         .expect("method receiver must have type");
                     (Some(base_type), recv.is_pointer)
                 } else {
                     (None, false)
                 };
-                
+
                 let obj_key = info.get_def(&func_decl.name);
-                ctx.declare_func(recv_type, is_pointer_recv, func_decl.name.symbol, obj_key, func_name);
+                ctx.declare_func(
+                    recv_type,
+                    is_pointer_recv,
+                    func_decl.name.symbol,
+                    obj_key,
+                    func_name,
+                );
             }
             Decl::Var(var_decl) => {
                 // Register global variables (so functions can reference them)
@@ -539,19 +600,26 @@ fn collect_file_declarations(
                         } else {
                             panic!("global var must have type annotation or initializer")
                         };
-                        
+
                         // Arrays are stored as GcRef (1 slot) in globals
                         let (slots, slot_types) = if info.is_array(type_key) {
                             (1, vec![vo_runtime::SlotType::GcRef])
                         } else {
-                            (info.type_slot_count(type_key), info.type_slot_types(type_key))
+                            (
+                                info.type_slot_count(type_key),
+                                info.type_slot_types(type_key),
+                            )
                         };
                         let value_kind = info.type_value_kind(type_key) as u8;
                         let obj_key = info.get_def(name);
                         ctx.register_global(
                             obj_key,
                             vo_vm::bytecode::GlobalDef {
-                                name: project.interner.resolve(name.symbol).unwrap_or("?").to_string(),
+                                name: project
+                                    .interner
+                                    .resolve(name.symbol)
+                                    .unwrap_or("?")
+                                    .to_string(),
                                 slots,
                                 value_kind,
                                 meta_id: 0,
@@ -574,11 +642,12 @@ fn compile_functions(
 ) -> Result<(), CodegenError> {
     // Collect method info for NamedTypeMeta.methods update
     // (recv_type, method_name, func_id, is_pointer_receiver, signature)
-    let mut method_mappings: Vec<(vo_analysis::objects::TypeKey, String, u32, bool, u32)> = Vec::new();
-    
+    let mut method_mappings: Vec<(vo_analysis::objects::TypeKey, String, u32, bool, u32)> =
+        Vec::new();
+
     // Note: Functions are already pre-registered by collect_declarations via declare_func.
     // This handles forward references (function A calls function B defined later).
-    
+
     // Compile function bodies - main package files first
     for file in &project.files {
         compile_file_functions(file, project, ctx, info, &mut method_mappings)?;
@@ -586,21 +655,28 @@ fn compile_functions(
     // Then imported package files
     for (pkg_path, files) in &project.imported_files {
         if let Some(pkg_type_info) = project.imported_type_infos.get(pkg_path) {
-            let pkg = project.tc_objs.find_package_by_path(pkg_path)
-                .unwrap_or_else(|| panic!("imported package not found during function compilation: {}", pkg_path));
+            let pkg = project
+                .tc_objs
+                .find_package_by_path(pkg_path)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "imported package not found during function compilation: {}",
+                        pkg_path
+                    )
+                });
             let pkg_info = TypeInfoWrapper::for_package(project, pkg, pkg_type_info);
             for file in files {
                 compile_file_functions(file, project, ctx, &pkg_info, &mut method_mappings)?;
             }
         }
     }
-    
+
     // Update NamedTypeMeta.methods with method func_ids (direct methods only)
     update_named_type_methods(ctx, &method_mappings, info);
-    
+
     // Note: finalize_itabs is called in compile_project after compile_init_and_entry
     // to handle itabs from both functions and global variable initialization
-    
+
     Ok(())
 }
 
@@ -617,14 +693,16 @@ fn compile_file_functions(
             if func_decl.body.is_none() {
                 continue;
             }
-            
-            let func_name = project.interner.resolve(func_decl.name.symbol)
+
+            let func_name = project
+                .interner
+                .resolve(func_decl.name.symbol)
                 .unwrap_or("unknown");
-            
+
             // init() functions are not pre-declared (can have multiple with same name)
             let is_init = func_decl.receiver.is_none() && func_name == "init";
             let func_obj_key = info.get_def(&func_decl.name);
-            
+
             let func_id = if is_init {
                 // Compile init() directly (not pre-declared)
                 let id = compile_func_decl_new(func_decl, ctx, info)?;
@@ -632,27 +710,35 @@ fn compile_file_functions(
                 id
             } else {
                 // Get pre-declared func_id using ObjKey (not func_indices which can collide across packages)
-                let id = ctx.get_func_by_objkey(func_obj_key)
-                    .ok_or_else(|| CodegenError::Internal(format!("function not pre-declared: {} obj_key={:?}", func_name, func_obj_key)))?;
-                
+                let id = ctx.get_func_by_objkey(func_obj_key).ok_or_else(|| {
+                    CodegenError::Internal(format!(
+                        "function not pre-declared: {} obj_key={:?}",
+                        func_name, func_obj_key
+                    ))
+                })?;
+
                 // Compile function body and replace placeholder
                 compile_func_decl_at(func_decl, id, ctx, info)?;
                 id
             };
-            
+
             // If this is a method, record the mapping
             if let Some(recv) = &func_decl.receiver {
                 // Get receiver base type from function signature
-                let recv_type = info.method_receiver_base_type(func_decl)
+                let recv_type = info
+                    .method_receiver_base_type(func_decl)
                     .expect("method receiver must have type");
                 {
-                    let method_name = project.interner.resolve(func_decl.name.symbol)
-                        .unwrap_or("?").to_string();
-                    
+                    let method_name = project
+                        .interner
+                        .resolve(func_decl.name.symbol)
+                        .unwrap_or("?")
+                        .to_string();
+
                     // Generate method signature rttid
                     let signature = generate_method_signature(func_decl, info, ctx);
                     let signature_rttid = ctx.intern_rttid(signature);
-                    
+
                     // For value receiver methods, generate a wrapper that accepts GcRef
                     // and dereferences it before calling the original method
                     let iface_func_id = if !recv.is_pointer {
@@ -660,12 +746,18 @@ fn compile_file_functions(
                     } else {
                         func_id
                     };
-                    
+
                     // Register ObjKey -> iface_func_id mapping for itab building
                     ctx.register_objkey_iface_func(func_obj_key, iface_func_id);
-                    
+
                     // Register the wrapper (or original for pointer receiver) for interface dispatch
-                    method_mappings.push((recv_type, method_name, iface_func_id, recv.is_pointer, signature_rttid));
+                    method_mappings.push((
+                        recv_type,
+                        method_name,
+                        iface_func_id,
+                        recv.is_pointer,
+                        signature_rttid,
+                    ));
                 }
             }
         }
@@ -680,14 +772,20 @@ fn update_named_type_methods(
 ) {
     use vo_analysis::typ::Type;
     let tc_objs = &info.project.tc_objs;
-    
+
     // Group methods by type_key, lookup ObjKey from Named type
     for (type_key, method_name, func_id, is_pointer_receiver, signature_rttid) in method_mappings {
         // Get ObjKey from the Named type (the true identity)
         if let Type::Named(named) = &tc_objs.types[*type_key] {
             if let Some(obj_key) = named.obj() {
                 if let Some(named_type_id) = ctx.get_named_type_id(*obj_key) {
-                    ctx.update_named_type_method(named_type_id, method_name.clone(), *func_id, *is_pointer_receiver, *signature_rttid);
+                    ctx.update_named_type_method(
+                        named_type_id,
+                        method_name.clone(),
+                        *func_id,
+                        *is_pointer_receiver,
+                        *signature_rttid,
+                    );
                 }
             }
         }
@@ -697,23 +795,21 @@ fn update_named_type_methods(
 /// Collect promoted methods from embedded fields (interfaces and structs) for all struct types.
 /// This generates wrapper functions and registers them to NamedTypeMeta.methods,
 /// so that runtime itab building can find them.
-fn collect_promoted_methods(
-    _project: &Project,
-    ctx: &mut CodegenContext,
-    info: &TypeInfoWrapper,
-) {
-    use vo_analysis::typ::Type;
+fn collect_promoted_methods(_project: &Project, ctx: &mut CodegenContext, info: &TypeInfoWrapper) {
     use vo_analysis::lookup::{lookup_field_or_method, LookupResult};
-    
-    
+    use vo_analysis::typ::Type;
+
     let tc_objs = &info.project.tc_objs;
     let interner = &info.project.interner;
-    
+
     // Collect all (type_key, obj_key, named_type_id) for Named struct types
-    let named_structs: Vec<_> = ctx.all_named_type_ids()
+    let named_structs: Vec<_> = ctx
+        .all_named_type_ids()
         .filter_map(|(obj_key, named_type_id)| {
             // Find the type_key for this obj_key
-            let type_key = tc_objs.types.iter()
+            let type_key = tc_objs
+                .types
+                .iter()
                 .find(|(_, t)| {
                     if let Type::Named(n) = t {
                         n.obj().as_ref() == Some(&obj_key)
@@ -722,7 +818,7 @@ fn collect_promoted_methods(
                     }
                 })
                 .map(|(k, _)| k)?;
-            
+
             // Check if underlying is struct
             let underlying = vo_analysis::typ::underlying_type(type_key, tc_objs);
             if tc_objs.types[underlying].try_as_struct().is_some() {
@@ -732,24 +828,28 @@ fn collect_promoted_methods(
             }
         })
         .collect();
-    
+
     // For each struct, find all promoted methods by collecting from embedded fields recursively
     for (type_key, _obj_key, named_type_id) in named_structs {
         // Get package for unexported method lookup
-        let pkg = tc_objs.types[type_key].try_as_named()
+        let pkg = tc_objs.types[type_key]
+            .try_as_named()
             .and_then(|n| n.obj().and_then(|obj_key| tc_objs.lobjs[obj_key].pkg()));
-        
+
         // Collect all potential method names from embedded types (recursively)
         let mut method_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         collect_embedded_method_names(type_key, tc_objs, &mut method_names);
-        
+
         // For each method name, use lookup_field_or_method to find it and generate wrapper
         for method_name in method_names {
             // Skip if already registered (direct method)
-            if ctx.get_method_from_named_type(named_type_id, &method_name).is_some() {
+            if ctx
+                .get_method_from_named_type(named_type_id, &method_name)
+                .is_some()
+            {
                 continue;
             }
-            
+
             // Look up method to get indices and determine wrapper type
             match lookup_field_or_method(type_key, true, pkg, &method_name, tc_objs) {
                 LookupResult::Entry(obj_key, indices, _) => {
@@ -757,9 +857,9 @@ fn collect_promoted_methods(
                     if indices.len() <= 1 {
                         continue;
                     }
-                    
+
                     let path_info = crate::embed::analyze_embed_path(type_key, &indices, tc_objs);
-                    
+
                     let func_id = if let Some(iface_type) = path_info.embedded_iface_type {
                         // Method from embedded interface
                         wrapper::generate_embedded_iface_wrapper(
@@ -774,12 +874,12 @@ fn collect_promoted_methods(
                         )
                     } else if let Some(base_iface_func) = ctx.get_iface_func_by_objkey(obj_key) {
                         // Method from embedded struct
-                        let original_func_id = ctx.get_func_by_objkey(obj_key)
-                            .unwrap_or(base_iface_func);
+                        let original_func_id =
+                            ctx.get_func_by_objkey(obj_key).unwrap_or(base_iface_func);
                         wrapper::generate_promoted_wrapper(
                             ctx,
                             type_key,
-                            &indices[..indices.len()-1],
+                            &indices[..indices.len() - 1],
                             obj_key,
                             original_func_id,
                             base_iface_func,
@@ -790,25 +890,27 @@ fn collect_promoted_methods(
                     } else {
                         continue;
                     };
-                    
-                    let sig_rttid = tc_objs.lobjs[obj_key].typ()
+
+                    let sig_rttid = tc_objs.lobjs[obj_key]
+                        .typ()
                         .map(|sig_type| {
                             let sig = signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
                             ctx.intern_rttid(sig)
                         })
                         .unwrap_or(0);
-                    
+
                     // Determine is_pointer_receiver for the promoted method:
                     // - If the embedding path contains a pointer step (e.g., struct embeds *T),
                     //   then even pointer receiver methods are accessible for the outer value type.
                     // - Otherwise, use the original method's receiver type.
-                    let original_is_ptr_recv = tc_objs.lobjs[obj_key].entity_type().func_has_ptr_recv();
+                    let original_is_ptr_recv =
+                        tc_objs.lobjs[obj_key].entity_type().func_has_ptr_recv();
                     let is_pointer_receiver = if path_info.has_pointer_step {
-                        false  // Method is always accessible via embedded pointer
+                        false // Method is always accessible via embedded pointer
                     } else {
                         original_is_ptr_recv
                     };
-                    
+
                     ctx.update_named_type_method_if_absent(
                         named_type_id,
                         method_name,
@@ -829,34 +931,32 @@ fn collect_embedded_method_names(
     tc_objs: &vo_analysis::objects::TCObjects,
     method_names: &mut std::collections::HashSet<String>,
 ) {
-    
-    
     let underlying = vo_analysis::typ::underlying_type(type_key, tc_objs);
     let struct_detail = match tc_objs.types[underlying].try_as_struct() {
         Some(s) => s,
         None => return,
     };
-    
+
     for &field_obj in struct_detail.fields() {
         let field = &tc_objs.lobjs[field_obj];
         if !field.var_embedded() {
             continue;
         }
-        
+
         let field_type = match field.typ() {
             Some(t) => t,
             None => continue,
         };
-        
+
         // Handle pointer embedding
         let base_type = if let Some(ptr) = tc_objs.types[field_type].try_as_pointer() {
             ptr.base()
         } else {
             field_type
         };
-        
+
         let field_underlying = vo_analysis::typ::underlying_type(base_type, tc_objs);
-        
+
         // Collect methods from interface
         if let Some(iface_detail) = tc_objs.types[field_underlying].try_as_interface() {
             let all_methods = iface_detail.all_methods();
@@ -868,7 +968,7 @@ fn collect_embedded_method_names(
                 method_names.insert(tc_objs.lobjs[m].name().to_string());
             }
         }
-        
+
         // Collect methods from Named type and recurse into its embedded fields
         if let Some(named_detail) = tc_objs.types[base_type].try_as_named() {
             for &m in named_detail.methods() {
@@ -888,7 +988,7 @@ fn generate_method_signature(
     ctx: &mut CodegenContext,
 ) -> vo_runtime::RuntimeType {
     use vo_runtime::{RuntimeType, ValueRttid};
-    
+
     // Collect param ValueRttids from Var objects (not TypeExpr)
     // Type checker already changed variadic param type from T to []T
     let mut params = Vec::new();
@@ -901,7 +1001,7 @@ fn generate_method_signature(
             params.push(ValueRttid::new(rttid, vk));
         }
     }
-    
+
     let mut results = Vec::new();
     for r in &func_decl.sig.results {
         let type_key = info.type_expr_type(r.ty.id);
@@ -909,8 +1009,12 @@ fn generate_method_signature(
         let vk = info.type_value_kind(type_key);
         results.push(ValueRttid::new(rttid, vk));
     }
-    
-    RuntimeType::Func { params, results, variadic: func_decl.sig.variadic }
+
+    RuntimeType::Func {
+        params,
+        results,
+        variadic: func_decl.sig.variadic,
+    }
 }
 
 /// Extract ValueRttids from a tuple type (params or results).
@@ -923,7 +1027,9 @@ fn tuple_to_value_rttids(
     use vo_analysis::typ::Type;
     use vo_runtime::ValueRttid;
     if let Type::Tuple(tuple) = &tc_objs.types[tuple_key] {
-        tuple.vars().iter()
+        tuple
+            .vars()
+            .iter()
             .filter_map(|&v| {
                 tc_objs.lobjs[v].typ().map(|t| {
                     let rttid = ctx.intern_type_key(t, info);
@@ -946,7 +1052,7 @@ fn signature_type_to_runtime_type(
 ) -> vo_runtime::RuntimeType {
     use vo_analysis::typ::Type;
     use vo_runtime::RuntimeType;
-    
+
     if let Type::Signature(sig) = &tc_objs.types[sig_type] {
         RuntimeType::Func {
             params: tuple_to_value_rttids(sig.params(), tc_objs, info, ctx),
@@ -954,7 +1060,11 @@ fn signature_type_to_runtime_type(
             variadic: sig.variadic(),
         }
     } else {
-        RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false }
+        RuntimeType::Func {
+            params: Vec::new(),
+            results: Vec::new(),
+            variadic: false,
+        }
     }
 }
 
@@ -986,28 +1096,34 @@ fn compile_func_body(
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
 ) -> Result<vo_vm::bytecode::FunctionDef, CodegenError> {
-    let name = info.project.interner.resolve(func_decl.name.symbol)
+    let name = info
+        .project
+        .interner
+        .resolve(func_decl.name.symbol)
         .unwrap_or("unknown");
     let func_type = info.obj_type(info.get_def(&func_decl.name), "function must have type");
     let param_type_keys = info.func_param_types(func_type);
-    
+
     let mut builder = FuncBuilder::new(name);
-    
+
     // Define parameters and collect escaped ones for boxing
     let mut escaped_params = Vec::new();
-    
+
     // Define receiver as first parameter (if method)
     if let Some(recv) = &func_decl.receiver {
         let (slots, slot_types) = if recv.is_pointer {
             (1, vec![vo_runtime::SlotType::GcRef])
         } else {
             let type_key = info.obj_type(info.get_use(&recv.ty), "method receiver must have type");
-            (info.type_slot_count(type_key), info.type_slot_types(type_key))
+            (
+                info.type_slot_count(type_key),
+                info.type_slot_types(type_key),
+            )
         };
-        
+
         builder.set_recv_slots(slots);
         builder.define_param(recv.name.as_ref().map(|n| n.symbol), slots, &slot_types);
-        
+
         // Check if receiver escapes (e.g., captured by closure)
         if let Some(name) = &recv.name {
             let obj_key = info.get_def(name);
@@ -1017,7 +1133,7 @@ fn compile_func_body(
             }
         }
     }
-    
+
     let params = &func_decl.sig.params;
     let mut param_type_iter = param_type_keys.into_iter();
     for param in params {
@@ -1050,23 +1166,29 @@ fn compile_func_body(
         param_type_iter.next().is_none(),
         "function signature param types had extra entries after binding AST params"
     );
-    
+
     // Box escaped parameters: allocate heap storage and copy param values
     for (sym, type_key, slots, _slot_types) in escaped_params {
         let meta_idx = ctx.get_boxing_meta(type_key, info);
         builder.emit_box_escaped_param(sym, slots, info.is_pointer(type_key), meta_idx);
     }
-    
+
     // Set return slots and types
-    let ret_slots: u16 = func_decl.sig.results.iter()
+    let ret_slots: u16 = func_decl
+        .sig
+        .results
+        .iter()
         .map(|r| info.type_expr_layout(r.ty.id).0)
         .sum();
     builder.set_ret_slots(ret_slots);
-    let return_types: Vec<_> = func_decl.sig.results.iter()
+    let return_types: Vec<_> = func_decl
+        .sig
+        .results
+        .iter()
         .map(|r| info.type_expr_type(r.ty.id))
         .collect();
     builder.set_return_types(return_types.clone());
-    
+
     // Compute error_ret_slot: if last return type is error, calculate its slot offset
     if let Some(last_type) = return_types.last() {
         if info.is_error_type(*last_type) {
@@ -1081,7 +1203,7 @@ fn compile_func_body(
             builder.set_error_ret_slot(offset as i16);
         }
     }
-    
+
     // Define named return variables as locals (zero-initialized)
     // Check if they escape (e.g. captured by defer closure)
     // IMPORTANT: For panic/recover to work correctly, if ANY named return escapes,
@@ -1096,12 +1218,15 @@ fn compile_func_body(
         result_type: vo_analysis::objects::TypeKey,
     }
     let mut escaped_returns: Vec<EscapedReturn> = Vec::new();
-    
+
     // First pass: check if ANY named return escapes
-    let any_escapes = func_decl.sig.results.iter()
+    let any_escapes = func_decl
+        .sig
+        .results
+        .iter()
         .filter_map(|r| r.name.as_ref())
         .any(|name| info.is_escaped(info.get_def(name)));
-    
+
     for result in &func_decl.sig.results {
         if let Some(name) = &result.name {
             let result_type = info.type_expr_type(result.ty.id);
@@ -1109,12 +1234,20 @@ fn compile_func_body(
             let obj_key = info.get_def(name);
             // Force escape if ANY named return escapes (for correct panic/recover)
             let escapes = any_escapes || info.is_escaped(obj_key);
-            
+
             let slot = if escapes {
                 // Named return escapes - allocate GcRef slot only (PtrNew emitted later)
                 // GC uses alloc_zeroed, so heap memory is already zero-initialized
-                let gcref_slot = builder.define_local_heap_boxed(name.symbol, slots, info.is_pointer(result_type));
-                escaped_returns.push(EscapedReturn { gcref_slot, slots, result_type });
+                let gcref_slot = builder.define_local_heap_boxed(
+                    name.symbol,
+                    slots,
+                    info.is_pointer(result_type),
+                );
+                escaped_returns.push(EscapedReturn {
+                    gcref_slot,
+                    slots,
+                    result_type,
+                });
                 gcref_slot
             } else {
                 let (_, slot_types) = info.type_expr_layout(result.ty.id);
@@ -1129,23 +1262,29 @@ fn compile_func_body(
             builder.register_named_return(slot, slots, escapes);
         }
     }
-    
+
     // Now emit PtrNew for all escaped returns (after all GcRef slots are allocated contiguously)
     for er in escaped_returns {
         let meta_idx = ctx.get_boxing_meta(er.result_type, info);
         let meta_reg = builder.alloc_slots(&[vo_runtime::SlotType::Value]);
         builder.emit_op(vo_vm::instruction::Opcode::LoadConst, meta_reg, meta_idx, 0);
-        builder.emit_with_flags(vo_vm::instruction::Opcode::PtrNew, er.slots as u8, er.gcref_slot, meta_reg, 0);
+        builder.emit_with_flags(
+            vo_vm::instruction::Opcode::PtrNew,
+            er.slots as u8,
+            er.gcref_slot,
+            meta_reg,
+            0,
+        );
     }
-    
+
     // Compile function body
     if let Some(body) = &func_decl.body {
         stmt::compile_block(body, ctx, &mut builder, info)?;
     }
-    
+
     // Add return if not present at end
     builder.emit_op(vo_vm::instruction::Opcode::Return, 0, 0, 0);
-    
+
     // Build and return FunctionDef
     Ok(builder.build())
 }
@@ -1153,7 +1292,12 @@ fn compile_func_body(
 /// Emit GlobalSet or GlobalSetN depending on slot count.
 fn emit_global_set(builder: &mut FuncBuilder, global_idx: u32, src: u16, slots: u16) {
     if slots == 1 {
-        builder.emit_op(vo_vm::instruction::Opcode::GlobalSet, global_idx as u16, src, 0);
+        builder.emit_op(
+            vo_vm::instruction::Opcode::GlobalSet,
+            global_idx as u16,
+            src,
+            0,
+        );
     } else {
         builder.emit_with_flags(
             vo_vm::instruction::Opcode::GlobalSetN,
@@ -1175,28 +1319,28 @@ fn compile_global_array_init(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use vo_vm::instruction::Opcode;
-    
+
     let array_len = info.array_len(array_type);
     let elem_type = info.array_elem_type(array_type);
     let elem_slots = info.type_slot_count(elem_type);
     let elem_bytes = (elem_slots as u32 * 8) as u16;
     let elem_vk = info.type_value_kind(elem_type);
-    
+
     // Allocate registers for: gcref, meta_reg, len_reg, temp for elements
     let gcref_slot = func.alloc_slots(&[vo_runtime::SlotType::GcRef]);
     let meta_reg = func.alloc_slots(&[vo_runtime::SlotType::Value]);
     let len_reg = func.alloc_slots(&[vo_runtime::SlotType::Value]);
-    
+
     // Get elem_meta: (rttid << 8) | elem_vk
     let elem_rttid = ctx.intern_type_key(elem_type, info);
     let elem_meta = ((elem_rttid as u64) << 8) | (elem_vk as u64);
     let meta_idx = ctx.const_int(elem_meta as i64);
     func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-    
+
     // Load array length
     let len_idx = ctx.const_int(array_len as i64);
     func.emit_op(Opcode::LoadConst, len_reg, len_idx, 0);
-    
+
     // Emit ArrayNew: gcref_slot = ArrayNew(meta_reg, len_reg)
     let flags = if elem_bytes <= 8 { elem_bytes as u8 } else { 0 };
     if flags == 0 {
@@ -1205,23 +1349,30 @@ fn compile_global_array_init(
         func.emit_op(Opcode::LoadConst, len_reg + 1, eb_idx, 0);
     }
     func.emit_with_flags(Opcode::ArrayNew, flags, gcref_slot, meta_reg, len_reg);
-    
+
     // Compile array elements and set them
     if let vo_syntax::ast::ExprKind::CompositeLit(lit) = &rhs.kind {
         let elem_slot_types = info.type_slot_types(elem_type);
         let tmp_elem = func.alloc_slots(&elem_slot_types);
         let idx_reg = func.alloc_slots(&[vo_runtime::SlotType::Value]);
-        
+
         for (i, elem) in lit.elems.iter().enumerate() {
             crate::expr::compile_elem_to(&elem.value, tmp_elem, elem_type, ctx, func, info)?;
             func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
-            func.emit_array_set(gcref_slot, idx_reg, tmp_elem, elem_bytes as usize, elem_vk, ctx);
+            func.emit_array_set(
+                gcref_slot,
+                idx_reg,
+                tmp_elem,
+                elem_bytes as usize,
+                elem_vk,
+                ctx,
+            );
         }
     }
-    
+
     // Store GcRef in global (1 slot)
     func.emit_op(Opcode::GlobalSet, global_idx as u16, gcref_slot, 0);
-    
+
     Ok(())
 }
 
@@ -1238,34 +1389,48 @@ fn compile_package_globals(
         if initializer.lhs.len() == 1 {
             let obj_key = initializer.lhs[0];
             let obj = &info.project.tc_objs.lobjs[obj_key];
-            
+
             if let Some(global_idx) = ctx.get_global_index(obj_key) {
                 let type_key = obj.typ();
-                
+
                 // Special handling for arrays: allocate on heap
                 if let Some(tk) = type_key {
                     if info.is_array(tk) {
                         compile_global_array_init(
-                            &initializer.rhs, tk, global_idx,
-                            ctx, init_builder, info
+                            &initializer.rhs,
+                            tk,
+                            global_idx,
+                            ctx,
+                            init_builder,
+                            info,
                         )?;
                         continue;
                     }
-                    
+
                     // Special handling for interface: use emit_assign for proper itab setup
                     if info.is_interface(tk) {
-                        let tmp = init_builder.alloc_slots(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
-                        crate::assign::emit_assign(tmp, crate::assign::AssignSource::Expr(&initializer.rhs), tk, ctx, init_builder, info)?;
+                        let tmp = init_builder.alloc_slots(&[
+                            vo_runtime::SlotType::Interface0,
+                            vo_runtime::SlotType::Interface1,
+                        ]);
+                        crate::assign::emit_assign(
+                            tmp,
+                            crate::assign::AssignSource::Expr(&initializer.rhs),
+                            tk,
+                            ctx,
+                            init_builder,
+                            info,
+                        )?;
                         emit_global_set(init_builder, global_idx, tmp, 2);
                         continue;
                     }
                 }
-                
+
                 let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
                 let slot_types = type_key
                     .map(|t| info.type_slot_types(t))
                     .unwrap_or_else(|| vec![vo_runtime::SlotType::Value]);
-                
+
                 let tmp = init_builder.alloc_slots(&slot_types);
                 crate::expr::compile_expr_to(&initializer.rhs, tmp, ctx, init_builder, info)?;
                 emit_global_set(init_builder, global_idx, tmp, slots);
@@ -1275,14 +1440,14 @@ fn compile_package_globals(
             // TODO: handle tuple unpacking if needed
             for (i, &obj_key) in initializer.lhs.iter().enumerate() {
                 let obj = &info.project.tc_objs.lobjs[obj_key];
-                
+
                 if let Some(global_idx) = ctx.get_global_index(obj_key) {
                     let type_key = obj.typ();
                     let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
                     let slot_types = type_key
                         .map(|t| info.type_slot_types(t))
                         .unwrap_or_else(|| vec![vo_runtime::SlotType::Value]);
-                    
+
                     // For multi-var, compile rhs once and extract values
                     // For now, just compile rhs for each (inefficient but correct)
                     let tmp = init_builder.alloc_slots(&slot_types);
@@ -1303,25 +1468,32 @@ fn compile_init_and_entry(
 ) -> Result<(), CodegenError> {
     // 1. Generate __init__ function for global variable initialization
     let mut init_builder = FuncBuilder::new("__init__");
-    
+
     // Initialize imported packages' global variables in dependency order
     // (dependencies are initialized before dependents)
     for (pkg_path, pkg_type_info) in project.imported_packages_in_order() {
-        let pkg = project.tc_objs.find_package_by_path(pkg_path)
-            .unwrap_or_else(|| panic!("imported package not found during global init compilation: {}", pkg_path));
+        let pkg = project
+            .tc_objs
+            .find_package_by_path(pkg_path)
+            .unwrap_or_else(|| {
+                panic!(
+                    "imported package not found during global init compilation: {}",
+                    pkg_path
+                )
+            });
         let pkg_info = TypeInfoWrapper::for_package(project, pkg, pkg_type_info);
         compile_package_globals(ctx, &mut init_builder, &pkg_info)?;
     }
-    
+
     // Then, initialize main package's global variables
     compile_package_globals(ctx, &mut init_builder, info)?;
-    
+
     // Add return
     init_builder.emit_op(vo_vm::instruction::Opcode::Return, 0, 0, 0);
     let init_func = init_builder.build();
     let init_func_id = ctx.add_function(init_func);
     // Note: __init__ is NOT registered as a user init function - it's handled separately
-    
+
     // 2. Find main function
     let main_func_id = ctx.main_func_id();
     if main_func_id.is_none() {
@@ -1329,7 +1501,7 @@ fn compile_init_and_entry(
             "missing entry function `func main()`".to_string(),
         ));
     }
-    
+
     // 3. Generate __island_init__ function (init only, no main - for island VMs)
     let mut island_init_builder = FuncBuilder::new("__island_init__");
     island_init_builder.emit_op(vo_vm::instruction::Opcode::Call, init_func_id as u16, 0, 0);
@@ -1343,26 +1515,26 @@ fn compile_init_and_entry(
 
     // 4. Generate __entry__ function (full: init + main - for main island)
     let mut entry_builder = FuncBuilder::new("__entry__");
-    
+
     // Call __init__ for global variable initialization
     entry_builder.emit_op(vo_vm::instruction::Opcode::Call, init_func_id as u16, 0, 0);
-    
+
     // Call user-defined init() functions in declaration order
     for &user_init_id in ctx.init_functions() {
         entry_builder.emit_op(vo_vm::instruction::Opcode::Call, user_init_id as u16, 0, 0);
     }
-    
+
     // Call main
     if let Some(main_id) = main_func_id {
         entry_builder.emit_op(vo_vm::instruction::Opcode::Call, main_id as u16, 0, 0);
     }
-    
+
     // Return
     entry_builder.emit_op(vo_vm::instruction::Opcode::Return, 0, 0, 0);
-    
+
     let entry_func = entry_builder.build();
     let entry_func_id = ctx.add_function(entry_func);
     ctx.set_entry_func(entry_func_id);
-    
+
     Ok(())
 }

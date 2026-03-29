@@ -23,7 +23,10 @@ fn tz_validate_impl(name: &str) -> bool {
         "(function(){{try{{new Intl.DateTimeFormat(undefined,{{timeZone:'{}'}});return true;}}catch(e){{return false;}}}})()",
         js_escape(name)
     );
-    js_sys::eval(&script).ok().and_then(|v| v.as_bool()).unwrap_or(false)
+    js_sys::eval(&script)
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 fn tz_offset_secs_impl(name: &str, unix_ms: f64) -> f64 {
@@ -32,7 +35,10 @@ fn tz_offset_secs_impl(name: &str, unix_ms: f64) -> f64 {
         unix_ms = unix_ms,
         name = js_escape(name)
     );
-    js_sys::eval(&script).ok().and_then(|v| v.as_f64()).unwrap_or(0.0)
+    js_sys::eval(&script)
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
 }
 
 fn tz_abbrev_impl(name: &str, unix_ms: f64) -> String {
@@ -41,12 +47,18 @@ fn tz_abbrev_impl(name: &str, unix_ms: f64) -> String {
         unix_ms = unix_ms,
         name = js_escape(name)
     );
-    js_sys::eval(&script).ok().and_then(|v| v.as_string()).unwrap_or_else(|| "UTC".to_string())
+    js_sys::eval(&script)
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| "UTC".to_string())
 }
 
 fn local_offset_secs_impl(unix_ms: f64) -> f64 {
     let script = format!("(-new Date({}).getTimezoneOffset()*60)", unix_ms);
-    js_sys::eval(&script).ok().and_then(|v| v.as_f64()).unwrap_or(0.0)
+    js_sys::eval(&script)
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
 }
 
 fn local_abbrev_impl(unix_ms: f64) -> String {
@@ -54,7 +66,10 @@ fn local_abbrev_impl(unix_ms: f64) -> String {
         "(function(){{try{{var d=new Date({unix_ms});var parts=new Intl.DateTimeFormat('en-US',{{timeZoneName:'short'}}).formatToParts(d);var p=parts.find(function(p){{return p.type==='timeZoneName';}});return p?p.value:'UTC';}}catch(e){{return 'UTC';}}}})()",
         unix_ms = unix_ms
     );
-    js_sys::eval(&script).ok().and_then(|v| v.as_string()).unwrap_or_else(|| "UTC".to_string())
+    js_sys::eval(&script)
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| "UTC".to_string())
 }
 
 fn now_unix_nano() -> i64 {
@@ -98,7 +113,10 @@ fn timesys_SleepNano(call: &mut ExternCallContext) -> ExternResult {
     let ns = call.arg_i64(0);
     let ms = ((ns as f64) / 1_000_000.0).ceil().max(0.0) as u32;
     let token = next_callback_token();
-    ExternResult::HostEventWait { token, delay_ms: ms }
+    ExternResult::HostEventWait {
+        token,
+        delay_ms: ms,
+    }
 }
 
 // --- Timezone implementations via JS Intl API (W1) ---

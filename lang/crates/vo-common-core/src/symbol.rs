@@ -101,7 +101,9 @@ impl SymbolInterner {
     #[inline]
     pub fn get(&self, string: &str) -> Option<Symbol> {
         use string_interner::Symbol as _;
-        self.interner.get(string).map(|s| Symbol(s.to_usize() as u32))
+        self.interner
+            .get(string)
+            .map(|s| Symbol(s.to_usize() as u32))
     }
 
     /// Resolves a symbol to its string.
@@ -113,8 +115,7 @@ impl SymbolInterner {
         if symbol.is_dummy() {
             return None;
         }
-        DefaultSymbol::try_from_usize(symbol.0 as usize)
-            .and_then(|s| self.interner.resolve(s))
+        DefaultSymbol::try_from_usize(symbol.0 as usize).and_then(|s| self.interner.resolve(s))
     }
 
     /// Returns the number of interned strings.
@@ -292,14 +293,14 @@ mod tests {
     #[test]
     fn test_interner_basic() {
         let mut interner = SymbolInterner::new();
-        
+
         let sym1 = interner.intern("hello");
         let sym2 = interner.intern("world");
         let sym3 = interner.intern("hello");
-        
+
         assert_eq!(sym1, sym3);
         assert_ne!(sym1, sym2);
-        
+
         assert_eq!(interner.resolve(sym1), Some("hello"));
         assert_eq!(interner.resolve(sym2), Some("world"));
     }
@@ -307,9 +308,9 @@ mod tests {
     #[test]
     fn test_interner_get() {
         let mut interner = SymbolInterner::new();
-        
+
         assert!(interner.get("hello").is_none());
-        
+
         let sym = interner.intern("hello");
         assert_eq!(interner.get("hello"), Some(sym));
         assert!(interner.get("world").is_none());
@@ -318,24 +319,24 @@ mod tests {
     #[test]
     fn test_interner_static() {
         let mut interner = SymbolInterner::new();
-        
+
         let sym1 = interner.intern_static("static");
         let sym2 = interner.intern("static");
-        
+
         assert_eq!(sym1, sym2);
     }
 
     #[test]
     fn test_interner_len() {
         let mut interner = SymbolInterner::new();
-        
+
         assert!(interner.is_empty());
         assert_eq!(interner.len(), 0);
-        
+
         interner.intern("a");
         interner.intern("b");
         interner.intern("a"); // duplicate
-        
+
         assert!(!interner.is_empty());
         assert_eq!(interner.len(), 2);
     }

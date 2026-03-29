@@ -2,18 +2,18 @@
 //!
 //! Used by builtin print/println and fmt package.
 
+use crate::ffi::ExternCallContext;
 use crate::gc::{Gc, GcRef};
 use crate::objects::{interface, slice, string as str_obj};
-use crate::ffi::ExternCallContext;
 use vo_common_core::types::ValueKind;
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
-use alloc::string::{String, ToString};
-#[cfg(not(feature = "std"))]
 use alloc::format;
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
 
 #[cfg(feature = "std")]
 use std::string::{String, ToString};
@@ -61,9 +61,13 @@ pub fn format_interface(slot0: u64, slot1: u64) -> String {
 }
 
 /// Format interface with optional ExternCallContext for error message extraction.
-pub fn format_interface_with_ctx(slot0: u64, slot1: u64, call: Option<&ExternCallContext>) -> String {
+pub fn format_interface_with_ctx(
+    slot0: u64,
+    slot1: u64,
+    call: Option<&ExternCallContext>,
+) -> String {
     let vk = interface::unpack_value_kind(slot0);
-    
+
     match vk {
         ValueKind::Void => "<nil>".to_string(),
         ValueKind::Bool => if slot1 != 0 { "true" } else { "false" }.to_string(),
@@ -77,15 +81,16 @@ pub fn format_interface_with_ctx(slot0: u64, slot1: u64, call: Option<&ExternCal
         ValueKind::Uint32 => (slot1 as u32).to_string(),
         ValueKind::Float32 => f32::from_bits(slot1 as u32).to_string(),
         ValueKind::Float64 => f64::from_bits(slot1).to_string(),
-        ValueKind::String => {
-            str_obj::as_str(slot1 as GcRef).to_string()
-        }
+        ValueKind::String => str_obj::as_str(slot1 as GcRef).to_string(),
         ValueKind::Pointer => {
             // Check if this is an error interface
             if let Some(ctx) = call {
                 let rttid = interface::unpack_rttid(slot0);
                 let wk = ctx.well_known();
-                if wk.error_ptr_rttid.map_or(false, |err_rttid| rttid == err_rttid) {
+                if wk
+                    .error_ptr_rttid
+                    .map_or(false, |err_rttid| rttid == err_rttid)
+                {
                     if let Some(field_offsets) = wk.error_field_offsets {
                         let ptr = slot1 as GcRef;
                         if !ptr.is_null() {
@@ -118,22 +123,22 @@ fn format_error_chain(ptr: GcRef, field_offsets: [u16; 2], ctx: &ExternCallConte
     } else {
         String::new()
     };
-    
+
     // Read cause field (interface: 2 slots)
     let cause_slot0 = unsafe { Gc::read_slot(ptr, field_offsets[1] as usize) };
     let cause_slot1 = unsafe { Gc::read_slot(ptr, field_offsets[1] as usize + 1) };
-    
+
     // Check if cause is nil (slot0 == 0 means nil interface)
     if cause_slot0 == 0 {
         return msg;
     }
-    
+
     // Recursively format cause
     let cause_msg = format_interface_with_ctx(cause_slot0, cause_slot1, Some(ctx));
     if cause_msg.is_empty() || cause_msg == "<nil>" {
         return msg;
     }
-    
+
     format!("{}: {}", msg, cause_msg)
 }
 

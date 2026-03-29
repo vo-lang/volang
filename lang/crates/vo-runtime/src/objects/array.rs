@@ -9,7 +9,6 @@ use crate::gc::{Gc, GcRef};
 use crate::slot::{byte_offset_for_slots, slot_to_usize, slots_for_bytes, Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta};
 
-
 #[repr(C)]
 pub struct ArrayHeader {
     pub len: Slot,
@@ -48,35 +47,47 @@ pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_bytes: usize, length: usiz
 }
 
 #[inline]
-pub fn is_nil(arr: GcRef) -> bool { arr.is_null() }
+pub fn is_nil(arr: GcRef) -> bool {
+    arr.is_null()
+}
 
 #[inline]
 pub fn len(arr: GcRef) -> usize {
-    if arr.is_null() { return 0; }
+    if arr.is_null() {
+        return 0;
+    }
     slot_to_usize(ArrayHeader::as_ref(arr).len)
 }
 
 #[inline]
 pub fn elem_meta(arr: GcRef) -> ValueMeta {
-    if arr.is_null() { return ValueMeta::new(0, ValueKind::Void); }
+    if arr.is_null() {
+        return ValueMeta::new(0, ValueKind::Void);
+    }
     ArrayHeader::as_ref(arr).elem_meta
 }
 
 #[inline]
 pub fn elem_kind(arr: GcRef) -> ValueKind {
-    if arr.is_null() { return ValueKind::Void; }
+    if arr.is_null() {
+        return ValueKind::Void;
+    }
     elem_meta(arr).value_kind()
 }
 
 #[inline]
 pub fn elem_meta_id(arr: GcRef) -> u32 {
-    if arr.is_null() { return 0; }
+    if arr.is_null() {
+        return 0;
+    }
     elem_meta(arr).meta_id()
 }
 
 #[inline]
 pub fn elem_bytes(arr: GcRef) -> usize {
-    if arr.is_null() { return 0; }
+    if arr.is_null() {
+        return 0;
+    }
     ArrayHeader::as_ref(arr).elem_bytes as usize
 }
 
@@ -137,7 +148,7 @@ pub fn get_auto(arr: GcRef, idx: usize, elem_bytes: usize) -> u64 {
                 2 => *(ptr.add(byte_offset) as *const u16) as u64,
                 4 => *(ptr.add(byte_offset) as *const u32) as u64,
                 _ => *(ptr.add(byte_offset) as *const u64),
-            }
+            },
         }
     }
 }
@@ -178,7 +189,7 @@ pub fn set_auto(arr: GcRef, idx: usize, val: u64, elem_bytes: usize) {
                 2 => *(ptr.add(byte_offset) as *mut u16) = val as u16,
                 4 => *(ptr.add(byte_offset) as *mut u32) = val as u32,
                 _ => *(ptr.add(byte_offset) as *mut u64) = val,
-            }
+            },
         }
     }
 }
@@ -218,7 +229,14 @@ pub fn set_n(arr: GcRef, idx: usize, src: &[u64], elem_bytes: usize) {
 }
 
 /// Copy element range (by elem_bytes)
-pub fn copy_range(src: GcRef, src_idx: usize, dst: GcRef, dst_idx: usize, count: usize, elem_bytes: usize) {
+pub fn copy_range(
+    src: GcRef,
+    src_idx: usize,
+    dst: GcRef,
+    dst_idx: usize,
+    count: usize,
+    elem_bytes: usize,
+) {
     let src_ptr = unsafe { data_ptr_bytes(src).add(src_idx * elem_bytes) };
     let dst_ptr = unsafe { data_ptr_bytes(dst).add(dst_idx * elem_bytes) };
     let byte_count = count * elem_bytes;

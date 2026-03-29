@@ -2,13 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::identity::{classify_import, find_owning_module, ImportClass, ModulePath};
-use crate::version::{DepConstraint, ExactVersion};
 use crate::lock;
 use crate::materialize;
 use crate::registry::Registry;
 use crate::schema::lockfile::LockFile;
 use crate::schema::modfile::{ModFile, Require};
 use crate::solver::{self, ResolvedGraph, SolvePreferences};
+use crate::version::{DepConstraint, ExactVersion};
 use crate::workspace;
 use crate::Error;
 
@@ -221,12 +221,17 @@ pub fn mod_tidy(
     // Determine which modules are actually needed by imports.
     let mut needed_modules: BTreeSet<ModulePath> = BTreeSet::new();
     for import_path in &external_imports {
-        if let Some((module, _)) = find_owning_module(import_path, mf.require.iter().map(|r| &r.module)) {
+        if let Some((module, _)) =
+            find_owning_module(import_path, mf.require.iter().map(|r| &r.module))
+        {
             needed_modules.insert(module.clone());
             continue;
         }
         if let Some(lock_file) = existing_lock.as_ref() {
-            if let Some((module, _)) = find_owning_module(import_path, lock_file.resolved.iter().map(|locked| &locked.path)) {
+            if let Some((module, _)) = find_owning_module(
+                import_path,
+                lock_file.resolved.iter().map(|locked| &locked.path),
+            ) {
                 needed_modules.insert(module.clone());
                 continue;
             }
@@ -327,9 +332,7 @@ pub fn mod_why(project_dir: &Path, target: &str) -> Result<Vec<String>, Error> {
     let target_mp = ModulePath::parse(target)?;
 
     if lf.find(&target_mp).is_none() {
-        return Err(Error::LockFileParse(format!(
-            "{target} is not in vo.lock"
-        )));
+        return Err(Error::LockFileParse(format!("{target} is not in vo.lock")));
     }
 
     // BFS from root's direct deps to target.
@@ -431,7 +434,9 @@ pub fn mod_clean(
         }
     }
 
-    Ok(CleanResult { removed_dirs: removed })
+    Ok(CleanResult {
+        removed_dirs: removed,
+    })
 }
 
 /// Result of a clean operation.
@@ -504,7 +509,9 @@ pub fn resolve_import_owner<'a>(
     }
 
     // Step 4: locked module owns it? (longest prefix match)
-    if let Some(result) = find_owning_module(import_path, lock_file.resolved.iter().map(|lm| &lm.path)) {
+    if let Some(result) =
+        find_owning_module(import_path, lock_file.resolved.iter().map(|lm| &lm.path))
+    {
         return Ok(result);
     }
 
@@ -541,7 +548,10 @@ fn scan_external_imports_dir(dir: &Path, imports: &mut BTreeSet<String>) -> Resu
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
             if name.starts_with('.')
                 || name == "vendor"
                 || name == "testdata"
@@ -605,7 +615,10 @@ fn remove_lock_file_if_exists(project_dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn write_or_remove_lock_file(project_dir: &Path, lock_file: Option<&LockFile>) -> Result<(), Error> {
+fn write_or_remove_lock_file(
+    project_dir: &Path,
+    lock_file: Option<&LockFile>,
+) -> Result<(), Error> {
     match lock_file {
         Some(lock_file) => write_lock_file(project_dir, lock_file),
         None => remove_lock_file_if_exists(project_dir),

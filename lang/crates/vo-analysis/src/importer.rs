@@ -2,7 +2,6 @@
 //!
 //! This module provides the interface for importing packages during type checking.
 
-
 use std::path::{Path, PathBuf};
 
 use crate::objects::PackageKey;
@@ -48,10 +47,10 @@ pub enum ImportResult {
 pub trait Importer {
     /// Imports a package by key.
     fn import(&mut self, key: &ImportKey) -> ImportResult;
-    
+
     /// Returns the working directory.
     fn working_dir(&self) -> &Path;
-    
+
     /// Returns the base directory for imports.
     fn base_dir(&self) -> Option<&Path>;
 }
@@ -72,11 +71,11 @@ impl Importer for NullImporter {
     fn import(&mut self, key: &ImportKey) -> ImportResult {
         ImportResult::Err(format!("cannot import \"{}\"", key.path))
     }
-    
+
     fn working_dir(&self) -> &Path {
         &self.working_dir
     }
-    
+
     fn base_dir(&self) -> Option<&Path> {
         None
     }

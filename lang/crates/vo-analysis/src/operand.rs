@@ -2,17 +2,16 @@
 //!
 //! An Operand represents an intermediate value during type checking.
 
-
 use crate::check::Checker;
 use crate::obj::{Builtin, ConstValue};
 use crate::objects::{TCObjects, TypeKey};
 use crate::typ::{self, BasicType};
 use crate::universe::Universe;
+use std::fmt::{self, Display, Write};
 use vo_common::span::Span;
 use vo_common::symbol::SymbolInterner;
-use vo_syntax::ast::ExprId;
 use vo_syntax::ast::Expr;
-use std::fmt::{self, Display, Write};
+use vo_syntax::ast::ExprId;
 
 /// Reference to an expression with its location.
 /// Binds expr_id and span together to prevent inconsistency.
@@ -24,7 +23,10 @@ pub(crate) struct ExprRef {
 
 impl ExprRef {
     pub fn from_expr(expr: &Expr) -> Self {
-        ExprRef { id: expr.id, span: expr.span }
+        ExprRef {
+            id: expr.id,
+            span: expr.span,
+        }
     }
 }
 
@@ -121,11 +123,19 @@ impl Operand {
     }
 
     pub fn with_mode(mode: OperandMode, typ: Option<TypeKey>) -> Operand {
-        Operand { mode, expr: None, typ }
+        Operand {
+            mode,
+            expr: None,
+            typ,
+        }
     }
 
     pub fn with_expr(mode: OperandMode, e: &Expr, typ: Option<TypeKey>) -> Operand {
-        Operand { mode, expr: Some(ExprRef::from_expr(e)), typ }
+        Operand {
+            mode,
+            expr: Some(ExprRef::from_expr(e)),
+            typ,
+        }
     }
 
     pub fn invalid(&self) -> bool {
@@ -136,17 +146,17 @@ impl Operand {
     pub fn pos(&self) -> Span {
         self.expr.map(|e| e.span).unwrap_or_default()
     }
-    
+
     /// Returns the expression ID if set.
     pub fn expr_id(&self) -> Option<ExprId> {
         self.expr.map(|e| e.id)
     }
-    
+
     /// Set the expression reference from an Expr.
     pub fn set_expr(&mut self, e: &Expr) {
         self.expr = Some(ExprRef::from_expr(e));
     }
-    
+
     /// Clear the expression reference.
     pub fn clear_expr(&mut self) {
         self.expr = None;
@@ -261,7 +271,7 @@ impl Operand {
     ) -> bool {
         let objs = &checker.tc_objs;
         let u = checker.universe();
-        
+
         if self.invalid() || t == u.types()[&BasicType::Invalid] {
             return true; // avoid spurious errors
         }
@@ -319,7 +329,9 @@ impl Operand {
 
         // Interface implementation check
         if ut_left.try_as_interface().is_some() {
-            if let Some((m, wrong_type)) = crate::lookup::missing_method(self_typ, ut_key_left, true, checker) {
+            if let Some((m, wrong_type)) =
+                crate::lookup::missing_method(self_typ, ut_key_left, true, checker)
+            {
                 if let Some(re) = reason {
                     let msg = if wrong_type {
                         "wrong type for method"

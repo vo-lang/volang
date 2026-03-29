@@ -6,9 +6,9 @@
 //!
 //! nil check: value_kind == Void (same as Go: typed nil is NOT nil interface)
 
-use vo_common_core::types::ValueKind;
-use crate::gc::GcRef;
 use super::string;
+use crate::gc::GcRef;
+use vo_common_core::types::ValueKind;
 
 pub const SLOT_COUNT: usize = 2;
 
@@ -132,48 +132,56 @@ impl InterfaceSlot {
     pub fn as_ref(&self) -> GcRef {
         self.slot1 as GcRef
     }
-    
+
     /// Get the data as string.
     #[inline]
     pub fn as_str(&self) -> &'static str {
         string::as_str(self.slot1 as GcRef)
     }
-    
+
     // ---- Type checking ----
-    
+
     /// Check if int.
     #[inline]
     pub fn is_int(&self) -> bool {
         self.value_kind() == ValueKind::Int
     }
-    
+
     /// Check if float.
     #[inline]
     pub fn is_float(&self) -> bool {
         self.value_kind() == ValueKind::Float64
     }
-    
+
     /// Check if bool.
     #[inline]
     pub fn is_bool(&self) -> bool {
         self.value_kind() == ValueKind::Bool
     }
-    
+
     /// Check if string.
     #[inline]
     pub fn is_string(&self) -> bool {
         self.value_kind() == ValueKind::String
     }
-    
+
     /// Check if reference type.
     #[inline]
     pub fn is_ref_type(&self) -> bool {
-        matches!(self.value_kind(), 
-            ValueKind::Slice | ValueKind::Map | ValueKind::Pointer |
-            ValueKind::Struct | ValueKind::Array | ValueKind::Channel | ValueKind::Port |
-            ValueKind::Closure | ValueKind::String)
+        matches!(
+            self.value_kind(),
+            ValueKind::Slice
+                | ValueKind::Map
+                | ValueKind::Pointer
+                | ValueKind::Struct
+                | ValueKind::Array
+                | ValueKind::Channel
+                | ValueKind::Port
+                | ValueKind::Closure
+                | ValueKind::String
+        )
     }
-    
+
     /// Create from u64.
     #[inline]
     pub fn from_u64(val: u64) -> Self {

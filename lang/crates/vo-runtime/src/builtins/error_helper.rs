@@ -10,14 +10,20 @@ use crate::objects::{interface, struct_ops};
 /// Used by vo_errors! macro and write_error_to.
 pub fn create_error(call: &mut ExternCallContext, msg: &str) -> (u64, u64) {
     let wk = call.well_known();
-    
+
     let named_type_id = wk.error_named_type_id.expect("errors.Error not found");
     let error_iface_meta_id = wk.error_iface_meta_id.expect("error interface not found");
     let error_ptr_rttid = wk.error_ptr_rttid.expect("*errors.Error rttid not found");
-    let struct_meta_id = wk.error_struct_meta_id.expect("errors.Error struct_meta_id not found");
-    let field_offsets = wk.error_field_offsets.expect("errors.Error field_offsets not found");
-    
-    let struct_meta = call.struct_meta(struct_meta_id as usize).expect("struct meta not found");
+    let struct_meta_id = wk
+        .error_struct_meta_id
+        .expect("errors.Error struct_meta_id not found");
+    let field_offsets = wk
+        .error_field_offsets
+        .expect("errors.Error field_offsets not found");
+
+    let struct_meta = call
+        .struct_meta(struct_meta_id as usize)
+        .expect("struct meta not found");
     let slots = struct_meta.slot_count() as usize;
     let err_obj = struct_ops::create(call.gc(), struct_meta_id, slots);
     let err_str = call.alloc_str(msg);
@@ -25,8 +31,8 @@ pub fn create_error(call: &mut ExternCallContext, msg: &str) -> (u64, u64) {
     // Field offsets: [msg, cause]
     unsafe {
         Gc::write_slot(err_obj, field_offsets[0] as usize, err_str as u64);
-        Gc::write_slot(err_obj, field_offsets[1] as usize, 0);      // cause slot0
-        Gc::write_slot(err_obj, field_offsets[1] as usize + 1, 0);  // cause slot1
+        Gc::write_slot(err_obj, field_offsets[1] as usize, 0); // cause slot0
+        Gc::write_slot(err_obj, field_offsets[1] as usize + 1, 0); // cause slot1
     }
 
     let itab_id = call.get_or_create_itab(named_type_id, error_iface_meta_id, true);
@@ -48,10 +54,16 @@ pub fn create_error_with_cause(
     let named_type_id = wk.error_named_type_id.expect("errors.Error not found");
     let error_iface_meta_id = wk.error_iface_meta_id.expect("error interface not found");
     let error_ptr_rttid = wk.error_ptr_rttid.expect("*errors.Error rttid not found");
-    let struct_meta_id = wk.error_struct_meta_id.expect("errors.Error struct_meta_id not found");
-    let field_offsets = wk.error_field_offsets.expect("errors.Error field_offsets not found");
+    let struct_meta_id = wk
+        .error_struct_meta_id
+        .expect("errors.Error struct_meta_id not found");
+    let field_offsets = wk
+        .error_field_offsets
+        .expect("errors.Error field_offsets not found");
 
-    let struct_meta = call.struct_meta(struct_meta_id as usize).expect("struct meta not found");
+    let struct_meta = call
+        .struct_meta(struct_meta_id as usize)
+        .expect("struct meta not found");
     let slots = struct_meta.slot_count() as usize;
     let err_obj = struct_ops::create(call.gc(), struct_meta_id, slots);
     let err_str = call.alloc_str(msg);

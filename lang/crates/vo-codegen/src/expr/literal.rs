@@ -39,7 +39,7 @@ fn compile_ident_as_map_key(
 ) -> Result<u16, CodegenError> {
     let name = info.project.interner.resolve(ident.symbol).unwrap_or("");
     let needs_boxing = info.is_interface(key_type);
-    
+
     // Handle true/false literals
     if name == "true" || name == "false" {
         let bool_val = if name == "true" { 1u16 } else { 0u16 };
@@ -51,21 +51,27 @@ fn compile_ident_as_map_key(
             return Ok(dst);
         }
     }
-    
+
     // Variable reference - load value first
-    let storage = func.lookup_local(ident.symbol)
+    let storage = func
+        .lookup_local(ident.symbol)
         .map(|l| l.storage)
-        .ok_or_else(|| CodegenError::Internal(format!("map key ident not found: {:?}", ident.symbol)))?;
+        .ok_or_else(|| {
+            CodegenError::Internal(format!("map key ident not found: {:?}", ident.symbol))
+        })?;
     let value_slots = storage.value_slots();
     let src_reg = func.alloc_slots(&vec![SlotType::Value; value_slots as usize]);
     func.emit_storage_load(storage, src_reg);
-    
+
     if needs_boxing {
-        let src_type = info.ident_type(ident)
-            .ok_or_else(|| CodegenError::Internal(format!("cannot get type for ident: {:?}", ident.symbol)))?;
+        let src_type = info.ident_type(ident).ok_or_else(|| {
+            CodegenError::Internal(format!("cannot get type for ident: {:?}", ident.symbol))
+        })?;
         let key_slot_types = info.type_slot_types(key_type);
         let iface_reg = func.alloc_slots(&key_slot_types);
-        crate::assign::emit_iface_assign_from_concrete(iface_reg, src_reg, src_type, key_type, ctx, func, info)?;
+        crate::assign::emit_iface_assign_from_concrete(
+            iface_reg, src_reg, src_type, key_type, ctx, func, info,
+        )?;
         Ok(iface_reg)
     } else {
         Ok(src_reg)
@@ -73,10 +79,16 @@ fn compile_ident_as_map_key(
 }
 
 /// Emit a bool value boxed as interface.
-fn emit_boxed_bool(val: u16, ctx: &mut CodegenContext, func: &mut FuncBuilder) -> Result<u16, CodegenError> {
+fn emit_boxed_bool(
+    val: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+) -> Result<u16, CodegenError> {
     let iface_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
     let slot0 = vo_runtime::objects::interface::pack_slot0(
-        0, vo_runtime::ValueKind::Bool as u32, vo_runtime::ValueKind::Bool
+        0,
+        vo_runtime::ValueKind::Bool as u32,
+        vo_runtime::ValueKind::Bool,
     );
     let slot0_idx = ctx.const_int(slot0 as i64);
     func.emit_op(Opcode::LoadConst, iface_reg, slot0_idx, 0);
@@ -89,7 +101,10 @@ fn emit_boxed_bool(val: u16, ctx: &mut CodegenContext, func: &mut FuncBuilder) -
 // =============================================================================
 
 /// Get constant value from type info
-pub fn get_const_value<'a>(expr_id: vo_syntax::ast::ExprId, info: &'a TypeInfoWrapper) -> Option<&'a vo_analysis::ConstValue> {
+pub fn get_const_value<'a>(
+    expr_id: vo_syntax::ast::ExprId,
+    info: &'a TypeInfoWrapper,
+) -> Option<&'a vo_analysis::ConstValue> {
     info.const_value(expr_id)
 }
 
@@ -128,7 +143,9 @@ pub fn compile_const_value(
         Value::IntBig(big) => {
             // Check if target type is float - need to convert int constant to float
             if info.is_float(target_type) {
-                let val: i64 = big.try_into().expect("type checker should ensure value fits i64");
+                let val: i64 = big
+                    .try_into()
+                    .expect("type checker should ensure value fits i64");
                 let f = val as f64;
                 let idx = ctx.const_float(f);
                 func.emit_op(Opcode::LoadConst, dst, idx, 0);
@@ -138,10 +155,13 @@ pub fn compile_const_value(
             } else {
                 // Use target type to determine signed vs unsigned conversion
                 let val: i64 = if info.is_unsigned(target_type) {
-                    let u: u64 = big.try_into().expect("type checker should ensure value fits u64");
+                    let u: u64 = big
+                        .try_into()
+                        .expect("type checker should ensure value fits u64");
                     u as i64
                 } else {
-                    big.try_into().expect("type checker should ensure value fits i64")
+                    big.try_into()
+                        .expect("type checker should ensure value fits i64")
                 };
                 let idx = ctx.const_int(val);
                 func.emit_op(Opcode::LoadConst, dst, idx, 0);
@@ -188,7 +208,7 @@ pub fn compile_composite_lit(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let type_key = info.expr_type(expr.id);
-    
+
     if info.is_struct(type_key) {
         compile_struct_lit(lit, dst, type_key, ctx, func, info)
     } else if info.is_array(type_key) {
@@ -198,7 +218,9 @@ pub fn compile_composite_lit(
     } else if info.is_map(type_key) {
         compile_map_lit(lit, dst, type_key, ctx, func, info)
     } else {
-        Err(CodegenError::UnsupportedExpr("composite literal for unsupported type".to_string()))
+        Err(CodegenError::UnsupportedExpr(
+            "composite literal for unsupported type".to_string(),
+        ))
     }
 }
 
@@ -211,30 +233,51 @@ fn compile_struct_lit(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let total_slots = info.type_slot_count(type_key);
-    
+
     // Zero-initialize all slots first
     for i in 0..total_slots {
         func.emit_op(Opcode::LoadInt, dst + i, 0, 0);
     }
-    
+
     // Initialize specified fields
     for (i, elem) in lit.elems.iter().enumerate() {
         if let Some(key) = &elem.key {
             // Named field: key is field name
             if let vo_syntax::ast::CompositeLitKey::Ident(field_ident) = key {
-                let field_name = info.project.interner.resolve(field_ident.symbol)
-                    .ok_or_else(|| CodegenError::Internal("cannot resolve field name".to_string()))?;
-                
-                let (offset, _slots, field_type) = info.struct_field_offset_with_type(type_key, field_name);
-                
+                let field_name = info
+                    .project
+                    .interner
+                    .resolve(field_ident.symbol)
+                    .ok_or_else(|| {
+                        CodegenError::Internal("cannot resolve field name".to_string())
+                    })?;
+
+                let (offset, _slots, field_type) =
+                    info.struct_field_offset_with_type(type_key, field_name);
+
                 // Use emit_assign to handle interface conversion
-                crate::assign::emit_assign(dst + offset, crate::assign::AssignSource::Expr(&elem.value), field_type, ctx, func, info)?;
+                crate::assign::emit_assign(
+                    dst + offset,
+                    crate::assign::AssignSource::Expr(&elem.value),
+                    field_type,
+                    ctx,
+                    func,
+                    info,
+                )?;
             }
         } else {
             // Positional field: use field index
-            let (offset, _field_slots, field_type) = info.struct_field_offset_by_index_with_type(type_key, i);
+            let (offset, _field_slots, field_type) =
+                info.struct_field_offset_by_index_with_type(type_key, i);
             // Use emit_assign to handle interface conversion
-            crate::assign::emit_assign(dst + offset, crate::assign::AssignSource::Expr(&elem.value), field_type, ctx, func, info)?;
+            crate::assign::emit_assign(
+                dst + offset,
+                crate::assign::AssignSource::Expr(&elem.value),
+                field_type,
+                ctx,
+                func,
+                info,
+            )?;
         }
     }
     Ok(())
@@ -249,11 +292,10 @@ fn resolve_elem_index(
 ) -> u64 {
     let index = if let Some(ref key) = elem.key {
         match key {
-            vo_syntax::ast::CompositeLitKey::Expr(key_expr) => {
-                info.try_const_int(key_expr)
-                    .map(|i| i as u64)
-                    .unwrap_or(*current_index)
-            }
+            vo_syntax::ast::CompositeLitKey::Expr(key_expr) => info
+                .try_const_int(key_expr)
+                .map(|i| i as u64)
+                .unwrap_or(*current_index),
             vo_syntax::ast::CompositeLitKey::Ident(_) => *current_index,
         }
     } else {
@@ -275,12 +317,12 @@ fn compile_array_lit(
     let array_len = info.array_len(type_key) as u16;
     let total_slots = array_len * elem_slots;
     let elem_type = info.array_elem_type(type_key);
-    
+
     // Zero-initialize all slots first (sparse arrays may have gaps)
     for i in 0..total_slots {
         func.emit_op(Opcode::LoadInt, dst + i, 0, 0);
     }
-    
+
     // Initialize specified elements with keyed index support
     let mut current_index: u64 = 0;
     for elem in lit.elems.iter() {
@@ -301,31 +343,31 @@ fn compile_slice_lit(
 ) -> Result<(), CodegenError> {
     let elem_bytes = info.slice_elem_bytes(type_key);
     let len = lit.elems.len();
-    
+
     // Get element meta with correct ValueKind
     let elem_type = info.slice_elem_type(type_key);
     let elem_slot_types = info.slice_elem_slot_types(type_key);
     let elem_vk = info.type_value_kind(elem_type);
     let elem_meta_idx = ctx.get_or_create_value_meta(elem_type, info);
-    
+
     // Load elem_meta into register
     let meta_reg = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
-    
+
     // SliceNew: a=dst, b=elem_meta, c=len_cap_start, flags=elem_flags
     let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
     // When flags=0 (dynamic), put len, cap, elem_bytes in consecutive registers
     let num_regs = if flags == 0 { 3 } else { 2 };
     let len_cap_reg = func.alloc_slots(&vec![SlotType::Value; num_regs]);
     let (b, c) = encode_i32(len as i32);
-    func.emit_op(Opcode::LoadInt, len_cap_reg, b, c);      // len
-    func.emit_op(Opcode::LoadInt, len_cap_reg + 1, b, c);  // cap = len
+    func.emit_op(Opcode::LoadInt, len_cap_reg, b, c); // len
+    func.emit_op(Opcode::LoadInt, len_cap_reg + 1, b, c); // cap = len
     if flags == 0 {
         let eb_idx = ctx.const_int(elem_bytes as i64);
         func.emit_op(Opcode::LoadConst, len_cap_reg + 2, eb_idx, 0);
     }
     func.emit_with_flags(Opcode::SliceNew, flags, dst, meta_reg, len_cap_reg);
-    
+
     // Set each element with keyed index support
     let mut current_index: u64 = 0;
     for elem in lit.elems.iter() {
@@ -347,10 +389,11 @@ fn compile_map_lit(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    let (key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid) = ctx.get_or_create_map_metas(type_key, info);
+    let (key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid) =
+        ctx.get_or_create_map_metas(type_key, info);
     let key_slot_types = info.map_key_slot_types(type_key);
     let val_slot_types = info.map_val_slot_types(type_key);
-    
+
     // MapNew: a=dst, b=packed_and_rttid, c=(key_slots<<8)|val_slots
     // packed_and_rttid[0] = (key_meta << 32) | val_meta
     // packed_and_rttid[1] = key_rttid (for struct key deep hash/eq)
@@ -365,13 +408,13 @@ fn compile_map_lit(
     // Load key_rttid into packed_reg+1
     let key_rttid_idx = ctx.const_int(key_rttid as i64);
     func.emit_op(Opcode::LoadConst, packed_reg + 1, key_rttid_idx, 0);
-    
+
     let slots_arg = crate::type_info::encode_map_new_slots(key_slots, val_slots);
     func.emit_op(Opcode::MapNew, dst, packed_reg, slots_arg);
-    
+
     // Get key type for interface boxing
     let (key_type, _) = info.map_key_val_types(type_key);
-    
+
     // Set each key-value pair
     for elem in &lit.elems {
         if let Some(key) = &elem.key {
@@ -383,16 +426,16 @@ fn compile_map_lit(
             let meta = crate::type_info::encode_map_set_meta(key_slots, val_slots);
             let meta_idx = ctx.const_int(meta as i64);
             func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
-            
+
             // Compile key - use compile_map_lit_key for unified interface key boxing
             let key_reg = compile_map_lit_key(key, key_type, ctx, func, info)?;
             func.emit_copy(meta_and_key_reg + 1, key_reg, key_slots);
-            
+
             // Compile value
             let (_, val_type) = info.map_key_val_types(type_key);
             let val_reg = func.alloc_slots(&val_slot_types);
             super::compile_elem_to(&elem.value, val_reg, val_type, ctx, func, info)?;
-            
+
             // MapSet: a=map, b=meta_and_key, c=val
             func.emit_op(Opcode::MapSet, dst, meta_and_key_reg, val_reg);
         }
@@ -444,17 +487,17 @@ pub(crate) fn lower_func_lit(
 ) -> Result<(u32, Vec<vo_analysis::objects::ObjKey>), CodegenError> {
     // Get closure captures from type info
     let captures = info.closure_captures(expr.id);
-    
+
     // Generate a unique name for the closure function
     let closure_name = format!("closure_{}", ctx.next_closure_id());
-    
+
     // Create new FuncBuilder for the closure body (slot 0 reserved for closure ref)
     let mut closure_builder = if captures.is_empty() {
         FuncBuilder::new(&closure_name)
     } else {
         FuncBuilder::new_closure(&closure_name)
     };
-    
+
     // Register captures in closure builder so it can access them via ClosureGet
     // Also collect capture types for cross-island serialization
     for (i, obj_key) in captures.iter().enumerate() {
@@ -472,7 +515,7 @@ pub(crate) fn lower_func_lit(
         // All regular closure captures are GcRef (pointers to heap-boxed escaped vars)
         closure_builder.add_capture_slot_types(&[SlotType::GcRef]);
     }
-    
+
     // Define parameters and collect escaped ones for boxing
     // Also collect param types for cross-island serialization
     let mut escaped_params = Vec::new();
@@ -510,23 +553,29 @@ pub(crate) fn lower_func_lit(
         param_type_iter.next().is_none(),
         "closure signature param types had extra entries after binding AST params"
     );
-    
+
     // Box escaped parameters: allocate heap storage and copy param values
     for (sym, type_key, slots, _slot_types) in escaped_params {
         let meta_idx = ctx.get_boxing_meta(type_key, info);
         closure_builder.emit_box_escaped_param(sym, slots, info.is_pointer(type_key), meta_idx);
     }
-    
+
     // Set return slots and types
-    let ret_slots: u16 = func_lit.sig.results.iter()
+    let ret_slots: u16 = func_lit
+        .sig
+        .results
+        .iter()
         .map(|r| info.type_expr_layout(r.ty.id).0)
         .sum();
     closure_builder.set_ret_slots(ret_slots);
-    let return_types: Vec<_> = func_lit.sig.results.iter()
+    let return_types: Vec<_> = func_lit
+        .sig
+        .results
+        .iter()
         .map(|r| info.type_expr_type(r.ty.id))
         .collect();
     closure_builder.set_return_types(return_types.clone());
-    
+
     // Compute error_ret_slot: if last return type is error, calculate its slot offset
     if let Some(last_type) = return_types.last() {
         if info.is_error_type(*last_type) {
@@ -540,7 +589,7 @@ pub(crate) fn lower_func_lit(
             closure_builder.set_error_ret_slot(offset as i16);
         }
     }
-    
+
     // Define named return variables (same logic as regular functions in lib.rs)
     // IMPORTANT: For panic/recover to work correctly, if ANY named return escapes,
     // ALL named returns must escape. This is because the VM's heap_ret recovery path
@@ -551,12 +600,15 @@ pub(crate) fn lower_func_lit(
         result_type: vo_analysis::objects::TypeKey,
     }
     let mut escaped_returns: Vec<EscapedReturn> = Vec::new();
-    
+
     // First pass: check if ANY named return escapes
-    let any_escapes = func_lit.sig.results.iter()
+    let any_escapes = func_lit
+        .sig
+        .results
+        .iter()
         .filter_map(|r| r.name.as_ref())
         .any(|name| info.is_escaped(info.get_def(name)));
-    
+
     for result in &func_lit.sig.results {
         if let Some(name) = &result.name {
             let result_type = info.type_expr_type(result.ty.id);
@@ -564,11 +616,19 @@ pub(crate) fn lower_func_lit(
             let obj_key = info.get_def(name);
             // Force escape if ANY named return escapes (for correct panic/recover)
             let escapes = any_escapes || info.is_escaped(obj_key);
-            
+
             let slot = if escapes {
                 // GC uses alloc_zeroed, so heap memory is already zero-initialized
-                let gcref_slot = closure_builder.define_local_heap_boxed(name.symbol, slots, info.is_pointer(result_type));
-                escaped_returns.push(EscapedReturn { gcref_slot, slots, result_type });
+                let gcref_slot = closure_builder.define_local_heap_boxed(
+                    name.symbol,
+                    slots,
+                    info.is_pointer(result_type),
+                );
+                escaped_returns.push(EscapedReturn {
+                    gcref_slot,
+                    slots,
+                    result_type,
+                });
                 gcref_slot
             } else {
                 let (_, slot_types) = info.type_expr_layout(result.ty.id);
@@ -582,7 +642,7 @@ pub(crate) fn lower_func_lit(
             closure_builder.register_named_return(slot, slots, escapes);
         }
     }
-    
+
     // Emit PtrNew for escaped returns
     for er in escaped_returns {
         let meta_idx = ctx.get_boxing_meta(er.result_type, info);
@@ -590,13 +650,13 @@ pub(crate) fn lower_func_lit(
         closure_builder.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         closure_builder.emit_with_flags(Opcode::PtrNew, er.slots as u8, er.gcref_slot, meta_reg, 0);
     }
-    
+
     // Compile closure body
     crate::stmt::compile_block(&func_lit.body, ctx, &mut closure_builder, info)?;
-    
+
     // Add return if not present
     closure_builder.emit_op(Opcode::Return, 0, 0, 0);
-    
+
     // Build and add closure function to module
     let closure_func = closure_builder.build();
     let func_id = ctx.add_function(closure_func);

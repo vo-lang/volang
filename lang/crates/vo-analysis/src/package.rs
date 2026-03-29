@@ -1,6 +1,5 @@
 //! Package representation for type checking.
 
-
 use crate::objects::{PackageKey, ScopeKey};
 use std::borrow::Cow;
 use std::fmt;

@@ -2,18 +2,18 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cranelift_codegen::ir::{types, Block, Function, FuncRef, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::StackSlotData;
 use cranelift_codegen::ir::StackSlotKind;
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, Block, FuncRef, Function, InstBuilder, MemFlags, Value};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 
-use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
-use vo_runtime::instruction::{Instruction, Opcode};
-use vo_runtime::jit_api::JitContext;
 use crate::translate::translate_inst;
 use crate::translator::{HelperFuncs, IrEmitter, SelectSyncCase, TranslateResult};
 use crate::JitError;
+use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
+use vo_runtime::instruction::{Instruction, Opcode};
+use vo_runtime::jit_api::JitContext;
 
 pub struct FunctionCompiler<'a> {
     builder: FunctionBuilder<'a>,
@@ -66,7 +66,7 @@ impl<'a> FunctionCompiler<'a> {
         let mut builder = FunctionBuilder::new(func, func_ctx);
         let entry_block = builder.create_block();
         builder.append_block_params_for_function_params(entry_block);
-        
+
         Self {
             builder,
             func_id,
@@ -95,15 +95,15 @@ impl<'a> FunctionCompiler<'a> {
         self.memory_only_start = crate::translator::compute_memory_only_start(&self.func_def.code);
         self.declare_variables();
         self.scan_jump_targets();
-        
+
         self.builder.switch_to_block(self.entry_block);
         self.emit_prologue();
-        
+
         let mut block_terminated = false;
-        
+
         for pc in 0..self.func_def.code.len() {
             self.current_pc = pc;
-            
+
             if let Some(&block) = self.blocks.get(&pc) {
                 if !block_terminated {
                     self.builder.ins().jump(block, &[]);
@@ -115,14 +115,14 @@ impl<'a> FunctionCompiler<'a> {
                 let dummy = self.builder.create_block();
                 self.builder.switch_to_block(dummy);
             }
-            
+
             let inst = &self.func_def.code[pc];
             block_terminated = self.translate_instruction(inst)?;
         }
-        
+
         self.builder.seal_all_blocks();
         self.builder.finalize();
-        
+
         Ok(())
     }
 
@@ -171,22 +171,29 @@ impl<'a> FunctionCompiler<'a> {
         let args_ptr = self.current_memory_base_ptr();
         let num_slots = self.vars.len();
         let mem_start = (self.memory_only_start as usize).min(num_slots);
-        
+
         // SSA-only slots (< memory_only_start): spill from SSA to fiber.stack.
         for i in 0..mem_start {
             let offset = (i * 8) as i32;
             let val = self.builder.use_var(self.vars[i]);
-            self.builder.ins().store(MemFlags::trusted(), val, dst_ptr, offset);
+            self.builder
+                .ins()
+                .store(MemFlags::trusted(), val, dst_ptr, offset);
         }
-        
+
         // Memory-aliased slots (>= memory_only_start): copy from args_ptr to fiber.stack.
         // In JIT-to-JIT direct calls, args_ptr points to native stack, not fiber.stack.
         // The VM reads from fiber.stack on Call fallback, so we must sync these slots.
         // SlotSet writes go through args_ptr, so args_ptr is the source of truth.
         for i in mem_start..num_slots {
             let offset = (i * 8) as i32;
-            let val = self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, offset);
-            self.builder.ins().store(MemFlags::trusted(), val, dst_ptr, offset);
+            let val = self
+                .builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), args_ptr, offset);
+            self.builder
+                .ins()
+                .store(MemFlags::trusted(), val, dst_ptr, offset);
         }
     }
 
@@ -195,15 +202,20 @@ impl<'a> FunctionCompiler<'a> {
         let uses_stack = self.builder.use_var(self.args_ptr_is_stack_var.unwrap());
         let use_stack = self.builder.ins().icmp_imm(IntCC::NotEqual, uses_stack, 0);
         let stack_args_ptr = self.fiber_stack_args_ptr();
-        self.builder.ins().select(use_stack, stack_args_ptr, entry_args_ptr)
+        self.builder
+            .ins()
+            .select(use_stack, stack_args_ptr, entry_args_ptr)
     }
-    
+
     /// Compute fiber.stack base dynamically from ctx.stack_ptr + saved_jit_bp.
     /// Needed because fiber.stack may reallocate during nested calls.
     fn fiber_stack_args_ptr(&mut self) -> Value {
         let ctx = self.builder.block_params(self.entry_block)[0];
         let stack_ptr = self.builder.ins().load(
-            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_STACK_PTR
+            types::I64,
+            MemFlags::trusted(),
+            ctx,
+            JitContext::OFFSET_STACK_PTR,
         );
         let jit_bp = self.builder.use_var(self.saved_jit_bp.unwrap());
         // fiber_args_ptr = stack_ptr + jit_bp * 8
@@ -214,17 +226,25 @@ impl<'a> FunctionCompiler<'a> {
     fn sync_select_exec_state_precise(&mut self, result_reg: u16) {
         let stack_args_ptr = self.fiber_stack_args_ptr();
         let result_offset = (result_reg as i32) * 8;
-        let result_val = self.builder.ins().load(types::I64, MemFlags::trusted(), stack_args_ptr, result_offset);
+        let result_val = self.builder.ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            stack_args_ptr,
+            result_offset,
+        );
         self.store_local(result_reg, result_val);
 
-        let recv_cases: Vec<(usize, u16, usize, bool)> = self.pending_select_cases
+        let recv_cases: Vec<(usize, u16, usize, bool)> = self
+            .pending_select_cases
             .iter()
             .enumerate()
             .filter_map(|(idx, case)| match *case {
                 SelectSyncCase::Send => None,
-                SelectSyncCase::Recv { dst_reg, elem_slots, has_ok } => {
-                    Some((idx, dst_reg, elem_slots as usize, has_ok))
-                }
+                SelectSyncCase::Recv {
+                    dst_reg,
+                    elem_slots,
+                    has_ok,
+                } => Some((idx, dst_reg, elem_slots as usize, has_ok)),
             })
             .collect();
 
@@ -238,8 +258,13 @@ impl<'a> FunctionCompiler<'a> {
             let match_block = self.builder.create_block();
             let miss_block = self.builder.create_block();
             let case_idx_val = self.builder.ins().iconst(types::I64, case_idx as i64);
-            let is_match = self.builder.ins().icmp(IntCC::Equal, result_val, case_idx_val);
-            self.builder.ins().brif(is_match, match_block, &[], miss_block, &[]);
+            let is_match = self
+                .builder
+                .ins()
+                .icmp(IntCC::Equal, result_val, case_idx_val);
+            self.builder
+                .ins()
+                .brif(is_match, match_block, &[], miss_block, &[]);
 
             self.builder.switch_to_block(match_block);
             self.builder.seal_block(match_block);
@@ -248,10 +273,20 @@ impl<'a> FunctionCompiler<'a> {
                 let slot = dst_reg + slot_offset as u16;
                 let byte_offset = (slot as i32) * 8;
                 if self.is_float_slot(slot) {
-                    let val = self.builder.ins().load(types::F64, MemFlags::trusted(), stack_args_ptr, byte_offset);
+                    let val = self.builder.ins().load(
+                        types::F64,
+                        MemFlags::trusted(),
+                        stack_args_ptr,
+                        byte_offset,
+                    );
                     self.write_var_f64(slot, val);
                 } else {
-                    let val = self.builder.ins().load(types::I64, MemFlags::trusted(), stack_args_ptr, byte_offset);
+                    let val = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::trusted(),
+                        stack_args_ptr,
+                        byte_offset,
+                    );
                     self.store_local(slot, val);
                 }
             }
@@ -275,10 +310,16 @@ impl<'a> FunctionCompiler<'a> {
         for slot in start_slot..start_slot + slot_count {
             let offset = (slot as i32) * 8;
             if self.is_float_slot(slot) {
-                let val = self.builder.ins().load(types::F64, MemFlags::trusted(), args_ptr, offset);
+                let val =
+                    self.builder
+                        .ins()
+                        .load(types::F64, MemFlags::trusted(), args_ptr, offset);
                 self.write_var_f64(slot, val);
             } else {
-                let val = self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, offset);
+                let val =
+                    self.builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), args_ptr, offset);
                 self.store_local(slot, val);
             }
         }
@@ -287,26 +328,29 @@ impl<'a> FunctionCompiler<'a> {
     fn emit_prologue(&mut self) {
         // entry_block has no predecessors (it's the function entry point)
         self.builder.seal_block(self.entry_block);
-        
+
         let params = self.builder.block_params(self.entry_block);
         let ctx = params[0];
-        let args_ptr = params[1];  // Points to fiber.stack[jit_bp]
+        let args_ptr = params[1]; // Points to fiber.stack[jit_bp]
         let _ret = params[2];
-        
+
         // Wrap args_ptr in a Variable so refresh_stack_base_after_reallocation can redefine
         // it after any call that may have triggered fiber.stack reallocation.
         let args_ptr_var = Variable::from_u32((self.vars.len() + 1001) as u32);
         self.builder.declare_var(args_ptr_var, types::I64);
         self.builder.def_var(args_ptr_var, args_ptr);
         self.args_ptr_var = Some(args_ptr_var);
-        
+
         // Save jit_bp from ctx at function entry.
         // This is needed to compute fiber.stack address for spilling.
         // Also saved as caller_bp (i32) for reuse by all call sites.
         let jit_bp_var = Variable::from_u32((self.vars.len() + 1000) as u32);
         self.builder.declare_var(jit_bp_var, types::I64);
         let jit_bp_i32 = self.builder.ins().load(
-            types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
+            types::I32,
+            MemFlags::trusted(),
+            ctx,
+            JitContext::OFFSET_JIT_BP,
         );
         let jit_bp_i64 = self.builder.ins().uextend(types::I64, jit_bp_i32);
         self.builder.def_var(jit_bp_var, jit_bp_i64);
@@ -314,31 +358,40 @@ impl<'a> FunctionCompiler<'a> {
         let args_ptr_is_stack_var = Variable::from_u32((self.vars.len() + 1002) as u32);
         self.builder.declare_var(args_ptr_is_stack_var, types::I8);
         let stack_args_ptr = self.fiber_stack_args_ptr();
-        let uses_stack = self.builder.ins().icmp(IntCC::Equal, args_ptr, stack_args_ptr);
+        let uses_stack = self
+            .builder
+            .ins()
+            .icmp(IntCC::Equal, args_ptr, stack_args_ptr);
         let one_i8 = self.builder.ins().iconst(types::I8, 1);
         let zero_i8 = self.builder.ins().iconst(types::I8, 0);
         let uses_stack_i8 = self.builder.ins().select(uses_stack, one_i8, zero_i8);
         self.builder.def_var(args_ptr_is_stack_var, uses_stack_i8);
         self.args_ptr_is_stack_var = Some(args_ptr_is_stack_var);
         self.saved_caller_bp = Some(jit_bp_i32);
-        
+
         // Save fiber_sp from ctx at function entry. Reused by all call sites.
         let fiber_sp_i32 = self.builder.ins().load(
-            types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_FIBER_SP
+            types::I32,
+            MemFlags::trusted(),
+            ctx,
+            JitContext::OFFSET_FIBER_SP,
         );
         self.saved_fiber_sp = Some(fiber_sp_i32);
-        
+
         let param_slots = self.func_def.param_slots as usize;
         let num_slots = self.vars.len();
-        
+
         // Load params from args_ptr into SSA vars (params already in args_ptr from caller)
         for i in 0..param_slots {
             let offset = (i * 8) as i32;
             let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
-            let val = self.builder.ins().load(ty, MemFlags::trusted(), args_ptr, offset);
+            let val = self
+                .builder
+                .ins()
+                .load(ty, MemFlags::trusted(), args_ptr, offset);
             self.builder.def_var(self.vars[i], val);
         }
-        
+
         // Initialize non-param SSA vars to 0.
         // Memory store only needed for memory-aliased slots (>= memory_only_start).
         let zero_i64 = self.builder.ins().iconst(types::I64, 0);
@@ -351,7 +404,9 @@ impl<'a> FunctionCompiler<'a> {
             }
             if i as u16 >= self.memory_only_start {
                 let offset = (i * 8) as i32;
-                self.builder.ins().store(MemFlags::trusted(), zero_i64, args_ptr, offset);
+                self.builder
+                    .ins()
+                    .store(MemFlags::trusted(), zero_i64, args_ptr, offset);
             }
         }
     }
@@ -362,18 +417,37 @@ impl<'a> FunctionCompiler<'a> {
             TranslateResult::Terminated => return Ok(true),
             TranslateResult::Unhandled => {}
         }
-        
+
         match inst.opcode() {
-            Opcode::Jump => { self.jump(inst); Ok(true) }
-            Opcode::JumpIf => { self.jump_if(inst); Ok(false) }
-            Opcode::JumpIfNot => { self.jump_if_not(inst); Ok(false) }
-            Opcode::Return => { self.ret(inst); Ok(true) }
-            Opcode::Panic => { self.panic(inst); Ok(true) }
+            Opcode::Jump => {
+                self.jump(inst);
+                Ok(true)
+            }
+            Opcode::JumpIf => {
+                self.jump_if(inst);
+                Ok(false)
+            }
+            Opcode::JumpIfNot => {
+                self.jump_if_not(inst);
+                Ok(false)
+            }
+            Opcode::Return => {
+                self.ret(inst);
+                Ok(true)
+            }
+            Opcode::Panic => {
+                self.panic(inst);
+                Ok(true)
+            }
             Opcode::Call => Ok(self.call(inst)),
             Opcode::CallExtern => {
-                crate::call_helpers::emit_call_extern(self, inst, crate::call_helpers::CallExternConfig {
-                    current_pc: self.current_pc,
-                });
+                crate::call_helpers::emit_call_extern(
+                    self,
+                    inst,
+                    crate::call_helpers::CallExternConfig {
+                        current_pc: self.current_pc,
+                    },
+                );
                 Ok(false)
             }
             Opcode::CallClosure => {
@@ -396,7 +470,7 @@ impl<'a> FunctionCompiler<'a> {
         let offset = inst.imm32();
         let target = (self.current_pc as i32 + offset) as usize;
         let block = self.blocks[&target];
-        
+
         self.builder.ins().jump(block, &[]);
     }
 
@@ -419,7 +493,9 @@ impl<'a> FunctionCompiler<'a> {
             }
         } else {
             let args_ptr = self.current_memory_base_ptr();
-            self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
+            self.builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
         }
     }
 
@@ -435,7 +511,9 @@ impl<'a> FunctionCompiler<'a> {
         }
         if slot >= self.memory_only_start {
             let args_ptr = self.current_memory_base_ptr();
-            self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
+            self.builder
+                .ins()
+                .store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
         }
         // Clear non-nil status when slot is written
         self.checked_non_nil.remove(&slot);
@@ -447,11 +525,13 @@ impl<'a> FunctionCompiler<'a> {
         let target = (self.current_pc as i32 + offset) as usize;
         let target_block = self.blocks[&target];
         let fall_through = self.builder.create_block();
-        
+
         let zero = self.builder.ins().iconst(types::I64, 0);
         let cmp = self.builder.ins().icmp(cmp_cond, cond, zero);
-        self.builder.ins().brif(cmp, target_block, &[], fall_through, &[]);
-        
+        self.builder
+            .ins()
+            .brif(cmp, target_block, &[], fall_through, &[]);
+
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
     }
@@ -460,16 +540,23 @@ impl<'a> FunctionCompiler<'a> {
         let idx = self.load_local(inst.a);
         let limit = self.load_local(inst.b);
         let (is_decrement, is_unsigned, is_inclusive) = inst.forloop_flags();
-        
+
         let (next_idx, continue_loop) = crate::translate::emit_forloop_step(
-            &mut self.builder, idx, limit, is_decrement, is_unsigned, is_inclusive
+            &mut self.builder,
+            idx,
+            limit,
+            is_decrement,
+            is_unsigned,
+            is_inclusive,
         );
         self.store_local(inst.a, next_idx);
-        
+
         let target_block = self.blocks[&inst.forloop_target(self.current_pc)];
         let fall_through = self.builder.create_block();
-        
-        self.builder.ins().brif(continue_loop, target_block, &[], fall_through, &[]);
+
+        self.builder
+            .ins()
+            .brif(continue_loop, target_block, &[], fall_through, &[]);
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
     }
@@ -489,19 +576,37 @@ impl<'a> FunctionCompiler<'a> {
 
         if !is_pure {
             // Set is_error_return for VM errdefer decision.
-            let err_flag = self.builder.ins().iconst(types::I8, if is_error_return { 1 } else { 0 });
-            self.builder.ins().store(MemFlags::trusted(), err_flag, ctx, JitContext::OFFSET_IS_ERROR_RETURN);
+            let err_flag = self
+                .builder
+                .ins()
+                .iconst(types::I8, if is_error_return { 1 } else { 0 });
+            self.builder.ins().store(
+                MemFlags::trusted(),
+                err_flag,
+                ctx,
+                JitContext::OFFSET_IS_ERROR_RETURN,
+            );
         }
-        
+
         if heap_returns {
             if self.func_def.has_defer {
                 // With defers, VM must read heap returns AFTER defers execute.
                 // Record metadata for VM to read GcRefs from fiber.stack[jit_bp + ret_gcref_start..].
                 let gcref_start = self.builder.ins().iconst(types::I16, inst.a as i64);
-                self.builder.ins().store(MemFlags::trusted(), gcref_start, ctx, JitContext::OFFSET_RET_GCREF_START);
+                self.builder.ins().store(
+                    MemFlags::trusted(),
+                    gcref_start,
+                    ctx,
+                    JitContext::OFFSET_RET_GCREF_START,
+                );
                 let one = self.builder.ins().iconst(types::I8, 1);
-                self.builder.ins().store(MemFlags::trusted(), one, ctx, JitContext::OFFSET_RET_IS_HEAP);
-                
+                self.builder.ins().store(
+                    MemFlags::trusted(),
+                    one,
+                    ctx,
+                    JitContext::OFFSET_RET_IS_HEAP,
+                );
+
                 // Spill GcRef slots to args_ptr so VM can read them from fiber.stack.
                 // SSA-only slots (< memory_only_start) aren't written to memory by store_local.
                 let gcref_count = inst.b as usize;
@@ -515,12 +620,22 @@ impl<'a> FunctionCompiler<'a> {
                         } else {
                             val
                         };
-                        self.builder.ins().store(MemFlags::trusted(), val_i64, args_ptr, (slot as i32) * 8);
+                        self.builder.ins().store(
+                            MemFlags::trusted(),
+                            val_i64,
+                            args_ptr,
+                            (slot as i32) * 8,
+                        );
                     }
                 }
             } else {
                 let zero = self.builder.ins().iconst(types::I8, 0);
-                self.builder.ins().store(MemFlags::trusted(), zero, ctx, JitContext::OFFSET_RET_IS_HEAP);
+                self.builder.ins().store(
+                    MemFlags::trusted(),
+                    zero,
+                    ctx,
+                    JitContext::OFFSET_RET_IS_HEAP,
+                );
 
                 // Escaped named returns (no defers): dereference GcRefs and copy to ret buffer.
                 let gcref_start = inst.a as usize;
@@ -529,10 +644,18 @@ impl<'a> FunctionCompiler<'a> {
                 let mut ret_offset = 0i32;
                 for i in 0..gcref_count {
                     let gcref = self.load_local((gcref_start + i) as u16);
-                    let slots_for_this_ref = self.func_def.heap_ret_slots.get(i).copied().unwrap_or(1) as usize;
+                    let slots_for_this_ref =
+                        self.func_def.heap_ret_slots.get(i).copied().unwrap_or(1) as usize;
                     for j in 0..slots_for_this_ref {
-                        let val = self.builder.ins().load(types::I64, MemFlags::trusted(), gcref, (j * 8) as i32);
-                        self.builder.ins().store(MemFlags::trusted(), val, ret_ptr, ret_offset);
+                        let val = self.builder.ins().load(
+                            types::I64,
+                            MemFlags::trusted(),
+                            gcref,
+                            (j * 8) as i32,
+                        );
+                        self.builder
+                            .ins()
+                            .store(MemFlags::trusted(), val, ret_ptr, ret_offset);
                         ret_offset += 8;
                     }
                 }
@@ -540,23 +663,35 @@ impl<'a> FunctionCompiler<'a> {
         } else {
             if !is_pure {
                 let zero = self.builder.ins().iconst(types::I8, 0);
-                self.builder.ins().store(MemFlags::trusted(), zero, ctx, JitContext::OFFSET_RET_IS_HEAP);
+                self.builder.ins().store(
+                    MemFlags::trusted(),
+                    zero,
+                    ctx,
+                    JitContext::OFFSET_RET_IS_HEAP,
+                );
 
                 // Store ret_start for VM to extract slot_types for GC scanning
                 let ret_start_val = self.builder.ins().iconst(types::I16, inst.a as i64);
-                self.builder.ins().store(MemFlags::trusted(), ret_start_val, ctx, JitContext::OFFSET_RET_START);
+                self.builder.ins().store(
+                    MemFlags::trusted(),
+                    ret_start_val,
+                    ctx,
+                    JitContext::OFFSET_RET_START,
+                );
             }
 
             let ret_slots = self.func_def.ret_slots as usize;
             let ret_reg = inst.a as usize;
-            
+
             for i in 0..ret_slots {
                 let val = self.load_local((ret_reg + i) as u16);
                 let offset = (i * 8) as i32;
-                self.builder.ins().store(MemFlags::trusted(), val, ret_ptr, offset);
+                self.builder
+                    .ins()
+                    .store(MemFlags::trusted(), val, ret_ptr, offset);
             }
         }
-        
+
         let ok = self.builder.ins().iconst(types::I32, 0);
         self.builder.ins().return_(&[ok]);
     }
@@ -580,17 +715,17 @@ impl<'a> FunctionCompiler<'a> {
         let arg_start = inst.b as usize;
         let arg_slots = (inst.c >> 8) as usize;
         let call_ret_slots = (inst.c & 0xFF) as usize;
-        
+
         // Get target function info
         let target_func = &self.vo_module.functions[target_func_id as usize];
-        
+
         // Self-recursive call: always use direct JIT call
         // We know the current function is jittable since we're compiling it
         if target_func_id == self.func_id {
             self.call_self_recursive(arg_start, arg_slots, call_ret_slots, target_func);
             return false;
         }
-        
+
         // has_defer callees need VM execution (defer requires real CallFrame in fiber.frames).
         // Everything else can use JIT-to-JIT direct call with VM fallback.
         if !target_func.has_defer {
@@ -602,51 +737,63 @@ impl<'a> FunctionCompiler<'a> {
 
             // JIT-to-JIT direct call with runtime check for compiled callee
             // If callee returns Call/WaitIo, we propagate it to VM
-            crate::call_helpers::emit_jit_call_with_fallback(self, crate::call_helpers::JitCallWithFallbackConfig {
-                func_id: target_func_id,
-                arg_start,
-                ret_reg: arg_start + arg_slots,
-                arg_slots,
-                call_ret_slots,
-                func_ret_slots: target_func.ret_slots as usize,
-                callee_local_slots: target_func.local_slots as usize,
-                callee_func_ref,
-            });
+            crate::call_helpers::emit_jit_call_with_fallback(
+                self,
+                crate::call_helpers::JitCallWithFallbackConfig {
+                    func_id: target_func_id,
+                    arg_start,
+                    ret_reg: arg_start + arg_slots,
+                    arg_slots,
+                    call_ret_slots,
+                    func_ret_slots: target_func.ret_slots as usize,
+                    callee_local_slots: target_func.local_slots as usize,
+                    callee_func_ref,
+                },
+            );
             false // Block not terminated - we have a merge block for continuation
         } else {
             // Callee has defer: requires real CallFrame in fiber.frames.
             // Use Call request mechanism: return JitResult::Call, VM executes callee,
             // then continues execution in interpreter
-            crate::call_helpers::emit_call_via_vm(self, crate::call_helpers::CallViaVmConfig {
-                func_id: target_func_id,
-                arg_start,
-                ret_reg: arg_start + arg_slots,
-                resume_pc: self.current_pc + 1,
-                ret_slots: call_ret_slots,
-            });
+            crate::call_helpers::emit_call_via_vm(
+                self,
+                crate::call_helpers::CallViaVmConfig {
+                    func_id: target_func_id,
+                    arg_start,
+                    ret_reg: arg_start + arg_slots,
+                    resume_pc: self.current_pc + 1,
+                    ret_slots: call_ret_slots,
+                },
+            );
             true // Block IS terminated - call_via_vm generates return instruction
         }
     }
-    
+
     /// Optimized self-recursive call using direct call instead of call_indirect.
-    /// 
+    ///
     /// Fast path: args passed via native stack slot, no push_frame/pop_frame.
     /// Slow path (Call/WaitIo): materialize callee frame to fiber.stack.
-    fn call_self_recursive(&mut self, arg_start: usize, arg_slots: usize, call_ret_slots: usize, target_func: &vo_runtime::bytecode::FunctionDef) {
+    fn call_self_recursive(
+        &mut self,
+        arg_start: usize,
+        arg_slots: usize,
+        call_ret_slots: usize,
+        target_func: &vo_runtime::bytecode::FunctionDef,
+    ) {
         let func_ret_slots = target_func.ret_slots as usize;
         let callee_local_slots = target_func.local_slots as usize;
         let ctx = self.builder.block_params(self.entry_block)[0];
-        
+
         // Reuse prologue-saved caller_bp and fiber_sp (avoids redundant ctx loads per call site)
         let caller_bp = self.saved_caller_bp.unwrap();
         let old_fiber_sp = self.saved_fiber_sp.unwrap();
-        
+
         // Read args via load_local (SSA when safe, memory when aliased)
         let mut arg_values = Vec::with_capacity(arg_slots);
         for i in 0..arg_slots {
             arg_values.push(self.load_local((arg_start + i) as u16));
         }
-        
+
         // Create args_slot on native stack for passing args to callee
         let args_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
@@ -654,12 +801,14 @@ impl<'a> FunctionCompiler<'a> {
             8,
         ));
         let args_ptr = self.builder.ins().stack_addr(types::I64, args_slot, 0);
-        
+
         // Copy args to native stack slot
         for (i, val) in arg_values.iter().enumerate() {
-            self.builder.ins().stack_store(*val, args_slot, (i * 8) as i32);
+            self.builder
+                .ins()
+                .stack_store(*val, args_slot, (i * 8) as i32);
         }
-        
+
         // Create ret_slot for return values
         let ret_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
@@ -667,95 +816,176 @@ impl<'a> FunctionCompiler<'a> {
             8,
         ));
         let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
-        
+
         // Constants for slow path
         let func_id_val = self.builder.ins().iconst(types::I32, self.func_id as i64);
-        let local_slots_val = self.builder.ins().iconst(types::I32, callee_local_slots as i64);
+        let local_slots_val = self
+            .builder
+            .ins()
+            .iconst(types::I32, callee_local_slots as i64);
         // ret_reg = arg_start + arg_slots: return values live after the arg region.
-        let ret_reg_val = self.builder.ins().iconst(types::I32, (arg_start + arg_slots) as i64);
+        let ret_reg_val = self
+            .builder
+            .ins()
+            .iconst(types::I32, (arg_start + arg_slots) as i64);
         let ret_slots_val = self.builder.ins().iconst(types::I32, call_ret_slots as i64);
-        let caller_resume_pc_val = self.builder.ins().iconst(types::I32, (self.current_pc + 1) as i64);
-        
+        let caller_resume_pc_val = self
+            .builder
+            .ins()
+            .iconst(types::I32, (self.current_pc + 1) as i64);
+
         // Inline update ctx.jit_bp and ctx.fiber_sp for callee's correct saved_jit_bp
         let new_bp = old_fiber_sp;
-        let new_sp = self.builder.ins().iadd_imm(new_bp, callee_local_slots as i64);
-        self.builder.ins().store(MemFlags::trusted(), new_bp, ctx, JitContext::OFFSET_JIT_BP);
-        self.builder.ins().store(MemFlags::trusted(), new_sp, ctx, JitContext::OFFSET_FIBER_SP);
-        
+        let new_sp = self
+            .builder
+            .ins()
+            .iadd_imm(new_bp, callee_local_slots as i64);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), new_bp, ctx, JitContext::OFFSET_JIT_BP);
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            new_sp,
+            ctx,
+            JitContext::OFFSET_FIBER_SP,
+        );
+
         // Call callee with args on native stack (FAST PATH)
         let result = if let Some(func_ref) = self.self_func_ref {
-            let call = crate::translator::emit_funcref_call_raw(self, func_ref, &[ctx, args_ptr, ret_ptr]);
+            let call =
+                crate::translator::emit_funcref_call_raw(self, func_ref, &[ctx, args_ptr, ret_ptr]);
             self.builder.inst_results(call)[0]
         } else {
-            let jit_func_table = self.builder.ins().load(types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_FUNC_TABLE);
+            let jit_func_table = self.builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                ctx,
+                JitContext::OFFSET_JIT_FUNC_TABLE,
+            );
             let func_id_i64 = self.builder.ins().iconst(types::I64, self.func_id as i64);
             let offset = self.builder.ins().imul_imm(func_id_i64, 8);
             let func_ptr_addr = self.builder.ins().iadd(jit_func_table, offset);
-            let jit_func_ptr = self.builder.ins().load(types::I64, MemFlags::trusted(), func_ptr_addr, 0);
-            
+            let jit_func_ptr =
+                self.builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), func_ptr_addr, 0);
+
             let sig = crate::call_helpers::import_jit_func_sig(self);
-            
-            let call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
+
+            let call =
+                self.builder
+                    .ins()
+                    .call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
             self.builder.inst_results(call)[0]
         };
-        
+
         // Check result
-        let ok_val = self.builder.ins().iconst(types::I32, crate::call_helpers::JIT_RESULT_OK as i64);
+        let ok_val = self
+            .builder
+            .ins()
+            .iconst(types::I32, crate::call_helpers::JIT_RESULT_OK as i64);
         let is_ok = self.builder.ins().icmp(IntCC::Equal, result, ok_val);
-        
+
         let non_ok_block = self.builder.create_block();
         let ok_block = self.builder.create_block();
-        
-        self.builder.ins().brif(is_ok, ok_block, &[], non_ok_block, &[]);
-        
+
+        self.builder
+            .ins()
+            .brif(is_ok, ok_block, &[], non_ok_block, &[]);
+
         // Non-OK path (SLOW PATH): materialize frames to fiber.stack
         self.builder.switch_to_block(non_ok_block);
         self.builder.seal_block(non_ok_block);
-        
-        crate::call_helpers::emit_non_ok_slow_path(self, crate::call_helpers::NonOkSlowPathParams {
-            jit_result: result,
-            ctx, caller_bp, old_fiber_sp,
-            callee_func_id_val: func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val,
-            copy_args: Some((args_slot, arg_slots)),
-        });
-        
+
+        crate::call_helpers::emit_non_ok_slow_path(
+            self,
+            crate::call_helpers::NonOkSlowPathParams {
+                jit_result: result,
+                ctx,
+                caller_bp,
+                old_fiber_sp,
+                callee_func_id_val: func_id_val,
+                local_slots_val,
+                ret_reg_val,
+                ret_slots_val,
+                caller_resume_pc_val,
+                copy_args: Some((args_slot, arg_slots)),
+            },
+        );
+
         // OK path (FAST PATH) - restore ctx.jit_bp and ctx.fiber_sp
         self.builder.switch_to_block(ok_block);
         self.builder.seal_block(ok_block);
-        
+
         // Restore ctx.jit_bp and ctx.fiber_sp (inline pop)
-        self.builder.ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
-        self.builder.ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
-        
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            caller_bp,
+            ctx,
+            JitContext::OFFSET_JIT_BP,
+        );
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            old_fiber_sp,
+            ctx,
+            JitContext::OFFSET_FIBER_SP,
+        );
+
         // Copy return values to caller's locals_slot.
         // Return values live at arg_start + arg_slots (new call buffer layout).
         for i in 0..call_ret_slots {
-            let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
+            let val = self
+                .builder
+                .ins()
+                .stack_load(types::I64, ret_slot, (i * 8) as i32);
             self.store_local((arg_start + arg_slots + i) as u16, val);
         }
     }
-    
 }
 
 impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
-    fn builder(&mut self) -> &mut FunctionBuilder<'a> { &mut self.builder }
-    fn read_var(&mut self, slot: u16) -> Value { self.load_local(slot) }
-    fn write_var(&mut self, slot: u16, val: Value) { self.store_local(slot, val); }
-    fn ctx_param(&mut self) -> Value { self.builder.block_params(self.entry_block)[0] }
+    fn builder(&mut self) -> &mut FunctionBuilder<'a> {
+        &mut self.builder
+    }
+    fn read_var(&mut self, slot: u16) -> Value {
+        self.load_local(slot)
+    }
+    fn write_var(&mut self, slot: u16, val: Value) {
+        self.store_local(slot, val);
+    }
+    fn ctx_param(&mut self) -> Value {
+        self.builder.block_params(self.entry_block)[0]
+    }
     fn gc_ptr(&mut self) -> Value {
         let ctx = self.ctx_param();
-        self.builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0)
+        self.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), ctx, 0)
     }
     fn globals_ptr(&mut self) -> Value {
         let ctx = self.ctx_param();
-        self.builder.ins().load(types::I64, MemFlags::trusted(), ctx, 8)
+        self.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), ctx, 8)
     }
-    fn vo_module(&self) -> &VoModule { self.vo_module }
-    fn current_pc(&self) -> usize { self.current_pc }
-    fn helpers(&self) -> &HelperFuncs { &self.helpers }
-    fn set_reg_const(&mut self, reg: u16, val: i64) { self.reg_consts.insert(reg, val); }
-    fn get_reg_const(&self, reg: u16) -> Option<i64> { self.reg_consts.get(&reg).copied() }
-    fn panic_return_value(&self) -> i32 { 1 }
+    fn vo_module(&self) -> &VoModule {
+        self.vo_module
+    }
+    fn current_pc(&self) -> usize {
+        self.current_pc
+    }
+    fn helpers(&self) -> &HelperFuncs {
+        &self.helpers
+    }
+    fn set_reg_const(&mut self, reg: u16, val: i64) {
+        self.reg_consts.insert(reg, val);
+    }
+    fn get_reg_const(&self, reg: u16) -> Option<i64> {
+        self.reg_consts.get(&reg).copied()
+    }
+    fn panic_return_value(&self) -> i32 {
+        1
+    }
     fn var_addr(&mut self, slot: u16) -> Value {
         let args_ptr = self.current_memory_base_ptr();
         self.builder.ins().iadd_imm(args_ptr, (slot as i64) * 8)
@@ -777,7 +1007,9 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
         for slot in start_slot..spill_end {
             let offset = (slot as i32) * 8;
             let val = self.builder.use_var(self.vars[slot as usize]);
-            self.builder.ins().store(MemFlags::trusted(), val, args_ptr, offset);
+            self.builder
+                .ins()
+                .store(MemFlags::trusted(), val, args_ptr, offset);
         }
     }
     fn local_slot_count(&self) -> usize {
@@ -787,7 +1019,11 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
         self.func_id
     }
     fn slot_type(&self, slot: u16) -> vo_runtime::SlotType {
-        self.func_def.slot_types.get(slot as usize).copied().unwrap_or_default()
+        self.func_def
+            .slot_types
+            .get(slot as usize)
+            .copied()
+            .unwrap_or_default()
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
         if slot < self.memory_only_start {
@@ -799,7 +1035,9 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
             }
         } else {
             let args_ptr = self.current_memory_base_ptr();
-            self.builder.ins().load(types::F64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
+            self.builder
+                .ins()
+                .load(types::F64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
         }
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
@@ -811,7 +1049,9 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
         }
         if slot >= self.memory_only_start {
             let args_ptr = self.current_memory_base_ptr();
-            self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
+            self.builder
+                .ins()
+                .store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
         }
         self.checked_non_nil.remove(&slot);
     }
@@ -820,7 +1060,10 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
             let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
-            let val = self.builder.ins().load(ty, MemFlags::trusted(), args_ptr, offset);
+            let val = self
+                .builder
+                .ins()
+                .load(ty, MemFlags::trusted(), args_ptr, offset);
             self.builder.def_var(self.vars[i], val);
         }
     }
@@ -855,6 +1098,5 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     fn prologue_fiber_sp(&self) -> Option<Value> {
         self.saved_fiber_sp
     }
-    fn refresh_stack_base_after_reallocation(&mut self) {
-    }
+    fn refresh_stack_base_after_reallocation(&mut self) {}
 }

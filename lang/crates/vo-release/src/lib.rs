@@ -3,12 +3,7 @@ mod repo;
 
 pub use error::{ReleaseError, ReleaseResult};
 pub use repo::{
-    ArtifactInput,
-    StageReleaseOptions,
-    StagedArtifact,
-    StagedRelease,
-    stage_release,
-    verify_repo,
+    stage_release, verify_repo, ArtifactInput, StageReleaseOptions, StagedArtifact, StagedRelease,
 };
 
 #[cfg(test)]

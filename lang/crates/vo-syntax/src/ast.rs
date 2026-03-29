@@ -52,7 +52,11 @@ impl Ident {
     /// Creates a new identifier (with DUMMY id).
     #[inline]
     pub const fn new(symbol: Symbol, span: Span) -> Self {
-        Self { id: IdentId::DUMMY, symbol, span }
+        Self {
+            id: IdentId::DUMMY,
+            symbol,
+            span,
+        }
     }
 
     /// Creates a dummy identifier.
@@ -885,11 +889,11 @@ pub struct BinaryExpr {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     // Arithmetic
-    Add,    // +
-    Sub,    // -
-    Mul,    // *
-    Div,    // /
-    Rem,    // %
+    Add, // +
+    Sub, // -
+    Mul, // *
+    Div, // /
+    Rem, // %
 
     // Bitwise
     And,    // &
@@ -900,12 +904,12 @@ pub enum BinaryOp {
     Shr,    // >>
 
     // Comparison
-    Eq,     // ==
-    NotEq,  // !=
-    Lt,     // <
-    LtEq,   // <=
-    Gt,     // >
-    GtEq,   // >=
+    Eq,    // ==
+    NotEq, // !=
+    Lt,    // <
+    LtEq,  // <=
+    Gt,    // >
+    GtEq,  // >=
 
     // Logical
     LogAnd, // &&
@@ -1053,7 +1057,11 @@ pub enum DynAccessOp {
     /// Direct call: `a~>(args...)`
     Call { args: Vec<Expr>, spread: bool },
     /// Method call: `a~>method(args...)`
-    MethodCall { method: Ident, args: Vec<Expr>, spread: bool },
+    MethodCall {
+        method: Ident,
+        args: Vec<Expr>,
+        spread: bool,
+    },
 }
 
 // =============================================================================
@@ -1271,7 +1279,10 @@ pub fn walk_stmt<V: Visitor>(visitor: &mut V, stmt: &Stmt) {
 pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr) {
     match &expr.kind {
         ExprKind::Ident(i) => visitor.visit_ident(i),
-        ExprKind::IntLit(_) | ExprKind::FloatLit(_) | ExprKind::RuneLit(_) | ExprKind::StringLit(_) => {}
+        ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::RuneLit(_)
+        | ExprKind::StringLit(_) => {}
         ExprKind::Binary(b) => {
             visitor.visit_expr(&b.left);
             visitor.visit_expr(&b.right);

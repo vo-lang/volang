@@ -2,11 +2,10 @@
 
 use std::collections::HashMap;
 use vo_common::symbol::Symbol;
-use vo_common_core::TransferType;
 use vo_common_core::instruction::{
-    HINT_LOOP,
-    LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
+    HINT_LOOP, LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
 };
+use vo_common_core::TransferType;
 use vo_runtime::SlotType;
 use vo_vm::bytecode::FunctionDef;
 use vo_vm::instruction::{Instruction, Opcode};
@@ -20,25 +19,38 @@ pub enum StorageKind {
     /// Used for: primitives, structs
     /// Semantics: register-like, JIT maps to SSA variables
     StackValue { slot: u16, slots: u16 },
-    
+
     /// Stack-allocated array (N slots, indirect access via SlotGet/SlotSet)
     /// Used for: non-escaping arrays
     /// Semantics: memory-like, JIT accesses via locals_slot memory
-    StackArray { base_slot: u16, elem_slots: u16, len: u16 },
-    
+    StackArray {
+        base_slot: u16,
+        elem_slots: u16,
+        len: u16,
+    },
+
     /// Heap-boxed struct/primitive/interface (1 slot GcRef, PtrGet/PtrSet access)
     /// Layout: [GcHeader][data...]
     /// When stores_pointer is true, HeapBoxed stores a pointer (single GcRef) that needs
     /// to be dereferenced before field access. When false, it stores the value directly.
-    HeapBoxed { gcref_slot: u16, value_slots: u16, stores_pointer: bool },
-    
+    HeapBoxed {
+        gcref_slot: u16,
+        value_slots: u16,
+        stores_pointer: bool,
+    },
+
     /// Heap-allocated array (1 slot GcRef, ArrayGet/ArraySet access)
     /// Layout: [GcHeader][ArrayHeader][elems...]
-    HeapArray { gcref_slot: u16, elem_slots: u16, elem_bytes: u16, elem_vk: vo_common_core::ValueKind },
-    
+    HeapArray {
+        gcref_slot: u16,
+        elem_slots: u16,
+        elem_bytes: u16,
+        elem_vk: vo_common_core::ValueKind,
+    },
+
     /// Reference type (1 slot GcRef IS the value itself, Copy access)
     Reference { slot: u16 },
-    
+
     /// Global variable (GlobalGet/GlobalSet access)
     Global { index: u16, slots: u16 },
 }
@@ -55,7 +67,7 @@ impl StorageKind {
             StorageKind::Global { index, .. } => *index,
         }
     }
-    
+
     /// Get the number of value slots (logical size, not physical GcRef slot count)
     pub fn value_slots(&self) -> u16 {
         match self {
@@ -67,10 +79,13 @@ impl StorageKind {
             StorageKind::Global { slots, .. } => *slots,
         }
     }
-    
+
     /// Check if this is a heap-allocated storage (GcRef in local slot)
     pub fn is_heap(&self) -> bool {
-        matches!(self, StorageKind::HeapBoxed { .. } | StorageKind::HeapArray { .. })
+        matches!(
+            self,
+            StorageKind::HeapBoxed { .. } | StorageKind::HeapArray { .. }
+        )
     }
 }
 
@@ -94,31 +109,31 @@ pub struct LocalVar {
 #[derive(Debug, Clone)]
 pub struct CaptureVar {
     pub symbol: Symbol,
-    pub index: u16,  // capture index in closure
-    pub slots: u16,  // always 1 (GcRef to escaped var)
+    pub index: u16, // capture index in closure
+    pub slots: u16, // always 1 (GcRef to escaped var)
 }
 
 /// Loop/switch context for break/continue and Hint generation.
 struct LoopContext {
-    depth: u8,                      // nesting depth (0 = outermost)
-    hint_pc: usize,                 // PC of HINT_LOOP (0 for switch)
-    loop_start: usize,              // PC where loop body starts (Jump target)
+    depth: u8,         // nesting depth (0 = outermost)
+    hint_pc: usize,    // PC of HINT_LOOP (0 for switch)
+    loop_start: usize, // PC where loop body starts (Jump target)
     continue_pc: usize,
-    continue_patches: Vec<usize>,   // for patching continue jumps later
+    continue_patches: Vec<usize>, // for patching continue jumps later
     break_patches: Vec<usize>,
     label: Option<Symbol>,
-    has_defer: bool,                // loop body contains defer
-    has_labeled_break: bool,        // loop body has break to outer loop
-    has_labeled_continue: bool,     // loop body has continue to outer loop
-    is_switch: bool,                // true if this is a switch statement
+    has_defer: bool,            // loop body contains defer
+    has_labeled_break: bool,    // loop body has break to outer loop
+    has_labeled_continue: bool, // loop body has continue to outer loop
+    is_switch: bool,            // true if this is a switch statement
 }
 
 /// Loop exit info returned by exit_loop.
 pub struct LoopExitInfo {
     pub break_patches: Vec<usize>,
     pub continue_patches: Vec<usize>,
-    pub hint_pc: usize,             // PC of HINT_LOOP
-    pub loop_start: usize,          // PC where loop body starts (Jump target)
+    pub hint_pc: usize,    // PC of HINT_LOOP
+    pub loop_start: usize, // PC where loop body starts (Jump target)
     pub depth: u8,
     pub has_defer: bool,
     pub has_labeled_break: bool,
@@ -134,15 +149,15 @@ pub struct FuncBuilder {
     recv_slots: u16,
     next_slot: u16,
     locals: HashMap<Symbol, LocalVar>,
-    captures: HashMap<Symbol, CaptureVar>,  // closure captures
-    named_return_slots: Vec<(u16, u16, bool)>,    // (slot, slots, escaped) for named return variables
+    captures: HashMap<Symbol, CaptureVar>, // closure captures
+    named_return_slots: Vec<(u16, u16, bool)>, // (slot, slots, escaped) for named return variables
     slot_types: Vec<SlotType>,
     code: Vec<Instruction>,
     loop_stack: Vec<LoopContext>,
     return_types: Vec<vo_analysis::objects::TypeKey>,
     // Label support for goto
-    labels: HashMap<Symbol, usize>,           // label -> pc
-    goto_patches: Vec<(usize, Symbol)>,       // (jump_pc, target_label)
+    labels: HashMap<Symbol, usize>,     // label -> pc
+    goto_patches: Vec<(usize, Symbol)>, // (jump_pc, target_label)
     // Scope stack for variable shadowing: each entry is a list of (symbol, previous_local)
     // When a variable is defined that shadows an existing one, we save the old LocalVar here.
     // On exit_scope, we restore the saved values.
@@ -197,7 +212,7 @@ impl FuncBuilder {
         // Reserve slot 0 for closure reference (counts as a param for JIT prologue)
         builder.slot_types.push(SlotType::GcRef);
         builder.next_slot = 1;
-        builder.param_slots = 1;  // closure ref is the first param slot
+        builder.param_slots = 1; // closure ref is the first param slot
         builder.is_closure = true;
         builder
     }
@@ -235,16 +250,18 @@ impl FuncBuilder {
     }
 
     /// Allocate slots with the given type sequence.
-    /// 
+    ///
     /// Static type principle: slot types are immutable after allocation.
     /// When reusing slots (after end_temp_region), types must match exactly.
     /// If types don't match, fresh slots are allocated at the end.
     pub fn alloc_slots(&mut self, types: &[SlotType]) -> u16 {
-        if types.is_empty() { return 0; }
+        if types.is_empty() {
+            return 0;
+        }
         let len = types.len();
         let slot = self.next_slot as usize;
         let end_slot = slot + len;
-        
+
         // Helper: allocate fresh slots at the end of slot_types
         let alloc_fresh = |this: &mut Self| -> u16 {
             let fresh = this.slot_types.len() as u16;
@@ -252,7 +269,7 @@ impl FuncBuilder {
             this.next_slot = fresh + len as u16;
             fresh
         };
-        
+
         // Case 1: Fully within existing slot_types (reuse region)
         if end_slot <= self.slot_types.len() {
             if self.slot_types[slot..end_slot] == *types {
@@ -261,7 +278,7 @@ impl FuncBuilder {
             }
             return alloc_fresh(self);
         }
-        
+
         // Case 2: Partial overlap with existing slot_types
         if slot < self.slot_types.len() {
             let overlap_len = self.slot_types.len() - slot;
@@ -274,18 +291,21 @@ impl FuncBuilder {
             // Case 3: No overlap - just extend
             self.slot_types.extend_from_slice(types);
         }
-        
+
         self.next_slot = end_slot as u16;
         slot as u16
     }
 
     /// Define a capture variable (for closure)
     pub fn define_capture(&mut self, sym: Symbol, index: u16) {
-        self.captures.insert(sym, CaptureVar {
-            symbol: sym,
-            index,
-            slots: 1,  // captures are always GcRef
-        });
+        self.captures.insert(
+            sym,
+            CaptureVar {
+                symbol: sym,
+                index,
+                slots: 1, // captures are always GcRef
+            },
+        );
     }
 
     /// Look up a capture variable
@@ -316,7 +336,13 @@ impl FuncBuilder {
 
     /// Box an escaped parameter: allocate heap storage and copy the stack param value into it.
     /// Emits PtrNew + PtrSet instructions. The local storage is updated to HeapBoxed.
-    pub fn emit_box_escaped_param(&mut self, sym: Symbol, value_slots: u16, stores_pointer: bool, meta_idx: u16) {
+    pub fn emit_box_escaped_param(
+        &mut self,
+        sym: Symbol,
+        value_slots: u16,
+        stores_pointer: bool,
+        meta_idx: u16,
+    ) {
         let local = match self.locals.get(&sym) {
             Some(l) => l,
             None => return,
@@ -325,18 +351,22 @@ impl FuncBuilder {
             StorageKind::StackValue { slot, .. } => slot,
             _ => return,
         };
-        
+
         let gcref_slot = self.next_slot;
         self.locals.insert(
             sym,
             LocalVar {
                 symbol: sym,
-                storage: StorageKind::HeapBoxed { gcref_slot, value_slots, stores_pointer },
+                storage: StorageKind::HeapBoxed {
+                    gcref_slot,
+                    value_slots,
+                    stores_pointer,
+                },
             },
         );
         self.slot_types.push(SlotType::GcRef);
         self.next_slot += 1;
-        
+
         // Emit PtrNew + PtrSet
         use vo_vm::instruction::Opcode;
         let meta_reg = self.alloc_slots(&[SlotType::Value]);
@@ -351,7 +381,13 @@ impl FuncBuilder {
     /// This is the core primitive - all define_local_* methods use this.
     fn bind_local(&mut self, sym: Symbol, storage: StorageKind) {
         self.save_shadowed(sym);
-        self.locals.insert(sym, LocalVar { symbol: sym, storage });
+        self.locals.insert(
+            sym,
+            LocalVar {
+                symbol: sym,
+                storage,
+            },
+        );
     }
 
     /// Define a local variable with the given StorageKind.
@@ -368,10 +404,24 @@ impl FuncBuilder {
     }
 
     /// Stack allocation for arrays (memory semantics).
-    pub fn define_local_stack_array(&mut self, sym: Symbol, total_slots: u16, elem_slots: u16, len: u16, types: &[SlotType]) -> u16 {
+    pub fn define_local_stack_array(
+        &mut self,
+        sym: Symbol,
+        total_slots: u16,
+        elem_slots: u16,
+        len: u16,
+        types: &[SlotType],
+    ) -> u16 {
         let base_slot = self.alloc_slots(types);
         debug_assert_eq!(types.len() as u16, total_slots);
-        self.bind_local(sym, StorageKind::StackArray { base_slot, elem_slots, len });
+        self.bind_local(
+            sym,
+            StorageKind::StackArray {
+                base_slot,
+                elem_slots,
+                len,
+            },
+        );
         base_slot
     }
 
@@ -383,16 +433,42 @@ impl FuncBuilder {
 
     /// Heap allocation for struct/primitive/interface (1 slot GcRef, PtrGet/PtrSet access).
     /// If stores_pointer is true, the HeapBoxed stores a pointer that needs dereferencing.
-    pub fn define_local_heap_boxed(&mut self, sym: Symbol, value_slots: u16, stores_pointer: bool) -> u16 {
+    pub fn define_local_heap_boxed(
+        &mut self,
+        sym: Symbol,
+        value_slots: u16,
+        stores_pointer: bool,
+    ) -> u16 {
         let gcref_slot = self.alloc_slots(&[SlotType::GcRef]);
-        self.bind_local(sym, StorageKind::HeapBoxed { gcref_slot, value_slots, stores_pointer });
+        self.bind_local(
+            sym,
+            StorageKind::HeapBoxed {
+                gcref_slot,
+                value_slots,
+                stores_pointer,
+            },
+        );
         gcref_slot
     }
 
     /// Heap allocation for array (1 slot GcRef, ArrayGet/ArraySet access).
-    pub fn define_local_heap_array(&mut self, sym: Symbol, elem_slots: u16, elem_bytes: u16, elem_vk: vo_common_core::ValueKind) -> u16 {
+    pub fn define_local_heap_array(
+        &mut self,
+        sym: Symbol,
+        elem_slots: u16,
+        elem_bytes: u16,
+        elem_vk: vo_common_core::ValueKind,
+    ) -> u16 {
         let gcref_slot = self.alloc_slots(&[SlotType::GcRef]);
-        self.bind_local(sym, StorageKind::HeapArray { gcref_slot, elem_slots, elem_bytes, elem_vk });
+        self.bind_local(
+            sym,
+            StorageKind::HeapArray {
+                gcref_slot,
+                elem_slots,
+                elem_bytes,
+                elem_vk,
+            },
+        );
         gcref_slot
     }
 
@@ -467,22 +543,37 @@ impl FuncBuilder {
     }
 
     pub fn is_heap_local(&self, sym: Symbol) -> bool {
-        self.locals.get(&sym).map(|l| l.storage.is_heap()).unwrap_or(false)
+        self.locals
+            .get(&sym)
+            .map(|l| l.storage.is_heap())
+            .unwrap_or(false)
     }
 
     /// Allocate temp slots for function arguments. Returns 0 if slots == 0.
     #[inline]
     pub fn alloc_args(&mut self, slots: u16) -> u16 {
-        if slots > 0 { self.alloc_args_typed(&vec![SlotType::Value; slots as usize]) } else { 0 }
+        if slots > 0 {
+            self.alloc_args_typed(&vec![SlotType::Value; slots as usize])
+        } else {
+            0
+        }
     }
 
     #[inline]
     pub fn alloc_args_typed(&mut self, slot_types: &[SlotType]) -> u16 {
-        if slot_types.is_empty() { 0 } else { self.alloc_slots(slot_types) }
+        if slot_types.is_empty() {
+            0
+        } else {
+            self.alloc_slots(slot_types)
+        }
     }
 
     #[inline]
-    pub fn alloc_call_buffer(&mut self, arg_slot_types: &[SlotType], ret_slot_types: &[SlotType]) -> u16 {
+    pub fn alloc_call_buffer(
+        &mut self,
+        arg_slot_types: &[SlotType],
+        ret_slot_types: &[SlotType],
+    ) -> u16 {
         let mut slot_types = arg_slot_types.to_vec();
         slot_types.extend_from_slice(ret_slot_types);
         if slot_types.is_empty() {
@@ -551,7 +642,13 @@ impl FuncBuilder {
     pub fn emit_closure_new(&mut self, dst: u16, func_id: u32, capture_count: u16) {
         let func_id_low = (func_id & 0xFFFF) as u16;
         let func_id_high = ((func_id >> 16) & 0xFF) as u8;
-        self.emit_with_flags(Opcode::ClosureNew, func_id_high, dst, func_id_low, capture_count);
+        self.emit_with_flags(
+            Opcode::ClosureNew,
+            func_id_high,
+            dst,
+            func_id_low,
+            capture_count,
+        );
     }
 
     // === Copy helpers ===
@@ -573,7 +670,7 @@ impl FuncBuilder {
             self.emit_with_flags(Opcode::PtrGetN, slots as u8, dst, ptr, offset);
         }
     }
-    
+
     /// Emit PtrAdd: dst = ptr + offset_reg * 8 (pointer arithmetic)
     pub fn emit_ptr_add(&mut self, dst: u16, ptr: u16, offset_reg: u16) {
         self.emit_op(Opcode::PtrAdd, dst, ptr, offset_reg);
@@ -589,10 +686,17 @@ impl FuncBuilder {
             self.emit_with_flags(Opcode::PtrSetN, slots as u8, ptr, offset, src);
         }
     }
-    
+
     /// Emit PtrSet with explicit barrier flag (single slot only).
     /// For multi-slot with GcRefs, use emit_ptr_set_with_slot_types instead.
-    pub fn emit_ptr_set_with_barrier(&mut self, ptr: u16, offset: u16, src: u16, slots: u16, is_gcref: bool) {
+    pub fn emit_ptr_set_with_barrier(
+        &mut self,
+        ptr: u16,
+        offset: u16,
+        src: u16,
+        slots: u16,
+        is_gcref: bool,
+    ) {
         if slots == 1 {
             let flags = if is_gcref { 1 } else { 0 };
             self.emit_with_flags(Opcode::PtrSet, flags, ptr, offset, src);
@@ -602,20 +706,28 @@ impl FuncBuilder {
             self.emit_with_flags(Opcode::PtrSetN, slots as u8, ptr, offset, src);
         }
     }
-    
+
     /// Emit PtrSet/PtrSetN with proper write barriers based on slot types.
     /// This correctly handles multi-slot structs containing GcRefs.
-    pub fn emit_ptr_set_with_slot_types(&mut self, ptr: u16, offset: u16, src: u16, slot_types: &[vo_runtime::SlotType]) {
+    pub fn emit_ptr_set_with_slot_types(
+        &mut self,
+        ptr: u16,
+        offset: u16,
+        src: u16,
+        slot_types: &[vo_runtime::SlotType],
+    ) {
         use vo_runtime::SlotType;
         let slots = slot_types.len() as u16;
-        
+
         if slots == 0 {
             return;
         }
-        
+
         // Check if any slot needs barrier
-        let has_gc_refs = slot_types.iter().any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1));
-        
+        let has_gc_refs = slot_types
+            .iter()
+            .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1));
+
         if !has_gc_refs {
             // No GcRefs - use simple PtrSetN
             if slots == 1 {
@@ -628,7 +740,13 @@ impl FuncBuilder {
             for (i, st) in slot_types.iter().enumerate() {
                 let is_gcref = matches!(st, SlotType::GcRef | SlotType::Interface1);
                 let flags = if is_gcref { 1 } else { 0 };
-                self.emit_with_flags(Opcode::PtrSet, flags, ptr, offset + i as u16, src + i as u16);
+                self.emit_with_flags(
+                    Opcode::PtrSet,
+                    flags,
+                    ptr,
+                    offset + i as u16,
+                    src + i as u16,
+                );
             }
         }
     }
@@ -643,7 +761,11 @@ impl FuncBuilder {
             StorageKind::StackValue { slot, slots } => {
                 self.emit_copy(dst, slot, slots);
             }
-            StorageKind::StackArray { base_slot, elem_slots, len } => {
+            StorageKind::StackArray {
+                base_slot,
+                elem_slots,
+                len,
+            } => {
                 // Copy element by element using SlotGet
                 for i in 0..len {
                     let idx_reg = self.alloc_slots(&[SlotType::Value]);
@@ -651,7 +773,11 @@ impl FuncBuilder {
                     self.emit_slot_get(dst + i * elem_slots, base_slot, idx_reg, elem_slots);
                 }
             }
-            StorageKind::HeapBoxed { gcref_slot, value_slots, .. } => {
+            StorageKind::HeapBoxed {
+                gcref_slot,
+                value_slots,
+                ..
+            } => {
                 self.emit_ptr_get(dst, gcref_slot, 0, value_slots);
             }
             StorageKind::HeapArray { gcref_slot, .. } => {
@@ -672,12 +798,21 @@ impl FuncBuilder {
     }
 
     /// Store value from src to storage with proper write barriers based on slot types.
-    pub fn emit_storage_store(&mut self, storage: StorageKind, src: u16, slot_types: &[vo_runtime::SlotType]) {
+    pub fn emit_storage_store(
+        &mut self,
+        storage: StorageKind,
+        src: u16,
+        slot_types: &[vo_runtime::SlotType],
+    ) {
         match storage {
             StorageKind::StackValue { slot, slots } => {
                 self.emit_copy(slot, src, slots);
             }
-            StorageKind::StackArray { base_slot, elem_slots, len } => {
+            StorageKind::StackArray {
+                base_slot,
+                elem_slots,
+                len,
+            } => {
                 // Copy element by element using SlotSet
                 for i in 0..len {
                     let idx_reg = self.alloc_slots(&[SlotType::Value]);
@@ -708,7 +843,7 @@ impl FuncBuilder {
     }
 
     // === Stack array slot access helpers ===
-    
+
     /// Emit SlotGet/SlotGetN for stack array element access.
     pub fn emit_slot_get(&mut self, dst: u16, base: u16, index: u16, elem_slots: u16) {
         if elem_slots == 1 {
@@ -717,7 +852,7 @@ impl FuncBuilder {
             self.emit_with_flags(Opcode::SlotGetN, elem_slots as u8, dst, base, index);
         }
     }
-    
+
     /// Emit SlotSet/SlotSetN for stack array element access.
     pub fn emit_slot_set(&mut self, base: u16, index: u16, src: u16, elem_slots: u16) {
         if elem_slots == 1 {
@@ -862,31 +997,37 @@ impl FuncBuilder {
         let current_pc = self.code.len();
         // offset is relative to pc+1
         let offset = body_start as i32 - (current_pc as i32 + 1);
-        self.code.push(Instruction::with_flags(Opcode::ForLoop, flags, idx_slot, limit_slot, offset as u16));
+        self.code.push(Instruction::with_flags(
+            Opcode::ForLoop,
+            flags,
+            idx_slot,
+            limit_slot,
+            offset as u16,
+        ));
     }
 
     // === Loop ===
 
     /// Enter a loop: emit HINT_LOOP (outside loop) and set loop_start.
-    /// 
+    ///
     /// The HINT_LOOP is emitted once before the loop starts, providing metadata
     /// for JIT analysis. The loop_start is where the back-edge Jump will target.
-    /// 
+    ///
     /// Returns the PC of HINT_LOOP (for patching exit_pc/end_pc later).
     pub fn enter_loop(&mut self, loop_start: usize, label: Option<Symbol>) -> usize {
         let depth = self.loop_stack.len() as u8;
         let hint_pc = self.current_pc();
-        
+
         // Emit HINT_LOOP with placeholder values (will be patched in finalize_loop_hint)
         // Format: flags=HINT_LOOP, a=loop_info, bc=exit_pc
         // loop_info: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset
         self.emit_hint_loop_placeholder(depth);
-        
+
         self.loop_stack.push(LoopContext {
             depth,
             hint_pc,
             loop_start,
-            continue_pc: 0,  // Will be set by caller if needed
+            continue_pc: 0, // Will be set by caller if needed
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
             label,
@@ -895,39 +1036,44 @@ impl FuncBuilder {
             has_labeled_continue: false,
             is_switch: false,
         });
-        
+
         hint_pc
     }
-    
+
     /// Set the loop_start for the current loop (called after enter_loop when loop_start is known).
     pub fn set_loop_start(&mut self, loop_start: usize) {
         if let Some(ctx) = self.loop_stack.last_mut() {
             ctx.loop_start = loop_start;
         }
     }
-    
+
     /// Emit HINT_LOOP with placeholder values.
     fn emit_hint_loop_placeholder(&mut self, depth: u8) {
         // loop_info: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset (all zero initially)
         let loop_info = (depth as u16) << 4;
-        self.code.push(Instruction::with_flags(Opcode::Hint, HINT_LOOP, loop_info, 0, 0));
+        self.code.push(Instruction::with_flags(
+            Opcode::Hint,
+            HINT_LOOP,
+            loop_info,
+            0,
+            0,
+        ));
     }
-    
-    
+
     /// Mark current loop as containing defer.
     pub fn mark_loop_has_defer(&mut self) {
         if let Some(ctx) = self.loop_stack.last_mut() {
             ctx.has_defer = true;
         }
     }
-    
+
     /// Enter a breakable non-loop context (switch, type switch, select).
     /// These support `break` but not `continue`.
     pub fn enter_breakable(&mut self, label: Option<Symbol>) {
         self.loop_stack.push(LoopContext {
             depth: self.loop_stack.len() as u8,
-            hint_pc: 0,     // not used for breakable
-            loop_start: 0,  // not used for breakable
+            hint_pc: 0,    // not used for breakable
+            loop_start: 0, // not used for breakable
             continue_pc: 0,
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
@@ -935,21 +1081,24 @@ impl FuncBuilder {
             has_defer: false,
             has_labeled_break: false,
             has_labeled_continue: false,
-            is_switch: true,  // marks as non-loop (no continue)
+            is_switch: true, // marks as non-loop (no continue)
         });
     }
-    
+
     /// Exit a breakable non-loop context. Returns break patches to be patched to end.
     pub fn exit_breakable(&mut self) -> Vec<usize> {
-        self.loop_stack.pop().expect("exit_breakable without enter_breakable").break_patches
+        self.loop_stack
+            .pop()
+            .expect("exit_breakable without enter_breakable")
+            .break_patches
     }
 
     /// Exit loop: record end_pc and return LoopExitInfo for patching.
-    /// 
+    ///
     /// The end_pc will be encoded into HINT_LOOP by finalize_loop_hint.
     pub fn exit_loop(&mut self) -> LoopExitInfo {
         let ctx = self.loop_stack.pop().expect("exit_loop without enter_loop");
-        
+
         LoopExitInfo {
             break_patches: ctx.break_patches,
             continue_patches: ctx.continue_patches,
@@ -961,45 +1110,68 @@ impl FuncBuilder {
             has_labeled_continue: ctx.has_labeled_continue,
         }
     }
-    
+
     /// Finalize loop: patch HINT_LOOP with flags, end_pc, and exit_pc.
-    /// 
+    ///
     /// HINT_LOOP format after patching:
     /// - a: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset (end_pc - hint_pc)
     /// - bc: exit_pc (32-bit)
-    pub fn finalize_loop_hint(&mut self, hint_pc: usize, end_pc: usize, exit_pc: usize, has_defer: bool, has_labeled_break: bool, has_labeled_continue: bool) {
-        assert!(hint_pc < self.code.len(), "finalize_loop_hint: hint_pc {} out of range", hint_pc);
-        assert!(end_pc > hint_pc, "finalize_loop_hint: end_pc {} must be > hint_pc {}", end_pc, hint_pc);
-        
+    pub fn finalize_loop_hint(
+        &mut self,
+        hint_pc: usize,
+        end_pc: usize,
+        exit_pc: usize,
+        has_defer: bool,
+        has_labeled_break: bool,
+        has_labeled_continue: bool,
+    ) {
+        assert!(
+            hint_pc < self.code.len(),
+            "finalize_loop_hint: hint_pc {} out of range",
+            hint_pc
+        );
+        assert!(
+            end_pc > hint_pc,
+            "finalize_loop_hint: end_pc {} must be > hint_pc {}",
+            end_pc,
+            hint_pc
+        );
+
         // Calculate end_offset (distance from hint_pc to end_pc, capped at 255)
         let offset = end_pc - hint_pc;
-        let end_offset = if offset > 255 { 0 } else { offset as u8 };  // 0 signals JIT to scan for back-edge
-        
+        let end_offset = if offset > 255 { 0 } else { offset as u8 }; // 0 signals JIT to scan for back-edge
+
         // Build flags
         let mut flags = 0u8;
-        if has_defer { flags |= LOOP_FLAG_HAS_DEFER; }
-        if has_labeled_break { flags |= LOOP_FLAG_HAS_LABELED_BREAK; }
-        if has_labeled_continue { flags |= LOOP_FLAG_HAS_LABELED_CONTINUE; }
-        
+        if has_defer {
+            flags |= LOOP_FLAG_HAS_DEFER;
+        }
+        if has_labeled_break {
+            flags |= LOOP_FLAG_HAS_LABELED_BREAK;
+        }
+        if has_labeled_continue {
+            flags |= LOOP_FLAG_HAS_LABELED_CONTINUE;
+        }
+
         // Get depth from existing instruction
         let existing_a = self.code[hint_pc].a;
         let depth = ((existing_a >> 4) & 0x0F) as u8;
-        
+
         // loop_info: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset
         let loop_info = ((end_offset as u16) << 8) | ((depth as u16) << 4) | (flags as u16 & 0x0F);
         self.code[hint_pc].a = loop_info;
-        
+
         // Update exit_pc in bc fields
         let (b, c) = Self::encode_jump_offset(exit_pc as i32);
         self.code[hint_pc].b = b;
         self.code[hint_pc].c = c;
     }
-    
+
     /// Get the depth of the current innermost loop.
     pub fn current_loop_depth(&self) -> Option<u8> {
         self.loop_stack.last().map(|ctx| ctx.depth)
     }
-    
+
     /// Get loop_start (Jump target) of loop at given index.
     pub fn loop_start_pc(&self, idx: usize) -> Option<usize> {
         self.loop_stack.get(idx).map(|ctx| ctx.loop_start)
@@ -1010,15 +1182,21 @@ impl FuncBuilder {
         match label {
             None => {
                 // No label: target innermost breakable (loop or switch)
-                if self.loop_stack.is_empty() { None } else { Some(self.loop_stack.len() - 1) }
+                if self.loop_stack.is_empty() {
+                    None
+                } else {
+                    Some(self.loop_stack.len() - 1)
+                }
             }
             Some(sym) => {
                 // Find context with matching label
-                self.loop_stack.iter().rposition(|ctx| ctx.label == Some(sym))
+                self.loop_stack
+                    .iter()
+                    .rposition(|ctx| ctx.label == Some(sym))
             }
         }
     }
-    
+
     /// Find loop index by label, skipping switch contexts (for continue)
     fn find_loop_index(&self, label: Option<Symbol>) -> Option<usize> {
         match label {
@@ -1028,7 +1206,9 @@ impl FuncBuilder {
             }
             Some(sym) => {
                 // Find loop with matching label
-                self.loop_stack.iter().rposition(|ctx| ctx.label == Some(sym) && !ctx.is_switch)
+                self.loop_stack
+                    .iter()
+                    .rposition(|ctx| ctx.label == Some(sym) && !ctx.is_switch)
             }
         }
     }
@@ -1037,7 +1217,7 @@ impl FuncBuilder {
         let pc = self.emit_jump(Opcode::Jump, 0);
         if let Some(idx) = self.find_break_index(label) {
             self.loop_stack[idx].break_patches.push(pc);
-            
+
             // If breaking to an outer context (labeled break), mark all inner loops
             let innermost = self.loop_stack.len() - 1;
             if label.is_some() && idx < innermost {
@@ -1060,7 +1240,7 @@ impl FuncBuilder {
                     self.loop_stack[i].has_labeled_continue = true;
                 }
             }
-            
+
             let continue_pc = self.loop_stack[idx].continue_pc;
             if continue_pc != 0 {
                 // continue_pc is known, jump directly
@@ -1097,7 +1277,7 @@ impl FuncBuilder {
     pub fn set_ret_slots(&mut self, slots: u16) {
         self.ret_slots = slots;
     }
-    
+
     /// Set param slots directly (for wrapper functions that don't use define_param)
     pub fn set_param_slots(&mut self, slots: u16) {
         self.param_slots = slots;
@@ -1111,7 +1291,7 @@ impl FuncBuilder {
     pub fn return_types(&self) -> &[vo_analysis::objects::TypeKey] {
         &self.return_types
     }
-    
+
     /// Check if the function returns error as its last return value.
     /// Used to determine if ? should propagate (return) or panic.
     pub fn has_error_return(&self, info: &crate::type_info::TypeInfoWrapper) -> bool {
@@ -1140,12 +1320,7 @@ impl FuncBuilder {
     /// * `error_src` - Source register containing error interface[2]
     /// * `dst` - Destination start register
     /// * `result_slots` - Number of result slots to fill with nil
-    pub fn emit_error_propagation(
-        &mut self,
-        error_src: u16,
-        dst: u16,
-        result_slots: u16,
-    ) -> usize {
+    pub fn emit_error_propagation(&mut self, error_src: u16, dst: u16, result_slots: u16) -> usize {
         // Fill result slots with nil
         for i in 0..result_slots {
             self.emit_op(Opcode::LoadInt, dst + i, 0, 0);
@@ -1159,7 +1334,9 @@ impl FuncBuilder {
 
     pub fn build(mut self) -> FunctionDef {
         // Patch forward gotos
-        let patches: Vec<_> = self.goto_patches.iter()
+        let patches: Vec<_> = self
+            .goto_patches
+            .iter()
             .filter_map(|(jump_pc, sym)| {
                 self.labels.get(sym).map(|&target_pc| (*jump_pc, target_pc))
             })
@@ -1167,29 +1344,40 @@ impl FuncBuilder {
         for (jump_pc, target_pc) in patches {
             self.patch_jump(jump_pc, target_pc);
         }
-        
+
         // Use slot_types.len() as high-water mark (not next_slot which gets restored by end_temp_region)
         let local_slots = (self.slot_types.len() as u16).max(self.ret_slots);
-        
+
         // Count heap-allocated named returns (escaped = true)
         // Used by panic recovery to return named return values after recover()
-        let (heap_ret_gcref_count, heap_ret_gcref_start, heap_ret_slots) = if !self.named_return_slots.is_empty() 
-            && self.named_return_slots.iter().all(|(_, _, escaped)| *escaped) {
-            // All escaped: first element's slot is the start
-            let start = self.named_return_slots.first().map(|(slot, _, _)| *slot).unwrap_or(0);
-            let slots: Vec<u16> = self.named_return_slots.iter().map(|(_, s, _)| *s).collect();
-            (self.named_return_slots.len() as u16, start, slots)
-        } else {
-            (0, 0, Vec::new())
-        };
+        let (heap_ret_gcref_count, heap_ret_gcref_start, heap_ret_slots) =
+            if !self.named_return_slots.is_empty()
+                && self
+                    .named_return_slots
+                    .iter()
+                    .all(|(_, _, escaped)| *escaped)
+            {
+                // All escaped: first element's slot is the start
+                let start = self
+                    .named_return_slots
+                    .first()
+                    .map(|(slot, _, _)| *slot)
+                    .unwrap_or(0);
+                let slots: Vec<u16> = self.named_return_slots.iter().map(|(_, s, _)| *s).collect();
+                (self.named_return_slots.len() as u16, start, slots)
+            } else {
+                (0, 0, Vec::new())
+            };
 
         // Scan code for defer instructions
-        let has_defer = self.code.iter().any(|inst| {
-            matches!(inst.opcode(), Opcode::DeferPush | Opcode::ErrDeferPush)
-        });
+        let has_defer = self
+            .code
+            .iter()
+            .any(|inst| matches!(inst.opcode(), Opcode::DeferPush | Opcode::ErrDeferPush));
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&self.code);
         let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&self.slot_types);
-        let borrowed_scan_slots_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&self.slot_types);
+        let borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&self.slot_types);
 
         FunctionDef {
             name: self.name,
@@ -1218,17 +1406,25 @@ impl FuncBuilder {
 
     /// Add a capture type for cross-island serialization.
     pub fn add_capture_type(&mut self, meta_raw: u32, rttid_raw: u32, slots: u16) {
-        self.capture_types.push(TransferType { meta_raw, rttid_raw, slots });
+        self.capture_types.push(TransferType {
+            meta_raw,
+            rttid_raw,
+            slots,
+        });
     }
-    
+
     /// Add capture SlotTypes for GC scanning.
     pub fn add_capture_slot_types(&mut self, types: &[SlotType]) {
         self.capture_slot_types.extend_from_slice(types);
     }
-    
+
     /// Add a parameter type for cross-island serialization.
     pub fn add_param_type(&mut self, meta_raw: u32, rttid_raw: u32, slots: u16) {
-        self.param_types.push(TransferType { meta_raw, rttid_raw, slots });
+        self.param_types.push(TransferType {
+            meta_raw,
+            rttid_raw,
+            slots,
+        });
     }
 
     pub fn add_param_type_key(
@@ -1243,10 +1439,7 @@ impl FuncBuilder {
         self.add_param_type(meta_raw, rttid_raw, slots);
     }
 
-    pub fn add_param_transfer_types(
-        &mut self,
-        param_types: &[vo_vm::bytecode::TransferType],
-    ) {
+    pub fn add_param_transfer_types(&mut self, param_types: &[vo_vm::bytecode::TransferType]) {
         for transfer_type in param_types {
             self.add_param_type(
                 transfer_type.meta_raw,
@@ -1255,7 +1448,7 @@ impl FuncBuilder {
             );
         }
     }
-    
+
     /// Set error return slot offset. Called after set_return_types with type info.
     pub fn set_error_ret_slot(&mut self, slot: i16) {
         self.error_ret_slot = slot;

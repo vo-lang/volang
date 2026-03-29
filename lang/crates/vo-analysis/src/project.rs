@@ -8,17 +8,17 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::vfs::{Resolver, VfsPackage};
 use vo_common::diagnostics::{DiagnosticEmitter, DiagnosticSink};
 use vo_common::source::SourceMap;
 use vo_common::symbol::SymbolInterner;
 use vo_common::vfs::FileSet;
 use vo_module::ext_manifest::{discover_extensions, ExtensionManifest};
-use crate::vfs::{Resolver, VfsPackage};
 use vo_syntax::ast::File;
 use vo_syntax::parser;
 
 use crate::check::Checker;
-use crate::importer::{ImportKey, ImportResult, Importer, validate_import_path};
+use crate::importer::{validate_import_path, ImportKey, ImportResult, Importer};
 use crate::objects::{PackageKey, TCObjects, TypeKey};
 
 /// Analysis error.
@@ -47,7 +47,9 @@ impl AnalysisError {
     /// Returns the source map if this is a Parse or Check error.
     pub fn source_map(&self) -> Option<&SourceMap> {
         match self {
-            AnalysisError::Parse(_, source_map) | AnalysisError::Check(_, source_map) => Some(source_map),
+            AnalysisError::Parse(_, source_map) | AnalysisError::Check(_, source_map) => {
+                Some(source_map)
+            }
             _ => None,
         }
     }
@@ -55,7 +57,9 @@ impl AnalysisError {
     /// Takes the diagnostics if this is a Parse or Check error.
     pub fn take_diagnostics(&mut self) -> Option<DiagnosticSink> {
         match self {
-            AnalysisError::Parse(diags, _) | AnalysisError::Check(diags, _) => Some(std::mem::take(diags)),
+            AnalysisError::Parse(diags, _) | AnalysisError::Check(diags, _) => {
+                Some(std::mem::take(diags))
+            }
             _ => None,
         }
     }
@@ -64,11 +68,17 @@ impl AnalysisError {
 impl std::fmt::Debug for AnalysisError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AnalysisError::Parse(diags, _) => f.debug_tuple("Parse")
+            AnalysisError::Parse(diags, _) => f
+                .debug_tuple("Parse")
                 .field(&format!("{} errors", diags.error_count()))
                 .finish(),
-            AnalysisError::Check(diags, _) => f.debug_tuple("Check")
-                .field(&format!("{} errors, {} warnings", diags.error_count(), diags.warning_count()))
+            AnalysisError::Check(diags, _) => f
+                .debug_tuple("Check")
+                .field(&format!(
+                    "{} errors, {} warnings",
+                    diags.error_count(),
+                    diags.warning_count()
+                ))
                 .finish(),
             AnalysisError::Import(msg) => f.debug_tuple("Import").field(msg).finish(),
             AnalysisError::Cycle(path) => f.debug_tuple("Cycle").field(path).finish(),
@@ -152,7 +162,10 @@ impl Project {
 
     /// Gets the type of an expression by ExprId.
     pub fn expr_type(&self, expr_id: vo_syntax::ast::ExprId) -> Option<&crate::typ::Type> {
-        self.type_info.types.get(&expr_id).map(|tv| &self.tc_objs.types[tv.typ])
+        self.type_info
+            .types
+            .get(&expr_id)
+            .map(|tv| &self.tc_objs.types[tv.typ])
     }
 
     /// Gets the expression types map.
@@ -180,7 +193,8 @@ impl Project {
     /// This order ensures that when initializing global variables,
     /// dependencies are initialized before dependents.
     pub fn imported_packages_in_order(&self) -> Vec<(&str, &crate::check::TypeInfo)> {
-        self.packages.iter()
+        self.packages
+            .iter()
             .filter(|&&pkg_key| pkg_key != self.main_package)
             .filter_map(|&pkg_key| {
                 let path = self.tc_objs.pkgs[pkg_key].path();
@@ -217,10 +231,7 @@ struct ProjectState {
 ///
 /// This is the main entry point for type checking a Vo project.
 /// It handles recursive package imports through the provided VFS.
-pub fn analyze_project<R: Resolver>(
-    files: FileSet,
-    vfs: &R,
-) -> Result<Project, AnalysisError> {
+pub fn analyze_project<R: Resolver>(files: FileSet, vfs: &R) -> Result<Project, AnalysisError> {
     analyze_project_with_options(files, vfs, &AnalysisOptions::default())
 }
 
@@ -243,13 +254,13 @@ pub fn analyze_project_with_options<R: Resolver>(
         imported_type_infos: BTreeMap::new(),
         extensions: Vec::new(),
     }));
-    
+
     // Create the main package
     let main_pkg_key = state
         .borrow_mut()
         .tc_objs
         .new_package("main".to_string(), "main".to_string());
-    
+
     // Parse the source files
     let parsed_files = parse_files(&files, &state)?;
 
@@ -268,7 +279,7 @@ pub fn analyze_project_with_options<R: Resolver>(
             )));
         }
     }
-    
+
     // Pre-load all imports BEFORE swap (importer needs state.tc_objs)
     {
         let mut importer = ProjectImporter::new(
@@ -281,24 +292,25 @@ pub fn analyze_project_with_options<R: Resolver>(
             return Err(AnalysisError::Import(e));
         }
     }
-    
+
     // Type check the main package
     {
         let mut state_ref = state.borrow_mut();
-        let mut checker = Checker::new_with_trace(main_pkg_key, state_ref.interner.clone(), options.trace);
-        
+        let mut checker =
+            Checker::new_with_trace(main_pkg_key, state_ref.interner.clone(), options.trace);
+
         // Swap tc_objs so checker uses our shared one (imports already loaded)
         std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
         drop(state_ref); // Release borrow before calling check
-        
+
         // Use check() - imports preloaded, will be found via find_package_by_path
         let result = checker.check(&parsed_files);
-        
+
         // Swap back and take type_info
         let mut state_ref = state.borrow_mut();
         std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
         state_ref.type_info = Some(checker.result);
-        
+
         match result {
             Ok(_) => {}
             Err(_) => {
@@ -308,7 +320,7 @@ pub fn analyze_project_with_options<R: Resolver>(
             }
         }
     }
-    
+
     // Extract final state
     let final_state = Rc::try_unwrap(state)
         .map_err(|rc| {
@@ -318,11 +330,11 @@ pub fn analyze_project_with_options<R: Resolver>(
             AnalysisError::Check(diags, source_map)
         })?
         .into_inner();
-    
+
     // Collect packages in dependency order
     let mut packages = final_state.checked_packages;
     packages.push(main_pkg_key);
-    
+
     Ok(Project {
         tc_objs: final_state.tc_objs,
         interner: final_state.interner,
@@ -345,38 +357,45 @@ fn parse_single_file(
     id_state: parser::IdState,
 ) -> Result<(File, parser::IdState), AnalysisError> {
     let mut state_ref = state.borrow_mut();
-    let file_name = path.file_name()
+    let file_name = path
+        .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let file_id = state_ref.source_map.add_file_with_path(file_name, path.to_path_buf(), content);
+    let file_id = state_ref
+        .source_map
+        .add_file_with_path(file_name, path.to_path_buf(), content);
     let base = state_ref.source_map.file_base(file_id).unwrap_or(0);
     let interner = state_ref.interner.clone();
     drop(state_ref);
-    
-    let (file, diags, new_interner, new_id_state) = parser::parse_with_state(content, base, interner, id_state);
-    
+
+    let (file, diags, new_interner, new_id_state) =
+        parser::parse_with_state(content, base, interner, id_state);
+
     let mut state_ref = state.borrow_mut();
     state_ref.interner = new_interner;
-    
+
     if diags.has_errors() {
         let source_map = std::mem::take(&mut state_ref.source_map);
         return Err(AnalysisError::Parse(diags, source_map));
     }
-    
+
     Ok((file, new_id_state))
 }
 
 /// Parse source files from a FileSet.
-fn parse_files(files: &FileSet, state: &Rc<RefCell<ProjectState>>) -> Result<Vec<File>, AnalysisError> {
+fn parse_files(
+    files: &FileSet,
+    state: &Rc<RefCell<ProjectState>>,
+) -> Result<Vec<File>, AnalysisError> {
     let mut parsed_files = Vec::new();
-    
+
     for (path, content) in &files.files {
         let id_state = state.borrow().id_state.clone();
         let (file, new_id_state) = parse_single_file(path, content, state, id_state)?;
         state.borrow_mut().id_state = new_id_state;
         parsed_files.push(file);
     }
-    
+
     Ok(parsed_files)
 }
 
@@ -387,13 +406,14 @@ fn parse_vfs_package(
 ) -> Result<Vec<File>, AnalysisError> {
     let mut parsed_files = Vec::new();
     let mut id_state = parser::IdState::default();
-    
+
     for vfs_file in &vfs_pkg.files {
-        let (file, new_id_state) = parse_single_file(&vfs_file.path, &vfs_file.content, state, id_state)?;
+        let (file, new_id_state) =
+            parse_single_file(&vfs_file.path, &vfs_file.content, state, id_state)?;
         id_state = new_id_state;
         parsed_files.push(file);
     }
-    
+
     Ok(parsed_files)
 }
 
@@ -453,7 +473,10 @@ fn declared_package_name(files: &[File], interner: &SymbolInterner) -> Option<St
 }
 
 /// Pre-load imports from files. Must be called BEFORE swapping tc_objs with checker.
-fn preload_file_imports<R: Resolver>(files: &[File], importer: &mut ProjectImporter<R>) -> Result<(), String> {
+fn preload_file_imports<R: Resolver>(
+    files: &[File],
+    importer: &mut ProjectImporter<R>,
+) -> Result<(), String> {
     for file in files {
         for import in &file.imports {
             let path = &import.path.value;
@@ -469,7 +492,10 @@ fn preload_file_imports<R: Resolver>(files: &[File], importer: &mut ProjectImpor
 }
 
 /// Pre-load all imports including core packages. For main package entry point.
-fn preload_imports<R: Resolver>(files: &[File], importer: &mut ProjectImporter<R>) -> Result<(), String> {
+fn preload_imports<R: Resolver>(
+    files: &[File],
+    importer: &mut ProjectImporter<R>,
+) -> Result<(), String> {
     // Always-link core packages required by runtime.
     let key = ImportKey::new("errors");
     match importer.import(&key) {
@@ -515,32 +541,37 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
             return ImportResult::Err(format!("invalid import path \"{}\": {}", import_path, e));
         }
         if let Some(current_package_path) = self.current_package_path.as_deref() {
-            if let Err(e) = vo_module::compat::validate_internal_access(current_package_path, import_path) {
+            if let Err(e) =
+                vo_module::compat::validate_internal_access(current_package_path, import_path)
+            {
                 return ImportResult::Err(e);
             }
         }
-        
+
         // Check cache first
         {
             let state = self.state.borrow();
             if let Some(&pkg_key) = state.cache.get(import_path) {
                 return ImportResult::Ok(pkg_key);
             }
-            
+
             // Check for import cycle
             if state.in_progress.contains(import_path) {
                 return ImportResult::Cycle;
             }
         }
-        
+
         let vfs_pkg = match self.vfs.resolve(import_path) {
             Some(pkg) => pkg,
             None => return ImportResult::Err(format!("package not found: {}", import_path)),
         };
-        
+
         // Mark as in progress
-        self.state.borrow_mut().in_progress.insert(import_path.to_string());
-        
+        self.state
+            .borrow_mut()
+            .in_progress
+            .insert(import_path.to_string());
+
         // Parse the package files
         let parsed_files = match parse_vfs_package(&vfs_pkg, &self.state) {
             Ok(files) => files,
@@ -579,7 +610,7 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
                 ));
             }
         }
-        
+
         // Pre-load imports BEFORE swap (importer needs state.tc_objs)
         {
             let mut sub_importer = ProjectImporter::new(
@@ -593,7 +624,7 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
                 return ImportResult::Err(e);
             }
         }
-        
+
         // Create package and type check.
         // Use vfs_pkg.path (canonical module path, possibly from vo.mod) so that the
         // typechecker Package.path() always holds the authoritative module path.
@@ -608,17 +639,17 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
             state.tc_objs.pkgs[pkg].set_name(vfs_pkg.name.clone());
             pkg
         };
-        
+
         // Type check the package (imports already preloaded, tc_objs can be swapped)
         let (check_result, pkg_type_info, check_diagnostics) = {
             let mut state_ref = self.state.borrow_mut();
             let mut checker = Checker::new(pkg_key, state_ref.interner.clone());
             std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
             drop(state_ref);
-            
+
             // Use check() instead of check_with_importer - imports already preloaded
             let result = checker.check(&parsed_files);
-            
+
             let mut state_ref = self.state.borrow_mut();
             let diagnostics = if result.is_err() && checker.diagnostics.borrow().has_errors() {
                 let emitter = DiagnosticEmitter::new(&state_ref.source_map);
@@ -629,41 +660,48 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
             std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
             (result, checker.result, diagnostics)
         };
-        
+
         // Remove from in progress
         {
             let mut state = self.state.borrow_mut();
             state.in_progress.remove(import_path);
-            
+
             match check_result {
                 Ok(_) => {
                     // Cache the result and record package
                     state.cache.insert(import_path.to_string(), pkg_key);
                     state.checked_packages.push(pkg_key);
                     // Save parsed files for codegen
-                    state.imported_files.insert(import_path.to_string(), parsed_files);
+                    state
+                        .imported_files
+                        .insert(import_path.to_string(), parsed_files);
                     // Save type info for codegen
-                    state.imported_type_infos.insert(import_path.to_string(), pkg_type_info);
+                    state
+                        .imported_type_infos
+                        .insert(import_path.to_string(), pkg_type_info);
                 }
                 Err(_) => {
                     if let Some(diag) = check_diagnostics {
                         let diag = diag.trim();
                         if !diag.is_empty() {
-                            return ImportResult::Err(format!("type check failed for {}:\n{}", import_path, diag));
+                            return ImportResult::Err(format!(
+                                "type check failed for {}:\n{}",
+                                import_path, diag
+                            ));
                         }
                     }
                     return ImportResult::Err(format!("type check failed for {}", import_path));
                 }
             }
         }
-        
+
         ImportResult::Ok(pkg_key)
     }
-    
+
     fn working_dir(&self) -> &std::path::Path {
         &self.working_dir
     }
-    
+
     fn base_dir(&self) -> Option<&std::path::Path> {
         Some(&self.working_dir)
     }
@@ -672,21 +710,16 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vfs::{ModSource, PackageResolver, StdSource};
     use std::path::PathBuf;
     use vo_common::vfs::{FileSet, MemoryFs};
-    use crate::vfs::{ModSource, PackageResolver, StdSource};
 
     #[test]
     fn test_analyze_project_rejects_relative_imports() {
         let mut files = FileSet::new(PathBuf::from("."));
         files.files.insert(
             PathBuf::from("main.vo"),
-            concat!(
-                "package main\n",
-                "import \"./codec\"\n",
-                "func main() {}\n",
-            )
-            .to_string(),
+            concat!("package main\n", "import \"./codec\"\n", "func main() {}\n",).to_string(),
         );
 
         let mut std_fs = MemoryFs::new();
@@ -773,10 +806,12 @@ mod tests {
             Err(AnalysisError::Import(msg)) => {
                 assert!(msg.contains("use of internal package not allowed"), "{msg}");
                 assert!(msg.contains("github.com/acme/lib"), "{msg}");
-                assert!(msg.contains("github.com/acme/secret/internal/secret"), "{msg}");
+                assert!(
+                    msg.contains("github.com/acme/secret/internal/secret"),
+                    "{msg}"
+                );
             }
             _ => panic!("expected internal package rejection"),
         }
     }
 }
-

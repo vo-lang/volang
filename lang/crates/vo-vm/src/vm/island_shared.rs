@@ -19,7 +19,11 @@ pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) {
     let (capture_types, param_types, struct_metas, runtime_types) = {
         let module = vm.module().expect("module loaded");
         let func_idx = payload.func_id as usize;
-        assert!(func_idx < module.functions.len(), "island spawn: invalid func_id {}", payload.func_id);
+        assert!(
+            func_idx < module.functions.len(),
+            "island spawn: invalid func_id {}",
+            payload.func_id
+        );
         let func_def = &module.functions[func_idx];
         (
             func_def.capture_types.clone(),
@@ -41,9 +45,8 @@ pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) {
         |gc, handle| crate::exec::resolve_unpacked_queue_handle(gc, handle, endpoint_registry),
     );
 
-    let closure_ref = vo_runtime::objects::closure::create(
-        gc, payload.func_id, payload.num_captures as usize,
-    );
+    let closure_ref =
+        vo_runtime::objects::closure::create(gc, payload.func_id, payload.num_captures as usize);
 
     for (i, &cap_ref) in unpacked_captures.iter().enumerate() {
         vo_runtime::objects::closure::set_capture(closure_ref, i, cap_ref as u64);
@@ -73,7 +76,10 @@ fn endpoint_recv_closed() -> EndpointResponseKind {
 }
 
 fn endpoint_recv_data(data: Vec<u8>) -> EndpointResponseKind {
-    EndpointResponseKind::RecvData { data, closed: false }
+    EndpointResponseKind::RecvData {
+        data,
+        closed: false,
+    }
 }
 
 pub(crate) fn handle_endpoint_request_command(
@@ -137,7 +143,8 @@ pub(crate) fn handle_endpoint_request_command(
             }
 
             for (target_island, resp_kind, resp_fiber) in responses {
-                vm.state.send_endpoint_response(target_island, endpoint_id, resp_kind, resp_fiber);
+                vm.state
+                    .send_endpoint_response(target_island, endpoint_id, resp_kind, resp_fiber);
             }
 
             for waiter in local_wakes {
@@ -150,7 +157,8 @@ pub(crate) fn handle_endpoint_request_command(
                 EndpointRequestKind::Recv => endpoint_recv_closed(),
                 EndpointRequestKind::Close | EndpointRequestKind::Transfer { .. } => return,
             };
-            vm.state.send_endpoint_response(from_island, endpoint_id, resp, fiber_id);
+            vm.state
+                .send_endpoint_response(from_island, endpoint_id, resp, fiber_id);
         }
     }
 }
@@ -207,7 +215,10 @@ fn handle_endpoint_request_inner(
                         local_wakes,
                     );
                 }
-                vo_runtime::objects::queue_state::ResolvedSendResult::RemoteDirect { receiver, payload: value } => {
+                vo_runtime::objects::queue_state::ResolvedSendResult::RemoteDirect {
+                    receiver,
+                    payload: value,
+                } => {
                     let recv_kind = pack_recv_data_for_waiter(ctx, &receiver, &value, vm_state);
                     dispatch_response(receiver, home_island, recv_kind, responses, local_wakes);
                     dispatch_response(
@@ -275,14 +286,28 @@ fn handle_endpoint_request_inner(
         EndpointRequestKind::Close => {
             state.close();
             for receiver in state.take_waiting_receivers() {
-                dispatch_response(receiver, home_island, endpoint_recv_closed(), responses, local_wakes);
+                dispatch_response(
+                    receiver,
+                    home_island,
+                    endpoint_recv_closed(),
+                    responses,
+                    local_wakes,
+                );
             }
             for (sender, _) in state.take_waiting_senders() {
-                dispatch_response(sender, home_island, endpoint_send_ack(true), responses, local_wakes);
+                dispatch_response(
+                    sender,
+                    home_island,
+                    endpoint_send_ack(true),
+                    responses,
+                    local_wakes,
+                );
             }
         }
         EndpointRequestKind::Transfer { .. } => {
-            unreachable!("Transfer is handled by caller before entering handle_endpoint_request_inner")
+            unreachable!(
+                "Transfer is handled by caller before entering handle_endpoint_request_inner"
+            )
         }
     }
 }
@@ -327,7 +352,11 @@ fn dispatch_response(
     }
 }
 
-pub(crate) fn finalize_closed_home_endpoint(vm: &mut Vm, endpoint_id: u64, exclude_peer: Option<u32>) {
+pub(crate) fn finalize_closed_home_endpoint(
+    vm: &mut Vm,
+    endpoint_id: u64,
+    exclude_peer: Option<u32>,
+) {
     let peers = vm
         .state
         .endpoint_registry
@@ -358,7 +387,9 @@ fn mark_remote_endpoint_closed(vm: &mut Vm, endpoint_id: u64) {
 fn resume_endpoint_response(vm: &mut Vm, fiber_id: u64, kind: &EndpointResponseKind) {
     vm.state.pending_island_responses = vm.state.pending_island_responses.saturating_sub(1);
     let fid = crate::scheduler::FiberId::from_raw(fiber_id as u32);
-    vm.scheduler.get_fiber_mut(fid).apply_endpoint_response(kind);
+    vm.scheduler
+        .get_fiber_mut(fid)
+        .apply_endpoint_response(kind);
     vm.scheduler.wake_fiber(fid);
 }
 

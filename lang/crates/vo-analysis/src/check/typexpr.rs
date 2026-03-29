@@ -3,17 +3,16 @@
 //! This module converts AST type expressions (TypeExpr) to internal types (TypeKey).
 //! It handles type-checking of type expressions and resolves them to TypeKey values.
 
-
-use vo_syntax::ast::Ident;
 use vo_common::span::Span;
+use vo_syntax::ast::Ident;
 
+use crate::lookup;
 use crate::obj::EntityType;
 use crate::objects::{ObjKey, ScopeKey, TypeKey};
 use crate::operand::{Operand, OperandMode};
-use crate::lookup;
 use crate::scope;
 use crate::typ::{self, ChanDir, Type};
-use vo_syntax::ast::{self, Expr, FuncSig, Param, Receiver, TypeExpr, TypeExprKind, InterfaceElem};
+use vo_syntax::ast::{self, Expr, FuncSig, InterfaceElem, Param, Receiver, TypeExpr, TypeExprKind};
 
 use super::checker::{Checker, ObjContext};
 use super::errors::TypeError;
@@ -86,7 +85,11 @@ impl Checker {
                     }
                     OperandMode::Invalid => None,
                     _ => {
-                        self.error_code_msg(TypeError::NotAType, ident.span, format!("{} is not a type", self.resolve_ident(ident)));
+                        self.error_code_msg(
+                            TypeError::NotAType,
+                            ident.span,
+                            format!("{} is not a type", self.resolve_ident(ident)),
+                        );
                         None
                     }
                 }
@@ -96,9 +99,11 @@ impl Checker {
                 let pkg_name = self.resolve_ident(&sel.pkg).to_string();
                 let type_name = self.resolve_ident(&sel.sel).to_string();
                 let sel_sel = sel.sel.clone();
-                
+
                 if let Some(scope_key) = self.octx.scope {
-                    if let Some((_, pkg_obj)) = scope::lookup_parent(scope_key, &pkg_name, self.objs()) {
+                    if let Some((_, pkg_obj)) =
+                        scope::lookup_parent(scope_key, &pkg_name, self.objs())
+                    {
                         let entity = self.lobj(pkg_obj).entity_type().clone();
                         if let EntityType::PkgName { imported, .. } = entity {
                             let pkg_scope = *self.package(imported).scope();
@@ -114,15 +119,31 @@ impl Checker {
                                         return t;
                                     }
                                 }
-                                self.error_code_msg(TypeError::NotAType, ty.span, format!("{}.{} is not a type", pkg_name, type_name));
+                                self.error_code_msg(
+                                    TypeError::NotAType,
+                                    ty.span,
+                                    format!("{}.{} is not a type", pkg_name, type_name),
+                                );
                             } else {
-                                self.error_code_msg(TypeError::NotAType, ty.span, format!("{}.{} is not a type", pkg_name, type_name));
+                                self.error_code_msg(
+                                    TypeError::NotAType,
+                                    ty.span,
+                                    format!("{}.{} is not a type", pkg_name, type_name),
+                                );
                             }
                         } else {
-                            self.error_code_msg(TypeError::NotAType, sel.pkg.span, format!("{} is not a package", pkg_name));
+                            self.error_code_msg(
+                                TypeError::NotAType,
+                                sel.pkg.span,
+                                format!("{} is not a package", pkg_name),
+                            );
                         }
                     } else {
-                        self.error_code_msg(TypeError::Undeclared, sel.pkg.span, format!("undeclared name: {}", pkg_name));
+                        self.error_code_msg(
+                            TypeError::Undeclared,
+                            sel.pkg.span,
+                            format!("undeclared name: {}", pkg_name),
+                        );
                     }
                 }
                 None
@@ -150,7 +171,11 @@ impl Checker {
                 let key_span = map.key.span;
                 let f = move |checker: &mut Checker| {
                     if !crate::typ::comparable(key, &checker.tc_objs) {
-                        checker.error_code_msg(TypeError::InvalidOp, key_span, "invalid map key type");
+                        checker.error_code_msg(
+                            TypeError::InvalidOp,
+                            key_span,
+                            "invalid map key type",
+                        );
                     }
                 };
                 self.later(Box::new(f));
@@ -181,7 +206,7 @@ impl Checker {
                 let base_type = self.indirect_type(base);
                 let t = self.new_t_pointer(base_type);
                 set_underlying(Some(t), &mut self.tc_objs);
-                
+
                 // Spec: pointer types are only valid when base type is a struct
                 // Delay this check because the base type may not be fully resolved yet
                 // (e.g., recursive types like `type Node struct { left *Node }`)
@@ -196,12 +221,15 @@ impl Checker {
                         checker.error_code_msg(
                             TypeError::PointerToNonStruct,
                             base_span,
-                            format!("invalid pointer type *{} (base must be struct)", checker.type_str(base_type)),
+                            format!(
+                                "invalid pointer type *{} (base must be struct)",
+                                checker.type_str(base_type)
+                            ),
                         );
                     }
                 };
                 self.later(Box::new(f));
-                
+
                 Some(t)
             }
             TypeExprKind::Interface(iface) => {
@@ -257,14 +285,18 @@ impl Checker {
                 }
 
                 let invalid_type = self.invalid_type();
-                
+
                 // Extract entity info first to avoid borrow conflicts
                 let entity_type = self.lobj(okey).entity_type().clone();
                 let obj_name = self.lobj(okey).name().to_string();
 
                 match &entity_type {
                     EntityType::PkgName { .. } => {
-                        self.error_code_msg(TypeError::PackageNotInSelector, ident.span, format!("use of package {} not in selector", obj_name));
+                        self.error_code_msg(
+                            TypeError::PackageNotInSelector,
+                            ident.span,
+                            format!("use of package {} not in selector", obj_name),
+                        );
                         return;
                     }
                     EntityType::Const { val } => {
@@ -325,7 +357,11 @@ impl Checker {
         if name == "_" {
             self.error_code(TypeError::BlankAsValue, ident.span);
         } else {
-            self.error_code_msg(TypeError::Undeclared, ident.span, format!("undeclared name: {}", name));
+            self.error_code_msg(
+                TypeError::Undeclared,
+                ident.span,
+                format!("undeclared name: {}", name),
+            );
         }
     }
 
@@ -345,7 +381,7 @@ impl Checker {
         if matches!(e.kind, vo_syntax::ast::ExprKind::Ellipsis) {
             return None;
         }
-        
+
         let mut x = Operand::new();
         self.expr(&mut x, e);
         if let OperandMode::Constant(v) = &x.mode {
@@ -383,7 +419,9 @@ impl Checker {
         for param in &func.params {
             let ty = self.indirect_type(&param.ty);
             // Use first name if available, otherwise empty
-            let name = param.names.first()
+            let name = param
+                .names
+                .first()
                 .map(|n| self.resolve_ident(n).to_string())
                 .unwrap_or_default();
             let var = self.new_param_var(Span::default(), Some(self.pkg), name, Some(ty));
@@ -395,7 +433,9 @@ impl Checker {
         let mut results = Vec::new();
         for result in &func.results {
             let ty = self.indirect_type(&result.ty);
-            let name = result.names.first()
+            let name = result
+                .names
+                .first()
                 .map(|n| self.resolve_ident(n).to_string())
                 .unwrap_or_default();
             let var = self.new_param_var(Span::default(), Some(self.pkg), name, Some(ty));
@@ -410,28 +450,18 @@ impl Checker {
 
     /// Type-checks a function signature and returns its type.
     /// Aligned with goscript's func_type implementation.
-    pub fn func_type_from_sig(
-        &mut self,
-        recv: Option<&Receiver>,
-        sig: &FuncSig,
-    ) -> TypeKey {
+    pub fn func_type_from_sig(&mut self, recv: Option<&Receiver>, sig: &FuncSig) -> TypeKey {
         // Create a new scope for the function (like goscript)
-        let scope_key = self.new_scope(
-            self.octx.scope,
-            0,
-            0,
-            "function",
-            true,
-        );
+        let scope_key = self.new_scope(self.octx.scope, 0, 0, "function", true);
         // Record scope for this function signature (like goscript: self.result.record_scope(&ftype, skey))
         self.result.record_scope(sig.span, scope_key);
 
         // Collect receiver (like goscript's collect_params for recv)
         let recv_list = self.collect_receiver(scope_key, recv);
-        
+
         // Collect params (like goscript's collect_params with variadic_ok=true)
         let (params, variadic) = self.collect_params_from_sig(scope_key, &sig.params, sig.variadic);
-        
+
         // Collect results (like goscript's collect_params with variadic_ok=false)
         let (results, _) = self.collect_results_from_sig(scope_key, &sig.results);
 
@@ -439,7 +469,7 @@ impl Checker {
         let recv_okey = if recv.is_some() {
             let r = recv.unwrap();
             let invalid_type = self.invalid_type();
-            
+
             // Vo Receiver is always exactly one, so recv_list has 0 or 1 element
             let recv_var = if recv_list.is_empty() {
                 // This shouldn't happen with valid Vo syntax, but handle like goscript
@@ -453,7 +483,7 @@ impl Checker {
             let recv_var_val = self.lobj(recv_var);
             let recv_type = recv_var_val.typ().unwrap();
             let (t, _) = crate::lookup::try_deref(recv_type, self.objs());
-            
+
             if t != invalid_type {
                 let err_msg = if let Some(n) = self.otype(t).try_as_named() {
                     // spec: "The type denoted by T is called the receiver base type; it must not
@@ -476,9 +506,13 @@ impl Checker {
                 } else {
                     Some("basic or unnamed type")
                 };
-                
+
                 if let Some(err) = err_msg {
-                    self.error_code_msg(TypeError::InvalidReceiver, r.span, format!("invalid receiver ({})", err));
+                    self.error_code_msg(
+                        TypeError::InvalidReceiver,
+                        r.span,
+                        format!("invalid receiver ({})", err),
+                    );
                     // ok to continue
                 }
             }
@@ -491,15 +525,17 @@ impl Checker {
         let params_tuple = self.new_tuple(params);
         let results_tuple = self.new_tuple(results);
 
-        self.new_t_signature(Some(scope_key), recv_okey, params_tuple, results_tuple, variadic)
+        self.new_t_signature(
+            Some(scope_key),
+            recv_okey,
+            params_tuple,
+            results_tuple,
+            variadic,
+        )
     }
 
     /// Collect receiver parameter (adapted from goscript's collect_params for Vo Receiver).
-    fn collect_receiver(
-        &mut self,
-        scope_key: ScopeKey,
-        recv: Option<&Receiver>,
-    ) -> Vec<ObjKey> {
+    fn collect_receiver(&mut self, scope_key: ScopeKey, recv: Option<&Receiver>) -> Vec<ObjKey> {
         let Some(r) = recv else {
             return vec![];
         };
@@ -510,10 +546,10 @@ impl Checker {
             kind: TypeExprKind::Ident(r.ty.clone()),
             span: r.ty.span,
         };
-        
+
         // Resolve type using indirect_type (like goscript)
         let base_type = self.indirect_type(&base_type_expr);
-        
+
         // Final type is T or *T
         let recv_type = if r.is_pointer {
             self.new_t_pointer_checked(base_type, r.ty.span)
@@ -523,7 +559,9 @@ impl Checker {
 
         // Create param var and declare (like goscript's collect_params)
         // For anonymous receivers, use empty name (receiver is unused in method body)
-        let recv_name = r.name.as_ref()
+        let recv_name = r
+            .name
+            .as_ref()
             .map(|n| self.resolve_ident(n).to_string())
             .unwrap_or_default();
         let par = self.new_param_var(r.span, Some(self.pkg), recv_name, Some(recv_type));
@@ -561,7 +599,12 @@ impl Checker {
 
             if param.names.is_empty() {
                 // Anonymous parameter
-                let var = self.new_param_var(param.ty.span, Some(self.pkg), String::new(), Some(param_type));
+                let var = self.new_param_var(
+                    param.ty.span,
+                    Some(self.pkg),
+                    String::new(),
+                    Some(param_type),
+                );
                 // Record implicit object (like goscript: self.result.record_implicit(fkey, par))
                 self.result.record_implicit(param.ty.span, var);
                 vars.push(var);
@@ -573,7 +616,8 @@ impl Checker {
                     if name_str.is_empty() {
                         // This is an invalid case, but continue like goscript
                     }
-                    let var = self.new_param_var(name.span, Some(self.pkg), name_str, Some(param_type));
+                    let var =
+                        self.new_param_var(name.span, Some(self.pkg), name_str, Some(param_type));
                     let scope_pos = self.scope(scope_key).pos();
                     self.declare(scope_key, var, scope_pos);
                     self.result.record_def(name.clone(), Some(var));
@@ -621,13 +665,19 @@ impl Checker {
 
             if let Some(name) = &result.name {
                 let name_str = self.resolve_ident(name).to_string();
-                let var = self.new_param_var(name.span, Some(self.pkg), name_str, Some(result_type));
+                let var =
+                    self.new_param_var(name.span, Some(self.pkg), name_str, Some(result_type));
                 let scope_pos = self.scope(scope_key).pos();
                 self.declare(scope_key, var, scope_pos);
                 self.result.record_def(name.clone(), Some(var));
                 vars.push(var);
             } else {
-                let var = self.new_param_var(result.ty.span, Some(self.pkg), String::new(), Some(result_type));
+                let var = self.new_param_var(
+                    result.ty.span,
+                    Some(self.pkg),
+                    String::new(),
+                    Some(result_type),
+                );
                 vars.push(var);
             }
         }
@@ -676,7 +726,8 @@ impl Checker {
 
         let mut fields: Vec<ObjKey> = Vec::new();
         let mut tags: Option<Vec<Option<String>>> = None;
-        let mut field_set: std::collections::HashMap<String, ObjKey> = std::collections::HashMap::new();
+        let mut field_set: std::collections::HashMap<String, ObjKey> =
+            std::collections::HashMap::new();
 
         for field in &s.fields {
             let field_type = self.type_expr(&field.ty);
@@ -687,14 +738,14 @@ impl Checker {
                 // spec: "An embedded type must be specified as a type name T or as a pointer
                 // to a non-interface type name *T, and T itself may not be a pointer type."
                 let invalid_type = self.invalid_type();
-                
+
                 // For embedded fields, extract the type name
                 let embedded_name = self.get_embedded_field_name(&field.ty);
-                
+
                 // Check embedded field constraints
                 let (underlying, is_ptr) = lookup::try_deref(field_type, self.objs());
                 let underlying_type = typ::underlying_type(underlying, self.objs());
-                
+
                 let is_valid = match &self.otype(underlying_type) {
                     Type::Basic(_) if underlying_type == invalid_type => false,
                     Type::Pointer(_) => {
@@ -716,17 +767,21 @@ impl Checker {
                     Some(final_type),
                     true,
                 );
-                
+
                 // Check for duplicate field
                 if embedded_name != "_" {
                     if let Some(&prev) = field_set.get(&embedded_name) {
-                        self.error_code_msg(TypeError::FieldRedeclared, field.ty.span, format!("{} redeclared", embedded_name));
+                        self.error_code_msg(
+                            TypeError::FieldRedeclared,
+                            field.ty.span,
+                            format!("{} redeclared", embedded_name),
+                        );
                         self.report_alt_decl(prev);
                     } else {
                         field_set.insert(embedded_name, fld);
                     }
                 }
-                
+
                 self.add_field_with_tag(&mut fields, &mut tags, tag, fld);
             } else {
                 // Named fields
@@ -739,17 +794,21 @@ impl Checker {
                         Some(field_type),
                         false,
                     );
-                    
+
                     // Check for duplicate field
                     if name_str != "_" {
                         if let Some(&prev) = field_set.get(&name_str) {
-                            self.error_code_msg(TypeError::FieldRedeclared, name.span, format!("{} redeclared", name_str));
+                            self.error_code_msg(
+                                TypeError::FieldRedeclared,
+                                name.span,
+                                format!("{} redeclared", name_str),
+                            );
                             self.report_alt_decl(prev);
                         } else {
                             field_set.insert(name_str, fld);
                         }
                     }
-                    
+
                     self.result.record_def(name.clone(), Some(fld));
                     self.add_field_with_tag(&mut fields, &mut tags, tag.clone(), fld);
                 }
@@ -814,11 +873,13 @@ impl Checker {
             let f = move |checker: &mut Checker| {
                 let mut embeds: Vec<TypeKey> = Vec::new();
                 let invalid_type = checker.invalid_type();
-                
+
                 for ident in &embedded_idents {
                     let name = checker.resolve_ident(ident);
                     if let Some(scope_key) = checker.octx.scope {
-                        if let Some((_, okey)) = scope::lookup_parent(scope_key, name, &checker.tc_objs) {
+                        if let Some((_, okey)) =
+                            scope::lookup_parent(scope_key, name, &checker.tc_objs)
+                        {
                             let typ = checker.tc_objs.lobjs[okey].typ();
                             if let Some(t) = typ {
                                 if t == invalid_type {
@@ -832,14 +893,18 @@ impl Checker {
                                         embeds.push(t);
                                     }
                                     _ => {
-                                        checker.error_code_msg(TypeError::NotAType, ident.span, format!("{} is not an interface", name));
+                                        checker.error_code_msg(
+                                            TypeError::NotAType,
+                                            ident.span,
+                                            format!("{} is not an interface", name),
+                                        );
                                     }
                                 }
                             }
                         }
                     }
                 }
-                
+
                 if let Type::Interface(iface_detail) = &mut checker.tc_objs.types[itype] {
                     *iface_detail.embeddeds_mut() = embeds;
                 }
@@ -858,10 +923,10 @@ impl Checker {
         } else {
             (None, vec![])
         };
-        
+
         let scope = self.octx.scope.unwrap_or(self.universe().scope());
         let info = self.info_from_type_lit(scope, iface, tname, &path);
-        
+
         if info.is_none() || info.as_ref().unwrap().is_empty() {
             // Empty interface or error - exit early
             if let Some(iface_detail) = self.otype(itype).try_as_interface() {
@@ -893,41 +958,56 @@ impl Checker {
         // Two-phase processing (like goscript):
         // Phase 1: Create method objects with empty signatures, call set_func
         // Phase 2: Fix signatures using minfo.src_index() to get AST
-        
+
         let info_ref = info.unwrap();
         let explicits = info_ref.explicits;
         let mut sig_fix: Vec<super::interface::MethodInfo> = vec![];
-        
+
         // Phase 1: Create method objects
         for (i, minfo) in info_ref.methods.iter().enumerate() {
             let fun = if minfo.func().is_none() {
                 // Method not yet type-checked, get name from AST using src_index
-                let src_index = minfo.src_index().expect("MethodInfo must have src_index when func is None");
+                let src_index = minfo
+                    .src_index()
+                    .expect("MethodInfo must have src_index when func is None");
                 let method_ast = match &iface.elems[src_index] {
                     InterfaceElem::Method(m) => m,
                     _ => panic!("src_index should point to a Method element"),
                 };
                 let name = self.resolve_ident(&method_ast.name).to_string();
-                
+
                 // Create receiver
-                let recv_var = self.new_var(Span::default(), Some(self.pkg), String::new(), Some(recv_type));
-                
+                let recv_var = self.new_var(
+                    Span::default(),
+                    Some(self.pkg),
+                    String::new(),
+                    Some(recv_type),
+                );
+
                 // Create empty signature (will be fixed in phase 2)
                 let empty_tuple = self.new_t_tuple(vec![]);
-                let sig_type = self.new_t_signature(None, Some(recv_var), empty_tuple, empty_tuple, false);
+                let sig_type =
+                    self.new_t_signature(None, Some(recv_var), empty_tuple, empty_tuple, false);
 
-                let fun_key = self.new_func(method_ast.name.span, Some(self.pkg), name.clone(), Some(sig_type), false);
-                
+                let fun_key = self.new_func(
+                    method_ast.name.span,
+                    Some(self.pkg),
+                    name.clone(),
+                    Some(sig_type),
+                    false,
+                );
+
                 // Record definition for the method
-                self.result.record_def(method_ast.name.clone(), Some(fun_key));
-                
+                self.result
+                    .record_def(method_ast.name.clone(), Some(fun_key));
+
                 minfo.set_func(fun_key);
                 sig_fix.push(minfo.clone());
                 fun_key
             } else {
                 minfo.func().unwrap()
             };
-            
+
             // Add to interface type
             if let Type::Interface(iface_detail) = &mut self.otype_mut(itype) {
                 if i < explicits {
@@ -946,14 +1026,14 @@ impl Checker {
                 InterfaceElem::Method(m) => m,
                 _ => continue,
             };
-            
+
             // Type-check method signature within its scope (like goscript)
             self.octx = ObjContext::new();
             self.octx.scope = minfo.scope();
-            
+
             // Type-check the method signature
             let sig_type = self.func_type_from_sig(None, &method_ast.sig);
-            
+
             // Update the method's signature, keeping the receiver
             let fun_key = minfo.func().unwrap();
             let old_sig_type = self.lobj(fun_key).typ().unwrap();
@@ -962,11 +1042,11 @@ impl Checker {
             } else {
                 None
             };
-            
+
             if let Type::Signature(sig) = &mut self.otype_mut(sig_type) {
                 sig.set_recv(recv);
             }
-            
+
             // Update the function's type to the new signature
             self.lobj_mut(fun_key).set_type(Some(sig_type));
         }
@@ -974,21 +1054,24 @@ impl Checker {
 
         // Sort methods by name - collect data first to avoid borrow conflicts
         if let Type::Interface(iface_detail) = &self.otype(itype) {
-            let mut methods: Vec<_> = iface_detail.methods().iter()
+            let mut methods: Vec<_> = iface_detail
+                .methods()
+                .iter()
                 .map(|&k| (k, self.lobj(k).name().to_string()))
                 .collect();
             methods.sort_by(|a, b| a.1.cmp(&b.1));
             let sorted_methods: Vec<_> = methods.into_iter().map(|(k, _)| k).collect();
-            
+
             let all_methods_opt = iface_detail.all_methods().clone();
             let sorted_all = all_methods_opt.map(|all| {
-                let mut all_with_names: Vec<_> = all.iter()
+                let mut all_with_names: Vec<_> = all
+                    .iter()
                     .map(|&k| (k, self.lobj(k).name().to_string()))
                     .collect();
                 all_with_names.sort_by(|a, b| a.1.cmp(&b.1));
                 all_with_names.into_iter().map(|(k, _)| k).collect()
             });
-            
+
             // Now update with mutable borrow
             if let Type::Interface(iface_detail) = &mut self.otype_mut(itype) {
                 *iface_detail.methods_mut() = sorted_methods;
@@ -998,5 +1081,4 @@ impl Checker {
 
         itype
     }
-
 }

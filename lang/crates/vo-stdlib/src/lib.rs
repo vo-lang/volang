@@ -11,21 +11,21 @@ extern crate alloc;
 mod source;
 
 // Cross-platform stdlib modules
-pub mod math;
 pub mod bits;
-pub mod rand;
 pub mod bytes;
-pub mod strings;
-pub mod strconv;
-pub mod unicode;
 pub mod fmt;
-pub mod regexp;
-pub mod json;
-pub mod toml_pkg;
-pub mod tag;
 pub mod io;
+pub mod json;
+pub mod math;
+pub mod rand;
+pub mod regexp;
+pub mod strconv;
+pub mod strings;
+pub mod tag;
+pub mod toml_pkg;
 #[cfg(feature = "std")]
 pub mod toolchain;
+pub mod unicode;
 
 // Internal modules (used by json/toml)
 pub(crate) mod serde;
@@ -33,20 +33,15 @@ pub(crate) mod serde_json;
 pub(crate) mod serde_toml;
 
 // Platform-specific modules
-pub mod time;
-pub mod os;
-pub mod net;
-pub mod filepath;
 pub mod exec;
+pub mod filepath;
+pub mod net;
+pub mod os;
+pub mod time;
 
 pub use source::{EmbeddedStdlib, StdlibFs};
 #[cfg(feature = "std")]
-pub use toolchain::{
-    install_toolchain_host,
-    ToolchainHost,
-    ToolchainModule,
-    ToolchainRunMode,
-};
+pub use toolchain::{install_toolchain_host, ToolchainHost, ToolchainModule, ToolchainRunMode};
 
 use vo_runtime::bytecode::ExternDef;
 use vo_runtime::ffi::ExternRegistry;
@@ -56,7 +51,7 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     // Register runtime builtins (builtin, dynamic)
     vo_runtime::builtins::builtin::register_externs(registry, externs);
     vo_runtime::builtins::dynamic::register_externs(registry, externs);
-    
+
     // Cross-platform
     math::register_externs(registry, externs);
     bits::register_externs(registry, externs);

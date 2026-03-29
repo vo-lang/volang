@@ -20,15 +20,13 @@ pub fn package_abi_path(
     let package_path = normalize_path(package_path);
     if let Some(module_path) = module_path {
         let module_path = normalize_path(module_path);
-        let abi_root = extension_name
-            .map(normalize_path)
-            .unwrap_or_else(|| {
-                module_path
-                    .rsplit('/')
-                    .next()
-                    .map(normalize_path)
-                    .unwrap_or_else(|| module_path.clone())
-            });
+        let abi_root = extension_name.map(normalize_path).unwrap_or_else(|| {
+            module_path
+                .rsplit('/')
+                .next()
+                .map(normalize_path)
+                .unwrap_or_else(|| module_path.clone())
+        });
         if package_path == module_path {
             return abi_root;
         }
@@ -88,11 +86,17 @@ mod tests {
 
     #[test]
     fn normalize_abi_lookup_pkg_path_normalizes_components() {
-        assert_eq!(normalize_abi_lookup_pkg_path("../libs/vo-play"), "libs_vo_play");
+        assert_eq!(
+            normalize_abi_lookup_pkg_path("../libs/vo-play"),
+            "libs_vo_play"
+        );
     }
 
     #[test]
     fn abi_lookup_name_joins_pkg_and_func() {
-        assert_eq!(abi_lookup_name("voplay/scene3d", "physicsInit"), "voplay_scene3d_physicsInit");
+        assert_eq!(
+            abi_lookup_name("voplay/scene3d", "physicsInit"),
+            "voplay_scene3d_physicsInit"
+        );
     }
 }

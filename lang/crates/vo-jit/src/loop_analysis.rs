@@ -4,10 +4,12 @@
 //! embedded by codegen, providing precise loop boundaries for JIT.
 
 use std::collections::HashSet;
+use vo_common_core::instruction::HINT_LOOP;
+use vo_common_core::instruction::{
+    LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
+};
 use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::instruction::{Instruction, Opcode};
-use vo_common_core::instruction::HINT_LOOP;
-use vo_common_core::instruction::{LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE};
 
 /// Information about a detected loop (from Hint instructions).
 #[derive(Debug, Clone)]
@@ -47,21 +49,21 @@ pub fn analyze_loops(func_def: &FunctionDef) -> Vec<LoopInfo> {
 }
 
 /// Analyze bytecode to find all loops using Hint instructions.
-/// 
+///
 /// New HINT_LOOP format (no HINT_LOOP_END needed):
 /// - a: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset
 /// - bc: exit_pc (32-bit)
-/// 
+///
 /// begin_pc (loop_start) is hint_pc + 1 (the instruction after HINT_LOOP).
 /// end_pc is hint_pc + end_offset (the back-edge Jump).
 pub fn analyze_loops_from_code(code: &[Instruction]) -> Vec<LoopInfo> {
     let mut loops = Vec::new();
-    
+
     for (pc, inst) in code.iter().enumerate() {
         if inst.opcode() != Opcode::Hint {
             continue;
         }
-        
+
         match inst.flags {
             f if f == HINT_LOOP => {
                 let loop_info_bits = inst.a;
@@ -69,10 +71,10 @@ pub fn analyze_loops_from_code(code: &[Instruction]) -> Vec<LoopInfo> {
                 let depth = ((loop_info_bits >> 4) & 0x0F) as u8;
                 let end_offset = ((loop_info_bits >> 8) & 0xFF) as usize;
                 let exit_pc = inst.imm32_unsigned() as usize;
-                
+
                 // begin_pc is the instruction after HINT_LOOP (the loop_start)
                 let begin_pc = pc + 1;
-                
+
                 // end_pc: if end_offset > 0, use it; otherwise scan for back-edge Jump
                 let end_pc = if end_offset > 0 {
                     pc + end_offset
@@ -80,10 +82,10 @@ pub fn analyze_loops_from_code(code: &[Instruction]) -> Vec<LoopInfo> {
                     // Fallback: scan forward to find back-edge Jump targeting begin_pc
                     find_back_edge_jump(code, begin_pc)
                 };
-                
+
                 let (live_in, live_out) = analyze_loop_liveness(code, begin_pc, end_pc);
                 let has_calls = has_function_calls(code, begin_pc, end_pc);
-                
+
                 loops.push(LoopInfo {
                     depth,
                     begin_pc,
@@ -100,7 +102,7 @@ pub fn analyze_loops_from_code(code: &[Instruction]) -> Vec<LoopInfo> {
             _ => {}
         }
     }
-    
+
     loops
 }
 
@@ -131,7 +133,10 @@ fn find_back_edge_jump(code: &[Instruction], loop_start: usize) -> usize {
     }
     // No back-edge found - this is a codegen bug
     // If HINT_LOOP was emitted, there must be a back-edge Jump
-    panic!("find_back_edge_jump: no back-edge Jump found targeting loop_start={}", loop_start)
+    panic!(
+        "find_back_edge_jump: no back-edge Jump found targeting loop_start={}",
+        loop_start
+    )
 }
 
 /// Find loop info by header PC (begin_pc).
@@ -152,7 +157,6 @@ fn has_function_calls(code: &[Instruction], header_pc: usize, back_edge_pc: usiz
     false
 }
 
-
 /// Analyze which registers are live-in and live-out for a loop.
 ///
 /// - live_in: registers read before being written in the loop
@@ -164,34 +168,34 @@ fn analyze_loop_liveness(
 ) -> (Vec<u16>, Vec<u16>) {
     let mut read_before_write: HashSet<u16> = HashSet::new();
     let mut written: HashSet<u16> = HashSet::new();
-    
+
     for pc in header_pc..=back_edge_pc {
         let inst = &code[pc];
-        
+
         // Get registers read by this instruction
         for reg in get_read_regs(inst) {
             if !written.contains(&reg) {
                 read_before_write.insert(reg);
             }
         }
-        
+
         // Get registers written by this instruction
         if let Some(dst) = get_write_reg(inst) {
             written.insert(dst);
         }
-        
+
         // Handle multi-slot writes (e.g., Call with multiple return values)
         for dst in get_write_regs_multi(inst) {
             written.insert(dst);
         }
     }
-    
+
     let mut live_in: Vec<u16> = read_before_write.into_iter().collect();
     let mut live_out: Vec<u16> = written.into_iter().collect();
-    
+
     live_in.sort();
     live_out.sort();
-    
+
     (live_in, live_out)
 }
 
@@ -219,18 +223,45 @@ fn push_recv_result_slots(regs: &mut Vec<u16>, dst_start: u16, elem_slots: u16, 
 /// Get registers read by an instruction.
 fn get_read_regs(inst: &Instruction) -> Vec<u16> {
     let mut regs = Vec::new();
-    
+
     match inst.opcode() {
         // Instructions that read from b and/or c
         Opcode::Copy | Opcode::Not | Opcode::NegI | Opcode::NegF => {
             regs.push(inst.b);
         }
-        Opcode::AddI | Opcode::SubI | Opcode::MulI | Opcode::DivI | Opcode::DivU | Opcode::ModI | Opcode::ModU |
-        Opcode::AddF | Opcode::SubF | Opcode::MulF | Opcode::DivF |
-        Opcode::And | Opcode::Or | Opcode::Xor | Opcode::Shl | Opcode::ShrS | Opcode::ShrU |
-        Opcode::EqI | Opcode::NeI | Opcode::LtI | Opcode::LeI | Opcode::GtI | Opcode::GeI |
-        Opcode::LtU | Opcode::LeU | Opcode::GtU | Opcode::GeU |
-        Opcode::EqF | Opcode::NeF | Opcode::LtF | Opcode::LeF | Opcode::GtF | Opcode::GeF => {
+        Opcode::AddI
+        | Opcode::SubI
+        | Opcode::MulI
+        | Opcode::DivI
+        | Opcode::DivU
+        | Opcode::ModI
+        | Opcode::ModU
+        | Opcode::AddF
+        | Opcode::SubF
+        | Opcode::MulF
+        | Opcode::DivF
+        | Opcode::And
+        | Opcode::Or
+        | Opcode::Xor
+        | Opcode::Shl
+        | Opcode::ShrS
+        | Opcode::ShrU
+        | Opcode::EqI
+        | Opcode::NeI
+        | Opcode::LtI
+        | Opcode::LeI
+        | Opcode::GtI
+        | Opcode::GeI
+        | Opcode::LtU
+        | Opcode::LeU
+        | Opcode::GtU
+        | Opcode::GeU
+        | Opcode::EqF
+        | Opcode::NeF
+        | Opcode::LtF
+        | Opcode::LeF
+        | Opcode::GtF
+        | Opcode::GeF => {
             regs.push(inst.b);
             regs.push(inst.c);
         }
@@ -257,8 +288,8 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
         }
         // ForLoop reads idx and limit
         Opcode::ForLoop => {
-            regs.push(inst.a);  // idx
-            regs.push(inst.b);  // limit
+            regs.push(inst.a); // idx
+            regs.push(inst.b); // limit
         }
         // Return reads return value registers
         Opcode::Return => {
@@ -283,9 +314,9 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
         }
         // SliceSet reads slice, index, and value (possibly multi-slot)
         Opcode::SliceSet => {
-            regs.push(inst.a);  // slice
-            regs.push(inst.b);  // index
-            // Value may be multi-slot
+            regs.push(inst.a); // slice
+            regs.push(inst.b); // index
+                               // Value may be multi-slot
             let elem_bytes = match inst.flags {
                 0 => 64, // Dynamic - assume max for safety
                 0x81 | 0x82 | 0x84 | 0x44 => 8,
@@ -321,7 +352,7 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
         }
         // PtrSetN reads pointer and n value slots
         Opcode::PtrSetN => {
-            regs.push(inst.a);  // pointer
+            regs.push(inst.a); // pointer
             let n = inst.flags as u16;
             for i in 0..n {
                 regs.push(inst.c + i);
@@ -337,7 +368,7 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
         }
         // CallClosure reads closure ref and arguments
         Opcode::CallClosure => {
-            regs.push(inst.a);  // closure ref
+            regs.push(inst.a); // closure ref
             let arg_start = inst.b;
             let arg_slots = (inst.c >> 8) as u16;
             for i in 0..arg_slots {
@@ -364,7 +395,11 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
         }
         Opcode::SelectSend => {
             regs.push(inst.a);
-            let elem_slots = if inst.flags == 0 { 1 } else { inst.flags as u16 };
+            let elem_slots = if inst.flags == 0 {
+                1
+            } else {
+                inst.flags as u16
+            };
             push_slot_range(&mut regs, inst.b, elem_slots);
         }
         Opcode::SelectRecv => {
@@ -373,7 +408,7 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
         // Many other instructions - add as needed
         _ => {}
     }
-    
+
     regs
 }
 
@@ -381,19 +416,56 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
 fn get_write_reg(inst: &Instruction) -> Option<u16> {
     match inst.opcode() {
         // Most arithmetic/logic instructions write to a
-        Opcode::Copy | Opcode::Not | Opcode::NegI | Opcode::NegF |
-        Opcode::AddI | Opcode::SubI | Opcode::MulI | Opcode::DivI | Opcode::DivU | Opcode::ModI | Opcode::ModU |
-        Opcode::AddF | Opcode::SubF | Opcode::MulF | Opcode::DivF |
-        Opcode::And | Opcode::Or | Opcode::Xor | Opcode::Shl | Opcode::ShrS | Opcode::ShrU |
-        Opcode::EqI | Opcode::NeI | Opcode::LtI | Opcode::LeI | Opcode::GtI | Opcode::GeI |
-        Opcode::LtU | Opcode::LeU | Opcode::GtU | Opcode::GeU |
-        Opcode::EqF | Opcode::NeF | Opcode::LtF | Opcode::LeF | Opcode::GtF | Opcode::GeF |
-        Opcode::LoadInt | Opcode::LoadConst |
-        Opcode::PtrGet | Opcode::PtrNew | Opcode::SliceGet | Opcode::SliceNew |
-        Opcode::QueueNew |
-        Opcode::QueueLen | Opcode::QueueCap |
-        Opcode::IslandNew | Opcode::SelectExec |
-        Opcode::ForLoop => {  // ForLoop writes idx (a)
+        Opcode::Copy
+        | Opcode::Not
+        | Opcode::NegI
+        | Opcode::NegF
+        | Opcode::AddI
+        | Opcode::SubI
+        | Opcode::MulI
+        | Opcode::DivI
+        | Opcode::DivU
+        | Opcode::ModI
+        | Opcode::ModU
+        | Opcode::AddF
+        | Opcode::SubF
+        | Opcode::MulF
+        | Opcode::DivF
+        | Opcode::And
+        | Opcode::Or
+        | Opcode::Xor
+        | Opcode::Shl
+        | Opcode::ShrS
+        | Opcode::ShrU
+        | Opcode::EqI
+        | Opcode::NeI
+        | Opcode::LtI
+        | Opcode::LeI
+        | Opcode::GtI
+        | Opcode::GeI
+        | Opcode::LtU
+        | Opcode::LeU
+        | Opcode::GtU
+        | Opcode::GeU
+        | Opcode::EqF
+        | Opcode::NeF
+        | Opcode::LtF
+        | Opcode::LeF
+        | Opcode::GtF
+        | Opcode::GeF
+        | Opcode::LoadInt
+        | Opcode::LoadConst
+        | Opcode::PtrGet
+        | Opcode::PtrNew
+        | Opcode::SliceGet
+        | Opcode::SliceNew
+        | Opcode::QueueNew
+        | Opcode::QueueLen
+        | Opcode::QueueCap
+        | Opcode::IslandNew
+        | Opcode::SelectExec
+        | Opcode::ForLoop => {
+            // ForLoop writes idx (a)
             Some(inst.a)
         }
         _ => None,
@@ -403,7 +475,7 @@ fn get_write_reg(inst: &Instruction) -> Option<u16> {
 /// Get registers written by multi-slot instructions (e.g., Call return values).
 fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
     let mut regs = Vec::new();
-    
+
     match inst.opcode() {
         Opcode::Call => {
             let ret_start = inst.b + ((inst.c >> 8) as u16);
@@ -455,7 +527,7 @@ fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
             // SliceGet: when elem_bytes > 8, writes multiple slots
             // flags encodes elem info: 0=dynamic, 1-8=direct, >8=multi-slot
             let elem_bytes = match inst.flags {
-                0 => 64, // Dynamic - assume max for safety
+                0 => 64,                        // Dynamic - assume max for safety
                 0x81 | 0x82 | 0x84 | 0x44 => 8, // Small types fit in 1 slot
                 f => f as usize,
             };
@@ -474,19 +546,20 @@ fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
         }
         _ => {}
     }
-    
+
     regs
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     fn make_func(code: Vec<Instruction>) -> FunctionDef {
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
         let slot_types = vec![];
         let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&slot_types);
-        let borrowed_scan_slots_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
+        let borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
         FunctionDef {
             name: "test".to_string(),
             param_count: 0,
@@ -511,45 +584,75 @@ mod tests {
             borrowed_scan_slots_prefix,
         }
     }
-    
+
     fn hint_loop(depth: u8, end_offset: u8, exit_pc: u32) -> Instruction {
         // New format: a = flags(4) | depth(4) | end_offset(8), bc = exit_pc
         let loop_info = ((end_offset as u16) << 8) | ((depth as u16) << 4);
         let b = (exit_pc & 0xFFFF) as u16;
         let c = ((exit_pc >> 16) & 0xFFFF) as u16;
-        Instruction { op: Opcode::Hint as u8, flags: HINT_LOOP, a: loop_info, b, c }
+        Instruction {
+            op: Opcode::Hint as u8,
+            flags: HINT_LOOP,
+            a: loop_info,
+            b,
+            c,
+        }
     }
-    
+
     fn load_int(dst: u16, val: i32) -> Instruction {
         let b = (val as u32 & 0xFFFF) as u16;
         let c = ((val as u32 >> 16) & 0xFFFF) as u16;
-        Instruction { op: Opcode::LoadInt as u8, flags: 0, a: dst, b, c }
+        Instruction {
+            op: Opcode::LoadInt as u8,
+            flags: 0,
+            a: dst,
+            b,
+            c,
+        }
     }
-    
+
     fn add_i(dst: u16, src1: u16, src2: u16) -> Instruction {
-        Instruction { op: Opcode::AddI as u8, flags: 0, a: dst, b: src1, c: src2 }
+        Instruction {
+            op: Opcode::AddI as u8,
+            flags: 0,
+            a: dst,
+            b: src1,
+            c: src2,
+        }
     }
-    
+
     fn jump(offset: i32) -> Instruction {
         let b = (offset as u32 & 0xFFFF) as u16;
         let c = ((offset as u32 >> 16) & 0xFFFF) as u16;
-        Instruction { op: Opcode::Jump as u8, flags: 0, a: 0, b, c }
+        Instruction {
+            op: Opcode::Jump as u8,
+            flags: 0,
+            a: 0,
+            b,
+            c,
+        }
     }
-    
+
     fn ret() -> Instruction {
-        Instruction { op: Opcode::Return as u8, flags: 0, a: 0, b: 0, c: 0 }
+        Instruction {
+            op: Opcode::Return as u8,
+            flags: 0,
+            a: 0,
+            b: 0,
+            c: 0,
+        }
     }
-    
+
     #[test]
     fn test_no_loops() {
-        let func = make_func(vec![
-            load_int(0, 42),
-            ret(),
-        ]);
+        let func = make_func(vec![load_int(0, 42), ret()]);
         let loops = analyze_loops(&func);
-        assert!(loops.is_empty(), "Should detect no loops without Hint instructions");
+        assert!(
+            loops.is_empty(),
+            "Should detect no loops without Hint instructions"
+        );
     }
-    
+
     #[test]
     fn test_simple_loop_with_hints() {
         // Simple loop with new Hint format (no HINT_LOOP_END):
@@ -560,24 +663,27 @@ mod tests {
         // 4: Jump -3              <- end_pc (back-edge)
         // 5: Return               <- exit_pc
         let func = make_func(vec![
-            load_int(0, 0),                  // 0
-            hint_loop(0, 3, 5),              // 1: HINT_LOOP, end_offset=3 -> end_pc=4
-            load_int(1, 10),                 // 2: begin_pc (loop_start)
-            add_i(0, 0, 1),                  // 3
-            jump(-3),                        // 4: back edge (end_pc)
-            ret(),                           // 5: exit_pc
+            load_int(0, 0),     // 0
+            hint_loop(0, 3, 5), // 1: HINT_LOOP, end_offset=3 -> end_pc=4
+            load_int(1, 10),    // 2: begin_pc (loop_start)
+            add_i(0, 0, 1),     // 3
+            jump(-3),           // 4: back edge (end_pc)
+            ret(),              // 5: exit_pc
         ]);
-        
+
         let loops = analyze_loops(&func);
         assert_eq!(loops.len(), 1, "Should detect 1 loop");
-        
+
         let loop_info = &loops[0];
         assert_eq!(loop_info.begin_pc, 2, "begin_pc should be hint_pc + 1 = 2");
-        assert_eq!(loop_info.end_pc, 4, "end_pc should be hint_pc + end_offset = 4");
+        assert_eq!(
+            loop_info.end_pc, 4,
+            "end_pc should be hint_pc + end_offset = 4"
+        );
         assert_eq!(loop_info.exit_pc, 5, "exit_pc should be 5");
         assert_eq!(loop_info.depth, 0, "depth should be 0");
     }
-    
+
     #[test]
     fn test_nested_loops_with_hints() {
         // Nested loops with new format:
@@ -592,35 +698,35 @@ mod tests {
         // 8: LoadInt r0, 0
         // 9: Return                 <- outer exit_pc
         let func = make_func(vec![
-            hint_loop(0, 7, 9),       // 0: outer HINT_LOOP
-            load_int(0, 0),           // 1: outer begin_pc
-            hint_loop(1, 2, 5),       // 2: inner HINT_LOOP
-            add_i(0, 0, 1),           // 3: inner begin_pc
-            jump(-2),                 // 4: inner back edge
-            load_int(0, 0),           // 5: inner exit_pc
-            load_int(0, 0),           // 6
-            jump(-7),                 // 7: outer back edge
-            load_int(0, 0),           // 8
-            ret(),                    // 9: outer exit_pc
+            hint_loop(0, 7, 9), // 0: outer HINT_LOOP
+            load_int(0, 0),     // 1: outer begin_pc
+            hint_loop(1, 2, 5), // 2: inner HINT_LOOP
+            add_i(0, 0, 1),     // 3: inner begin_pc
+            jump(-2),           // 4: inner back edge
+            load_int(0, 0),     // 5: inner exit_pc
+            load_int(0, 0),     // 6
+            jump(-7),           // 7: outer back edge
+            load_int(0, 0),     // 8
+            ret(),              // 9: outer exit_pc
         ]);
-        
+
         let loops = analyze_loops(&func);
         assert_eq!(loops.len(), 2, "Should detect 2 nested loops");
-        
+
         // Loops are in bytecode order (outer first, then inner)
         let outer = &loops[0];
         assert_eq!(outer.depth, 0);
         assert_eq!(outer.begin_pc, 1, "outer begin_pc = hint_pc + 1");
         assert_eq!(outer.end_pc, 7, "outer end_pc = hint_pc + end_offset");
         assert_eq!(outer.exit_pc, 9);
-        
+
         let inner = &loops[1];
         assert_eq!(inner.depth, 1);
         assert_eq!(inner.begin_pc, 3, "inner begin_pc = hint_pc + 1");
         assert_eq!(inner.end_pc, 4, "inner end_pc = hint_pc + end_offset");
         assert_eq!(inner.exit_pc, 5);
     }
-    
+
     #[test]
     fn test_infinite_loop() {
         // Infinite loop: exit_pc = 0
@@ -628,14 +734,14 @@ mod tests {
         // 1: AddI r0, r0, r1        <- begin_pc
         // 2: Jump -2                <- end_pc (back edge)
         let func = make_func(vec![
-            hint_loop(0, 2, 0),       // 0: HINT_LOOP with exit=0 (infinite)
-            add_i(0, 0, 1),           // 1: begin_pc
-            jump(-2),                 // 2: back edge (end_pc)
+            hint_loop(0, 2, 0), // 0: HINT_LOOP with exit=0 (infinite)
+            add_i(0, 0, 1),     // 1: begin_pc
+            jump(-2),           // 2: back edge (end_pc)
         ]);
-        
+
         let loops = analyze_loops(&func);
         assert_eq!(loops.len(), 1);
-        
+
         let loop_info = &loops[0];
         assert_eq!(loop_info.begin_pc, 1, "begin_pc = hint_pc + 1");
         assert_eq!(loop_info.end_pc, 2, "end_pc = hint_pc + end_offset");
@@ -647,34 +753,81 @@ mod tests {
     // =========================================================================
 
     fn slice_set(slice: u16, idx: u16, val: u16, elem_bytes: u8) -> Instruction {
-        Instruction { op: Opcode::SliceSet as u8, flags: elem_bytes, a: slice, b: idx, c: val }
+        Instruction {
+            op: Opcode::SliceSet as u8,
+            flags: elem_bytes,
+            a: slice,
+            b: idx,
+            c: val,
+        }
     }
 
     fn slice_get(dst: u16, slice: u16, idx: u16, elem_bytes: u8) -> Instruction {
-        Instruction { op: Opcode::SliceGet as u8, flags: elem_bytes, a: dst, b: slice, c: idx }
+        Instruction {
+            op: Opcode::SliceGet as u8,
+            flags: elem_bytes,
+            a: dst,
+            b: slice,
+            c: idx,
+        }
     }
 
     fn copy_n(dst: u16, src: u16, n: u8) -> Instruction {
-        Instruction { op: Opcode::CopyN as u8, flags: n, a: dst, b: src, c: 0 }
+        Instruction {
+            op: Opcode::CopyN as u8,
+            flags: n,
+            a: dst,
+            b: src,
+            c: 0,
+        }
     }
 
     fn iface_assign(dst: u16, src: u16, vk: u8) -> Instruction {
-        Instruction { op: Opcode::IfaceAssign as u8, flags: vk, a: dst, b: src, c: 0 }
+        Instruction {
+            op: Opcode::IfaceAssign as u8,
+            flags: vk,
+            a: dst,
+            b: src,
+            c: 0,
+        }
     }
 
     fn call_extern(dst: u16, extern_id: u16, arg_start: u16, arg_count: u8) -> Instruction {
-        Instruction { op: Opcode::CallExtern as u8, flags: arg_count, a: dst, b: extern_id, c: arg_start }
+        Instruction {
+            op: Opcode::CallExtern as u8,
+            flags: arg_count,
+            a: dst,
+            b: extern_id,
+            c: arg_start,
+        }
     }
 
-    fn call_iface(iface_slot: u16, arg_start: u16, arg_slots: u8, ret_slots: u8, method_idx: u8) -> Instruction {
+    fn call_iface(
+        iface_slot: u16,
+        arg_start: u16,
+        arg_slots: u8,
+        ret_slots: u8,
+        method_idx: u8,
+    ) -> Instruction {
         let c = ((arg_slots as u16) << 8) | (ret_slots as u16);
-        Instruction { op: Opcode::CallIface as u8, flags: method_idx, a: iface_slot, b: arg_start, c }
+        Instruction {
+            op: Opcode::CallIface as u8,
+            flags: method_idx,
+            a: iface_slot,
+            b: arg_start,
+            c,
+        }
     }
 
     fn queue_new(dst: u16, elem_type: u16, cap: u16, elem_slots: u8, is_port: bool) -> Instruction {
         Instruction {
             op: Opcode::QueueNew as u8,
-            flags: elem_slots | if is_port { vo_runtime::instruction::QUEUE_KIND_PORT_FLAG } else { 0 },
+            flags: elem_slots
+                | if is_port {
+                    vo_runtime::instruction::QUEUE_KIND_PORT_FLAG
+                } else {
+                    0
+                },
             a: dst,
             b: elem_type,
             c: cap,
@@ -682,41 +835,95 @@ mod tests {
     }
 
     fn queue_len(dst: u16, ch: u16) -> Instruction {
-        Instruction { op: Opcode::QueueLen as u8, flags: 0, a: dst, b: ch, c: 0 }
+        Instruction {
+            op: Opcode::QueueLen as u8,
+            flags: 0,
+            a: dst,
+            b: ch,
+            c: 0,
+        }
     }
 
     fn queue_cap(dst: u16, ch: u16) -> Instruction {
-        Instruction { op: Opcode::QueueCap as u8, flags: 0, a: dst, b: ch, c: 0 }
+        Instruction {
+            op: Opcode::QueueCap as u8,
+            flags: 0,
+            a: dst,
+            b: ch,
+            c: 0,
+        }
     }
 
     fn queue_close(ch: u16) -> Instruction {
-        Instruction { op: Opcode::QueueClose as u8, flags: 0, a: ch, b: 0, c: 0 }
+        Instruction {
+            op: Opcode::QueueClose as u8,
+            flags: 0,
+            a: ch,
+            b: 0,
+            c: 0,
+        }
     }
 
     fn queue_send(ch: u16, val_start: u16, elem_slots: u8) -> Instruction {
-        Instruction { op: Opcode::QueueSend as u8, flags: elem_slots, a: ch, b: val_start, c: 0 }
+        Instruction {
+            op: Opcode::QueueSend as u8,
+            flags: elem_slots,
+            a: ch,
+            b: val_start,
+            c: 0,
+        }
     }
 
     fn queue_recv(dst: u16, ch: u16, elem_slots: u8, has_ok: bool) -> Instruction {
         let flags = (elem_slots << 1) | if has_ok { 1 } else { 0 };
-        Instruction { op: Opcode::QueueRecv as u8, flags, a: dst, b: ch, c: 0 }
+        Instruction {
+            op: Opcode::QueueRecv as u8,
+            flags,
+            a: dst,
+            b: ch,
+            c: 0,
+        }
     }
 
     fn select_send_inst(ch: u16, val_start: u16, elem_slots: u8) -> Instruction {
-        Instruction { op: Opcode::SelectSend as u8, flags: elem_slots, a: ch, b: val_start, c: 0 }
+        Instruction {
+            op: Opcode::SelectSend as u8,
+            flags: elem_slots,
+            a: ch,
+            b: val_start,
+            c: 0,
+        }
     }
 
     fn select_recv_inst(dst: u16, ch: u16, elem_slots: u8, has_ok: bool) -> Instruction {
         let flags = (elem_slots << 1) | if has_ok { 1 } else { 0 };
-        Instruction { op: Opcode::SelectRecv as u8, flags, a: dst, b: ch, c: 0 }
+        Instruction {
+            op: Opcode::SelectRecv as u8,
+            flags,
+            a: dst,
+            b: ch,
+            c: 0,
+        }
     }
 
     fn select_begin(case_count: u16, has_default: bool) -> Instruction {
-        Instruction { op: Opcode::SelectBegin as u8, flags: if has_default { 1 } else { 0 }, a: case_count, b: 0, c: 0 }
+        Instruction {
+            op: Opcode::SelectBegin as u8,
+            flags: if has_default { 1 } else { 0 },
+            a: case_count,
+            b: 0,
+            c: 0,
+        }
     }
 
     fn select_exec(result: u16) -> Instruction {
-        Instruction { op: Opcode::SelectExec as u8, flags: 0, a: result, b: 0, c: 0 }
+        Instruction {
+            op: Opcode::SelectExec as u8,
+            flags: 0,
+            a: result,
+            b: 0,
+            c: 0,
+        }
     }
 
     #[test]
@@ -725,12 +932,20 @@ mod tests {
         // Single slot element
         let inst = slice_set(10, 11, 12, 8);
         let regs = get_read_regs(&inst);
-        assert_eq!(regs, vec![10, 11, 12], "SliceSet should read slice, idx, val");
+        assert_eq!(
+            regs,
+            vec![10, 11, 12],
+            "SliceSet should read slice, idx, val"
+        );
 
         // Multi-slot element (16 bytes = 2 slots)
         let inst = slice_set(10, 11, 12, 16);
         let regs = get_read_regs(&inst);
-        assert_eq!(regs, vec![10, 11, 12, 13], "SliceSet with 16 bytes should read 2 value slots");
+        assert_eq!(
+            regs,
+            vec![10, 11, 12, 13],
+            "SliceSet with 16 bytes should read 2 value slots"
+        );
     }
 
     #[test]
@@ -745,12 +960,20 @@ mod tests {
         // Concrete source (vk != 16)
         let inst = iface_assign(5, 10, 1);
         let regs = get_read_regs(&inst);
-        assert_eq!(regs, vec![10], "IfaceAssign with concrete source reads 1 slot");
+        assert_eq!(
+            regs,
+            vec![10],
+            "IfaceAssign with concrete source reads 1 slot"
+        );
 
         // Interface source (vk == 16)
         let inst = iface_assign(5, 10, 16);
         let regs = get_read_regs(&inst);
-        assert_eq!(regs, vec![10, 11], "IfaceAssign with interface source reads 2 slots");
+        assert_eq!(
+            regs,
+            vec![10, 11],
+            "IfaceAssign with interface source reads 2 slots"
+        );
     }
 
     #[test]
@@ -758,7 +981,11 @@ mod tests {
         // CallExtern: a=dst, b=extern_id, c=arg_start, flags=arg_count
         let inst = call_extern(0, 5, 10, 3);
         let regs = get_read_regs(&inst);
-        assert_eq!(regs, vec![10, 11, 12], "CallExtern should read arg_count args from arg_start");
+        assert_eq!(
+            regs,
+            vec![10, 11, 12],
+            "CallExtern should read arg_count args from arg_start"
+        );
     }
 
     #[test]
@@ -766,7 +993,11 @@ mod tests {
         // CallIface: a=iface_slot (2 slots), b=arg_start, c=(arg_slots<<8|ret_slots)
         let inst = call_iface(5, 10, 2, 1, 0);
         let regs = get_read_regs(&inst);
-        assert_eq!(regs, vec![5, 6, 10, 11], "CallIface should read iface (2 slots) + args");
+        assert_eq!(
+            regs,
+            vec![5, 6, 10, 11],
+            "CallIface should read iface (2 slots) + args"
+        );
     }
 
     #[test]
@@ -808,7 +1039,11 @@ mod tests {
     fn test_get_write_regs_multi_call_iface() {
         let inst = call_iface(5, 10, 2, 3, 0);
         let regs = get_write_regs_multi(&inst);
-        assert_eq!(regs, vec![12, 13, 14], "CallIface should write ret_slots after arg slots");
+        assert_eq!(
+            regs,
+            vec![12, 13, 14],
+            "CallIface should write ret_slots after arg slots"
+        );
     }
 
     #[test]
@@ -833,9 +1068,18 @@ mod tests {
 
     #[test]
     fn test_get_write_regs_multi_queue_and_select_ops() {
-        assert_eq!(get_write_regs_multi(&queue_recv(10, 5, 2, true)), vec![10, 11, 12]);
-        assert_eq!(get_write_regs_multi(&queue_recv(20, 6, 2, false)), vec![20, 21]);
-        assert_eq!(get_write_regs_multi(&select_recv_inst(30, 7, 0, true)), vec![30, 31]);
+        assert_eq!(
+            get_write_regs_multi(&queue_recv(10, 5, 2, true)),
+            vec![10, 11, 12]
+        );
+        assert_eq!(
+            get_write_regs_multi(&queue_recv(20, 6, 2, false)),
+            vec![20, 21]
+        );
+        assert_eq!(
+            get_write_regs_multi(&select_recv_inst(30, 7, 0, true)),
+            vec![30, 31]
+        );
     }
 
     #[test]

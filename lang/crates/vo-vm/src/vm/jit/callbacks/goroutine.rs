@@ -1,7 +1,7 @@
 //! JIT callbacks for goroutine spawning.
 
-use vo_runtime::jit_api::JitContext;
 use vo_runtime::gc::GcRef;
+use vo_runtime::jit_api::JitContext;
 use vo_runtime::objects::closure;
 
 use crate::fiber::Fiber;
@@ -40,7 +40,7 @@ pub extern "C" fn jit_go_start(
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
     let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
-    
+
     if is_closure_call != 0 {
         unsafe { spawn_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) };
     } else {
@@ -69,27 +69,27 @@ pub extern "C" fn jit_go_island(
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
     let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
-    
+
     let island_handle = island as GcRef;
     let closure = closure_ref as GcRef;
     let island_id = vo_runtime::island::id(island_handle);
-    
+
     if island_id == vm.state.current_island_id {
         unsafe { spawn_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) };
     } else {
         let func_id = closure::func_id(closure);
         let capture_count = closure::capture_count(closure);
-        
+
         let mut capture_data = Vec::with_capacity(capture_count);
         for i in 0..capture_count {
             capture_data.push(closure::get_capture(closure, i));
         }
-        
+
         let mut arg_data = Vec::with_capacity(arg_slots as usize);
         for i in 0..arg_slots as usize {
             arg_data.push(unsafe { *args_ptr.add(i) });
         }
-        
+
         let func_def = &module.functions[func_id as usize];
         let result = crate::exec::GoIslandResult {
             island: island_handle,
@@ -97,7 +97,7 @@ pub extern "C" fn jit_go_island(
             capture_data,
             arg_data,
         };
-        
+
         crate::exec::prepare_queue_handles_for_transfer(
             &result,
             island_id,
@@ -108,7 +108,10 @@ pub extern "C" fn jit_go_island(
             &mut vm.state,
         );
         let data = crate::exec::pack_closure_for_island(
-            &vm.state.gc, &result, &func_def.capture_types, &func_def.param_types,
+            &vm.state.gc,
+            &result,
+            &func_def.capture_types,
+            &func_def.param_types,
             &module.struct_metas,
             &module.runtime_types,
         );
@@ -116,4 +119,3 @@ pub extern "C" fn jit_go_island(
         vm.state.send_spawn_fiber_to_island(island_id, closure_data);
     }
 }
-

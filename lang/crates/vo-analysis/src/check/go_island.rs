@@ -5,7 +5,7 @@
 //! - Every captured variable's type is sendable
 //! - Every argument's type is sendable
 
-use vo_syntax::ast::{ExprKind, File, StmtKind, Stmt, Visitor};
+use vo_syntax::ast::{ExprKind, File, Stmt, StmtKind, Visitor};
 
 use crate::check::sendable::check_sendable;
 use crate::check::type_info::TypeInfo;

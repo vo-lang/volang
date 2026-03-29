@@ -1,7 +1,7 @@
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Error;
 
@@ -70,7 +70,12 @@ pub struct SemVer {
 
 impl SemVer {
     pub fn new(major: u64, minor: u64, patch: u64) -> Self {
-        Self { major, minor, patch, pre: Vec::new() }
+        Self {
+            major,
+            minor,
+            patch,
+            pre: Vec::new(),
+        }
     }
 
     pub fn is_prerelease(&self) -> bool {
@@ -80,9 +85,9 @@ impl SemVer {
     /// Parse "MAJOR.MINOR.PATCH[-PRERELEASE]" (no prefix).
     pub fn parse(s: &str) -> Result<Self, Error> {
         if s.contains('+') {
-            return Err(Error::InvalidVersion(
-                format!("build metadata (+) is not allowed: {s}"),
-            ));
+            return Err(Error::InvalidVersion(format!(
+                "build metadata (+) is not allowed: {s}"
+            )));
         }
         let (version_part, pre_part) = match s.find('-') {
             Some(idx) => (&s[..idx], Some(&s[idx + 1..])),
@@ -90,9 +95,9 @@ impl SemVer {
         };
         let parts: Vec<&str> = version_part.split('.').collect();
         if parts.len() != 3 {
-            return Err(Error::InvalidVersion(
-                format!("expected MAJOR.MINOR.PATCH, got: {s}"),
-            ));
+            return Err(Error::InvalidVersion(format!(
+                "expected MAJOR.MINOR.PATCH, got: {s}"
+            )));
         }
         let major = parse_numeric_no_leading_zero(parts[0], s)?;
         let minor = parse_numeric_no_leading_zero(parts[1], s)?;
@@ -104,18 +109,25 @@ impl SemVer {
             Some(p) => parse_prerelease(p, s)?,
             None => Vec::new(),
         };
-        Ok(SemVer { major, minor, patch, pre })
+        Ok(SemVer {
+            major,
+            minor,
+            patch,
+            pre,
+        })
     }
 }
 
 fn parse_numeric_no_leading_zero(s: &str, full: &str) -> Result<u64, Error> {
     if s.is_empty() {
-        return Err(Error::InvalidVersion(format!("empty numeric component in: {full}")));
+        return Err(Error::InvalidVersion(format!(
+            "empty numeric component in: {full}"
+        )));
     }
     if s.len() > 1 && s.starts_with('0') {
-        return Err(Error::InvalidVersion(
-            format!("leading zero in numeric component '{s}' in: {full}"),
-        ));
+        return Err(Error::InvalidVersion(format!(
+            "leading zero in numeric component '{s}' in: {full}"
+        )));
     }
     s.parse::<u64>()
         .map_err(|_| Error::InvalidVersion(format!("invalid numeric '{s}' in: {full}")))
@@ -125,18 +137,18 @@ fn parse_prerelease(s: &str, full: &str) -> Result<Vec<PreRelease>, Error> {
     let mut result = Vec::new();
     for ident in s.split('.') {
         if ident.is_empty() {
-            return Err(Error::InvalidVersion(
-                format!("empty prerelease identifier in: {full}"),
-            ));
+            return Err(Error::InvalidVersion(format!(
+                "empty prerelease identifier in: {full}"
+            )));
         }
         if ident.chars().all(|c| c.is_ascii_digit()) {
             let n = parse_numeric_no_leading_zero(ident, full)?;
             result.push(PreRelease::Num(n));
         } else {
             if !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-                return Err(Error::InvalidVersion(
-                    format!("invalid prerelease identifier '{ident}' in: {full}"),
-                ));
+                return Err(Error::InvalidVersion(format!(
+                    "invalid prerelease identifier '{ident}' in: {full}"
+                )));
             }
             result.push(PreRelease::Alpha(ident.to_string()));
         }
@@ -241,9 +253,9 @@ impl ToolchainVersion {
     /// Parse "MAJOR.MINOR.PATCH[-PRERELEASE]" (no v prefix).
     pub fn parse(s: &str) -> Result<Self, Error> {
         if s.starts_with('v') {
-            return Err(Error::InvalidVersion(
-                format!("toolchain version must not start with 'v': {s}"),
-            ));
+            return Err(Error::InvalidVersion(format!(
+                "toolchain version must not start with 'v': {s}"
+            )));
         }
         Ok(ToolchainVersion(SemVer::parse(s)?))
     }
@@ -283,17 +295,26 @@ impl DepConstraint {
     pub fn parse(s: &str) -> Result<Self, Error> {
         if let Some(rest) = s.strip_prefix('^') {
             let v = SemVer::parse(rest)?;
-            Ok(DepConstraint { op: ConstraintOp::Compatible, version: v })
+            Ok(DepConstraint {
+                op: ConstraintOp::Compatible,
+                version: v,
+            })
         } else if let Some(rest) = s.strip_prefix('~') {
             let v = SemVer::parse(rest)?;
-            Ok(DepConstraint { op: ConstraintOp::PatchCompat, version: v })
+            Ok(DepConstraint {
+                op: ConstraintOp::PatchCompat,
+                version: v,
+            })
         } else if s.starts_with('v') {
             let ev = ExactVersion::parse(s)?;
-            Ok(DepConstraint { op: ConstraintOp::Exact, version: ev.0 })
+            Ok(DepConstraint {
+                op: ConstraintOp::Exact,
+                version: ev.0,
+            })
         } else {
-            Err(Error::InvalidConstraint(
-                format!("dependency constraint must start with '^', '~', or 'v': {s}"),
-            ))
+            Err(Error::InvalidConstraint(format!(
+                "dependency constraint must start with '^', '~', or 'v': {s}"
+            )))
         }
     }
 
@@ -331,17 +352,26 @@ impl ToolchainConstraint {
     pub fn parse(s: &str) -> Result<Self, Error> {
         if let Some(rest) = s.strip_prefix('^') {
             let v = SemVer::parse(rest)?;
-            Ok(ToolchainConstraint { op: ConstraintOp::Compatible, version: v })
+            Ok(ToolchainConstraint {
+                op: ConstraintOp::Compatible,
+                version: v,
+            })
         } else if let Some(rest) = s.strip_prefix('~') {
             let v = SemVer::parse(rest)?;
-            Ok(ToolchainConstraint { op: ConstraintOp::PatchCompat, version: v })
+            Ok(ToolchainConstraint {
+                op: ConstraintOp::PatchCompat,
+                version: v,
+            })
         } else if s.starts_with('v') {
-            Err(Error::InvalidConstraint(
-                format!("toolchain constraint must not start with 'v': {s}"),
-            ))
+            Err(Error::InvalidConstraint(format!(
+                "toolchain constraint must not start with 'v': {s}"
+            )))
         } else {
             let v = SemVer::parse(s)?;
-            Ok(ToolchainConstraint { op: ConstraintOp::Exact, version: v })
+            Ok(ToolchainConstraint {
+                op: ConstraintOp::Exact,
+                version: v,
+            })
         }
     }
 
@@ -387,19 +417,42 @@ fn constraint_range(op: &ConstraintOp, version: &SemVer) -> (SemVer, SemVer) {
     let upper = match op {
         ConstraintOp::Compatible => {
             if version.major != 0 {
-                SemVer { major: version.major + 1, minor: 0, patch: 0, pre: vec![] }
+                SemVer {
+                    major: version.major + 1,
+                    minor: 0,
+                    patch: 0,
+                    pre: vec![],
+                }
             } else if version.minor != 0 {
-                SemVer { major: 0, minor: version.minor + 1, patch: 0, pre: vec![] }
+                SemVer {
+                    major: 0,
+                    minor: version.minor + 1,
+                    patch: 0,
+                    pre: vec![],
+                }
             } else {
-                SemVer { major: 0, minor: 0, patch: version.patch + 1, pre: vec![] }
+                SemVer {
+                    major: 0,
+                    minor: 0,
+                    patch: version.patch + 1,
+                    pre: vec![],
+                }
             }
         }
-        ConstraintOp::PatchCompat => {
-            SemVer { major: version.major, minor: version.minor + 1, patch: 0, pre: vec![] }
-        }
+        ConstraintOp::PatchCompat => SemVer {
+            major: version.major,
+            minor: version.minor + 1,
+            patch: 0,
+            pre: vec![],
+        },
         ConstraintOp::Exact => {
             // Not meaningful for exact — return a degenerate range.
-            SemVer { major: version.major, minor: version.minor, patch: version.patch + 1, pre: vec![] }
+            SemVer {
+                major: version.major,
+                minor: version.minor,
+                patch: version.patch + 1,
+                pre: vec![],
+            }
         }
     };
     (lower, upper)
@@ -542,7 +595,10 @@ mod tests {
     #[test]
     fn test_semver_parse_prerelease() {
         let v = SemVer::parse("1.0.0-beta.1").unwrap();
-        assert_eq!(v.pre, vec![PreRelease::Alpha("beta".into()), PreRelease::Num(1)]);
+        assert_eq!(
+            v.pre,
+            vec![PreRelease::Alpha("beta".into()), PreRelease::Num(1)]
+        );
     }
 
     #[test]
@@ -578,7 +634,10 @@ mod tests {
     #[test]
     fn test_semver_display() {
         assert_eq!(SemVer::parse("1.2.3").unwrap().to_string(), "1.2.3");
-        assert_eq!(SemVer::parse("1.0.0-beta.1").unwrap().to_string(), "1.0.0-beta.1");
+        assert_eq!(
+            SemVer::parse("1.0.0-beta.1").unwrap().to_string(),
+            "1.0.0-beta.1"
+        );
     }
 
     // --- ExactVersion ---

@@ -31,18 +31,20 @@
 //! ```
 
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-#[cfg(not(feature = "std"))]
 use alloc::vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::closure;
 
 use crate::bytecode::{FunctionDef, Module};
-use crate::fiber::{CallFrame, DeferEntry, Fiber, PanicState, ReturnValues, UnwindingMode, UnwindingState};
+use crate::fiber::{
+    CallFrame, DeferEntry, Fiber, PanicState, ReturnValues, UnwindingMode, UnwindingState,
+};
 use crate::instruction::Instruction;
-use crate::vm::ExecResult;
 use crate::vm::helpers::{stack_get, stack_set};
+use crate::vm::ExecResult;
 
 /// Handle Return instruction. This is the ONLY entry point for return logic.
 ///
@@ -62,13 +64,14 @@ pub fn handle_return(
         let mode = fiber.unwinding.as_ref().unwrap().mode;
         return match mode {
             UnwindingMode::Return => {
-                let include_errdefers = compute_include_errdefers(fiber, inst, func, is_error_return);
+                let include_errdefers =
+                    compute_include_errdefers(fiber, inst, func, is_error_return);
                 handle_return_defer_returned(fiber, module, include_errdefers)
             }
             UnwindingMode::Panic => handle_panic_defer_returned(fiber, module),
         };
     }
-    
+
     // Case 3: Normal return (may start defer execution)
     handle_initial_return(fiber, inst, func, module, is_error_return)
 }
@@ -94,7 +97,9 @@ pub fn handle_jit_ok_return(
     include_errdefers: bool,
 ) -> ExecResult {
     let current_frame_depth = fiber.frames.len();
-    let has_defers = fiber.defer_stack.last()
+    let has_defers = fiber
+        .defer_stack
+        .last()
         .map_or(false, |e| e.frame_depth == current_frame_depth);
 
     // Fast path: no defers and no heap returns → just return the buffer
@@ -118,17 +123,38 @@ pub fn handle_jit_ok_return(
             .map(|i| stack_get(stack, bp + gcref_start + i))
             .collect();
         let slots_per_ref: Vec<usize> = func.heap_ret_slots.iter().map(|&s| s as usize).collect();
-        let pending = collect_defers(&mut fiber.defer_stack, current_frame_depth, include_errdefers);
-        (Some(ReturnValues::Heap { gcrefs, slots_per_ref }), pending)
+        let pending = collect_defers(
+            &mut fiber.defer_stack,
+            current_frame_depth,
+            include_errdefers,
+        );
+        (
+            Some(ReturnValues::Heap {
+                gcrefs,
+                slots_per_ref,
+            }),
+            pending,
+        )
     } else {
         // Extract slot_types from func for GC scanning
         let ret_count = ret.len();
-        let slot_types: Vec<vo_runtime::SlotType> = func.slot_types
+        let slot_types: Vec<vo_runtime::SlotType> = func
+            .slot_types
             .get(ret_start..ret_start + ret_count)
             .map(|s| s.to_vec())
             .unwrap_or_default();
-        let pending = collect_defers(&mut fiber.defer_stack, current_frame_depth, include_errdefers);
-        (Some(ReturnValues::Stack { vals: ret.to_vec(), slot_types }), pending)
+        let pending = collect_defers(
+            &mut fiber.defer_stack,
+            current_frame_depth,
+            include_errdefers,
+        );
+        (
+            Some(ReturnValues::Stack {
+                vals: ret.to_vec(),
+                slot_types,
+            }),
+            pending,
+        )
     };
 
     let frame = match pop_frame(fiber) {
@@ -175,12 +201,12 @@ fn compute_include_errdefers(
     if func.error_ret_slot < 0 {
         return false;
     }
-    
+
     // Runtime check: is the error return value non-nil?
     // Error is an interface (2 slots), slot0's low byte is value_kind (0 = Void = nil)
     let bp = fiber.frames.last().unwrap().bp;
     let stack = fiber.stack.as_ptr();
-    
+
     let error_slot0 = if (inst.flags & vo_common_core::bytecode::RETURN_FLAG_HEAP_RETURNS) != 0 {
         // heap_returns: each return value is a GcRef, error is always the last one
         // inst.a = gcref_start, inst.b = gcref_count
@@ -196,7 +222,7 @@ fn compute_include_errdefers(
         let slot = bp + inst.a as usize + func.error_ret_slot as usize;
         stack_get(stack, slot)
     };
-    
+
     (error_slot0 & 0xFF) != 0
 }
 
@@ -209,41 +235,48 @@ fn handle_initial_return(
     is_error_return: bool,
 ) -> ExecResult {
     let current_frame_depth = fiber.frames.len();
-    
+
     // Check: is this return from a closure-for-extern-replay?
     if fiber.closure_replay.at_replay_boundary(current_frame_depth) && current_frame_depth > 0 {
         let ret_start = inst.a as usize;
         let ret_count = inst.b as usize;
         let current_bp = fiber.frames.last().unwrap().bp;
         let stack = fiber.stack.as_ptr();
-        
+
         // Cache return values with slot_types for safe GC scanning.
         // Without slot_types, the GC would treat all cached values as GcRefs,
         // causing UB when non-pointer values (int, float, slot0 metadata) are dereferenced.
         let vals: Vec<u64> = (0..ret_count)
             .map(|i| stack_get(stack, current_bp + ret_start + i))
             .collect();
-        let ret_slot_types: Vec<vo_runtime::SlotType> = if ret_start + ret_count <= func.slot_types.len() {
-            func.slot_types[ret_start..ret_start + ret_count].to_vec()
-        } else {
-            Vec::new()
-        };
-        
+        let ret_slot_types: Vec<vo_runtime::SlotType> =
+            if ret_start + ret_count <= func.slot_types.len() {
+                func.slot_types[ret_start..ret_start + ret_count].to_vec()
+            } else {
+                Vec::new()
+            };
+
         fiber.closure_replay.results.push((vals, ret_slot_types));
         fiber.closure_replay.pop_depth();
-        
+
         // Check for defers in the closure — they must run first
-        let has_defers = fiber.defer_stack.last()
+        let has_defers = fiber
+            .defer_stack
+            .last()
             .map_or(false, |e| e.frame_depth == current_frame_depth);
 
         if has_defers {
             let include_errdefers = compute_include_errdefers(fiber, inst, func, is_error_return);
             // Collect defers, pop frame, run defers, then FrameChanged on completion
-            let pending = collect_defers(&mut fiber.defer_stack, current_frame_depth, include_errdefers);
+            let pending = collect_defers(
+                &mut fiber.defer_stack,
+                current_frame_depth,
+                include_errdefers,
+            );
             let frame = pop_frame(fiber).unwrap();
             let first_defer = pending[0].clone();
             let rest: Vec<_> = pending[1..].to_vec();
-            
+
             fiber.unwinding = Some(UnwindingState {
                 pending: rest,
                 target_depth: fiber.frames.len(),
@@ -254,19 +287,21 @@ fn handle_initial_return(
                 caller_ret_count: frame.ret_count as usize,
                 is_closure_replay: true,
             });
-            
+
             return call_defer_entry(fiber, &first_defer, module);
         }
-        
+
         // No defers — pop closure frame and return FrameChanged.
         // Caller's PC still points at CallExtern (we did pc -= 1 earlier).
         // VM will re-execute CallExtern → extern replays → consumes cached result.
         let _ = pop_frame(fiber);
         return ExecResult::FrameChanged;
     }
-    
+
     let heap_returns = (inst.flags & vo_common_core::bytecode::RETURN_FLAG_HEAP_RETURNS) != 0;
-    let has_defers = fiber.defer_stack.last()
+    let has_defers = fiber
+        .defer_stack
+        .last()
         .map_or(false, |e| e.frame_depth == current_frame_depth);
 
     // Fast path: no defers, small return count, stack returns
@@ -285,31 +320,46 @@ fn handle_initial_return(
         let gcref_start = inst.a as usize;
         let gcref_count = inst.b as usize;
         let current_bp = fiber.frames.last().unwrap().bp;
-        
+
         let gcrefs: Vec<u64> = (0..gcref_count)
             .map(|i| stack_get(stack, current_bp + gcref_start + i))
             .collect();
-        
+
         // Read slot counts from FunctionDef (supports mixed sizes)
         let slots_per_ref: Vec<usize> = func.heap_ret_slots.iter().map(|&s| s as usize).collect();
-        
-        let pending = collect_defers(&mut fiber.defer_stack, current_frame_depth, include_errdefers);
-        (Some(ReturnValues::Heap { gcrefs, slots_per_ref }), pending)
+
+        let pending = collect_defers(
+            &mut fiber.defer_stack,
+            current_frame_depth,
+            include_errdefers,
+        );
+        (
+            Some(ReturnValues::Heap {
+                gcrefs,
+                slots_per_ref,
+            }),
+            pending,
+        )
     } else {
         let ret_start = inst.a as usize;
         let ret_count = inst.b as usize;
         let current_bp = fiber.frames.last().unwrap().bp;
-        
+
         let vals: Vec<u64> = (0..ret_count)
             .map(|i| stack_get(stack, current_bp + ret_start + i))
             .collect();
-        
-        let slot_types: Vec<vo_runtime::SlotType> = func.slot_types
+
+        let slot_types: Vec<vo_runtime::SlotType> = func
+            .slot_types
             .get(ret_start..ret_start + ret_count)
             .map(|s| s.to_vec())
             .unwrap_or_default();
-        
-        let pending = collect_defers(&mut fiber.defer_stack, current_frame_depth, include_errdefers);
+
+        let pending = collect_defers(
+            &mut fiber.defer_stack,
+            current_frame_depth,
+            include_errdefers,
+        );
         (Some(ReturnValues::Stack { vals, slot_types }), pending)
     };
 
@@ -324,7 +374,7 @@ fn handle_initial_return(
     if !pending_defers.is_empty() {
         let mut pending = pending_defers;
         let first_defer = pending.remove(0);
-        
+
         fiber.unwinding = Some(UnwindingState {
             pending,
             target_depth: fiber.frames.len(),
@@ -335,7 +385,7 @@ fn handle_initial_return(
             caller_ret_count: frame.ret_count as usize,
             is_closure_replay: false,
         });
-        
+
         return call_defer_entry(fiber, &first_defer, module);
     }
 
@@ -352,29 +402,34 @@ fn handle_return_defer_returned(
     include_errdefers: bool,
 ) -> ExecResult {
     let current_frame_depth = fiber.frames.len();
-    
+
     // Collect any defers from the defer function itself
     let pending = &mut fiber.unwinding.as_mut().unwrap().pending;
-    collect_and_prepend_nested_defers(&mut fiber.defer_stack, pending, current_frame_depth, include_errdefers);
+    collect_and_prepend_nested_defers(
+        &mut fiber.defer_stack,
+        pending,
+        current_frame_depth,
+        include_errdefers,
+    );
     let _ = pop_frame(fiber);
-    
+
     let state = fiber.unwinding.as_mut().unwrap();
     if !state.pending.is_empty() {
         return execute_next_defer(fiber, module);
     }
-    
+
     // All defers complete - finalize return
     let return_values = state.return_values.take();
     let caller_ret_reg = state.caller_ret_reg;
     let caller_ret_count = state.caller_ret_count;
     let is_closure_replay = state.is_closure_replay;
     fiber.unwinding = None;
-    
+
     // Closure-replay return: no return values to write (handled by extern replay)
     if is_closure_replay {
         return ExecResult::FrameChanged;
     }
-    
+
     let ret_vals = return_values_to_vec(return_values, caller_ret_count);
     let result = write_return_values(fiber, &ret_vals, caller_ret_reg, caller_ret_count);
     return result;
@@ -385,15 +440,12 @@ fn handle_return_defer_returned(
 /// 2. Defer returned in Panic mode (continue unwinding)
 ///
 /// This is the ONLY entry point for panic unwinding logic.
-pub fn handle_panic_unwind(
-    fiber: &mut Fiber,
-    module: &Module,
-) -> ExecResult {
+pub fn handle_panic_unwind(fiber: &mut Fiber, module: &Module) -> ExecResult {
     // Fatal panics skip defer execution entirely
     if matches!(fiber.panic_state, Some(PanicState::Fatal)) {
         return ExecResult::Panic;
     }
-    
+
     match &fiber.unwinding {
         Some(_) if fiber.at_defer_boundary() => {
             // Defer just returned in Panic mode
@@ -411,99 +463,99 @@ pub fn handle_panic_unwind(
 }
 
 /// Handle defer returned in Panic mode.
-fn handle_panic_defer_returned(
-    fiber: &mut Fiber,
-    module: &Module,
-) -> ExecResult {
+fn handle_panic_defer_returned(fiber: &mut Fiber, module: &Module) -> ExecResult {
     let current_frame_depth = fiber.frames.len();
-    
+
     // Collect any defers from the defer function
     let pending = &mut fiber.unwinding.as_mut().unwrap().pending;
     collect_and_prepend_nested_defers(&mut fiber.defer_stack, pending, current_frame_depth, true);
     let _ = pop_frame(fiber);
-    
+
     // Check if recover() was called (panic_state is None means recovered)
     if fiber.panic_state.is_none() {
         // Recovered! Switch to Return mode which filters errdefers.
         let state = fiber.unwinding.as_mut().unwrap();
         state.switch_to_return_mode();
-        
+
         if !state.pending.is_empty() {
             return execute_next_defer(fiber, module);
         }
-        
+
         // No more defers - return to caller with appropriate values
         let return_values = state.return_values.take();
         let caller_ret_reg = state.caller_ret_reg;
         let caller_ret_count = state.caller_ret_count;
         fiber.unwinding = None;
-        
+
         let ret_vals = return_values_to_vec(return_values, caller_ret_count);
         let result = write_return_values(fiber, &ret_vals, caller_ret_reg, caller_ret_count);
         return result;
     }
-    
+
     // Still panicking - ensure Panic mode (may have been Return if panic occurred during defer)
     let state = fiber.unwinding.as_mut().unwrap();
     state.mode = UnwindingMode::Panic;
-    
+
     if !state.pending.is_empty() {
         return execute_next_defer(fiber, module);
     }
-    
+
     // No more defers in this frame - unwind to parent
     fiber.unwinding = None;
     start_panic_unwind(fiber, module)
 }
 
 /// Handle panic that occurs during unwinding (inside defer or nested call).
-fn handle_panic_during_unwinding(
-    fiber: &mut Fiber,
-    module: &Module,
-) -> ExecResult {
+fn handle_panic_during_unwinding(fiber: &mut Fiber, module: &Module) -> ExecResult {
     let target_depth = fiber.unwinding.as_ref().unwrap().target_depth;
-    
+
     // Unwind all frames back to defer boundary (including the defer frame itself)
     while fiber.frames.len() > target_depth {
         let current_frame_depth = fiber.frames.len();
         let pending = &mut fiber.unwinding.as_mut().unwrap().pending;
-        collect_and_prepend_nested_defers(&mut fiber.defer_stack, pending, current_frame_depth, true);
+        collect_and_prepend_nested_defers(
+            &mut fiber.defer_stack,
+            pending,
+            current_frame_depth,
+            true,
+        );
         if let Some(frame) = pop_frame(fiber) {
             fiber.clear_parent_borrowed_slots(&frame, 0, 0);
         }
     }
-    
+
     // Continue with remaining defers in Panic mode
     let state = fiber.unwinding.as_mut().unwrap();
-    state.mode = UnwindingMode::Panic;  // Ensure we're in Panic mode
-    
+    state.mode = UnwindingMode::Panic; // Ensure we're in Panic mode
+
     if !state.pending.is_empty() {
         return execute_next_defer(fiber, module);
     }
-    
+
     // No more pending defers - unwind to parent frame
     fiber.unwinding = None;
     start_panic_unwind(fiber, module)
 }
 
 /// Start fresh panic unwinding from current frame.
-fn start_panic_unwind(
-    fiber: &mut Fiber,
-    module: &Module,
-) -> ExecResult {
+fn start_panic_unwind(fiber: &mut Fiber, module: &Module) -> ExecResult {
     loop {
         if fiber.frames.is_empty() {
             return ExecResult::Panic;
         }
-        
+
         // Intercept panic at closure replay boundary: convert to error for extern replay.
         // The closure frame is at depth == closure_replay_depth. When panic unwinds
         // to or past it, we pop the closure frame and let the caller's CallExtern replay
         // with the panicked flag set.
-        if fiber.closure_replay.should_intercept_panic(fiber.frames.len()) {
+        if fiber
+            .closure_replay
+            .should_intercept_panic(fiber.frames.len())
+        {
             let target_depth = fiber.closure_replay.depth - 1; // caller's frame depth
             fiber.closure_replay.pop_depth();
-            fiber.closure_replay.panic_message = fiber.panic_state.as_ref().map(|state| state.message());
+            fiber.closure_replay.panic_message =
+                fiber.panic_state.as_ref().map(|state| state.message());
             // Consume the panic — it will be reported as an error by the extern function
             fiber.panic_state = None;
             fiber.panic_trap_kind = None;
@@ -520,17 +572,17 @@ fn start_panic_unwind(
             fiber.unwinding = None;
             return ExecResult::FrameChanged;
         }
-        
+
         let frame_depth = fiber.frames.len();
         let pending = collect_defers(&mut fiber.defer_stack, frame_depth, true);
-        
+
         if !pending.is_empty() {
-            let (return_values, caller_ret_reg, caller_ret_count) = 
+            let (return_values, caller_ret_reg, caller_ret_count) =
                 extract_frame_return_values(fiber, module);
-            
+
             let frame = pop_frame(fiber).unwrap();
             fiber.clear_parent_borrowed_slots(&frame, caller_ret_reg as usize, caller_ret_count);
-            
+
             let mut pending = pending;
             let first_defer = pending.remove(0);
 
@@ -547,7 +599,7 @@ fn start_panic_unwind(
 
             return call_defer_entry(fiber, &first_defer, module);
         }
-        
+
         if let Some(frame) = pop_frame(fiber) {
             fiber.clear_parent_borrowed_slots(&frame, 0, 0);
         }
@@ -564,7 +616,10 @@ fn return_values_to_vec(rv: Option<ReturnValues>, caller_ret_count: usize) -> Ve
     match rv {
         None => vec![0u64; caller_ret_count],
         Some(ReturnValues::Stack { vals, .. }) => vals,
-        Some(ReturnValues::Heap { gcrefs, slots_per_ref }) => read_heap_gcrefs(&gcrefs, &slots_per_ref),
+        Some(ReturnValues::Heap {
+            gcrefs,
+            slots_per_ref,
+        }) => read_heap_gcrefs(&gcrefs, &slots_per_ref),
     }
 }
 
@@ -581,21 +636,28 @@ fn extract_frame_return_values(
     let Some(func) = module.functions.get(frame.func_id as usize) else {
         return (None, frame.ret_reg, frame.ret_count as usize);
     };
-    
+
     if func.heap_ret_gcref_count == 0 {
         return (None, frame.ret_reg, frame.ret_count as usize);
     }
-    
+
     let gcref_count = func.heap_ret_gcref_count as usize;
     let gcref_start = func.heap_ret_gcref_start as usize;
     let stack = fiber.stack.as_ptr();
     let gcrefs: Vec<u64> = (0..gcref_count)
         .map(|i| stack_get(stack, frame.bp + gcref_start + i))
         .collect();
-    
+
     let slots_per_ref: Vec<usize> = func.heap_ret_slots.iter().map(|&s| s as usize).collect();
-    
-    (Some(ReturnValues::Heap { gcrefs, slots_per_ref }), frame.ret_reg, frame.ret_count as usize)
+
+    (
+        Some(ReturnValues::Heap {
+            gcrefs,
+            slots_per_ref,
+        }),
+        frame.ret_reg,
+        frame.ret_count as usize,
+    )
 }
 
 /// Pop frame from call stack.
@@ -606,10 +668,7 @@ fn pop_frame(fiber: &mut Fiber) -> Option<CallFrame> {
 
 /// Complete a no-defer stack return directly from the current frame.
 #[inline]
-fn fast_complete_stack_return(
-    fiber: &mut Fiber,
-    inst: &Instruction,
-) -> ExecResult {
+fn fast_complete_stack_return(fiber: &mut Fiber, inst: &Instruction) -> ExecResult {
     let ret_start = inst.a as usize;
     let ret_count = inst.b as usize;
     let frame = match pop_frame(fiber) {
@@ -759,10 +818,7 @@ fn collect_and_prepend_nested_defers(
 
 /// Execute next defer from pending list, updating current_defer_generation.
 #[inline]
-fn execute_next_defer(
-    fiber: &mut Fiber,
-    module: &Module,
-) -> ExecResult {
+fn execute_next_defer(fiber: &mut Fiber, module: &Module) -> ExecResult {
     let state = fiber.unwinding.as_mut().unwrap();
     let next_defer = state.pending.remove(0);
     state.current_defer_generation = next_defer.registered_at_generation;
@@ -770,11 +826,7 @@ fn execute_next_defer(
 }
 
 /// Call a defer entry (push frame and return).
-fn call_defer_entry(
-    fiber: &mut Fiber,
-    entry: &DeferEntry,
-    module: &Module,
-) -> ExecResult {
+fn call_defer_entry(fiber: &mut Fiber, entry: &DeferEntry, module: &Module) -> ExecResult {
     let func_id = if entry.is_closure {
         closure::func_id(entry.closure)
     } else {
@@ -785,7 +837,7 @@ fn call_defer_entry(
     let arg_slots = entry.arg_slots as usize;
 
     let args_start = fiber.sp;
-    
+
     // Use common closure call layout logic
     let layout = if entry.is_closure {
         vo_runtime::objects::closure::call_layout(
@@ -795,9 +847,12 @@ fn call_defer_entry(
             func.is_closure,
         )
     } else {
-        vo_runtime::objects::closure::ClosureCallLayout { slot0: None, arg_offset: 0 }
+        vo_runtime::objects::closure::ClosureCallLayout {
+            slot0: None,
+            arg_offset: 0,
+        }
     };
-    
+
     // Ensure stack has enough space for both local_slots and arg_offset+args
     let arg_space = layout.arg_offset + arg_slots;
     let total_slots = (func.local_slots as usize).max(arg_space);

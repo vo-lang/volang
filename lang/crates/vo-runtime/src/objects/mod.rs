@@ -9,7 +9,6 @@ pub mod alloc_error {
     pub const OVERFLOW: i32 = 4;
 }
 
-
 /// Macro to implement as_ref/as_mut for GC object header types.
 macro_rules! impl_gc_object {
     ($name:ident) => {
@@ -32,11 +31,11 @@ pub(crate) use impl_gc_object;
 pub mod array;
 pub mod queue;
 pub use self::queue as channel;
-pub mod queue_state;
 pub mod closure;
 pub mod compare;
 pub mod interface;
 pub mod map;
+pub mod queue_state;
 pub mod slice;
 pub mod string;
 pub mod struct_ops;

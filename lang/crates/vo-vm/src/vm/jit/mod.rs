@@ -38,11 +38,12 @@ pub mod callbacks;
 mod context;
 mod frame;
 
-pub use context::{JitContextWrapper, build_jit_context};
+pub use context::{build_jit_context, JitContextWrapper};
 
 /// Create default panic message for runtime errors (nil deref, bounds check, etc).
 fn create_default_panic_msg(gc: &mut vo_runtime::gc::Gc) -> InterfaceSlot {
-    let msg_str = vo_runtime::objects::string::new_from_string(gc, helpers::ERR_NIL_POINTER.to_string());
+    let msg_str =
+        vo_runtime::objects::string::new_from_string(gc, helpers::ERR_NIL_POINTER.to_string());
     let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
     InterfaceSlot::new(slot0, msg_str as u64)
 }
@@ -67,14 +68,16 @@ fn setup_jit_panic(
     if ctx.is_user_panic() {
         fiber.set_recoverable_panic(ctx.panic_msg());
     }
-    let panic_msg = fiber.take_recoverable_panic()
+    let panic_msg = fiber
+        .take_recoverable_panic()
         .unwrap_or_else(|| create_default_panic_msg(gc));
 
     materialize_jit_frames(fiber, module, 0);
 
     if fiber.panic_source_loc.is_none() {
         let resume_pc = ctx.call_resume_pc();
-        fiber.panic_source_loc = fiber.current_frame()
+        fiber.panic_source_loc = fiber
+            .current_frame()
             .map(|f| (f.func_id as u32, resume_pc.saturating_sub(1)));
     }
 
@@ -101,7 +104,11 @@ pub fn dispatch_jit_call(
     let arg_start = inst.b as usize;
     let arg_slots = (inst.c >> 8) as usize;
     let ret_slots = (inst.c & 0xFF) as usize;
-    let caller_frame = fiber.frames.last().copied().expect("dispatch_jit_call: missing caller frame");
+    let caller_frame = fiber
+        .frames
+        .last()
+        .copied()
+        .expect("dispatch_jit_call: missing caller frame");
     let caller_func = &module.functions[caller_frame.func_id as usize];
     let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(arg_start as u16);
 
@@ -247,10 +254,12 @@ fn handle_jit_result(
             let call_kind = ctx.ctx.call_kind;
             match call_kind {
                 JitContext::CALL_KIND_YIELD => return ExecResult::TimesliceExpired,
-                JitContext::CALL_KIND_BLOCK => return ExecResult::Block(crate::fiber::BlockReason::Queue),
+                JitContext::CALL_KIND_BLOCK => {
+                    return ExecResult::Block(crate::fiber::BlockReason::Queue)
+                }
                 _ => {} // Regular or Prepared call - continue to frame setup
             }
-            
+
             let callee_func_id = ctx.call_func_id();
             let call_arg_start = ctx.call_arg_start() as usize;
             let callee_ret_slots = ctx.call_ret_slots() as usize;
@@ -260,9 +269,13 @@ fn handle_jit_result(
                 let caller_resume_pc = ctx.call_arg_start() as u32;
                 let call_ret_reg = ctx.call_ret_reg();
                 setup_prepared_call(
-                    fiber, module, callee_func_id,
-                    callee_ret_slots as u16, call_ret_reg,
-                    callee_bp, caller_resume_pc,
+                    fiber,
+                    module,
+                    callee_func_id,
+                    callee_ret_slots as u16,
+                    call_ret_reg,
+                    callee_bp,
+                    caller_resume_pc,
                 );
                 // Trigger JIT compilation for callee so future dynamic calls
                 // can use the JIT-to-JIT fast path.
@@ -272,21 +285,34 @@ fn handle_jit_result(
                 }
                 return ExecResult::FrameChanged;
             }
-            
+
             // Regular call: JIT requests VM to execute a non-JIT function.
             let resume_pc = ctx.call_resume_pc();
             let call_ret_reg = ctx.call_ret_reg();
             let callee_bp = setup_regular_call(
-                fiber, module, callee_func_id,
-                callee_ret_slots as u16, call_ret_reg,
-                call_arg_start, resume_pc,
+                fiber,
+                module,
+                callee_func_id,
+                callee_ret_slots as u16,
+                call_ret_reg,
+                call_arg_start,
+                resume_pc,
             );
 
             // Check if callee can be JIT-executed instead of interpreter fallback
             if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
                 let callee_func_def = &module.functions[callee_func_id as usize];
-                if let Some(jit_func) = jit_mgr.resolve_call(callee_func_id, callee_func_def, module) {
-                    return execute_jit_callee(vm, fiber, module, jit_func, callee_bp, callee_ret_slots);
+                if let Some(jit_func) =
+                    jit_mgr.resolve_call(callee_func_id, callee_func_def, module)
+                {
+                    return execute_jit_callee(
+                        vm,
+                        fiber,
+                        module,
+                        jit_func,
+                        callee_bp,
+                        callee_ret_slots,
+                    );
                 }
             }
 
@@ -295,7 +321,7 @@ fn handle_jit_result(
         JitResult::WaitIo => {
             let resume_pc = ctx.call_resume_pc();
             materialize_jit_frames(fiber, module, resume_pc);
-            
+
             #[cfg(feature = "std")]
             {
                 let io_token = ctx.wait_io_token();
@@ -344,7 +370,7 @@ fn setup_prepared_call(
     let param_slots = callee_func_def.param_slots as usize;
     let local_slots = callee_func_def.local_slots as usize;
     let gc_scan_slots = callee_func_def.gc_scan_slots as usize;
-    
+
     // Materialize any intermediate JIT frames from non-OK propagation
     if !fiber.resume_stack.is_empty() {
         materialize_jit_frames(fiber, module, caller_resume_pc);
@@ -354,10 +380,10 @@ fn setup_prepared_call(
             frame.pc = caller_resume_pc as usize;
         }
     }
-    
+
     fiber.reserve_slots_at(callee_bp, local_slots);
     fiber.zero_slots_tail_at(callee_bp, gc_scan_slots, param_slots);
-    
+
     fiber.push_call_frame(
         callee_func_id,
         callee_bp,
@@ -382,15 +408,15 @@ fn setup_regular_call(
     resume_pc: u32,
 ) -> usize {
     materialize_jit_frames(fiber, module, resume_pc);
-    
+
     // After materialize_jit_frames, the last frame is the immediate caller.
     let caller_frame = fiber.frames.last().unwrap();
     let actual_caller_bp = caller_frame.bp;
     let caller_func = &module.functions[caller_frame.func_id as usize];
-    
+
     // Recompute fiber.sp from the materialized caller frame
     fiber.sp = actual_caller_bp + caller_func.local_slots as usize;
-    
+
     let callee_func_def = &module.functions[callee_func_id as usize];
     let callee_local_slots = callee_func_def.local_slots as usize;
     let callee_gc_scan_slots = callee_func_def.gc_scan_slots as usize;
@@ -445,7 +471,7 @@ fn setup_regular_call(
 /// If a frame with same func_id AND bp already exists, just update pc.
 fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
     let len = fiber.resume_stack.len();
-    
+
     if len == 0 {
         // No shadow frames, just update entry frame's pc for resume
         if let Some(frame) = fiber.frames.last_mut() {
@@ -453,21 +479,21 @@ fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
         }
         return;
     }
-    
+
     // Step 1: Update entry frame's pc (the frame that was in fiber.frames before JIT ran)
     // The last element in resume_stack is the outermost caller's info, containing
     // the resume_pc for the entry frame.
     if let Some(entry_frame) = fiber.frames.last_mut() {
         entry_frame.pc = fiber.resume_stack[len - 1].resume_pc as usize;
     }
-    
+
     // Step 2: Convert resume_stack entries to frames (reverse order: outermost first)
     for i in (0..len).rev() {
         let rp = fiber.resume_stack[i];
         let func_id = rp.func_id;
         let bp = rp.bp as usize;
         let func_def = &module.functions[func_id as usize];
-        
+
         // Calculate pc for this frame:
         // - innermost (i=0): use resume_pc parameter (where VM should continue)
         // - others: use resume_stack[i-1].resume_pc (the next inner frame's caller resume pc)
@@ -476,17 +502,18 @@ fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
         } else {
             fiber.resume_stack[i - 1].resume_pc as usize
         };
-        
+
         // rp.func_id is the CALLEE's func_id, rp.bp is the callee's bp.
         // This creates a frame for the callee at the correct location.
         // rp.caller_bp is the caller's bp (used for ret_reg destination).
         // rp.resume_pc is the CALLER's resume pc (used for the previous frame's pc).
-        
+
         // Check for OSR duplicate: same func_id AND same bp means same frame
-        let existing = fiber.frames.iter_mut().find(|f| 
-            f.func_id == func_id && f.bp == bp
-        );
-        
+        let existing = fiber
+            .frames
+            .iter_mut()
+            .find(|f| f.func_id == func_id && f.bp == bp);
+
         if let Some(frame) = existing {
             // OSR case: frame already exists, just update pc
             frame.pc = pc;
@@ -508,14 +535,14 @@ fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
             fiber.frames.push(frame);
         }
     }
-    
+
     // Step 3: Fix fiber.sp — must cover the innermost frame.
     // The non-OK propagation chain's push_frame calls overwrote fiber.sp with
     // progressively lower values. Restore it to the innermost callee's sp.
     let innermost = &fiber.resume_stack[0];
     let innermost_local_slots = module.functions[innermost.func_id as usize].local_slots as usize;
     fiber.sp = innermost.bp + innermost_local_slots;
-    
+
     // Clear resume_stack since VM now owns the frames
     fiber.resume_stack.clear();
 }
@@ -539,19 +566,21 @@ pub extern "C" fn jit_call_extern(
     _ret: *mut u64,
     ret_slots: u32,
 ) -> JitResult {
-    use vo_runtime::ffi::{ExternRegistry, ExternResult, ExternInvoke, ExternWorld, ExternFiberInputs};
+    use vo_runtime::ffi::{
+        ExternFiberInputs, ExternInvoke, ExternRegistry, ExternResult, ExternWorld,
+    };
     let ctx_ref = unsafe { &mut *ctx };
     let registry = unsafe { &*(extern_registry as *const ExternRegistry) };
     let gc = unsafe { &mut *gc };
     let module = unsafe { &*(module as *const Module) };
-    
+
     // JIT passes same buffer for args and ret (args_ptr used twice in call_helpers.rs)
     // buffer_size = max(arg_count, ret_slots)
     let buffer_size = (arg_count as usize).max(ret_slots as usize).max(1);
-    
+
     // Use the args buffer directly as our temp_stack (it's the same as ret buffer)
     let buffer = unsafe { std::slice::from_raw_parts_mut(args as *mut u64, buffer_size) };
-    
+
     // Get additional context needed for extern calls
     let itab_cache = unsafe { &mut *ctx_ref.itab_cache };
     let program_args = unsafe { &*ctx_ref.program_args };
@@ -560,17 +589,18 @@ pub extern "C" fn jit_call_extern(
     // SAFETY: output pointer was set from Arc<dyn OutputSink> in build_jit_context;
     // the Arc keeps it alive for the VM's lifetime.
     let output: &dyn vo_runtime::output::OutputSink = unsafe { &*ctx_ref.output };
-    
+
     // Get resume_io_token from fiber (for replay-at-PC semantics)
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     let resume_io_token = fiber.resume_io_token.take();
-    
+
     // Take closure replay state from fiber (populated by VM suspend/replay on re-entry)
-    let (closure_replay_results, closure_replay_panic_message) = fiber.closure_replay.take_for_extern();
-    
+    let (closure_replay_results, closure_replay_panic_message) =
+        fiber.closure_replay.take_for_extern();
+
     let invoke = ExternInvoke {
         extern_id,
-        bp: 0,        // start of buffer
+        bp: 0, // start of buffer
         arg_start: 0,
         arg_slots: arg_count as u16,
         ret_start: 0, // returns overwrite args in same buffer
@@ -597,7 +627,7 @@ pub extern "C" fn jit_call_extern(
         replay_panic_message: closure_replay_panic_message,
     };
     let result = registry.call(buffer, invoke, world, fiber_inputs);
-    
+
     match result {
         ExternResult::Ok => JitResult::Ok,
         ExternResult::CallClosure { .. } => {
@@ -606,7 +636,8 @@ pub extern "C" fn jit_call_extern(
         }
         ExternResult::Panic(msg) => {
             let msg_str = vo_runtime::objects::string::new_from_string(gc, msg);
-            let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
+            let slot0 =
+                vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
             unsafe {
                 *ctx_ref.panic_flag = true;
                 *ctx_ref.is_user_panic = true;
@@ -633,7 +664,9 @@ pub extern "C" fn jit_call_extern(
             JitResult::Replay
         }
         ExternResult::NotRegistered(_) => {
-            unsafe { *ctx_ref.panic_flag = true; }
+            unsafe {
+                *ctx_ref.panic_flag = true;
+            }
             JitResult::Panic
         }
     }
@@ -669,16 +702,16 @@ pub fn dispatch_loop_osr(
     // Use raw pointers to avoid borrow conflicts
     let module_ptr = vm.module.as_ref().unwrap() as *const Module;
     let fiber_ptr = vm.scheduler.get_fiber_mut(fiber_id) as *mut Fiber;
-    
+
     let (result, ctx) = unsafe {
         let module = &*module_ptr;
         let fiber = &mut *fiber_ptr;
-        
+
         // Sync fiber.sp to the correct value for this frame.
         // After a WaitIo cycle, fiber.sp may be stale (left at a higher value
         // by push_frame in the non-OK path). The correct sp is bp + local_slots.
         fiber.sp = bp + local_slots;
-        
+
         let mut ctx = build_jit_context(vm, fiber, module);
         ctx.ctx.stack_ptr = fiber.stack_ptr();
         ctx.ctx.stack_cap = fiber.stack.len() as u32;
@@ -686,15 +719,15 @@ pub fn dispatch_loop_osr(
 
         // locals_ptr points to fiber.stack[bp..]
         let locals_ptr = fiber.stack_ptr().add(bp);
-        
+
         // Call loop function
         let result = loop_func(ctx.as_ptr(), locals_ptr);
         (result, ctx)
     };
-    
+
     let fiber = unsafe { &mut *fiber_ptr };
     let module = unsafe { &*module_ptr };
-    
+
     match result {
         JitResult::Ok => {
             // resume_stack should be empty on Ok (no nested non-OK propagation).
@@ -713,7 +746,7 @@ pub fn dispatch_loop_osr(
             let callee_ret_slots = ctx.call_ret_slots();
             let call_kind = ctx.ctx.call_kind;
             let call_ret_reg = ctx.call_ret_reg();
-            
+
             // Check for special call_kind values (Yield/Block)
             match call_kind {
                 JitContext::CALL_KIND_YIELD | JitContext::CALL_KIND_BLOCK => {
@@ -723,14 +756,18 @@ pub fn dispatch_loop_osr(
                 }
                 _ => {}
             }
-            
+
             if call_kind == JitContext::CALL_KIND_PREPARED {
                 let callee_bp = ctx.call_resume_pc() as usize;
                 let caller_resume_pc = ctx.call_arg_start() as u32;
                 setup_prepared_call(
-                    fiber, module, callee_func_id,
-                    callee_ret_slots, call_ret_reg,
-                    callee_bp, caller_resume_pc,
+                    fiber,
+                    module,
+                    callee_func_id,
+                    callee_ret_slots,
+                    call_ret_reg,
+                    callee_bp,
+                    caller_resume_pc,
                 );
                 // Hint: trigger JIT compilation for callee so future loop OSR
                 // iterations can use JIT-to-JIT fast path. Error ignored because
@@ -743,9 +780,13 @@ pub fn dispatch_loop_osr(
             } else {
                 let resume_pc = ctx.call_resume_pc();
                 setup_regular_call(
-                    fiber, module, callee_func_id,
-                    callee_ret_slots, call_ret_reg,
-                    call_arg_start, resume_pc,
+                    fiber,
+                    module,
+                    callee_func_id,
+                    callee_ret_slots,
+                    call_ret_reg,
+                    call_arg_start,
+                    resume_pc,
                 );
                 OsrResult::FrameChanged
             }
@@ -754,15 +795,15 @@ pub fn dispatch_loop_osr(
         JitResult::WaitIo => {
             let token = ctx.wait_io_token();
             let resume_pc = ctx.call_resume_pc();
-            
+
             // Materialize any intermediate JIT frames from nested calls.
             // Without this, resume_stack entries are lost and the fiber
             // resumes at the wrong PC (callee's PC in the loop function's frame).
             materialize_jit_frames(fiber, module, resume_pc);
-            
+
             // Store token for scheduler
             fiber.resume_io_token = Some(token);
-            
+
             OsrResult::WaitIo
         }
         #[cfg(not(feature = "std"))]
@@ -803,26 +844,26 @@ pub(crate) fn try_loop_osr(
 /// Get compiled loop or compile if hot. Returns None if not ready.
 fn get_or_compile_loop(vm: &mut Vm, func_id: u32, loop_pc: usize) -> Option<vo_jit::LoopFunc> {
     use vo_runtime::instruction::Opcode;
-    
+
     let module = vm.module.as_ref()?;
     let func_def = &module.functions[func_id as usize];
     let jit_mgr = vm.jit_mgr.as_mut()?;
-    
+
     // Already compiled?
     if let Some(lf) = unsafe { jit_mgr.get_loop_func(func_id, loop_pc) } {
         return Some(lf);
     }
-    
+
     // Already failed?
     if jit_mgr.is_loop_failed(func_id, loop_pc) {
         return None;
     }
-    
+
     // Not hot yet?
     if !jit_mgr.record_backedge(func_id, loop_pc) {
         return None;
     }
-    
+
     // Hot - try to compile
     let loop_info = match jit_mgr.find_loop(func_id, func_def, loop_pc) {
         Some(info) => info,
@@ -833,7 +874,7 @@ fn get_or_compile_loop(vm: &mut Vm, func_id: u32, loop_pc: usize) -> Option<vo_j
             return None;
         }
     };
-    
+
     // Pre-compile Call targets so JIT-to-JIT calls can succeed
     let loop_end = loop_info.end_pc + 1;
     for pc in loop_info.begin_pc..loop_end {
@@ -846,7 +887,7 @@ fn get_or_compile_loop(vm: &mut Vm, func_id: u32, loop_pc: usize) -> Option<vo_j
             }
         }
     }
-    
+
     match jit_mgr.compile_loop(func_id, func_def, module, &loop_info) {
         Ok(_) => unsafe { jit_mgr.get_loop_func(func_id, loop_pc) },
         Err(_) => {

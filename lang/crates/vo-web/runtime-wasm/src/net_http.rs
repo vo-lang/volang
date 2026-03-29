@@ -8,8 +8,8 @@
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use vo_runtime::bytecode::ExternDef;
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
+use vo_runtime::bytecode::ExternDef;
 use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::slice;
@@ -93,12 +93,21 @@ fn build_js_headers_obj(headers: &[String]) -> String {
     obj
 }
 
-fn build_fetch_promise(method: &str, url: &str, headers: &[String], body: &[u8]) -> Result<js_sys::Promise, String> {
+fn build_fetch_promise(
+    method: &str,
+    url: &str,
+    headers: &[String],
+    body: &[u8],
+) -> Result<js_sys::Promise, String> {
     let headers_obj = build_js_headers_obj(headers);
     let body_init = if body.is_empty() {
         String::new()
     } else {
-        let bytes = body.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(",");
+        let bytes = body
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         format!("opts.body=new Uint8Array([{}]);", bytes)
     };
 
@@ -180,7 +189,14 @@ pub fn parse_fetch_js_value(token: u64, val: &JsValue) -> FetchResult {
     };
 
     let _ = token;
-    FetchResult { status_code, status, proto, headers, body, error: None }
+    FetchResult {
+        status_code,
+        status,
+        proto,
+        headers,
+        body,
+        error: None,
+    }
 }
 
 fn read_string_slice(slice_ref: GcRef) -> Vec<String> {
@@ -206,7 +222,9 @@ fn wasm_http_native_request(call: &mut ExternCallContext) -> ExternResult {
     if let Some(token) = call.take_resume_host_event_token() {
         let result = match take_fetch_result(token) {
             Some(r) => r,
-            None => return ExternResult::Panic(format!("fetch result missing for token {}", token)),
+            None => {
+                return ExternResult::Panic(format!("fetch result missing for token {}", token))
+            }
         };
 
         if let Some(err_msg) = result.error {

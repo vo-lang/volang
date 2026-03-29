@@ -9,16 +9,9 @@ use vo_vm::vm::{SchedulingOutcome, Vm};
 
 use crate::effects::SessionEffects;
 use crate::{
-    advance_session,
-    emit_outbound_frames,
-    push_targeted_inbound_island_frame,
-    resume_waiting_event,
-    run_inbound_island_command,
-    run_inbound_island_frame,
-    PendingHostEvent,
-    SessionError,
-    StepResult,
-    SessionMailbox,
+    advance_session, emit_outbound_frames, push_targeted_inbound_island_frame,
+    resume_waiting_event, run_inbound_island_command, run_inbound_island_frame, PendingHostEvent,
+    SessionError, SessionMailbox, StepResult,
 };
 
 pub struct AppSession {
@@ -50,10 +43,7 @@ impl AppSession {
 
     // ── Core run methods ────────────────────────────────────────────────
 
-    pub fn run(
-        &mut self,
-        panic_message: &'static str,
-    ) -> Result<StepResult, SessionError> {
+    pub fn run(&mut self, panic_message: &'static str) -> Result<StepResult, SessionError> {
         self.clear_outputs();
         let outcome = self
             .vm
@@ -63,10 +53,7 @@ impl AppSession {
         Ok(self.record_step(outcome))
     }
 
-    pub fn run_init(
-        &mut self,
-        panic_message: &'static str,
-    ) -> Result<StepResult, SessionError> {
+    pub fn run_init(&mut self, panic_message: &'static str) -> Result<StepResult, SessionError> {
         self.clear_outputs();
         let outcome = self
             .vm
@@ -142,10 +129,7 @@ impl AppSession {
 
     // ── Island frame management ─────────────────────────────────────────
 
-    pub fn push_inbound_island_frame(
-        &mut self,
-        data: &[u8],
-    ) -> Result<(), SessionError> {
+    pub fn push_inbound_island_frame(&mut self, data: &[u8]) -> Result<(), SessionError> {
         push_targeted_inbound_island_frame(&mut self.vm, data)
     }
 
@@ -224,11 +208,7 @@ mod tests {
     fn resume_waiting_event_requires_replay_wait_token() {
         let mut session = AppSession::new(Vm::new(), Box::new(String::new));
 
-        let result = session.resume_waiting_event(
-            7,
-            "{}",
-            "unexpected bounded panic outcome",
-        );
+        let result = session.resume_waiting_event(7, "{}", "unexpected bounded panic outcome");
 
         assert_eq!(result, Err(SessionError::NotWaitingForEvents));
     }
@@ -237,11 +217,7 @@ mod tests {
     fn try_resume_waiting_event_returns_none_when_not_waiting() {
         let mut session = AppSession::new(Vm::new(), Box::new(String::new));
 
-        let result = session.try_resume_waiting_event(
-            7,
-            "{}",
-            "unexpected bounded panic outcome",
-        );
+        let result = session.try_resume_waiting_event(7, "{}", "unexpected bounded panic outcome");
 
         assert_eq!(result, Ok(None));
     }

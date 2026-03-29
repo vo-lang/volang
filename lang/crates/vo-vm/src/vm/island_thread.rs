@@ -5,9 +5,9 @@ use std::sync::Arc;
 use vo_runtime::island::IslandCommand;
 use vo_runtime::island_transport::IslandTransport;
 
-use crate::bytecode::Module;
-use super::{island_shared, Vm};
 pub use super::types::IslandRegistry;
+use super::{island_shared, Vm};
+use crate::bytecode::Module;
 
 /// Run an island thread - processes commands and executes fibers.
 #[cfg(feature = "jit")]
@@ -65,7 +65,7 @@ fn run_island_vm(
     } else {
         Some(
             vo_runtime::ext_loader::ExtensionLoader::from_manifests(&extension_manifests)
-                .unwrap_or_else(|e| panic!("failed to load island extensions: {}", e))
+                .unwrap_or_else(|e| panic!("failed to load island extensions: {}", e)),
         )
     };
     vm.load_with_extensions((*module).clone(), ext_loader);
@@ -85,29 +85,33 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) {
         loop {
             match transport.try_recv() {
                 Ok(Some(cmd)) => {
-                    if handle_command(vm, cmd) { return; }
+                    if handle_command(vm, cmd) {
+                        return;
+                    }
                 }
                 Ok(None) => break,
                 Err(_) => return,
             }
         }
         vm.state.clear_endpoint_tombstones_if_quiescent();
-        
+
         // 2. Run scheduler if there's work
         if vm.scheduler.has_work() {
             let _ = vm.run_scheduled();
             vm.state.clear_endpoint_tombstones_if_quiescent();
             continue; // Check for new commands after running
         }
-        
+
         // 3. No runnable fibers - decide how to wait for next event
         let has_waiters = vm.scheduler.has_io_waiters() || vm.scheduler.has_blocked();
-        
+
         if has_waiters {
             // Has pending I/O or blocked fibers - use timeout to allow periodic polling
             match transport.recv_timeout(std::time::Duration::from_millis(10)) {
                 Ok(cmd) => {
-                    if handle_command(vm, cmd) { return; }
+                    if handle_command(vm, cmd) {
+                        return;
+                    }
                     vm.state.clear_endpoint_tombstones_if_quiescent();
                 }
                 Err(vo_runtime::island_transport::TransportError::Timeout) => {
@@ -120,7 +124,9 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) {
             // Completely idle - block until command arrives
             match transport.recv() {
                 Ok(cmd) => {
-                    if handle_command(vm, cmd) { return; }
+                    if handle_command(vm, cmd) {
+                        return;
+                    }
                     vm.state.clear_endpoint_tombstones_if_quiescent();
                 }
                 Err(_) => return,
@@ -138,18 +144,32 @@ fn handle_command(vm: &mut Vm, cmd: IslandCommand) -> bool {
             false
         }
         IslandCommand::WakeFiber { fiber_id } => {
-            vm.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
+            vm.scheduler
+                .wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
             false
         }
-        IslandCommand::EndpointRequest { endpoint_id, kind, from_island, fiber_id } => {
-            island_shared::handle_endpoint_request_command(vm, endpoint_id, kind, from_island, fiber_id);
+        IslandCommand::EndpointRequest {
+            endpoint_id,
+            kind,
+            from_island,
+            fiber_id,
+        } => {
+            island_shared::handle_endpoint_request_command(
+                vm,
+                endpoint_id,
+                kind,
+                from_island,
+                fiber_id,
+            );
             false
         }
-        IslandCommand::EndpointResponse { endpoint_id, kind, fiber_id } => {
+        IslandCommand::EndpointResponse {
+            endpoint_id,
+            kind,
+            fiber_id,
+        } => {
             island_shared::handle_endpoint_response_command(vm, endpoint_id, kind, fiber_id);
             false
         }
     }
 }
-
-

@@ -1,6 +1,6 @@
 //! Type parsing.
 
-use super::{Parser, ParseResult};
+use super::{ParseResult, Parser};
 use crate::ast::*;
 use crate::token::TokenKind;
 use vo_common::span::Span;
@@ -9,17 +9,14 @@ impl<'a> Parser<'a> {
     /// Parses a type expression.
     pub fn parse_type(&mut self) -> ParseResult<TypeExpr> {
         let start = self.current.span.start;
-        
+
         let kind = match self.current.kind {
             TokenKind::Ident => {
                 let ident = self.parse_ident()?;
                 // Check for qualified type: pkg.Type
                 if self.eat(TokenKind::Dot) {
                     let sel = self.parse_ident()?;
-                    TypeExprKind::Selector(Box::new(SelectorTypeExpr { 
-                        pkg: ident, 
-                        sel 
-                    }))
+                    TypeExprKind::Selector(Box::new(SelectorTypeExpr { pkg: ident, sel }))
                 } else {
                     TypeExprKind::Ident(ident)
                 }
@@ -37,7 +34,11 @@ impl<'a> Parser<'a> {
                     self.advance();
                     self.expect(TokenKind::RBracket)?;
                     let elem = self.parse_type()?;
-                    let len = Expr { id: self.alloc_expr_id(), kind: ExprKind::Ellipsis, span: ellipsis_span };
+                    let len = Expr {
+                        id: self.alloc_expr_id(),
+                        kind: ExprKind::Ellipsis,
+                        span: ellipsis_span,
+                    };
                     TypeExprKind::Array(Box::new(ArrayType { len, elem }))
                 } else {
                     // Array type: [N]T
@@ -90,9 +91,15 @@ impl<'a> Parser<'a> {
                 };
                 let elem = self.parse_type()?;
                 if is_port {
-                    TypeExprKind::Port(Box::new(PortType { dir: ChanDir::Recv, elem }))
+                    TypeExprKind::Port(Box::new(PortType {
+                        dir: ChanDir::Recv,
+                        elem,
+                    }))
                 } else {
-                    TypeExprKind::Chan(Box::new(ChanType { dir: ChanDir::Recv, elem }))
+                    TypeExprKind::Chan(Box::new(ChanType {
+                        dir: ChanDir::Recv,
+                        elem,
+                    }))
                 }
             }
             TokenKind::Func => {
@@ -122,7 +129,7 @@ impl<'a> Parser<'a> {
                 return Err(());
             }
         };
-        
+
         Ok(self.make_type_expr(kind, Span::new(start, self.current.span.start)))
     }
 
@@ -130,7 +137,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LParen)?;
         let params = self.parse_func_type_params()?;
         self.expect(TokenKind::RParen)?;
-        
+
         // Parse result types
         let results = if self.at(TokenKind::LParen) {
             self.advance();
@@ -141,16 +148,20 @@ impl<'a> Parser<'a> {
             let start = self.current.span.start;
             let ty = self.parse_type()?;
             let span = Span::new(start, self.current.span.start);
-            vec![Param { names: Vec::new(), ty, span }]
+            vec![Param {
+                names: Vec::new(),
+                ty,
+                span,
+            }]
         } else {
             Vec::new()
         };
-        
+
         Ok(FuncType { params, results })
     }
-    
+
     /// Parses function type parameters, which may have optional names.
-    /// 
+    ///
     /// Strategy (aligned with goscript):
     /// 1. Collect first param group as types (could be names or types)
     /// 2. Try to parse another type after the list
@@ -160,10 +171,10 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::RParen) {
             return Ok(Vec::new());
         }
-        
+
         // Phase 1: Collect first parameter declaration (types that might be names)
         let first_group = self.collect_type_list()?;
-        
+
         // Phase 2: Try to parse a type after the list
         if let Some(ty) = self.try_parse_type() {
             // Success: first_group was identifier names, ty is their type
@@ -174,7 +185,7 @@ impl<'a> Parser<'a> {
             Ok(self.types_to_anonymous_params(first_group))
         }
     }
-    
+
     /// Collects a comma-separated list of types (stops at ')' or when non-type follows).
     pub(crate) fn collect_type_list(&mut self) -> ParseResult<Vec<TypeExpr>> {
         let mut types = Vec::new();
@@ -186,7 +197,7 @@ impl<'a> Parser<'a> {
         }
         Ok(types)
     }
-    
+
     /// Tries to parse a type without consuming tokens on failure.
     pub(crate) fn try_parse_type(&mut self) -> Option<TypeExpr> {
         if self.is_type_start() || self.at(TokenKind::Ellipsis) {
@@ -196,83 +207,117 @@ impl<'a> Parser<'a> {
             None
         }
     }
-    
+
     /// Converts type expressions to identifier names (for named parameter parsing).
     pub(crate) fn types_to_idents(&self, types: Vec<TypeExpr>) -> Vec<Ident> {
-        types.into_iter().filter_map(|t| {
-            if let TypeExprKind::Ident(ident) = t.kind {
-                Some(ident)
-            } else {
-                None // Non-ident types are invalid as names, skip
-            }
-        }).collect()
+        types
+            .into_iter()
+            .filter_map(|t| {
+                if let TypeExprKind::Ident(ident) = t.kind {
+                    Some(ident)
+                } else {
+                    None // Non-ident types are invalid as names, skip
+                }
+            })
+            .collect()
     }
-    
+
     /// Converts type expressions to anonymous Params.
     pub(crate) fn types_to_anonymous_params(&self, types: Vec<TypeExpr>) -> Vec<Param> {
-        types.into_iter().map(|ty| {
-            let span = ty.span;
-            Param { names: Vec::new(), ty, span }
-        }).collect()
+        types
+            .into_iter()
+            .map(|ty| {
+                let span = ty.span;
+                Param {
+                    names: Vec::new(),
+                    ty,
+                    span,
+                }
+            })
+            .collect()
     }
-    
+
     /// Parses remaining named parameters after first group. Returns (params, is_variadic).
-    pub(crate) fn parse_named_params(&mut self, first_names: Vec<TypeExpr>, first_type: TypeExpr) -> ParseResult<(Vec<Param>, bool)> {
+    pub(crate) fn parse_named_params(
+        &mut self,
+        first_names: Vec<TypeExpr>,
+        first_type: TypeExpr,
+    ) -> ParseResult<(Vec<Param>, bool)> {
         let mut params = Vec::new();
         let mut variadic = false;
-        
+
         let names = self.types_to_idents(first_names);
         let span = if let Some(first) = names.first() {
             Span::new(first.span.start, first_type.span.end)
         } else {
             first_type.span
         };
-        params.push(Param { names, ty: first_type, span });
-        
+        params.push(Param {
+            names,
+            ty: first_type,
+            span,
+        });
+
         while self.eat(TokenKind::Comma) && !self.at(TokenKind::RParen) {
             let start = self.current.span.start;
-            
+
             if self.eat(TokenKind::Ellipsis) {
                 variadic = true;
                 let ty = self.parse_type()?;
-                params.push(Param { names: Vec::new(), ty, span: Span::new(start, self.current.span.start) });
+                params.push(Param {
+                    names: Vec::new(),
+                    ty,
+                    span: Span::new(start, self.current.span.start),
+                });
                 break;
             }
-            
+
             let names = self.parse_ident_list()?;
-            
+
             if self.eat(TokenKind::Ellipsis) {
                 variadic = true;
                 let ty = self.parse_type()?;
-                params.push(Param { names, ty, span: Span::new(start, self.current.span.start) });
+                params.push(Param {
+                    names,
+                    ty,
+                    span: Span::new(start, self.current.span.start),
+                });
                 break;
             }
-            
+
             let ty = self.parse_type()?;
-            params.push(Param { names, ty, span: Span::new(start, self.current.span.start) });
+            params.push(Param {
+                names,
+                ty,
+                span: Span::new(start, self.current.span.start),
+            });
         }
-        
+
         Ok((params, variadic))
     }
-    
+
     fn parse_struct_body(&mut self) -> ParseResult<StructType> {
         self.expect(TokenKind::LBrace)?;
-        
+
         let mut fields = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at_eof() {
             fields.push(self.parse_field()?);
             self.expect_semi();
         }
-        
+
         self.expect(TokenKind::RBrace)?;
         Ok(StructType { fields })
     }
 
     fn parse_field(&mut self) -> ParseResult<Field> {
         let start = self.current.span.start;
-        
+
         // Could be: names Type tag? | Type tag? (embedded)
-        if self.at(TokenKind::Ident) && (self.peek_is(TokenKind::Comma) || self.peek_is(TokenKind::Ident) || self.is_type_start_peek()) {
+        if self.at(TokenKind::Ident)
+            && (self.peek_is(TokenKind::Comma)
+                || self.peek_is(TokenKind::Ident)
+                || self.is_type_start_peek())
+        {
             // Named field(s)
             let names = self.parse_ident_list()?;
             let ty = self.parse_type()?;

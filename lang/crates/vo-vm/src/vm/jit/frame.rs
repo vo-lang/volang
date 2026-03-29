@@ -34,34 +34,34 @@ pub extern "C" fn jit_push_frame(
 ) -> *mut u64 {
     let ctx_ref = unsafe { &mut *ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
-    
+
     // Set caller's frame.pc so VM can resume the caller at the correct
     // position if the callee returns Call (e.g., PREPARED trampoline).
     if let Some(caller_frame) = fiber.frames.last_mut() {
         caller_frame.pc = caller_resume_pc as usize;
     }
-    
+
     // New frame base is current sp.
     // Use ctx.fiber_sp (not fiber.sp) as the canonical stack pointer.
     // In JIT non-OK propagation blocks, ctx.fiber_sp is correctly restored
     // to the caller's sp, but fiber.sp may still reflect a deeper call's sp.
     let new_bp = ctx_ref.fiber_sp as usize;
     let new_sp = fiber.reserve_slots_at(new_bp, local_slots as usize);
-    
+
     // NOTE: No zeroing here! With mixed stack, callee initializes its own
     // locals_slot in prologue. fiber.stack is only used for parameter passing
     // and spilling on slow path.
-    
+
     // NOTE: No resume_stack.push here! This is the fast path.
     // Resume points are pushed lazily via jit_push_resume_point only when
     // callee returns Call/WaitIo.
-    
+
     // Update ctx fields (stack_ptr may have changed due to reallocation)
     ctx_ref.stack_ptr = fiber.stack_ptr();
     ctx_ref.stack_cap = fiber.stack.len() as u32;
     ctx_ref.jit_bp = new_bp as u32;
     ctx_ref.fiber_sp = new_sp as u32;
-    
+
     // Return args_ptr for the new frame
     unsafe { ctx_ref.stack_ptr.add(new_bp) }
 }
@@ -76,14 +76,14 @@ pub extern "C" fn jit_push_frame(
 pub extern "C" fn jit_pop_frame(ctx: *mut JitContext, caller_bp: u32) {
     let ctx_ref = unsafe { &mut *ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
-    
+
     // Restore fiber.sp to caller's sp (which is callee's bp, stored in ctx.jit_bp)
     fiber.sp = ctx_ref.jit_bp as usize;
     ctx_ref.fiber_sp = ctx_ref.jit_bp;
-    
+
     // Restore jit_bp to caller's bp (passed as parameter)
     ctx_ref.jit_bp = caller_bp;
-    
+
     // NOTE: No resume_stack.pop here! This is the fast path.
     // Resume points are pushed lazily via jit_push_resume_point only when
     // callee returns Call/WaitIo.
@@ -117,7 +117,7 @@ pub extern "C" fn jit_push_resume_point(
 ) {
     let ctx_ref = unsafe { &mut *ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
-    
+
     // Push to resume_stack (builds chain in reverse: innermost callee first, outermost caller last)
     #[cfg(feature = "jit")]
     fiber.resume_stack.push(crate::fiber::ResumePoint {

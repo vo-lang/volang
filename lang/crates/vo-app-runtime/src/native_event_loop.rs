@@ -17,10 +17,21 @@ use crate::{NativeGuiRuntime, NativeTickProvider, SyncRenderBuffer, TickLoopCont
 // ── Internal event enum ─────────────────────────────────────────────────────
 
 enum GuestEvent {
-    Event { handler_id: i32, payload: String },
-    AsyncEvent { handler_id: i32, payload: String },
-    GameLoopTick { loop_id: i32, control: Arc<TickLoopControl> },
-    IslandData { data: Vec<u8> },
+    Event {
+        handler_id: i32,
+        payload: String,
+    },
+    AsyncEvent {
+        handler_id: i32,
+        payload: String,
+    },
+    GameLoopTick {
+        loop_id: i32,
+        control: Arc<TickLoopControl>,
+    },
+    IslandData {
+        data: Vec<u8>,
+    },
     Shutdown,
 }
 
@@ -46,7 +57,10 @@ impl NativeGuestHandle {
     /// Blocks until the guest produces render output for this event.
     pub fn send_event(&self, handler_id: i32, payload: &str) -> Result<Vec<u8>, String> {
         self.event_tx
-            .send(GuestEvent::Event { handler_id, payload: payload.to_string() })
+            .send(GuestEvent::Event {
+                handler_id,
+                payload: payload.to_string(),
+            })
             .map_err(|_| "guest VM stopped".to_string())?;
         self.render_rx
             .recv()
@@ -59,14 +73,19 @@ impl NativeGuestHandle {
     /// [`SyncRenderBuffer`] returned by [`spawn_native_gui`].
     pub fn send_event_async(&self, handler_id: i32, payload: &str) -> Result<(), String> {
         self.event_tx
-            .send(GuestEvent::AsyncEvent { handler_id, payload: payload.to_string() })
+            .send(GuestEvent::AsyncEvent {
+                handler_id,
+                payload: payload.to_string(),
+            })
             .map_err(|_| "guest VM stopped".to_string())
     }
 
     /// Push inbound island transport data to the guest VM.
     pub fn push_island_data(&self, data: &[u8]) -> Result<(), String> {
         self.event_tx
-            .send(GuestEvent::IslandData { data: data.to_vec() })
+            .send(GuestEvent::IslandData {
+                data: data.to_vec(),
+            })
             .map_err(|_| "guest VM stopped".to_string())
     }
 }
@@ -150,7 +169,10 @@ where
         .map_err(|_| "guest thread died before producing initial render".to_string())?;
     let initial = initial?;
 
-    let handle = NativeGuestHandle { event_tx, render_rx };
+    let handle = NativeGuestHandle {
+        event_tx,
+        render_rx,
+    };
     Ok((initial, handle, buffer))
 }
 
@@ -214,34 +236,41 @@ fn run_event_loop(
                 runtime.shutdown();
                 break;
             }
-            GuestEvent::Event { handler_id, payload } => {
-                match runtime.dispatch_event(handler_id, &payload) {
-                    Ok(step) => {
-                        flush_stdout(&on_stdout, "event", step.stdout.as_deref());
-                        let _ = render_tx.send(Ok(step.render_output.unwrap_or_default()));
-                    }
-                    Err(error) => {
-                        let _ = render_tx.send(Err(error.to_string()));
-                        return;
-                    }
+            GuestEvent::Event {
+                handler_id,
+                payload,
+            } => match runtime.dispatch_event(handler_id, &payload) {
+                Ok(step) => {
+                    flush_stdout(&on_stdout, "event", step.stdout.as_deref());
+                    let _ = render_tx.send(Ok(step.render_output.unwrap_or_default()));
                 }
-            }
-            GuestEvent::AsyncEvent { handler_id, payload } => {
-                match runtime.try_dispatch_event(handler_id, &payload) {
-                    Ok(Some(step)) => {
-                        flush_stdout(&on_stdout, "event", step.stdout.as_deref());
-                        buffer.push(step.render_output.unwrap_or_default());
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        report_error(&on_error, &format!("guest VM error on async event: {}", error));
-                        runtime.shutdown();
-                        return;
-                    }
+                Err(error) => {
+                    let _ = render_tx.send(Err(error.to_string()));
+                    return;
                 }
-            }
+            },
+            GuestEvent::AsyncEvent {
+                handler_id,
+                payload,
+            } => match runtime.try_dispatch_event(handler_id, &payload) {
+                Ok(Some(step)) => {
+                    flush_stdout(&on_stdout, "event", step.stdout.as_deref());
+                    buffer.push(step.render_output.unwrap_or_default());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    report_error(
+                        &on_error,
+                        &format!("guest VM error on async event: {}", error),
+                    );
+                    runtime.shutdown();
+                    return;
+                }
+            },
             GuestEvent::GameLoopTick { loop_id, control } => {
-                let Some(dt_ms) = control.take_pending_tick() else { continue; };
+                let Some(dt_ms) = control.take_pending_tick() else {
+                    continue;
+                };
                 let payload = format!(r#"{{"dt":{:.3}}}"#, dt_ms);
                 match runtime.try_dispatch_event(event_ids::GAME_LOOP, &payload) {
                     Ok(Some(step)) => {
@@ -254,25 +283,29 @@ fn run_event_loop(
                         }
                     }
                     Err(error) => {
-                        report_error(&on_error, &format!("guest VM error on game loop tick: {}", error));
+                        report_error(
+                            &on_error,
+                            &format!("guest VM error on game loop tick: {}", error),
+                        );
                         runtime.shutdown();
                         return;
                     }
                 }
             }
-            GuestEvent::IslandData { data } => {
-                match runtime.dispatch_island_frame(&data) {
-                    Ok(step) => {
-                        flush_stdout(&on_stdout, "island", step.stdout.as_deref());
-                        buffer.push(step.render_output.unwrap_or_default());
-                    }
-                    Err(error) => {
-                        report_error(&on_error, &format!("guest VM error on island data: {}", error));
-                        runtime.shutdown();
-                        return;
-                    }
+            GuestEvent::IslandData { data } => match runtime.dispatch_island_frame(&data) {
+                Ok(step) => {
+                    flush_stdout(&on_stdout, "island", step.stdout.as_deref());
+                    buffer.push(step.render_output.unwrap_or_default());
                 }
-            }
+                Err(error) => {
+                    report_error(
+                        &on_error,
+                        &format!("guest VM error on island data: {}", error),
+                    );
+                    runtime.shutdown();
+                    return;
+                }
+            },
         }
     }
 }

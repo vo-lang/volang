@@ -2,18 +2,18 @@
 //!
 //! This module compiles Vo statements to bytecode.
 
-mod var_def;
-mod for_range;
-mod for_loop;
+mod assign_stmt;
 mod defer_go;
+mod dyn_assign;
+mod for_loop;
+mod for_range;
+mod return_stmt;
 mod select;
 mod switch;
-mod dyn_assign;
-mod assign_stmt;
-mod return_stmt;
+mod var_def;
 
-pub use var_def::LocalDefiner;
 pub use return_stmt::emit_error_return;
+pub use var_def::LocalDefiner;
 
 use vo_runtime::SlotType;
 use vo_syntax::ast::{Block, Stmt, StmtKind};
@@ -71,7 +71,7 @@ fn compile_stmt_with_label(
             | StmtKind::Go(_)
             | StmtKind::ErrDefer(_)
     );
-    
+
     if can_reclaim {
         func.begin_temp_region();
         let result = compile_stmt_inner(stmt, ctx, func, info, label);
@@ -96,7 +96,9 @@ fn compile_stmt_inner(
             let mut sc = LocalDefiner::new(ctx, func, info);
             for spec in &var_decl.specs {
                 for (i, name) in spec.names.iter().enumerate() {
-                    let type_key = spec.ty.as_ref()
+                    let type_key = spec
+                        .ty
+                        .as_ref()
                         .map(|ty| info.type_expr_type(ty.id))
                         .or_else(|| spec.values.get(i).map(|v| info.expr_type(v.id)))
                         .expect("variable declaration must have type annotation or initializer");
@@ -105,7 +107,8 @@ fn compile_stmt_inner(
                     let escapes = info.is_escaped(obj_key);
                     let init = spec.values.get(i);
 
-                    sc.define_local(name.symbol, type_key, escapes, init, Some(obj_key))?.0;
+                    sc.define_local(name.symbol, type_key, escapes, init, Some(obj_key))?
+                        .0;
                 }
             }
         }
@@ -134,7 +137,7 @@ fn compile_stmt_inner(
         StmtKind::If(if_stmt) => {
             // Enter scope for init variable shadowing (Go semantics: if x := 1; x > 0 { } creates new scope)
             func.enter_scope();
-            
+
             // Init statement
             if let Some(init) = &if_stmt.init {
                 compile_stmt(init, ctx, func, info)?;
@@ -171,7 +174,7 @@ fn compile_stmt_inner(
             } else {
                 func.patch_jump(else_jump, func.current_pc());
             }
-            
+
             // Exit scope (restore any shadowed variables from init)
             func.exit_scope();
         }
@@ -182,15 +185,38 @@ fn compile_stmt_inner(
 
             match &for_stmt.clause {
                 ForClause::Cond(cond_opt) => {
-                    for_loop::compile_for_cond(for_stmt, cond_opt.as_ref(), label, ctx, func, info)?;
+                    for_loop::compile_for_cond(
+                        for_stmt,
+                        cond_opt.as_ref(),
+                        label,
+                        ctx,
+                        func,
+                        info,
+                    )?;
                 }
 
                 ForClause::Three { init, cond, post } => {
-                    for_loop::compile_for_three(for_stmt, init.as_ref().map(|s| s.as_ref()), cond.as_ref(), post.as_ref().map(|s| s.as_ref()), label, ctx, func, info)?;
+                    for_loop::compile_for_three(
+                        for_stmt,
+                        init.as_ref().map(|s| s.as_ref()),
+                        cond.as_ref(),
+                        post.as_ref().map(|s| s.as_ref()),
+                        label,
+                        ctx,
+                        func,
+                        info,
+                    )?;
                 }
 
-                ForClause::Range { key, value, expr, define } => {
-                    for_range::compile_for_range(for_stmt, key, value, expr, *define, label, ctx, func, info)?;
+                ForClause::Range {
+                    key,
+                    value,
+                    expr,
+                    define,
+                } => {
+                    for_range::compile_for_range(
+                        for_stmt, key, value, expr, *define, label, ctx, func, info,
+                    )?;
                 }
             }
         }
@@ -222,7 +248,13 @@ fn compile_stmt_inner(
 
         // === Go ===
         StmtKind::Go(go_stmt) => {
-            defer_go::compile_go(go_stmt.target_island.as_ref(), &go_stmt.call, ctx, func, info)?;
+            defer_go::compile_go(
+                go_stmt.target_island.as_ref(),
+                &go_stmt.call,
+                ctx,
+                func,
+                info,
+            )?;
         }
 
         // === Send (channel send) ===
@@ -231,7 +263,8 @@ fn compile_stmt_inner(
             let target_type = info.expr_type(send_stmt.chan.id);
             let elem_type = info.queue_elem_type(target_type);
             let elem_slots = info.queue_elem_slots(target_type) as u8;
-            let val_reg = crate::expr::compile_expr_to_type(&send_stmt.value, elem_type, ctx, func, info)?;
+            let val_reg =
+                crate::expr::compile_expr_to_type(&send_stmt.value, elem_type, ctx, func, info)?;
             func.emit_with_flags(Opcode::QueueSend, elem_slots, target_reg, val_reg, 0);
         }
 
@@ -256,24 +289,24 @@ fn compile_stmt_inner(
         // === Inc/Dec ===
         StmtKind::IncDec(inc_dec) => {
             use crate::lvalue::{emit_lvalue_load, emit_lvalue_store};
-            
+
             let lv = crate::lvalue::resolve_lvalue(&inc_dec.expr, ctx, func, info)?;
             let tmp = func.alloc_slots(&[SlotType::Value]);
             emit_lvalue_load(&lv, tmp, ctx, func);
-            
+
             let one = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::LoadInt, one, 1, 0);
-            
+
             if inc_dec.is_inc {
                 func.emit_op(Opcode::AddI, tmp, tmp, one);
             } else {
                 func.emit_op(Opcode::SubI, tmp, tmp, one);
             }
-            
+
             // Truncate for narrow integer types (Go semantics: wrap on overflow)
             let expr_type = info.expr_type(inc_dec.expr.id);
             crate::expr::emit_int_trunc(tmp, expr_type, func, info);
-            
+
             // Inc/dec on integers - no GC refs
             emit_lvalue_store(&lv, tmp, ctx, func, &[vo_runtime::SlotType::Value]);
         }

@@ -10,13 +10,13 @@
 //!
 //! Vo doesn't support complex numbers.
 
-use vo_syntax::ast::{BinaryOp, UnaryOp};
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 use num_traits::cast::ToPrimitive;
 use num_traits::sign::Signed;
 use num_traits::{Num, Zero};
 use std::fmt;
+use vo_syntax::ast::{BinaryOp, UnaryOp};
 
 // ============================================================================
 // Part 1: Constants and Types
@@ -296,7 +296,10 @@ fn detect_int_radix(lit: &str) -> (u32, usize) {
         (8, 2)
     } else if lit.starts_with("0b") || lit.starts_with("0B") {
         (2, 2)
-    } else if lit.len() > 1 && lit.starts_with('0') && lit.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
+    } else if lit.len() > 1
+        && lit.starts_with('0')
+        && lit.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+    {
         // Legacy octal: 0644 style (Go compatible)
         (8, 1)
     } else {
@@ -310,12 +313,12 @@ pub fn int_from_literal(lit: &str) -> Value {
     let lit = lit.replace('_', "");
     let (radix, start) = detect_int_radix(&lit);
     let digits = &lit[start..];
-    
+
     // Try parsing as i64 first (fast path)
     if let Ok(x) = i64::from_str_radix(digits, radix) {
         return Value::Int64(x);
     }
-    
+
     // Try parsing as BigInt for large numbers
     match BigInt::from_str_radix(digits, radix) {
         Ok(x) => make_int(x),
@@ -327,12 +330,12 @@ pub fn int_from_literal(lit: &str) -> Value {
 pub fn float_from_literal(lit: &str) -> Value {
     // Remove underscores
     let lit = lit.replace('_', "");
-    
+
     // Check for hex float literal (0x...p...)
     if lit.starts_with("0x") || lit.starts_with("0X") {
         return parse_hex_float(&lit);
     }
-    
+
     match lit.parse::<f64>() {
         Ok(f) => make_float64(f),
         Err(_) => Value::Unknown,
@@ -345,30 +348,30 @@ pub fn float_from_literal(lit: &str) -> Value {
 fn parse_hex_float(lit: &str) -> Value {
     // Remove 0x/0X prefix
     let lit = &lit[2..];
-    
+
     // Find 'p' or 'P' (required for hex float)
     let p_pos = lit.find(|c| c == 'p' || c == 'P');
     let p_pos = match p_pos {
         Some(pos) => pos,
         None => return Value::Unknown, // hex float must have exponent
     };
-    
+
     let mantissa_str = &lit[..p_pos];
     let exp_str = &lit[p_pos + 1..];
-    
+
     // Parse the mantissa (may have a decimal point)
     let mantissa = parse_hex_mantissa(mantissa_str);
     let mantissa = match mantissa {
         Some(m) => m,
         None => return Value::Unknown,
     };
-    
+
     // Parse the exponent (decimal integer, may be negative)
     let exp: i32 = match exp_str.parse() {
         Ok(e) => e,
         Err(_) => return Value::Unknown,
     };
-    
+
     // Compute: mantissa * 2^exp
     let result = mantissa * (2.0_f64).powi(exp);
     make_float64(result)
@@ -379,13 +382,13 @@ fn parse_hex_mantissa(s: &str) -> Option<f64> {
     if s.is_empty() {
         return None;
     }
-    
+
     let (int_part, frac_part) = if let Some(dot_pos) = s.find('.') {
         (&s[..dot_pos], &s[dot_pos + 1..])
     } else {
         (s, "")
     };
-    
+
     // Parse integer part
     let int_val: f64 = if int_part.is_empty() {
         0.0
@@ -395,7 +398,7 @@ fn parse_hex_mantissa(s: &str) -> Option<f64> {
             Err(_) => return None,
         }
     };
-    
+
     // Parse fractional part
     let frac_val: f64 = if frac_part.is_empty() {
         0.0
@@ -410,7 +413,7 @@ fn parse_hex_mantissa(s: &str) -> Option<f64> {
         }
         val
     };
-    
+
     Some(int_val + frac_val)
 }
 
@@ -504,9 +507,13 @@ pub fn float64_val(x: &Value) -> (f64, bool) {
 pub fn sign(x: &Value) -> i32 {
     match x {
         Value::Int64(i) => {
-            if *i < 0 { -1 }
-            else if *i > 0 { 1 }
-            else { 0 }
+            if *i < 0 {
+                -1
+            } else if *i > 0 {
+                1
+            } else {
+                0
+            }
         }
         Value::IntBig(i) => match i.sign() {
             Sign::Minus => -1,
@@ -514,14 +521,22 @@ pub fn sign(x: &Value) -> i32 {
             Sign::Plus => 1,
         },
         Value::Rat(r) => {
-            if r.is_negative() { -1 }
-            else if r.is_zero() { 0 }
-            else { 1 }
+            if r.is_negative() {
+                -1
+            } else if r.is_zero() {
+                0
+            } else {
+                1
+            }
         }
         Value::Float(f) => {
-            if *f < 0.0 { -1 }
-            else if *f > 0.0 { 1 }
-            else { 0 }
+            if *f < 0.0 {
+                -1
+            } else if *f > 0.0 {
+                1
+            } else {
+                0
+            }
         }
         Value::Unknown => 1, // Avoid spurious division by zero
         _ => panic!("{:?} not numeric", x),
@@ -652,7 +667,7 @@ fn ord(x: &Value) -> i32 {
 fn match_values(x: Value, y: Value) -> (Value, Value) {
     let ox = ord(&x);
     let oy = ord(&y);
-    
+
     if ox < oy {
         (promote(x, &y), y)
     } else if ox > oy {
@@ -710,13 +725,11 @@ pub fn unary_op(op: UnaryOp, y: &Value, prec: u32) -> Value {
                 _ => Value::Unknown,
             }
         }
-        UnaryOp::Not => {
-            match y {
-                Value::Unknown => Value::Unknown,
-                Value::Bool(b) => Value::Bool(!b),
-                _ => Value::Unknown,
-            }
-        }
+        UnaryOp::Not => match y {
+            Value::Unknown => Value::Unknown,
+            Value::Bool(b) => Value::Bool(!b),
+            _ => Value::Unknown,
+        },
         UnaryOp::BitNot => {
             match y {
                 Value::Unknown => Value::Unknown,
@@ -751,16 +764,16 @@ pub fn binary_op(x: &Value, op: BinaryOp, y: &Value) -> Value {
     if x.is_unknown() || y.is_unknown() {
         return Value::Unknown;
     }
-    
+
     let (x, y) = match_values(x.clone(), y.clone());
-    
+
     match (&x, &y) {
         (Value::Bool(a), Value::Bool(b)) => match op {
             BinaryOp::LogAnd => Value::Bool(*a && *b),
             BinaryOp::LogOr => Value::Bool(*a || *b),
             _ => Value::Unknown,
         },
-        
+
         (Value::Int64(a), Value::Int64(b)) => {
             match op {
                 BinaryOp::Add => {
@@ -811,7 +824,7 @@ pub fn binary_op(x: &Value, op: BinaryOp, y: &Value) -> Value {
                 _ => Value::Unknown,
             }
         }
-        
+
         (Value::IntBig(a), Value::IntBig(b)) => {
             match op {
                 BinaryOp::Add => make_int(a + b),
@@ -839,40 +852,34 @@ pub fn binary_op(x: &Value, op: BinaryOp, y: &Value) -> Value {
                 _ => Value::Unknown,
             }
         }
-        
-        (Value::Rat(a), Value::Rat(b)) => {
-            match op {
-                BinaryOp::Add => make_rat(a + b),
-                BinaryOp::Sub => make_rat(a - b),
-                BinaryOp::Mul => make_rat(a * b),
-                BinaryOp::Div => {
-                    if b.is_zero() {
-                        Value::Unknown
-                    } else {
-                        make_rat(a / b)
-                    }
+
+        (Value::Rat(a), Value::Rat(b)) => match op {
+            BinaryOp::Add => make_rat(a + b),
+            BinaryOp::Sub => make_rat(a - b),
+            BinaryOp::Mul => make_rat(a * b),
+            BinaryOp::Div => {
+                if b.is_zero() {
+                    Value::Unknown
+                } else {
+                    make_rat(a / b)
                 }
-                _ => Value::Unknown,
             }
-        }
-        
-        (Value::Float(a), Value::Float(b)) => {
-            match op {
-                BinaryOp::Add => make_float(a + b),
-                BinaryOp::Sub => make_float(a - b),
-                BinaryOp::Mul => make_float(a * b),
-                BinaryOp::Div => make_float(a / b),
-                _ => Value::Unknown,
-            }
-        }
-        
-        (Value::Str(a), Value::Str(b)) => {
-            match op {
-                BinaryOp::Add => Value::Str(format!("{}{}", a, b)),
-                _ => Value::Unknown,
-            }
-        }
-        
+            _ => Value::Unknown,
+        },
+
+        (Value::Float(a), Value::Float(b)) => match op {
+            BinaryOp::Add => make_float(a + b),
+            BinaryOp::Sub => make_float(a - b),
+            BinaryOp::Mul => make_float(a * b),
+            BinaryOp::Div => make_float(a / b),
+            _ => Value::Unknown,
+        },
+
+        (Value::Str(a), Value::Str(b)) => match op {
+            BinaryOp::Add => Value::Str(format!("{}{}", a, b)),
+            _ => Value::Unknown,
+        },
+
         _ => Value::Unknown,
     }
 }
@@ -883,7 +890,7 @@ pub fn shift(x: &Value, op: BinaryOp, s: u32) -> Value {
     if s == 0 {
         return x.clone();
     }
-    
+
     match x {
         Value::Unknown => Value::Unknown,
         Value::Int64(i) => {
@@ -892,19 +899,15 @@ pub fn shift(x: &Value, op: BinaryOp, s: u32) -> Value {
                     // Left shift may overflow
                     make_int(i64_to_big(*i) << s as usize)
                 }
-                BinaryOp::Shr => {
-                    Value::Int64(i >> s)
-                }
+                BinaryOp::Shr => Value::Int64(i >> s),
                 _ => Value::Unknown,
             }
         }
-        Value::IntBig(i) => {
-            match op {
-                BinaryOp::Shl => make_int(i << s as usize),
-                BinaryOp::Shr => make_int(i >> s as usize),
-                _ => Value::Unknown,
-            }
-        }
+        Value::IntBig(i) => match op {
+            BinaryOp::Shl => make_int(i << s as usize),
+            BinaryOp::Shr => make_int(i >> s as usize),
+            _ => Value::Unknown,
+        },
         _ => Value::Unknown,
     }
 }
@@ -915,28 +918,26 @@ pub fn compare(x: &Value, op: BinaryOp, y: &Value) -> bool {
     if x.is_unknown() || y.is_unknown() {
         return false;
     }
-    
+
     let (x, y) = match_values(x.clone(), y.clone());
-    
+
     match (&x, &y) {
         (Value::Bool(a), Value::Bool(b)) => match op {
             BinaryOp::Eq => a == b,
             BinaryOp::NotEq => a != b,
             _ => false,
         },
-        
+
         (Value::Int64(a), Value::Int64(b)) => cmp_ord(a.cmp(b), op),
         (Value::IntBig(a), Value::IntBig(b)) => cmp_ord(a.cmp(b), op),
         (Value::Rat(a), Value::Rat(b)) => cmp_ord(a.cmp(b), op),
-        (Value::Float(a), Value::Float(b)) => {
-            match a.partial_cmp(b) {
-                Some(ord) => cmp_ord(ord, op),
-                None => false,
-            }
-        }
-        
+        (Value::Float(a), Value::Float(b)) => match a.partial_cmp(b) {
+            Some(ord) => cmp_ord(ord, op),
+            None => false,
+        },
+
         (Value::Str(a), Value::Str(b)) => cmp_ord(a.cmp(b), op),
-        
+
         _ => false,
     }
 }
@@ -982,12 +983,12 @@ impl Value {
             std::borrow::Cow::Owned(result)
         }
     }
-    
+
     /// Returns sign as i32 (-1, 0, or 1).
     pub fn sign(&self) -> i32 {
         sign(self)
     }
-    
+
     /// Returns string value for Str variant.
     pub fn str_as_string(&self) -> &str {
         match self {
@@ -995,32 +996,32 @@ impl Value {
             _ => "",
         }
     }
-    
+
     /// Returns (i64, exact) for Int variants.
     pub fn int_as_i64(&self) -> (i64, bool) {
         int64_val(self)
     }
-    
+
     /// Returns (u64, exact) for Int variants.
     pub fn int_as_u64(&self) -> (u64, bool) {
         uint64_val(self)
     }
-    
+
     /// Returns true if this is an Int value.
     pub fn is_int(&self) -> bool {
         matches!(self, Value::Int64(_) | Value::IntBig(_))
     }
-    
+
     /// Returns true if this is a Bool value.
     pub fn is_bool(&self) -> bool {
         matches!(self, Value::Bool(_))
     }
-    
+
     /// Returns true if this is a String value.
     pub fn is_string(&self) -> bool {
         matches!(self, Value::Str(_))
     }
-    
+
     /// Returns the integer value as i64 if possible (legacy).
     pub fn int_val(&self) -> Option<i64> {
         match self {
@@ -1029,7 +1030,7 @@ impl Value {
             _ => None,
         }
     }
-    
+
     /// Returns BigInt if this is an Int value.
     pub fn as_big_int(&self) -> Option<BigInt> {
         match self {
@@ -1038,16 +1039,20 @@ impl Value {
             _ => None,
         }
     }
-    
+
     /// Check if value can be represented as the given basic type.
-    pub fn representable(&self, base: &crate::typ::BasicDetail, rounded: Option<&mut Value>) -> bool {
+    pub fn representable(
+        &self,
+        base: &crate::typ::BasicDetail,
+        rounded: Option<&mut Value>,
+    ) -> bool {
         use crate::typ::{BasicInfo, BasicType};
         use num_traits::ToPrimitive;
-        
+
         if self.is_unknown() {
             return true; // avoid follow-up errors
         }
-        
+
         match base.info() {
             BasicInfo::IsInteger => {
                 let int_val = to_int(self);
@@ -1060,7 +1065,9 @@ impl Value {
                             BasicType::Int => true,
                             BasicType::Int8 => *i >= i8::MIN as i64 && *i <= i8::MAX as i64,
                             BasicType::Int16 => *i >= i16::MIN as i64 && *i <= i16::MAX as i64,
-                            BasicType::Int32 | BasicType::Rune => *i >= i32::MIN as i64 && *i <= i32::MAX as i64,
+                            BasicType::Int32 | BasicType::Rune => {
+                                *i >= i32::MIN as i64 && *i <= i32::MAX as i64
+                            }
                             BasicType::Int64 => true,
                             BasicType::Uint | BasicType::Uintptr => *i >= 0,
                             BasicType::Uint8 | BasicType::Byte => *i >= 0 && *i <= u8::MAX as i64,

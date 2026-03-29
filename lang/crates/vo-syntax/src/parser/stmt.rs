@@ -1,16 +1,16 @@
 //! Statement parsing.
 
-use super::{Parser, ParseResult};
+use super::{ParseResult, Parser};
+use crate::ast::Ident;
 use crate::ast::*;
 use crate::token::TokenKind;
 use vo_common::span::Span;
-use crate::ast::Ident;
 
 impl<'a> Parser<'a> {
     /// Parses a statement.
     pub fn parse_stmt(&mut self) -> ParseResult<Stmt> {
         let start = self.current.span.start;
-        
+
         let kind = match self.current.kind {
             TokenKind::Semicolon => {
                 self.advance();
@@ -60,7 +60,10 @@ impl<'a> Parser<'a> {
                 };
                 let call = self.parse_expr()?;
                 self.expect_semi();
-                StmtKind::Go(GoStmt { target_island, call })
+                StmtKind::Go(GoStmt {
+                    target_island,
+                    call,
+                })
             }
             TokenKind::Defer => {
                 self.advance();
@@ -116,7 +119,7 @@ impl<'a> Parser<'a> {
                 return self.parse_simple_stmt();
             }
         };
-        
+
         Ok(Stmt {
             kind,
             span: Span::new(start, self.current.span.start),
@@ -125,7 +128,7 @@ impl<'a> Parser<'a> {
 
     fn parse_simple_stmt(&mut self) -> ParseResult<Stmt> {
         let start = self.current.span.start;
-        
+
         // Check for labeled statement: label: stmt
         if self.at(TokenKind::Ident) && self.peek_is(TokenKind::Colon) {
             let label = self.parse_ident()?;
@@ -139,10 +142,10 @@ impl<'a> Parser<'a> {
                 span: Span::new(start, self.current.span.start),
             });
         }
-        
+
         // Parse left-hand side expression(s)
         let left = self.parse_expr_list()?;
-        
+
         let kind = match self.current.kind {
             // Short variable declaration: x := expr
             TokenKind::ColonEq => {
@@ -153,10 +156,18 @@ impl<'a> Parser<'a> {
                 StmtKind::ShortVar(ShortVarDecl { names, values })
             }
             // Assignment: x = expr, x += expr, etc.
-            TokenKind::Eq | TokenKind::PlusEq | TokenKind::MinusEq |
-            TokenKind::StarEq | TokenKind::SlashEq | TokenKind::PercentEq |
-            TokenKind::AmpEq | TokenKind::PipeEq | TokenKind::CaretEq |
-            TokenKind::AmpCaretEq | TokenKind::ShlEq | TokenKind::ShrEq => {
+            TokenKind::Eq
+            | TokenKind::PlusEq
+            | TokenKind::MinusEq
+            | TokenKind::StarEq
+            | TokenKind::SlashEq
+            | TokenKind::PercentEq
+            | TokenKind::AmpEq
+            | TokenKind::PipeEq
+            | TokenKind::CaretEq
+            | TokenKind::AmpCaretEq
+            | TokenKind::ShlEq
+            | TokenKind::ShrEq => {
                 let op = self.token_to_assign_op(&self.current.kind);
                 self.advance();
                 let rhs = self.parse_expr_list()?;
@@ -171,7 +182,10 @@ impl<'a> Parser<'a> {
                     self.error("increment requires single expression");
                     return Err(());
                 }
-                StmtKind::IncDec(IncDecStmt { expr: left.into_iter().next().unwrap(), is_inc: true })
+                StmtKind::IncDec(IncDecStmt {
+                    expr: left.into_iter().next().unwrap(),
+                    is_inc: true,
+                })
             }
             TokenKind::MinusMinus => {
                 self.advance();
@@ -180,7 +194,10 @@ impl<'a> Parser<'a> {
                     self.error("decrement requires single expression");
                     return Err(());
                 }
-                StmtKind::IncDec(IncDecStmt { expr: left.into_iter().next().unwrap(), is_inc: false })
+                StmtKind::IncDec(IncDecStmt {
+                    expr: left.into_iter().next().unwrap(),
+                    is_inc: false,
+                })
             }
             // Send statement: ch <- value
             TokenKind::Arrow => {
@@ -191,7 +208,10 @@ impl<'a> Parser<'a> {
                 }
                 let value = self.parse_expr()?;
                 self.expect_semi();
-                StmtKind::Send(SendStmt { chan: left.into_iter().next().unwrap(), value })
+                StmtKind::Send(SendStmt {
+                    chan: left.into_iter().next().unwrap(),
+                    value,
+                })
             }
             // Expression statement
             _ => {
@@ -203,7 +223,7 @@ impl<'a> Parser<'a> {
                 StmtKind::Expr(left.into_iter().next().unwrap())
             }
         };
-        
+
         Ok(Stmt {
             kind,
             span: Span::new(start, self.current.span.start),
@@ -212,14 +232,14 @@ impl<'a> Parser<'a> {
 
     fn parse_if_stmt(&mut self) -> ParseResult<StmtKind> {
         self.expect(TokenKind::If)?;
-        
+
         // Disable composite literals in condition
         let saved = self.allow_composite_lit;
         self.allow_composite_lit = false;
-        
+
         // Parse init or condition
         let first = self.parse_simple_stmt_or_expr()?;
-        
+
         let (init, cond) = if self.at(TokenKind::Semicolon) {
             // Has init statement
             self.advance();
@@ -235,11 +255,11 @@ impl<'a> Parser<'a> {
                 }
             }
         };
-        
+
         self.allow_composite_lit = saved;
-        
+
         let then = self.parse_block()?;
-        
+
         let else_ = if self.eat(TokenKind::Else) {
             if self.at(TokenKind::If) {
                 let else_if = self.parse_stmt()?;
@@ -254,70 +274,105 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        
-        Ok(StmtKind::If(IfStmt { init, cond, then, else_ }))
+
+        Ok(StmtKind::If(IfStmt {
+            init,
+            cond,
+            then,
+            else_,
+        }))
     }
 
     fn parse_for_stmt(&mut self) -> ParseResult<StmtKind> {
         self.expect(TokenKind::For)?;
-        
+
         let saved = self.allow_composite_lit;
         self.allow_composite_lit = false;
-        
+
         // Phase 1: Parse first (init/cond/range-vars), may be None
-        let first = if self.at(TokenKind::LBrace) || self.at(TokenKind::Semicolon) || self.at(TokenKind::Range) {
+        let first = if self.at(TokenKind::LBrace)
+            || self.at(TokenKind::Semicolon)
+            || self.at(TokenKind::Range)
+        {
             None
         } else {
             Some(self.parse_simple_stmt_or_expr()?)
         };
-        
+
         // Phase 2: Determine clause type based on (first, current_token)
         let clause = match (&first, &self.current.kind) {
             // for { }
             (None, TokenKind::LBrace) => ForClause::Cond(None),
-            
+
             // for range expr { }
             (None, TokenKind::Range) => {
                 self.advance();
                 let expr = self.parse_expr()?;
-                ForClause::Range { key: None, value: None, define: false, expr }
+                ForClause::Range {
+                    key: None,
+                    value: None,
+                    define: false,
+                    expr,
+                }
             }
-            
+
             // for ; cond; post { } or for init; cond; post { }
             (_, TokenKind::Semicolon) => {
                 self.advance();
-                let cond = if self.at(TokenKind::Semicolon) { None } else { Some(self.parse_expr()?) };
+                let cond = if self.at(TokenKind::Semicolon) {
+                    None
+                } else {
+                    Some(self.parse_expr()?)
+                };
                 self.expect(TokenKind::Semicolon)?;
-                let post = if self.at(TokenKind::LBrace) { None } else { Some(Box::new(self.parse_simple_stmt_or_expr()?)) };
-                ForClause::Three { init: first.map(Box::new), cond, post }
-            }
-            
-            // for cond { }
-            (Some(stmt), TokenKind::LBrace) => {
-                match &stmt.kind {
-                    StmtKind::Expr(expr) => ForClause::Cond(Some(expr.clone())),
-                    _ => {
-                        self.error("expected expression in for condition");
-                        return Err(());
-                    }
+                let post = if self.at(TokenKind::LBrace) {
+                    None
+                } else {
+                    Some(Box::new(self.parse_simple_stmt_or_expr()?))
+                };
+                ForClause::Three {
+                    init: first.map(Box::new),
+                    cond,
+                    post,
                 }
             }
-            
+
+            // for cond { }
+            (Some(stmt), TokenKind::LBrace) => match &stmt.kind {
+                StmtKind::Expr(expr) => ForClause::Cond(Some(expr.clone())),
+                _ => {
+                    self.error("expected expression in for condition");
+                    return Err(());
+                }
+            },
+
             // for k := range expr { } or for k, v = range expr { }
             (Some(stmt), TokenKind::Range) => {
                 self.advance();
                 let expr = self.parse_expr()?;
                 match &stmt.kind {
                     StmtKind::ShortVar(svd) => {
-                        let exprs: Vec<Expr> = svd.names.iter().map(|ident| {
-                            self.make_expr(ExprKind::Ident(ident.clone()), ident.span)
-                        }).collect();
+                        let exprs: Vec<Expr> = svd
+                            .names
+                            .iter()
+                            .map(|ident| self.make_expr(ExprKind::Ident(ident.clone()), ident.span))
+                            .collect();
                         let (key, value) = self.exprs_to_key_value(&exprs);
-                        ForClause::Range { key, value, define: true, expr }
+                        ForClause::Range {
+                            key,
+                            value,
+                            define: true,
+                            expr,
+                        }
                     }
                     StmtKind::Assign(assign) => {
                         let (key, value) = self.exprs_to_key_value(&assign.lhs);
-                        ForClause::Range { key, value, define: false, expr }
+                        ForClause::Range {
+                            key,
+                            value,
+                            define: false,
+                            expr,
+                        }
                     }
                     _ => {
                         self.error("invalid for-range clause");
@@ -325,16 +380,16 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            
+
             _ => {
                 self.error("invalid for clause");
                 return Err(());
             }
         };
-        
+
         self.allow_composite_lit = saved;
         let body = self.parse_block()?;
-        
+
         Ok(StmtKind::For(ForStmt { clause, body }))
     }
 
@@ -365,16 +420,16 @@ impl<'a> Parser<'a> {
 
     fn parse_switch_stmt(&mut self) -> ParseResult<StmtKind> {
         self.expect(TokenKind::Switch)?;
-        
+
         let saved = self.allow_composite_lit;
         self.allow_composite_lit = false;
-        
+
         // Phase 1: Parse s1 and s2 (like goscript)
         let (mut s1, mut s2): (Option<Stmt>, Option<Stmt>) = (None, None);
-        
+
         if !self.at(TokenKind::LBrace) {
             s2 = Some(self.parse_simple_stmt_or_expr()?);
-            
+
             if self.at(TokenKind::Semicolon) {
                 self.advance();
                 s1 = s2.take();
@@ -383,16 +438,16 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        
+
         self.allow_composite_lit = saved;
-        
+
         // Phase 2: Check if type switch and build AST
         if let Some(ref guard) = s2 {
             if let Some((assign, expr)) = Self::is_type_switch_guard(guard) {
                 return self.parse_type_switch_body(s1.map(Box::new), assign, expr);
             }
         }
-        
+
         // Regular switch: extract tag expression from s2
         let tag = match s2 {
             Some(stmt) => match stmt.kind {
@@ -404,31 +459,45 @@ impl<'a> Parser<'a> {
             },
             None => None,
         };
-        
+
         self.expect(TokenKind::LBrace)?;
         let mut cases = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at_eof() {
             cases.push(self.parse_case_clause()?);
         }
         self.expect(TokenKind::RBrace)?;
-        
-        Ok(StmtKind::Switch(SwitchStmt { init: s1.map(Box::new), tag, cases }))
+
+        Ok(StmtKind::Switch(SwitchStmt {
+            init: s1.map(Box::new),
+            tag,
+            cases,
+        }))
     }
 
-    fn parse_type_switch_body(&mut self, init: Option<Box<Stmt>>, assign: Option<Ident>, expr: Expr) -> ParseResult<StmtKind> {
+    fn parse_type_switch_body(
+        &mut self,
+        init: Option<Box<Stmt>>,
+        assign: Option<Ident>,
+        expr: Expr,
+    ) -> ParseResult<StmtKind> {
         self.expect(TokenKind::LBrace)?;
         let mut cases = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at_eof() {
             cases.push(self.parse_type_case_clause()?);
         }
         self.expect(TokenKind::RBrace)?;
-        
-        Ok(StmtKind::TypeSwitch(TypeSwitchStmt { init, assign, expr, cases }))
+
+        Ok(StmtKind::TypeSwitch(TypeSwitchStmt {
+            init,
+            assign,
+            expr,
+            cases,
+        }))
     }
 
     fn parse_case_clause(&mut self) -> ParseResult<CaseClause> {
         let start = self.current.span.start;
-        
+
         let exprs = if self.eat(TokenKind::Case) {
             self.parse_expr_list()?
         } else if self.eat(TokenKind::Default) {
@@ -437,14 +506,18 @@ impl<'a> Parser<'a> {
             self.error_expected("'case' or 'default'");
             return Err(());
         };
-        
+
         self.expect(TokenKind::Colon)?;
-        
+
         let mut body = Vec::new();
-        while !self.at(TokenKind::Case) && !self.at(TokenKind::Default) && !self.at(TokenKind::RBrace) && !self.at_eof() {
+        while !self.at(TokenKind::Case)
+            && !self.at(TokenKind::Default)
+            && !self.at(TokenKind::RBrace)
+            && !self.at_eof()
+        {
             body.push(self.parse_stmt()?);
         }
-        
+
         Ok(CaseClause {
             exprs,
             body,
@@ -454,7 +527,7 @@ impl<'a> Parser<'a> {
 
     fn parse_type_case_clause(&mut self) -> ParseResult<TypeCaseClause> {
         let start = self.current.span.start;
-        
+
         let types = if self.eat(TokenKind::Case) {
             self.parse_type_list()?
         } else if self.eat(TokenKind::Default) {
@@ -463,14 +536,18 @@ impl<'a> Parser<'a> {
             self.error_expected("'case' or 'default'");
             return Err(());
         };
-        
+
         self.expect(TokenKind::Colon)?;
-        
+
         let mut body = Vec::new();
-        while !self.at(TokenKind::Case) && !self.at(TokenKind::Default) && !self.at(TokenKind::RBrace) && !self.at_eof() {
+        while !self.at(TokenKind::Case)
+            && !self.at(TokenKind::Default)
+            && !self.at(TokenKind::RBrace)
+            && !self.at_eof()
+        {
             body.push(self.parse_stmt()?);
         }
-        
+
         Ok(TypeCaseClause {
             types,
             body,
@@ -497,19 +574,19 @@ impl<'a> Parser<'a> {
     fn parse_select_stmt(&mut self) -> ParseResult<StmtKind> {
         self.expect(TokenKind::Select)?;
         self.expect(TokenKind::LBrace)?;
-        
+
         let mut cases = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at_eof() {
             cases.push(self.parse_select_case()?);
         }
-        
+
         self.expect(TokenKind::RBrace)?;
         Ok(StmtKind::Select(SelectStmt { cases }))
     }
 
     fn parse_select_case(&mut self) -> ParseResult<SelectCase> {
         let start = self.current.span.start;
-        
+
         let comm = if self.eat(TokenKind::Case) {
             Some(self.parse_comm_clause()?)
         } else if self.eat(TokenKind::Default) {
@@ -518,14 +595,18 @@ impl<'a> Parser<'a> {
             self.error_expected("'case' or 'default'");
             return Err(());
         };
-        
+
         self.expect(TokenKind::Colon)?;
-        
+
         let mut body = Vec::new();
-        while !self.at(TokenKind::Case) && !self.at(TokenKind::Default) && !self.at(TokenKind::RBrace) && !self.at_eof() {
+        while !self.at(TokenKind::Case)
+            && !self.at(TokenKind::Default)
+            && !self.at(TokenKind::RBrace)
+            && !self.at_eof()
+        {
             body.push(self.parse_stmt()?);
         }
-        
+
         Ok(SelectCase {
             comm,
             body,
@@ -535,7 +616,7 @@ impl<'a> Parser<'a> {
 
     fn parse_comm_clause(&mut self) -> ParseResult<CommClause> {
         // Could be: send (ch <- v) or recv (v = <-ch, v := <-ch, <-ch)
-        
+
         // Check for receive expression starting with <-
         if self.at(TokenKind::Arrow) {
             self.advance();
@@ -546,10 +627,10 @@ impl<'a> Parser<'a> {
                 expr,
             }));
         }
-        
+
         // Parse left side
         let left = self.parse_expr_list()?;
-        
+
         match self.current.kind {
             TokenKind::Arrow => {
                 // Send: ch <- value
@@ -570,7 +651,11 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::Arrow)?;
                 let expr = self.parse_expr()?;
                 let lhs = self.exprs_to_idents(left)?;
-                Ok(CommClause::Recv(RecvStmt { lhs, define: true, expr }))
+                Ok(CommClause::Recv(RecvStmt {
+                    lhs,
+                    define: true,
+                    expr,
+                }))
             }
             TokenKind::Eq => {
                 // Receive with assignment: v = <-ch
@@ -578,7 +663,11 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::Arrow)?;
                 let expr = self.parse_expr()?;
                 let lhs = self.exprs_to_idents(left)?;
-                Ok(CommClause::Recv(RecvStmt { lhs, define: false, expr }))
+                Ok(CommClause::Recv(RecvStmt {
+                    lhs,
+                    define: false,
+                    expr,
+                }))
             }
             _ => {
                 self.error("expected send or receive in select case");
@@ -589,7 +678,7 @@ impl<'a> Parser<'a> {
 
     fn parse_simple_stmt_or_expr(&mut self) -> ParseResult<Stmt> {
         let start = self.current.span.start;
-        
+
         // Check for labeled statement
         if self.at(TokenKind::Ident) && self.peek_is(TokenKind::Colon) {
             let label = self.parse_ident()?;
@@ -603,9 +692,9 @@ impl<'a> Parser<'a> {
                 span: Span::new(start, self.current.span.start),
             });
         }
-        
+
         let left = self.parse_expr_list()?;
-        
+
         let kind = match self.current.kind {
             TokenKind::ColonEq => {
                 self.advance();
@@ -613,23 +702,38 @@ impl<'a> Parser<'a> {
                 // Check for range keyword - will be handled by for loop parser
                 if self.at(TokenKind::Range) {
                     return Ok(Stmt {
-                        kind: StmtKind::ShortVar(ShortVarDecl { names, values: vec![] }),
+                        kind: StmtKind::ShortVar(ShortVarDecl {
+                            names,
+                            values: vec![],
+                        }),
                         span: Span::new(start, self.current.span.start),
                     });
                 }
                 let values = self.parse_expr_list()?;
                 StmtKind::ShortVar(ShortVarDecl { names, values })
             }
-            TokenKind::Eq | TokenKind::PlusEq | TokenKind::MinusEq |
-            TokenKind::StarEq | TokenKind::SlashEq | TokenKind::PercentEq |
-            TokenKind::AmpEq | TokenKind::PipeEq | TokenKind::CaretEq |
-            TokenKind::AmpCaretEq | TokenKind::ShlEq | TokenKind::ShrEq => {
+            TokenKind::Eq
+            | TokenKind::PlusEq
+            | TokenKind::MinusEq
+            | TokenKind::StarEq
+            | TokenKind::SlashEq
+            | TokenKind::PercentEq
+            | TokenKind::AmpEq
+            | TokenKind::PipeEq
+            | TokenKind::CaretEq
+            | TokenKind::AmpCaretEq
+            | TokenKind::ShlEq
+            | TokenKind::ShrEq => {
                 let op = self.token_to_assign_op(&self.current.kind);
                 self.advance();
                 // Check for range keyword - will be handled by for loop parser
                 if self.at(TokenKind::Range) {
                     return Ok(Stmt {
-                        kind: StmtKind::Assign(AssignStmt { lhs: left, op, rhs: vec![] }),
+                        kind: StmtKind::Assign(AssignStmt {
+                            lhs: left,
+                            op,
+                            rhs: vec![],
+                        }),
                         span: Span::new(start, self.current.span.start),
                     });
                 }
@@ -642,7 +746,10 @@ impl<'a> Parser<'a> {
                     self.error("increment requires single expression");
                     return Err(());
                 }
-                StmtKind::IncDec(IncDecStmt { expr: left.into_iter().next().unwrap(), is_inc: true })
+                StmtKind::IncDec(IncDecStmt {
+                    expr: left.into_iter().next().unwrap(),
+                    is_inc: true,
+                })
             }
             TokenKind::MinusMinus => {
                 self.advance();
@@ -650,7 +757,10 @@ impl<'a> Parser<'a> {
                     self.error("decrement requires single expression");
                     return Err(());
                 }
-                StmtKind::IncDec(IncDecStmt { expr: left.into_iter().next().unwrap(), is_inc: false })
+                StmtKind::IncDec(IncDecStmt {
+                    expr: left.into_iter().next().unwrap(),
+                    is_inc: false,
+                })
             }
             TokenKind::Arrow => {
                 self.advance();
@@ -659,7 +769,10 @@ impl<'a> Parser<'a> {
                     return Err(());
                 }
                 let value = self.parse_expr()?;
-                StmtKind::Send(SendStmt { chan: left.into_iter().next().unwrap(), value })
+                StmtKind::Send(SendStmt {
+                    chan: left.into_iter().next().unwrap(),
+                    value,
+                })
             }
             _ => {
                 if left.len() != 1 {
@@ -669,7 +782,7 @@ impl<'a> Parser<'a> {
                 StmtKind::Expr(left.into_iter().next().unwrap())
             }
         };
-        
+
         Ok(Stmt {
             kind,
             span: Span::new(start, self.current.span.start),
@@ -715,5 +828,4 @@ impl<'a> Parser<'a> {
             _ => unreachable!("not an assignment operator: {:?}", kind),
         }
     }
-
 }

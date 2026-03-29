@@ -29,23 +29,32 @@ enum MethodValueWrapperKey {
     /// Pointer receiver: captures pointer directly
     Pointer { recv_type: TypeKey, func_id: u32 },
     /// Interface: captures interface (2 slots), uses CallIface
-    Interface { iface_type: TypeKey, method_idx: u32, param_slots: u16, ret_slots: u16 },
+    Interface {
+        iface_type: TypeKey,
+        method_idx: u32,
+        param_slots: u16,
+        ret_slots: u16,
+    },
     /// Embedded interface: captures boxed outer struct, reads iface from offset, uses CallIface
-    EmbeddedInterface { iface_type: TypeKey, embed_offset: u16, method_idx: u32 },
+    EmbeddedInterface {
+        iface_type: TypeKey,
+        embed_offset: u16,
+        method_idx: u32,
+    },
 }
 
 /// Get ret_slots for builtin extern functions.
-/// 
+///
 /// All externs registered via `get_or_register_extern` MUST be listed here.
 /// For variable-size externs (dyn_call, dyn_method),
 /// use `get_or_register_extern_with_ret_slots` with explicit size at each call site.
 fn builtin_extern_ret_slots(name: &str) -> u16 {
     match name {
         // === Dynamic access ===
-        "dyn_field" => 4,  // Unified field access: (value[2], error[2])
-        "dyn_index" => 4,  // Unified index access: (value[2], error[2])
-        "dyn_set_field" => 2,  // Unified field set: error[2]
-        "dyn_set_index_unified" => 2,  // Unified index set: error[2]
+        "dyn_field" => 4,             // Unified field access: (value[2], error[2])
+        "dyn_index" => 4,             // Unified index access: (value[2], error[2])
+        "dyn_set_field" => 2,         // Unified field set: error[2]
+        "dyn_set_index_unified" => 2, // Unified index set: error[2]
         // User API: dyn.GetAttr/GetIndex - (data[2], error[2]) = 4 slots
         "dyn_GetAttr" | "dyn_GetIndex" => 4,
         // User API: dyn.SetAttr/SetIndex - error[2] = 2 slots
@@ -54,16 +63,16 @@ fn builtin_extern_ret_slots(name: &str) -> u16 {
         "dyn_pack_any_slice" => 3,
         // error[2] = 2 slots
         "dyn_type_assert_error" => 2,
-        
+
         // === Builtins (no return) ===
         "vo_print" | "vo_println" => 0,
         "vo_assert" => 0,
         "panic_with_error" => 0,
-        
+
         // === Builtins (return 1 slot) ===
         "vo_copy" => 1,
         "vo_slice_append_slice" => 1,
-        
+
         // === Type conversions (return 1 slot: string or slice) ===
         "vo_conv_int_str" => 1,
         "vo_conv_bytes_str" => 1,
@@ -71,19 +80,23 @@ fn builtin_extern_ret_slots(name: &str) -> u16 {
         "vo_conv_str_bytes" => 1,
         "vo_conv_str_runes" => 1,
         "vo_string_to_bytes" | "vo_bytes_to_string" => 1,
-        
+
         // Unknown extern - this is a bug, all externs must be listed above
-        _ => panic!("builtin_extern_ret_slots: unknown extern '{}', add it to the list", name),
+        _ => panic!(
+            "builtin_extern_ret_slots: unknown extern '{}', add it to the list",
+            name
+        ),
     }
 }
-use vo_analysis::objects::{ObjKey, TypeKey};
-use vo_common::symbol::Symbol;
 use crate::type_interner::TypeInterner;
-use vo_vm::bytecode::{
-    Constant, FunctionDef, GlobalDef, InterfaceMeta, Itab, MethodInfo, Module, NamedTypeMeta, StructMeta,
-};
-use vo_common::SourceMap;
+use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_common::span::Span;
+use vo_common::symbol::Symbol;
+use vo_common::SourceMap;
+use vo_vm::bytecode::{
+    Constant, FunctionDef, GlobalDef, InterfaceMeta, Itab, MethodInfo, Module, NamedTypeMeta,
+    StructMeta,
+};
 
 /// Package-level codegen context.
 pub struct CodegenContext {
@@ -129,13 +142,13 @@ pub struct CodegenContext {
 
     /// ObjKey -> func_id (original method)
     objkey_to_func: HashMap<ObjKey, u32>,
-    
+
     /// ObjKey -> iface_func_id (wrapper for value receiver methods, or original for pointer receiver)
     objkey_to_iface_func: HashMap<ObjKey, u32>,
 
     /// init functions (in declaration order)
     init_functions: Vec<u32>,
-    
+
     /// main function id (if exists)
     main_func_id: Option<u32>,
 
@@ -149,13 +162,13 @@ pub struct CodegenContext {
 
     /// Current function ID being compiled (for debug info recording)
     current_func_id: Option<u32>,
-    
+
     /// Builtin protocol interface meta IDs
     builtin_protocols: BuiltinProtocols,
-    
+
     /// Method value wrappers cache
     method_value_wrappers: HashMap<MethodValueWrapperKey, u32>,
-    
+
     /// Unified wrapper cache (name -> func_id)
     /// Used for: defer_extern, defer_iface, method_expr_iface, etc.
     wrapper_cache: HashMap<String, u32>,
@@ -166,7 +179,7 @@ impl CodegenContext {
     pub(crate) fn module(&self) -> &Module {
         &self.module
     }
-    
+
     pub fn new(name: &str) -> Self {
         Self {
             module: Module {
@@ -219,12 +232,12 @@ impl CodegenContext {
             wrapper_cache: HashMap::new(),
         }
     }
-    
+
     /// Register a builtin protocol interface.
     pub fn register_builtin_protocol(&mut self, name: &str, meta: InterfaceMeta) {
         let meta_id = self.module.interface_metas.len() as u32;
         self.module.interface_metas.push(meta);
-        
+
         match name {
             "AttrObject" => self.builtin_protocols.attr_object_meta_id = Some(meta_id),
             "SetAttrObject" => self.builtin_protocols.set_attr_object_meta_id = Some(meta_id),
@@ -234,7 +247,7 @@ impl CodegenContext {
             _ => {}
         }
     }
-    
+
     /// Get builtin protocol interface meta IDs.
     pub fn builtin_protocols(&self) -> &BuiltinProtocols {
         &self.builtin_protocols
@@ -304,7 +317,11 @@ impl CodegenContext {
     /// Recursively intern a type_key, returning its rttid.
     /// For composite types, this first interns inner types to get their ValueRttids.
     /// Named types are dynamically registered if not already present.
-    pub fn intern_type_key(&mut self, type_key: vo_analysis::objects::TypeKey, info: &crate::type_info::TypeInfoWrapper) -> u32 {
+    pub fn intern_type_key(
+        &mut self,
+        type_key: vo_analysis::objects::TypeKey,
+        info: &crate::type_info::TypeInfoWrapper,
+    ) -> u32 {
         let tc_objs = &info.project.tc_objs;
         let mut ctx = crate::type_interner::InternContext {
             named_type_ids: &mut self.named_type_ids,
@@ -328,15 +345,18 @@ impl CodegenContext {
     /// This enables O(1) dynamic field access via `~>` operator.
     pub fn finalize_runtime_types(&mut self) {
         use vo_runtime::RuntimeType;
-        
+
         // Collect updates to avoid borrow issues
         let mut updates: Vec<(usize, Option<u32>, Option<u32>)> = Vec::new(); // (idx, struct_meta_id, iface_meta_id)
-        
+
         for (idx, rt) in self.type_interner.types().iter().enumerate() {
             match rt {
                 RuntimeType::Named { id, .. } => {
                     // Get struct_meta_id from named_type_meta's underlying
-                    let struct_meta_id = self.module.named_type_metas.get(*id as usize)
+                    let struct_meta_id = self
+                        .module
+                        .named_type_metas
+                        .get(*id as usize)
                         .filter(|m| m.underlying_meta.value_kind() == vo_runtime::ValueKind::Struct)
                         .map(|m| m.underlying_meta.meta_id());
                     if struct_meta_id.is_some() {
@@ -355,11 +375,15 @@ impl CodegenContext {
                 _ => {}
             }
         }
-        
+
         // Apply updates
         let types = self.type_interner.types_mut();
         for (idx, struct_meta_id, _iface_meta_id) in updates {
-            if let RuntimeType::Named { struct_meta_id: ref mut smi, .. } = types[idx] {
+            if let RuntimeType::Named {
+                struct_meta_id: ref mut smi,
+                ..
+            } = types[idx]
+            {
                 *smi = struct_meta_id;
             }
         }
@@ -369,27 +393,35 @@ impl CodegenContext {
     /// Should be called after all types are registered.
     pub fn fill_well_known_types(&mut self) {
         use vo_runtime::RuntimeType;
-        
-        
+
         // Find errors.Error named_type_id
-        let error_named_type_id = self.module.named_type_metas
+        let error_named_type_id = self
+            .module
+            .named_type_metas
             .iter()
             .position(|m| m.name == "errors.Error")
             .map(|i| i as u32);
-        
+
         // Find error interface meta_id
-        let error_iface_meta_id = self.module.interface_metas
+        let error_iface_meta_id = self
+            .module
+            .interface_metas
             .iter()
             .position(|m| m.name == "error")
             .map(|i| i as u32);
-        
+
         // Find errors.Error rttid and *errors.Error rttid
-        let (error_named_rttid, error_struct_meta_id) = if let Some(named_id) = error_named_type_id {
-            let rttid = self.type_interner.types()
+        let (error_named_rttid, error_struct_meta_id) = if let Some(named_id) = error_named_type_id
+        {
+            let rttid = self
+                .type_interner
+                .types()
                 .iter()
                 .position(|rt| matches!(rt, RuntimeType::Named { id, .. } if *id == named_id))
                 .map(|i| i as u32);
-            let struct_meta_id = self.module.named_type_metas
+            let struct_meta_id = self
+                .module
+                .named_type_metas
                 .get(named_id as usize)
                 .filter(|m| m.underlying_meta.value_kind() == vo_runtime::ValueKind::Struct)
                 .map(|m| m.underlying_meta.meta_id());
@@ -397,19 +429,23 @@ impl CodegenContext {
         } else {
             (None, None)
         };
-        
+
         let error_ptr_rttid = if let Some(named_rttid) = error_named_rttid {
-            self.type_interner.types()
+            self.type_interner
+                .types()
                 .iter()
                 .position(|rt| match rt {
-                    RuntimeType::Pointer(elem) => elem.rttid() == named_rttid && elem.value_kind() == vo_runtime::ValueKind::Struct,
+                    RuntimeType::Pointer(elem) => {
+                        elem.rttid() == named_rttid
+                            && elem.value_kind() == vo_runtime::ValueKind::Struct
+                    }
                     _ => false,
                 })
                 .map(|i| i as u32)
         } else {
             None
         };
-        
+
         // Get field offsets for errors.Error: [msg, cause]
         let error_field_offsets = error_struct_meta_id.and_then(|meta_id| {
             let meta = self.module.struct_metas.get(meta_id as usize)?;
@@ -417,7 +453,7 @@ impl CodegenContext {
             let cause_offset = meta.get_field("cause").map(|f| f.offset)?;
             Some([msg_offset, cause_offset])
         });
-        
+
         self.module.well_known = vo_vm::bytecode::WellKnownTypes {
             error_named_type_id,
             error_iface_meta_id,
@@ -443,27 +479,63 @@ impl CodegenContext {
     }
 
     /// Update a NamedTypeMeta's methods map after function compilation
-    pub fn update_named_type_method(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool, signature_rttid: u32) {
+    pub fn update_named_type_method(
+        &mut self,
+        named_type_id: u32,
+        method_name: String,
+        func_id: u32,
+        is_pointer_receiver: bool,
+        signature_rttid: u32,
+    ) {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
-            meta.methods.insert(method_name, MethodInfo { func_id, is_pointer_receiver, signature_rttid });
+            meta.methods.insert(
+                method_name,
+                MethodInfo {
+                    func_id,
+                    is_pointer_receiver,
+                    signature_rttid,
+                },
+            );
         }
     }
 
     /// Update a NamedTypeMeta's methods map only if the method is not already present
-    pub fn update_named_type_method_if_absent(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool, signature_rttid: u32) {
+    pub fn update_named_type_method_if_absent(
+        &mut self,
+        named_type_id: u32,
+        method_name: String,
+        func_id: u32,
+        is_pointer_receiver: bool,
+        signature_rttid: u32,
+    ) {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
-            meta.methods.entry(method_name).or_insert(MethodInfo { func_id, is_pointer_receiver, signature_rttid });
+            meta.methods.entry(method_name).or_insert(MethodInfo {
+                func_id,
+                is_pointer_receiver,
+                signature_rttid,
+            });
         }
     }
 
     /// Update a NamedTypeMeta's methods map only if the method is not already present.
     /// Returns true if a new method was added, false if the method already existed.
-    pub fn update_named_type_method_if_absent_check(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool, signature_rttid: u32) -> bool {
+    pub fn update_named_type_method_if_absent_check(
+        &mut self,
+        named_type_id: u32,
+        method_name: String,
+        func_id: u32,
+        is_pointer_receiver: bool,
+        signature_rttid: u32,
+    ) -> bool {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
             use std::collections::btree_map::Entry;
             match meta.methods.entry(method_name) {
                 Entry::Vacant(e) => {
-                    e.insert(MethodInfo { func_id, is_pointer_receiver, signature_rttid });
+                    e.insert(MethodInfo {
+                        func_id,
+                        is_pointer_receiver,
+                        signature_rttid,
+                    });
                     true
                 }
                 Entry::Occupied(_) => false,
@@ -476,15 +548,24 @@ impl CodegenContext {
     /// Get methods from a NamedTypeMeta
     pub fn get_named_type_methods(&self, named_type_id: u32) -> Vec<(String, MethodInfo)> {
         if let Some(meta) = self.module.named_type_metas.get(named_type_id as usize) {
-            meta.methods.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+            meta.methods
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
         } else {
             Vec::new()
         }
     }
 
     /// Get a specific method from a NamedTypeMeta by name
-    pub fn get_method_from_named_type(&self, named_type_id: u32, method_name: &str) -> Option<MethodInfo> {
-        self.module.named_type_metas.get(named_type_id as usize)
+    pub fn get_method_from_named_type(
+        &self,
+        named_type_id: u32,
+        method_name: &str,
+    ) -> Option<MethodInfo> {
+        self.module
+            .named_type_metas
+            .get(named_type_id as usize)
             .and_then(|meta| meta.methods.get(method_name).cloned())
     }
 
@@ -510,56 +591,62 @@ impl CodegenContext {
                 }
             }
         }
-        
+
         // Check if already registered
         if let Some(id) = self.interface_meta_ids.get(&underlying) {
             return *id;
         }
-        
+
         // Build InterfaceMeta from type info (includes embedded interfaces)
-        let (method_names, methods) = if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying] {
-            let all_methods_ref = iface.all_methods();
-            let method_objs: Vec<ObjKey> = if let Some(methods) = all_methods_ref.as_ref() {
-                methods.iter().cloned().collect()
+        let (method_names, methods) =
+            if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying] {
+                let all_methods_ref = iface.all_methods();
+                let method_objs: Vec<ObjKey> = if let Some(methods) = all_methods_ref.as_ref() {
+                    methods.iter().cloned().collect()
+                } else {
+                    iface.methods().iter().cloned().collect()
+                };
+
+                let names: Vec<String> = method_objs
+                    .iter()
+                    .map(|m| tc_objs.lobjs[*m].name().to_string())
+                    .collect();
+
+                let metas: Vec<vo_vm::bytecode::InterfaceMethodMeta> = method_objs
+                    .iter()
+                    .map(|&m| {
+                        let obj = &tc_objs.lobjs[m];
+                        let name = obj.name().to_string();
+                        let sig_type = obj
+                            .typ()
+                            .expect("interface method must have signature type");
+                        let mut ctx = crate::type_interner::InternContext {
+                            named_type_ids: &mut self.named_type_ids,
+                            named_type_metas: &mut self.module.named_type_metas,
+                            struct_meta_ids: &mut self.struct_meta_ids,
+                            struct_metas: &mut self.module.struct_metas,
+                            interface_meta_ids: &self.interface_meta_ids,
+                        };
+                        let signature_rttid = crate::type_interner::intern_type_key(
+                            &mut self.type_interner,
+                            sig_type,
+                            tc_objs,
+                            interner,
+                            &mut ctx,
+                        )
+                        .rttid();
+                        vo_vm::bytecode::InterfaceMethodMeta {
+                            name,
+                            signature_rttid,
+                        }
+                    })
+                    .collect();
+
+                (names, metas)
             } else {
-                iface.methods().iter().cloned().collect()
+                (Vec::new(), Vec::new())
             };
 
-            let names: Vec<String> = method_objs
-                .iter()
-                .map(|m| tc_objs.lobjs[*m].name().to_string())
-                .collect();
-
-            let metas: Vec<vo_vm::bytecode::InterfaceMethodMeta> = method_objs
-                .iter()
-                .map(|&m| {
-                    let obj = &tc_objs.lobjs[m];
-                    let name = obj.name().to_string();
-                    let sig_type = obj.typ().expect("interface method must have signature type");
-                    let mut ctx = crate::type_interner::InternContext {
-                        named_type_ids: &mut self.named_type_ids,
-                        named_type_metas: &mut self.module.named_type_metas,
-                        struct_meta_ids: &mut self.struct_meta_ids,
-                        struct_metas: &mut self.module.struct_metas,
-                        interface_meta_ids: &self.interface_meta_ids,
-                    };
-                    let signature_rttid = crate::type_interner::intern_type_key(
-                        &mut self.type_interner,
-                        sig_type,
-                        tc_objs,
-                        interner,
-                        &mut ctx,
-                    )
-                    .rttid();
-                    vo_vm::bytecode::InterfaceMethodMeta { name, signature_rttid }
-                })
-                .collect();
-
-            (names, metas)
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        
         let meta = InterfaceMeta {
             name: String::new(), // Anonymous interface
             method_names,
@@ -579,9 +666,15 @@ impl CodegenContext {
     ) -> u32 {
         let iface_meta_id = self.get_or_create_interface_meta_id(type_key, tc_objs, interner);
         let iface_meta = &self.module.interface_metas[iface_meta_id as usize];
-        iface_meta.method_names.iter().position(|n| n == method_name)
+        iface_meta
+            .method_names
+            .iter()
+            .position(|n| n == method_name)
             .map(|i| i as u32)
-            .expect(&format!("method {} not found in interface - codegen bug", method_name))
+            .expect(&format!(
+                "method {} not found in interface - codegen bug",
+                method_name
+            ))
     }
 
     // === Itab and IfaceAssign constant ===
@@ -591,7 +684,13 @@ impl CodegenContext {
     /// rttid: runtime type id for slot0
     /// type_key: for itab building (used with lookup_field_or_method)
     /// Returns const_idx.
-    pub fn register_iface_assign_const_concrete(&mut self, rttid: u32, type_key: Option<TypeKey>, iface_meta_id: u32, tc_objs: &vo_analysis::objects::TCObjects) -> u16 {
+    pub fn register_iface_assign_const_concrete(
+        &mut self,
+        rttid: u32,
+        type_key: Option<TypeKey>,
+        iface_meta_id: u32,
+        tc_objs: &vo_analysis::objects::TCObjects,
+    ) -> u16 {
         if iface_meta_id == 0 {
             // Empty interface: no itab needed
             let packed = ((rttid as i64) << 32) | 0;
@@ -606,7 +705,8 @@ impl CodegenContext {
                 // Skip non-Named types - they don't have methods and shouldn't satisfy non-empty interfaces
                 // This can happen with variadic args or other edge cases
                 if tc_objs.types[tk].try_as_named().is_some() {
-                    self.pending_itabs.push((rttid, tk, iface_meta_id, const_idx));
+                    self.pending_itabs
+                        .push((rttid, tk, iface_meta_id, const_idx));
                 }
             }
             const_idx
@@ -622,7 +722,11 @@ impl CodegenContext {
 
     /// Build pending itabs after all methods are registered.
     /// Uses lookup_field_or_method to find methods (including promoted methods from embedded fields).
-    pub fn finalize_itabs(&mut self, tc_objs: &vo_analysis::objects::TCObjects, interner: &vo_common::SymbolInterner) {
+    pub fn finalize_itabs(
+        &mut self,
+        tc_objs: &vo_analysis::objects::TCObjects,
+        interner: &vo_common::SymbolInterner,
+    ) {
         let pending = std::mem::take(&mut self.pending_itabs);
         for (rttid, type_key, iface_meta_id, const_idx) in pending {
             let itab_id = self.build_itab(type_key, iface_meta_id, tc_objs, interner);
@@ -631,27 +735,34 @@ impl CodegenContext {
         }
     }
 
-    fn build_itab(&mut self, type_key: TypeKey, iface_meta_id: u32, tc_objs: &vo_analysis::objects::TCObjects, _interner: &vo_common::SymbolInterner) -> u32 {
+    fn build_itab(
+        &mut self,
+        type_key: TypeKey,
+        iface_meta_id: u32,
+        tc_objs: &vo_analysis::objects::TCObjects,
+        _interner: &vo_common::SymbolInterner,
+    ) -> u32 {
         // Get named_type_id - all methods should already be in NamedTypeMeta.methods
         // (direct methods from compile_functions, promoted methods from collect_promoted_methods)
-        let named_type_id = tc_objs.types[type_key].try_as_named()
+        let named_type_id = tc_objs.types[type_key]
+            .try_as_named()
             .and_then(|n| n.obj().as_ref().copied())
             .and_then(|obj_key| self.get_named_type_id(obj_key));
-        
-        let named_type_id = named_type_id
-            .expect("itab building requires Named type with registered NamedTypeMeta");
-        
+
+        let named_type_id =
+            named_type_id.expect("itab building requires Named type with registered NamedTypeMeta");
+
         // Check cache first - ensures same (type, interface) pair always gets same itab_id
         let cache_key = (named_type_id, iface_meta_id);
         if let Some(&itab_id) = self.itab_cache.get(&cache_key) {
             return itab_id;
         }
-        
+
         let iface_meta = &self.module.interface_metas[iface_meta_id as usize];
-        
+
         // Collect method names first to avoid borrow issues
         let method_names: Vec<String> = iface_meta.method_names.clone();
-        
+
         // Simply look up each method from NamedTypeMeta.methods
         let methods: Vec<u32> = method_names
             .iter()
@@ -670,14 +781,21 @@ impl CodegenContext {
         self.itab_cache.insert(cache_key, itab_id);
         itab_id
     }
-    
+
     // === Function registration ===
 
     /// Pre-register a function for forward references.
     /// Allocates a placeholder FunctionDef so the ID is valid immediately.
     /// - Methods: registered to func_indices for embed.rs method lookup
     /// - All functions: registered to objkey_to_func for cross-package lookup
-    pub fn declare_func(&mut self, recv: Option<TypeKey>, is_pointer_recv: bool, name: Symbol, obj_key: vo_analysis::objects::ObjKey, func_name: &str) {
+    pub fn declare_func(
+        &mut self,
+        recv: Option<TypeKey>,
+        is_pointer_recv: bool,
+        name: Symbol,
+        obj_key: vo_analysis::objects::ObjKey,
+        func_name: &str,
+    ) {
         let id = self.module.functions.len() as u32;
         // Push a placeholder that will be replaced later
         self.module.functions.push(FunctionDef {
@@ -715,14 +833,21 @@ impl CodegenContext {
             self.main_func_id = Some(id);
         }
     }
-    
+
     /// Get main function id (if exists)
     pub fn main_func_id(&self) -> Option<u32> {
         self.main_func_id
     }
 
-    pub fn get_func_index(&self, recv: Option<TypeKey>, is_pointer_recv: bool, name: Symbol) -> Option<u32> {
-        self.func_indices.get(&(recv, is_pointer_recv, name)).copied()
+    pub fn get_func_index(
+        &self,
+        recv: Option<TypeKey>,
+        is_pointer_recv: bool,
+        name: Symbol,
+    ) -> Option<u32> {
+        self.func_indices
+            .get(&(recv, is_pointer_recv, name))
+            .copied()
     }
 
     /// Add anonymous function (for generated functions like __init__, __entry__).
@@ -731,7 +856,7 @@ impl CodegenContext {
         self.module.functions.push(func);
         id
     }
-    
+
     /// Replace function at given ID (used by compile_func_decl_at).
     pub fn replace_function(&mut self, func_id: u32, func: FunctionDef) {
         self.module.functions[func_id as usize] = func;
@@ -782,7 +907,11 @@ impl CodegenContext {
 
     // === Global registration ===
 
-    pub fn register_global(&mut self, obj_key: vo_analysis::objects::ObjKey, def: GlobalDef) -> u32 {
+    pub fn register_global(
+        &mut self,
+        obj_key: vo_analysis::objects::ObjKey,
+        def: GlobalDef,
+    ) -> u32 {
         let slot_offset = self.global_slot_offset;
         self.global_slot_offset += def.slots as u32;
         self.module.globals.push(def);
@@ -822,7 +951,9 @@ impl CodegenContext {
             return idx;
         }
         let idx = self.module.constants.len() as u16;
-        self.module.constants.push(Constant::String(val.to_string()));
+        self.module
+            .constants
+            .push(Constant::String(val.to_string()));
         self.const_string.insert(val.to_string(), idx);
         idx
     }
@@ -853,18 +984,22 @@ impl CodegenContext {
         }
         // Materialize anonymous/nested struct metadata on demand.
         self.intern_type_key(canonical, info);
-        self.get_struct_meta_id(canonical)
-            .unwrap_or_else(|| panic!("compute_value_meta_raw: missing struct meta for type {:?}", canonical))
+        self.get_struct_meta_id(canonical).unwrap_or_else(|| {
+            panic!(
+                "compute_value_meta_raw: missing struct meta for type {:?}",
+                canonical
+            )
+        })
     }
 
     fn box_layout_key(slot_types: &[vo_runtime::SlotType]) -> Vec<u8> {
-        slot_types.iter().map(|&slot_type| slot_type as u8).collect()
+        slot_types
+            .iter()
+            .map(|&slot_type| slot_type as u8)
+            .collect()
     }
 
-    fn get_or_create_box_struct_meta_id(
-        &mut self,
-        slot_types: &[vo_runtime::SlotType],
-    ) -> u32 {
+    fn get_or_create_box_struct_meta_id(&mut self, slot_types: &[vo_runtime::SlotType]) -> u32 {
         let key = Self::box_layout_key(slot_types);
         if let Some(&id) = self.box_struct_meta_ids.get(&key) {
             return id;
@@ -886,7 +1021,7 @@ impl CodegenContext {
         info: &crate::type_info::TypeInfoWrapper,
     ) -> u32 {
         use vo_runtime::ValueKind;
-        
+
         let vk = info.type_value_kind(type_key);
         let meta_id: u32 = match vk {
             ValueKind::Struct => self.ensure_struct_meta_id(type_key, info),
@@ -899,7 +1034,7 @@ impl CodegenContext {
         };
         (meta_id << 8) | (vk as u32)
     }
-    
+
     /// Get or create ValueMeta constant in constant pool.
     /// Returns constant pool index.
     pub fn get_or_create_value_meta(
@@ -910,7 +1045,7 @@ impl CodegenContext {
         let value_meta = self.compute_value_meta_raw(type_key, info);
         self.add_const(Constant::Int(value_meta as i64))
     }
-    
+
     /// Get ValueMeta for boxing a variable.
     /// For boxed values whose physical object layout differs from the logical ValueKind,
     /// returns a synthetic Struct meta matching the actual slot layout stored by PtrNew.
@@ -924,7 +1059,10 @@ impl CodegenContext {
         // Reference types, arrays, and interfaces are boxed as raw slot sequences.
         // Their PtrNew object layout must therefore be described by box-local slot_types,
         // not by the logical ValueKind's runtime object layout.
-        if info.is_reference_type(type_key) || info.is_array(type_key) || info.is_interface(type_key) {
+        if info.is_reference_type(type_key)
+            || info.is_array(type_key)
+            || info.is_interface(type_key)
+        {
             use vo_runtime::ValueKind;
             let meta_id = self.get_or_create_box_struct_meta_id(&info.type_slot_types(type_key));
             let value_meta = (meta_id << 8) | (ValueKind::Struct as u32);
@@ -944,7 +1082,7 @@ impl CodegenContext {
         let elem_type = info.array_elem_type(array_type);
         self.get_or_create_value_meta(elem_type, info)
     }
-    
+
     /// Get or create key and value ValueMeta for MapNew.
     /// Returns (key_meta_const_idx, val_meta_const_idx, key_slots, val_slots, key_rttid).
     /// key_rttid is used for struct key deep hash/eq operations.
@@ -955,18 +1093,18 @@ impl CodegenContext {
     ) -> (u16, u16, u16, u16, u32) {
         let (key_slots, val_slots) = info.map_key_val_slots(map_type);
         let (key_type, val_type) = info.map_key_val_types(map_type);
-        
+
         let key_meta_idx = self.get_or_create_value_meta(key_type, info);
         let val_meta_idx = self.get_or_create_value_meta(val_type, info);
-        
+
         // Get key_rttid for struct key deep hash/eq
         let key_rttid = self.intern_type_key(key_type, info);
-        
+
         (key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid)
     }
 
     // === Closure ID ===
-    
+
     pub fn next_closure_id(&mut self) -> u32 {
         let id = self.module.functions.len() as u32;
         id
@@ -994,10 +1132,20 @@ impl CodegenContext {
     // === Method value support ===
 
     /// Helper: emit Copy instructions to copy params from src to dst
-    fn emit_copy_params(code: &mut Vec<vo_vm::instruction::Instruction>, src_start: u16, dst_start: u16, count: u16) {
+    fn emit_copy_params(
+        code: &mut Vec<vo_vm::instruction::Instruction>,
+        src_start: u16,
+        dst_start: u16,
+        count: u16,
+    ) {
         use vo_vm::instruction::{Instruction, Opcode};
         for i in 0..count {
-            code.push(Instruction::new(Opcode::Copy, dst_start + i, src_start + i, 0));
+            code.push(Instruction::new(
+                Opcode::Copy,
+                dst_start + i,
+                src_start + i,
+                0,
+            ));
         }
     }
 
@@ -1015,7 +1163,9 @@ impl CodegenContext {
         first_param
     }
 
-    fn flatten_param_layouts(param_layouts: &[Vec<vo_runtime::SlotType>]) -> Vec<vo_runtime::SlotType> {
+    fn flatten_param_layouts(
+        param_layouts: &[Vec<vo_runtime::SlotType>],
+    ) -> Vec<vo_runtime::SlotType> {
         let mut slot_types = Vec::new();
         for layout in param_layouts {
             slot_types.extend_from_slice(layout);
@@ -1050,7 +1200,8 @@ impl CodegenContext {
         use vo_vm::bytecode::FunctionDef;
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
         let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&slot_types);
-        let borrowed_scan_slots_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
+        let borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
         let wrapper_func = FunctionDef {
             name,
             param_count: param_slots,
@@ -1064,7 +1215,7 @@ impl CodegenContext {
             heap_ret_slots: Vec::new(),
             is_closure: true,
             error_ret_slot: -1,
-            has_defer: false,  // wrappers never have defer
+            has_defer: false, // wrappers never have defer
             has_calls,
             has_call_extern,
             code,
@@ -1079,9 +1230,9 @@ impl CodegenContext {
         self.method_value_wrappers.insert(cache_key, wrapper_id);
         wrapper_id
     }
-    
+
     /// Get or create wrapper function for method value (value or pointer receiver).
-    /// 
+    ///
     /// - `needs_deref`: true for value receiver (unbox via PtrGet), false for pointer receiver
     /// - `recv_slots`: slots needed for receiver in method signature
     /// - `param_slots`: total param slots including receiver
@@ -1097,9 +1248,15 @@ impl CodegenContext {
         capture_type: vo_vm::bytecode::TransferType,
     ) -> Result<u32, crate::error::CodegenError> {
         let cache_key = if is_pointer_recv {
-            MethodValueWrapperKey::Pointer { recv_type, func_id: method_func_id }
+            MethodValueWrapperKey::Pointer {
+                recv_type,
+                func_id: method_func_id,
+            }
         } else {
-            MethodValueWrapperKey::Value { recv_type, func_id: method_func_id }
+            MethodValueWrapperKey::Value {
+                recv_type,
+                func_id: method_func_id,
+            }
         };
         if let Some(&wrapper_id) = self.method_value_wrappers.get(&cache_key) {
             return Ok(wrapper_id);
@@ -1116,7 +1273,11 @@ impl CodegenContext {
         let mut builder = crate::func::FuncBuilder::new_closure(&wrapper_name);
         let first_param_slot = Self::define_wrapper_params(&mut builder, &param_slot_types);
         builder.add_param_transfer_types(&param_types);
-        builder.add_capture_type(capture_type.meta_raw, capture_type.rttid_raw, capture_type.slots);
+        builder.add_capture_type(
+            capture_type.meta_raw,
+            capture_type.rttid_raw,
+            capture_type.slots,
+        );
         builder.add_capture_slot_types(&[vo_runtime::SlotType::GcRef]);
 
         let capture_box = builder.alloc_slots(&[vo_runtime::SlotType::GcRef]);
@@ -1135,13 +1296,24 @@ impl CodegenContext {
 
         let (func_id_low, func_id_high) = crate::type_info::encode_func_id(method_func_id);
         let call_c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
-        builder.emit_with_flags(vo_vm::instruction::Opcode::Call, func_id_high, func_id_low, args_start, call_c);
+        builder.emit_with_flags(
+            vo_vm::instruction::Opcode::Call,
+            func_id_high,
+            func_id_low,
+            args_start,
+            call_c,
+        );
         builder.set_ret_slots(ret_slots);
-        builder.emit_op(vo_vm::instruction::Opcode::Return, args_start + total_arg_slots, ret_slots, 0);
+        builder.emit_op(
+            vo_vm::instruction::Opcode::Return,
+            args_start + total_arg_slots,
+            ret_slots,
+            0,
+        );
 
         Ok(self.register_method_value_wrapper_from_builder(cache_key, builder))
     }
-    
+
     /// Get or create wrapper function for interface method value.
     /// The wrapper gets interface from captures and calls via CallIface.
     pub fn get_or_create_method_value_wrapper_iface(
@@ -1154,9 +1326,17 @@ impl CodegenContext {
         param_types: Vec<vo_vm::bytecode::TransferType>,
         capture_type: vo_vm::bytecode::TransferType,
     ) -> Result<u32, crate::error::CodegenError> {
-        let param_slots = param_slot_types.iter().map(|slot_types| slot_types.len() as u16).sum();
+        let param_slots = param_slot_types
+            .iter()
+            .map(|slot_types| slot_types.len() as u16)
+            .sum();
         let ret_slots = ret_slot_types.len() as u16;
-        let cache_key = MethodValueWrapperKey::Interface { iface_type, method_idx, param_slots, ret_slots };
+        let cache_key = MethodValueWrapperKey::Interface {
+            iface_type,
+            method_idx,
+            param_slots,
+            ret_slots,
+        };
         if let Some(&wrapper_id) = self.method_value_wrappers.get(&cache_key) {
             return Ok(wrapper_id);
         }
@@ -1170,29 +1350,51 @@ impl CodegenContext {
         let mut builder = crate::func::FuncBuilder::new_closure(&wrapper_name);
         let first_param_slot = Self::define_wrapper_params(&mut builder, &param_slot_types);
         builder.add_param_transfer_types(&param_types);
-        builder.add_capture_type(capture_type.meta_raw, capture_type.rttid_raw, capture_type.slots);
+        builder.add_capture_type(
+            capture_type.meta_raw,
+            capture_type.rttid_raw,
+            capture_type.slots,
+        );
         builder.add_capture_slot_types(&[vo_runtime::SlotType::GcRef]);
 
         let capture_box = builder.alloc_slots(&[vo_runtime::SlotType::GcRef]);
         builder.emit_op(vo_vm::instruction::Opcode::ClosureGet, capture_box, 0, 0);
 
-        let iface_slot = builder.alloc_slots(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
+        let iface_slot = builder.alloc_slots(&[
+            vo_runtime::SlotType::Interface0,
+            vo_runtime::SlotType::Interface1,
+        ]);
         builder.emit_ptr_get(iface_slot, capture_box, 0, 2);
 
         let forwarded_slot_types = Self::flatten_param_layouts(&param_slot_types);
-        let args_start = builder.alloc_dynamic_call_buffer(&[vo_runtime::SlotType::Value], &forwarded_slot_types, &ret_slot_types);
+        let args_start = builder.alloc_dynamic_call_buffer(
+            &[vo_runtime::SlotType::Value],
+            &forwarded_slot_types,
+            &ret_slot_types,
+        );
         if let Some(first_param) = first_param_slot {
             builder.emit_copy(args_start, first_param, param_slots);
         }
 
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
-        builder.emit_with_flags(vo_vm::instruction::Opcode::CallIface, method_idx as u8, iface_slot, args_start, call_c);
+        builder.emit_with_flags(
+            vo_vm::instruction::Opcode::CallIface,
+            method_idx as u8,
+            iface_slot,
+            args_start,
+            call_c,
+        );
         builder.set_ret_slots(ret_slots);
-        builder.emit_op(vo_vm::instruction::Opcode::Return, args_start + param_slots, ret_slots, 0);
+        builder.emit_op(
+            vo_vm::instruction::Opcode::Return,
+            args_start + param_slots,
+            ret_slots,
+            0,
+        );
 
         Ok(self.register_method_value_wrapper_from_builder(cache_key, builder))
     }
-    
+
     /// Get or create wrapper function for method value on embedded interface field.
     /// The wrapper gets boxed outer struct from captures, reads the embedded interface,
     /// and calls via CallIface.
@@ -1206,34 +1408,56 @@ impl CodegenContext {
         method_name: &str,
         param_types: Vec<vo_vm::bytecode::TransferType>,
     ) -> Result<u32, crate::error::CodegenError> {
-        let cache_key = MethodValueWrapperKey::EmbeddedInterface { iface_type, embed_offset, method_idx };
+        let cache_key = MethodValueWrapperKey::EmbeddedInterface {
+            iface_type,
+            embed_offset,
+            method_idx,
+        };
         if let Some(&wrapper_id) = self.method_value_wrappers.get(&cache_key) {
             return Ok(wrapper_id);
         }
-        
+
         use vo_vm::instruction::{Instruction, Opcode};
-        
+
         let wrapper_param_slots = 1 + param_slots;
         let iface_slots = 2u16;
-        
+
         let mut code = Vec::new();
         let outer_ptr = wrapper_param_slots;
         let iface_reg = outer_ptr + 1;
         let args_start = iface_reg + iface_slots + 1;
-        
+
         // ClosureGet + PtrGet: get embedded interface from boxed outer struct
         code.push(Instruction::new(Opcode::ClosureGet, outer_ptr, 0, 0));
-        code.push(Instruction::with_flags(Opcode::PtrGet, iface_slots as u8, iface_reg, outer_ptr, embed_offset));
-        
+        code.push(Instruction::with_flags(
+            Opcode::PtrGet,
+            iface_slots as u8,
+            iface_reg,
+            outer_ptr,
+            embed_offset,
+        ));
+
         // Copy params and call
         Self::emit_copy_params(&mut code, 1, args_start, param_slots);
-        
+
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
-        code.push(Instruction::with_flags(Opcode::CallIface, method_idx as u8, iface_reg, args_start, call_c));
+        code.push(Instruction::with_flags(
+            Opcode::CallIface,
+            method_idx as u8,
+            iface_reg,
+            args_start,
+            call_c,
+        ));
         // Return values live at args_start + param_slots (new call buffer layout).
         let ret_start = args_start + param_slots;
-        code.push(Instruction::with_flags(Opcode::Return, 0, ret_start, ret_slots, 0));
-        
+        code.push(Instruction::with_flags(
+            Opcode::Return,
+            0,
+            ret_start,
+            ret_slots,
+            0,
+        ));
+
         let wrapper_name = format!(
             "__method_value_embed_iface_{}_{}_t{}_o{}",
             method_name,
@@ -1241,9 +1465,13 @@ impl CodegenContext {
             iface_type.raw(),
             embed_offset,
         );
-        let local_slots = wrapper_param_slots + 1 + iface_slots + 1 + (param_slots + ret_slots).max(1);
+        let local_slots =
+            wrapper_param_slots + 1 + iface_slots + 1 + (param_slots + ret_slots).max(1);
         let mut slot_types = vec![vo_runtime::SlotType::GcRef; 2]; // closure ref + ClosureGet dest
-        slot_types.extend(std::iter::repeat(vo_runtime::SlotType::Value).take((local_slots as usize).saturating_sub(2)));
+        slot_types.extend(
+            std::iter::repeat(vo_runtime::SlotType::Value)
+                .take((local_slots as usize).saturating_sub(2)),
+        );
         let capture_slot_types = vec![vo_runtime::SlotType::GcRef];
         let wrapper_id = self.register_wrapper_func(
             wrapper_name,
@@ -1260,14 +1488,18 @@ impl CodegenContext {
     }
 
     // === Wrapper cache ===
-    
+
     /// Get a cached wrapper by name.
     pub fn get_wrapper(&self, name: &str) -> Option<u32> {
         self.wrapper_cache.get(name).copied()
     }
-    
+
     /// Build wrapper from FuncBuilder, register in cache, return func_id.
-    pub fn register_wrapper_from_builder(&mut self, name: &str, builder: crate::func::FuncBuilder) -> u32 {
+    pub fn register_wrapper_from_builder(
+        &mut self,
+        name: &str,
+        builder: crate::func::FuncBuilder,
+    ) -> u32 {
         let func_id = self.add_function(builder.build());
         self.wrapper_cache.insert(name.to_string(), func_id);
         func_id
@@ -1300,16 +1532,28 @@ impl CodegenContext {
     /// Check all IDs are within 24-bit limit. Returns error message if exceeded.
     pub fn check_id_limits(&self) -> Result<(), String> {
         if self.module.struct_metas.len() as u32 > MAX_24BIT_ID {
-            return Err(format!("too many struct types: {} exceeds 24-bit limit", self.module.struct_metas.len()));
+            return Err(format!(
+                "too many struct types: {} exceeds 24-bit limit",
+                self.module.struct_metas.len()
+            ));
         }
         if self.module.interface_metas.len() as u32 > MAX_24BIT_ID {
-            return Err(format!("too many interface types: {} exceeds 24-bit limit", self.module.interface_metas.len()));
+            return Err(format!(
+                "too many interface types: {} exceeds 24-bit limit",
+                self.module.interface_metas.len()
+            ));
         }
         if self.module.named_type_metas.len() as u32 > MAX_24BIT_ID {
-            return Err(format!("too many named types: {} exceeds 24-bit limit", self.module.named_type_metas.len()));
+            return Err(format!(
+                "too many named types: {} exceeds 24-bit limit",
+                self.module.named_type_metas.len()
+            ));
         }
         if self.type_interner.len() as u32 > MAX_24BIT_ID {
-            return Err(format!("too many runtime types: {} exceeds 24-bit limit", self.type_interner.len()));
+            return Err(format!(
+                "too many runtime types: {} exceeds 24-bit limit",
+                self.type_interner.len()
+            ));
         }
         Ok(())
     }
@@ -1328,11 +1572,24 @@ impl CodegenContext {
 
     /// Record a debug location from a Span using SourceMap.
     /// Stores line:col:len for error display and highlighting.
-    pub fn add_debug_loc_from_span(&mut self, func_id: u32, pc: u32, span: Span, source_map: &SourceMap) {
+    pub fn add_debug_loc_from_span(
+        &mut self,
+        func_id: u32,
+        pc: u32,
+        span: Span,
+        source_map: &SourceMap,
+    ) {
         if let Some(file) = source_map.lookup_file(span.start) {
             let lc = file.line_col(span.start);
             let len = (span.end.to_u32() - span.start.to_u32()) as u16;
-            self.module.debug_info.add_loc(func_id, pc, file.name(), lc.line, lc.column as u16, len);
+            self.module.debug_info.add_loc(
+                func_id,
+                pc,
+                file.name(),
+                lc.line,
+                lc.column as u16,
+                len,
+            );
         }
     }
 

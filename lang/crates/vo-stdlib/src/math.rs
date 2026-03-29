@@ -179,14 +179,14 @@ fn frexp(x: f64) -> (f64, i64) {
     let sign = bits & 0x8000_0000_0000_0000;
     let exp = ((bits >> 52) & 0x7FF) as i64;
     let mantissa = bits & 0x000F_FFFF_FFFF_FFFF;
-    
+
     if exp == 0 {
         // Subnormal - normalize first
         let normalized = x * (1u64 << 54) as f64;
         let (frac, e) = frexp(normalized);
         return (frac, e - 54);
     }
-    
+
     // Normal number: return mantissa in [0.5, 1) and exponent
     let frac_bits = sign | 0x3FE0_0000_0000_0000 | mantissa;
     let frac = f64::from_bits(frac_bits);
@@ -206,7 +206,11 @@ fn fma(x: f64, y: f64, z: f64) -> f64 {
 
 #[vostd_fn("math", "Inf")]
 fn inf(sign: i64) -> f64 {
-    if sign >= 0 { f64::INFINITY } else { f64::NEG_INFINITY }
+    if sign >= 0 {
+        f64::INFINITY
+    } else {
+        f64::NEG_INFINITY
+    }
 }
 
 #[vostd_fn("math", "NaN")]

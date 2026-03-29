@@ -139,7 +139,9 @@ impl<K: Eq + Hash, V> VoMap<K, V> {
                         tombstone_idx = Some(idx);
                     }
                 }
-                Bucket::Occupied { key: k, hash: h, .. } => {
+                Bucket::Occupied {
+                    key: k, hash: h, ..
+                } => {
                     if *h == hash && *k == key {
                         // Replace existing
                         let old = mem::replace(
@@ -173,7 +175,11 @@ impl<K: Eq + Hash, V> VoMap<K, V> {
             match &self.buckets[idx] {
                 Bucket::Empty => return None,
                 Bucket::Tombstone => {}
-                Bucket::Occupied { key: k, value, hash: h } => {
+                Bucket::Occupied {
+                    key: k,
+                    value,
+                    hash: h,
+                } => {
                     if *h == hash && k == key {
                         return Some(value);
                     }
@@ -201,7 +207,9 @@ impl<K: Eq + Hash, V> VoMap<K, V> {
                 match &self.buckets[idx] {
                     Bucket::Empty => break None,
                     Bucket::Tombstone => {}
-                    Bucket::Occupied { key: k, hash: h, .. } => {
+                    Bucket::Occupied {
+                        key: k, hash: h, ..
+                    } => {
                         if *h == hash && k == key {
                             break Some(idx);
                         }
@@ -236,7 +244,9 @@ impl<K: Eq + Hash, V> VoMap<K, V> {
             match &self.buckets[idx] {
                 Bucket::Empty => return None,
                 Bucket::Tombstone => {}
-                Bucket::Occupied { key: k, hash: h, .. } => {
+                Bucket::Occupied {
+                    key: k, hash: h, ..
+                } => {
                     if *h == hash && k == key {
                         let old = core::mem::replace(&mut self.buckets[idx], Bucket::Tombstone);
                         self.len -= 1;
@@ -485,7 +495,7 @@ struct FnvHasher(u64);
 impl FnvHasher {
     const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
     const PRIME: u64 = 0x100000001b3;
-    
+
     #[inline]
     fn new() -> Self {
         Self(Self::OFFSET_BASIS)
@@ -497,7 +507,7 @@ impl core::hash::Hasher for FnvHasher {
     fn finish(&self) -> u64 {
         self.0
     }
-    
+
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
         for &byte in bytes {
@@ -558,12 +568,12 @@ mod tests {
         }
 
         let gen_before = map.generation();
-        
+
         // Force resize by inserting many elements
         for i in 10..20 {
             map.insert(i, i);
         }
-        
+
         // Generation should have changed
         assert_ne!(map.generation(), gen_before);
     }

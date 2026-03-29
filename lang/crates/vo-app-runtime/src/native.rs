@@ -6,12 +6,7 @@ use std::sync::Arc;
 use vo_runtime::output::CaptureSink;
 use vo_vm::vm::Vm;
 
-use crate::{
-    take_captured_stdout,
-    GuiAppSession,
-    SessionDispatchError,
-    StepResult,
-};
+use crate::{take_captured_stdout, GuiAppSession, SessionDispatchError, StepResult};
 
 type IslandFrameSink = Box<dyn FnMut(Vec<u8>) -> Result<(), String> + Send>;
 
@@ -47,7 +42,9 @@ impl NativeGuiRuntime {
     pub fn install_host_bridge(&mut self, bridge: vo_ext::host::HostBridge) {
         vo_ext::host::install(bridge);
         let ptr = vo_ext::host::with_bridge(|b| vo_ext::host::encode_bridge_ptr(b)).unwrap();
-        unsafe { self.session.vm_mut().broadcast_bridge(ptr); }
+        unsafe {
+            self.session.vm_mut().broadcast_bridge(ptr);
+        }
     }
 
     /// Convenience: build and install a host bridge from a tick provider and
@@ -61,8 +58,7 @@ impl NativeGuiRuntime {
         tick_provider: crate::NativeTickProvider,
         capabilities: &[&str],
     ) {
-        let mut bridge = vo_ext::host::HostBridge::new()
-            .with_tick(Box::new(tick_provider));
+        let mut bridge = vo_ext::host::HostBridge::new().with_tick(Box::new(tick_provider));
         for cap in capabilities {
             bridge = bridge.with_capability(*cap);
         }
@@ -81,7 +77,9 @@ impl NativeGuiRuntime {
 
     pub fn start(&mut self) -> Result<StepResult, SessionDispatchError<String>> {
         let sink = &mut self.island_frame_sink;
-        let step = self.session.start_and_emit(|bytes| emit_via_sink(sink, bytes))?;
+        let step = self
+            .session
+            .start_and_emit(|bytes| emit_via_sink(sink, bytes))?;
         Ok(step)
     }
 
@@ -91,11 +89,8 @@ impl NativeGuiRuntime {
         payload: &str,
     ) -> Result<StepResult, SessionDispatchError<String>> {
         let sink = &mut self.island_frame_sink;
-        self.session.dispatch_event_and_emit(
-            handler_id,
-            payload,
-            |bytes| emit_via_sink(sink, bytes),
-        )
+        self.session
+            .dispatch_event_and_emit(handler_id, payload, |bytes| emit_via_sink(sink, bytes))
     }
 
     pub fn try_dispatch_event(
@@ -104,11 +99,8 @@ impl NativeGuiRuntime {
         payload: &str,
     ) -> Result<Option<StepResult>, SessionDispatchError<String>> {
         let sink = &mut self.island_frame_sink;
-        self.session.try_dispatch_event_and_emit(
-            handler_id,
-            payload,
-            |bytes| emit_via_sink(sink, bytes),
-        )
+        self.session
+            .try_dispatch_event_and_emit(handler_id, payload, |bytes| emit_via_sink(sink, bytes))
     }
 
     pub fn dispatch_island_frame(
@@ -116,10 +108,8 @@ impl NativeGuiRuntime {
         data: &[u8],
     ) -> Result<StepResult, SessionDispatchError<String>> {
         let sink = &mut self.island_frame_sink;
-        self.session.dispatch_inbound_island_frame_and_emit(
-            data,
-            |bytes| emit_via_sink(sink, bytes),
-        )
+        self.session
+            .dispatch_inbound_island_frame_and_emit(data, |bytes| emit_via_sink(sink, bytes))
     }
 
     /// Shut down the runtime, cleaning up VM state and host bridge.

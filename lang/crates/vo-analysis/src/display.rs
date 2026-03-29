@@ -3,7 +3,6 @@
 //! This module provides display/formatting traits for types, objects,
 //! and other type-checker constructs.
 
-
 use crate::obj::{fmt_obj, Pos};
 use crate::objects::{ObjKey, ScopeKey, TCObjects, TypeKey};
 use crate::scope::fmt_scope_full;
@@ -79,4 +78,3 @@ impl Display for Selection {
         self.fmt(f, objs)
     }
 }
-

@@ -4,24 +4,14 @@ use std::sync::Arc;
 
 use vo_runtime::output::CaptureSink;
 use vo_stdlib::toolchain::{
-    install_toolchain_host,
-    is_toolchain_host_installed,
-    ToolchainHost,
-    ToolchainModule,
+    install_toolchain_host, is_toolchain_host_installed, ToolchainHost, ToolchainModule,
     ToolchainRunMode,
 };
 use vo_syntax::display::format_file;
 use vo_syntax::parser;
 
 use crate::{
-    compile,
-    compile_string,
-    format_text,
-    parse_text,
-    run,
-    run_with_output,
-    CompileOutput,
-    Module,
+    compile, compile_string, format_text, parse_text, run, run_with_output, CompileOutput, Module,
     RunMode,
 };
 
@@ -55,13 +45,11 @@ fn run_mode(mode: ToolchainRunMode) -> RunMode {
 fn parse_source(source: &str) -> Result<String, String> {
     let (file, diags, _) = parser::parse(source, 0);
     if diags.has_errors() {
-        return Err(
-            diags
-                .iter()
-                .map(|diag| diag.message.as_str())
-                .collect::<Vec<_>>()
-                .join("; "),
-        );
+        return Err(diags
+            .iter()
+            .map(|diag| diag.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; "));
     }
     Ok(format!("{:#?}", file))
 }
@@ -69,13 +57,11 @@ fn parse_source(source: &str) -> Result<String, String> {
 fn format_source_impl(source: &str) -> Result<String, String> {
     let (file, diags, interner) = parser::parse(source, 0);
     if diags.has_errors() {
-        return Err(
-            diags
-                .iter()
-                .map(|diag| diag.message.as_str())
-                .collect::<Vec<_>>()
-                .join("; "),
-        );
+        return Err(diags
+            .iter()
+            .map(|diag| diag.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; "));
     }
     Ok(format_file(&file, &interner))
 }
@@ -131,11 +117,15 @@ fn init_file_impl(path: &str) -> Result<(), String> {
 
 impl ToolchainHost for EngineToolchainHost {
     fn compile_file(&self, path: &str) -> Result<ToolchainModule, String> {
-        compile(path).map(into_toolchain_module).map_err(|e| e.to_string())
+        compile(path)
+            .map(into_toolchain_module)
+            .map_err(|e| e.to_string())
     }
 
     fn compile_dir(&self, path: &str) -> Result<ToolchainModule, String> {
-        compile(path).map(into_toolchain_module).map_err(|e| e.to_string())
+        compile(path)
+            .map(into_toolchain_module)
+            .map_err(|e| e.to_string())
     }
 
     fn compile_string(&self, code: &str) -> Result<ToolchainModule, String> {
@@ -148,9 +138,18 @@ impl ToolchainHost for EngineToolchainHost {
         run(from_toolchain_module(module), run_mode(mode), Vec::new()).map_err(|e| e.to_string())
     }
 
-    fn run_capture(&self, module: &ToolchainModule, mode: ToolchainRunMode) -> Result<String, String> {
+    fn run_capture(
+        &self,
+        module: &ToolchainModule,
+        mode: ToolchainRunMode,
+    ) -> Result<String, String> {
         let sink = CaptureSink::new();
-        let result = run_with_output(from_toolchain_module(module), run_mode(mode), Vec::new(), sink.clone());
+        let result = run_with_output(
+            from_toolchain_module(module),
+            run_mode(mode),
+            Vec::new(),
+            sink.clone(),
+        );
         let output = sink.take();
         match result {
             Ok(()) => Ok(output),
@@ -238,18 +237,20 @@ impl ToolchainHost for EngineToolchainHost {
 }
 
 pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf, String> {
-    use vo_module::identity::ModulePath;
-    use vo_module::version::ExactVersion;
     use vo_module::github_registry::GitHubRegistry;
+    use vo_module::identity::ModulePath;
     use vo_module::materialize;
     use vo_module::registry::Registry;
     use vo_module::schema::lockfile::LockedModule;
+    use vo_module::version::ExactVersion;
 
     let mp = ModulePath::parse(module).map_err(|e| format!("{e}"))?;
     let ev = ExactVersion::parse(version).map_err(|e| format!("{e}"))?;
 
     let registry = GitHubRegistry::new();
-    let manifest = registry.fetch_manifest(&mp, &ev).map_err(|e| format!("{e}"))?;
+    let manifest = registry
+        .fetch_manifest(&mp, &ev)
+        .map_err(|e| format!("{e}"))?;
 
     let mod_cache = crate::compile::default_mod_cache_root();
     let cache_dir = materialize::cache_dir(&mod_cache, &mp, &ev);
@@ -263,13 +264,15 @@ pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf,
         release_manifest: manifest.source.digest.clone(), // placeholder
         source: manifest.source.digest.clone(),
         deps: manifest.require.iter().map(|r| r.module.clone()).collect(),
-        artifacts: manifest.artifacts.iter().map(|a| {
-            vo_module::schema::lockfile::LockedArtifact {
+        artifacts: manifest
+            .artifacts
+            .iter()
+            .map(|a| vo_module::schema::lockfile::LockedArtifact {
                 id: a.id.clone(),
                 size: a.size,
                 digest: a.digest.clone(),
-            }
-        }).collect(),
+            })
+            .collect(),
     };
 
     let lf = vo_module::schema::lockfile::LockFile {
@@ -283,8 +286,8 @@ pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf,
     };
 
     materialize::download_all(&mod_cache, &lf, &registry).map_err(|e| format!("{e}"))?;
-    let manifests = vo_module::ext_manifest::discover_extensions(&cache_dir)
-        .map_err(|e| format!("{e}"))?;
+    let manifests =
+        vo_module::ext_manifest::discover_extensions(&cache_dir).map_err(|e| format!("{e}"))?;
     crate::compile::ensure_extension_manifests_built(&manifests, &lf.resolved)
         .map_err(|e| format!("{e}"))?;
 

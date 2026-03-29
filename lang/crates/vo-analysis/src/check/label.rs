@@ -3,7 +3,6 @@
 //! This module validates label declarations and usages for goto, break,
 //! and continue statements.
 
-
 use std::collections::HashMap;
 
 use vo_common::span::Span;
@@ -138,14 +137,22 @@ impl Checker {
                 if block.mark_used(&name) {
                     // Label found and marked as used
                 } else {
-                    self.error_code_msg(TypeError::LabelNotDeclared, goto.label.span, format!("label {} not declared", name));
+                    self.error_code_msg(
+                        TypeError::LabelNotDeclared,
+                        goto.label.span,
+                        format!("label {} not declared", name),
+                    );
                 }
             }
             StmtKind::Break(brk) => {
                 if let Some(label) = &brk.label {
                     let name = self.ident_name(label);
                     if !block.mark_used(&name) {
-                        self.error_code_msg(TypeError::LabelNotDeclared, label.span, format!("label {} not declared", name));
+                        self.error_code_msg(
+                            TypeError::LabelNotDeclared,
+                            label.span,
+                            format!("label {} not declared", name),
+                        );
                     }
                 }
             }
@@ -153,7 +160,11 @@ impl Checker {
                 if let Some(label) = &cont.label {
                     let name = self.ident_name(label);
                     if !block.mark_used(&name) {
-                        self.error_code_msg(TypeError::LabelNotDeclared, label.span, format!("label {} not declared", name));
+                        self.error_code_msg(
+                            TypeError::LabelNotDeclared,
+                            label.span,
+                            format!("label {} not declared", name),
+                        );
                     }
                 }
             }
@@ -195,7 +206,12 @@ impl Checker {
     fn report_unused_labels(&mut self, block: &LabelBlock) {
         for (name, info) in &block.labels {
             if !info.used {
-                self.emit(TypeError::UnusedLabel.at_with_message(info.span, format!("label {} declared but not used", name)));
+                self.emit(
+                    TypeError::UnusedLabel.at_with_message(
+                        info.span,
+                        format!("label {} declared but not used", name),
+                    ),
+                );
             }
         }
     }

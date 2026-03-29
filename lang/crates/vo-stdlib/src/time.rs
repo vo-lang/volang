@@ -45,13 +45,13 @@ fn timesys_sleep_nano(ctx: &mut ExternCallContext) -> ExternResult {
     if d <= 0 {
         return ExternResult::Ok;
     }
-    
+
     // Check if we're resuming from a timer completion
     if let Some(_token) = ctx.take_resume_io_token() {
         // Timer completed, return normally
         return ExternResult::Ok;
     }
-    
+
     // Submit timer and wait for I/O
     let token = ctx.io_mut().submit_timer(d);
     ExternResult::WaitIo { token }
@@ -60,13 +60,13 @@ fn timesys_sleep_nano(ctx: &mut ExternCallContext) -> ExternResult {
 // ==================== Timezone support ====================
 
 #[cfg(feature = "std")]
-use chrono::{TimeZone as ChronoTz, Offset};
+use chrono::{Offset, TimeZone as ChronoTz};
 #[cfg(feature = "std")]
 use chrono_tz::Tz;
 #[cfg(feature = "std")]
-use vo_runtime::objects::string as str_obj;
-#[cfg(feature = "std")]
 use vo_runtime::builtins::error_helper::write_error_to;
+#[cfg(feature = "std")]
+use vo_runtime::objects::string as str_obj;
 
 /// Convert unix_sec to a DateTime in the given Tz, handling ambiguous/non-existent times.
 #[cfg(feature = "std")]
@@ -82,7 +82,9 @@ fn tz_at(tz: Tz, unix_sec: i64) -> chrono::DateTime<Tz> {
                 chrono::LocalResult::Ambiguous(a, _) => a,
                 chrono::LocalResult::None => {
                     // Extremely unlikely: still in gap after +3600; use UTC fallback.
-                    chrono::DateTime::from_timestamp(unix_sec, 0).unwrap().with_timezone(&tz)
+                    chrono::DateTime::from_timestamp(unix_sec, 0)
+                        .unwrap()
+                        .with_timezone(&tz)
                 }
             }
         }
@@ -172,7 +174,10 @@ fn timesys_load_location(call: &mut ExternCallContext) -> ExternResult {
 }
 
 #[cfg(feature = "std")]
-pub fn register_externs(registry: &mut vo_runtime::ffi::ExternRegistry, externs: &[vo_runtime::bytecode::ExternDef]) {
+pub fn register_externs(
+    registry: &mut vo_runtime::ffi::ExternRegistry,
+    externs: &[vo_runtime::bytecode::ExternDef],
+) {
     for (id, def) in externs.iter().enumerate() {
         match def.name.as_str() {
             "time_nowUnixNano" => registry.register(id as u32, timesys_now_unix_nano),

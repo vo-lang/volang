@@ -3,14 +3,13 @@
 //! This module type-checks statements, handling control flow,
 //! scope management, and statement-specific semantics.
 
-
 use std::collections::HashMap;
 
+use ordered_float::OrderedFloat;
 use vo_common::diagnostics::Label;
 use vo_common::span::Span;
 use vo_syntax::ast::Ident;
 use vo_syntax::ast::{AssignOp, Block, Expr, ExprKind, ForClause, Stmt, StmtKind};
-use ordered_float::OrderedFloat;
 
 use crate::constant::Value;
 use crate::objects::{ScopeKey, TypeKey};
@@ -169,7 +168,14 @@ impl Checker {
         // Check for missing return
         let sig_val = self.otype(sig).try_as_signature().unwrap();
         if sig_val.results_count(self.objs()) > 0 && !self.is_terminating_block(body) {
-            self.error_code_msg(TypeError::MissingReturn, Span::new(vo_common::BytePos(end as u32), vo_common::BytePos(end as u32)), "missing return");
+            self.error_code_msg(
+                TypeError::MissingReturn,
+                Span::new(
+                    vo_common::BytePos(end as u32),
+                    vo_common::BytePos(end as u32),
+                ),
+                "missing return",
+            );
         }
 
         // Check for unused variables
@@ -204,7 +210,11 @@ impl Checker {
         unused.sort_by(|a, b| a.0.start.cmp(&b.0.start));
 
         for (span, name) in unused {
-            self.error_code_msg(TypeError::UnusedVar, span, format!("{} declared but not used", name));
+            self.error_code_msg(
+                TypeError::UnusedVar,
+                span,
+                format!("{} declared but not used", name),
+            );
         }
 
         // Recursively check children scopes (but not function literal scopes)
@@ -239,7 +249,10 @@ impl Checker {
                     self.error_code_msg(
                         TypeError::MultipleDefaults,
                         case.span,
-                        format!("multiple defaults (first at {})", first_span.start.to_usize()),
+                        format!(
+                            "multiple defaults (first at {})",
+                            first_span.start.to_usize()
+                        ),
                     );
                 } else {
                     first_default = Some(case.span);
@@ -258,7 +271,10 @@ impl Checker {
                     self.error_code_msg(
                         TypeError::MultipleDefaults,
                         case.span,
-                        format!("multiple defaults (first at {})", first_span.start.to_usize()),
+                        format!(
+                            "multiple defaults (first at {})",
+                            first_span.start.to_usize()
+                        ),
                     );
                 } else {
                     first_default = Some(case.span);
@@ -277,7 +293,10 @@ impl Checker {
                     self.error_code_msg(
                         TypeError::MultipleDefaults,
                         case.span,
-                        format!("multiple defaults (first at {})", first_span.start.to_usize()),
+                        format!(
+                            "multiple defaults (first at {})",
+                            first_span.start.to_usize()
+                        ),
                     );
                 } else {
                     first_default = Some(case.span);
@@ -295,16 +314,28 @@ impl Checker {
         let under = typ::underlying_type(queue_type, self.objs());
         let queue = self.otype(under);
         let Some((dir, elem)) = queue.queue_dir_elem() else {
-            self.error_code_msg(TypeError::SendToNonChan, span, "cannot send to non-channel-or-port type");
+            self.error_code_msg(
+                TypeError::SendToNonChan,
+                span,
+                "cannot send to non-channel-or-port type",
+            );
             return None;
         };
         if in_select && queue.is_port() {
-            self.error_code_msg(TypeError::InvalidOp, span, "select does not support send on port");
+            self.error_code_msg(
+                TypeError::InvalidOp,
+                span,
+                "select does not support send on port",
+            );
             return None;
         }
         if dir == ChanDir::RecvOnly {
             if queue.is_port() {
-                self.error_code_msg(TypeError::InvalidOp, span, "cannot send to receive-only port");
+                self.error_code_msg(
+                    TypeError::InvalidOp,
+                    span,
+                    "cannot send to receive-only port",
+                );
             } else {
                 self.error_code(TypeError::SendToRecvOnly, span);
             }
@@ -317,12 +348,20 @@ impl Checker {
         let under = typ::underlying_type(queue_type, self.objs());
         let queue = self.otype(under);
         let Some((dir, elem)) = queue.queue_dir_elem() else {
-            self.error_code_msg(TypeError::RecvFromNonChan, span, "cannot receive from non-channel-or-port");
+            self.error_code_msg(
+                TypeError::RecvFromNonChan,
+                span,
+                "cannot receive from non-channel-or-port",
+            );
             return None;
         };
         if dir == ChanDir::SendOnly {
             if queue.is_port() {
-                self.error_code_msg(TypeError::InvalidOp, span, "cannot receive from send-only port");
+                self.error_code_msg(
+                    TypeError::InvalidOp,
+                    span,
+                    "cannot receive from send-only port",
+                );
             } else {
                 self.error_code(TypeError::RecvFromSendOnly, span);
             }
@@ -332,12 +371,7 @@ impl Checker {
     }
 
     /// Checks case values in an expression switch.
-    fn case_values(
-        &mut self,
-        x: &mut Operand,
-        exprs: &[Expr],
-        seen: &mut ValueMap,
-    ) {
+    fn case_values(&mut self, x: &mut Operand, exprs: &[Expr], seen: &mut ValueMap) {
         for e in exprs {
             let v = &mut Operand::new();
             self.expr(v, e);
@@ -354,7 +388,7 @@ impl Checker {
             if res.invalid() {
                 continue;
             }
-            
+
             // Check for duplicate constant values
             if let OperandMode::Constant(val) = &v.mode {
                 match GoVal::from_const(val) {
@@ -367,8 +401,13 @@ impl Checker {
                         {
                             self.emit(
                                 TypeError::DuplicateCase
-                                    .at_with_message(e.span, format!("duplicate case {} in expression switch", val))
-                                    .with_label(Label::secondary(pt.span).with_message("previous case"))
+                                    .at_with_message(
+                                        e.span,
+                                        format!("duplicate case {} in expression switch", val),
+                                    )
+                                    .with_label(
+                                        Label::secondary(pt.span).with_message("previous case"),
+                                    ),
                             );
                             continue;
                         }
@@ -413,7 +452,7 @@ impl Checker {
                 self.emit(
                     TypeError::DuplicateCase
                         .at_with_message(span, format!("duplicate case {} in type switch", ts))
-                        .with_label(Label::secondary(prev_span).with_message("previous case"))
+                        .with_label(Label::secondary(prev_span).with_message("previous case")),
                 );
                 continue;
             }
@@ -552,10 +591,15 @@ impl Checker {
                             return;
                         }
                         if astmt.lhs.len() == 1 && astmt.rhs.len() == 1 {
-                            if let vo_syntax::ast::ExprKind::DynAccess(dyn_access) = &astmt.lhs[0].kind {
+                            if let vo_syntax::ast::ExprKind::DynAccess(dyn_access) =
+                                &astmt.lhs[0].kind
+                            {
                                 use vo_syntax::ast::DynAccessOp;
 
-                                let is_write = matches!(dyn_access.op, DynAccessOp::Field(_) | DynAccessOp::Index(_));
+                                let is_write = matches!(
+                                    dyn_access.op,
+                                    DynAccessOp::Field(_) | DynAccessOp::Index(_)
+                                );
                                 if is_write {
                                     // Dynamic write is allowed in any function:
                                     // - With error return: fail-on-error (propagate error)
@@ -579,7 +623,11 @@ impl Checker {
                                             if key_x.invalid() {
                                                 return;
                                             }
-                                            self.assignment(&mut key_x, Some(any_type), "dynamic write index");
+                                            self.assignment(
+                                                &mut key_x,
+                                                Some(any_type),
+                                                "dynamic write index",
+                                            );
                                         }
                                         _ => unreachable!(),
                                     }
@@ -589,10 +637,18 @@ impl Checker {
                                     if val_x.invalid() {
                                         return;
                                     }
-                                    self.assignment(&mut val_x, Some(any_type), "dynamic write value");
+                                    self.assignment(
+                                        &mut val_x,
+                                        Some(any_type),
+                                        "dynamic write value",
+                                    );
 
                                     // Resolve protocol method for static dispatch (SetAttr or SetIndex)
-                                    let dyn_resolve = match self.resolve_dyn_set_method(base_type, &dyn_access.op, astmt.lhs[0].span) {
+                                    let dyn_resolve = match self.resolve_dyn_set_method(
+                                        base_type,
+                                        &dyn_access.op,
+                                        astmt.lhs[0].span,
+                                    ) {
                                         Ok(resolve) => resolve,
                                         Err(()) => {
                                             // Error already reported
@@ -638,8 +694,10 @@ impl Checker {
                             self.error_code_msg(
                                 TypeError::GoIslandTargetNotIsland,
                                 island.span,
-                                format!("go @(island) target has type {}, want island",
-                                    self.type_str(x.typ.unwrap())),
+                                format!(
+                                    "go @(island) target has type {}, want island",
+                                    self.type_str(x.typ.unwrap())
+                                ),
                             );
                         }
                     }
@@ -697,11 +755,22 @@ impl Checker {
                                     continue;
                                 }
                                 let alt_pos = self.lobj(alt).pos();
-                                let alt_span = Span::new(vo_common::BytePos(alt_pos as u32), vo_common::BytePos(alt_pos as u32));
+                                let alt_span = Span::new(
+                                    vo_common::BytePos(alt_pos as u32),
+                                    vo_common::BytePos(alt_pos as u32),
+                                );
                                 self.emit(
                                     TypeError::ResultNotInScope
-                                        .at_with_message(stmt.span, format!("result parameter {} not in scope at return", lobj.name()))
-                                        .with_label(Label::secondary(alt_span).with_message(format!("inner declaration of {}", lobj.name())))
+                                        .at_with_message(
+                                            stmt.span,
+                                            format!(
+                                                "result parameter {} not in scope at return",
+                                                lobj.name()
+                                            ),
+                                        )
+                                        .with_label(Label::secondary(alt_span).with_message(
+                                            format!("inner declaration of {}", lobj.name()),
+                                        )),
                                 );
                                 // ok to continue
                             }
@@ -815,7 +884,7 @@ impl Checker {
                 if let Some(init) = &tss.init {
                     self.stmt(init, &StmtContext::new());
                 }
-                
+
                 // Check if there's a lhs variable (x := expr.(type))
                 // If name is "_", treat as None to avoid declared but not used error
                 let lhs: Option<&Ident> = tss.assign.as_ref().and_then(|assign| {
@@ -828,7 +897,7 @@ impl Checker {
                         Some(assign)
                     }
                 });
-                
+
                 // For type switch, tss.expr is x.(type) - we need to check the inner expr
                 // to avoid "use of .(type) outside type switch" error from expr checker
                 let x = &mut Operand::new();
@@ -848,21 +917,21 @@ impl Checker {
                     self.close_scope();
                     return;
                 }
-                
+
                 self.multiple_defaults_type(&tss.cases);
-                
+
                 // Track seen types for duplicate detection
                 let mut seen_types: HashMap<Option<TypeKey>, Span> = HashMap::new();
                 let mut lhs_vars: Vec<crate::objects::ObjKey> = Vec::new();
-                
+
                 // Save original interface type before case_types calls mutate x.typ
                 let original_xtyp = x.typ;
-                
+
                 for clause in &tss.cases {
                     // Check each type in this type switch case.
                     let mut t = self.case_types(x, xtype, &clause.types, &mut seen_types);
                     self.open_scope(clause.span, "case");
-                    
+
                     // If lhs exists, declare a corresponding variable in the case-local scope.
                     if let Some(lhs_ident) = lhs {
                         // spec: "The TypeSwitchGuard may include a short variable declaration.
@@ -876,7 +945,9 @@ impl Checker {
                         let name = self.resolve_symbol(lhs_ident.symbol).to_string();
                         let okey = self.new_var(lhs_ident.span, Some(self.pkg), name, t);
                         // Type switch case variable scope starts at the case clause
-                        let scope_pos = clause.types.last()
+                        let scope_pos = clause
+                            .types
+                            .last()
                             .and_then(|te| te.as_ref())
                             .map(|te| te.span.end.to_usize())
                             .unwrap_or(clause.span.start.to_usize());
@@ -887,11 +958,11 @@ impl Checker {
                         // Collect them for later analysis.
                         lhs_vars.push(okey);
                     }
-                    
+
                     self.stmt_list(&clause.body, &inner_ctx);
                     self.close_scope();
                 }
-                
+
                 // If lhs exists, we must have at least one lhs variable that was used.
                 if lhs.is_some() {
                     let used = lhs_vars.iter().fold(false, |acc, &okey| {
@@ -903,10 +974,13 @@ impl Checker {
                     if !used {
                         let lhs_ident = lhs.unwrap();
                         let name = self.resolve_symbol(lhs_ident.symbol);
-                        self.emit(TypeError::UnusedVar.at_with_message(lhs_ident.span, format!("{} declared but not used", name)));
+                        self.emit(TypeError::UnusedVar.at_with_message(
+                            lhs_ident.span,
+                            format!("{} declared but not used", name),
+                        ));
                     }
                 }
-                
+
                 self.close_scope();
             }
 
@@ -925,7 +999,9 @@ impl Checker {
                                 // Check channel type for send
                                 if !ch.invalid() {
                                     let chtype = ch.typ.unwrap();
-                                    if let Some(elem_ty) = self.send_queue_elem_type(chtype, send.chan.span, true) {
+                                    if let Some(elem_ty) =
+                                        self.send_queue_elem_type(chtype, send.chan.span, true)
+                                    {
                                         if !val.invalid() {
                                             self.assignment(val, Some(elem_ty), "send");
                                         }
@@ -942,25 +1018,29 @@ impl Checker {
                                 } else {
                                     None
                                 };
-                                
+
                                 // Handle lhs variables (v := <-ch or v, ok := <-ch)
                                 if !recv.lhs.is_empty() {
                                     let scope_key = self.octx.scope.unwrap();
                                     let bool_type = self.basic_type(BasicType::Bool);
-                                    
+
                                     // Types for lhs: [elem_type, bool] for comma-ok
-                                    let rhs_types: [Option<TypeKey>; 2] = [
-                                        elem_type,
-                                        Some(bool_type),
-                                    ];
-                                    
+                                    let rhs_types: [Option<TypeKey>; 2] =
+                                        [elem_type, Some(bool_type)];
+
                                     if recv.define {
                                         // Short variable declaration: v := <-ch or v, ok := <-ch
                                         let mut new_vars = Vec::new();
                                         for (i, ident) in recv.lhs.iter().enumerate() {
-                                            let name = self.resolve_symbol(ident.symbol).to_string();
+                                            let name =
+                                                self.resolve_symbol(ident.symbol).to_string();
                                             let var_type = rhs_types.get(i).copied().flatten();
-                                            let okey = self.new_var(ident.span, Some(self.pkg), name.clone(), var_type);
+                                            let okey = self.new_var(
+                                                ident.span,
+                                                Some(self.pkg),
+                                                name.clone(),
+                                                var_type,
+                                            );
                                             self.result.record_def(ident.clone(), Some(okey));
                                             if name != "_" {
                                                 new_vars.push(okey);
@@ -974,11 +1054,14 @@ impl Checker {
                                     } else {
                                         // Assignment: v = <-ch or v, ok = <-ch
                                         for (i, ident) in recv.lhs.iter().enumerate() {
-                                            let name = self.resolve_symbol(ident.symbol).to_string();
+                                            let name =
+                                                self.resolve_symbol(ident.symbol).to_string();
                                             if name == "_" {
                                                 continue;
                                             }
-                                            if let Some(var_type) = rhs_types.get(i).copied().flatten() {
+                                            if let Some(var_type) =
+                                                rhs_types.get(i).copied().flatten()
+                                            {
                                                 // Look up existing variable and check assignment
                                                 if let Some(okey) = self.lookup(&name) {
                                                     self.result.record_use(ident.clone(), okey);
@@ -987,10 +1070,18 @@ impl Checker {
                                                         let mut val = Operand::new();
                                                         val.mode = OperandMode::Value;
                                                         val.typ = Some(var_type);
-                                                        self.assignment(&mut val, Some(t), "assignment");
+                                                        self.assignment(
+                                                            &mut val,
+                                                            Some(t),
+                                                            "assignment",
+                                                        );
                                                     }
                                                 } else {
-                                                    self.error_code_msg(TypeError::Undeclared, ident.span, format!("undeclared name: {}", name));
+                                                    self.error_code_msg(
+                                                        TypeError::Undeclared,
+                                                        ident.span,
+                                                        format!("undeclared name: {}", name),
+                                                    );
                                                 }
                                             }
                                         }
@@ -1032,15 +1123,24 @@ impl Checker {
                         if let Some(p) = post {
                             // spec: post statement must not be a short variable declaration
                             if matches!(&p.kind, StmtKind::ShortVar(_)) {
-                                self.error_code_msg(TypeError::InvalidOp, p.span, "cannot declare in post statement");
+                                self.error_code_msg(
+                                    TypeError::InvalidOp,
+                                    p.span,
+                                    "cannot declare in post statement",
+                                );
                             }
                             self.stmt(p, &StmtContext::new());
                         }
                     }
-                    ForClause::Range { key, value, define, expr } => {
+                    ForClause::Range {
+                        key,
+                        value,
+                        define,
+                        expr,
+                    } => {
                         let x = &mut Operand::new();
                         self.expr(x, expr);
-                        
+
                         // Determine key/value types based on range expression type
                         let (key_type, val_type) = if x.invalid() {
                             (None, None)
@@ -1052,19 +1152,17 @@ impl Checker {
                                     // for i := range n { } - key is int, no value
                                     (Some(self.basic_type(BasicType::Int)), None)
                                 }
-                                typ::Type::Basic(_) if typ::is_string(under, self.objs()) => {
-                                    (Some(self.basic_type(BasicType::Int)), 
-                                     Some(self.basic_type(BasicType::Rune)))
-                                }
+                                typ::Type::Basic(_) if typ::is_string(under, self.objs()) => (
+                                    Some(self.basic_type(BasicType::Int)),
+                                    Some(self.basic_type(BasicType::Rune)),
+                                ),
                                 typ::Type::Array(a) => {
                                     (Some(self.basic_type(BasicType::Int)), Some(a.elem()))
                                 }
                                 typ::Type::Slice(s) => {
                                     (Some(self.basic_type(BasicType::Int)), Some(s.elem()))
                                 }
-                                typ::Type::Map(m) => {
-                                    (Some(m.key()), Some(m.elem()))
-                                }
+                                typ::Type::Map(m) => (Some(m.key()), Some(m.elem())),
                                 typ::Type::Chan(c) => {
                                     if c.dir() == ChanDir::SendOnly {
                                         self.error_code(TypeError::RecvFromSendOnly, expr.span);
@@ -1072,18 +1170,22 @@ impl Checker {
                                     (Some(c.elem()), None)
                                 }
                                 _ => {
-                                    self.error_code_msg(TypeError::InvalidOp, expr.span, format!("cannot range over {:?}", xtype));
+                                    self.error_code_msg(
+                                        TypeError::InvalidOp,
+                                        expr.span,
+                                        format!("cannot range over {:?}", xtype),
+                                    );
                                     (None, None)
                                 }
                             }
                         };
-                        
+
                         // Declare or assign key/value variables
                         // Aligned with goscript/types/src/check/stmt.rs::Stmt::Range
                         let scope_key = self.octx.scope.unwrap();
                         let lhs: [Option<&Expr>; 2] = [key.as_ref(), value.as_ref()];
                         let rhs = [key_type, val_type];
-                        
+
                         if *define {
                             // Short variable declaration
                             let mut vars = vec![];
@@ -1096,7 +1198,11 @@ impl Checker {
                                 let ident = match self.expr_as_ident(lhs_e) {
                                     Some(id) => id,
                                     None => {
-                                        self.error_code_msg(TypeError::NonNameInShortDecl, lhs_e.span, "expected identifier on left side of :=");
+                                        self.error_code_msg(
+                                            TypeError::NonNameInShortDecl,
+                                            lhs_e.span,
+                                            "expected identifier on left side of :=",
+                                        );
                                         continue;
                                     }
                                 };
@@ -1116,7 +1222,11 @@ impl Checker {
                                     self.init_var(okey, &mut x, "range clause");
                                 } else if i == 1 && has_name {
                                     // value variable but no value type (e.g. range over int/chan)
-                                    self.error_code_msg(TypeError::InvalidOp, lhs_e.span, "range over integer/channel has no second value");
+                                    self.error_code_msg(
+                                        TypeError::InvalidOp,
+                                        lhs_e.span,
+                                        "range over integer/channel has no second value",
+                                    );
                                     let invalid_type = self.invalid_type();
                                     self.lobj_mut(okey).set_type(Some(invalid_type));
                                 } else {
@@ -1171,18 +1281,26 @@ impl Checker {
     fn suspended_call(&mut self, kw: &str, call: &Expr) {
         let x = &mut Operand::new();
         self.raw_expr(x, call, None);
-        
+
         // Check that it's actually a function call
         match &call.kind {
             vo_syntax::ast::ExprKind::Call(_) => {
                 // Valid: function call
             }
             vo_syntax::ast::ExprKind::Conversion(_) => {
-                self.error_code_msg(TypeError::CannotCall, call.span, format!("{} requires function call, not conversion", kw));
+                self.error_code_msg(
+                    TypeError::CannotCall,
+                    call.span,
+                    format!("{} requires function call, not conversion", kw),
+                );
             }
             _ => {
                 if !x.invalid() {
-                    self.error_code_msg(TypeError::CannotCall, call.span, format!("expression in {} must be function call", kw));
+                    self.error_code_msg(
+                        TypeError::CannotCall,
+                        call.span,
+                        format!("expression in {} must be function call", kw),
+                    );
                 }
             }
         }
@@ -1190,12 +1308,7 @@ impl Checker {
 
     /// Short variable declaration in statement context.
     /// Aligned with goscript/types/src/check/assignment.rs::short_var_decl
-    fn short_var_decl_stmt(
-        &mut self,
-        names: &[Ident],
-        values: &[Expr],
-        span: Span,
-    ) {
+    fn short_var_decl_stmt(&mut self, names: &[Ident], values: &[Expr], span: Span) {
         let top = self.delayed_count();
         let scope_key = match self.octx.scope {
             Some(s) => s,
@@ -1214,7 +1327,11 @@ impl Checker {
                 if self.lobj(okey).entity_type().is_var() {
                     lhs_vars.push(okey);
                 } else {
-                    self.error_code_msg(TypeError::CannotAssign, ident.span, format!("cannot assign to {}", name));
+                    self.error_code_msg(
+                        TypeError::CannotAssign,
+                        ident.span,
+                        format!("cannot assign to {}", name),
+                    );
                     // dummy variable
                     let dummy = self.new_var(ident.span, Some(self.pkg), "_".to_string(), None);
                     lhs_vars.push(dummy);
@@ -1242,7 +1359,10 @@ impl Checker {
         // for short variable declarations) and ends at the end of the innermost
         // containing block."
         if !new_vars.is_empty() {
-            let scope_pos = values.last().map(|e| e.span.end.to_usize()).unwrap_or(span.end.to_usize());
+            let scope_pos = values
+                .last()
+                .map(|e| e.span.end.to_usize())
+                .unwrap_or(span.end.to_usize());
             for okey in &new_vars {
                 self.declare(scope_key, *okey, scope_pos);
             }
@@ -1291,5 +1411,4 @@ impl Checker {
             AssignOp::AndNot => Some(BinaryOp::AndNot),
         }
     }
-
 }

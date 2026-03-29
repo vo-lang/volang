@@ -108,12 +108,12 @@ fn split_after_n(s: &str, sep: &str, n: i64) -> Vec<String> {
     if sep.is_empty() {
         return s.chars().take(n as usize).map(|c| c.to_string()).collect();
     }
-    
+
     let mut result = Vec::new();
     let mut start = 0;
     let mut count = 0;
     let max = n as usize;
-    
+
     while count < max - 1 {
         if let Some(pos) = s[start..].find(sep) {
             let end = start + pos + sep.len();

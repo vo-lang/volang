@@ -4,7 +4,6 @@
 //!
 //! Adapted from goscript with Vo-specific modifications.
 
-
 use vo_syntax::ast::{Expr, ExprKind as AstExprKind};
 
 use crate::objects::TypeKey;
@@ -20,7 +19,9 @@ impl Checker {
     /// Type-checks a call expression.
     /// Returns the expression kind (Statement, Conversion, or Expression).
     pub(crate) fn call(&mut self, x: &mut Operand, e: &Expr) -> ExprKind {
-        let AstExprKind::Call(call) = &e.kind else { unreachable!() };
+        let AstExprKind::Call(call) = &e.kind else {
+            unreachable!()
+        };
         let call_span = e.span;
 
         // Evaluate the function expression
@@ -49,7 +50,10 @@ impl Checker {
                     }
                     _ => {
                         self.use_exprs(&call.args);
-                        self.error_code(TypeError::TooManyConversionArgs, call.args.last().unwrap().span);
+                        self.error_code(
+                            TypeError::TooManyConversionArgs,
+                            call.args.last().unwrap().span,
+                        );
                     }
                 }
                 ExprKind::Conversion
@@ -121,7 +125,9 @@ impl Checker {
         re: &UnpackedResultLeftovers,
         n: usize,
     ) {
-        let AstExprKind::Call(call) = &e.kind else { unreachable!() };
+        let AstExprKind::Call(call) = &e.kind else {
+            unreachable!()
+        };
         let call_span = e.span;
         let sig_val = self.otype(sig).try_as_signature().unwrap();
         let variadic = sig_val.variadic();
@@ -136,7 +142,11 @@ impl Checker {
                 return;
             }
             if call.args.len() == 1 && n > 1 {
-                self.error_code_msg(TypeError::SpreadMultiValue, call_span, format!("cannot use ... with {}-valued expression", n));
+                self.error_code_msg(
+                    TypeError::SpreadMultiValue,
+                    call_span,
+                    format!("cannot use ... with {}-valued expression", n),
+                );
                 re.use_all(self);
                 return;
             }
@@ -161,14 +171,7 @@ impl Checker {
 
     /// Checks passing of argument x to the i'th parameter of the given signature.
     /// If ellipsis is true, the argument is followed by ... at that position in the call.
-    fn argument(
-        &mut self,
-        sig: TypeKey,
-        i: usize,
-        x: &mut Operand,
-        ellipsis: bool,
-        note: &str,
-    ) {
+    fn argument(&mut self, sig: TypeKey, i: usize, x: &mut Operand, ellipsis: bool, note: &str) {
         self.single_value(x);
         if x.invalid() {
             return;
@@ -195,7 +198,11 @@ impl Checker {
             }
             // Check that x is assignable to the slice type
             let xtype = x.typ.unwrap();
-            if self.otype(xtype).underlying_val(self.objs()).try_as_slice().is_none()
+            if self
+                .otype(xtype)
+                .underlying_val(self.objs())
+                .try_as_slice()
+                .is_none()
                 && xtype != self.basic_type(typ::BasicType::UntypedNil)
             {
                 self.error_code(TypeError::InvalidVariadicArg, x.pos());

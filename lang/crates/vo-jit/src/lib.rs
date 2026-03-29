@@ -58,11 +58,15 @@ impl std::fmt::Display for JitError {
 impl std::error::Error for JitError {}
 
 impl From<cranelift_module::ModuleError> for JitError {
-    fn from(e: cranelift_module::ModuleError) -> Self { JitError::Module(e) }
+    fn from(e: cranelift_module::ModuleError) -> Self {
+        JitError::Module(e)
+    }
 }
 
 impl From<cranelift_codegen::CodegenError> for JitError {
-    fn from(e: cranelift_codegen::CodegenError) -> Self { JitError::Codegen(e) }
+    fn from(e: cranelift_codegen::CodegenError) -> Self {
+        JitError::Codegen(e)
+    }
 }
 
 // =============================================================================
@@ -92,13 +96,24 @@ pub struct JitCache {
 
 impl JitCache {
     pub fn new() -> Self {
-        Self { functions: HashMap::new(), loops: HashMap::new() }
+        Self {
+            functions: HashMap::new(),
+            loops: HashMap::new(),
+        }
     }
-    pub fn get(&self, func_id: u32) -> Option<&CompiledFunction> { self.functions.get(&func_id) }
-    pub fn insert(&mut self, func_id: u32, func: CompiledFunction) { self.functions.insert(func_id, func); }
-    pub fn contains(&self, func_id: u32) -> bool { self.functions.contains_key(&func_id) }
+    pub fn get(&self, func_id: u32) -> Option<&CompiledFunction> {
+        self.functions.get(&func_id)
+    }
+    pub fn insert(&mut self, func_id: u32, func: CompiledFunction) {
+        self.functions.insert(func_id, func);
+    }
+    pub fn contains(&self, func_id: u32) -> bool {
+        self.functions.contains_key(&func_id)
+    }
     pub unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> {
-        self.functions.get(&func_id).map(|f| std::mem::transmute(f.code_ptr))
+        self.functions
+            .get(&func_id)
+            .map(|f| std::mem::transmute(f.code_ptr))
     }
     pub fn get_loop(&self, func_id: u32, begin_pc: usize) -> Option<&CompiledLoop> {
         self.loops.get(&(func_id, begin_pc))
@@ -110,12 +125,16 @@ impl JitCache {
         self.loops.contains_key(&(func_id, begin_pc))
     }
     pub unsafe fn get_loop_func_ptr(&self, func_id: u32, begin_pc: usize) -> Option<LoopFunc> {
-        self.loops.get(&(func_id, begin_pc)).map(|l| std::mem::transmute(l.code_ptr))
+        self.loops
+            .get(&(func_id, begin_pc))
+            .map(|l| std::mem::transmute(l.code_ptr))
     }
 }
 
 impl Default for JitCache {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // =============================================================================
@@ -136,19 +155,19 @@ impl JitCompiler {
     pub fn new() -> Result<Self, JitError> {
         Self::with_debug(false)
     }
-    
+
     pub fn with_debug(debug_ir: bool) -> Result<Self, JitError> {
         let mut flag_builder = settings::builder();
         flag_builder.set("opt_level", "speed").unwrap();
-        
-        let isa_builder = cranelift_native::builder()
-            .map_err(|e| JitError::Internal(e.to_string()))?;
+
+        let isa_builder =
+            cranelift_native::builder().map_err(|e| JitError::Internal(e.to_string()))?;
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
             .map_err(|e| JitError::Internal(e.to_string()))?;
 
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-        
+
         // Register runtime helper symbols
         helpers::register_symbols(&mut builder);
 
@@ -196,13 +215,19 @@ impl JitCompiler {
                 continue;
             }
             if let Some(&decl_id) = self.func_decl_ids.get(&callee_id) {
-                let callee_ref = self.module.declare_func_in_func(decl_id, &mut self.ctx.func);
+                let callee_ref = self
+                    .module
+                    .declare_func_in_func(decl_id, &mut self.ctx.func);
                 refs[callee_id as usize] = Some(callee_ref);
             }
         }
     }
 
-    fn finalize_function(&mut self, func_id_cl: cranelift_module::FuncId, #[cfg_attr(not(debug_assertions), allow(unused))] name: &str) -> Result<*const u8, JitError> {
+    fn finalize_function(
+        &mut self,
+        func_id_cl: cranelift_module::FuncId,
+        #[cfg_attr(not(debug_assertions), allow(unused))] name: &str,
+    ) -> Result<*const u8, JitError> {
         #[cfg(debug_assertions)]
         {
             let flags = settings::Flags::new(settings::builder());
@@ -218,11 +243,11 @@ impl JitCompiler {
                 }
             }
         }
-        
+
         self.module.define_function(func_id_cl, &mut self.ctx)?;
         self.module.clear_context(&mut self.ctx);
         self.module.finalize_definitions()?;
-        
+
         Ok(self.module.get_finalized_function(func_id_cl))
     }
 
@@ -242,13 +267,15 @@ impl JitCompiler {
 
         let ptr_type = self.module.target_config().pointer_type();
         let mut sig = Signature::new(self.module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(ptr_type));  // ctx
-        sig.params.push(AbiParam::new(ptr_type));  // args
-        sig.params.push(AbiParam::new(ptr_type));  // ret
+        sig.params.push(AbiParam::new(ptr_type)); // ctx
+        sig.params.push(AbiParam::new(ptr_type)); // args
+        sig.params.push(AbiParam::new(ptr_type)); // ret
         sig.returns.push(AbiParam::new(types::I32));
 
         let func_name = format!("vo_jit_{}", func_id);
-        let func_id_cl = self.module.declare_function(&func_name, cranelift_module::Linkage::Local, &sig)?;
+        let func_id_cl =
+            self.module
+                .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)?;
         self.func_decl_ids.insert(func_id, func_id_cl);
 
         self.ctx.func.signature = sig;
@@ -257,7 +284,9 @@ impl JitCompiler {
         let mut func_ctx = FunctionBuilderContext::new();
         let helpers = self.get_helper_refs();
         // Get FuncRef for self-recursive calls optimization
-        let self_func_ref = self.module.declare_func_in_func(func_id_cl, &mut self.ctx.func);
+        let self_func_ref = self
+            .module
+            .declare_func_in_func(func_id_cl, &mut self.ctx.func);
         let mut callee_func_refs = std::mem::take(&mut self.callee_func_refs_buf);
         self.rebuild_callee_func_refs(
             &mut callee_func_refs,
@@ -280,16 +309,19 @@ impl JitCompiler {
         };
         self.callee_func_refs_buf = callee_func_refs;
         compile_result?;
-        
+
         if self.debug_ir {
             eprintln!("=== JIT IR for func_{} {} ===", func_id, func.name);
             eprintln!("{}", self.ctx.func.display());
         }
-        
-        let code_ptr = self.finalize_function(func_id_cl, &format!("func_{} {}", func_id, func.name))?;
+
+        let code_ptr =
+            self.finalize_function(func_id_cl, &format!("func_{} {}", func_id, func.name))?;
         let compiled = CompiledFunction {
-            code_ptr, code_size: 0,
-            param_slots: func.param_slots, ret_slots: func.ret_slots,
+            code_ptr,
+            code_size: 0,
+            param_slots: func.param_slots,
+            ret_slots: func.ret_slots,
         };
         self.cache.insert(func_id, compiled);
         Ok(())
@@ -312,15 +344,18 @@ impl JitCompiler {
 
         let ptr_type = self.module.target_config().pointer_type();
         let mut sig = Signature::new(self.module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(ptr_type));   // ctx
-        sig.params.push(AbiParam::new(ptr_type));   // locals_ptr
+        sig.params.push(AbiParam::new(ptr_type)); // ctx
+        sig.params.push(AbiParam::new(ptr_type)); // locals_ptr
         sig.returns.push(AbiParam::new(types::I32));
 
         let func_name = format!("vo_loop_{}_{}", func_id, begin_pc);
-        let func_id_cl = self.module.declare_function(&func_name, cranelift_module::Linkage::Local, &sig)?;
+        let func_id_cl =
+            self.module
+                .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)?;
 
         self.ctx.func.signature = sig;
-        self.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(1, func_id * 10000 + begin_pc as u32);
+        self.ctx.func.name =
+            cranelift_codegen::ir::UserFuncName::user(1, func_id * 10000 + begin_pc as u32);
 
         let mut func_ctx = FunctionBuilderContext::new();
         let helpers = self.get_helper_refs();
@@ -346,22 +381,38 @@ impl JitCompiler {
         };
         self.callee_func_refs_buf = callee_func_refs;
         compile_result?;
-        
-        let code_ptr = self.finalize_function(func_id_cl, &format!("loop_{}_{}", func_id, begin_pc))?;
-        let compiled = CompiledLoop { code_ptr, loop_info: loop_info.clone() };
+
+        let code_ptr =
+            self.finalize_function(func_id_cl, &format!("loop_{}_{}", func_id, begin_pc))?;
+        let compiled = CompiledLoop {
+            code_ptr,
+            loop_info: loop_info.clone(),
+        };
         self.cache.insert_loop(func_id, begin_pc, compiled);
         Ok(())
     }
 
-    pub fn get(&self, func_id: u32) -> Option<&CompiledFunction> { self.cache.get(func_id) }
-    pub unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> { self.cache.get_func_ptr(func_id) }
-    pub fn get_loop(&self, func_id: u32, begin_pc: usize) -> Option<&CompiledLoop> { self.cache.get_loop(func_id, begin_pc) }
-    pub unsafe fn get_loop_func_ptr(&self, func_id: u32, begin_pc: usize) -> Option<LoopFunc> { self.cache.get_loop_func_ptr(func_id, begin_pc) }
-    pub fn cache(&self) -> &JitCache { &self.cache }
+    pub fn get(&self, func_id: u32) -> Option<&CompiledFunction> {
+        self.cache.get(func_id)
+    }
+    pub unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> {
+        self.cache.get_func_ptr(func_id)
+    }
+    pub fn get_loop(&self, func_id: u32, begin_pc: usize) -> Option<&CompiledLoop> {
+        self.cache.get_loop(func_id, begin_pc)
+    }
+    pub unsafe fn get_loop_func_ptr(&self, func_id: u32, begin_pc: usize) -> Option<LoopFunc> {
+        self.cache.get_loop_func_ptr(func_id, begin_pc)
+    }
+    pub fn cache(&self) -> &JitCache {
+        &self.cache
+    }
 }
 
 impl Default for JitCompiler {
-    fn default() -> Self { Self::new().expect("failed to create JIT compiler") }
+    fn default() -> Self {
+        Self::new().expect("failed to create JIT compiler")
+    }
 }
 
 /// Check if a function can be safely called via JIT-to-JIT direct call from
@@ -391,7 +442,8 @@ mod tests {
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
         let slot_types = vec![SlotType::Value; local_slots as usize];
         let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&slot_types);
-        let borrowed_scan_slots_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
+        let borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
         FunctionDef {
             name: "test".into(),
             param_count: 0,
@@ -434,14 +486,24 @@ mod tests {
         let mut jit = JitCompiler::new().expect("create jit compiler");
         let result = jit.compile(0, &module.functions[0], &module, &[]);
 
-        assert!(result.is_ok(), "SelectRecv should compile in JIT: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "SelectRecv should compile in JIT: {:?}",
+            result
+        );
     }
 
     #[test]
     fn compile_supports_port_queue_opcodes() {
         let func = make_func(
             vec![
-                Instruction::with_flags(Opcode::QueueNew, vo_runtime::instruction::QUEUE_KIND_PORT_FLAG | 1, 0, 1, 2),
+                Instruction::with_flags(
+                    Opcode::QueueNew,
+                    vo_runtime::instruction::QUEUE_KIND_PORT_FLAG | 1,
+                    0,
+                    1,
+                    2,
+                ),
                 Instruction::new(Opcode::QueueLen, 3, 0, 0),
                 Instruction::new(Opcode::QueueCap, 4, 0, 0),
                 Instruction::with_flags(Opcode::QueueSend, 1, 0, 1, 0),
@@ -457,6 +519,10 @@ mod tests {
         let mut jit = JitCompiler::new().expect("create jit compiler");
         let result = jit.compile(0, &module.functions[0], &module, &[]);
 
-        assert!(result.is_ok(), "Queue opcodes should compile in JIT: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Queue opcodes should compile in JIT: {:?}",
+            result
+        );
     }
 }

@@ -18,16 +18,16 @@ use vo_common::span::Span;
 crate::define_key! {
     /// Key for language objects (variables, functions, types, etc.)
     pub struct ObjKey;
-    
+
     /// Key for types
     pub struct TypeKey;
-    
+
     /// Key for scopes
     pub struct ScopeKey;
-    
+
     /// Key for packages
     pub struct PackageKey;
-    
+
     /// Key for declaration info
     pub struct DeclInfoKey;
 }
@@ -53,25 +53,25 @@ fn default_fmt_qualifier(p: &Package) -> Cow<'_, str> {
 pub struct TCObjects {
     /// All language objects (variables, functions, types, constants, etc.)
     pub lobjs: LangObjs,
-    
+
     /// All types
     pub types: Types,
-    
+
     /// All scopes
     pub scopes: Scopes,
-    
+
     /// All packages
     pub pkgs: Packages,
-    
+
     /// Package path -> PackageKey cache for O(1) lookup
     pkg_path_cache: HashMap<String, PackageKey>,
-    
+
     /// Declaration info for package-level objects
     pub decls: Decls,
-    
+
     /// The universe with predefined types and functions
     pub universe: Option<Universe>,
-    
+
     /// Qualifier function for formatting output
     pub fmt_qualifier: FmtQualifier,
 }
@@ -98,7 +98,7 @@ impl TCObjects {
         objs.universe = Some(Universe::new(&mut objs));
         objs
     }
-    
+
     /// Returns a reference to the universe.
     pub fn universe(&self) -> &Universe {
         self.universe.as_ref().expect("universe not initialized")
@@ -154,7 +154,7 @@ impl TCObjects {
         self.pkg_path_cache.insert(path, key);
         key
     }
-    
+
     /// Find an existing package by its path (O(1) lookup).
     pub fn find_package_by_path(&self, path: &str) -> Option<PackageKey> {
         self.pkg_path_cache.get(path).copied()
@@ -240,12 +240,7 @@ impl TCObjects {
         self.lobjs.insert(lobj)
     }
 
-    pub fn new_label(
-        &mut self,
-        span: Span,
-        pkg: Option<PackageKey>,
-        name: String,
-    ) -> ObjKey {
+    pub fn new_label(&mut self, span: Span, pkg: Option<PackageKey>, name: String) -> ObjKey {
         let lobj = crate::obj::LangObj::new_label(span, pkg, name, self.universe());
         self.lobjs.insert(lobj)
     }
@@ -259,15 +254,18 @@ impl TCObjects {
         info: crate::typ::BasicInfo,
         name: &'static str,
     ) -> TypeKey {
-        self.types.insert(Type::Basic(crate::typ::BasicDetail::new(typ, info, name)))
+        self.types
+            .insert(Type::Basic(crate::typ::BasicDetail::new(typ, info, name)))
     }
 
     pub fn new_t_array(&mut self, elem: TypeKey, len: Option<u64>) -> TypeKey {
-        self.types.insert(Type::Array(crate::typ::ArrayDetail::new(elem, len)))
+        self.types
+            .insert(Type::Array(crate::typ::ArrayDetail::new(elem, len)))
     }
 
     pub fn new_t_slice(&mut self, elem: TypeKey) -> TypeKey {
-        self.types.insert(Type::Slice(crate::typ::SliceDetail::new(elem)))
+        self.types
+            .insert(Type::Slice(crate::typ::SliceDetail::new(elem)))
     }
 
     pub fn new_t_struct(
@@ -275,15 +273,18 @@ impl TCObjects {
         fields: Vec<ObjKey>,
         tags: Option<Vec<Option<String>>>,
     ) -> TypeKey {
-        self.types.insert(Type::Struct(crate::typ::StructDetail::new(fields, tags)))
+        self.types
+            .insert(Type::Struct(crate::typ::StructDetail::new(fields, tags)))
     }
 
     pub fn new_t_pointer(&mut self, base: TypeKey) -> TypeKey {
-        self.types.insert(Type::Pointer(crate::typ::PointerDetail::new(base)))
+        self.types
+            .insert(Type::Pointer(crate::typ::PointerDetail::new(base)))
     }
 
     pub fn new_t_tuple(&mut self, vars: Vec<ObjKey>) -> TypeKey {
-        self.types.insert(Type::Tuple(crate::typ::TupleDetail::new(vars)))
+        self.types
+            .insert(Type::Tuple(crate::typ::TupleDetail::new(vars)))
     }
 
     pub fn new_t_signature(
@@ -294,29 +295,37 @@ impl TCObjects {
         results: TypeKey,
         variadic: bool,
     ) -> TypeKey {
-        self.types.insert(Type::Signature(crate::typ::SignatureDetail::new(
-            scope, recv, params, results, variadic,
-        )))
+        self.types
+            .insert(Type::Signature(crate::typ::SignatureDetail::new(
+                scope, recv, params, results, variadic,
+            )))
     }
 
     pub fn new_t_interface(&mut self, methods: Vec<ObjKey>, embeddeds: Vec<TypeKey>) -> TypeKey {
-        self.types.insert(Type::Interface(crate::typ::InterfaceDetail::new(methods, embeddeds)))
+        self.types
+            .insert(Type::Interface(crate::typ::InterfaceDetail::new(
+                methods, embeddeds,
+            )))
     }
 
     pub fn new_t_empty_interface(&mut self) -> TypeKey {
-        self.types.insert(Type::Interface(crate::typ::InterfaceDetail::new_empty()))
+        self.types
+            .insert(Type::Interface(crate::typ::InterfaceDetail::new_empty()))
     }
 
     pub fn new_t_map(&mut self, key: TypeKey, elem: TypeKey) -> TypeKey {
-        self.types.insert(Type::Map(crate::typ::MapDetail::new(key, elem)))
+        self.types
+            .insert(Type::Map(crate::typ::MapDetail::new(key, elem)))
     }
 
     pub fn new_t_chan(&mut self, dir: crate::typ::ChanDir, elem: TypeKey) -> TypeKey {
-        self.types.insert(Type::Chan(crate::typ::ChanDetail::new(dir, elem)))
+        self.types
+            .insert(Type::Chan(crate::typ::ChanDetail::new(dir, elem)))
     }
 
     pub fn new_t_port(&mut self, dir: crate::typ::ChanDir, elem: TypeKey) -> TypeKey {
-        self.types.insert(Type::Port(crate::typ::PortDetail::new(dir, elem)))
+        self.types
+            .insert(Type::Port(crate::typ::PortDetail::new(dir, elem)))
     }
 
     pub fn new_t_island(&mut self) -> TypeKey {
@@ -329,7 +338,9 @@ impl TCObjects {
         underlying: Option<TypeKey>,
         methods: Vec<ObjKey>,
     ) -> TypeKey {
-        self.types.insert(Type::Named(crate::typ::NamedDetail::new(obj, underlying, methods)))
+        self.types.insert(Type::Named(crate::typ::NamedDetail::new(
+            obj, underlying, methods,
+        )))
     }
 }
 
@@ -351,10 +362,10 @@ mod tests {
     #[test]
     fn test_key_types() {
         use crate::arena::ArenaKey;
-        
+
         let obj_key = ObjKey::from_usize(42);
         assert_eq!(obj_key.as_usize(), 42);
-        
+
         let type_key = TypeKey::null();
         assert!(type_key.is_null());
     }

@@ -1,14 +1,14 @@
 //! Execution functions for Vo modules.
 
 use std::fmt;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{atomic::AtomicBool, Arc};
 use vo_common_core::debug_info::SourceLoc;
-use vo_vm::bytecode::Module;
-use vo_vm::vm::{RuntimeTrapKind, SchedulingOutcome, Vm, VmError};
 use vo_runtime::ext_loader::{ExtensionLoader, ExtensionManifest};
 use vo_runtime::output::{OutputSink, StdoutSink};
+use vo_vm::bytecode::Module;
+use vo_vm::vm::{RuntimeTrapKind, SchedulingOutcome, Vm, VmError};
 
-use crate::compile::{CompileOutput, CompileError};
+use crate::compile::{CompileError, CompileOutput};
 use crate::toolchain::ensure_toolchain_host_installed;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,17 +41,22 @@ pub enum RuntimeErrorKind {
 impl RuntimeError {
     fn from_vm_error(e: &VmError, module: &Module) -> Self {
         let lookup = |loc: &Option<vo_vm::vm::ErrorLocation>| {
-            loc.as_ref().and_then(|l| module.debug_info.lookup(l.func_id, l.pc))
+            loc.as_ref()
+                .and_then(|l| module.debug_info.lookup(l.func_id, l.pc))
         };
-        
+
         let (message, location, kind) = match e {
-            VmError::Interrupted => {
-                ("interrupted by host".to_string(), None, RuntimeErrorKind::Interrupted)
-            }
+            VmError::Interrupted => (
+                "interrupted by host".to_string(),
+                None,
+                RuntimeErrorKind::Interrupted,
+            ),
             VmError::RuntimeTrap { kind, msg, loc } => {
                 let k = match kind {
                     RuntimeTrapKind::IndexOutOfBounds => RuntimeErrorKind::IndexOutOfBounds,
-                    RuntimeTrapKind::NilPointerDereference => RuntimeErrorKind::NilPointerDereference,
+                    RuntimeTrapKind::NilPointerDereference => {
+                        RuntimeErrorKind::NilPointerDereference
+                    }
                     RuntimeTrapKind::TypeAssertionFailed => RuntimeErrorKind::TypeAssertionFailed,
                     RuntimeTrapKind::DivisionByZero => RuntimeErrorKind::DivisionByZero,
                     RuntimeTrapKind::SendOnClosedChannel => RuntimeErrorKind::SendOnClosedChannel,
@@ -59,15 +64,19 @@ impl RuntimeError {
                 };
                 (msg.clone(), lookup(loc), k)
             }
-            VmError::PanicUnwound { msg, loc } => {
-                (msg.as_deref().unwrap_or("panic").to_string(), lookup(loc), RuntimeErrorKind::Panic)
-            }
-            VmError::Deadlock(msg) => {
-                (msg.clone(), None, RuntimeErrorKind::Deadlock)
-            }
+            VmError::PanicUnwound { msg, loc } => (
+                msg.as_deref().unwrap_or("panic").to_string(),
+                lookup(loc),
+                RuntimeErrorKind::Panic,
+            ),
+            VmError::Deadlock(msg) => (msg.clone(), None, RuntimeErrorKind::Deadlock),
             _ => (format!("{:?}", e), None, RuntimeErrorKind::Other),
         };
-        RuntimeError { message, location, kind }
+        RuntimeError {
+            message,
+            location,
+            kind,
+        }
     }
 }
 
@@ -133,13 +142,13 @@ pub fn run_with_output_interruptible(
         locked_modules,
     } = compiled;
     let ext_loader = load_extensions(&extensions, &locked_modules)?;
-    
+
     #[cfg(feature = "jit")]
     let mut vm = match mode {
         RunMode::Vm => Vm::new(),
         RunMode::Jit => {
             use vo_vm::JitConfig;
-            
+
             let call_threshold = std::env::var("VO_JIT_CALL_THRESHOLD")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -149,14 +158,18 @@ pub fn run_with_output_interruptible(
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(50);
             let debug_ir = std::env::var("VO_JIT_DEBUG").is_ok();
-            
-            let config = JitConfig { call_threshold, loop_threshold, debug_ir };
+
+            let config = JitConfig {
+                call_threshold,
+                loop_threshold,
+                debug_ir,
+            };
             let mut vm = Vm::with_jit_config(config);
             vm.init_jit();
             vm
         }
     };
-    
+
     #[cfg(not(feature = "jit"))]
     let mut vm = {
         if mode == RunMode::Jit {
@@ -164,7 +177,7 @@ pub fn run_with_output_interruptible(
         }
         Vm::new()
     };
-    
+
     vm.state.output = sink;
     vm.set_program_args(args);
     if let Some(interrupt_flag) = interrupt_flag {
@@ -181,7 +194,8 @@ pub fn run_with_output_interruptible(
 }
 
 fn vm_err_to_run_err(vm: &Vm, e: &VmError) -> RunError {
-    let runtime_err = vm.module()
+    let runtime_err = vm
+        .module()
         .map(|m| RuntimeError::from_vm_error(e, m))
         .unwrap_or_else(|| RuntimeError {
             message: format!("{:?}", e),
@@ -214,18 +228,20 @@ fn load_extensions(
         return Ok(None);
     }
 
-    crate::compile::ensure_extension_manifests_built(manifests, locked_modules)
-        .map_err(|e| RunError::Runtime(RuntimeError {
+    crate::compile::ensure_extension_manifests_built(manifests, locked_modules).map_err(|e| {
+        RunError::Runtime(RuntimeError {
             message: format!("failed to prepare native extensions: {}", e),
             location: None,
             kind: RuntimeErrorKind::Other,
-        }))?;
+        })
+    })?;
 
-    let loader = ExtensionLoader::from_manifests(manifests)
-        .map_err(|e| RunError::Runtime(RuntimeError {
+    let loader = ExtensionLoader::from_manifests(manifests).map_err(|e| {
+        RunError::Runtime(RuntimeError {
             message: format!("failed to load extensions: {}", e),
             location: None,
             kind: RuntimeErrorKind::Other,
-        }))?;
+        })
+    })?;
     Ok(Some(loader))
 }

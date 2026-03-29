@@ -31,7 +31,10 @@ impl SessionMailbox {
     }
 
     pub fn record_pending_host_events(&mut self, events: Vec<VmPendingHostEvent>) {
-        self.replay_event_wait_token = events.iter().find(|event| event.replay).map(|event| event.token);
+        self.replay_event_wait_token = events
+            .iter()
+            .find(|event| event.replay)
+            .map(|event| event.token);
         for event in events.into_iter().filter(|event| !event.replay) {
             if self.pending_host_event_tokens.insert(event.token) {
                 self.pending_host_events.push_back(PendingHostEvent {

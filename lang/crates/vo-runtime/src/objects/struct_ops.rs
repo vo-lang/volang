@@ -24,7 +24,10 @@ pub unsafe fn hash(obj: GcRef, field_count: usize) -> u64 {
 
 /// Create a new struct with zero-initialized fields.
 pub fn create(gc: &mut Gc, meta_id: u32, size_slots: usize) -> GcRef {
-    gc.alloc(ValueMeta::new(meta_id, ValueKind::Struct), size_slots as u16)
+    gc.alloc(
+        ValueMeta::new(meta_id, ValueKind::Struct),
+        size_slots as u16,
+    )
 }
 
 /// Get field value (safe for FFI use).

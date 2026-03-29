@@ -15,7 +15,14 @@ fn match_string(call: &mut ExternCallContext) -> ExternResult {
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let s = call.arg_str(slots::ARG_S);
     #[cfg(target_arch = "wasm32")]
-    web_sys::console::warn_1(&format!("[regexp.matchString] pattern={:?} s_len={}", pattern, s.len()).into());
+    web_sys::console::warn_1(
+        &format!(
+            "[regexp.matchString] pattern={:?} s_len={}",
+            pattern,
+            s.len()
+        )
+        .into(),
+    );
     let (matched, valid) = match Regex::new(pattern) {
         Ok(re) => (re.is_match(s), true),
         Err(_) => (false, false),
@@ -34,12 +41,10 @@ fn match_bytes(call: &mut ExternCallContext) -> ExternResult {
     let b_ptr = slice::data_ptr(b_ref);
     let bytes = unsafe { core::slice::from_raw_parts(b_ptr, b_len) };
     let (matched, valid) = match Regex::new(pattern) {
-        Ok(re) => {
-            match core::str::from_utf8(bytes) {
-                Ok(s) => (re.is_match(s), true),
-                Err(_) => (false, true),
-            }
-        }
+        Ok(re) => match core::str::from_utf8(bytes) {
+            Ok(s) => (re.is_match(s), true),
+            Err(_) => (false, true),
+        },
         Err(_) => (false, false),
     };
     call.ret_bool(slots::RET_0, matched);
@@ -68,7 +73,10 @@ fn find_string_index(call: &mut ExternCallContext) -> ExternResult {
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let s = call.arg_str(slots::ARG_S);
     let (start, end) = match Regex::new(pattern) {
-        Ok(re) => re.find(s).map(|m| (m.start() as i64, m.end() as i64)).unwrap_or((-1, -1)),
+        Ok(re) => re
+            .find(s)
+            .map(|m| (m.start() as i64, m.end() as i64))
+            .unwrap_or((-1, -1)),
         Err(_) => (-1, -1),
     };
     call.ret_i64(slots::RET_0, start);
@@ -78,12 +86,12 @@ fn find_string_index(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_fn("regexp", "findAllString")]
 fn find_all_string(call: &mut ExternCallContext) -> ExternResult {
-    use vo_runtime::objects::{array, slice, string as str_obj};
     use vo_common_core::types::ValueMeta;
+    use vo_runtime::objects::{array, slice, string as str_obj};
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let s = call.arg_str(slots::ARG_S);
     let n = call.arg_i64(slots::ARG_N);
-    
+
     let results: Vec<String> = match Regex::new(pattern) {
         Ok(re) => {
             if n < 0 {
@@ -91,12 +99,15 @@ fn find_all_string(call: &mut ExternCallContext) -> ExternResult {
             } else if n == 0 {
                 Vec::new()
             } else {
-                re.find_iter(s).take(n as usize).map(|m| m.as_str().to_string()).collect()
+                re.find_iter(s)
+                    .take(n as usize)
+                    .map(|m| m.as_str().to_string())
+                    .collect()
             }
         }
         Err(_) => Vec::new(),
     };
-    
+
     let gc = call.gc();
     let elem_meta = ValueMeta::new(0, vo_common_core::types::ValueKind::String);
     let arr = array::create(gc, elem_meta, 8, results.len());
@@ -145,12 +156,12 @@ fn replace_all_literal_string(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_fn("regexp", "splitString")]
 fn split_string(call: &mut ExternCallContext) -> ExternResult {
-    use vo_runtime::objects::{array, slice, string as str_obj};
     use vo_common_core::types::ValueMeta;
+    use vo_runtime::objects::{array, slice, string as str_obj};
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let s = call.arg_str(slots::ARG_S);
     let n = call.arg_i64(slots::ARG_N);
-    
+
     let results: Vec<String> = match Regex::new(pattern) {
         Ok(re) => {
             if n < 0 {
@@ -163,7 +174,7 @@ fn split_string(call: &mut ExternCallContext) -> ExternResult {
         }
         Err(_) => vec![s.to_string()],
     };
-    
+
     let gc = call.gc();
     let elem_meta = ValueMeta::new(0, vo_common_core::types::ValueKind::String);
     let arr = array::create(gc, elem_meta, 8, results.len());
@@ -180,24 +191,23 @@ fn split_string(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_fn("regexp", "findStringSubmatch")]
 fn find_string_submatch(call: &mut ExternCallContext) -> ExternResult {
-    use vo_runtime::objects::{array, slice, string as str_obj};
     use vo_common_core::types::ValueMeta;
+    use vo_runtime::objects::{array, slice, string as str_obj};
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let s = call.arg_str(slots::ARG_S);
-    
+
     let results: Vec<String> = match Regex::new(pattern) {
-        Ok(re) => {
-            re.captures(s)
-                .map(|caps| {
-                    caps.iter()
-                        .map(|m| m.map(|m| m.as_str().to_string()).unwrap_or_default())
-                        .collect()
-                })
-                .unwrap_or_default()
-        }
+        Ok(re) => re
+            .captures(s)
+            .map(|caps| {
+                caps.iter()
+                    .map(|m| m.map(|m| m.as_str().to_string()).unwrap_or_default())
+                    .collect()
+            })
+            .unwrap_or_default(),
         Err(_) => Vec::new(),
     };
-    
+
     let gc = call.gc();
     let elem_meta = ValueMeta::new(0, vo_common_core::types::ValueKind::String);
     let arr = array::create(gc, elem_meta, 8, results.len());

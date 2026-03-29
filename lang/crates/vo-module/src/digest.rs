@@ -1,5 +1,5 @@
-use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 
 use crate::Error;
 
@@ -18,14 +18,18 @@ impl Digest {
             Error::InvalidDigest(format!("digest must start with 'sha256:': {s}"))
         })?;
         if hex.len() != 64 {
-            return Err(Error::InvalidDigest(
-                format!("sha256 digest must be 64 hex chars, got {}: {s}", hex.len()),
-            ));
+            return Err(Error::InvalidDigest(format!(
+                "sha256 digest must be 64 hex chars, got {}: {s}",
+                hex.len()
+            )));
         }
-        if !hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
-            return Err(Error::InvalidDigest(
-                format!("digest must be lowercase hex: {s}"),
-            ));
+        if !hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            return Err(Error::InvalidDigest(format!(
+                "digest must be lowercase hex: {s}"
+            )));
         }
         Ok(Digest { raw: s.to_string() })
     }
@@ -40,8 +44,8 @@ impl Digest {
 
     /// Compute the SHA-256 digest of the given data.
     pub fn from_sha256(data: &[u8]) -> Self {
-        use std::fmt::Write;
         use sha2::{Digest as Sha2Digest, Sha256};
+        use std::fmt::Write;
         let mut hasher = Sha256::new();
         hasher.update(data);
         let result = hasher.finalize();
@@ -85,13 +89,19 @@ mod tests {
 
     #[test]
     fn test_digest_parse() {
-        let d = Digest::parse("sha256:2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d").unwrap();
+        let d = Digest::parse(
+            "sha256:2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d2f7d",
+        )
+        .unwrap();
         assert_eq!(d.hex().len(), 64);
     }
 
     #[test]
     fn test_digest_reject_uppercase() {
-        assert!(Digest::parse("sha256:2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D").is_err());
+        assert!(Digest::parse(
+            "sha256:2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D2F7D"
+        )
+        .is_err());
     }
 
     #[test]
@@ -101,6 +111,9 @@ mod tests {
 
     #[test]
     fn test_digest_reject_no_prefix() {
-        assert!(Digest::parse("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab").is_err());
+        assert!(Digest::parse(
+            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab"
+        )
+        .is_err());
     }
 }

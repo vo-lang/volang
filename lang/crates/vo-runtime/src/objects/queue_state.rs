@@ -9,7 +9,7 @@
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 
 #[cfg(feature = "std")]
-use std::{collections::VecDeque, vec::Vec, boxed::Box};
+use std::{boxed::Box, collections::VecDeque, vec::Vec};
 
 use hashbrown::HashSet;
 
@@ -65,7 +65,10 @@ impl QueueKind {
         match kind {
             ValueKind::Channel => Self::Chan,
             ValueKind::Port => Self::Port,
-            other => panic!("QueueKind::from_value_kind: expected channel/port kind, got {:?}", other),
+            other => panic!(
+                "QueueKind::from_value_kind: expected channel/port kind, got {:?}",
+                other
+            ),
         }
     }
 }
@@ -76,10 +79,10 @@ impl QueueKind {
 pub struct QueueData {
     pub state: Slot,
     pub cap: Slot,
-    pub elem_meta: ValueMeta,  // 4 bytes
-    pub elem_slots: u16,       // 2 bytes
+    pub elem_meta: ValueMeta, // 4 bytes
+    pub elem_slots: u16,      // 2 bytes
     /// Channel backing kind: BACKING_LOCAL (0) or BACKING_REMOTE (1).
-    pub backing: u16,          // 2 bytes
+    pub backing: u16, // 2 bytes
     pub kind: u16,
     pub reserved: u16,
     pub elem_rttid: u32,
@@ -177,13 +180,18 @@ impl QueueWaiter {
         Self {
             island_id,
             fiber_id,
-            select: Some(SelectInfo { case_index, select_id }),
+            select: Some(SelectInfo {
+                case_index,
+                select_id,
+            }),
         }
     }
 
     #[inline]
     pub fn is_select_with_id(&self, select_id: u64) -> bool {
-        self.select.as_ref().is_some_and(|info| info.select_id == select_id)
+        self.select
+            .as_ref()
+            .is_some_and(|info| info.select_id == select_id)
     }
 }
 
@@ -307,7 +315,8 @@ impl<W, M> QueueState<W, M> {
 
     fn recv_impl(&mut self, waiter: Option<W>) -> (RecvResult<W>, Option<M>) {
         if let Some(value) = self.buffer.pop_front() {
-            let woke_sender = if let Some((sender, sender_value)) = self.waiting_senders.pop_front() {
+            let woke_sender = if let Some((sender, sender_value)) = self.waiting_senders.pop_front()
+            {
                 self.buffer.push_back(sender_value);
                 Some(sender)
             } else {
@@ -426,15 +435,17 @@ impl<M> QueueState<QueueWaiter, M> {
     /// Called when a select completes (one case became ready) to remove
     /// this fiber from all other channels it was waiting on.
     pub fn cancel_select_waiters(&mut self, select_id: u64) {
-        self.waiting_receivers.retain(|w| !w.is_select_with_id(select_id));
-        self.waiting_senders.retain(|(w, _)| !w.is_select_with_id(select_id));
+        self.waiting_receivers
+            .retain(|w| !w.is_select_with_id(select_id));
+        self.waiting_senders
+            .retain(|(w, _)| !w.is_select_with_id(select_id));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     // Simple waiter type for unit tests (avoids depending on QueueWaiter).
     type TestQueue = QueueState<u32, Vec<u64>>;

@@ -3,17 +3,16 @@
 //! This module sets up the universe scope with all predefined types,
 //! constants, and built-in functions.
 
-
 use crate::obj::{Builtin, ConstValue, LangObj};
 use crate::objects::{ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
-use vo_common::span::Span;
 use crate::package::Package;
 use crate::scope::Scope;
 use crate::typ::{
-    BasicDetail, BasicInfo, BasicType, InterfaceDetail, SignatureDetail, SliceDetail,
-    TupleDetail, Type,
+    BasicDetail, BasicInfo, BasicType, InterfaceDetail, SignatureDetail, SliceDetail, TupleDetail,
+    Type,
 };
 use std::collections::HashMap;
+use vo_common::span::Span;
 
 /// ExprKind describes the kind of an expression.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -75,7 +74,7 @@ impl Universe {
         // Get byte and rune type keys
         let byte = alias_types[&BasicType::Byte];
         let rune = alias_types[&BasicType::Rune];
-        
+
         // Merge alias types into types map
         types.extend(alias_types);
 
@@ -101,13 +100,22 @@ impl Universe {
         // Create helper types
         let slice_of_bytes = objs.types.insert(Type::Slice(SliceDetail::new(byte)));
         let no_value_tuple = objs.types.insert(Type::Tuple(TupleDetail::new(vec![])));
-        
+
         // Create indir sentinel for type cycle detection
-        let indir = objs.lobjs.insert(LangObj::new_type_name(Span::default(), None, "*".to_string(), None));
-        
+        let indir = objs.lobjs.insert(LangObj::new_type_name(
+            Span::default(),
+            None,
+            "*".to_string(),
+            None,
+        ));
+
         // Create guard_sig for func cycle detection
         let guard_sig = objs.types.insert(Type::Signature(SignatureDetail::new(
-            None, None, no_value_tuple, no_value_tuple, false,
+            None,
+            None,
+            no_value_tuple,
+            no_value_tuple,
+            false,
         )));
 
         Universe {
@@ -184,7 +192,9 @@ impl Universe {
     }
 
     fn create_any_type(universe_scope: ScopeKey, objs: &mut TCObjects) -> TypeKey {
-        let any_type = objs.types.insert(Type::Interface(InterfaceDetail::new_empty()));
+        let any_type = objs
+            .types
+            .insert(Type::Interface(InterfaceDetail::new_empty()));
 
         let type_name = objs.lobjs.insert(LangObj::new_type_name(
             Span::default(),
@@ -224,9 +234,9 @@ impl Universe {
 
     fn create_universe_scope(objs: &mut TCObjects) -> (ScopeKey, PackageKey) {
         let universe_scope = objs.scopes.insert(Scope::new(None, 0, 0, "universe"));
-        let unsafe_scope = objs
-            .scopes
-            .insert(Scope::new(Some(universe_scope), 0, 0, "package unsafe"));
+        let unsafe_scope =
+            objs.scopes
+                .insert(Scope::new(Some(universe_scope), 0, 0, "package unsafe"));
         let mut pkg = Package::new(
             "unsafe".to_string(),
             "unsafe".to_string(),
@@ -336,25 +346,33 @@ impl Universe {
         )));
 
         // === Error() string ===
-        let err_res_var = objs
-            .lobjs
-            .insert(LangObj::new_var(Span::default(), None, "".to_string(), Some(string_type)));
+        let err_res_var = objs.lobjs.insert(LangObj::new_var(
+            Span::default(),
+            None,
+            "".to_string(),
+            Some(string_type),
+        ));
         let err_params = objs.types.insert(Type::Tuple(TupleDetail::new(vec![])));
         let err_results = objs
             .types
             .insert(Type::Tuple(TupleDetail::new(vec![err_res_var])));
         let err_sig = objs.types.insert(Type::Signature(SignatureDetail::new(
-            None, None, err_params, err_results, false,
+            None,
+            None,
+            err_params,
+            err_results,
+            false,
         )));
-        let err_method = objs
-            .lobjs
-            .insert(LangObj::new_func(Span::default(), None, "Error".to_string(), Some(err_sig), false));
+        let err_method = objs.lobjs.insert(LangObj::new_func(
+            Span::default(),
+            None,
+            "Error".to_string(),
+            Some(err_sig),
+            false,
+        ));
 
         // Create underlying interface type (only Error method)
-        let iface = InterfaceDetail::new_complete(
-            vec![err_method],
-            vec![],
-        );
+        let iface = InterfaceDetail::new_complete(vec![err_method], vec![]);
         let underlying = objs.types.insert(Type::Interface(iface));
 
         // Point named "error" to its underlying interface
@@ -398,12 +416,18 @@ impl Universe {
                 ConstValue::Bool(false),
                 false,
             ),
-            ("iota", BasicType::UntypedInt, crate::constant::make_int64(0), true),
+            (
+                "iota",
+                BasicType::UntypedInt,
+                crate::constant::make_int64(0),
+                true,
+            ),
         ];
 
         for (name, typ, val, is_iota) in consts {
             let type_key = types[&typ];
-            let obj = LangObj::new_const(Span::default(), None, name.to_string(), Some(type_key), val);
+            let obj =
+                LangObj::new_const(Span::default(), None, name.to_string(), Some(type_key), val);
             let obj_key = objs.lobjs.insert(obj);
             Scope::insert(universe_scope, obj_key, objs);
             if is_iota {

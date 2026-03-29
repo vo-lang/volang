@@ -8,8 +8,8 @@ use vo_runtime::objects::closure;
 use crate::bytecode::Module;
 use crate::fiber::Fiber;
 use crate::instruction::Instruction;
-use crate::vm::ExecResult;
 use crate::vm::helpers::{stack_get, stack_set};
+use crate::vm::ExecResult;
 use vo_runtime::itab::ItabCache;
 
 #[derive(Clone, Copy)]
@@ -71,8 +71,12 @@ fn resolve_call_iface_target(
     itab_id: u32,
     method_idx: usize,
 ) -> CallIfaceTarget {
-    let itab = itab_cache.get_itab(itab_id)
-        .unwrap_or_else(|| panic!("CallIface: missing itab_id={} method_idx={}", itab_id, method_idx));
+    let itab = itab_cache.get_itab(itab_id).unwrap_or_else(|| {
+        panic!(
+            "CallIface: missing itab_id={} method_idx={}",
+            itab_id, method_idx
+        )
+    });
     let func_id = *itab.methods.get(method_idx).unwrap_or_else(|| {
         let caller = fiber.frames.last().copied();
         let (caller_func_id, caller_pc, caller_name) = caller
@@ -111,16 +115,16 @@ fn resolve_call_iface_target(
     }
 }
 
-pub fn exec_call(
-    fiber: &mut Fiber,
-    inst: &Instruction,
-    module: &Module,
-) -> ExecResult {
+pub fn exec_call(fiber: &mut Fiber, inst: &Instruction, module: &Module) -> ExecResult {
     let func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
     let arg_start = inst.b as usize;
     let arg_slots = (inst.c >> 8) as usize;
     let ret_slots = (inst.c & 0xFF) as usize;
-    let caller_frame = fiber.frames.last().copied().expect("Call: missing caller frame");
+    let caller_frame = fiber
+        .frames
+        .last()
+        .copied()
+        .expect("Call: missing caller frame");
     let caller_func = &module.functions[caller_frame.func_id as usize];
     let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(arg_start as u16);
 
@@ -141,11 +145,7 @@ pub fn exec_call(
     ExecResult::FrameChanged
 }
 
-pub fn exec_call_closure(
-    fiber: &mut Fiber,
-    inst: &Instruction,
-    module: &Module,
-) -> ExecResult {
+pub fn exec_call_closure(fiber: &mut Fiber, inst: &Instruction, module: &Module) -> ExecResult {
     let caller_bp = fiber.frames.last().map_or(0, |f| f.bp);
     let stack = fiber.stack_ptr();
     let closure_ref = stack_get(stack, caller_bp + inst.a as usize) as GcRef;
@@ -181,7 +181,11 @@ pub fn exec_call_closure(
     );
 
     let borrowed_start = (arg_start - layout.arg_offset) as u16;
-    let caller_frame = fiber.frames.last().copied().expect("CallClosure: missing caller frame");
+    let caller_frame = fiber
+        .frames
+        .last()
+        .copied()
+        .expect("CallClosure: missing caller frame");
     let caller_func = &module.functions[caller_frame.func_id as usize];
     let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(borrowed_start);
 
@@ -194,7 +198,11 @@ pub fn exec_call_closure(
         func.local_slots as u16,
         func.gc_scan_slots,
     );
-    fiber.zero_slots_tail_at(new_bp, func.gc_scan_slots as usize, layout.arg_offset + arg_slots);
+    fiber.zero_slots_tail_at(
+        new_bp,
+        func.gc_scan_slots as usize,
+        layout.arg_offset + arg_slots,
+    );
     let stack = fiber.stack_ptr();
 
     if let Some(slot0_val) = layout.slot0 {
@@ -215,7 +223,11 @@ pub fn exec_call_iface(
     let method_idx_u8 = inst.flags;
     let method_idx = method_idx_u8 as usize;
 
-    let caller_frame = fiber.frames.last().copied().expect("CallIface: missing caller frame");
+    let caller_frame = fiber
+        .frames
+        .last()
+        .copied()
+        .expect("CallIface: missing caller frame");
     let caller_bp = caller_frame.bp;
     let caller_func_id = caller_frame.func_id;
     let callsite_pc = caller_frame.pc.saturating_sub(1) as u32;
@@ -232,14 +244,23 @@ pub fn exec_call_iface(
     let slot1 = stack_get(stack, caller_bp + inst.a as usize + 1);
 
     let itab_id = (slot0 >> 32) as u32;
-    let target = match probe_call_iface_ic(fiber, caller_func_id, callsite_pc, itab_id, method_idx_u8) {
-        Some(target) => target,
-        None => {
-            let target = resolve_call_iface_target(fiber, module, itab_cache, itab_id, method_idx);
-            fill_call_iface_ic(fiber, caller_func_id, callsite_pc, itab_id, method_idx_u8, target);
-            target
-        }
-    };
+    let target =
+        match probe_call_iface_ic(fiber, caller_func_id, callsite_pc, itab_id, method_idx_u8) {
+            Some(target) => target,
+            None => {
+                let target =
+                    resolve_call_iface_target(fiber, module, itab_cache, itab_id, method_idx);
+                fill_call_iface_ic(
+                    fiber,
+                    caller_func_id,
+                    callsite_pc,
+                    itab_id,
+                    method_idx_u8,
+                    target,
+                );
+                target
+            }
+        };
 
     let new_bp = fiber.push_borrowed_call_frame(
         target.func_id,

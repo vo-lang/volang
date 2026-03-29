@@ -14,20 +14,20 @@ use codespan_reporting::diagnostic::{
     Diagnostic as CSDiagnostic, Label as CSLabel, LabelStyle, Severity as CSSeverity,
 };
 use codespan_reporting::files::SimpleFiles;
+#[cfg(not(feature = "terminal"))]
+use codespan_reporting::term::Config;
 #[cfg(feature = "terminal")]
 use codespan_reporting::term::{
     self,
     termcolor::{ColorChoice, StandardStream, WriteColor},
     Config,
 };
-#[cfg(not(feature = "terminal"))]
-use codespan_reporting::term::Config;
 
 use crate::source::SourceMap;
 use crate::span::Span;
+use vo_common_core::SourceLoc;
 #[cfg(feature = "terminal")]
 use vo_common_core::SourceProvider;
-use vo_common_core::SourceLoc;
 
 /// Severity level of a diagnostic.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -79,7 +79,7 @@ impl From<Severity> for CSSeverity {
 }
 
 /// A label attached to a diagnostic, pointing to a specific location in source code.
-/// 
+///
 /// With global position space, the span alone identifies the file.
 #[derive(Clone, Debug)]
 pub struct Label {
@@ -389,7 +389,7 @@ impl<'a> DiagnosticEmitter<'a> {
     pub fn emit_to<W: WriteColor>(&self, writer: &mut W, diagnostic: &Diagnostic) {
         let files = self.build_files();
         let cs_diagnostic = self.to_codespan(diagnostic);
-        
+
         let _ = term::emit(writer, &self.config, &files, &cs_diagnostic);
     }
 
@@ -434,14 +434,21 @@ impl<'a> DiagnosticEmitter<'a> {
                 format!("{}:{}:{}", file.name(), lc.line, lc.column)
             })
         });
-        
-        let code_str = diagnostic.code
+
+        let code_str = diagnostic
+            .code
             .map(|c| format!("[E{:04}]", c))
             .unwrap_or_default();
-        
+
         match loc {
-            Some(l) => format!("{}: {}{}: {}", l, diagnostic.severity, code_str, diagnostic.message),
-            None => format!("{}{}: {}", diagnostic.severity, code_str, diagnostic.message),
+            Some(l) => format!(
+                "{}: {}{}: {}",
+                l, diagnostic.severity, code_str, diagnostic.message
+            ),
+            None => format!(
+                "{}{}: {}",
+                diagnostic.severity, code_str, diagnostic.message
+            ),
         }
     }
 
@@ -458,8 +465,8 @@ impl<'a> DiagnosticEmitter<'a> {
     /// Converts our diagnostic to codespan-reporting format.
     #[allow(dead_code)]
     fn to_codespan(&self, diagnostic: &Diagnostic) -> CSDiagnostic<usize> {
-        let mut cs_diagnostic = CSDiagnostic::new(diagnostic.severity.into())
-            .with_message(&diagnostic.message);
+        let mut cs_diagnostic =
+            CSDiagnostic::new(diagnostic.severity.into()).with_message(&diagnostic.message);
 
         if let Some(code) = diagnostic.code {
             cs_diagnostic = cs_diagnostic.with_code(format!("E{:04}", code));
@@ -475,7 +482,7 @@ impl<'a> DiagnosticEmitter<'a> {
                 // Convert global span to local range for codespan-reporting
                 let start = file.local_offset(label.span.start) as usize;
                 let end = file.local_offset(label.span.end) as usize;
-                
+
                 let mut cs_label = CSLabel::new(label.style, file_id, start..end);
                 if let Some(msg) = &label.message {
                     cs_label = cs_label.with_message(msg);
@@ -488,7 +495,10 @@ impl<'a> DiagnosticEmitter<'a> {
 
         let mut notes = diagnostic.notes.clone();
         for suggestion in &diagnostic.suggestions {
-            notes.push(format!("help: {}: `{}`", suggestion.message, suggestion.replacement));
+            notes.push(format!(
+                "help: {}: `{}`",
+                suggestion.message, suggestion.replacement
+            ));
         }
         cs_diagnostic = cs_diagnostic.with_notes(notes);
 
@@ -544,13 +554,16 @@ pub fn render_error(
 
     // Try to get source code
     let source = source_provider.read_source(&loc.file);
-    
+
     if let Some(source) = source {
         // Have source - pretty print
         render_error_with_source(loc, severity, message, &source);
     } else {
         // No source - simple format
-        eprintln!("{}:{}:{}: {}: {}", loc.file, loc.line, loc.col, severity, message);
+        eprintln!(
+            "{}:{}:{}: {}: {}",
+            loc.file, loc.line, loc.col, severity, message
+        );
     }
 }
 
@@ -560,19 +573,18 @@ fn render_error_with_source(loc: &SourceLoc, severity: &str, message: &str, sour
     // Build a temporary SourceMap with just this file
     let mut source_map = SourceMap::new();
     source_map.add_file(loc.file.as_str(), source);
-    
+
     // Calculate byte position from line:col
     let file = source_map.files().next().unwrap();
     let line_start = file.line_start((loc.line - 1) as usize).unwrap_or(0);
     let start = line_start + (loc.col - 1) as u32;
     let end = start + loc.len as u32;
     let span = Span::from_u32(start, end);
-    
+
     // Create diagnostic (severity string is for display, always use Error style for codespan)
     let _ = severity;
-    let diagnostic = Diagnostic::error(message)
-        .with_label(Label::primary(span));
-    
+    let diagnostic = Diagnostic::error(message).with_label(Label::primary(span));
+
     // Emit
     let emitter = DiagnosticEmitter::new(&source_map);
     eprintln!();
@@ -597,7 +609,7 @@ mod tests {
         assert!(!Severity::Error.is_warning());
         assert!(Severity::Warning.is_warning());
         assert!(!Severity::Warning.is_error());
-        
+
         assert_eq!(format!("{}", Severity::Error), "error");
         assert_eq!(format!("{}", Severity::Warning), "warning");
         assert_eq!(format!("{}", Severity::Note), "note");
@@ -606,9 +618,8 @@ mod tests {
 
     #[test]
     fn test_label_creation() {
-        let label = Label::primary(10u32..20u32)
-            .with_message("test message");
-        
+        let label = Label::primary(10u32..20u32).with_message("test message");
+
         assert_eq!(label.style, LabelStyle::Primary);
         assert_eq!(label.span.start.0, 10);
         assert_eq!(label.span.end.0, 20);
@@ -618,18 +629,14 @@ mod tests {
     #[test]
     fn test_label_secondary() {
         let label = Label::secondary(5u32..15u32);
-        
+
         assert_eq!(label.style, LabelStyle::Secondary);
     }
 
     #[test]
     fn test_suggestion() {
-        let suggestion = Suggestion::new(
-            10u32..15u32,
-            "replacement",
-            "try this instead",
-        );
-        
+        let suggestion = Suggestion::new(10u32..15u32, "replacement", "try this instead");
+
         assert_eq!(suggestion.span.start.0, 10);
         assert_eq!(suggestion.replacement, "replacement");
         assert_eq!(suggestion.message, "try this instead");
@@ -641,7 +648,7 @@ mod tests {
             .with_code(1)
             .with_label(Label::primary(0u32..5u32))
             .with_note("this is a note");
-        
+
         assert!(diag.is_error());
         assert!(!diag.is_warning());
         assert_eq!(diag.message, "test error");
@@ -653,7 +660,7 @@ mod tests {
     #[test]
     fn test_diagnostic_warning() {
         let diag = Diagnostic::warning("test warning");
-        
+
         assert!(diag.is_warning());
         assert!(!diag.is_error());
     }
@@ -661,27 +668,24 @@ mod tests {
     #[test]
     fn test_diagnostic_with_multiple_labels() {
         let diag = Diagnostic::error("multiple labels")
-            .with_labels([
-                Label::primary(0u32..5u32),
-                Label::secondary(10u32..15u32),
-            ]);
-        
+            .with_labels([Label::primary(0u32..5u32), Label::secondary(10u32..15u32)]);
+
         assert_eq!(diag.labels.len(), 2);
     }
 
     #[test]
     fn test_diagnostic_sink_basic() {
         let mut sink = DiagnosticSink::new();
-        
+
         assert!(sink.is_empty());
         assert_eq!(sink.len(), 0);
         assert!(!sink.has_errors());
         assert!(!sink.has_warnings());
-        
+
         sink.emit(Diagnostic::error("error 1"));
         sink.emit(Diagnostic::warning("warning 1"));
         sink.emit(Diagnostic::error("error 2"));
-        
+
         assert!(!sink.is_empty());
         assert_eq!(sink.len(), 3);
         assert!(sink.has_errors());
@@ -693,10 +697,10 @@ mod tests {
     #[test]
     fn test_diagnostic_sink_emit_methods() {
         let mut sink = DiagnosticSink::new();
-        
+
         sink.error("test error");
         sink.warning("test warning");
-        
+
         assert_eq!(sink.error_count(), 1);
         assert_eq!(sink.warning_count(), 1);
     }
@@ -706,9 +710,9 @@ mod tests {
         let mut sink = DiagnosticSink::new();
         sink.emit(Diagnostic::error("error"));
         sink.emit(Diagnostic::warning("warning"));
-        
+
         let diagnostics = sink.take();
-        
+
         assert_eq!(diagnostics.len(), 2);
         assert!(sink.is_empty());
         assert_eq!(sink.error_count(), 0);
@@ -719,9 +723,9 @@ mod tests {
     fn test_diagnostic_sink_clear() {
         let mut sink = DiagnosticSink::new();
         sink.emit(Diagnostic::error("error"));
-        
+
         sink.clear();
-        
+
         assert!(sink.is_empty());
         assert_eq!(sink.error_count(), 0);
     }
@@ -730,13 +734,13 @@ mod tests {
     fn test_diagnostic_sink_extend() {
         let mut sink1 = DiagnosticSink::new();
         sink1.emit(Diagnostic::error("error 1"));
-        
+
         let mut sink2 = DiagnosticSink::new();
         sink2.emit(Diagnostic::error("error 2"));
         sink2.emit(Diagnostic::warning("warning"));
-        
+
         sink1.extend(sink2);
-        
+
         assert_eq!(sink1.len(), 3);
         assert_eq!(sink1.error_count(), 2);
         assert_eq!(sink1.warning_count(), 1);
@@ -747,7 +751,7 @@ mod tests {
         let mut sink = DiagnosticSink::new();
         sink.emit(Diagnostic::error("error 1"));
         sink.emit(Diagnostic::error("error 2"));
-        
+
         let messages: Vec<_> = sink.iter().map(|d| d.message.as_str()).collect();
         assert_eq!(messages, vec!["error 1", "error 2"]);
     }
@@ -756,14 +760,14 @@ mod tests {
     fn test_diagnostic_emitter() {
         let mut source_map = SourceMap::new();
         source_map.add_file("test.vo", "func main() {}");
-        
+
         let emitter = DiagnosticEmitter::new(&source_map);
-        
+
         let diagnostic = Diagnostic::error("undefined variable")
             .with_label(Label::primary(5u32..9u32).with_message("not found"));
-        
+
         let output = emitter.emit_to_string(&diagnostic);
-        
+
         assert!(output.contains("error"));
         assert!(output.contains("undefined variable"));
     }
@@ -772,36 +776,34 @@ mod tests {
     fn test_diagnostic_emitter_all() {
         let mut source_map = SourceMap::new();
         source_map.add_file("test.vo", "var x = 1\nvar y = 2");
-        
+
         let mut sink = DiagnosticSink::new();
         sink.emit(Diagnostic::error("error 1").with_label(Label::primary(0u32..3u32)));
         sink.emit(Diagnostic::warning("warning 1").with_label(Label::primary(10u32..13u32)));
-        
+
         let emitter = DiagnosticEmitter::new(&source_map);
         let output = emitter.emit_all_to_string(&sink);
-        
+
         assert!(output.contains("error 1"));
         assert!(output.contains("warning 1"));
     }
 
     #[test]
     fn test_notes_only_diagnostic() {
-        let diag = Diagnostic::note("this is informational")
-            .with_note("additional context");
-        
+        let diag = Diagnostic::note("this is informational").with_note("additional context");
+
         assert_eq!(diag.severity, Severity::Note);
         assert_eq!(diag.notes.len(), 1);
     }
 
     #[test]
     fn test_diagnostic_with_suggestion() {
-        let diag = Diagnostic::error("missing semicolon")
-            .with_suggestion(Suggestion::new(
-                10u32..10u32,
-                ";",
-                "add a semicolon",
-            ));
-        
+        let diag = Diagnostic::error("missing semicolon").with_suggestion(Suggestion::new(
+            10u32..10u32,
+            ";",
+            "add a semicolon",
+        ));
+
         assert_eq!(diag.suggestions.len(), 1);
         assert_eq!(diag.suggestions[0].replacement, ";");
     }

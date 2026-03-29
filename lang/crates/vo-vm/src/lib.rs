@@ -3,12 +3,11 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+pub mod exec;
 pub mod fiber;
+mod gc_roots;
 pub mod scheduler;
 pub mod vm;
-pub mod exec;
-mod gc_roots;
-
 
 // Re-export from vo-common-core for backward compatibility
 pub use vo_runtime::bytecode;

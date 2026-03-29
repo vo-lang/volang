@@ -3,12 +3,11 @@
 //! A LangObj describes a named language entity such as a package,
 //! constant, type, variable, function (incl. methods), or label.
 
-
 pub use crate::constant::Value as ConstValue;
 use crate::objects::{ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
+use crate::package::Package;
 use crate::typ::{self, BasicType};
 use crate::universe::Universe;
-use crate::package::Package;
 use std::borrow::Cow;
 use vo_common::span::Span;
 
@@ -89,14 +88,9 @@ impl Builtin {
 #[derive(Clone, Debug, PartialEq)]
 pub enum EntityType {
     /// An imported package.
-    PkgName {
-        imported: PackageKey,
-        used: bool,
-    },
+    PkgName { imported: PackageKey, used: bool },
     /// A declared constant.
-    Const {
-        val: ConstValue,
-    },
+    Const { val: ConstValue },
     /// A name for a (defined or alias) type.
     TypeName,
     /// A declared variable (including function parameters, results, and struct fields).
@@ -108,9 +102,7 @@ pub enum EntityType {
         has_body: bool,
     },
     /// A declared label.
-    Label {
-        used: bool,
-    },
+    Label { used: bool },
     /// A built-in function.
     Builtin(Builtin),
     /// The predeclared value nil.
@@ -197,7 +189,6 @@ impl EntityType {
         }
     }
 }
-
 
 /// Object color for dependency ordering.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -343,7 +334,10 @@ impl LangObj {
         has_body: bool,
     ) -> LangObj {
         LangObj::new(
-            EntityType::Func { has_ptr_recv: false, has_body },
+            EntityType::Func {
+                has_ptr_recv: false,
+                has_body,
+            },
             span,
             pkg,
             name,
@@ -351,7 +345,12 @@ impl LangObj {
         )
     }
 
-    pub fn new_label(span: Span, pkg: Option<PackageKey>, name: String, univ: &Universe) -> LangObj {
+    pub fn new_label(
+        span: Span,
+        pkg: Option<PackageKey>,
+        name: String,
+        univ: &Universe,
+    ) -> LangObj {
         let t = univ.types()[&BasicType::Invalid];
         LangObj::new(EntityType::Label { used: false }, span, pkg, name, Some(t))
     }
@@ -367,7 +366,13 @@ impl LangObj {
     }
 
     pub fn new_nil(typ: TypeKey) -> LangObj {
-        LangObj::new(EntityType::Nil, Span::default(), None, "nil".to_string(), Some(typ))
+        LangObj::new(
+            EntityType::Nil,
+            Span::default(),
+            None,
+            "nil".to_string(),
+            Some(typ),
+        )
     }
 
     // Getters
@@ -437,10 +442,7 @@ impl LangObj {
 
     /// Returns true if the name is exported (starts with uppercase).
     pub fn exported(&self) -> bool {
-        self.name
-            .chars()
-            .next()
-            .map_or(false, |c| c.is_uppercase())
+        self.name.chars().next().map_or(false, |c| c.is_uppercase())
     }
 
     /// Returns the unique identifier for this object.
@@ -448,10 +450,7 @@ impl LangObj {
         if self.exported() {
             Cow::Borrowed(&self.name)
         } else {
-            let path = self
-                .pkg
-                .map(|pk| objs.pkgs[pk].path())
-                .unwrap_or("_");
+            let path = self.pkg.map(|pk| objs.pkgs[pk].path()).unwrap_or("_");
             Cow::Owned(format!("{}.{}", path, self.name))
         }
     }
@@ -519,7 +518,11 @@ impl LangObj {
         }
     }
 
-    pub fn func_fmt_name(&self, f: &mut std::fmt::Formatter<'_>, objs: &TCObjects) -> std::fmt::Result {
+    pub fn func_fmt_name(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        objs: &TCObjects,
+    ) -> std::fmt::Result {
         match &self.entity_type {
             EntityType::Func { .. } => fmt_func_name(self, f, objs),
             _ => panic!("not a func"),

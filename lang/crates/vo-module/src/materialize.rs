@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use crate::digest::Digest;
 use crate::identity::ModulePath;
-use crate::version::ExactVersion;
 use crate::registry::Registry;
 use crate::schema::lockfile::{LockFile, LockedArtifact, LockedModule};
+use crate::version::ExactVersion;
 use crate::Error;
 
 // ── Shared cache layout (platform-agnostic) ──────────────────────────────────
@@ -76,7 +76,10 @@ pub fn extract_source_entries(archive_bytes: &[u8]) -> Result<Vec<SourceEntry>, 
             Ok(c) => c,
             Err(_) => continue,
         };
-        entries.push(SourceEntry { relative_path: stripped, content });
+        entries.push(SourceEntry {
+            relative_path: stripped,
+            content,
+        });
     }
 
     if archive_root.is_none() {
@@ -96,7 +99,10 @@ fn strip_archive_root(
         None => return Ok(None),
     };
     let std::path::Component::Normal(first) = first else {
-        return Err(format!("invalid source package entry path: {}", raw_path.display()));
+        return Err(format!(
+            "invalid source package entry path: {}",
+            raw_path.display()
+        ));
     };
     let first = first.to_string_lossy().to_string();
     match archive_root {
@@ -116,10 +122,7 @@ fn strip_archive_root(
 fn source_entry_allowed(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let path_str = path.to_string_lossy();
-    path_str.ends_with(".vo")
-        || name == "vo.mod"
-        || name == "vo.lock"
-        || name == "vo.ext.toml"
+    path_str.ends_with(".vo") || name == "vo.mod" || name == "vo.lock" || name == "vo.ext.toml"
 }
 
 /// Cache directory layout helper.
@@ -137,8 +140,7 @@ pub fn cache_dir(cache_root: &Path, module: &ModulePath, version: &ExactVersion)
 /// Relative cache directory for a module (no cache_root prefix).
 /// Useful as a VFS module root key.
 pub fn cache_relative_dir(module: &ModulePath, version: &ExactVersion) -> PathBuf {
-    PathBuf::from(cache_key(module.as_str()))
-        .join(version.to_string())
+    PathBuf::from(cache_key(module.as_str())).join(version.to_string())
 }
 
 /// Check if a source package is already cached and valid.
@@ -191,12 +193,10 @@ pub fn download_source(
     }
     std::fs::create_dir_all(&stage_dir)?;
 
-    safe_unpack_tar_gz(&data, &stage_dir).map_err(|e| {
-        Error::DigestMismatch {
-            context: format!("source package for {} {}", locked.path, locked.version),
-            expected: "safe archive".to_string(),
-            found: e,
-        }
+    safe_unpack_tar_gz(&data, &stage_dir).map_err(|e| Error::DigestMismatch {
+        context: format!("source package for {} {}", locked.path, locked.version),
+        expected: "safe archive".to_string(),
+        found: e,
     })?;
 
     if !stage_dir.join("vo.mod").is_file() {
@@ -208,8 +208,14 @@ pub fn download_source(
     }
 
     // Write metadata files used by compile-time frozen-build validation
-    std::fs::write(stage_dir.join(SOURCE_DIGEST_MARKER), format!("{}\n", locked.source))?;
-    std::fs::write(stage_dir.join(VERSION_MARKER), format!("{}\n", locked.version))?;
+    std::fs::write(
+        stage_dir.join(SOURCE_DIGEST_MARKER),
+        format!("{}\n", locked.source),
+    )?;
+    std::fs::write(
+        stage_dir.join(VERSION_MARKER),
+        format!("{}\n", locked.version),
+    )?;
     std::fs::write(stage_dir.join("vo.release.json"), manifest_raw)?;
 
     if dir.exists() {
@@ -311,15 +317,11 @@ pub fn download_all(
         }
 
         let (source_asset, manifest_raw) = if needs_source {
-            let (manifest, raw) =
-                registry.fetch_manifest_raw(&locked.path, &locked.version)?;
+            let (manifest, raw) = registry.fetch_manifest_raw(&locked.path, &locked.version)?;
             let computed = Digest::from_sha256(&raw);
             if computed != locked.release_manifest {
                 return Err(Error::DigestMismatch {
-                    context: format!(
-                        "release manifest for {} {}",
-                        locked.path, locked.version
-                    ),
+                    context: format!("release manifest for {} {}", locked.path, locked.version),
                     expected: locked.release_manifest.as_str().to_string(),
                     found: computed.as_str().to_string(),
                 });
@@ -373,7 +375,9 @@ fn download_jobs_sequential(
             job.locked.path,
             job.locked.version
         );
-        if let (Some(asset_name), Some(raw)) = (job.source_asset.as_deref(), job.manifest_raw.as_deref()) {
+        if let (Some(asset_name), Some(raw)) =
+            (job.source_asset.as_deref(), job.manifest_raw.as_deref())
+        {
             download_source(cache_root, job.locked, registry, asset_name, raw)?;
         }
         for artifact in &job.artifacts {
@@ -415,8 +419,12 @@ fn download_jobs_parallel(
                         idx, total, job.locked.path, job.locked.version
                     );
 
-                    if let (Some(asset_name), Some(raw)) = (job.source_asset.as_deref(), job.manifest_raw.as_deref()) {
-                        if let Err(e) = download_source(cache_root, job.locked, registry, asset_name, raw) {
+                    if let (Some(asset_name), Some(raw)) =
+                        (job.source_asset.as_deref(), job.manifest_raw.as_deref())
+                    {
+                        if let Err(e) =
+                            download_source(cache_root, job.locked, registry, asset_name, raw)
+                        {
                             *error_ref.lock().unwrap() = Some(e);
                             return;
                         }
@@ -425,7 +433,9 @@ fn download_jobs_parallel(
                         if error_ref.lock().unwrap().is_some() {
                             return;
                         }
-                        if let Err(e) = download_artifact(cache_root, job.locked, artifact, registry) {
+                        if let Err(e) =
+                            download_artifact(cache_root, job.locked, artifact, registry)
+                        {
                             *error_ref.lock().unwrap() = Some(e);
                             return;
                         }
@@ -451,11 +461,12 @@ fn validate_source_cache_entry(cache_root: &Path, locked: &LockedModule) -> Resu
         });
     }
 
-    let version = read_trimmed_metadata(&dir.join(VERSION_MARKER)).ok_or_else(|| Error::MissingArtifact {
-        module: locked.path.as_str().to_string(),
-        version: locked.version.to_string(),
-        detail: "cached version metadata is missing".to_string(),
-    })?;
+    let version =
+        read_trimmed_metadata(&dir.join(VERSION_MARKER)).ok_or_else(|| Error::MissingArtifact {
+            module: locked.path.as_str().to_string(),
+            version: locked.version.to_string(),
+            detail: "cached version metadata is missing".to_string(),
+        })?;
     if version != locked.version.to_string() {
         return Err(Error::MissingArtifact {
             module: locked.path.as_str().to_string(),
@@ -464,11 +475,14 @@ fn validate_source_cache_entry(cache_root: &Path, locked: &LockedModule) -> Resu
         });
     }
 
-    let source_digest = read_trimmed_metadata(&dir.join(SOURCE_DIGEST_MARKER)).ok_or_else(|| Error::MissingArtifact {
-        module: locked.path.as_str().to_string(),
-        version: locked.version.to_string(),
-        detail: "cached source digest metadata is missing".to_string(),
-    })?;
+    let source_digest =
+        read_trimmed_metadata(&dir.join(SOURCE_DIGEST_MARKER)).ok_or_else(|| {
+            Error::MissingArtifact {
+                module: locked.path.as_str().to_string(),
+                version: locked.version.to_string(),
+                detail: "cached source digest metadata is missing".to_string(),
+            }
+        })?;
     if source_digest != locked.source.as_str() {
         return Err(Error::MissingArtifact {
             module: locked.path.as_str().to_string(),
@@ -528,14 +542,19 @@ fn validate_artifact_cache_entry(
         return Err(Error::MissingArtifact {
             module: locked.path.as_str().to_string(),
             version: locked.version.to_string(),
-            detail: format!("artifact {} digest does not match vo.lock", artifact.id.name),
+            detail: format!(
+                "artifact {} digest does not match vo.lock",
+                artifact.id.name
+            ),
         });
     }
     Ok(())
 }
 
 fn read_trimmed_metadata(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok().map(|value| value.trim().to_string())
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
 }
 
 /// Safely unpack a tar.gz archive into `dest`, rejecting entries with

@@ -26,7 +26,10 @@ fn find_slot_value_kind(
                 // Nested struct: recursively find the actual slot type
                 let inner_rttid = field.type_info.rttid();
                 let inner_meta_id = match module.runtime_types.get(inner_rttid as usize) {
-                    Some(RuntimeType::Named { struct_meta_id: Some(id), .. }) => *id,
+                    Some(RuntimeType::Named {
+                        struct_meta_id: Some(id),
+                        ..
+                    }) => *id,
                     Some(RuntimeType::Struct { meta_id, .. }) => *meta_id,
                     _ => return ValueKind::Void,
                 };
@@ -49,14 +52,14 @@ pub fn deep_hash_struct_inline(key: &[u64], rttid: u32, module: &Module) -> u64 
         Some(m) => m,
         None => return shallow_hash_inline(key),
     };
-    
+
     let slot_types = &struct_meta.slot_types;
     let mut h = HASH_SEED;
     let mut i = 0;
-    
+
     while i < slot_types.len() && i < key.len() {
         let val = key[i];
-        
+
         match slot_types[i] {
             SlotType::Value | SlotType::Float => {
                 h = h.wrapping_add(val).wrapping_mul(HASH_K);
@@ -64,7 +67,7 @@ pub fn deep_hash_struct_inline(key: &[u64], rttid: u32, module: &Module) -> u64 
             SlotType::GcRef => {
                 // Find actual slot type, recursively descending into nested structs
                 let slot_vk = find_slot_value_kind(struct_meta, i as u16, module);
-                
+
                 if slot_vk == ValueKind::String {
                     // Hash string by content
                     if val == 0 {
@@ -109,9 +112,13 @@ fn shallow_hash_inline(key: &[u64]) -> u64 {
 /// Returns Some(result) if comparison is done, None if deep comparison needed.
 #[inline]
 fn try_shallow_eq(a: u64, b: u64) -> Option<bool> {
-    if a == b { Some(true) }
-    else if a == 0 || b == 0 { Some(false) }
-    else { None }
+    if a == b {
+        Some(true)
+    } else if a == 0 || b == 0 {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Compare two interface values for equality.
@@ -121,14 +128,14 @@ pub fn iface_eq(b_slot0: u64, b_slot1: u64, c_slot0: u64, c_slot1: u64, module: 
     // Compare only rttid + vk (low 32 bits), NOT itab_id
     let b_type = (b_slot0 & 0xFFFFFFFF) as u32;
     let c_type = (c_slot0 & 0xFFFFFFFF) as u32;
-    
+
     if b_type != c_type {
         return 0;
     }
-    
+
     let vk = ValueKind::from_u8((b_slot0 & 0xFF) as u8);
     let rttid = ((b_slot0 >> 8) & 0xFFFFFF) as u32;
-    
+
     // Check for uncomparable types - return 2 to signal panic
     // Note: Channel and Island ARE comparable (identity comparison like Pointer)
     match vk {
@@ -137,20 +144,18 @@ pub fn iface_eq(b_slot0: u64, b_slot1: u64, c_slot0: u64, c_slot1: u64, module: 
         }
         _ => {}
     }
-    
+
     let eq = match vk {
         ValueKind::String => try_shallow_eq(b_slot1, c_slot1).unwrap_or_else(|| {
             string::as_str(b_slot1 as GcRef) == string::as_str(c_slot1 as GcRef)
         }),
-        ValueKind::Struct => try_shallow_eq(b_slot1, c_slot1).unwrap_or_else(|| {
-            deep_eq_struct(b_slot1 as GcRef, c_slot1 as GcRef, rttid, module)
-        }),
-        ValueKind::Array => try_shallow_eq(b_slot1, c_slot1).unwrap_or_else(|| {
-            deep_eq_array(b_slot1 as GcRef, c_slot1 as GcRef, rttid, module)
-        }),
+        ValueKind::Struct => try_shallow_eq(b_slot1, c_slot1)
+            .unwrap_or_else(|| deep_eq_struct(b_slot1 as GcRef, c_slot1 as GcRef, rttid, module)),
+        ValueKind::Array => try_shallow_eq(b_slot1, c_slot1)
+            .unwrap_or_else(|| deep_eq_array(b_slot1 as GcRef, c_slot1 as GcRef, rttid, module)),
         _ => b_slot1 == c_slot1,
     };
-    
+
     eq as u64
 }
 
@@ -169,7 +174,7 @@ where
     let mut i = 0;
     while i < slot_types.len() && i < len {
         let (a_val, b_val, a_next, b_next) = get_slot(i);
-        
+
         match slot_types[i] {
             SlotType::Value | SlotType::Float => {
                 if a_val != b_val {
@@ -179,7 +184,7 @@ where
             SlotType::GcRef => {
                 if a_val != b_val {
                     let slot_vk = find_slot_value_kind(struct_meta, i as u16, module);
-                    
+
                     if slot_vk == ValueKind::String {
                         if a_val == 0 || b_val == 0 {
                             return false;
@@ -211,7 +216,10 @@ where
 /// Resolve rttid to StructMeta, returning None if not found.
 fn get_struct_meta(rttid: u32, module: &Module) -> Option<&vo_common_core::bytecode::StructMeta> {
     let struct_meta_id = match module.runtime_types.get(rttid as usize) {
-        Some(RuntimeType::Named { struct_meta_id: Some(id), .. }) => *id,
+        Some(RuntimeType::Named {
+            struct_meta_id: Some(id),
+            ..
+        }) => *id,
         Some(RuntimeType::Struct { meta_id, .. }) => *meta_id,
         _ => return None,
     };
@@ -223,12 +231,12 @@ pub fn deep_eq_struct_inline(a: &[u64], b: &[u64], rttid: u32, module: &Module) 
     if a.len() != b.len() {
         return false;
     }
-    
+
     let struct_meta = match get_struct_meta(rttid, module) {
         Some(m) => m,
         None => return a == b,
     };
-    
+
     deep_eq_struct_core(struct_meta, a.len(), module, |i| {
         let a_next = if i + 1 < a.len() { a[i + 1] } else { 0 };
         let b_next = if i + 1 < b.len() { b[i + 1] } else { 0 };
@@ -242,7 +250,7 @@ pub fn deep_eq_struct(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
         Some(m) => m,
         None => return a == b,
     };
-    
+
     let len = struct_meta.slot_types.len();
     deep_eq_struct_core(struct_meta, len, module, |i| {
         let a_val = unsafe { *a.add(i) };
@@ -259,11 +267,11 @@ pub fn deep_eq_struct(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
 pub fn iface_hash(slot0: u64, slot1: u64, module: &Module) -> u64 {
     let vk = ValueKind::from_u8((slot0 & 0xFF) as u8);
     let rttid = ((slot0 >> 8) & 0xFFFFFF) as u32;
-    
+
     let mut h = HASH_SEED;
     // Include type info in hash
     h = h.wrapping_add(slot0 & 0xFFFFFFFF).wrapping_mul(HASH_K);
-    
+
     match vk {
         ValueKind::String => {
             if slot1 != 0 {
@@ -306,29 +314,29 @@ pub fn iface_hash(slot0: u64, slot1: u64, module: &Module) -> u64 {
             h = h.wrapping_add(slot1).wrapping_mul(HASH_K);
         }
     }
-    
+
     h.rotate_left(5)
 }
 
 pub fn deep_eq_array(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
     let a_len = array::len(a);
     let b_len = array::len(b);
-    
+
     if a_len != b_len {
         return false;
     }
-    
+
     let len = a_len;
     let elem_vk = array::elem_kind(a);
     let elem_bytes = array::elem_bytes(a);
-    
+
     // For reference types (string, struct, array, etc.), elements are slot-aligned
     // For primitives, compare raw bytes
     let needs_deep_compare = matches!(
         elem_vk,
         ValueKind::String | ValueKind::Struct | ValueKind::Array
     );
-    
+
     if !needs_deep_compare {
         // Primitives: compare raw data bytes
         let total_bytes = len * elem_bytes;
@@ -339,33 +347,33 @@ pub fn deep_eq_array(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
                 == core::slice::from_raw_parts(b_ptr, total_bytes)
         };
     }
-    
+
     // Reference types: need element-by-element deep comparison
     let elem_slots = elem_bytes / SLOT_BYTES;
     let elem_rttid = match module.runtime_types.get(rttid as usize) {
         Some(RuntimeType::Array { elem, .. }) => elem.rttid(),
-        Some(RuntimeType::Named { id, .. }) => {
-            module.named_type_metas.get(*id as usize)
-                .and_then(|meta| {
-                    let underlying_rttid = meta.underlying_rttid.rttid();
-                    match module.runtime_types.get(underlying_rttid as usize) {
-                        Some(RuntimeType::Array { elem, .. }) => Some(elem.rttid()),
-                        _ => None,
-                    }
-                })
-                .unwrap_or(0)
-        }
+        Some(RuntimeType::Named { id, .. }) => module
+            .named_type_metas
+            .get(*id as usize)
+            .and_then(|meta| {
+                let underlying_rttid = meta.underlying_rttid.rttid();
+                match module.runtime_types.get(underlying_rttid as usize) {
+                    Some(RuntimeType::Array { elem, .. }) => Some(elem.rttid()),
+                    _ => None,
+                }
+            })
+            .unwrap_or(0),
         _ => 0,
     };
-    
+
     let a_data = array::data_ptr_bytes(a) as *const u64;
     let b_data = array::data_ptr_bytes(b) as *const u64;
-    
+
     for i in 0..len {
         let offset = i * elem_slots;
         let a_val = unsafe { *a_data.add(offset) };
         let b_val = unsafe { *b_data.add(offset) };
-        
+
         let eq = match elem_vk {
             ValueKind::String => try_shallow_eq(a_val, b_val).unwrap_or_else(|| {
                 string::as_str(a_val as GcRef) == string::as_str(b_val as GcRef)

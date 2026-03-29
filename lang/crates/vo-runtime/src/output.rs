@@ -151,7 +151,9 @@ static mut WRITE_HOOK: Option<fn(&str)> = None;
 /// Useful in WASM to flush output to console.log immediately.
 #[cfg(not(feature = "std"))]
 pub fn set_write_hook(hook: fn(&str)) {
-    unsafe { WRITE_HOOK = Some(hook); }
+    unsafe {
+        WRITE_HOOK = Some(hook);
+    }
 }
 
 #[cfg(not(feature = "std"))]

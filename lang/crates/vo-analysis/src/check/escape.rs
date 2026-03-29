@@ -3,15 +3,15 @@
 //! This module implements static escape analysis to determine which local variables
 //! need heap allocation. It runs as a separate pass after type checking completes.
 
-use crate::objects::{ObjKey, ScopeKey, TCObjects};
-use crate::typ;
 use super::type_info::TypeInfo;
+use crate::objects::{ObjKey, ScopeKey, TCObjects};
+use crate::selection::SelectionKind;
+use crate::typ;
+use std::collections::{HashMap, HashSet};
+use vo_syntax::ast::ExprId;
 use vo_syntax::ast::{
     AssignOp, Block, Decl, Expr, ExprKind, File, FuncDecl, Ident, Stmt, StmtKind, UnaryOp,
 };
-use crate::selection::SelectionKind;
-use std::collections::{HashMap, HashSet};
-use vo_syntax::ast::ExprId;
 
 /// Escape analysis result.
 pub struct EscapeResult {
@@ -24,11 +24,7 @@ pub struct EscapeResult {
 }
 
 /// Analyze escape for all files and return escaped variables and closure captures.
-pub fn analyze(
-    files: &[File],
-    type_info: &TypeInfo,
-    tc_objs: &TCObjects,
-) -> EscapeResult {
+pub fn analyze(files: &[File], type_info: &TypeInfo, tc_objs: &TCObjects) -> EscapeResult {
     let mut analyzer = EscapeAnalyzer::new(type_info, tc_objs);
     for file in files {
         analyzer.visit_file(file);
@@ -85,7 +81,7 @@ impl<'a> EscapeAnalyzer<'a> {
             func_context_stack: Vec::new(),
         }
     }
-    
+
     /// Mark all named returns in the current function as escaped.
     /// Called when a defer/errdefer is encountered.
     fn mark_named_returns_escaped(&mut self) {
@@ -102,7 +98,7 @@ impl<'a> EscapeAnalyzer<'a> {
             self.loop_defined_vars.insert(obj);
         }
     }
-    
+
     /// Mark loop variable from an identifier expression (if define=true).
     fn mark_loop_var_from_ident(&mut self, expr: &Expr) {
         if let ExprKind::Ident(ident) = &expr.kind {
@@ -171,16 +167,19 @@ impl<'a> EscapeAnalyzer<'a> {
             let func_scope = self.type_info.scopes.get(&fdecl.sig.span).copied();
             let saved = self.func_scope;
             self.func_scope = func_scope;
-            
+
             // Collect named returns - they'll be marked as escaped when we encounter defer/errdefer
-            let named_returns: Vec<ObjKey> = fdecl.sig.results.iter()
+            let named_returns: Vec<ObjKey> = fdecl
+                .sig
+                .results
+                .iter()
                 .filter_map(|r| r.name.as_ref())
                 .filter_map(|name| self.type_info.defs.get(&name.id).and_then(|o| *o))
                 .collect();
             self.func_context_stack.push(FuncContext { named_returns });
-            
+
             self.visit_block(body);
-            
+
             self.func_context_stack.pop();
             self.func_scope = saved;
         }
@@ -199,18 +198,22 @@ impl<'a> EscapeAnalyzer<'a> {
             StmtKind::Var(vdecl) => {
                 for spec in &vdecl.specs {
                     // Check if var type is interface
-                    let is_interface_type = spec.ty.as_ref().and_then(|ty| {
-                        self.type_info.type_exprs.get(&ty.id)
-                    }).map(|&type_key| {
-                        typ::is_interface(type_key, self.tc_objs)
-                    }).unwrap_or(false);
-                    
+                    let is_interface_type = spec
+                        .ty
+                        .as_ref()
+                        .and_then(|ty| self.type_info.type_exprs.get(&ty.id))
+                        .map(|&type_key| typ::is_interface(type_key, self.tc_objs))
+                        .unwrap_or(false);
+
                     for value in &spec.values {
                         self.visit_expr(value);
                         // If var type is interface and value is not basic type, value escapes
                         // But if value is also interface, it doesn't escape (interface-to-interface copy)
                         if is_interface_type {
-                            let value_is_interface = self.type_info.types.get(&value.id)
+                            let value_is_interface = self
+                                .type_info
+                                .types
+                                .get(&value.id)
                                 .map(|t| typ::is_interface(t.typ, self.tc_objs))
                                 .unwrap_or(false);
                             if !value_is_interface {
@@ -254,7 +257,10 @@ impl<'a> EscapeAnalyzer<'a> {
                         if let Some(tv) = self.type_info.types.get(&l.id) {
                             if typ::is_interface(tv.typ, self.tc_objs) {
                                 // Check if RHS is also interface - if so, don't escape
-                                let rhs_is_interface = self.type_info.types.get(&r.id)
+                                let rhs_is_interface = self
+                                    .type_info
+                                    .types
+                                    .get(&r.id)
                                     .map(|t| typ::is_interface(t.typ, self.tc_objs))
                                     .unwrap_or(false);
                                 if !rhs_is_interface {
@@ -287,10 +293,10 @@ impl<'a> EscapeAnalyzer<'a> {
             }
             StmtKind::For(fs) => {
                 use vo_syntax::ast::ForClause;
-                
+
                 // Enter loop - variables defined here are loop variables
                 self.loop_depth += 1;
-                
+
                 match &fs.clause {
                     ForClause::Cond(Some(e)) => self.visit_expr(e),
                     ForClause::Three { init, cond, post } => {
@@ -312,17 +318,26 @@ impl<'a> EscapeAnalyzer<'a> {
                             self.visit_stmt(post);
                         }
                     }
-                    ForClause::Range { key, value, define, expr } => {
+                    ForClause::Range {
+                        key,
+                        value,
+                        define,
+                        expr,
+                    } => {
                         if *define {
-                            if let Some(k) = key { self.mark_loop_var_from_ident(k); }
-                            if let Some(v) = value { self.mark_loop_var_from_ident(v); }
+                            if let Some(k) = key {
+                                self.mark_loop_var_from_ident(k);
+                            }
+                            if let Some(v) = value {
+                                self.mark_loop_var_from_ident(v);
+                            }
                         }
                         self.visit_expr(expr);
                     }
                     _ => {}
                 }
                 self.visit_block(&fs.body);
-                
+
                 self.loop_depth -= 1;
             }
             StmtKind::Switch(ss) => {
@@ -393,7 +408,10 @@ impl<'a> EscapeAnalyzer<'a> {
                 self.visit_expr(&s.chan);
                 self.visit_expr(&s.value);
             }
-            StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Goto(_) | StmtKind::Fallthrough => {}
+            StmtKind::Break(_)
+            | StmtKind::Continue(_)
+            | StmtKind::Goto(_)
+            | StmtKind::Fallthrough => {}
             StmtKind::Labeled(l) => self.visit_stmt(&l.stmt),
         }
     }
@@ -428,20 +446,26 @@ impl<'a> EscapeAnalyzer<'a> {
             ExprKind::FuncLit(func) => {
                 let closure_scope = self.type_info.scopes.get(&func.sig.span).copied();
                 let saved_scope = self.func_scope;
-                
+
                 self.func_scope = closure_scope;
-                self.closure_stack.push(ClosureEntry { id: expr.id, scope: closure_scope });
+                self.closure_stack.push(ClosureEntry {
+                    id: expr.id,
+                    scope: closure_scope,
+                });
                 self.closure_captures.insert(expr.id, Vec::new());
-                
+
                 // Collect named returns - they'll be marked as escaped when we encounter defer/errdefer
-                let named_returns: Vec<ObjKey> = func.sig.results.iter()
+                let named_returns: Vec<ObjKey> = func
+                    .sig
+                    .results
+                    .iter()
                     .filter_map(|r| r.name.as_ref())
                     .filter_map(|name| self.type_info.defs.get(&name.id).and_then(|o| *o))
                     .collect();
                 self.func_context_stack.push(FuncContext { named_returns });
-                
+
                 self.visit_block(&func.body);
-                
+
                 self.func_context_stack.pop();
                 self.func_scope = saved_scope;
                 self.closure_stack.pop();
@@ -494,11 +518,18 @@ impl<'a> EscapeAnalyzer<'a> {
                     vo_syntax::ast::DynAccessOp::Index(idx) => self.visit_expr(idx),
                     vo_syntax::ast::DynAccessOp::Call { args, .. }
                     | vo_syntax::ast::DynAccessOp::MethodCall { args, .. } => {
-                        for arg in args { self.visit_expr(arg) }
+                        for arg in args {
+                            self.visit_expr(arg)
+                        }
                     }
                 }
             }
-            ExprKind::IntLit(_) | ExprKind::FloatLit(_) | ExprKind::RuneLit(_) | ExprKind::StringLit(_) | ExprKind::TypeAsExpr(_) | ExprKind::Ellipsis => {}
+            ExprKind::IntLit(_)
+            | ExprKind::FloatLit(_)
+            | ExprKind::RuneLit(_)
+            | ExprKind::StringLit(_)
+            | ExprKind::TypeAsExpr(_)
+            | ExprKind::Ellipsis => {}
         }
     }
 
@@ -509,12 +540,12 @@ impl<'a> EscapeAnalyzer<'a> {
             Some(s) => s,
             None => return false, // package-level var, not captured
         };
-        
+
         // Check if var_scope is a function scope (not package-level)
         if !self.is_within_any_func(var_scope) {
             return false; // package-level variable
         }
-        
+
         // var_scope not within func_scope → captured
         !self.scope_contains(func_scope, var_scope)
     }
@@ -598,12 +629,26 @@ impl<'a> EscapeAnalyzer<'a> {
 
     /// Check if selector expr is a pointer-receiver method on value type → mark receiver as escaped.
     /// Used for both method calls (c.Method()) and method values (c.Method).
-    fn check_ptr_recv_method_escape(&mut self, selector_id: vo_syntax::ast::ExprId, recv_expr: &Expr) {
-        let Some(selection) = self.type_info.selections.get(&selector_id) else { return };
-        if !matches!(selection.kind(), SelectionKind::MethodVal) { return }
-        if !self.method_has_pointer_receiver(selection.obj()) { return }
-        let Some(recv_type) = self.type_info.types.get(&recv_expr.id) else { return };
-        if self.is_pointer_type(recv_type.typ) { return }
+    fn check_ptr_recv_method_escape(
+        &mut self,
+        selector_id: vo_syntax::ast::ExprId,
+        recv_expr: &Expr,
+    ) {
+        let Some(selection) = self.type_info.selections.get(&selector_id) else {
+            return;
+        };
+        if !matches!(selection.kind(), SelectionKind::MethodVal) {
+            return;
+        }
+        if !self.method_has_pointer_receiver(selection.obj()) {
+            return;
+        }
+        let Some(recv_type) = self.type_info.types.get(&recv_expr.id) else {
+            return;
+        };
+        if self.is_pointer_type(recv_type.typ) {
+            return;
+        }
         // Value type with pointer receiver method → escapes
         if let Some(root) = self.find_root_var(recv_expr) {
             self.escaped.insert(root);
@@ -613,29 +658,31 @@ impl<'a> EscapeAnalyzer<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::Checker;
     use crate::importer::NullImporter;
-    use vo_syntax::parser;
+    use crate::Checker;
     use std::path::PathBuf;
+    use vo_syntax::parser;
 
     /// Helper to parse and type-check Vo code, returning escaped variable names.
     fn get_escaped_vars(source: &str) -> Vec<String> {
         use crate::arena::ArenaKey;
         use crate::objects::PackageKey;
         let (file, _diags, interner) = parser::parse(source, 0);
-        
+
         let mut checker = Checker::new_with_trace(PackageKey::null(), interner, false);
         let main_pkg_key = checker
             .tc_objs
             .new_package("main".to_string(), "main".to_string());
         checker.pkg = main_pkg_key;
-        
+
         let mut importer = NullImporter::new(PathBuf::from("."));
         if checker.check_with_importer(&[file], &mut importer).is_err() {
             panic!("Type check failed: {:?}", checker.diagnostics.take());
         }
-        
-        let mut names: Vec<String> = checker.result.escaped_vars
+
+        let mut names: Vec<String> = checker
+            .result
+            .escaped_vars
             .iter()
             .map(|&obj| checker.tc_objs.lobjs[obj].name().to_string())
             .collect();
@@ -649,20 +696,27 @@ mod tests {
 
     #[test]
     fn test_no_escape_simple() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             func main() {
                 x := 42
                 y := x + 1
                 _ = y
             }
-        "#);
-        assert!(escaped.is_empty(), "no variables should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.is_empty(),
+            "no variables should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_no_escape_struct_local_use() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             type Point struct { x int; y int }
             func main() {
@@ -671,8 +725,13 @@ mod tests {
                 p.y = 2
                 _ = p.x + p.y
             }
-        "#);
-        assert!(escaped.is_empty(), "no variables should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.is_empty(),
+            "no variables should escape: {:?}",
+            escaped
+        );
     }
 
     // =========================================================================
@@ -681,7 +740,8 @@ mod tests {
 
     #[test]
     fn test_address_escape() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             type Point struct { x int; y int }
             func main() {
@@ -689,13 +749,19 @@ mod tests {
                 p := &s
                 _ = p
             }
-        "#);
-        assert!(escaped.contains(&"s".to_string()), "s should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"s".to_string()),
+            "s should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_nested_field_address_escape() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             type Inner struct { x int }
             type Outer struct { inner Inner }
@@ -704,14 +770,20 @@ mod tests {
                 p := &o.inner
                 _ = p
             }
-        "#);
-        assert!(escaped.contains(&"o".to_string()), "o should escape (not just inner): {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"o".to_string()),
+            "o should escape (not just inner): {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_deeply_nested_field_address_escape() {
         // Take address of nested struct field (not int - Vo only allows &struct)
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             type A struct { x int }
             type B struct { a A }
@@ -721,8 +793,13 @@ mod tests {
                 p := &c.b.a
                 _ = p
             }
-        "#);
-        assert!(escaped.contains(&"c".to_string()), "c should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"c".to_string()),
+            "c should escape: {:?}",
+            escaped
+        );
     }
 
     // =========================================================================
@@ -731,20 +808,27 @@ mod tests {
 
     #[test]
     fn test_closure_capture_int() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             func main() {
                 x := 42
                 f := func() int { return x }
                 _ = f()
             }
-        "#);
-        assert!(escaped.contains(&"x".to_string()), "x should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"x".to_string()),
+            "x should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_closure_capture_struct() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             type Point struct { x int; y int }
             func main() {
@@ -752,13 +836,19 @@ mod tests {
                 f := func() int { return p.x }
                 _ = f()
             }
-        "#);
-        assert!(escaped.contains(&"p".to_string()), "p should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"p".to_string()),
+            "p should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_closure_param_capture() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             func foo(x int) func() int {
                 return func() int { return x }
@@ -767,13 +857,19 @@ mod tests {
                 f := foo(42)
                 _ = f()
             }
-        "#);
-        assert!(escaped.contains(&"x".to_string()), "x (param) should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"x".to_string()),
+            "x (param) should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_nested_closure_capture() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             func main() {
                 x := 1
@@ -783,15 +879,21 @@ mod tests {
                 }
                 f()
             }
-        "#);
-        assert!(escaped.contains(&"x".to_string()), "x should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"x".to_string()),
+            "x should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_nested_closure_param_capture() {
         // Test case: closure parameter captured by inner closure
         // func(a) returns func(b) that uses a
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             func outer() func(int) func(int) int {
                 return func(a int) func(int) int {
@@ -805,13 +907,19 @@ mod tests {
                 g := f(5)
                 _ = g(3)
             }
-        "#);
-        assert!(escaped.contains(&"a".to_string()), "a (closure param) should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"a".to_string()),
+            "a (closure param) should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_closure_no_capture_local() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             func main() {
                 f := func() int {
@@ -820,9 +928,14 @@ mod tests {
                 }
                 _ = f()
             }
-        "#);
+        "#,
+        );
         // y is local to the closure, not captured
-        assert!(!escaped.contains(&"y".to_string()), "y should not escape: {:?}", escaped);
+        assert!(
+            !escaped.contains(&"y".to_string()),
+            "y should not escape: {:?}",
+            escaped
+        );
     }
 
     // =========================================================================
@@ -831,7 +944,8 @@ mod tests {
 
     #[test]
     fn test_interface_assignment() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             type Point struct { x int; y int }
             func main() {
@@ -839,13 +953,19 @@ mod tests {
                 var i interface{} = s
                 _ = i
             }
-        "#);
-        assert!(escaped.contains(&"s".to_string()), "s should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"s".to_string()),
+            "s should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_interface_param_assignment() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             type Point struct { x int; y int }
             func foo(i interface{}) {
@@ -855,7 +975,8 @@ mod tests {
                 var s Point
                 foo(s)
             }
-        "#);
+        "#,
+        );
         // Note: This tests function call, not direct assignment
         // The current implementation may not catch this case
         // as it only handles direct assignment statements
@@ -867,42 +988,60 @@ mod tests {
 
     #[test]
     fn test_array_slice_escape() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             func main() {
                 var arr [5]int
                 s := arr[:]
                 _ = s
             }
-        "#);
-        assert!(escaped.contains(&"arr".to_string()), "arr should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"arr".to_string()),
+            "arr should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_array_partial_slice_escape() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             func main() {
                 var arr [10]int
                 s := arr[2:5]
                 _ = s
             }
-        "#);
-        assert!(escaped.contains(&"arr".to_string()), "arr should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"arr".to_string()),
+            "arr should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_slice_of_slice_no_escape() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             func main() {
                 var s []int
                 s2 := s[1:3]
                 _ = s2
             }
-        "#);
+        "#,
+        );
         // Slicing a slice doesn't cause escape (slice is already a reference type)
-        assert!(!escaped.contains(&"s".to_string()), "s should not escape: {:?}", escaped);
+        assert!(
+            !escaped.contains(&"s".to_string()),
+            "s should not escape: {:?}",
+            escaped
+        );
     }
 
     // =========================================================================
@@ -911,16 +1050,22 @@ mod tests {
 
     #[test]
     fn test_package_var_no_capture() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             var globalX int = 10
             func main() {
                 f := func() int { return globalX }
                 _ = f()
             }
-        "#);
+        "#,
+        );
         // Package-level variables are not "captured" - they're already global
-        assert!(!escaped.contains(&"globalX".to_string()), "globalX should not be marked as escaped: {:?}", escaped);
+        assert!(
+            !escaped.contains(&"globalX".to_string()),
+            "globalX should not be marked as escaped: {:?}",
+            escaped
+        );
     }
 
     // =========================================================================
@@ -929,7 +1074,8 @@ mod tests {
 
     #[test]
     fn test_multiple_escapes() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             type Point struct { x int; y int }
             func main() {
@@ -945,15 +1091,29 @@ mod tests {
                 _ = f()
                 _ = i
             }
-        "#);
-        assert!(escaped.contains(&"a".to_string()), "a should escape: {:?}", escaped);
-        assert!(escaped.contains(&"b".to_string()), "b should escape: {:?}", escaped);
-        assert!(escaped.contains(&"c".to_string()), "c should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"a".to_string()),
+            "a should escape: {:?}",
+            escaped
+        );
+        assert!(
+            escaped.contains(&"b".to_string()),
+            "b should escape: {:?}",
+            escaped
+        );
+        assert!(
+            escaped.contains(&"c".to_string()),
+            "c should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_mixed_escape_and_no_escape() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             type Point struct { x int; y int }
             func main() {
@@ -966,9 +1126,18 @@ mod tests {
                 stays.x = 1
                 _ = stays.x
             }
-        "#);
-        assert!(escaped.contains(&"escapes".to_string()), "escapes should escape: {:?}", escaped);
-        assert!(!escaped.contains(&"stays".to_string()), "stays should not escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"escapes".to_string()),
+            "escapes should escape: {:?}",
+            escaped
+        );
+        assert!(
+            !escaped.contains(&"stays".to_string()),
+            "stays should not escape: {:?}",
+            escaped
+        );
     }
 
     // =========================================================================
@@ -977,7 +1146,8 @@ mod tests {
 
     #[test]
     fn test_escape_in_if_branch() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             type Point struct { x int; y int }
             func main() {
@@ -987,13 +1157,19 @@ mod tests {
                     _ = p
                 }
             }
-        "#);
-        assert!(escaped.contains(&"s".to_string()), "s should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"s".to_string()),
+            "s should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_escape_in_for_loop() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             func main() {
                 x := 0
@@ -1002,13 +1178,19 @@ mod tests {
                     _ = f()
                 }
             }
-        "#);
-        assert!(escaped.contains(&"x".to_string()), "x should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"x".to_string()),
+            "x should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_select_recv_capture() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             func main() {
                 done := make(chan struct{})
@@ -1020,7 +1202,8 @@ mod tests {
                 }
                 _ = f
             }
-        "#);
+        "#,
+        );
         assert!(
             escaped.contains(&"done".to_string()),
             "done should escape when captured in select receive clause: {:?}",
@@ -1030,7 +1213,8 @@ mod tests {
 
     #[test]
     fn test_select_recv_assign_capture() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             func main() {
                 ch := make(chan int)
@@ -1043,7 +1227,8 @@ mod tests {
                 }
                 _ = f
             }
-        "#);
+        "#,
+        );
         assert!(
             escaped.contains(&"x".to_string()),
             "x should escape when assigned in select receive clause inside closure: {:?}",
@@ -1053,7 +1238,8 @@ mod tests {
 
     #[test]
     fn test_select_send_capture() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             func main() {
                 ch := make(chan int)
@@ -1066,7 +1252,8 @@ mod tests {
                 }
                 _ = f
             }
-        "#);
+        "#,
+        );
         assert!(
             escaped.contains(&"ch".to_string()),
             "ch should escape when used in select send clause inside closure: {:?}",
@@ -1085,7 +1272,8 @@ mod tests {
 
     #[test]
     fn test_index_then_address() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             type Point struct { x int; y int }
             func main() {
@@ -1093,13 +1281,19 @@ mod tests {
                 p := &arr[0]
                 _ = p
             }
-        "#);
-        assert!(escaped.contains(&"arr".to_string()), "arr should escape: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"arr".to_string()),
+            "arr should escape: {:?}",
+            escaped
+        );
     }
 
     #[test]
     fn test_pointer_receiver_escape() {
-        let escaped = get_escaped_vars(r#"
+        let escaped = get_escaped_vars(
+            r#"
             package main
             type Point struct { x int; y int }
             func (p *Point) Double() { p.x = p.x * 2 }
@@ -1107,7 +1301,12 @@ mod tests {
                 p := Point{x: 1, y: 2}
                 p.Double()
             }
-        "#);
-        assert!(escaped.contains(&"p".to_string()), "p should escape due to pointer receiver method call, got: {:?}", escaped);
+        "#,
+        );
+        assert!(
+            escaped.contains(&"p".to_string()),
+            "p should escape due to pointer receiver method call, got: {:?}",
+            escaped
+        );
     }
 }

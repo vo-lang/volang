@@ -10,8 +10,8 @@ use alloc::{vec, vec::Vec};
 use hashbrown::HashMap;
 
 use crate::gc::{Gc, GcRef};
-use crate::objects::{array, map, queue, slice, string};
 use crate::objects::queue_state::QueueKind;
+use crate::objects::{array, map, queue, slice, string};
 use crate::slot::SLOT_BYTES;
 use vo_common_core::bytecode::StructMeta;
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
@@ -82,7 +82,14 @@ pub fn pack_slots(
     runtime_types: &[RuntimeType],
 ) -> PackedValue {
     let mut packed = PackedValue::new();
-    pack_value(&mut packed, gc, src, value_meta, struct_metas, runtime_types);
+    pack_value(
+        &mut packed,
+        gc,
+        src,
+        value_meta,
+        struct_metas,
+        runtime_types,
+    );
     packed
 }
 
@@ -188,10 +195,10 @@ fn pack_value(
     runtime_types: &[RuntimeType],
 ) {
     let vk = value_meta.value_kind();
-    
+
     // Write type tag
     packed.data.push(vk as u8);
-    
+
     if vk.is_queue() {
         let chan_ref = src[0] as GcRef;
         pack_queue_handle(packed, chan_ref);
@@ -252,9 +259,7 @@ fn pack_value(
             }
 
             // Not sendable - caught at compile time or runtime-checked
-            ValueKind::Island
-            | ValueKind::Closure
-            | ValueKind::Interface => {
+            ValueKind::Island | ValueKind::Closure | ValueKind::Interface => {
                 panic!("Cannot pack non-sendable type: {:?}", vk);
             }
             ValueKind::Channel | ValueKind::Port => unreachable!("queue kinds handled above"),
@@ -268,7 +273,9 @@ fn pack_string(packed: &mut PackedValue, str_ref: GcRef) {
         packed.data.extend_from_slice(&0u64.to_le_bytes());
     } else {
         let bytes = string::as_bytes(str_ref);
-        packed.data.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        packed
+            .data
+            .extend_from_slice(&(bytes.len() as u64).to_le_bytes());
         packed.data.extend_from_slice(bytes);
     }
 }
@@ -292,9 +299,15 @@ fn pack_slice(
     let arr_ref = slice::array_ref(slice_ref);
     let elem_bytes = array::elem_bytes(arr_ref);
 
-    packed.data.extend_from_slice(&(length as u64).to_le_bytes());
-    packed.data.extend_from_slice(&elem_meta.to_raw().to_le_bytes());
-    packed.data.extend_from_slice(&(elem_bytes as u32).to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&(length as u64).to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&elem_meta.to_raw().to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&(elem_bytes as u32).to_le_bytes());
 
     // Zero-size elements (e.g., struct{}) - just write count, no element data
     if elem_bytes == 0 {
@@ -317,7 +330,14 @@ fn pack_slice(
 
     for i in 0..length {
         read_element(data_ptr, i, elem_bytes, elem_meta, &mut elem_buf);
-        pack_value(packed, gc, &elem_buf, elem_meta, struct_metas, runtime_types);
+        pack_value(
+            packed,
+            gc,
+            &elem_buf,
+            elem_meta,
+            struct_metas,
+            runtime_types,
+        );
     }
 }
 
@@ -339,9 +359,15 @@ fn pack_array(
     let elem_meta = array::elem_meta(arr_ref);
     let elem_bytes = array::elem_bytes(arr_ref);
 
-    packed.data.extend_from_slice(&(length as u64).to_le_bytes());
-    packed.data.extend_from_slice(&elem_meta.to_raw().to_le_bytes());
-    packed.data.extend_from_slice(&(elem_bytes as u32).to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&(length as u64).to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&elem_meta.to_raw().to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&(elem_bytes as u32).to_le_bytes());
 
     // Zero-size elements (e.g., struct{}) - just write count, no element data
     if elem_bytes == 0 {
@@ -364,7 +390,14 @@ fn pack_array(
 
     for i in 0..length {
         read_element(data_ptr, i, elem_bytes, elem_meta, &mut elem_buf);
-        pack_value(packed, gc, &elem_buf, elem_meta, struct_metas, runtime_types);
+        pack_value(
+            packed,
+            gc,
+            &elem_buf,
+            elem_meta,
+            struct_metas,
+            runtime_types,
+        );
     }
 }
 
@@ -382,10 +415,14 @@ fn pack_struct_inline(
 
     let meta = &struct_metas[meta_id];
     let slot_count = meta.slot_types.len();
-    
+
     // Write meta_id for reconstruction
-    packed.data.extend_from_slice(&(meta_id as u32).to_le_bytes());
-    packed.data.extend_from_slice(&(slot_count as u32).to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&(meta_id as u32).to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&(slot_count as u32).to_le_bytes());
 
     // Pack each field based on fields metadata
     for field in &meta.fields {
@@ -402,7 +439,14 @@ fn pack_struct_inline(
             ValueMeta::new(0, field_vk)
         };
         let field_src = &src[slot_idx..slot_idx + field_slots];
-        pack_value(packed, gc, field_src, field_meta, struct_metas, runtime_types);
+        pack_value(
+            packed,
+            gc,
+            field_src,
+            field_meta,
+            struct_metas,
+            runtime_types,
+        );
     }
 }
 
@@ -431,7 +475,9 @@ fn pack_pointer(
     let obj_meta = ValueMeta::new(value_meta.meta_id(), ValueKind::Struct);
     let slots = struct_metas[meta_id].slot_types.len();
 
-    packed.data.extend_from_slice(&obj_meta.to_raw().to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&obj_meta.to_raw().to_le_bytes());
     packed.data.extend_from_slice(&(slots as u32).to_le_bytes());
 
     // Read and pack the pointed object
@@ -441,7 +487,14 @@ fn pack_pointer(
     for i in 0..slots {
         obj_slots[i] = unsafe { Gc::read_slot(ptr_ref, i) };
     }
-    pack_value(packed, gc, &obj_slots, obj_meta, struct_metas, runtime_types);
+    pack_value(
+        packed,
+        gc,
+        &obj_slots,
+        obj_meta,
+        struct_metas,
+        runtime_types,
+    );
 }
 
 fn pack_map(
@@ -465,11 +518,21 @@ fn pack_map(
     let val_slots = map::val_slots(map_ref) as usize;
     let key_rttid = map::key_rttid(map_ref);
 
-    packed.data.extend_from_slice(&(length as u64).to_le_bytes());
-    packed.data.extend_from_slice(&key_meta.to_raw().to_le_bytes());
-    packed.data.extend_from_slice(&val_meta.to_raw().to_le_bytes());
-    packed.data.extend_from_slice(&(key_slots as u16).to_le_bytes());
-    packed.data.extend_from_slice(&(val_slots as u16).to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&(length as u64).to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&key_meta.to_raw().to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&val_meta.to_raw().to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&(key_slots as u16).to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&(val_slots as u16).to_le_bytes());
     packed.data.extend_from_slice(&key_rttid.to_le_bytes());
 
     // Iterate and pack entries
@@ -500,7 +563,8 @@ fn unpack_value<F>(
     *cursor += 1;
 
     if vk.is_queue() {
-        dst[0] = unpack_queue_handle(gc, data, cursor, queue_handle_cache, resolve_queue_handle) as u64;
+        dst[0] =
+            unpack_queue_handle(gc, data, cursor, queue_handle_cache, resolve_queue_handle) as u64;
     } else {
         match vk {
             ValueKind::Void => {}
@@ -785,7 +849,7 @@ where
     // Allocate new object
     let new_obj = gc.alloc(obj_meta, slots as u16);
     let mut obj_slots = vec![0u64; slots];
-    
+
     unpack_value(
         gc,
         data,
@@ -796,7 +860,7 @@ where
         queue_handle_cache,
         resolve_queue_handle,
     );
-    
+
     // Write slots to new object
     for (i, &val) in obj_slots.iter().enumerate() {
         unsafe { Gc::write_slot(new_obj, i, val) };
@@ -833,7 +897,7 @@ where
 
     // Create new map
     let new_map = map::create(gc, key_meta, val_meta, key_slots, val_slots, key_rttid);
-    
+
     let mut key_buf = vec![0u64; key_slots as usize];
     let mut val_buf = vec![0u64; val_slots as usize];
 
@@ -897,8 +961,12 @@ fn pack_queue_handle_inner(packed: &mut PackedValue, chan_ref: GcRef) {
     packed.data.extend_from_slice(&endpoint_id.to_le_bytes());
     packed.data.extend_from_slice(&home_island.to_le_bytes());
     packed.data.extend_from_slice(&cap.to_le_bytes());
-    packed.data.extend_from_slice(&elem_meta.to_raw().to_le_bytes());
-    packed.data.extend_from_slice(&elem_rttid.to_raw().to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&elem_meta.to_raw().to_le_bytes());
+    packed
+        .data
+        .extend_from_slice(&elem_rttid.to_raw().to_le_bytes());
     packed.data.extend_from_slice(&elem_slots.to_le_bytes());
     packed.data.push(closed as u8);
 }
@@ -969,27 +1037,39 @@ where
 // =============================================================================
 
 fn read_u64(data: &[u8], cursor: &mut usize) -> u64 {
-    let bytes: [u8; 8] = data[*cursor..*cursor + 8].try_into().expect("pack: insufficient data for u64");
+    let bytes: [u8; 8] = data[*cursor..*cursor + 8]
+        .try_into()
+        .expect("pack: insufficient data for u64");
     *cursor += 8;
     u64::from_le_bytes(bytes)
 }
 
 fn read_u32(data: &[u8], cursor: &mut usize) -> u32 {
-    let bytes: [u8; 4] = data[*cursor..*cursor + 4].try_into().expect("pack: insufficient data for u32");
+    let bytes: [u8; 4] = data[*cursor..*cursor + 4]
+        .try_into()
+        .expect("pack: insufficient data for u32");
     *cursor += 4;
     u32::from_le_bytes(bytes)
 }
 
 fn read_u16(data: &[u8], cursor: &mut usize) -> u16 {
-    let bytes: [u8; 2] = data[*cursor..*cursor + 2].try_into().expect("pack: insufficient data for u16");
+    let bytes: [u8; 2] = data[*cursor..*cursor + 2]
+        .try_into()
+        .expect("pack: insufficient data for u16");
     *cursor += 2;
     u16::from_le_bytes(bytes)
 }
 
-fn read_element(base_ptr: *mut u8, idx: usize, elem_bytes: usize, elem_meta: ValueMeta, dst: &mut [u64]) {
+fn read_element(
+    base_ptr: *mut u8,
+    idx: usize,
+    elem_bytes: usize,
+    elem_meta: ValueMeta,
+    dst: &mut [u64],
+) {
     let ptr = unsafe { base_ptr.add(idx * elem_bytes) };
     let vk = elem_meta.value_kind();
-    
+
     match elem_bytes {
         1 => {
             let v = unsafe { *ptr };
@@ -1044,10 +1124,16 @@ fn write_element(base_ptr: *mut u8, idx: usize, elem_bytes: usize, src: &[u64]) 
 mod tests {
     use super::*;
     use crate::objects::{queue, queue_state::QueueKind, slice};
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     fn make_byte_slice(gc: &mut Gc, bytes: &[u8]) -> GcRef {
-        let slice_ref = slice::create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, bytes.len(), bytes.len());
+        let slice_ref = slice::create(
+            gc,
+            ValueMeta::new(0, ValueKind::Uint8),
+            1,
+            bytes.len(),
+            bytes.len(),
+        );
         for (i, &byte) in bytes.iter().enumerate() {
             slice::set(slice_ref, i, byte as u64, 1);
         }
@@ -1071,11 +1157,17 @@ mod tests {
 
         // Test integer
         let src = [42u64];
-        let packed = pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::Int64), &struct_metas, &runtime_types);
-        
+        let packed = pack_slots(
+            &gc,
+            &src,
+            ValueMeta::new(0, ValueKind::Int64),
+            &struct_metas,
+            &runtime_types,
+        );
+
         let mut dst = [0u64];
         unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);
-        
+
         assert_eq!(dst[0], 42);
     }
 
@@ -1088,12 +1180,18 @@ mod tests {
         // Create a string
         let str_ref = string::create(&mut gc, b"hello");
         let src = [str_ref as u64];
-        
-        let packed = pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::String), &struct_metas, &runtime_types);
-        
+
+        let packed = pack_slots(
+            &gc,
+            &src,
+            ValueMeta::new(0, ValueKind::String),
+            &struct_metas,
+            &runtime_types,
+        );
+
         let mut dst = [0u64];
         unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);
-        
+
         let unpacked_str = dst[0] as GcRef;
         assert_eq!(string::as_str(unpacked_str), "hello");
         // Verify it's a different GcRef (deep copy)
@@ -1107,7 +1205,13 @@ mod tests {
         let runtime_types = vec![];
 
         let src = [0u64];
-        let packed = pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::Slice), &struct_metas, &runtime_types);
+        let packed = pack_slots(
+            &gc,
+            &src,
+            ValueMeta::new(0, ValueKind::Slice),
+            &struct_metas,
+            &runtime_types,
+        );
 
         let mut dst = [1u64];
         unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);
@@ -1124,7 +1228,13 @@ mod tests {
         let slice_ref = make_byte_slice(&mut gc, &[]);
         let src = [slice_ref as u64];
 
-        let packed = pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::Slice), &struct_metas, &runtime_types);
+        let packed = pack_slots(
+            &gc,
+            &src,
+            ValueMeta::new(0, ValueKind::Slice),
+            &struct_metas,
+            &runtime_types,
+        );
 
         let mut dst = [0u64];
         unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);
@@ -1144,7 +1254,13 @@ mod tests {
         let slice_ref = make_byte_slice(&mut gc, &[30, 1, 0, 0, 0]);
         let src = [slice_ref as u64];
 
-        let packed = pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::Slice), &struct_metas, &runtime_types);
+        let packed = pack_slots(
+            &gc,
+            &src,
+            ValueMeta::new(0, ValueKind::Slice),
+            &struct_metas,
+            &runtime_types,
+        );
 
         let mut dst = [0u64];
         unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);
@@ -1172,7 +1288,13 @@ mod tests {
         queue::install_home_info(port, 77, 12);
 
         let src = [port as u64];
-        let packed = pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::Port), &struct_metas, &runtime_types);
+        let packed = pack_slots(
+            &gc,
+            &src,
+            ValueMeta::new(0, ValueKind::Port),
+            &struct_metas,
+            &runtime_types,
+        );
 
         let mut dst = [0u64];
         unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);
@@ -1201,7 +1323,13 @@ mod tests {
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             let src = [chan as u64];
-            pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::Channel), &struct_metas, &runtime_types)
+            pack_slots(
+                &gc,
+                &src,
+                ValueMeta::new(0, ValueKind::Channel),
+                &struct_metas,
+                &runtime_types,
+            )
         }));
         assert!(result.is_err());
     }

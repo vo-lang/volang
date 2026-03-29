@@ -4,13 +4,7 @@ use alloc::vec::Vec;
 
 use vo_vm::vm::Vm;
 
-use crate::{
-    GuestSession,
-    PendingHostEvent,
-    RenderIslandSession,
-    SessionError,
-    StepResult,
-};
+use crate::{GuestSession, PendingHostEvent, RenderIslandSession, SessionError, StepResult};
 
 pub struct RenderIslandRuntime {
     session: RenderIslandSession,
@@ -93,10 +87,7 @@ impl GuestRuntime {
         self.session.try_dispatch_gui_event(handler_id, payload)
     }
 
-    pub fn push_island_frame(
-        &mut self,
-        data: &[u8],
-    ) -> Result<StepResult, SessionError> {
+    pub fn push_island_frame(&mut self, data: &[u8]) -> Result<StepResult, SessionError> {
         self.session.dispatch_inbound_island_frame(data)
     }
 

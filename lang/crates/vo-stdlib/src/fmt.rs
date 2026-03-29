@@ -12,9 +12,9 @@
 //! which call these native functions.
 
 #[cfg(not(feature = "std"))]
-use alloc::string::{String, ToString};
-#[cfg(not(feature = "std"))]
 use alloc::format;
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
 
 use vo_common_core::types::ValueKind;
 use vo_ffi_macro::vostd_fn;
@@ -64,15 +64,15 @@ fn format_args_slice_with_ctx(slice_ref: GcRef, call: Option<&ExternCallContext>
     if slice_ref.is_null() {
         return String::new();
     }
-    
+
     let len = slice::len(slice_ref);
     if len == 0 {
         return String::new();
     }
-    
+
     let data_ptr = slice::data_ptr(slice_ref) as *const u64;
     let mut result = String::new();
-    
+
     for i in 0..len {
         if i > 0 {
             result.push(' ');
@@ -82,7 +82,7 @@ fn format_args_slice_with_ctx(slice_ref: GcRef, call: Option<&ExternCallContext>
         let slot1 = unsafe { *data_ptr.add(i * 2 + 1) };
         result.push_str(&format_interface_with_ctx(slot0, slot1, call));
     }
-    
+
     result
 }
 
@@ -145,7 +145,11 @@ fn parse_number(chars: &mut core::iter::Peekable<core::str::Chars<'_>>) -> Optio
         chars.next();
         n = n * 10 + (c as u8 - b'0') as usize;
     }
-    if any { Some(n) } else { None }
+    if any {
+        Some(n)
+    } else {
+        None
+    }
 }
 
 fn parse_format_spec(chars: &mut core::iter::Peekable<core::str::Chars<'_>>) -> Option<FormatSpec> {
@@ -153,11 +157,26 @@ fn parse_format_spec(chars: &mut core::iter::Peekable<core::str::Chars<'_>>) -> 
 
     loop {
         match chars.peek().copied() {
-            Some('-') => { flags.left = true; let _ = chars.next(); }
-            Some('+') => { flags.plus = true; let _ = chars.next(); }
-            Some('0') => { flags.zero = true; let _ = chars.next(); }
-            Some('#') => { flags.hash = true; let _ = chars.next(); }
-            Some(' ') => { flags.space = true; let _ = chars.next(); }
+            Some('-') => {
+                flags.left = true;
+                let _ = chars.next();
+            }
+            Some('+') => {
+                flags.plus = true;
+                let _ = chars.next();
+            }
+            Some('0') => {
+                flags.zero = true;
+                let _ = chars.next();
+            }
+            Some('#') => {
+                flags.hash = true;
+                let _ = chars.next();
+            }
+            Some(' ') => {
+                flags.space = true;
+                let _ = chars.next();
+            }
             _ => break,
         }
     }
@@ -191,7 +210,11 @@ fn pad_width(mut s: String, spec: FormatSpec, default_pad: char) -> String {
     }
 
     let pad_len = width - len;
-    let pad_char = if spec.flags.zero && !spec.flags.left { '0' } else { default_pad };
+    let pad_char = if spec.flags.zero && !spec.flags.left {
+        '0'
+    } else {
+        default_pad
+    };
     if spec.flags.left {
         for _ in 0..pad_len {
             s.push(pad_char);
@@ -251,17 +274,21 @@ fn pad_numeric(mut s: String, spec: FormatSpec) -> String {
 
 /// Format with printf-style format string.
 fn sprintf_impl(format_str: &str, args_ref: GcRef, call: Option<&ExternCallContext>) -> String {
-    let args_len = if args_ref.is_null() { 0 } else { slice::len(args_ref) };
-    let data_ptr = if args_ref.is_null() { 
-        core::ptr::null() 
-    } else { 
-        slice::data_ptr(args_ref) as *const u64 
+    let args_len = if args_ref.is_null() {
+        0
+    } else {
+        slice::len(args_ref)
     };
-    
+    let data_ptr = if args_ref.is_null() {
+        core::ptr::null()
+    } else {
+        slice::data_ptr(args_ref) as *const u64
+    };
+
     let mut result = String::new();
     let mut chars = format_str.chars().peekable();
     let mut arg_idx = 0usize;
-    
+
     while let Some(c) = chars.next() {
         if c != '%' {
             result.push(c);
@@ -291,7 +318,7 @@ fn sprintf_impl(format_str: &str, args_ref: GcRef, call: Option<&ExternCallConte
         result.push_str(&format_with_spec(spec, slot0, slot1, call));
         arg_idx += 1;
     }
-    
+
     result
 }
 
@@ -300,15 +327,19 @@ fn sprintf_impl(format_str: &str, args_ref: GcRef, call: Option<&ExternCallConte
 fn int_magnitude(slot1: u64, vk: ValueKind) -> (bool, u64) {
     if vk.is_signed_int() {
         let v: i64 = match vk {
-            ValueKind::Int8  => (slot1 as i8)  as i64,
+            ValueKind::Int8 => (slot1 as i8) as i64,
             ValueKind::Int16 => (slot1 as i16) as i64,
             ValueKind::Int32 => (slot1 as i32) as i64,
             _ => slot1 as i64,
         };
-        if v < 0 { (true, v.unsigned_abs()) } else { (false, v as u64) }
+        if v < 0 {
+            (true, v.unsigned_abs())
+        } else {
+            (false, v as u64)
+        }
     } else {
         let m: u64 = match vk {
-            ValueKind::Uint8  => slot1 as u8  as u64,
+            ValueKind::Uint8 => slot1 as u8 as u64,
             ValueKind::Uint16 => slot1 as u16 as u64,
             ValueKind::Uint32 => slot1 as u32 as u64,
             _ => slot1,
@@ -330,7 +361,12 @@ fn fmt_exp_go(s: &str, verb: char) -> String {
     }
 }
 
-fn format_with_spec(spec: FormatSpec, slot0: u64, slot1: u64, call: Option<&ExternCallContext>) -> String {
+fn format_with_spec(
+    spec: FormatSpec,
+    slot0: u64,
+    slot1: u64,
+    call: Option<&ExternCallContext>,
+) -> String {
     let vk = interface::unpack_value_kind(slot0);
 
     match spec.verb {
@@ -362,8 +398,12 @@ fn format_with_spec(spec: FormatSpec, slot0: u64, slot1: u64, call: Option<&Exte
                     let digit_len = digits.chars().count();
                     if digit_len < prec {
                         let mut out = String::new();
-                        if sign != '\0' { out.push(sign); }
-                        for _ in 0..(prec - digit_len) { out.push('0'); }
+                        if sign != '\0' {
+                            out.push(sign);
+                        }
+                        for _ in 0..(prec - digit_len) {
+                            out.push('0');
+                        }
                         out.push_str(digits);
                         s = out;
                     }
@@ -383,23 +423,25 @@ fn format_with_spec(spec: FormatSpec, slot0: u64, slot1: u64, call: Option<&Exte
             }
             pad_width(s, spec, ' ')
         }
-        'f' => {
-            match vk {
-                ValueKind::Float32 | ValueKind::Float64 => {
-                    let f = match vk {
-                        ValueKind::Float32 => f32::from_bits(slot1 as u32) as f64,
-                        _ => f64::from_bits(slot1),
-                    };
-                    let prec = spec.precision.unwrap_or(6);
-                    let mut s = if spec.flags.plus { format!("{:+.*}", prec, f) }
-                                else if spec.flags.space && f >= 0.0 { format!(" {:.*}", prec, f) }
-                                else { format!("{:.*}", prec, f) };
-                    s = pad_numeric(s, spec);
-                    s
-                }
-                _ => format!("%!f({})", format_interface(slot0, slot1)),
+        'f' => match vk {
+            ValueKind::Float32 | ValueKind::Float64 => {
+                let f = match vk {
+                    ValueKind::Float32 => f32::from_bits(slot1 as u32) as f64,
+                    _ => f64::from_bits(slot1),
+                };
+                let prec = spec.precision.unwrap_or(6);
+                let mut s = if spec.flags.plus {
+                    format!("{:+.*}", prec, f)
+                } else if spec.flags.space && f >= 0.0 {
+                    format!(" {:.*}", prec, f)
+                } else {
+                    format!("{:.*}", prec, f)
+                };
+                s = pad_numeric(s, spec);
+                s
             }
-        }
+            _ => format!("%!f({})", format_interface(slot0, slot1)),
+        },
         'e' | 'E' => {
             match vk {
                 ValueKind::Float32 | ValueKind::Float64 => {
@@ -409,8 +451,11 @@ fn format_with_spec(spec: FormatSpec, slot0: u64, slot1: u64, call: Option<&Exte
                     };
                     let prec = spec.precision.unwrap_or(6);
                     // Build mantissa with optional sign prefix, then fix exponent to Go format.
-                    let raw = if spec.verb == 'E' { format!("{:.*E}", prec, f) }
-                              else { format!("{:.*e}", prec, f) };
+                    let raw = if spec.verb == 'E' {
+                        format!("{:.*E}", prec, f)
+                    } else {
+                        format!("{:.*e}", prec, f)
+                    };
                     let mut s = fmt_exp_go(&raw, spec.verb);
                     if spec.flags.plus && !s.starts_with('-') && !s.starts_with('+') {
                         s = format!("+{}", s);
@@ -431,17 +476,26 @@ fn format_with_spec(spec: FormatSpec, slot0: u64, slot1: u64, call: Option<&Exte
                     };
                     // Go %g: use %e if exponent < -4 or >= prec, else %f. Strip trailing zeros.
                     let prec = spec.precision.unwrap_or(6).max(1);
-                    let exp = if f == 0.0 { 0i32 } else { f.abs().log10().floor() as i32 };
+                    let exp = if f == 0.0 {
+                        0i32
+                    } else {
+                        f.abs().log10().floor() as i32
+                    };
                     let s = if exp < -4 || exp >= prec as i32 {
                         // Use %e format with prec-1 decimal places, then strip trailing zeros.
-                        let raw = if spec.verb == 'G' { format!("{:.*E}", prec - 1, f) }
-                                  else { format!("{:.*e}", prec - 1, f) };
+                        let raw = if spec.verb == 'G' {
+                            format!("{:.*E}", prec - 1, f)
+                        } else {
+                            format!("{:.*e}", prec - 1, f)
+                        };
                         let s = fmt_exp_go(&raw, spec.verb);
                         // Strip trailing zeros from mantissa.
                         if let Some(e_pos) = s.find(|c| c == 'e' || c == 'E') {
                             let mant = s[..e_pos].trim_end_matches('0').trim_end_matches('.');
                             format!("{}{}", mant, &s[e_pos..])
-                        } else { s }
+                        } else {
+                            s
+                        }
                     } else {
                         // Use %f format with enough sig digits, strip trailing zeros.
                         let dec_places = (prec as i32 - 1 - exp).max(0) as usize;
@@ -449,7 +503,9 @@ fn format_with_spec(spec: FormatSpec, slot0: u64, slot1: u64, call: Option<&Exte
                         // Strip trailing zeros after decimal.
                         if raw.contains('.') {
                             raw.trim_end_matches('0').trim_end_matches('.').to_string()
-                        } else { raw }
+                        } else {
+                            raw
+                        }
                     };
                     let mut s = s;
                     if spec.flags.plus && !s.starts_with('-') && !s.starts_with('+') {
@@ -462,23 +518,22 @@ fn format_with_spec(spec: FormatSpec, slot0: u64, slot1: u64, call: Option<&Exte
                 _ => format!("%!{}({})", spec.verb, format_interface(slot0, slot1)),
             }
         }
-        't' => {
-            match vk {
-                ValueKind::Bool => pad_width(
-                    if slot1 != 0 { "true" } else { "false" }.to_string(),
-                    spec, ' ',
-                ),
-                _ => format!("%!t({})", format_interface(slot0, slot1)),
-            }
-        }
+        't' => match vk {
+            ValueKind::Bool => pad_width(
+                if slot1 != 0 { "true" } else { "false" }.to_string(),
+                spec,
+                ' ',
+            ),
+            _ => format!("%!t({})", format_interface(slot0, slot1)),
+        },
         'b' => {
             if vk.is_integer() {
                 let (neg, mag) = int_magnitude(slot1, vk);
                 let raw = format!("{:b}", mag);
                 let s = match (neg, spec.flags.hash) {
-                    (true,  true)  => format!("-0b{}", raw),
-                    (false, true)  => format!("0b{}", raw),
-                    (true,  false) => format!("-{}", raw),
+                    (true, true) => format!("-0b{}", raw),
+                    (false, true) => format!("0b{}", raw),
+                    (true, false) => format!("-{}", raw),
                     (false, false) => raw,
                 };
                 pad_numeric(s, spec)
@@ -503,9 +558,9 @@ fn format_with_spec(spec: FormatSpec, slot0: u64, slot1: u64, call: Option<&Exte
                 let raw = format!("{:o}", mag);
                 let use_prefix = spec.flags.hash || spec.verb == 'O';
                 let s = match (neg, use_prefix) {
-                    (true,  true)  => format!("-0o{}", raw),
-                    (false, true)  => format!("0o{}", raw),
-                    (true,  false) => format!("-{}", raw),
+                    (true, true) => format!("-0o{}", raw),
+                    (false, true) => format!("0o{}", raw),
+                    (true, false) => format!("-{}", raw),
                     (false, false) => raw,
                 };
                 pad_numeric(s, spec)
@@ -513,48 +568,44 @@ fn format_with_spec(spec: FormatSpec, slot0: u64, slot1: u64, call: Option<&Exte
                 format!("%!{}({})", spec.verb, format_interface(slot0, slot1))
             }
         }
-        'x' => {
-            match vk {
-                ValueKind::String => {
-                    let s = str_obj::as_str(slot1 as GcRef);
-                    let hex: String = s.bytes().map(|b| format!("{:02x}", b)).collect();
-                    pad_width(hex, spec, ' ')
-                }
-                _ if vk.is_integer() => {
-                    let (neg, mag) = int_magnitude(slot1, vk);
-                    let raw = format!("{:x}", mag);
-                    let s = match (neg, spec.flags.hash) {
-                        (true,  true)  => format!("-0x{}", raw),
-                        (false, true)  => format!("0x{}", raw),
-                        (true,  false) => format!("-{}", raw),
-                        (false, false) => raw,
-                    };
-                    pad_numeric(s, spec)
-                }
-                _ => format!("%!x({})", format_interface(slot0, slot1)),
+        'x' => match vk {
+            ValueKind::String => {
+                let s = str_obj::as_str(slot1 as GcRef);
+                let hex: String = s.bytes().map(|b| format!("{:02x}", b)).collect();
+                pad_width(hex, spec, ' ')
             }
-        }
-        'X' => {
-            match vk {
-                ValueKind::String => {
-                    let s = str_obj::as_str(slot1 as GcRef);
-                    let hex: String = s.bytes().map(|b| format!("{:02X}", b)).collect();
-                    pad_width(hex, spec, ' ')
-                }
-                _ if vk.is_integer() => {
-                    let (neg, mag) = int_magnitude(slot1, vk);
-                    let raw = format!("{:X}", mag);
-                    let s = match (neg, spec.flags.hash) {
-                        (true,  true)  => format!("-0X{}", raw),
-                        (false, true)  => format!("0X{}", raw),
-                        (true,  false) => format!("-{}", raw),
-                        (false, false) => raw,
-                    };
-                    pad_numeric(s, spec)
-                }
-                _ => format!("%!X({})", format_interface(slot0, slot1)),
+            _ if vk.is_integer() => {
+                let (neg, mag) = int_magnitude(slot1, vk);
+                let raw = format!("{:x}", mag);
+                let s = match (neg, spec.flags.hash) {
+                    (true, true) => format!("-0x{}", raw),
+                    (false, true) => format!("0x{}", raw),
+                    (true, false) => format!("-{}", raw),
+                    (false, false) => raw,
+                };
+                pad_numeric(s, spec)
             }
-        }
+            _ => format!("%!x({})", format_interface(slot0, slot1)),
+        },
+        'X' => match vk {
+            ValueKind::String => {
+                let s = str_obj::as_str(slot1 as GcRef);
+                let hex: String = s.bytes().map(|b| format!("{:02X}", b)).collect();
+                pad_width(hex, spec, ' ')
+            }
+            _ if vk.is_integer() => {
+                let (neg, mag) = int_magnitude(slot1, vk);
+                let raw = format!("{:X}", mag);
+                let s = match (neg, spec.flags.hash) {
+                    (true, true) => format!("-0X{}", raw),
+                    (false, true) => format!("0X{}", raw),
+                    (true, false) => format!("-{}", raw),
+                    (false, false) => raw,
+                };
+                pad_numeric(s, spec)
+            }
+            _ => format!("%!X({})", format_interface(slot0, slot1)),
+        },
         'c' => {
             if vk.is_integer() {
                 let ch = char::from_u32(slot1 as u32).unwrap_or('\u{FFFD}');
@@ -564,19 +615,17 @@ fn format_with_spec(spec: FormatSpec, slot0: u64, slot1: u64, call: Option<&Exte
             }
         }
         'p' => pad_width(format!("0x{:x}", slot1), spec, ' '),
-        'q' => {
-            match vk {
-                ValueKind::String => {
-                    let s = str_obj::as_str(slot1 as GcRef);
-                    pad_width(format!("{:?}", s), spec, ' ')
-                }
-                _ if vk.is_integer() => {
-                    let ch = char::from_u32(slot1 as u32).unwrap_or('\u{FFFD}');
-                    pad_width(format!("{:?}", ch), spec, ' ')
-                }
-                _ => format!("%!q({})", format_interface(slot0, slot1)),
+        'q' => match vk {
+            ValueKind::String => {
+                let s = str_obj::as_str(slot1 as GcRef);
+                pad_width(format!("{:?}", s), spec, ' ')
             }
-        }
+            _ if vk.is_integer() => {
+                let ch = char::from_u32(slot1 as u32).unwrap_or('\u{FFFD}');
+                pad_width(format!("{:?}", ch), spec, ' ')
+            }
+            _ => format!("%!q({})", format_interface(slot0, slot1)),
+        },
         'T' => pad_width(value_kind_to_type_name(vk), spec, ' '),
         _ => format!("%!{}({})", spec.verb, format_interface(slot0, slot1)),
     }
@@ -687,9 +736,7 @@ fn sscanf_impl_scan(
                 }
                 's' => {
                     let start = input_pos;
-                    while input_pos < input.len()
-                        && !input_bytes[input_pos].is_ascii_whitespace()
-                    {
+                    while input_pos < input.len() && !input_bytes[input_pos].is_ascii_whitespace() {
                         input_pos += 1;
                     }
                     let token = &input[start..input_pos];
@@ -702,9 +749,7 @@ fn sscanf_impl_scan(
                 }
                 't' => {
                     let start = input_pos;
-                    while input_pos < input.len()
-                        && !input_bytes[input_pos].is_ascii_whitespace()
-                    {
+                    while input_pos < input.len() && !input_bytes[input_pos].is_ascii_whitespace() {
                         input_pos += 1;
                     }
                     let token = &input[start..input_pos];
@@ -732,9 +777,7 @@ fn sscanf_impl_scan(
                     {
                         input_pos += 2;
                     }
-                    while input_pos < input.len()
-                        && input_bytes[input_pos].is_ascii_hexdigit()
-                    {
+                    while input_pos < input.len() && input_bytes[input_pos].is_ascii_hexdigit() {
                         input_pos += 1;
                     }
                     let token = &input[start..input_pos];
@@ -806,9 +849,7 @@ fn sscanf_impl_scan(
                 }
                 'v' => {
                     let start = input_pos;
-                    while input_pos < input.len()
-                        && !input_bytes[input_pos].is_ascii_whitespace()
-                    {
+                    while input_pos < input.len() && !input_bytes[input_pos].is_ascii_whitespace() {
                         input_pos += 1;
                     }
                     let token = &input[start..input_pos];

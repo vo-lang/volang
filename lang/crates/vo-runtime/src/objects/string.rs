@@ -8,8 +8,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::gc::{Gc, GcRef};
-use crate::objects::{array, slice};
 use crate::objects::slice::SliceData;
+use crate::objects::{array, slice};
 use crate::slot::{ptr_to_slot, slot_to_ptr, Slot};
 use vo_common_core::types::{ValueKind, ValueMeta};
 
@@ -19,7 +19,9 @@ pub fn create(gc: &mut Gc, bytes: &[u8]) -> GcRef {
     }
     let arr = array::create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, bytes.len());
     let arr_data_ptr = array::data_ptr_bytes(arr);
-    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), arr_data_ptr, bytes.len()); }
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), arr_data_ptr, bytes.len());
+    }
     alloc_string(gc, arr, arr_data_ptr, bytes.len())
 }
 
@@ -41,14 +43,20 @@ pub fn from_rust_str(gc: &mut Gc, s: &str) -> GcRef {
 
 #[inline]
 pub fn len(s: GcRef) -> usize {
-    if s.is_null() { return 0; }
+    if s.is_null() {
+        return 0;
+    }
     slice::len(s)
 }
 #[inline]
-pub fn data_ptr(s: GcRef) -> *mut u8 { slice::data_ptr(s) }
+pub fn data_ptr(s: GcRef) -> *mut u8 {
+    slice::data_ptr(s)
+}
 
 pub fn as_bytes(s: GcRef) -> &'static [u8] {
-    if s.is_null() { return &[]; }
+    if s.is_null() {
+        return &[];
+    }
     unsafe { core::slice::from_raw_parts(slice::data_ptr(s), slice::len(s)) }
 }
 
@@ -75,7 +83,10 @@ pub const RUNE_ERROR: i32 = 0xFFFD;
 /// Decode a single UTF-8 rune from bytes.
 /// Returns (rune, width). For invalid UTF-8, returns (RUNE_ERROR, 1).
 fn decode_rune(bytes: &[u8]) -> (i32, usize) {
-    match core::str::from_utf8(bytes).ok().and_then(|s| s.chars().next()) {
+    match core::str::from_utf8(bytes)
+        .ok()
+        .and_then(|s| s.chars().next())
+    {
         Some(c) => (c as i32, c.len_utf8()),
         None if !bytes.is_empty() => (RUNE_ERROR, 1),
         None => (RUNE_ERROR, 0),
@@ -83,8 +94,12 @@ fn decode_rune(bytes: &[u8]) -> (i32, usize) {
 }
 
 pub fn concat(gc: &mut Gc, a: GcRef, b: GcRef) -> GcRef {
-    if a.is_null() { return b; }
-    if b.is_null() { return a; }
+    if a.is_null() {
+        return b;
+    }
+    if b.is_null() {
+        return a;
+    }
     let a_len = slice::len(a);
     let b_len = slice::len(b);
     let total = a_len + b_len;
@@ -98,7 +113,9 @@ pub fn concat(gc: &mut Gc, a: GcRef, b: GcRef) -> GcRef {
 }
 
 pub fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> GcRef {
-    if s.is_null() || start >= end { return core::ptr::null_mut(); }
+    if s.is_null() || start >= end {
+        return core::ptr::null_mut();
+    }
     let src = SliceData::as_ref(s);
     let arr = slot_to_ptr(src.array);
     let data_ptr = slot_to_ptr::<u8>(src.data_ptr);
@@ -106,12 +123,18 @@ pub fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> GcRef {
 }
 
 pub fn eq(a: GcRef, b: GcRef) -> bool {
-    if a == b { return true; }
-    if a.is_null() || b.is_null() { return false; }
+    if a == b {
+        return true;
+    }
+    if a.is_null() || b.is_null() {
+        return false;
+    }
     as_bytes(a) == as_bytes(b)
 }
 
-pub fn ne(a: GcRef, b: GcRef) -> bool { !eq(a, b) }
+pub fn ne(a: GcRef, b: GcRef) -> bool {
+    !eq(a, b)
+}
 
 macro_rules! str_cmp {
     ($name:ident, $op:tt) => {
@@ -139,9 +162,13 @@ pub fn new_from_string(gc: &mut Gc, s: String) -> GcRef {
 
 /// Create string from a byte slice object. Copies the data (strings are immutable).
 pub fn from_slice(gc: &mut Gc, slice_ref: GcRef) -> GcRef {
-    if slice_ref.is_null() { return core::ptr::null_mut(); }
+    if slice_ref.is_null() {
+        return core::ptr::null_mut();
+    }
     let len = slice::len(slice_ref);
-    if len == 0 { return core::ptr::null_mut(); }
+    if len == 0 {
+        return core::ptr::null_mut();
+    }
     // Must copy data - strings are immutable, but the source slice may be mutated later
     let src_ptr = slice::data_ptr(slice_ref);
     let bytes = unsafe { core::slice::from_raw_parts(src_ptr, len) };
@@ -157,7 +184,9 @@ pub fn to_byte_slice_obj(gc: &mut Gc, s: GcRef) -> GcRef {
     }
     let arr = array::create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, len);
     let arr_data_ptr = array::data_ptr_bytes(arr);
-    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), arr_data_ptr, len); }
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), arr_data_ptr, len);
+    }
     slice::from_array_range(gc, arr, 0, len)
 }
 
@@ -196,7 +225,9 @@ pub fn to_rune_slice_obj(gc: &mut Gc, s: GcRef) -> GcRef {
     let arr = array::create(gc, ValueMeta::new(0, ValueKind::Int32), 4, len);
     let arr_data_ptr = array::data_ptr_bytes(arr) as *mut i32;
     for (i, c) in str_data.chars().enumerate() {
-        unsafe { *arr_data_ptr.add(i) = c as i32; }
+        unsafe {
+            *arr_data_ptr.add(i) = c as i32;
+        }
     }
     slice::from_array_range(gc, arr, 0, len)
 }

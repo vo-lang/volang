@@ -38,8 +38,7 @@ impl FileSystem for WasmVfs {
         if let Some(e) = err {
             return Err(io::Error::new(io::ErrorKind::NotFound, e));
         }
-        String::from_utf8(data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        String::from_utf8(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
@@ -56,15 +55,13 @@ impl FileSystem for WasmVfs {
 
     fn exists(&self, path: &Path) -> bool {
         let full = self.full_path(path);
-        let (_name, _size, _mode, _mtime, _is_dir, err) =
-            vo_web_runtime_wasm::vfs::stat(&full);
+        let (_name, _size, _mode, _mtime, _is_dir, err) = vo_web_runtime_wasm::vfs::stat(&full);
         err.is_none()
     }
 
     fn is_dir(&self, path: &Path) -> bool {
         let full = self.full_path(path);
-        let (_name, _size, _mode, _mtime, is_dir, err) =
-            vo_web_runtime_wasm::vfs::stat(&full);
+        let (_name, _size, _mode, _mtime, is_dir, err) = vo_web_runtime_wasm::vfs::stat(&full);
         err.is_none() && is_dir
     }
 }

@@ -517,7 +517,7 @@ mod tests {
     fn test_token_kind_keyword() {
         assert_eq!(TokenKind::keyword("func"), Some(TokenKind::Func));
         assert_eq!(TokenKind::keyword("struct"), Some(TokenKind::Struct));
-        assert_eq!(TokenKind::keyword("object"), None);  // object is no longer a keyword
+        assert_eq!(TokenKind::keyword("object"), None); // object is no longer a keyword
         assert_eq!(TokenKind::keyword("notakeyword"), None);
     }
 
@@ -580,12 +580,34 @@ mod tests {
     #[test]
     fn test_all_keywords() {
         let keywords = [
-            "break", "case", "chan", "const", "continue", "default", "defer",
-            "else", "fallthrough", "for", "func", "go", "goto", "if", "import",
-            "interface", "map", "port", "package", "range", "return", "select",
-            "struct", "switch", "type", "var",
+            "break",
+            "case",
+            "chan",
+            "const",
+            "continue",
+            "default",
+            "defer",
+            "else",
+            "fallthrough",
+            "for",
+            "func",
+            "go",
+            "goto",
+            "if",
+            "import",
+            "interface",
+            "map",
+            "port",
+            "package",
+            "range",
+            "return",
+            "select",
+            "struct",
+            "switch",
+            "type",
+            "var",
         ];
-        
+
         for kw in keywords {
             assert!(TokenKind::keyword(kw).is_some(), "Missing keyword: {}", kw);
             assert!(TokenKind::keyword(kw).unwrap().is_keyword());

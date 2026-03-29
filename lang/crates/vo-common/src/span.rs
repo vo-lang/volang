@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn test_span_contains() {
         let span = Span::from_u32(10, 20);
-        
+
         assert!(span.contains(BytePos(10)));
         assert!(span.contains(BytePos(15)));
         assert!(span.contains(BytePos(19)));
@@ -315,7 +315,7 @@ mod tests {
         let outer = Span::from_u32(10, 30);
         let inner = Span::from_u32(15, 25);
         let overlapping = Span::from_u32(5, 20);
-        
+
         assert!(outer.contains_span(inner));
         assert!(outer.contains_span(outer));
         assert!(!outer.contains_span(overlapping));
@@ -327,7 +327,7 @@ mod tests {
         let span1 = Span::from_u32(10, 20);
         let span2 = Span::from_u32(15, 30);
         let merged = span1.merge(span2);
-        
+
         assert_eq!(merged.start.0, 10);
         assert_eq!(merged.end.0, 30);
     }
@@ -337,7 +337,7 @@ mod tests {
         let span1 = Span::from_u32(10, 20);
         let span2 = Span::from_u32(25, 35);
         let combined = span1.to(span2);
-        
+
         assert_eq!(combined.start.0, 10);
         assert_eq!(combined.end.0, 35);
     }
@@ -346,7 +346,7 @@ mod tests {
     fn test_span_shrink() {
         let span = Span::from_u32(10, 30);
         let shrunk = span.shrink(5);
-        
+
         assert_eq!(shrunk.start.0, 15);
         assert_eq!(shrunk.end.0, 25);
     }
@@ -355,7 +355,7 @@ mod tests {
     fn test_span_to_range() {
         let span = Span::from_u32(10, 20);
         let range = span.to_range();
-        
+
         assert_eq!(range, 10..20);
     }
 
@@ -382,7 +382,7 @@ mod tests {
     fn test_spanned_map() {
         let spanned = Spanned::new(10, Span::from_u32(0, 5));
         let mapped = spanned.map(|x| x * 2);
-        
+
         assert_eq!(mapped.node, 20);
         assert_eq!(mapped.span, Span::from_u32(0, 5));
     }

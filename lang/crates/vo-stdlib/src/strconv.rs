@@ -4,13 +4,13 @@
 //! Integer parsing/formatting and quote/unquote are implemented in Vo.
 
 #[cfg(not(feature = "std"))]
-use alloc::string::String;
-#[cfg(not(feature = "std"))]
 use alloc::format;
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::string::ToString;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use vo_ffi_macro::vostd_fn;
 
@@ -40,10 +40,16 @@ fn parse_float(s: &str, bit_size: i64) -> (f64, bool) {
 #[vostd_fn("strconv", "FormatFloat")]
 fn format_float(f: f64, fmt: u8, prec: i64, bit_size: i64) -> String {
     let f = if bit_size == 32 { (f as f32) as f64 } else { f };
-    
-    if f.is_nan() { return "NaN".to_string(); }
+
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
     if f.is_infinite() {
-        return if f > 0.0 { "+Inf".to_string() } else { "-Inf".to_string() };
+        return if f > 0.0 {
+            "+Inf".to_string()
+        } else {
+            "-Inf".to_string()
+        };
     }
 
     match fmt {
@@ -68,22 +74,14 @@ fn format_float(f: f64, fmt: u8, prec: i64, bit_size: i64) -> String {
             let upper = fmt == b'E';
             format_e(f, prec, upper)
         }
-        b'f' | b'F' => {
-            format_f(f, prec)
-        }
+        b'f' | b'F' => format_f(f, prec),
         b'g' => {
             // Go 'g': use 'e' for large/small exponents, 'f' otherwise
             format_g(f, prec, false)
         }
-        b'G' => {
-            format_g(f, prec, true)
-        }
-        b'x' => {
-            format_hex_float(f, prec, false)
-        }
-        b'X' => {
-            format_hex_float(f, prec, true)
-        }
+        b'G' => format_g(f, prec, true),
+        b'x' => format_hex_float(f, prec, false),
+        b'X' => format_hex_float(f, prec, true),
         _ => format!("{}", f),
     }
 }
@@ -175,7 +173,9 @@ fn format_f(f: f64, prec: i64) -> String {
 
     // Build the f-format string with exact p decimal places
     let mut s = String::new();
-    if negative { s.push('-'); }
+    if negative {
+        s.push('-');
+    }
 
     if rexp <= 0 {
         s.push('0');
@@ -227,7 +227,12 @@ fn format_f(f: f64, prec: i64) -> String {
 fn parse_ryu_output(s: &str) -> (bool, Vec<u8>, i32) {
     let bytes = s.as_bytes();
     let mut i = 0;
-    let negative = if bytes[i] == b'-' { i += 1; true } else { false };
+    let negative = if bytes[i] == b'-' {
+        i += 1;
+        true
+    } else {
+        false
+    };
 
     let mut digits = Vec::new();
     let mut dot_pos: Option<usize> = None;
@@ -239,7 +244,7 @@ fn parse_ryu_output(s: &str) -> (bool, Vec<u8>, i32) {
         if bytes[j] == b'E' || bytes[j] == b'e' {
             exp_start = j;
             // Parse exponent
-            let exp_str = &s[j+1..];
+            let exp_str = &s[j + 1..];
             exp_val = exp_str.parse::<i32>().unwrap_or(0);
             break;
         }
@@ -291,7 +296,9 @@ fn parse_ryu_output(s: &str) -> (bool, Vec<u8>, i32) {
 /// Format digits in Go 'e' notation: d.dddde±dd
 fn digits_to_e_format(negative: bool, digits: &[u8], exp10: i32, upper: bool) -> String {
     let mut s = String::new();
-    if negative { s.push('-'); }
+    if negative {
+        s.push('-');
+    }
     s.push((digits[0] + b'0') as char);
     if digits.len() > 1 {
         s.push('.');
@@ -316,7 +323,9 @@ fn digits_to_e_format(negative: bool, digits: &[u8], exp10: i32, upper: bool) ->
 /// Format digits in Go 'f' notation (no exponent)
 fn digits_to_f_format(negative: bool, digits: &[u8], exp10: i32) -> String {
     let mut s = String::new();
-    if negative { s.push('-'); }
+    if negative {
+        s.push('-');
+    }
 
     if exp10 <= 0 {
         // 0.000...digits
@@ -356,7 +365,11 @@ fn format_g(f: f64, prec: i64, upper: bool) -> String {
     if f == 0.0 {
         // Go's g/G format always outputs "0" for zero, regardless of precision
         let negative = f.to_bits() >> 63 != 0;
-        return if negative { "-0".to_string() } else { "0".to_string() };
+        return if negative {
+            "-0".to_string()
+        } else {
+            "0".to_string()
+        };
     }
 
     // Get shortest representation via ryu
@@ -387,18 +400,26 @@ fn format_g(f: f64, prec: i64, upper: bool) -> String {
     let exp = rexp - 1;
     if exp < -4 || exp >= p as i32 {
         let mut d = rd;
-        while d.len() < p { d.push(0); }
+        while d.len() < p {
+            d.push(0);
+        }
         d.truncate(p);
         // Strip trailing zeros from fractional part
-        while d.len() > 1 && *d.last().unwrap() == 0 { d.pop(); }
+        while d.len() > 1 && *d.last().unwrap() == 0 {
+            d.pop();
+        }
         digits_to_e_format(negative, &d, rexp, upper)
     } else {
         let mut d = rd;
-        while d.len() < p { d.push(0); }
+        while d.len() < p {
+            d.push(0);
+        }
         d.truncate(p);
         // Strip trailing zeros after decimal point, keeping integer part
         let min_digits = if rexp > 0 { rexp as usize } else { 1 };
-        while d.len() > min_digits && *d.last().unwrap() == 0 { d.pop(); }
+        while d.len() > min_digits && *d.last().unwrap() == 0 {
+            d.pop();
+        }
         digits_to_f_format(negative, &d, rexp)
     }
 }
@@ -458,7 +479,14 @@ fn format_hex_float(f: f64, prec: i64, upper: bool) -> String {
         let p = if prec < 0 { 0 } else { prec as usize };
         let prefix = if upper { "0X" } else { "0x" };
         return if p > 0 {
-            format!("{}{}0.{:0>width$}{}+00", sign, prefix, "", p_char, width = p)
+            format!(
+                "{}{}0.{:0>width$}{}+00",
+                sign,
+                prefix,
+                "",
+                p_char,
+                width = p
+            )
         } else {
             format!("{}{}0{}+00", sign, prefix, p_char)
         };
@@ -476,7 +504,11 @@ fn format_hex_float(f: f64, prec: i64, upper: bool) -> String {
     e += 52;
 
     let prefix = if upper { "0X" } else { "0x" };
-    let hex_chars = if upper { "0123456789ABCDEF" } else { "0123456789abcdef" };
+    let hex_chars = if upper {
+        "0123456789ABCDEF"
+    } else {
+        "0123456789abcdef"
+    };
 
     // Convert fraction to hex string (13 hex digits for 52 bits)
     let mut hex_frac = String::new();
@@ -500,14 +532,33 @@ fn format_hex_float(f: f64, prec: i64, upper: bool) -> String {
     };
 
     if hex_frac.is_empty() {
-        format!("{}{}{}{}{}",sign, prefix, lead_digit, p_char, format_exp_signed(e))
+        format!(
+            "{}{}{}{}{}",
+            sign,
+            prefix,
+            lead_digit,
+            p_char,
+            format_exp_signed(e)
+        )
     } else {
-        format!("{}{}{}.{}{}{}",sign, prefix, lead_digit, hex_frac, p_char, format_exp_signed(e))
+        format!(
+            "{}{}{}.{}{}{}",
+            sign,
+            prefix,
+            lead_digit,
+            hex_frac,
+            p_char,
+            format_exp_signed(e)
+        )
     }
 }
 
 fn format_exp_signed(e: i64) -> String {
-    if e >= 0 { format!("+{:02}", e) } else { format!("-{:02}", -e) }
+    if e >= 0 {
+        format!("+{:02}", e)
+    } else {
+        format!("-{:02}", -e)
+    }
 }
 
 vo_runtime::stdlib_register!(strconv: ParseFloat, FormatFloat);

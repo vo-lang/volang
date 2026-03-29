@@ -18,10 +18,12 @@ use crate::gc::{Gc, GcRef};
 use crate::slot::{ptr_to_slot, slot_to_ptr, Slot};
 use vo_common_core::types::{ValueMeta, ValueRttid};
 
-use super::queue_state::{LocalQueueState, QueueBacking, QueueData, DATA_SLOTS,
-    QueueKind, QueueWaiter, QueueMessage, HomeInfo, RemoteProxy};
+use super::queue_state::{
+    HomeInfo, LocalQueueState, QueueBacking, QueueData, QueueKind, QueueMessage, QueueWaiter,
+    RemoteProxy, DATA_SLOTS,
+};
 
-pub use super::queue_state::{ResolvedSendResult, SendResult, RecvResult};
+pub use super::queue_state::{RecvResult, ResolvedSendResult, SendResult};
 
 impl LocalQueueState {
     pub fn iter_buffer(&self) -> impl Iterator<Item = &[u64]> {
@@ -67,7 +69,17 @@ pub fn create_remote_proxy(
     elem_rttid: ValueRttid,
     elem_slots: u16,
 ) -> GcRef {
-    create_remote_proxy_with_closed(gc, kind, endpoint_id, home_island, cap, elem_meta, elem_rttid, elem_slots, false)
+    create_remote_proxy_with_closed(
+        gc,
+        kind,
+        endpoint_id,
+        home_island,
+        cap,
+        elem_meta,
+        elem_rttid,
+        elem_slots,
+        false,
+    )
 }
 
 pub fn create_remote_proxy_with_closed(
@@ -105,10 +117,10 @@ pub fn create_remote_proxy_with_closed(
 }
 
 /// Create a new channel with validation (unified logic for VM and JIT).
-/// 
+///
 /// Validates:
 /// - cap >= 0
-/// 
+///
 /// Returns Ok(GcRef) on success, Err(error_code) on failure.
 pub fn create_checked(
     gc: &mut Gc,
@@ -119,9 +131,20 @@ pub fn create_checked(
     cap: i64,
 ) -> Result<GcRef, i32> {
     use super::alloc_error;
-    if cap < 0 { return Err(alloc_error::NEGATIVE_CAP); }
-    if kind == QueueKind::Port && cap == 0 { return Err(alloc_error::NEGATIVE_CAP); }
-    Ok(create(gc, kind, elem_meta, elem_rttid, elem_slots, cap as usize))
+    if cap < 0 {
+        return Err(alloc_error::NEGATIVE_CAP);
+    }
+    if kind == QueueKind::Port && cap == 0 {
+        return Err(alloc_error::NEGATIVE_CAP);
+    }
+    Ok(create(
+        gc,
+        kind,
+        elem_meta,
+        elem_rttid,
+        elem_slots,
+        cap as usize,
+    ))
 }
 
 #[inline]
@@ -201,7 +224,10 @@ pub fn install_home_info(chan: GcRef, endpoint_id: u64, home_island: u32) {
         "install_home_info on non-LOCAL channel"
     );
     debug_assert!(data.endpoint_ptr == 0, "HomeInfo already installed");
-    assert!(kind(chan) == QueueKind::Port, "install_home_info: chan cannot cross islands");
+    assert!(
+        kind(chan) == QueueKind::Port,
+        "install_home_info: chan cannot cross islands"
+    );
     let info = Box::new(HomeInfo {
         endpoint_id,
         home_island,
@@ -230,17 +256,24 @@ pub fn with_local_state<T, F: FnOnce(&mut LocalQueueState) -> T>(chan: GcRef, f:
 
 #[inline]
 pub fn len(chan: GcRef) -> usize {
-    if is_remote(chan) { return 0; }
+    if is_remote(chan) {
+        return 0;
+    }
     local_state(chan).len()
 }
 #[inline]
 pub fn is_closed(chan: GcRef) -> bool {
-    if is_remote(chan) { return remote_proxy(chan).closed; }
+    if is_remote(chan) {
+        return remote_proxy(chan).closed;
+    }
     local_state(chan).is_closed()
 }
 #[inline]
 pub fn close(chan: GcRef) {
-    debug_assert!(!is_remote(chan), "close called on REMOTE channel — use message passing");
+    debug_assert!(
+        !is_remote(chan),
+        "close called on REMOTE channel — use message passing"
+    );
     local_state(chan).close();
 }
 
@@ -282,7 +315,11 @@ pub fn cancel_select_waiters(chan: GcRef, select_id: u64) {
 }
 
 /// Atomic send: try to send, if would block, register waiter in same operation.
-pub fn send_or_block(chan: GcRef, value: QueueMessage, waiter: QueueWaiter) -> SendResult<QueueWaiter, QueueMessage> {
+pub fn send_or_block(
+    chan: GcRef,
+    value: QueueMessage,
+    waiter: QueueWaiter,
+) -> SendResult<QueueWaiter, QueueMessage> {
     let cap = super::queue_state::capacity(chan);
     with_local_state(chan, |s| s.send_or_block(value, cap, waiter))
 }
@@ -295,11 +332,16 @@ pub fn send_or_block_resolved(
     local_island: u32,
 ) -> ResolvedSendResult<QueueWaiter, QueueMessage> {
     let cap = super::queue_state::capacity(chan);
-    with_local_state(chan, |s| s.send_or_block_resolved(value, cap, waiter, local_island))
+    with_local_state(chan, |s| {
+        s.send_or_block_resolved(value, cap, waiter, local_island)
+    })
 }
 
 /// Atomic recv: try to receive, if would block, register waiter in same operation.
-pub fn recv_or_block(chan: GcRef, waiter: QueueWaiter) -> (RecvResult<QueueWaiter>, Option<QueueMessage>) {
+pub fn recv_or_block(
+    chan: GcRef,
+    waiter: QueueWaiter,
+) -> (RecvResult<QueueWaiter>, Option<QueueMessage>) {
     with_local_state(chan, |s| s.recv_or_block(waiter))
 }
 
@@ -341,7 +383,7 @@ pub unsafe fn drop_inner(chan: GcRef) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use vo_common_core::ValueKind;
 
     #[test]

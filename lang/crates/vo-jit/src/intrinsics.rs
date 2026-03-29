@@ -22,11 +22,11 @@ pub fn try_emit_for_extern<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -
     let name = e.vo_module().externs[extern_id].name.as_str();
 
     match name {
-        "math_Sqrt"  => emit_unary(e, inst, |b, v| b.ins().sqrt(v)),
+        "math_Sqrt" => emit_unary(e, inst, |b, v| b.ins().sqrt(v)),
         "math_Floor" => emit_unary(e, inst, |b, v| b.ins().floor(v)),
-        "math_Ceil"  => emit_unary(e, inst, |b, v| b.ins().ceil(v)),
+        "math_Ceil" => emit_unary(e, inst, |b, v| b.ins().ceil(v)),
         "math_Trunc" => emit_unary(e, inst, |b, v| b.ins().trunc(v)),
-        "math_FMA"   => emit_fma(e, inst),
+        "math_FMA" => emit_fma(e, inst),
         _ => return false,
     }
     true

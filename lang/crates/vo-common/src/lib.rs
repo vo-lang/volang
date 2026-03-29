@@ -8,20 +8,22 @@
 //! - Symbol interning for efficient identifier handling
 //! - Common type definitions (ValueKind) - re-exported from vo-common-core
 
+pub mod abi;
+pub mod diagnostics;
 pub mod source;
 pub mod span;
-pub mod diagnostics;
-pub mod abi;
-pub mod vfs;
 pub mod stable_hash;
+pub mod vfs;
 
-pub use source::{SourceMap, SourceFile, FileId, SourceLoc};
-pub use span::{Span, Spanned, BytePos};
-pub use diagnostics::{Diagnostic, DiagnosticSink, Severity, Label};
-pub use vfs::{FileSystem, RealFs, MemoryFs, OverlayFs, FileSet};
+pub use diagnostics::{Diagnostic, DiagnosticSink, Label, Severity};
+pub use source::{FileId, SourceFile, SourceLoc, SourceMap};
+pub use span::{BytePos, Span, Spanned};
 #[cfg(feature = "zip")]
 pub use vfs::ZipFs;
+pub use vfs::{FileSet, FileSystem, MemoryFs, OverlayFs, RealFs};
 
 // Re-export from vo-common-core for backwards compatibility
+pub use vo_common_core::symbol::{
+    self, builtin_consts, builtin_funcs, builtin_types, kw, Symbol, SymbolInterner, BLANK,
+};
 pub use vo_common_core::ValueKind;
-pub use vo_common_core::symbol::{self, Symbol, SymbolInterner, kw, builtin_types, builtin_funcs, builtin_consts, BLANK};

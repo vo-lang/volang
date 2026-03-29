@@ -1,14 +1,14 @@
 //! JIT callbacks for defer/recover operations.
 
+use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::jit_api::JitContext;
 use vo_runtime::InterfaceSlot;
-use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::{ValueKind, ValueMeta};
 
 use crate::fiber::{DeferEntry, Fiber};
 
 /// Push a defer entry from JIT code.
-/// 
+///
 /// Called by JIT-compiled code when executing DeferPush or ErrDeferPush instructions.
 /// The defer entry is stored in fiber.defer_stack with frame_depth = fiber.frames.len().
 pub extern "C" fn jit_defer_push(
@@ -23,7 +23,7 @@ pub extern "C" fn jit_defer_push(
     let ctx_ref = unsafe { &*ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     let gc = unsafe { &mut *ctx_ref.gc };
-    
+
     let is_closure = is_closure != 0;
     let arg_slots = arg_count as u16;
     let frame_depth = fiber.frames.len();
@@ -60,17 +60,14 @@ pub extern "C" fn jit_defer_push(
 }
 
 /// Execute recover() from JIT code.
-/// 
+///
 /// Called by JIT-compiled code when executing Recover instruction.
 /// Returns 1 if panic was recovered, 0 otherwise.
 /// Result (interface{}) is written to result_ptr (2 slots).
-pub extern "C" fn jit_recover(
-    ctx: *mut JitContext,
-    result_ptr: *mut u64,
-) -> u32 {
+pub extern "C" fn jit_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> u32 {
     let ctx_ref = unsafe { &*ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
-    
+
     // Check if in valid recover context
     if !fiber.is_direct_defer_context() {
         // Not in direct defer context - return nil without consuming panic
@@ -80,17 +77,17 @@ pub extern "C" fn jit_recover(
         }
         return 0;
     }
-    
+
     // Try to take the panic value
     let recovered = fiber.take_recoverable_panic();
     let val = recovered.unwrap_or(InterfaceSlot::nil());
-    
+
     // Store result (interface{} = 2 slots)
     unsafe {
         *result_ptr = val.slot0;
         *result_ptr.add(1) = val.slot1;
     }
-    
+
     // If recover succeeded, switch from Panic to Return mode
     if recovered.is_some() {
         fiber.switch_panic_to_return_mode();

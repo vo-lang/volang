@@ -10,14 +10,14 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-#[cfg(feature = "std")]
-use std::collections::HashMap;
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
+#[cfg(feature = "std")]
+use std::collections::HashMap;
 
-use vo_common_core::bytecode::{InterfaceMeta, Itab, NamedTypeMeta, Module};
-use vo_common_core::runtime_type::RuntimeType;
 use crate::ValueKind;
+use vo_common_core::bytecode::{InterfaceMeta, Itab, Module, NamedTypeMeta};
+use vo_common_core::runtime_type::RuntimeType;
 
 /// Unified itab table with runtime cache for interface-to-interface assignments.
 #[derive(Debug, Default)]
@@ -51,7 +51,7 @@ impl ItabCache {
     /// Get or create itab for interface-to-interface assignment (runtime).
     /// For concrete type assignments, itab_id is already in the constant.
     /// Panics if named type doesn't implement the interface (compile-time checked).
-    /// 
+    ///
     /// `src_is_pointer`: true if source is pointer type (*T), false if value type (T).
     /// Value types cannot use pointer receiver methods.
     pub fn get_or_create(
@@ -62,13 +62,19 @@ impl ItabCache {
         named_type_metas: &[NamedTypeMeta],
         interface_metas: &[InterfaceMeta],
     ) -> u32 {
-        self.try_get_or_create(named_type_id, iface_meta_id, src_is_pointer, named_type_metas, interface_metas)
-            .expect("method not found in named type")
+        self.try_get_or_create(
+            named_type_id,
+            iface_meta_id,
+            src_is_pointer,
+            named_type_metas,
+            interface_metas,
+        )
+        .expect("method not found in named type")
     }
 
     /// Try to get or create itab. Returns None if named type doesn't implement the interface.
     /// Use this for dynamic access where type mismatch should return error, not panic.
-    /// 
+    ///
     /// `src_is_pointer`: true if source is pointer type (*T), false if value type (T).
     /// Value types cannot use pointer receiver methods.
     pub fn try_get_or_create(
@@ -85,7 +91,13 @@ impl ItabCache {
             return Some(itab_id);
         }
 
-        let itab = Self::try_build_itab(named_type_id, iface_meta_id, src_is_pointer, named_type_metas, interface_metas)?;
+        let itab = Self::try_build_itab(
+            named_type_id,
+            iface_meta_id,
+            src_is_pointer,
+            named_type_metas,
+            interface_metas,
+        )?;
         let itab_id = self.itabs.len() as u32;
         self.itabs.push(itab);
         self.cache.insert(key, itab_id);
@@ -94,7 +106,7 @@ impl ItabCache {
     }
 
     /// Build itab for a named type implementing an interface.
-    /// 
+    ///
     /// `src_is_pointer`: true if source is pointer type (*T), false if value type (T).
     /// When src_is_pointer is false, methods with pointer receivers are not accessible.
     fn try_build_itab(
@@ -136,15 +148,15 @@ impl ItabCache {
 // =============================================================================
 
 /// Check if a source type satisfies a target interface.
-/// 
+///
 /// This is the single source of truth for interface satisfaction checking,
 /// used by both VM and JIT type assertions.
-/// 
+///
 /// - `src_rttid`: Runtime type ID of the source value
 /// - `src_vk`: ValueKind of the source value (Pointer vs Struct, etc.)
 /// - `target_iface_id`: Interface meta ID of the target interface
 /// - `module`: Module containing type metadata
-/// 
+///
 /// Returns true if the source type implements all methods of the target interface
 /// with matching signatures, respecting pointer receiver rules.
 pub fn check_interface_satisfaction(
@@ -157,13 +169,15 @@ pub fn check_interface_satisfaction(
         Some(m) => m,
         None => return false,
     };
-    
+
     if iface_meta.methods.is_empty() {
         return true; // empty interface always satisfied
     }
-    
+
     // Look up RuntimeType to find named_type_id for method lookup
-    if let Some(named_type_id) = module.runtime_types.get(src_rttid as usize)
+    if let Some(named_type_id) = module
+        .runtime_types
+        .get(src_rttid as usize)
         .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
     {
         if let Some(named_type) = module.named_type_metas.get(named_type_id as usize) {
@@ -191,10 +205,9 @@ pub fn check_interface_satisfaction(
 fn extract_named_type_id(rt: &RuntimeType, runtime_types: &[RuntimeType]) -> Option<u32> {
     match rt {
         RuntimeType::Named { id, .. } => Some(*id),
-        RuntimeType::Pointer(elem_value_rttid) => {
-            runtime_types.get(elem_value_rttid.rttid() as usize)
-                .and_then(|inner| extract_named_type_id(inner, runtime_types))
-        }
+        RuntimeType::Pointer(elem_value_rttid) => runtime_types
+            .get(elem_value_rttid.rttid() as usize)
+            .and_then(|inner| extract_named_type_id(inner, runtime_types)),
         _ => None,
     }
 }

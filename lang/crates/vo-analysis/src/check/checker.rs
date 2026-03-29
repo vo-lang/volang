@@ -3,7 +3,6 @@
 //! This module contains the main Checker struct and related context types
 //! for type checking Vo source code.
 
-
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -16,11 +15,11 @@ use vo_syntax::ast::{Expr, File};
 
 use super::errors::TypeError;
 use super::type_info::TypeInfo;
+use crate::importer::Importer;
 use crate::obj::{ConstValue, Pos};
 use crate::objects::{DeclInfoKey, ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
 use crate::operand::OperandMode;
 use crate::universe::Universe;
-use crate::importer::{Importer};
 
 // =============================================================================
 // ExprInfo - information about untyped expressions
@@ -110,7 +109,7 @@ pub struct Checker {
     pub trace_enabled: bool,
     /// Current trace indentation level.
     pub trace_indent: Rc<RefCell<usize>>,
-    
+
     // --- Per-check state ---
     /// Positions of unused dot-imported packages for each file scope.
     pub unused_dot_imports: HashMap<ScopeKey, HashMap<PackageKey, Span>>,
@@ -133,7 +132,11 @@ impl Checker {
     }
 
     /// Creates a new type checker with trace option.
-    pub fn new_with_trace(pkg: PackageKey, interner: SymbolInterner, trace_enabled: bool) -> Checker {
+    pub fn new_with_trace(
+        pkg: PackageKey,
+        interner: SymbolInterner,
+        trace_enabled: bool,
+    ) -> Checker {
         let tc_objs = TCObjects::new();
         Checker {
             tc_objs,
@@ -170,7 +173,6 @@ impl Checker {
         self.tc_objs.universe()
     }
 
-
     /// Emit a diagnostic.
     pub(crate) fn emit(&self, diagnostic: Diagnostic) {
         self.diagnostics.borrow_mut().emit(diagnostic);
@@ -190,7 +192,6 @@ impl Checker {
     pub(crate) fn has_errors(&self) -> bool {
         self.diagnostics.borrow().has_errors()
     }
-
 
     /// Returns whether tracing is enabled.
     pub(crate) fn trace(&self) -> bool {
@@ -261,7 +262,6 @@ impl Checker {
     pub(crate) fn scope_mut(&mut self, key: ScopeKey) -> &mut crate::scope::Scope {
         &mut self.tc_objs.scopes[key]
     }
-
 
     /// Returns a reference to a declaration info.
     pub(crate) fn decl_info(&self, key: DeclInfoKey) -> &super::resolver::DeclInfo {
@@ -348,26 +348,27 @@ impl Checker {
         self.init_order();
         self.unused_imports();
         self.record_untyped();
-        
+
         // Escape analysis pass
         let escape_result = super::escape::analyze(files, &self.result, &self.tc_objs);
         self.result.escaped_vars = escape_result.escaped;
         self.result.closure_captures = escape_result.closure_captures;
         self.result.loop_defined_vars = escape_result.loop_defined_vars;
-        
+
         // go @(island) sendability post-pass (needs closure_captures from escape analysis)
-        let go_island_diags = super::go_island::check_go_island_sendability(files, &self.result, &self.tc_objs);
+        let go_island_diags =
+            super::go_island::check_go_island_sendability(files, &self.result, &self.tc_objs);
         for diag in go_island_diags {
             self.error_code_msg(diag.code, diag.span, diag.message);
         }
-        
+
         if self.has_errors() {
             Err(())
         } else {
             Ok(self.pkg)
         }
     }
-    
+
     /// Type check files with an importer for handling imports.
     pub fn check_with_importer(
         &mut self,
@@ -381,19 +382,20 @@ impl Checker {
         self.init_order();
         self.unused_imports();
         self.record_untyped();
-        
+
         // Escape analysis pass
         let escape_result = super::escape::analyze(files, &self.result, &self.tc_objs);
         self.result.escaped_vars = escape_result.escaped;
         self.result.closure_captures = escape_result.closure_captures;
         self.result.loop_defined_vars = escape_result.loop_defined_vars;
-        
+
         // go @(island) sendability post-pass (needs closure_captures from escape analysis)
-        let go_island_diags = super::go_island::check_go_island_sendability(files, &self.result, &self.tc_objs);
+        let go_island_diags =
+            super::go_island::check_go_island_sendability(files, &self.result, &self.tc_objs);
         for diag in go_island_diags {
             self.error_code_msg(diag.code, diag.span, diag.message);
         }
-        
+
         if self.has_errors() {
             Err(())
         } else {
@@ -418,11 +420,7 @@ impl Checker {
                     self.error_code_msg(
                         TypeError::PackageNameMismatch,
                         ident.span,
-                        format!(
-                            "package {}; expected {}",
-                            name,
-                            pkg_name.as_ref().unwrap()
-                        ),
+                        format!("package {}; expected {}", name, pkg_name.as_ref().unwrap()),
                     );
                     return Err(());
                 }
@@ -442,7 +440,8 @@ impl Checker {
             if info.mode != OperandMode::Invalid {
                 if let Some(typ) = info.typ {
                     // Use the type as-is - it may have been updated by convert_untyped
-                    self.result.record_type_and_value(id, info.mode.clone(), typ);
+                    self.result
+                        .record_type_and_value(id, info.mode.clone(), typ);
                 }
             }
         }

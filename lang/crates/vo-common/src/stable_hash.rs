@@ -42,6 +42,9 @@ impl StableHasher {
 
     pub fn finish_suffix(self) -> String {
         let digest = self.finish();
-        digest.strip_prefix("sha256:").unwrap_or(&digest).to_string()
+        digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&digest)
+            .to_string()
     }
 }

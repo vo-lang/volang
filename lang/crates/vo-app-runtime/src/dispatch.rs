@@ -70,9 +70,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::{
-        emit_outbound_frames,
-        emit_trimmed_stdout,
-        ignore_not_waiting_for_events,
+        emit_outbound_frames, emit_trimmed_stdout, ignore_not_waiting_for_events,
         SessionDispatchError,
     };
     use crate::SessionError;
@@ -101,14 +99,15 @@ mod tests {
     fn emit_outbound_frames_stops_on_first_host_error() {
         let mut seen = Vec::new();
 
-        let result: Result<(), String> = emit_outbound_frames(vec![vec![1], vec![2], vec![3]], |frame| {
-            seen.push(frame.clone());
-            if frame == vec![2] {
-                Err(String::from("boom"))
-            } else {
-                Ok(())
-            }
-        });
+        let result: Result<(), String> =
+            emit_outbound_frames(vec![vec![1], vec![2], vec![3]], |frame| {
+                seen.push(frame.clone());
+                if frame == vec![2] {
+                    Err(String::from("boom"))
+                } else {
+                    Ok(())
+                }
+            });
 
         assert_eq!(result, Err(String::from("boom")));
         assert_eq!(seen, vec![vec![1], vec![2]]);

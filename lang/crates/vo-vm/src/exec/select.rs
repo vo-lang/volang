@@ -49,7 +49,12 @@ pub fn exec_select_begin(fiber: &mut Fiber, case_count: usize, has_default: bool
 
 /// Add a send case to the current select.
 #[inline]
-pub fn exec_select_send(select_state: &mut Option<SelectState>, queue_reg: u16, val_reg: u16, elem_slots: u8) {
+pub fn exec_select_send(
+    select_state: &mut Option<SelectState>,
+    queue_reg: u16,
+    val_reg: u16,
+    elem_slots: u8,
+) {
     let state = select_state.as_mut().expect("no active select");
     state.cases.push(SelectCase {
         kind: SelectCaseKind::Send,
@@ -94,11 +99,12 @@ pub fn exec_select_exec(
 ) -> SelectResult {
     // Path 1: Woken by another goroutine - complete the woken case
     // Check and take woken_index first to avoid borrow conflicts
-    let woken_idx = select_state.as_mut()
+    let woken_idx = select_state
+        .as_mut()
         .expect("no active select")
         .woken_index
         .take();
-    
+
     if let Some(idx) = woken_idx {
         return complete_woken_case(stack, bp, result_reg, idx, select_state);
     }
@@ -110,12 +116,38 @@ pub fn exec_select_exec(
     };
 
     match ready {
-        ReadyCase::Send { idx, ch, elem_slots, val_reg } => {
-            execute_send_case(stack, bp, result_reg, idx, ch, elem_slots, val_reg, select_state)
-        }
-        ReadyCase::Recv { idx, ch, elem_slots, val_reg, has_ok } => {
-            execute_recv_case(stack, bp, result_reg, idx, ch, elem_slots, val_reg, has_ok, select_state)
-        }
+        ReadyCase::Send {
+            idx,
+            ch,
+            elem_slots,
+            val_reg,
+        } => execute_send_case(
+            stack,
+            bp,
+            result_reg,
+            idx,
+            ch,
+            elem_slots,
+            val_reg,
+            select_state,
+        ),
+        ReadyCase::Recv {
+            idx,
+            ch,
+            elem_slots,
+            val_reg,
+            has_ok,
+        } => execute_recv_case(
+            stack,
+            bp,
+            result_reg,
+            idx,
+            ch,
+            elem_slots,
+            val_reg,
+            has_ok,
+            select_state,
+        ),
         ReadyCase::Default => {
             stack_set(stack, bp + result_reg as usize, u64::MAX);
             *select_state = None;
@@ -142,8 +174,19 @@ enum ReadyCase {
     None,
     Default,
     UnsupportedRemotePort,
-    Send { idx: usize, ch: GcRef, elem_slots: usize, val_reg: u16 },
-    Recv { idx: usize, ch: GcRef, elem_slots: usize, val_reg: u16, has_ok: bool },
+    Send {
+        idx: usize,
+        ch: GcRef,
+        elem_slots: usize,
+        val_reg: u16,
+    },
+    Recv {
+        idx: usize,
+        ch: GcRef,
+        elem_slots: usize,
+        val_reg: u16,
+        has_ok: bool,
+    },
 }
 
 /// Find a ready case. If multiple are ready, randomly select one (Go semantics).
@@ -210,7 +253,7 @@ fn complete_woken_case(
     select_state: &mut Option<SelectState>,
 ) -> SelectResult {
     let state = select_state.as_mut().expect("no active select");
-    
+
     // Cancel waiters on other channels
     cancel_select_waiters(state);
 
@@ -245,27 +288,19 @@ fn execute_send_case(
     select_state: &mut Option<SelectState>,
 ) -> SelectResult {
     let val_start = bp + val_reg as usize;
-    let value: QueueMessage = (0..elem_slots).map(|i| stack_get(stack, val_start + i)).collect();
+    let value: QueueMessage = (0..elem_slots)
+        .map(|i| stack_get(stack, val_start + i))
+        .collect();
 
     // Use try_send so that waiting receivers are properly woken.
     // Direct buffer push would leave waiting receivers blocked forever.
     match queue::try_send(ch, value) {
-        SendResult::DirectSend(receiver) => finish_selected_case(
-            stack,
-            bp,
-            result_reg,
-            idx,
-            select_state,
-            Some(receiver),
-        ),
-        SendResult::Buffered => finish_selected_case(
-            stack,
-            bp,
-            result_reg,
-            idx,
-            select_state,
-            None,
-        ),
+        SendResult::DirectSend(receiver) => {
+            finish_selected_case(stack, bp, result_reg, idx, select_state, Some(receiver))
+        }
+        SendResult::Buffered => {
+            finish_selected_case(stack, bp, result_reg, idx, select_state, None)
+        }
         SendResult::Closed => {
             *select_state = None;
             SelectResult::SendOnClosed
@@ -346,7 +381,13 @@ fn recv_case_wake(
 // =============================================================================
 
 /// Register this fiber as a waiter on all channels in the select.
-fn register_select_waiters(stack: *const Slot, bp: usize, island_id: u32, fiber_id: u32, state: &mut SelectState) {
+fn register_select_waiters(
+    stack: *const Slot,
+    bp: usize,
+    island_id: u32,
+    fiber_id: u32,
+    state: &mut SelectState,
+) {
     let select_id = state.select_id;
 
     for (idx, case) in state.cases.iter().enumerate() {
@@ -363,7 +404,9 @@ fn register_select_waiters(stack: *const Slot, bp: usize, island_id: u32, fiber_
             SelectCaseKind::Send => {
                 let val_start = bp + case.val_reg as usize;
                 let elem_slots = case.elem_slots as usize;
-                let value: QueueMessage = (0..elem_slots).map(|i| stack_get(stack, val_start + i)).collect();
+                let value: QueueMessage = (0..elem_slots)
+                    .map(|i| stack_get(stack, val_start + i))
+                    .collect();
                 queue::register_sender(
                     ch,
                     QueueWaiter::selecting(island_id, fiber_id as u64, idx as u16, select_id),

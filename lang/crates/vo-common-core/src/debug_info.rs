@@ -27,11 +27,19 @@ pub struct FuncDebugInfo {
 
 impl FuncDebugInfo {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, pc: u32, file_id: u16, line: u32, col: u16, len: u16) {
-        self.entries.push(DebugLoc { pc, file_id, line, col, len });
+        self.entries.push(DebugLoc {
+            pc,
+            file_id,
+            line,
+            col,
+            len,
+        });
     }
 
     pub fn sort(&mut self) {
@@ -60,7 +68,12 @@ pub struct SourceLoc {
 
 impl SourceLoc {
     pub fn new(file: impl Into<String>, line: u32, col: u16, len: u16) -> Self {
-        Self { file: file.into(), line, col, len }
+        Self {
+            file: file.into(),
+            line,
+            col,
+            len,
+        }
     }
 }
 

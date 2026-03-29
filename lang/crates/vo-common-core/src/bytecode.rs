@@ -4,17 +4,17 @@
 pub const RETURN_FLAG_HEAP_RETURNS: u8 = 0x02;
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec, collections::BTreeMap};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
-#[cfg(feature = "std")]
-use std::collections::{HashMap, BTreeMap};
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
+#[cfg(feature = "std")]
+use std::collections::{BTreeMap, HashMap};
 
+use crate::debug_info::DebugInfo;
+use crate::instruction::Instruction;
 use crate::types::{SlotType, ValueMeta, ValueRttid};
 use crate::RuntimeType;
-use crate::instruction::Instruction;
-use crate::debug_info::DebugInfo;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Constant {
@@ -100,7 +100,9 @@ impl FunctionDef {
                 Opcode::CallExtern => has_call_extern = true,
                 _ => {}
             }
-            if has_calls && has_call_extern { break; }
+            if has_calls && has_call_extern {
+                break;
+            }
         }
         (has_calls, has_call_extern)
     }
@@ -155,7 +157,11 @@ pub enum ExtSlotKind {
 impl ExtSlotKind {
     #[inline]
     pub fn from_u8(v: u8) -> Self {
-        if v == 1 { Self::Bytes } else { Self::Value }
+        if v == 1 {
+            Self::Bytes
+        } else {
+            Self::Value
+        }
     }
 }
 
@@ -223,7 +229,7 @@ impl StructMeta {
     pub fn slot_count(&self) -> u16 {
         self.slot_types.len() as u16
     }
-    
+
     /// Get field by name (O(1) lookup).
     #[inline]
     pub fn get_field(&self, name: &str) -> Option<&FieldMeta> {
@@ -264,7 +270,7 @@ pub struct WellKnownTypes {
     pub error_struct_meta_id: Option<u32>,
     /// Field offsets in errors.Error: [msg, cause]
     pub error_field_offsets: Option<[u16; 2]>,
-    
+
     // Builtin protocol interface meta IDs for dynamic access
     /// AttrObject protocol iface_meta_id
     pub attr_object_iface_id: Option<u32>,
@@ -284,9 +290,9 @@ pub struct Module {
     pub struct_metas: Vec<StructMeta>,
     pub interface_metas: Vec<InterfaceMeta>,
     pub named_type_metas: Vec<NamedTypeMeta>,
-    pub runtime_types: Vec<RuntimeType>,  // rttid -> RuntimeType
-    pub itabs: Vec<Itab>,  // compile-time built itabs
-    pub well_known: WellKnownTypes,  // pre-computed type IDs
+    pub runtime_types: Vec<RuntimeType>, // rttid -> RuntimeType
+    pub itabs: Vec<Itab>,                // compile-time built itabs
+    pub well_known: WellKnownTypes,      // pre-computed type IDs
     pub constants: Vec<Constant>,
     pub globals: Vec<GlobalDef>,
     pub functions: Vec<FunctionDef>,

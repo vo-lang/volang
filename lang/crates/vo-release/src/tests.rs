@@ -6,7 +6,7 @@ use tar::Archive;
 use tempfile::TempDir;
 use vo_module::schema::manifest::ReleaseManifest;
 
-use crate::{ArtifactInput, ReleaseError, StageReleaseOptions, stage_release, verify_repo};
+use crate::{stage_release, verify_repo, ArtifactInput, ReleaseError, StageReleaseOptions};
 
 const TEST_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -167,5 +167,7 @@ fn stage_release_excludes_output_directory_from_source_package() {
     entries.sort();
 
     assert!(entries.iter().any(|entry| entry.ends_with("/keep.txt")));
-    assert!(entries.iter().all(|entry| !entry.contains(".dist/preexisting.txt")));
+    assert!(entries
+        .iter()
+        .all(|entry| !entry.contains(".dist/preexisting.txt")));
 }

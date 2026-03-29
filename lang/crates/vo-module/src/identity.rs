@@ -1,6 +1,6 @@
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
 use std::fmt;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::version::ExactVersion;
 use crate::Error;
@@ -29,28 +29,28 @@ impl ModulePath {
             return Err(Error::InvalidModulePath("empty module path".into()));
         }
         if s.starts_with('/') || s.ends_with('/') {
-            return Err(Error::InvalidModulePath(
-                format!("module path must not start or end with '/': {s}"),
-            ));
+            return Err(Error::InvalidModulePath(format!(
+                "module path must not start or end with '/': {s}"
+            )));
         }
         if !s.starts_with("github.com/") {
-            return Err(Error::InvalidModulePath(
-                format!("module path must start with 'github.com/': {s}"),
-            ));
+            return Err(Error::InvalidModulePath(format!(
+                "module path must start with 'github.com/': {s}"
+            )));
         }
 
         let segments: Vec<&str> = s.split('/').collect();
         // Minimum: github.com / owner / repo = 3 segments
         if segments.len() < 3 {
-            return Err(Error::InvalidModulePath(
-                format!("module path must have at least github.com/<owner>/<repo>: {s}"),
-            ));
+            return Err(Error::InvalidModulePath(format!(
+                "module path must have at least github.com/<owner>/<repo>: {s}"
+            )));
         }
         for seg in &segments {
             if seg.is_empty() {
-                return Err(Error::InvalidModulePath(
-                    format!("empty segment in module path: {s}"),
-                ));
+                return Err(Error::InvalidModulePath(format!(
+                    "empty segment in module path: {s}"
+                )));
             }
             validate_segment(seg, s)?;
         }
@@ -63,9 +63,9 @@ impl ModulePath {
         let major = parse_major_suffix(last)?;
         if let Some(n) = major {
             if n < 2 {
-                return Err(Error::InvalidModulePath(
-                    format!("major version suffix must be >= v2, got v{n} in: {s}"),
-                ));
+                return Err(Error::InvalidModulePath(format!(
+                    "major version suffix must be >= v2, got v{n} in: {s}"
+                )));
             }
         }
 
@@ -116,8 +116,7 @@ impl ModulePath {
         let mp = self.as_str();
         if import_path == mp {
             Some("")
-        } else if import_path.starts_with(mp)
-            && import_path.as_bytes().get(mp.len()) == Some(&b'/')
+        } else if import_path.starts_with(mp) && import_path.as_bytes().get(mp.len()) == Some(&b'/')
         {
             Some(&import_path[mp.len() + 1..])
         } else {
@@ -189,9 +188,9 @@ impl<'de> Deserialize<'de> for ModulePath {
 fn validate_segment(seg: &str, full: &str) -> Result<(), Error> {
     for c in seg.chars() {
         if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-') {
-            return Err(Error::InvalidModulePath(
-                format!("segment '{seg}' contains invalid character '{c}' in: {full}"),
-            ));
+            return Err(Error::InvalidModulePath(format!(
+                "segment '{seg}' contains invalid character '{c}' in: {full}"
+            )));
         }
     }
     Ok(())
@@ -210,13 +209,13 @@ fn parse_major_suffix(seg: &str) -> Result<Option<u64>, Error> {
     }
     // Has leading zero?
     if rest.len() > 1 && rest.starts_with('0') {
-        return Err(Error::InvalidModulePath(
-            format!("zero-padded major suffix '{seg}' is invalid"),
-        ));
+        return Err(Error::InvalidModulePath(format!(
+            "zero-padded major suffix '{seg}' is invalid"
+        )));
     }
-    let n: u64 = rest.parse().map_err(|_| {
-        Error::InvalidModulePath(format!("invalid major suffix '{seg}'"))
-    })?;
+    let n: u64 = rest
+        .parse()
+        .map_err(|_| Error::InvalidModulePath(format!("invalid major suffix '{seg}'")))?;
     Ok(Some(n))
 }
 
@@ -238,35 +237,35 @@ pub fn classify_import(path: &str) -> Result<ImportClass, Error> {
         return Err(Error::InvalidImportPath("empty import path".to_string()));
     }
     if path.starts_with('/') || path.starts_with('.') {
-        return Err(Error::InvalidImportPath(
-            format!("relative or absolute import paths are not allowed: {path}"),
-        ));
+        return Err(Error::InvalidImportPath(format!(
+            "relative or absolute import paths are not allowed: {path}"
+        )));
     }
     if path.contains('@') {
-        return Err(Error::InvalidImportPath(
-            format!("'@' is not part of import syntax: {path}"),
-        ));
+        return Err(Error::InvalidImportPath(format!(
+            "'@' is not part of import syntax: {path}"
+        )));
     }
     let first_segment = path.split('/').next().unwrap();
     if first_segment.contains('.') {
         // External: must begin with github.com/
         if !path.starts_with("github.com/") {
-            return Err(Error::InvalidImportPath(
-                format!("external import must begin with 'github.com/': {path}"),
-            ));
+            return Err(Error::InvalidImportPath(format!(
+                "external import must begin with 'github.com/': {path}"
+            )));
         }
         if path == "github.com" || path == "github.com/" {
-            return Err(Error::InvalidImportPath(
-                format!("incomplete external import path: {path}"),
-            ));
+            return Err(Error::InvalidImportPath(format!(
+                "incomplete external import path: {path}"
+            )));
         }
         Ok(ImportClass::External)
     } else {
         // Check for explicitly banned stdlib prefix
         if path == "std" || path.starts_with("std/") {
-            return Err(Error::InvalidImportPath(
-                format!("'std/...' import prefix is not allowed, use bare package name: {path}"),
-            ));
+            return Err(Error::InvalidImportPath(format!(
+                "'std/...' import prefix is not allowed, use bare package name: {path}"
+            )));
         }
         Ok(ImportClass::Stdlib)
     }
@@ -279,7 +278,7 @@ pub fn check_internal_visibility(importer_path: &str, target_path: &str) -> bool
     let marker = "/internal/";
     if let Some(idx) = target_path.find(marker) {
         let required_prefix = &target_path[..idx]; // is everything before "/internal/"
-        // The importer must share this prefix
+                                                   // The importer must share this prefix
         if importer_path.starts_with(required_prefix)
             && (importer_path.len() == required_prefix.len()
                 || importer_path.as_bytes().get(required_prefix.len()) == Some(&b'/'))
@@ -352,7 +351,9 @@ pub fn find_owning_module<'m, 'i>(
     let mut best: Option<(&ModulePath, &str)> = None;
     for mp in modules {
         if let Some(sub) = mp.owns_import(import_path) {
-            let dominated = best.as_ref().map_or(false, |(b, _)| b.as_str().len() >= mp.as_str().len());
+            let dominated = best
+                .as_ref()
+                .map_or(false, |(b, _)| b.as_str().len() >= mp.as_str().len());
             if !dominated {
                 best = Some((mp, sub));
             }
@@ -450,10 +451,16 @@ mod tests {
     #[test]
     fn test_version_tag() {
         let root = ModulePath::parse("github.com/acme/lib").unwrap();
-        assert_eq!(root.version_tag(&ExactVersion::parse("v1.4.2").unwrap()), "v1.4.2");
+        assert_eq!(
+            root.version_tag(&ExactVersion::parse("v1.4.2").unwrap()),
+            "v1.4.2"
+        );
 
         let nested = ModulePath::parse("github.com/acme/mono/graphics").unwrap();
-        assert_eq!(nested.version_tag(&ExactVersion::parse("v0.8.0").unwrap()), "graphics/v0.8.0");
+        assert_eq!(
+            nested.version_tag(&ExactVersion::parse("v0.8.0").unwrap()),
+            "graphics/v0.8.0"
+        );
 
         let nested_v2 = ModulePath::parse("github.com/acme/mono/graphics/v2").unwrap();
         assert_eq!(
@@ -467,7 +474,10 @@ mod tests {
     #[test]
     fn test_classify_stdlib() {
         assert_eq!(classify_import("fmt").unwrap(), ImportClass::Stdlib);
-        assert_eq!(classify_import("encoding/json").unwrap(), ImportClass::Stdlib);
+        assert_eq!(
+            classify_import("encoding/json").unwrap(),
+            ImportClass::Stdlib
+        );
     }
 
     #[test]
@@ -524,7 +534,10 @@ mod tests {
 
     #[test]
     fn test_internal_visibility_no_marker() {
-        assert!(check_internal_visibility("github.com/x/y", "github.com/a/b/util"));
+        assert!(check_internal_visibility(
+            "github.com/x/y",
+            "github.com/a/b/util"
+        ));
     }
 
     // --- find_owning_module ---

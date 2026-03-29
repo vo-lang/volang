@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 
 use libloading::{Library, Symbol};
 
-use crate::ffi::{ExternEntry, ExternFnPtr, ExtensionTable};
+use crate::ffi::{ExtensionTable, ExternEntry, ExternFnPtr};
 
 // Re-export from vo-module
-pub use vo_module::ext_manifest::{ExtensionManifest, discover_extensions};
+pub use vo_module::ext_manifest::{discover_extensions, ExtensionManifest};
 
 /// ABI version — must match vo-ext's ABI_VERSION.
 pub const ABI_VERSION: u32 = 2;
@@ -43,11 +43,23 @@ impl std::fmt::Display for ExtError {
         match self {
             ExtError::LoadFailed(msg) => write!(f, "failed to load extension: {}", msg),
             ExtError::MissingEntryPoint => write!(f, "extension missing vo_ext_get_entries"),
-            ExtError::SymbolLookupFailed { extension, symbol, message } => {
-                write!(f, "failed to lookup symbol '{}' from extension '{}': {}", symbol, extension, message)
+            ExtError::SymbolLookupFailed {
+                extension,
+                symbol,
+                message,
+            } => {
+                write!(
+                    f,
+                    "failed to lookup symbol '{}' from extension '{}': {}",
+                    symbol, extension, message
+                )
             }
             ExtError::VersionMismatch { expected, found } => {
-                write!(f, "ABI version mismatch: expected {}, found {}", expected, found)
+                write!(
+                    f,
+                    "ABI version mismatch: expected {}, found {}",
+                    expected, found
+                )
             }
             ExtError::ManifestError(msg) => write!(f, "manifest error: {}", msg),
             ExtError::Io(e) => write!(f, "IO error: {}", e),
@@ -118,11 +130,17 @@ impl ExtensionLoader {
         self.load_impl(path, name, path.to_path_buf())
     }
 
-    fn load_impl(&mut self, path: &Path, name: &str, manifest_path: PathBuf) -> Result<(), ExtError> {
+    fn load_impl(
+        &mut self,
+        path: &Path,
+        name: &str,
+        manifest_path: PathBuf,
+    ) -> Result<(), ExtError> {
         // Canonicalize path to resolve .. and symlinks (needed for QEMU compatibility)
-        let canonical_path = path.canonicalize()
+        let canonical_path = path
+            .canonicalize()
             .map_err(|e| ExtError::LoadFailed(format!("{}: {}", path.display(), e)))?;
-        
+
         // Use RTLD_LOCAL to keep dylib symbols private and avoid linkme EXTERN_TABLE conflicts
         // with the host binary. Extensions are standalone and do not share symbols.
         #[cfg(unix)]
@@ -133,9 +151,7 @@ impl ExtensionLoader {
                 .map_err(|e| ExtError::LoadFailed(e.to_string()))?
         };
         #[cfg(not(unix))]
-        let lib = unsafe {
-            Library::new(path).map_err(|e| ExtError::LoadFailed(e.to_string()))?
-        };
+        let lib = unsafe { Library::new(path).map_err(|e| ExtError::LoadFailed(e.to_string()))? };
 
         let get_entries: Symbol<extern "C" fn() -> ExtensionTable> = unsafe {
             lib.get(b"vo_ext_get_entries")
@@ -151,18 +167,15 @@ impl ExtensionLoader {
             });
         }
 
-        let c_entries: &[ExternEntry] = unsafe {
-            std::slice::from_raw_parts(table.entries, table.entry_count as usize)
-        };
+        let c_entries: &[ExternEntry] =
+            unsafe { std::slice::from_raw_parts(table.entries, table.entry_count as usize) };
 
         let ext_idx = self.loaded.len();
         let mut entries = Vec::with_capacity(c_entries.len());
 
         for (i, c_entry) in c_entries.iter().enumerate() {
             self.cache.insert(c_entry.name().to_string(), (ext_idx, i));
-            entries.push(LoadedEntry {
-                func: c_entry.func,
-            });
+            entries.push(LoadedEntry { func: c_entry.func });
         }
 
         self.loaded.push(LoadedExtension {
@@ -208,7 +221,11 @@ impl ExtensionLoader {
     /// # Safety
     ///
     /// The caller must ensure `T` matches the actual symbol type exported by the library.
-    pub unsafe fn symbol<T>(&self, extension: &str, symbol: &[u8]) -> Result<Option<Symbol<'_, T>>, ExtError> {
+    pub unsafe fn symbol<T>(
+        &self,
+        extension: &str,
+        symbol: &[u8],
+    ) -> Result<Option<Symbol<'_, T>>, ExtError> {
         let Some(lib) = self.library(extension) else {
             return Ok(None);
         };
@@ -216,7 +233,9 @@ impl ExtensionLoader {
             Ok(sym) => Ok(Some(sym)),
             Err(err) => Err(ExtError::SymbolLookupFailed {
                 extension: extension.to_string(),
-                symbol: String::from_utf8_lossy(symbol).trim_end_matches('\0').to_string(),
+                symbol: String::from_utf8_lossy(symbol)
+                    .trim_end_matches('\0')
+                    .to_string(),
                 message: err.to_string(),
             }),
         }

@@ -19,9 +19,9 @@
 //! reference.  The host **must** call `vo_ext_clear_host_bridge` before
 //! dropping the bridge.
 
-pub mod timer;
-pub mod tick;
 pub mod capability;
+pub mod tick;
+pub mod timer;
 
 use std::cell::RefCell;
 

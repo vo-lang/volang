@@ -87,10 +87,7 @@ fn resolve_library_path(path: PathBuf) -> PathBuf {
     }
     #[cfg(target_os = "windows")]
     {
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let new_name = file_name.strip_prefix("lib").unwrap_or(file_name);
         path.with_file_name(new_name).with_extension("dll")
     }
@@ -138,9 +135,7 @@ fn parse_wasm_extension_from_value(
     Ok(Some(parse_wasm_extension_table(wasm)?))
 }
 
-fn parse_wasm_extension_table(
-    table: &toml::value::Table,
-) -> Result<WasmExtensionManifest, Error> {
+fn parse_wasm_extension_table(table: &toml::value::Table) -> Result<WasmExtensionManifest, Error> {
     let kind = match table_string(table, "type").as_deref() {
         Some("standalone") => WasmExtensionKind::Standalone,
         Some("bindgen") => WasmExtensionKind::Bindgen,
@@ -188,7 +183,10 @@ fn parse_wasm_extension_table(
 }
 
 fn table_string(table: &toml::value::Table, key: &str) -> Option<String> {
-    table.get(key).and_then(toml::Value::as_str).map(str::to_string)
+    table
+        .get(key)
+        .and_then(toml::Value::as_str)
+        .map(str::to_string)
 }
 
 #[cfg(test)]
