@@ -106,8 +106,8 @@ pub fn prepare_queue_handles_for_transfer(
         }
         let box_ref = slot as GcRef;
         let mut capture_slots = vec![0u64; transfer_type.slots as usize];
-        for j in 0..transfer_type.slots as usize {
-            capture_slots[j] = unsafe { Gc::read_slot(box_ref, j) };
+        for (j, slot) in capture_slots.iter_mut().enumerate() {
+            *slot = unsafe { Gc::read_slot(box_ref, j) };
         }
         prepare_value_queue_handles_for_transfer_inner(
             &capture_slots,
@@ -238,8 +238,8 @@ fn prepare_value_queue_handles_for_transfer_inner(
             let obj_meta = vo_runtime::ValueMeta::new(value_meta.meta_id(), ValueKind::Struct);
             let obj_slots_count = struct_metas[meta_id].slot_types.len();
             let mut obj_slots = vec![0u64; obj_slots_count];
-            for i in 0..obj_slots_count {
-                obj_slots[i] = unsafe { Gc::read_slot(ptr_ref, i) };
+            for (i, slot) in obj_slots.iter_mut().enumerate() {
+                *slot = unsafe { Gc::read_slot(ptr_ref, i) };
             }
             prepare_value_queue_handles_for_transfer_inner(
                 &obj_slots,
@@ -268,7 +268,7 @@ fn prepare_value_queue_handles_for_transfer_inner(
             if elem_bytes == 0 {
                 return;
             }
-            let elem_slot_count = (elem_bytes + 7) / 8;
+            let elem_slot_count = elem_bytes.div_ceil(8);
             let data_ptr = vo_runtime::objects::slice::data_ptr(slice_ref);
             let mut elem_buf = vec![0u64; elem_slot_count];
             for i in 0..length {
@@ -298,7 +298,7 @@ fn prepare_value_queue_handles_for_transfer_inner(
             if elem_bytes == 0 {
                 return;
             }
-            let elem_slot_count = (elem_bytes + 7) / 8;
+            let elem_slot_count = elem_bytes.div_ceil(8);
             let data_ptr = vo_runtime::objects::array::data_ptr_bytes(arr_ref);
             let mut elem_buf = vec![0u64; elem_slot_count];
             for i in 0..length {
@@ -440,10 +440,12 @@ fn lookup_struct_meta_id_safe(rttid: u32, runtime_types: &[vo_common_core::Runti
         if let vo_common_core::RuntimeType::Struct { meta_id, .. } = rt {
             return *meta_id;
         }
-        if let vo_common_core::RuntimeType::Named { struct_meta_id, .. } = rt {
-            if let Some(id) = struct_meta_id {
-                return *id;
-            }
+        if let vo_common_core::RuntimeType::Named {
+            struct_meta_id: Some(id),
+            ..
+        } = rt
+        {
+            return *id;
         }
     }
     0 // Fallback — struct without meta

@@ -71,6 +71,12 @@ pub struct EndpointRegistry {
     tombstone_count: usize,
 }
 
+impl Default for EndpointRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EndpointRegistry {
     pub fn new() -> Self {
         Self {
@@ -385,7 +391,6 @@ impl VmState {
                         island_id, error
                     )
                 });
-            return;
         }
         #[cfg(not(feature = "std"))]
         {

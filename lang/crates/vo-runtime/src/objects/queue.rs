@@ -59,6 +59,7 @@ pub fn create(
 }
 
 /// Create a REMOTE proxy channel (no ChannelState, operations go through messages).
+#[allow(clippy::too_many_arguments)]
 pub fn create_remote_proxy(
     gc: &mut Gc,
     kind: QueueKind,
@@ -82,6 +83,7 @@ pub fn create_remote_proxy(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_remote_proxy_with_closed(
     gc: &mut Gc,
     kind: QueueKind,

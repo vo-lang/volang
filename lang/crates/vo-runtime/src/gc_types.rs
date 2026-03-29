@@ -1,3 +1,4 @@
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 //! GC object scanning by type.
 
 use crate::gc::{scan_slots_by_types, Gc, GcRef};
@@ -71,10 +72,8 @@ pub fn typed_write_barrier_by_meta(
         }
         // Interface: 2 slots (slot0=header, slot1=data). Only barrier data if it's a GcRef.
         ValueKind::Interface => {
-            if vals.len() >= 2 {
-                if interface::data_is_gc_ref(vals[0]) && vals[1] != 0 {
-                    gc.write_barrier(parent, vals[1] as GcRef);
-                }
+            if vals.len() >= 2 && interface::data_is_gc_ref(vals[0]) && vals[1] != 0 {
+                gc.write_barrier(parent, vals[1] as GcRef);
             }
         }
         // Primitive types: no GcRefs
@@ -379,10 +378,8 @@ fn scan_elem(gc: &mut Gc, slots: &[u64], scan: &ElemScan) {
             }
         }
         ElemScan::Interface => {
-            if slots.len() >= 2 {
-                if interface::data_is_gc_ref(slots[0]) && slots[1] != 0 {
-                    gc.mark_gray(slots[1] as GcRef);
-                }
+            if slots.len() >= 2 && interface::data_is_gc_ref(slots[0]) && slots[1] != 0 {
+                gc.mark_gray(slots[1] as GcRef);
             }
         }
         ElemScan::Typed(types) => {

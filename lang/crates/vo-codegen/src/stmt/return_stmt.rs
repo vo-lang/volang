@@ -329,9 +329,9 @@ pub(super) fn compile_return(
 
                     let mut src_offset = 0u16;
                     let mut dst_offset = 0u16;
-                    for i in 0..info.tuple_len(tuple_type) {
+                    let n_elems = info.tuple_len(tuple_type);
+                    for (i, &rt) in ret_types.iter().enumerate().take(n_elems) {
                         let elem_type = info.tuple_elem_type(tuple_type, i);
-                        let rt = ret_types[i];
                         crate::assign::emit_assign(
                             ret_start + dst_offset,
                             crate::assign::AssignSource::Slot {

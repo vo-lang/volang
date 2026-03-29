@@ -38,19 +38,19 @@ fn emit_unary<'a>(
     inst: &Instruction,
     op: impl FnOnce(&mut cranelift_frontend::FunctionBuilder, Value) -> Value,
 ) {
-    let v = read_f64_arg(e, inst.c as u16);
+    let v = read_f64_arg(e, inst.c);
     let r = op(e.builder(), v);
-    e.write_var(inst.a as u16, r);
+    e.write_var(inst.a, r);
 }
 
 /// Emit fused multiply-add: FMA(x, y, z) = x*y + z
 fn emit_fma<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let arg_start = inst.c as u16;
+    let arg_start = inst.c;
     let a = read_f64_arg(e, arg_start);
     let b = read_f64_arg(e, arg_start + 1);
     let c = read_f64_arg(e, arg_start + 2);
     let r = e.builder().ins().fma(a, b, c);
-    e.write_var(inst.a as u16, r);
+    e.write_var(inst.a, r);
 }
 
 /// Read an argument slot as F64. If the SSA variable is I64 (non-Float slot),

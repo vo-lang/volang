@@ -23,7 +23,7 @@ fn walkdir(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
                 files.extend(walkdir(&path)?);
             } else if path
                 .extension()
-                .map_or(false, |ext| ext == "vo" || ext == "toml")
+                .is_some_and(|ext| ext == "vo" || ext == "toml")
             {
                 files.push(path);
             }

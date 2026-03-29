@@ -1,3 +1,4 @@
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 //! JIT runtime API.
 //!
 //! This module defines the C ABI interface between JIT-compiled code and the
@@ -994,7 +995,6 @@ pub extern "C" fn vo_map_iter_init(m: u64, iter_ptr: *mut u64) {
             SLOTS,
         );
     }
-    core::mem::forget(iter);
 }
 
 /// Advance map iterator and get next key-value pair.

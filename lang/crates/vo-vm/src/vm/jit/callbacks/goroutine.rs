@@ -39,7 +39,7 @@ pub extern "C" fn jit_go_start(
 ) {
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
-    let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
+    let module = unsafe { &*(ctx.module) };
 
     if is_closure_call != 0 {
         unsafe { spawn_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) };
@@ -68,7 +68,7 @@ pub extern "C" fn jit_go_island(
 ) {
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
-    let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
+    let module = unsafe { &*(ctx.module) };
 
     let island_handle = island as GcRef;
     let closure = closure_ref as GcRef;

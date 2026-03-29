@@ -89,7 +89,7 @@ pub fn format_interface_with_ctx(
                 let wk = ctx.well_known();
                 if wk
                     .error_ptr_rttid
-                    .map_or(false, |err_rttid| rttid == err_rttid)
+                    .is_some_and(|err_rttid| rttid == err_rttid)
                 {
                     if let Some(field_offsets) = wk.error_field_offsets {
                         let ptr = slot1 as GcRef;
@@ -102,14 +102,14 @@ pub fn format_interface_with_ctx(
             format!("0x{:x}", slot1)
         }
         ValueKind::Slice => format_slice_value(slot1 as GcRef),
-        ValueKind::Map => format!("map[...]"),
+        ValueKind::Map => "map[...]".to_string(),
         ValueKind::Channel => format!("0x{:x}", slot1),
         ValueKind::Port => format!("0x{:x}", slot1),
         ValueKind::Closure => format!("0x{:x}", slot1),
-        ValueKind::Array => format!("[...]"),
-        ValueKind::Struct => format!("{{...}}"),
+        ValueKind::Array => "[...]".to_string(),
+        ValueKind::Struct => "{...}".to_string(),
         ValueKind::Interface => format!("0x{:x}", slot1),
-        ValueKind::Island => format!("<island>"),
+        ValueKind::Island => "<island>".to_string(),
     }
 }
 

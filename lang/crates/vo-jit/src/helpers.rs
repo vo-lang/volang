@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! JIT helper function declarations and symbol registration.
 //!
 //! This module contains:

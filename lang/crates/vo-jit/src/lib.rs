@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! JIT compiler for Vo bytecode using Cranelift.
 
 mod call_helpers;
@@ -110,6 +111,8 @@ impl JitCache {
     pub fn contains(&self, func_id: u32) -> bool {
         self.functions.contains_key(&func_id)
     }
+    /// # Safety
+    /// The returned function pointer must only be called with the correct ABI.
     pub unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> {
         self.functions
             .get(&func_id)
@@ -124,6 +127,8 @@ impl JitCache {
     pub fn contains_loop(&self, func_id: u32, begin_pc: usize) -> bool {
         self.loops.contains_key(&(func_id, begin_pc))
     }
+    /// # Safety
+    /// The returned function pointer must only be called with the correct ABI.
     pub unsafe fn get_loop_func_ptr(&self, func_id: u32, begin_pc: usize) -> Option<LoopFunc> {
         self.loops
             .get(&(func_id, begin_pc))
@@ -395,12 +400,16 @@ impl JitCompiler {
     pub fn get(&self, func_id: u32) -> Option<&CompiledFunction> {
         self.cache.get(func_id)
     }
+    /// # Safety
+    /// The returned function pointer must only be called with the correct ABI.
     pub unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> {
         self.cache.get_func_ptr(func_id)
     }
     pub fn get_loop(&self, func_id: u32, begin_pc: usize) -> Option<&CompiledLoop> {
         self.cache.get_loop(func_id, begin_pc)
     }
+    /// # Safety
+    /// The returned function pointer must only be called with the correct ABI.
     pub unsafe fn get_loop_func_ptr(&self, func_id: u32, begin_pc: usize) -> Option<LoopFunc> {
         self.cache.get_loop_func_ptr(func_id, begin_pc)
     }

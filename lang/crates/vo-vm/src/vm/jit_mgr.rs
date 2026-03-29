@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! JIT Manager - Unified JIT state machine for function compilation.
 //!
 //! Manages compilation states, hot counters, and version dispatch for all functions.
@@ -214,7 +215,7 @@ impl JitManager {
         if ptr.is_null() {
             None
         } else {
-            Some(unsafe { std::mem::transmute(*ptr) })
+            Some(unsafe { std::mem::transmute::<*const u8, JitFunc>(*ptr) })
         }
     }
 
@@ -233,10 +234,8 @@ impl JitManager {
         }
 
         // 2. Record call, compile if hot
-        if self.record_call(func_id) {
-            if self.compile_full(func_id, func_def, module).is_ok() {
-                return self.get_entry(func_id);
-            }
+        if self.record_call(func_id) && self.compile_full(func_id, func_def, module).is_ok() {
+            return self.get_entry(func_id);
         }
 
         // 3. Fall back to VM
@@ -421,6 +420,8 @@ impl JitManager {
     }
 
     /// Get loop function pointer.
+    /// # Safety
+    /// The returned function pointer must only be called with the correct ABI.
     pub unsafe fn get_loop_func(&self, func_id: u32, begin_pc: usize) -> Option<LoopFunc> {
         self.compiler.get_loop_func_ptr(func_id, begin_pc)
     }

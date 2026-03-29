@@ -147,7 +147,7 @@ impl ExtensionLoader {
         let lib = unsafe {
             let flags = libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_LOCAL;
             libloading::os::unix::Library::open(Some(&canonical_path), flags)
-                .map(|l| Library::from(l))
+                .map(Library::from)
                 .map_err(|e| ExtError::LoadFailed(e.to_string()))?
         };
         #[cfg(not(unix))]

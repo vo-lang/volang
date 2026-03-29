@@ -141,6 +141,7 @@ pub fn write_recv_result<F>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn replay_remote_queue_recv_response<F>(
     gc: &mut Gc,
     response: crate::fiber::RemoteRecvResponse,
@@ -210,6 +211,7 @@ pub fn exec_queue_new(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn queue_send_core(
     ch: GcRef,
     src: &[u64],

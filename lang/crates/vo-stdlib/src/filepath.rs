@@ -17,7 +17,7 @@ use vo_runtime::ffi::{ExternCallContext, ExternResult};
 fn filepath_eval_symlinks(call: &mut ExternCallContext) -> ExternResult {
     let path = call.arg_str(slots::ARG_PATH);
 
-    match eval_symlinks_impl(&path) {
+    match eval_symlinks_impl(path) {
         Ok(resolved) => {
             let result = call.alloc_str(&resolved);
             call.ret_ref(slots::RET_0, result);
@@ -60,19 +60,16 @@ fn eval_symlinks_impl(path: &str) -> Result<String, String> {
                     }
 
                     // Try to canonicalize the parent
-                    match fs::canonicalize(parent) {
-                        Ok(resolved_parent) => {
-                            // Get the file name
-                            if let Some(file_name) = current.file_name() {
-                                let mut result = resolved_parent;
-                                result.push(file_name);
-                                return result
-                                    .to_str()
-                                    .map(|s| s.to_string())
-                                    .ok_or_else(|| "path contains invalid UTF-8".to_string());
-                            }
+                    if let Ok(resolved_parent) = fs::canonicalize(parent) {
+                        // Get the file name
+                        if let Some(file_name) = current.file_name() {
+                            let mut result = resolved_parent;
+                            result.push(file_name);
+                            return result
+                                .to_str()
+                                .map(|s| s.to_string())
+                                .ok_or_else(|| "path contains invalid UTF-8".to_string());
                         }
-                        Err(_) => {}
                     }
                 }
                 Err(format!("lstat {}: no such file or directory", path))

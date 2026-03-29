@@ -98,7 +98,7 @@ impl Checker {
                 // Handle qualified type: pkg.Type
                 let pkg_name = self.resolve_ident(&sel.pkg).to_string();
                 let type_name = self.resolve_ident(&sel.sel).to_string();
-                let sel_sel = sel.sel.clone();
+                let sel_sel = sel.sel;
 
                 if let Some(scope_key) = self.octx.scope {
                     if let Some((_, pkg_obj)) =
@@ -274,7 +274,7 @@ impl Checker {
         // Look up in scope
         if let Some(scope_key) = self.octx.scope {
             if let Some((_skey, okey)) = scope::lookup_parent(scope_key, name, self.objs()) {
-                self.result.record_use(ident.clone(), okey);
+                self.result.record_use(*ident, okey);
 
                 // Type-check the object if needed
                 let obj = &self.lobj(okey);
@@ -466,8 +466,7 @@ impl Checker {
         let (results, _) = self.collect_results_from_sig(scope_key, &sig.results);
 
         // Validate receiver (like goscript)
-        let recv_okey = if recv.is_some() {
-            let r = recv.unwrap();
+        let recv_okey = if let Some(r) = recv {
             let invalid_type = self.invalid_type();
 
             // Vo Receiver is always exactly one, so recv_list has 0 or 1 element
@@ -543,7 +542,7 @@ impl Checker {
         // Build TypeExpr for base type
         let base_type_expr = TypeExpr {
             id: vo_syntax::ast::TypeExprId::DUMMY,
-            kind: TypeExprKind::Ident(r.ty.clone()),
+            kind: TypeExprKind::Ident(r.ty),
             span: r.ty.span,
         };
 
@@ -569,8 +568,8 @@ impl Checker {
         let scope_pos = self.scope(scope_key).pos();
         self.declare(scope_key, par, scope_pos);
         // Only record def if receiver has a name
-        if let Some(name) = &r.name {
-            self.result.record_def(name.clone(), Some(par));
+        if let Some(name) = r.name {
+            self.result.record_def(name, Some(par));
         }
 
         vec![par]
@@ -620,7 +619,7 @@ impl Checker {
                         self.new_param_var(name.span, Some(self.pkg), name_str, Some(param_type));
                     let scope_pos = self.scope(scope_key).pos();
                     self.declare(scope_key, var, scope_pos);
-                    self.result.record_def(name.clone(), Some(var));
+                    self.result.record_def(*name, Some(var));
                     vars.push(var);
                 }
                 named = true;
@@ -669,7 +668,7 @@ impl Checker {
                     self.new_param_var(name.span, Some(self.pkg), name_str, Some(result_type));
                 let scope_pos = self.scope(scope_key).pos();
                 self.declare(scope_key, var, scope_pos);
-                self.result.record_def(name.clone(), Some(var));
+                self.result.record_def(*name, Some(var));
                 vars.push(var);
             } else {
                 let var = self.new_param_var(
@@ -809,7 +808,7 @@ impl Checker {
                         }
                     }
 
-                    self.result.record_def(name.clone(), Some(fld));
+                    self.result.record_def(*name, Some(fld));
                     self.add_field_with_tag(&mut fields, &mut tags, tag.clone(), fld);
                 }
             }
@@ -863,7 +862,7 @@ impl Checker {
         let mut embedded_idents: Vec<Ident> = Vec::new();
         for elem in &iface.elems {
             if let InterfaceElem::Embedded(ident) = elem {
-                embedded_idents.push(ident.clone());
+                embedded_idents.push(*ident);
             }
         }
 
@@ -915,7 +914,7 @@ impl Checker {
         // Compute method set using info_from_type_lit (like goscript)
         let (tname, path) = if let Some(d) = def {
             if let Some(named) = self.otype(d).try_as_named() {
-                let obj = named.obj().clone();
+                let obj = *named.obj();
                 (obj, obj.map(|o| vec![o]).unwrap_or_default())
             } else {
                 (None, vec![])
@@ -998,8 +997,7 @@ impl Checker {
                 );
 
                 // Record definition for the method
-                self.result
-                    .record_def(method_ast.name.clone(), Some(fun_key));
+                self.result.record_def(method_ast.name, Some(fun_key));
 
                 minfo.set_func(fun_key);
                 sig_fix.push(minfo.clone());

@@ -370,6 +370,7 @@ impl Checker {
     }
 
     /// Type check files with an importer for handling imports.
+    #[allow(clippy::result_unit_err)]
     pub fn check_with_importer(
         &mut self,
         files: &[File],
@@ -416,11 +417,15 @@ impl Checker {
                     } else {
                         pkg_name = Some(name.to_string());
                     }
-                } else if name != pkg_name.as_ref().unwrap() {
+                } else if Some(name) != pkg_name.as_deref() {
                     self.error_code_msg(
                         TypeError::PackageNameMismatch,
                         ident.span,
-                        format!("package {}; expected {}", name, pkg_name.as_ref().unwrap()),
+                        format!(
+                            "package {}; expected {}",
+                            name,
+                            pkg_name.as_deref().unwrap_or("")
+                        ),
                     );
                     return Err(());
                 }

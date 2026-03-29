@@ -123,6 +123,7 @@ fn capture_box_meta(value_meta: ValueMeta) -> ValueMeta {
 
 /// Encode spawn fiber payload with proper type-aware serialization.
 ///
+#[allow(clippy::too_many_arguments)]
 pub fn encode_spawn_payload(
     gc: &Gc,
     func_id: u32,
@@ -151,8 +152,8 @@ pub fn encode_spawn_payload(
         let value_meta = ValueMeta::from_raw(transfer_type.meta_raw);
         let gcref = slot as GcRef;
         let mut value_slots = vec![0u64; transfer_type.slots as usize];
-        for j in 0..transfer_type.slots as usize {
-            value_slots[j] = unsafe { Gc::read_slot(gcref, j) };
+        for (j, slot) in value_slots.iter_mut().enumerate() {
+            *slot = unsafe { Gc::read_slot(gcref, j) };
         }
         let packed = pack_slots(gc, &value_slots, value_meta, struct_metas, runtime_types);
         let packed_data = packed.data();
@@ -205,6 +206,7 @@ pub fn decode_spawn_header(data: &[u8]) -> SpawnPayload {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn unpack_spawn_payload<F>(
     gc: &mut Gc,
     data: &[u8],
@@ -254,9 +256,9 @@ where
         offset += len;
 
         let box_ref = gc.alloc(capture_box_meta(value_meta), transfer_type.slots);
-        for j in 0..transfer_type.slots as usize {
+        for (j, &slot) in value_slots.iter().enumerate() {
             unsafe {
-                Gc::write_slot(box_ref, j, value_slots[j]);
+                Gc::write_slot(box_ref, j, slot);
             }
         }
         captures.push(box_ref);

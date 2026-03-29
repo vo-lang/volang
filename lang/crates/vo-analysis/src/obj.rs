@@ -23,7 +23,7 @@ pub fn get_id<'a>(pkg: Option<&'a Package>, name: &'a str) -> Cow<'a, str> {
 
 /// Returns true if name is exported (starts with uppercase).
 pub fn is_exported(name: &str) -> bool {
-    name.chars().next().map_or(false, |c| c.is_uppercase())
+    name.chars().next().is_some_and(|c| c.is_uppercase())
 }
 
 /// Properties for variable entities.
@@ -442,7 +442,7 @@ impl LangObj {
 
     /// Returns true if the name is exported (starts with uppercase).
     pub fn exported(&self) -> bool {
-        self.name.chars().next().map_or(false, |c| c.is_uppercase())
+        self.name.chars().next().is_some_and(|c| c.is_uppercase())
     }
 
     /// Returns the unique identifier for this object.
@@ -536,11 +536,12 @@ impl LangObj {
 use std::collections::HashMap;
 
 /// An ObjSet is a set of objects identified by their unique id.
+#[derive(Default)]
 pub struct ObjSet(HashMap<String, ObjKey>);
 
 impl ObjSet {
     pub fn new() -> ObjSet {
-        ObjSet(HashMap::new())
+        ObjSet::default()
     }
 
     /// Inserts an object into the set. Returns the existing object if already present.

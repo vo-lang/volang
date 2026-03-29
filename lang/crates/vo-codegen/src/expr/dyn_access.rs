@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 //! Dynamic access expression compilation (a~>field, a~>[key], a~>(args), a~>method(args))
 
 use vo_runtime::{SlotType, ValueKind};

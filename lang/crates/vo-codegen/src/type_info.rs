@@ -749,8 +749,7 @@ impl<'a> TypeInfoWrapper<'a> {
     pub fn is_empty_interface(&self, type_key: TypeKey) -> bool {
         let underlying = vo_analysis::typ::underlying_type(type_key, self.tc_objs());
         if let vo_analysis::typ::Type::Interface(iface) = &self.tc_objs().types[underlying] {
-            iface.methods().is_empty()
-                && iface.all_methods().as_ref().map_or(true, |m| m.is_empty())
+            iface.methods().is_empty() && iface.all_methods().as_ref().is_none_or(|m| m.is_empty())
         } else {
             false
         }
@@ -1505,7 +1504,7 @@ pub fn encode_map_get_meta(key_slots: u16, val_slots: u16, has_ok: bool) -> u32 
 /// Encode MapNew slots: (key_slots << 8) | val_slots
 #[inline]
 pub fn encode_map_new_slots(key_slots: u16, val_slots: u16) -> u16 {
-    ((key_slots as u16) << 8) | (val_slots as u16)
+    (key_slots << 8) | val_slots
 }
 
 /// Encode Call args: (arg_slots << 8) | ret_slots

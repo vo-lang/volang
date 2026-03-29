@@ -302,7 +302,7 @@ impl Checker {
 
         // Record definition
         if let Some(alias) = &import.alias {
-            self.result.record_def(alias.clone(), Some(pkg_name_obj));
+            self.result.record_def(*alias, Some(pkg_name_obj));
         } else {
             self.result.record_implicit(import.span, pkg_name_obj);
         }
@@ -463,24 +463,26 @@ impl Checker {
                     let scope = *self.package(self.pkg).scope();
                     if name_str == "init" {
                         self.lobj_mut(okey).set_parent(Some(scope));
-                        self.result.record_def(func_decl.name.clone(), Some(okey));
+                        self.result.record_def(func_decl.name, Some(okey));
                         if func_decl.body.is_none() {
                             self.error_code(TypeError::MissingFuncBody, func_decl.span);
                         }
                     } else {
                         self.declare(scope, okey, 0);
-                        self.result.record_def(func_decl.name.clone(), Some(okey));
+                        self.result.record_def(func_decl.name, Some(okey));
                     }
                 } else {
                     // Method - get receiver info from AST
-                    let recv = func_decl.receiver.as_ref().unwrap();
+                    let Some(recv) = func_decl.receiver.as_ref() else {
+                        unreachable!()
+                    };
                     let recv_type_name = self.resolve_ident(&recv.ty).to_string();
                     let is_pointer = recv.is_pointer;
 
                     if name_str != "_" {
                         methods.push((okey, recv_type_name, is_pointer));
                     }
-                    self.result.record_def(func_decl.name.clone(), Some(okey));
+                    self.result.record_def(func_decl.name, Some(okey));
                 }
 
                 let di = self
@@ -517,7 +519,7 @@ impl Checker {
 
         let scope = *self.package(self.pkg).scope();
         self.declare(scope, okey, 0);
-        self.result.record_def(ident.clone(), Some(okey));
+        self.result.record_def(*ident, Some(okey));
         self.obj_map.insert(okey, dkey);
         let order = self.obj_map.len() as u32;
         self.lobj_mut(okey).set_order(order);
@@ -562,13 +564,13 @@ impl Checker {
         let mut path: Vec<ObjKey> = Vec::new();
         let current = okey;
 
-        loop {
-            // Check for cycle
-            if path.contains(&current) {
-                return None;
-            }
-            path.push(current);
+        // Check for cycle
+        if path.contains(&current) {
+            return None;
+        }
+        path.push(current);
 
+        {
             // Check if it's an alias
             if let Some(&decl_key) = self.obj_map.get(&current) {
                 let decl = self.decl_info(decl_key);
@@ -586,7 +588,7 @@ impl Checker {
 
             // Not in obj_map means it's predeclared or imported
             // Just return it
-            return Some((is_pointer, current));
+            Some((is_pointer, current))
         }
     }
 
@@ -653,7 +655,7 @@ impl Checker {
             self.error_code_msg(
                 TypeError::ExtraInitExpr,
                 extra_expr.span,
-                format!("extra init expr"),
+                "extra init expr".to_string(),
             );
         } else if l > r {
             if is_const {
@@ -740,7 +742,7 @@ impl Checker {
         // Check regular imported packages
         let pkg_scope = *self.package(self.pkg).scope();
         for &child_scope in self.scope(pkg_scope).children() {
-            for (_, &okey) in self.scope(child_scope).elems() {
+            for &okey in self.scope(child_scope).elems().values() {
                 let obj = self.lobj(okey);
                 if let crate::obj::EntityType::PkgName { imported, used } = obj.entity_type() {
                     if !used {
@@ -755,7 +757,7 @@ impl Checker {
         }
 
         // Check dot-imported packages
-        for (_, imports) in &self.unused_dot_imports {
+        for imports in self.unused_dot_imports.values() {
             for (&pkey, &span) in imports {
                 self.emit(TypeError::UnusedImport.at_with_message(
                     span,

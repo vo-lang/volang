@@ -1,4 +1,5 @@
 //! Codegen context - manages module-level state.
+#![allow(clippy::too_many_arguments)]
 
 use std::collections::HashMap;
 
@@ -602,9 +603,9 @@ impl CodegenContext {
             if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying] {
                 let all_methods_ref = iface.all_methods();
                 let method_objs: Vec<ObjKey> = if let Some(methods) = all_methods_ref.as_ref() {
-                    methods.iter().cloned().collect()
+                    methods.to_vec()
                 } else {
-                    iface.methods().iter().cloned().collect()
+                    iface.methods().to_vec()
                 };
 
                 let names: Vec<String> = method_objs
@@ -671,10 +672,12 @@ impl CodegenContext {
             .iter()
             .position(|n| n == method_name)
             .map(|i| i as u32)
-            .expect(&format!(
-                "method {} not found in interface - codegen bug",
-                method_name
-            ))
+            .unwrap_or_else(|| {
+                panic!(
+                    "method {} not found in interface - codegen bug",
+                    method_name
+                )
+            })
     }
 
     // === Itab and IfaceAssign constant ===
@@ -693,11 +696,11 @@ impl CodegenContext {
     ) -> u16 {
         if iface_meta_id == 0 {
             // Empty interface: no itab needed
-            let packed = ((rttid as i64) << 32) | 0;
+            let packed = (rttid as i64) << 32;
             self.const_int(packed)
         } else {
             // Non-empty interface: defer itab building
-            let packed = ((rttid as i64) << 32) | 0;
+            let packed = (rttid as i64) << 32;
             let const_idx = self.add_const(Constant::Int(packed));
             // Store type_key for lookup_field_or_method during itab building
             // Only add to pending if type_key is a Named type (has methods)
@@ -1106,8 +1109,7 @@ impl CodegenContext {
     // === Closure ID ===
 
     pub fn next_closure_id(&mut self) -> u32 {
-        let id = self.module.functions.len() as u32;
-        id
+        self.module.functions.len() as u32
     }
 
     // === ObjKey mapping ===
@@ -1468,10 +1470,10 @@ impl CodegenContext {
         let local_slots =
             wrapper_param_slots + 1 + iface_slots + 1 + (param_slots + ret_slots).max(1);
         let mut slot_types = vec![vo_runtime::SlotType::GcRef; 2]; // closure ref + ClosureGet dest
-        slot_types.extend(
-            std::iter::repeat(vo_runtime::SlotType::Value)
-                .take((local_slots as usize).saturating_sub(2)),
-        );
+        slot_types.extend(std::iter::repeat_n(
+            vo_runtime::SlotType::Value,
+            (local_slots as usize).saturating_sub(2),
+        ));
         let capture_slot_types = vec![vo_runtime::SlotType::GcRef];
         let wrapper_id = self.register_wrapper_func(
             wrapper_name,

@@ -1,4 +1,5 @@
 //! Function and method call compilation.
+#![allow(clippy::too_many_arguments)]
 
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_analysis::selection::{Selection, SelectionKind};
@@ -220,11 +221,11 @@ fn emit_direct_func_call(
 
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
 
-    let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
+    let c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
     let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_idx);
     func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
 
-    let ret_start = args_start + total_arg_slots as u16;
+    let ret_start = args_start + total_arg_slots;
     if ret_slots > 0 && dst != ret_start {
         func.emit_copy(dst, ret_start, ret_slots);
     }
@@ -331,7 +332,7 @@ pub fn compile_call(
             );
             compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
 
-            let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
+            let c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
             func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
 
             let ret_start = args_start + total_arg_slots as u16;
@@ -462,7 +463,7 @@ pub fn compile_closure_call_from_reg(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    let ret_slots = info.type_slot_count(info.expr_type(expr.id)) as u16;
+    let ret_slots = info.type_slot_count(info.expr_type(expr.id));
 
     // Get function type from the closure expression to handle variadic properly
     let func_type = info.expr_type(callee_expr.id);
@@ -481,11 +482,10 @@ pub fn compile_closure_call_from_reg(
     let c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
     func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
 
-    let ret_start = args_start + total_arg_slots as u16;
+    let ret_start = args_start + total_arg_slots;
     if ret_slots > 0 && dst != ret_start {
         func.emit_copy(dst, ret_start, ret_slots);
     }
-
     Ok(())
 }
 
@@ -802,7 +802,7 @@ fn emit_static_method_call(
     let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_id);
     func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
 
-    let ret_start = args_start + total_slots as u16;
+    let ret_start = args_start + total_slots;
     if ret_slots > 0 && dst != ret_start {
         func.emit_copy(dst, ret_start, ret_slots);
     }
@@ -852,7 +852,7 @@ fn emit_interface_call_with_args(
         c,
     );
 
-    let ret_start = args_start + arg_slots as u16;
+    let ret_start = args_start + arg_slots;
     if ret_slots > 0 && dst != ret_start {
         func.emit_copy(dst, ret_start, ret_slots);
     }
@@ -978,7 +978,7 @@ pub fn compile_extern_call(
 
     // Get return slot count from the function's result type
     let sig = info.as_signature(func_type);
-    let ret_slots = info.type_slot_count(sig.results()) as u16;
+    let ret_slots = info.type_slot_count(sig.results());
     let extern_id = ctx.get_or_register_extern_with_slots(extern_name, ret_slots, param_kinds);
 
     // Use compile_method_args for proper type conversion (e.g., boxing to `any`)
@@ -1013,7 +1013,7 @@ pub fn compile_args_with_types(
 ) -> Result<u16, CodegenError> {
     let arg_info = info.get_call_arg_info(args, param_types);
 
-    if let Some(_) = arg_info.tuple_expand {
+    if arg_info.tuple_expand.is_some() {
         // Multi-value expansion: compile tuple once, then convert each element
         let tuple = super::CompiledTuple::compile(&args[0], ctx, func, info)?;
 

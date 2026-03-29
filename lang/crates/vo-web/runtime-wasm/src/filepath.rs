@@ -9,7 +9,7 @@ use crate::vfs;
 
 fn eval_symlinks(call: &mut ExternCallContext) -> ExternResult {
     let path = call.arg_str(0);
-    let (_, _, _, _, _, err) = vfs::stat(&path);
+    let (_, _, _, _, _, err) = vfs::stat(path);
 
     if err.is_some() {
         // Path doesn't exist - try to resolve parent
@@ -29,7 +29,7 @@ fn eval_symlinks(call: &mut ExternCallContext) -> ExternResult {
         return ExternResult::Ok;
     }
 
-    let result = normalize_path(&path);
+    let result = normalize_path(path);
     let str_ref = string::from_rust_str(call.gc(), &result);
     call.ret_ref(0, str_ref);
     write_nil_error(call, 1);
@@ -75,9 +75,8 @@ fn normalize_path(path: &str) -> String {
 
 pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     for (id, def) in externs.iter().enumerate() {
-        match def.name.as_str() {
-            "path_filepath_evalSymlinks" => registry.register(id as u32, eval_symlinks),
-            _ => {}
+        if def.name.as_str() == "path_filepath_evalSymlinks" {
+            registry.register(id as u32, eval_symlinks);
         }
     }
 }

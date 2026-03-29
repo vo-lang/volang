@@ -1,4 +1,5 @@
 //! Fiber scheduler for cooperative multitasking.
+#![allow(clippy::items_after_test_module)]
 
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, collections::VecDeque, string::String, vec::Vec};
@@ -132,13 +133,13 @@ impl Scheduler {
     /// Get fiber by FiberId (O(1) index access).
     #[inline]
     pub fn get_fiber(&self, id: FiberId) -> &Fiber {
-        &*self.fibers[id.0 as usize]
+        &self.fibers[id.0 as usize]
     }
 
     /// Get mutable fiber by FiberId (O(1) index access).
     #[inline]
     pub fn get_fiber_mut(&mut self, id: FiberId) -> &mut Fiber {
-        &mut *self.fibers[id.0 as usize]
+        &mut self.fibers[id.0 as usize]
     }
 
     /// Wake a blocked fiber.

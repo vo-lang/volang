@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err, clippy::too_many_arguments)]
 //! Function compiler: bytecode -> Cranelift IR.
 
 use std::collections::{HashMap, HashSet};

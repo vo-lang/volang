@@ -146,8 +146,8 @@ pub fn find_loop_by_header(loops: &[LoopInfo], header_pc: usize) -> Option<&Loop
 
 /// Check if a loop contains function calls.
 fn has_function_calls(code: &[Instruction], header_pc: usize, back_edge_pc: usize) -> bool {
-    for pc in header_pc..=back_edge_pc {
-        match code[pc].opcode() {
+    for inst in &code[header_pc..=back_edge_pc] {
+        match inst.opcode() {
             Opcode::Call | Opcode::CallClosure | Opcode::CallIface | Opcode::CallExtern => {
                 return true;
             }
@@ -169,9 +169,7 @@ fn analyze_loop_liveness(
     let mut read_before_write: HashSet<u16> = HashSet::new();
     let mut written: HashSet<u16> = HashSet::new();
 
-    for pc in header_pc..=back_edge_pc {
-        let inst = &code[pc];
-
+    for inst in &code[header_pc..=back_edge_pc] {
         // Get registers read by this instruction
         for reg in get_read_regs(inst) {
             if !written.contains(&reg) {
@@ -293,7 +291,7 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
         }
         // Return reads return value registers
         Opcode::Return => {
-            let count = inst.b as u16;
+            let count = inst.b;
             for i in 0..count {
                 regs.push(inst.a + i);
             }
@@ -322,7 +320,7 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
                 0x81 | 0x82 | 0x84 | 0x44 => 8,
                 f => f as usize,
             };
-            let elem_slots = (elem_bytes + 7) / 8;
+            let elem_slots = elem_bytes.div_ceil(8);
             for i in 0..elem_slots {
                 regs.push(inst.c + i as u16);
             }
@@ -361,7 +359,7 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
         // Call reads arguments
         Opcode::Call => {
             let arg_start = inst.b;
-            let arg_slots = (inst.c >> 8) as u16;
+            let arg_slots = inst.c >> 8;
             for i in 0..arg_slots {
                 regs.push(arg_start + i);
             }
@@ -370,14 +368,14 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
         Opcode::CallClosure => {
             regs.push(inst.a); // closure ref
             let arg_start = inst.b;
-            let arg_slots = (inst.c >> 8) as u16;
+            let arg_slots = inst.c >> 8;
             for i in 0..arg_slots {
                 regs.push(arg_start + i);
             }
         }
         // CallExtern reads arguments (a=dst, b=extern_id, c=arg_start, flags=arg_count)
         Opcode::CallExtern => {
-            let arg_start = inst.c as u16;
+            let arg_start = inst.c;
             let arg_count = inst.flags as u16;
             for i in 0..arg_count {
                 regs.push(arg_start + i);
@@ -388,7 +386,7 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
             regs.push(inst.a);
             regs.push(inst.a + 1);
             let arg_start = inst.b;
-            let arg_slots = (inst.c >> 8) as u16;
+            let arg_slots = inst.c >> 8;
             for i in 0..arg_slots {
                 regs.push(arg_start + i);
             }
@@ -478,15 +476,15 @@ fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
 
     match inst.opcode() {
         Opcode::Call => {
-            let ret_start = inst.b + ((inst.c >> 8) as u16);
-            let ret_slots = (inst.c & 0xFF) as u16;
+            let ret_start = inst.b + (inst.c >> 8);
+            let ret_slots = inst.c & 0xFF;
             for i in 0..ret_slots {
                 regs.push(ret_start + i);
             }
         }
         Opcode::CallClosure => {
-            let ret_start = inst.b + ((inst.c >> 8) as u16);
-            let ret_slots = (inst.c & 0xFF) as u16;
+            let ret_start = inst.b + (inst.c >> 8);
+            let ret_slots = inst.c & 0xFF;
             for i in 0..ret_slots {
                 regs.push(ret_start + i);
             }
@@ -498,8 +496,8 @@ fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
             regs.push(inst.a);
         }
         Opcode::CallIface => {
-            let ret_start = inst.b + ((inst.c >> 8) as u16);
-            let ret_slots = (inst.c & 0xFF) as u16;
+            let ret_start = inst.b + (inst.c >> 8);
+            let ret_slots = inst.c & 0xFF;
             for i in 0..ret_slots {
                 regs.push(ret_start + i);
             }
@@ -531,7 +529,7 @@ fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
                 0x81 | 0x82 | 0x84 | 0x44 => 8, // Small types fit in 1 slot
                 f => f as usize,
             };
-            let elem_slots = (elem_bytes + 7) / 8;
+            let elem_slots = elem_bytes.div_ceil(8);
             for i in 0..elem_slots {
                 regs.push(inst.a + i as u16);
             }

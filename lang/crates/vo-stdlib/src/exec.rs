@@ -66,8 +66,8 @@ fn exec_start_process(call: &mut ExternCallContext) -> ExternResult {
         Some(read_string_slice(env_ref))
     };
 
-    let mut cmd = Command::new(&path);
-    if let Err(e) = configure_command(&mut cmd, &args, &dir, env.as_deref()) {
+    let mut cmd = Command::new(path);
+    if let Err(e) = configure_command(&mut cmd, &args, dir, env.as_deref()) {
         call.ret_i64(0, -1);
         write_error_to(call, 1, &e.to_string());
         return ExternResult::Ok;
@@ -279,8 +279,8 @@ fn exec_run_capture_output(call: &mut ExternCallContext) -> ExternResult {
         Some(read_string_slice(env_ref))
     };
 
-    let mut cmd = Command::new(&path);
-    if let Err(e) = configure_command(&mut cmd, &args, &dir, env.as_deref()) {
+    let mut cmd = Command::new(path);
+    if let Err(e) = configure_command(&mut cmd, &args, dir, env.as_deref()) {
         call.ret_ref(0, std::ptr::null_mut());
         call.ret_i64(1, 0);
         call.ret_i64(2, -1);
@@ -331,8 +331,8 @@ fn exec_run_capture_output(call: &mut ExternCallContext) -> ExternResult {
 fn run_combined_output(
     mut cmd: Command,
 ) -> std::io::Result<(Vec<u8>, std::process::ExitStatus, u32)> {
-    let (read_fd, write_fd) = nix::unistd::pipe()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    let (read_fd, write_fd) =
+        nix::unistd::pipe().map_err(|e| std::io::Error::other(e.to_string()))?;
 
     let read_raw = read_fd.into_raw_fd();
     let write_raw = write_fd.into_raw_fd();

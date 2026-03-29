@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 //! For loop compilation (cond and three-part forms).
 //!
 //! Note: for-range loops are in for_range.rs

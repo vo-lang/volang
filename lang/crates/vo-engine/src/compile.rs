@@ -1,4 +1,5 @@
 //! Compilation functions for Vo source code.
+#![allow(clippy::items_after_test_module)]
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -778,8 +779,8 @@ mod tests {
         });
 
         assert!(validate_extension_manifests_for_frozen_build(
-            &[manifest.clone()],
-            &[locked.clone()],
+            std::slice::from_ref(&manifest),
+            std::slice::from_ref(&locked),
             &mod_root
         )
         .is_ok());
@@ -2180,7 +2181,7 @@ fn collect_compile_input_files(
     out: &mut Vec<PathBuf>,
 ) -> Result<(), CompileError> {
     let mut entries = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let path = entry.path();
         if path.is_dir() {

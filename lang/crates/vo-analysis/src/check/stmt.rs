@@ -394,7 +394,7 @@ impl Checker {
                 match GoVal::from_const(val) {
                     GoVal::Invalid => {}
                     gov => {
-                        let entry = seen.entry(gov).or_insert_with(Vec::new);
+                        let entry = seen.entry(gov).or_default();
                         if let Some(pt) = entry
                             .iter()
                             .find(|pt| typ::identical(v.typ.unwrap(), pt.typ, self.objs()))
@@ -741,7 +741,7 @@ impl Checker {
                     .unwrap()
                     .results();
                 let res = self.otype(reskey).try_as_tuple().unwrap();
-                if res.vars().len() > 0 {
+                if !res.vars().is_empty() {
                     // function returns results
                     // (if one, say the first, result parameter is named, all of them are named)
                     if rs.values.is_empty() && self.lobj(res.vars()[0]).name() != "" {
@@ -893,7 +893,7 @@ impl Checker {
                         self.emit(TypeError::NoNewVars.at(assign.span));
                         None
                     } else {
-                        self.result.record_def(assign.clone(), None);
+                        self.result.record_def(*assign, None);
                         Some(assign)
                     }
                 });
@@ -964,7 +964,7 @@ impl Checker {
                 }
 
                 // If lhs exists, we must have at least one lhs variable that was used.
-                if lhs.is_some() {
+                if let Some(lhs_ident) = lhs {
                     let used = lhs_vars.iter().fold(false, |acc, &okey| {
                         let prop = self.lobj_mut(okey).entity_type_mut().var_property_mut();
                         let var_used = prop.used;
@@ -972,7 +972,6 @@ impl Checker {
                         acc || var_used
                     });
                     if !used {
-                        let lhs_ident = lhs.unwrap();
                         let name = self.resolve_symbol(lhs_ident.symbol);
                         self.emit(TypeError::UnusedVar.at_with_message(
                             lhs_ident.span,
@@ -1041,7 +1040,7 @@ impl Checker {
                                                 name.clone(),
                                                 var_type,
                                             );
-                                            self.result.record_def(ident.clone(), Some(okey));
+                                            self.result.record_def(*ident, Some(okey));
                                             if name != "_" {
                                                 new_vars.push(okey);
                                             }
@@ -1064,7 +1063,7 @@ impl Checker {
                                             {
                                                 // Look up existing variable and check assignment
                                                 if let Some(okey) = self.lookup(&name) {
-                                                    self.result.record_use(ident.clone(), okey);
+                                                    self.result.record_use(*ident, okey);
                                                     let lhs_type = self.lobj(okey).typ();
                                                     if let Some(t) = lhs_type {
                                                         let mut val = Operand::new();
@@ -1323,7 +1322,7 @@ impl Checker {
 
             // Check if variable already exists in current scope
             if let Some(okey) = self.scope(scope_key).lookup(&name) {
-                self.result.record_use(ident.clone(), okey);
+                self.result.record_use(*ident, okey);
                 if self.lobj(okey).entity_type().is_var() {
                     lhs_vars.push(okey);
                 } else {
@@ -1342,7 +1341,7 @@ impl Checker {
                 if name != "_" {
                     new_vars.push(okey);
                 }
-                self.result.record_def(ident.clone(), Some(okey));
+                self.result.record_def(*ident, Some(okey));
                 lhs_vars.push(okey);
             }
         }

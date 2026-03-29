@@ -964,7 +964,7 @@ mod tests {
 
     #[test]
     fn test_interface_param_assignment() {
-        let escaped = get_escaped_vars(
+        let _escaped = get_escaped_vars(
             r#"
             package main
             type Point struct { x int; y int }

@@ -86,7 +86,7 @@ impl Checker {
             }
 
             let mut indep: Vec<ObjKey> = nodes[0..first_dependant].iter().map(|n| n.obj).collect();
-            indep.sort_by(|a, b| self.lobj(*a).order().cmp(&self.lobj(*b).order()));
+            indep.sort_by_key(|a| self.lobj(*a).order());
             order.append(&mut indep);
 
             // reduce dependency count of all dependent nodes
@@ -115,9 +115,7 @@ impl Checker {
                 let decl_key = self.obj_map[&x];
                 match &self.decl_info(decl_key) {
                     DeclInfo::Var(var) => {
-                        if var.init.is_none() {
-                            return None;
-                        }
+                        var.init.as_ref()?;
                         // n:1 variable declarations such as: a, b = f()
                         // introduce a node for each lhs variable (here: a, b);
                         // but they all have the same initializer - emit only

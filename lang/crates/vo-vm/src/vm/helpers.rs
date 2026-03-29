@@ -1,3 +1,4 @@
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 //! Stack and memory access helpers.
 
 #[cfg(not(feature = "std"))]
@@ -201,6 +202,8 @@ use alloc::vec::Vec;
 // Re-export from vo-runtime for convenience
 pub use vo_runtime::objects::closure::{call_layout as closure_call_layout, ClosureCallLayout};
 
+/// # Safety
+/// `args` must point to at least `arg_count` valid u64 values.
 pub unsafe fn build_closure_fiber_from_args_ptr(
     functions: &[FunctionDef],
     next_fiber_id: u32,

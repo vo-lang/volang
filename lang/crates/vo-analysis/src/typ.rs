@@ -468,6 +468,10 @@ impl ArrayDetail {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len.is_some_and(|n| n == 0)
+    }
+
     pub fn set_len(&mut self, len: u64) {
         self.len = Some(len);
     }
@@ -690,7 +694,7 @@ impl InterfaceDetail {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.all_methods().as_ref().map_or(true, |m| m.is_empty())
+        self.all_methods().as_ref().is_none_or(|m| m.is_empty())
     }
 
     pub fn is_complete(&self) -> bool {

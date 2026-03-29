@@ -208,9 +208,7 @@ mod read_impl {
             if i < len {
                 let val = rng.next_u64();
                 let bytes = val.to_le_bytes();
-                for j in 0..(len - i) {
-                    buf[i + j] = bytes[j];
-                }
+                buf[i..len].copy_from_slice(&bytes[..len - i]);
             }
         });
 

@@ -270,11 +270,10 @@ fn try_resolve_via_cargo_metadata(pkg_name: &str) -> Option<String> {
     let last = module_path.rsplit('/').next().unwrap_or(&module_path);
     if last == pkg_name || module_path == pkg_name {
         Some(module_path)
-    } else if let Some(sub) = pkg_name.strip_prefix(&format!("{}/", last)) {
-        // Sub-package: "voplay/scene2d" → "github.com/vo-lang/voplay/scene2d"
-        Some(format!("{}/{}", module_path, sub))
     } else {
-        None
+        pkg_name
+            .strip_prefix(&format!("{}/", last))
+            .map(|sub| format!("{}/{}", module_path, sub))
     }
 }
 
@@ -436,8 +435,7 @@ fn find_vo_mod_root() -> Option<PathBuf> {
 fn resolve_pkg_path(project_root: &Path, pkg_path: &str) -> Option<(PathBuf, bool)> {
     // Check for stdlib path (e.g., "fmt", "encoding/json")
     // Use vo-module's STD_PREFIX convention: "std/" prefix
-    if pkg_path.starts_with("std/") {
-        let std_pkg_path = &pkg_path[4..]; // Remove "std/" prefix
+    if let Some(std_pkg_path) = pkg_path.strip_prefix("std/") {
         let stdlib_candidates = [
             project_root.join("stdlib").join(std_pkg_path),
             project_root.join("../stdlib").join(std_pkg_path),

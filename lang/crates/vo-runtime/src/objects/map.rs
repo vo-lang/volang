@@ -445,6 +445,8 @@ pub fn iter_next(iter: &mut MapIterator) -> Option<(&'static [u64], &'static [u6
     }
 }
 
+/// # Safety
+/// Caller must ensure `m` is a valid `GcRef` pointing to a live map object.
 pub unsafe fn drop_inner(m: GcRef) {
     let data = MapData::as_mut(m);
     if data.inner != 0 {

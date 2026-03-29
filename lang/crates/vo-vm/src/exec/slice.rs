@@ -47,10 +47,10 @@ pub fn exec_slice_new(
             Ok(())
         }
         Err(code) => Err(match code {
-            alloc_error::NEGATIVE_LEN => format!("runtime error: makeslice: len out of range"),
-            alloc_error::NEGATIVE_CAP => format!("runtime error: makeslice: cap out of range"),
-            alloc_error::LEN_GT_CAP => format!("runtime error: makeslice: len larger than cap"),
-            _ => format!("runtime error: makeslice: cap out of range"),
+            alloc_error::NEGATIVE_LEN => "runtime error: makeslice: len out of range".to_string(),
+            alloc_error::NEGATIVE_CAP => "runtime error: makeslice: cap out of range".to_string(),
+            alloc_error::LEN_GT_CAP => "runtime error: makeslice: len larger than cap".to_string(),
+            _ => "runtime error: makeslice: cap out of range".to_string(),
         }),
     }
 }
@@ -117,7 +117,7 @@ pub fn exec_slice_append(
         0x84 | 0x44 => (4, 1),                                              // int32 or float32
         f => (f as usize, 1),
     };
-    let elem_slots = (elem_bytes + 7) / 8;
+    let elem_slots = elem_bytes.div_ceil(8);
 
     // Read elem_meta from c
     let elem_meta = ValueMeta::from_raw(stack_get(stack, bp + inst.c as usize) as u32);

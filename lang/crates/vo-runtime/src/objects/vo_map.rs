@@ -549,8 +549,7 @@ mod tests {
         }
 
         let mut count = 0;
-        let mut iter = map.iter();
-        while let Some((k, _)) = iter.next() {
+        for (k, _) in map.iter() {
             count += 1;
             // Delete during iteration - should not affect iterator
             if *k % 2 == 0 {

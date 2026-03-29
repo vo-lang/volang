@@ -85,7 +85,7 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
         init: Option<&vo_syntax::ast::Expr>,
         obj_key: Option<ObjKey>,
     ) -> Result<(StorageKind, Option<DeferredHeapAlloc>), CodegenError> {
-        let is_loop_var = obj_key.map_or(false, |k| self.info.is_loop_var(k));
+        let is_loop_var = obj_key.is_some_and(|k| self.info.is_loop_var(k));
         let slot_types = self.info.type_slot_types(type_key);
 
         // Compile init FIRST (for shadowing: `i := i` references outer `i`)

@@ -283,11 +283,7 @@ fn type_key_to_runtime_type(
             } else {
                 Vec::new()
             };
-            let mut slot_types = if needs_registration {
-                Vec::new()
-            } else {
-                Vec::new()
-            };
+            let mut slot_types = Vec::new();
             let mut offset = 0u16;
 
             for (i, &f) in s.fields().iter().enumerate() {

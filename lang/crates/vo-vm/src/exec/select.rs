@@ -277,6 +277,7 @@ fn complete_woken_case(
     finish_selected_case(stack, bp, result_reg, idx, select_state, wake)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_send_case(
     stack: *mut Slot,
     bp: usize,
@@ -311,6 +312,7 @@ fn execute_send_case(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_recv_case(
     stack: *mut Slot,
     bp: usize,

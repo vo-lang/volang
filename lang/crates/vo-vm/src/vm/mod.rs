@@ -792,11 +792,11 @@ impl Vm {
                     }
                 }
             }
-            return Err(VmError::Deadlock(msg));
+            Err(VmError::Deadlock(msg))
         } else {
-            return Err(VmError::Deadlock(
+            Err(VmError::Deadlock(
                 "vm deadlock: all fibers blocked".to_string(),
-            ));
+            ))
         }
     }
 
@@ -1777,7 +1777,7 @@ impl Vm {
                         0x44 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
                         0 => {
                             let elem_bytes = stack_get(stack, bp + inst.c as usize + 1) as usize;
-                            for i in 0..(elem_bytes + 7) / 8 {
+                            for i in 0..elem_bytes.div_ceil(8) {
                                 let ptr =
                                     unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                 stack_set(stack, dst + i, unsafe { *ptr });
@@ -1786,7 +1786,7 @@ impl Vm {
                         }
                         _ => {
                             let elem_bytes = inst.flags as usize;
-                            for i in 0..(elem_bytes + 7) / 8 {
+                            for i in 0..elem_bytes.div_ceil(8) {
                                 let ptr =
                                     unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                 stack_set(stack, dst + i, unsafe { *ptr });
@@ -1832,7 +1832,7 @@ impl Vm {
                         }
                         0 => {
                             let elem_bytes = stack_get(stack, bp + inst.b as usize + 1) as usize;
-                            let elem_slots = (elem_bytes + 7) / 8;
+                            let elem_slots = elem_bytes.div_ceil(8);
                             for i in 0..elem_slots {
                                 let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
                                 unsafe { *ptr = stack_get(stack, src + i) };
@@ -1853,7 +1853,7 @@ impl Vm {
                         }
                         _ => {
                             let elem_bytes = inst.flags as usize;
-                            let elem_slots = (elem_bytes + 7) / 8;
+                            let elem_slots = elem_bytes.div_ceil(8);
                             for i in 0..elem_slots {
                                 let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
                                 unsafe { *ptr = stack_get(stack, src + i) };
@@ -1929,7 +1929,7 @@ impl Vm {
                         0x44 => unsafe { *(base.add(idx * 4) as *const u32) as u64 },
                         0 => {
                             let elem_bytes = stack_get(stack, bp + inst.c as usize + 1) as usize;
-                            for i in 0..(elem_bytes + 7) / 8 {
+                            for i in 0..elem_bytes.div_ceil(8) {
                                 let ptr =
                                     unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                 stack_set(stack, dst + i, unsafe { *ptr });
@@ -1938,7 +1938,7 @@ impl Vm {
                         }
                         _ => {
                             let elem_bytes = inst.flags as usize;
-                            for i in 0..(elem_bytes + 7) / 8 {
+                            for i in 0..elem_bytes.div_ceil(8) {
                                 let ptr =
                                     unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                 stack_set(stack, dst + i, unsafe { *ptr });
@@ -1986,7 +1986,7 @@ impl Vm {
                         }
                         0 => {
                             let elem_bytes = stack_get(stack, bp + inst.b as usize + 1) as usize;
-                            let elem_slots = (elem_bytes + 7) / 8;
+                            let elem_slots = elem_bytes.div_ceil(8);
                             for i in 0..elem_slots {
                                 let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
                                 unsafe { *ptr = stack_get(stack, src + i) };
@@ -2011,7 +2011,7 @@ impl Vm {
                         }
                         _ => {
                             let elem_bytes = inst.flags as usize;
-                            let elem_slots = (elem_bytes + 7) / 8;
+                            let elem_slots = elem_bytes.div_ceil(8);
                             for i in 0..elem_slots {
                                 let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
                                 unsafe { *ptr = stack_get(stack, src + i) };

@@ -65,7 +65,7 @@ pub fn net_lookup_addr(call: &mut ExternCallContext) -> ExternResult {
     let addr = call.arg_str(slots::ARG_ADDR);
 
     // Reverse DNS lookup via libc
-    match reverse_lookup(&addr) {
+    match reverse_lookup(addr) {
         Ok(names) => {
             let arr = alloc_string_slice(call, &names);
             call.ret_ref(slots::RET_0, arr);

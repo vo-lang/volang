@@ -78,7 +78,7 @@ fn setup_jit_panic(
         let resume_pc = ctx.call_resume_pc();
         fiber.panic_source_loc = fiber
             .current_frame()
-            .map(|f| (f.func_id as u32, resume_pc.saturating_sub(1)));
+            .map(|f| (f.func_id, resume_pc.saturating_sub(1)));
     }
 
     panic_msg
@@ -491,7 +491,7 @@ fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
     for i in (0..len).rev() {
         let rp = fiber.resume_stack[i];
         let func_id = rp.func_id;
-        let bp = rp.bp as usize;
+        let bp = rp.bp;
         let func_def = &module.functions[func_id as usize];
 
         // Calculate pc for this frame:

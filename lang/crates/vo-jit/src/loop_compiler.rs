@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err, clippy::too_many_arguments)]
 //! Loop compiler for OSR (On-Stack Replacement).
 
 use std::collections::{HashMap, HashSet};

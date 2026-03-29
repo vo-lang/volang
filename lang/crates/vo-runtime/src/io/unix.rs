@@ -70,11 +70,11 @@ impl UnixDriver {
             if kqueue_fd < 0 {
                 return Err(io::Error::last_os_error());
             }
-            return Ok(Self {
+            Ok(Self {
                 fd_states: HashMap::new(),
                 timers: HashMap::new(),
                 kqueue_fd,
-            });
+            })
         }
 
         #[cfg(not(any(
@@ -102,12 +102,13 @@ impl UnixDriver {
 
         // Check for concurrent operation on same direction
         if let Some(state) = self.fd_states.get(&fd) {
-            if is_read && state.read.is_some() {
-                let existing = state.read.as_ref().unwrap();
-                panic!(
-                    "concurrent read on fd {}: existing token={}, new token={}",
-                    fd, existing.token, op.token
-                );
+            if is_read {
+                if let Some(existing) = state.read.as_ref() {
+                    panic!(
+                        "concurrent read on fd {}: existing token={}, new token={}",
+                        fd, existing.token, op.token
+                    );
+                }
             }
             if !is_read && state.write.is_some() {
                 panic!("concurrent write operation on fd {}", fd);
@@ -243,7 +244,7 @@ impl UnixDriver {
                 });
             }
             self.timers.insert(token, TimerState { token });
-            return SubmitResult::Pending;
+            SubmitResult::Pending
         }
 
         #[cfg(not(any(
@@ -450,18 +451,18 @@ impl UnixDriver {
             if n > 0 {
                 // kqueue returns separate events for read/write, need to merge
                 let mut fd_events: HashMap<i32, (bool, bool)> = HashMap::new();
-                for i in 0..n as usize {
+                for event in &events[..n as usize] {
                     // Check if this is a timer event
-                    if events[i].filter == libc::EVFILT_TIMER {
-                        let token = events[i].ident as IoToken;
+                    if event.filter == libc::EVFILT_TIMER {
+                        let token = event.ident as IoToken;
                         ready_timers.push(token);
                     } else {
-                        let fd = events[i].ident as i32;
+                        let fd = event.ident as i32;
                         let entry = fd_events.entry(fd).or_insert((false, false));
-                        if events[i].filter == libc::EVFILT_READ {
+                        if event.filter == libc::EVFILT_READ {
                             entry.0 = true;
                         }
-                        if events[i].filter == libc::EVFILT_WRITE {
+                        if event.filter == libc::EVFILT_WRITE {
                             entry.1 = true;
                         }
                     }

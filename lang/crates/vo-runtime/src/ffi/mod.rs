@@ -928,7 +928,7 @@ impl<'a> ExternCallContext<'a> {
                 };
 
                 let elem_meta = crate::ValueMeta::new(elem_value_rttid.rttid(), elem_vk);
-                let new_ref = array::create(&mut self.gc, elem_meta, elem_bytes, array_len);
+                let new_ref = array::create(self.gc, elem_meta, elem_bytes, array_len);
 
                 // Copy raw_slots to array data area
                 let data_ptr = array::data_ptr_bytes(new_ref) as *mut u64;
@@ -945,7 +945,7 @@ impl<'a> ExternCallContext<'a> {
             }
             _ => {
                 let slot0 = interface::pack_slot0(0, rttid, vk);
-                InterfaceSlot::new(slot0, raw_slots.get(0).copied().unwrap_or(0))
+                InterfaceSlot::new(slot0, raw_slots.first().copied().unwrap_or(0))
             }
         }
     }

@@ -124,8 +124,7 @@ fn cmd_run(args: &[String]) -> i32 {
             program_args.push(arg.clone());
         } else if arg == "--" {
             saw_dashdash = true;
-        } else if arg.starts_with("--mode=") {
-            let m = &arg[7..];
+        } else if let Some(m) = arg.strip_prefix("--mode=") {
             if m == "jit" {
                 mode = RunMode::Jit;
             }
@@ -220,8 +219,7 @@ fn cmd_test(args: &[String]) -> i32 {
     let mut path: Option<&str> = None;
 
     for arg in args {
-        if arg.starts_with("--mode=") {
-            let m = &arg[7..];
+        if let Some(m) = arg.strip_prefix("--mode=") {
             if m == "jit" {
                 mode = RunMode::Jit;
             }

@@ -5,7 +5,7 @@ pub const SLOT_BYTES: usize = 8;
 
 #[inline]
 pub fn slots_for_bytes(bytes: usize) -> usize {
-    (bytes + SLOT_BYTES - 1) / SLOT_BYTES
+    bytes.div_ceil(SLOT_BYTES)
 }
 
 #[inline]

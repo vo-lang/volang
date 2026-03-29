@@ -84,7 +84,7 @@ extern "C" {
 // ── Thread-local state ────────────────────────────────────────────────────────
 
 thread_local! {
-    static LOADED_PREFIXES: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    static LOADED_PREFIXES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 
     /// Maps extern_id → (name, param_kinds).
     /// param_kinds is non-empty for v2 externs; empty for legacy externs.

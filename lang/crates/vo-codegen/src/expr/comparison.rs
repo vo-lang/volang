@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 //! Composite type comparison (struct/array equality).
 
 use vo_runtime::SlotType;

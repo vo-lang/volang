@@ -67,7 +67,7 @@ pub extern "C" fn jit_queue_send(
 ) -> JitResult {
     use crate::exec::{queue_send_core, QueueAction};
 
-    let module = unsafe { &*((*ctx).module as *const vo_runtime::bytecode::Module) };
+    let module = unsafe { &*((*ctx).module) };
     let (vm, fiber) = unsafe { extract_context(ctx) };
     if fiber.consume_remote_send_closed() {
         return set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED);
@@ -136,7 +136,7 @@ pub extern "C" fn jit_queue_recv(
 ) -> JitResult {
     use crate::exec::{complete_queue_recv, queue_recv_core, QueueRecvCoreResult};
 
-    let module = unsafe { &*((*ctx).module as *const vo_runtime::bytecode::Module) };
+    let module = unsafe { &*((*ctx).module) };
     let (vm, fiber) = unsafe { extract_context(ctx) };
     let ch = chan as GcRef;
     let has_ok = has_ok != 0;

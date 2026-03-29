@@ -40,6 +40,12 @@ pub struct HostBridge {
     pub(crate) capabilities: Vec<String>,
 }
 
+impl Default for HostBridge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HostBridge {
     pub fn new() -> Self {
         Self {

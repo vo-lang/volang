@@ -167,9 +167,9 @@ pub fn compile_expr_to_ptr(
         return Ok(());
     }
 
-    Err(CodegenError::UnsupportedExpr(format!(
-        "cannot get pointer to expression"
-    )))
+    Err(CodegenError::UnsupportedExpr(
+        "cannot get pointer to expression".to_string(),
+    ))
 }
 
 /// Compile address-of operator (&x).

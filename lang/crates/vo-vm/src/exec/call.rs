@@ -152,7 +152,7 @@ pub fn exec_call_closure(fiber: &mut Fiber, inst: &Instruction, module: &Module)
     let func_id = closure::func_id(closure_ref);
     let arg_start = inst.b as usize;
     let arg_slots = (inst.c >> 8) as usize;
-    let ret_slots = (inst.c & 0xFF) as u16;
+    let ret_slots = inst.c & 0xFF;
 
     let func = &module.functions[func_id as usize];
 

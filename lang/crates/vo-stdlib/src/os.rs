@@ -1347,7 +1347,7 @@ fn os_native_chtimes(call: &mut ExternCallContext) -> ExternResult {
     let atime_systime = UNIX_EPOCH + Duration::from_secs(atime as u64);
     let mtime_systime = UNIX_EPOCH + Duration::from_secs(mtime as u64);
 
-    let file = match File::options().write(true).open(&name) {
+    let file = match File::options().write(true).open(name) {
         Ok(f) => f,
         Err(e) => {
             write_io_error(call, slots::RET_0, e);

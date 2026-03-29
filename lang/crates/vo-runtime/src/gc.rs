@@ -1,4 +1,5 @@
 //! Garbage collector core.
+#![allow(clippy::items_after_test_module)]
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -706,7 +707,7 @@ impl Gc {
 
         // Set debt threshold for next cycle
         let threshold = (self.estimate as u64 * self.pause as u64 / 100) as i64;
-        self.debt = self.debt.min(-(threshold.max(1024) as i64));
+        self.debt = self.debt.min(-threshold.max(1024));
     }
 
     pub fn total_bytes(&self) -> usize {
@@ -833,10 +834,8 @@ pub fn scan_slots_by_types(gc: &mut Gc, slots: &[u64], slot_types: &[crate::Slot
             }
             SlotType::Interface0 => {
                 // Interface header slot - check if data slot contains GcRef
-                if i + 1 < slots.len() && interface::data_is_gc_ref(slots[i]) {
-                    if slots[i + 1] != 0 {
-                        gc.mark_gray(slots[i + 1] as GcRef);
-                    }
+                if i + 1 < slots.len() && interface::data_is_gc_ref(slots[i]) && slots[i + 1] != 0 {
+                    gc.mark_gray(slots[i + 1] as GcRef);
                 }
                 i += 1; // Skip data slot (Interface1)
             }

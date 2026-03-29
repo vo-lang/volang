@@ -1,3 +1,4 @@
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 //! Deep comparison for interface values.
 //!
 //! Shared logic used by both VM (exec_iface_eq) and JIT (vo_iface_eq).

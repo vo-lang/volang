@@ -59,7 +59,7 @@ fn compile_args_as_interfaces(
 
     // Each arg is an interface (2 slots)
     let args_start =
-        func.alloc_slots(&vec![SlotType::Interface0, SlotType::Interface1].repeat(total_args));
+        func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1].repeat(total_args));
     let mut slot_offset = 0u16;
 
     for arg in args.iter() {

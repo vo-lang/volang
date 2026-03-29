@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 //! Embedding path analysis and traversal for method resolution.
 //!
 //! # Overview

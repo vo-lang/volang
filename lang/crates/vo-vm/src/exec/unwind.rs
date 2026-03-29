@@ -86,6 +86,7 @@ pub fn handle_return(
 /// - heap GcRefs in `fiber.stack[bp + ret_gcref_start ..]` (heap returns)
 ///
 /// Defers are collected from `fiber.defer_stack` using `frame_depth = fiber.frames.len()`.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_jit_ok_return(
     fiber: &mut Fiber,
     func: &FunctionDef,
@@ -100,7 +101,7 @@ pub fn handle_jit_ok_return(
     let has_defers = fiber
         .defer_stack
         .last()
-        .map_or(false, |e| e.frame_depth == current_frame_depth);
+        .is_some_and(|e| e.frame_depth == current_frame_depth);
 
     // Fast path: no defers and no heap returns → just return the buffer
     if !has_defers && !heap_returns {
@@ -182,8 +183,7 @@ pub fn handle_jit_ok_return(
     }
 
     let ret_vals = return_values_to_vec(return_values, frame.ret_count as usize);
-    let result = write_return_values(fiber, &ret_vals, frame.ret_reg, frame.ret_count as usize);
-    result
+    write_return_values(fiber, &ret_vals, frame.ret_reg, frame.ret_count as usize)
 }
 
 /// Compute whether to include errdefers based on error return status.
@@ -263,7 +263,7 @@ fn handle_initial_return(
         let has_defers = fiber
             .defer_stack
             .last()
-            .map_or(false, |e| e.frame_depth == current_frame_depth);
+            .is_some_and(|e| e.frame_depth == current_frame_depth);
 
         if has_defers {
             let include_errdefers = compute_include_errdefers(fiber, inst, func, is_error_return);
@@ -302,7 +302,7 @@ fn handle_initial_return(
     let has_defers = fiber
         .defer_stack
         .last()
-        .map_or(false, |e| e.frame_depth == current_frame_depth);
+        .is_some_and(|e| e.frame_depth == current_frame_depth);
 
     // Fast path: no defers, small return count, stack returns
     if !has_defers {
@@ -391,8 +391,7 @@ fn handle_initial_return(
 
     // No defers - complete return immediately
     let ret_vals = return_values_to_vec(return_values, frame.ret_count as usize);
-    let result = write_return_values(fiber, &ret_vals, frame.ret_reg, frame.ret_count as usize);
-    result
+    write_return_values(fiber, &ret_vals, frame.ret_reg, frame.ret_count as usize)
 }
 
 /// Handle defer returned in Return mode.
@@ -431,8 +430,7 @@ fn handle_return_defer_returned(
     }
 
     let ret_vals = return_values_to_vec(return_values, caller_ret_count);
-    let result = write_return_values(fiber, &ret_vals, caller_ret_reg, caller_ret_count);
-    return result;
+    write_return_values(fiber, &ret_vals, caller_ret_reg, caller_ret_count)
 }
 
 /// Handle panic unwinding. Called when:

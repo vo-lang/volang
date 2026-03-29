@@ -82,6 +82,7 @@ impl Package {
         self.imports = pkgs;
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn fmt_with_qualifier(
         &self,
         f: &mut fmt::Formatter<'_>,

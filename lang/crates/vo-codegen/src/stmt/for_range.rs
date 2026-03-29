@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 //! For-range loop compilation.
 //!
 //! Handles compilation of for-range loops over arrays, slices, strings, maps, channels, and integers.
@@ -117,9 +118,11 @@ pub(crate) struct RangeVarInfo {
 }
 
 /// Define or lookup a range variable (key or value) using LocalDefiner.
+///
 /// - If `define` is true: declare new variable with proper escape handling
 /// - If `define` is false: lookup existing variable
 /// - Blank identifier `_` always gets a temp slot (never defined or looked up)
+///
 /// Returns RangeVarInfo with storage info for proper escaped variable handling.
 pub(crate) fn range_var_info(
     sc: &mut LocalDefiner,

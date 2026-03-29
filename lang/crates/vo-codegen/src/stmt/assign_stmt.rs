@@ -61,7 +61,7 @@ pub(super) fn compile_short_var(
                 )?;
             } else if let Some(local) = sc.func.lookup_local(name.symbol) {
                 // Redeclaration: existing variable
-                let storage = local.storage.clone();
+                let storage = local.storage;
                 let obj_key = info.get_use(name);
                 let lhs_type = info.obj_type(obj_key, "redeclared var must have type");
                 crate::assign::emit_store_to_storage(
@@ -112,7 +112,7 @@ pub(super) fn compile_short_var(
                 sc.define_local_from_slot(name.symbol, rhs_type, escapes, tmp, Some(obj_key))?;
             } else if let Some(local) = sc.func.lookup_local(name.symbol) {
                 // Redeclaration: existing variable
-                let storage = local.storage.clone();
+                let storage = local.storage;
                 let obj_key = info.get_use(name);
                 let lhs_type = info.obj_type(obj_key, "redeclared var must have type");
                 crate::assign::emit_store_to_storage(
@@ -243,11 +243,7 @@ fn compile_multi_value_assign(
             emit_int_trunc(tuple.base + offset, elem_type, func, info);
 
             let lv = resolve_lvalue(lhs_expr, ctx, func, info)?;
-            let slot_types: Vec<vo_runtime::SlotType> = info
-                .type_slot_types(elem_type)
-                .iter()
-                .map(|s| (*s).into())
-                .collect();
+            let slot_types = info.type_slot_types(elem_type).to_vec();
             emit_lvalue_store(&lv, tuple.base + offset, ctx, func, &slot_types);
         }
         offset += elem_slots;
@@ -375,7 +371,7 @@ fn compile_assign(
             vo_runtime::SlotType::Interface1,
         ]
     } else {
-        slot_types.iter().map(|s| (*s).into()).collect()
+        slot_types.to_vec()
     };
     emit_lvalue_store(&lv, tmp, ctx, func, &store_slot_types);
 

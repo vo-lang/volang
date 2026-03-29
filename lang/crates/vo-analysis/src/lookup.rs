@@ -426,13 +426,12 @@ fn add_to_field_set(
     objs: &TCObjects,
 ) {
     let key = objs.lobjs[*f].id(objs);
-    if !multiples {
-        if set
+    if !multiples
+        && set
             .insert(key.to_string(), FieldCollision::Var(*f))
             .is_none()
-        {
-            return;
-        }
+    {
+        return;
     }
     set.insert(key.to_string(), FieldCollision::Collision);
 }
@@ -454,8 +453,8 @@ fn add_to_method_set(
     for (i, okey) in list.iter().enumerate() {
         let mobj = &objs.lobjs[*okey];
         let key = mobj.id(objs).to_string();
-        if !multiples {
-            if !set.contains_key(&key) && (indirect || !ptr_recv(mobj, objs)) {
+        if !multiples && !set.contains_key(&key) && (indirect || !ptr_recv(mobj, objs)) {
+            {
                 set.insert(
                     key,
                     MethodCollision::Method(Selection::new(
@@ -492,10 +491,7 @@ pub fn missing_method(
     // First, check if intf is an interface type and if it's empty
     let intf_underlying = typ::underlying_type(intf, &checker.tc_objs);
     {
-        let ival = match checker.tc_objs.types[intf_underlying].try_as_interface() {
-            Some(i) => i,
-            None => return None, // Not an interface type
-        };
+        let ival = checker.tc_objs.types[intf_underlying].try_as_interface()?;
         if ival.is_empty() {
             return None;
         }

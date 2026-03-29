@@ -24,10 +24,7 @@ pub fn make_wrapper_ident(pkg_path: &str, func_name: &str) -> syn::Ident {
 /// Replaces `/`, `.`, and `-` with `_`. Used to derive stable Rust symbol names
 /// from the short package name (e.g. "vogui" → "vogui", "encoding/hex" → "encoding_hex").
 fn normalize_raw_pkg(raw_pkg: &str) -> String {
-    raw_pkg
-        .replace('/', "_")
-        .replace('.', "_")
-        .replace('-', "_")
+    raw_pkg.replace(['/', '.', '-'], "_")
 }
 
 /// Derive the Rust constant name for a stdlib/internal entry: `__STDLIB_<pkg>_<func>`.

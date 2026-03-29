@@ -60,6 +60,7 @@ pub fn exec_err_defer_push(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_defer_entry(
     stack: *const Slot,
     bp: usize,

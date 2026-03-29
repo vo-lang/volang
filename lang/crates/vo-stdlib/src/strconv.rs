@@ -98,7 +98,7 @@ fn format_e(f: f64, prec: i64, upper: bool) -> String {
         if p == 0 {
             return format!("{}0{}+00", sign, e_char);
         }
-        let zeros: String = core::iter::repeat('0').take(p).collect();
+        let zeros = "0".repeat(p);
         return format!("{}0.{}{}+00", sign, zeros, e_char);
     }
 
@@ -135,7 +135,7 @@ fn format_f(f: f64, prec: i64) -> String {
         if p == 0 {
             return format!("{}0", sign);
         }
-        let zeros: String = core::iter::repeat('0').take(p).collect();
+        let zeros = "0".repeat(p);
         return format!("{}0.{}", sign, zeros);
     }
 
@@ -158,11 +158,7 @@ fn format_f(f: f64, prec: i64) -> String {
         // e.g., exp10=-2, digits start at position 3 after decimal point
         // We need p digits after decimal, but first (-exp10) are zeros
         let zeros_after_dot = (-exp10) as usize;
-        if p > zeros_after_dot {
-            p - zeros_after_dot
-        } else {
-            0
-        }
+        p.saturating_sub(zeros_after_dot)
     } else {
         total_sig
     };
@@ -252,11 +248,11 @@ fn parse_ryu_output(s: &str) -> (bool, Vec<u8>, i32) {
 
     // Collect digits and find dot position
     let mut digit_count_before_dot = 0;
-    for j in i..exp_start {
-        if bytes[j] == b'.' {
+    for &byte in &bytes[i..exp_start] {
+        if byte == b'.' {
             dot_pos = Some(digits.len());
         } else {
-            digits.push(bytes[j] - b'0');
+            digits.push(byte - b'0');
             if dot_pos.is_none() {
                 digit_count_before_dot += 1;
             }
@@ -277,7 +273,7 @@ fn parse_ryu_output(s: &str) -> (bool, Vec<u8>, i32) {
     // For "1.23E20": digits=[1,2,3], dot_pos=1, exp_val=20
     //   value = 1.23 * 10^20 = 0.123 * 10^21, so exp10 = digit_count_before_dot + exp_val = 1 + 20 = 21
 
-    let mut exp10 = digit_count_before_dot as i32 + exp_val;
+    let mut exp10 = digit_count_before_dot + exp_val;
 
     // Strip leading zeros from digits (adjusting exponent)
     while digits.len() > 1 && digits[0] == 0 {
@@ -384,7 +380,7 @@ fn format_g(f: f64, prec: i64, upper: bool) -> String {
     if prec < 0 {
         let exp = exp10 - 1;
         // Go uses fixed eprec=6 for shortest mode
-        if exp < -4 || exp >= 6 {
+        if !(-4..6).contains(&exp) {
             return digits_to_e_format(negative, &digits, exp10, upper);
         }
         return digits_to_f_format(negative, &digits, exp10);

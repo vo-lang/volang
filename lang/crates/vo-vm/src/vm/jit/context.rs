@@ -101,7 +101,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         call_extern_fn: Some(super::jit_call_extern),
         #[cfg(not(feature = "std"))]
         call_extern_fn: None,
-        module: module as *const Module as *const vo_runtime::bytecode::Module,
+        module: module as *const Module,
         jit_func_table,
         jit_func_count,
         direct_call_table,

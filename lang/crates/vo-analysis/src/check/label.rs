@@ -40,11 +40,12 @@ impl LabelBlock {
 
     /// Declares a new label in this block.
     fn declare(&mut self, name: String, span: Span) -> bool {
-        if self.labels.contains_key(&name) {
-            false // Already declared
-        } else {
-            self.labels.insert(name, LabelInfo { span, used: false });
+        use std::collections::hash_map::Entry;
+        if let Entry::Vacant(e) = self.labels.entry(name) {
+            e.insert(LabelInfo { span, used: false });
             true
+        } else {
+            false
         }
     }
 

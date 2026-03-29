@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 //! Wrapper function generation for defer/go and interface method dispatch.
 //!
 //! This module handles generating wrapper functions:

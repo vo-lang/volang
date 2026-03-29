@@ -53,9 +53,10 @@ pub enum Kind {
 /// - `Float(f64)` for approximate values
 ///
 /// Vo doesn't support complex numbers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum Value {
     /// Unknown value (due to error).
+    #[default]
     Unknown,
     /// Boolean constant.
     Bool(bool),
@@ -69,12 +70,6 @@ pub enum Value {
     Rat(BigRational),
     /// Approximate float constant.
     Float(f64),
-}
-
-impl Default for Value {
-    fn default() -> Self {
-        Value::Unknown
-    }
 }
 
 impl PartialEq for Value {
@@ -298,7 +293,7 @@ fn detect_int_radix(lit: &str) -> (u32, usize) {
         (2, 2)
     } else if lit.len() > 1
         && lit.starts_with('0')
-        && lit.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+        && lit.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
     {
         // Legacy octal: 0644 style (Go compatible)
         (8, 1)
@@ -350,7 +345,7 @@ fn parse_hex_float(lit: &str) -> Value {
     let lit = &lit[2..];
 
     // Find 'p' or 'P' (required for hex float)
-    let p_pos = lit.find(|c| c == 'p' || c == 'P');
+    let p_pos = lit.find(['p', 'P']);
     let p_pos = match p_pos {
         Some(pos) => pos,
         None => return Value::Unknown, // hex float must have exponent
@@ -738,7 +733,7 @@ pub fn unary_op(op: UnaryOp, y: &Value, prec: u32) -> Value {
                     if prec > 0 {
                         // For unsigned types, limit precision
                         let mask = (BigInt::from(1) << prec as usize) - 1;
-                        z = z & mask;
+                        z &= mask;
                     }
                     make_int(z)
                 }
@@ -746,7 +741,7 @@ pub fn unary_op(op: UnaryOp, y: &Value, prec: u32) -> Value {
                     let mut z = !i.clone();
                     if prec > 0 {
                         let mask = (BigInt::from(1) << prec as usize) - 1;
-                        z = z & mask;
+                        z &= mask;
                     }
                     make_int(z)
                 }

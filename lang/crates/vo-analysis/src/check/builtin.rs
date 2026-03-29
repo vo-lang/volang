@@ -185,7 +185,7 @@ impl Checker {
                     // Record signature based on actual argument count
                     let size_args = nargs - 1; // excluding type argument
                     let args: Vec<TypeKey> = std::iter::once(arg0t)
-                        .chain(std::iter::repeat(int_type).take(size_args))
+                        .chain(std::iter::repeat_n(int_type, size_args))
                         .collect();
                     record_sig(self, x.typ, &args, false);
                 }
@@ -530,7 +530,7 @@ impl Checker {
 
         // Validate size arguments
         for i in 1..nargs {
-            if let Err(_) = self.index(&call.args[i], None) {
+            if self.index(&call.args[i], None).is_err() {
                 // Error already reported by index
             }
         }

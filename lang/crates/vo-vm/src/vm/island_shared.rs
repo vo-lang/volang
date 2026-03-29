@@ -361,7 +361,7 @@ pub(crate) fn finalize_closed_home_endpoint(
         .state
         .endpoint_registry
         .get_live(endpoint_id)
-        .and_then(|ch| queue::home_info(ch))
+        .and_then(queue::home_info)
         .map(|info| info.peers.iter().copied().collect::<Vec<_>>())
         .unwrap_or_default();
 

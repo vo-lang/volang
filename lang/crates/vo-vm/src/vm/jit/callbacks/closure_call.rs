@@ -35,7 +35,7 @@ pub extern "C" fn jit_prepare_closure_call(
     out: *mut PreparedCall,
 ) {
     let ctx = unsafe { &mut *ctx };
-    let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
+    let module = unsafe { &*(ctx.module) };
 
     // 1. Resolve func_id from closure
     let closure_gcref = closure_ref as GcRef;
@@ -120,7 +120,7 @@ pub extern "C" fn jit_prepare_iface_call(
     use vo_runtime::objects::interface;
 
     let ctx_ref = unsafe { &mut *ctx };
-    let module = unsafe { &*(ctx_ref.module as *const vo_runtime::bytecode::Module) };
+    let module = unsafe { &*(ctx_ref.module) };
     let itab_cache = unsafe { &*ctx_ref.itab_cache };
 
     // 1. Resolve func_id from itab

@@ -24,12 +24,12 @@ fn next_fetch_token() -> u64 {
 
 // Pending fetch Promises: (token, Promise). Consumed by run_vm_async.
 thread_local! {
-    static PENDING_FETCH_PROMISES: RefCell<Vec<(u64, js_sys::Promise)>> = RefCell::new(Vec::new());
+    static PENDING_FETCH_PROMISES: RefCell<Vec<(u64, js_sys::Promise)>> = const { RefCell::new(Vec::new()) };
 }
 
 // Fetch results stored after Promise resolves. Consumed by extern re-invocation.
 thread_local! {
-    static FETCH_RESULTS: RefCell<Vec<(u64, FetchResult)>> = RefCell::new(Vec::new());
+    static FETCH_RESULTS: RefCell<Vec<(u64, FetchResult)>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Debug)]
@@ -65,11 +65,9 @@ pub fn store_fetch_result(token: u64, result: FetchResult) {
 pub fn take_fetch_result(token: u64) -> Option<FetchResult> {
     FETCH_RESULTS.with(|cell| {
         let mut v = cell.borrow_mut();
-        if let Some(pos) = v.iter().position(|(t, _)| *t == token) {
-            Some(v.remove(pos).1)
-        } else {
-            None
-        }
+        v.iter()
+            .position(|(t, _)| *t == token)
+            .map(|pos| v.remove(pos).1)
     })
 }
 
@@ -132,7 +130,7 @@ fn build_fetch_promise(
     );
 
     js_sys::eval(&script)
-        .map(|v| js_sys::Promise::from(v))
+        .map(js_sys::Promise::from)
         .map_err(|e| format!("fetch init failed: {:?}", e))
 }
 

@@ -1,3 +1,4 @@
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 //! Map instructions: MapNew, MapGet, MapSet, MapDelete, MapLen
 
 extern crate alloc;
@@ -19,8 +20,8 @@ pub fn exec_map_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc
     let key_rttid = stack_get(stack, bp + inst.b as usize + 1) as u32;
     let key_meta = ValueMeta::from_raw((packed >> 32) as u32);
     let val_meta = ValueMeta::from_raw(packed as u32);
-    let key_slots = (inst.c >> 8) as u16;
-    let val_slots = (inst.c & 0xFF) as u16;
+    let key_slots = inst.c >> 8;
+    let val_slots = inst.c & 0xFF;
     let m = map::create(gc, key_meta, val_meta, key_slots, val_slots, key_rttid);
     stack_set(stack, bp + inst.a as usize, m as u64);
 }
@@ -53,8 +54,8 @@ pub fn exec_map_get(stack: *mut Slot, bp: usize, inst: &Instruction, module: Opt
 
     let (val_opt, ok) = map::get_with_ok(m, &key, module);
     if let Some(val) = val_opt {
-        for i in 0..val_slots.min(val.len()) {
-            stack_set(stack, dst_start + i, val[i]);
+        for (i, &v) in val.iter().enumerate().take(val_slots) {
+            stack_set(stack, dst_start + i, v);
         }
     } else {
         for i in 0..val_slots {
@@ -163,7 +164,7 @@ pub fn exec_map_iter_init(stack: *mut Slot, bp: usize, inst: &Instruction) {
         let dst = stack.add(iter_slot);
         core::ptr::copy_nonoverlapping(src, dst, SLOTS);
     }
-    core::mem::forget(iter);
+    let _ = iter;
 }
 
 /// MapIterNext: Advance iterator and get next key-value
@@ -184,11 +185,11 @@ pub fn exec_map_iter_next(stack: *mut Slot, bp: usize, inst: &Instruction) {
             let key_dst = bp + inst.a as usize;
             let val_dst = key_dst + key_slots;
 
-            for i in 0..key_slots.min(key.len()) {
-                stack_set(stack, key_dst + i, key[i]);
+            for (i, &k) in key.iter().enumerate().take(key_slots) {
+                stack_set(stack, key_dst + i, k);
             }
-            for i in 0..val_slots.min(val.len()) {
-                stack_set(stack, val_dst + i, val[i]);
+            for (i, &v) in val.iter().enumerate().take(val_slots) {
+                stack_set(stack, val_dst + i, v);
             }
             stack_set(stack, ok_slot, 1);
         }

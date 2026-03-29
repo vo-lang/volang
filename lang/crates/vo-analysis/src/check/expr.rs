@@ -720,14 +720,14 @@ impl Checker {
         }
 
         // Check for zero divisor
-        if op == BinaryOp::Div || op == BinaryOp::Rem {
-            if x.mode.constant_val().is_some() || typ::is_integer(x.typ.unwrap(), self.objs()) {
-                if let Some(v) = y.mode.constant_val() {
-                    if v.sign() == 0 {
-                        self.invalid_op(y.pos(), "division by zero");
-                        x.mode = OperandMode::Invalid;
-                        return;
-                    }
+        if (op == BinaryOp::Div || op == BinaryOp::Rem)
+            && (x.mode.constant_val().is_some() || typ::is_integer(x.typ.unwrap(), self.objs()))
+        {
+            if let Some(v) = y.mode.constant_val() {
+                if v.sign() == 0 {
+                    self.invalid_op(y.pos(), "division by zero");
+                    x.mode = OperandMode::Invalid;
+                    return;
                 }
             }
         }
@@ -757,6 +757,7 @@ impl Checker {
     /// Checks an index expression for validity.
     /// max is the upper bound for index (exclusive: index must be < max).
     /// Returns the value of the index when it's a constant, returns None if it's not.
+    #[allow(clippy::result_unit_err)]
     pub fn index(&mut self, index: &Expr, max: Option<u64>) -> Result<Option<u64>, ()> {
         self.check_int_index(index, max, false)
     }
@@ -764,6 +765,7 @@ impl Checker {
     /// Checks a slice bound expression for validity.
     /// max is the upper bound for the slice bound (inclusive: bound must be <= max).
     /// Returns the value when it's a constant, returns None if it's not.
+    #[allow(clippy::result_unit_err)]
     pub fn slice_bound(&mut self, bound: &Expr, max: Option<u64>) -> Result<Option<u64>, ()> {
         self.check_int_index(bound, max, true)
     }
@@ -802,9 +804,9 @@ impl Checker {
             }
             let (i, valid) = v.to_int().int_as_u64();
             let out_of_bounds = if inclusive {
-                max.map_or(false, |m| i > m) // slice bound: i <= max
+                max.is_some_and(|m| i > m) // slice bound: i <= max
             } else {
-                max.map_or(false, |m| i >= m) // array index: i < max
+                max.is_some_and(|m| i >= m) // array index: i < max
             };
             if !valid || out_of_bounds {
                 self.invalid_arg(index.span, "index out of bounds");
@@ -855,7 +857,7 @@ impl Checker {
                     }
                 };
                 (kv_index, &elem.value)
-            } else if length.is_some() && index >= length.unwrap() {
+            } else if length.is_some_and(|l| index >= l) {
                 self.error_code_msg(
                     TypeError::InvalidOp,
                     elem.value.span,
@@ -1318,17 +1320,11 @@ impl Checker {
                         let elem_type = m.elem();
                         for elem in &lit.elems {
                             // Check key
-                            if let Some(ref key) = elem.key {
-                                if let CompositeLitKey::Expr(key_expr) = key {
-                                    let mut key_op = Operand::new();
-                                    self.expr(&mut key_op, key_expr);
-                                    if !key_op.invalid() {
-                                        self.assignment(
-                                            &mut key_op,
-                                            Some(key_type),
-                                            "map literal key",
-                                        );
-                                    }
+                            if let Some(CompositeLitKey::Expr(key_expr)) = &elem.key {
+                                let mut key_op = Operand::new();
+                                self.expr(&mut key_op, key_expr);
+                                if !key_op.invalid() {
+                                    self.assignment(&mut key_op, Some(key_type), "map literal key");
                                 }
                             }
                             // Check value (with hint for nested composite literals)
@@ -1867,7 +1863,7 @@ impl Checker {
                 if let crate::obj::EntityType::PkgName { imported, .. } = lobj.entity_type() {
                     let imported = *imported;
                     debug_assert_eq!(self.pkg, lobj_pkg.unwrap());
-                    self.result.record_use(ident.clone(), okey);
+                    self.result.record_use(*ident, okey);
                     // Mark package as used
                     if let crate::obj::EntityType::PkgName { used, .. } =
                         self.lobj_mut(okey).entity_type_mut()
@@ -1907,7 +1903,7 @@ impl Checker {
                         );
                         self.error_code_msg(TypeError::Undeclared, sel.sel.span, msg);
                     }
-                    self.result.record_use(sel.sel.clone(), exp_key);
+                    self.result.record_use(sel.sel, exp_key);
 
                     // Simplified version of the code for Idents:
                     // - imported objects are always fully initialized

@@ -1,3 +1,4 @@
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 //! Copy instructions: CopyN, SlotGet, SlotSet, SlotGetN, SlotSetN
 
 use crate::instruction::Instruction;

@@ -162,10 +162,12 @@ impl Checker {
             // spec: "If an untyped constant is assigned to a variable of interface
             // type or the blank identifier, the constant is first converted to type
             // bool, rune, int, float64, or string respectively."
-            let target = if t.is_none() || typ::is_interface(t.unwrap(), self.objs()) {
-                typ::untyped_default_type(xt, self.objs())
-            } else {
-                t.unwrap()
+            let target = match t {
+                None => typ::untyped_default_type(xt, self.objs()),
+                Some(tk) if typ::is_interface(tk, self.objs()) => {
+                    typ::untyped_default_type(xt, self.objs())
+                }
+                Some(tk) => tk,
             };
             self.convert_untyped(x, target);
             if x.invalid() {
@@ -449,11 +451,9 @@ impl Checker {
                 }
             }
         }
-        if let UnpackResult::CommaOk(e, types) = result {
-            if let Some(expr) = e {
-                self.result
-                    .record_comma_ok_types(expr, &types, &mut self.tc_objs, self.pkg);
-            }
+        if let UnpackResult::CommaOk(Some(expr), types) = result {
+            self.result
+                .record_comma_ok_types(expr, &types, &mut self.tc_objs, self.pkg);
         }
     }
 
@@ -511,11 +511,9 @@ impl Checker {
                 }
             }
         }
-        if let UnpackResult::CommaOk(e, types) = result {
-            if let Some(expr) = e {
-                self.result
-                    .record_comma_ok_types(expr, &types, &mut self.tc_objs, self.pkg);
-            }
+        if let UnpackResult::CommaOk(Some(expr), types) = result {
+            self.result
+                .record_comma_ok_types(expr, &types, &mut self.tc_objs, self.pkg);
         }
     }
 
@@ -829,7 +827,7 @@ impl Checker {
     /// Extracts an identifier from an expression if possible.
     pub(crate) fn expr_as_ident(&self, e: &Expr) -> Option<Ident> {
         match &e.kind {
-            vo_syntax::ast::ExprKind::Ident(ident) => Some(ident.clone()),
+            vo_syntax::ast::ExprKind::Ident(ident) => Some(*ident),
             vo_syntax::ast::ExprKind::Paren(inner) => self.expr_as_ident(inner),
             _ => None,
         }

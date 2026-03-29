@@ -573,9 +573,7 @@ fn safe_unpack_tar_gz(data: &[u8], dest: &Path) -> Result<(), String> {
         // Reject symlinks and hardlinks.
         let entry_type = header.entry_type();
         if entry_type.is_symlink() || entry_type.is_hard_link() {
-            return Err(
-                "archive contains a symlink or hardlink, which is not allowed".to_string(),
-            );
+            return Err("archive contains a symlink or hardlink, which is not allowed".to_string());
         }
 
         let raw_path = entry.path().map_err(|e| e.to_string())?.into_owned();

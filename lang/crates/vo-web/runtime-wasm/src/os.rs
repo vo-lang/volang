@@ -14,7 +14,7 @@ const ERR_NOT_SUPPORTED: &str = "operation not supported on wasm";
 // Thread-local args injected by run_with_args() before running the VM.
 thread_local! {
     pub static WASM_PROG_ARGS: std::cell::RefCell<Option<Vec<String>>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 fn write_not_supported_error(call: &mut ExternCallContext, slot: u16) {

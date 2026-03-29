@@ -27,7 +27,7 @@ fn analyze_source(source: &str) -> Result<Project, AnalysisError> {
 
     let mut importer = NullImporter::new(PathBuf::from("."));
     if checker
-        .check_with_importer(&[file.clone()], &mut importer)
+        .check_with_importer(std::slice::from_ref(&file), &mut importer)
         .is_err()
     {
         let diags = checker.diagnostics.take();

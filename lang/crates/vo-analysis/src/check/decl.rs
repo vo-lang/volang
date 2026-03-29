@@ -517,7 +517,7 @@ impl Checker {
                             let typ = current_spec.and_then(|s| s.ty.clone());
 
                             self.const_decl(okey, &typ, &init);
-                            self.result.record_def(name.clone(), Some(okey));
+                            self.result.record_def(*name, Some(okey));
                             okey
                         })
                         .collect();
@@ -561,7 +561,7 @@ impl Checker {
                                 self.resolve_ident(name).to_string(),
                                 None,
                             );
-                            self.result.record_def(name.clone(), Some(okey));
+                            self.result.record_def(*name, Some(okey));
                             okey
                         })
                         .collect();
@@ -616,7 +616,7 @@ impl Checker {
                     self.resolve_ident(&tdecl.name).to_string(),
                     None,
                 );
-                self.result.record_def(tdecl.name.clone(), Some(okey));
+                self.result.record_def(tdecl.name, Some(okey));
 
                 // Declare in scope first (type scope starts at identifier)
                 if let Some(scope) = self.octx.scope {

@@ -107,8 +107,7 @@ fn compile_stmt_inner(
                     let escapes = info.is_escaped(obj_key);
                     let init = spec.values.get(i);
 
-                    sc.define_local(name.symbol, type_key, escapes, init, Some(obj_key))?
-                        .0;
+                    sc.define_local(name.symbol, type_key, escapes, init, Some(obj_key))?;
                 }
             }
         }

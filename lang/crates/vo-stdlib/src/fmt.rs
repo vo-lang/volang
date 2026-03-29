@@ -352,7 +352,7 @@ fn int_magnitude(slot1: u64, vk: ValueKind) -> (bool, u64) {
 /// Rust produces "1.2e0" or "1.2e-10"; Go requires sign + at least 2 exponent digits.
 fn fmt_exp_go(s: &str, verb: char) -> String {
     let e_char = if verb == 'E' { 'E' } else { 'e' };
-    if let Some(pos) = s.find(|c| c == 'e' || c == 'E') {
+    if let Some(pos) = s.find(['e', 'E']) {
         let mantissa = &s[..pos];
         let exp: i32 = s[pos + 1..].parse().unwrap_or(0);
         format!("{}{}{:+03}", mantissa, e_char, exp)
@@ -386,12 +386,12 @@ fn format_with_spec(
                 }
 
                 if let Some(prec) = spec.precision {
-                    let (sign, digits) = if s.starts_with('-') {
-                        ('-', &s[1..])
-                    } else if s.starts_with('+') {
-                        ('+', &s[1..])
-                    } else if s.starts_with(' ') {
-                        (' ', &s[1..])
+                    let (sign, digits) = if let Some(rest) = s.strip_prefix('-') {
+                        ('-', rest)
+                    } else if let Some(rest) = s.strip_prefix('+') {
+                        ('+', rest)
+                    } else if let Some(rest) = s.strip_prefix(' ') {
+                        (' ', rest)
                     } else {
                         ('\0', s.as_str())
                     };
@@ -490,7 +490,7 @@ fn format_with_spec(
                         };
                         let s = fmt_exp_go(&raw, spec.verb);
                         // Strip trailing zeros from mantissa.
-                        if let Some(e_pos) = s.find(|c| c == 'e' || c == 'E') {
+                        if let Some(e_pos) = s.find(['e', 'E']) {
                             let mant = s[..e_pos].trim_end_matches('0').trim_end_matches('.');
                             format!("{}{}", mant, &s[e_pos..])
                         } else {

@@ -190,7 +190,7 @@ fn register_types(
                     };
                     let struct_meta_id = ctx.register_struct_meta(underlying_key, meta);
                     ctx.alias_struct_meta_id(named_key, struct_meta_id);
-                    ValueMeta::new(struct_meta_id as u32, vo_runtime::ValueKind::Struct)
+                    ValueMeta::new(struct_meta_id, vo_runtime::ValueKind::Struct)
                 }
                 TypeExprKind::Interface(_) => {
                     // Build InterfaceMeta
@@ -201,9 +201,9 @@ fn register_types(
                         let all_methods_ref = iface.all_methods();
                         let method_objs: Vec<vo_analysis::objects::ObjKey> =
                             if let Some(methods) = all_methods_ref.as_ref() {
-                                methods.iter().cloned().collect()
+                                methods.to_vec()
                             } else {
-                                iface.methods().iter().cloned().collect()
+                                iface.methods().to_vec()
                             };
 
                         let names: Vec<String> = method_objs
@@ -244,7 +244,7 @@ fn register_types(
                         methods,
                     };
                     let iface_meta_id = ctx.register_interface_meta(underlying_key, meta);
-                    ValueMeta::new(iface_meta_id as u32, vo_runtime::ValueKind::Interface)
+                    ValueMeta::new(iface_meta_id, vo_runtime::ValueKind::Interface)
                 }
                 _ => {
                     // Other types (Map, Slice, Chan, etc.): intern underlying type to get rttid
@@ -287,9 +287,9 @@ fn register_types(
                     let all_methods_ref = iface.all_methods();
                     let method_objs: Vec<vo_analysis::objects::ObjKey> =
                         if let Some(methods) = all_methods_ref.as_ref() {
-                            methods.iter().cloned().collect()
+                            methods.to_vec()
                         } else {
-                            iface.methods().iter().cloned().collect()
+                            iface.methods().to_vec()
                         };
 
                     let names: Vec<String> = method_objs
@@ -851,75 +851,73 @@ fn collect_promoted_methods(_project: &Project, ctx: &mut CodegenContext, info: 
             }
 
             // Look up method to get indices and determine wrapper type
-            match lookup_field_or_method(type_key, true, pkg, &method_name, tc_objs) {
-                LookupResult::Entry(obj_key, indices, _) => {
-                    // Skip if not promoted (indices.len() == 1 means direct method)
-                    if indices.len() <= 1 {
-                        continue;
-                    }
-
-                    let path_info = crate::embed::analyze_embed_path(type_key, &indices, tc_objs);
-
-                    let func_id = if let Some(iface_type) = path_info.embedded_iface_type {
-                        // Method from embedded interface
-                        wrapper::generate_embedded_iface_wrapper(
-                            ctx,
-                            &path_info,
-                            iface_type,
-                            &method_name,
-                            obj_key,
-                            info,
-                            tc_objs,
-                            interner,
-                        )
-                    } else if let Some(base_iface_func) = ctx.get_iface_func_by_objkey(obj_key) {
-                        // Method from embedded struct
-                        let original_func_id =
-                            ctx.get_func_by_objkey(obj_key).unwrap_or(base_iface_func);
-                        wrapper::generate_promoted_wrapper(
-                            ctx,
-                            type_key,
-                            &indices[..indices.len() - 1],
-                            obj_key,
-                            original_func_id,
-                            base_iface_func,
-                            &method_name,
-                            info,
-                            tc_objs,
-                        )
-                    } else {
-                        continue;
-                    };
-
-                    let sig_rttid = tc_objs.lobjs[obj_key]
-                        .typ()
-                        .map(|sig_type| {
-                            let sig = signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
-                            ctx.intern_rttid(sig)
-                        })
-                        .unwrap_or(0);
-
-                    // Determine is_pointer_receiver for the promoted method:
-                    // - If the embedding path contains a pointer step (e.g., struct embeds *T),
-                    //   then even pointer receiver methods are accessible for the outer value type.
-                    // - Otherwise, use the original method's receiver type.
-                    let original_is_ptr_recv =
-                        tc_objs.lobjs[obj_key].entity_type().func_has_ptr_recv();
-                    let is_pointer_receiver = if path_info.has_pointer_step {
-                        false // Method is always accessible via embedded pointer
-                    } else {
-                        original_is_ptr_recv
-                    };
-
-                    ctx.update_named_type_method_if_absent(
-                        named_type_id,
-                        method_name,
-                        func_id,
-                        is_pointer_receiver,
-                        sig_rttid,
-                    );
+            if let LookupResult::Entry(obj_key, indices, _) =
+                lookup_field_or_method(type_key, true, pkg, &method_name, tc_objs)
+            {
+                // Skip if not promoted (indices.len() == 1 means direct method)
+                if indices.len() <= 1 {
+                    continue;
                 }
-                _ => {}
+
+                let path_info = crate::embed::analyze_embed_path(type_key, &indices, tc_objs);
+
+                let func_id = if let Some(iface_type) = path_info.embedded_iface_type {
+                    // Method from embedded interface
+                    wrapper::generate_embedded_iface_wrapper(
+                        ctx,
+                        &path_info,
+                        iface_type,
+                        &method_name,
+                        obj_key,
+                        info,
+                        tc_objs,
+                        interner,
+                    )
+                } else if let Some(base_iface_func) = ctx.get_iface_func_by_objkey(obj_key) {
+                    // Method from embedded struct
+                    let original_func_id =
+                        ctx.get_func_by_objkey(obj_key).unwrap_or(base_iface_func);
+                    wrapper::generate_promoted_wrapper(
+                        ctx,
+                        type_key,
+                        &indices[..indices.len() - 1],
+                        obj_key,
+                        original_func_id,
+                        base_iface_func,
+                        &method_name,
+                        info,
+                        tc_objs,
+                    )
+                } else {
+                    continue;
+                };
+
+                let sig_rttid = tc_objs.lobjs[obj_key]
+                    .typ()
+                    .map(|sig_type| {
+                        let sig = signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
+                        ctx.intern_rttid(sig)
+                    })
+                    .unwrap_or(0);
+
+                // Determine is_pointer_receiver for the promoted method:
+                // - If the embedding path contains a pointer step (e.g., struct embeds *T),
+                //   then even pointer receiver methods are accessible for the outer value type.
+                // - Otherwise, use the original method's receiver type.
+                let original_is_ptr_recv = tc_objs.lobjs[obj_key].entity_type().func_has_ptr_recv();
+                let is_pointer_receiver = if path_info.has_pointer_step {
+                    false // Method is always accessible via embedded pointer
+                } else {
+                    original_is_ptr_recv
+                };
+
+                ctx.update_named_type_method_if_absent(
+                    named_type_id,
+                    method_name,
+                    func_id,
+                    is_pointer_receiver,
+                    sig_rttid,
+                );
             }
         }
     }

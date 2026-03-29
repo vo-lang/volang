@@ -924,7 +924,7 @@ mod tests {
         module.constants.push(Constant::Nil);
         module.constants.push(Constant::Bool(true));
         module.constants.push(Constant::Int(42));
-        module.constants.push(Constant::Float(3.14));
+        module.constants.push(Constant::Float(std::f64::consts::PI));
         module.constants.push(Constant::String("hello".into()));
 
         let bytes = module.serialize();

@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! Shared instruction translation logic.
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -1399,7 +1400,7 @@ fn slice_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         let val = load_element(e, addr, elem_bytes, needs_sext);
         e.write_var(inst.a, val);
     } else {
-        let elem_slots = (elem_bytes + 7) / 8;
+        let elem_slots = elem_bytes.div_ceil(8);
         for i in 0..elem_slots {
             let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);
             let addr = e.builder().ins().iadd(data_ptr, slot_off);
@@ -1435,7 +1436,7 @@ fn slice_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             emit_array_write_barrier(e, arr, val);
         }
     } else {
-        let elem_slots = (elem_bytes + 7) / 8;
+        let elem_slots = elem_bytes.div_ceil(8);
         for i in 0..elem_slots {
             let v = e.read_var(inst.c + i as u16);
             let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);
@@ -1642,7 +1643,7 @@ fn array_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         let val = load_element(e, addr, elem_bytes, needs_sext);
         e.write_var(inst.a, val);
     } else {
-        let elem_slots = (elem_bytes + 7) / 8;
+        let elem_slots = elem_bytes.div_ceil(8);
         for i in 0..elem_slots {
             let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);
             let addr = e.builder().ins().iadd(arr, slot_off);
@@ -1685,7 +1686,7 @@ fn array_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             emit_array_write_barrier(e, arr, val);
         }
     } else {
-        let elem_slots = (elem_bytes + 7) / 8;
+        let elem_slots = elem_bytes.div_ceil(8);
         for i in 0..elem_slots {
             let v = e.read_var(inst.c + i as u16);
             let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);
@@ -2895,7 +2896,9 @@ fn select_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 /// SelectExec: Execute the select statement.
+///
 /// - a: result_reg (to store chosen case index, or -1 for default)
+///
 /// May return WaitQueue if select blocks.
 fn select_exec<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
     use vo_runtime::jit_api::JitContext;

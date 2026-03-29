@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 //! Method value and method expression compilation.
 //!
 //! - Method value: `t.M` where M is a method, creates a closure capturing the receiver
@@ -142,22 +143,20 @@ pub fn compile_method_value(
         crate::embed::MethodDispatch::Static {
             func_id,
             expects_ptr_recv,
-        } => {
-            return compile_method_value_static(
-                &sel.expr,
-                recv_type,
-                selection.obj(),
-                func_id,
-                expects_ptr_recv,
-                &call_info.embed_path,
-                dst,
-                ctx,
-                func,
-                info,
-            );
-        }
+        } => compile_method_value_static(
+            &sel.expr,
+            recv_type,
+            selection.obj(),
+            func_id,
+            expects_ptr_recv,
+            &call_info.embed_path,
+            dst,
+            ctx,
+            func,
+            info,
+        ),
         crate::embed::MethodDispatch::EmbeddedInterface { .. } => {
-            return compile_method_value_embedded_iface(
+            compile_method_value_embedded_iface(
                 &sel.expr,
                 recv_type,
                 &call_info,
@@ -166,13 +165,11 @@ pub fn compile_method_value(
                 ctx,
                 func,
                 info,
-            );
+            )
         }
-        crate::embed::MethodDispatch::Interface { .. } => {
-            return Err(CodegenError::Internal(
-                "unexpected interface dispatch in method value".to_string(),
-            ));
-        }
+        crate::embed::MethodDispatch::Interface { .. } => Err(CodegenError::Internal(
+            "unexpected interface dispatch in method value".to_string(),
+        )),
     }
 }
 

@@ -1,3 +1,4 @@
+#![allow(clippy::should_implement_trait)]
 //! Type-safe container accessors for Vo FFI.
 //!
 //! This module provides ergonomic APIs for working with Vo container types
@@ -131,10 +132,7 @@ pub struct VoSlice<T> {
 
 impl<T> Clone for VoSlice<T> {
     fn clone(&self) -> Self {
-        Self {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
+        *self
     }
 }
 impl<T> Copy for VoSlice<T> {}
@@ -233,10 +231,7 @@ pub struct VoMap<K, V> {
 
 impl<K, V> Clone for VoMap<K, V> {
     fn clone(&self) -> Self {
-        Self {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
+        *self
     }
 }
 impl<K, V> Copy for VoMap<K, V> {}
@@ -526,10 +521,7 @@ pub struct VoArray<T, const N: usize> {
 
 impl<T, const N: usize> Clone for VoArray<T, N> {
     fn clone(&self) -> Self {
-        Self {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
+        *self
     }
 }
 impl<T, const N: usize> Copy for VoArray<T, N> {}
@@ -624,10 +616,7 @@ pub struct VoPtr<T> {
 
 impl<T> Clone for VoPtr<T> {
     fn clone(&self) -> Self {
-        Self {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
+        *self
     }
 }
 impl<T> Copy for VoPtr<T> {}

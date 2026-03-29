@@ -165,40 +165,37 @@ pub(crate) fn compile_type_switch(
                 case_jumps.push((func.emit_jump(Opcode::JumpIf, ok_slot), case_idx));
             } else {
                 // Type case - check each type
-                for type_opt in &case.types {
-                    if let Some(type_expr) = type_opt {
-                        let type_key = info.type_expr_type(type_expr.id);
+                for type_expr in case.types.iter().flatten() {
+                    let type_key = info.type_expr_type(type_expr.id);
 
-                        let (assert_kind, target_id) =
-                            compute_iface_assert_params(type_key, ctx, info);
+                    let (assert_kind, target_id) = compute_iface_assert_params(type_key, ctx, info);
 
-                        // Allocate temp for IfaceAssert result (value + ok)
-                        let target_slots = info.type_slot_count(type_key) as u8;
-                        let result_slots: u16 = if assert_kind == 1 {
-                            2
-                        } else {
-                            target_slots as u16
-                        };
-                        // result + ok bool
-                        let mut assert_result_types = info.type_slot_types(type_key);
-                        assert_result_types.push(SlotType::Value); // ok bool
-                        let result_reg = func.alloc_slots(&assert_result_types); // +1 for ok bool
-                        let ok_slot = result_reg + result_slots;
+                    // Allocate temp for IfaceAssert result (value + ok)
+                    let target_slots = info.type_slot_count(type_key) as u8;
+                    let result_slots: u16 = if assert_kind == 1 {
+                        2
+                    } else {
+                        target_slots as u16
+                    };
+                    // result + ok bool
+                    let mut assert_result_types = info.type_slot_types(type_key);
+                    assert_result_types.push(SlotType::Value); // ok bool
+                    let result_reg = func.alloc_slots(&assert_result_types); // +1 for ok bool
+                    let ok_slot = result_reg + result_slots;
 
-                        // IfaceAssert: a=dst, b=src_iface, c=target_id
-                        // flags = assert_kind | (has_ok << 2) | (target_slots << 3)
-                        let flags = assert_kind | (1 << 2) | ((target_slots) << 3);
-                        func.emit_with_flags(
-                            Opcode::IfaceAssert,
-                            flags,
-                            result_reg,
-                            iface_slot,
-                            target_id as u16,
-                        );
+                    // IfaceAssert: a=dst, b=src_iface, c=target_id
+                    // flags = assert_kind | (has_ok << 2) | (target_slots << 3)
+                    let flags = assert_kind | (1 << 2) | ((target_slots) << 3);
+                    func.emit_with_flags(
+                        Opcode::IfaceAssert,
+                        flags,
+                        result_reg,
+                        iface_slot,
+                        target_id as u16,
+                    );
 
-                        // Jump to case body if ok is true
-                        case_jumps.push((func.emit_jump(Opcode::JumpIf, ok_slot), case_idx));
-                    }
+                    // Jump to case body if ok is true
+                    case_jumps.push((func.emit_jump(Opcode::JumpIf, ok_slot), case_idx));
                 }
             }
         }

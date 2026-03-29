@@ -238,7 +238,7 @@ fn marshal_field_value_depth<W: FormatWriter>(
             writer.write_uint(val);
         }
         ValueKind::Uint8 => {
-            let val = unsafe { *(field_ptr as *const u8) };
+            let val = unsafe { *field_ptr };
             writer.write_int(val as i64);
         }
         ValueKind::Uint16 => {
@@ -258,7 +258,7 @@ fn marshal_field_value_depth<W: FormatWriter>(
             writer.write_float(val as f64)?;
         }
         ValueKind::Bool => {
-            let val = unsafe { *(field_ptr as *const u8) } != 0;
+            let val = unsafe { *field_ptr } != 0;
             writer.write_bool(val);
         }
         ValueKind::String => {
@@ -549,6 +549,7 @@ fn marshal_map_value_depth<W: FormatWriter>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn marshal_elem_value_depth<W: FormatWriter>(
     call: &ExternCallContext,
     data_ptr: *mut u8,
@@ -1037,14 +1038,14 @@ fn json_to_iface_slots<'a, R: FormatReader<'a>>(
             let rttid = call.find_basic_type_rttid(ValueKind::Float64);
             (
                 interface::pack_slot0(0, rttid, ValueKind::Float64),
-                (i as f64).to_bits() as u64,
+                (i as f64).to_bits(),
             )
         }
         ParsedValue::Float(f) => {
             let rttid = call.find_basic_type_rttid(ValueKind::Float64);
             (
                 interface::pack_slot0(0, rttid, ValueKind::Float64),
-                f.to_bits() as u64,
+                f.to_bits(),
             )
         }
         ParsedValue::String(s) => {

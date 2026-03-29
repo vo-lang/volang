@@ -309,7 +309,7 @@ impl Universe {
         universe_scope: ScopeKey,
         objs: &mut TCObjects,
     ) {
-        for (_, &type_key) in types {
+        for &type_key in types.values() {
             let name = objs.types[type_key]
                 .try_as_basic()
                 .map(|b| b.name().to_string())
@@ -486,7 +486,7 @@ impl Universe {
         universe_scope: ScopeKey,
         objs: &mut TCObjects,
     ) {
-        for (&builtin, _info) in builtins {
+        for &builtin in builtins.keys() {
             let obj = LangObj::new_builtin(builtin, invalid_type);
             let obj_key = objs.lobjs.insert(obj);
             Scope::insert(universe_scope, obj_key, objs);

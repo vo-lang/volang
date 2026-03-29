@@ -160,7 +160,7 @@ impl Checker {
                 // Break with label breaks the labeled statement
                 if let Some(brk_label) = &brk.label {
                     let brk_name = self.resolve_ident(brk_label);
-                    label.map_or(false, |l| l == brk_name)
+                    label.is_some_and(|l| l == brk_name)
                 } else {
                     implicit
                 }
@@ -171,7 +171,7 @@ impl Checker {
                     || if_stmt
                         .else_
                         .as_ref()
-                        .map_or(false, |e| self.has_break(e, label, implicit))
+                        .is_some_and(|e| self.has_break(e, label, implicit))
             }
             StmtKind::Labeled(ls) => self.has_break(&ls.stmt, label, implicit),
             StmtKind::Switch(sw) => {

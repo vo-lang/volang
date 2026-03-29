@@ -367,7 +367,7 @@ fn type_expr_to_vo_type(type_expr: &ast::TypeExpr, interner: &SymbolInterner) ->
                     let ty = type_expr_to_vo_type(&p.ty, interner);
                     // Each named param gets its own slot
                     let count = p.names.len().max(1);
-                    std::iter::repeat(ty).take(count)
+                    std::iter::repeat_n(ty, count)
                 })
                 .collect();
             let results: Vec<VoType> = func
@@ -385,7 +385,7 @@ fn type_expr_to_vo_type(type_expr: &ast::TypeExpr, interner: &SymbolInterner) ->
                     let ty = type_expr_to_vo_type(&field.ty, interner);
                     // Each named field gets its own slot, embedded field is 1
                     let count = field.names.len().max(1);
-                    std::iter::repeat(ty).take(count)
+                    std::iter::repeat_n(ty, count)
                 })
                 .collect();
             VoType::Struct(field_types)

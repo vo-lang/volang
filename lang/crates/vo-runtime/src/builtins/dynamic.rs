@@ -291,6 +291,7 @@ fn get_via_protocol(
 }
 
 /// Set via protocol (SetAttrObject or SetIndexObject)
+#[allow(clippy::too_many_arguments)]
 fn set_via_protocol(
     call: &mut ExternCallContext,
     base_slot1: u64,
@@ -387,6 +388,7 @@ fn get_reflection(
 }
 
 /// Set a value by field name or index.
+#[allow(clippy::too_many_arguments)]
 fn set_reflection(
     call: &mut ExternCallContext,
     _base_slot0: u64,
@@ -1155,9 +1157,7 @@ fn compute_error_offset(
 }
 
 fn output_slot_count(is_any: bool, vk: ValueKind, width: usize) -> u16 {
-    if is_any {
-        2
-    } else if (vk == ValueKind::Struct || vk == ValueKind::Array) && width > 2 {
+    if is_any || ((vk == ValueKind::Struct || vk == ValueKind::Array) && width > 2) {
         2
     } else {
         width.min(2) as u16
@@ -1168,6 +1168,7 @@ fn output_slot_count(is_any: bool, vk: ValueKind, width: usize) -> u16 {
 // Layer 4: Call/Method Implementation
 // ============================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn do_call(
     call: &mut ExternCallContext,
     closure_ref: GcRef,
@@ -1270,6 +1271,7 @@ fn do_call(
     call_return_success(call, error_offset)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn do_method(
     call: &mut ExternCallContext,
     base_slot0: u64,
@@ -1381,8 +1383,11 @@ fn unpack_args(
     };
 
     // Unpack non-variadic args
-    for i in 0..non_variadic_count.min(arg_count) {
-        let param = &params[i];
+    for (i, param) in params
+        .iter()
+        .enumerate()
+        .take(non_variadic_count.min(arg_count))
+    {
         let param_vk = param.value_kind();
         let param_rttid = param.rttid();
         let param_slots = call.get_type_slot_count(param_rttid) as usize;
@@ -1419,10 +1424,9 @@ fn unpack_args(
                         | ValueKind::Slice
                         | ValueKind::Map
                         | ValueKind::Pointer
-                ) {
-                    if arg_rttid != param_rttid {
-                        return Err(());
-                    }
+                ) && arg_rttid != param_rttid
+                {
+                    return Err(());
                 }
             }
         }
@@ -1556,7 +1560,7 @@ fn pack_returns(
             call.ret_u64(dst_off, 0);
             call.ret_u64(dst_off + 1, new_ref as u64);
         } else {
-            call.ret_u64(dst_off, raw_slots.get(0).copied().unwrap_or(0));
+            call.ret_u64(dst_off, raw_slots.first().copied().unwrap_or(0));
             if output_slots > 1 {
                 call.ret_u64(dst_off + 1, raw_slots.get(1).copied().unwrap_or(0));
             }
@@ -1771,6 +1775,7 @@ fn dyn_method(call: &mut ExternCallContext) -> ExternResult {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn do_call_via_protocol(
     call: &mut ExternCallContext,
     base_slot1: u64,

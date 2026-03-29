@@ -122,7 +122,7 @@ enum FnMode {
     Manual,
     /// `fn(args...) -> Result<T, String>` where T maps to Vo return values before error.
     /// Carries the extracted inner type `T`.
-    Result(Type),
+    Result(Box<Type>),
     /// `fn(args...) -> T` (everything else)
     Simple,
 }
@@ -267,7 +267,7 @@ fn detect_fn_mode(func: &ItemFn) -> syn::Result<FnMode> {
 
     // Rule 2: Result mode
     if let Some(inner_ty) = result_inner {
-        return Ok(FnMode::Result(inner_ty));
+        return Ok(FnMode::Result(Box::new(inner_ty)));
     }
 
     // Check for Result<T, E> where E is not String
@@ -328,7 +328,7 @@ fn generate_wrapper(
         }
         FnMode::Result(inner_ty) => {
             let (ok_writes, err_zero_writes, err_slot) =
-                codegen::generate_result_ret_writes(inner_ty)?;
+                codegen::generate_result_ret_writes(inner_ty.as_ref())?;
             quote! {
                 let __result = #call_expr;
                 match __result {
@@ -441,6 +441,7 @@ fn unified_manual_impl(
 }
 
 /// Result/Simple mode: generate wrapper and register.
+#[allow(clippy::too_many_arguments)]
 fn unified_auto_impl(
     func: &ItemFn,
     raw_pkg: &str,

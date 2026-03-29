@@ -27,7 +27,7 @@ impl ImportKey {
     }
 }
 
-pub fn validate_import_path<'a>(path: &'a str) -> Result<&'a str, String> {
+pub fn validate_import_path(path: &str) -> Result<&str, String> {
     vo_module::compat::validate_import_path(path)?;
     Ok(path)
 }

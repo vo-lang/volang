@@ -236,6 +236,7 @@ impl Checker {
     /// The same result qualifications apply as for info_from_type_lit.
     /// info_from_type_name should only be called from info_from_type_lit.
     /// Aligned with goscript/types/src/check/interface.rs::info_from_type_name
+    #[allow(clippy::ptr_arg)]
     fn info_from_type_name(
         &mut self,
         skey: ScopeKey,

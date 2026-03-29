@@ -35,6 +35,7 @@ pub struct CallFrame {
 
 impl CallFrame {
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         func_id: u32,
         bp: usize,
@@ -286,6 +287,12 @@ pub struct ClosureReplayState {
     pub panic_message: Option<String>,
     /// Stack of saved `depth` values for nested replay cycles.
     pub depth_stack: Vec<usize>,
+}
+
+impl Default for ClosureReplayState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ClosureReplayState {
@@ -651,7 +658,7 @@ impl Fiber {
     pub fn at_defer_boundary(&self) -> bool {
         self.unwinding
             .as_ref()
-            .map_or(false, |s| s.at_defer_boundary(self.frames.len()))
+            .is_some_and(|s| s.at_defer_boundary(self.frames.len()))
     }
 
     /// Check if we're in panic unwinding mode AND directly in the defer function
@@ -763,6 +770,7 @@ impl Fiber {
         self.push_call_frame_extended(func_id, bp, bp, ret_reg, ret_count, scan_slots, None, 0, 0);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn push_call_frame_extended(
         &mut self,
         func_id: u32,
@@ -788,6 +796,7 @@ impl Fiber {
         ));
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn push_borrowed_call_frame(
         &mut self,
         func_id: u32,
@@ -930,7 +939,7 @@ impl Fiber {
             self.panic_source_loc = self
                 .frames
                 .last()
-                .map(|f| (f.func_id as u32, f.pc.saturating_sub(1) as u32));
+                .map(|f| (f.func_id, f.pc.saturating_sub(1) as u32));
         }
     }
 

@@ -142,6 +142,7 @@ pub fn unpack_slots_with_queue_handle_resolver<F>(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn unpack_slots_with_queue_handle_resolver_and_cache<F>(
     gc: &mut Gc,
     data: &[u8],
@@ -177,10 +178,12 @@ fn lookup_struct_meta_id(rttid: u32, runtime_types: &[RuntimeType]) -> u32 {
         if let RuntimeType::Struct { meta_id, .. } = rt {
             return *meta_id;
         }
-        if let RuntimeType::Named { struct_meta_id, .. } = rt {
-            if let Some(id) = struct_meta_id {
-                return *id;
-            }
+        if let RuntimeType::Named {
+            struct_meta_id: Some(id),
+            ..
+        } = rt
+        {
+            return *id;
         }
     }
     panic!("Cannot find struct meta_id for rttid {}", rttid);
@@ -320,10 +323,10 @@ fn pack_slice(
         if meta_id < struct_metas.len() {
             struct_metas[meta_id].slot_types.len()
         } else {
-            (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+            elem_bytes.div_ceil(SLOT_BYTES)
         }
     } else {
-        (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+        elem_bytes.div_ceil(SLOT_BYTES)
     };
     let mut elem_buf = vec![0u64; elem_slots];
     let data_ptr = slice::data_ptr(slice_ref);
@@ -380,10 +383,10 @@ fn pack_array(
         if meta_id < struct_metas.len() {
             struct_metas[meta_id].slot_types.len()
         } else {
-            (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+            elem_bytes.div_ceil(SLOT_BYTES)
         }
     } else {
-        (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+        elem_bytes.div_ceil(SLOT_BYTES)
     };
     let mut elem_buf = vec![0u64; elem_slots];
     let data_ptr = array::data_ptr_bytes(arr_ref);
@@ -484,8 +487,8 @@ fn pack_pointer(
     // Note: pack_value will write another ValueKind tag, which is redundant with obj_meta above.
     // This is intentional for simplicity - unpack_pointer reads both consistently.
     let mut obj_slots = vec![0u64; slots];
-    for i in 0..slots {
-        obj_slots[i] = unsafe { Gc::read_slot(ptr_ref, i) };
+    for (i, slot) in obj_slots.iter_mut().enumerate() {
+        *slot = unsafe { Gc::read_slot(ptr_ref, i) };
     }
     pack_value(
         packed,
@@ -547,6 +550,7 @@ fn pack_map(
 // Internal Unpack Implementation
 // =============================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn unpack_value<F>(
     gc: &mut Gc,
     data: &[u8],
@@ -700,10 +704,10 @@ where
         if meta_id < struct_metas.len() {
             struct_metas[meta_id].slot_types.len()
         } else {
-            (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+            elem_bytes.div_ceil(SLOT_BYTES)
         }
     } else {
-        (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+        elem_bytes.div_ceil(SLOT_BYTES)
     };
     let mut elem_buf = vec![0u64; elem_slots];
 
@@ -761,10 +765,10 @@ where
         if meta_id < struct_metas.len() {
             struct_metas[meta_id].slot_types.len()
         } else {
-            (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+            elem_bytes.div_ceil(SLOT_BYTES)
         }
     } else {
-        (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+        elem_bytes.div_ceil(SLOT_BYTES)
     };
     let mut elem_buf = vec![0u64; elem_slots];
 
@@ -785,6 +789,7 @@ where
     new_arr
 }
 
+#[allow(clippy::too_many_arguments)]
 fn unpack_struct_inline<F>(
     gc: &mut Gc,
     data: &[u8],
@@ -891,8 +896,8 @@ where
     let length = read_u64(data, cursor) as usize;
     let key_meta = ValueMeta::from_raw(read_u32(data, cursor));
     let val_meta = ValueMeta::from_raw(read_u32(data, cursor));
-    let key_slots = read_u16(data, cursor) as u16;
-    let val_slots = read_u16(data, cursor) as u16;
+    let key_slots = read_u16(data, cursor);
+    let val_slots = read_u16(data, cursor);
     let key_rttid = read_u32(data, cursor);
 
     // Create new map
