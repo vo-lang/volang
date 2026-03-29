@@ -1,12 +1,6 @@
 name: Deploy to GitHub Pages
 
 on:
-  push:
-    branches: ["main", "master"]
-    paths:
-      - "playground/**"
-      - "studio/**"
-      - "lang/crates/**"
   workflow_dispatch:
 
 permissions:

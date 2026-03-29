@@ -1,11 +1,11 @@
-name: Deploy Site
+name: Deploy Studio to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: ["main"]
     paths:
-      - 'studio/**'
-
+      - "studio/**"
+      - "lang/crates/**"
   workflow_dispatch:
 
 permissions:
@@ -14,28 +14,65 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: "pages"
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout volang
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Checkout vogui
+        uses: actions/checkout@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: studio/package-lock.json
+          repository: vo-lang/vogui
+          path: ../vogui
 
-      - name: Install dependencies
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            studio/wasm -> target
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            studio/package-lock.json
+            ../vogui/js/package-lock.json
+
+      - name: Build vo-web WASM
+        working-directory: lang/crates/vo-web
+        run: wasm-pack build --target web --release
+
+      - name: Build studio WASM
+        working-directory: studio
+        run: wasm-pack build wasm --target web --release --out-dir ../public/wasm --out-name vo_studio_wasm
+
+      - name: Build VoGUI JS
+        working-directory: ../vogui/js
+        run: npm ci && npm run build
+
+      - name: Install Studio dependencies
+        working-directory: studio
         run: npm ci
-        working-directory: studio
 
-      - name: Build
-        run: npm run build
+      - name: Build Studio
         working-directory: studio
+        run: npm run build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
