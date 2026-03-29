@@ -39,9 +39,7 @@ pub fn package_abi_path(
 
 pub fn normalize_abi_lookup_pkg_path(path: &str) -> String {
     normalize_path(path)
-        .replace('/', "_")
-        .replace('.', "_")
-        .replace('-', "_")
+        .replace(['/', '.', '-'], "_")
 }
 
 pub fn abi_lookup_name(pkg_path: &str, func_name: &str) -> String {
