@@ -5201,6 +5201,7 @@ dependencies = [
  "toml 0.8.2",
  "ureq",
  "vo-common",
+ "vo-syntax",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

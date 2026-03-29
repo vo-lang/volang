@@ -85,8 +85,18 @@ pub struct RenderIslandVfsSnapshot {
     files: Vec<RenderIslandVfsFile>,
 }
 
+async fn run_blocking<T, F>(task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|err| format!("blocking task failed: {}", err))?
+}
+
 #[tauri::command]
-pub fn cmd_run_gui(
+pub async fn cmd_run_gui(
     entry_path: String,
     session_id: u64,
     state: tauri::State<'_, AppState>,
@@ -94,42 +104,55 @@ pub fn cmd_run_gui(
 ) -> Result<GuiRunOutput, String> {
     state.clear_guest_runtime();
     let session_root = state.session_root();
-    let run_target = resolve_run_target(&session_root, state.workspace_root(), &entry_path, state.single_file_run())?;
-    let compile_path = run_target.compile_path.to_string_lossy().to_string();
-    let compile_start = Instant::now();
-    let compile_output = with_compile_log_sink(
-        gui_runtime::make_studio_log_sink(app.clone(), session_id),
-        || prepare_and_compile(&compile_path),
-    )?;
-    gui_runtime::emit_studio_log(
-        &app,
-        session_id,
-        gui_runtime::StudioLogRecord::new("studio-native", "gui_compile_done", "system")
-            .path(entry_path.clone())
-            .duration_ms(compile_start.elapsed().as_millis()),
-    );
-    let module_bytes = compile_output.module.serialize();
-    let framework = extract_framework_contract(&compile_output.extensions);
-    state.set_last_extensions(compile_output.extensions.clone());
-    let start_start = Instant::now();
-    let (render_bytes, handle, push_rx) = gui_runtime::run_gui(compile_output, app.clone(), session_id)
-        .map_err(|error| error.to_string())?;
-    gui_runtime::emit_studio_log(
-        &app,
-        session_id,
-        gui_runtime::StudioLogRecord::new("studio-native", "gui_start_done", "system")
-            .path(entry_path.clone())
-            .duration_ms(start_start.elapsed().as_millis()),
-    );
+    let workspace_root = state.workspace_root().to_path_buf();
+    let single_file_run = state.single_file_run();
+    let task_entry_path = entry_path.clone();
+    let task_app = app.clone();
+    let (run_output, extensions, handle, push_rx) = run_blocking(move || {
+        let run_target = resolve_run_target(&session_root, &workspace_root, &task_entry_path, single_file_run)?;
+        let compile_path = run_target.compile_path.to_string_lossy().to_string();
+        let compile_start = Instant::now();
+        let compile_output = with_compile_log_sink(
+            gui_runtime::make_studio_log_sink(task_app.clone(), session_id),
+            || prepare_and_compile(&compile_path),
+        )?;
+        gui_runtime::emit_studio_log(
+            &task_app,
+            session_id,
+            gui_runtime::StudioLogRecord::new("studio-native", "gui_compile_done", "system")
+                .path(task_entry_path.clone())
+                .duration_ms(compile_start.elapsed().as_millis()),
+        );
+        let module_bytes = compile_output.module.serialize();
+        let framework = extract_framework_contract(&compile_output.extensions);
+        let extensions = compile_output.extensions.clone();
+        let start_start = Instant::now();
+        let (render_bytes, handle, push_rx) = gui_runtime::run_gui(compile_output, task_app.clone(), session_id)
+            .map_err(|error| error.to_string())?;
+        gui_runtime::emit_studio_log(
+            &task_app,
+            session_id,
+            gui_runtime::StudioLogRecord::new("studio-native", "gui_start_done", "system")
+                .path(task_entry_path.clone())
+                .duration_ms(start_start.elapsed().as_millis()),
+        );
+        let external_widget_handler_id = find_on_widget_handler_id(&render_bytes);
+        Ok((
+            GuiRunOutput {
+                render_bytes,
+                module_bytes,
+                entry_path: task_entry_path,
+                framework,
+                external_widget_handler_id,
+            },
+            extensions,
+            handle,
+            push_rx,
+        ))
+    }).await?;
+    state.set_last_extensions(extensions);
     state.install_guest_runtime(handle, push_rx);
-    let external_widget_handler_id = find_on_widget_handler_id(&render_bytes);
-    Ok(GuiRunOutput {
-        render_bytes,
-        module_bytes,
-        entry_path,
-        framework,
-        external_widget_handler_id,
-    })
+    Ok(run_output)
 }
 
 #[tauri::command]

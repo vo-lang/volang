@@ -51,7 +51,9 @@ function proxyErrorMessage(error: unknown): string {
 async function proxyGhReleaseRequest(req: ProxyRequest, res: ProxyResponse): Promise<void> {
   const target = `https://github.com${req.url ?? ''}`;
   try {
-    const upstream = await globalThis.fetch(target, { redirect: 'follow' }) as UpstreamResponse;
+    const upstream = await (globalThis as typeof globalThis & {
+      fetch(url: string, init: { redirect: 'follow' }): Promise<UpstreamResponse>;
+    }).fetch(target, { redirect: 'follow' });
     writeProxyResponseHeaders(res, upstream);
     const buf = new Uint8Array(await upstream.arrayBuffer());
     res.end(buf);
@@ -79,6 +81,32 @@ function ghReleaseProxy() {
   };
 }
 
+function studioManualChunks(id: string): string | undefined {
+  const normalized = id.replace(/\\/g, '/');
+  if (!normalized.includes('/node_modules/')) {
+    return undefined;
+  }
+  if (normalized.includes('/monaco-editor/esm/')) {
+    return 'vendor-monaco';
+  }
+  if (normalized.includes('/golden-layout/')) {
+    return 'vendor-layout';
+  }
+  if (normalized.includes('/@xterm/')) {
+    return 'vendor-terminal';
+  }
+  if (normalized.includes('/marked/') || normalized.includes('/highlight.js/')) {
+    return 'vendor-docs';
+  }
+  if (normalized.includes('/@tauri-apps/')) {
+    return 'vendor-tauri';
+  }
+  if (normalized.includes('/svelte/')) {
+    return 'vendor-svelte';
+  }
+  return 'vendor';
+}
+
 export default defineConfig({
   plugins: [ghReleaseProxy(), svelte({ preprocess: vitePreprocess() })],
   server: {
@@ -88,6 +116,12 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     target: ['es2020', 'chrome105'],
+    chunkSizeWarningLimit: 2800,
+    rollupOptions: {
+      output: {
+        manualChunks: studioManualChunks,
+      },
+    },
   },
   // Allow .wasm files from public/ to be served as assets
   assetsInclude: ['**/*.wasm'],

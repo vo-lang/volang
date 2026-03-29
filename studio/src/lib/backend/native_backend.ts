@@ -24,11 +24,11 @@ import type {
   SessionInfo,
   StreamHandle,
 } from '../types';
+import { invoke as tauriInvoke, listen as tauriListen } from '../tauri';
 import { consolePush } from '../../stores/console';
 import { formatDurationMs, pushUiConsole, renderStudioLogRecord, type StudioLogRecord } from './gui_console';
 import { makeTauriStreamHandle } from './stream_handle';
 
-type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 type GuiFatalErrorEvent = { sessionId: number; message: string };
 type StudioLogEvent = { sessionId: number; record: StudioLogRecord };
 
@@ -37,13 +37,22 @@ function displayPath(path: string): string {
   return normalized || path;
 }
 
+function waitForNextUiFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(() => resolve());
+      return;
+    }
+    setTimeout(resolve, 0);
+  });
+}
+
 function pushNativeStudioLog(record: StudioLogRecord): void {
   pushUiConsole(renderStudioLogRecord(record, displayPath));
 }
 
 export class NativeBackend implements Backend {
   readonly platform = 'native' as const;
-  private invokePromise: Promise<Invoke> | null = null;
   private guiSessionId = 0;
   private guiFatalError: Error | null = null;
   private guiFatalListenerPromise: Promise<void> | null = null;
@@ -151,13 +160,14 @@ export class NativeBackend implements Backend {
   }
 
   async runGui(path: string): Promise<GuiRunOutput> {
-    await this.ensureGuiListeners();
     const sessionId = this.guiSessionId + 1;
     this.guiSessionId = sessionId;
     this.guiFatalError = null;
     const targetLabel = displayPath(path);
     consolePush('system', `Opening GUI ${targetLabel}`);
     consolePush('system', `Preparing dependencies and compiling GUI ${targetLabel}...`);
+    await waitForNextUiFrame();
+    await this.ensureGuiListeners();
     const totalStart = performance.now();
     const raw = await this.invoke<{
       renderBytes: number[];
@@ -275,37 +285,25 @@ export class NativeBackend implements Backend {
   }
 
   private async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-    const invoke = await this.getInvoke();
-    return invoke<T>(command, args);
-  }
-
-  private async getInvoke(): Promise<Invoke> {
-    if (!this.invokePromise) {
-      this.invokePromise = import('@tauri-apps/api/core').then(({ invoke }) => invoke as Invoke);
-    }
-    return this.invokePromise;
+    return tauriInvoke<T>(command, args);
   }
 
   private async ensureGuiListeners(): Promise<void> {
     if (!this.guiFatalListenerPromise) {
-      this.guiFatalListenerPromise = import('@tauri-apps/api/event')
-        .then(({ listen }) => listen<GuiFatalErrorEvent>('gui_fatal_error', (event) => {
-          if (event.payload.sessionId !== this.guiSessionId) {
-            return;
-          }
-          this.guiFatalError = new Error(event.payload.message);
-        }))
-        .then(() => undefined);
+      this.guiFatalListenerPromise = tauriListen<GuiFatalErrorEvent>('gui_fatal_error', (event) => {
+        if (event.payload.sessionId !== this.guiSessionId) {
+          return;
+        }
+        this.guiFatalError = new Error(event.payload.message);
+      }).then(() => undefined);
     }
     if (!this.guiLogListenerPromise) {
-      this.guiLogListenerPromise = import('@tauri-apps/api/event')
-        .then(({ listen }) => listen<StudioLogEvent>('studio_log', (event) => {
-          if (event.payload.sessionId !== this.guiSessionId) {
-            return;
-          }
-          pushNativeStudioLog(event.payload.record);
-        }))
-        .then(() => undefined);
+      this.guiLogListenerPromise = tauriListen<StudioLogEvent>('studio_log', (event) => {
+        if (event.payload.sessionId !== this.guiSessionId) {
+          return;
+        }
+        pushNativeStudioLog(event.payload.record);
+      }).then(() => undefined);
     }
     await this.guiFatalListenerPromise;
     await this.guiLogListenerPromise;

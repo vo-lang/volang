@@ -812,30 +812,11 @@
   }
   .docs-cta:hover .btn-arrow { stroke: #89b4fa; }
 
-  .btn-ghost {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    border: 1px solid rgba(88, 91, 112, 0.2);
-    border-radius: 8px;
-    padding: 7px 12px;
-    background: transparent;
-    color: #7f849c;
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: border-color 0.2s, color 0.2s;
-  }
-  .btn-ghost:hover {
-    border-color: rgba(137, 180, 250, 0.4);
-    color: #89b4fa;
-  }
   .btn-arrow {
     width: 12px; height: 12px;
     stroke: currentColor; fill: none;
     stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
   }
-  .btn-arrow.small { width: 11px; height: 11px; }
 
   /* ══════════════════════════════════════════
      RIGHT CONTENT — projects-first

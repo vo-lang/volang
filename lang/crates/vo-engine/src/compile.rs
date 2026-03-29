@@ -1838,7 +1838,6 @@ pub(crate) fn ensure_local_native_extension_built(module_dir: &Path) -> Result<(
 fn build_native_extension(module_dir: &Path) -> Result<(), String> {
     let rust_dir = module_dir.join("rust");
     emit_compile_log(CompileLogRecord::new("vo-engine", "native_extension_build_start").path(rust_dir.display().to_string()));
-    eprintln!("Building native extension at {}...", rust_dir.display());
     let output = std::process::Command::new("cargo")
         .arg("build")
         .args(if cfg!(debug_assertions) { Vec::<&str>::new() } else { vec!["--release"] })
@@ -1846,8 +1845,7 @@ fn build_native_extension(module_dir: &Path) -> Result<(), String> {
         .output()
         .map_err(|e| format!("failed to run cargo build: {}", e))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("cargo build failed for {}: {}", rust_dir.display(), stderr));
+        return Err(format!("cargo build failed for {}: {}", rust_dir.display(), String::from_utf8_lossy(&output.stderr)));
     }
     emit_compile_log(CompileLogRecord::new("vo-engine", "native_extension_build_done").path(rust_dir.display().to_string()));
     Ok(())

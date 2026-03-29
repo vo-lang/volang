@@ -15,6 +15,7 @@
   let kind: 'single' | 'module' = 'single';
   let name = '';
   let location = defaultLocation;
+  const locationInputId = 'create-project-location-input';
 
   $: isNative = platform === 'native';
   $: effectiveName = name.trim() || (kind === 'single' ? 'my_app' : 'my_project');
@@ -64,10 +65,15 @@
     />
 
     <div class="location-row">
-      <label class="location-label">Location</label>
+      {#if isNative}
+        <label class="location-label" for={locationInputId}>Location</label>
+      {:else}
+        <span class="location-label">Location</span>
+      {/if}
       {#if isNative}
         <div class="location-native">
           <input
+            id={locationInputId}
             bind:value={location}
             class="location-input"
             placeholder="~/code"

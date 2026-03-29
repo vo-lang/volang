@@ -2,26 +2,16 @@
 // Studio is framework-neutral: renderer modules are loaded dynamically
 // from the VFS snapshot using a blob URL — no framework-specific imports.
 
+import { invoke as tauriInvoke, listen as tauriListen } from '../tauri';
 import type { Backend } from '../backend/backend';
 import { isGuiSessionSupersededError, type RuntimeService } from '../services/runtime_service';
 import type { FrameworkContract } from '../types';
 import type { VoWebModule } from '../studio_wasm';
 import { loadStudioWasm, makeVoWebModule } from '../studio_wasm';
 
-type TauriInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
-
-let nativeDebugInvokePromise: Promise<TauriInvoke | null> | null = null;
-
 async function logNativeDebug(message: string): Promise<void> {
   try {
-    if (!nativeDebugInvokePromise) {
-      nativeDebugInvokePromise = import('@tauri-apps/api/core')
-        .then((mod) => mod.invoke as TauriInvoke)
-        .catch(() => null);
-    }
-    const invoke = await nativeDebugInvokePromise;
-    if (!invoke) return;
-    await invoke('cmd_debug_log', { message });
+    await tauriInvoke('cmd_debug_log', { message });
   } catch {}
 }
 
@@ -224,9 +214,8 @@ function makeStudioGuiHost(
       let unlisten: (() => void) | null = null;
       return {
         async init(): Promise<void> {
-          const { listen } = await import('@tauri-apps/api/event');
           void logNativeDebug('render island channel init');
-          unlisten = await listen<number[]>('island_data', (event) => {
+          unlisten = await tauriListen<number[]>('island_data', (event) => {
             const frame = new Uint8Array(event.payload);
             handler?.(frame);
           });
