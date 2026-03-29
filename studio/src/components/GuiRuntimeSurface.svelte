@@ -6,7 +6,7 @@
     injectStyles,
     render as renderGui,
     setupKeyHandler,
-  } from '../../../../vogui/js/dist/index.js';
+  } from '@vogui/runtime';
   import { isGuiSessionSupersededError, type RuntimeService } from '../lib/services/runtime_service';
   import { runtime } from '../stores/runtime';
 

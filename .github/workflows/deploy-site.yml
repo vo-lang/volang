@@ -30,9 +30,6 @@ jobs:
           repository: vo-lang/vogui
           path: vogui
 
-      - name: Symlink vogui as sibling
-        run: ln -s "$GITHUB_WORKSPACE/vogui" "$(dirname "$GITHUB_WORKSPACE")/vogui"
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -55,7 +52,7 @@ jobs:
           cache: "npm"
           cache-dependency-path: |
             studio/package-lock.json
-            ../vogui/js/package-lock.json
+            vogui/js/package-lock.json
 
       - name: Build vo-web WASM
         working-directory: lang/crates/vo-web
@@ -66,12 +63,16 @@ jobs:
         run: wasm-pack build wasm --target web --release --out-dir ../public/wasm --out-name vo_studio_wasm
 
       - name: Build VoGUI JS
-        working-directory: ../vogui/js
+        working-directory: vogui/js
         run: npm ci && npm run build
 
       - name: Install Studio dependencies
         working-directory: studio
         run: npm ci
+
+      - name: Install @vogui/runtime from local build
+        working-directory: studio
+        run: npm install --no-save ../vogui/js
 
       - name: Build Studio
         working-directory: studio

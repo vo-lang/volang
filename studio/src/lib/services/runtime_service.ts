@@ -1,6 +1,6 @@
 import { get, type Readable } from 'svelte/store';
 
-import { findExternalWidgetHandlerIdInBytes } from '../../../../../vogui/js/dist/index.js';
+import { findExternalWidgetHandlerIdInBytes } from '@vogui/runtime';
 import type { Backend } from '../backend/backend';
 import type { GuiRunOutput, RunEvent, RunOpts, StreamHandle } from '../types';
 import { formatError } from '../format_error';

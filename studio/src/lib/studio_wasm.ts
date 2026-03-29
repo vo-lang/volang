@@ -2,7 +2,7 @@
 // The wasm-pack output is expected at /wasm/ (served from studio/public/wasm/).
 // Build: wasm-pack build studio/wasm --target web --out-dir ../public/wasm
 
-import { getRef } from '../../../../vogui/js/dist/index.js';
+import { getRef } from '@vogui/runtime';
 
 // ── VoVm instance interface (matches VoVm wasm-bindgen class exports) ────────
 
