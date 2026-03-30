@@ -327,8 +327,17 @@ fn build_source_package(repo_root: &Path, top_dir: &str, out_dir: &Path) -> Rele
         let rel = path
             .strip_prefix(repo_root)
             .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
-        let data = fs::read(&path)
+        let raw = fs::read(&path)
             .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
+        let data: Vec<u8> = if path.file_name().and_then(OsStr::to_str) == Some("Cargo.toml") {
+            if let Ok(content) = std::str::from_utf8(&raw) {
+                strip_cargo_patch_sections(content).into_bytes()
+            } else {
+                raw
+            }
+        } else {
+            raw
+        };
         let mut header = Header::new_gnu();
         header.set_size(data.len() as u64);
         header.set_mode(file_mode(&path)?);
@@ -351,6 +360,36 @@ fn build_source_package(repo_root: &Path, top_dir: &str, out_dir: &Path) -> Rele
     encoder
         .finish()
         .map_err(|error| ReleaseError::IoError(repo_root.to_path_buf(), error.to_string()))
+}
+
+/// Strip all `[patch.*]` TOML table sections from a `Cargo.toml`.
+///
+/// These sections are used in development monorepos to redirect git
+/// dependencies to local sibling paths. They must not be included in
+/// published source packages because the local paths do not exist in the
+/// module cache.
+pub(crate) fn strip_cargo_patch_sections(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut in_patch = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && !trimmed.starts_with("[[") {
+            let inner = trimmed.trim_start_matches('[').trim_end_matches(']').trim();
+            if inner == "patch" || inner.starts_with("patch.") || inner.starts_with("patch \"") {
+                in_patch = true;
+                continue;
+            } else {
+                in_patch = false;
+            }
+        } else if trimmed.starts_with("[[") {
+            in_patch = false;
+        }
+        if !in_patch {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn collect_source_files(root: &Path, dir: &Path, out_dir: &Path) -> ReleaseResult<Vec<PathBuf>> {

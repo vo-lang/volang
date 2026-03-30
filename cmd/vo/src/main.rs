@@ -19,7 +19,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use vo_engine::{check, compile, format_source, format_text, run, Module, RunMode};
+use vo_engine::{
+    check_with_auto_install, compile_with_auto_install, format_source, format_text, run, Module,
+    RunMode,
+};
 use vo_release::{ArtifactInput, StageReleaseOptions};
 
 fn main() {
@@ -135,7 +138,7 @@ fn cmd_run(args: &[String]) -> i32 {
         }
     }
 
-    let output = match compile(file) {
+    let output = match compile_with_auto_install(file) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("{}", e);
@@ -173,7 +176,7 @@ fn cmd_build(args: &[String]) -> i32 {
         }
     }
 
-    let output = match compile(path) {
+    let output = match compile_with_auto_install(path) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("{}", e);
@@ -205,7 +208,7 @@ fn cmd_check(args: &[String]) -> i32 {
     let path = if args.is_empty() { "." } else { &args[0] };
 
     println!("Checking project: {}", path);
-    match check(path) {
+    match check_with_auto_install(path) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("{}", e);
@@ -240,7 +243,7 @@ fn cmd_test(args: &[String]) -> i32 {
         }
     };
 
-    let output = match compile(&test_path) {
+    let output = match compile_with_auto_install(&test_path) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("{}", e);
@@ -414,7 +417,7 @@ fn cmd_emit(args: &[String]) -> i32 {
         }
     }
 
-    let output = match compile(path) {
+    let output = match compile_with_auto_install(path) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("[VO:COMPILE] {}", e);

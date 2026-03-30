@@ -2,7 +2,7 @@
 // The wasm-pack output is expected at /wasm/ (served from studio/public/wasm/).
 // Build: wasm-pack build studio/wasm --target web --out-dir ../public/wasm
 
-import { getRef } from '@vogui/runtime';
+import { getRef, measureText, measureTextLines } from '@vogui/runtime';
 
 // ── VoVm instance interface (matches VoVm wasm-bindgen class exports) ────────
 
@@ -355,6 +355,38 @@ function buildStandaloneImports(): WebAssembly.Imports {
       host_stop_game_loop(id: number): void {
         const loop = standaloneGameLoops.get(id);
         if (loop !== undefined) { cancelAnimationFrame(loop.rafId); standaloneGameLoops.delete(id); }
+      },
+      host_measure_text(
+        textPtr: number, textLen: number,
+        fontPtr: number, fontLen: number,
+        maxWidth: number, lineHeight: number,
+        whiteSpace: number,
+        outLenPtr: number,
+      ): number {
+        const text = readWasmString(ref, textPtr, textLen);
+        const font = readWasmString(ref, fontPtr, fontLen);
+        const result = measureText(text, font, maxWidth, lineHeight, whiteSpace);
+        const destPtr = wasmAlloc(ref, result.length);
+        const mem = (ref.instance!.exports.memory as WebAssembly.Memory).buffer;
+        new Uint8Array(mem, destPtr, result.length).set(result);
+        new Uint32Array(mem, outLenPtr, 1)[0] = result.length;
+        return destPtr;
+      },
+      host_measure_text_lines(
+        textPtr: number, textLen: number,
+        fontPtr: number, fontLen: number,
+        maxWidth: number, lineHeight: number,
+        whiteSpace: number,
+        outLenPtr: number,
+      ): number {
+        const text = readWasmString(ref, textPtr, textLen);
+        const font = readWasmString(ref, fontPtr, fontLen);
+        const result = measureTextLines(text, font, maxWidth, lineHeight, whiteSpace);
+        const destPtr = wasmAlloc(ref, result.length);
+        const mem = (ref.instance!.exports.memory as WebAssembly.Memory).buffer;
+        new Uint8Array(mem, destPtr, result.length).set(result);
+        new Uint32Array(mem, outLenPtr, 1)[0] = result.length;
+        return destPtr;
       },
     },
   };

@@ -15,7 +15,7 @@ use vo_common::vfs::MemoryFs;
 use vo_module::digest::Digest;
 use vo_module::ext_manifest::{WasmExtensionKind, WasmExtensionManifest};
 use vo_module::materialize;
-use vo_module::schema::lockfile::{LockFile, LockedArtifact, LockedModule};
+use vo_module::schema::lockfile::{LockedArtifact, LockedModule};
 use vo_module::schema::manifest::ReleaseManifest;
 use vo_module::schema::modfile::ModFile;
 
@@ -117,34 +117,36 @@ fn read_vfs_release_manifest_digest(module: &str, version: &str) -> Option<Strin
     Some(Digest::from_sha256(content.as_bytes()).to_string())
 }
 
-fn collect_locked_specs(
-    mod_file: &ModFile,
-    lock_file: &LockFile,
-) -> Result<Vec<(String, String)>, String> {
-    vo_module::lock::verify_root_consistency(mod_file, lock_file)
-        .map_err(|e| format!("vo.lock validation error: {}", e))?;
-    vo_module::lock::verify_graph_completeness(mod_file, lock_file)
-        .map_err(|e| format!("vo.lock validation error: {}", e))?;
-    Ok(lock_file
-        .resolved
+fn inline_project_deps(vo_mod_content: &str, vo_lock_content: &str) -> Result<vo_module::project::ProjectDeps, String> {
+    let fs = MemoryFs::new()
+        .with_file("vo.mod", vo_mod_content)
+        .with_file("vo.lock", vo_lock_content);
+    vo_module::project::read_project_deps(&fs, &[]).map_err(|error| error.to_string())
+}
+
+fn format_module_project_deps_error(
+    error: vo_module::project::ProjectDepsError,
+    module: &str,
+    version: &str,
+) -> String {
+    match (error.stage, error.kind) {
+        (
+            vo_module::project::ProjectDepsStage::LockFile,
+            vo_module::project::ProjectDepsErrorKind::Missing,
+        ) => format!(
+            "module {}@{} requires external modules but vo.lock is missing",
+            module, version
+        ),
+        _ => format!("{} for {}@{}", error, module, version),
+    }
+}
+
+fn collect_locked_specs(project_deps: &vo_module::project::ProjectDeps) -> Vec<(String, String)> {
+    project_deps
+        .locked_modules
         .iter()
         .map(|module| (module.path.as_str().to_string(), module.version.to_string()))
-        .collect())
-}
-
-fn collect_locked_modules(
-    mod_file: &ModFile,
-    lock_file: &LockFile,
-) -> Result<Vec<LockedModule>, String> {
-    vo_module::lock::verify_root_consistency(mod_file, lock_file)
-        .map_err(|e| format!("vo.lock validation error: {}", e))?;
-    vo_module::lock::verify_graph_completeness(mod_file, lock_file)
-        .map_err(|e| format!("vo.lock validation error: {}", e))?;
-    Ok(lock_file.resolved.clone())
-}
-
-fn requires_registry_modules(mod_file: &ModFile) -> bool {
-    !mod_file.require.is_empty()
+        .collect()
 }
 
 fn remember_selected_version(
@@ -621,12 +623,6 @@ fn read_vfs_locked_specs(module: &str, version: &str) -> Result<Vec<(String, Str
             module, version
         )
     })?;
-    let dep_mod_file = ModFile::parse(&dep_vo_mod)
-        .map_err(|e| format!("vo.mod parse error for {}: {}", module, e))?;
-    if !requires_registry_modules(&dep_mod_file) {
-        return Ok(Vec::new());
-    }
-
     let vo_lock_path = vfs_module_file_path(module, version, "vo.lock");
     let dep_vo_lock = read_vfs_text(&vo_lock_path).map_err(|_| {
         format!(
@@ -634,9 +630,14 @@ fn read_vfs_locked_specs(module: &str, version: &str) -> Result<Vec<(String, Str
             module, version
         )
     })?;
-    let dep_lock_file = LockFile::parse(&dep_vo_lock)
-        .map_err(|e| format!("vo.lock parse error for {}: {}", module, e))?;
-    collect_locked_specs(&dep_mod_file, &dep_lock_file)
+    let project_deps = vo_module::project::read_project_deps(
+        &MemoryFs::new()
+            .with_file("vo.mod", dep_vo_mod)
+            .with_file("vo.lock", dep_vo_lock),
+        &[],
+    )
+    .map_err(|error| format_module_project_deps_error(error, module, version))?;
+    Ok(collect_locked_specs(&project_deps))
 }
 
 /// Load the pre-built WASM extension binary for a module if one exists on GitHub.
@@ -764,45 +765,23 @@ async fn load_cached_ext_from_vfs(module: &str, version: &str) -> Result<bool, S
 }
 
 pub async fn ensure_vfs_deps(vo_mod_content: &str, vo_lock_content: &str) -> Result<(), String> {
-    let mod_file =
-        ModFile::parse(vo_mod_content).map_err(|e| format!("vo.mod parse error: {}", e))?;
-    if !requires_registry_modules(&mod_file) {
+    let project_deps = inline_project_deps(vo_mod_content, vo_lock_content)?;
+    if !project_deps.has_mod_file || project_deps.locked_modules.is_empty() {
         return Ok(());
     }
-
-    let lock_file =
-        LockFile::parse(vo_lock_content).map_err(|e| format!("vo.lock parse error: {}", e))?;
-    let initial = collect_locked_modules(&mod_file, &lock_file)?;
-    ensure_vfs_locked_modules(initial).await
+    ensure_vfs_locked_modules(project_deps.locked_modules).await
 }
 
 pub async fn ensure_vfs_deps_from_fs(local_fs: &MemoryFs, entry: &str) -> Result<(), String> {
-    use vo_common::vfs::FileSystem;
-
     let entry_dir = std::path::Path::new(entry)
         .parent()
         .unwrap_or(std::path::Path::new("."));
-    let mod_candidates = [entry_dir.join("vo.mod"), PathBuf::from("vo.mod")];
-    let lock_candidates = [entry_dir.join("vo.lock"), PathBuf::from("vo.lock")];
-
-    for candidate in &mod_candidates {
-        if let Ok(mod_content) = local_fs.read_file(candidate) {
-            let mod_file =
-                ModFile::parse(&mod_content).map_err(|e| format!("vo.mod parse error: {}", e))?;
-            if !requires_registry_modules(&mod_file) {
-                return Ok(());
-            }
-
-            for lock_candidate in &lock_candidates {
-                if let Ok(lock_content) = local_fs.read_file(lock_candidate) {
-                    return ensure_vfs_deps(&mod_content, &lock_content).await;
-                }
-            }
-
-            return Err("this build requires external modules but vo.lock is missing".to_string());
-        }
+    let project_deps = vo_module::project::read_project_deps_near(local_fs, entry_dir, &[])
+        .map_err(|error| error.to_string())?;
+    if !project_deps.has_mod_file || project_deps.locked_modules.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    ensure_vfs_locked_modules(project_deps.locked_modules).await
 }
 
 pub async fn prepare_github_modules(_source: &str) -> Result<(MemoryFs, String), String> {

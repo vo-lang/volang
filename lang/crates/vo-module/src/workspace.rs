@@ -75,6 +75,27 @@ pub fn resolve_overrides(workfile: &WorkFile, workfile_dir: &Path) -> Result<Vec
     Ok(overrides)
 }
 
+ pub fn validate_overrides(
+     overrides: &[Override],
+     root_module: Option<&ModulePath>,
+ ) -> Result<(), Error> {
+     verify_override_identity(overrides)?;
+     if let Some(root_module) = root_module {
+         check_no_self_override(root_module, overrides)?;
+     }
+     Ok(())
+ }
+
+ pub fn resolve_validated_overrides(
+     workfile: &WorkFile,
+     workfile_dir: &Path,
+     root_module: Option<&ModulePath>,
+ ) -> Result<Vec<Override>, Error> {
+     let overrides = resolve_overrides(workfile, workfile_dir)?;
+     validate_overrides(&overrides, root_module)?;
+     Ok(overrides)
+ }
+
 /// Verify that each override directory's `vo.mod` declares the expected module path.
 /// Per spec §11.1: the local directory must identify the same canonical module path.
 pub fn verify_override_identity(overrides: &[Override]) -> Result<(), Error> {

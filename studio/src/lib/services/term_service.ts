@@ -1,6 +1,7 @@
 import { get, writable, type Readable } from 'svelte/store';
 
 import type { Backend } from '../backend/backend';
+import type { DiagnosticError } from '../types';
 import type { CompilerService } from './compiler_service';
 import type { RuntimeService } from './runtime_service';
 import type { WorkspaceService } from './workspace_service';
@@ -161,6 +162,20 @@ export class TermService {
     }));
   }
 
+  private formatDiagnostic(err: DiagnosticError): string {
+    const location = `${err.file}:${err.line}`;
+    const category = err.category === 'module-system'
+      ? [err.moduleStage, err.moduleKind].filter(Boolean).join('/') || err.category
+      : err.category;
+    const moduleRef = err.modulePath
+      ? `${err.modulePath}${err.moduleVersion ? `@${err.moduleVersion}` : ''}`
+      : null;
+    if (moduleRef) {
+      return `[${category}] ${location}: ${err.message} (${moduleRef})`;
+    }
+    return `[${category}] ${location}: ${err.message}`;
+  }
+
   private record(command: string): void {
     this.stateStore.update((state) => ({
       ...state,
@@ -236,7 +251,7 @@ export class TermService {
     if (result.ok) {
       this.append('output', `✓ Check passed: ${target}`);
     } else {
-      result.errors.forEach((err) => this.append('error', `${err.file}:${err.line}: ${err.message}`));
+      result.errors.forEach((err) => this.append('error', this.formatDiagnostic(err)));
     }
   }
 
@@ -270,7 +285,7 @@ export class TermService {
     if (result.ok) {
       this.append('output', `✓ Built: ${result.outputPath ?? target}`);
     } else {
-      result.errors.forEach((err) => this.append('error', `${err.file}:${err.line}: ${err.message}`));
+      result.errors.forEach((err) => this.append('error', this.formatDiagnostic(err)));
     }
   }
 
@@ -280,7 +295,7 @@ export class TermService {
     if (result.ok) {
       this.append('output', `✓ Compiled: ${result.outputPath ?? target}`);
     } else {
-      result.errors.forEach((err) => this.append('error', `${err.file}:${err.line}: ${err.message}`));
+      result.errors.forEach((err) => this.append('error', this.formatDiagnostic(err)));
     }
   }
 

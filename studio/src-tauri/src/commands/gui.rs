@@ -114,7 +114,7 @@ pub async fn cmd_run_gui(
         let compile_start = Instant::now();
         let compile_output = with_compile_log_sink(
             gui_runtime::make_studio_log_sink(task_app.clone(), session_id),
-            || prepare_and_compile(&compile_path),
+            || prepare_and_compile(&compile_path).map_err(|error| error.to_string()),
         )?;
         gui_runtime::emit_studio_log(
             &task_app,

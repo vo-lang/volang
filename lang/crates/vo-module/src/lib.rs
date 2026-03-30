@@ -7,6 +7,7 @@ pub mod identity;
 pub mod lock;
 pub mod materialize;
 pub mod ops;
+pub mod project;
 pub mod registry;
 pub mod schema;
 pub mod solver;

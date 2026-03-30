@@ -228,7 +228,7 @@ fn load_extensions(
         return Ok(None);
     }
 
-    crate::compile::ensure_extension_manifests_built(manifests, locked_modules).map_err(|e| {
+    let resolved = crate::compile::prepare_extension_manifests(manifests, locked_modules).map_err(|e| {
         RunError::Runtime(RuntimeError {
             message: format!("failed to prepare native extensions: {}", e),
             location: None,
@@ -236,7 +236,7 @@ fn load_extensions(
         })
     })?;
 
-    let loader = ExtensionLoader::from_manifests(manifests).map_err(|e| {
+    let loader = ExtensionLoader::from_manifests(&resolved).map_err(|e| {
         RunError::Runtime(RuntimeError {
             message: format!("failed to load extensions: {}", e),
             location: None,

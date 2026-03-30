@@ -235,6 +235,9 @@ fn materialize_workspace_context(source_root: &Path, materialized_root: &Path) -
     let mut workfile = WorkFile::parse(&content)
         .map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
     let workfile_dir = workfile_path.parent().unwrap_or(source_root);
+    let root_module = try_read_workspace_root_module(source_root);
+    vo_module::workspace::resolve_validated_overrides(&workfile, workfile_dir, root_module.as_ref())
+        .map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
     for entry in &mut workfile.uses {
         let resolved = resolve_workspace_use_path(workfile_dir, &entry.path);
         let canonical = resolved.canonicalize().unwrap_or(resolved);
@@ -251,6 +254,13 @@ fn resolve_workspace_use_path(base: &Path, raw_path: &str) -> PathBuf {
     } else {
         base.join(path)
     }
+}
+
+fn try_read_workspace_root_module(source_root: &Path) -> Option<vo_module::identity::ModulePath> {
+    let mod_path = source_root.join("vo.mod");
+    let content = fs::read_to_string(mod_path).ok()?;
+    let mod_file = vo_module::schema::modfile::ModFile::parse(&content).ok()?;
+    Some(mod_file.module)
 }
 
 fn remove_existing_path(path: &Path) -> Result<(), String> {

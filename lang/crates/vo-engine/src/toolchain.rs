@@ -288,7 +288,7 @@ pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf,
     materialize::download_all(&mod_cache, &lf, &registry).map_err(|e| format!("{e}"))?;
     let manifests =
         vo_module::ext_manifest::discover_extensions(&cache_dir).map_err(|e| e.to_string())?;
-    crate::compile::ensure_extension_manifests_built(&manifests, &lf.resolved)
+    let _ = crate::compile::prepare_extension_manifests(&manifests, &lf.resolved)
         .map_err(|e| e.to_string())?;
 
     Ok(cache_dir)

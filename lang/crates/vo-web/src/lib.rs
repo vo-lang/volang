@@ -281,104 +281,16 @@ pub fn build_stdlib_fs() -> MemoryFs {
 }
 
 #[cfg(feature = "compiler")]
-fn read_current_module<F: FileSystem>(fs: &F) -> Option<String> {
-    let vomod_path = Path::new("vo.mod");
-    let content = fs.read_file(vomod_path).ok()?;
-    let modfile = vo_module::schema::modfile::ModFile::parse(&content).ok()?;
-    Some(modfile.module.as_str().to_string())
+fn load_project_deps<F: FileSystem>(fs: &F) -> Result<vo_module::project::ProjectDeps, String> {
+    vo_module::project::read_project_deps(fs, &[]).map_err(|error| error.to_string())
 }
 
 #[cfg(feature = "compiler")]
-fn read_allowed_external_modules<F: FileSystem>(fs: &F) -> Result<Option<Vec<String>>, String> {
-    Ok(read_locked_external_modules(fs)?.map(|modules| {
-        modules
-            .into_iter()
-            .map(|module| module.path.as_str().to_string())
-            .collect()
-    }))
-}
-
-#[cfg(feature = "compiler")]
-fn read_locked_external_modules<F: FileSystem>(
-    fs: &F,
-) -> Result<Option<Vec<vo_module::schema::lockfile::LockedModule>>, String> {
-    let vomod_path = Path::new("vo.mod");
-    let mod_content = match fs.read_file(vomod_path) {
-        Ok(content) => content,
-        Err(_) => return Ok(None),
-    };
-
-    let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content)
-        .map_err(|e| format!("vo.mod parse error: {}", e))?;
-    if mod_file.require.is_empty() {
-        return Ok(Some(Vec::new()));
-    }
-
-    let volock_path = Path::new("vo.lock");
-    let lock_content = fs
-        .read_file(volock_path)
-        .map_err(|_| "this build requires external modules but vo.lock is missing".to_string())?;
-    let lock_file = vo_module::schema::lockfile::LockFile::parse(&lock_content)
-        .map_err(|e| format!("vo.lock parse error: {}", e))?;
-    vo_module::lock::verify_root_consistency(&mod_file, &lock_file)
-        .map_err(|e| format!("vo.lock validation error: {}", e))?;
-    vo_module::lock::verify_graph_completeness(&mod_file, &lock_file)
-        .map_err(|e| format!("vo.lock validation error: {}", e))?;
-
-    Ok(Some(lock_file.resolved.clone()))
-}
-
-/// Like `read_current_module` but searches for `vo.mod` at `dir/vo.mod` first,
-/// then falls back to `vo.mod` at the filesystem root.
-#[cfg(feature = "compiler")]
-fn read_current_module_near<F: FileSystem>(fs: &F, dir: &Path) -> Option<String> {
-    let candidates = [dir.join("vo.mod"), PathBuf::from("vo.mod")];
-    for candidate in &candidates {
-        if let Ok(content) = fs.read_file(candidate) {
-            let modfile = vo_module::schema::modfile::ModFile::parse(&content).ok()?;
-            return Some(modfile.module.as_str().to_string());
-        }
-    }
-    None
-}
-
-/// Like `read_locked_external_modules` but searches for `vo.mod`/`vo.lock`
-/// at `dir/` first, then falls back to the filesystem root.
-#[cfg(feature = "compiler")]
-fn read_locked_external_modules_near<F: FileSystem>(
+fn load_project_deps_near<F: FileSystem>(
     fs: &F,
     dir: &Path,
-) -> Result<Option<Vec<vo_module::schema::lockfile::LockedModule>>, String> {
-    let mod_candidates = [dir.join("vo.mod"), PathBuf::from("vo.mod")];
-    let lock_candidates = [dir.join("vo.lock"), PathBuf::from("vo.lock")];
-
-    for mod_candidate in &mod_candidates {
-        let mod_content = match fs.read_file(mod_candidate) {
-            Ok(content) => content,
-            Err(_) => continue,
-        };
-
-        let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content)
-            .map_err(|e| format!("vo.mod parse error: {}", e))?;
-        if mod_file.require.is_empty() {
-            return Ok(Some(Vec::new()));
-        }
-
-        for lock_candidate in &lock_candidates {
-            if let Ok(lock_content) = fs.read_file(lock_candidate) {
-                let lock_file = vo_module::schema::lockfile::LockFile::parse(&lock_content)
-                    .map_err(|e| format!("vo.lock parse error: {}", e))?;
-                vo_module::lock::verify_root_consistency(&mod_file, &lock_file)
-                    .map_err(|e| format!("vo.lock validation error: {}", e))?;
-                vo_module::lock::verify_graph_completeness(&mod_file, &lock_file)
-                    .map_err(|e| format!("vo.lock validation error: {}", e))?;
-                return Ok(Some(lock_file.resolved.clone()));
-            }
-        }
-
-        return Err("this build requires external modules but vo.lock is missing".to_string());
-    }
-    Ok(None)
+) -> Result<vo_module::project::ProjectDeps, String> {
+    vo_module::project::read_project_deps_near(fs, dir, &[]).map_err(|error| error.to_string())
 }
 
 /// Extract unique external module root paths from source code imports.
@@ -473,7 +385,8 @@ pub fn compile_source_with_mod_fs(
     let file_set = FileSet::from_file(&fs, Path::new(filename), PathBuf::from("."))
         .map_err(|e| format!("Failed to read file: {}", e))?;
 
-    let current_module = read_current_module(&fs);
+    let project_deps = load_project_deps(&fs)?;
+    let current_module = project_deps.current_module.clone();
     let resolver = CurrentModuleResolver::new(
         PackageResolver {
             std: StdSource::with_fs(std_fs),
@@ -531,12 +444,12 @@ pub fn compile_entry_with_mod_fs(
     let file_set = FileSet::collect(&local_fs, pkg_dir, PathBuf::from("."))
         .map_err(|e| format!("Failed to collect package files: {}", e))?;
 
-    let current_module = read_current_module(&local_fs);
-    let allowed_modules = read_allowed_external_modules(&local_fs)?;
-    let mod_source = match allowed_modules {
-        Some(allowed_modules) => ModSource::with_fs(mod_fs).with_allowed_modules(allowed_modules),
-        None => ModSource::with_fs(mod_fs),
-    };
+    let project_deps = load_project_deps(&local_fs)?;
+    let current_module = project_deps.current_module.clone();
+    let mut mod_source = ModSource::with_fs(mod_fs);
+    if project_deps.has_mod_file {
+        mod_source = mod_source.with_allowed_modules(project_deps.allowed_modules.clone());
+    }
     let resolver = CurrentModuleResolver::new(
         PackageResolver {
             std: StdSource::with_fs(std_fs),
@@ -577,27 +490,22 @@ pub fn compile_entry_with_vfs(
     // Search for vo.mod/vo.lock at the package directory level first, then at root.
     // This handles both root-level projects (files at "vo.mod") and VFS projects
     // where files are stored with full relative paths (e.g. "workspace/.examples/vo.mod").
-    let current_module = read_current_module_near(&local_fs, pkg_dir);
-    let locked_modules = read_locked_external_modules_near(&local_fs, pkg_dir)?;
-    let mod_source = match locked_modules {
-        Some(locked_modules) => {
-            let allowed_modules = locked_modules
-                .iter()
-                .map(|module| module.path.as_str().to_string())
-                .collect::<Vec<_>>();
-            ModSource::with_fs(WasmVfs::new(vfs_mod_root))
-                .with_allowed_modules(allowed_modules)
-                .with_module_roots(locked_modules.iter().map(|module| {
-                    let rel = vo_module::materialize::cache_dir(
-                        Path::new(""),
-                        &module.path,
-                        &module.version,
-                    );
-                    (module.path.as_str().to_string(), rel)
-                }))
-        }
-        None => ModSource::with_fs(WasmVfs::new(vfs_mod_root)),
-    };
+    let project_deps = load_project_deps_near(&local_fs, pkg_dir)?;
+    let current_module = project_deps.current_module.clone();
+    let mut mod_source = ModSource::with_fs(WasmVfs::new(vfs_mod_root));
+    if project_deps.has_mod_file {
+        mod_source = mod_source.with_allowed_modules(project_deps.allowed_modules.clone());
+    }
+    if !project_deps.locked_modules.is_empty() {
+        mod_source = mod_source.with_module_roots(project_deps.locked_modules.iter().map(|module| {
+            let rel = vo_module::materialize::cache_dir(
+                Path::new(""),
+                &module.path,
+                &module.version,
+            );
+            (module.path.as_str().to_string(), rel)
+        }));
+    }
     let resolver = CurrentModuleResolver::new(
         PackageResolverMixed {
             std: StdSource::with_fs(build_stdlib_fs()),
@@ -633,7 +541,8 @@ pub fn compile_source_with_vfs(
     let file_set = FileSet::from_file(&fs, Path::new(filename), PathBuf::from("."))
         .map_err(|e| format!("Failed to read file: {}", e))?;
 
-    let current_module = read_current_module(&fs);
+    let project_deps = load_project_deps(&fs)?;
+    let current_module = project_deps.current_module.clone();
     let resolver = CurrentModuleResolver::new(
         PackageResolverMixed {
             std: StdSource::with_fs(build_stdlib_fs()),

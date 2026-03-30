@@ -9,10 +9,10 @@ mod run;
 mod toolchain;
 
 pub use compile::{
-    check, compile, compile_from_memory, compile_source_at, compile_string,
+    check, check_with_auto_install, compile, compile_from_memory, compile_source_at, compile_string,
     compile_with_auto_install, compile_with_cache, default_mod_cache_root,
-    ensure_extension_manifests_built, with_compile_log_sink, CompileError, CompileLogRecord,
-    CompileOutput,
+    prepare_extension_manifests, with_compile_log_sink, CompileError, CompileLogRecord,
+    CompileOutput, ModuleSystemError, ModuleSystemErrorKind, ModuleSystemStage,
 };
 pub use format::{format_text, parse_text};
 pub use run::{

@@ -3,8 +3,9 @@ use crate::state::AppState;
 use std::path::PathBuf;
 use vo_app_runtime::take_captured_stdout;
 use vo_engine::{
-    compile_with_auto_install, format_text, run_with_output,
-    run_with_output_interruptible, CompileOutput, CaptureSink, RunError, RunMode, RuntimeErrorKind,
+    check_with_auto_install, compile_with_auto_install, format_text, run_with_output,
+    run_with_output_interruptible, CaptureSink, CompileError, CompileOutput, RunError, RunMode,
+    RuntimeErrorKind,
 };
 
 #[derive(serde::Serialize)]
@@ -14,6 +15,11 @@ pub struct DiagnosticError {
     pub line: u32,
     pub column: u32,
     pub message: String,
+    pub category: String,
+    pub module_stage: Option<String>,
+    pub module_kind: Option<String>,
+    pub module_path: Option<String>,
+    pub module_version: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -54,12 +60,41 @@ pub enum RunEvent {
     Error { message: String },
 }
 
-pub(crate) fn prepare_and_compile(target: &str) -> Result<CompileOutput, String> {
-    compile_with_auto_install(target).map_err(|e| e.to_string())
+pub(crate) fn prepare_and_compile(target: &str) -> Result<CompileOutput, CompileError> {
+    compile_with_auto_install(target)
 }
 
-fn diagnostic_from_error(file: String, message: String) -> DiagnosticError {
-    DiagnosticError { file, line: 0, column: 0, message }
+fn diagnostic_from_compile_error(default_file: &str, error: &CompileError) -> DiagnosticError {
+    let module_error = error.module_system();
+    DiagnosticError {
+        file: module_error
+            .and_then(|module_error| module_error.path.clone())
+            .unwrap_or_else(|| default_file.to_string()),
+        line: 0,
+        column: 0,
+        message: module_error
+            .map(|module_error| module_error.detail.clone())
+            .unwrap_or_else(|| error.to_string()),
+        category: error.category().to_string(),
+        module_stage: module_error.map(|module_error| module_error.stage.as_str().to_string()),
+        module_kind: module_error.map(|module_error| module_error.kind.as_str().to_string()),
+        module_path: module_error.and_then(|module_error| module_error.module_path.clone()),
+        module_version: module_error.and_then(|module_error| module_error.version.clone()),
+    }
+}
+
+fn diagnostic_from_message(file: &str, category: &str, message: String) -> DiagnosticError {
+    DiagnosticError {
+        file: file.to_string(),
+        line: 0,
+        column: 0,
+        message,
+        category: category.to_string(),
+        module_stage: None,
+        module_kind: None,
+        module_path: None,
+        module_version: None,
+    }
 }
 
 fn resolve_command_target(
@@ -82,9 +117,12 @@ fn default_output_path(target: &ResolvedTarget) -> PathBuf {
 pub fn cmd_check_vo(path: String, state: tauri::State<'_, AppState>) -> Result<CheckResult, String> {
     let target = resolve_command_target(&state, &path)?;
     let compile_str = target.compile_path.to_string_lossy().to_string();
-    match prepare_and_compile(&compile_str) {
+    match check_with_auto_install(&compile_str) {
         Ok(_) => Ok(CheckResult { ok: true, errors: vec![] }),
-        Err(msg) => Ok(CheckResult { ok: false, errors: vec![diagnostic_from_error(compile_str, msg)] }),
+        Err(error) => Ok(CheckResult {
+            ok: false,
+            errors: vec![diagnostic_from_compile_error(&compile_str, &error)],
+        }),
     }
 }
 
@@ -95,11 +133,24 @@ pub fn cmd_compile_vo(path: String, state: tauri::State<'_, AppState>) -> Result
     match prepare_and_compile(&compile_str) {
         Ok(output) => {
             let output_path = default_output_path(&target);
-            std::fs::write(&output_path, output.module.serialize())
-                .map_err(|err| format!("failed to write output: {}", err))?;
+            if let Err(error) = std::fs::write(&output_path, output.module.serialize()) {
+                return Ok(CompileResult {
+                    ok: false,
+                    errors: vec![diagnostic_from_message(
+                        &output_path.to_string_lossy(),
+                        "io",
+                        format!("failed to write output: {}", error),
+                    )],
+                    output_path: None,
+                });
+            }
             Ok(CompileResult { ok: true, errors: vec![], output_path: Some(output_path.to_string_lossy().to_string()) })
         }
-        Err(msg) => Ok(CompileResult { ok: false, errors: vec![diagnostic_from_error(compile_str, msg)], output_path: None }),
+        Err(error) => Ok(CompileResult {
+            ok: false,
+            errors: vec![diagnostic_from_compile_error(&compile_str, &error)],
+            output_path: None,
+        }),
     }
 }
 
@@ -115,25 +166,40 @@ pub fn cmd_build_vo(path: String, output: Option<String>, state: tauri::State<'_
     match prepare_and_compile(&compile_str) {
         Ok(compiled) => {
             let output_path = output.map(std::path::PathBuf::from).unwrap_or_else(|| default_output_path(&target));
-            std::fs::write(&output_path, compiled.module.serialize())
-                .map_err(|err| format!("failed to write output: {}", err))?;
+            if let Err(error) = std::fs::write(&output_path, compiled.module.serialize()) {
+                return Ok(BuildResult {
+                    ok: false,
+                    errors: vec![diagnostic_from_message(
+                        &output_path.to_string_lossy(),
+                        "io",
+                        format!("failed to write output: {}", error),
+                    )],
+                    output_path: None,
+                });
+            }
             Ok(BuildResult { ok: true, errors: vec![], output_path: Some(output_path.to_string_lossy().to_string()) })
         }
-        Err(msg) => Ok(BuildResult { ok: false, errors: vec![diagnostic_from_error(compile_str, msg)], output_path: None }),
+        Err(error) => Ok(BuildResult {
+            ok: false,
+            errors: vec![diagnostic_from_compile_error(&compile_str, &error)],
+            output_path: None,
+        }),
     }
 }
 
 #[tauri::command]
 pub fn cmd_dump_vo(path: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
     let target = resolve_command_target(&state, &path)?;
-    let output = prepare_and_compile(&target.compile_path.to_string_lossy())?;
+    let output = prepare_and_compile(&target.compile_path.to_string_lossy())
+        .map_err(|error| error.to_string())?;
     Ok(format_text(&output.module))
 }
 
 #[tauri::command]
 pub fn cmd_run_vo(path: String, run_mode: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
     let run_target = resolve_run_target(&state.session_root(), state.workspace_root(), &path, state.single_file_run())?;
-    let compiled = prepare_and_compile(&run_target.compile_path.to_string_lossy())?;
+    let compiled = prepare_and_compile(&run_target.compile_path.to_string_lossy())
+        .map_err(|error| error.to_string())?;
     let sink = CaptureSink::new();
     let result = run_with_output(compiled, parse_run_mode(&run_mode)?, Vec::new(), sink.clone());
     let captured = take_captured_stdout(sink.as_ref()).unwrap_or_default();
@@ -172,7 +238,7 @@ pub async fn cmd_run_vo_stream(
         let compiled = match prepare_and_compile(&compile_str) {
             Ok(c) => c,
             Err(err) => {
-                let _ = on_event.send(RunEvent::Stderr { text: err });
+                let _ = on_event.send(RunEvent::Stderr { text: err.to_string() });
                 let _ = on_event.send(RunEvent::Done { exit_code: 1, duration_ms: start.elapsed().as_millis() as u64 });
                 run_handle.clear_current();
                 return;

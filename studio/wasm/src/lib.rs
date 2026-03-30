@@ -581,16 +581,12 @@ fn vfs_exists(path: &str) -> bool {
     err.is_none()
 }
 
-fn read_project_locked_modules(
-    project_root: &str,
-) -> Result<Vec<vo_module::schema::lockfile::LockedModule>, String> {
-    let lock_path = join_vfs_path(project_root, "vo.lock");
-    if !vfs_exists(&lock_path) {
-        return Ok(Vec::new());
-    }
-    let lock = vo_module::schema::lockfile::LockFile::parse(&read_vfs_text(&lock_path)?)
-        .map_err(|e| format!("parse {}: {}", lock_path, e))?;
-    Ok(lock.resolved)
+fn load_project_deps_from_vfs(project_root: &str) -> Result<vo_module::project::ProjectDeps, String> {
+    let mut local_fs = MemoryFs::new();
+    read_vfs_package(project_root, &mut local_fs)?;
+    let project_dir = Path::new(project_root.trim_start_matches('/'));
+    vo_module::project::read_project_deps_near(&local_fs, project_dir, &[])
+        .map_err(|error| error.to_string())
 }
 
 fn framework_module_root(locked: &vo_module::schema::lockfile::LockedModule) -> String {
@@ -705,8 +701,8 @@ fn discover_framework_modules(target: &ResolvedVfsCompileTarget) -> Result<Vec<F
             }
         }
 
-        let locked_modules = read_project_locked_modules(project_root)?;
-        append_locked_framework_modules(&mut modules, &locked_modules)?;
+        let project_deps = load_project_deps_from_vfs(project_root)?;
+        append_locked_framework_modules(&mut modules, &project_deps.locked_modules)?;
     } else {
         let single_file = SingleFileEntry::load(target)?;
         let locked_modules = single_file.locked_modules()?;

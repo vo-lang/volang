@@ -1,4 +1,7 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::digest::Digest;
 use crate::identity::ModulePath;
@@ -31,6 +34,128 @@ pub fn cache_key(module: &str) -> String {
 /// OS cache root or prepending with `/` for a VFS root.
 pub fn relative_module_dir(module: &str, version: &str) -> String {
     format!("{}/{}", cache_key(module), version)
+}
+
+static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct TempPathGuard {
+    path: PathBuf,
+    is_dir: bool,
+}
+
+impl TempPathGuard {
+    fn dir(path: PathBuf) -> Self {
+        Self { path, is_dir: true }
+    }
+
+    fn file(path: PathBuf) -> Self {
+        Self {
+            path,
+            is_dir: false,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempPathGuard {
+    fn drop(&mut self) {
+        if self.is_dir {
+            let _ = std::fs::remove_dir_all(&self.path);
+        } else {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn next_temp_path(parent: &Path, stem: &str) -> PathBuf {
+    let counter = TEMP_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    parent.join(format!(
+        ".{stem}.{}.{}.tmp",
+        std::process::id(),
+        timestamp + counter as u128,
+    ))
+}
+
+fn create_unique_stage_dir(parent: &Path, stem: &str) -> Result<TempPathGuard, Error> {
+    for _ in 0..64 {
+        let path = next_temp_path(parent, stem);
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(TempPathGuard::dir(path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(Error::Io(error)),
+        }
+    }
+    Err(Error::SourceScan(format!(
+        "failed to allocate unique staging directory in {}",
+        parent.display(),
+    )))
+}
+
+fn create_unique_temp_file(parent: &Path, stem: &str) -> Result<(std::fs::File, TempPathGuard), Error> {
+    for _ in 0..64 {
+        let path = next_temp_path(parent, stem);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((file, TempPathGuard::file(path))),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(Error::Io(error)),
+        }
+    }
+    Err(Error::SourceScan(format!(
+        "failed to allocate unique temporary file in {}",
+        parent.display(),
+    )))
+}
+
+fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    let parent = path.parent().ok_or_else(|| {
+        Error::SourceScan(format!("path has no parent: {}", path.display()))
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let stem = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact");
+    let (mut file, temp) = create_unique_temp_file(parent, stem)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+
+    match std::fs::rename(temp.path(), path) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            if let Ok(existing) = std::fs::read(path) {
+                if existing == bytes {
+                    return Ok(());
+                }
+            }
+            if path.exists() {
+                match std::fs::remove_file(path) {
+                    Ok(()) => {
+                        std::fs::rename(temp.path(), path)?;
+                        Ok(())
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        std::fs::rename(temp.path(), path)?;
+                        Ok(())
+                    }
+                    Err(error) => Err(Error::Io(error)),
+                }
+            } else {
+                Err(Error::Io(rename_error))
+            }
+        }
+    }
 }
 
 // ── Source package extraction (platform-agnostic) ────────────────────────────
@@ -165,6 +290,10 @@ pub fn download_source(
     source_asset_name: &str,
     manifest_raw: &[u8],
 ) -> Result<(), Error> {
+    if is_source_cached(cache_root, locked) {
+        return Ok(());
+    }
+
     let data = registry.fetch_source_package(&locked.path, &locked.version, source_asset_name)?;
 
     // Verify digest
@@ -186,21 +315,18 @@ pub fn download_source(
     })?;
     std::fs::create_dir_all(parent)?;
 
-    let stage_name = format!(".{}.installing", locked.version);
-    let stage_dir = parent.join(stage_name);
-    if stage_dir.exists() {
-        std::fs::remove_dir_all(&stage_dir)?;
-    }
-    std::fs::create_dir_all(&stage_dir)?;
+    let stage = create_unique_stage_dir(
+        parent,
+        &format!("{}-{}", cache_key(locked.path.as_str()), locked.version),
+    )?;
 
-    safe_unpack_tar_gz(&data, &stage_dir).map_err(|e| Error::DigestMismatch {
+    safe_unpack_tar_gz(&data, stage.path()).map_err(|e| Error::DigestMismatch {
         context: format!("source package for {} {}", locked.path, locked.version),
         expected: "safe archive".to_string(),
         found: e,
     })?;
 
-    if !stage_dir.join("vo.mod").is_file() {
-        std::fs::remove_dir_all(&stage_dir)?;
+    if !stage.path().join("vo.mod").is_file() {
         return Err(Error::SourceScan(format!(
             "source package for {} {} does not contain vo.mod at the module root",
             locked.path, locked.version,
@@ -209,21 +335,35 @@ pub fn download_source(
 
     // Write metadata files used by compile-time frozen-build validation
     std::fs::write(
-        stage_dir.join(SOURCE_DIGEST_MARKER),
+        stage.path().join(SOURCE_DIGEST_MARKER),
         format!("{}\n", locked.source),
     )?;
     std::fs::write(
-        stage_dir.join(VERSION_MARKER),
+        stage.path().join(VERSION_MARKER),
         format!("{}\n", locked.version),
     )?;
-    std::fs::write(stage_dir.join("vo.release.json"), manifest_raw)?;
+    std::fs::write(stage.path().join("vo.release.json"), manifest_raw)?;
 
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir)?;
+    if is_source_cached(cache_root, locked) {
+        return Ok(());
     }
-    std::fs::rename(&stage_dir, &dir)?;
 
-    Ok(())
+    match std::fs::rename(stage.path(), &dir) {
+        Ok(()) => {}
+        Err(rename_error) => {
+            if is_source_cached(cache_root, locked) {
+                return Ok(());
+            }
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir)?;
+                std::fs::rename(stage.path(), &dir)?;
+            } else {
+                return Err(Error::Io(rename_error));
+            }
+        }
+    }
+
+    validate_source_cache_entry(cache_root, locked)
 }
 
 /// Download and verify a target-specific artifact into the cache.
@@ -233,6 +373,10 @@ pub fn download_artifact(
     artifact: &LockedArtifact,
     registry: &dyn Registry,
 ) -> Result<(), Error> {
+    if is_artifact_cached(cache_root, locked, artifact) {
+        return Ok(());
+    }
+
     let data = registry.fetch_artifact(&locked.path, &locked.version, &artifact.id.name)?;
 
     // Verify size
@@ -262,10 +406,10 @@ pub fn download_artifact(
 
     let dir = cache_dir(cache_root, &locked.path, &locked.version);
     let art_dir = dir.join("artifacts");
-    std::fs::create_dir_all(&art_dir)?;
-    std::fs::write(art_dir.join(&artifact.id.name), &data)?;
+    let artifact_path = art_dir.join(&artifact.id.name);
+    atomic_write_bytes(&artifact_path, &data)?;
 
-    Ok(())
+    validate_artifact_cache_entry(cache_root, locked, artifact)
 }
 
 /// Verify that all locked modules and their required artifacts are present in the cache
@@ -622,6 +766,87 @@ fn safe_unpack_tar_gz(data: &[u8], dest: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    use crate::identity::ArtifactId;
+    use crate::schema::lockfile::LockedArtifact;
+    use crate::version::ToolchainConstraint;
+
+    struct CountingRegistry {
+        source_fetches: AtomicUsize,
+        source_bytes: Vec<u8>,
+    }
+
+    impl CountingRegistry {
+        fn new(source_bytes: Vec<u8>) -> Self {
+            Self {
+                source_fetches: AtomicUsize::new(0),
+                source_bytes,
+            }
+        }
+    }
+
+    impl Registry for CountingRegistry {
+        fn list_versions(&self, _module: &ModulePath) -> Result<Vec<ExactVersion>, Error> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_manifest(
+            &self,
+            _module: &ModulePath,
+            _version: &ExactVersion,
+        ) -> Result<crate::schema::manifest::ReleaseManifest, Error> {
+            Err(Error::RegistryError("unused in test".to_string()))
+        }
+
+        fn fetch_source_package(
+            &self,
+            _module: &ModulePath,
+            _version: &ExactVersion,
+            _asset_name: &str,
+        ) -> Result<Vec<u8>, Error> {
+            self.source_fetches.fetch_add(1, AtomicOrdering::Relaxed);
+            Ok(self.source_bytes.clone())
+        }
+
+        fn fetch_artifact(
+            &self,
+            _module: &ModulePath,
+            _version: &ExactVersion,
+            _asset_name: &str,
+        ) -> Result<Vec<u8>, Error> {
+            Err(Error::RegistryError("unused in test".to_string()))
+        }
+    }
+
+    fn test_locked_module(module: &str, version: &str, manifest_raw: &[u8], source_digest: &Digest) -> LockedModule {
+        LockedModule {
+            path: ModulePath::parse(module).unwrap(),
+            version: ExactVersion::parse(version).unwrap(),
+            vo: ToolchainConstraint::parse("0.1.0").unwrap(),
+            commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            release_manifest: Digest::from_sha256(manifest_raw),
+            source: source_digest.clone(),
+            deps: Vec::new(),
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn write_cached_source(module_dir: &Path, locked: &LockedModule, manifest_raw: &[u8]) {
+        std::fs::create_dir_all(module_dir).unwrap();
+        std::fs::write(
+            module_dir.join("vo.mod"),
+            format!("module {}\nvo 0.1.0\n", locked.path),
+        )
+        .unwrap();
+        std::fs::write(module_dir.join(VERSION_MARKER), format!("{}\n", locked.version)).unwrap();
+        std::fs::write(
+            module_dir.join(SOURCE_DIGEST_MARKER),
+            format!("{}\n", locked.source),
+        )
+        .unwrap();
+        std::fs::write(module_dir.join("vo.release.json"), manifest_raw).unwrap();
+    }
 
     #[test]
     fn test_cache_dir() {
@@ -642,5 +867,134 @@ mod tests {
             d.as_str(),
             "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
+    }
+
+    #[test]
+    fn test_create_unique_stage_dir_returns_distinct_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = create_unique_stage_dir(temp.path(), "stage").unwrap();
+        let second = create_unique_stage_dir(temp.path(), "stage").unwrap();
+
+        assert_ne!(first.path(), second.path());
+        assert!(first.path().is_dir());
+        assert!(second.path().is_dir());
+    }
+
+    #[test]
+    fn test_atomic_write_bytes_replaces_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("artifact.bin");
+
+        std::fs::write(&path, b"old-bytes").unwrap();
+        atomic_write_bytes(&path, b"new-bytes").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new-bytes");
+    }
+
+    #[test]
+    fn test_download_source_skips_fetch_when_cache_is_already_valid() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest_raw = b"{\"module\":\"github.com/acme/lib\"}\n";
+        let source_digest = Digest::parse(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let locked = test_locked_module(
+            "github.com/acme/lib",
+            "v1.0.0",
+            manifest_raw,
+            &source_digest,
+        );
+        let module_dir = cache_dir(temp.path(), &locked.path, &locked.version);
+        write_cached_source(&module_dir, &locked, manifest_raw);
+        let registry = CountingRegistry::new(b"unused-source".to_vec());
+
+        download_source(
+            temp.path(),
+            &locked,
+            &registry,
+            "source.tar.gz",
+            manifest_raw,
+        )
+        .unwrap();
+
+        assert_eq!(registry.source_fetches.load(AtomicOrdering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_download_artifact_replaces_invalid_existing_cache_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest_raw = b"{\"module\":\"github.com/acme/lib\"}\n";
+        let source_digest = Digest::parse(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let mut locked = test_locked_module(
+            "github.com/acme/lib",
+            "v1.0.0",
+            manifest_raw,
+            &source_digest,
+        );
+        let module_dir = cache_dir(temp.path(), &locked.path, &locked.version);
+        write_cached_source(&module_dir, &locked, manifest_raw);
+
+        let artifact_bytes = b"fresh-artifact";
+        let artifact = LockedArtifact {
+            id: ArtifactId {
+                kind: "extension-native".to_string(),
+                target: "aarch64-apple-darwin".to_string(),
+                name: "libdemo.dylib".to_string(),
+            },
+            size: artifact_bytes.len() as u64,
+            digest: Digest::from_sha256(artifact_bytes),
+        };
+        locked.artifacts.push(artifact.clone());
+
+        let art_path = module_dir.join("artifacts").join(&artifact.id.name);
+        std::fs::create_dir_all(art_path.parent().unwrap()).unwrap();
+        std::fs::write(&art_path, b"stale").unwrap();
+
+        struct ArtifactRegistry {
+            bytes: Vec<u8>,
+        }
+
+        impl Registry for ArtifactRegistry {
+            fn list_versions(&self, _module: &ModulePath) -> Result<Vec<ExactVersion>, Error> {
+                Ok(Vec::new())
+            }
+
+            fn fetch_manifest(
+                &self,
+                _module: &ModulePath,
+                _version: &ExactVersion,
+            ) -> Result<crate::schema::manifest::ReleaseManifest, Error> {
+                Err(Error::RegistryError("unused in test".to_string()))
+            }
+
+            fn fetch_source_package(
+                &self,
+                _module: &ModulePath,
+                _version: &ExactVersion,
+                _asset_name: &str,
+            ) -> Result<Vec<u8>, Error> {
+                Err(Error::RegistryError("unused in test".to_string()))
+            }
+
+            fn fetch_artifact(
+                &self,
+                _module: &ModulePath,
+                _version: &ExactVersion,
+                _asset_name: &str,
+            ) -> Result<Vec<u8>, Error> {
+                Ok(self.bytes.clone())
+            }
+        }
+
+        let registry = ArtifactRegistry {
+            bytes: artifact_bytes.to_vec(),
+        };
+        download_artifact(temp.path(), &locked, &artifact, &registry).unwrap();
+
+        assert_eq!(std::fs::read(&art_path).unwrap(), artifact_bytes);
     }
 }

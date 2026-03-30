@@ -78,6 +78,11 @@ export interface DiagnosticError {
   line: number;
   column: number;
   message: string;
+  category: string;
+  moduleStage?: string | null;
+  moduleKind?: string | null;
+  modulePath?: string | null;
+  moduleVersion?: string | null;
 }
 
 export type RunEvent =
