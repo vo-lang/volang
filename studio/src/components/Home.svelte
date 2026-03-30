@@ -36,6 +36,16 @@
     hasGui: boolean;
   }
 
+  interface LocalDemo {
+    name: string;
+    subPath: string;
+    desc: string;
+  }
+
+  const localDemos: LocalDemo[] = [
+    { name: 'Streaming Chat', subPath: 'chat_demo', desc: 'VirtualScroll + MeasureText' },
+  ];
+
   const examples: Example[] = [
     { name: 'Channels',        file: 'channels.vo',        desc: 'Goroutine communication',       source: exChannels,      hasGui: false },
     { name: 'Closures',        file: 'closures.vo',        desc: 'Captured variables',            source: exClosures,      hasGui: false },
@@ -377,6 +387,21 @@
             </button>
           {/each}
         </div>
+        {#if isNative && localDemos.length > 0}
+          <span class="quick-try-label quick-try-label-demo">Demos</span>
+          <div class="ex-list">
+            {#each localDemos as demo}
+              <button
+                class="ex-link ex-link-demo"
+                on:click={() => onOpenLocalPath(`${$catalogStore.root}/${demo.subPath}`)}
+              >
+                <span class="ex-link-name">{demo.name}</span>
+                <span class="ex-link-dot">·</span>
+                <span class="ex-link-desc">{demo.desc}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
       </div>
 
     </aside>
@@ -710,6 +735,10 @@
     color: #a6e3a1;
     padding-top: 8px;
   }
+  .quick-try-label-demo {
+    color: #cba6f7;
+    padding-top: 8px;
+  }
 
   .ex-list {
     display: flex;
@@ -736,6 +765,9 @@
   }
   .ex-link-gui:hover {
     background: rgba(166, 227, 161, 0.06);
+  }
+  .ex-link-demo:hover {
+    background: rgba(203, 166, 247, 0.06);
   }
   .ex-link-name {
     font-size: 12px;
