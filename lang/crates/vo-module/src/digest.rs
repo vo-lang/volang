@@ -58,6 +58,40 @@ impl Digest {
     }
 }
 
+pub fn verify_digest(
+    bytes: &[u8],
+    expected_digest: &Digest,
+    context: impl Into<String>,
+) -> Result<(), Error> {
+    let context = context.into();
+    let computed = Digest::from_sha256(bytes);
+    if computed != *expected_digest {
+        return Err(Error::DigestMismatch {
+            context,
+            expected: expected_digest.as_str().to_string(),
+            found: computed.as_str().to_string(),
+        });
+    }
+    Ok(())
+}
+
+pub fn verify_size_and_digest(
+    bytes: &[u8],
+    expected_size: u64,
+    expected_digest: &Digest,
+    context: impl Into<String>,
+) -> Result<(), Error> {
+    let context = context.into();
+    if bytes.len() as u64 != expected_size {
+        return Err(Error::DigestMismatch {
+            context: format!("{context}: size mismatch"),
+            expected: format!("{} bytes", expected_size),
+            found: format!("{} bytes", bytes.len()),
+        });
+    }
+    verify_digest(bytes, expected_digest, context)
+}
+
 impl fmt::Display for Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.raw)
@@ -112,8 +146,25 @@ mod tests {
     #[test]
     fn test_digest_reject_no_prefix() {
         assert!(Digest::parse(
-            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab"
+            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab",
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_verify_digest_mismatch() {
+        let expected = Digest::parse(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let err = verify_digest(b"hello", &expected, "sample").unwrap_err();
+        assert!(err.to_string().contains("digest mismatch for sample"));
+    }
+
+    #[test]
+    fn test_verify_size_and_digest_size_mismatch() {
+        let expected = Digest::from_sha256(b"hello");
+        let err = verify_size_and_digest(b"hello", 1, &expected, "sample").unwrap_err();
+        assert!(err.to_string().contains("size mismatch"));
     }
 }

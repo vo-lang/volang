@@ -87,7 +87,7 @@ pub struct Vm {
     #[cfg(feature = "std")]
     extension_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
     #[cfg(feature = "std")]
-    extension_manifests: Option<Vec<vo_runtime::ext_loader::ExtensionManifest>>,
+    extension_specs: Option<Vec<vo_runtime::ext_loader::NativeExtensionSpec>>,
     pub module: Option<Module>,
     pub scheduler: Scheduler,
     pub state: VmState,
@@ -124,7 +124,7 @@ impl Vm {
             #[cfg(feature = "std")]
             extension_loader: None,
             #[cfg(feature = "std")]
-            extension_manifests: None,
+            extension_specs: None,
             module: None,
             scheduler: Scheduler::new(),
             state: VmState::new(),
@@ -265,9 +265,9 @@ impl Vm {
 
         validate_externs_registered(&self.state.extern_registry, &module.externs);
 
-        self.extension_manifests = ext_loader
+        self.extension_specs = ext_loader
             .as_ref()
-            .map(|loader| loader.manifests().to_vec());
+            .map(|loader| loader.specs().to_vec());
         self.extension_loader = ext_loader;
 
         self.finish_load(module);
@@ -363,7 +363,7 @@ impl Vm {
         // Spawn island thread with JIT config from main VM
         let module_arc = std::sync::Arc::new(module.clone());
         let registry_clone = registry.clone();
-        let extension_manifests = self.extension_manifests.clone().unwrap_or_default();
+        let extension_specs = self.extension_specs.clone().unwrap_or_default();
         #[cfg(feature = "jit")]
         let jit_config = self.jit_mgr.as_ref().map(|mgr| mgr.config().clone());
         let join_handle = std::thread::spawn(move || {
@@ -373,7 +373,7 @@ impl Vm {
                 module_arc,
                 island_transport,
                 registry_clone,
-                extension_manifests,
+                extension_specs,
                 jit_config,
             );
             #[cfg(not(feature = "jit"))]
@@ -382,7 +382,7 @@ impl Vm {
                 module_arc,
                 island_transport,
                 registry_clone,
-                extension_manifests,
+                extension_specs,
             );
         });
 

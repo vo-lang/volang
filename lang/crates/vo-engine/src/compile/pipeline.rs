@@ -10,7 +10,7 @@ use vo_codegen::compile_project;
 use vo_common::vfs::{FileSet, FileSystem, ZipFs};
 use vo_module::project::ProjectDeps;
 
-use super::native::{prepare_extension_manifests_for_frozen_build, validate_locked_modules_installed};
+use super::native::{prepare_native_extension_specs_for_frozen_build, validate_locked_modules_installed};
 use super::project_prepare::{load_project_deps_for_engine, read_all_replaces_with_fs, replacing_resolver};
 use super::{CompileError, CompileOutput};
 
@@ -83,7 +83,7 @@ impl<F: FileSystem> PreparedProject<F> {
 
 impl AnalyzedCompilation {
     fn prepare_extensions_for_frozen_build(&self) -> Result<(), CompileError> {
-        prepare_extension_manifests_for_frozen_build(
+        prepare_native_extension_specs_for_frozen_build(
             &self.project.extensions,
             &self.locked_modules,
             &self.mod_cache,
@@ -93,7 +93,7 @@ impl AnalyzedCompilation {
     }
 
     fn into_output(self) -> Result<CompileOutput, CompileError> {
-        let extensions = prepare_extension_manifests_for_frozen_build(
+        let extensions = prepare_native_extension_specs_for_frozen_build(
             &self.project.extensions,
             &self.locked_modules,
             &self.mod_cache,

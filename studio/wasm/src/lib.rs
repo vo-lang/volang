@@ -29,8 +29,8 @@ fn ensure_panic_hook() {
 include!(concat!(env!("OUT_DIR"), "/term_embedded.rs"));
 
 fn emit_host_log(record: vo_web::HostLogRecord) {
-    let source = record.source.clone();
-    let code = record.code.clone();
+    let source = record.core.source.clone();
+    let code = record.core.code.clone();
     let text = record.text.clone();
     vo_web::emit_host_log(record);
     match text {
@@ -406,13 +406,13 @@ fn normalize_joined_vfs_path(path: &Path) -> String {
     }
 }
 
-fn load_workspace_context_from_vfs(project_root: &str) -> Result<vo_web::WorkspaceProjectContext, String> {
+fn load_workspace_context_from_vfs(project_root: &str) -> Result<vo_module::project::ProjectContext, String> {
     let vfs = vo_web::WasmVfs::new("");
     let project_dir = Path::new(project_root.trim_start_matches('/'));
-    vo_web::load_workspace_project_context(&vfs, project_dir)
+    vo_module::project::load_project_context(&vfs, project_dir)
 }
 
-fn workspace_replace_vfs_roots(context: &vo_web::WorkspaceProjectContext) -> Vec<String> {
+fn workspace_replace_vfs_roots(context: &vo_module::project::ProjectContext) -> Vec<String> {
     let mut replace_dirs = context
         .workspace_replaces
         .values()
@@ -425,7 +425,7 @@ fn workspace_replace_vfs_roots(context: &vo_web::WorkspaceProjectContext) -> Vec
 
 fn build_workspace_project_from_vfs(
     project_root: &str,
-) -> Result<(MemoryFs, vo_web::WorkspaceProjectContext), String> {
+) -> Result<(MemoryFs, vo_module::project::ProjectContext), String> {
     let vfs = vo_web::WasmVfs::new("");
     let context = load_workspace_context_from_vfs(project_root)?;
     let mut local_fs = MemoryFs::new();

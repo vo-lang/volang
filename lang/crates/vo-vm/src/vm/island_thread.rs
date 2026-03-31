@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use vo_runtime::ext_loader::{ExtensionLoader, NativeExtensionSpec};
 use vo_runtime::island::IslandCommand;
 use vo_runtime::island_transport::IslandTransport;
 
@@ -16,7 +17,7 @@ pub fn run_island_thread(
     module: Arc<Module>,
     transport: impl IslandTransport,
     island_registry: IslandRegistry,
-    extension_manifests: Vec<vo_runtime::ext_loader::ExtensionManifest>,
+    extension_specs: Vec<NativeExtensionSpec>,
     jit_config: Option<super::JitConfig>,
 ) {
     let mut vm = match jit_config {
@@ -28,7 +29,7 @@ pub fn run_island_thread(
         module,
         transport,
         island_registry,
-        extension_manifests,
+        extension_specs,
         &mut vm,
     );
 }
@@ -39,7 +40,7 @@ pub fn run_island_thread(
     module: Arc<Module>,
     transport: impl IslandTransport,
     island_registry: IslandRegistry,
-    extension_manifests: Vec<vo_runtime::ext_loader::ExtensionManifest>,
+    extension_specs: Vec<NativeExtensionSpec>,
 ) {
     let mut vm = Vm::new();
     run_island_vm(
@@ -47,7 +48,7 @@ pub fn run_island_thread(
         module,
         transport,
         island_registry,
-        extension_manifests,
+        extension_specs,
         &mut vm,
     );
 }
@@ -57,14 +58,14 @@ fn run_island_vm(
     module: Arc<Module>,
     transport: impl IslandTransport,
     island_registry: IslandRegistry,
-    extension_manifests: Vec<vo_runtime::ext_loader::ExtensionManifest>,
+    extension_specs: Vec<NativeExtensionSpec>,
     vm: &mut Vm,
 ) {
-    let ext_loader = if extension_manifests.is_empty() {
+    let ext_loader = if extension_specs.is_empty() {
         None
     } else {
         Some(
-            vo_runtime::ext_loader::ExtensionLoader::from_manifests(&extension_manifests)
+            ExtensionLoader::from_specs(&extension_specs)
                 .unwrap_or_else(|e| panic!("failed to load island extensions: {}", e)),
         )
     };

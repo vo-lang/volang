@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 
 use vo_common::vfs::MemoryFs;
 use vo_module::cache::layout::{cache_key, relative_module_dir, VERSION_MARKER};
+use vo_module::identity::ModulePath;
 use vo_module::schema::lockfile::{LockedArtifact, LockedModule};
 use vo_module::schema::manifest::ReleaseManifest;
+use vo_module::version::ExactVersion;
 
 pub(super) const VFS_ARTIFACT_DIR: &str = ".vo-artifacts";
 pub(super) const VFS_WASM_TARGET: &str = "wasm32-unknown-unknown";
@@ -172,12 +174,16 @@ pub(super) fn release_manifest_from_files(
             module, version
         )
     })?;
-    ReleaseManifest::parse(&manifest_content).map_err(|error| {
-        format!(
-            "vo.release.json parse error for {}@{}: {}",
-            module, version, error
-        )
-    })
+    let expected_module = ModulePath::parse(module)
+        .map_err(|error| format!("invalid module path {}: {}", module, error))?;
+    let expected_version = ExactVersion::parse(version)
+        .map_err(|error| format!("invalid version {}: {}", version, error))?;
+    vo_module::registry::parse_requested_release_manifest(
+        &manifest_content,
+        &expected_module,
+        &expected_version,
+    )
+    .map_err(|error| format!("vo.release.json parse error for {}@{}: {}", module, version, error))
 }
 
 pub(super) fn read_release_manifest_from_vfs(
@@ -186,12 +192,16 @@ pub(super) fn read_release_manifest_from_vfs(
 ) -> Result<ReleaseManifest, String> {
     let manifest_path = vfs_module_file_path(module, version, "vo.release.json");
     let manifest_content = read_vfs_text(&manifest_path)?;
-    ReleaseManifest::parse(&manifest_content).map_err(|error| {
-        format!(
-            "vo.release.json parse error for {}@{}: {}",
-            module, version, error
-        )
-    })
+    let expected_module = ModulePath::parse(module)
+        .map_err(|error| format!("invalid module path {}: {}", module, error))?;
+    let expected_version = ExactVersion::parse(version)
+        .map_err(|error| format!("invalid version {}: {}", version, error))?;
+    vo_module::registry::parse_requested_release_manifest(
+        &manifest_content,
+        &expected_module,
+        &expected_version,
+    )
+    .map_err(|error| format!("vo.release.json parse error for {}@{}: {}", module, version, error))
 }
 
 // ── Project deps helpers ────────────────────────────────────────────────────

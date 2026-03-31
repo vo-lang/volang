@@ -1851,6 +1851,7 @@ dependencies = [
 name = "vo-engine"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "sha2",
  "vo-analysis",
@@ -1958,7 +1959,6 @@ dependencies = [
  "regex",
  "vo-common-core",
  "vo-ffi-macro",
- "vo-module",
 ]
 
 [[package]]
@@ -2035,6 +2035,7 @@ dependencies = [
  "vo-analysis",
  "vo-codegen",
  "vo-common",
+ "vo-common-core",
  "vo-module",
  "vo-runtime",
  "vo-stdlib",

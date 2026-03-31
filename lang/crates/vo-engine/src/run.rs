@@ -2,8 +2,9 @@
 
 use std::fmt;
 use std::sync::{atomic::AtomicBool, Arc};
+
 use vo_common_core::debug_info::SourceLoc;
-use vo_runtime::ext_loader::{ExtensionLoader, ExtensionManifest};
+use vo_runtime::ext_loader::{ExtensionLoader, NativeExtensionSpec};
 use vo_runtime::output::{OutputSink, StdoutSink};
 use vo_vm::bytecode::Module;
 use vo_vm::vm::{RuntimeTrapKind, SchedulingOutcome, Vm, VmError};
@@ -139,9 +140,9 @@ pub fn run_with_output_interruptible(
         module,
         source_root: _,
         extensions,
-        locked_modules,
+        locked_modules: _,
     } = compiled;
-    let ext_loader = load_extensions(&extensions, &locked_modules)?;
+    let ext_loader = load_extensions(&extensions)?;
 
     #[cfg(feature = "jit")]
     let mut vm = match mode {
@@ -212,7 +213,7 @@ fn vm_err_to_run_err(vm: &Vm, e: &VmError) -> RunError {
 /// and load the module with extensions.
 pub fn build_gui_vm(compiled: CompileOutput) -> Result<Vm, String> {
     ensure_toolchain_host_installed();
-    let ext_loader = load_extensions(&compiled.extensions, &compiled.locked_modules)
+    let ext_loader = load_extensions(&compiled.extensions)
         .map_err(|e| e.to_string())?;
     let mut vm = Vm::new();
     vm.enable_external_island_transport();
@@ -220,23 +221,12 @@ pub fn build_gui_vm(compiled: CompileOutput) -> Result<Vm, String> {
     Ok(vm)
 }
 
-fn load_extensions(
-    manifests: &[ExtensionManifest],
-    locked_modules: &[vo_module::schema::lockfile::LockedModule],
-) -> Result<Option<ExtensionLoader>, RunError> {
-    if manifests.is_empty() {
+fn load_extensions(specs: &[NativeExtensionSpec]) -> Result<Option<ExtensionLoader>, RunError> {
+    if specs.is_empty() {
         return Ok(None);
     }
 
-    let resolved = crate::compile::prepare_extension_manifests(manifests, locked_modules).map_err(|e| {
-        RunError::Runtime(RuntimeError {
-            message: format!("failed to prepare native extensions: {}", e),
-            location: None,
-            kind: RuntimeErrorKind::Other,
-        })
-    })?;
-
-    let loader = ExtensionLoader::from_manifests(&resolved).map_err(|e| {
+    let loader = ExtensionLoader::from_specs(specs).map_err(|e| {
         RunError::Runtime(RuntimeError {
             message: format!("failed to load extensions: {}", e),
             location: None,

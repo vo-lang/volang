@@ -1,6 +1,6 @@
 //! WASM extension loading, caching, and validation for installed modules.
 
-use vo_module::digest::Digest;
+use vo_module::digest::verify_size_and_digest;
 use vo_module::ext_manifest::{WasmExtensionKind, WasmExtensionManifest};
 use vo_module::schema::lockfile::LockedModule;
 
@@ -101,14 +101,16 @@ fn verify_locked_artifact_bytes(
     let artifact = find_locked_wasm_artifact(locked, asset_name).ok_or_else(|| {
         format!("vo.lock is missing wasm artifact {} for {}@{}", asset_name, locked.path, locked.version)
     })?;
-    let actual = Digest::from_sha256(bytes).to_string();
-    if actual != artifact.digest.as_str() {
-        return Err(format!(
-            "locked wasm artifact {} for {}@{} digest mismatch in the VFS: expected {}, found {}",
-            asset_name, locked.path, locked.version, artifact.digest, actual,
-        ));
-    }
-    Ok(())
+    verify_size_and_digest(
+        bytes,
+        artifact.size,
+        &artifact.digest,
+        format!(
+            "locked wasm artifact {} for {}@{} in the VFS",
+            asset_name, locked.path, locked.version,
+        ),
+    )
+    .map_err(|error| error.to_string())
 }
 
 pub(super) async fn load_locked_ext_from_vfs(locked: &LockedModule) -> Result<(), String> {

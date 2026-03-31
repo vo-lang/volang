@@ -9,13 +9,27 @@ use std::path::{Path, PathBuf};
 
 use libloading::{Library, Symbol};
 
-use crate::ffi::{ExtensionTable, ExternEntry, ExternFnPtr};
+use crate::ffi::{ExtensionTable, ExternEntry, ExternFnPtr, EXTENSION_ABI_VERSION};
 
-// Re-export from vo-module
-pub use vo_module::ext_manifest::{discover_extensions, ExtensionManifest};
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeExtensionSpec {
+    pub name: String,
+    pub native_path: PathBuf,
+    pub manifest_path: PathBuf,
+}
+
+impl NativeExtensionSpec {
+    pub fn new(name: impl Into<String>, native_path: PathBuf, manifest_path: PathBuf) -> Self {
+        Self {
+            name: name.into(),
+            native_path,
+            manifest_path,
+        }
+    }
+}
 
 /// ABI version — must match vo-ext's ABI_VERSION.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = EXTENSION_ABI_VERSION;
 
 /// Error type for extension loading.
 #[derive(Debug)]
@@ -32,8 +46,6 @@ pub enum ExtError {
     },
     /// ABI version mismatch.
     VersionMismatch { expected: u32, found: u32 },
-    /// Manifest parse error.
-    ManifestError(String),
     /// IO error.
     Io(std::io::Error),
 }
@@ -61,7 +73,6 @@ impl std::fmt::Display for ExtError {
                     expected, found
                 )
             }
-            ExtError::ManifestError(msg) => write!(f, "manifest error: {}", msg),
             ExtError::Io(e) => write!(f, "IO error: {}", e),
         }
     }
@@ -96,7 +107,7 @@ pub struct ExtensionLoader {
     loaded: Vec<LoadedExtension>,
     /// Cache: function name -> (ext_idx, entry_idx).
     cache: HashMap<String, (usize, usize)>,
-    manifests: Vec<ExtensionManifest>,
+    specs: Vec<NativeExtensionSpec>,
 }
 
 impl ExtensionLoader {
@@ -105,23 +116,23 @@ impl ExtensionLoader {
         Self {
             loaded: Vec::new(),
             cache: HashMap::new(),
-            manifests: Vec::new(),
+            specs: Vec::new(),
         }
     }
 
-    pub fn from_manifests(manifests: &[ExtensionManifest]) -> Result<Self, ExtError> {
+    pub fn from_specs(specs: &[NativeExtensionSpec]) -> Result<Self, ExtError> {
         let mut loader = Self::new();
-        for manifest in manifests {
-            loader.load_manifest(manifest)?;
+        for spec in specs {
+            loader.load_spec(spec)?;
         }
         Ok(loader)
     }
 
-    fn load_manifest(&mut self, manifest: &ExtensionManifest) -> Result<(), ExtError> {
+    fn load_spec(&mut self, spec: &NativeExtensionSpec) -> Result<(), ExtError> {
         self.load_impl(
-            &manifest.native_path,
-            &manifest.name,
-            manifest.manifest_path.clone(),
+            &spec.native_path,
+            &spec.name,
+            spec.manifest_path.clone(),
         )
     }
 
@@ -183,12 +194,8 @@ impl ExtensionLoader {
             name: name.to_string(),
             entries,
         });
-        self.manifests.push(ExtensionManifest {
-            name: name.to_string(),
-            native_path: canonical_path,
-            manifest_path,
-            wasm: None,
-        });
+        self.specs
+            .push(NativeExtensionSpec::new(name, canonical_path, manifest_path));
 
         Ok(())
     }
@@ -204,8 +211,8 @@ impl ExtensionLoader {
         self.loaded.iter().map(|e| e.name.as_str()).collect()
     }
 
-    pub fn manifests(&self) -> &[ExtensionManifest] {
-        &self.manifests
+    pub fn specs(&self) -> &[NativeExtensionSpec] {
+        &self.specs
     }
 
     /// Get a loaded extension library by manifest name.

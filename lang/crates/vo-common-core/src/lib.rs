@@ -17,6 +17,7 @@ extern crate alloc;
 pub mod bytecode;
 pub mod debug_info;
 pub mod instruction;
+pub mod log_record;
 pub mod runtime_type;
 pub mod serialize;
 pub mod source_provider;
@@ -29,6 +30,7 @@ pub use bytecode::{
 };
 pub use debug_info::{DebugInfo, DebugLoc, FuncDebugInfo, SourceLoc};
 pub use instruction::{Instruction, Opcode};
+pub use log_record::LogRecordCore;
 pub use runtime_type::{ChanDir, InterfaceMethod, RuntimeType, StructField};
 pub use source_provider::{NoSource, SourceProvider};
 pub use symbol::Symbol;

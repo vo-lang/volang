@@ -83,7 +83,7 @@ pub use vo_runtime::ffi::EXTERN_TABLE;
 
 /// ABI version for extension compatibility checking.
 /// Must match `vo_runtime::ext_loader::ABI_VERSION`.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = vo_runtime::ffi::EXTENSION_ABI_VERSION;
 
 /// Export the extension entry point.
 ///

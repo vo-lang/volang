@@ -4,8 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use vo_common::vfs::{MemoryFs, RealFs};
+use vo_common_core::LogRecordCore;
+use vo_module::ext_manifest::ExtensionManifest;
 use vo_module::schema::lockfile::LockedModule;
-use vo_runtime::ext_loader::ExtensionManifest;
+use vo_runtime::ext_loader::NativeExtensionSpec;
 use vo_vm::bytecode::Module;
 
 mod cache;
@@ -17,45 +19,13 @@ mod project_prepare;
 mod tests;
 
 const MOD_CACHE_DIR: &str = ".vo/mod";
-const COMPILE_CACHE_SCHEMA_VERSION: &str = "3";
+const COMPILE_CACHE_SCHEMA_VERSION: &str = "4";
 const COMPILE_CACHE_SLOT_NAMESPACE: &str = "vo-compile-cache-slot";
 const COMPILE_CACHE_NATIVE_NAMESPACE: &str = "vo-compile-cache-native";
 
-#[derive(Clone, Debug)]
-pub struct CompileLogRecord {
-    pub source: &'static str,
-    pub code: &'static str,
-    pub path: Option<String>,
-    pub module: Option<String>,
-    pub version: Option<String>,
-}
+pub type PreparedNativeExtension = NativeExtensionSpec;
 
-impl CompileLogRecord {
-    pub fn new(source: &'static str, code: &'static str) -> Self {
-        Self {
-            source,
-            code,
-            path: None,
-            module: None,
-            version: None,
-        }
-    }
-
-    pub fn path(mut self, path: impl Into<String>) -> Self {
-        self.path = Some(path.into());
-        self
-    }
-
-    pub fn module(mut self, module: impl Into<String>) -> Self {
-        self.module = Some(module.into());
-        self
-    }
-
-    pub fn version(mut self, version: impl Into<String>) -> Self {
-        self.version = Some(version.into());
-        self
-    }
-}
+pub type CompileLogRecord = LogRecordCore;
 
 type CompileLogSink = dyn Fn(CompileLogRecord) + Send + Sync;
 
@@ -243,7 +213,7 @@ impl CompileError {
 pub struct CompileOutput {
     pub module: Module,
     pub source_root: PathBuf,
-    pub extensions: Vec<ExtensionManifest>,
+    pub extensions: Vec<PreparedNativeExtension>,
     pub locked_modules: Vec<LockedModule>,
 }
 
@@ -422,7 +392,7 @@ fn auto_download_locked_modules(root: &Path) -> Result<(), CompileError> {
             .with_locked(locked)
             .with_path(&cache_dir)
         })?;
-        prepare_extension_manifests(&manifests, &project_deps.locked_modules)?;
+        prepare_native_extension_specs(&manifests, &project_deps.locked_modules)?;
     }
 
     Ok(())
@@ -435,11 +405,11 @@ pub fn default_mod_cache_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(MOD_CACHE_DIR))
 }
 
-pub fn prepare_extension_manifests(
+pub fn prepare_native_extension_specs(
     manifests: &[ExtensionManifest],
     locked_modules: &[LockedModule],
-) -> Result<Vec<ExtensionManifest>, ModuleSystemError> {
-    native::prepare_extension_manifests_for_frozen_build(
+) -> Result<Vec<PreparedNativeExtension>, ModuleSystemError> {
+    native::prepare_native_extension_specs_for_frozen_build(
         manifests,
         locked_modules,
         &default_mod_cache_root(),

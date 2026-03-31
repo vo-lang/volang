@@ -1,9 +1,166 @@
 use crate::digest::Digest;
 use crate::identity::ModulePath;
+use crate::schema::manifest::ReleaseManifest;
 use crate::schema::lockfile::{LockFile, LockRoot, LockedArtifact, LockedModule};
 use crate::schema::modfile::ModFile;
 use crate::solver::ResolvedGraph;
 use crate::Error;
+
+fn manifest_deps(manifest: &ReleaseManifest) -> Vec<ModulePath> {
+    let mut deps: Vec<ModulePath> = manifest.require.iter().map(|r| r.module.clone()).collect();
+    deps.sort();
+    deps
+}
+
+fn manifest_artifacts(manifest: &ReleaseManifest) -> Vec<LockedArtifact> {
+    let mut artifacts: Vec<LockedArtifact> = manifest
+        .artifacts
+        .iter()
+        .map(|artifact| LockedArtifact {
+            id: artifact.id.clone(),
+            size: artifact.size,
+            digest: artifact.digest.clone(),
+        })
+        .collect();
+    artifacts.sort_by(|a, b| a.id.cmp(&b.id));
+    artifacts
+}
+
+fn format_deps(deps: &[ModulePath]) -> String {
+    deps.iter()
+        .map(|dep| dep.as_str().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_artifacts(artifacts: &[LockedArtifact]) -> String {
+    artifacts
+        .iter()
+        .map(|artifact| {
+            format!(
+                "{} {} {} {} {}",
+                artifact.id.kind,
+                artifact.id.target,
+                artifact.id.name,
+                artifact.size,
+                artifact.digest,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn locked_module_from_release_manifest(
+    manifest: &ReleaseManifest,
+    manifest_digest: Digest,
+) -> LockedModule {
+    LockedModule {
+        path: manifest.module.clone(),
+        version: manifest.version.clone(),
+        vo: manifest.vo.clone(),
+        commit: manifest.commit.clone(),
+        release_manifest: manifest_digest,
+        source: manifest.source.digest.clone(),
+        deps: manifest_deps(manifest),
+        artifacts: manifest_artifacts(manifest),
+    }
+}
+
+pub fn locked_module_from_manifest_raw(
+    manifest: &ReleaseManifest,
+    manifest_raw: &[u8],
+) -> LockedModule {
+    locked_module_from_release_manifest(manifest, Digest::from_sha256(manifest_raw))
+}
+
+pub fn validate_locked_module_against_manifest(
+    locked: &LockedModule,
+    manifest: &ReleaseManifest,
+    manifest_digest: &Digest,
+) -> Result<(), Error> {
+    let expected = locked_module_from_release_manifest(manifest, manifest_digest.clone());
+    if locked.path != expected.path {
+        return Err(Error::LockedModuleMismatch {
+            module: locked.path.to_string(),
+            field: "path".to_string(),
+            expected: expected.path.to_string(),
+            found: locked.path.to_string(),
+        });
+    }
+    if locked.version != expected.version {
+        return Err(Error::LockedModuleMismatch {
+            module: locked.path.to_string(),
+            field: "version".to_string(),
+            expected: expected.version.to_string(),
+            found: locked.version.to_string(),
+        });
+    }
+    if locked.vo != expected.vo {
+        return Err(Error::LockedModuleMismatch {
+            module: locked.path.to_string(),
+            field: "vo".to_string(),
+            expected: expected.vo.to_string(),
+            found: locked.vo.to_string(),
+        });
+    }
+    if locked.commit != expected.commit {
+        return Err(Error::LockedModuleMismatch {
+            module: locked.path.to_string(),
+            field: "commit".to_string(),
+            expected: expected.commit,
+            found: locked.commit.clone(),
+        });
+    }
+    if locked.release_manifest != expected.release_manifest {
+        return Err(Error::LockedModuleMismatch {
+            module: locked.path.to_string(),
+            field: "release_manifest".to_string(),
+            expected: expected.release_manifest.to_string(),
+            found: locked.release_manifest.to_string(),
+        });
+    }
+    if locked.source != expected.source {
+        return Err(Error::LockedModuleMismatch {
+            module: locked.path.to_string(),
+            field: "source".to_string(),
+            expected: expected.source.to_string(),
+            found: locked.source.to_string(),
+        });
+    }
+    if locked.deps != expected.deps {
+        return Err(Error::LockedModuleMismatch {
+            module: locked.path.to_string(),
+            field: "deps".to_string(),
+            expected: format_deps(&expected.deps),
+            found: format_deps(&locked.deps),
+        });
+    }
+    if locked.artifacts.len() != expected.artifacts.len() {
+        return Err(Error::LockedModuleMismatch {
+            module: locked.path.to_string(),
+            field: "artifacts".to_string(),
+            expected: format_artifacts(&expected.artifacts),
+            found: format_artifacts(&locked.artifacts),
+        });
+    }
+    for (found, expected_artifact) in locked.artifacts.iter().zip(expected.artifacts.iter()) {
+        if found.id != expected_artifact.id
+            || found.size != expected_artifact.size
+            || found.digest != expected_artifact.digest
+        {
+            return Err(Error::LockedModuleMismatch {
+                module: locked.path.to_string(),
+                field: format!(
+                    "artifact {} {} {}",
+                    found.id.kind, found.id.target, found.id.name,
+                ),
+                expected: format_artifacts(std::slice::from_ref(expected_artifact)),
+                found: format_artifacts(std::slice::from_ref(found)),
+            });
+        }
+    }
+    Ok(())
+}
 
 /// Generate a `vo.lock` from a resolved graph and the root module file.
 pub fn generate_lock(
@@ -18,44 +175,10 @@ pub fn generate_lock(
 
     let mut resolved: Vec<LockedModule> = Vec::new();
     for (mp, rm) in &graph.modules {
-        let deps: Vec<ModulePath> = {
-            let mut d: Vec<ModulePath> = rm
-                .manifest
-                .require
-                .iter()
-                .map(|r| r.module.clone())
-                .collect();
-            d.sort();
-            d
-        };
-
-        let artifacts: Vec<LockedArtifact> = {
-            let mut a: Vec<LockedArtifact> = rm
-                .manifest
-                .artifacts
-                .iter()
-                .map(|ma| LockedArtifact {
-                    id: ma.id.clone(),
-                    size: ma.size,
-                    digest: ma.digest.clone(),
-                })
-                .collect();
-            a.sort_by(|x, y| x.id.cmp(&y.id));
-            a
-        };
-
-        let manifest_digest = Digest::from_sha256(&rm.manifest_raw);
-
-        resolved.push(LockedModule {
-            path: mp.clone(),
-            version: rm.version.clone(),
-            vo: rm.manifest.vo.clone(),
-            commit: rm.manifest.commit.clone(),
-            release_manifest: manifest_digest,
-            source: rm.manifest.source.digest.clone(),
-            deps,
-            artifacts,
-        });
+        let locked = locked_module_from_manifest_raw(&rm.manifest, &rm.manifest_raw);
+        debug_assert_eq!(locked.path, *mp);
+        debug_assert_eq!(locked.version, rm.version);
+        resolved.push(locked);
     }
 
     resolved.sort_by(|a, b| a.path.cmp(&b.path));
@@ -134,6 +257,38 @@ pub fn verify_graph_completeness(mod_file: &ModFile, lock_file: &LockFile) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_manifest() -> ReleaseManifest {
+        ReleaseManifest::parse(
+            r#"{
+  "schema_version": 1,
+  "module": "github.com/acme/lib",
+  "version": "v1.2.3",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "module_root": ".",
+  "vo": "^0.1.0",
+  "require": [
+    { "module": "github.com/acme/util", "constraint": "^0.1.0" }
+  ],
+  "source": {
+    "name": "lib-v1.2.3-source.tar.gz",
+    "size": 3,
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "artifacts": [
+    {
+      "kind": "extension-wasm",
+      "target": "wasm32-unknown-unknown",
+      "name": "lib.wasm",
+      "size": 4,
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}"#,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn test_verify_root_consistency_ok() {
         let mf = ModFile::parse("module github.com/acme/app\nvo ^1.0.0\n").unwrap();
@@ -244,5 +399,28 @@ deps = []
 "#;
         let lf = LockFile::parse(lf_content).unwrap();
         assert!(verify_graph_completeness(&mf, &lf).is_ok());
+    }
+
+    #[test]
+    fn test_locked_module_from_manifest_raw() {
+        let manifest = sample_manifest();
+        let raw = manifest.render();
+        let locked = locked_module_from_manifest_raw(&manifest, raw.as_bytes());
+        assert_eq!(locked.path.as_str(), "github.com/acme/lib");
+        assert_eq!(locked.version.to_string(), "v1.2.3");
+        assert_eq!(locked.deps.len(), 1);
+        assert_eq!(locked.artifacts.len(), 1);
+        assert_eq!(locked.release_manifest, Digest::from_sha256(raw.as_bytes()));
+    }
+
+    #[test]
+    fn test_validate_locked_module_against_manifest_detects_commit_mismatch() {
+        let manifest = sample_manifest();
+        let raw = manifest.render();
+        let digest = Digest::from_sha256(raw.as_bytes());
+        let mut locked = locked_module_from_manifest_raw(&manifest, raw.as_bytes());
+        locked.commit = "ffffffffffffffffffffffffffffffffffffffff".to_string();
+        let err = validate_locked_module_against_manifest(&locked, &manifest, &digest).unwrap_err();
+        assert!(err.to_string().contains("commit"));
     }
 }

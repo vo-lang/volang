@@ -143,6 +143,8 @@ pub type ExternFn = fn(&mut ExternCallContext) -> ExternResult;
 
 // ==================== Extension ABI (dylib boundary) ====================
 
+pub const EXTENSION_ABI_VERSION: u32 = 2;
+
 /// Extension ABI result codes returned across dylib boundary.
 pub mod ext_abi {
     pub const RESULT_OK: u32 = 0;

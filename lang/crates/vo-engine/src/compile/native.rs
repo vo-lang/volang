@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 
 use vo_common::vfs::RealFs;
 use vo_module::cache::validate::InstalledModuleError;
+use vo_module::ext_manifest::ExtensionManifest;
 use vo_module::schema::lockfile::{LockedArtifact, LockedModule};
-use vo_runtime::ext_loader::ExtensionManifest;
+use vo_runtime::ext_loader::NativeExtensionSpec;
 
 use super::{emit_compile_log, CompileError, CompileLogRecord, ModuleSystemError, ModuleSystemErrorKind, ModuleSystemStage};
 
@@ -60,22 +61,22 @@ fn installed_module_error_to_module_system(e: InstalledModuleError) -> ModuleSys
     err
 }
 
-pub(super) fn prepare_extension_manifests_for_frozen_build(
+pub(super) fn prepare_native_extension_specs_for_frozen_build(
     manifests: &[ExtensionManifest],
     locked_modules: &[LockedModule],
     mod_root: &Path,
-) -> Result<Vec<ExtensionManifest>, ModuleSystemError> {
+) -> Result<Vec<NativeExtensionSpec>, ModuleSystemError> {
     use std::collections::BTreeMap;
 
     let mod_root = mod_root.canonicalize().unwrap_or_else(|_| mod_root.to_path_buf());
-    let mut prepared: BTreeMap<PathBuf, ExtensionManifest> = BTreeMap::new();
+    let mut prepared: BTreeMap<PathBuf, NativeExtensionSpec> = BTreeMap::new();
 
     for manifest in manifests {
         let module_dir = extension_manifest_module_dir(manifest)?;
         if prepared.contains_key(&module_dir) {
             continue;
         }
-        let resolved = prepare_extension_manifest(manifest, locked_modules, &mod_root)?;
+        let resolved = prepare_extension_spec(manifest, locked_modules, &mod_root)?;
         prepared.insert(module_dir, resolved);
     }
 
@@ -83,7 +84,10 @@ pub(super) fn prepare_extension_manifests_for_frozen_build(
         .iter()
         .map(|m| {
             let dir = extension_manifest_module_dir(m).unwrap();
-            prepared.get(&dir).cloned().unwrap_or_else(|| m.clone())
+            prepared
+                .get(&dir)
+                .cloned()
+                .unwrap_or_else(|| native_extension_spec(m, m.native_path.clone()))
         })
         .collect())
 }
@@ -108,6 +112,14 @@ pub(super) fn current_target_triple() -> &'static str {
     env!("VO_TARGET_TRIPLE")
 }
 
+fn native_extension_spec(manifest: &ExtensionManifest, native_path: PathBuf) -> NativeExtensionSpec {
+    NativeExtensionSpec::new(
+        manifest.name.clone(),
+        native_path,
+        manifest.manifest_path.clone(),
+    )
+}
+
 
 fn extension_manifest_module_dir(manifest: &ExtensionManifest) -> Result<PathBuf, ModuleSystemError> {
     let module_dir = manifest.manifest_path.parent().ok_or_else(|| {
@@ -124,39 +136,39 @@ fn extension_manifest_module_dir(manifest: &ExtensionManifest) -> Result<PathBuf
     Ok(module_dir.canonicalize().unwrap_or_else(|_| module_dir.to_path_buf()))
 }
 
-fn prepare_extension_manifest(
+fn prepare_extension_spec(
     manifest: &ExtensionManifest,
     locked_modules: &[LockedModule],
     mod_root: &Path,
-) -> Result<ExtensionManifest, ModuleSystemError> {
+) -> Result<NativeExtensionSpec, ModuleSystemError> {
     let module_dir = extension_manifest_module_dir(manifest)?;
     if !module_dir.starts_with(mod_root) {
         ensure_local_native_extension_built(&module_dir)?;
-        return Ok(manifest.clone());
+        return Ok(native_extension_spec(manifest, manifest.native_path.clone()));
     }
 
     let locked = locked_module_for_cached_extension(&module_dir, mod_root, locked_modules)?;
     validate_installed_module_at_dir(&module_dir, locked)?;
-    prepare_cached_extension_manifest(manifest, locked, &module_dir)
+    prepare_cached_extension_spec(manifest, locked, &module_dir)
 }
 
-fn prepare_cached_extension_manifest(
+fn prepare_cached_extension_spec(
     manifest: &ExtensionManifest,
     locked: &LockedModule,
     module_dir: &Path,
-) -> Result<ExtensionManifest, ModuleSystemError> {
-    let mut resolved = manifest.clone();
+) -> Result<NativeExtensionSpec, ModuleSystemError> {
+    let mut native_path = manifest.native_path.clone();
     match find_locked_native_artifact(manifest, locked) {
         Ok(artifact) => {
             validate_locked_native_artifact_bytes(module_dir, locked, artifact)?;
-            resolved.native_path = locked_native_artifact_path(module_dir, artifact);
+            native_path = locked_native_artifact_path(module_dir, artifact);
         }
         Err(error) if error.kind == ModuleSystemErrorKind::Missing => {
             ensure_local_native_extension_built(module_dir)?;
         }
         Err(error) => return Err(error),
     }
-    Ok(resolved)
+    Ok(native_extension_spec(manifest, native_path))
 }
 
 fn locked_module_for_cached_extension<'a>(

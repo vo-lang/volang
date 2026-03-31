@@ -12,8 +12,9 @@ mod toolchain;
 pub use compile::{
     check, check_with_auto_install, compile, compile_from_memory, compile_source_at, compile_string,
     compile_with_auto_install, compile_with_cache, default_mod_cache_root,
-    prepare_extension_manifests, with_compile_log_sink, CompileError, CompileLogRecord,
+    prepare_native_extension_specs, with_compile_log_sink, CompileError, CompileLogRecord,
     CompileOutput, ModuleSystemError, ModuleSystemErrorKind, ModuleSystemStage,
+    PreparedNativeExtension,
 };
 pub use format::{format_text, parse_text};
 pub use run::{

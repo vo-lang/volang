@@ -14,6 +14,7 @@ use vo_common::source::SourceMap;
 use vo_common::symbol::SymbolInterner;
 use vo_common::vfs::FileSet;
 use vo_module::ext_manifest::{discover_extensions, ExtensionManifest};
+use vo_module::identity::{self, ModulePath};
 use vo_syntax::ast::File;
 use vo_syntax::parser;
 
@@ -422,7 +423,7 @@ fn current_package_path_from_root(root: &Path) -> Option<String> {
     let mut current = Some(root.as_path());
     while let Some(dir) = current {
         if let Some(module_path) = read_module_path_from_disk(dir) {
-            if !vo_module::compat::is_valid_module_path(&module_path) {
+            if ModulePath::parse(&module_path).is_err() {
                 return None;
             }
             let sub_path = root
@@ -541,10 +542,11 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
             return ImportResult::Err(format!("invalid import path \"{}\": {}", import_path, e));
         }
         if let Some(current_package_path) = self.current_package_path.as_deref() {
-            if let Err(e) =
-                vo_module::compat::validate_internal_access(current_package_path, import_path)
-            {
-                return ImportResult::Err(e);
+            if !identity::check_internal_visibility(current_package_path, import_path) {
+                return ImportResult::Err(format!(
+                    "use of internal package not allowed: {} cannot import {}",
+                    current_package_path, import_path,
+                ));
             }
         }
 

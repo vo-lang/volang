@@ -69,9 +69,7 @@ pub use island::VoVm;
 #[cfg(feature = "compiler")]
 pub use compile::{
     EmbeddedStdlib,
-    WorkspaceProjectContext,
     build_stdlib_fs,
-    load_workspace_project_context,
     compile,
     compile_source_with_std_fs, compile_source_with_mod_fs,
     compile_entry_with_std_fs, compile_entry_with_mod_fs,

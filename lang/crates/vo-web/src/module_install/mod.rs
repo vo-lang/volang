@@ -17,8 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use vo_common::vfs::MemoryFs;
 use vo_module::cache::layout::{SOURCE_DIGEST_MARKER, VERSION_MARKER};
-use vo_module::digest::Digest;
-use vo_module::schema::lockfile::{LockedArtifact, LockedModule};
+use vo_module::schema::lockfile::LockedModule;
 
 use extension::*;
 use log::*;
@@ -190,7 +189,7 @@ pub async fn ensure_vfs_deps_from_fs(local_fs: &MemoryFs, entry: &str) -> Result
         .parent()
         .unwrap_or(std::path::Path::new("."));
     let project_deps =
-        crate::compile::load_workspace_project_context(local_fs, entry_dir)?.project_deps;
+        vo_module::project::load_project_context(local_fs, entry_dir)?.project_deps;
     if !project_deps.has_mod_file || project_deps.locked_modules.is_empty() {
         return Ok(());
     }
@@ -201,9 +200,9 @@ pub async fn ensure_vfs_deps_from_fs(local_fs: &MemoryFs, entry: &str) -> Result
 
 /// Fetch the latest release version for a module from the GitHub API.
 async fn fetch_latest_module_version(module: &str) -> Result<String, String> {
-    let repo = vo_module::compat::module_repository(module)
-        .ok_or_else(|| format!("not a github.com module path: {}", module))?;
-    let module_root = vo_module::compat::module_root(module).unwrap_or_else(|| ".".to_string());
+    let module_path = vo_module::identity::ModulePath::parse(module).map_err(|e| format!("{e}"))?;
+    let repo = vo_module::registry::repository_id(&module_path);
+    let module_root = module_path.module_root();
     let fetch_start = crate::now_ms();
     log_dependency_version_resolve_start(module);
 
@@ -224,8 +223,11 @@ async fn fetch_latest_module_version(module: &str) -> Result<String, String> {
         let tag = value["tag_name"]
             .as_str()
             .ok_or_else(|| format!("no tag_name in GitHub latest release for {}", module))?;
-        log_dependency_version_resolved(module, tag, fetch_start);
-        return Ok(tag.to_string());
+        let version = vo_module::registry::version_from_tag(&module_path, tag)
+            .ok_or_else(|| format!("invalid tag_name '{}' in GitHub latest release for {}", tag, module))?
+            .to_string();
+        log_dependency_version_resolved(module, &version, fetch_start);
+        return Ok(version);
     } else {
         let api_url = format!(
             "https://api.github.com/repos/{}/{}/releases?per_page=20",
@@ -241,9 +243,10 @@ async fn fetch_latest_module_version(module: &str) -> Result<String, String> {
         let prefix = format!("{}/", module_root);
         for release in &releases {
             if let Some(tag) = release["tag_name"].as_str() {
-                if let Some(version) = tag.strip_prefix(&prefix) {
-                    log_dependency_version_resolved(module, version, fetch_start);
-                    return Ok(version.to_string());
+                if let Some(version) = vo_module::registry::version_from_tag(&module_path, tag) {
+                    let version = version.to_string();
+                    log_dependency_version_resolved(module, &version, fetch_start);
+                    return Ok(version);
                 }
             }
         }
@@ -275,34 +278,21 @@ pub async fn resolve_and_install_module(module: &str) -> Result<(String, String)
 pub fn read_locked_module_from_vfs(module: &str, version: &str) -> Result<LockedModule, String> {
     let manifest_path = vfs_module_file_path(module, version, "vo.release.json");
     let manifest_content = read_vfs_text(&manifest_path)?;
-    let manifest = vo_module::schema::manifest::ReleaseManifest::parse(&manifest_content)
-        .map_err(|e| format!("parse release manifest for {}@{}: {}", module, version, e))?;
+    let expected_module = vo_module::identity::ModulePath::parse(module)
+        .map_err(|e| format!("invalid module path {}: {}", module, e))?;
+    let expected_version = vo_module::version::ExactVersion::parse(version)
+        .map_err(|e| format!("invalid version {}: {}", version, e))?;
+    let manifest = vo_module::registry::parse_requested_release_manifest(
+        &manifest_content,
+        &expected_module,
+        &expected_version,
+    )
+    .map_err(|e| format!("parse release manifest for {}@{}: {}", module, version, e))?;
 
-    let manifest_digest = Digest::from_sha256(manifest_content.as_bytes());
-
-    let deps: Vec<vo_module::identity::ModulePath> =
-        manifest.require.iter().map(|r| r.module.clone()).collect();
-
-    let artifacts: Vec<LockedArtifact> = manifest
-        .artifacts
-        .iter()
-        .map(|a| LockedArtifact {
-            id: a.id.clone(),
-            size: a.size,
-            digest: a.digest.clone(),
-        })
-        .collect();
-
-    Ok(LockedModule {
-        path: manifest.module,
-        version: manifest.version,
-        vo: manifest.vo,
-        commit: manifest.commit,
-        release_manifest: manifest_digest,
-        source: manifest.source.digest,
-        deps,
-        artifacts,
-    })
+    Ok(vo_module::lock::locked_module_from_manifest_raw(
+        &manifest,
+        manifest_content.as_bytes(),
+    ))
 }
 
 // ── Synthetic project files ─────────────────────────────────────────────────

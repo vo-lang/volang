@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vo_app_runtime::SyncRenderBuffer;
-use vo_module::ext_manifest::ExtensionManifest;
+use vo_engine::PreparedNativeExtension;
 
 use crate::gui_runtime::GuestHandle;
 
@@ -120,7 +120,7 @@ pub struct AppState {
     console_run: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     guest: Mutex<Option<GuestHandle>>,
     push_rx: Mutex<Option<Arc<SyncRenderBuffer>>>,
-    last_extensions: Mutex<Vec<ExtensionManifest>>,
+    last_extensions: Mutex<Vec<PreparedNativeExtension>>,
 }
 
 impl AppState {
@@ -193,11 +193,11 @@ impl AppState {
         *self.push_rx.lock().unwrap() = Some(push_rx);
     }
 
-    pub fn set_last_extensions(&self, extensions: Vec<ExtensionManifest>) {
+    pub fn set_last_extensions(&self, extensions: Vec<PreparedNativeExtension>) {
         *self.last_extensions.lock().unwrap() = extensions;
     }
 
-    pub fn last_extensions(&self) -> Vec<ExtensionManifest> {
+    pub fn last_extensions(&self) -> Vec<PreparedNativeExtension> {
         self.last_extensions.lock().unwrap().clone()
     }
 

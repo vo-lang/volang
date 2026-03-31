@@ -72,6 +72,21 @@ pub fn repository_id(module: &ModulePath) -> RepositoryId {
     }
 }
 
+pub fn release_tag(module: &ModulePath, version: &ExactVersion) -> String {
+    module.version_tag(version)
+}
+
+pub fn version_from_tag(module: &ModulePath, tag: &str) -> Option<ExactVersion> {
+    let root = module.module_root();
+    let version_str = if root == "." {
+        tag
+    } else {
+        let prefix = format!("{}/", root);
+        tag.strip_prefix(&prefix)?
+    };
+    ExactVersion::parse(version_str).ok()
+}
+
 /// Build the GitHub release asset download URL for a module+version+asset.
 ///
 /// `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset_name>`
@@ -84,11 +99,26 @@ pub fn release_download_url(
     asset_name: &str,
 ) -> String {
     let rid = repository_id(module);
-    let tag = module.version_tag(version);
+    let tag = release_tag(module, version);
     format!(
         "https://github.com/{}/{}/releases/download/{}/{}",
         rid.owner, rid.repo, tag, asset_name,
     )
+}
+
+pub fn parse_requested_release_manifest(
+    content: &str,
+    expected_module: &ModulePath,
+    expected_version: &ExactVersion,
+) -> Result<ReleaseManifest, Error> {
+    let manifest = ReleaseManifest::parse(content).map_err(|error| {
+        Error::InvalidReleaseMetadata(format!(
+            "invalid vo.release.json for {}@{}: {}",
+            expected_module, expected_version, error,
+        ))
+    })?;
+    validate_manifest(&manifest, expected_module, expected_version)?;
+    Ok(manifest)
 }
 
 /// Validate that a release manifest is consistent with the module path and version
@@ -172,6 +202,38 @@ mod tests {
         let mp = ModulePath::parse("github.com/acme/mono/graphics").unwrap();
         let v = ExactVersion::parse("v0.8.0").unwrap();
         assert_eq!(mp.version_tag(&v), "graphics/v0.8.0");
+    }
+
+    #[test]
+    fn test_version_from_tag_nested() {
+        let mp = ModulePath::parse("github.com/acme/mono/graphics/v2").unwrap();
+        let v = version_from_tag(&mp, "graphics/v2/v2.1.0").unwrap();
+        assert_eq!(v.to_string(), "v2.1.0");
+    }
+
+    #[test]
+    fn test_parse_requested_release_manifest() {
+        let manifest = parse_requested_release_manifest(
+            r#"{
+  "schema_version": 1,
+  "module": "github.com/acme/lib",
+  "version": "v1.2.3",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "module_root": ".",
+  "vo": "^0.1.0",
+  "require": [],
+  "source": {
+    "name": "lib-v1.2.3-source.tar.gz",
+    "size": 3,
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "artifacts": []
+}"#,
+            &ModulePath::parse("github.com/acme/lib").unwrap(),
+            &ExactVersion::parse("v1.2.3").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.module.as_str(), "github.com/acme/lib");
     }
 
     #[test]

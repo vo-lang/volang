@@ -1327,6 +1327,7 @@ dependencies = [
  "vo-analysis",
  "vo-codegen",
  "vo-common",
+ "vo-common-core",
  "vo-module",
  "vo-runtime",
  "vo-stdlib",

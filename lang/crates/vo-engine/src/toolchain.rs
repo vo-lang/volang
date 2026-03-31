@@ -230,61 +230,30 @@ impl ToolchainHost for EngineToolchainHost {
 pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf, String> {
     use vo_module::github_registry::GitHubRegistry;
     use vo_module::identity::ModulePath;
-    use vo_module::registry::Registry;
-    use vo_module::schema::lockfile::LockedModule;
     use vo_module::version::ExactVersion;
 
     let mp = ModulePath::parse(module).map_err(|e| format!("{e}"))?;
     let ev = ExactVersion::parse(version).map_err(|e| format!("{e}"))?;
 
     let registry = GitHubRegistry::new();
-    let (manifest, manifest_raw) = registry
-        .fetch_manifest_raw(&mp, &ev)
-        .map_err(|e| format!("{e}"))?;
-
     let mod_cache = crate::compile::default_mod_cache_root();
-    let cache_dir = vo_module::cache::layout::cache_dir(&mod_cache, &mp, &ev);
-
-    let manifest_digest = vo_module::digest::Digest::from_sha256(&manifest_raw);
-
-    // Build a synthetic LockedModule for download
-    let locked = LockedModule {
-        path: mp.clone(),
-        version: ev.clone(),
-        vo: manifest.vo.clone(),
-        commit: manifest.commit.clone(),
-        release_manifest: manifest_digest,
-        source: manifest.source.digest.clone(),
-        deps: manifest.require.iter().map(|r| r.module.clone()).collect(),
-        artifacts: manifest
-            .artifacts
-            .iter()
-            .map(|a| vo_module::schema::lockfile::LockedArtifact {
-                id: a.id.clone(),
-                size: a.size,
-                digest: a.digest.clone(),
-            })
-            .collect(),
-    };
-
-    let lf = vo_module::schema::lockfile::LockFile {
-        version: 1,
-        created_by: "vo get".to_string(),
-        root: vo_module::schema::lockfile::LockRoot {
-            module: mp.clone(),
-            vo: manifest.vo.clone(),
-        },
-        resolved: vec![locked],
-    };
-
-    vo_module::cache::install::populate_locked_cache(&mod_cache, &lf, &registry)
-        .map_err(|e| format!("{e}"))?;
+    let installed = vo_module::cache::install::install_exact_module(
+        &mod_cache,
+        &registry,
+        &mp,
+        &ev,
+        "vo get",
+    )
+    .map_err(|e| format!("{e}"))?;
     let manifests =
-        vo_module::ext_manifest::discover_extensions(&cache_dir).map_err(|e| e.to_string())?;
-    let _ = crate::compile::prepare_extension_manifests(&manifests, &lf.resolved)
+        vo_module::ext_manifest::discover_extensions(&installed.cache_dir).map_err(|e| e.to_string())?;
+    let _ = crate::compile::prepare_native_extension_specs(
+        &manifests,
+        std::slice::from_ref(&installed.locked),
+    )
         .map_err(|e| e.to_string())?;
 
-    Ok(cache_dir)
+    Ok(installed.cache_dir)
 }
 
 pub fn ensure_toolchain_host_installed() {

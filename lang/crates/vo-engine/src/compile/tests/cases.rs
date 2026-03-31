@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use super::{
     current_target_triple, installed_module_release_manifest_digest, load_project_deps_for_engine,
-    locked_module_cache_dir, make_locked, prepare_extension_manifests_for_frozen_build,
+    locked_module_cache_dir, make_locked, prepare_native_extension_specs_for_frozen_build,
     read_saved_cache_fingerprint, render_lock_with_modules, temp_dir,
     validate_locked_modules_installed, write_minimal_native_extension_crate,
 };
@@ -179,7 +179,7 @@ fn test_validate_locked_extension_manifests_falls_back_to_local_build_without_lo
     let manifests = [manifest];
     let locked_modules = [locked];
 
-    let resolved = prepare_extension_manifests_for_frozen_build(&manifests, &locked_modules, &mod_root)
+    let resolved = prepare_native_extension_specs_for_frozen_build(&manifests, &locked_modules, &mod_root)
         .expect("should fall back to local build when no native artifact is locked");
     assert_eq!(resolved[0].native_path, expected_native_path);
 
@@ -260,7 +260,7 @@ fn test_resolve_extension_manifests_uses_cached_native_artifact_path() {
         digest: Digest::from_sha256(artifact_bytes),
     });
 
-    let resolved = prepare_extension_manifests_for_frozen_build(
+    let resolved = prepare_native_extension_specs_for_frozen_build(
         std::slice::from_ref(&manifest),
         std::slice::from_ref(&locked),
         &mod_root,

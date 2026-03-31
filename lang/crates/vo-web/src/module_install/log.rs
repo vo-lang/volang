@@ -3,8 +3,8 @@
 use crate::host_log::HostLogRecord;
 
 pub(super) fn emit_log(record: HostLogRecord) {
-    let source = record.source.clone();
-    let code = record.code.clone();
+    let source = record.core.source.clone();
+    let code = record.core.code.clone();
     let text = record.text.clone();
     crate::host_log::emit_host_log(record);
     match text {

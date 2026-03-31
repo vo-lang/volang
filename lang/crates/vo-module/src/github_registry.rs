@@ -5,7 +5,10 @@ use std::sync::Mutex;
 use serde::Deserialize;
 
 use crate::identity::ModulePath;
-use crate::registry::{release_download_url, repository_id, validate_manifest, Registry};
+use crate::registry::{
+    parse_requested_release_manifest, release_download_url, repository_id, version_from_tag,
+    Registry,
+};
 use crate::schema::manifest::ReleaseManifest;
 use crate::version::ExactVersion;
 use crate::Error;
@@ -107,13 +110,7 @@ impl GitHubRegistry {
                 module, version, e
             ))
         })?;
-        let manifest = ReleaseManifest::parse(&content).map_err(|e| {
-            Error::InvalidReleaseMetadata(format!(
-                "invalid vo.release.json for {}@{}: {}",
-                module, version, e
-            ))
-        })?;
-        validate_manifest(&manifest, module, version)?;
+        let manifest = parse_requested_release_manifest(&content, module, version)?;
         Ok((manifest, bytes))
     }
 
@@ -215,18 +212,6 @@ impl Registry for GitHubRegistry {
         let url = release_download_url(module, version, asset_name);
         self.fetch_bytes(&url)
     }
-}
-
-/// Extract an `ExactVersion` from a Git tag, accounting for the module's root prefix.
-fn version_from_tag(module: &ModulePath, tag: &str) -> Option<ExactVersion> {
-    let root = module.module_root();
-    let version_str = if root == "." {
-        tag
-    } else {
-        let prefix = format!("{}/", root);
-        tag.strip_prefix(&prefix)?
-    };
-    ExactVersion::parse(version_str).ok()
 }
 
 #[cfg(test)]

@@ -17,15 +17,6 @@ use crate::wasm_vfs::WasmVfs;
 // Re-export stdlib filesystem
 pub use vo_stdlib::EmbeddedStdlib;
 
-pub type WorkspaceProjectContext = vo_module::project::ProjectContext;
-
-pub fn load_workspace_project_context<F: FileSystem>(
-    fs: &F,
-    dir: &Path,
-) -> Result<WorkspaceProjectContext, String> {
-    vo_module::project::load_project_context(fs, dir)
-}
-
 /// Build the standard library filesystem. Exported for libraries to extend.
 pub fn build_stdlib_fs() -> MemoryFs {
     fn build_embedded_stdlib_fs() -> MemoryFs {
@@ -77,6 +68,65 @@ fn build_entry_file_set(local_fs: &MemoryFs, entry: &str) -> Result<FileSet, Str
         .map_err(|e| format!("Failed to collect package files: {}", e))
 }
 
+struct PreparedCompileInput {
+    local_fs: MemoryFs,
+    file_set: FileSet,
+    project_root: PathBuf,
+    project_deps: vo_module::project::ProjectDeps,
+    workspace_replaces: HashMap<String, PathBuf>,
+}
+
+enum LocalCompileSource {
+    SingleFile { source: String, filename: String },
+    Entry { entry: String, local_fs: MemoryFs },
+}
+
+enum ModuleSourceMode {
+    Fs { std_fs: MemoryFs, mod_fs: MemoryFs },
+    Vfs { vfs_mod_root: String },
+}
+
+fn build_project_mod_source<F: FileSystem>(
+    mod_fs: F,
+    project_deps: &vo_module::project::ProjectDeps,
+) -> vo_analysis::vfs::ModSource<F> {
+    if project_deps.has_mod_file {
+        vo_analysis::vfs::ModSource::with_fs(mod_fs)
+            .with_allowed_modules(project_deps.allowed_modules.clone())
+    } else {
+        vo_analysis::vfs::ModSource::with_fs(mod_fs)
+    }
+}
+
+fn prepare_compile_input(source: LocalCompileSource) -> Result<PreparedCompileInput, String> {
+    match source {
+        LocalCompileSource::SingleFile { source, filename } => {
+            reject_single_file_external_imports(&source)?;
+            let local_fs = build_single_file_fs(&source, &filename);
+            let file_set = build_single_file_set(&local_fs, &filename)?;
+            let context = vo_module::project::load_project_context(&local_fs, entry_package_dir(&filename))?;
+            Ok(PreparedCompileInput {
+                local_fs,
+                file_set,
+                project_root: context.project_root,
+                project_deps: context.project_deps,
+                workspace_replaces: context.workspace_replaces,
+            })
+        }
+        LocalCompileSource::Entry { entry, local_fs } => {
+            let file_set = build_entry_file_set(&local_fs, &entry)?;
+            let context = vo_module::project::load_project_context(&local_fs, entry_package_dir(&entry))?;
+            Ok(PreparedCompileInput {
+                local_fs,
+                file_set,
+                project_root: context.project_root,
+                project_deps: context.project_deps,
+                workspace_replaces: context.workspace_replaces,
+            })
+        }
+    }
+}
+
 fn configure_workspace_replaces<R>(
     resolver: R,
     local_fs: &MemoryFs,
@@ -98,6 +148,52 @@ fn compile_file_set_with_resolver<R: vo_analysis::vfs::Resolver>(
     Ok(module.serialize())
 }
 
+fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
+    input: PreparedCompileInput,
+    package_resolver: R,
+) -> Result<Vec<u8>, String> {
+    let current_module = input.project_deps.current_module.clone();
+    let local_fs = input.local_fs;
+    let resolver = vo_analysis::vfs::CurrentModuleResolver::with_root(
+        configure_workspace_replaces(package_resolver, &local_fs, &input.workspace_replaces),
+        local_fs,
+        input.project_root,
+        current_module,
+    );
+    compile_file_set_with_resolver(input.file_set, &resolver)
+}
+
+fn compile_with_modes(
+    source: LocalCompileSource,
+    module_source: ModuleSourceMode,
+) -> Result<Vec<u8>, String> {
+    let input = prepare_compile_input(source)?;
+    match module_source {
+        ModuleSourceMode::Fs { std_fs, mod_fs } => {
+            let package_resolver = vo_analysis::vfs::PackageResolver {
+                std: vo_analysis::vfs::StdSource::with_fs(std_fs),
+                r#mod: build_project_mod_source(mod_fs, &input.project_deps),
+            };
+            compile_with_package_resolver(input, package_resolver)
+        }
+        ModuleSourceMode::Vfs { vfs_mod_root } => {
+            let package_resolver = vo_analysis::vfs::PackageResolverMixed {
+                std: vo_analysis::vfs::StdSource::with_fs(build_stdlib_fs()),
+                r#mod: vo_analysis::vfs::ModSource::with_fs(WasmVfs::new(&vfs_mod_root))
+                    .with_project_deps(&input.project_deps),
+            };
+            compile_with_package_resolver(input, package_resolver)
+        }
+    }
+}
+
+fn is_external_import_path(import_path: &str) -> bool {
+    matches!(
+        vo_module::identity::classify_import(import_path),
+        Ok(vo_module::identity::ImportClass::External)
+    )
+}
+
 // ── Import analysis ──────────────────────────────────────────────────────────
 
 /// Extract unique external module root paths from source code imports.
@@ -113,7 +209,7 @@ pub fn extract_external_module_paths(source: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     for import in &file.imports {
         let import_path = import.path.value.as_str();
-        if vo_module::compat::validate_import_path(import_path).is_ok() {
+        if is_external_import_path(import_path) {
             if let Some(module_root) = vo_module::identity::extract_module_root(import_path) {
                 if seen.insert(module_root.clone()) {
                     modules.push(module_root);
@@ -131,12 +227,7 @@ pub fn reject_single_file_external_imports(source: &str) -> Result<(), String> {
     }
     for import in &file.imports {
         let import_path = import.path.value.as_str();
-        if vo_module::compat::validate_import_path(import_path).is_ok()
-            && import_path
-                .split('/')
-                .next()
-                .is_some_and(|segment| segment.contains('.'))
-        {
+        if is_external_import_path(import_path) {
             return Err(format!(
                 "external import \"{}\" requires a project with vo.mod and vo.lock; single-file web compilation no longer resolves third-party modules",
                 import_path,
@@ -178,7 +269,16 @@ pub fn compile_source_with_std_fs(
     filename: &str,
     std_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
-    compile_source_with_mod_fs(source, filename, std_fs, MemoryFs::new())
+    compile_with_modes(
+        LocalCompileSource::SingleFile {
+            source: source.to_string(),
+            filename: filename.to_string(),
+        },
+        ModuleSourceMode::Fs {
+            std_fs,
+            mod_fs: MemoryFs::new(),
+        },
+    )
 }
 
 /// Compile source with separate stdlib and external module filesystems.
@@ -191,29 +291,13 @@ pub fn compile_source_with_mod_fs(
     std_fs: MemoryFs,
     mod_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
-    reject_single_file_external_imports(source)?;
-
-    let fs = build_single_file_fs(source, filename);
-    let file_set = build_single_file_set(&fs, filename)?;
-
-    let project_deps = vo_module::project::read_project_deps(&fs, &[])
-        .map_err(|error| error.to_string())?;
-    let current_module = project_deps.current_module.clone();
-    let resolver = vo_analysis::vfs::CurrentModuleResolver::new(
-        vo_analysis::vfs::PackageResolver {
-            std: vo_analysis::vfs::StdSource::with_fs(std_fs),
-            r#mod: if project_deps.has_mod_file {
-                vo_analysis::vfs::ModSource::with_fs(mod_fs)
-                    .with_allowed_modules(project_deps.allowed_modules.clone())
-            } else {
-                vo_analysis::vfs::ModSource::with_fs(mod_fs)
-            },
+    compile_with_modes(
+        LocalCompileSource::SingleFile {
+            source: source.to_string(),
+            filename: filename.to_string(),
         },
-        fs,
-        current_module,
-    );
-
-    compile_file_set_with_resolver(file_set, &resolver)
+        ModuleSourceMode::Fs { std_fs, mod_fs },
+    )
 }
 
 /// Compile a multi-file Vo package given a pre-populated local filesystem.
@@ -228,7 +312,16 @@ pub fn compile_entry_with_std_fs(
     local_fs: MemoryFs,
     std_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
-    compile_entry_with_mod_fs(entry, local_fs, std_fs, MemoryFs::new())
+    compile_with_modes(
+        LocalCompileSource::Entry {
+            entry: entry.to_string(),
+            local_fs,
+        },
+        ModuleSourceMode::Fs {
+            std_fs,
+            mod_fs: MemoryFs::new(),
+        },
+    )
 }
 
 /// Compile a multi-file Vo package with separate stdlib and module filesystems.
@@ -244,30 +337,13 @@ pub fn compile_entry_with_mod_fs(
     std_fs: MemoryFs,
     mod_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
-    let file_set = build_entry_file_set(&local_fs, entry)?;
-
-    let context = load_workspace_project_context(&local_fs, entry_package_dir(entry))?;
-    let current_module = context.project_deps.current_module.clone();
-    let resolver = vo_analysis::vfs::CurrentModuleResolver::with_root(
-        configure_workspace_replaces(
-            vo_analysis::vfs::PackageResolver {
-            std: vo_analysis::vfs::StdSource::with_fs(std_fs),
-                r#mod: if context.project_deps.has_mod_file {
-                    vo_analysis::vfs::ModSource::with_fs(mod_fs)
-                        .with_allowed_modules(context.project_deps.allowed_modules.clone())
-                } else {
-                    vo_analysis::vfs::ModSource::with_fs(mod_fs)
-                },
-            },
-            &local_fs,
-            &context.workspace_replaces,
-        ),
-        local_fs,
-        context.project_root,
-        current_module,
-    );
-
-    compile_file_set_with_resolver(file_set, &resolver)
+    compile_with_modes(
+        LocalCompileSource::Entry {
+            entry: entry.to_string(),
+            local_fs,
+        },
+        ModuleSourceMode::Fs { std_fs, mod_fs },
+    )
 }
 
 /// Compile a multi-file Vo package, resolving third-party modules from the JS VFS.
@@ -282,25 +358,15 @@ pub fn compile_entry_with_vfs(
     local_fs: MemoryFs,
     vfs_mod_root: &str,
 ) -> Result<Vec<u8>, String> {
-    let file_set = build_entry_file_set(&local_fs, entry)?;
-
-    let context = load_workspace_project_context(&local_fs, entry_package_dir(entry))?;
-    let current_module = context.project_deps.current_module.clone();
-    let resolver = vo_analysis::vfs::CurrentModuleResolver::with_root(
-        configure_workspace_replaces(
-            vo_analysis::vfs::PackageResolverMixed {
-            std: vo_analysis::vfs::StdSource::with_fs(build_stdlib_fs()),
-                r#mod: vo_analysis::vfs::ModSource::with_fs(WasmVfs::new(vfs_mod_root)).with_project_deps(&context.project_deps),
-            },
-            &local_fs,
-            &context.workspace_replaces,
-        ),
-        local_fs,
-        context.project_root,
-        current_module,
-    );
-
-    compile_file_set_with_resolver(file_set, &resolver)
+    compile_with_modes(
+        LocalCompileSource::Entry {
+            entry: entry.to_string(),
+            local_fs,
+        },
+        ModuleSourceMode::Vfs {
+            vfs_mod_root: vfs_mod_root.to_string(),
+        },
+    )
 }
 
 /// Compile a single-file Vo source, resolving third-party modules from the JS VFS.
@@ -309,24 +375,15 @@ pub fn compile_source_with_vfs(
     filename: &str,
     vfs_mod_root: &str,
 ) -> Result<Vec<u8>, String> {
-    reject_single_file_external_imports(source)?;
-
-    let fs = build_single_file_fs(source, filename);
-    let file_set = build_single_file_set(&fs, filename)?;
-
-    let project_deps = vo_module::project::read_project_deps(&fs, &[])
-        .map_err(|error| error.to_string())?;
-    let current_module = project_deps.current_module.clone();
-    let resolver = vo_analysis::vfs::CurrentModuleResolver::new(
-        vo_analysis::vfs::PackageResolverMixed {
-            std: vo_analysis::vfs::StdSource::with_fs(build_stdlib_fs()),
-            r#mod: vo_analysis::vfs::ModSource::with_fs(WasmVfs::new(vfs_mod_root)).with_project_deps(&project_deps),
+    compile_with_modes(
+        LocalCompileSource::SingleFile {
+            source: source.to_string(),
+            filename: filename.to_string(),
         },
-        fs,
-        current_module,
-    );
-
-    compile_file_set_with_resolver(file_set, &resolver)
+        ModuleSourceMode::Vfs {
+            vfs_mod_root: vfs_mod_root.to_string(),
+        },
+    )
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

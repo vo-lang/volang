@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use vo_module::schema::lockfile::LockedModule;
+use vo_runtime::ext_loader::NativeExtensionSpec;
 use vo_runtime::bytecode::ExternDef;
-use vo_runtime::ext_loader::ExtensionManifest;
 use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
 use vo_runtime::objects::interface::InterfaceSlot;
 use vo_runtime::Module;
@@ -12,7 +12,7 @@ use vo_runtime::Module;
 pub struct ToolchainModule {
     pub module: Module,
     pub source_root: PathBuf,
-    pub extensions: Vec<ExtensionManifest>,
+    pub extensions: Vec<NativeExtensionSpec>,
     pub locked_modules: Vec<LockedModule>,
 }
 

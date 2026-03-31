@@ -4,9 +4,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cache::layout::{cache_key, SOURCE_DIGEST_MARKER, VERSION_MARKER};
-use crate::digest::Digest;
+use crate::digest::{verify_digest, verify_size_and_digest};
+use crate::identity::ModulePath;
+use crate::lock::locked_module_from_manifest_raw;
 use crate::registry::Registry;
-use crate::schema::lockfile::{LockFile, LockedArtifact, LockedModule};
+use crate::schema::lockfile::{LockFile, LockRoot, LockedArtifact, LockedModule};
+use crate::version::ExactVersion;
 use crate::Error;
 
 static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -280,15 +283,11 @@ fn download_source(
 
     let data = registry.fetch_source_package(&locked.path, &locked.version, source_asset_name)?;
 
-    // Verify digest
-    let computed = Digest::from_sha256(&data);
-    if computed != locked.source {
-        return Err(Error::DigestMismatch {
-            context: format!("source package for {} {}", locked.path, locked.version),
-            expected: locked.source.as_str().to_string(),
-            found: computed.as_str().to_string(),
-        });
-    }
+    verify_digest(
+        &data,
+        &locked.source,
+        format!("source package for {} {}", locked.path, locked.version),
+    )?;
 
     let dir = crate::cache::layout::cache_dir(cache_root, &locked.path, &locked.version);
     let parent = dir.parent().ok_or_else(|| {
@@ -363,30 +362,12 @@ fn download_artifact(
 
     let data = registry.fetch_artifact(&locked.path, &locked.version, &artifact.id.name)?;
 
-    // Verify size
-    if data.len() as u64 != artifact.size {
-        return Err(Error::DigestMismatch {
-            context: format!(
-                "artifact {} for {} {}: size mismatch",
-                artifact.id.name, locked.path, locked.version
-            ),
-            expected: format!("{} bytes", artifact.size),
-            found: format!("{} bytes", data.len()),
-        });
-    }
-
-    // Verify digest
-    let computed = Digest::from_sha256(&data);
-    if computed != artifact.digest {
-        return Err(Error::DigestMismatch {
-            context: format!(
-                "artifact {} for {} {}",
-                artifact.id.name, locked.path, locked.version
-            ),
-            expected: artifact.digest.as_str().to_string(),
-            found: computed.as_str().to_string(),
-        });
-    }
+    verify_size_and_digest(
+        &data,
+        artifact.size,
+        &artifact.digest,
+        format!("artifact {} for {} {}", artifact.id.name, locked.path, locked.version),
+    )?;
 
     let dir = crate::cache::layout::cache_dir(cache_root, &locked.path, &locked.version);
     let art_dir = dir.join("artifacts");
@@ -419,6 +400,37 @@ struct DownloadJob<'a> {
     artifacts: Vec<&'a LockedArtifact>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ExactInstallResult {
+    pub cache_dir: PathBuf,
+    pub locked: LockedModule,
+}
+
+pub fn install_exact_module(
+    cache_root: &Path,
+    registry: &dyn Registry,
+    module: &ModulePath,
+    version: &ExactVersion,
+    created_by: &str,
+) -> Result<ExactInstallResult, Error> {
+    let (manifest, manifest_raw) = registry.fetch_manifest_raw(module, version)?;
+    let locked = locked_module_from_manifest_raw(&manifest, &manifest_raw);
+    let lock_file = LockFile {
+        version: 1,
+        created_by: created_by.to_string(),
+        root: LockRoot {
+            module: module.clone(),
+            vo: manifest.vo.clone(),
+        },
+        resolved: vec![locked.clone()],
+    };
+    populate_locked_cache(cache_root, &lock_file, registry)?;
+    Ok(ExactInstallResult {
+        cache_dir: crate::cache::layout::cache_dir(cache_root, module, version),
+        locked,
+    })
+}
+
 /// Download all missing source packages and artifacts for the locked graph.
 ///
 /// Phase 1 (sequential): fetch manifests (uses registry cache) and determine
@@ -446,14 +458,11 @@ pub fn populate_locked_cache(
 
         let (source_asset, manifest_raw) = if needs_source {
             let (manifest, raw) = registry.fetch_manifest_raw(&locked.path, &locked.version)?;
-            let computed = Digest::from_sha256(&raw);
-            if computed != locked.release_manifest {
-                return Err(Error::DigestMismatch {
-                    context: format!("release manifest for {} {}", locked.path, locked.version),
-                    expected: locked.release_manifest.as_str().to_string(),
-                    found: computed.as_str().to_string(),
-                });
-            }
+            verify_digest(
+                &raw,
+                &locked.release_manifest,
+                format!("release manifest for {} {}", locked.path, locked.version),
+            )?;
             (Some(manifest.source.name.clone()), Some(raw))
         } else {
             (None, None)
@@ -631,10 +640,13 @@ fn safe_unpack_tar_gz(data: &[u8], dest: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+    use crate::digest::Digest;
     use crate::identity::ModulePath;
     use crate::identity::ArtifactId;
+    use crate::schema::manifest::ReleaseManifest;
     use crate::schema::lockfile::LockedArtifact;
     use crate::version::ExactVersion;
     use crate::version::ToolchainConstraint;
@@ -713,6 +725,62 @@ mod tests {
         )
         .unwrap();
         std::fs::write(module_dir.join("vo.release.json"), manifest_raw).unwrap();
+    }
+
+    fn build_source_archive(root: &str, files: &[(&str, &str)]) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        for (relative_path, content) in files {
+            let full_path = format!("{root}/{relative_path}");
+            let bytes = content.as_bytes();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, full_path, Cursor::new(bytes))
+                .unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    struct ExactInstallRegistry {
+        manifest: ReleaseManifest,
+        source_bytes: Vec<u8>,
+        source_fetches: AtomicUsize,
+    }
+
+    impl Registry for ExactInstallRegistry {
+        fn list_versions(&self, _module: &ModulePath) -> Result<Vec<ExactVersion>, Error> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_manifest(
+            &self,
+            _module: &ModulePath,
+            _version: &ExactVersion,
+        ) -> Result<ReleaseManifest, Error> {
+            Ok(self.manifest.clone())
+        }
+
+        fn fetch_source_package(
+            &self,
+            _module: &ModulePath,
+            _version: &ExactVersion,
+            _asset_name: &str,
+        ) -> Result<Vec<u8>, Error> {
+            self.source_fetches.fetch_add(1, AtomicOrdering::Relaxed);
+            Ok(self.source_bytes.clone())
+        }
+
+        fn fetch_artifact(
+            &self,
+            _module: &ModulePath,
+            _version: &ExactVersion,
+            _asset_name: &str,
+        ) -> Result<Vec<u8>, Error> {
+            Err(Error::RegistryError("unused in test".to_string()))
+        }
     }
 
     #[test]
@@ -842,5 +910,68 @@ mod tests {
         download_artifact(temp.path(), &locked, &artifact, &registry).unwrap();
 
         assert_eq!(std::fs::read(&art_path).unwrap(), artifact_bytes);
+    }
+
+    #[test]
+    fn test_install_exact_module_populates_cache_and_returns_locked_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_bytes = build_source_archive(
+            "lib-v1.2.3",
+            &[
+                ("vo.mod", "module github.com/acme/lib\nvo ^0.1.0\n"),
+                ("lib.vo", "package lib\nfunc Hello() {}\n"),
+            ],
+        );
+        let source_digest = Digest::from_sha256(&source_bytes);
+        let manifest = ReleaseManifest::parse(&format!(
+            r#"{{
+  "schema_version": 1,
+  "module": "github.com/acme/lib",
+  "version": "v1.2.3",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "module_root": ".",
+  "vo": "^0.1.0",
+  "require": [],
+  "source": {{
+    "name": "lib-v1.2.3-source.tar.gz",
+    "size": {},
+    "digest": "{}"
+  }},
+  "artifacts": []
+}}"#,
+            source_bytes.len(),
+            source_digest
+        ))
+        .unwrap();
+        let registry = ExactInstallRegistry {
+            manifest: manifest.clone(),
+            source_bytes: source_bytes.clone(),
+            source_fetches: AtomicUsize::new(0),
+        };
+        let module = ModulePath::parse("github.com/acme/lib").unwrap();
+        let version = ExactVersion::parse("v1.2.3").unwrap();
+
+        let installed = install_exact_module(temp.path(), &registry, &module, &version, "vo test").unwrap();
+
+        assert_eq!(installed.cache_dir, crate::cache::layout::cache_dir(temp.path(), &module, &version));
+        assert_eq!(installed.locked.path, module);
+        assert_eq!(installed.locked.version, version);
+        assert_eq!(registry.source_fetches.load(AtomicOrdering::Relaxed), 1);
+        assert_eq!(
+            std::fs::read_to_string(installed.cache_dir.join("vo.mod")).unwrap(),
+            "module github.com/acme/lib\nvo ^0.1.0\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(installed.cache_dir.join(VERSION_MARKER))
+                .unwrap()
+                .trim(),
+            "v1.2.3"
+        );
+        assert_eq!(
+            std::fs::read_to_string(installed.cache_dir.join(SOURCE_DIGEST_MARKER))
+                .unwrap()
+                .trim(),
+            source_digest.to_string()
+        );
     }
 }

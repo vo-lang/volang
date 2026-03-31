@@ -72,7 +72,7 @@ impl StudioLogRecord {
 
 impl From<CompileLogRecord> for StudioLogRecord {
     fn from(record: CompileLogRecord) -> Self {
-        let level = match record.code {
+        let level = match record.code.as_str() {
             "compile_cache_hit" | "dependency_cached" | "native_extension_cached" | "native_extension_build_done" => "success",
             _ => "system",
         };

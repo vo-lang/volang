@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use vo_common::stable_hash::StableHasher;
 use vo_module::schema::lockfile::LockedModule;
-use vo_runtime::ext_loader::ExtensionManifest;
+use vo_runtime::ext_loader::NativeExtensionSpec;
 use vo_vm::bytecode::Module;
 
 use super::{
@@ -13,6 +13,29 @@ use super::{
     COMPILE_CACHE_SCHEMA_VERSION, COMPILE_CACHE_SLOT_NAMESPACE,
 };
 use super::native::current_target_triple;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedNativeExtensionSpec {
+    name: String,
+    native_path: PathBuf,
+    manifest_path: PathBuf,
+}
+
+impl From<&NativeExtensionSpec> for CachedNativeExtensionSpec {
+    fn from(spec: &NativeExtensionSpec) -> Self {
+        Self {
+            name: spec.name.clone(),
+            native_path: spec.native_path.clone(),
+            manifest_path: spec.manifest_path.clone(),
+        }
+    }
+}
+
+impl From<CachedNativeExtensionSpec> for NativeExtensionSpec {
+    fn from(spec: CachedNativeExtensionSpec) -> Self {
+        NativeExtensionSpec::new(spec.name, spec.native_path, spec.manifest_path)
+    }
+}
 
 pub(super) struct CompileCacheSlot {
     pub(super) dir: PathBuf,
@@ -192,16 +215,22 @@ pub(super) fn save_compile_cache(slot: &CompileCacheSlot, fingerprint: &str, out
     }
 }
 
-fn save_extensions(path: &Path, extensions: &[ExtensionManifest]) -> bool {
-    match serde_json::to_vec(extensions) {
+fn save_extensions(path: &Path, extensions: &[NativeExtensionSpec]) -> bool {
+    let cached = extensions
+        .iter()
+        .map(CachedNativeExtensionSpec::from)
+        .collect::<Vec<_>>();
+    match serde_json::to_vec(&cached) {
         Ok(bytes) => fs::write(path, bytes).is_ok(),
         Err(_) => false,
     }
 }
 
-fn load_extensions(path: &Path) -> Option<Vec<ExtensionManifest>> {
+fn load_extensions(path: &Path) -> Option<Vec<NativeExtensionSpec>> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).ok(),
+        Ok(bytes) => serde_json::from_slice::<Vec<CachedNativeExtensionSpec>>(&bytes)
+            .ok()
+            .map(|extensions| extensions.into_iter().map(NativeExtensionSpec::from).collect()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
         Err(_) => None,
     }

@@ -32,6 +32,7 @@ compiler = [
 
 [dependencies]
 # Core VM (always required, no std for WASM)
+vo-common-core = { path = "../vo-common-core", default-features = false }
 vo-vm = { path = "../vo-vm", default-features = false }
 vo-web-runtime-wasm = { path = "runtime-wasm" }
 vo-runtime = { path = "../vo-runtime", default-features = false }

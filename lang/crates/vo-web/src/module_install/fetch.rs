@@ -8,8 +8,10 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
+use vo_module::identity::ModulePath;
 use vo_module::schema::lockfile::LockedModule;
 use vo_module::schema::manifest::ReleaseManifest;
+use vo_module::version::ExactVersion;
 
 /// Rewrite GitHub release download URLs to go through the dev-server
 /// CORS proxy (`/gh-release/`).  Azure blob storage behind the GitHub
@@ -60,59 +62,15 @@ pub(crate) async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(array.to_vec())
 }
 
-fn verify_download_bytes(
-    bytes: &[u8],
-    expected_size: u64,
-    expected_digest: &str,
-    label: &str,
-) -> Result<(), String> {
-    if bytes.len() as u64 != expected_size {
-        return Err(format!(
-            "{} size mismatch: expected {} bytes, got {} bytes",
-            label,
-            expected_size,
-            bytes.len(),
-        ));
-    }
-    let Some(expected_hex) = expected_digest.strip_prefix("sha256:") else {
-        return Err(format!(
-            "{} declares an invalid digest: {}",
-            label, expected_digest
-        ));
-    };
-    let actual = vo_module::digest::Digest::from_sha256(bytes);
-    let actual = actual.hex();
-    if !expected_hex.eq_ignore_ascii_case(actual) {
-        return Err(format!(
-            "{} digest mismatch: expected sha256:{}, got sha256:{}",
-            label, expected_hex, actual,
-        ));
-    }
-    Ok(())
-}
-
 // ── URL building ─────────────────────────────────────────────────────────
 
 fn release_manifest_url(module: &str, version: &str) -> Result<String, String> {
-    asset_download_url(module, version, "vo.release.json")
-}
-
-fn release_tag(module: &str, version: &str) -> String {
-    let root = vo_module::compat::module_root(module).unwrap_or_else(|| ".".to_string());
-    if root == "." {
-        version.to_string()
-    } else {
-        format!("{}/{}", root, version)
-    }
-}
-
-fn asset_download_url(module: &str, version: &str, asset_name: &str) -> Result<String, String> {
-    let repo = vo_module::compat::module_repository(module)
-        .ok_or_else(|| format!("not a github.com module path: {}", module))?;
-    let tag = release_tag(module, version);
-    Ok(format!(
-        "https://github.com/{}/{}/releases/download/{}/{}",
-        repo.owner, repo.repo, tag, asset_name,
+    let module = ModulePath::parse(module).map_err(|e| e.to_string())?;
+    let version = ExactVersion::parse(version).map_err(|e| e.to_string())?;
+    Ok(vo_module::registry::release_download_url(
+        &module,
+        &version,
+        "vo.release.json",
     ))
 }
 
@@ -130,72 +88,6 @@ fn manifest_asset_download_url(manifest: &ReleaseManifest, asset_name: &str) -> 
 
 // ── Release manifest fetch ───────────────────────────────────────────────
 
-fn parse_requested_release_manifest(
-    content: &str,
-    module: &str,
-    version: &str,
-) -> Result<ReleaseManifest, String> {
-    let manifest = ReleaseManifest::parse(content).map_err(|error| {
-        format!(
-            "invalid release manifest for {}@{}: {}",
-            module, version, error
-        )
-    })?;
-    if manifest.module.as_str() != module {
-        return Err(format!(
-            "requested {}@{} but release manifest declares module {}",
-            module, version, manifest.module,
-        ));
-    }
-    if manifest.version.to_string() != version {
-        return Err(format!(
-            "requested {}@{} but release manifest declares version {}",
-            module, version, manifest.version,
-        ));
-    }
-    Ok(manifest)
-}
-
-fn validate_locked_manifest(
-    manifest: &ReleaseManifest,
-    manifest_digest: &str,
-    locked: &LockedModule,
-) -> Result<(), String> {
-    let module = locked.path.as_str();
-    let version = locked.version.to_string();
-    if manifest_digest != locked.release_manifest.as_str() {
-        return Err(format!(
-            "release manifest digest mismatch for {}@{}: expected {}, found {}",
-            module, version, locked.release_manifest, manifest_digest,
-        ));
-    }
-    if manifest.source.digest != locked.source {
-        return Err(format!(
-            "release manifest source digest mismatch for {}@{}: expected {}, found {}",
-            module, version, locked.source, manifest.source.digest,
-        ));
-    }
-    if manifest.vo != locked.vo {
-        return Err(format!(
-            "release manifest vo constraint mismatch for {}@{}: expected {}, found {}",
-            module, version, locked.vo, manifest.vo,
-        ));
-    }
-    for artifact in &locked.artifacts {
-        if !manifest
-            .artifacts
-            .iter()
-            .any(|candidate| candidate.id == artifact.id && candidate.digest == artifact.digest)
-        {
-            return Err(format!(
-                "release manifest for {}@{} is missing locked artifact {} {} {}",
-                module, version, artifact.id.kind, artifact.id.target, artifact.id.name,
-            ));
-        }
-    }
-    Ok(())
-}
-
 async fn fetch_release_manifest_checked(
     module: &str,
     version: &str,
@@ -208,16 +100,24 @@ async fn fetch_release_manifest_checked(
             module, version, e
         )
     })?;
-    let manifest_digest = vo_module::digest::Digest::from_sha256(&manifest_bytes).to_string();
+    let manifest_digest = vo_module::digest::Digest::from_sha256(&manifest_bytes);
     let manifest_content = String::from_utf8(manifest_bytes).map_err(|error| {
         format!(
             "release manifest for {}@{} is not valid UTF-8: {}",
             module, version, error
         )
     })?;
-    let manifest = parse_requested_release_manifest(&manifest_content, module, version)?;
+    let expected_module = ModulePath::parse(module).map_err(|e| e.to_string())?;
+    let expected_version = ExactVersion::parse(version).map_err(|e| e.to_string())?;
+    let manifest = vo_module::registry::parse_requested_release_manifest(
+        &manifest_content,
+        &expected_module,
+        &expected_version,
+    )
+    .map_err(|e| e.to_string())?;
     if let Some(locked) = locked {
-        validate_locked_manifest(&manifest, &manifest_digest, locked)?;
+        vo_module::lock::validate_locked_module_against_manifest(locked, &manifest, &manifest_digest)
+            .map_err(|e| e.to_string())?;
     }
     Ok((manifest, manifest_content))
 }
@@ -327,12 +227,13 @@ async fn fetch_source_files_inner(
             module, version, e
         )
     })?;
-    verify_download_bytes(
+    vo_module::digest::verify_size_and_digest(
         &source_package,
         manifest.source.size,
-        manifest.source.digest.as_str(),
-        &format!("source package for {}@{}", module, version),
-    )?;
+        &manifest.source.digest,
+        format!("source package for {}@{}", module, version),
+    )
+    .map_err(|e| e.to_string())?;
     let mut files = extract_release_source_package_files(&source_package, &manifest)?;
     append_release_manifest_file(&mut files, module, &manifest_content);
     Ok(files)
@@ -369,7 +270,6 @@ async fn fetch_artifact_bytes(
     module: &str,
     version: &str,
     manifest: &ReleaseManifest,
-    locked: Option<&LockedModule>,
     target: &str,
     asset_name: &str,
     label: &str,
@@ -380,24 +280,6 @@ async fn fetch_artifact_bytes(
             module, version, label, asset_name,
         )
     })?;
-    if let Some(locked) = locked {
-        let locked_artifact = locked
-            .artifacts
-            .iter()
-            .find(|a| a.id.target == target && a.id.name == asset_name)
-            .ok_or_else(|| {
-                format!(
-                    "vo.lock is missing target artifact {} for {}@{} ({})",
-                    asset_name, module, version, target,
-                )
-            })?;
-        if artifact.digest != locked_artifact.digest {
-            return Err(format!(
-                "locked artifact digest mismatch for {}@{} {}: expected {}, found {}",
-                module, version, asset_name, locked_artifact.digest, artifact.digest,
-            ));
-        }
-    }
     let bytes = fetch_bytes(&manifest_asset_download_url(manifest, &artifact.id.name))
         .await
         .map_err(|e| {
@@ -406,12 +288,13 @@ async fn fetch_artifact_bytes(
                 label, module, version, e
             )
         })?;
-    verify_download_bytes(
+    vo_module::digest::verify_size_and_digest(
         &bytes,
         artifact.size,
-        artifact.digest.as_str(),
-        &format!("{} for {}@{}", label, module, version),
-    )?;
+        &artifact.digest,
+        format!("{} for {}@{}", label, module, version),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(bytes)
 }
 
@@ -424,7 +307,7 @@ async fn fetch_artifact_bytes_with_locked_manifest(
     let module = locked.path.as_str();
     let version = locked.version.to_string();
     let (manifest, _) = fetch_release_manifest_checked(module, &version, Some(locked)).await?;
-    fetch_artifact_bytes(module, &version, &manifest, Some(locked), target, asset_name, label).await
+    fetch_artifact_bytes(module, &version, &manifest, target, asset_name, label).await
 }
 
 pub(crate) async fn fetch_locked_wasm_binary(
@@ -450,9 +333,7 @@ pub(crate) async fn fetch_wasm_js_glue_text_from_manifest(
     manifest: &ReleaseManifest,
     asset_name: &str,
 ) -> Result<String, String> {
-    let bytes = fetch_artifact_bytes(
-        module, version, manifest, None, "wasm32-unknown-unknown", asset_name, "wasm JS glue",
-    ).await?;
+    let bytes = fetch_artifact_bytes(module, version, manifest, "wasm32-unknown-unknown", asset_name, "wasm JS glue").await?;
     String::from_utf8(bytes).map_err(|error| {
         format!("wasm JS glue for {}@{} is not valid UTF-8: {}", module, version, error)
     })
@@ -485,5 +366,5 @@ pub(crate) async fn fetch_wasm_binary_from_manifest(
             module, version, artifact.id.name, asset_name,
         ));
     }
-    fetch_artifact_bytes(module, version, manifest, None, "wasm32-unknown-unknown", asset_name, "wasm artifact").await
+    fetch_artifact_bytes(module, version, manifest, "wasm32-unknown-unknown", asset_name, "wasm artifact").await
 }

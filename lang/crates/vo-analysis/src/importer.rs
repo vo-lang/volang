@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::objects::PackageKey;
+use vo_module::identity;
 
 /// Configuration for tracing/debugging.
 #[derive(Debug, Default, Clone)]
@@ -28,7 +29,7 @@ impl ImportKey {
 }
 
 pub fn validate_import_path(path: &str) -> Result<&str, String> {
-    vo_module::compat::validate_import_path(path)?;
+    identity::classify_import(path).map_err(|error| error.to_string())?;
     Ok(path)
 }
 

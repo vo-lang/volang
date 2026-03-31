@@ -1,16 +1,13 @@
 //! Host log record system for structured logging from WASM to JS host.
 
+use vo_common_core::LogRecordCore;
 use wasm_bindgen::prelude::*;
 
 #[derive(Clone, Default)]
 pub struct HostLogRecord {
-    pub source: String,
-    pub code: String,
+    pub core: LogRecordCore,
     pub level: String,
     pub text: Option<String>,
-    pub path: Option<String>,
-    pub module: Option<String>,
-    pub version: Option<String>,
     pub duration_ms: Option<u64>,
     pub asset_kind: Option<String>,
     pub asset_name: Option<String>,
@@ -24,8 +21,7 @@ impl HostLogRecord {
         level: impl Into<String>,
     ) -> Self {
         Self {
-            source: source.into(),
-            code: code.into(),
+            core: LogRecordCore::new(source, code),
             level: level.into(),
             ..Self::default()
         }
@@ -37,17 +33,17 @@ impl HostLogRecord {
     }
 
     pub fn path(mut self, path: impl Into<String>) -> Self {
-        self.path = Some(path.into());
+        self.core = self.core.path(path);
         self
     }
 
     pub fn module(mut self, module: impl Into<String>) -> Self {
-        self.module = Some(module.into());
+        self.core = self.core.module(module);
         self
     }
 
     pub fn version(mut self, version: impl Into<String>) -> Self {
-        self.version = Some(version.into());
+        self.core = self.core.version(version);
         self
     }
 
@@ -103,13 +99,13 @@ pub fn emit_host_log(record: HostLogRecord) {
     if hook.is_function() {
         let func = js_sys::Function::from(hook);
         let object = js_sys::Object::new();
-        set_string(&object, "source", &record.source);
-        set_string(&object, "code", &record.code);
+        set_string(&object, "source", &record.core.source);
+        set_string(&object, "code", &record.core.code);
         set_string(&object, "level", &record.level);
         set_optional_string(&object, "text", record.text.as_deref());
-        set_optional_string(&object, "path", record.path.as_deref());
-        set_optional_string(&object, "module", record.module.as_deref());
-        set_optional_string(&object, "version", record.version.as_deref());
+        set_optional_string(&object, "path", record.core.path.as_deref());
+        set_optional_string(&object, "module", record.core.module.as_deref());
+        set_optional_string(&object, "version", record.core.version.as_deref());
         set_optional_string(&object, "assetKind", record.asset_kind.as_deref());
         set_optional_string(&object, "assetName", record.asset_name.as_deref());
         set_optional_u64(&object, "durationMs", record.duration_ms);
