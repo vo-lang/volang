@@ -271,6 +271,23 @@ pub fn classify_import(path: &str) -> Result<ImportClass, Error> {
     }
 }
 
+/// Extract the 3-segment module root from an external import path.
+///
+/// For example, `"github.com/acme/lib/util"` → `Some("github.com/acme/lib")`.
+/// Returns `None` for stdlib imports or paths with fewer than 3 segments.
+pub fn extract_module_root(import_path: &str) -> Option<String> {
+    let first_segment = import_path.split('/').next()?;
+    if !first_segment.contains('.') {
+        return None;
+    }
+    let segments: Vec<&str> = import_path.splitn(4, '/').collect();
+    if segments.len() >= 3 {
+        Some(format!("{}/{}/{}", segments[0], segments[1], segments[2]))
+    } else {
+        None
+    }
+}
+
 /// Check internal package visibility per spec §9.4.
 /// Returns true if `importer_path` is allowed to import `target_path`.
 pub fn check_internal_visibility(importer_path: &str, target_path: &str) -> bool {
@@ -564,5 +581,35 @@ mod tests {
     fn test_find_owning_module_none() {
         let modules = vec![ModulePath::parse("github.com/acme/app").unwrap()];
         assert!(find_owning_module("github.com/other/lib/util", &modules).is_none());
+    }
+
+    // --- extract_module_root ---
+
+    #[test]
+    fn test_extract_module_root_subpackage() {
+        assert_eq!(
+            extract_module_root("github.com/acme/lib/util"),
+            Some("github.com/acme/lib".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_extract_module_root_exact() {
+        assert_eq!(
+            extract_module_root("github.com/acme/lib"),
+            Some("github.com/acme/lib".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_extract_module_root_stdlib() {
+        assert_eq!(extract_module_root("fmt"), None);
+        assert_eq!(extract_module_root("encoding/json"), None);
+    }
+
+    #[test]
+    fn test_extract_module_root_incomplete() {
+        assert_eq!(extract_module_root("github.com/acme"), None);
+        assert_eq!(extract_module_root("github.com"), None);
     }
 }

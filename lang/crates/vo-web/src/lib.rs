@@ -13,7 +13,11 @@ use vo_vm::vm::SchedulingOutcome;
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "compiler")]
+use std::collections::HashMap;
+#[cfg(feature = "compiler")]
 use std::path::{Path, PathBuf};
+#[cfg(feature = "compiler")]
+use std::sync::OnceLock;
 
 #[cfg(feature = "compiler")]
 use vo_common::vfs::{FileSet, FileSystem, MemoryFs};
@@ -27,9 +31,9 @@ pub use wasm_vfs::WasmVfs;
 mod module_install;
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use module_install::{
-    build_synthetic_project_files, discover_vfs_installed_version, ensure_vfs_deps,
-    ensure_vfs_deps_from_fs, ensure_vfs_versioned_imports, install_module_to_vfs,
-    prepare_github_modules, resolve_and_install_module,
+    build_synthetic_project_files, ensure_vfs_deps,
+    ensure_vfs_deps_from_fs, install_module_to_vfs,
+    resolve_and_install_module,
 };
 
 /// Initialize panic hook for better error messages in console.
@@ -258,39 +262,89 @@ pub use vo_stdlib::EmbeddedStdlib;
 /// Build the standard library filesystem. Exported for libraries to extend.
 #[cfg(feature = "compiler")]
 pub fn build_stdlib_fs() -> MemoryFs {
-    let stdlib = vo_stdlib::EmbeddedStdlib::new();
-    let mut fs = MemoryFs::new();
+    fn build_embedded_stdlib_fs() -> MemoryFs {
+        let stdlib = vo_stdlib::EmbeddedStdlib::new();
+        let mut fs = MemoryFs::new();
 
-    fn add_dir_recursive(stdlib: &vo_stdlib::EmbeddedStdlib, fs: &mut MemoryFs, path: &Path) {
-        use vo_common::vfs::FileSystem;
-        if let Ok(entries) = stdlib.read_dir(path) {
-            for entry in entries {
-                if stdlib.is_dir(&entry) {
-                    add_dir_recursive(stdlib, fs, &entry);
-                } else if entry.to_str().map(|s| s.ends_with(".vo")).unwrap_or(false) {
-                    if let Ok(content) = stdlib.read_file(&entry) {
-                        fs.add_file(entry, content);
+        fn add_dir_recursive(stdlib: &vo_stdlib::EmbeddedStdlib, fs: &mut MemoryFs, path: &Path) {
+            use vo_common::vfs::FileSystem;
+            if let Ok(entries) = stdlib.read_dir(path) {
+                for entry in entries {
+                    if stdlib.is_dir(&entry) {
+                        add_dir_recursive(stdlib, fs, &entry);
+                    } else if entry.to_str().map(|s| s.ends_with(".vo")).unwrap_or(false) {
+                        if let Ok(content) = stdlib.read_file(&entry) {
+                            fs.add_file(entry, content);
+                        }
                     }
                 }
             }
         }
+
+        add_dir_recursive(&stdlib, &mut fs, Path::new("."));
+        fs
     }
 
-    add_dir_recursive(&stdlib, &mut fs, Path::new("."));
+    static STDLIB_FS: OnceLock<MemoryFs> = OnceLock::new();
+    STDLIB_FS.get_or_init(build_embedded_stdlib_fs).clone()
+}
+
+#[cfg(feature = "compiler")]
+pub type WorkspaceProjectContext = vo_module::project::ProjectContext;
+
+#[cfg(feature = "compiler")]
+pub fn load_workspace_project_context<F: FileSystem>(
+    fs: &F,
+    dir: &Path,
+) -> Result<WorkspaceProjectContext, String> {
+    vo_module::project::load_project_context(fs, dir)
+}
+
+#[cfg(feature = "compiler")]
+fn entry_package_dir(entry: &str) -> &Path {
+    Path::new(entry).parent().unwrap_or(Path::new("."))
+}
+
+#[cfg(feature = "compiler")]
+fn build_single_file_fs(source: &str, filename: &str) -> MemoryFs {
+    let mut fs = MemoryFs::new();
+    fs.add_file(PathBuf::from(filename), source.to_string());
     fs
 }
 
 #[cfg(feature = "compiler")]
-fn load_project_deps<F: FileSystem>(fs: &F) -> Result<vo_module::project::ProjectDeps, String> {
-    vo_module::project::read_project_deps(fs, &[]).map_err(|error| error.to_string())
+fn build_single_file_set(fs: &MemoryFs, filename: &str) -> Result<FileSet, String> {
+    FileSet::from_file(fs, Path::new(filename), PathBuf::from("."))
+        .map_err(|e| format!("Failed to read file: {}", e))
 }
 
 #[cfg(feature = "compiler")]
-fn load_project_deps_near<F: FileSystem>(
-    fs: &F,
-    dir: &Path,
-) -> Result<vo_module::project::ProjectDeps, String> {
-    vo_module::project::read_project_deps_near(fs, dir, &[]).map_err(|error| error.to_string())
+fn build_entry_file_set(local_fs: &MemoryFs, entry: &str) -> Result<FileSet, String> {
+    FileSet::collect(local_fs, entry_package_dir(entry), PathBuf::from("."))
+        .map_err(|e| format!("Failed to collect package files: {}", e))
+}
+
+#[cfg(feature = "compiler")]
+fn configure_workspace_replaces<R>(
+    resolver: R,
+    local_fs: &MemoryFs,
+    workspace_replaces: &HashMap<String, PathBuf>,
+) -> vo_analysis::vfs::ReplacingResolver<R, MemoryFs> {
+    vo_analysis::vfs::ReplacingResolver::with_fs(
+        resolver,
+        local_fs.clone(),
+        workspace_replaces.clone(),
+    )
+}
+
+#[cfg(feature = "compiler")]
+fn compile_file_set_with_resolver<R: vo_analysis::vfs::Resolver>(
+    file_set: FileSet,
+    resolver: &R,
+) -> Result<Vec<u8>, String> {
+    let project = vo_analysis::analyze_project(file_set, resolver).map_err(|e| format!("{}", e))?;
+    let module = vo_codegen::compile_project(&project).map_err(|e| format!("{}", e))?;
+    Ok(module.serialize())
 }
 
 /// Extract unique external module root paths from source code imports.
@@ -307,18 +361,10 @@ pub fn extract_external_module_paths(source: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     for import in &file.imports {
         let import_path = import.path.value.as_str();
-        if vo_module::compat::validate_import_path(import_path).is_ok()
-            && import_path
-                .split('/')
-                .next()
-                .is_some_and(|segment| segment.contains('.'))
-        {
-            // Extract 3-segment module root: github.com/owner/repo
-            let segments: Vec<&str> = import_path.split('/').collect();
-            if segments.len() >= 3 {
-                let module_path = format!("{}/{}/{}", segments[0], segments[1], segments[2]);
-                if seen.insert(module_path.clone()) {
-                    modules.push(module_path);
+        if vo_module::compat::validate_import_path(import_path).is_ok() {
+            if let Some(module_root) = vo_module::identity::extract_module_root(import_path) {
+                if seen.insert(module_root.clone()) {
+                    modules.push(module_root);
                 }
             }
         }
@@ -371,39 +417,35 @@ pub fn compile_source_with_mod_fs(
     std_fs: MemoryFs,
     mod_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
-    use vo_analysis::analyze_project;
-    use vo_analysis::vfs::{CurrentModuleResolver, ModSource, PackageResolver, StdSource};
-    use vo_codegen::compile_project;
-
     reject_single_file_external_imports(source)?;
 
     // Create virtual file system with the source
-    let mut fs = MemoryFs::new();
-    fs.add_file(PathBuf::from(filename), source.to_string());
+    let fs = build_single_file_fs(source, filename);
 
     // Create FileSet
-    let file_set = FileSet::from_file(&fs, Path::new(filename), PathBuf::from("."))
-        .map_err(|e| format!("Failed to read file: {}", e))?;
+    let file_set = build_single_file_set(&fs, filename)?;
 
-    let project_deps = load_project_deps(&fs)?;
+    let project_deps = vo_module::project::read_project_deps(&fs, &[])
+        .map_err(|error| error.to_string())?;
     let current_module = project_deps.current_module.clone();
-    let resolver = CurrentModuleResolver::new(
-        PackageResolver {
-            std: StdSource::with_fs(std_fs),
-            r#mod: ModSource::with_fs(mod_fs),
+    let resolver = vo_analysis::vfs::CurrentModuleResolver::new(
+        vo_analysis::vfs::PackageResolver {
+            std: vo_analysis::vfs::StdSource::with_fs(std_fs),
+            r#mod: if project_deps.has_mod_file {
+                vo_analysis::vfs::ModSource::with_fs(mod_fs)
+                    .with_allowed_modules(project_deps.allowed_modules.clone())
+            } else {
+                vo_analysis::vfs::ModSource::with_fs(mod_fs)
+            },
         },
         fs,
         current_module,
     );
 
     // Analyze project
-    let project = analyze_project(file_set, &resolver).map_err(|e| format!("{}", e))?;
-
     // Compile to bytecode
-    let module = compile_project(&project).map_err(|e| format!("{}", e))?;
-
     // Serialize to bytes
-    Ok(module.serialize())
+    compile_file_set_with_resolver(file_set, &resolver)
 }
 
 /// Compile a multi-file Vo package given a pre-populated local filesystem.
@@ -436,34 +478,30 @@ pub fn compile_entry_with_mod_fs(
     std_fs: MemoryFs,
     mod_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
-    use vo_analysis::analyze_project;
-    use vo_analysis::vfs::{CurrentModuleResolver, ModSource, PackageResolver, StdSource};
-    use vo_codegen::compile_project;
+    let file_set = build_entry_file_set(&local_fs, entry)?;
 
-    let pkg_dir = Path::new(entry).parent().unwrap_or(Path::new("."));
-    let file_set = FileSet::collect(&local_fs, pkg_dir, PathBuf::from("."))
-        .map_err(|e| format!("Failed to collect package files: {}", e))?;
-
-    let project_deps = load_project_deps(&local_fs)?;
-    let current_module = project_deps.current_module.clone();
-    let mut mod_source = ModSource::with_fs(mod_fs);
-    if project_deps.has_mod_file {
-        mod_source = mod_source.with_allowed_modules(project_deps.allowed_modules.clone());
-    }
-    let resolver = CurrentModuleResolver::new(
-        PackageResolver {
-            std: StdSource::with_fs(std_fs),
-            r#mod: mod_source,
-        },
+    let context = load_workspace_project_context(&local_fs, entry_package_dir(entry))?;
+    let current_module = context.project_deps.current_module.clone();
+    let resolver = vo_analysis::vfs::CurrentModuleResolver::with_root(
+        configure_workspace_replaces(
+            vo_analysis::vfs::PackageResolver {
+            std: vo_analysis::vfs::StdSource::with_fs(std_fs),
+                r#mod: if context.project_deps.has_mod_file {
+                    vo_analysis::vfs::ModSource::with_fs(mod_fs)
+                        .with_allowed_modules(context.project_deps.allowed_modules.clone())
+                } else {
+                    vo_analysis::vfs::ModSource::with_fs(mod_fs)
+                },
+            },
+            &local_fs,
+            &context.workspace_replaces,
+        ),
         local_fs,
+        context.project_root,
         current_module,
     );
 
-    let project = analyze_project(file_set, &resolver).map_err(|e| format!("{}", e))?;
-
-    let module = compile_project(&project).map_err(|e| format!("{}", e))?;
-
-    Ok(module.serialize())
+    compile_file_set_with_resolver(file_set, &resolver)
 }
 
 /// Compile a multi-file Vo package, resolving third-party modules from the JS VFS.
@@ -479,47 +517,25 @@ pub fn compile_entry_with_vfs(
     local_fs: MemoryFs,
     vfs_mod_root: &str,
 ) -> Result<Vec<u8>, String> {
-    use vo_analysis::analyze_project;
-    use vo_analysis::vfs::{CurrentModuleResolver, ModSource, PackageResolverMixed, StdSource};
-    use vo_codegen::compile_project;
+    let file_set = build_entry_file_set(&local_fs, entry)?;
 
-    let pkg_dir = Path::new(entry).parent().unwrap_or(Path::new("."));
-    let file_set = FileSet::collect(&local_fs, pkg_dir, PathBuf::from("."))
-        .map_err(|e| format!("Failed to collect package files: {}", e))?;
-
-    // Search for vo.mod/vo.lock at the package directory level first, then at root.
-    // This handles both root-level projects (files at "vo.mod") and VFS projects
-    // where files are stored with full relative paths (e.g. "workspace/.examples/vo.mod").
-    let project_deps = load_project_deps_near(&local_fs, pkg_dir)?;
-    let current_module = project_deps.current_module.clone();
-    let mut mod_source = ModSource::with_fs(WasmVfs::new(vfs_mod_root));
-    if project_deps.has_mod_file {
-        mod_source = mod_source.with_allowed_modules(project_deps.allowed_modules.clone());
-    }
-    if !project_deps.locked_modules.is_empty() {
-        mod_source = mod_source.with_module_roots(project_deps.locked_modules.iter().map(|module| {
-            let rel = vo_module::materialize::cache_dir(
-                Path::new(""),
-                &module.path,
-                &module.version,
-            );
-            (module.path.as_str().to_string(), rel)
-        }));
-    }
-    let resolver = CurrentModuleResolver::new(
-        PackageResolverMixed {
-            std: StdSource::with_fs(build_stdlib_fs()),
-            r#mod: mod_source,
-        },
+    let context = load_workspace_project_context(&local_fs, entry_package_dir(entry))?;
+    let current_module = context.project_deps.current_module.clone();
+    let resolver = vo_analysis::vfs::CurrentModuleResolver::with_root(
+        configure_workspace_replaces(
+            vo_analysis::vfs::PackageResolverMixed {
+            std: vo_analysis::vfs::StdSource::with_fs(build_stdlib_fs()),
+                r#mod: vo_analysis::vfs::ModSource::with_fs(WasmVfs::new(vfs_mod_root)).with_project_deps(&context.project_deps),
+            },
+            &local_fs,
+            &context.workspace_replaces,
+        ),
         local_fs,
+        context.project_root,
         current_module,
     );
 
-    let project = analyze_project(file_set, &resolver).map_err(|e| format!("{}", e))?;
-
-    let module = compile_project(&project).map_err(|e| format!("{}", e))?;
-
-    Ok(module.serialize())
+    compile_file_set_with_resolver(file_set, &resolver)
 }
 
 /// Compile a single-file Vo source, resolving third-party modules from the JS VFS.
@@ -529,34 +545,25 @@ pub fn compile_source_with_vfs(
     filename: &str,
     vfs_mod_root: &str,
 ) -> Result<Vec<u8>, String> {
-    use vo_analysis::analyze_project;
-    use vo_analysis::vfs::{CurrentModuleResolver, ModSource, PackageResolverMixed, StdSource};
-    use vo_codegen::compile_project;
-
     reject_single_file_external_imports(source)?;
 
-    let mut fs = MemoryFs::new();
-    fs.add_file(PathBuf::from(filename), source.to_string());
+    let fs = build_single_file_fs(source, filename);
 
-    let file_set = FileSet::from_file(&fs, Path::new(filename), PathBuf::from("."))
-        .map_err(|e| format!("Failed to read file: {}", e))?;
+    let file_set = build_single_file_set(&fs, filename)?;
 
-    let project_deps = load_project_deps(&fs)?;
+    let project_deps = vo_module::project::read_project_deps(&fs, &[])
+        .map_err(|error| error.to_string())?;
     let current_module = project_deps.current_module.clone();
-    let resolver = CurrentModuleResolver::new(
-        PackageResolverMixed {
-            std: StdSource::with_fs(build_stdlib_fs()),
-            r#mod: ModSource::with_fs(WasmVfs::new(vfs_mod_root)),
+    let resolver = vo_analysis::vfs::CurrentModuleResolver::new(
+        vo_analysis::vfs::PackageResolverMixed {
+            std: vo_analysis::vfs::StdSource::with_fs(build_stdlib_fs()),
+            r#mod: vo_analysis::vfs::ModSource::with_fs(WasmVfs::new(vfs_mod_root)).with_project_deps(&project_deps),
         },
         fs,
         current_module,
     );
 
-    let project = analyze_project(file_set, &resolver).map_err(|e| format!("{}", e))?;
-
-    let module = compile_project(&project).map_err(|e| format!("{}", e))?;
-
-    Ok(module.serialize())
+    compile_file_set_with_resolver(file_set, &resolver)
 }
 
 #[cfg(test)]
@@ -642,6 +649,133 @@ mod tests {
 
         let result =
             compile_entry_with_mod_fs("main.vo", local_fs, build_stdlib_fs(), MemoryFs::new());
+        match &result {
+            Err(e) => panic!("compile_entry_with_mod_fs failed: {}", e),
+            Ok(bytes) => assert!(!bytes.is_empty(), "empty bytecode"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "compiler")]
+    fn test_compile_entry_with_mod_fs_honors_workspace_replace_without_vo_lock() {
+        let mut local_fs = MemoryFs::new();
+        local_fs.add_file(
+            "workspace/app/vo.mod",
+            "module github.com/acme/app\n\nvo 0.1.0\n\nrequire github.com/acme/replaced v0.1.0\n",
+        );
+        local_fs.add_file(
+            "workspace/vo.work",
+            "version = 1\n\n[[use]]\npath = \"./replaced\"\n",
+        );
+        local_fs.add_file(
+            "workspace/app/main.vo",
+            concat!(
+                "package main\n",
+                "import \"github.com/acme/replaced\"\n",
+                "func main() {\n",
+                "    replaced.Hello()\n",
+                "}\n",
+            ),
+        );
+        local_fs.add_file(
+            "workspace/replaced/vo.mod",
+            "module github.com/acme/replaced\n\nvo 0.1.0\n",
+        );
+        local_fs.add_file(
+            "workspace/replaced/replaced.vo",
+            concat!("package replaced\n", "func Hello() {}\n",),
+        );
+
+        let result = compile_entry_with_mod_fs(
+            "workspace/app/main.vo",
+            local_fs,
+            build_stdlib_fs(),
+            MemoryFs::new(),
+        );
+        match &result {
+            Err(e) => panic!("compile_entry_with_mod_fs failed: {}", e),
+            Ok(bytes) => assert!(!bytes.is_empty(), "empty bytecode"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "compiler")]
+    fn test_compile_entry_with_mod_fs_keeps_locked_transitive_modules_for_workspace_replace() {
+        let std_fs = build_stdlib_fs();
+        let mut local_fs = MemoryFs::new();
+        let mut mod_fs = MemoryFs::new();
+
+        local_fs.add_file(
+            "workspace/app/vo.mod",
+            "module github.com/acme/app\n\nvo 0.1.0\n\nrequire github.com/acme/replaced v0.1.0\n",
+        );
+        local_fs.add_file(
+            "workspace/app/vo.lock",
+            concat!(
+                "version = 1\n",
+                "created_by = \"vo test\"\n\n",
+                "[root]\n",
+                "module = \"github.com/acme/app\"\n",
+                "vo = \"0.1.0\"\n\n",
+                "[[resolved]]\n",
+                "path = \"github.com/acme/replaced\"\n",
+                "version = \"v0.1.0\"\n",
+                "vo = \"0.1.0\"\n",
+                "commit = \"0123456789abcdef0123456789abcdef01234567\"\n",
+                "release_manifest = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\n",
+                "source = \"sha256:2222222222222222222222222222222222222222222222222222222222222222\"\n",
+                "deps = [\"github.com/acme/core\"]\n",
+                "artifacts = []\n\n",
+                "[[resolved]]\n",
+                "path = \"github.com/acme/core\"\n",
+                "version = \"v0.1.0\"\n",
+                "vo = \"0.1.0\"\n",
+                "commit = \"fedcba9876543210fedcba9876543210fedcba98\"\n",
+                "release_manifest = \"sha256:3333333333333333333333333333333333333333333333333333333333333333\"\n",
+                "source = \"sha256:4444444444444444444444444444444444444444444444444444444444444444\"\n",
+                "deps = []\n",
+                "artifacts = []\n",
+            ),
+        );
+        local_fs.add_file(
+            "workspace/vo.work",
+            "version = 1\n\n[[use]]\npath = \"./replaced\"\n",
+        );
+        local_fs.add_file(
+            "workspace/app/main.vo",
+            concat!(
+                "package main\n",
+                "import \"github.com/acme/replaced\"\n",
+                "func main() {\n",
+                "    replaced.Hello()\n",
+                "}\n",
+            ),
+        );
+        local_fs.add_file(
+            "workspace/replaced/vo.mod",
+            "module github.com/acme/replaced\n\nvo 0.1.0\n\nrequire github.com/acme/core v0.1.0\n",
+        );
+        local_fs.add_file(
+            "workspace/replaced/replaced.vo",
+            concat!(
+                "package replaced\n",
+                "import \"github.com/acme/core\"\n",
+                "func Hello() {\n",
+                "    core.Hello()\n",
+                "}\n",
+            ),
+        );
+
+        mod_fs.add_file(
+            "github.com/acme/core/vo.mod",
+            "module github.com/acme/core\n\nvo 0.1.0\n",
+        );
+        mod_fs.add_file(
+            "github.com/acme/core/core.vo",
+            concat!("package core\n", "func Hello() {}\n",),
+        );
+
+        let result = compile_entry_with_mod_fs("workspace/app/main.vo", local_fs, std_fs, mod_fs);
         match &result {
             Err(e) => panic!("compile_entry_with_mod_fs failed: {}", e),
             Ok(bytes) => assert!(!bytes.is_empty(), "empty bytecode"),
@@ -826,6 +960,15 @@ fn make_run_result_obj(status: &str, stdout: &str, stderr: &str) -> JsValue {
     obj.into()
 }
 
+fn register_wasm_runtime_externs(reg: &mut ExternRegistry, exts: &[ExternDef]) {
+    vo_stdlib::register_externs(reg, exts);
+    vo_web_runtime_wasm::os::register_externs(reg, exts);
+    vo_web_runtime_wasm::exec::register_externs(reg, exts);
+    vo_web_runtime_wasm::time::register_externs(reg, exts);
+    vo_web_runtime_wasm::filepath::register_externs(reg, exts);
+    vo_web_runtime_wasm::net_http::register_externs(reg, exts);
+}
+
 /// Async VM execution loop: runs until complete, awaiting JS callbacks for Sleep/fetch.
 /// Returns (status, stdout, stderr).
 async fn run_vm_async(bytecode: &[u8]) -> (String, String, String) {
@@ -844,12 +987,7 @@ async fn run_vm_async(bytecode: &[u8]) -> (String, String, String) {
     let mut vm = vo_vm::vm::Vm::new();
     let reg = &mut vm.state.extern_registry;
     let exts = &module.externs;
-    vo_stdlib::register_externs(reg, exts);
-    vo_web_runtime_wasm::os::register_externs(reg, exts);
-    vo_web_runtime_wasm::exec::register_externs(reg, exts);
-    vo_web_runtime_wasm::time::register_externs(reg, exts);
-    vo_web_runtime_wasm::filepath::register_externs(reg, exts);
-    vo_web_runtime_wasm::net_http::register_externs(reg, exts);
+    register_wasm_runtime_externs(reg, exts);
     vm.load(module);
 
     run_vm_async_inner(&mut vm).await
@@ -916,27 +1054,8 @@ fn finish_async_outcome(
     }
 }
 
-/// Best-effort monotonic clock in milliseconds for WASM host environments.
-///
-/// Prefers globalThis.performance.now() when available (browser + Node),
-/// falling back to Date.now().
-fn js_now_ms() -> f64 {
-    let global = js_sys::global();
-    if let Ok(perf) = js_sys::Reflect::get(&global, &JsValue::from_str("performance")) {
-        if !perf.is_undefined() && !perf.is_null() {
-            if let Ok(now_fn) = js_sys::Reflect::get(&perf, &JsValue::from_str("now")) {
-                if now_fn.is_function() {
-                    let func = js_sys::Function::from(now_fn);
-                    if let Ok(v) = func.call0(&perf) {
-                        if let Some(ms) = v.as_f64() {
-                            return ms.max(0.0);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    js_sys::Date::now().max(0.0)
+pub(crate) fn now_ms() -> f64 {
+    vo_web_runtime_wasm::time::now_ms()
 }
 
 /// Await one JS setTimeout via a Promise. Returns false if setTimeout is unavailable.
@@ -967,9 +1086,9 @@ async fn wasm_callback_sleep_ms(ms: u32) {
     if ms == 0 {
         return;
     }
-    let deadline_ms = js_now_ms() + ms as f64;
+    let deadline_ms = now_ms() + ms as f64;
     loop {
-        let remaining_ms = deadline_ms - js_now_ms();
+        let remaining_ms = deadline_ms - now_ms();
         if remaining_ms <= 0.0 {
             break;
         }
@@ -1039,16 +1158,7 @@ pub fn create_loaded_vm_from_module(
     let mut vm = Vm::new();
     let reg = &mut vm.state.extern_registry;
     let exts = &module.externs;
-
-    // stdlib (cross-platform)
-    vo_stdlib::register_externs(reg, exts);
-
-    // wasm platform
-    vo_web_runtime_wasm::os::register_externs(reg, exts);
-    vo_web_runtime_wasm::exec::register_externs(reg, exts);
-    vo_web_runtime_wasm::time::register_externs(reg, exts);
-    vo_web_runtime_wasm::filepath::register_externs(reg, exts);
-    vo_web_runtime_wasm::net_http::register_externs(reg, exts);
+    register_wasm_runtime_externs(reg, exts);
 
     // caller
     register_externs(reg, exts);
@@ -1115,12 +1225,7 @@ pub async fn run_bytecode_async_with_externs(
     let mut vm = vo_vm::vm::Vm::new();
     let reg = &mut vm.state.extern_registry;
     let exts = &module.externs;
-    vo_stdlib::register_externs(reg, exts);
-    vo_web_runtime_wasm::os::register_externs(reg, exts);
-    vo_web_runtime_wasm::exec::register_externs(reg, exts);
-    vo_web_runtime_wasm::time::register_externs(reg, exts);
-    vo_web_runtime_wasm::filepath::register_externs(reg, exts);
-    vo_web_runtime_wasm::net_http::register_externs(reg, exts);
+    register_wasm_runtime_externs(reg, exts);
     extra_reg(reg, exts);
     vm.load(module);
 
@@ -1174,9 +1279,9 @@ async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, String, String) 
             break;
         }
         timer_events.sort_unstable_by_key(|e| e.delay_ms);
-        let batch_start_ms = js_now_ms();
+        let batch_start_ms = now_ms();
         for ev in timer_events {
-            let elapsed = js_now_ms() - batch_start_ms;
+            let elapsed = now_ms() - batch_start_ms;
             let remaining = ((ev.delay_ms as f64) - elapsed).ceil().max(0.0) as u32;
             if remaining > 0 {
                 wasm_callback_sleep_ms(remaining).await;

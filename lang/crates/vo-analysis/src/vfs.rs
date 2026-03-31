@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use vo_common::abi::package_abi_path;
-use vo_common::vfs::{FileSystem, RealFs};
+use vo_common::vfs::{normalize_fs_path, FileSystem, RealFs};
 use vo_module::ext_manifest::extension_name_from_content;
 
 /// A resolved package from the package resolver.
@@ -114,6 +114,27 @@ impl<F: FileSystem> ModSource<F> {
                 .map(|(module, root)| (module.into(), root.into()))
                 .collect(),
         );
+        self
+    }
+
+    /// Configure allowed modules and locked module roots from project dependencies.
+    ///
+    /// This is the canonical way to wire a `ModSource` to a resolved `ProjectDeps`:
+    /// - If a `vo.mod` was found, restricts resolution to allowed modules only.
+    /// - If locked modules exist, maps each to its cache-relative version directory.
+    pub fn with_project_deps(mut self, deps: &vo_module::project::ProjectDeps) -> Self {
+        if deps.has_mod_file {
+            self = self.with_allowed_modules(deps.allowed_modules.clone());
+        }
+        if !deps.locked_modules.is_empty() {
+            self = self.with_module_roots(deps.locked_modules.iter().map(|locked| {
+                let rel = vo_module::cache::layout::relative_module_dir(
+                    locked.path.as_str(),
+                    &locked.version,
+                );
+                (locked.path.as_str().to_string(), rel)
+            }));
+        }
         self
     }
 
@@ -430,42 +451,54 @@ fn load_vo_files<F: FileSystem>(fs: &F, dir: &Path) -> Option<Vec<VfsFile>> {
 /// When an import path matches a replaced module (exact or sub-package),
 /// the package is resolved from the replacement's local filesystem path
 /// instead of the module cache.
-pub struct ReplacingResolver<R> {
+pub struct ReplacingResolver<R, F = RealFs> {
     inner: R,
-    /// module path → absolute local directory
+    fs: F,
     replaces: HashMap<String, PathBuf>,
 }
 
-impl<R> ReplacingResolver<R> {
+impl<R> ReplacingResolver<R, RealFs> {
     pub fn new(inner: R, replaces: HashMap<String, PathBuf>) -> Self {
-        Self { inner, replaces }
+        Self {
+            inner,
+            fs: RealFs::new("."),
+            replaces,
+        }
     }
 }
 
-impl<R: Resolver> Resolver for ReplacingResolver<R> {
-    fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
-        // Check if any replace directive matches this import.
-        // Matches exact module path or sub-packages (module + "/").
-        for (module, local_dir) in &self.replaces {
-            let (matched, sub) = if import_path == module.as_str() {
-                (true, "")
-            } else if import_path.starts_with(module.as_str())
-                && import_path.as_bytes().get(module.len()) == Some(&b'/')
-            {
-                (true, &import_path[module.len() + 1..])
-            } else {
-                (false, "")
-            };
+impl<R, F> ReplacingResolver<R, F> {
+    pub fn with_fs(inner: R, fs: F, replaces: HashMap<String, PathBuf>) -> Self {
+        Self { inner, fs, replaces }
+    }
 
-            if matched {
-                let resolve_dir = if sub.is_empty() {
-                    local_dir.clone()
+    fn match_replace<'a>(&'a self, import_path: &'a str) -> Option<(&'a str, &'a PathBuf, &'a str)> {
+        self.replaces
+            .iter()
+            .filter_map(|(module, local_dir)| {
+                if import_path == module.as_str() {
+                    Some((module.as_str(), local_dir, ""))
+                } else if import_path.starts_with(module.as_str())
+                    && import_path.as_bytes().get(module.len()) == Some(&b'/')
+                {
+                    Some((module.as_str(), local_dir, &import_path[module.len() + 1..]))
                 } else {
-                    local_dir.join(sub)
-                };
-                let fs = RealFs::new(&resolve_dir);
-                return resolve_package(&fs, Path::new("."), import_path);
-            }
+                    None
+                }
+            })
+            .max_by_key(|(module, _, _)| module.len())
+    }
+}
+
+impl<R: Resolver, F: FileSystem> Resolver for ReplacingResolver<R, F> {
+    fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
+        if let Some((_module, local_dir, sub)) = self.match_replace(import_path) {
+            let resolve_dir = if sub.is_empty() {
+                local_dir.clone()
+            } else {
+                normalize_fs_path(&local_dir.join(sub))
+            };
+            return resolve_package(&self.fs, &resolve_dir, import_path);
         }
 
         self.inner.resolve(import_path)
@@ -481,14 +514,25 @@ impl<R: Resolver> Resolver for ReplacingResolver<R> {
 pub struct CurrentModuleResolver<R, F> {
     inner: R,
     local_fs: F,
+    local_root: PathBuf,
     current_module: Option<String>,
 }
 
 impl<R, F> CurrentModuleResolver<R, F> {
     pub fn new(inner: R, local_fs: F, current_module: Option<String>) -> Self {
+        Self::with_root(inner, local_fs, PathBuf::from("."), current_module)
+    }
+
+    pub fn with_root(
+        inner: R,
+        local_fs: F,
+        local_root: impl Into<PathBuf>,
+        current_module: Option<String>,
+    ) -> Self {
         Self {
             inner,
             local_fs,
+            local_root: normalize_fs_path(&local_root.into()),
             current_module,
         }
     }
@@ -509,11 +553,11 @@ impl<R: Resolver, F: FileSystem> Resolver for CurrentModuleResolver<R, F> {
 
             if let Some(sub_path) = sub_path {
                 let local_path = if sub_path.is_empty() {
-                    Path::new(".")
+                    self.local_root.clone()
                 } else {
-                    Path::new(sub_path)
+                    normalize_fs_path(&self.local_root.join(sub_path))
                 };
-                if let Some(pkg) = resolve_package(&self.local_fs, local_path, import_path) {
+                if let Some(pkg) = resolve_package(&self.local_fs, &local_path, import_path) {
                     return Some(pkg);
                 }
             }
@@ -580,6 +624,35 @@ mod tests {
     }
 
     #[test]
+    fn test_current_module_resolves_with_prefixed_local_root() {
+        let mut fs = MemoryFs::new();
+        fs.add_file(
+            "workspace/game/vo.mod",
+            "module github.com/acme/game\n\nvo 0.1\n",
+        );
+        fs.add_file("workspace/game/main.vo", "package main\n");
+        fs.add_file("workspace/game/codec/codec.vo", "package codec\n");
+
+        let base = PackageResolver::with_fs(fs.clone());
+        let resolver = CurrentModuleResolver::with_root(
+            base,
+            fs,
+            "workspace/game",
+            Some("github.com/acme/game".to_string()),
+        );
+
+        let root = resolver
+            .resolve("github.com/acme/game")
+            .expect("root package should resolve from prefixed local root");
+        assert_eq!(root.fs_path, PathBuf::from("workspace/game"));
+
+        let sub = resolver
+            .resolve("github.com/acme/game/codec")
+            .expect("subpackage should resolve from prefixed local root");
+        assert_eq!(sub.fs_path, PathBuf::from("workspace/game/codec"));
+    }
+
+    #[test]
     fn test_mod_source_resolves_versioned_module_roots() {
         let mut fs = MemoryFs::new();
         fs.add_file(
@@ -617,5 +690,38 @@ mod tests {
             sub.fs_path,
             PathBuf::from("cache/github.com/acme/game/.vo/versions/v0.1.0/codec")
         );
+    }
+
+    #[test]
+    fn test_replacing_resolver_resolves_from_memory_fs_override() {
+        let mut workspace_fs = MemoryFs::new();
+        workspace_fs.add_file(
+            "workspace/voplay/vo.mod",
+            "module github.com/vo-lang/voplay\n\nvo 0.1\n",
+        );
+        workspace_fs.add_file("workspace/voplay/voplay.vo", "package voplay\n");
+        workspace_fs.add_file("workspace/voplay/codec/codec.vo", "package codec\n");
+
+        let base = PackageResolver::with_fs(MemoryFs::new());
+        let resolver = ReplacingResolver::with_fs(
+            base,
+            workspace_fs,
+            HashMap::from([(
+                "github.com/vo-lang/voplay".to_string(),
+                PathBuf::from("workspace/voplay"),
+            )]),
+        );
+
+        let root = resolver
+            .resolve("github.com/vo-lang/voplay")
+            .expect("root package should resolve from replacement");
+        assert_eq!(root.path, "github.com/vo-lang/voplay");
+        assert_eq!(root.fs_path, PathBuf::from("workspace/voplay"));
+
+        let sub = resolver
+            .resolve("github.com/vo-lang/voplay/codec")
+            .expect("subpackage should resolve from replacement");
+        assert_eq!(sub.path, "github.com/vo-lang/voplay/codec");
+        assert_eq!(sub.fs_path, PathBuf::from("workspace/voplay/codec"));
     }
 }

@@ -3,65 +3,34 @@ use std::path::{Path, PathBuf};
 
 use vo_analysis::vfs::{ModSource, PackageResolverMixed, ReplacingResolver, StdSource};
 use vo_common::vfs::{FileSystem, RealFs};
-use vo_module::identity::ModulePath;
 use vo_module::project::{ProjectDeps, ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage};
-use vo_module::schema::modfile::ModFile;
 use vo_stdlib::EmbeddedStdlib;
 
 use super::{default_mod_cache_root, CompileError, ModuleSystemError, ModuleSystemErrorKind, ModuleSystemStage};
-use super::native::locked_module_cache_relative_dir;
 
-fn try_read_root_module(root: &Path) -> Option<ModulePath> {
-    let mod_path = root.join("vo.mod");
-    let content = std::fs::read_to_string(mod_path).ok()?;
-    let mod_file = ModFile::parse(&content).ok()?;
-    Some(mod_file.module)
+fn workspace_error_to_compile_error(error: vo_module::Error) -> CompileError {
+    let kind = match &error {
+        vo_module::Error::Io(_) => ModuleSystemErrorKind::ReadFailed,
+        vo_module::Error::WorkFileParse(_) => ModuleSystemErrorKind::ParseFailed,
+        _ => ModuleSystemErrorKind::ValidationFailed,
+    };
+    CompileError::ModuleSystem(ModuleSystemError::new(
+        ModuleSystemStage::Workspace,
+        kind,
+        error.to_string(),
+    ))
 }
 
 pub(super) fn read_all_replaces(root: &Path) -> Result<HashMap<String, PathBuf>, CompileError> {
-    use vo_module::schema::workfile::WorkFile;
-    use vo_module::workspace;
+    read_all_replaces_with_fs(&RealFs::new("."), root)
+}
 
-    let Some(workfile_path) = workspace::discover_workfile(root) else {
-        return Ok(HashMap::new());
-    };
-    let workfile_dir = workfile_path.parent().unwrap_or(root);
-    let content = std::fs::read_to_string(&workfile_path).map_err(|e| {
-        ModuleSystemError::new(
-            ModuleSystemStage::Workspace,
-            ModuleSystemErrorKind::ReadFailed,
-            format!("vo.work read error: {}", e),
-        )
-        .with_path(&workfile_path)
-    })?;
-    let workfile = WorkFile::parse(&content).map_err(|e| {
-        ModuleSystemError::new(
-            ModuleSystemStage::Workspace,
-            ModuleSystemErrorKind::ParseFailed,
-            format!("vo.work parse error: {}", e),
-        )
-        .with_path(&workfile_path)
-    })?;
-    let root_module = try_read_root_module(root);
-    let overrides = workspace::resolve_validated_overrides(&workfile, workfile_dir, root_module.as_ref()).map_err(|e| {
-        ModuleSystemError::new(
-            ModuleSystemStage::Workspace,
-            ModuleSystemErrorKind::ValidationFailed,
-            format!("vo.work error: {}", e),
-        )
-        .with_path(&workfile_path)
-    })?;
-
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let mut map = HashMap::new();
-    for ov in overrides {
-        let abs = ov.local_dir.canonicalize().unwrap_or(ov.local_dir);
-        if abs == canonical_root {
-            continue;
-        }
-        map.insert(ov.module.as_str().to_string(), abs);
-    }
-    Ok(map)
+pub(super) fn read_all_replaces_with_fs<F: FileSystem>(
+    fs: &F,
+    root: &Path,
+) -> Result<HashMap<String, PathBuf>, CompileError> {
+    vo_module::workspace::load_workspace_replaces(fs, root, None)
+        .map_err(workspace_error_to_compile_error)
 }
 
 pub(super) fn project_deps_error_to_module_system(error: ProjectDepsError) -> ModuleSystemError {
@@ -93,20 +62,9 @@ pub(super) fn load_project_deps_for_engine<F: FileSystem>(
 
 pub(super) fn create_resolver(plan: &ProjectDeps) -> PackageResolverMixed<EmbeddedStdlib, RealFs> {
     let mod_root = default_mod_cache_root();
-    let mut mod_source = ModSource::with_fs(RealFs::new(mod_root.clone()));
-    if plan.has_mod_file {
-        mod_source = mod_source.with_allowed_modules(plan.allowed_modules.clone());
-    }
-    if !plan.locked_modules.is_empty() {
-        mod_source = mod_source.with_module_roots(plan.locked_modules.iter().map(|locked| {
-            let rel = locked_module_cache_relative_dir(locked);
-            (locked.path.as_str().to_string(), rel)
-        }));
-    }
-
     PackageResolverMixed {
         std: StdSource::with_fs(EmbeddedStdlib::new()),
-        r#mod: mod_source,
+        r#mod: ModSource::with_fs(RealFs::new(mod_root)).with_project_deps(plan),
     }
 }
 

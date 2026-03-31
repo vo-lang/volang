@@ -12,12 +12,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use vo_common::vfs::MemoryFs;
+use vo_module::cache::layout::{cache_key, relative_module_dir, SOURCE_DIGEST_MARKER, VERSION_MARKER};
 use vo_module::digest::Digest;
 use vo_module::ext_manifest::{WasmExtensionKind, WasmExtensionManifest};
-use vo_module::materialize;
 use vo_module::schema::lockfile::{LockedArtifact, LockedModule};
 use vo_module::schema::manifest::ReleaseManifest;
-use vo_module::schema::modfile::ModFile;
 
 use vo_web_runtime_wasm::ext_bridge;
 
@@ -65,23 +64,11 @@ fn write_vfs_text(path: &str, content: &str) -> Result<(), String> {
 }
 
 fn vfs_module_dir(module: &str, version: &str) -> String {
-    format!("/{}", materialize::relative_module_dir(module, version))
+    format!("/{}", relative_module_dir(module, version).display())
 }
 
 fn vfs_module_file_path(module: &str, version: &str, file_name: &str) -> String {
     format!("{}/{}", vfs_module_dir(module, version), file_name)
-}
-
-fn vfs_source_digest_path(module: &str, version: &str) -> String {
-    format!(
-        "{}/{}",
-        vfs_module_dir(module, version),
-        materialize::SOURCE_DIGEST_MARKER
-    )
-}
-
-fn vfs_release_manifest_path(module: &str, version: &str) -> String {
-    format!("{}/vo.release.json", vfs_module_dir(module, version))
 }
 
 fn vfs_artifact_path(module: &str, version: &str, asset_name: &str) -> String {
@@ -94,27 +81,13 @@ fn vfs_artifact_path(module: &str, version: &str, asset_name: &str) -> String {
 }
 
 fn read_vfs_installed_version(module: &str, version: &str) -> Option<String> {
-    let path = vfs_module_file_path(module, version, materialize::VERSION_MARKER);
+    let path = vfs_module_file_path(module, version, VERSION_MARKER);
     let content = read_vfs_text(&path).ok()?;
     let version = content.trim();
     if version.is_empty() {
         return None;
     }
     Some(version.to_string())
-}
-
-fn read_vfs_installed_source_digest(module: &str, version: &str) -> Option<String> {
-    let content = read_vfs_text(&vfs_source_digest_path(module, version)).ok()?;
-    let digest = content.trim();
-    if digest.is_empty() {
-        return None;
-    }
-    Some(digest.to_string())
-}
-
-fn read_vfs_release_manifest_digest(module: &str, version: &str) -> Option<String> {
-    let content = read_vfs_text(&vfs_release_manifest_path(module, version)).ok()?;
-    Some(Digest::from_sha256(content.as_bytes()).to_string())
 }
 
 fn inline_project_deps(vo_mod_content: &str, vo_lock_content: &str) -> Result<vo_module::project::ProjectDeps, String> {
@@ -223,7 +196,7 @@ fn log_dependency_version_resolved(module: &str, version: &str, start_ms: f64) {
         crate::HostLogRecord::new("vo-web", "dependency_version_resolved", "success")
             .module(module)
             .version(version)
-            .duration_ms(js_sys::Date::now() - start_ms),
+            .duration_ms(crate::now_ms() - start_ms),
     );
 }
 
@@ -240,7 +213,7 @@ fn log_dependency_fetch_done(module: &str, version: &str, start_ms: f64) {
         crate::HostLogRecord::new("vo-web", "dependency_fetch_done", "success")
             .module(module)
             .version(version)
-            .duration_ms(js_sys::Date::now() - start_ms),
+            .duration_ms(crate::now_ms() - start_ms),
     );
 }
 
@@ -282,7 +255,7 @@ fn log_extension_asset_load_done(
             .version(version)
             .asset(asset_kind, asset_name)
             .cached(cached)
-            .duration_ms(js_sys::Date::now() - start_ms),
+            .duration_ms(crate::now_ms() - start_ms),
     );
 }
 
@@ -340,13 +313,139 @@ async fn load_wasm_extension_bytes(
     ext_bridge::load_wasm_ext_module(module, wasm_bytes, &js_glue_url).await
 }
 
+async fn fetch_optional_bindgen_js_glue<F, Fut>(
+    module: &str,
+    version: &str,
+    wasm_extension: &WasmExtensionManifest,
+    cached: bool,
+    mut fetch: F,
+) -> Result<Option<String>, String>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    match wasm_extension.kind {
+        WasmExtensionKind::Bindgen => {
+            let js_glue_name = wasm_extension.js_glue.as_deref().unwrap_or_default().to_string();
+            let js_glue_fetch_start = crate::now_ms();
+            log_extension_asset_load_start(module, version, "js_glue", &js_glue_name, cached);
+            let js_glue_text = fetch(js_glue_name.clone()).await?;
+            log_extension_asset_load_done(
+                module,
+                version,
+                "js_glue",
+                &js_glue_name,
+                cached,
+                js_glue_fetch_start,
+            );
+            Ok(Some(js_glue_text))
+        }
+        WasmExtensionKind::Standalone => Ok(None),
+    }
+}
+
+struct FetchedExtensionAssets {
+    wasm_bytes: Vec<u8>,
+    js_glue_text: Option<String>,
+}
+
+fn cache_fetched_extension_assets(
+    module: &str,
+    version: &str,
+    wasm_extension: &WasmExtensionManifest,
+    wasm_bytes: &[u8],
+    js_glue_text: Option<&str>,
+) -> Result<(), String> {
+    write_vfs_bytes(
+        &vfs_artifact_path(module, version, &wasm_extension.wasm),
+        wasm_bytes,
+    )?;
+    if let Some(js_glue_text) = js_glue_text {
+        let js_glue_name = wasm_extension.js_glue.as_deref().unwrap_or_default();
+        write_vfs_text(&vfs_artifact_path(module, version, js_glue_name), js_glue_text)?;
+    }
+    Ok(())
+}
+
+async fn fetch_extension_assets<F, G, FutWasm, FutJs>(
+    module: &str,
+    version: &str,
+    wasm_extension: &WasmExtensionManifest,
+    cached: bool,
+    mut fetch_wasm: F,
+    fetch_js_glue: G,
+) -> Result<FetchedExtensionAssets, String>
+where
+    F: FnMut() -> FutWasm,
+    G: FnMut(String) -> FutJs,
+    FutWasm: std::future::Future<Output = Result<Vec<u8>, String>>,
+    FutJs: std::future::Future<Output = Result<String, String>>,
+{
+    let wasm_fetch_start = crate::now_ms();
+    log_extension_asset_load_start(module, version, "wasm", &wasm_extension.wasm, cached);
+    let wasm_bytes = fetch_wasm().await?;
+    log_extension_asset_load_done(
+        module,
+        version,
+        "wasm",
+        &wasm_extension.wasm,
+        cached,
+        wasm_fetch_start,
+    );
+    let js_glue_text = fetch_optional_bindgen_js_glue(
+        module,
+        version,
+        wasm_extension,
+        cached,
+        fetch_js_glue,
+    )
+    .await?;
+    Ok(FetchedExtensionAssets {
+        wasm_bytes,
+        js_glue_text,
+    })
+}
+
+async fn fetch_and_cache_extension_assets<F, G, FutWasm, FutJs>(
+    module: &str,
+    version: &str,
+    wasm_extension: &WasmExtensionManifest,
+    cached: bool,
+    fetch_wasm: F,
+    fetch_js_glue: G,
+) -> Result<FetchedExtensionAssets, String>
+where
+    F: FnMut() -> FutWasm,
+    G: FnMut(String) -> FutJs,
+    FutWasm: std::future::Future<Output = Result<Vec<u8>, String>>,
+    FutJs: std::future::Future<Output = Result<String, String>>,
+{
+    let assets = fetch_extension_assets(
+        module,
+        version,
+        wasm_extension,
+        cached,
+        fetch_wasm,
+        fetch_js_glue,
+    )
+    .await?;
+    cache_fetched_extension_assets(
+        module,
+        version,
+        wasm_extension,
+        &assets.wasm_bytes,
+        assets.js_glue_text.as_deref(),
+    )?;
+    Ok(assets)
+}
+
 fn write_versioned_module_files_to_vfs(
     module: &str,
     version: &str,
     files: &[(PathBuf, String)],
 ) -> Result<(), String> {
     let module_prefix = Path::new(module);
-    let install_root = PathBuf::from(materialize::relative_module_dir(module, version));
+    let install_root = relative_module_dir(module, version);
     for (vfs_path, content) in files {
         let file_rel = vfs_path.strip_prefix(module_prefix).map_err(|_| {
             format!(
@@ -383,74 +482,24 @@ fn release_manifest_from_files(
     })
 }
 
+fn read_release_manifest_from_vfs(module: &str, version: &str) -> Result<ReleaseManifest, String> {
+    let manifest_path = vfs_module_file_path(module, version, "vo.release.json");
+    let manifest_content = read_vfs_text(&manifest_path)?;
+    ReleaseManifest::parse(&manifest_content).map_err(|error| {
+        format!(
+            "vo.release.json parse error for {}@{}: {}",
+            module, version, error
+        )
+    })
+}
+
 fn validate_vfs_installed_module(locked: &LockedModule) -> Result<(), String> {
     let module = locked.path.as_str();
     let version = locked.version.to_string();
-    let vo_mod_path = vfs_module_file_path(module, &version, "vo.mod");
-    let mod_content = read_vfs_text(&vo_mod_path).map_err(|_| {
-        format!(
-            "locked module {}@{} is not installed correctly in the VFS (found <missing vo.mod>)",
-            module, version,
-        )
-    })?;
-    let mod_file = ModFile::parse(&mod_content).map_err(|error| {
-        format!(
-            "invalid cached vo.mod for {}@{} in the VFS: {}",
-            module, version, error
-        )
-    })?;
-    if mod_file.module != locked.path {
-        return Err(format!(
-            "cached vo.mod module mismatch for {}@{} in the VFS: expected {}, found {}",
-            module, version, module, mod_file.module,
-        ));
-    }
-    if mod_file.vo != locked.vo {
-        return Err(format!(
-            "cached vo.mod toolchain constraint mismatch for {}@{} in the VFS: expected {}, found {}",
-            module, version, locked.vo, mod_file.vo,
-        ));
-    }
-    let installed_version = read_vfs_installed_version(module, &version)
-        .ok_or_else(|| format!(
-            "locked module {}@{} is not installed correctly in the VFS (found <missing .vo-version>)",
-            module, version,
-        ))?;
-    if installed_version != version {
-        return Err(format!(
-            "locked module {}@{} is not installed correctly in the VFS (found {})",
-            module, version, installed_version,
-        ));
-    }
-    let source_digest = read_vfs_installed_source_digest(module, &version).ok_or_else(|| {
-        format!(
-            "locked module {}@{} is missing source digest metadata at {}",
-            module,
-            version,
-            vfs_source_digest_path(module, &version),
-        )
-    })?;
-    if source_digest != locked.source.as_str() {
-        return Err(format!(
-            "locked module {}@{} source digest mismatch in the VFS: expected {}, found {}",
-            module, version, locked.source, source_digest,
-        ));
-    }
-    let manifest_digest = read_vfs_release_manifest_digest(module, &version).ok_or_else(|| {
-        format!(
-            "locked module {}@{} is missing {} in the VFS",
-            module,
-            version,
-            vfs_release_manifest_path(module, &version),
-        )
-    })?;
-    if manifest_digest != locked.release_manifest.as_str() {
-        return Err(format!(
-            "locked module {}@{} release manifest digest mismatch in the VFS: expected {}, found {}",
-            module, version, locked.release_manifest, manifest_digest,
-        ));
-    }
-    Ok(())
+    let vfs_root = vfs_module_dir(module, &version);
+    let fs = crate::wasm_vfs::WasmVfs::new(&vfs_root[1..]); // strip leading '/'
+    vo_module::cache::validate::validate_installed_module(&fs, std::path::Path::new("."), locked)
+        .map_err(|e| e.to_string())
 }
 
 async fn load_locked_ext_from_vfs(locked: &LockedModule) -> Result<(), String> {
@@ -513,55 +562,32 @@ async fn install_locked_module_to_vfs(locked: &LockedModule) -> Result<String, S
     let module = locked.path.as_str();
     let version = locked.version.to_string();
 
-    let fetch_start = js_sys::Date::now();
+    let fetch_start = crate::now_ms();
     log_dependency_fetch_start(module, &version);
     let files = wasm_fetch::fetch_locked_module_files(locked).await?;
     log_dependency_fetch_done(module, &version, fetch_start);
     write_versioned_module_files_to_vfs(module, &version, &files)?;
     write_vfs_text(
-        &vfs_module_file_path(module, &version, materialize::VERSION_MARKER),
+        &vfs_module_file_path(module, &version, VERSION_MARKER),
         &format!("{}\n", version),
     )?;
     write_vfs_text(
-        &vfs_module_file_path(module, &version, materialize::SOURCE_DIGEST_MARKER),
+        &vfs_module_file_path(module, &version, SOURCE_DIGEST_MARKER),
         &format!("{}\n", locked.source),
     )?;
 
     if let Some(wasm_extension) = read_wasm_extension_from_vfs(module, &version) {
-        let wasm_fetch_start = js_sys::Date::now();
-        log_extension_asset_load_start(module, &version, "wasm", &wasm_extension.wasm, false);
-        let wasm_bytes = wasm_fetch::fetch_locked_wasm_binary(locked, &wasm_extension.wasm).await?;
-        log_extension_asset_load_done(
+        fetch_and_cache_extension_assets(
             module,
             &version,
-            "wasm",
-            &wasm_extension.wasm,
+            &wasm_extension,
             false,
-            wasm_fetch_start,
-        );
-        write_vfs_bytes(
-            &vfs_artifact_path(module, &version, &wasm_extension.wasm),
-            &wasm_bytes,
-        )?;
-        if let WasmExtensionKind::Bindgen = wasm_extension.kind {
-            let js_glue_name = wasm_extension.js_glue.as_deref().unwrap_or_default();
-            let js_glue_fetch_start = js_sys::Date::now();
-            log_extension_asset_load_start(module, &version, "js_glue", js_glue_name, false);
-            let js_glue_text =
-                wasm_fetch::fetch_locked_wasm_js_glue_text(locked, js_glue_name).await?;
-            log_extension_asset_load_done(
-                module,
-                &version,
-                "js_glue",
-                js_glue_name,
-                false,
-                js_glue_fetch_start,
-            );
-            write_vfs_text(
-                &vfs_artifact_path(module, &version, js_glue_name),
-                &js_glue_text,
-            )?;
-        }
+            || wasm_fetch::fetch_locked_wasm_binary(locked, &wasm_extension.wasm),
+            |js_glue_name| async move {
+                wasm_fetch::fetch_locked_wasm_js_glue_text(locked, &js_glue_name).await
+            },
+        )
+        .await?;
         load_locked_ext_from_vfs(locked).await?;
     }
 
@@ -651,6 +677,13 @@ pub(crate) async fn load_ext_if_present(module: &str, version: &str) {
     let Some(wasm_extension) = read_wasm_extension_from_vfs(module, version) else {
         return;
     };
+    let manifest = match read_release_manifest_from_vfs(module, version) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            log_extension_load_error(module, version, error);
+            return;
+        }
+    };
 
     match load_cached_ext_from_vfs(module, version).await {
         Ok(true) => return,
@@ -660,63 +693,61 @@ pub(crate) async fn load_ext_if_present(module: &str, version: &str) {
         }
     }
 
-    let wasm_fetch_start = js_sys::Date::now();
-    log_extension_asset_load_start(module, version, "wasm", &wasm_extension.wasm, true);
-    let wasm_bytes =
-        match wasm_fetch::fetch_wasm_binary(module, version, &wasm_extension.wasm).await {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                log_extension_asset_load_error(module, version, "wasm", &wasm_extension.wasm, e);
-                return;
-            }
-        };
-    log_extension_asset_load_done(
+    let assets = match fetch_extension_assets(
         module,
         version,
-        "wasm",
-        &wasm_extension.wasm,
+        &wasm_extension,
         true,
-        wasm_fetch_start,
-    );
-    if let Err(e) = write_vfs_bytes(
-        &vfs_artifact_path(module, version, &wasm_extension.wasm),
-        &wasm_bytes,
-    ) {
-        log_extension_cache_error(module, version, "wasm", &wasm_extension.wasm, e);
-    }
-
-    let js_glue_text = match wasm_extension.kind {
-        WasmExtensionKind::Bindgen => {
-            let js_glue_name = wasm_extension.js_glue.as_deref().unwrap_or_default();
-            let js_glue_fetch_start = js_sys::Date::now();
-            log_extension_asset_load_start(module, version, "js_glue", js_glue_name, true);
-            match wasm_fetch::fetch_wasm_js_glue_text(module, version, js_glue_name).await {
-                Ok(text) => {
-                    log_extension_asset_load_done(
-                        module,
-                        version,
-                        "js_glue",
-                        js_glue_name,
-                        true,
-                        js_glue_fetch_start,
-                    );
-                    if let Err(e) =
-                        write_vfs_text(&vfs_artifact_path(module, version, js_glue_name), &text)
-                    {
-                        log_extension_cache_error(module, version, "js_glue", js_glue_name, e);
-                    }
-                    Some(text)
-                }
-                Err(e) => {
-                    log_extension_asset_load_error(module, version, "js_glue", js_glue_name, e);
-                    return;
-                }
+        || wasm_fetch::fetch_wasm_binary_from_manifest(module, version, &manifest, &wasm_extension.wasm),
+        |js_glue_name| {
+            let manifest = manifest.clone();
+            async move {
+                wasm_fetch::fetch_wasm_js_glue_text_from_manifest(
+                    module,
+                    version,
+                    &manifest,
+                    &js_glue_name,
+                )
+                .await
             }
+        },
+    )
+    .await {
+        Ok(result) => result,
+        Err(e) => {
+            let js_glue_name = wasm_extension.js_glue.as_deref().unwrap_or_default();
+            let (asset_kind, asset_name) = if e.contains("JS glue") || e.contains("js glue") {
+                ("js_glue", js_glue_name)
+            } else {
+                ("wasm", wasm_extension.wasm.as_str())
+            };
+            log_extension_asset_load_error(module, version, asset_kind, asset_name, e);
+            return;
         }
-        WasmExtensionKind::Standalone => None,
     };
 
-    if let Err(e) = load_wasm_extension_bytes(module, &wasm_bytes, js_glue_text.as_deref()).await {
+    if let Err(e) = cache_fetched_extension_assets(
+        module,
+        version,
+        &wasm_extension,
+        &assets.wasm_bytes,
+        assets.js_glue_text.as_deref(),
+    ) {
+        let js_glue_name = wasm_extension.js_glue.as_deref().unwrap_or_default();
+        let (asset_kind, asset_name) = if e.contains(js_glue_name) && !js_glue_name.is_empty() {
+            ("js_glue", js_glue_name)
+        } else {
+            ("wasm", wasm_extension.wasm.as_str())
+        };
+        log_extension_cache_error(module, version, asset_kind, asset_name, e);
+    }
+
+    if let Err(e) = load_wasm_extension_bytes(
+        module,
+        &assets.wasm_bytes,
+        assets.js_glue_text.as_deref(),
+    )
+    .await {
         log_extension_load_error(module, version, e);
     }
 }
@@ -776,25 +807,13 @@ pub async fn ensure_vfs_deps_from_fs(local_fs: &MemoryFs, entry: &str) -> Result
     let entry_dir = std::path::Path::new(entry)
         .parent()
         .unwrap_or(std::path::Path::new("."));
-    let project_deps = vo_module::project::read_project_deps_near(local_fs, entry_dir, &[])
-        .map_err(|error| error.to_string())?;
+    let project_deps = crate::load_workspace_project_context(local_fs, entry_dir)?.project_deps;
     if !project_deps.has_mod_file || project_deps.locked_modules.is_empty() {
         return Ok(());
     }
     ensure_vfs_locked_modules(project_deps.locked_modules).await
 }
 
-pub async fn prepare_github_modules(_source: &str) -> Result<(MemoryFs, String), String> {
-    Err(
-        "external module imports in web builds now require a project with vo.mod and vo.lock; source-scanned dependency fetching is no longer supported".to_string()
-    )
-}
-
-pub async fn ensure_vfs_versioned_imports(_source: &str) -> Result<(), String> {
-    Err(
-        "version-suffixed imports are no longer supported in web builds; declare dependencies in vo.mod and vo.lock instead".to_string()
-    )
-}
 
 pub async fn install_module_to_vfs(spec: &str) -> Result<String, String> {
     let (module, version) = spec
@@ -803,7 +822,7 @@ pub async fn install_module_to_vfs(spec: &str) -> Result<String, String> {
         .map(|(m, v)| (m.to_string(), v.to_string()))
         .ok_or_else(|| format!("invalid spec {:?}: expected module@version", spec))?;
 
-    let fetch_start = js_sys::Date::now();
+    let fetch_start = crate::now_ms();
     log_dependency_fetch_start(&module, &version);
     let files = wasm_fetch::fetch_module_files(&module, &version)
         .await
@@ -812,62 +831,46 @@ pub async fn install_module_to_vfs(spec: &str) -> Result<String, String> {
     let manifest = release_manifest_from_files(&module, &version, &files)?;
     write_versioned_module_files_to_vfs(&module, &version, &files)?;
     write_vfs_text(
-        &vfs_module_file_path(&module, &version, materialize::VERSION_MARKER),
+        &vfs_module_file_path(&module, &version, VERSION_MARKER),
         &format!("{}\n", version),
     )?;
     write_vfs_text(
-        &vfs_module_file_path(&module, &version, materialize::SOURCE_DIGEST_MARKER),
+        &vfs_module_file_path(&module, &version, SOURCE_DIGEST_MARKER),
         &format!("{}\n", manifest.source.digest),
     )?;
 
     if let Some(wasm_extension) = read_wasm_extension_from_vfs(&module, &version) {
-        let wasm_fetch_start = js_sys::Date::now();
-        log_extension_asset_load_start(&module, &version, "wasm", &wasm_extension.wasm, false);
-        let wasm_bytes =
-            wasm_fetch::fetch_wasm_binary(&module, &version, &wasm_extension.wasm).await?;
-        log_extension_asset_load_done(
+        let assets = fetch_and_cache_extension_assets(
             &module,
             &version,
-            "wasm",
-            &wasm_extension.wasm,
+            &wasm_extension,
             false,
-            wasm_fetch_start,
-        );
-        write_vfs_bytes(
-            &vfs_artifact_path(&module, &version, &wasm_extension.wasm),
-            &wasm_bytes,
-        )?;
-        let js_glue_text = match wasm_extension.kind {
-            WasmExtensionKind::Bindgen => {
-                let js_glue_name = wasm_extension.js_glue.as_deref().unwrap_or_default();
-                let js_glue_fetch_start = js_sys::Date::now();
-                log_extension_asset_load_start(&module, &version, "js_glue", js_glue_name, false);
-                let js_glue_text =
-                    wasm_fetch::fetch_wasm_js_glue_text(&module, &version, js_glue_name).await?;
-                log_extension_asset_load_done(
-                    &module,
-                    &version,
-                    "js_glue",
-                    js_glue_name,
-                    false,
-                    js_glue_fetch_start,
-                );
-                write_vfs_text(
-                    &vfs_artifact_path(&module, &version, js_glue_name),
-                    &js_glue_text,
-                )?;
-                Some(js_glue_text)
-            }
-            WasmExtensionKind::Standalone => None,
-        };
-        load_wasm_extension_bytes(&module, &wasm_bytes, js_glue_text.as_deref()).await?;
+            || wasm_fetch::fetch_wasm_binary_from_manifest(&module, &version, &manifest, &wasm_extension.wasm),
+            |js_glue_name| {
+                let module = module.clone();
+                let version = version.clone();
+                let manifest = manifest.clone();
+                async move {
+                    wasm_fetch::fetch_wasm_js_glue_text_from_manifest(
+                        &module,
+                        &version,
+                        &manifest,
+                        &js_glue_name,
+                    )
+                    .await
+                }
+            },
+        )
+        .await?;
+        load_wasm_extension_bytes(&module, &assets.wasm_bytes, assets.js_glue_text.as_deref())
+            .await?;
     }
 
     Ok(vfs_module_dir(&module, &version))
 }
 
-pub fn discover_vfs_installed_version(module: &str) -> Option<String> {
-    let encoded = vo_module::materialize::cache_key(module);
+fn discover_vfs_installed_version(module: &str) -> Option<String> {
+    let encoded = cache_key(module);
     let module_dir = format!("/{}", encoded);
     let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(&module_dir);
     if err.is_some() {
@@ -881,7 +884,7 @@ pub fn discover_vfs_installed_version(module: &str) -> Option<String> {
             "{}/{}/{}",
             module_dir,
             name,
-            vo_module::materialize::VERSION_MARKER
+            VERSION_MARKER
         );
         if let Ok(content) = read_vfs_text(&version_marker) {
             let version = content.trim().to_string();
@@ -898,7 +901,7 @@ async fn fetch_latest_module_version(module: &str) -> Result<String, String> {
     let repo = vo_module::compat::module_repository(module)
         .ok_or_else(|| format!("not a github.com module path: {}", module))?;
     let module_root = vo_module::compat::module_root(module).unwrap_or_else(|| ".".to_string());
-    let fetch_start = js_sys::Date::now();
+    let fetch_start = crate::now_ms();
     log_dependency_version_resolve_start(module);
 
     // For root-level modules, use the /releases/latest endpoint.
@@ -1309,22 +1312,13 @@ mod wasm_fetch {
         Ok((manifest, manifest_content))
     }
 
-    async fn fetch_release_manifest(
-        module: &str,
-        version: &str,
-    ) -> Result<ReleaseManifest, String> {
-        fetch_release_manifest_checked(module, version, None)
-            .await
-            .map(|(manifest, _)| manifest)
-    }
-
     // ── Source package extraction ─────────────────────────────────────────────
 
     fn extract_release_source_package_files(
         source_package: &[u8],
         manifest: &ReleaseManifest,
     ) -> Result<Vec<(PathBuf, String)>, String> {
-        let entries = vo_module::materialize::extract_source_entries(source_package)
+        let entries = vo_module::cache::install::extract_source_entries(source_package)
             .map_err(|e| format!("{} for {}@{}", e, manifest.module, manifest.version))?;
         if entries.is_empty() {
             return Err(format!(
@@ -1335,10 +1329,10 @@ mod wasm_fetch {
         let module = manifest.module.as_str();
         Ok(entries
             .into_iter()
-            .map(|e| {
+            .map(|(relative_path, content)| {
                 (
-                    PathBuf::from(format!("{}/{}", module, e.relative_path.display())),
-                    e.content,
+                    PathBuf::from(format!("{}/{}", module, relative_path.display())),
+                    content,
                 )
             })
             .collect())
@@ -1560,33 +1554,52 @@ mod wasm_fetch {
         })
     }
 
-    pub async fn fetch_wasm_js_glue_text(
+    async fn fetch_manifest_artifact_bytes(
         module: &str,
         version: &str,
+        manifest: &ReleaseManifest,
+        target: &str,
         asset_name: &str,
-    ) -> Result<String, String> {
-        let manifest = fetch_release_manifest(module, version).await?;
-        let artifact = find_manifest_artifact(&manifest, "wasm32-unknown-unknown", asset_name)
-            .ok_or_else(|| {
-                format!(
-                    "release manifest for {}@{} is missing wasm JS glue artifact {}",
-                    module, version, asset_name,
-                )
-            })?;
-        let bytes = fetch_bytes(&manifest_asset_download_url(&manifest, &artifact.id.name))
+        label: &str,
+    ) -> Result<Vec<u8>, String> {
+        let artifact = find_manifest_artifact(manifest, target, asset_name).ok_or_else(|| {
+            format!(
+                "release manifest for {}@{} is missing {} artifact {}",
+                module, version, label, asset_name,
+            )
+        })?;
+        let bytes = fetch_bytes(&manifest_asset_download_url(manifest, &artifact.id.name))
             .await
             .map_err(|e| {
                 format!(
-                    "failed to fetch wasm JS glue for {}@{}: {}",
-                    module, version, e
+                    "failed to fetch {} for {}@{}: {}",
+                    label, module, version, e
                 )
             })?;
         verify_download_bytes(
             &bytes,
             artifact.size,
             artifact.digest.as_str(),
-            &format!("wasm JS glue for {}@{}", module, version),
+            &format!("{} for {}@{}", label, module, version),
         )?;
+        Ok(bytes)
+    }
+
+    pub async fn fetch_wasm_js_glue_text_from_manifest(
+        module: &str,
+        version: &str,
+        manifest: &ReleaseManifest,
+        asset_name: &str,
+    ) -> Result<String, String> {
+        let bytes = fetch_manifest_artifact_bytes(
+            module,
+            version,
+            manifest,
+            "wasm32-unknown-unknown",
+            asset_name,
+            "wasm JS glue",
+        )
+        .await?;
         String::from_utf8(bytes).map_err(|error| {
             format!(
                 "wasm JS glue for {}@{} is not valid UTF-8: {}",
@@ -1595,58 +1608,44 @@ mod wasm_fetch {
         })
     }
 
-    pub async fn fetch_wasm_js_glue_url(
+    pub async fn fetch_wasm_binary_from_manifest(
         module: &str,
         version: &str,
-        asset_name: &str,
-    ) -> Result<String, String> {
-        let js_text = fetch_wasm_js_glue_text(module, version, asset_name).await?;
-        super::js_glue_data_url(&js_text)
-    }
-
-    pub async fn fetch_wasm_binary(
-        module: &str,
-        version: &str,
+        manifest: &ReleaseManifest,
         asset_name: &str,
     ) -> Result<Vec<u8>, String> {
-        let url = if let Some(local_url) = try_local_wasm_url(module, version) {
-            local_url
-        } else {
-            let manifest = fetch_release_manifest(module, version).await?;
-            let artifact = manifest
-                .artifacts
-                .iter()
-                .find(|a| a.id.kind == "extension-wasm" && a.id.target == "wasm32-unknown-unknown")
-                .ok_or_else(|| format!(
-                    "release manifest for {}@{} is missing extension-wasm artifact for wasm32-unknown-unknown",
-                    module, version,
-                ))?;
-            if artifact.id.name != asset_name {
-                return Err(format!(
-                    "release manifest for {}@{} declares wasm artifact {}, but vo.ext.toml requests {}",
-                    module, version, artifact.id.name, asset_name,
-                ));
-            }
-            let url = manifest_asset_download_url(&manifest, &artifact.id.name);
-            let bytes = fetch_bytes(&url).await.map_err(|e| {
+        if let Some(local_url) = try_local_wasm_url(module, version) {
+            return fetch_bytes(&local_url).await.map_err(|e| {
                 format!(
-                    "failed to fetch wasm artifact for {}@{}: {}",
+                    "failed to fetch local wasm override for {}@{}: {}",
                     module, version, e
                 )
-            })?;
-            verify_download_bytes(
-                &bytes,
-                artifact.size,
-                artifact.digest.as_str(),
-                &format!("wasm artifact for {}@{}", module, version),
-            )?;
-            return Ok(bytes);
-        };
-        fetch_bytes(&url).await.map_err(|e| {
-            format!(
-                "failed to fetch local wasm override for {}@{}: {}",
-                module, version, e
-            )
-        })
+            });
+        }
+
+        let artifact = manifest
+            .artifacts
+            .iter()
+            .find(|a| a.id.kind == "extension-wasm" && a.id.target == "wasm32-unknown-unknown")
+            .ok_or_else(|| format!(
+                "release manifest for {}@{} is missing extension-wasm artifact for wasm32-unknown-unknown",
+                module, version,
+            ))?;
+        if artifact.id.name != asset_name {
+            return Err(format!(
+                "release manifest for {}@{} declares wasm artifact {}, but vo.ext.toml requests {}",
+                module, version, artifact.id.name, asset_name,
+            ));
+        }
+        fetch_manifest_artifact_bytes(
+            module,
+            version,
+            manifest,
+            "wasm32-unknown-unknown",
+            asset_name,
+            "wasm artifact",
+        )
+        .await
     }
+
 }

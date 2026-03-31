@@ -7,12 +7,11 @@ use vo_stdlib::toolchain::{
     install_toolchain_host, is_toolchain_host_installed, ToolchainHost, ToolchainModule,
     ToolchainRunMode,
 };
-use vo_syntax::display::format_file;
 use vo_syntax::parser;
 
 use crate::{
-    compile, compile_string, format_text, parse_text, run, run_with_output, CompileOutput, Module,
-    RunMode,
+    compile, compile_string, format_source, format_text, parse_text, run, run_with_output,
+    CompileOutput, Module, RunMode,
 };
 
 struct EngineToolchainHost;
@@ -55,15 +54,7 @@ fn parse_source(source: &str) -> Result<String, String> {
 }
 
 fn format_source_impl(source: &str) -> Result<String, String> {
-    let (file, diags, interner) = parser::parse(source, 0);
-    if diags.has_errors() {
-        return Err(diags
-            .iter()
-            .map(|diag| diag.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; "));
-    }
-    Ok(format_file(&file, &interner))
+    format_source(source)
 }
 
 fn init_project_impl(dir: &str, mod_name: &str) -> Result<String, String> {
@@ -239,7 +230,6 @@ impl ToolchainHost for EngineToolchainHost {
 pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf, String> {
     use vo_module::github_registry::GitHubRegistry;
     use vo_module::identity::ModulePath;
-    use vo_module::materialize;
     use vo_module::registry::Registry;
     use vo_module::schema::lockfile::LockedModule;
     use vo_module::version::ExactVersion;
@@ -248,12 +238,14 @@ pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf,
     let ev = ExactVersion::parse(version).map_err(|e| format!("{e}"))?;
 
     let registry = GitHubRegistry::new();
-    let manifest = registry
-        .fetch_manifest(&mp, &ev)
+    let (manifest, manifest_raw) = registry
+        .fetch_manifest_raw(&mp, &ev)
         .map_err(|e| format!("{e}"))?;
 
     let mod_cache = crate::compile::default_mod_cache_root();
-    let cache_dir = materialize::cache_dir(&mod_cache, &mp, &ev);
+    let cache_dir = vo_module::cache::layout::cache_dir(&mod_cache, &mp, &ev);
+
+    let manifest_digest = vo_module::digest::Digest::from_sha256(&manifest_raw);
 
     // Build a synthetic LockedModule for download
     let locked = LockedModule {
@@ -261,7 +253,7 @@ pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf,
         version: ev.clone(),
         vo: manifest.vo.clone(),
         commit: manifest.commit.clone(),
-        release_manifest: manifest.source.digest.clone(), // placeholder
+        release_manifest: manifest_digest,
         source: manifest.source.digest.clone(),
         deps: manifest.require.iter().map(|r| r.module.clone()).collect(),
         artifacts: manifest
@@ -285,7 +277,8 @@ pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf,
         resolved: vec![locked],
     };
 
-    materialize::download_all(&mod_cache, &lf, &registry).map_err(|e| format!("{e}"))?;
+    vo_module::cache::install::populate_locked_cache(&mod_cache, &lf, &registry)
+        .map_err(|e| format!("{e}"))?;
     let manifests =
         vo_module::ext_manifest::discover_extensions(&cache_dir).map_err(|e| e.to_string())?;
     let _ = crate::compile::prepare_extension_manifests(&manifests, &lf.resolved)

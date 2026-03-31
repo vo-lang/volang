@@ -1,7 +1,7 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use vo_common::vfs::FileSystem;
+use vo_common::vfs::{normalize_fs_path, FileSystem};
 
 use crate::lock;
 use crate::schema::lockfile::{LockFile, LockedModule};
@@ -252,6 +252,77 @@ fn read_optional_file<F: FileSystem>(
             .with_path(path),
         ),
     }
+}
+
+/// Find the nearest project root by walking up from `dir` looking for `vo.mod`.
+/// Returns `dir` itself (normalized) if no `vo.mod` is found.
+pub fn find_project_root_in<F: FileSystem>(fs: &F, dir: &Path) -> PathBuf {
+    let mut current = normalize_fs_path(dir);
+    loop {
+        let candidate = if current == Path::new(".") || current.as_os_str().is_empty() {
+            PathBuf::from("vo.mod")
+        } else {
+            current.join("vo.mod")
+        };
+        if fs.exists(&candidate) && !fs.is_dir(&candidate) {
+            return current;
+        }
+        if !current.pop() {
+            return normalize_fs_path(dir);
+        }
+    }
+}
+
+/// Read a `vo.mod` file from a directory, returning `None` if the file does not exist.
+fn read_mod_file_in<F: FileSystem>(fs: &F, dir: &Path) -> Result<Option<ModFile>, String> {
+    let mod_path = if dir == Path::new(".") || dir.as_os_str().is_empty() {
+        PathBuf::from("vo.mod")
+    } else {
+        dir.join("vo.mod")
+    };
+    match fs.read_file(&mod_path) {
+        Ok(content) => ModFile::parse(&content)
+            .map(Some)
+            .map_err(|error| format!("vo.mod parse error: {}", error)),
+        Err(_) if !fs.exists(&mod_path) => Ok(None),
+        Err(error) => Err(format!("vo.mod read error: {}", error)),
+    }
+}
+
+/// Resolved project context: project root, dependencies, and workspace replaces.
+///
+/// This is the canonical result of project discovery and should be used by both
+/// native (vo-engine) and web (vo-web) compilation paths.
+pub struct ProjectContext {
+    pub project_root: PathBuf,
+    pub project_deps: ProjectDeps,
+    pub workspace_replaces: HashMap<String, PathBuf>,
+}
+
+/// Load the full project context for a directory.
+///
+/// Discovers the nearest `vo.mod` ancestor, loads workspace replaces,
+/// and reads project dependencies (excluding workspace-replaced modules).
+pub fn load_project_context<F: FileSystem>(
+    fs: &F,
+    dir: &Path,
+) -> Result<ProjectContext, String> {
+    let project_root = find_project_root_in(fs, dir);
+    let root_mod = read_mod_file_in(fs, &project_root)?;
+    let workspace_replaces = crate::workspace::load_workspace_replaces(
+        fs,
+        &project_root,
+        root_mod.as_ref().map(|mf| &mf.module),
+    )
+    .map_err(|error| error.to_string())?;
+    let excluded_modules = workspace_replaces.keys().cloned().collect::<Vec<_>>();
+    let project_deps = read_project_deps_near(fs, &project_root, &excluded_modules)
+        .map_err(|error| error.to_string())?;
+    Ok(ProjectContext {
+        project_root,
+        project_deps,
+        workspace_replaces,
+    })
 }
 
 #[cfg(test)]
