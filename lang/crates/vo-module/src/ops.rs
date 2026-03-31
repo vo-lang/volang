@@ -210,17 +210,17 @@ pub fn mod_remove(
 /// - Re-solves the dependency graph and writes `vo.lock`.
 pub fn mod_tidy(
     project_dir: &Path,
+    external_imports: &BTreeSet<String>,
     cache_root: &Path,
     registry: &dyn Registry,
     created_by: &str,
 ) -> Result<TidyResult, Error> {
-    let external_imports = scan_external_imports(project_dir)?;
     let mut mf = read_mod_file(project_dir)?;
     let existing_lock = read_lock_file(project_dir).ok();
 
     // Determine which modules are actually needed by imports.
     let mut needed_modules: BTreeSet<ModulePath> = BTreeSet::new();
-    for import_path in &external_imports {
+    for import_path in external_imports {
         if let Some((module, _)) =
             find_owning_module(import_path, mf.require.iter().map(|r| &r.module))
         {
@@ -535,64 +535,6 @@ pub fn read_lock_file(project_dir: &Path) -> Result<LockFile, Error> {
     let path = project_dir.join("vo.lock");
     let content = std::fs::read_to_string(&path)?;
     LockFile::parse(&content)
-}
-
-fn scan_external_imports(project_dir: &Path) -> Result<BTreeSet<String>, Error> {
-    let mut imports = BTreeSet::new();
-    scan_external_imports_dir(project_dir, &mut imports)?;
-    Ok(imports)
-}
-
-fn scan_external_imports_dir(dir: &Path, imports: &mut BTreeSet<String>) -> Result<(), Error> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            let name = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("");
-            if name.starts_with('.')
-                || name == "vendor"
-                || name == "testdata"
-                || name == "node_modules"
-                || name == "target"
-                || name == "dist"
-            {
-                continue;
-            }
-            scan_external_imports_dir(&path, imports)?;
-            continue;
-        }
-        if path.extension().map(|value| value == "vo").unwrap_or(false) {
-            scan_external_imports_file(&path, imports)?;
-        }
-    }
-    Ok(())
-}
-
-fn scan_external_imports_file(path: &Path, imports: &mut BTreeSet<String>) -> Result<(), Error> {
-    let content = std::fs::read_to_string(path)?;
-    let (file, diagnostics, _) = vo_syntax::parse(&content, 0);
-    if diagnostics.has_errors() {
-        let detail = diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(Error::SourceScan(format!(
-            "failed to parse {} while scanning imports: {}",
-            path.display(),
-            detail,
-        )));
-    }
-    for import in &file.imports {
-        let import_path = import.path.value.clone();
-        if classify_import(&import_path)? == ImportClass::External {
-            imports.insert(import_path);
-        }
-    }
-    Ok(())
 }
 
 fn write_mod_file(project_dir: &Path, mf: &ModFile) -> Result<(), Error> {

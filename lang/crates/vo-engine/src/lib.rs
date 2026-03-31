@@ -6,6 +6,7 @@
 mod compile;
 mod format;
 mod run;
+mod scan;
 mod toolchain;
 
 pub use compile::{
@@ -19,6 +20,7 @@ pub use run::{
     build_gui_vm, run, run_with_output, run_with_output_interruptible, RunError, RunMode,
     RuntimeError, RuntimeErrorKind,
 };
+pub use scan::scan_external_imports;
 pub use toolchain::{ensure_toolchain_host_installed, install_module};
 
 /// Format Vo source code, returning the formatted string.
