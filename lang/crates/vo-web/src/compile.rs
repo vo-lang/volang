@@ -1,0 +1,577 @@
+//! Vo source compilation pipeline for WASM targets.
+//!
+//! Provides multiple compilation entry points:
+//! - Single-file compilation (`compile_source_with_*`)
+//! - Multi-file package compilation (`compile_entry_with_*`)
+//! - Module source backed by `MemoryFs` or `WasmVfs`
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use vo_common::vfs::{FileSet, FileSystem, MemoryFs};
+
+use crate::js_types::CompileResult;
+use crate::wasm_vfs::WasmVfs;
+
+// Re-export stdlib filesystem
+pub use vo_stdlib::EmbeddedStdlib;
+
+pub type WorkspaceProjectContext = vo_module::project::ProjectContext;
+
+pub fn load_workspace_project_context<F: FileSystem>(
+    fs: &F,
+    dir: &Path,
+) -> Result<WorkspaceProjectContext, String> {
+    vo_module::project::load_project_context(fs, dir)
+}
+
+/// Build the standard library filesystem. Exported for libraries to extend.
+pub fn build_stdlib_fs() -> MemoryFs {
+    fn build_embedded_stdlib_fs() -> MemoryFs {
+        let stdlib = vo_stdlib::EmbeddedStdlib::new();
+        let mut fs = MemoryFs::new();
+
+        fn add_dir_recursive(stdlib: &vo_stdlib::EmbeddedStdlib, fs: &mut MemoryFs, path: &Path) {
+            use vo_common::vfs::FileSystem;
+            if let Ok(entries) = stdlib.read_dir(path) {
+                for entry in entries {
+                    if stdlib.is_dir(&entry) {
+                        add_dir_recursive(stdlib, fs, &entry);
+                    } else if entry.to_str().map(|s| s.ends_with(".vo")).unwrap_or(false) {
+                        if let Ok(content) = stdlib.read_file(&entry) {
+                            fs.add_file(entry, content);
+                        }
+                    }
+                }
+            }
+        }
+
+        add_dir_recursive(&stdlib, &mut fs, Path::new("."));
+        fs
+    }
+
+    static STDLIB_FS: OnceLock<MemoryFs> = OnceLock::new();
+    STDLIB_FS.get_or_init(build_embedded_stdlib_fs).clone()
+}
+
+// ── Internal helpers ─────────────────────────────────────────────────────────
+
+fn entry_package_dir(entry: &str) -> &Path {
+    Path::new(entry).parent().unwrap_or(Path::new("."))
+}
+
+fn build_single_file_fs(source: &str, filename: &str) -> MemoryFs {
+    let mut fs = MemoryFs::new();
+    fs.add_file(PathBuf::from(filename), source.to_string());
+    fs
+}
+
+fn build_single_file_set(fs: &MemoryFs, filename: &str) -> Result<FileSet, String> {
+    FileSet::from_file(fs, Path::new(filename), PathBuf::from("."))
+        .map_err(|e| format!("Failed to read file: {}", e))
+}
+
+fn build_entry_file_set(local_fs: &MemoryFs, entry: &str) -> Result<FileSet, String> {
+    FileSet::collect(local_fs, entry_package_dir(entry), PathBuf::from("."))
+        .map_err(|e| format!("Failed to collect package files: {}", e))
+}
+
+fn configure_workspace_replaces<R>(
+    resolver: R,
+    local_fs: &MemoryFs,
+    workspace_replaces: &HashMap<String, PathBuf>,
+) -> vo_analysis::vfs::ReplacingResolver<R, MemoryFs> {
+    vo_analysis::vfs::ReplacingResolver::with_fs(
+        resolver,
+        local_fs.clone(),
+        workspace_replaces.clone(),
+    )
+}
+
+fn compile_file_set_with_resolver<R: vo_analysis::vfs::Resolver>(
+    file_set: FileSet,
+    resolver: &R,
+) -> Result<Vec<u8>, String> {
+    let project = vo_analysis::analyze_project(file_set, resolver).map_err(|e| format!("{}", e))?;
+    let module = vo_codegen::compile_project(&project).map_err(|e| format!("{}", e))?;
+    Ok(module.serialize())
+}
+
+// ── Import analysis ──────────────────────────────────────────────────────────
+
+/// Extract unique external module root paths from source code imports.
+///
+/// For each `import "github.com/owner/repo/..."`, extracts the 3-segment
+/// module root `github.com/owner/repo`. Returns deduplicated module paths.
+pub fn extract_external_module_paths(source: &str) -> Vec<String> {
+    let (file, diagnostics, _) = vo_syntax::parser::parse(source, 0);
+    if diagnostics.has_errors() {
+        return Vec::new();
+    }
+    let mut modules = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for import in &file.imports {
+        let import_path = import.path.value.as_str();
+        if vo_module::compat::validate_import_path(import_path).is_ok() {
+            if let Some(module_root) = vo_module::identity::extract_module_root(import_path) {
+                if seen.insert(module_root.clone()) {
+                    modules.push(module_root);
+                }
+            }
+        }
+    }
+    modules
+}
+
+pub fn reject_single_file_external_imports(source: &str) -> Result<(), String> {
+    let (file, diagnostics, _) = vo_syntax::parser::parse(source, 0);
+    if diagnostics.has_errors() {
+        return Ok(());
+    }
+    for import in &file.imports {
+        let import_path = import.path.value.as_str();
+        if vo_module::compat::validate_import_path(import_path).is_ok()
+            && import_path
+                .split('/')
+                .next()
+                .is_some_and(|segment| segment.contains('.'))
+        {
+            return Err(format!(
+                "external import \"{}\" requires a project with vo.mod and vo.lock; single-file web compilation no longer resolves third-party modules",
+                import_path,
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ── Public compilation functions ─────────────────────────────────────────────
+
+/// Compile Vo source code to bytecode (WASM export).
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn compile(source: &str, filename: Option<String>) -> CompileResult {
+    let filename = filename.unwrap_or_else(|| "main.vo".to_string());
+
+    match compile_source_with_std_fs(source, &filename, build_stdlib_fs()) {
+        Ok(bytecode) => CompileResult {
+            success: true,
+            bytecode: Some(bytecode),
+            error_message: None,
+            error_line: None,
+            error_column: None,
+        },
+        Err(msg) => CompileResult {
+            success: false,
+            bytecode: None,
+            error_message: Some(msg),
+            error_line: None,
+            error_column: None,
+        },
+    }
+}
+
+/// Compile source with a custom stdlib filesystem.
+/// Exported for libraries (like vogui) that need to add extra packages.
+pub fn compile_source_with_std_fs(
+    source: &str,
+    filename: &str,
+    std_fs: MemoryFs,
+) -> Result<Vec<u8>, String> {
+    compile_source_with_mod_fs(source, filename, std_fs, MemoryFs::new())
+}
+
+/// Compile source with separate stdlib and external module filesystems.
+///
+/// `mod_fs` must have module files at paths matching the canonical module path, e.g.
+/// `github.com/vo-lang/resvg/resvg.vo` for `import "github.com/vo-lang/resvg"`.
+pub fn compile_source_with_mod_fs(
+    source: &str,
+    filename: &str,
+    std_fs: MemoryFs,
+    mod_fs: MemoryFs,
+) -> Result<Vec<u8>, String> {
+    reject_single_file_external_imports(source)?;
+
+    let fs = build_single_file_fs(source, filename);
+    let file_set = build_single_file_set(&fs, filename)?;
+
+    let project_deps = vo_module::project::read_project_deps(&fs, &[])
+        .map_err(|error| error.to_string())?;
+    let current_module = project_deps.current_module.clone();
+    let resolver = vo_analysis::vfs::CurrentModuleResolver::new(
+        vo_analysis::vfs::PackageResolver {
+            std: vo_analysis::vfs::StdSource::with_fs(std_fs),
+            r#mod: if project_deps.has_mod_file {
+                vo_analysis::vfs::ModSource::with_fs(mod_fs)
+                    .with_allowed_modules(project_deps.allowed_modules.clone())
+            } else {
+                vo_analysis::vfs::ModSource::with_fs(mod_fs)
+            },
+        },
+        fs,
+        current_module,
+    );
+
+    compile_file_set_with_resolver(file_set, &resolver)
+}
+
+/// Compile a multi-file Vo package given a pre-populated local filesystem.
+///
+/// `entry` is the path to the package entry file inside `local_fs`
+/// (e.g. `"studio/main.vo"`). `local_fs` must contain all package source files.
+/// `std_fs` must contain stdlib packages only.
+/// Third-party modules (imports containing `.`) are not resolved by this variant;
+/// use `compile_entry_with_mod_fs` if the package has external module dependencies.
+pub fn compile_entry_with_std_fs(
+    entry: &str,
+    local_fs: MemoryFs,
+    std_fs: MemoryFs,
+) -> Result<Vec<u8>, String> {
+    compile_entry_with_mod_fs(entry, local_fs, std_fs, MemoryFs::new())
+}
+
+/// Compile a multi-file Vo package with separate stdlib and module filesystems.
+///
+/// `entry` is the path to the package entry file inside `local_fs`.
+/// `std_fs` contains stdlib packages (fmt, strings, etc.).
+/// `mod_fs` contains third-party module dependencies at their canonical paths
+/// (e.g. `github.com/vo-lang/vogui/app.vo`). Imports containing `.` are
+/// resolved from `mod_fs`.
+pub fn compile_entry_with_mod_fs(
+    entry: &str,
+    local_fs: MemoryFs,
+    std_fs: MemoryFs,
+    mod_fs: MemoryFs,
+) -> Result<Vec<u8>, String> {
+    let file_set = build_entry_file_set(&local_fs, entry)?;
+
+    let context = load_workspace_project_context(&local_fs, entry_package_dir(entry))?;
+    let current_module = context.project_deps.current_module.clone();
+    let resolver = vo_analysis::vfs::CurrentModuleResolver::with_root(
+        configure_workspace_replaces(
+            vo_analysis::vfs::PackageResolver {
+            std: vo_analysis::vfs::StdSource::with_fs(std_fs),
+                r#mod: if context.project_deps.has_mod_file {
+                    vo_analysis::vfs::ModSource::with_fs(mod_fs)
+                        .with_allowed_modules(context.project_deps.allowed_modules.clone())
+                } else {
+                    vo_analysis::vfs::ModSource::with_fs(mod_fs)
+                },
+            },
+            &local_fs,
+            &context.workspace_replaces,
+        ),
+        local_fs,
+        context.project_root,
+        current_module,
+    );
+
+    compile_file_set_with_resolver(file_set, &resolver)
+}
+
+/// Compile a multi-file Vo package, resolving third-party modules from the JS VFS.
+///
+/// This is the preferred WASM compilation path: stdlib is embedded, local files
+/// come from `local_fs`, and third-party modules (imports containing `.`) are
+/// resolved from the JS VirtualFS at `vfs_mod_root` (e.g. `"/.vo/mod"`).
+///
+/// Modules must be installed into the VFS beforehand (via `install_module_to_vfs`).
+pub fn compile_entry_with_vfs(
+    entry: &str,
+    local_fs: MemoryFs,
+    vfs_mod_root: &str,
+) -> Result<Vec<u8>, String> {
+    let file_set = build_entry_file_set(&local_fs, entry)?;
+
+    let context = load_workspace_project_context(&local_fs, entry_package_dir(entry))?;
+    let current_module = context.project_deps.current_module.clone();
+    let resolver = vo_analysis::vfs::CurrentModuleResolver::with_root(
+        configure_workspace_replaces(
+            vo_analysis::vfs::PackageResolverMixed {
+            std: vo_analysis::vfs::StdSource::with_fs(build_stdlib_fs()),
+                r#mod: vo_analysis::vfs::ModSource::with_fs(WasmVfs::new(vfs_mod_root)).with_project_deps(&context.project_deps),
+            },
+            &local_fs,
+            &context.workspace_replaces,
+        ),
+        local_fs,
+        context.project_root,
+        current_module,
+    );
+
+    compile_file_set_with_resolver(file_set, &resolver)
+}
+
+/// Compile a single-file Vo source, resolving third-party modules from the JS VFS.
+pub fn compile_source_with_vfs(
+    source: &str,
+    filename: &str,
+    vfs_mod_root: &str,
+) -> Result<Vec<u8>, String> {
+    reject_single_file_external_imports(source)?;
+
+    let fs = build_single_file_fs(source, filename);
+    let file_set = build_single_file_set(&fs, filename)?;
+
+    let project_deps = vo_module::project::read_project_deps(&fs, &[])
+        .map_err(|error| error.to_string())?;
+    let current_module = project_deps.current_module.clone();
+    let resolver = vo_analysis::vfs::CurrentModuleResolver::new(
+        vo_analysis::vfs::PackageResolverMixed {
+            std: vo_analysis::vfs::StdSource::with_fs(build_stdlib_fs()),
+            r#mod: vo_analysis::vfs::ModSource::with_fs(WasmVfs::new(vfs_mod_root)).with_project_deps(&project_deps),
+        },
+        fs,
+        current_module,
+    );
+
+    compile_file_set_with_resolver(file_set, &resolver)
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compile_entry_with_mod_fs_uses_vo_lock() {
+        let std_fs = build_stdlib_fs();
+        let mut local_fs = MemoryFs::new();
+        let mut mod_fs = MemoryFs::new();
+
+        local_fs.add_file(
+            "vo.mod",
+            "module github.com/acme/app\n\nvo 0.1.0\n\nrequire github.com/acme/lib v0.1.0\n",
+        );
+        local_fs.add_file(
+            "vo.lock",
+            concat!(
+                "version = 1\n",
+                "created_by = \"vo test\"\n\n",
+                "[root]\n",
+                "module = \"github.com/acme/app\"\n",
+                "vo = \"0.1.0\"\n\n",
+                "[[resolved]]\n",
+                "path = \"github.com/acme/lib\"\n",
+                "version = \"v0.1.0\"\n",
+                "vo = \"0.1.0\"\n",
+                "commit = \"0123456789abcdef0123456789abcdef01234567\"\n",
+                "release_manifest = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\n",
+                "source = \"sha256:2222222222222222222222222222222222222222222222222222222222222222\"\n",
+                "deps = []\n",
+            ),
+        );
+        local_fs.add_file(
+            "app/main.vo",
+            concat!(
+                "package main\n",
+                "import \"github.com/acme/lib\"\n",
+                "func main() {\n",
+                "    lib.Hello()\n",
+                "}\n",
+            ),
+        );
+
+        mod_fs.add_file(
+            "github.com/acme/lib/vo.mod",
+            "module github.com/acme/lib\n\nvo 0.1.0\n",
+        );
+        mod_fs.add_file(
+            "github.com/acme/lib/lib.vo",
+            concat!("package lib\n", "func Hello() {}\n",),
+        );
+
+        let result = compile_entry_with_mod_fs("app/main.vo", local_fs, std_fs, mod_fs);
+        match &result {
+            Err(e) => panic!("compile_entry_with_mod_fs failed: {}", e),
+            Ok(bytes) => assert!(!bytes.is_empty(), "empty bytecode"),
+        }
+    }
+
+    #[test]
+    fn test_compile_entry_resolves_current_module_canonical_imports() {
+        let mut local_fs = MemoryFs::new();
+        local_fs.add_file("vo.mod", "module github.com/acme/app\n\nvo 0.1.0\n");
+        local_fs.add_file(
+            "main.vo",
+            concat!(
+                "package main\n",
+                "import \"github.com/acme/app/util\"\n",
+                "func main() {\n",
+                "    util.Hello()\n",
+                "}\n",
+            ),
+        );
+        local_fs.add_file(
+            "util/util.vo",
+            concat!("package util\n", "func Hello() {}\n",),
+        );
+
+        let result =
+            compile_entry_with_mod_fs("main.vo", local_fs, build_stdlib_fs(), MemoryFs::new());
+        match &result {
+            Err(e) => panic!("compile_entry_with_mod_fs failed: {}", e),
+            Ok(bytes) => assert!(!bytes.is_empty(), "empty bytecode"),
+        }
+    }
+
+    #[test]
+    fn test_compile_entry_with_mod_fs_honors_workspace_replace_without_vo_lock() {
+        let mut local_fs = MemoryFs::new();
+        local_fs.add_file(
+            "workspace/app/vo.mod",
+            "module github.com/acme/app\n\nvo 0.1.0\n\nrequire github.com/acme/replaced v0.1.0\n",
+        );
+        local_fs.add_file(
+            "workspace/vo.work",
+            "version = 1\n\n[[use]]\npath = \"./replaced\"\n",
+        );
+        local_fs.add_file(
+            "workspace/app/main.vo",
+            concat!(
+                "package main\n",
+                "import \"github.com/acme/replaced\"\n",
+                "func main() {\n",
+                "    replaced.Hello()\n",
+                "}\n",
+            ),
+        );
+        local_fs.add_file(
+            "workspace/replaced/vo.mod",
+            "module github.com/acme/replaced\n\nvo 0.1.0\n",
+        );
+        local_fs.add_file(
+            "workspace/replaced/replaced.vo",
+            concat!("package replaced\n", "func Hello() {}\n",),
+        );
+
+        let result = compile_entry_with_mod_fs(
+            "workspace/app/main.vo",
+            local_fs,
+            build_stdlib_fs(),
+            MemoryFs::new(),
+        );
+        match &result {
+            Err(e) => panic!("compile_entry_with_mod_fs failed: {}", e),
+            Ok(bytes) => assert!(!bytes.is_empty(), "empty bytecode"),
+        }
+    }
+
+    #[test]
+    fn test_compile_entry_with_mod_fs_keeps_locked_transitive_modules_for_workspace_replace() {
+        let std_fs = build_stdlib_fs();
+        let mut local_fs = MemoryFs::new();
+        let mut mod_fs = MemoryFs::new();
+
+        local_fs.add_file(
+            "workspace/app/vo.mod",
+            "module github.com/acme/app\n\nvo 0.1.0\n\nrequire github.com/acme/replaced v0.1.0\n",
+        );
+        local_fs.add_file(
+            "workspace/app/vo.lock",
+            concat!(
+                "version = 1\n",
+                "created_by = \"vo test\"\n\n",
+                "[root]\n",
+                "module = \"github.com/acme/app\"\n",
+                "vo = \"0.1.0\"\n\n",
+                "[[resolved]]\n",
+                "path = \"github.com/acme/replaced\"\n",
+                "version = \"v0.1.0\"\n",
+                "vo = \"0.1.0\"\n",
+                "commit = \"0123456789abcdef0123456789abcdef01234567\"\n",
+                "release_manifest = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\n",
+                "source = \"sha256:2222222222222222222222222222222222222222222222222222222222222222\"\n",
+                "deps = [\"github.com/acme/core\"]\n",
+                "artifacts = []\n\n",
+                "[[resolved]]\n",
+                "path = \"github.com/acme/core\"\n",
+                "version = \"v0.1.0\"\n",
+                "vo = \"0.1.0\"\n",
+                "commit = \"fedcba9876543210fedcba9876543210fedcba98\"\n",
+                "release_manifest = \"sha256:3333333333333333333333333333333333333333333333333333333333333333\"\n",
+                "source = \"sha256:4444444444444444444444444444444444444444444444444444444444444444\"\n",
+                "deps = []\n",
+                "artifacts = []\n",
+            ),
+        );
+        local_fs.add_file(
+            "workspace/vo.work",
+            "version = 1\n\n[[use]]\npath = \"./replaced\"\n",
+        );
+        local_fs.add_file(
+            "workspace/app/main.vo",
+            concat!(
+                "package main\n",
+                "import \"github.com/acme/replaced\"\n",
+                "func main() {\n",
+                "    replaced.Hello()\n",
+                "}\n",
+            ),
+        );
+        local_fs.add_file(
+            "workspace/replaced/vo.mod",
+            "module github.com/acme/replaced\n\nvo 0.1.0\n\nrequire github.com/acme/core v0.1.0\n",
+        );
+        local_fs.add_file(
+            "workspace/replaced/replaced.vo",
+            concat!(
+                "package replaced\n",
+                "import \"github.com/acme/core\"\n",
+                "func Hello() {\n",
+                "    core.Hello()\n",
+                "}\n",
+            ),
+        );
+
+        mod_fs.add_file(
+            "github.com/acme/core/vo.mod",
+            "module github.com/acme/core\n\nvo 0.1.0\n",
+        );
+        mod_fs.add_file(
+            "github.com/acme/core/core.vo",
+            concat!("package core\n", "func Hello() {}\n",),
+        );
+
+        let result = compile_entry_with_mod_fs("workspace/app/main.vo", local_fs, std_fs, mod_fs);
+        match &result {
+            Err(e) => panic!("compile_entry_with_mod_fs failed: {}", e),
+            Ok(bytes) => assert!(!bytes.is_empty(), "empty bytecode"),
+        }
+    }
+
+    #[test]
+    fn test_compile_source_with_mod_fs_rejects_external_imports_without_project_files() {
+        let source = concat!(
+            "package main\n",
+            "import \"github.com/acme/lib\"\n",
+            "func main() {\n",
+            "    lib.Hello()\n",
+            "}\n",
+        );
+        let std_fs = build_stdlib_fs();
+        let mod_fs = MemoryFs::new()
+            .with_file(
+                "github.com/acme/lib/vo.mod",
+                "module github.com/acme/lib\n\nvo 0.1.0\n",
+            )
+            .with_file(
+                "github.com/acme/lib/lib.vo",
+                concat!("package lib\n", "func Hello() {}\n",),
+            );
+
+        let result = compile_source_with_mod_fs(source, "main.vo", std_fs, mod_fs);
+        match result {
+            Err(message) => {
+                assert!(
+                    message.contains("requires a project with vo.mod and vo.lock"),
+                    "{message}"
+                );
+                assert!(message.contains("github.com/acme/lib"), "{message}");
+            }
+            Ok(_) => panic!("expected single-file external import rejection"),
+        }
+    }
+}
