@@ -3,7 +3,6 @@ use std::path::Path;
 
 use crate::identity::{classify_import, find_owning_module, ImportClass, ModulePath};
 use crate::lock;
-use crate::materialize;
 use crate::registry::Registry;
 use crate::schema::lockfile::LockFile;
 use crate::schema::modfile::{ModFile, Require};
@@ -74,7 +73,7 @@ pub fn mod_add(
     let lock_file = prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
     write_mod_file(project_dir, &mf)?;
     write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
-    download_lock_file(cache_root, lock_file.as_ref(), registry)?;
+    ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;
 
     Ok(())
 }
@@ -113,7 +112,7 @@ pub fn mod_update(
 
     let lock_file = prepare_lock_file(&mf, registry, &prefs, created_by)?;
     write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
-    download_lock_file(cache_root, lock_file.as_ref(), registry)?;
+    ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;
 
     Ok(())
 }
@@ -132,7 +131,7 @@ pub fn mod_sync(
     let mf = read_mod_file(project_dir)?;
     let lock_file = prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
     write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
-    download_lock_file(cache_root, lock_file.as_ref(), registry)?;
+    ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;
     Ok(())
 }
 
@@ -147,7 +146,7 @@ pub fn mod_download(
     registry: &dyn Registry,
 ) -> Result<(), Error> {
     let lf = read_lock_file(project_dir)?;
-    materialize::download_all(cache_root, &lf, registry)?;
+    crate::cache::install::populate_locked_cache(cache_root, &lf, registry)?;
     Ok(())
 }
 
@@ -161,7 +160,7 @@ pub fn mod_verify(project_dir: &Path, cache_root: &Path) -> Result<(), Error> {
     let lf = read_lock_file(project_dir)?;
     lock::verify_root_consistency(&mf, &lf)?;
     lock::verify_graph_completeness(&mf, &lf)?;
-    materialize::verify_frozen_cache(cache_root, &lf)?;
+    crate::cache::install::verify_locked_cache(cache_root, &lf)?;
     Ok(())
 }
 
@@ -191,7 +190,7 @@ pub fn mod_remove(
     let lock_file = prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
     write_mod_file(project_dir, &mf)?;
     write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
-    download_lock_file(cache_root, lock_file.as_ref(), registry)?;
+    ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;
 
     Ok(())
 }
@@ -262,7 +261,7 @@ pub fn mod_tidy(
     let lock_file = prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
     write_mod_file(project_dir, &mf)?;
     write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
-    download_lock_file(cache_root, lock_file.as_ref(), registry)?;
+    ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;
 
     Ok(TidyResult {
         added: added.iter().map(|m| m.as_str().to_string()).collect(),
@@ -396,7 +395,7 @@ pub fn mod_clean(
         if let Ok(lf) = read_lock_file(project_dir) {
             lf.resolved
                 .iter()
-                .map(|lm| materialize::cache_dir(cache_root, &lm.path, &lm.version))
+                .map(|lm| crate::cache::layout::cache_dir(cache_root, &lm.path, &lm.version))
                 .collect()
         } else {
             BTreeSet::new()
@@ -472,7 +471,7 @@ pub fn frozen_build_check(
 
     lock::verify_root_consistency(&mf, &lf)?;
     lock::verify_graph_completeness(&mf, &lf)?;
-    materialize::verify_frozen_cache(cache_root, &lf)?;
+    crate::cache::install::verify_locked_cache(cache_root, &lf)?;
 
     Ok(Some(lf))
 }
@@ -567,13 +566,13 @@ fn write_or_remove_lock_file(
     }
 }
 
-fn download_lock_file(
+pub fn ensure_locked_modules_cached(
     cache_root: &Path,
     lock_file: Option<&LockFile>,
     registry: &dyn Registry,
 ) -> Result<(), Error> {
     if let Some(lock_file) = lock_file {
-        materialize::download_all(cache_root, lock_file, registry)?;
+        crate::cache::install::populate_locked_cache(cache_root, lock_file, registry)?;
     }
     Ok(())
 }

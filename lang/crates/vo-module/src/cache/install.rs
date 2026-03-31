@@ -3,38 +3,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::cache::layout::{cache_key, SOURCE_DIGEST_MARKER, VERSION_MARKER};
 use crate::digest::Digest;
-use crate::identity::ModulePath;
 use crate::registry::Registry;
 use crate::schema::lockfile::{LockFile, LockedArtifact, LockedModule};
-use crate::version::ExactVersion;
 use crate::Error;
-
-// ── Shared cache layout (platform-agnostic) ──────────────────────────────────
-
-/// Metadata file name for the cached source digest marker.
-pub const SOURCE_DIGEST_MARKER: &str = ".vo-source-digest";
-
-/// Metadata file name for the cached version marker.
-pub const VERSION_MARKER: &str = ".vo-version";
-
-/// Encode a module path as a flat directory name.
-///
-/// Replaces `/` with `@` (forbidden in module-path segments) so that
-/// different module paths never collide in a flat directory listing.
-///
-/// Example: `github.com/acme/lib` → `github.com@acme@lib`
-pub fn cache_key(module: &str) -> String {
-    module.replace('/', "@")
-}
-
-/// Relative cache directory path for a module version (no root prefix).
-///
-/// Returns `"<encoded_module>/<version>"`, suitable for joining with an
-/// OS cache root or prepending with `/` for a VFS root.
-pub fn relative_module_dir(module: &str, version: &str) -> String {
-    format!("{}/{}", cache_key(module), version)
-}
 
 static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -160,12 +133,9 @@ fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 
 // ── Source package extraction (platform-agnostic) ────────────────────────────
 
-/// A single file entry extracted from a release source package archive.
-pub struct SourceEntry {
-    /// Path relative to the module root (e.g. `src/main.vo`, `vo.mod`).
-    pub relative_path: PathBuf,
-    /// UTF-8 file content.
-    pub content: String,
+enum ArchiveEntry {
+    Directory(PathBuf),
+    File(PathBuf, Vec<u8>),
 }
 
 /// Extract source entries from a tar.gz release source package.
@@ -175,40 +145,21 @@ pub struct SourceEntry {
 /// and skips non-UTF-8 entries.
 ///
 /// Returns entries with paths relative to the module root.
-pub fn extract_source_entries(archive_bytes: &[u8]) -> Result<Vec<SourceEntry>, String> {
-    use std::io::Read;
-
-    let gz = flate2::read::GzDecoder::new(archive_bytes);
-    let mut archive = tar::Archive::new(gz);
-    let mut archive_root: Option<String> = None;
+pub fn extract_source_entries(archive_bytes: &[u8]) -> Result<Vec<(PathBuf, String)>, String> {
     let mut entries = Vec::new();
 
-    for entry in archive.entries().map_err(|e| e.to_string())? {
-        let mut entry = entry.map_err(|e| e.to_string())?;
-        if !entry.header().entry_type().is_file() {
-            continue;
-        }
-        let raw_path = entry.path().map_err(|e| e.to_string())?.into_owned();
-        let Some(stripped) = strip_archive_root(&raw_path, &mut archive_root)? else {
+    for entry in read_archive_entries(archive_bytes)? {
+        let ArchiveEntry::File(relative_path, bytes) = entry else {
             continue;
         };
-        if !source_entry_allowed(&stripped) {
+        if !source_entry_allowed(&relative_path) {
             continue;
         }
-        let mut buf = Vec::new();
-        entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-        let content = match String::from_utf8(buf) {
+        let content = match String::from_utf8(bytes) {
             Ok(c) => c,
             Err(_) => continue,
         };
-        entries.push(SourceEntry {
-            relative_path: stripped,
-            content,
-        });
-    }
-
-    if archive_root.is_none() {
-        return Err("source package archive is empty".to_string());
+        entries.push((relative_path, content));
     }
 
     Ok(entries)
@@ -250,31 +201,64 @@ fn source_entry_allowed(path: &Path) -> bool {
     path_str.ends_with(".vo") || name == "vo.mod" || name == "vo.lock" || name == "vo.ext.toml"
 }
 
-/// Cache directory layout helper.
-/// Cache key: `<cache_root>/<module_path_encoded>/<version>/`
-///
-/// The module path is encoded by replacing `/` with `@` (which is forbidden
-/// in module-path segments) so that different paths never collide.
-/// For example `github.com/acme/lib` → `github.com@acme@lib`.
-pub fn cache_dir(cache_root: &Path, module: &ModulePath, version: &ExactVersion) -> PathBuf {
-    cache_root
-        .join(cache_key(module.as_str()))
-        .join(version.to_string())
+fn read_archive_entries(data: &[u8]) -> Result<Vec<ArchiveEntry>, String> {
+    use std::io::Read;
+
+    let gz = flate2::read::GzDecoder::new(data);
+    let mut archive = tar::Archive::new(gz);
+    let mut archive_root: Option<String> = None;
+    let mut entries = Vec::new();
+
+    for entry in archive.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            return Err("archive contains a symlink or hardlink, which is not allowed".to_string());
+        }
+
+        let raw_path = entry.path().map_err(|e| e.to_string())?.into_owned();
+        let Some(relative_path) = strip_archive_root(&raw_path, &mut archive_root)? else {
+            continue;
+        };
+        validate_archive_entry_path(&relative_path)?;
+
+        if entry_type.is_dir() {
+            entries.push(ArchiveEntry::Directory(relative_path));
+            continue;
+        }
+        if entry_type.is_file() {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            entries.push(ArchiveEntry::File(relative_path, bytes));
+        }
+    }
+
+    if archive_root.is_none() {
+        return Err("source package archive is empty".to_string());
+    }
+
+    Ok(entries)
 }
 
-/// Relative cache directory for a module (no cache_root prefix).
-/// Useful as a VFS module root key.
-pub fn cache_relative_dir(module: &ModulePath, version: &ExactVersion) -> PathBuf {
-    PathBuf::from(cache_key(module.as_str())).join(version.to_string())
+fn validate_archive_entry_path(relative_path: &Path) -> Result<(), String> {
+    for component in relative_path.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err(format!(
+                "archive entry contains invalid path component: {}",
+                relative_path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Check if a source package is already cached and valid.
-pub fn is_source_cached(cache_root: &Path, locked: &LockedModule) -> bool {
+fn is_source_cached(cache_root: &Path, locked: &LockedModule) -> bool {
     validate_source_cache_entry(cache_root, locked).is_ok()
 }
 
 /// Check if a specific artifact is cached and valid.
-pub fn is_artifact_cached(
+fn is_artifact_cached(
     cache_root: &Path,
     locked: &LockedModule,
     artifact: &LockedArtifact,
@@ -283,7 +267,7 @@ pub fn is_artifact_cached(
 }
 
 /// Download and verify a source package into the cache.
-pub fn download_source(
+fn download_source(
     cache_root: &Path,
     locked: &LockedModule,
     registry: &dyn Registry,
@@ -306,7 +290,7 @@ pub fn download_source(
         });
     }
 
-    let dir = cache_dir(cache_root, &locked.path, &locked.version);
+    let dir = crate::cache::layout::cache_dir(cache_root, &locked.path, &locked.version);
     let parent = dir.parent().ok_or_else(|| {
         Error::SourceScan(format!(
             "cache directory has no parent for {} {}",
@@ -367,7 +351,7 @@ pub fn download_source(
 }
 
 /// Download and verify a target-specific artifact into the cache.
-pub fn download_artifact(
+fn download_artifact(
     cache_root: &Path,
     locked: &LockedModule,
     artifact: &LockedArtifact,
@@ -404,7 +388,7 @@ pub fn download_artifact(
         });
     }
 
-    let dir = cache_dir(cache_root, &locked.path, &locked.version);
+    let dir = crate::cache::layout::cache_dir(cache_root, &locked.path, &locked.version);
     let art_dir = dir.join("artifacts");
     let artifact_path = art_dir.join(&artifact.id.name);
     atomic_write_bytes(&artifact_path, &data)?;
@@ -416,7 +400,7 @@ pub fn download_artifact(
 /// with correct digests. This is the frozen-build verification step.
 ///
 /// Returns an error describing the first missing or invalid entry.
-pub fn verify_frozen_cache(cache_root: &Path, lock_file: &LockFile) -> Result<(), Error> {
+pub fn verify_locked_cache(cache_root: &Path, lock_file: &LockFile) -> Result<(), Error> {
     for locked in &lock_file.resolved {
         validate_source_cache_entry(cache_root, locked)?;
 
@@ -441,7 +425,7 @@ struct DownloadJob<'a> {
 /// which source packages and artifacts need downloading.
 /// Phase 2 (parallel on native, sequential on wasm): download all identified
 /// items concurrently with progress output to stderr.
-pub fn download_all(
+pub fn populate_locked_cache(
     cache_root: &Path,
     lock_file: &LockFile,
     registry: &dyn Registry,
@@ -596,69 +580,15 @@ fn download_jobs_parallel(
 }
 
 fn validate_source_cache_entry(cache_root: &Path, locked: &LockedModule) -> Result<(), Error> {
-    let dir = cache_dir(cache_root, &locked.path, &locked.version);
-    if !dir.is_dir() {
-        return Err(Error::MissingArtifact {
-            module: locked.path.as_str().to_string(),
-            version: locked.version.to_string(),
-            detail: "source package not in cache".to_string(),
-        });
-    }
-
-    let version =
-        read_trimmed_metadata(&dir.join(VERSION_MARKER)).ok_or_else(|| Error::MissingArtifact {
-            module: locked.path.as_str().to_string(),
-            version: locked.version.to_string(),
-            detail: "cached version metadata is missing".to_string(),
-        })?;
-    if version != locked.version.to_string() {
-        return Err(Error::MissingArtifact {
-            module: locked.path.as_str().to_string(),
-            version: locked.version.to_string(),
-            detail: "cached version metadata does not match vo.lock".to_string(),
-        });
-    }
-
-    let source_digest =
-        read_trimmed_metadata(&dir.join(SOURCE_DIGEST_MARKER)).ok_or_else(|| {
-            Error::MissingArtifact {
-                module: locked.path.as_str().to_string(),
-                version: locked.version.to_string(),
-                detail: "cached source digest metadata is missing".to_string(),
-            }
-        })?;
-    if source_digest != locked.source.as_str() {
-        return Err(Error::MissingArtifact {
-            module: locked.path.as_str().to_string(),
-            version: locked.version.to_string(),
-            detail: "cached source digest does not match vo.lock".to_string(),
-        });
-    }
-
-    if !dir.join("vo.mod").is_file() {
-        return Err(Error::MissingArtifact {
-            module: locked.path.as_str().to_string(),
-            version: locked.version.to_string(),
-            detail: "cached module is missing vo.mod".to_string(),
-        });
-    }
-
-    let manifest_path = dir.join("vo.release.json");
-    let manifest_raw = std::fs::read(&manifest_path).map_err(|_| Error::MissingArtifact {
-        module: locked.path.as_str().to_string(),
-        version: locked.version.to_string(),
-        detail: "cached module is missing vo.release.json".to_string(),
-    })?;
-    let manifest_digest = Digest::from_sha256(&manifest_raw);
-    if manifest_digest != locked.release_manifest {
-        return Err(Error::MissingArtifact {
-            module: locked.path.as_str().to_string(),
-            version: locked.version.to_string(),
-            detail: "cached release manifest does not match vo.lock".to_string(),
-        });
-    }
-
-    Ok(())
+    let module_dir = crate::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
+    let fs = vo_common::vfs::RealFs::new(cache_root);
+    crate::cache::validate::validate_installed_module(&fs, &module_dir, locked).map_err(|e| {
+        Error::MissingArtifact {
+            module: e.module,
+            version: e.version,
+            detail: format!("{}", e.kind),
+        }
+    })
 }
 
 fn validate_artifact_cache_entry(
@@ -666,98 +596,33 @@ fn validate_artifact_cache_entry(
     locked: &LockedModule,
     artifact: &LockedArtifact,
 ) -> Result<(), Error> {
-    let path = cache_dir(cache_root, &locked.path, &locked.version)
-        .join("artifacts")
-        .join(&artifact.id.name);
-    let bytes = std::fs::read(&path).map_err(|_| Error::MissingArtifact {
-        module: locked.path.as_str().to_string(),
-        version: locked.version.to_string(),
-        detail: format!("artifact {} not in cache", artifact.id.name),
-    })?;
-    if bytes.len() as u64 != artifact.size {
-        return Err(Error::MissingArtifact {
-            module: locked.path.as_str().to_string(),
-            version: locked.version.to_string(),
-            detail: format!("artifact {} size does not match vo.lock", artifact.id.name),
-        });
-    }
-    let digest = Digest::from_sha256(&bytes);
-    if digest != artifact.digest {
-        return Err(Error::MissingArtifact {
-            module: locked.path.as_str().to_string(),
-            version: locked.version.to_string(),
-            detail: format!(
-                "artifact {} digest does not match vo.lock",
-                artifact.id.name
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn read_trimmed_metadata(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|value| value.trim().to_string())
+    let module_dir = crate::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
+    let artifact_path = module_dir.join("artifacts").join(&artifact.id.name);
+    let fs = vo_common::vfs::RealFs::new(cache_root);
+    crate::cache::validate::validate_installed_artifact(&fs, &artifact_path, locked, artifact)
+        .map_err(|e| Error::MissingArtifact {
+            module: e.module,
+            version: e.version,
+            detail: format!("{}", e.kind),
+        })
 }
 
 /// Safely unpack a tar.gz archive into `dest`, rejecting entries with
 /// path-traversal components (`..`), absolute paths, or symlinks.
 fn safe_unpack_tar_gz(data: &[u8], dest: &Path) -> Result<(), String> {
-    use std::io::Read;
-
-    let gz = flate2::read::GzDecoder::new(data);
-    let mut archive = tar::Archive::new(gz);
-    let mut archive_root: Option<String> = None;
-
-    for entry in archive.entries().map_err(|e| e.to_string())? {
-        let mut entry = entry.map_err(|e| e.to_string())?;
-        let header = entry.header();
-
-        // Reject symlinks and hardlinks.
-        let entry_type = header.entry_type();
-        if entry_type.is_symlink() || entry_type.is_hard_link() {
-            return Err("archive contains a symlink or hardlink, which is not allowed".to_string());
-        }
-
-        let raw_path = entry.path().map_err(|e| e.to_string())?.into_owned();
-        let Some(relative_path) = strip_archive_root(&raw_path, &mut archive_root)? else {
-            continue;
-        };
-
-        for component in relative_path.components() {
-            if !matches!(component, std::path::Component::Normal(_)) {
-                return Err(format!(
-                    "archive entry contains invalid path component: {}",
-                    relative_path.display()
-                ));
+    for entry in read_archive_entries(data)? {
+        match entry {
+            ArchiveEntry::Directory(relative_path) => {
+                std::fs::create_dir_all(dest.join(relative_path)).map_err(|e| e.to_string())?;
+            }
+            ArchiveEntry::File(relative_path, bytes) => {
+                let full_path = dest.join(relative_path);
+                if let Some(parent) = full_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                std::fs::write(&full_path, &bytes).map_err(|e| e.to_string())?;
             }
         }
-
-        let full_path = dest.join(&relative_path);
-
-        if !full_path.starts_with(dest) {
-            return Err(format!(
-                "archive entry escapes destination: {}",
-                relative_path.display()
-            ));
-        }
-
-        if entry_type.is_dir() {
-            std::fs::create_dir_all(&full_path).map_err(|e| e.to_string())?;
-        } else if entry_type.is_file() {
-            if let Some(parent) = full_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            let mut buf = Vec::new();
-            entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-            std::fs::write(&full_path, &buf).map_err(|e| e.to_string())?;
-        }
-        // Skip other entry types (device nodes, etc.)
-    }
-
-    if archive_root.is_none() {
-        return Err("source package archive is empty".to_string());
     }
 
     Ok(())
@@ -768,8 +633,10 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+    use crate::identity::ModulePath;
     use crate::identity::ArtifactId;
     use crate::schema::lockfile::LockedArtifact;
+    use crate::version::ExactVersion;
     use crate::version::ToolchainConstraint;
 
     struct CountingRegistry {
@@ -849,27 +716,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_dir() {
-        let root = Path::new("/tmp/vo-cache");
-        let mp = ModulePath::parse("github.com/acme/lib").unwrap();
-        let v = ExactVersion::parse("v1.2.3").unwrap();
-        let dir = cache_dir(root, &mp, &v);
-        assert_eq!(
-            dir,
-            PathBuf::from("/tmp/vo-cache/github.com@acme@lib/v1.2.3")
-        );
-    }
-
-    #[test]
-    fn test_digest_from_sha256() {
-        let d = Digest::from_sha256(b"hello");
-        assert_eq!(
-            d.as_str(),
-            "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-        );
-    }
-
-    #[test]
     fn test_create_unique_stage_dir_returns_distinct_paths() {
         let temp = tempfile::tempdir().unwrap();
         let first = create_unique_stage_dir(temp.path(), "stage").unwrap();
@@ -905,7 +751,7 @@ mod tests {
             manifest_raw,
             &source_digest,
         );
-        let module_dir = cache_dir(temp.path(), &locked.path, &locked.version);
+        let module_dir = crate::cache::layout::cache_dir(temp.path(), &locked.path, &locked.version);
         write_cached_source(&module_dir, &locked, manifest_raw);
         let registry = CountingRegistry::new(b"unused-source".to_vec());
 
@@ -935,7 +781,7 @@ mod tests {
             manifest_raw,
             &source_digest,
         );
-        let module_dir = cache_dir(temp.path(), &locked.path, &locked.version);
+        let module_dir = crate::cache::layout::cache_dir(temp.path(), &locked.path, &locked.version);
         write_cached_source(&module_dir, &locked, manifest_raw);
 
         let artifact_bytes = b"fresh-artifact";

@@ -1,61 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use vo_common::vfs::RealFs;
+use vo_module::cache::validate::InstalledModuleError;
 use vo_module::schema::lockfile::{LockedArtifact, LockedModule};
-use vo_module::schema::modfile::ModFile;
 use vo_runtime::ext_loader::ExtensionManifest;
 
 use super::{emit_compile_log, CompileError, CompileLogRecord, ModuleSystemError, ModuleSystemErrorKind, ModuleSystemStage};
-
-pub(super) fn locked_module_cache_dir(mod_root: &Path, locked: &LockedModule) -> PathBuf {
-    vo_module::materialize::cache_dir(mod_root, &locked.path, &locked.version)
-}
-
-pub(super) fn locked_module_cache_relative_dir(locked: &LockedModule) -> PathBuf {
-    vo_module::materialize::cache_relative_dir(&locked.path, &locked.version)
-}
-
-fn read_trimmed_metadata(path: &Path) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    let trimmed = content.trim().to_string();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed)
-}
-
-fn installed_module_version(module_dir: &Path) -> Option<String> {
-    read_trimmed_metadata(&module_dir.join(vo_module::materialize::VERSION_MARKER))
-}
-
-fn installed_module_source_digest(module_dir: &Path) -> Option<String> {
-    read_trimmed_metadata(&module_dir.join(vo_module::materialize::SOURCE_DIGEST_MARKER))
-}
-
-pub(super) fn installed_module_release_manifest_digest(
-    module_dir: &Path,
-) -> Result<Option<String>, ModuleSystemError> {
-    let path = module_dir.join("vo.release.json");
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(
-                ModuleSystemError::new(
-                    ModuleSystemStage::CachedModule,
-                    ModuleSystemErrorKind::ReadFailed,
-                    format!(
-                        "failed to read cached release manifest at {}: {}",
-                        path.display(),
-                        error,
-                    ),
-                )
-                .with_path(&path),
-            );
-        }
-    };
-    Ok(Some(vo_module::digest::Digest::from_sha256(&bytes).to_string()))
-}
 
 pub(super) fn validate_locked_modules_installed(
     locked_modules: &[LockedModule],
@@ -71,159 +22,42 @@ fn validate_locked_module_installed(
     locked: &LockedModule,
     mod_root: &Path,
 ) -> Result<(), CompileError> {
-    let module_dir = locked_module_cache_dir(mod_root, locked);
-    validate_installed_module(&module_dir, locked).map_err(CompileError::ModuleSystem)
+    let module_dir = vo_module::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
+    let fs = RealFs::new(mod_root);
+    vo_module::cache::validate::validate_installed_module(&fs, &module_dir, locked)
+        .map_err(|e| CompileError::ModuleSystem(installed_module_error_to_module_system(e)))
 }
 
-fn validate_installed_module(module_dir: &Path, locked: &LockedModule) -> Result<(), ModuleSystemError> {
-    if !module_dir.join("vo.mod").is_file() {
-        return Err(
-            ModuleSystemError::new(
-                ModuleSystemStage::CachedModule,
-                ModuleSystemErrorKind::Missing,
-                format!(
-                    "locked module {}@{} is not installed at {}; frozen builds do not auto-install dependencies",
-                    locked.path, locked.version, module_dir.display(),
-                ),
-            )
-            .with_locked(locked)
-            .with_path(module_dir),
-        );
-    }
+fn validate_installed_module_at_dir(
+    module_dir: &Path,
+    locked: &LockedModule,
+) -> Result<(), ModuleSystemError> {
+    let fs = RealFs::new(module_dir);
+    vo_module::cache::validate::validate_installed_module(&fs, Path::new("."), locked)
+        .map_err(installed_module_error_to_module_system)
+}
 
-    let installed_content = fs::read_to_string(module_dir.join("vo.mod")).map_err(|e| {
-        ModuleSystemError::new(
-            ModuleSystemStage::CachedModule,
-            ModuleSystemErrorKind::ReadFailed,
-            format!(
-                "invalid cached vo.mod for {}@{}: {}",
-                locked.path, locked.version, e
-            ),
-        )
-        .with_locked(locked)
-        .with_path(&module_dir.join("vo.mod"))
-    })?;
-    let installed_mod = ModFile::parse(&installed_content).map_err(|e| {
-        ModuleSystemError::new(
-            ModuleSystemStage::CachedModule,
-            ModuleSystemErrorKind::ParseFailed,
-            format!(
-                "invalid cached vo.mod for {}@{}: {}",
-                locked.path, locked.version, e
-            ),
-        )
-        .with_locked(locked)
-        .with_path(&module_dir.join("vo.mod"))
-    })?;
-    if installed_mod.module != locked.path {
-        return Err(
-            ModuleSystemError::new(
-                ModuleSystemStage::CachedModule,
-                ModuleSystemErrorKind::Mismatch,
-                format!(
-                    "cached vo.mod module mismatch for {}@{} at {}: expected {}, found {}",
-                    locked.path,
-                    locked.version,
-                    module_dir.display(),
-                    locked.path,
-                    installed_mod.module,
-                ),
-            )
-            .with_locked(locked)
-            .with_path(&module_dir.join("vo.mod")),
-        );
-    }
-    if installed_mod.vo != locked.vo {
-        return Err(
-            ModuleSystemError::new(
-                ModuleSystemStage::CachedModule,
-                ModuleSystemErrorKind::Mismatch,
-                format!(
-                    "cached vo.mod toolchain constraint mismatch for {}@{} at {}: expected {}, found {}",
-                    locked.path,
-                    locked.version,
-                    module_dir.display(),
-                    locked.vo,
-                    installed_mod.vo,
-                ),
-            )
-            .with_locked(locked)
-            .with_path(&module_dir.join("vo.mod")),
-        );
-    }
-
-    let installed_version = installed_module_version(module_dir);
-    if installed_version.as_deref() != Some(&locked.version.to_string()) {
-        let found = installed_version.unwrap_or_else(|| "<missing .vo-version>".to_string());
-        return Err(
-            ModuleSystemError::new(
-                ModuleSystemStage::CachedModule,
-                ModuleSystemErrorKind::Mismatch,
-                format!(
-                    "locked module {}@{} is not installed correctly at {} (found {}); frozen builds do not auto-install dependencies",
-                    locked.path, locked.version, module_dir.display(), found,
-                ),
-            )
-            .with_locked(locked)
-            .with_path(&module_dir.join(vo_module::materialize::VERSION_MARKER)),
-        );
-    }
-
-    let source_digest = installed_module_source_digest(module_dir).ok_or_else(|| {
-        ModuleSystemError::new(
-            ModuleSystemStage::CachedModule,
-            ModuleSystemErrorKind::MissingMetadata,
-            format!(
-                "locked module {}@{} is missing source digest metadata at {}/.vo-source-digest; frozen builds do not auto-install dependencies",
-                locked.path, locked.version, module_dir.display(),
-            ),
-        )
-        .with_locked(locked)
-        .with_path(&module_dir.join(vo_module::materialize::SOURCE_DIGEST_MARKER))
-    })?;
-    if source_digest != locked.source.as_str() {
-        return Err(
-            ModuleSystemError::new(
-                ModuleSystemStage::CachedModule,
-                ModuleSystemErrorKind::Mismatch,
-                format!(
-                    "locked module {}@{} source digest mismatch at {}: expected {}, found {}; frozen builds do not auto-install dependencies",
-                    locked.path, locked.version, module_dir.display(), locked.source, source_digest,
-                ),
-            )
-            .with_locked(locked)
-            .with_path(&module_dir.join(vo_module::materialize::SOURCE_DIGEST_MARKER)),
-        );
-    }
-
-    let manifest_digest = installed_module_release_manifest_digest(module_dir)?.ok_or_else(|| {
-        ModuleSystemError::new(
-            ModuleSystemStage::CachedModule,
-            ModuleSystemErrorKind::MissingMetadata,
-            format!(
-                "locked module {}@{} is missing vo.release.json at {}; frozen builds do not auto-install dependencies",
-                locked.path, locked.version, module_dir.display(),
-            ),
-        )
-        .with_locked(locked)
-        .with_path(&module_dir.join("vo.release.json"))
-    })?;
-    if manifest_digest != locked.release_manifest.as_str() {
-        return Err(
-            ModuleSystemError::new(
-                ModuleSystemStage::CachedModule,
-                ModuleSystemErrorKind::Mismatch,
-                format!(
-                    "locked module {}@{} release manifest digest mismatch at {}: expected {}, found {}; frozen builds do not auto-install dependencies",
-                    locked.path, locked.version, module_dir.display(), locked.release_manifest, manifest_digest,
-                ),
-            )
-            .with_locked(locked)
-            .with_path(&module_dir.join("vo.release.json")),
-        );
-    }
-
-    Ok(())
+fn installed_module_error_to_module_system(e: InstalledModuleError) -> ModuleSystemError {
+    use vo_module::cache::validate::InstalledModuleErrorKind;
+    let (kind, detail) = match &e.kind {
+        InstalledModuleErrorKind::Missing { .. } => {
+            (ModuleSystemErrorKind::Missing, format!(
+                "{}: frozen builds do not auto-install dependencies", e,
+            ))
+        }
+        InstalledModuleErrorKind::Mismatch { .. } => {
+            (ModuleSystemErrorKind::Mismatch, format!(
+                "{}: frozen builds do not auto-install dependencies", e,
+            ))
+        }
+        InstalledModuleErrorKind::ParseFailed { .. } => {
+            (ModuleSystemErrorKind::ParseFailed, e.to_string())
+        }
+    };
+    let mut err = ModuleSystemError::new(ModuleSystemStage::CachedModule, kind, detail);
+    err.module_path = Some(e.module);
+    err.version = Some(e.version);
+    err
 }
 
 pub(super) fn prepare_extension_manifests_for_frozen_build(
@@ -302,7 +136,7 @@ fn prepare_extension_manifest(
     }
 
     let locked = locked_module_for_cached_extension(&module_dir, mod_root, locked_modules)?;
-    validate_installed_module(&module_dir, locked)?;
+    validate_installed_module_at_dir(&module_dir, locked)?;
     prepare_cached_extension_manifest(manifest, locked, &module_dir)
 }
 

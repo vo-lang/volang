@@ -47,6 +47,18 @@ impl FileSystem for EmbeddedStdlib {
         })
     }
 
+    fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.files
+            .get(path)
+            .map(|s| s.as_bytes().to_vec())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("file not found: {:?}", path),
+                )
+            })
+    }
+
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         let mut seen = HashSet::new();
         let is_root =

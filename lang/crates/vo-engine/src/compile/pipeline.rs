@@ -11,7 +11,7 @@ use vo_common::vfs::{FileSet, FileSystem, ZipFs};
 use vo_module::project::ProjectDeps;
 
 use super::native::{prepare_extension_manifests_for_frozen_build, validate_locked_modules_installed};
-use super::project_prepare::{load_project_deps_for_engine, read_all_replaces, replacing_resolver};
+use super::project_prepare::{load_project_deps_for_engine, read_all_replaces_with_fs, replacing_resolver};
 use super::{CompileError, CompileOutput};
 
 struct PreparedProject<F> {
@@ -55,7 +55,13 @@ impl<F: FileSystem> PreparedProject<F> {
     fn analyze(self) -> Result<AnalyzedCompilation, CompileError> {
         let current_module = self.project_deps.current_module.clone();
         let locked_modules = self.project_deps.locked_modules.clone();
-        let resolver = build_current_module_resolver(self.fs, &self.project_deps, self.replaces, current_module);
+        let resolver = build_current_module_resolver(
+            self.fs,
+            &self.project_deps,
+            self.replaces,
+            self.source_root.clone(),
+            current_module,
+        );
         let project = analyze_project(self.file_set, &resolver)
             .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
         Ok(AnalyzedCompilation {
@@ -110,10 +116,11 @@ fn build_current_module_resolver<F: FileSystem>(
     fs: F,
     project_deps: &ProjectDeps,
     replaces: HashMap<String, PathBuf>,
+    local_root: PathBuf,
     current_module: Option<String>,
 ) -> CurrentModuleResolver<ReplacingResolver<vo_analysis::vfs::PackageResolverMixed<vo_stdlib::EmbeddedStdlib, vo_common::vfs::RealFs>>, F> {
     let replaced = replacing_resolver(project_deps, replaces);
-    CurrentModuleResolver::new(replaced, fs, current_module)
+    CurrentModuleResolver::with_root(replaced, fs, local_root, current_module)
 }
 
 fn collect_file_set<F: FileSystem>(
@@ -171,7 +178,7 @@ pub(super) fn check_with_fs<F: FileSystem>(
     root: &Path,
     single_file: Option<&OsStr>,
 ) -> Result<(), CompileError> {
-    let replaces = read_all_replaces(root)?;
+    let replaces = read_all_replaces_with_fs(&fs, root)?;
     PreparedProject::load(fs, root.to_path_buf(), single_file, replaces, "no .vo files found")?.check()
 }
 
@@ -180,7 +187,7 @@ pub(super) fn compile_with_fs<F: FileSystem>(
     root: &Path,
     single_file: Option<&OsStr>,
 ) -> Result<CompileOutput, CompileError> {
-    let replaces = read_all_replaces(root)?;
+    let replaces = read_all_replaces_with_fs(&fs, root)?;
     PreparedProject::load(fs, root.to_path_buf(), single_file, replaces, "no .vo files found")?.compile()
 }
 

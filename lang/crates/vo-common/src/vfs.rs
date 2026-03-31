@@ -5,6 +5,7 @@ use std::io::{self};
 #[cfg(feature = "zip")]
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use vo_common_core::SourceProvider;
 
@@ -12,6 +13,9 @@ use vo_common_core::SourceProvider;
 pub trait FileSystem: Send + Sync {
     /// Read file contents as a string.
     fn read_file(&self, path: &Path) -> io::Result<String>;
+
+    /// Read file contents as raw bytes.
+    fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>>;
 
     /// List entries in a directory.
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>>;
@@ -25,6 +29,85 @@ pub trait FileSystem: Send + Sync {
     /// Root path of the file system (if any).
     fn root(&self) -> Option<&Path> {
         None
+    }
+}
+
+pub fn normalize_fs_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let tail = normalized.components().next_back();
+                match tail {
+                    Some(Component::Normal(_)) => {
+                        normalized.pop();
+                    }
+                    Some(Component::RootDir | Component::Prefix(_)) => {}
+                    _ => normalized.push(".."),
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
+fn join_scoped_path(base: &Path, child: &Path) -> PathBuf {
+    if child.is_absolute() {
+        return normalize_fs_path(child);
+    }
+    if child == Path::new(".") || child.as_os_str().is_empty() {
+        return normalize_fs_path(base);
+    }
+    if base == Path::new(".") || base.as_os_str().is_empty() {
+        return normalize_fs_path(child);
+    }
+    normalize_fs_path(&base.join(child))
+}
+
+fn strip_scoped_prefix(path: &Path, scope: &Path) -> Option<PathBuf> {
+    if scope == Path::new(".") || scope.as_os_str().is_empty() {
+        return Some(normalize_fs_path(path));
+    }
+    let relative = path.strip_prefix(scope).ok()?;
+    if relative.as_os_str().is_empty() {
+        Some(PathBuf::from("."))
+    } else {
+        Some(normalize_fs_path(relative))
+    }
+}
+
+impl<T: FileSystem + ?Sized> FileSystem for Arc<T> {
+    fn read_file(&self, path: &Path) -> io::Result<String> {
+        (**self).read_file(path)
+    }
+
+    fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+        (**self).read_bytes(path)
+    }
+
+    fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        (**self).read_dir(path)
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        (**self).exists(path)
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        (**self).is_dir(path)
+    }
+
+    fn root(&self) -> Option<&Path> {
+        (**self).root()
     }
 }
 
@@ -54,6 +137,10 @@ impl RealFs {
 impl FileSystem for RealFs {
     fn read_file(&self, path: &Path) -> io::Result<String> {
         std::fs::read_to_string(self.root.join(path))
+    }
+
+    fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+        std::fs::read(self.root.join(path))
     }
 
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
@@ -133,6 +220,18 @@ impl FileSystem for MemoryFs {
         })
     }
 
+    fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.files
+            .get(path)
+            .map(|s| s.as_bytes().to_vec())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("file not found: {:?}", path),
+                )
+            })
+    }
+
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         let mut entries = Vec::new();
         let is_root =
@@ -203,6 +302,62 @@ impl FileSystem for MemoryFs {
 }
 
 impl SourceProvider for MemoryFs {
+    fn read_source(&self, path: &str) -> Option<String> {
+        self.read_file(Path::new(path)).ok()
+    }
+}
+
+#[derive(Clone)]
+pub struct ScopedFs<F: FileSystem> {
+    base: F,
+    root: PathBuf,
+}
+
+impl<F: FileSystem> ScopedFs<F> {
+    pub fn new(base: F, root: impl Into<PathBuf>) -> Self {
+        Self {
+            base,
+            root: normalize_fs_path(&root.into()),
+        }
+    }
+
+    fn resolve(&self, path: &Path) -> PathBuf {
+        join_scoped_path(&self.root, path)
+    }
+}
+
+impl<F: FileSystem> FileSystem for ScopedFs<F> {
+    fn read_file(&self, path: &Path) -> io::Result<String> {
+        self.base.read_file(&self.resolve(path))
+    }
+
+    fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.base.read_bytes(&self.resolve(path))
+    }
+
+    fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        let resolved_dir = self.resolve(path);
+        let entries = self.base.read_dir(&resolved_dir)?;
+        Ok(entries
+            .into_iter()
+            .filter_map(|entry| strip_scoped_prefix(&entry, &self.root))
+            .collect())
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        self.base.exists(&self.resolve(path))
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        self.base.is_dir(&self.resolve(path))
+    }
+
+    fn root(&self) -> Option<&Path> {
+        Some(&self.root)
+    }
+}
+
+impl<F: FileSystem> SourceProvider for ScopedFs<F> {
     fn read_source(&self, path: &str) -> Option<String> {
         self.read_file(Path::new(path)).ok()
     }
@@ -300,6 +455,19 @@ impl FileSystem for ZipFs {
                 format!("file not found: {:?}", full_path),
             )
         })
+    }
+
+    fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+        let full_path = self.resolve(path);
+        self.files
+            .get(&full_path)
+            .map(|s| s.as_bytes().to_vec())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("file not found: {:?}", full_path),
+                )
+            })
     }
 
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
@@ -476,6 +644,12 @@ impl<P: FileSystem, S: FileSystem> FileSystem for OverlayFs<P, S> {
             .or_else(|_| self.secondary.read_file(path))
     }
 
+    fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.primary
+            .read_bytes(path)
+            .or_else(|_| self.secondary.read_bytes(path))
+    }
+
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         // Merge entries from both file systems
         let mut entries = self.primary.read_dir(path).unwrap_or_default();
@@ -532,6 +706,37 @@ mod tests {
 
         let content = fs.read_file(Path::new("/project/main.vo")).unwrap();
         assert_eq!(content, "package main");
+    }
+
+    #[test]
+    fn test_normalize_fs_path_collapses_parent_segments() {
+        assert_eq!(
+            normalize_fs_path(Path::new("workspace/app/../voplay")),
+            PathBuf::from("workspace/voplay")
+        );
+        assert_eq!(
+            normalize_fs_path(Path::new("./workspace/./voplay")),
+            PathBuf::from("workspace/voplay")
+        );
+    }
+
+    #[test]
+    fn test_scoped_fs_reads_relative_to_scope_root() {
+        let fs = MemoryFs::new()
+            .with_file("workspace/voplay/vo.mod", "module github.com/vo-lang/voplay\n\nvo 0.1\n")
+            .with_file("workspace/voplay/codec/codec.vo", "package codec\n");
+        let scoped = ScopedFs::new(fs, "workspace/app/../voplay");
+
+        let mod_file = scoped.read_file(Path::new("vo.mod")).unwrap();
+        assert!(mod_file.contains("module github.com/vo-lang/voplay"));
+
+        let entries = scoped.read_dir(Path::new(".")) .unwrap();
+        assert!(entries.contains(&PathBuf::from("vo.mod")));
+        assert!(entries.contains(&PathBuf::from("codec")));
+
+        let codec = scoped.read_file(Path::new("codec/codec.vo")).unwrap();
+        assert_eq!(codec, "package codec\n");
+        assert_eq!(scoped.root(), Some(Path::new("workspace/voplay")));
     }
 
     #[test]

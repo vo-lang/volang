@@ -16,6 +16,50 @@ use vo_runtime::objects::slice;
 use vo_runtime::slot::slot_to_ptr;
 use wasm_bindgen::prelude::*;
 
+#[wasm_bindgen(inline_js = r#"
+export function voHttpBuildFetchPromise(method, url, headers, body) {
+  const opts = { method, headers: {} };
+  for (const line of headers) {
+    const index = line.indexOf(':');
+    if (index < 0) {
+      continue;
+    }
+    const key = line.slice(0, index).trim();
+    const value = line.slice(index + 1).trimStart();
+    if (key.length > 0) {
+      opts.headers[key] = value;
+    }
+  }
+  if (body && body.length > 0) {
+    opts.body = body;
+  }
+  return fetch(url, opts)
+    .then(async (response) => {
+      const resolvedHeaders = [];
+      response.headers.forEach((value, key) => {
+        resolvedHeaders.push(`${key}: ${value}`);
+      });
+      return {
+        statusCode: response.status,
+        status: `HTTP/1.1 ${response.status} ${response.statusText}`,
+        proto: 'HTTP/1.1',
+        headers: resolvedHeaders,
+        body: new Uint8Array(await response.arrayBuffer()),
+      };
+    })
+    .catch((error) => ({ error: String(error) }));
+}
+"#)]
+extern "C" {
+    #[wasm_bindgen(js_name = voHttpBuildFetchPromise)]
+    fn js_build_fetch_promise(
+        method: &str,
+        url: &str,
+        headers: &js_sys::Array,
+        body: &[u8],
+    ) -> js_sys::Promise;
+}
+
 static FETCH_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 fn next_fetch_token() -> u64 {
@@ -71,67 +115,17 @@ pub fn take_fetch_result(token: u64) -> Option<FetchResult> {
     })
 }
 
-fn js_str_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('\'', "\\'")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-}
-
-fn build_js_headers_obj(headers: &[String]) -> String {
-    let mut obj = "{".to_string();
-    for line in headers {
-        if let Some(pos) = line.find(": ") {
-            let k = js_str_escape(&line[..pos]);
-            let v = js_str_escape(&line[pos + 2..]);
-            obj.push_str(&format!("'{}':'{}',", k, v));
-        }
-    }
-    obj.push('}');
-    obj
-}
-
 fn build_fetch_promise(
     method: &str,
     url: &str,
     headers: &[String],
     body: &[u8],
 ) -> Result<js_sys::Promise, String> {
-    let headers_obj = build_js_headers_obj(headers);
-    let body_init = if body.is_empty() {
-        String::new()
-    } else {
-        let bytes = body
-            .iter()
-            .map(|b| b.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        format!("opts.body=new Uint8Array([{}]);", bytes)
-    };
-
-    let script = format!(
-        concat!(
-            "(function(){{",
-            "var opts={{method:'{method}',headers:{headers}}};",
-            "{body_init}",
-            "return fetch('{url}',opts).then(function(r){{",
-            "var sc=r.status;var st=r.statusText;",
-            "var hds=[];r.headers.forEach(function(v,k){{hds.push(k+': '+v);}});",
-            "return r.arrayBuffer().then(function(buf){{",
-            "return{{statusCode:sc,status:'HTTP/1.1 '+sc+' '+st,proto:'HTTP/1.1',headers:hds,body:new Uint8Array(buf)}};",
-            "}});",
-            "}}).catch(function(e){{return{{error:String(e)}};}})",
-            "}})()"
-        ),
-        method = js_str_escape(method),
-        url = js_str_escape(url),
-        headers = headers_obj,
-        body_init = body_init,
-    );
-
-    js_sys::eval(&script)
-        .map(js_sys::Promise::from)
-        .map_err(|e| format!("fetch init failed: {:?}", e))
+    let header_values = js_sys::Array::new();
+    for header in headers {
+        header_values.push(&JsValue::from_str(header));
+    }
+    Ok(js_build_fetch_promise(method, url, &header_values, body))
 }
 
 /// Parse a resolved fetch Promise result JsValue into FetchResult.

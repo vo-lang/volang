@@ -41,6 +41,15 @@ impl FileSystem for WasmVfs {
         String::from_utf8(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
+    fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+        let full = self.full_path(path);
+        let (data, err) = vo_web_runtime_wasm::vfs::read_file(&full);
+        if let Some(e) = err {
+            return Err(io::Error::new(io::ErrorKind::NotFound, e));
+        }
+        Ok(data)
+    }
+
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         let full = self.full_path(path);
         let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(&full);

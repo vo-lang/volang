@@ -1,3 +1,4 @@
+pub mod cache;
 pub mod compat;
 pub mod digest;
 pub mod ext_manifest;
@@ -5,7 +6,6 @@ pub mod ext_manifest;
 pub mod github_registry;
 pub mod identity;
 pub mod lock;
-pub mod materialize;
 pub mod ops;
 pub mod project;
 pub mod registry;

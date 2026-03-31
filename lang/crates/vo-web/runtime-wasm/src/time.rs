@@ -4,6 +4,121 @@ use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
 use vo_runtime::objects::string as str_obj;
 use wasm_bindgen::prelude::*;
 
+#[wasm_bindgen(inline_js = r#"
+export function voTimeNowMs() {
+  if (globalThis.performance && typeof globalThis.performance.now === 'function') {
+    return Math.max(0, globalThis.performance.now());
+  }
+  return Math.max(0, Date.now());
+}
+
+function voTimeExtractPart(parts, type) {
+  const part = parts.find((entry) => entry.type === type);
+  return part ? (parseInt(part.value, 10) || 0) : 0;
+}
+
+export function voTimeTzValidate(name) {
+  if (name === 'UTC' || name === 'Local') {
+    return true;
+  }
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: name });
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+export function voTimeTzOffsetSecs(name, unixMs) {
+  if (name === 'Local') {
+    return voTimeLocalOffsetSecs(unixMs);
+  }
+  if (name === 'UTC') {
+    return 0;
+  }
+  try {
+    const date = new Date(unixMs);
+    const parts = new Intl.DateTimeFormat('en', {
+      timeZone: name,
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: 'numeric',
+      second: 'numeric',
+      hour12: false,
+    }).formatToParts(date);
+    const localUtcMs = Date.UTC(
+      voTimeExtractPart(parts, 'year'),
+      voTimeExtractPart(parts, 'month') - 1,
+      voTimeExtractPart(parts, 'day'),
+      voTimeExtractPart(parts, 'hour') % 24,
+      voTimeExtractPart(parts, 'minute'),
+      voTimeExtractPart(parts, 'second'),
+    );
+    return Math.round((localUtcMs - unixMs) / 1000);
+  } catch (_error) {
+    return 0;
+  }
+}
+
+export function voTimeTzAbbrev(name, unixMs) {
+  if (name === 'Local') {
+    return voTimeLocalAbbrev(unixMs);
+  }
+  if (name === 'UTC') {
+    return 'UTC';
+  }
+  try {
+    const date = new Date(unixMs);
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: name,
+      timeZoneName: 'short',
+    }).formatToParts(date);
+    const part = parts.find((entry) => entry.type === 'timeZoneName');
+    return part ? part.value : 'UTC';
+  } catch (_error) {
+    return 'UTC';
+  }
+}
+
+export function voTimeLocalOffsetSecs(unixMs) {
+  return -new Date(unixMs).getTimezoneOffset() * 60;
+}
+
+export function voTimeLocalAbbrev(unixMs) {
+  try {
+    const date = new Date(unixMs);
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZoneName: 'short',
+    }).formatToParts(date);
+    const part = parts.find((entry) => entry.type === 'timeZoneName');
+    return part ? part.value : 'UTC';
+  } catch (_error) {
+    return 'UTC';
+  }
+}
+"#)]
+extern "C" {
+    #[wasm_bindgen(js_name = voTimeNowMs)]
+    fn js_now_ms_impl() -> f64;
+
+    #[wasm_bindgen(js_name = voTimeTzValidate)]
+    fn js_tz_validate_impl(name: &str) -> bool;
+
+    #[wasm_bindgen(js_name = voTimeTzOffsetSecs)]
+    fn js_tz_offset_secs_impl(name: &str, unix_ms: f64) -> f64;
+
+    #[wasm_bindgen(js_name = voTimeTzAbbrev)]
+    fn js_tz_abbrev_impl(name: &str, unix_ms: f64) -> String;
+
+    #[wasm_bindgen(js_name = voTimeLocalOffsetSecs)]
+    fn js_local_offset_secs_impl(unix_ms: f64) -> f64;
+
+    #[wasm_bindgen(js_name = voTimeLocalAbbrev)]
+    fn js_local_abbrev_impl(unix_ms: f64) -> String;
+}
+
 /// Monotonically increasing token counter for callback-based sleep/fetch.
 static CALLBACK_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -11,65 +126,28 @@ fn next_callback_token() -> u64 {
     CALLBACK_TOKEN.fetch_add(1, Ordering::Relaxed)
 }
 
-fn js_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\'', "\\'")
-}
-
 fn tz_validate_impl(name: &str) -> bool {
-    if name == "UTC" || name == "Local" {
-        return true;
-    }
-    let script = format!(
-        "(function(){{try{{new Intl.DateTimeFormat(undefined,{{timeZone:'{}'}});return true;}}catch(e){{return false;}}}})()",
-        js_escape(name)
-    );
-    js_sys::eval(&script)
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    js_tz_validate_impl(name)
 }
 
 fn tz_offset_secs_impl(name: &str, unix_ms: f64) -> f64 {
-    let script = format!(
-        "(function(){{try{{var d=new Date({unix_ms});var fmt=new Intl.DateTimeFormat('en',{{timeZone:'{name}',year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'numeric',second:'numeric',hour12:false}});var parts=fmt.formatToParts(d);var get=function(t){{var p=parts.find(function(p){{return p.type===t;}});return p?parseInt(p.value):0;}};var h=get('hour')%24;var ld=new Date(Date.UTC(get('year'),get('month')-1,get('day'),h,get('minute'),get('second')));return Math.round((ld-d)/1000);}}catch(e){{return 0;}}}})()",
-        unix_ms = unix_ms,
-        name = js_escape(name)
-    );
-    js_sys::eval(&script)
-        .ok()
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0)
+    js_tz_offset_secs_impl(name, unix_ms)
 }
 
 fn tz_abbrev_impl(name: &str, unix_ms: f64) -> String {
-    let script = format!(
-        "(function(){{try{{var d=new Date({unix_ms});var parts=new Intl.DateTimeFormat('en-US',{{timeZone:'{name}',timeZoneName:'short'}}).formatToParts(d);var p=parts.find(function(p){{return p.type==='timeZoneName';}});return p?p.value:'UTC';}}catch(e){{return 'UTC';}}}})()",
-        unix_ms = unix_ms,
-        name = js_escape(name)
-    );
-    js_sys::eval(&script)
-        .ok()
-        .and_then(|v| v.as_string())
-        .unwrap_or_else(|| "UTC".to_string())
+    js_tz_abbrev_impl(name, unix_ms)
 }
 
 fn local_offset_secs_impl(unix_ms: f64) -> f64 {
-    let script = format!("(-new Date({}).getTimezoneOffset()*60)", unix_ms);
-    js_sys::eval(&script)
-        .ok()
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0)
+    js_local_offset_secs_impl(unix_ms)
 }
 
 fn local_abbrev_impl(unix_ms: f64) -> String {
-    let script = format!(
-        "(function(){{try{{var d=new Date({unix_ms});var parts=new Intl.DateTimeFormat('en-US',{{timeZoneName:'short'}}).formatToParts(d);var p=parts.find(function(p){{return p.type==='timeZoneName';}});return p?p.value:'UTC';}}catch(e){{return 'UTC';}}}})()",
-        unix_ms = unix_ms
-    );
-    js_sys::eval(&script)
-        .ok()
-        .and_then(|v| v.as_string())
-        .unwrap_or_else(|| "UTC".to_string())
+    js_local_abbrev_impl(unix_ms)
+}
+
+pub fn now_ms() -> f64 {
+    js_now_ms_impl()
 }
 
 fn now_unix_nano() -> i64 {
@@ -79,24 +157,7 @@ fn now_unix_nano() -> i64 {
 }
 
 fn now_mono_nano() -> i64 {
-    // Use globalThis.performance.now() when available (browser + Node.js).
-    let global = js_sys::global();
-    if let Ok(perf) = js_sys::Reflect::get(&global, &JsValue::from_str("performance")) {
-        if !perf.is_undefined() && !perf.is_null() {
-            if let Ok(now_fn) = js_sys::Reflect::get(&perf, &JsValue::from_str("now")) {
-                if now_fn.is_function() {
-                    let func = js_sys::Function::from(now_fn);
-                    if let Ok(v) = func.call0(&perf) {
-                        if let Some(ms) = v.as_f64() {
-                            return (ms.max(0.0) * 1_000_000.0) as i64;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // Fallback when performance API is unavailable.
-    now_unix_nano()
+    (now_ms() * 1_000_000.0) as i64
 }
 
 fn timesys_NowUnixNano(call: &mut ExternCallContext) -> ExternResult {

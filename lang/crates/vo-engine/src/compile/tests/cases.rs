@@ -87,7 +87,7 @@ fn test_validate_locked_modules_installed_requires_vo_mod_and_version() {
     )
     .unwrap();
     let err = validate_locked_modules_installed(&[locked.clone()], &mod_root).unwrap_err();
-    assert!(err.to_string().contains("<missing .vo-version>"), "{}", err);
+    assert!(err.to_string().contains(".vo-version"), "{}", err);
 
     fs::write(module_dir.join(".vo-version"), "v0.1.0\n").unwrap();
     let err = validate_locked_modules_installed(&[locked.clone()], &mod_root).unwrap_err();
@@ -118,7 +118,7 @@ fn test_validate_locked_modules_installed_requires_vo_mod_and_version() {
     wrong_version.version = ExactVersion::parse("v0.1.1").unwrap();
     let err = validate_locked_modules_installed(&[wrong_version], &mod_root).unwrap_err();
     assert!(err.to_string().contains("v0.1.1"), "{}", err);
-    assert!(err.to_string().contains("is not installed at"), "{}", err);
+    assert!(err.to_string().contains("not in cache") || err.to_string().contains("is missing directory"), "{}", err);
 
     fs::remove_dir_all(&mod_root).unwrap();
 }

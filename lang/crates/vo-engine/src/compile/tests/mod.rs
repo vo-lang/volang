@@ -9,9 +9,7 @@ use vo_module::version::{ExactVersion, ToolchainConstraint};
 
 use super::cache::compile_cache_slot;
 use super::native::{
-    current_target_triple, installed_module_release_manifest_digest, locked_module_cache_dir,
-    prepare_extension_manifests_for_frozen_build,
-    validate_locked_modules_installed,
+    current_target_triple, prepare_extension_manifests_for_frozen_build, validate_locked_modules_installed,
 };
 use super::project_prepare::load_project_deps_for_engine;
 
@@ -27,6 +25,18 @@ fn temp_dir(prefix: &str) -> PathBuf {
             .unwrap()
             .as_nanos()
     ))
+}
+
+fn locked_module_cache_dir(mod_root: &Path, locked: &LockedModule) -> PathBuf {
+    vo_module::cache::layout::cache_dir(mod_root, &locked.path, &locked.version)
+}
+
+fn installed_module_release_manifest_digest(module_dir: &Path) -> std::io::Result<Option<String>> {
+    match fs::read(module_dir.join("vo.release.json")) {
+        Ok(bytes) => Ok(Some(Digest::from_sha256(&bytes).to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn make_locked(

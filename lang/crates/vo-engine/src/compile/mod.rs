@@ -337,6 +337,19 @@ pub fn check_with_auto_install(path: &str) -> Result<(), CompileError> {
     check(path)
 }
 
+fn locked_module_fully_cached(mod_cache: &Path, locked: &LockedModule) -> bool {
+    let fs = RealFs::new(mod_cache);
+    let module_dir = vo_module::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
+    if vo_module::cache::validate::validate_installed_module(&fs, &module_dir, locked).is_err() {
+        return false;
+    }
+    locked.artifacts.iter().all(|artifact| {
+        let artifact_path = module_dir.join("artifacts").join(&artifact.id.name);
+        vo_module::cache::validate::validate_installed_artifact(&fs, &artifact_path, locked, artifact)
+            .is_ok()
+    })
+}
+
 fn auto_download_locked_modules(root: &Path) -> Result<(), CompileError> {
     use vo_module::github_registry::GitHubRegistry;
 
@@ -356,11 +369,7 @@ fn auto_download_locked_modules(root: &Path) -> Result<(), CompileError> {
         .locked_modules
         .iter()
         .map(|locked| {
-            let source_cached = vo_module::materialize::is_source_cached(&mod_cache, locked);
-            let artifacts_cached = locked.artifacts.iter().all(|artifact| {
-                vo_module::materialize::is_artifact_cached(&mod_cache, locked, artifact)
-            });
-            let fully_cached = source_cached && artifacts_cached;
+            let fully_cached = locked_module_fully_cached(&mod_cache, locked);
             if fully_cached {
                 emit_compile_log(
                     CompileLogRecord::new("vo-engine", "dependency_cached")
@@ -381,7 +390,7 @@ fn auto_download_locked_modules(root: &Path) -> Result<(), CompileError> {
             )
         })
         .collect::<Vec<_>>();
-    vo_module::materialize::download_all(&mod_cache, lock_file, &registry).map_err(|e| {
+    vo_module::cache::install::populate_locked_cache(&mod_cache, lock_file, &registry).map_err(|e| {
         ModuleSystemError::new(
             ModuleSystemStage::DependencyDownload,
             ModuleSystemErrorKind::DownloadFailed,
@@ -400,7 +409,7 @@ fn auto_download_locked_modules(root: &Path) -> Result<(), CompileError> {
     }
 
     for locked in &project_deps.locked_modules {
-        let cache_dir = vo_module::materialize::cache_dir(&mod_cache, &locked.path, &locked.version);
+        let cache_dir = vo_module::cache::layout::cache_dir(&mod_cache, &locked.path, &locked.version);
         let manifests = vo_module::ext_manifest::discover_extensions(&cache_dir).map_err(|e| {
             ModuleSystemError::new(
                 ModuleSystemStage::NativeExtension,

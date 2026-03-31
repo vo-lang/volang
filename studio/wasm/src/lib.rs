@@ -13,7 +13,7 @@ use toml::Value;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
 use vo_common::stable_hash::StableHasher;
-use vo_common::vfs::{FileSystem, MemoryFs};
+use vo_common::vfs::{normalize_fs_path, FileSystem, MemoryFs};
 use vo_app_runtime::{GuestRuntime, RenderBuffer, RenderIslandRuntime, SessionError};
 
 fn session_error_to_js(error: SessionError) -> JsValue {
@@ -394,12 +394,86 @@ fn read_vfs_package(pkg_dir: &str, local_fs: &mut MemoryFs) -> Result<(), String
     Ok(())
 }
 
+fn normalize_joined_vfs_path(path: &Path) -> String {
+    let normalized = normalize_fs_path(path);
+    let raw = normalized.to_string_lossy().replace('\\', "/");
+    if raw.is_empty() || raw == "." {
+        "/".to_string()
+    } else if raw.starts_with('/') {
+        raw
+    } else {
+        format!("/{raw}")
+    }
+}
+
+fn load_workspace_context_from_vfs(project_root: &str) -> Result<vo_web::WorkspaceProjectContext, String> {
+    let vfs = vo_web::WasmVfs::new("");
+    let project_dir = Path::new(project_root.trim_start_matches('/'));
+    vo_web::load_workspace_project_context(&vfs, project_dir)
+}
+
+fn workspace_replace_vfs_roots(context: &vo_web::WorkspaceProjectContext) -> Vec<String> {
+    let mut replace_dirs = context
+        .workspace_replaces
+        .values()
+        .map(|path| normalize_joined_vfs_path(path))
+        .collect::<Vec<_>>();
+    replace_dirs.sort();
+    replace_dirs.dedup();
+    replace_dirs
+}
+
+fn build_workspace_project_from_vfs(
+    project_root: &str,
+) -> Result<(MemoryFs, vo_web::WorkspaceProjectContext), String> {
+    let vfs = vo_web::WasmVfs::new("");
+    let context = load_workspace_context_from_vfs(project_root)?;
+    let mut local_fs = MemoryFs::new();
+    read_vfs_package(project_root, &mut local_fs)?;
+    if let Some(workfile_path) = vo_module::workspace::discover_workfile_in(&vfs, &context.project_root) {
+        let workfile_path = normalize_joined_vfs_path(&workfile_path);
+        let content = read_vfs_text(&workfile_path)?;
+        local_fs.add_file(PathBuf::from(workfile_path.trim_start_matches('/')), content);
+    }
+    for replace_dir in workspace_replace_vfs_roots(&context) {
+        read_vfs_package(&replace_dir, &mut local_fs)?;
+    }
+    Ok((local_fs, context))
+}
+
 fn read_vfs_text(path: &str) -> Result<String, String> {
     let (data, err) = vo_web_runtime_wasm::vfs::read_file(path);
     if let Some(e) = err {
         return Err(format!("read file '{}': {}", path, e));
     }
-    String::from_utf8(data).map_err(|e| format!("utf8 '{}': {}", path, e))
+    String::from_utf8(data).map_err(|e| format!("utf8 decode '{}': {}", path, e))
+}
+
+fn discover_installed_vfs_module_version(module: &str) -> Option<String> {
+    let encoded = vo_module::cache::layout::cache_key(module);
+    let module_dir = format!("/{}", encoded);
+    let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(&module_dir);
+    if err.is_some() {
+        return None;
+    }
+    for (name, is_dir, _mode) in entries {
+        if !is_dir || !name.starts_with('v') {
+            continue;
+        }
+        let version_marker = format!(
+            "{}/{}/{}",
+            module_dir,
+            name,
+            vo_module::cache::layout::VERSION_MARKER,
+        );
+        if let Ok(content) = read_vfs_text(&version_marker) {
+            let version = content.trim().to_string();
+            if !version.is_empty() {
+                return Some(version);
+            }
+        }
+    }
+    None
 }
 
 fn read_vfs_bytes(path: &str) -> Result<Vec<u8>, String> {
@@ -425,7 +499,7 @@ impl SingleFileEntry {
     fn installed_modules(&self) -> Result<Vec<(String, String)>, String> {
         let mut installed = Vec::new();
         for module in &self.external_modules {
-            let version = vo_web::discover_vfs_installed_version(module)
+            let version = discover_installed_vfs_module_version(module)
                 .ok_or_else(|| format!(
                     "module {} is not installed in the VFS; call prepareEntry before compiling",
                     module,
@@ -474,14 +548,14 @@ fn entry_local_file_path(entry_clean: &str, file_name: &str) -> PathBuf {
 
 fn build_compile_fs_from_vfs(entry_path: &str) -> Result<(ResolvedVfsCompileTarget, MemoryFs), String> {
     let target = resolve_vfs_compile_target(entry_path)?;
-    let mut local_fs = MemoryFs::new();
-
-    if let Some(project_root) = &target.project_root {
-        read_vfs_package(project_root, &mut local_fs)?;
+    let local_fs = if let Some(project_root) = &target.project_root {
+        build_workspace_project_from_vfs(project_root)?.0
     } else {
         let single_file = SingleFileEntry::load(&target)?;
+        let mut local_fs = MemoryFs::new();
         single_file.populate_compile_fs(&mut local_fs)?;
-    }
+        local_fs
+    };
 
     Ok((target, local_fs))
 }
@@ -581,18 +655,10 @@ fn vfs_exists(path: &str) -> bool {
     err.is_none()
 }
 
-fn load_project_deps_from_vfs(project_root: &str) -> Result<vo_module::project::ProjectDeps, String> {
-    let mut local_fs = MemoryFs::new();
-    read_vfs_package(project_root, &mut local_fs)?;
-    let project_dir = Path::new(project_root.trim_start_matches('/'));
-    vo_module::project::read_project_deps_near(&local_fs, project_dir, &[])
-        .map_err(|error| error.to_string())
-}
-
 fn framework_module_root(locked: &vo_module::schema::lockfile::LockedModule) -> String {
     format!(
         "/{}",
-        vo_module::materialize::relative_module_dir(locked.path.as_str(), &locked.version.to_string())
+        vo_module::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version).display()
     )
 }
 
@@ -675,38 +741,52 @@ fn parse_framework_module(manifest_path: &str) -> Result<Option<FrameworkModule>
     }))
 }
 
-fn append_locked_framework_modules(
+fn append_framework_module_if_present(
     modules: &mut Vec<FrameworkModule>,
-    locked_modules: &[vo_module::schema::lockfile::LockedModule],
+    seen_roots: &mut std::collections::HashSet<String>,
+    manifest_path: &str,
 ) -> Result<(), String> {
-    for locked in locked_modules {
-        let manifest_path = join_vfs_path(&framework_module_root(locked), "vo.ext.toml");
-        if !vfs_exists(&manifest_path) {
-            continue;
-        }
-        if let Some(module) = parse_framework_module(&manifest_path)? {
+    if !vfs_exists(manifest_path) {
+        return Ok(());
+    }
+    if let Some(module) = parse_framework_module(manifest_path)? {
+        if seen_roots.insert(module.module_root.clone()) {
             modules.push(module);
         }
     }
     Ok(())
 }
 
+fn append_locked_framework_modules(
+    modules: &mut Vec<FrameworkModule>,
+    seen_roots: &mut std::collections::HashSet<String>,
+    locked_modules: &[vo_module::schema::lockfile::LockedModule],
+) -> Result<(), String> {
+    for locked in locked_modules {
+        let manifest_path = join_vfs_path(&framework_module_root(locked), "vo.ext.toml");
+        append_framework_module_if_present(modules, seen_roots, &manifest_path)?;
+    }
+    Ok(())
+}
+
 fn discover_framework_modules(target: &ResolvedVfsCompileTarget) -> Result<Vec<FrameworkModule>, String> {
     let mut modules = Vec::new();
+    let mut seen_roots = std::collections::HashSet::new();
     if let Some(project_root) = &target.project_root {
         let project_manifest = join_vfs_path(project_root, "vo.ext.toml");
-        if vfs_exists(&project_manifest) {
-            if let Some(module) = parse_framework_module(&project_manifest)? {
-                modules.push(module);
-            }
+        append_framework_module_if_present(&mut modules, &mut seen_roots, &project_manifest)?;
+
+        let context = load_workspace_context_from_vfs(project_root)?;
+        for replace_dir in workspace_replace_vfs_roots(&context) {
+            let manifest_path = join_vfs_path(&replace_dir, "vo.ext.toml");
+            append_framework_module_if_present(&mut modules, &mut seen_roots, &manifest_path)?;
         }
 
-        let project_deps = load_project_deps_from_vfs(project_root)?;
-        append_locked_framework_modules(&mut modules, &project_deps.locked_modules)?;
+        append_locked_framework_modules(&mut modules, &mut seen_roots, &context.project_deps.locked_modules)?;
     } else {
         let single_file = SingleFileEntry::load(target)?;
         let locked_modules = single_file.locked_modules()?;
-        append_locked_framework_modules(&mut modules, &locked_modules)?;
+        append_locked_framework_modules(&mut modules, &mut seen_roots, &locked_modules)?;
     }
     Ok(modules)
 }
@@ -882,8 +962,7 @@ pub fn prepare_entry(entry_path: &str) -> js_sys::Promise {
 
         if let Some(project_root) = &target.project_root {
             let read_start = js_sys::Date::now();
-            let mut local_fs = MemoryFs::new();
-            read_vfs_package(project_root, &mut local_fs)
+            let (local_fs, _context) = build_workspace_project_from_vfs(project_root)
                 .map_err(|e| JsValue::from_str(&e))?;
             log_wasm_path("prepare_entry_read_package_done", project_root, "system", Some(read_start));
             let entry_clean = target.entry_path.trim_start_matches('/').to_string();
