@@ -9,7 +9,7 @@ use vo_runtime::ext_loader::NativeExtensionSpec;
 use vo_vm::bytecode::Module;
 
 use super::{
-    default_mod_cache_root, CompileError, CompileOutput, COMPILE_CACHE_NATIVE_NAMESPACE,
+    CompileError, CompileOutput, COMPILE_CACHE_NATIVE_NAMESPACE,
     COMPILE_CACHE_SCHEMA_VERSION, COMPILE_CACHE_SLOT_NAMESPACE,
 };
 use super::native::current_target_triple;
@@ -70,30 +70,33 @@ pub(super) fn compile_cache_slot(root: &Path, single_file: Option<&OsStr>) -> Co
 }
 
 pub(super) fn compute_compile_cache_fingerprint(
-    root: &Path,
-    single_file: Option<&OsStr>,
+    source_root: &Path,
+    project_root: &Path,
+    mod_cache: &Path,
+    single_file: Option<&Path>,
     replaces: &HashMap<String, PathBuf>,
 ) -> Result<String, CompileError> {
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let mod_cache_root = default_mod_cache_root();
-    let canonical_mod_cache = mod_cache_root.canonicalize().unwrap_or(mod_cache_root);
+    let canonical_source_root = source_root.canonicalize().unwrap_or_else(|_| source_root.to_path_buf());
+    let canonical_project_root = project_root.canonicalize().unwrap_or_else(|_| project_root.to_path_buf());
+    let canonical_mod_cache = mod_cache.canonicalize().unwrap_or_else(|_| mod_cache.to_path_buf());
     let mut hasher = StableHasher::new(COMPILE_CACHE_NATIVE_NAMESPACE);
     hasher.update_str("schema", COMPILE_CACHE_SCHEMA_VERSION);
     hasher.update_str("compiler_version", env!("CARGO_PKG_VERSION"));
     hasher.update_str("compiler_build_id", env!("VO_COMPILER_BUILD_ID"));
     hasher.update_str("target_triple", current_target_triple());
-    hasher.update_path("source_root", &canonical_root);
+    hasher.update_path("source_root", &canonical_source_root);
+    hasher.update_path("project_root", &canonical_project_root);
     hasher.update_path("mod_cache_root", &canonical_mod_cache);
     hasher.update_bool("single_file", single_file.is_some());
-    if let Some(file_name) = single_file {
-        hasher.update_str("entry_name", &file_name.to_string_lossy());
+    if let Some(file_path) = single_file {
+        hasher.update_path("entry_file", file_path);
     } else {
-        hasher.update_str("entry_name", ".");
+        hasher.update_str("entry_file", ".");
     }
 
-    hash_compile_input_tree(&mut hasher, "source_root", &canonical_root)?;
+    hash_compile_input_tree(&mut hasher, "project_root", &canonical_project_root)?;
 
-    if let Some(workfile_path) = vo_module::workspace::discover_workfile(&canonical_root) {
+    if let Some(workfile_path) = vo_module::workspace::discover_workfile(&canonical_project_root) {
         let canonical_workfile = workfile_path.canonicalize().unwrap_or(workfile_path);
         hasher.update_path("workspace_file", &canonical_workfile);
         hasher.update_bytes("workspace_file_bytes", &fs::read(&canonical_workfile)?);

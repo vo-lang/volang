@@ -5,6 +5,7 @@ pub mod ext_manifest;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod github_registry;
 pub mod identity;
+pub mod lifecycle;
 pub mod lock;
 pub mod ops;
 pub mod project;
@@ -45,6 +46,11 @@ pub enum Error {
     ConflictingConstraints {
         module: String,
         detail: String,
+    },
+    SelectedVersionConflict {
+        module: String,
+        existing: String,
+        requested: String,
     },
     DependencyToolchainMismatch {
         module: String,
@@ -121,6 +127,13 @@ impl fmt::Display for Error {
             }
             Self::ConflictingConstraints { module, detail } => {
                 write!(f, "conflicting constraints for {module}: {detail}")
+            }
+            Self::SelectedVersionConflict {
+                module,
+                existing,
+                requested,
+            } => {
+                write!(f, "module {module} was selected at both {existing} and {requested}")
             }
             Self::DependencyToolchainMismatch {
                 module,

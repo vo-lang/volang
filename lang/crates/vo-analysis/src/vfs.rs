@@ -123,11 +123,11 @@ impl<F: FileSystem> ModSource<F> {
     /// - If a `vo.mod` was found, restricts resolution to allowed modules only.
     /// - If locked modules exist, maps each to its cache-relative version directory.
     pub fn with_project_deps(mut self, deps: &vo_module::project::ProjectDeps) -> Self {
-        if deps.has_mod_file {
-            self = self.with_allowed_modules(deps.allowed_modules.clone());
+        if deps.has_mod_file() {
+            self = self.with_allowed_modules(deps.allowed_modules().to_vec());
         }
-        if !deps.locked_modules.is_empty() {
-            self = self.with_module_roots(deps.locked_modules.iter().map(|locked| {
+        if !deps.locked_modules().is_empty() {
+            self = self.with_module_roots(deps.locked_modules().iter().map(|locked| {
                 let rel = vo_module::cache::layout::relative_module_dir(
                     locked.path.as_str(),
                     &locked.version,

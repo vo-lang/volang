@@ -449,33 +449,6 @@ fn read_vfs_text(path: &str) -> Result<String, String> {
     String::from_utf8(data).map_err(|e| format!("utf8 decode '{}': {}", path, e))
 }
 
-fn discover_installed_vfs_module_version(module: &str) -> Option<String> {
-    let encoded = vo_module::cache::layout::cache_key(module);
-    let module_dir = format!("/{}", encoded);
-    let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(&module_dir);
-    if err.is_some() {
-        return None;
-    }
-    for (name, is_dir, _mode) in entries {
-        if !is_dir || !name.starts_with('v') {
-            continue;
-        }
-        let version_marker = format!(
-            "{}/{}/{}",
-            module_dir,
-            name,
-            vo_module::cache::layout::VERSION_MARKER,
-        );
-        if let Ok(content) = read_vfs_text(&version_marker) {
-            let version = content.trim().to_string();
-            if !version.is_empty() {
-                return Some(version);
-            }
-        }
-    }
-    None
-}
-
 fn read_vfs_bytes(path: &str) -> Result<Vec<u8>, String> {
     let (data, err) = vo_web_runtime_wasm::vfs::read_file(path);
     if let Some(e) = err {
@@ -497,16 +470,8 @@ impl SingleFileEntry {
     }
 
     fn installed_modules(&self) -> Result<Vec<(String, String)>, String> {
-        let mut installed = Vec::new();
-        for module in &self.external_modules {
-            let version = discover_installed_vfs_module_version(module)
-                .ok_or_else(|| format!(
-                    "module {} is not installed in the VFS; call prepareEntry before compiling",
-                    module,
-                ))?;
-            installed.push((module.clone(), version));
-        }
-        Ok(installed)
+        vo_web::collect_installed_vfs_module_specs(&self.external_modules)
+            .map_err(|error| format!("{}; call prepareEntry before compiling", error))
     }
 
     fn locked_modules(&self) -> Result<Vec<vo_module::schema::lockfile::LockedModule>, String> {
@@ -514,21 +479,31 @@ impl SingleFileEntry {
         if installed.is_empty() {
             return Ok(Vec::new());
         }
-        let (_mod_content, lock_content) =
-            vo_web::build_synthetic_project_files(STUDIO_SYNTHETIC_MODULE, &installed)?;
-        let lock = vo_module::schema::lockfile::LockFile::parse(&lock_content)
-            .map_err(|e| format!("parse synthetic vo.lock: {}", e))?;
-        Ok(lock.resolved)
+        vo_web::collect_vfs_locked_module_closure(&installed)
+    }
+
+    fn synthetic_project_files(&self) -> Result<Option<(String, String)>, String> {
+        let installed = self.installed_modules()?;
+        if installed.is_empty() {
+            return Ok(None);
+        }
+        let locked_modules = vo_web::collect_vfs_locked_module_closure(&installed)?;
+        let files = vo_module::project::build_synthetic_project_files(
+            STUDIO_SYNTHETIC_MODULE,
+            "0.1.0",
+            "vo-studio",
+            &installed,
+            &locked_modules,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Some(files))
     }
 
     fn populate_compile_fs(&self, local_fs: &mut MemoryFs) -> Result<(), String> {
         local_fs.add_file(PathBuf::from(&self.entry_clean), self.content.clone());
-        let installed = self.installed_modules()?;
-        if installed.is_empty() {
+        let Some((mod_content, lock_content)) = self.synthetic_project_files()? else {
             return Ok(());
-        }
-        let (mod_content, lock_content) =
-            vo_web::build_synthetic_project_files(STUDIO_SYNTHETIC_MODULE, &installed)?;
+        };
         local_fs.add_file(entry_local_file_path(&self.entry_clean, "vo.mod"), mod_content);
         local_fs.add_file(entry_local_file_path(&self.entry_clean, "vo.lock"), lock_content);
         Ok(())
@@ -782,7 +757,7 @@ fn discover_framework_modules(target: &ResolvedVfsCompileTarget) -> Result<Vec<F
             append_framework_module_if_present(&mut modules, &mut seen_roots, &manifest_path)?;
         }
 
-        append_locked_framework_modules(&mut modules, &mut seen_roots, &context.project_deps.locked_modules)?;
+        append_locked_framework_modules(&mut modules, &mut seen_roots, context.project_deps.locked_modules())?;
     } else {
         let single_file = SingleFileEntry::load(target)?;
         let locked_modules = single_file.locked_modules()?;

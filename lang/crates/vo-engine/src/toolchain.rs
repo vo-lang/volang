@@ -250,6 +250,7 @@ pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf,
     let _ = crate::compile::prepare_native_extension_specs(
         &manifests,
         std::slice::from_ref(&installed.locked),
+        &mod_cache,
     )
         .map_err(|e| e.to_string())?;
 

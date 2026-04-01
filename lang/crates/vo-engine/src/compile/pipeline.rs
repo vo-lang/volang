@@ -11,13 +11,14 @@ use vo_common::vfs::{FileSet, FileSystem, ZipFs};
 use vo_module::project::ProjectDeps;
 
 use super::native::{prepare_native_extension_specs_for_frozen_build, validate_locked_modules_installed};
-use super::project_prepare::{load_project_deps_for_engine, read_all_replaces_with_fs, replacing_resolver};
+use super::project_prepare::replacing_resolver;
 use super::{CompileError, CompileOutput};
 
 struct PreparedProject<F> {
     fs: F,
     file_set: FileSet,
     source_root: PathBuf,
+    local_root: PathBuf,
     mod_cache: PathBuf,
     replaces: HashMap<String, PathBuf>,
     project_deps: ProjectDeps,
@@ -31,21 +32,31 @@ struct AnalyzedCompilation {
 }
 
 impl<F: FileSystem> PreparedProject<F> {
-    fn load(
+    fn load_prepared(
         fs: F,
+        file_set_root: PathBuf,
+        file_set_dir: PathBuf,
         source_root: PathBuf,
-        single_file: Option<&OsStr>,
+        local_root: PathBuf,
+        mod_cache: PathBuf,
+        single_file: Option<PathBuf>,
         replaces: HashMap<String, PathBuf>,
+        project_deps: ProjectDeps,
         empty_message: &'static str,
     ) -> Result<Self, CompileError> {
-        let file_set = collect_file_set(&fs, &source_root, single_file, empty_message)?;
-        let project_deps = load_project_deps_for_engine(&fs, &replaces)?;
-        let mod_cache = super::default_mod_cache_root();
-        validate_locked_modules_installed(&project_deps.locked_modules, &mod_cache)?;
+        let file_set = collect_file_set(
+            &fs,
+            &file_set_dir,
+            single_file.as_deref(),
+            file_set_root,
+            empty_message,
+        )?;
+        validate_locked_modules_installed(project_deps.locked_modules(), &mod_cache)?;
         Ok(Self {
             fs,
             file_set,
             source_root,
+            local_root,
             mod_cache,
             replaces,
             project_deps,
@@ -53,13 +64,14 @@ impl<F: FileSystem> PreparedProject<F> {
     }
 
     fn analyze(self) -> Result<AnalyzedCompilation, CompileError> {
-        let current_module = self.project_deps.current_module.clone();
-        let locked_modules = self.project_deps.locked_modules.clone();
+        let current_module = self.project_deps.current_module().map(str::to_string);
+        let locked_modules = self.project_deps.locked_modules().to_vec();
         let resolver = build_current_module_resolver(
             self.fs,
             &self.project_deps,
+            &self.mod_cache,
             self.replaces,
-            self.source_root.clone(),
+            self.local_root,
             current_module,
         );
         let project = analyze_project(self.file_set, &resolver)
@@ -115,24 +127,26 @@ impl AnalyzedCompilation {
 fn build_current_module_resolver<F: FileSystem>(
     fs: F,
     project_deps: &ProjectDeps,
+    mod_cache: &Path,
     replaces: HashMap<String, PathBuf>,
     local_root: PathBuf,
     current_module: Option<String>,
 ) -> CurrentModuleResolver<ReplacingResolver<vo_analysis::vfs::PackageResolverMixed<vo_stdlib::EmbeddedStdlib, vo_common::vfs::RealFs>>, F> {
-    let replaced = replacing_resolver(project_deps, replaces);
+    let replaced = replacing_resolver(project_deps, mod_cache, replaces);
     CurrentModuleResolver::with_root(replaced, fs, local_root, current_module)
 }
 
 fn collect_file_set<F: FileSystem>(
     fs: &F,
-    root: &Path,
-    single_file: Option<&OsStr>,
+    dir: &Path,
+    single_file: Option<&Path>,
+    abs_root: PathBuf,
     empty_message: &'static str,
 ) -> Result<FileSet, CompileError> {
-    let file_set = if let Some(file_name) = single_file {
-        FileSet::from_file(fs, Path::new(file_name), root.to_path_buf())?
+    let file_set = if let Some(file_path) = single_file {
+        FileSet::from_file(fs, file_path, abs_root)?
     } else {
-        FileSet::collect(fs, Path::new("."), root.to_path_buf())?
+        FileSet::collect(fs, dir, abs_root)?
     };
 
     if file_set.files.is_empty() {
@@ -173,13 +187,29 @@ pub(super) fn load_bytecode(path: &Path) -> Result<CompileOutput, CompileError> 
     })
 }
 
-pub(super) fn check_with_fs<F: FileSystem>(
+pub(super) fn check_with_project_context<F: FileSystem>(
     fs: F,
-    root: &Path,
-    single_file: Option<&OsStr>,
+    project_root: PathBuf,
+    mod_cache: PathBuf,
+    source_root: PathBuf,
+    package_dir: PathBuf,
+    single_file: Option<PathBuf>,
+    project_deps: ProjectDeps,
+    replaces: HashMap<String, PathBuf>,
 ) -> Result<(), CompileError> {
-    let replaces = read_all_replaces_with_fs(&fs, root)?;
-    PreparedProject::load(fs, root.to_path_buf(), single_file, replaces, "no .vo files found")?.check()
+    PreparedProject::load_prepared(
+        fs,
+        project_root,
+        package_dir,
+        source_root,
+        PathBuf::from("."),
+        mod_cache,
+        single_file,
+        replaces,
+        project_deps,
+        "no .vo files found",
+    )?
+    .check()
 }
 
 pub(super) fn compile_with_fs<F: FileSystem>(
@@ -187,8 +217,47 @@ pub(super) fn compile_with_fs<F: FileSystem>(
     root: &Path,
     single_file: Option<&OsStr>,
 ) -> Result<CompileOutput, CompileError> {
-    let replaces = read_all_replaces_with_fs(&fs, root)?;
-    PreparedProject::load(fs, root.to_path_buf(), single_file, replaces, "no .vo files found")?.compile()
+    let mod_cache = super::default_mod_cache_root();
+    let context = vo_module::project::load_project_context(&fs, root)
+        .map_err(super::ModuleSystemError::from)?;
+    PreparedProject::load_prepared(
+        fs,
+        root.to_path_buf(),
+        PathBuf::from("."),
+        root.to_path_buf(),
+        PathBuf::from("."),
+        mod_cache,
+        single_file.map(PathBuf::from),
+        context.workspace_replaces,
+        context.project_deps,
+        "no .vo files found",
+    )?
+    .compile()
+}
+
+pub(super) fn compile_with_project_context<F: FileSystem>(
+    fs: F,
+    project_root: PathBuf,
+    mod_cache: PathBuf,
+    source_root: PathBuf,
+    package_dir: PathBuf,
+    single_file: Option<PathBuf>,
+    project_deps: ProjectDeps,
+    replaces: HashMap<String, PathBuf>,
+) -> Result<CompileOutput, CompileError> {
+    PreparedProject::load_prepared(
+        fs,
+        project_root,
+        package_dir,
+        source_root,
+        PathBuf::from("."),
+        mod_cache,
+        single_file,
+        replaces,
+        project_deps,
+        "no .vo files found",
+    )?
+    .compile()
 }
 
 pub(super) fn compile_zip(
@@ -201,11 +270,19 @@ pub(super) fn compile_zip(
     }?;
 
     let abs_root = zip_path.canonicalize().unwrap_or_else(|_| zip_path.to_path_buf());
-    PreparedProject::load(
+    let mod_cache = super::default_mod_cache_root();
+    let project_deps = vo_module::project::read_project_deps(&zip_fs, &[])
+        .map_err(super::ModuleSystemError::from)?;
+    PreparedProject::load_prepared(
         zip_fs,
+        abs_root.clone(),
+        PathBuf::from("."),
         abs_root,
+        PathBuf::from("."),
+        mod_cache,
         None,
         HashMap::new(),
+        project_deps,
         "no .vo files found in zip",
     )?
     .compile()

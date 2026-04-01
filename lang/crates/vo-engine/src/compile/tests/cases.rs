@@ -29,6 +29,46 @@ fn test_compile_source_without_external_modules() {
 }
 
 #[test]
+fn test_compile_with_cache_fingerprint_tracks_ancestor_project_manifest() {
+    let root = temp_dir("vo_compile_cache_ancestor_project_manifest");
+    let app_root = root.join("app");
+    let cmd_root = app_root.join("cmd").join("play");
+    let util_root = app_root.join("util");
+
+    fs::create_dir_all(&cmd_root).unwrap();
+    fs::create_dir_all(&util_root).unwrap();
+
+    fs::write(
+        app_root.join("vo.mod"),
+        "module github.com/acme/app\nvo 0.1.0\n",
+    )
+    .unwrap();
+    fs::write(
+        cmd_root.join("main.vo"),
+        "package main\nimport \"github.com/acme/app/util\"\nfunc main(){util.Hello()}\n",
+    )
+    .unwrap();
+    fs::write(util_root.join("util.vo"), "package util\nfunc Hello(){}\n").unwrap();
+
+    let entry = cmd_root.join("main.vo");
+    compile_with_cache(entry.to_string_lossy().as_ref()).unwrap();
+    let first = read_saved_cache_fingerprint(&cmd_root, Some(entry.file_name().unwrap()));
+
+    fs::write(
+        app_root.join("vo.mod"),
+        "module github.com/acme/app\nvo 0.2.0\n",
+    )
+    .unwrap();
+
+    compile_with_cache(entry.to_string_lossy().as_ref()).unwrap();
+    let second = read_saved_cache_fingerprint(&cmd_root, Some(entry.file_name().unwrap()));
+
+    assert_ne!(first, second);
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn test_compile_rejects_version_suffix_imports() {
     let root = temp_dir("vo_compile_version_suffix");
     fs::create_dir_all(&root).unwrap();
@@ -124,7 +164,7 @@ fn test_validate_locked_modules_installed_requires_vo_mod_and_version() {
 }
 
 #[test]
-fn test_validate_locked_extension_manifests_falls_back_to_local_build_without_locked_artifact() {
+fn test_validate_locked_extension_manifests_require_locked_native_artifact() {
     let mod_root = temp_dir("vo_validate_locked_extensions");
     let locked = make_locked(
         "github.com/example/demo",
@@ -163,7 +203,6 @@ fn test_validate_locked_extension_manifests_falls_back_to_local_build_without_lo
         .into_iter()
         .next()
         .unwrap();
-    let expected_native_path = manifest.native_path.clone();
     let mut locked = make_locked(
         "github.com/example/demo",
         "v0.1.0",
@@ -179,9 +218,17 @@ fn test_validate_locked_extension_manifests_falls_back_to_local_build_without_lo
     let manifests = [manifest];
     let locked_modules = [locked];
 
-    let resolved = prepare_native_extension_specs_for_frozen_build(&manifests, &locked_modules, &mod_root)
-        .expect("should fall back to local build when no native artifact is locked");
-    assert_eq!(resolved[0].native_path, expected_native_path);
+    let error = prepare_native_extension_specs_for_frozen_build(&manifests, &locked_modules, &mod_root)
+        .expect_err("cached published modules must require a locked native artifact");
+    assert_eq!(error.stage, ModuleSystemStage::NativeExtension);
+    assert_eq!(error.kind, ModuleSystemErrorKind::Missing);
+    assert!(
+        error
+            .detail
+            .contains("vo.lock does not pin an extension-native artifact"),
+        "{}",
+        error.detail
+    );
 
     fs::remove_dir_all(&mod_root).unwrap();
 }
@@ -269,6 +316,34 @@ fn test_resolve_extension_manifests_uses_cached_native_artifact_path() {
     assert_eq!(resolved[0].native_path, artifact_path);
 
     fs::remove_dir_all(&mod_root).unwrap();
+}
+
+#[test]
+fn test_compile_single_file_uses_ancestor_project_context() {
+    let root = temp_dir("vo_compile_ancestor_project_context");
+    let app_root = root.join("app");
+    let cmd_root = app_root.join("cmd").join("play");
+    let util_root = app_root.join("util");
+
+    fs::create_dir_all(&cmd_root).unwrap();
+    fs::create_dir_all(&util_root).unwrap();
+
+    fs::write(
+        app_root.join("vo.mod"),
+        "module github.com/acme/app\nvo 0.1.0\n",
+    )
+    .unwrap();
+    fs::write(
+        cmd_root.join("main.vo"),
+        "package main\nimport \"github.com/acme/app/util\"\nfunc main(){util.Hello()}\n",
+    )
+    .unwrap();
+    fs::write(util_root.join("util.vo"), "package util\nfunc Hello(){}\n").unwrap();
+
+    let output = compile(cmd_root.join("main.vo").to_string_lossy().as_ref()).unwrap();
+    assert_eq!(output.source_root, cmd_root.canonicalize().unwrap());
+
+    fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
@@ -652,8 +727,8 @@ fn test_read_external_module_plan_all_replaced_returns_empty_without_lock() {
     );
 
     let plan = load_project_deps_for_engine(&fs, &replaces).unwrap();
-    assert!(plan.allowed_modules.is_empty());
-    assert!(plan.locked_modules.is_empty());
+    assert!(plan.allowed_modules().is_empty());
+    assert!(plan.locked_modules().is_empty());
 }
 
 #[test]
@@ -698,9 +773,9 @@ fn test_read_external_module_plan_keeps_locked_transitive_external_modules_for_w
     );
 
     let plan = load_project_deps_for_engine(&fs, &replaces).unwrap();
-    assert_eq!(plan.allowed_modules, vec![core_module_str.to_string()]);
-    assert_eq!(plan.locked_modules.len(), 1);
-    assert_eq!(plan.locked_modules[0].path.as_str(), core_module_str);
+    assert_eq!(plan.allowed_modules(), &[core_module_str.to_string()]);
+    assert_eq!(plan.locked_modules().len(), 1);
+    assert_eq!(plan.locked_modules()[0].path.as_str(), core_module_str);
 }
 
 #[test]

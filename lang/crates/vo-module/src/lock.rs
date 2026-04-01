@@ -73,6 +73,21 @@ pub fn locked_module_from_manifest_raw(
     locked_module_from_release_manifest(manifest, Digest::from_sha256(manifest_raw))
 }
 
+pub fn locked_module_from_requested_manifest_raw(
+    manifest_raw: &[u8],
+    module: &str,
+    version: &str,
+) -> Result<LockedModule, Error> {
+    let manifest_content = std::str::from_utf8(manifest_raw)
+        .map_err(|error| Error::ManifestParse(format!("vo.release.json utf-8 error: {error}")))?;
+    let manifest = crate::registry::parse_requested_release_manifest_for_spec(
+        module,
+        version,
+        manifest_content,
+    )?;
+    Ok(locked_module_from_manifest_raw(&manifest, manifest_raw))
+}
+
 pub fn validate_locked_module_against_manifest(
     locked: &LockedModule,
     manifest: &ReleaseManifest,
@@ -411,6 +426,34 @@ deps = []
         assert_eq!(locked.deps.len(), 1);
         assert_eq!(locked.artifacts.len(), 1);
         assert_eq!(locked.release_manifest, Digest::from_sha256(raw.as_bytes()));
+    }
+
+    #[test]
+    fn test_locked_module_from_requested_manifest_raw() {
+        let manifest = sample_manifest();
+        let raw = manifest.render();
+        let locked = locked_module_from_requested_manifest_raw(
+            raw.as_bytes(),
+            manifest.module.as_str(),
+            &manifest.version.to_string(),
+        )
+        .unwrap();
+        assert_eq!(locked.path.as_str(), manifest.module.as_str());
+        assert_eq!(locked.version.to_string(), manifest.version.to_string());
+        assert_eq!(locked.release_manifest, Digest::from_sha256(raw.as_bytes()));
+    }
+
+    #[test]
+    fn test_locked_module_from_requested_manifest_raw_rejects_mismatched_spec() {
+        let manifest = sample_manifest();
+        let raw = manifest.render();
+        let err = locked_module_from_requested_manifest_raw(
+            raw.as_bytes(),
+            "github.com/acme/other",
+            &manifest.version.to_string(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not match expected"));
     }
 
     #[test]

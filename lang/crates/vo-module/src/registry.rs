@@ -121,6 +121,16 @@ pub fn parse_requested_release_manifest(
     Ok(manifest)
 }
 
+pub fn parse_requested_release_manifest_for_spec(
+    module: &str,
+    version: &str,
+    content: &str,
+) -> Result<ReleaseManifest, Error> {
+    let expected_module = ModulePath::parse(module)?;
+    let expected_version = ExactVersion::parse(version)?;
+    parse_requested_release_manifest(content, &expected_module, &expected_version)
+}
+
 /// Validate that a release manifest is consistent with the module path and version
 /// it was fetched for.
 pub fn validate_manifest(

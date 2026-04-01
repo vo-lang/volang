@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use vo_common::vfs::{FileSet, FileSystem, MemoryFs};
+use vo_module::project::{ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage};
 
 use crate::js_types::CompileResult;
 use crate::wasm_vfs::WasmVfs;
@@ -58,14 +59,28 @@ fn build_single_file_fs(source: &str, filename: &str) -> MemoryFs {
     fs
 }
 
-fn build_single_file_set(fs: &MemoryFs, filename: &str) -> Result<FileSet, String> {
+fn build_single_file_set(fs: &MemoryFs, filename: &str) -> Result<FileSet, WebCompileError> {
     FileSet::from_file(fs, Path::new(filename), PathBuf::from("."))
-        .map_err(|e| format!("Failed to read file: {}", e))
+        .map_err(|error| {
+            WebCompileError::new(
+                WebCompileStage::FileSet,
+                WebCompileErrorKind::ReadFailed,
+                format!("Failed to read file: {}", error),
+            )
+            .with_path(Path::new(filename))
+        })
 }
 
-fn build_entry_file_set(local_fs: &MemoryFs, entry: &str) -> Result<FileSet, String> {
+fn build_entry_file_set(local_fs: &MemoryFs, entry: &str) -> Result<FileSet, WebCompileError> {
     FileSet::collect(local_fs, entry_package_dir(entry), PathBuf::from("."))
-        .map_err(|e| format!("Failed to collect package files: {}", e))
+        .map_err(|error| {
+            WebCompileError::new(
+                WebCompileStage::FileSet,
+                WebCompileErrorKind::ReadFailed,
+                format!("Failed to collect package files: {}", error),
+            )
+            .with_path(entry_package_dir(entry))
+        })
 }
 
 struct PreparedCompileInput {
@@ -76,35 +91,110 @@ struct PreparedCompileInput {
     workspace_replaces: HashMap<String, PathBuf>,
 }
 
-enum LocalCompileSource {
+pub enum CompileSource {
     SingleFile { source: String, filename: String },
     Entry { entry: String, local_fs: MemoryFs },
 }
 
-enum ModuleSourceMode {
+pub enum ModuleSource {
     Fs { std_fs: MemoryFs, mod_fs: MemoryFs },
     Vfs { vfs_mod_root: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebCompileStage {
+    Policy,
+    FileSet,
+    Workspace,
+    ModFile,
+    LockFile,
+    Analysis,
+    Codegen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebCompileErrorKind {
+    Missing,
+    ReadFailed,
+    ParseFailed,
+    ValidationFailed,
+    AnalysisFailed,
+    CodegenFailed,
+}
+
+#[derive(Debug, Clone)]
+struct WebCompileError {
+    stage: WebCompileStage,
+    kind: WebCompileErrorKind,
+    path: Option<PathBuf>,
+    detail: String,
+}
+
+impl WebCompileError {
+    fn new(stage: WebCompileStage, kind: WebCompileErrorKind, detail: impl Into<String>) -> Self {
+        Self {
+            stage,
+            kind,
+            path: None,
+            detail: detail.into(),
+        }
+    }
+
+    fn with_path(mut self, path: &Path) -> Self {
+        self.path = Some(path.to_path_buf());
+        self
+    }
+}
+
+impl std::fmt::Display for WebCompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.detail)
+    }
+}
+
+impl std::error::Error for WebCompileError {}
+
+impl From<ProjectDepsError> for WebCompileError {
+    fn from(error: ProjectDepsError) -> Self {
+        let stage = match error.stage {
+            ProjectDepsStage::Workspace => WebCompileStage::Workspace,
+            ProjectDepsStage::ModFile => WebCompileStage::ModFile,
+            ProjectDepsStage::LockFile => WebCompileStage::LockFile,
+        };
+        let kind = match error.kind {
+            ProjectDepsErrorKind::Missing => WebCompileErrorKind::Missing,
+            ProjectDepsErrorKind::ReadFailed => WebCompileErrorKind::ReadFailed,
+            ProjectDepsErrorKind::ParseFailed => WebCompileErrorKind::ParseFailed,
+            ProjectDepsErrorKind::ValidationFailed => WebCompileErrorKind::ValidationFailed,
+        };
+        let mut mapped = Self::new(stage, kind, error.detail);
+        if let Some(path) = error.path.as_ref() {
+            mapped = mapped.with_path(path);
+        }
+        mapped
+    }
 }
 
 fn build_project_mod_source<F: FileSystem>(
     mod_fs: F,
     project_deps: &vo_module::project::ProjectDeps,
 ) -> vo_analysis::vfs::ModSource<F> {
-    if project_deps.has_mod_file {
+    if project_deps.has_mod_file() {
         vo_analysis::vfs::ModSource::with_fs(mod_fs)
-            .with_allowed_modules(project_deps.allowed_modules.clone())
+            .with_allowed_modules(project_deps.allowed_modules().to_vec())
     } else {
         vo_analysis::vfs::ModSource::with_fs(mod_fs)
     }
 }
 
-fn prepare_compile_input(source: LocalCompileSource) -> Result<PreparedCompileInput, String> {
+fn prepare_compile_input(source: CompileSource) -> Result<PreparedCompileInput, WebCompileError> {
     match source {
-        LocalCompileSource::SingleFile { source, filename } => {
-            reject_single_file_external_imports(&source)?;
+        CompileSource::SingleFile { source, filename } => {
+            reject_single_file_external_imports_typed(&source)?;
             let local_fs = build_single_file_fs(&source, &filename);
             let file_set = build_single_file_set(&local_fs, &filename)?;
-            let context = vo_module::project::load_project_context(&local_fs, entry_package_dir(&filename))?;
+            let context = vo_module::project::load_project_context(&local_fs, entry_package_dir(&filename))
+                .map_err(WebCompileError::from)?;
             Ok(PreparedCompileInput {
                 local_fs,
                 file_set,
@@ -113,9 +203,10 @@ fn prepare_compile_input(source: LocalCompileSource) -> Result<PreparedCompileIn
                 workspace_replaces: context.workspace_replaces,
             })
         }
-        LocalCompileSource::Entry { entry, local_fs } => {
+        CompileSource::Entry { entry, local_fs } => {
             let file_set = build_entry_file_set(&local_fs, &entry)?;
-            let context = vo_module::project::load_project_context(&local_fs, entry_package_dir(&entry))?;
+            let context = vo_module::project::load_project_context(&local_fs, entry_package_dir(&entry))
+                .map_err(WebCompileError::from)?;
             Ok(PreparedCompileInput {
                 local_fs,
                 file_set,
@@ -142,17 +233,29 @@ fn configure_workspace_replaces<R>(
 fn compile_file_set_with_resolver<R: vo_analysis::vfs::Resolver>(
     file_set: FileSet,
     resolver: &R,
-) -> Result<Vec<u8>, String> {
-    let project = vo_analysis::analyze_project(file_set, resolver).map_err(|e| format!("{}", e))?;
-    let module = vo_codegen::compile_project(&project).map_err(|e| format!("{}", e))?;
+) -> Result<Vec<u8>, WebCompileError> {
+    let project = vo_analysis::analyze_project(file_set, resolver).map_err(|error| {
+        WebCompileError::new(
+            WebCompileStage::Analysis,
+            WebCompileErrorKind::AnalysisFailed,
+            format!("{}", error),
+        )
+    })?;
+    let module = vo_codegen::compile_project(&project).map_err(|error| {
+        WebCompileError::new(
+            WebCompileStage::Codegen,
+            WebCompileErrorKind::CodegenFailed,
+            format!("{}", error),
+        )
+    })?;
     Ok(module.serialize())
 }
 
 fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
     input: PreparedCompileInput,
     package_resolver: R,
-) -> Result<Vec<u8>, String> {
-    let current_module = input.project_deps.current_module.clone();
+) -> Result<Vec<u8>, WebCompileError> {
+    let current_module = input.project_deps.current_module().map(str::to_string);
     let local_fs = input.local_fs;
     let resolver = vo_analysis::vfs::CurrentModuleResolver::with_root(
         configure_workspace_replaces(package_resolver, &local_fs, &input.workspace_replaces),
@@ -163,20 +266,20 @@ fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
     compile_file_set_with_resolver(input.file_set, &resolver)
 }
 
-fn compile_with_modes(
-    source: LocalCompileSource,
-    module_source: ModuleSourceMode,
-) -> Result<Vec<u8>, String> {
+fn compile_web_typed(
+    source: CompileSource,
+    module_source: ModuleSource,
+) -> Result<Vec<u8>, WebCompileError> {
     let input = prepare_compile_input(source)?;
     match module_source {
-        ModuleSourceMode::Fs { std_fs, mod_fs } => {
+        ModuleSource::Fs { std_fs, mod_fs } => {
             let package_resolver = vo_analysis::vfs::PackageResolver {
                 std: vo_analysis::vfs::StdSource::with_fs(std_fs),
                 r#mod: build_project_mod_source(mod_fs, &input.project_deps),
             };
             compile_with_package_resolver(input, package_resolver)
         }
-        ModuleSourceMode::Vfs { vfs_mod_root } => {
+        ModuleSource::Vfs { vfs_mod_root } => {
             let package_resolver = vo_analysis::vfs::PackageResolverMixed {
                 std: vo_analysis::vfs::StdSource::with_fs(build_stdlib_fs()),
                 r#mod: vo_analysis::vfs::ModSource::with_fs(WasmVfs::new(&vfs_mod_root))
@@ -187,14 +290,24 @@ fn compile_with_modes(
     }
 }
 
+pub fn compile_web(
+    source: CompileSource,
+    module_source: ModuleSource,
+) -> Result<Vec<u8>, String> {
+    compile_web_typed(source, module_source).map_err(stringify_web_compile_error)
+}
+
+fn stringify_web_compile_error(error: WebCompileError) -> String {
+    let _ = (error.stage, error.kind, error.path.as_ref());
+    error.to_string()
+}
+
 fn is_external_import_path(import_path: &str) -> bool {
     matches!(
         vo_module::identity::classify_import(import_path),
         Ok(vo_module::identity::ImportClass::External)
     )
 }
-
-// ── Import analysis ──────────────────────────────────────────────────────────
 
 /// Extract unique external module root paths from source code imports.
 ///
@@ -220,7 +333,7 @@ pub fn extract_external_module_paths(source: &str) -> Vec<String> {
     modules
 }
 
-pub fn reject_single_file_external_imports(source: &str) -> Result<(), String> {
+fn reject_single_file_external_imports_typed(source: &str) -> Result<(), WebCompileError> {
     let (file, diagnostics, _) = vo_syntax::parser::parse(source, 0);
     if diagnostics.has_errors() {
         return Ok(());
@@ -228,13 +341,21 @@ pub fn reject_single_file_external_imports(source: &str) -> Result<(), String> {
     for import in &file.imports {
         let import_path = import.path.value.as_str();
         if is_external_import_path(import_path) {
-            return Err(format!(
-                "external import \"{}\" requires a project with vo.mod and vo.lock; single-file web compilation no longer resolves third-party modules",
-                import_path,
+            return Err(WebCompileError::new(
+                WebCompileStage::Policy,
+                WebCompileErrorKind::ValidationFailed,
+                format!(
+                    "external import \"{}\" requires a project with vo.mod and vo.lock; single-file web compilation no longer resolves third-party modules",
+                    import_path,
+                ),
             ));
         }
     }
     Ok(())
+}
+
+pub fn reject_single_file_external_imports(source: &str) -> Result<(), String> {
+    reject_single_file_external_imports_typed(source).map_err(stringify_web_compile_error)
 }
 
 // ── Public compilation functions ─────────────────────────────────────────────
@@ -269,12 +390,12 @@ pub fn compile_source_with_std_fs(
     filename: &str,
     std_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
-    compile_with_modes(
-        LocalCompileSource::SingleFile {
+    compile_web(
+        CompileSource::SingleFile {
             source: source.to_string(),
             filename: filename.to_string(),
         },
-        ModuleSourceMode::Fs {
+        ModuleSource::Fs {
             std_fs,
             mod_fs: MemoryFs::new(),
         },
@@ -291,12 +412,12 @@ pub fn compile_source_with_mod_fs(
     std_fs: MemoryFs,
     mod_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
-    compile_with_modes(
-        LocalCompileSource::SingleFile {
+    compile_web(
+        CompileSource::SingleFile {
             source: source.to_string(),
             filename: filename.to_string(),
         },
-        ModuleSourceMode::Fs { std_fs, mod_fs },
+        ModuleSource::Fs { std_fs, mod_fs },
     )
 }
 
@@ -312,12 +433,12 @@ pub fn compile_entry_with_std_fs(
     local_fs: MemoryFs,
     std_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
-    compile_with_modes(
-        LocalCompileSource::Entry {
+    compile_web(
+        CompileSource::Entry {
             entry: entry.to_string(),
             local_fs,
         },
-        ModuleSourceMode::Fs {
+        ModuleSource::Fs {
             std_fs,
             mod_fs: MemoryFs::new(),
         },
@@ -337,12 +458,12 @@ pub fn compile_entry_with_mod_fs(
     std_fs: MemoryFs,
     mod_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
-    compile_with_modes(
-        LocalCompileSource::Entry {
+    compile_web(
+        CompileSource::Entry {
             entry: entry.to_string(),
             local_fs,
         },
-        ModuleSourceMode::Fs { std_fs, mod_fs },
+        ModuleSource::Fs { std_fs, mod_fs },
     )
 }
 
@@ -358,12 +479,12 @@ pub fn compile_entry_with_vfs(
     local_fs: MemoryFs,
     vfs_mod_root: &str,
 ) -> Result<Vec<u8>, String> {
-    compile_with_modes(
-        LocalCompileSource::Entry {
+    compile_web(
+        CompileSource::Entry {
             entry: entry.to_string(),
             local_fs,
         },
-        ModuleSourceMode::Vfs {
+        ModuleSource::Vfs {
             vfs_mod_root: vfs_mod_root.to_string(),
         },
     )
@@ -375,12 +496,12 @@ pub fn compile_source_with_vfs(
     filename: &str,
     vfs_mod_root: &str,
 ) -> Result<Vec<u8>, String> {
-    compile_with_modes(
-        LocalCompileSource::SingleFile {
+    compile_web(
+        CompileSource::SingleFile {
             source: source.to_string(),
             filename: filename.to_string(),
         },
-        ModuleSourceMode::Vfs {
+        ModuleSource::Vfs {
             vfs_mod_root: vfs_mod_root.to_string(),
         },
     )

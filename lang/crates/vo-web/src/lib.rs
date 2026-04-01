@@ -70,7 +70,7 @@ pub use island::VoVm;
 pub use compile::{
     EmbeddedStdlib,
     build_stdlib_fs,
-    compile,
+    compile, compile_web, CompileSource, ModuleSource,
     compile_source_with_std_fs, compile_source_with_mod_fs,
     compile_entry_with_std_fs, compile_entry_with_mod_fs,
     compile_entry_with_vfs, compile_source_with_vfs,
@@ -89,7 +89,7 @@ pub use host_log::{HostLogRecord, emit_host_log};
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use module_install::{
-    build_synthetic_project_files, ensure_vfs_deps,
+    collect_installed_vfs_module_specs, collect_vfs_locked_module_closure, ensure_vfs_deps,
     ensure_vfs_deps_from_fs, install_module_to_vfs,
     resolve_and_install_module,
 };

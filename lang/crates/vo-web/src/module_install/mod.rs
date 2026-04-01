@@ -13,10 +13,9 @@ mod fetch;
 mod log;
 mod vfs_io;
 
-use std::collections::{HashMap, HashSet};
-
 use vo_common::vfs::MemoryFs;
 use vo_module::cache::layout::{SOURCE_DIGEST_MARKER, VERSION_MARKER};
+use vo_module::lifecycle::{ModuleSelection, ModuleSelectionPlanner};
 use vo_module::schema::lockfile::LockedModule;
 
 use extension::*;
@@ -27,20 +26,134 @@ use vfs_io::*;
 
 pub use extension::load_ext_if_present;
 
+type ModuleInstallResult<T> = Result<T, ModuleInstallError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModuleInstallStage {
+    Spec,
+    Workspace,
+    ModFile,
+    LockFile,
+    Manifest,
+    Fetch,
+    VersionResolve,
+    Selection,
+    Vfs,
+    Extension,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModuleInstallErrorKind {
+    Missing,
+    ReadFailed,
+    WriteFailed,
+    ParseFailed,
+    ValidationFailed,
+    NetworkFailed,
+    LoadFailed,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ModuleInstallError {
+    stage: ModuleInstallStage,
+    kind: ModuleInstallErrorKind,
+    module_path: Option<String>,
+    version: Option<String>,
+    path: Option<String>,
+    detail: String,
+}
+
+impl ModuleInstallError {
+    fn new(stage: ModuleInstallStage, kind: ModuleInstallErrorKind, detail: impl Into<String>) -> Self {
+        Self {
+            stage,
+            kind,
+            module_path: None,
+            version: None,
+            path: None,
+            detail: detail.into(),
+        }
+    }
+
+    fn with_module(mut self, module: impl Into<String>) -> Self {
+        self.module_path = Some(module.into());
+        self
+    }
+
+    fn with_module_version(mut self, module: impl Into<String>, version: impl Into<String>) -> Self {
+        self.module_path = Some(module.into());
+        self.version = Some(version.into());
+        self
+    }
+
+    fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+}
+
+impl std::fmt::Display for ModuleInstallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.detail)
+    }
+}
+
+impl std::error::Error for ModuleInstallError {}
+
+impl From<ProjectDepsError> for ModuleInstallError {
+    fn from(error: ProjectDepsError) -> Self {
+        let stage = match error.stage {
+            ProjectDepsStage::Workspace => ModuleInstallStage::Workspace,
+            ProjectDepsStage::ModFile => ModuleInstallStage::ModFile,
+            ProjectDepsStage::LockFile => ModuleInstallStage::LockFile,
+        };
+        let kind = match error.kind {
+            ProjectDepsErrorKind::Missing => ModuleInstallErrorKind::Missing,
+            ProjectDepsErrorKind::ReadFailed => ModuleInstallErrorKind::ReadFailed,
+            ProjectDepsErrorKind::ParseFailed => ModuleInstallErrorKind::ParseFailed,
+            ProjectDepsErrorKind::ValidationFailed => ModuleInstallErrorKind::ValidationFailed,
+        };
+        let mut mapped = Self::new(stage, kind, error.detail);
+        if let Some(path) = error.path.as_ref() {
+            mapped = mapped.with_path(path.display().to_string());
+        }
+        mapped
+    }
+}
+
+pub(super) fn stringify_module_install_error(error: ModuleInstallError) -> String {
+    let _ = (
+        error.stage,
+        error.kind,
+        error.module_path.as_ref(),
+        error.version.as_ref(),
+        error.path.as_ref(),
+    );
+    error.to_string()
+}
+
 // ── Install a single module by spec ─────────────────────────────────────────
 
 pub async fn install_module_to_vfs(spec: &str) -> Result<String, String> {
+    install_module_to_vfs_typed(spec).await.map_err(stringify_module_install_error)
+}
+
+async fn install_module_to_vfs_typed(spec: &str) -> ModuleInstallResult<String> {
     let (module, version) = spec
         .rsplit_once('@')
         .filter(|(m, v)| !m.is_empty() && !v.is_empty())
         .map(|(m, v)| (m.to_string(), v.to_string()))
-        .ok_or_else(|| format!("invalid spec {:?}: expected module@version", spec))?;
+        .ok_or_else(|| {
+            ModuleInstallError::new(
+                ModuleInstallStage::Spec,
+                ModuleInstallErrorKind::ParseFailed,
+                format!("invalid spec {:?}: expected module@version", spec),
+            )
+        })?;
 
     let fetch_start = crate::now_ms();
     log_dependency_fetch_start(&module, &version);
-    let files = fetch::fetch_module_files(&module, &version)
-        .await
-        .map_err(|e| format!("fetch module {}: {}", module, e))?;
+    let files = fetch::fetch_module_files(&module, &version).await?;
     log_dependency_fetch_done(&module, &version, fetch_start);
     let manifest = release_manifest_from_files(&module, &version, &files)?;
     write_versioned_module_files_to_vfs(&module, &version, &files)?;
@@ -85,7 +198,7 @@ pub async fn install_module_to_vfs(spec: &str) -> Result<String, String> {
 
 // ── Install a locked module (with digest verification) ──────────────────────
 
-async fn install_locked_module_to_vfs(locked: &LockedModule) -> Result<String, String> {
+async fn install_locked_module_to_vfs(locked: &LockedModule) -> ModuleInstallResult<String> {
     let module = locked.path.as_str();
     let version = locked.version.to_string();
 
@@ -123,18 +236,16 @@ async fn install_locked_module_to_vfs(locked: &LockedModule) -> Result<String, S
 
 // ── Ensure locked modules are installed ─────────────────────────────────────
 
-async fn ensure_vfs_locked_modules(initial: Vec<LockedModule>) -> Result<(), String> {
-    let mut visited = HashSet::new();
-    let mut selected_versions = HashMap::new();
-    for locked in initial {
-        let module = locked.path.as_str().to_string();
-        let version = locked.version.to_string();
-        remember_selected_version(&mut selected_versions, &module, &version)?;
-        let visit_key = format!("{}@{}", module, version);
-        if !visited.insert(visit_key) {
-            continue;
-        }
-
+async fn ensure_vfs_locked_modules(initial: Vec<LockedModule>) -> ModuleInstallResult<()> {
+    for locked in vo_module::lifecycle::normalize_locked_modules(initial)
+        .map_err(|error| {
+            ModuleInstallError::new(
+                ModuleInstallStage::Selection,
+                ModuleInstallErrorKind::ValidationFailed,
+                error.to_string(),
+            )
+        })?
+    {
         if validate_vfs_installed_module(&locked).is_ok() {
             load_locked_ext_from_vfs(&locked).await?;
         } else {
@@ -148,27 +259,48 @@ async fn ensure_vfs_locked_modules(initial: Vec<LockedModule>) -> Result<(), Str
 
 async fn ensure_vfs_versioned_module_closure(
     initial: Vec<(String, String)>,
-) -> Result<(), String> {
-    let mut visited = HashSet::new();
-    let mut selected_versions = HashMap::new();
-    let mut stack = initial;
+) -> ModuleInstallResult<()> {
+    let initial = initial
+        .into_iter()
+        .map(|(module, version)| {
+            ModuleSelection::parse(&module, &version).map_err(|error| {
+                ModuleInstallError::new(
+                    ModuleInstallStage::Selection,
+                    ModuleInstallErrorKind::ParseFailed,
+                    error.to_string(),
+                )
+                .with_module_version(&module, &version)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut planner = ModuleSelectionPlanner::new(initial).map_err(|error| {
+        ModuleInstallError::new(
+            ModuleInstallStage::Selection,
+            ModuleInstallErrorKind::ValidationFailed,
+            error.to_string(),
+        )
+    })?;
 
-    while let Some((module, version)) = stack.pop() {
-        remember_selected_version(&mut selected_versions, &module, &version)?;
-        let visit_key = format!("{}@{}", module, version);
-        if !visited.insert(visit_key) {
-            continue;
-        }
+    while let Some(selection) = planner.next() {
+        let module = selection.module.as_str().to_string();
+        let version = selection.version.to_string();
 
         if read_vfs_installed_version(&module, &version).as_deref() != Some(version.as_str()) {
-            let spec = format!("{}@{}", module, version);
-            install_module_to_vfs(&spec).await?;
+            let spec = selection.spec();
+            install_module_to_vfs_typed(&spec).await?;
         } else {
             load_ext_if_present(&module, &version).await;
         }
 
-        let specs = read_vfs_locked_specs(&module, &version)?;
-        stack.extend(specs);
+        let deps = read_vfs_locked_selections(&module, &version)?;
+        planner.push_all(deps).map_err(|error| {
+            ModuleInstallError::new(
+                ModuleInstallStage::Selection,
+                ModuleInstallErrorKind::ValidationFailed,
+                error.to_string(),
+            )
+            .with_module_version(&module, &version)
+        })?;
     }
 
     Ok(())
@@ -177,30 +309,52 @@ async fn ensure_vfs_versioned_module_closure(
 // ── Public dependency ensuring ──────────────────────────────────────────────
 
 pub async fn ensure_vfs_deps(vo_mod_content: &str, vo_lock_content: &str) -> Result<(), String> {
-    let project_deps = inline_project_deps(vo_mod_content, vo_lock_content)?;
-    if !project_deps.has_mod_file || project_deps.locked_modules.is_empty() {
+    ensure_vfs_deps_typed(vo_mod_content, vo_lock_content)
+        .await
+        .map_err(stringify_module_install_error)
+}
+
+async fn ensure_vfs_deps_typed(vo_mod_content: &str, vo_lock_content: &str) -> ModuleInstallResult<()> {
+    let project_deps = vo_module::project::read_inline_project_deps(vo_mod_content, vo_lock_content, &[])
+        .map_err(ModuleInstallError::from)?;
+    if !project_deps.has_mod_file() || project_deps.locked_modules().is_empty() {
         return Ok(());
     }
-    ensure_vfs_locked_modules(project_deps.locked_modules).await
+    ensure_vfs_locked_modules(project_deps.into_locked_modules()).await
 }
 
 pub async fn ensure_vfs_deps_from_fs(local_fs: &MemoryFs, entry: &str) -> Result<(), String> {
+    ensure_vfs_deps_from_fs_typed(local_fs, entry)
+        .await
+        .map_err(stringify_module_install_error)
+}
+
+async fn ensure_vfs_deps_from_fs_typed(local_fs: &MemoryFs, entry: &str) -> ModuleInstallResult<()> {
     let entry_dir = std::path::Path::new(entry)
         .parent()
         .unwrap_or(std::path::Path::new("."));
     let project_deps =
-        vo_module::project::load_project_context(local_fs, entry_dir)?.project_deps;
-    if !project_deps.has_mod_file || project_deps.locked_modules.is_empty() {
+        vo_module::project::load_project_context(local_fs, entry_dir)
+            .map_err(ModuleInstallError::from)?
+            .project_deps;
+    if !project_deps.has_mod_file() || project_deps.locked_modules().is_empty() {
         return Ok(());
     }
-    ensure_vfs_locked_modules(project_deps.locked_modules).await
+    ensure_vfs_locked_modules(project_deps.into_locked_modules()).await
 }
 
 // ── Version resolution ──────────────────────────────────────────────────────
 
 /// Fetch the latest release version for a module from the GitHub API.
-async fn fetch_latest_module_version(module: &str) -> Result<String, String> {
-    let module_path = vo_module::identity::ModulePath::parse(module).map_err(|e| format!("{e}"))?;
+async fn fetch_latest_module_version_typed(module: &str) -> ModuleInstallResult<String> {
+    let module_path = vo_module::identity::ModulePath::parse(module).map_err(|error| {
+        ModuleInstallError::new(
+            ModuleInstallStage::VersionResolve,
+            ModuleInstallErrorKind::ParseFailed,
+            format!("{error}"),
+        )
+        .with_module(module)
+    })?;
     let repo = vo_module::registry::repository_id(&module_path);
     let module_root = module_path.module_root();
     let fetch_start = crate::now_ms();
@@ -213,18 +367,42 @@ async fn fetch_latest_module_version(module: &str) -> Result<String, String> {
             "https://api.github.com/repos/{}/{}/releases/latest",
             repo.owner, repo.repo,
         );
-        let bytes = fetch::fetch_bytes(&api_url)
-            .await
-            .map_err(|e| format!("failed to fetch latest release for {}: {}", module, e))?;
-        let text = String::from_utf8(bytes)
-            .map_err(|e| format!("invalid UTF-8 in GitHub API response: {}", e))?;
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| format!("invalid JSON from GitHub API for {}: {}", module, e))?;
+        let bytes = fetch::fetch_bytes(&api_url).await?;
+        let text = String::from_utf8(bytes).map_err(|error| {
+            ModuleInstallError::new(
+                ModuleInstallStage::VersionResolve,
+                ModuleInstallErrorKind::ParseFailed,
+                format!("invalid UTF-8 in GitHub API response: {}", error),
+            )
+            .with_module(module)
+        })?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+            ModuleInstallError::new(
+                ModuleInstallStage::VersionResolve,
+                ModuleInstallErrorKind::ParseFailed,
+                format!("invalid JSON from GitHub API for {}: {}", module, error),
+            )
+            .with_module(module)
+        })?;
         let tag = value["tag_name"]
             .as_str()
-            .ok_or_else(|| format!("no tag_name in GitHub latest release for {}", module))?;
+            .ok_or_else(|| {
+                ModuleInstallError::new(
+                    ModuleInstallStage::VersionResolve,
+                    ModuleInstallErrorKind::Missing,
+                    format!("no tag_name in GitHub latest release for {}", module),
+                )
+                .with_module(module)
+            })?;
         let version = vo_module::registry::version_from_tag(&module_path, tag)
-            .ok_or_else(|| format!("invalid tag_name '{}' in GitHub latest release for {}", tag, module))?
+            .ok_or_else(|| {
+                ModuleInstallError::new(
+                    ModuleInstallStage::VersionResolve,
+                    ModuleInstallErrorKind::ParseFailed,
+                    format!("invalid tag_name '{}' in GitHub latest release for {}", tag, module),
+                )
+                .with_module(module)
+            })?
             .to_string();
         log_dependency_version_resolved(module, &version, fetch_start);
         return Ok(version);
@@ -233,13 +411,23 @@ async fn fetch_latest_module_version(module: &str) -> Result<String, String> {
             "https://api.github.com/repos/{}/{}/releases?per_page=20",
             repo.owner, repo.repo,
         );
-        let bytes = fetch::fetch_bytes(&api_url)
-            .await
-            .map_err(|e| format!("failed to list releases for {}: {}", module, e))?;
-        let text = String::from_utf8(bytes)
-            .map_err(|e| format!("invalid UTF-8 in GitHub API response: {}", e))?;
-        let releases: Vec<serde_json::Value> = serde_json::from_str(&text)
-            .map_err(|e| format!("invalid JSON from GitHub API for {}: {}", module, e))?;
+        let bytes = fetch::fetch_bytes(&api_url).await?;
+        let text = String::from_utf8(bytes).map_err(|error| {
+            ModuleInstallError::new(
+                ModuleInstallStage::VersionResolve,
+                ModuleInstallErrorKind::ParseFailed,
+                format!("invalid UTF-8 in GitHub API response: {}", error),
+            )
+            .with_module(module)
+        })?;
+        let releases: Vec<serde_json::Value> = serde_json::from_str(&text).map_err(|error| {
+            ModuleInstallError::new(
+                ModuleInstallStage::VersionResolve,
+                ModuleInstallErrorKind::ParseFailed,
+                format!("invalid JSON from GitHub API for {}: {}", module, error),
+            )
+            .with_module(module)
+        })?;
         let prefix = format!("{}/", module_root);
         for release in &releases {
             if let Some(tag) = release["tag_name"].as_str() {
@@ -250,71 +438,139 @@ async fn fetch_latest_module_version(module: &str) -> Result<String, String> {
                 }
             }
         }
-        Err(format!(
-            "no release found for module {} (tag prefix '{}')",
-            module, prefix
-        ))
+        Err(
+            ModuleInstallError::new(
+                ModuleInstallStage::VersionResolve,
+                ModuleInstallErrorKind::Missing,
+                format!(
+                    "no release found for module {} (tag prefix '{}')",
+                    module, prefix
+                ),
+            )
+            .with_module(module),
+        )
     }
+}
+
+pub fn collect_installed_vfs_module_specs(
+    modules: &[String],
+) -> Result<Vec<(String, String)>, String> {
+    collect_installed_vfs_module_specs_typed(modules).map_err(stringify_module_install_error)
+}
+
+fn collect_installed_vfs_module_specs_typed(
+    modules: &[String],
+) -> ModuleInstallResult<Vec<(String, String)>> {
+    let mut installed = Vec::new();
+    for module in modules {
+        let version = discover_vfs_installed_version(module)?
+            .ok_or_else(|| {
+                ModuleInstallError::new(
+                    ModuleInstallStage::Vfs,
+                    ModuleInstallErrorKind::Missing,
+                    format!("module {} is not installed in the VFS", module),
+                )
+                .with_module(module)
+            })?;
+        installed.push((module.clone(), version));
+    }
+    Ok(installed)
 }
 
 /// Resolve a module version: check VFS cache first, then fetch latest from GitHub.
 pub async fn resolve_module_version(module: &str) -> Result<String, String> {
-    if let Some(version) = discover_vfs_installed_version(module) {
+    resolve_module_version_typed(module)
+        .await
+        .map_err(stringify_module_install_error)
+}
+
+async fn resolve_module_version_typed(module: &str) -> ModuleInstallResult<String> {
+    if let Some(version) = discover_vfs_installed_version(module)? {
         log_dependency_version_cached(module, &version);
         return Ok(version);
     }
-    fetch_latest_module_version(module).await
+    fetch_latest_module_version_typed(module).await
 }
 
 /// Resolve, install, and return `(module, version)` for a single external module.
 pub async fn resolve_and_install_module(module: &str) -> Result<(String, String), String> {
-    let version = resolve_module_version(module).await?;
+    resolve_and_install_module_typed(module)
+        .await
+        .map_err(stringify_module_install_error)
+}
+
+async fn resolve_and_install_module_typed(module: &str) -> ModuleInstallResult<(String, String)> {
+    let version = resolve_module_version_typed(module).await?;
     ensure_vfs_versioned_module_closure(vec![(module.to_string(), version.clone())]).await?;
     Ok((module.to_string(), version))
 }
 
 // ── Locked module reading from VFS ──────────────────────────────────────────
 
-pub fn read_locked_module_from_vfs(module: &str, version: &str) -> Result<LockedModule, String> {
+fn read_locked_module_from_vfs(module: &str, version: &str) -> ModuleInstallResult<LockedModule> {
     let manifest_path = vfs_module_file_path(module, version, "vo.release.json");
     let manifest_content = read_vfs_text(&manifest_path)?;
-    let expected_module = vo_module::identity::ModulePath::parse(module)
-        .map_err(|e| format!("invalid module path {}: {}", module, e))?;
-    let expected_version = vo_module::version::ExactVersion::parse(version)
-        .map_err(|e| format!("invalid version {}: {}", version, e))?;
-    let manifest = vo_module::registry::parse_requested_release_manifest(
-        &manifest_content,
-        &expected_module,
-        &expected_version,
-    )
-    .map_err(|e| format!("parse release manifest for {}@{}: {}", module, version, e))?;
-
-    Ok(vo_module::lock::locked_module_from_manifest_raw(
-        &manifest,
+    vo_module::lock::locked_module_from_requested_manifest_raw(
         manifest_content.as_bytes(),
-    ))
+        module,
+        version,
+    )
+    .map_err(|error| {
+        ModuleInstallError::new(
+            ModuleInstallStage::Manifest,
+            ModuleInstallErrorKind::ParseFailed,
+            format!("parse release manifest for {}@{}: {}", module, version, error),
+        )
+        .with_module_version(module, version)
+    })
 }
 
 // ── Synthetic project files ─────────────────────────────────────────────────
 
-fn collect_vfs_locked_module_closure(
-    initial: Vec<(String, String)>,
+pub fn collect_vfs_locked_module_closure(
+    initial: &[(String, String)],
 ) -> Result<Vec<LockedModule>, String> {
-    let mut visited = HashSet::new();
-    let mut selected_versions = HashMap::new();
-    let mut stack = initial;
+    collect_vfs_locked_module_closure_typed(initial).map_err(stringify_module_install_error)
+}
+
+fn collect_vfs_locked_module_closure_typed(
+    initial: &[(String, String)],
+) -> ModuleInstallResult<Vec<LockedModule>> {
+    let initial = initial
+        .iter()
+        .map(|(module, version)| {
+            ModuleSelection::parse(module, version).map_err(|error| {
+                ModuleInstallError::new(
+                    ModuleInstallStage::Selection,
+                    ModuleInstallErrorKind::ParseFailed,
+                    error.to_string(),
+                )
+                .with_module_version(module, version)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut planner = ModuleSelectionPlanner::new(initial).map_err(|error| {
+        ModuleInstallError::new(
+            ModuleInstallStage::Selection,
+            ModuleInstallErrorKind::ValidationFailed,
+            error.to_string(),
+        )
+    })?;
     let mut resolved = Vec::new();
 
-    while let Some((module, version)) = stack.pop() {
-        remember_selected_version(&mut selected_versions, &module, &version)?;
-        let visit_key = format!("{}@{}", module, version);
-        if !visited.insert(visit_key) {
-            continue;
-        }
-
+    while let Some(selection) = planner.next() {
+        let module = selection.module.as_str().to_string();
+        let version = selection.version.to_string();
         let locked = read_locked_module_from_vfs(&module, &version)?;
-        let specs = read_vfs_locked_specs(&module, &version)?;
-        stack.extend(specs);
+        let deps = read_vfs_locked_selections(&module, &version)?;
+        planner.push_all(deps).map_err(|error| {
+            ModuleInstallError::new(
+                ModuleInstallStage::Selection,
+                ModuleInstallErrorKind::ValidationFailed,
+                error.to_string(),
+            )
+            .with_module_version(&module, &version)
+        })?;
         resolved.push(locked);
     }
 
@@ -325,44 +581,4 @@ fn collect_vfs_locked_module_closure(
             .then_with(|| a.version.to_string().cmp(&b.version.to_string()))
     });
     Ok(resolved)
-}
-
-pub fn build_synthetic_project_files(
-    synthetic_module: &str,
-    installed: &[(String, String)],
-) -> Result<(String, String), String> {
-    use vo_module::schema::lockfile::{LockFile, LockRoot};
-
-    let module = vo_module::identity::ModulePath::parse(synthetic_module).map_err(|e| {
-        format!(
-            "invalid synthetic module path '{}': {}",
-            synthetic_module, e
-        )
-    })?;
-    let vo = vo_module::version::ToolchainConstraint::parse("0.1.0")
-        .map_err(|e| format!("invalid toolchain constraint: {}", e))?;
-
-    // Build vo.mod
-    let mut mod_content = format!("module {}\nvo {}\n", module, vo);
-    if !installed.is_empty() {
-        mod_content.push('\n');
-        let mut sorted: Vec<&(String, String)> = installed.iter().collect();
-        sorted.sort_by(|a, b| a.0.cmp(&b.0));
-        for (m, v) in &sorted {
-            mod_content.push_str(&format!("require {} {}\n", m, v));
-        }
-    }
-
-    // Build vo.lock from installed release manifests
-    let resolved = collect_vfs_locked_module_closure(installed.to_vec())?;
-
-    let lock_file = LockFile {
-        version: 1,
-        created_by: "vo-studio".to_string(),
-        root: LockRoot { module, vo },
-        resolved,
-    };
-    let lock_content = lock_file.render();
-
-    Ok((mod_content, lock_content))
 }

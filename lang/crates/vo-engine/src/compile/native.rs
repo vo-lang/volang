@@ -157,18 +157,12 @@ fn prepare_cached_extension_spec(
     locked: &LockedModule,
     module_dir: &Path,
 ) -> Result<NativeExtensionSpec, ModuleSystemError> {
-    let mut native_path = manifest.native_path.clone();
-    match find_locked_native_artifact(manifest, locked) {
-        Ok(artifact) => {
-            validate_locked_native_artifact_bytes(module_dir, locked, artifact)?;
-            native_path = locked_native_artifact_path(module_dir, artifact);
-        }
-        Err(error) if error.kind == ModuleSystemErrorKind::Missing => {
-            ensure_local_native_extension_built(module_dir)?;
-        }
-        Err(error) => return Err(error),
-    }
-    Ok(native_extension_spec(manifest, native_path))
+    let artifact = find_locked_native_artifact(manifest, locked)?;
+    validate_locked_native_artifact_bytes(module_dir, locked, artifact)?;
+    Ok(native_extension_spec(
+        manifest,
+        locked_native_artifact_path(module_dir, artifact),
+    ))
 }
 
 fn locked_module_for_cached_extension<'a>(
@@ -265,59 +259,14 @@ fn validate_locked_native_artifact_bytes(
     artifact: &LockedArtifact,
 ) -> Result<(), ModuleSystemError> {
     let artifact_path = locked_native_artifact_path(module_dir, artifact);
-    let bytes = fs::read(&artifact_path).map_err(|error| {
-        ModuleSystemError::new(
-            ModuleSystemStage::NativeExtension,
-            ModuleSystemErrorKind::ReadFailed,
-            format!(
-                "failed to read cached native extension artifact for {}@{} at {}: {}",
-                locked.path,
-                locked.version,
-                artifact_path.display(),
-                error,
-            ),
-        )
-        .with_locked(locked)
-        .with_path(&artifact_path)
-    })?;
-    if bytes.len() as u64 != artifact.size {
-        return Err(
-            ModuleSystemError::new(
-                ModuleSystemStage::NativeExtension,
-                ModuleSystemErrorKind::VerificationFailed,
-                format!(
-                    "cached native extension artifact size mismatch for {}@{} ({}): expected {}, found {}",
-                    locked.path,
-                    locked.version,
-                    artifact.id.name,
-                    artifact.size,
-                    bytes.len(),
-                ),
-            )
-            .with_locked(locked)
-            .with_path(&artifact_path),
-        );
-    }
-    let digest = vo_module::digest::Digest::from_sha256(&bytes);
-    if digest != artifact.digest {
-        return Err(
-            ModuleSystemError::new(
-                ModuleSystemStage::NativeExtension,
-                ModuleSystemErrorKind::VerificationFailed,
-                format!(
-                    "cached native extension artifact digest mismatch for {}@{} ({}): expected {}, found {}",
-                    locked.path,
-                    locked.version,
-                    artifact.id.name,
-                    artifact.digest,
-                    digest,
-                ),
-            )
-            .with_locked(locked)
-            .with_path(&artifact_path),
-        );
-    }
-    Ok(())
+    let fs = RealFs::new(module_dir);
+    let rel_path = Path::new("artifacts").join(&artifact.id.name);
+    vo_module::cache::validate::validate_installed_artifact(&fs, &rel_path, locked, artifact)
+        .map_err(|e| {
+            let mut err = installed_module_error_to_module_system(e);
+            err.stage = ModuleSystemStage::NativeExtension;
+            err.with_path(&artifact_path)
+        })
 }
 
 pub(super) fn ensure_local_native_extension_built(module_dir: &Path) -> Result<(), ModuleSystemError> {

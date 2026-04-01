@@ -2,8 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use vo_common::vfs::FileSystem;
 use vo_module::digest::Digest;
 use vo_module::identity::ModulePath;
+use vo_module::project::ProjectDeps;
 use vo_module::schema::lockfile::LockedModule;
 use vo_module::version::{ExactVersion, ToolchainConstraint};
 
@@ -11,9 +13,19 @@ use super::cache::compile_cache_slot;
 use super::native::{
     current_target_triple, prepare_native_extension_specs_for_frozen_build, validate_locked_modules_installed,
 };
-use super::project_prepare::load_project_deps_for_engine;
+use super::{CompileError, ModuleSystemError};
 
 mod cases;
+
+fn load_project_deps_for_engine<F: FileSystem>(
+    fs: &F,
+    workspace_replaces: &std::collections::HashMap<String, PathBuf>,
+) -> Result<ProjectDeps, CompileError> {
+    let excluded_modules = workspace_replaces.keys().cloned().collect::<Vec<_>>();
+    let project_deps = vo_module::project::read_project_deps(fs, &excluded_modules)
+        .map_err(ModuleSystemError::from)?;
+    Ok(project_deps)
+}
 
 fn temp_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!(

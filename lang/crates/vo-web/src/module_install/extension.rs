@@ -9,13 +9,23 @@ use vo_web_runtime_wasm::ext_bridge;
 use super::fetch as wasm_fetch;
 use super::log::*;
 use super::vfs_io::*;
+use super::{
+    stringify_module_install_error, ModuleInstallError, ModuleInstallErrorKind,
+    ModuleInstallResult, ModuleInstallStage,
+};
 
 // ── Core loading ────────────────────────────────────────────────────────────
 
-fn js_glue_data_url(js_text: &str) -> Result<String, String> {
+fn js_glue_data_url(js_text: &str) -> ModuleInstallResult<String> {
     let encoded = wasm_bindgen::JsValue::from(js_sys::encode_uri_component(js_text))
         .as_string()
-        .ok_or_else(|| "failed to encode wasm JS glue URL".to_string())?;
+        .ok_or_else(|| {
+            ModuleInstallError::new(
+                ModuleInstallStage::Extension,
+                ModuleInstallErrorKind::ParseFailed,
+                "failed to encode wasm JS glue URL",
+            )
+        })?;
     Ok(format!("data:text/javascript;charset=utf-8,{}", encoded))
 }
 
@@ -23,12 +33,21 @@ pub(super) async fn load_wasm_extension_bytes(
     module: &str,
     wasm_bytes: &[u8],
     js_glue_text: Option<&str>,
-) -> Result<(), String> {
+) -> ModuleInstallResult<()> {
     let js_glue_url = match js_glue_text {
         Some(js_glue_text) => js_glue_data_url(js_glue_text)?,
         None => String::new(),
     };
-    ext_bridge::load_wasm_ext_module(module, wasm_bytes, &js_glue_url).await
+    ext_bridge::load_wasm_ext_module(module, wasm_bytes, &js_glue_url)
+        .await
+        .map_err(|error| {
+            ModuleInstallError::new(
+                ModuleInstallStage::Extension,
+                ModuleInstallErrorKind::LoadFailed,
+                error,
+            )
+            .with_module(module)
+        })
 }
 
 // ── VFS extension manifest reading ──────────────────────────────────────────
@@ -50,19 +69,36 @@ pub(super) fn read_wasm_extension_from_vfs(
 
 // ── VFS js_glue reading ──────────────────────────────────────────────────────
 
+fn try_read_cached_vfs_bytes(path: &str) -> Option<Vec<u8>> {
+    let (data, err) = vo_web_runtime_wasm::vfs::read_file(path);
+    if err.is_some() {
+        return None;
+    }
+    Some(data)
+}
+
 fn read_bindgen_js_glue_from_vfs(
     module: &str,
     version: &str,
     ext: &WasmExtensionManifest,
-) -> Result<Option<String>, Option<String>> {
+) -> ModuleInstallResult<Option<String>> {
     match ext.kind {
         WasmExtensionKind::Bindgen => {
             let name = ext.js_glue.as_deref().unwrap_or_default();
-            let bytes = read_vfs_bytes(&vfs_artifact_path(module, version, name))
-                .map_err(|_| None)?;
+            let path = vfs_artifact_path(module, version, name);
+            let Some(bytes) = try_read_cached_vfs_bytes(&path) else {
+                return Ok(None);
+            };
             String::from_utf8(bytes)
                 .map(Some)
-                .map_err(|e| Some(format!("cached wasm JS glue for {}@{} is not valid UTF-8: {}", module, version, e)))
+                .map_err(|error| {
+                    ModuleInstallError::new(
+                        ModuleInstallStage::Extension,
+                        ModuleInstallErrorKind::ParseFailed,
+                        format!("cached wasm JS glue for {}@{} is not valid UTF-8: {}", module, version, error),
+                    )
+                    .with_module_version(module, version)
+                })
         }
         WasmExtensionKind::Standalone => Ok(None),
     }
@@ -73,19 +109,17 @@ fn read_bindgen_js_glue_from_vfs(
 pub(super) async fn load_cached_ext_from_vfs(
     module: &str,
     version: &str,
-) -> Result<bool, String> {
+) -> ModuleInstallResult<bool> {
     let Some(ext) = read_wasm_extension_from_vfs(module, version) else {
         return Ok(false);
     };
-    let wasm_bytes = match read_vfs_bytes(&vfs_artifact_path(module, version, &ext.wasm)) {
-        Ok(bytes) => bytes,
-        Err(_) => return Ok(false),
+    let Some(wasm_bytes) = try_read_cached_vfs_bytes(&vfs_artifact_path(module, version, &ext.wasm)) else {
+        return Ok(false);
     };
-    let js_glue_text = match read_bindgen_js_glue_from_vfs(module, version, &ext) {
-        Ok(text) => text,
-        Err(None) => return Ok(false),
-        Err(Some(e)) => return Err(e),
-    };
+    let js_glue_text = read_bindgen_js_glue_from_vfs(module, version, &ext)?;
+    if matches!(ext.kind, WasmExtensionKind::Bindgen) && js_glue_text.is_none() {
+        return Ok(false);
+    }
     load_wasm_extension_bytes(module, &wasm_bytes, js_glue_text.as_deref()).await?;
     log_extension_cached(module, version);
     Ok(true)
@@ -97,9 +131,14 @@ fn verify_locked_artifact_bytes(
     locked: &LockedModule,
     asset_name: &str,
     bytes: &[u8],
-) -> Result<(), String> {
+) -> ModuleInstallResult<()> {
     let artifact = find_locked_wasm_artifact(locked, asset_name).ok_or_else(|| {
-        format!("vo.lock is missing wasm artifact {} for {}@{}", asset_name, locked.path, locked.version)
+        ModuleInstallError::new(
+            ModuleInstallStage::Extension,
+            ModuleInstallErrorKind::Missing,
+            format!("vo.lock is missing wasm artifact {} for {}@{}", asset_name, locked.path, locked.version),
+        )
+        .with_module_version(locked.path.as_str(), locked.version.to_string())
     })?;
     verify_size_and_digest(
         bytes,
@@ -110,10 +149,17 @@ fn verify_locked_artifact_bytes(
             asset_name, locked.path, locked.version,
         ),
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| {
+        ModuleInstallError::new(
+            ModuleInstallStage::Extension,
+            ModuleInstallErrorKind::ValidationFailed,
+            error.to_string(),
+        )
+        .with_module_version(locked.path.as_str(), locked.version.to_string())
+    })
 }
 
-pub(super) async fn load_locked_ext_from_vfs(locked: &LockedModule) -> Result<(), String> {
+pub(super) async fn load_locked_ext_from_vfs(locked: &LockedModule) -> ModuleInstallResult<()> {
     let module = locked.path.as_str();
     let version = locked.version.to_string();
     let Some(ext) = read_wasm_extension_from_vfs(module, &version) else {
@@ -124,11 +170,25 @@ pub(super) async fn load_locked_ext_from_vfs(locked: &LockedModule) -> Result<()
     let js_glue_text = match ext.kind {
         WasmExtensionKind::Bindgen => {
             let name = ext.js_glue.as_deref().unwrap_or_default();
-            let bytes = read_vfs_bytes(&vfs_artifact_path(module, &version, name))?;
-            verify_locked_artifact_bytes(locked, name, &bytes)?;
-            Some(String::from_utf8(bytes).map_err(|e| {
-                format!("wasm JS glue for {}@{} is not valid UTF-8: {}", module, version, e)
-            })?)
+            let path = vfs_artifact_path(module, &version, name);
+            let Some(bytes) = try_read_cached_vfs_bytes(&path) else {
+                return Err(ModuleInstallError::new(
+                    ModuleInstallStage::Extension,
+                    ModuleInstallErrorKind::Missing,
+                    format!("missing wasm JS glue for {}@{} in the VFS", module, version),
+                )
+                .with_module_version(module, &version));
+            };
+            String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|error| {
+                    ModuleInstallError::new(
+                        ModuleInstallStage::Extension,
+                        ModuleInstallErrorKind::ParseFailed,
+                        format!("cached wasm JS glue for {}@{} is not valid UTF-8: {}", module, version, error),
+                    )
+                    .with_module_version(module, &version)
+                })?
         }
         WasmExtensionKind::Standalone => None,
     };
@@ -149,12 +209,12 @@ pub(super) async fn fetch_and_cache_extension_assets<F, G, FutWasm, FutJs>(
     cached: bool,
     mut fetch_wasm: F,
     mut fetch_js_glue: G,
-) -> Result<FetchedExtensionAssets, String>
+) -> ModuleInstallResult<FetchedExtensionAssets>
 where
     F: FnMut() -> FutWasm,
     G: FnMut(String) -> FutJs,
-    FutWasm: std::future::Future<Output = Result<Vec<u8>, String>>,
-    FutJs: std::future::Future<Output = Result<String, String>>,
+    FutWasm: std::future::Future<Output = ModuleInstallResult<Vec<u8>>>,
+    FutJs: std::future::Future<Output = ModuleInstallResult<String>>,
 {
     let wasm_start = crate::now_ms();
     log_extension_asset_load_start(module, version, "wasm", &ext.wasm, cached);
@@ -198,7 +258,7 @@ pub async fn load_ext_if_present(module: &str, version: &str) {
     let manifest = match read_release_manifest_from_vfs(module, version) {
         Ok(manifest) => manifest,
         Err(error) => {
-            log_extension_load_error(module, version, error);
+            log_extension_load_error(module, version, stringify_module_install_error(error));
             return;
         }
     };
@@ -206,8 +266,9 @@ pub async fn load_ext_if_present(module: &str, version: &str) {
     match load_cached_ext_from_vfs(module, version).await {
         Ok(true) => return,
         Ok(false) => {}
-        Err(e) => {
-            log_extension_load_error(module, version, e);
+        Err(error) => {
+            log_extension_load_error(module, version, stringify_module_install_error(error));
+            return;
         }
     }
 
@@ -240,19 +301,19 @@ pub async fn load_ext_if_present(module: &str, version: &str) {
     .await
     {
         Ok(result) => result,
-        Err(e) => {
-            log_extension_load_error(module, version, e);
+        Err(error) => {
+            log_extension_load_error(module, version, stringify_module_install_error(error));
             return;
         }
     };
 
-    if let Err(e) = load_wasm_extension_bytes(
+    if let Err(error) = load_wasm_extension_bytes(
         module,
         &assets.wasm_bytes,
         assets.js_glue_text.as_deref(),
     )
     .await
     {
-        log_extension_load_error(module, version, e);
+        log_extension_load_error(module, version, stringify_module_install_error(error));
     }
 }
