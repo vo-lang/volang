@@ -8,7 +8,7 @@ use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
 use vo_runtime::objects::interface::InterfaceSlot;
 use vo_runtime::Module;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ToolchainModule {
     pub module: Module,
     pub source_root: PathBuf,

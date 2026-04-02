@@ -7,6 +7,7 @@ pub mod github_registry;
 pub mod identity;
 pub mod lifecycle;
 pub mod lock;
+pub mod operation_error;
 pub mod ops;
 pub mod project;
 pub mod registry;

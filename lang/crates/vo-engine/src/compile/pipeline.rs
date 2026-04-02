@@ -213,7 +213,7 @@ pub(super) fn compile_with_fs<F: FileSystem>(
 ) -> Result<CompileOutput, CompileError> {
     let mod_cache = super::default_mod_cache_root();
     let context = vo_module::project::load_project_context(&fs, root)
-        .map_err(super::ModuleSystemError::from)?;
+        .map_err(super::module_system_error_from_project)?;
     PreparedProject::load_prepared(
         fs,
         root.to_path_buf(),
@@ -266,7 +266,7 @@ pub(super) fn compile_zip(
     let abs_root = zip_path.canonicalize().unwrap_or_else(|_| zip_path.to_path_buf());
     let mod_cache = super::default_mod_cache_root();
     let project_deps = vo_module::project::read_project_deps(&zip_fs, &[])
-        .map_err(super::ModuleSystemError::from)?;
+        .map_err(super::module_system_error_from_project)?;
     PreparedProject::load_prepared(
         zip_fs,
         abs_root.clone(),

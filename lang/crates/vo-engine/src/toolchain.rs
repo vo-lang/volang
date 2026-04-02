@@ -10,29 +10,10 @@ use vo_stdlib::toolchain::{
 use vo_syntax::parser;
 
 use crate::{
-    compile, compile_string, format_source, format_text, parse_text, run, run_with_output,
-    CompileOutput, Module, RunMode,
+    compile, compile_string, format_source, format_text, run, run_with_output, Module, RunMode,
 };
 
 struct EngineToolchainHost;
-
-fn into_toolchain_module(output: CompileOutput) -> ToolchainModule {
-    ToolchainModule {
-        module: output.module,
-        source_root: output.source_root,
-        extensions: output.extensions,
-        locked_modules: output.locked_modules,
-    }
-}
-
-fn from_toolchain_module(module: &ToolchainModule) -> CompileOutput {
-    CompileOutput {
-        module: module.module.clone(),
-        source_root: module.source_root.clone(),
-        extensions: module.extensions.clone(),
-        locked_modules: module.locked_modules.clone(),
-    }
-}
 
 fn run_mode(mode: ToolchainRunMode) -> RunMode {
     match mode {
@@ -107,25 +88,19 @@ fn init_file_impl(path: &str) -> Result<(), String> {
 
 impl ToolchainHost for EngineToolchainHost {
     fn compile_file(&self, path: &str) -> Result<ToolchainModule, String> {
-        compile(path)
-            .map(into_toolchain_module)
-            .map_err(|e| e.to_string())
+        compile(path).map_err(|e| e.to_string())
     }
 
     fn compile_dir(&self, path: &str) -> Result<ToolchainModule, String> {
-        compile(path)
-            .map(into_toolchain_module)
-            .map_err(|e| e.to_string())
+        compile(path).map_err(|e| e.to_string())
     }
 
     fn compile_string(&self, code: &str) -> Result<ToolchainModule, String> {
-        compile_string(code)
-            .map(into_toolchain_module)
-            .map_err(|e| e.to_string())
+        compile_string(code).map_err(|e| e.to_string())
     }
 
     fn run(&self, module: &ToolchainModule, mode: ToolchainRunMode) -> Result<(), String> {
-        run(from_toolchain_module(module), run_mode(mode), Vec::new()).map_err(|e| e.to_string())
+        run(module.clone(), run_mode(mode), Vec::new()).map_err(|e| e.to_string())
     }
 
     fn run_capture(
@@ -135,7 +110,7 @@ impl ToolchainHost for EngineToolchainHost {
     ) -> Result<String, String> {
         let sink = CaptureSink::new();
         let result = run_with_output(
-            from_toolchain_module(module),
+            module.clone(),
             run_mode(mode),
             Vec::new(),
             sink.clone(),
@@ -169,8 +144,9 @@ impl ToolchainHost for EngineToolchainHost {
     }
 
     fn load_bytecode_text(&self, path: &str) -> Result<ToolchainModule, String> {
-        let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let module = parse_text(&text).map_err(|e| e.to_string())?;
+        let _text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let module: Result<Module, String> = Err("bytecode text format parsing not yet implemented".into());
+        let module = module?;
         let source_root = Path::new(path)
             .parent()
             .unwrap_or(Path::new("."))

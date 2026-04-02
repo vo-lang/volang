@@ -63,7 +63,7 @@ fn ensure_vfs_parent_dir(path: &str) -> ModuleInstallResult<()> {
                         ModuleInstallErrorKind::WriteFailed,
                         format!("mkdir {}: {}", parent, error),
                     )
-                    .with_path(parent.to_string()),
+                    .with_path(&*parent),
                 );
             }
         }
@@ -245,7 +245,7 @@ pub(super) fn format_module_project_deps_error(
             vo_module::project::ProjectDepsStage::LockFile,
             vo_module::project::ProjectDepsErrorKind::Missing,
         ) => {
-            ModuleInstallError::from(error)
+            super::module_install_error_from_project(error)
                 .with_module_version(module, version)
                 .with_detail(format!(
                     "module {}@{} requires external modules but vo.lock is missing",
@@ -254,7 +254,7 @@ pub(super) fn format_module_project_deps_error(
         }
         _ => {
             let detail = format!("{} for {}@{}", error, module, version);
-            ModuleInstallError::from(error)
+            super::module_install_error_from_project(error)
                 .with_module_version(module, version)
                 .with_detail(detail)
         }

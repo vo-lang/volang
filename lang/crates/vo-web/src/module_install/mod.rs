@@ -16,7 +16,8 @@ mod vfs_io;
 use vo_common::vfs::MemoryFs;
 use vo_module::cache::layout::{SOURCE_DIGEST_MARKER, VERSION_MARKER};
 use vo_module::lifecycle::{ModuleSelection, ModuleSelectionPlanner};
-use vo_module::project::ProjectDepsError;
+use vo_module::operation_error::OperationError;
+use vo_module::project::{ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage};
 use vo_module::schema::lockfile::LockedModule;
 
 use extension::*;
@@ -54,148 +55,28 @@ pub(super) enum ModuleInstallErrorKind {
     LoadFailed,
 }
 
-#[derive(Debug, Clone)]
-pub(super) enum ModuleInstallError {
-    Project(ProjectDepsError),
-    Stage {
-        stage: ModuleInstallStage,
-        kind: ModuleInstallErrorKind,
-        module_path: Option<String>,
-        version: Option<String>,
-        path: Option<String>,
-        detail: String,
-    },
-}
+pub(super) type ModuleInstallError = OperationError<ModuleInstallStage, ModuleInstallErrorKind>;
 
-impl ModuleInstallError {
-    fn new(stage: ModuleInstallStage, kind: ModuleInstallErrorKind, detail: impl Into<String>) -> Self {
-        Self::Stage {
-            stage,
-            kind,
-            module_path: None,
-            version: None,
-            path: None,
-            detail: detail.into(),
+fn module_install_error_from_project(error: ProjectDepsError) -> ModuleInstallError {
+    fn project_stage(stage: ProjectDepsStage) -> ModuleInstallStage {
+        match stage {
+            ProjectDepsStage::Workspace => ModuleInstallStage::Workspace,
+            ProjectDepsStage::ModFile => ModuleInstallStage::ModFile,
+            ProjectDepsStage::LockFile => ModuleInstallStage::LockFile,
         }
     }
-
-    fn materialize_project(error: ProjectDepsError) -> Self {
-        let stage = match error.stage {
-            vo_module::project::ProjectDepsStage::Workspace => ModuleInstallStage::Workspace,
-            vo_module::project::ProjectDepsStage::ModFile => ModuleInstallStage::ModFile,
-            vo_module::project::ProjectDepsStage::LockFile => ModuleInstallStage::LockFile,
-        };
-        let kind = match error.kind {
-            vo_module::project::ProjectDepsErrorKind::Missing => ModuleInstallErrorKind::Missing,
-            vo_module::project::ProjectDepsErrorKind::ReadFailed => ModuleInstallErrorKind::ReadFailed,
-            vo_module::project::ProjectDepsErrorKind::ParseFailed => ModuleInstallErrorKind::ParseFailed,
-            vo_module::project::ProjectDepsErrorKind::ValidationFailed => {
-                ModuleInstallErrorKind::ValidationFailed
-            }
-        };
-        Self::Stage {
-            stage,
-            kind,
-            module_path: None,
-            version: None,
-            path: error.path.as_ref().map(|path| path.display().to_string()),
-            detail: error.detail,
+    fn project_kind(kind: ProjectDepsErrorKind) -> ModuleInstallErrorKind {
+        match kind {
+            ProjectDepsErrorKind::Missing => ModuleInstallErrorKind::Missing,
+            ProjectDepsErrorKind::ReadFailed => ModuleInstallErrorKind::ReadFailed,
+            ProjectDepsErrorKind::ParseFailed => ModuleInstallErrorKind::ParseFailed,
+            ProjectDepsErrorKind::ValidationFailed => ModuleInstallErrorKind::ValidationFailed,
         }
     }
-
-    fn materialize(self) -> Self {
-        match self {
-            Self::Project(error) => Self::materialize_project(error),
-            other => other,
-        }
-    }
-
-    fn with_module(mut self, module: impl Into<String>) -> Self {
-        self = self.materialize();
-        if let Self::Stage { module_path, .. } = &mut self {
-            *module_path = Some(module.into());
-        }
-        self
-    }
-
-    fn with_module_version(mut self, module: impl Into<String>, version: impl Into<String>) -> Self {
-        self = self.materialize();
-        if let Self::Stage {
-            module_path,
-            version: version_slot,
-            ..
-        } = &mut self
-        {
-            *module_path = Some(module.into());
-            *version_slot = Some(version.into());
-        }
-        self
-    }
-
-    fn with_path(mut self, path: impl Into<String>) -> Self {
-        self = self.materialize();
-        if let Self::Stage { path: path_slot, .. } = &mut self {
-            *path_slot = Some(path.into());
-        }
-        self
-    }
-
-    fn with_detail(mut self, detail: impl Into<String>) -> Self {
-        self = self.materialize();
-        if let Self::Stage {
-            detail: detail_slot,
-            ..
-        } = &mut self
-        {
-            *detail_slot = detail.into();
-        }
-        self
-    }
-
-    fn observe(&self) {
-        match self {
-            Self::Project(error) => {
-                let _ = (error.stage, error.kind, error.path.as_ref());
-            }
-            Self::Stage {
-                stage,
-                kind,
-                module_path,
-                version,
-                path,
-                ..
-            } => {
-                let _ = (
-                    *stage,
-                    *kind,
-                    module_path.as_ref(),
-                    version.as_ref(),
-                    path.as_ref(),
-                );
-            }
-        }
-    }
-}
-
-impl std::fmt::Display for ModuleInstallError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Project(error) => write!(f, "{}", error),
-            Self::Stage { detail, .. } => write!(f, "{}", detail),
-        }
-    }
-}
-
-impl std::error::Error for ModuleInstallError {}
-
-impl From<ProjectDepsError> for ModuleInstallError {
-    fn from(error: ProjectDepsError) -> Self {
-        Self::Project(error)
-    }
+    ModuleInstallError::from_other(error, project_stage, project_kind)
 }
 
 pub(super) fn stringify_module_install_error(error: ModuleInstallError) -> String {
-    error.observe();
     error.to_string()
 }
 
@@ -383,7 +264,7 @@ pub async fn ensure_vfs_deps(vo_mod_content: &str, vo_lock_content: &str) -> Res
 
 async fn ensure_vfs_deps_typed(vo_mod_content: &str, vo_lock_content: &str) -> ModuleInstallResult<()> {
     let project_deps = vo_module::project::read_inline_project_deps(vo_mod_content, vo_lock_content, &[])
-        .map_err(ModuleInstallError::from)?;
+        .map_err(module_install_error_from_project)?;
     if !project_deps.has_mod_file() || project_deps.locked_modules().is_empty() {
         return Ok(());
     }
@@ -402,7 +283,7 @@ async fn ensure_vfs_deps_from_fs_typed(local_fs: &MemoryFs, entry: &str) -> Modu
         .unwrap_or(std::path::Path::new("."));
     let project_deps =
         vo_module::project::load_project_context(local_fs, entry_dir)
-            .map_err(ModuleInstallError::from)?
+            .map_err(module_install_error_from_project)?
             .project_deps;
     if !project_deps.has_mod_file() || project_deps.locked_modules().is_empty() {
         return Ok(());

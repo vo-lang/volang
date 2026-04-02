@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use vo_common::vfs::{normalize_fs_path, FileSystem, MemoryFs, RealFs};
 
 use crate::lock;
+use crate::operation_error::OperationError;
 use crate::schema::lockfile::{LockFile, LockRoot, LockedModule};
 use crate::schema::modfile::{ModFile, Require};
 use crate::Error;
@@ -136,41 +137,7 @@ impl ProjectDepsErrorKind {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ProjectDepsError {
-    pub stage: ProjectDepsStage,
-    pub kind: ProjectDepsErrorKind,
-    pub path: Option<PathBuf>,
-    pub detail: String,
-}
-
-impl ProjectDepsError {
-    fn new(
-        stage: ProjectDepsStage,
-        kind: ProjectDepsErrorKind,
-        detail: impl Into<String>,
-    ) -> Self {
-        Self {
-            stage,
-            kind,
-            path: None,
-            detail: detail.into(),
-        }
-    }
-
-    fn with_path(mut self, path: &Path) -> Self {
-        self.path = Some(path.to_path_buf());
-        self
-    }
-}
-
-impl std::fmt::Display for ProjectDepsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.detail)
-    }
-}
-
-impl std::error::Error for ProjectDepsError {}
+pub type ProjectDepsError = OperationError<ProjectDepsStage, ProjectDepsErrorKind>;
 
 pub fn read_mod_file(project_dir: &Path) -> Result<ModFile, Error> {
     let path = project_dir.join("vo.mod");
@@ -659,7 +626,7 @@ artifacts = []
         };
         assert_eq!(error.stage, ProjectDepsStage::LockFile);
         assert_eq!(error.kind, ProjectDepsErrorKind::Missing);
-        assert_eq!(error.path, Some(PathBuf::from("vo.lock")));
+        assert_eq!(error.path.as_deref(), Some("vo.lock"));
         assert!(
             error
                 .detail
@@ -705,7 +672,7 @@ artifacts = []
         let error = read_project_deps(&fs, &[]).unwrap_err();
         assert_eq!(error.stage, ProjectDepsStage::LockFile);
         assert_eq!(error.kind, ProjectDepsErrorKind::ValidationFailed);
-        assert_eq!(error.path, Some(PathBuf::from("vo.lock")));
+        assert_eq!(error.path.as_deref(), Some("vo.lock"));
         assert!(error.detail.contains("orphaned"), "{}", error.detail);
     }
 

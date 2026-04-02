@@ -23,7 +23,7 @@ fn load_project_deps_for_engine<F: FileSystem>(
 ) -> Result<ProjectDeps, CompileError> {
     let excluded_modules = workspace_replaces.keys().cloned().collect::<Vec<_>>();
     let project_deps = vo_module::project::read_project_deps(fs, &excluded_modules)
-        .map_err(ModuleSystemError::from)?;
+        .map_err(super::module_system_error_from_project)?;
     Ok(project_deps)
 }
 

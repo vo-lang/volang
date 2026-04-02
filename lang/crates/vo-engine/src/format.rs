@@ -3,11 +3,6 @@
 use vo_vm::bytecode::{Constant, FunctionDef, Module};
 use vo_vm::instruction::{Instruction, Opcode};
 
-/// Parse bytecode text format into a Module.
-pub fn parse_text(_input: &str) -> Result<Module, String> {
-    Err("bytecode text format parsing not yet implemented".into())
-}
-
 /// Format a Module as text.
 pub fn format_text(module: &Module) -> String {
     let mut out = String::new();

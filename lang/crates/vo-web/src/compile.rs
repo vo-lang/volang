@@ -11,7 +11,8 @@ use std::sync::OnceLock;
 
 use vo_analysis::vfs::{analyze_file_set_with_current_module, project_package_resolver_with_replaces};
 use vo_common::vfs::{FileSet, MemoryFs};
-use vo_module::project::ProjectDepsError;
+use vo_module::operation_error::OperationError;
+use vo_module::project::{ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage};
 
 use crate::js_types::CompileResult;
 use crate::wasm_vfs::WasmVfs;
@@ -118,61 +119,21 @@ enum WebCompileErrorKind {
     CodegenFailed,
 }
 
-#[derive(Debug, Clone)]
-enum WebCompileError {
-    Project(ProjectDepsError),
-    Stage {
-        stage: WebCompileStage,
-        kind: WebCompileErrorKind,
-        path: Option<PathBuf>,
-        detail: String,
-    },
-}
+type WebCompileError = OperationError<WebCompileStage, WebCompileErrorKind>;
 
-impl WebCompileError {
-    fn new(stage: WebCompileStage, kind: WebCompileErrorKind, detail: impl Into<String>) -> Self {
-        Self::Stage {
-            stage,
-            kind,
-            path: None,
-            detail: detail.into(),
+fn web_compile_error_from_project(error: ProjectDepsError) -> WebCompileError {
+    fn project_stage(stage: ProjectDepsStage) -> WebCompileStage {
+        match stage {
+            ProjectDepsStage::Workspace | ProjectDepsStage::ModFile | ProjectDepsStage::LockFile => WebCompileStage::Policy,
         }
     }
-
-    fn with_path(mut self, path: &Path) -> Self {
-        if let Self::Stage { path: path_slot, .. } = &mut self {
-            *path_slot = Some(path.to_path_buf());
-        }
-        self
-    }
-
-    fn observe(&self) {
-        match self {
-            Self::Project(error) => {
-                let _ = (error.stage, error.kind, error.path.as_ref());
-            }
-            Self::Stage { stage, kind, path, .. } => {
-                let _ = (*stage, *kind, path.as_ref());
-            }
+    fn project_kind(kind: ProjectDepsErrorKind) -> WebCompileErrorKind {
+        match kind {
+            ProjectDepsErrorKind::Missing | ProjectDepsErrorKind::ReadFailed => WebCompileErrorKind::ReadFailed,
+            ProjectDepsErrorKind::ParseFailed | ProjectDepsErrorKind::ValidationFailed => WebCompileErrorKind::ValidationFailed,
         }
     }
-}
-
-impl std::fmt::Display for WebCompileError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Project(error) => write!(f, "{}", error),
-            Self::Stage { detail, .. } => write!(f, "{}", detail),
-        }
-    }
-}
-
-impl std::error::Error for WebCompileError {}
-
-impl From<ProjectDepsError> for WebCompileError {
-    fn from(error: ProjectDepsError) -> Self {
-        Self::Project(error)
-    }
+    WebCompileError::from_other(error, project_stage, project_kind)
 }
 
 fn prepare_compile_input(source: CompileSource) -> Result<PreparedCompileInput, WebCompileError> {
@@ -182,7 +143,7 @@ fn prepare_compile_input(source: CompileSource) -> Result<PreparedCompileInput, 
             let local_fs = build_single_file_fs(&source, &filename);
             let file_set = build_single_file_set(&local_fs, &filename)?;
             let context = vo_module::project::load_project_context(&local_fs, entry_package_dir(&filename))
-                .map_err(WebCompileError::from)?;
+                .map_err(web_compile_error_from_project)?;
             Ok(PreparedCompileInput {
                 local_fs,
                 file_set,
@@ -194,7 +155,7 @@ fn prepare_compile_input(source: CompileSource) -> Result<PreparedCompileInput, 
         CompileSource::Entry { entry, local_fs } => {
             let file_set = build_entry_file_set(&local_fs, &entry)?;
             let context = vo_module::project::load_project_context(&local_fs, entry_package_dir(&entry))
-                .map_err(WebCompileError::from)?;
+                .map_err(web_compile_error_from_project)?;
             Ok(PreparedCompileInput {
                 local_fs,
                 file_set,
@@ -273,7 +234,6 @@ pub fn compile_web(
 }
 
 fn stringify_web_compile_error(error: WebCompileError) -> String {
-    error.observe();
     error.to_string()
 }
 

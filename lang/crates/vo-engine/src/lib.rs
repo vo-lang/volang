@@ -16,7 +16,7 @@ pub use compile::{
     CompileOutput, ModuleSystemError, ModuleSystemErrorKind, ModuleSystemStage,
     PreparedNativeExtension,
 };
-pub use format::{format_text, parse_text};
+pub use format::format_text;
 pub use run::{
     build_gui_vm, run, run_with_output, run_with_output_interruptible, RunError, RunMode,
     RuntimeError, RuntimeErrorKind,

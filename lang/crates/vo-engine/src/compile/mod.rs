@@ -7,10 +7,10 @@ use std::sync::Arc;
 use vo_common::vfs::{MemoryFs, RealFs, ScopedFs};
 use vo_common_core::LogRecordCore;
 use vo_module::ext_manifest::ExtensionManifest;
+use vo_module::operation_error::OperationError;
 use vo_module::project::{ProjectDeps, ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage};
 use vo_module::schema::lockfile::LockedModule;
 use vo_runtime::ext_loader::NativeExtensionSpec;
-use vo_vm::bytecode::Module;
 
 mod cache;
 mod native;
@@ -123,148 +123,10 @@ impl ModuleSystemErrorKind {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum ModuleSystemError {
-    Project(ProjectDepsError),
-    Stage {
-        stage: ModuleSystemStage,
-        kind: ModuleSystemErrorKind,
-        module_path: Option<String>,
-        version: Option<String>,
-        path: Option<String>,
-        detail: String,
-    },
-}
+pub type ModuleSystemError = OperationError<ModuleSystemStage, ModuleSystemErrorKind>;
 
-impl ModuleSystemError {
-    fn new(stage: ModuleSystemStage, kind: ModuleSystemErrorKind, detail: impl Into<String>) -> Self {
-        Self::Stage {
-            stage,
-            kind,
-            module_path: None,
-            version: None,
-            path: None,
-            detail: detail.into(),
-        }
-    }
-
-    fn materialize_project(error: ProjectDepsError) -> Self {
-        Self::Stage {
-            stage: project_stage(error.stage),
-            kind: project_kind(error.kind),
-            module_path: None,
-            version: None,
-            path: error.path.as_ref().map(|path| path.display().to_string()),
-            detail: error.detail,
-        }
-    }
-
-    fn materialize(self) -> Self {
-        match self {
-            Self::Project(error) => Self::materialize_project(error),
-            other => other,
-        }
-    }
-
-    fn with_locked(mut self, locked: &LockedModule) -> Self {
-        self = self.materialize();
-        if let Self::Stage {
-            module_path,
-            version,
-            ..
-        } = &mut self
-        {
-            *module_path = Some(locked.path.as_str().to_string());
-            *version = Some(locked.version.to_string());
-        }
-        self
-    }
-
-    fn with_module_version(mut self, module: impl Into<String>, version: impl Into<String>) -> Self {
-        self = self.materialize();
-        if let Self::Stage {
-            module_path,
-            version: version_slot,
-            ..
-        } = &mut self
-        {
-            *module_path = Some(module.into());
-            *version_slot = Some(version.into());
-        }
-        self
-    }
-
-    fn with_path(mut self, path: &Path) -> Self {
-        self = self.materialize();
-        if let Self::Stage { path: path_slot, .. } = &mut self {
-            *path_slot = Some(path.display().to_string());
-        }
-        self
-    }
-
-    fn with_stage(mut self, stage: ModuleSystemStage) -> Self {
-        self = self.materialize();
-        if let Self::Stage { stage: stage_slot, .. } = &mut self {
-            *stage_slot = stage;
-        }
-        self
-    }
-
-    pub fn stage(&self) -> ModuleSystemStage {
-        match self {
-            Self::Project(error) => project_stage(error.stage),
-            Self::Stage { stage, .. } => *stage,
-        }
-    }
-
-    pub fn kind(&self) -> ModuleSystemErrorKind {
-        match self {
-            Self::Project(error) => project_kind(error.kind),
-            Self::Stage { kind, .. } => *kind,
-        }
-    }
-
-    pub fn module_path(&self) -> Option<&str> {
-        match self {
-            Self::Project(_) => None,
-            Self::Stage { module_path, .. } => module_path.as_deref(),
-        }
-    }
-
-    pub fn version(&self) -> Option<&str> {
-        match self {
-            Self::Project(_) => None,
-            Self::Stage { version, .. } => version.as_deref(),
-        }
-    }
-
-    pub fn path(&self) -> Option<&str> {
-        match self {
-            Self::Project(error) => error.path.as_ref().and_then(|path| path.to_str()),
-            Self::Stage { path, .. } => path.as_deref(),
-        }
-    }
-
-    pub fn detail(&self) -> &str {
-        match self {
-            Self::Project(error) => &error.detail,
-            Self::Stage { detail, .. } => detail,
-        }
-    }
-}
-
-impl std::fmt::Display for ModuleSystemError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.detail())
-    }
-}
-
-impl std::error::Error for ModuleSystemError {}
-
-impl From<ProjectDepsError> for ModuleSystemError {
-    fn from(error: ProjectDepsError) -> Self {
-        Self::Project(error)
-    }
+pub(super) fn module_system_error_from_project(error: ProjectDepsError) -> ModuleSystemError {
+    ModuleSystemError::from_other(error, project_stage, project_kind)
 }
 
 fn project_stage(stage: ProjectDepsStage) -> ModuleSystemStage {
@@ -329,13 +191,7 @@ impl CompileError {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct CompileOutput {
-    pub module: Module,
-    pub source_root: PathBuf,
-    pub extensions: Vec<PreparedNativeExtension>,
-    pub locked_modules: Vec<LockedModule>,
-}
+pub type CompileOutput = vo_stdlib::toolchain::ToolchainModule;
 
 struct RealPathCompileContext {
     source_root: PathBuf,
@@ -369,7 +225,7 @@ fn load_real_path_compile_context(path: &Path) -> Result<RealPathCompileContext,
     let mod_cache = default_mod_cache_root();
     let base_fs = RealFs::new(".");
     let context = vo_module::project::load_project_context(&base_fs, &source_root)
-        .map_err(ModuleSystemError::from)?;
+        .map_err(module_system_error_from_project)?;
     let package_dir = relative_package_dir(&context.project_root, &source_root);
     let single_file = if path.is_file() {
         relative_single_file_path(&package_dir, path)
@@ -530,7 +386,7 @@ fn auto_download_locked_modules(root: &Path, mod_cache: &Path) -> Result<(), Com
     use vo_module::github_registry::GitHubRegistry;
 
     let plan = vo_module::lifecycle::load_project_locked_dependency_plan(root, mod_cache)
-        .map_err(ModuleSystemError::from)?;
+        .map_err(module_system_error_from_project)?;
     let project_deps = plan.project_deps;
 
     if !project_deps.has_mod_file() || project_deps.locked_modules().is_empty() {

@@ -643,7 +643,7 @@ fn map_project_deps_error_for_release_verify(error: project::ProjectDepsError) -
     }
     match error.kind {
         project::ProjectDepsErrorKind::ReadFailed => match error.path {
-            Some(path) => ReleaseError::IoError(path, error.detail),
+            Some(path) => ReleaseError::IoError(PathBuf::from(path), error.detail),
             None => ReleaseError::Module(error.detail),
         },
         _ => ReleaseError::Module(error.detail),

@@ -56,7 +56,7 @@ fn installed_module_error_to_module_system(e: InstalledModuleError) -> ModuleSys
         }
     };
     ModuleSystemError::new(ModuleSystemStage::CachedModule, kind, detail)
-        .with_module_version(e.module, e.version)
+        .with_module_version(e.module, e.version.to_string())
 }
 
 pub(super) fn prepare_native_extension_specs_for_frozen_build(
@@ -215,7 +215,7 @@ fn native_extension_artifact_name(
                     manifest.native_path.display(),
                 ),
             )
-            .with_locked(locked)
+            .with_module_version(locked.path.as_str(), locked.version.to_string())
             .with_path(&manifest.native_path)
         })
 }
@@ -242,7 +242,7 @@ fn find_locked_native_artifact<'a>(
                     locked.path, locked.version, artifact_name,
                 ),
             )
-            .with_locked(locked)
+            .with_module_version(locked.path.as_str(), locked.version.to_string())
             .with_path(&manifest.manifest_path)
         })
 }
