@@ -10,8 +10,7 @@ use sha2::{Digest, Sha256};
 use tar::{Builder, Header};
 use vo_module::digest::Digest as ModDigest;
 use vo_module::identity::ArtifactId;
-use vo_module::lock;
-use vo_module::schema::lockfile::LockFile;
+use vo_module::project;
 use vo_module::schema::manifest::{
     ManifestArtifact, ManifestRequire, ManifestSource, ReleaseManifest,
 };
@@ -85,7 +84,7 @@ struct PreparedArtifact {
 
 pub fn verify_repo(repo_root: &Path) -> ReleaseResult<()> {
     let repo_root = canonical_repo_root(repo_root)?;
-    let mod_file = read_mod_file(&repo_root)?;
+    read_mod_file(&repo_root)?;
 
     let vo_sum_paths = find_named_files(&repo_root, "vo.sum")?;
     if !vo_sum_paths.is_empty() {
@@ -100,17 +99,8 @@ pub fn verify_repo(repo_root: &Path) -> ReleaseResult<()> {
         return Err(ReleaseError::LegacyAliasImports(alias_imports));
     }
 
-    // Verify dependency graph if lock file exists
-    let lock_path = repo_root.join("vo.lock");
-    if lock_path.exists() {
-        let lock_file = read_lock_file(&repo_root)?;
-        lock::verify_root_consistency(&mod_file, &lock_file)?;
-        lock::verify_graph_completeness(&mod_file, &lock_file)?;
-    } else if !mod_file.require.is_empty() {
-        return Err(ReleaseError::Module(
-            "vo.mod has require directives but vo.lock is missing; run: vo mod sync".to_string(),
-        ));
-    }
+    project::read_project_deps_at_root(&repo_root, &[])
+        .map_err(map_project_deps_error_for_release_verify)?;
     Ok(())
 }
 
@@ -632,17 +622,32 @@ fn is_major_version_suffix(value: &str) -> bool {
 }
 
 fn read_mod_file(repo_root: &Path) -> ReleaseResult<ModFile> {
-    let mod_path = repo_root.join("vo.mod");
-    let content = fs::read_to_string(&mod_path)
-        .map_err(|e| ReleaseError::IoError(mod_path.clone(), e.to_string()))?;
-    ModFile::parse(&content).map_err(|e| e.into())
+    project::read_mod_file(repo_root)
+        .map_err(|error| map_project_file_error(repo_root.join("vo.mod"), error))
 }
 
-fn read_lock_file(repo_root: &Path) -> ReleaseResult<LockFile> {
-    let lock_path = repo_root.join("vo.lock");
-    let content = fs::read_to_string(&lock_path)
-        .map_err(|e| ReleaseError::IoError(lock_path.clone(), e.to_string()))?;
-    LockFile::parse(&content).map_err(|e| e.into())
+fn map_project_file_error(path: PathBuf, error: vo_module::Error) -> ReleaseError {
+    match error {
+        vo_module::Error::Io(error) => ReleaseError::IoError(path, error.to_string()),
+        other => other.into(),
+    }
+}
+
+fn map_project_deps_error_for_release_verify(error: project::ProjectDepsError) -> ReleaseError {
+    if error.stage == project::ProjectDepsStage::LockFile
+        && error.kind == project::ProjectDepsErrorKind::Missing
+    {
+        return ReleaseError::Module(
+            "vo.mod has require directives but vo.lock is missing; run: vo mod sync".to_string(),
+        );
+    }
+    match error.kind {
+        project::ProjectDepsErrorKind::ReadFailed => match error.path {
+            Some(path) => ReleaseError::IoError(path, error.detail),
+            None => ReleaseError::Module(error.detail),
+        },
+        _ => ReleaseError::Module(error.detail),
+    }
 }
 
 #[cfg(unix)]

@@ -16,6 +16,7 @@ mod vfs_io;
 use vo_common::vfs::MemoryFs;
 use vo_module::cache::layout::{SOURCE_DIGEST_MARKER, VERSION_MARKER};
 use vo_module::lifecycle::{ModuleSelection, ModuleSelectionPlanner};
+use vo_module::project::ProjectDepsError;
 use vo_module::schema::lockfile::LockedModule;
 
 use extension::*;
@@ -54,18 +55,21 @@ pub(super) enum ModuleInstallErrorKind {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ModuleInstallError {
-    stage: ModuleInstallStage,
-    kind: ModuleInstallErrorKind,
-    module_path: Option<String>,
-    version: Option<String>,
-    path: Option<String>,
-    detail: String,
+pub(super) enum ModuleInstallError {
+    Project(ProjectDepsError),
+    Stage {
+        stage: ModuleInstallStage,
+        kind: ModuleInstallErrorKind,
+        module_path: Option<String>,
+        version: Option<String>,
+        path: Option<String>,
+        detail: String,
+    },
 }
 
 impl ModuleInstallError {
     fn new(stage: ModuleInstallStage, kind: ModuleInstallErrorKind, detail: impl Into<String>) -> Self {
-        Self {
+        Self::Stage {
             stage,
             kind,
             module_path: None,
@@ -75,26 +79,110 @@ impl ModuleInstallError {
         }
     }
 
+    fn materialize_project(error: ProjectDepsError) -> Self {
+        let stage = match error.stage {
+            vo_module::project::ProjectDepsStage::Workspace => ModuleInstallStage::Workspace,
+            vo_module::project::ProjectDepsStage::ModFile => ModuleInstallStage::ModFile,
+            vo_module::project::ProjectDepsStage::LockFile => ModuleInstallStage::LockFile,
+        };
+        let kind = match error.kind {
+            vo_module::project::ProjectDepsErrorKind::Missing => ModuleInstallErrorKind::Missing,
+            vo_module::project::ProjectDepsErrorKind::ReadFailed => ModuleInstallErrorKind::ReadFailed,
+            vo_module::project::ProjectDepsErrorKind::ParseFailed => ModuleInstallErrorKind::ParseFailed,
+            vo_module::project::ProjectDepsErrorKind::ValidationFailed => {
+                ModuleInstallErrorKind::ValidationFailed
+            }
+        };
+        Self::Stage {
+            stage,
+            kind,
+            module_path: None,
+            version: None,
+            path: error.path.as_ref().map(|path| path.display().to_string()),
+            detail: error.detail,
+        }
+    }
+
+    fn materialize(self) -> Self {
+        match self {
+            Self::Project(error) => Self::materialize_project(error),
+            other => other,
+        }
+    }
+
     fn with_module(mut self, module: impl Into<String>) -> Self {
-        self.module_path = Some(module.into());
+        self = self.materialize();
+        if let Self::Stage { module_path, .. } = &mut self {
+            *module_path = Some(module.into());
+        }
         self
     }
 
     fn with_module_version(mut self, module: impl Into<String>, version: impl Into<String>) -> Self {
-        self.module_path = Some(module.into());
-        self.version = Some(version.into());
+        self = self.materialize();
+        if let Self::Stage {
+            module_path,
+            version: version_slot,
+            ..
+        } = &mut self
+        {
+            *module_path = Some(module.into());
+            *version_slot = Some(version.into());
+        }
         self
     }
 
     fn with_path(mut self, path: impl Into<String>) -> Self {
-        self.path = Some(path.into());
+        self = self.materialize();
+        if let Self::Stage { path: path_slot, .. } = &mut self {
+            *path_slot = Some(path.into());
+        }
         self
+    }
+
+    fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self = self.materialize();
+        if let Self::Stage {
+            detail: detail_slot,
+            ..
+        } = &mut self
+        {
+            *detail_slot = detail.into();
+        }
+        self
+    }
+
+    fn observe(&self) {
+        match self {
+            Self::Project(error) => {
+                let _ = (error.stage, error.kind, error.path.as_ref());
+            }
+            Self::Stage {
+                stage,
+                kind,
+                module_path,
+                version,
+                path,
+                ..
+            } => {
+                let _ = (
+                    *stage,
+                    *kind,
+                    module_path.as_ref(),
+                    version.as_ref(),
+                    path.as_ref(),
+                );
+            }
+        }
     }
 }
 
 impl std::fmt::Display for ModuleInstallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.detail)
+        match self {
+            Self::Project(error) => write!(f, "{}", error),
+            Self::Stage { detail, .. } => write!(f, "{}", detail),
+        }
     }
 }
 
@@ -102,33 +190,12 @@ impl std::error::Error for ModuleInstallError {}
 
 impl From<ProjectDepsError> for ModuleInstallError {
     fn from(error: ProjectDepsError) -> Self {
-        let stage = match error.stage {
-            ProjectDepsStage::Workspace => ModuleInstallStage::Workspace,
-            ProjectDepsStage::ModFile => ModuleInstallStage::ModFile,
-            ProjectDepsStage::LockFile => ModuleInstallStage::LockFile,
-        };
-        let kind = match error.kind {
-            ProjectDepsErrorKind::Missing => ModuleInstallErrorKind::Missing,
-            ProjectDepsErrorKind::ReadFailed => ModuleInstallErrorKind::ReadFailed,
-            ProjectDepsErrorKind::ParseFailed => ModuleInstallErrorKind::ParseFailed,
-            ProjectDepsErrorKind::ValidationFailed => ModuleInstallErrorKind::ValidationFailed,
-        };
-        let mut mapped = Self::new(stage, kind, error.detail);
-        if let Some(path) = error.path.as_ref() {
-            mapped = mapped.with_path(path.display().to_string());
-        }
-        mapped
+        Self::Project(error)
     }
 }
 
 pub(super) fn stringify_module_install_error(error: ModuleInstallError) -> String {
-    let _ = (
-        error.stage,
-        error.kind,
-        error.module_path.as_ref(),
-        error.version.as_ref(),
-        error.path.as_ref(),
-    );
+    error.observe();
     error.to_string()
 }
 
@@ -475,13 +542,6 @@ fn collect_installed_vfs_module_specs_typed(
         installed.push((module.clone(), version));
     }
     Ok(installed)
-}
-
-/// Resolve a module version: check VFS cache first, then fetch latest from GitHub.
-pub async fn resolve_module_version(module: &str) -> Result<String, String> {
-    resolve_module_version_typed(module)
-        .await
-        .map_err(stringify_module_install_error)
 }
 
 async fn resolve_module_version_typed(module: &str) -> ModuleInstallResult<String> {

@@ -955,7 +955,7 @@ fn resolve_cli_path(cwd: &Path, value: &str) -> PathBuf {
 }
 
 fn print_lock_summary(project_root: &Path) {
-    match vo_module::ops::read_lock_file(project_root) {
+    match vo_module::project::read_lock_file(project_root) {
         Ok(lock) => {
             println!(
                 "wrote vo.lock with {} resolved modules",
@@ -973,23 +973,15 @@ fn print_lock_summary(project_root: &Path) {
 
 fn module_root_from_path(path: &str) -> Result<PathBuf, String> {
     let path = Path::new(path);
-    let mut dir = if path.is_dir() {
+    let dir = if path.is_dir() {
         path.to_path_buf()
     } else {
         path.parent().unwrap_or(Path::new(".")).to_path_buf()
     };
-    dir = dir.canonicalize().unwrap_or(dir);
+    let dir = dir.canonicalize().unwrap_or(dir);
     let search_start = dir.clone();
-    let mut current = dir.as_path();
-    loop {
-        if current.join("vo.mod").is_file() {
-            return Ok(current.to_path_buf());
-        }
-        match current.parent() {
-            Some(parent) => current = parent,
-            None => return Err(format!("no vo.mod found from {}", search_start.display(),)),
-        }
-    }
+    vo_module::project::find_project_root(&dir)
+        .ok_or_else(|| format!("no vo.mod found from {}", search_start.display()))
 }
 
 #[cfg(test)]

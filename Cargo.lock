@@ -1882,6 +1882,7 @@ dependencies = [
  "quote",
  "syn",
  "vo-common",
+ "vo-module",
  "vo-syntax",
 ]
 

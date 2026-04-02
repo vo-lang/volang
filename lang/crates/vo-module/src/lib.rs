@@ -77,7 +77,6 @@ pub enum Error {
         expected: String,
         found: String,
     },
-    MissingLockFile,
     MissingArtifact {
         module: String,
         version: String,
@@ -166,9 +165,6 @@ impl fmt::Display for Error {
                     f,
                     "digest mismatch for {context}: expected {expected}, found {found}"
                 )
-            }
-            Self::MissingLockFile => {
-                write!(f, "this build imports external modules but vo.lock is missing\n  run: vo mod sync")
             }
             Self::MissingArtifact {
                 module,

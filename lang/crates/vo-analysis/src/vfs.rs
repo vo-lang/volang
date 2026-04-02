@@ -11,8 +11,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use vo_common::abi::package_abi_path;
-use vo_common::vfs::{normalize_fs_path, FileSystem, RealFs};
+use vo_common::vfs::{normalize_fs_path, FileSet, FileSystem, RealFs};
 use vo_module::ext_manifest::extension_name_from_content;
+
+use crate::project::{AnalysisError, Project};
 
 /// A resolved package from the package resolver.
 #[derive(Debug, Clone)]
@@ -224,6 +226,30 @@ impl<F: FileSystem + Clone> PackageResolver<F> {
     }
 }
 
+pub fn project_mod_source<F: FileSystem>(
+    mod_fs: F,
+    deps: &vo_module::project::ProjectDeps,
+) -> ModSource<F> {
+    ModSource::with_fs(mod_fs).with_project_deps(deps)
+}
+
+pub fn project_package_resolver_with_replaces<S: FileSystem, M: FileSystem, R: FileSystem>(
+    std_fs: S,
+    mod_fs: M,
+    replace_fs: R,
+    deps: &vo_module::project::ProjectDeps,
+    workspace_replaces: HashMap<String, PathBuf>,
+) -> ReplacingResolver<PackageResolverMixed<S, M>, R> {
+    ReplacingResolver::with_fs(
+        PackageResolverMixed {
+            std: StdSource::with_fs(std_fs),
+            r#mod: project_mod_source(mod_fs, deps),
+        },
+        replace_fs,
+        workspace_replaces,
+    )
+}
+
 impl<S: FileSystem + Send + Sync, M: FileSystem + Send + Sync> Resolver
     for PackageResolverMixed<S, M>
 {
@@ -298,7 +324,7 @@ fn find_module_identity_in_fs<F: FileSystem>(fs: &F, pkg_path: &Path) -> Option<
     None
 }
 
-fn find_module_identity_abs(abs_pkg_path: &Path) -> Option<(String, String)> {
+pub(crate) fn find_module_identity_abs(abs_pkg_path: &Path) -> Option<(String, String)> {
     if !abs_pkg_path.is_absolute() {
         return None;
     }
@@ -317,7 +343,7 @@ fn find_module_identity_abs(abs_pkg_path: &Path) -> Option<(String, String)> {
     }
 }
 
-pub fn read_module_path_from_disk(dir: &Path) -> Option<String> {
+pub(crate) fn read_module_path_from_disk(dir: &Path) -> Option<String> {
     let content = std::fs::read_to_string(dir.join("vo.mod")).ok()?;
     for line in content.lines() {
         if let Some(rest) = line.trim().strip_prefix("module ") {
@@ -565,6 +591,17 @@ impl<R: Resolver, F: FileSystem> Resolver for CurrentModuleResolver<R, F> {
 
         self.inner.resolve(import_path)
     }
+}
+
+pub fn analyze_file_set_with_current_module<R: Resolver, F: FileSystem>(
+    file_set: FileSet,
+    resolver: R,
+    local_fs: F,
+    local_root: impl Into<PathBuf>,
+    current_module: Option<String>,
+) -> Result<Project, AnalysisError> {
+    let resolver = CurrentModuleResolver::with_root(resolver, local_fs, local_root, current_module);
+    crate::project::analyze_project(file_set, &resolver)
 }
 
 #[cfg(test)]

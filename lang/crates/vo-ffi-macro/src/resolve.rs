@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use syn::{FnArg, ItemFn, ReturnType, Type};
+use vo_module::project;
+use vo_module::schema::modfile::ModFile;
 
 use crate::vo_parser;
 
@@ -242,6 +244,12 @@ pub fn find_pkg_dir_for_slots(pkg_path: &str) -> Option<PathBuf> {
     None
 }
 
+fn read_module_path_from_project_root(project_root: &Path) -> Option<String> {
+    project::read_mod_file(project_root)
+        .ok()
+        .map(|mod_file| mod_file.module.as_str().to_string())
+}
+
 /// Resolve a short package name to its full module path by reading this crate's
 /// `Cargo.toml` `[package.metadata.vo]` section.
 ///
@@ -300,16 +308,9 @@ fn parse_cargo_vomod_field(content: &str) -> Option<String> {
 /// Parse the `module` declaration from a vo.mod file.
 /// Returns the module path, e.g. `"github.com/vo-lang/vogui"`.
 fn parse_vomod_module(content: &str) -> Option<String> {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("module ") {
-            let m = rest.trim();
-            if !m.is_empty() {
-                return Some(m.to_string());
-            }
-        }
-    }
-    None
+    ModFile::parse(content)
+        .ok()
+        .map(|mod_file| mod_file.module.as_str().to_string())
 }
 
 /// Walk up from CARGO_MANIFEST_DIR looking for a `vo.mod` whose `module`
@@ -320,20 +321,15 @@ fn find_pkg_dir_by_vomod(full_module_path: &str) -> Option<PathBuf> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
     let mut dir = PathBuf::from(manifest_dir);
     for _ in 0..10 {
-        let vomod = dir.join("vo.mod");
-        if vomod.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&vomod) {
-                if let Some(module_path) = parse_vomod_module(&content) {
-                    if module_path == full_module_path {
-                        return Some(dir);
-                    }
-                    // Sub-package: full_module_path starts with module_path + "/"
-                    if let Some(sub) = full_module_path.strip_prefix(&format!("{}/", module_path)) {
-                        let sub_dir = dir.join(sub);
-                        if sub_dir.exists() {
-                            return Some(sub_dir);
-                        }
-                    }
+        if let Some(module_path) = read_module_path_from_project_root(&dir) {
+            if module_path == full_module_path {
+                return Some(dir);
+            }
+            // Sub-package: full_module_path starts with module_path + "/"
+            if let Some(sub) = full_module_path.strip_prefix(&format!("{}/", module_path)) {
+                let sub_dir = dir.join(sub);
+                if sub_dir.exists() {
+                    return Some(sub_dir);
                 }
             }
         }
@@ -415,19 +411,8 @@ fn find_stdlib_dir() -> Option<PathBuf> {
 
 /// Find project root by searching for vo.mod.
 fn find_vo_mod_root() -> Option<PathBuf> {
-    // Start from CARGO_MANIFEST_DIR
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
-    let mut dir = PathBuf::from(manifest_dir);
-
-    // Search upward for vo.mod
-    loop {
-        if dir.join("vo.mod").exists() {
-            return Some(dir);
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
+    project::find_project_root(&PathBuf::from(manifest_dir))
 }
 
 /// Resolve package path to filesystem directory.
@@ -464,16 +449,11 @@ fn resolve_pkg_path(project_root: &Path, pkg_path: &str) -> Option<(PathBuf, boo
     // Check if pkg_path is a full module path for the current project (including sub-packages).
     // e.g. "github.com/vo-lang/voplay/scene2d" with module "github.com/vo-lang/voplay"
     //    → resolve to project_root.join("scene2d")
-    let vomod = project_root.join("vo.mod");
-    if vomod.is_file() {
-        if let Ok(content) = std::fs::read_to_string(&vomod) {
-            if let Some(module_path) = parse_vomod_module(&content) {
-                if let Some(sub) = pkg_path.strip_prefix(&format!("{}/", module_path)) {
-                    let pkg_dir = project_root.join(sub);
-                    if pkg_dir.exists() {
-                        return Some((pkg_dir, false));
-                    }
-                }
+    if let Some(module_path) = read_module_path_from_project_root(project_root) {
+        if let Some(sub) = pkg_path.strip_prefix(&format!("{}/", module_path)) {
+            let pkg_dir = project_root.join(sub);
+            if pkg_dir.exists() {
+                return Some((pkg_dir, false));
             }
         }
     }

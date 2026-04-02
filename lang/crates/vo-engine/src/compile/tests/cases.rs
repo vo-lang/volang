@@ -220,14 +220,14 @@ fn test_validate_locked_extension_manifests_require_locked_native_artifact() {
 
     let error = prepare_native_extension_specs_for_frozen_build(&manifests, &locked_modules, &mod_root)
         .expect_err("cached published modules must require a locked native artifact");
-    assert_eq!(error.stage, ModuleSystemStage::NativeExtension);
-    assert_eq!(error.kind, ModuleSystemErrorKind::Missing);
+    assert_eq!(error.stage(), ModuleSystemStage::NativeExtension);
+    assert_eq!(error.kind(), ModuleSystemErrorKind::Missing);
     assert!(
         error
-            .detail
+            .detail()
             .contains("vo.lock does not pin an extension-native artifact"),
         "{}",
-        error.detail
+        error.detail()
     );
 
     fs::remove_dir_all(&mod_root).unwrap();
@@ -528,12 +528,12 @@ fn test_compile_rejects_workspace_override_identity_mismatch() {
     let result = compile(app_root.to_str().unwrap());
     match result {
         Err(CompileError::ModuleSystem(error)) => {
-            assert_eq!(error.stage, ModuleSystemStage::Workspace);
-            assert_eq!(error.kind, ModuleSystemErrorKind::ValidationFailed);
+            assert_eq!(error.stage(), ModuleSystemStage::Workspace);
+            assert_eq!(error.kind(), ModuleSystemErrorKind::ValidationFailed);
             assert!(
-                error.detail.contains("workspace override identity mismatch"),
+                error.detail().contains("workspace override identity mismatch"),
                 "{}",
-                error.detail
+                error.detail()
             );
         }
         other => panic!("expected workspace validation error, got {other:?}"),
@@ -562,12 +562,12 @@ fn test_compile_rejects_workspace_self_override() {
     let result = compile(root.to_str().unwrap());
     match result {
         Err(CompileError::ModuleSystem(error)) => {
-            assert_eq!(error.stage, ModuleSystemStage::Workspace);
-            assert_eq!(error.kind, ModuleSystemErrorKind::ValidationFailed);
+            assert_eq!(error.stage(), ModuleSystemStage::Workspace);
+            assert_eq!(error.kind(), ModuleSystemErrorKind::ValidationFailed);
             assert!(
-                error.detail.contains("must not override itself"),
+                error.detail().contains("must not override itself"),
                 "{}",
-                error.detail
+                error.detail()
             );
         }
         other => panic!("expected workspace validation error, got {other:?}"),
@@ -694,14 +694,14 @@ fn test_compile_unreplaced_external_dep_requires_vo_lock() {
     let result = load_project_deps_for_engine(&fs, &replaces);
     match result {
         Err(CompileError::ModuleSystem(message)) => {
-            assert_eq!(message.stage, ModuleSystemStage::LockFile);
-            assert_eq!(message.kind, ModuleSystemErrorKind::Missing);
+            assert_eq!(message.stage(), ModuleSystemStage::LockFile);
+            assert_eq!(message.kind(), ModuleSystemErrorKind::Missing);
             assert!(
                 message
-                    .detail
+                    .detail()
                     .contains("this build requires external modules but vo.lock is missing"),
                 "{}",
-                message.detail
+                message.detail()
             );
         }
         other => panic!("expected missing vo.lock error, got {other:?}"),
@@ -883,14 +883,14 @@ fn test_compile_directory_requires_vo_lock_for_external_dependencies() {
     let result = compile(app_root.to_str().unwrap());
     match result {
         Err(CompileError::ModuleSystem(message)) => {
-            assert_eq!(message.stage, ModuleSystemStage::LockFile);
-            assert_eq!(message.kind, ModuleSystemErrorKind::Missing);
+            assert_eq!(message.stage(), ModuleSystemStage::LockFile);
+            assert_eq!(message.kind(), ModuleSystemErrorKind::Missing);
             assert!(
                 message
-                    .detail
+                    .detail()
                     .contains("this build requires external modules but vo.lock is missing"),
                 "{}",
-                message.detail
+                message.detail()
             );
         }
         other => panic!("expected missing vo.lock module-system error, got {other:?}"),

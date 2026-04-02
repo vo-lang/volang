@@ -8,7 +8,7 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 
 use crate::state::{session_info, AppState, SessionInfo, SessionOrigin};
-use super::pathing::find_project_root;
+use super::pathing::{find_project_root, is_module_root};
 
 #[tauri::command]
 pub fn cmd_open_workspace_session(state: tauri::State<'_, AppState>) -> Result<SessionInfo, String> {
@@ -41,7 +41,7 @@ pub fn cmd_open_run_session(path: String, state: tauri::State<'_, AppState>) -> 
 
     let module_root = if is_vo_file {
         find_project_root(&canonical)
-    } else if canonical.is_dir() && canonical.join("vo.mod").is_file() {
+    } else if is_module_root(&canonical) {
         Some(canonical.clone())
     } else {
         None

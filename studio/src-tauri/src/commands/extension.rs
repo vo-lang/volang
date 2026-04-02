@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use super::pathing::resolve_path;
+use super::pathing::{is_module_root, resolve_path};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -101,7 +101,7 @@ fn collect_installed_modules(base: &std::path::Path, dir: &std::path::Path, out:
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.join("vo.mod").is_file() {
+        if is_module_root(&path) {
             let spec = path.strip_prefix(base)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| path.to_string_lossy().to_string());

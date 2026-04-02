@@ -240,21 +240,23 @@ pub(super) fn format_module_project_deps_error(
     module: &str,
     version: &str,
 ) -> ModuleInstallError {
-    let mut mapped = ModuleInstallError::from(error.clone()).with_module_version(module, version);
     match (error.stage, error.kind) {
         (
             vo_module::project::ProjectDepsStage::LockFile,
             vo_module::project::ProjectDepsErrorKind::Missing,
         ) => {
-            mapped.detail = format!(
-                "module {}@{} requires external modules but vo.lock is missing",
-                module, version
-            );
-            mapped
+            ModuleInstallError::from(error)
+                .with_module_version(module, version)
+                .with_detail(format!(
+                    "module {}@{} requires external modules but vo.lock is missing",
+                    module, version
+                ))
         }
         _ => {
-            mapped.detail = format!("{} for {}@{}", error, module, version);
-            mapped
+            let detail = format!("{} for {}@{}", error, module, version);
+            ModuleInstallError::from(error)
+                .with_module_version(module, version)
+                .with_detail(detail)
         }
     }
 }

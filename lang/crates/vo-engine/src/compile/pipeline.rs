@@ -4,14 +4,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use vo_analysis::project::Project as AnalysisProject;
-use vo_analysis::vfs::{CurrentModuleResolver, ReplacingResolver};
-use vo_analysis::analyze_project;
+use vo_analysis::vfs::{
+    analyze_file_set_with_current_module, project_package_resolver_with_replaces,
+};
 use vo_codegen::compile_project;
-use vo_common::vfs::{FileSet, FileSystem, ZipFs};
+use vo_common::vfs::{FileSet, FileSystem, RealFs, ZipFs};
 use vo_module::project::ProjectDeps;
+use vo_stdlib::EmbeddedStdlib;
 
 use super::native::{prepare_native_extension_specs_for_frozen_build, validate_locked_modules_installed};
-use super::project_prepare::replacing_resolver;
 use super::{CompileError, CompileOutput};
 
 struct PreparedProject<F> {
@@ -66,15 +67,20 @@ impl<F: FileSystem> PreparedProject<F> {
     fn analyze(self) -> Result<AnalyzedCompilation, CompileError> {
         let current_module = self.project_deps.current_module().map(str::to_string);
         let locked_modules = self.project_deps.locked_modules().to_vec();
-        let resolver = build_current_module_resolver(
-            self.fs,
+        let resolver = project_package_resolver_with_replaces(
+            EmbeddedStdlib::new(),
+            RealFs::new(&self.mod_cache),
+            RealFs::new("."),
             &self.project_deps,
-            &self.mod_cache,
             self.replaces,
+        );
+        let project = analyze_file_set_with_current_module(
+            self.file_set,
+            resolver,
+            self.fs,
             self.local_root,
             current_module,
-        );
-        let project = analyze_project(self.file_set, &resolver)
+        )
             .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
         Ok(AnalyzedCompilation {
             project,
@@ -122,18 +128,6 @@ impl AnalyzedCompilation {
             locked_modules: self.locked_modules,
         })
     }
-}
-
-fn build_current_module_resolver<F: FileSystem>(
-    fs: F,
-    project_deps: &ProjectDeps,
-    mod_cache: &Path,
-    replaces: HashMap<String, PathBuf>,
-    local_root: PathBuf,
-    current_module: Option<String>,
-) -> CurrentModuleResolver<ReplacingResolver<vo_analysis::vfs::PackageResolverMixed<vo_stdlib::EmbeddedStdlib, vo_common::vfs::RealFs>>, F> {
-    let replaced = replacing_resolver(project_deps, mod_cache, replaces);
-    CurrentModuleResolver::with_root(replaced, fs, local_root, current_module)
 }
 
 fn collect_file_set<F: FileSystem>(

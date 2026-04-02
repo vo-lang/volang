@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use vo_app_runtime::SyncRenderBuffer;
 use vo_engine::PreparedNativeExtension;
 
+use crate::commands::pathing::is_module_root;
 use crate::gui_runtime::GuestHandle;
 
 // ---------------------------------------------------------------------------
@@ -386,12 +387,12 @@ fn url_decode(input: &str) -> String {
 }
 
 fn detect_project_mode(path: &Path) -> ProjectMode {
-    if path.is_dir() && path.join("vo.mod").is_file() {
+    if is_module_root(path) {
         return ProjectMode::Module;
     }
     if path.is_file() {
         let parent = path.parent().unwrap_or(path);
-        if parent.join("vo.mod").is_file() {
+        if is_module_root(parent) {
             return ProjectMode::Module;
         }
     }

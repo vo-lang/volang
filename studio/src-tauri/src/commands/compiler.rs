@@ -68,18 +68,18 @@ fn diagnostic_from_compile_error(default_file: &str, error: &CompileError) -> Di
     let module_error = error.module_system();
     DiagnosticError {
         file: module_error
-            .and_then(|module_error| module_error.path.clone())
+            .and_then(|module_error| module_error.path().map(str::to_string))
             .unwrap_or_else(|| default_file.to_string()),
         line: 0,
         column: 0,
         message: module_error
-            .map(|module_error| module_error.detail.clone())
+            .map(|module_error| module_error.detail().to_string())
             .unwrap_or_else(|| error.to_string()),
         category: error.category().to_string(),
-        module_stage: module_error.map(|module_error| module_error.stage.as_str().to_string()),
-        module_kind: module_error.map(|module_error| module_error.kind.as_str().to_string()),
-        module_path: module_error.and_then(|module_error| module_error.module_path.clone()),
-        module_version: module_error.and_then(|module_error| module_error.version.clone()),
+        module_stage: module_error.map(|module_error| module_error.stage().as_str().to_string()),
+        module_kind: module_error.map(|module_error| module_error.kind().as_str().to_string()),
+        module_path: module_error.and_then(|module_error| module_error.module_path().map(str::to_string)),
+        module_version: module_error.and_then(|module_error| module_error.version().map(str::to_string)),
     }
 }
 

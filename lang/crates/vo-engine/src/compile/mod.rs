@@ -15,7 +15,6 @@ use vo_vm::bytecode::Module;
 mod cache;
 mod native;
 mod pipeline;
-mod project_prepare;
 
 #[cfg(test)]
 mod tests;
@@ -125,18 +124,21 @@ impl ModuleSystemErrorKind {
 }
 
 #[derive(Debug, Clone)]
-pub struct ModuleSystemError {
-    pub stage: ModuleSystemStage,
-    pub kind: ModuleSystemErrorKind,
-    pub module_path: Option<String>,
-    pub version: Option<String>,
-    pub path: Option<String>,
-    pub detail: String,
+pub enum ModuleSystemError {
+    Project(ProjectDepsError),
+    Stage {
+        stage: ModuleSystemStage,
+        kind: ModuleSystemErrorKind,
+        module_path: Option<String>,
+        version: Option<String>,
+        path: Option<String>,
+        detail: String,
+    },
 }
 
 impl ModuleSystemError {
     fn new(stage: ModuleSystemStage, kind: ModuleSystemErrorKind, detail: impl Into<String>) -> Self {
-        Self {
+        Self::Stage {
             stage,
             kind,
             module_path: None,
@@ -146,21 +148,114 @@ impl ModuleSystemError {
         }
     }
 
+    fn materialize_project(error: ProjectDepsError) -> Self {
+        Self::Stage {
+            stage: project_stage(error.stage),
+            kind: project_kind(error.kind),
+            module_path: None,
+            version: None,
+            path: error.path.as_ref().map(|path| path.display().to_string()),
+            detail: error.detail,
+        }
+    }
+
+    fn materialize(self) -> Self {
+        match self {
+            Self::Project(error) => Self::materialize_project(error),
+            other => other,
+        }
+    }
+
     fn with_locked(mut self, locked: &LockedModule) -> Self {
-        self.module_path = Some(locked.path.as_str().to_string());
-        self.version = Some(locked.version.to_string());
+        self = self.materialize();
+        if let Self::Stage {
+            module_path,
+            version,
+            ..
+        } = &mut self
+        {
+            *module_path = Some(locked.path.as_str().to_string());
+            *version = Some(locked.version.to_string());
+        }
+        self
+    }
+
+    fn with_module_version(mut self, module: impl Into<String>, version: impl Into<String>) -> Self {
+        self = self.materialize();
+        if let Self::Stage {
+            module_path,
+            version: version_slot,
+            ..
+        } = &mut self
+        {
+            *module_path = Some(module.into());
+            *version_slot = Some(version.into());
+        }
         self
     }
 
     fn with_path(mut self, path: &Path) -> Self {
-        self.path = Some(path.display().to_string());
+        self = self.materialize();
+        if let Self::Stage { path: path_slot, .. } = &mut self {
+            *path_slot = Some(path.display().to_string());
+        }
         self
+    }
+
+    fn with_stage(mut self, stage: ModuleSystemStage) -> Self {
+        self = self.materialize();
+        if let Self::Stage { stage: stage_slot, .. } = &mut self {
+            *stage_slot = stage;
+        }
+        self
+    }
+
+    pub fn stage(&self) -> ModuleSystemStage {
+        match self {
+            Self::Project(error) => project_stage(error.stage),
+            Self::Stage { stage, .. } => *stage,
+        }
+    }
+
+    pub fn kind(&self) -> ModuleSystemErrorKind {
+        match self {
+            Self::Project(error) => project_kind(error.kind),
+            Self::Stage { kind, .. } => *kind,
+        }
+    }
+
+    pub fn module_path(&self) -> Option<&str> {
+        match self {
+            Self::Project(_) => None,
+            Self::Stage { module_path, .. } => module_path.as_deref(),
+        }
+    }
+
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            Self::Project(_) => None,
+            Self::Stage { version, .. } => version.as_deref(),
+        }
+    }
+
+    pub fn path(&self) -> Option<&str> {
+        match self {
+            Self::Project(error) => error.path.as_ref().and_then(|path| path.to_str()),
+            Self::Stage { path, .. } => path.as_deref(),
+        }
+    }
+
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::Project(error) => &error.detail,
+            Self::Stage { detail, .. } => detail,
+        }
     }
 }
 
 impl std::fmt::Display for ModuleSystemError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.detail)
+        write!(f, "{}", self.detail())
     }
 }
 
@@ -168,22 +263,24 @@ impl std::error::Error for ModuleSystemError {}
 
 impl From<ProjectDepsError> for ModuleSystemError {
     fn from(error: ProjectDepsError) -> Self {
-        let stage = match error.stage {
-            ProjectDepsStage::Workspace => ModuleSystemStage::Workspace,
-            ProjectDepsStage::ModFile => ModuleSystemStage::ModFile,
-            ProjectDepsStage::LockFile => ModuleSystemStage::LockFile,
-        };
-        let kind = match error.kind {
-            ProjectDepsErrorKind::Missing => ModuleSystemErrorKind::Missing,
-            ProjectDepsErrorKind::ReadFailed => ModuleSystemErrorKind::ReadFailed,
-            ProjectDepsErrorKind::ParseFailed => ModuleSystemErrorKind::ParseFailed,
-            ProjectDepsErrorKind::ValidationFailed => ModuleSystemErrorKind::ValidationFailed,
-        };
-        let mut mapped = ModuleSystemError::new(stage, kind, error.detail);
-        if let Some(path) = error.path.as_ref() {
-            mapped = mapped.with_path(path);
-        }
-        mapped
+        Self::Project(error)
+    }
+}
+
+fn project_stage(stage: ProjectDepsStage) -> ModuleSystemStage {
+    match stage {
+        ProjectDepsStage::Workspace => ModuleSystemStage::Workspace,
+        ProjectDepsStage::ModFile => ModuleSystemStage::ModFile,
+        ProjectDepsStage::LockFile => ModuleSystemStage::LockFile,
+    }
+}
+
+fn project_kind(kind: ProjectDepsErrorKind) -> ModuleSystemErrorKind {
+    match kind {
+        ProjectDepsErrorKind::Missing => ModuleSystemErrorKind::Missing,
+        ProjectDepsErrorKind::ReadFailed => ModuleSystemErrorKind::ReadFailed,
+        ProjectDepsErrorKind::ParseFailed => ModuleSystemErrorKind::ParseFailed,
+        ProjectDepsErrorKind::ValidationFailed => ModuleSystemErrorKind::ValidationFailed,
     }
 }
 
@@ -429,25 +526,12 @@ pub fn check_with_auto_install(path: &str) -> Result<(), CompileError> {
     check(path)
 }
 
-fn locked_module_fully_cached(mod_cache: &Path, locked: &LockedModule) -> bool {
-    let fs = RealFs::new(mod_cache);
-    let module_dir = vo_module::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
-    if vo_module::cache::validate::validate_installed_module(&fs, &module_dir, locked).is_err() {
-        return false;
-    }
-    locked.artifacts.iter().all(|artifact| {
-        let artifact_path = module_dir.join("artifacts").join(&artifact.id.name);
-        vo_module::cache::validate::validate_installed_artifact(&fs, &artifact_path, locked, artifact)
-            .is_ok()
-    })
-}
-
 fn auto_download_locked_modules(root: &Path, mod_cache: &Path) -> Result<(), CompileError> {
     use vo_module::github_registry::GitHubRegistry;
 
-    let project_deps = vo_module::project::load_project_context(&RealFs::new("."), root)
-        .map_err(ModuleSystemError::from)?
-        .project_deps;
+    let plan = vo_module::lifecycle::load_project_locked_dependency_plan(root, mod_cache)
+        .map_err(ModuleSystemError::from)?;
+    let project_deps = plan.project_deps;
 
     if !project_deps.has_mod_file() || project_deps.locked_modules().is_empty() {
         return Ok(());
@@ -455,33 +539,26 @@ fn auto_download_locked_modules(root: &Path, mod_cache: &Path) -> Result<(), Com
     let Some(lock_file) = project_deps.lock_file() else {
         return Ok(());
     };
+
+    let dependency_state = plan.dependency_state;
+    for dependency in &dependency_state {
+        if dependency.cached {
+            emit_compile_log(
+                CompileLogRecord::new("vo-engine", "dependency_cached")
+                    .module(&dependency.module)
+                    .version(&dependency.version),
+            );
+        } else {
+            emit_compile_log(
+                CompileLogRecord::new("vo-engine", "dependency_fetch_start")
+                    .module(&dependency.module)
+                    .version(&dependency.version),
+            );
+        }
+    }
+
     let registry = GitHubRegistry::new();
-    let module_cache_state = project_deps
-        .locked_modules()
-        .iter()
-        .map(|locked| {
-            let fully_cached = locked_module_fully_cached(mod_cache, locked);
-            if fully_cached {
-                emit_compile_log(
-                    CompileLogRecord::new("vo-engine", "dependency_cached")
-                        .module(locked.path.as_str())
-                        .version(locked.version.to_string()),
-                );
-            } else {
-                emit_compile_log(
-                    CompileLogRecord::new("vo-engine", "dependency_fetch_start")
-                        .module(locked.path.as_str())
-                        .version(locked.version.to_string()),
-                );
-            }
-            (
-                locked.path.to_string(),
-                locked.version.to_string(),
-                fully_cached,
-            )
-        })
-        .collect::<Vec<_>>();
-    vo_module::cache::install::populate_locked_cache(mod_cache, lock_file, &registry).map_err(|e| {
+    vo_module::lifecycle::download_locked_dependencies(mod_cache, lock_file, &registry).map_err(|e| {
         ModuleSystemError::new(
             ModuleSystemStage::DependencyDownload,
             ModuleSystemErrorKind::DownloadFailed,
@@ -489,12 +566,13 @@ fn auto_download_locked_modules(root: &Path, mod_cache: &Path) -> Result<(), Com
         )
         .with_path(mod_cache)
     })?;
-    for (module, version, fully_cached) in module_cache_state {
-        if !fully_cached {
+
+    for dependency in dependency_state {
+        if !dependency.cached {
             emit_compile_log(
                 CompileLogRecord::new("vo-engine", "dependency_fetch_done")
-                    .module(module)
-                    .version(version),
+                    .module(dependency.module)
+                    .version(dependency.version),
             );
         }
     }

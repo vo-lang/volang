@@ -77,8 +77,7 @@ fn init_project_impl(dir: &str, mod_name: &str) -> Result<String, String> {
 
     let mod_file = dir_path.join("vo.mod");
     if !mod_file.exists() {
-        fs::write(&mod_file, format!("module {}\n\nvo 0.1\n", mod_name))
-            .map_err(|e| e.to_string())?;
+        vo_module::ops::mod_init(dir_path, mod_name, "0.1").map_err(|e| e.to_string())?;
         created.push("vo.mod");
     }
 

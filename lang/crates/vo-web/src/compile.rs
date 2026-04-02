@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use vo_common::vfs::{FileSet, FileSystem, MemoryFs};
-use vo_module::project::{ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage};
+use vo_analysis::vfs::{analyze_file_set_with_current_module, project_package_resolver_with_replaces};
+use vo_common::vfs::{FileSet, MemoryFs};
+use vo_module::project::ProjectDepsError;
 
 use crate::js_types::CompileResult;
 use crate::wasm_vfs::WasmVfs;
@@ -105,34 +106,32 @@ pub enum ModuleSource {
 enum WebCompileStage {
     Policy,
     FileSet,
-    Workspace,
-    ModFile,
-    LockFile,
     Analysis,
     Codegen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WebCompileErrorKind {
-    Missing,
     ReadFailed,
-    ParseFailed,
     ValidationFailed,
     AnalysisFailed,
     CodegenFailed,
 }
 
 #[derive(Debug, Clone)]
-struct WebCompileError {
-    stage: WebCompileStage,
-    kind: WebCompileErrorKind,
-    path: Option<PathBuf>,
-    detail: String,
+enum WebCompileError {
+    Project(ProjectDepsError),
+    Stage {
+        stage: WebCompileStage,
+        kind: WebCompileErrorKind,
+        path: Option<PathBuf>,
+        detail: String,
+    },
 }
 
 impl WebCompileError {
     fn new(stage: WebCompileStage, kind: WebCompileErrorKind, detail: impl Into<String>) -> Self {
-        Self {
+        Self::Stage {
             stage,
             kind,
             path: None,
@@ -141,14 +140,30 @@ impl WebCompileError {
     }
 
     fn with_path(mut self, path: &Path) -> Self {
-        self.path = Some(path.to_path_buf());
+        if let Self::Stage { path: path_slot, .. } = &mut self {
+            *path_slot = Some(path.to_path_buf());
+        }
         self
+    }
+
+    fn observe(&self) {
+        match self {
+            Self::Project(error) => {
+                let _ = (error.stage, error.kind, error.path.as_ref());
+            }
+            Self::Stage { stage, kind, path, .. } => {
+                let _ = (*stage, *kind, path.as_ref());
+            }
+        }
     }
 }
 
 impl std::fmt::Display for WebCompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.detail)
+        match self {
+            Self::Project(error) => write!(f, "{}", error),
+            Self::Stage { detail, .. } => write!(f, "{}", detail),
+        }
     }
 }
 
@@ -156,34 +171,7 @@ impl std::error::Error for WebCompileError {}
 
 impl From<ProjectDepsError> for WebCompileError {
     fn from(error: ProjectDepsError) -> Self {
-        let stage = match error.stage {
-            ProjectDepsStage::Workspace => WebCompileStage::Workspace,
-            ProjectDepsStage::ModFile => WebCompileStage::ModFile,
-            ProjectDepsStage::LockFile => WebCompileStage::LockFile,
-        };
-        let kind = match error.kind {
-            ProjectDepsErrorKind::Missing => WebCompileErrorKind::Missing,
-            ProjectDepsErrorKind::ReadFailed => WebCompileErrorKind::ReadFailed,
-            ProjectDepsErrorKind::ParseFailed => WebCompileErrorKind::ParseFailed,
-            ProjectDepsErrorKind::ValidationFailed => WebCompileErrorKind::ValidationFailed,
-        };
-        let mut mapped = Self::new(stage, kind, error.detail);
-        if let Some(path) = error.path.as_ref() {
-            mapped = mapped.with_path(path);
-        }
-        mapped
-    }
-}
-
-fn build_project_mod_source<F: FileSystem>(
-    mod_fs: F,
-    project_deps: &vo_module::project::ProjectDeps,
-) -> vo_analysis::vfs::ModSource<F> {
-    if project_deps.has_mod_file() {
-        vo_analysis::vfs::ModSource::with_fs(mod_fs)
-            .with_allowed_modules(project_deps.allowed_modules().to_vec())
-    } else {
-        vo_analysis::vfs::ModSource::with_fs(mod_fs)
+        Self::Project(error)
     }
 }
 
@@ -218,23 +206,20 @@ fn prepare_compile_input(source: CompileSource) -> Result<PreparedCompileInput, 
     }
 }
 
-fn configure_workspace_replaces<R>(
-    resolver: R,
-    local_fs: &MemoryFs,
-    workspace_replaces: &HashMap<String, PathBuf>,
-) -> vo_analysis::vfs::ReplacingResolver<R, MemoryFs> {
-    vo_analysis::vfs::ReplacingResolver::with_fs(
-        resolver,
-        local_fs.clone(),
-        workspace_replaces.clone(),
-    )
-}
-
-fn compile_file_set_with_resolver<R: vo_analysis::vfs::Resolver>(
-    file_set: FileSet,
-    resolver: &R,
+fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
+    input: PreparedCompileInput,
+    package_resolver: R,
 ) -> Result<Vec<u8>, WebCompileError> {
-    let project = vo_analysis::analyze_project(file_set, resolver).map_err(|error| {
+    let current_module = input.project_deps.current_module().map(str::to_string);
+    let local_fs = input.local_fs;
+    let project = analyze_file_set_with_current_module(
+        input.file_set,
+        package_resolver,
+        local_fs,
+        input.project_root,
+        current_module,
+    )
+    .map_err(|error| {
         WebCompileError::new(
             WebCompileStage::Analysis,
             WebCompileErrorKind::AnalysisFailed,
@@ -251,21 +236,6 @@ fn compile_file_set_with_resolver<R: vo_analysis::vfs::Resolver>(
     Ok(module.serialize())
 }
 
-fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
-    input: PreparedCompileInput,
-    package_resolver: R,
-) -> Result<Vec<u8>, WebCompileError> {
-    let current_module = input.project_deps.current_module().map(str::to_string);
-    let local_fs = input.local_fs;
-    let resolver = vo_analysis::vfs::CurrentModuleResolver::with_root(
-        configure_workspace_replaces(package_resolver, &local_fs, &input.workspace_replaces),
-        local_fs,
-        input.project_root,
-        current_module,
-    );
-    compile_file_set_with_resolver(input.file_set, &resolver)
-}
-
 fn compile_web_typed(
     source: CompileSource,
     module_source: ModuleSource,
@@ -273,18 +243,23 @@ fn compile_web_typed(
     let input = prepare_compile_input(source)?;
     match module_source {
         ModuleSource::Fs { std_fs, mod_fs } => {
-            let package_resolver = vo_analysis::vfs::PackageResolver {
-                std: vo_analysis::vfs::StdSource::with_fs(std_fs),
-                r#mod: build_project_mod_source(mod_fs, &input.project_deps),
-            };
+            let package_resolver = project_package_resolver_with_replaces(
+                std_fs,
+                mod_fs,
+                input.local_fs.clone(),
+                &input.project_deps,
+                input.workspace_replaces.clone(),
+            );
             compile_with_package_resolver(input, package_resolver)
         }
         ModuleSource::Vfs { vfs_mod_root } => {
-            let package_resolver = vo_analysis::vfs::PackageResolverMixed {
-                std: vo_analysis::vfs::StdSource::with_fs(build_stdlib_fs()),
-                r#mod: vo_analysis::vfs::ModSource::with_fs(WasmVfs::new(&vfs_mod_root))
-                    .with_project_deps(&input.project_deps),
-            };
+            let package_resolver = project_package_resolver_with_replaces(
+                build_stdlib_fs(),
+                WasmVfs::new(&vfs_mod_root),
+                input.local_fs.clone(),
+                &input.project_deps,
+                input.workspace_replaces.clone(),
+            );
             compile_with_package_resolver(input, package_resolver)
         }
     }
@@ -298,7 +273,7 @@ pub fn compile_web(
 }
 
 fn stringify_web_compile_error(error: WebCompileError) -> String {
-    let _ = (error.stage, error.kind, error.path.as_ref());
+    error.observe();
     error.to_string()
 }
 

@@ -3,6 +3,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 
+use vo_module::project;
 use vo_module::schema::workfile::WorkFile;
 
 #[derive(Debug, Clone)]
@@ -88,19 +89,21 @@ fn canonicalize_absolute_input(path: &Path) -> Result<PathBuf, String> {
 }
 
 pub fn find_project_root(path: &Path) -> Option<PathBuf> {
-    let mut current = if path.is_dir() {
+    let current = if path.is_dir() {
         path.to_path_buf()
     } else {
         path.parent()?.to_path_buf()
     };
+    project::find_project_root(&current)
+}
 
-    loop {
-        if current.join("vo.mod").is_file() {
-            return Some(current);
-        }
-        if !current.pop() {
-            return None;
-        }
+pub fn is_module_root(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    match project::find_project_root(path) {
+        Some(root) => root == path,
+        None => false,
     }
 }
 
@@ -257,10 +260,7 @@ fn resolve_workspace_use_path(base: &Path, raw_path: &str) -> PathBuf {
 }
 
 fn try_read_workspace_root_module(source_root: &Path) -> Option<vo_module::identity::ModulePath> {
-    let mod_path = source_root.join("vo.mod");
-    let content = fs::read_to_string(mod_path).ok()?;
-    let mod_file = vo_module::schema::modfile::ModFile::parse(&content).ok()?;
-    Some(mod_file.module)
+    project::read_mod_file(source_root).ok().map(|mod_file| mod_file.module)
 }
 
 fn remove_existing_path(path: &Path) -> Result<(), String> {

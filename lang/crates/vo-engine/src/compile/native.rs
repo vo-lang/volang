@@ -55,10 +55,8 @@ fn installed_module_error_to_module_system(e: InstalledModuleError) -> ModuleSys
             (ModuleSystemErrorKind::ParseFailed, e.to_string())
         }
     };
-    let mut err = ModuleSystemError::new(ModuleSystemStage::CachedModule, kind, detail);
-    err.module_path = Some(e.module);
-    err.version = Some(e.version);
-    err
+    ModuleSystemError::new(ModuleSystemStage::CachedModule, kind, detail)
+        .with_module_version(e.module, e.version)
 }
 
 pub(super) fn prepare_native_extension_specs_for_frozen_build(
@@ -263,9 +261,9 @@ fn validate_locked_native_artifact_bytes(
     let rel_path = Path::new("artifacts").join(&artifact.id.name);
     vo_module::cache::validate::validate_installed_artifact(&fs, &rel_path, locked, artifact)
         .map_err(|e| {
-            let mut err = installed_module_error_to_module_system(e);
-            err.stage = ModuleSystemStage::NativeExtension;
-            err.with_path(&artifact_path)
+            installed_module_error_to_module_system(e)
+                .with_stage(ModuleSystemStage::NativeExtension)
+                .with_path(&artifact_path)
         })
 }
 

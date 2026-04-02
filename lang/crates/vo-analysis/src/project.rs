@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crate::vfs::{Resolver, VfsPackage};
+use crate::vfs::{find_module_identity_abs, Resolver, VfsPackage};
 use vo_common::diagnostics::{DiagnosticEmitter, DiagnosticSink};
 use vo_common::source::SourceMap;
 use vo_common::symbol::SymbolInterner;
@@ -420,46 +420,15 @@ fn parse_vfs_package(
 
 fn current_package_path_from_root(root: &Path) -> Option<String> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let mut current = Some(root.as_path());
-    while let Some(dir) = current {
-        if let Some(module_path) = read_module_path_from_disk(dir) {
-            if ModulePath::parse(&module_path).is_err() {
-                return None;
-            }
-            let sub_path = root
-                .strip_prefix(dir)
-                .ok()
-                .map(path_to_forward_slashes)
-                .unwrap_or_default();
-            return Some(if sub_path.is_empty() {
-                module_path
-            } else {
-                format!("{}/{}", module_path, sub_path)
-            });
-        }
-        current = dir.parent();
+    let (module_path, sub_path) = find_module_identity_abs(&root)?;
+    if ModulePath::parse(&module_path).is_err() {
+        return None;
     }
-    None
-}
-
-fn read_module_path_from_disk(dir: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(dir.join("vo.mod")).ok()?;
-    for line in content.lines() {
-        if let Some(rest) = line.trim().strip_prefix("module ") {
-            let module_path = rest.trim();
-            if !module_path.is_empty() {
-                return Some(module_path.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn path_to_forward_slashes(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
+    Some(if sub_path.is_empty() {
+        module_path
+    } else {
+        format!("{}/{}", module_path, sub_path)
+    })
 }
 
 fn declared_package_name(files: &[File], interner: &SymbolInterner) -> Option<String> {
