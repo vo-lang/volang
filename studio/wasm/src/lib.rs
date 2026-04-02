@@ -410,6 +410,7 @@ fn load_workspace_context_from_vfs(project_root: &str) -> Result<vo_module::proj
     let vfs = vo_web::WasmVfs::new("");
     let project_dir = Path::new(project_root.trim_start_matches('/'));
     vo_module::project::load_project_context(&vfs, project_dir)
+        .map_err(|e| e.to_string())
 }
 
 fn workspace_replace_vfs_roots(context: &vo_module::project::ProjectContext) -> Vec<String> {
