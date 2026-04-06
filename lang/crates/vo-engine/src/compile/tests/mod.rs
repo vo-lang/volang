@@ -14,7 +14,7 @@ use super::native::{
     current_target_triple, prepare_native_extension_specs_for_frozen_build,
     validate_locked_modules_installed,
 };
-use super::{CompileError, ModuleSystemError};
+use super::CompileError;
 
 mod cases;
 

@@ -203,6 +203,20 @@ struct RealPathCompileContext {
     workspace_replaces: HashMap<String, PathBuf>,
 }
 
+impl RealPathCompileContext {
+    fn into_pipeline_context(self) -> pipeline::ProjectCompileContext {
+        pipeline::ProjectCompileContext {
+            project_root: self.project_root,
+            mod_cache: self.mod_cache,
+            source_root: self.source_root,
+            package_dir: self.package_dir,
+            single_file: self.single_file,
+            project_deps: self.project_deps,
+            replaces: self.workspace_replaces,
+        }
+    }
+}
+
 fn relative_package_dir(project_root: &Path, source_root: &Path) -> PathBuf {
     match source_root.strip_prefix(project_root) {
         Ok(relative) if relative.as_os_str().is_empty() => PathBuf::from("."),
@@ -249,25 +263,9 @@ fn scoped_project_fs(project_root: &Path) -> ScopedFs<RealFs> {
 
 pub fn check(path: &str) -> Result<(), CompileError> {
     let p = Path::new(path);
-    let RealPathCompileContext {
-        source_root,
-        project_root,
-        mod_cache,
-        package_dir,
-        single_file,
-        project_deps,
-        workspace_replaces,
-    } = load_real_path_compile_context(p)?;
-    pipeline::check_with_project_context(
-        scoped_project_fs(&project_root),
-        project_root,
-        mod_cache,
-        source_root,
-        package_dir,
-        single_file,
-        project_deps,
-        workspace_replaces,
-    )
+    let context = load_real_path_compile_context(p)?;
+    let fs = scoped_project_fs(&context.project_root);
+    pipeline::check_with_project_context(fs, context.into_pipeline_context())
 }
 
 pub fn compile(path: &str) -> Result<CompileOutput, CompileError> {
@@ -281,25 +279,9 @@ pub fn compile(path: &str) -> Result<CompileOutput, CompileError> {
         return pipeline::compile_zip(Path::new(&zip_path), internal_root.as_deref());
     }
 
-    let RealPathCompileContext {
-        source_root,
-        project_root,
-        mod_cache,
-        package_dir,
-        single_file,
-        project_deps,
-        workspace_replaces,
-    } = load_real_path_compile_context(p)?;
-    pipeline::compile_with_project_context(
-        scoped_project_fs(&project_root),
-        project_root,
-        mod_cache,
-        source_root,
-        package_dir,
-        single_file,
-        project_deps,
-        workspace_replaces,
-    )
+    let context = load_real_path_compile_context(p)?;
+    let fs = scoped_project_fs(&context.project_root);
+    pipeline::compile_with_project_context(fs, context.into_pipeline_context())
 }
 
 pub fn compile_with_cache(path: &str) -> Result<CompileOutput, CompileError> {
@@ -308,42 +290,26 @@ pub fn compile_with_cache(path: &str) -> Result<CompileOutput, CompileError> {
     {
         return compile(path);
     }
-    let RealPathCompileContext {
-        source_root,
-        project_root,
-        mod_cache,
-        package_dir,
-        single_file,
-        project_deps,
-        workspace_replaces,
-    } = load_real_path_compile_context(entry_path)?;
+    let context = load_real_path_compile_context(entry_path)?;
     let cache_slot = cache::compile_cache_slot(
-        &source_root,
-        single_file.as_deref().and_then(Path::file_name),
+        &context.source_root,
+        context.single_file.as_deref().and_then(Path::file_name),
     );
     let fingerprint = cache::compute_compile_cache_fingerprint(
-        &source_root,
-        &project_root,
-        &mod_cache,
-        single_file.as_deref(),
-        &workspace_replaces,
+        &context.source_root,
+        &context.project_root,
+        &context.mod_cache,
+        context.single_file.as_deref(),
+        &context.workspace_replaces,
     )?;
 
-    if let Some(output) = cache::try_load_cache(&cache_slot, &source_root, &fingerprint) {
+    if let Some(output) = cache::try_load_cache(&cache_slot, &context.source_root, &fingerprint) {
         emit_compile_log(CompileLogRecord::new("vo-engine", "compile_cache_hit").path(path));
         return Ok(output);
     }
 
-    let output = pipeline::compile_with_project_context(
-        scoped_project_fs(&project_root),
-        project_root,
-        mod_cache,
-        source_root,
-        package_dir,
-        single_file,
-        project_deps,
-        workspace_replaces,
-    )?;
+    let fs = scoped_project_fs(&context.project_root);
+    let output = pipeline::compile_with_project_context(fs, context.into_pipeline_context())?;
 
     cache::save_compile_cache(&cache_slot, &fingerprint, &output);
     emit_compile_log(CompileLogRecord::new("vo-engine", "compile_cache_store").path(path));

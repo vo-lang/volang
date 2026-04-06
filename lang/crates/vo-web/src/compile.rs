@@ -68,7 +68,7 @@ fn build_single_file_set(fs: &MemoryFs, filename: &str) -> Result<FileSet, WebCo
     FileSet::from_file(fs, Path::new(filename), PathBuf::from(".")).map_err(|error| {
         WebCompileError::new(
             WebCompileStage::FileSet,
-            WebCompileErrorKind::ReadFailed,
+            WebCompileErrorKind::Read,
             format!("Failed to read file: {}", error),
         )
         .with_path(Path::new(filename))
@@ -79,7 +79,7 @@ fn build_entry_file_set(local_fs: &MemoryFs, entry: &str) -> Result<FileSet, Web
     FileSet::collect(local_fs, entry_package_dir(entry), PathBuf::from(".")).map_err(|error| {
         WebCompileError::new(
             WebCompileStage::FileSet,
-            WebCompileErrorKind::ReadFailed,
+            WebCompileErrorKind::Read,
             format!("Failed to collect package files: {}", error),
         )
         .with_path(entry_package_dir(entry))
@@ -114,10 +114,10 @@ enum WebCompileStage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WebCompileErrorKind {
-    ReadFailed,
-    ValidationFailed,
-    AnalysisFailed,
-    CodegenFailed,
+    Read,
+    Validation,
+    Analysis,
+    Codegen,
 }
 
 type WebCompileError = OperationError<WebCompileStage, WebCompileErrorKind>;
@@ -133,10 +133,10 @@ fn web_compile_error_from_project(error: ProjectDepsError) -> WebCompileError {
     fn project_kind(kind: ProjectDepsErrorKind) -> WebCompileErrorKind {
         match kind {
             ProjectDepsErrorKind::Missing | ProjectDepsErrorKind::ReadFailed => {
-                WebCompileErrorKind::ReadFailed
+                WebCompileErrorKind::Read
             }
             ProjectDepsErrorKind::ParseFailed | ProjectDepsErrorKind::ValidationFailed => {
-                WebCompileErrorKind::ValidationFailed
+                WebCompileErrorKind::Validation
             }
         }
     }
@@ -192,14 +192,14 @@ fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
     .map_err(|error| {
         WebCompileError::new(
             WebCompileStage::Analysis,
-            WebCompileErrorKind::AnalysisFailed,
+            WebCompileErrorKind::Analysis,
             format!("{}", error),
         )
     })?;
     let module = vo_codegen::compile_project(&project).map_err(|error| {
         WebCompileError::new(
             WebCompileStage::Codegen,
-            WebCompileErrorKind::CodegenFailed,
+            WebCompileErrorKind::Codegen,
             format!("{}", error),
         )
     })?;
@@ -285,7 +285,7 @@ fn reject_single_file_external_imports_typed(source: &str) -> Result<(), WebComp
         if is_external_import_path(import_path) {
             return Err(WebCompileError::new(
                 WebCompileStage::Policy,
-                WebCompileErrorKind::ValidationFailed,
+                WebCompileErrorKind::Validation,
                 format!(
                     "external import \"{}\" requires a project with vo.mod and vo.lock; single-file web compilation no longer resolves third-party modules",
                     import_path,

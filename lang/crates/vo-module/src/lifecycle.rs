@@ -76,8 +76,12 @@ impl ModuleSelectionPlanner {
         }
         Ok(())
     }
+}
 
-    pub fn next(&mut self) -> Option<ModuleSelection> {
+impl Iterator for ModuleSelectionPlanner {
+    type Item = ModuleSelection;
+
+    fn next(&mut self) -> Option<Self::Item> {
         while let Some(selection) = self.stack.pop() {
             if self.visited.insert(selection.spec()) {
                 return Some(selection);
@@ -318,7 +322,10 @@ where
     let mut planner = ModuleSelectionPlanner::new(initial)?;
     let mut resolved = Vec::new();
 
-    while let Some(selection) = planner.next() {
+    loop {
+        let Some(selection) = planner.next() else {
+            break;
+        };
         let deps = dependencies_of(&selection)?;
         planner.push_all(deps)?;
         resolved.push(selection);

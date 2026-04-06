@@ -9,118 +9,128 @@ use crate::schema::lockfile::{LockFile, LockRoot, LockedModule};
 use crate::schema::modfile::{ModFile, Require};
 use crate::Error;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum ProjectDeps {
+    #[default]
     NoModule,
-    WithModule {
-        current_module: String,
-        mod_file_path: PathBuf,
-        mod_file: ModFile,
-        lock_state: LockState,
-    },
+    WithModule(Box<ProjectModuleContext>),
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectModuleContext {
+    pub current_module: String,
+    pub mod_file_path: PathBuf,
+    pub mod_file: ModFile,
+    pub lock_state: LockState,
 }
 
 #[derive(Debug, Clone)]
 pub enum LockState {
     NoLock,
-    Locked {
-        lock_file_path: PathBuf,
-        lock_file: LockFile,
-        allowed_modules: Vec<String>,
-        locked_modules: Vec<LockedModule>,
-    },
+    Locked(Box<LockedProjectContext>),
 }
 
-impl Default for ProjectDeps {
-    fn default() -> Self {
-        ProjectDeps::NoModule
-    }
+#[derive(Debug, Clone)]
+pub struct LockedProjectContext {
+    pub lock_file_path: PathBuf,
+    pub lock_file: LockFile,
+    pub allowed_modules: Vec<String>,
+    pub locked_modules: Vec<LockedModule>,
 }
 
 impl ProjectDeps {
-    pub fn has_mod_file(&self) -> bool {
-        matches!(self, ProjectDeps::WithModule { .. })
-    }
-
-    pub fn current_module(&self) -> Option<&str> {
+    fn module_context(&self) -> Option<&ProjectModuleContext> {
         match self {
             ProjectDeps::NoModule => None,
-            ProjectDeps::WithModule { current_module, .. } => Some(current_module),
+            ProjectDeps::WithModule(context) => Some(context.as_ref()),
         }
     }
 
+    pub fn has_mod_file(&self) -> bool {
+        self.module_context().is_some()
+    }
+
+    pub fn current_module(&self) -> Option<&str> {
+        self.module_context()
+            .map(|context| context.current_module.as_str())
+    }
+
     pub fn allowed_modules(&self) -> &[String] {
-        match self {
-            ProjectDeps::NoModule => &[],
-            ProjectDeps::WithModule {
-                lock_state:
-                    LockState::Locked {
-                        allowed_modules, ..
-                    },
-                ..
-            } => allowed_modules,
-            ProjectDeps::WithModule {
-                lock_state: LockState::NoLock,
-                ..
-            } => &[],
+        match self.module_context() {
+            Some(context) => context.lock_state.allowed_modules(),
+            None => &[],
         }
     }
 
     pub fn locked_modules(&self) -> &[LockedModule] {
-        match self {
-            ProjectDeps::NoModule => &[],
-            ProjectDeps::WithModule {
-                lock_state: LockState::Locked { locked_modules, .. },
-                ..
-            } => locked_modules,
-            ProjectDeps::WithModule {
-                lock_state: LockState::NoLock,
-                ..
-            } => &[],
+        match self.module_context() {
+            Some(context) => context.lock_state.locked_modules(),
+            None => &[],
         }
     }
 
     pub fn mod_file(&self) -> Option<&ModFile> {
-        match self {
-            ProjectDeps::NoModule => None,
-            ProjectDeps::WithModule { mod_file, .. } => Some(mod_file),
-        }
+        self.module_context().map(|context| &context.mod_file)
     }
 
     pub fn mod_file_path(&self) -> Option<&Path> {
-        match self {
-            ProjectDeps::NoModule => None,
-            ProjectDeps::WithModule { mod_file_path, .. } => Some(mod_file_path),
-        }
+        self.module_context()
+            .map(|context| context.mod_file_path.as_path())
     }
 
     pub fn lock_file(&self) -> Option<&LockFile> {
-        match self {
-            ProjectDeps::WithModule {
-                lock_state: LockState::Locked { lock_file, .. },
-                ..
-            } => Some(lock_file),
-            _ => None,
-        }
+        self.module_context()
+            .and_then(|context| context.lock_state.lock_file())
     }
 
     pub fn lock_file_path(&self) -> Option<&Path> {
-        match self {
-            ProjectDeps::WithModule {
-                lock_state: LockState::Locked { lock_file_path, .. },
-                ..
-            } => Some(lock_file_path),
-            _ => None,
-        }
+        self.module_context()
+            .and_then(|context| context.lock_state.lock_file_path())
     }
 
     pub fn into_locked_modules(self) -> Vec<LockedModule> {
         match self {
-            ProjectDeps::WithModule {
-                lock_state: LockState::Locked { locked_modules, .. },
-                ..
-            } => locked_modules,
-            _ => Vec::new(),
+            ProjectDeps::NoModule => Vec::new(),
+            ProjectDeps::WithModule(context) => context.lock_state.into_locked_modules(),
+        }
+    }
+}
+
+impl LockState {
+    fn locked_context(&self) -> Option<&LockedProjectContext> {
+        match self {
+            LockState::NoLock => None,
+            LockState::Locked(context) => Some(context.as_ref()),
+        }
+    }
+
+    pub fn allowed_modules(&self) -> &[String] {
+        match self.locked_context() {
+            Some(context) => &context.allowed_modules,
+            None => &[],
+        }
+    }
+
+    pub fn locked_modules(&self) -> &[LockedModule] {
+        match self.locked_context() {
+            Some(context) => &context.locked_modules,
+            None => &[],
+        }
+    }
+
+    pub fn lock_file(&self) -> Option<&LockFile> {
+        self.locked_context().map(|context| &context.lock_file)
+    }
+
+    pub fn lock_file_path(&self) -> Option<&Path> {
+        self.locked_context()
+            .map(|context| context.lock_file_path.as_path())
+    }
+
+    pub fn into_locked_modules(self) -> Vec<LockedModule> {
+        match self {
+            LockState::NoLock => Vec::new(),
+            LockState::Locked(context) => context.locked_modules,
         }
     }
 }
@@ -389,17 +399,17 @@ fn read_project_deps_from_mod_file<F: FileSystem>(
             locked_modules.push(locked.clone());
         }
 
-        return Ok(ProjectDeps::WithModule {
+        return Ok(ProjectDeps::WithModule(Box::new(ProjectModuleContext {
             current_module,
             mod_file_path: mod_candidate.to_path_buf(),
             mod_file,
-            lock_state: LockState::Locked {
+            lock_state: LockState::Locked(Box::new(LockedProjectContext {
                 lock_file_path: lock_candidate.clone(),
                 lock_file,
                 allowed_modules,
                 locked_modules,
-            },
-        });
+            })),
+        })));
     }
 
     if has_unexcluded_external {
@@ -414,12 +424,12 @@ fn read_project_deps_from_mod_file<F: FileSystem>(
         return Err(error);
     }
 
-    Ok(ProjectDeps::WithModule {
+    Ok(ProjectDeps::WithModule(Box::new(ProjectModuleContext {
         current_module,
         mod_file_path: mod_candidate.to_path_buf(),
         mod_file,
         lock_state: LockState::NoLock,
-    })
+    })))
 }
 
 fn read_optional_file<F: FileSystem>(

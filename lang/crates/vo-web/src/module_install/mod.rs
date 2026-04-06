@@ -236,7 +236,10 @@ async fn ensure_vfs_versioned_module_closure(
         )
     })?;
 
-    while let Some(selection) = planner.next() {
+    loop {
+        let Some(selection) = Iterator::next(&mut planner) else {
+            break;
+        };
         let module = selection.module.as_str().to_string();
         let version = selection.version.to_string();
 
@@ -513,7 +516,10 @@ fn collect_vfs_locked_module_closure_typed(
     })?;
     let mut resolved = Vec::new();
 
-    while let Some(selection) = planner.next() {
+    loop {
+        let Some(selection) = Iterator::next(&mut planner) else {
+            break;
+        };
         let module = selection.module.as_str().to_string();
         let version = selection.version.to_string();
         let locked = read_locked_module_from_vfs(&module, &version)?;
