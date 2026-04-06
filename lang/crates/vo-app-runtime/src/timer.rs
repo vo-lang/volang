@@ -89,7 +89,13 @@ impl NativeTimerProvider {
 impl vo_ext::host::timer::TimerProvider for NativeTimerProvider {
     fn start_timeout(&self, id: i32, ms: i32) {
         let control = Arc::new(TimerControl::new());
-        if let Some(existing) = self.inner.timeouts.lock().unwrap().insert(id, Arc::clone(&control)) {
+        if let Some(existing) = self
+            .inner
+            .timeouts
+            .lock()
+            .unwrap()
+            .insert(id, Arc::clone(&control))
+        {
             existing.request_stop();
         }
         let inner = self.weak_inner();
@@ -116,7 +122,13 @@ impl vo_ext::host::timer::TimerProvider for NativeTimerProvider {
 
     fn start_interval(&self, id: i32, ms: i32) {
         let control = Arc::new(TimerControl::new());
-        if let Some(existing) = self.inner.intervals.lock().unwrap().insert(id, Arc::clone(&control)) {
+        if let Some(existing) = self
+            .inner
+            .intervals
+            .lock()
+            .unwrap()
+            .insert(id, Arc::clone(&control))
+        {
             existing.request_stop();
         }
         let inner = self.weak_inner();

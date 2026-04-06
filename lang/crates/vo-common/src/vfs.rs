@@ -723,14 +723,17 @@ mod tests {
     #[test]
     fn test_scoped_fs_reads_relative_to_scope_root() {
         let fs = MemoryFs::new()
-            .with_file("workspace/voplay/vo.mod", "module github.com/vo-lang/voplay\n\nvo 0.1\n")
+            .with_file(
+                "workspace/voplay/vo.mod",
+                "module github.com/vo-lang/voplay\n\nvo 0.1\n",
+            )
             .with_file("workspace/voplay/codec/codec.vo", "package codec\n");
         let scoped = ScopedFs::new(fs, "workspace/app/../voplay");
 
         let mod_file = scoped.read_file(Path::new("vo.mod")).unwrap();
         assert!(mod_file.contains("module github.com/vo-lang/voplay"));
 
-        let entries = scoped.read_dir(Path::new(".")) .unwrap();
+        let entries = scoped.read_dir(Path::new(".")).unwrap();
         assert!(entries.contains(&PathBuf::from("vo.mod")));
         assert!(entries.contains(&PathBuf::from("codec")));
 

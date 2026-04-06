@@ -48,7 +48,8 @@ pub fn mod_add(
     let dep_constraint = match constraint {
         Some(c) => DepConstraint::parse(c)?,
         None => {
-            let latest = lifecycle::latest_supported_requirement_version(&mf.vo, &dep_mp, registry)?;
+            let latest =
+                lifecycle::latest_supported_requirement_version(&mf.vo, &dep_mp, registry)?;
             // Write ^MAJOR.MINOR.PATCH
             DepConstraint {
                 op: crate::version::ConstraintOp::Compatible,
@@ -67,7 +68,8 @@ pub fn mod_add(
         });
     }
 
-    let lock_file = lifecycle::prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
+    let lock_file =
+        lifecycle::prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
     write_mod_file(project_dir, &mf)?;
     write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
     ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;
@@ -126,7 +128,8 @@ pub fn mod_sync(
     created_by: &str,
 ) -> Result<(), Error> {
     let mf = read_mod_file(project_dir)?;
-    let lock_file = lifecycle::prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
+    let lock_file =
+        lifecycle::prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
     write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
     ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;
     Ok(())
@@ -182,7 +185,8 @@ pub fn mod_remove(
         )));
     }
 
-    let lock_file = lifecycle::prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
+    let lock_file =
+        lifecycle::prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
     write_mod_file(project_dir, &mf)?;
     write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
     ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;
@@ -253,7 +257,8 @@ pub fn mod_tidy(
         });
     }
 
-    let lock_file = lifecycle::prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
+    let lock_file =
+        lifecycle::prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
     write_mod_file(project_dir, &mf)?;
     write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
     ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;

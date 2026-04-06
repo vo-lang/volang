@@ -13,10 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
+      - uses: ./.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2
 
@@ -38,9 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      - uses: ./.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2
 
@@ -72,7 +67,7 @@ jobs:
           repository: vo-lang/${{ matrix.repo }}
           path: module
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./volang/.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2
         with:

@@ -9,7 +9,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use vo_analysis::vfs::{analyze_file_set_with_current_module, project_package_resolver_with_replaces};
+use vo_analysis::vfs::{
+    analyze_file_set_with_current_module, project_package_resolver_with_layout_and_replaces,
+    project_package_resolver_with_replaces, ProjectModLayout,
+};
 use vo_common::vfs::{FileSet, MemoryFs};
 use vo_module::operation_error::OperationError;
 use vo_module::project::{ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage};
@@ -62,27 +65,25 @@ fn build_single_file_fs(source: &str, filename: &str) -> MemoryFs {
 }
 
 fn build_single_file_set(fs: &MemoryFs, filename: &str) -> Result<FileSet, WebCompileError> {
-    FileSet::from_file(fs, Path::new(filename), PathBuf::from("."))
-        .map_err(|error| {
-            WebCompileError::new(
-                WebCompileStage::FileSet,
-                WebCompileErrorKind::ReadFailed,
-                format!("Failed to read file: {}", error),
-            )
-            .with_path(Path::new(filename))
-        })
+    FileSet::from_file(fs, Path::new(filename), PathBuf::from(".")).map_err(|error| {
+        WebCompileError::new(
+            WebCompileStage::FileSet,
+            WebCompileErrorKind::ReadFailed,
+            format!("Failed to read file: {}", error),
+        )
+        .with_path(Path::new(filename))
+    })
 }
 
 fn build_entry_file_set(local_fs: &MemoryFs, entry: &str) -> Result<FileSet, WebCompileError> {
-    FileSet::collect(local_fs, entry_package_dir(entry), PathBuf::from("."))
-        .map_err(|error| {
-            WebCompileError::new(
-                WebCompileStage::FileSet,
-                WebCompileErrorKind::ReadFailed,
-                format!("Failed to collect package files: {}", error),
-            )
-            .with_path(entry_package_dir(entry))
-        })
+    FileSet::collect(local_fs, entry_package_dir(entry), PathBuf::from(".")).map_err(|error| {
+        WebCompileError::new(
+            WebCompileStage::FileSet,
+            WebCompileErrorKind::ReadFailed,
+            format!("Failed to collect package files: {}", error),
+        )
+        .with_path(entry_package_dir(entry))
+    })
 }
 
 struct PreparedCompileInput {
@@ -124,13 +125,19 @@ type WebCompileError = OperationError<WebCompileStage, WebCompileErrorKind>;
 fn web_compile_error_from_project(error: ProjectDepsError) -> WebCompileError {
     fn project_stage(stage: ProjectDepsStage) -> WebCompileStage {
         match stage {
-            ProjectDepsStage::Workspace | ProjectDepsStage::ModFile | ProjectDepsStage::LockFile => WebCompileStage::Policy,
+            ProjectDepsStage::Workspace
+            | ProjectDepsStage::ModFile
+            | ProjectDepsStage::LockFile => WebCompileStage::Policy,
         }
     }
     fn project_kind(kind: ProjectDepsErrorKind) -> WebCompileErrorKind {
         match kind {
-            ProjectDepsErrorKind::Missing | ProjectDepsErrorKind::ReadFailed => WebCompileErrorKind::ReadFailed,
-            ProjectDepsErrorKind::ParseFailed | ProjectDepsErrorKind::ValidationFailed => WebCompileErrorKind::ValidationFailed,
+            ProjectDepsErrorKind::Missing | ProjectDepsErrorKind::ReadFailed => {
+                WebCompileErrorKind::ReadFailed
+            }
+            ProjectDepsErrorKind::ParseFailed | ProjectDepsErrorKind::ValidationFailed => {
+                WebCompileErrorKind::ValidationFailed
+            }
         }
     }
     WebCompileError::from_other(error, project_stage, project_kind)
@@ -142,8 +149,9 @@ fn prepare_compile_input(source: CompileSource) -> Result<PreparedCompileInput, 
             reject_single_file_external_imports_typed(&source)?;
             let local_fs = build_single_file_fs(&source, &filename);
             let file_set = build_single_file_set(&local_fs, &filename)?;
-            let context = vo_module::project::load_project_context(&local_fs, entry_package_dir(&filename))
-                .map_err(web_compile_error_from_project)?;
+            let context =
+                vo_module::project::load_project_context(&local_fs, entry_package_dir(&filename))
+                    .map_err(web_compile_error_from_project)?;
             Ok(PreparedCompileInput {
                 local_fs,
                 file_set,
@@ -154,8 +162,9 @@ fn prepare_compile_input(source: CompileSource) -> Result<PreparedCompileInput, 
         }
         CompileSource::Entry { entry, local_fs } => {
             let file_set = build_entry_file_set(&local_fs, &entry)?;
-            let context = vo_module::project::load_project_context(&local_fs, entry_package_dir(&entry))
-                .map_err(web_compile_error_from_project)?;
+            let context =
+                vo_module::project::load_project_context(&local_fs, entry_package_dir(&entry))
+                    .map_err(web_compile_error_from_project)?;
             Ok(PreparedCompileInput {
                 local_fs,
                 file_set,
@@ -204,12 +213,13 @@ fn compile_web_typed(
     let input = prepare_compile_input(source)?;
     match module_source {
         ModuleSource::Fs { std_fs, mod_fs } => {
-            let package_resolver = project_package_resolver_with_replaces(
+            let package_resolver = project_package_resolver_with_layout_and_replaces(
                 std_fs,
                 mod_fs,
                 input.local_fs.clone(),
                 &input.project_deps,
                 input.workspace_replaces.clone(),
+                ProjectModLayout::ImportPaths,
             );
             compile_with_package_resolver(input, package_resolver)
         }
@@ -226,10 +236,7 @@ fn compile_web_typed(
     }
 }
 
-pub fn compile_web(
-    source: CompileSource,
-    module_source: ModuleSource,
-) -> Result<Vec<u8>, String> {
+pub fn compile_web(source: CompileSource, module_source: ModuleSource) -> Result<Vec<u8>, String> {
     compile_web_typed(source, module_source).map_err(stringify_web_compile_error)
 }
 

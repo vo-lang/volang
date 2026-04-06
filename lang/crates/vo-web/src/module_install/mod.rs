@@ -83,7 +83,9 @@ pub(super) fn stringify_module_install_error(error: ModuleInstallError) -> Strin
 // ── Install a single module by spec ─────────────────────────────────────────
 
 pub async fn install_module_to_vfs(spec: &str) -> Result<String, String> {
-    install_module_to_vfs_typed(spec).await.map_err(stringify_module_install_error)
+    install_module_to_vfs_typed(spec)
+        .await
+        .map_err(stringify_module_install_error)
 }
 
 async fn install_module_to_vfs_typed(spec: &str) -> ModuleInstallResult<String> {
@@ -120,7 +122,14 @@ async fn install_module_to_vfs_typed(spec: &str) -> ModuleInstallResult<String> 
             &version,
             &wasm_extension,
             false,
-            || fetch::fetch_wasm_binary_from_manifest(&module, &version, &manifest, &wasm_extension.wasm),
+            || {
+                fetch::fetch_wasm_binary_from_manifest(
+                    &module,
+                    &version,
+                    &manifest,
+                    &wasm_extension.wasm,
+                )
+            },
             |js_glue_name| {
                 let module = module.clone();
                 let version = version.clone();
@@ -185,15 +194,13 @@ async fn install_locked_module_to_vfs(locked: &LockedModule) -> ModuleInstallRes
 // ── Ensure locked modules are installed ─────────────────────────────────────
 
 async fn ensure_vfs_locked_modules(initial: Vec<LockedModule>) -> ModuleInstallResult<()> {
-    for locked in vo_module::lifecycle::normalize_locked_modules(initial)
-        .map_err(|error| {
-            ModuleInstallError::new(
-                ModuleInstallStage::Selection,
-                ModuleInstallErrorKind::ValidationFailed,
-                error.to_string(),
-            )
-        })?
-    {
+    for locked in vo_module::lifecycle::normalize_locked_modules(initial).map_err(|error| {
+        ModuleInstallError::new(
+            ModuleInstallStage::Selection,
+            ModuleInstallErrorKind::ValidationFailed,
+            error.to_string(),
+        )
+    })? {
         if validate_vfs_installed_module(&locked).is_ok() {
             load_locked_ext_from_vfs(&locked).await?;
         } else {
@@ -262,9 +269,13 @@ pub async fn ensure_vfs_deps(vo_mod_content: &str, vo_lock_content: &str) -> Res
         .map_err(stringify_module_install_error)
 }
 
-async fn ensure_vfs_deps_typed(vo_mod_content: &str, vo_lock_content: &str) -> ModuleInstallResult<()> {
-    let project_deps = vo_module::project::read_inline_project_deps(vo_mod_content, vo_lock_content, &[])
-        .map_err(module_install_error_from_project)?;
+async fn ensure_vfs_deps_typed(
+    vo_mod_content: &str,
+    vo_lock_content: &str,
+) -> ModuleInstallResult<()> {
+    let project_deps =
+        vo_module::project::read_inline_project_deps(vo_mod_content, vo_lock_content, &[])
+            .map_err(module_install_error_from_project)?;
     if !project_deps.has_mod_file() || project_deps.locked_modules().is_empty() {
         return Ok(());
     }
@@ -277,14 +288,16 @@ pub async fn ensure_vfs_deps_from_fs(local_fs: &MemoryFs, entry: &str) -> Result
         .map_err(stringify_module_install_error)
 }
 
-async fn ensure_vfs_deps_from_fs_typed(local_fs: &MemoryFs, entry: &str) -> ModuleInstallResult<()> {
+async fn ensure_vfs_deps_from_fs_typed(
+    local_fs: &MemoryFs,
+    entry: &str,
+) -> ModuleInstallResult<()> {
     let entry_dir = std::path::Path::new(entry)
         .parent()
         .unwrap_or(std::path::Path::new("."));
-    let project_deps =
-        vo_module::project::load_project_context(local_fs, entry_dir)
-            .map_err(module_install_error_from_project)?
-            .project_deps;
+    let project_deps = vo_module::project::load_project_context(local_fs, entry_dir)
+        .map_err(module_install_error_from_project)?
+        .project_deps;
     if !project_deps.has_mod_file() || project_deps.locked_modules().is_empty() {
         return Ok(());
     }
@@ -332,22 +345,23 @@ async fn fetch_latest_module_version_typed(module: &str) -> ModuleInstallResult<
             )
             .with_module(module)
         })?;
-        let tag = value["tag_name"]
-            .as_str()
-            .ok_or_else(|| {
-                ModuleInstallError::new(
-                    ModuleInstallStage::VersionResolve,
-                    ModuleInstallErrorKind::Missing,
-                    format!("no tag_name in GitHub latest release for {}", module),
-                )
-                .with_module(module)
-            })?;
+        let tag = value["tag_name"].as_str().ok_or_else(|| {
+            ModuleInstallError::new(
+                ModuleInstallStage::VersionResolve,
+                ModuleInstallErrorKind::Missing,
+                format!("no tag_name in GitHub latest release for {}", module),
+            )
+            .with_module(module)
+        })?;
         let version = vo_module::registry::version_from_tag(&module_path, tag)
             .ok_or_else(|| {
                 ModuleInstallError::new(
                     ModuleInstallStage::VersionResolve,
                     ModuleInstallErrorKind::ParseFailed,
-                    format!("invalid tag_name '{}' in GitHub latest release for {}", tag, module),
+                    format!(
+                        "invalid tag_name '{}' in GitHub latest release for {}",
+                        tag, module
+                    ),
                 )
                 .with_module(module)
             })?
@@ -386,17 +400,15 @@ async fn fetch_latest_module_version_typed(module: &str) -> ModuleInstallResult<
                 }
             }
         }
-        Err(
-            ModuleInstallError::new(
-                ModuleInstallStage::VersionResolve,
-                ModuleInstallErrorKind::Missing,
-                format!(
-                    "no release found for module {} (tag prefix '{}')",
-                    module, prefix
-                ),
-            )
-            .with_module(module),
+        Err(ModuleInstallError::new(
+            ModuleInstallStage::VersionResolve,
+            ModuleInstallErrorKind::Missing,
+            format!(
+                "no release found for module {} (tag prefix '{}')",
+                module, prefix
+            ),
         )
+        .with_module(module))
     }
 }
 
@@ -411,15 +423,14 @@ fn collect_installed_vfs_module_specs_typed(
 ) -> ModuleInstallResult<Vec<(String, String)>> {
     let mut installed = Vec::new();
     for module in modules {
-        let version = discover_vfs_installed_version(module)?
-            .ok_or_else(|| {
-                ModuleInstallError::new(
-                    ModuleInstallStage::Vfs,
-                    ModuleInstallErrorKind::Missing,
-                    format!("module {} is not installed in the VFS", module),
-                )
-                .with_module(module)
-            })?;
+        let version = discover_vfs_installed_version(module)?.ok_or_else(|| {
+            ModuleInstallError::new(
+                ModuleInstallStage::Vfs,
+                ModuleInstallErrorKind::Missing,
+                format!("module {} is not installed in the VFS", module),
+            )
+            .with_module(module)
+        })?;
         installed.push((module.clone(), version));
     }
     Ok(installed)
@@ -460,7 +471,10 @@ fn read_locked_module_from_vfs(module: &str, version: &str) -> ModuleInstallResu
         ModuleInstallError::new(
             ModuleInstallStage::Manifest,
             ModuleInstallErrorKind::ParseFailed,
-            format!("parse release manifest for {}@{}: {}", module, version, error),
+            format!(
+                "parse release manifest for {}@{}: {}",
+                module, version, error
+            ),
         )
         .with_module_version(module, version)
     })

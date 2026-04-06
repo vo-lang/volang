@@ -133,7 +133,10 @@ impl fmt::Display for Error {
                 existing,
                 requested,
             } => {
-                write!(f, "module {module} was selected at both {existing} and {requested}")
+                write!(
+                    f,
+                    "module {module} was selected at both {existing} and {requested}"
+                )
             }
             Self::DependencyToolchainMismatch {
                 module,

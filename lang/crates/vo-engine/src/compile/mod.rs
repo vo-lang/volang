@@ -304,7 +304,8 @@ pub fn compile(path: &str) -> Result<CompileOutput, CompileError> {
 
 pub fn compile_with_cache(path: &str) -> Result<CompileOutput, CompileError> {
     let entry_path = Path::new(path);
-    if path.ends_with(".voc") || path.ends_with(".vob") || pipeline::parse_zip_path(path).is_some() {
+    if path.ends_with(".voc") || path.ends_with(".vob") || pipeline::parse_zip_path(path).is_some()
+    {
         return compile(path);
     }
     let RealPathCompileContext {
@@ -414,14 +415,16 @@ fn auto_download_locked_modules(root: &Path, mod_cache: &Path) -> Result<(), Com
     }
 
     let registry = GitHubRegistry::new();
-    vo_module::lifecycle::download_locked_dependencies(mod_cache, lock_file, &registry).map_err(|e| {
-        ModuleSystemError::new(
-            ModuleSystemStage::DependencyDownload,
-            ModuleSystemErrorKind::DownloadFailed,
-            format!("failed to download dependencies: {}", e),
-        )
-        .with_path(mod_cache)
-    })?;
+    vo_module::lifecycle::download_locked_dependencies(mod_cache, lock_file, &registry).map_err(
+        |e| {
+            ModuleSystemError::new(
+                ModuleSystemStage::DependencyDownload,
+                ModuleSystemErrorKind::DownloadFailed,
+                format!("failed to download dependencies: {}", e),
+            )
+            .with_path(mod_cache)
+        },
+    )?;
 
     for dependency in dependency_state {
         if !dependency.cached {
@@ -448,9 +451,5 @@ pub fn prepare_native_extension_specs(
     locked_modules: &[LockedModule],
     mod_cache: &Path,
 ) -> Result<Vec<PreparedNativeExtension>, ModuleSystemError> {
-    native::prepare_native_extension_specs_for_frozen_build(
-        manifests,
-        locked_modules,
-        mod_cache,
-    )
+    native::prepare_native_extension_specs_for_frozen_build(manifests, locked_modules, mod_cache)
 }

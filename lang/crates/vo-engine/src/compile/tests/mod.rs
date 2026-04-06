@@ -11,7 +11,8 @@ use vo_module::version::{ExactVersion, ToolchainConstraint};
 
 use super::cache::compile_cache_slot;
 use super::native::{
-    current_target_triple, prepare_native_extension_specs_for_frozen_build, validate_locked_modules_installed,
+    current_target_triple, prepare_native_extension_specs_for_frozen_build,
+    validate_locked_modules_installed,
 };
 use super::{CompileError, ModuleSystemError};
 

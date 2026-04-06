@@ -33,8 +33,8 @@ impl VoVm {
     /// Does NOT run initialization — call `run` after setup.
     #[wasm_bindgen(constructor)]
     pub fn new(bytecode: &[u8]) -> Result<VoVm, JsValue> {
-        let vm = crate::vm::create_loaded_vm(bytecode, |_, _| {})
-            .map_err(|e| JsValue::from_str(&e))?;
+        let vm =
+            crate::vm::create_loaded_vm(bytecode, |_, _| {}).map_err(|e| JsValue::from_str(&e))?;
         Ok(VoVm { inner: vm })
     }
 
@@ -42,11 +42,9 @@ impl VoVm {
     /// `register_ext_bridges` must have been called before this.
     #[wasm_bindgen(js_name = "withExterns")]
     pub fn with_externs(bytecode: &[u8]) -> Result<VoVm, JsValue> {
-        let vm = crate::vm::create_loaded_vm(
-            bytecode,
-            crate::vm::ext_bridge::register_wasm_ext_bridges,
-        )
-        .map_err(|e| JsValue::from_str(&e))?;
+        let vm =
+            crate::vm::create_loaded_vm(bytecode, crate::vm::ext_bridge::register_wasm_ext_bridges)
+                .map_err(|e| JsValue::from_str(&e))?;
         Ok(VoVm { inner: vm })
     }
 

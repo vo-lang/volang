@@ -18,14 +18,12 @@ pub(super) const VFS_WASM_TARGET: &str = "wasm32-unknown-unknown";
 pub(super) fn read_vfs_text(path: &str) -> ModuleInstallResult<String> {
     let (data, err) = vo_web_runtime_wasm::vfs::read_file(path);
     if let Some(err) = err {
-        return Err(
-            ModuleInstallError::new(
-                ModuleInstallStage::Vfs,
-                ModuleInstallErrorKind::ReadFailed,
-                format!("read {}: {}", path, err),
-            )
-            .with_path(path),
-        );
+        return Err(ModuleInstallError::new(
+            ModuleInstallStage::Vfs,
+            ModuleInstallErrorKind::ReadFailed,
+            format!("read {}: {}", path, err),
+        )
+        .with_path(path));
     }
     String::from_utf8(data).map_err(|error| {
         ModuleInstallError::new(
@@ -40,14 +38,12 @@ pub(super) fn read_vfs_text(path: &str) -> ModuleInstallResult<String> {
 pub(super) fn read_vfs_bytes(path: &str) -> ModuleInstallResult<Vec<u8>> {
     let (data, err) = vo_web_runtime_wasm::vfs::read_file(path);
     if let Some(err) = err {
-        return Err(
-            ModuleInstallError::new(
-                ModuleInstallStage::Vfs,
-                ModuleInstallErrorKind::ReadFailed,
-                format!("read {}: {}", path, err),
-            )
-            .with_path(path),
-        );
+        return Err(ModuleInstallError::new(
+            ModuleInstallStage::Vfs,
+            ModuleInstallErrorKind::ReadFailed,
+            format!("read {}: {}", path, err),
+        )
+        .with_path(path));
     }
     Ok(data)
 }
@@ -57,14 +53,12 @@ fn ensure_vfs_parent_dir(path: &str) -> ModuleInstallResult<()> {
         let parent = parent.to_string_lossy();
         if parent != "/" && !parent.is_empty() {
             if let Some(error) = vo_web_runtime_wasm::vfs::mkdir_all(&parent, 0o755) {
-                return Err(
-                    ModuleInstallError::new(
-                        ModuleInstallStage::Vfs,
-                        ModuleInstallErrorKind::WriteFailed,
-                        format!("mkdir {}: {}", parent, error),
-                    )
-                    .with_path(&*parent),
-                );
+                return Err(ModuleInstallError::new(
+                    ModuleInstallStage::Vfs,
+                    ModuleInstallErrorKind::WriteFailed,
+                    format!("mkdir {}: {}", parent, error),
+                )
+                .with_path(&*parent));
             }
         }
     }
@@ -74,14 +68,12 @@ fn ensure_vfs_parent_dir(path: &str) -> ModuleInstallResult<()> {
 pub(super) fn write_vfs_bytes(path: &str, bytes: &[u8]) -> ModuleInstallResult<()> {
     ensure_vfs_parent_dir(path)?;
     if let Some(error) = vo_web_runtime_wasm::vfs::write_file(path, bytes, 0o644) {
-        return Err(
-            ModuleInstallError::new(
-                ModuleInstallStage::Vfs,
-                ModuleInstallErrorKind::WriteFailed,
-                format!("write {}: {}", path, error),
-            )
-            .with_path(path),
-        );
+        return Err(ModuleInstallError::new(
+            ModuleInstallStage::Vfs,
+            ModuleInstallErrorKind::WriteFailed,
+            format!("write {}: {}", path, error),
+        )
+        .with_path(path));
     }
     Ok(())
 }
@@ -205,12 +197,19 @@ pub(super) fn release_manifest_from_files(
         )
         .with_module_version(module, version)
     })?;
-    vo_module::registry::parse_requested_release_manifest_for_spec(module, version, &manifest_content)
+    vo_module::registry::parse_requested_release_manifest_for_spec(
+        module,
+        version,
+        &manifest_content,
+    )
     .map_err(|error| {
         ModuleInstallError::new(
             ModuleInstallStage::Manifest,
             ModuleInstallErrorKind::ParseFailed,
-            format!("vo.release.json parse error for {}@{}: {}", module, version, error),
+            format!(
+                "vo.release.json parse error for {}@{}: {}",
+                module, version, error
+            ),
         )
         .with_module_version(module, version)
     })
@@ -222,12 +221,19 @@ pub(super) fn read_release_manifest_from_vfs(
 ) -> ModuleInstallResult<ReleaseManifest> {
     let manifest_path = vfs_module_file_path(module, version, "vo.release.json");
     let manifest_content = read_vfs_text(&manifest_path)?;
-    vo_module::registry::parse_requested_release_manifest_for_spec(module, version, &manifest_content)
+    vo_module::registry::parse_requested_release_manifest_for_spec(
+        module,
+        version,
+        &manifest_content,
+    )
     .map_err(|error| {
         ModuleInstallError::new(
             ModuleInstallStage::Manifest,
             ModuleInstallErrorKind::ParseFailed,
-            format!("vo.release.json parse error for {}@{}: {}", module, version, error),
+            format!(
+                "vo.release.json parse error for {}@{}: {}",
+                module, version, error
+            ),
         )
         .with_module_version(module, version)
     })
@@ -244,14 +250,12 @@ pub(super) fn format_module_project_deps_error(
         (
             vo_module::project::ProjectDepsStage::LockFile,
             vo_module::project::ProjectDepsErrorKind::Missing,
-        ) => {
-            super::module_install_error_from_project(error)
-                .with_module_version(module, version)
-                .with_detail(format!(
-                    "module {}@{} requires external modules but vo.lock is missing",
-                    module, version
-                ))
-        }
+        ) => super::module_install_error_from_project(error)
+            .with_module_version(module, version)
+            .with_detail(format!(
+                "module {}@{} requires external modules but vo.lock is missing",
+                module, version
+            )),
         _ => {
             let detail = format!("{} for {}@{}", error, module, version);
             super::module_install_error_from_project(error)
@@ -268,23 +272,18 @@ pub(super) fn read_vfs_locked_selections(
     let vfs_root = vfs_module_dir(module, version);
     let fs = crate::wasm_vfs::WasmVfs::new(&vfs_root[1..]);
     if !fs.exists(Path::new("vo.mod")) {
-        return Err(
-            ModuleInstallError::new(
-                ModuleInstallStage::ModFile,
-                ModuleInstallErrorKind::Missing,
-                format!(
-                    "module {}@{} is missing cached vo.mod in the VFS",
-                    module, version
-                ),
-            )
-            .with_module_version(module, version),
-        );
+        return Err(ModuleInstallError::new(
+            ModuleInstallStage::ModFile,
+            ModuleInstallErrorKind::Missing,
+            format!(
+                "module {}@{} is missing cached vo.mod in the VFS",
+                module, version
+            ),
+        )
+        .with_module_version(module, version));
     }
-    let project_deps = vo_module::project::read_project_deps(
-        &fs,
-        &[],
-    )
-    .map_err(|error| format_module_project_deps_error(error, module, version))?;
+    let project_deps = vo_module::project::read_project_deps(&fs, &[])
+        .map_err(|error| format_module_project_deps_error(error, module, version))?;
     Ok(vo_module::lifecycle::locked_module_selections(
         project_deps.locked_modules(),
     ))

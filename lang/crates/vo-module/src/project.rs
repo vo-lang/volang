@@ -52,16 +52,31 @@ impl ProjectDeps {
     pub fn allowed_modules(&self) -> &[String] {
         match self {
             ProjectDeps::NoModule => &[],
-            ProjectDeps::WithModule { lock_state: LockState::Locked { allowed_modules, .. }, .. } => allowed_modules,
-            ProjectDeps::WithModule { lock_state: LockState::NoLock, .. } => &[],
+            ProjectDeps::WithModule {
+                lock_state:
+                    LockState::Locked {
+                        allowed_modules, ..
+                    },
+                ..
+            } => allowed_modules,
+            ProjectDeps::WithModule {
+                lock_state: LockState::NoLock,
+                ..
+            } => &[],
         }
     }
 
     pub fn locked_modules(&self) -> &[LockedModule] {
         match self {
             ProjectDeps::NoModule => &[],
-            ProjectDeps::WithModule { lock_state: LockState::Locked { locked_modules, .. }, .. } => locked_modules,
-            ProjectDeps::WithModule { lock_state: LockState::NoLock, .. } => &[],
+            ProjectDeps::WithModule {
+                lock_state: LockState::Locked { locked_modules, .. },
+                ..
+            } => locked_modules,
+            ProjectDeps::WithModule {
+                lock_state: LockState::NoLock,
+                ..
+            } => &[],
         }
     }
 
@@ -81,21 +96,30 @@ impl ProjectDeps {
 
     pub fn lock_file(&self) -> Option<&LockFile> {
         match self {
-            ProjectDeps::WithModule { lock_state: LockState::Locked { lock_file, .. }, .. } => Some(lock_file),
+            ProjectDeps::WithModule {
+                lock_state: LockState::Locked { lock_file, .. },
+                ..
+            } => Some(lock_file),
             _ => None,
         }
     }
 
     pub fn lock_file_path(&self) -> Option<&Path> {
         match self {
-            ProjectDeps::WithModule { lock_state: LockState::Locked { lock_file_path, .. }, .. } => Some(lock_file_path),
+            ProjectDeps::WithModule {
+                lock_state: LockState::Locked { lock_file_path, .. },
+                ..
+            } => Some(lock_file_path),
             _ => None,
         }
     }
 
     pub fn into_locked_modules(self) -> Vec<LockedModule> {
         match self {
-            ProjectDeps::WithModule { lock_state: LockState::Locked { locked_modules, .. }, .. } => locked_modules,
+            ProjectDeps::WithModule {
+                lock_state: LockState::Locked { locked_modules, .. },
+                ..
+            } => locked_modules,
             _ => Vec::new(),
         }
     }
@@ -204,14 +228,12 @@ pub fn read_project_deps_at_root_in<F: FileSystem>(
         dir.join("vo.mod")
     };
     let Some(mod_content) = read_optional_file(fs, &mod_path, ProjectDepsStage::ModFile)? else {
-        return Err(
-            ProjectDepsError::new(
-                ProjectDepsStage::ModFile,
-                ProjectDepsErrorKind::Missing,
-                "this operation requires vo.mod at the selected project root",
-            )
-            .with_path(&mod_path),
-        );
+        return Err(ProjectDepsError::new(
+            ProjectDepsStage::ModFile,
+            ProjectDepsErrorKind::Missing,
+            "this operation requires vo.mod at the selected project root",
+        )
+        .with_path(&mod_path));
     };
     let mod_file = ModFile::parse(&mod_content).map_err(|error| {
         ProjectDepsError::new(
@@ -280,7 +302,8 @@ fn read_project_deps_with_candidates<F: FileSystem>(
     excluded_modules: &[String],
 ) -> Result<ProjectDeps, ProjectDepsError> {
     for mod_candidate in mod_candidates {
-        let Some(mod_content) = read_optional_file(fs, mod_candidate, ProjectDepsStage::ModFile)? else {
+        let Some(mod_content) = read_optional_file(fs, mod_candidate, ProjectDepsStage::ModFile)?
+        else {
             continue;
         };
 
@@ -323,7 +346,9 @@ fn read_project_deps_from_mod_file<F: FileSystem>(
         .any(|req| !excluded_modules.contains(req.module.as_str()));
 
     for lock_candidate in lock_candidates {
-        let Some(lock_content) = read_optional_file(fs, lock_candidate, ProjectDepsStage::LockFile)? else {
+        let Some(lock_content) =
+            read_optional_file(fs, lock_candidate, ProjectDepsStage::LockFile)?
+        else {
             continue;
         };
 
@@ -405,14 +430,12 @@ fn read_optional_file<F: FileSystem>(
     match fs.read_file(path) {
         Ok(content) => Ok(Some(content)),
         Err(_) if !fs.exists(path) => Ok(None),
-        Err(error) => Err(
-            ProjectDepsError::new(
-                stage,
-                ProjectDepsErrorKind::ReadFailed,
-                format!("{} read error: {}", stage.as_str(), error),
-            )
-            .with_path(path),
-        ),
+        Err(error) => Err(ProjectDepsError::new(
+            stage,
+            ProjectDepsErrorKind::ReadFailed,
+            format!("{} read error: {}", stage.as_str(), error),
+        )
+        .with_path(path)),
     }
 }
 
@@ -464,14 +487,12 @@ fn read_mod_file_in<F: FileSystem>(
             .with_path(&mod_path)
         }),
         Err(_) if !fs.exists(&mod_path) => Ok(None),
-        Err(error) => Err(
-            ProjectDepsError::new(
-                ProjectDepsStage::ModFile,
-                ProjectDepsErrorKind::ReadFailed,
-                format!("vo.mod read error: {}", error),
-            )
-            .with_path(&mod_path),
-        ),
+        Err(error) => Err(ProjectDepsError::new(
+            ProjectDepsStage::ModFile,
+            ProjectDepsErrorKind::ReadFailed,
+            format!("vo.mod read error: {}", error),
+        )
+        .with_path(&mod_path)),
     }
 }
 
@@ -509,8 +530,7 @@ pub fn load_project_context<F: FileSystem>(
         ProjectDepsError::new(ProjectDepsStage::Workspace, kind, error.to_string())
     })?;
     let excluded_modules = workspace_replaces.keys().cloned().collect::<Vec<_>>();
-    let project_deps = read_project_deps_near(fs, &project_root, &excluded_modules)
-        ?;
+    let project_deps = read_project_deps_near(fs, &project_root, &excluded_modules)?;
     Ok(ProjectContext {
         project_root,
         project_deps,
@@ -627,11 +647,9 @@ artifacts = []
         assert_eq!(error.stage, ProjectDepsStage::LockFile);
         assert_eq!(error.kind, ProjectDepsErrorKind::Missing);
         assert_eq!(error.path.as_deref(), Some("vo.lock"));
-        assert!(
-            error
-                .detail
-                .contains("this build requires external modules but vo.lock is missing")
-        );
+        assert!(error
+            .detail
+            .contains("this build requires external modules but vo.lock is missing"));
     }
 
     #[test]
@@ -653,7 +671,10 @@ artifacts = []
         fs.add_file("vo.lock", lock_file_for_workspace_replace());
         let deps = read_project_deps(&fs, &["github.com/vo-lang/voplay".to_string()])
             .unwrap_or_else(|error| panic!("unexpected error: {error}"));
-        assert_eq!(deps.allowed_modules(), &["github.com/vo-lang/core".to_string()]);
+        assert_eq!(
+            deps.allowed_modules(),
+            &["github.com/vo-lang/core".to_string()]
+        );
         assert_eq!(deps.locked_modules().len(), 1);
         let locked: &LockedModule = &deps.locked_modules()[0];
         assert_eq!(locked.path.as_str(), "github.com/vo-lang/core");
@@ -699,9 +720,18 @@ artifacts = []
         let deps = read_project_deps_near(&fs, Path::new("workspace/app"), &[])
             .unwrap_or_else(|error| panic!("unexpected error: {error}"));
         assert_eq!(deps.current_module(), Some("github.com/workspace/app"));
-        assert_eq!(deps.allowed_modules(), &["github.com/vo-lang/local".to_string()]);
-        assert_eq!(deps.mod_file_path(), Some(Path::new("workspace/app/vo.mod")));
-        assert_eq!(deps.lock_file_path(), Some(Path::new("workspace/app/vo.lock")));
+        assert_eq!(
+            deps.allowed_modules(),
+            &["github.com/vo-lang/local".to_string()]
+        );
+        assert_eq!(
+            deps.mod_file_path(),
+            Some(Path::new("workspace/app/vo.mod"))
+        );
+        assert_eq!(
+            deps.lock_file_path(),
+            Some(Path::new("workspace/app/vo.lock"))
+        );
     }
 
     #[test]
@@ -717,16 +747,28 @@ artifacts = []
         .unwrap();
 
         let mod_file = ModFile::parse(&mod_content).unwrap();
-        assert_eq!(mod_file.module.as_str(), "github.com/vo-lang/studio-examples");
+        assert_eq!(
+            mod_file.module.as_str(),
+            "github.com/vo-lang/studio-examples"
+        );
         assert_eq!(mod_file.require.len(), 1);
         assert_eq!(mod_file.require[0].module, locked.path);
-        assert_eq!(mod_file.require[0].constraint.to_string(), locked.version.to_string());
+        assert_eq!(
+            mod_file.require[0].constraint.to_string(),
+            locked.version.to_string()
+        );
 
         let lock_file = LockFile::parse(&lock_content).unwrap();
         assert_eq!(lock_file.created_by, "vo-studio");
-        assert_eq!(lock_file.root.module.as_str(), "github.com/vo-lang/studio-examples");
+        assert_eq!(
+            lock_file.root.module.as_str(),
+            "github.com/vo-lang/studio-examples"
+        );
         assert_eq!(lock_file.resolved.len(), 1);
-        assert_eq!(lock_file.resolved[0].path.as_str(), "github.com/vo-lang/voplay");
+        assert_eq!(
+            lock_file.resolved[0].path.as_str(),
+            "github.com/vo-lang/voplay"
+        );
     }
 
     #[test]
@@ -743,8 +785,14 @@ artifacts = []
         )
         .unwrap();
 
-        assert_eq!(deps.allowed_modules(), &["github.com/vo-lang/core".to_string()]);
+        assert_eq!(
+            deps.allowed_modules(),
+            &["github.com/vo-lang/core".to_string()]
+        );
         assert_eq!(deps.locked_modules().len(), 1);
-        assert_eq!(deps.locked_modules()[0].path.as_str(), "github.com/vo-lang/core");
+        assert_eq!(
+            deps.locked_modules()[0].path.as_str(),
+            "github.com/vo-lang/core"
+        );
     }
 }

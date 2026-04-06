@@ -89,16 +89,17 @@ fn read_bindgen_js_glue_from_vfs(
             let Some(bytes) = try_read_cached_vfs_bytes(&path) else {
                 return Ok(None);
             };
-            String::from_utf8(bytes)
-                .map(Some)
-                .map_err(|error| {
-                    ModuleInstallError::new(
-                        ModuleInstallStage::Extension,
-                        ModuleInstallErrorKind::ParseFailed,
-                        format!("cached wasm JS glue for {}@{} is not valid UTF-8: {}", module, version, error),
-                    )
-                    .with_module_version(module, version)
-                })
+            String::from_utf8(bytes).map(Some).map_err(|error| {
+                ModuleInstallError::new(
+                    ModuleInstallStage::Extension,
+                    ModuleInstallErrorKind::ParseFailed,
+                    format!(
+                        "cached wasm JS glue for {}@{} is not valid UTF-8: {}",
+                        module, version, error
+                    ),
+                )
+                .with_module_version(module, version)
+            })
         }
         WasmExtensionKind::Standalone => Ok(None),
     }
@@ -113,7 +114,9 @@ pub(super) async fn load_cached_ext_from_vfs(
     let Some(ext) = read_wasm_extension_from_vfs(module, version) else {
         return Ok(false);
     };
-    let Some(wasm_bytes) = try_read_cached_vfs_bytes(&vfs_artifact_path(module, version, &ext.wasm)) else {
+    let Some(wasm_bytes) =
+        try_read_cached_vfs_bytes(&vfs_artifact_path(module, version, &ext.wasm))
+    else {
         return Ok(false);
     };
     let js_glue_text = read_bindgen_js_glue_from_vfs(module, version, &ext)?;
@@ -136,7 +139,10 @@ fn verify_locked_artifact_bytes(
         ModuleInstallError::new(
             ModuleInstallStage::Extension,
             ModuleInstallErrorKind::Missing,
-            format!("vo.lock is missing wasm artifact {} for {}@{}", asset_name, locked.path, locked.version),
+            format!(
+                "vo.lock is missing wasm artifact {} for {}@{}",
+                asset_name, locked.path, locked.version
+            ),
         )
         .with_module_version(locked.path.as_str(), locked.version.to_string())
     })?;
@@ -179,16 +185,17 @@ pub(super) async fn load_locked_ext_from_vfs(locked: &LockedModule) -> ModuleIns
                 )
                 .with_module_version(module, &version));
             };
-            String::from_utf8(bytes)
-                .map(Some)
-                .map_err(|error| {
-                    ModuleInstallError::new(
-                        ModuleInstallStage::Extension,
-                        ModuleInstallErrorKind::ParseFailed,
-                        format!("cached wasm JS glue for {}@{} is not valid UTF-8: {}", module, version, error),
-                    )
-                    .with_module_version(module, &version)
-                })?
+            String::from_utf8(bytes).map(Some).map_err(|error| {
+                ModuleInstallError::new(
+                    ModuleInstallStage::Extension,
+                    ModuleInstallErrorKind::ParseFailed,
+                    format!(
+                        "cached wasm JS glue for {}@{} is not valid UTF-8: {}",
+                        module, version, error
+                    ),
+                )
+                .with_module_version(module, &version)
+            })?
         }
         WasmExtensionKind::Standalone => None,
     };
@@ -240,7 +247,10 @@ where
         write_vfs_text(&vfs_artifact_path(module, version, name), text)?;
     }
 
-    Ok(FetchedExtensionAssets { wasm_bytes, js_glue_text })
+    Ok(FetchedExtensionAssets {
+        wasm_bytes,
+        js_glue_text,
+    })
 }
 
 // ── Public extension loading entry point ────────────────────────────────────
@@ -307,12 +317,8 @@ pub async fn load_ext_if_present(module: &str, version: &str) {
         }
     };
 
-    if let Err(error) = load_wasm_extension_bytes(
-        module,
-        &assets.wasm_bytes,
-        assets.js_glue_text.as_deref(),
-    )
-    .await
+    if let Err(error) =
+        load_wasm_extension_bytes(module, &assets.wasm_bytes, assets.js_glue_text.as_deref()).await
     {
         log_extension_load_error(module, version, stringify_module_install_error(error));
     }

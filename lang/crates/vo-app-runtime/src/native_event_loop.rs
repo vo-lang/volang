@@ -13,8 +13,8 @@ use vo_vm::vm::Vm;
 
 use crate::protocol::event_ids;
 use crate::{
-    NativeGuiRuntime, NativeTickProvider, NativeTimerProvider, SyncRenderBuffer,
-    TickLoopControl, TimerControl,
+    NativeGuiRuntime, NativeTickProvider, NativeTimerProvider, SyncRenderBuffer, TickLoopControl,
+    TimerControl,
 };
 
 // ── Internal event enum ─────────────────────────────────────────────────────
@@ -298,7 +298,7 @@ fn run_event_loop(
                         return;
                     }
                 }
-            },
+            }
             GuestEvent::GameLoopTick { loop_id, control } => {
                 let Some(dt_ms) = control.take_pending_tick() else {
                     continue;

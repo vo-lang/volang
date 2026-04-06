@@ -129,11 +129,7 @@ impl ExtensionLoader {
     }
 
     fn load_spec(&mut self, spec: &NativeExtensionSpec) -> Result<(), ExtError> {
-        self.load_impl(
-            &spec.native_path,
-            &spec.name,
-            spec.manifest_path.clone(),
-        )
+        self.load_impl(&spec.native_path, &spec.name, spec.manifest_path.clone())
     }
 
     /// Load an extension from a dynamic library path.
@@ -194,8 +190,11 @@ impl ExtensionLoader {
             name: name.to_string(),
             entries,
         });
-        self.specs
-            .push(NativeExtensionSpec::new(name, canonical_path, manifest_path));
+        self.specs.push(NativeExtensionSpec::new(
+            name,
+            canonical_path,
+            manifest_path,
+        ));
 
         Ok(())
     }

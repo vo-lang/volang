@@ -76,6 +76,12 @@ pub struct ModSource<F: FileSystem = RealFs> {
     module_roots: Option<HashMap<String, PathBuf>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectModLayout {
+    ImportPaths,
+    VersionedCache,
+}
+
 impl ModSource<RealFs> {
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -119,25 +125,26 @@ impl<F: FileSystem> ModSource<F> {
         self
     }
 
-    /// Configure allowed modules and locked module roots from project dependencies.
-    ///
-    /// This is the canonical way to wire a `ModSource` to a resolved `ProjectDeps`:
-    /// - If a `vo.mod` was found, restricts resolution to allowed modules only.
-    /// - If locked modules exist, maps each to its cache-relative version directory.
-    pub fn with_project_deps(mut self, deps: &vo_module::project::ProjectDeps) -> Self {
+    pub fn with_project_allowed_modules(mut self, deps: &vo_module::project::ProjectDeps) -> Self {
         if deps.has_mod_file() {
             self = self.with_allowed_modules(deps.allowed_modules().to_vec());
         }
+        self
+    }
+
+    pub fn with_project_locked_module_roots(
+        mut self,
+        deps: &vo_module::project::ProjectDeps,
+    ) -> Self {
         if !deps.locked_modules().is_empty() {
-            self = self.with_module_roots(deps.locked_modules().iter().map(|locked| {
-                let rel = vo_module::cache::layout::relative_module_dir(
-                    locked.path.as_str(),
-                    &locked.version,
-                );
-                (locked.path.as_str().to_string(), rel)
-            }));
+            self = self.with_module_roots(project_locked_module_roots(deps));
         }
         self
+    }
+
+    pub fn with_project_deps(self, deps: &vo_module::project::ProjectDeps) -> Self {
+        self.with_project_allowed_modules(deps)
+            .with_project_locked_module_roots(deps)
     }
 
     pub fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
@@ -189,6 +196,19 @@ impl<F: FileSystem> ModSource<F> {
     }
 }
 
+fn project_locked_module_roots(deps: &vo_module::project::ProjectDeps) -> Vec<(String, PathBuf)> {
+    deps.locked_modules()
+        .iter()
+        .map(|locked| {
+            let rel = vo_module::cache::layout::relative_module_dir(
+                locked.path.as_str(),
+                &locked.version,
+            );
+            (locked.path.as_str().to_string(), rel)
+        })
+        .collect()
+}
+
 /// Trait for package resolution.
 pub trait Resolver: Send + Sync {
     /// Resolve an import path.
@@ -230,7 +250,19 @@ pub fn project_mod_source<F: FileSystem>(
     mod_fs: F,
     deps: &vo_module::project::ProjectDeps,
 ) -> ModSource<F> {
-    ModSource::with_fs(mod_fs).with_project_deps(deps)
+    project_mod_source_with_layout(mod_fs, deps, ProjectModLayout::VersionedCache)
+}
+
+pub fn project_mod_source_with_layout<F: FileSystem>(
+    mod_fs: F,
+    deps: &vo_module::project::ProjectDeps,
+    layout: ProjectModLayout,
+) -> ModSource<F> {
+    let source = ModSource::with_fs(mod_fs).with_project_allowed_modules(deps);
+    match layout {
+        ProjectModLayout::ImportPaths => source,
+        ProjectModLayout::VersionedCache => source.with_project_locked_module_roots(deps),
+    }
 }
 
 pub fn project_package_resolver_with_replaces<S: FileSystem, M: FileSystem, R: FileSystem>(
@@ -240,10 +272,32 @@ pub fn project_package_resolver_with_replaces<S: FileSystem, M: FileSystem, R: F
     deps: &vo_module::project::ProjectDeps,
     workspace_replaces: HashMap<String, PathBuf>,
 ) -> ReplacingResolver<PackageResolverMixed<S, M>, R> {
+    project_package_resolver_with_layout_and_replaces(
+        std_fs,
+        mod_fs,
+        replace_fs,
+        deps,
+        workspace_replaces,
+        ProjectModLayout::VersionedCache,
+    )
+}
+
+pub fn project_package_resolver_with_layout_and_replaces<
+    S: FileSystem,
+    M: FileSystem,
+    R: FileSystem,
+>(
+    std_fs: S,
+    mod_fs: M,
+    replace_fs: R,
+    deps: &vo_module::project::ProjectDeps,
+    workspace_replaces: HashMap<String, PathBuf>,
+    layout: ProjectModLayout,
+) -> ReplacingResolver<PackageResolverMixed<S, M>, R> {
     ReplacingResolver::with_fs(
         PackageResolverMixed {
             std: StdSource::with_fs(std_fs),
-            r#mod: project_mod_source(mod_fs, deps),
+            r#mod: project_mod_source_with_layout(mod_fs, deps, layout),
         },
         replace_fs,
         workspace_replaces,
@@ -495,10 +549,17 @@ impl<R> ReplacingResolver<R, RealFs> {
 
 impl<R, F> ReplacingResolver<R, F> {
     pub fn with_fs(inner: R, fs: F, replaces: HashMap<String, PathBuf>) -> Self {
-        Self { inner, fs, replaces }
+        Self {
+            inner,
+            fs,
+            replaces,
+        }
     }
 
-    fn match_replace<'a>(&'a self, import_path: &'a str) -> Option<(&'a str, &'a PathBuf, &'a str)> {
+    fn match_replace<'a>(
+        &'a self,
+        import_path: &'a str,
+    ) -> Option<(&'a str, &'a PathBuf, &'a str)> {
         self.replaces
             .iter()
             .filter_map(|(module, local_dir)| {
@@ -727,6 +788,43 @@ mod tests {
             sub.fs_path,
             PathBuf::from("cache/github.com/acme/game/.vo/versions/v0.1.0/codec")
         );
+    }
+
+    #[test]
+    fn test_project_mod_source_import_paths_resolves_locked_modules_from_canonical_paths() {
+        let fs = MemoryFs::new()
+            .with_file(
+                "github.com/acme/game/vo.mod",
+                "module github.com/acme/game\n\nvo 0.1.0\n",
+            )
+            .with_file("github.com/acme/game/game.vo", "package game\n");
+        let deps = vo_module::project::read_inline_project_deps(
+            "module github.com/acme/app\n\nvo 0.1.0\n\nrequire github.com/acme/game v0.1.0\n",
+            concat!(
+                "version = 1\n",
+                "created_by = \"vo test\"\n\n",
+                "[root]\n",
+                "module = \"github.com/acme/app\"\n",
+                "vo = \"0.1.0\"\n\n",
+                "[[resolved]]\n",
+                "path = \"github.com/acme/game\"\n",
+                "version = \"v0.1.0\"\n",
+                "vo = \"0.1.0\"\n",
+                "commit = \"0123456789abcdef0123456789abcdef01234567\"\n",
+                "release_manifest = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\n",
+                "source = \"sha256:2222222222222222222222222222222222222222222222222222222222222222\"\n",
+                "deps = []\n",
+            ),
+            &[],
+        )
+        .unwrap();
+
+        let mod_source = project_mod_source_with_layout(fs, &deps, ProjectModLayout::ImportPaths);
+        let root = mod_source
+            .resolve("github.com/acme/game")
+            .expect("root package should resolve from canonical import path layout");
+        assert_eq!(root.path, "github.com/acme/game");
+        assert_eq!(root.fs_path, PathBuf::from("github.com/acme/game"));
     }
 
     #[test]

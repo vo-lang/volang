@@ -7,7 +7,10 @@ use vo_module::ext_manifest::ExtensionManifest;
 use vo_module::schema::lockfile::{LockedArtifact, LockedModule};
 use vo_runtime::ext_loader::NativeExtensionSpec;
 
-use super::{emit_compile_log, CompileError, CompileLogRecord, ModuleSystemError, ModuleSystemErrorKind, ModuleSystemStage};
+use super::{
+    emit_compile_log, CompileError, CompileLogRecord, ModuleSystemError, ModuleSystemErrorKind,
+    ModuleSystemStage,
+};
 
 pub(super) fn validate_locked_modules_installed(
     locked_modules: &[LockedModule],
@@ -23,7 +26,8 @@ fn validate_locked_module_installed(
     locked: &LockedModule,
     mod_root: &Path,
 ) -> Result<(), CompileError> {
-    let module_dir = vo_module::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
+    let module_dir =
+        vo_module::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
     let fs = RealFs::new(mod_root);
     vo_module::cache::validate::validate_installed_module(&fs, &module_dir, locked)
         .map_err(|e| CompileError::ModuleSystem(installed_module_error_to_module_system(e)))
@@ -41,16 +45,14 @@ fn validate_installed_module_at_dir(
 fn installed_module_error_to_module_system(e: InstalledModuleError) -> ModuleSystemError {
     use vo_module::cache::validate::InstalledModuleErrorKind;
     let (kind, detail) = match &e.kind {
-        InstalledModuleErrorKind::Missing { .. } => {
-            (ModuleSystemErrorKind::Missing, format!(
-                "{}: frozen builds do not auto-install dependencies", e,
-            ))
-        }
-        InstalledModuleErrorKind::Mismatch { .. } => {
-            (ModuleSystemErrorKind::Mismatch, format!(
-                "{}: frozen builds do not auto-install dependencies", e,
-            ))
-        }
+        InstalledModuleErrorKind::Missing { .. } => (
+            ModuleSystemErrorKind::Missing,
+            format!("{}: frozen builds do not auto-install dependencies", e,),
+        ),
+        InstalledModuleErrorKind::Mismatch { .. } => (
+            ModuleSystemErrorKind::Mismatch,
+            format!("{}: frozen builds do not auto-install dependencies", e,),
+        ),
         InstalledModuleErrorKind::ParseFailed { .. } => {
             (ModuleSystemErrorKind::ParseFailed, e.to_string())
         }
@@ -66,7 +68,9 @@ pub(super) fn prepare_native_extension_specs_for_frozen_build(
 ) -> Result<Vec<NativeExtensionSpec>, ModuleSystemError> {
     use std::collections::BTreeMap;
 
-    let mod_root = mod_root.canonicalize().unwrap_or_else(|_| mod_root.to_path_buf());
+    let mod_root = mod_root
+        .canonicalize()
+        .unwrap_or_else(|_| mod_root.to_path_buf());
     let mut prepared: BTreeMap<PathBuf, NativeExtensionSpec> = BTreeMap::new();
 
     for manifest in manifests {
@@ -110,7 +114,10 @@ pub(super) fn current_target_triple() -> &'static str {
     env!("VO_TARGET_TRIPLE")
 }
 
-fn native_extension_spec(manifest: &ExtensionManifest, native_path: PathBuf) -> NativeExtensionSpec {
+fn native_extension_spec(
+    manifest: &ExtensionManifest,
+    native_path: PathBuf,
+) -> NativeExtensionSpec {
     NativeExtensionSpec::new(
         manifest.name.clone(),
         native_path,
@@ -118,8 +125,9 @@ fn native_extension_spec(manifest: &ExtensionManifest, native_path: PathBuf) -> 
     )
 }
 
-
-fn extension_manifest_module_dir(manifest: &ExtensionManifest) -> Result<PathBuf, ModuleSystemError> {
+fn extension_manifest_module_dir(
+    manifest: &ExtensionManifest,
+) -> Result<PathBuf, ModuleSystemError> {
     let module_dir = manifest.manifest_path.parent().ok_or_else(|| {
         ModuleSystemError::new(
             ModuleSystemStage::NativeExtension,
@@ -131,7 +139,9 @@ fn extension_manifest_module_dir(manifest: &ExtensionManifest) -> Result<PathBuf
         )
         .with_path(&manifest.manifest_path)
     })?;
-    Ok(module_dir.canonicalize().unwrap_or_else(|_| module_dir.to_path_buf()))
+    Ok(module_dir
+        .canonicalize()
+        .unwrap_or_else(|_| module_dir.to_path_buf()))
 }
 
 fn prepare_extension_spec(
@@ -142,7 +152,10 @@ fn prepare_extension_spec(
     let module_dir = extension_manifest_module_dir(manifest)?;
     if !module_dir.starts_with(mod_root) {
         ensure_local_native_extension_built(&module_dir)?;
-        return Ok(native_extension_spec(manifest, manifest.native_path.clone()));
+        return Ok(native_extension_spec(
+            manifest,
+            manifest.native_path.clone(),
+        ));
     }
 
     let locked = locked_module_for_cached_extension(&module_dir, mod_root, locked_modules)?;
@@ -168,17 +181,18 @@ fn locked_module_for_cached_extension<'a>(
     mod_root: &Path,
     locked_modules: &'a [LockedModule],
 ) -> Result<&'a LockedModule, ModuleSystemError> {
-    let (module_path, version) = module_identity_from_cache_dir(mod_root, module_dir).ok_or_else(|| {
-        ModuleSystemError::new(
-            ModuleSystemStage::NativeExtension,
-            ModuleSystemErrorKind::ValidationFailed,
-            format!(
-                "failed to infer module path for cached extension at {}",
-                module_dir.display(),
-            ),
-        )
-        .with_path(module_dir)
-    })?;
+    let (module_path, version) =
+        module_identity_from_cache_dir(mod_root, module_dir).ok_or_else(|| {
+            ModuleSystemError::new(
+                ModuleSystemStage::NativeExtension,
+                ModuleSystemErrorKind::ValidationFailed,
+                format!(
+                    "failed to infer module path for cached extension at {}",
+                    module_dir.display(),
+                ),
+            )
+            .with_path(module_dir)
+        })?;
     locked_modules
         .iter()
         .find(|locked| locked.path.as_str() == module_path && locked.version.to_string() == version)
@@ -267,7 +281,9 @@ fn validate_locked_native_artifact_bytes(
         })
 }
 
-pub(super) fn ensure_local_native_extension_built(module_dir: &Path) -> Result<(), ModuleSystemError> {
+pub(super) fn ensure_local_native_extension_built(
+    module_dir: &Path,
+) -> Result<(), ModuleSystemError> {
     let rust_manifest = module_dir.join("rust").join("Cargo.toml");
     if !rust_manifest.exists() {
         return Ok(());
@@ -277,7 +293,11 @@ pub(super) fn ensure_local_native_extension_built(module_dir: &Path) -> Result<(
         ModuleSystemError::new(
             ModuleSystemStage::NativeExtension,
             ModuleSystemErrorKind::ParseFailed,
-            format!("failed to discover extensions at {}: {}", module_dir.display(), e),
+            format!(
+                "failed to discover extensions at {}: {}",
+                module_dir.display(),
+                e
+            ),
         )
         .with_path(module_dir)
     })?;
@@ -292,7 +312,11 @@ pub(super) fn ensure_local_native_extension_built(module_dir: &Path) -> Result<(
                     ModuleSystemError::new(
                         ModuleSystemStage::NativeExtension,
                         ModuleSystemErrorKind::ReadFailed,
-                        format!("failed to scan rust sources at {}: {}", rust_dir.display(), e),
+                        format!(
+                            "failed to scan rust sources at {}: {}",
+                            rust_dir.display(),
+                            e
+                        ),
                     )
                     .with_path(&rust_dir)
                 })?;
@@ -340,18 +364,16 @@ fn build_native_extension(module_dir: &Path) -> Result<(), ModuleSystemError> {
             .with_path(&rust_dir)
         })?;
     if !output.status.success() {
-        return Err(
-            ModuleSystemError::new(
-                ModuleSystemStage::NativeExtension,
-                ModuleSystemErrorKind::BuildFailed,
-                format!(
-                    "cargo build failed for {}: {}",
-                    rust_dir.display(),
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            )
-            .with_path(&rust_dir),
-        );
+        return Err(ModuleSystemError::new(
+            ModuleSystemStage::NativeExtension,
+            ModuleSystemErrorKind::BuildFailed,
+            format!(
+                "cargo build failed for {}: {}",
+                rust_dir.display(),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
+        .with_path(&rust_dir));
     }
     emit_compile_log(
         CompileLogRecord::new("vo-engine", "native_extension_build_done")

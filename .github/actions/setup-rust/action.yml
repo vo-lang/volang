@@ -1,0 +1,27 @@
+name: Setup pinned Rust
+description: Install the Rust toolchain declared in rust-toolchain.toml
+runs:
+  using: composite
+  steps:
+    - id: toolchain
+      shell: bash
+      run: |
+        python - <<'PY' >> "$GITHUB_OUTPUT"
+        import os
+        import tomllib
+        from pathlib import Path
+
+        repo_root = Path(os.environ["GITHUB_ACTION_PATH"]).resolve().parents[2]
+        data = tomllib.loads((repo_root / "rust-toolchain.toml").read_text())
+        toolchain = data["toolchain"]
+        print(f"channel={toolchain['channel']}")
+        print(f"profile={toolchain.get('profile', 'default')}")
+        print(f"components={','.join(toolchain.get('components', []))}")
+        print(f"targets={','.join(toolchain.get('targets', []))}")
+        PY
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ steps.toolchain.outputs.channel }}
+        profile: ${{ steps.toolchain.outputs.profile }}
+        components: ${{ steps.toolchain.outputs.components }}
+        targets: ${{ steps.toolchain.outputs.targets }}

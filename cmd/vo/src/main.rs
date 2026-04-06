@@ -692,7 +692,13 @@ fn cmd_mod_tidy(args: &[String]) -> i32 {
             return 1;
         }
     };
-    match vo_module::ops::mod_tidy(&project_root, &external_imports, &cache_root, &registry, "vo mod tidy") {
+    match vo_module::ops::mod_tidy(
+        &project_root,
+        &external_imports,
+        &cache_root,
+        &registry,
+        "vo mod tidy",
+    ) {
         Ok(result) => {
             for m in &result.added {
                 println!("  + {}", m);

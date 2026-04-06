@@ -10,9 +10,9 @@ use core::cell::Cell;
 use vo_vm::vm::SchedulingOutcome;
 use wasm_bindgen::prelude::*;
 
-use crate::js_types::make_run_result_obj;
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 use crate::js_types::make_run_result_js;
+use crate::js_types::make_run_result_obj;
 use crate::vm::{register_wasm_runtime_externs, ExternRegistrar, Module};
 
 // ── Outcome helpers ─────────────────────────────────────────────────────────
@@ -303,11 +303,8 @@ async fn run_with_modules_inner(source: &str) -> (String, String, String) {
         Ok(b) => b,
         Err(e) => return ("compile_error".into(), String::new(), e),
     };
-    run_bytecode_async_with_externs(
-        &bytecode,
-        crate::vm::ext_bridge::register_wasm_ext_bridges,
-    )
-    .await
+    run_bytecode_async_with_externs(&bytecode, crate::vm::ext_bridge::register_wasm_ext_bridges)
+        .await
 }
 
 /// Pre-load a WASM extension module before running Vo code.

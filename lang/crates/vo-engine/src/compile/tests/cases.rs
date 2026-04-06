@@ -1,15 +1,15 @@
 use std::fs;
 use std::path::PathBuf;
 
+use super::super::{
+    compile, compile_source_at, compile_string, compile_with_cache, CompileError,
+    ModuleSystemErrorKind, ModuleSystemStage,
+};
 use super::{
     current_target_triple, installed_module_release_manifest_digest, load_project_deps_for_engine,
     locked_module_cache_dir, make_locked, prepare_native_extension_specs_for_frozen_build,
     read_saved_cache_fingerprint, render_lock_with_modules, temp_dir,
     validate_locked_modules_installed, write_minimal_native_extension_crate,
-};
-use super::super::{
-    compile, compile_source_at, compile_string, compile_with_cache, CompileError,
-    ModuleSystemErrorKind, ModuleSystemStage,
 };
 use vo_common::vfs::MemoryFs;
 use vo_module::digest::Digest;
@@ -97,7 +97,11 @@ fn test_compile_without_vomod_rejects_external_modules() {
         &root,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("github.com/vo-lang/resvg"), "{}", err);
+    assert!(
+        err.to_string().contains("github.com/vo-lang/resvg"),
+        "{}",
+        err
+    );
 
     fs::remove_dir_all(&root).unwrap();
 }
@@ -158,7 +162,12 @@ fn test_validate_locked_modules_installed_requires_vo_mod_and_version() {
     wrong_version.version = ExactVersion::parse("v0.1.1").unwrap();
     let err = validate_locked_modules_installed(&[wrong_version], &mod_root).unwrap_err();
     assert!(err.to_string().contains("v0.1.1"), "{}", err);
-    assert!(err.to_string().contains("not in cache") || err.to_string().contains("is missing directory"), "{}", err);
+    assert!(
+        err.to_string().contains("not in cache")
+            || err.to_string().contains("is missing directory"),
+        "{}",
+        err
+    );
 
     fs::remove_dir_all(&mod_root).unwrap();
 }
@@ -182,8 +191,7 @@ fn test_validate_locked_extension_manifests_require_locked_native_artifact() {
     )
     .unwrap();
     fs::write(module_dir.join(".vo-version"), "v0.1.0\n").unwrap();
-    let source_digest =
-        "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+    let source_digest = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
     fs::write(
         module_dir.join(".vo-source-digest"),
         format!("{}\n", source_digest),
@@ -218,8 +226,9 @@ fn test_validate_locked_extension_manifests_require_locked_native_artifact() {
     let manifests = [manifest];
     let locked_modules = [locked];
 
-    let error = prepare_native_extension_specs_for_frozen_build(&manifests, &locked_modules, &mod_root)
-        .expect_err("cached published modules must require a locked native artifact");
+    let error =
+        prepare_native_extension_specs_for_frozen_build(&manifests, &locked_modules, &mod_root)
+            .expect_err("cached published modules must require a locked native artifact");
     assert_eq!(error.stage(), ModuleSystemStage::NativeExtension);
     assert_eq!(error.kind(), ModuleSystemErrorKind::Missing);
     assert!(
@@ -252,8 +261,7 @@ fn test_resolve_extension_manifests_uses_cached_native_artifact_path() {
     )
     .unwrap();
     fs::write(module_dir.join(".vo-version"), "v0.1.0\n").unwrap();
-    let source_digest =
-        "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+    let source_digest = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
     fs::write(
         module_dir.join(".vo-source-digest"),
         format!("{}\n", source_digest),
@@ -531,7 +539,9 @@ fn test_compile_rejects_workspace_override_identity_mismatch() {
             assert_eq!(error.stage(), ModuleSystemStage::Workspace);
             assert_eq!(error.kind(), ModuleSystemErrorKind::ValidationFailed);
             assert!(
-                error.detail().contains("workspace override identity mismatch"),
+                error
+                    .detail()
+                    .contains("workspace override identity mismatch"),
                 "{}",
                 error.detail()
             );
@@ -607,7 +617,11 @@ fn test_compile_with_cache_fingerprint_tracks_extension_manifest() {
     let root = temp_dir("vo_compile_cache_ext_manifest");
 
     fs::create_dir_all(root.join("rust")).unwrap();
-    fs::write(root.join("vo.mod"), "module github.com/acme/app\nvo 0.1.0\n").unwrap();
+    fs::write(
+        root.join("vo.mod"),
+        "module github.com/acme/app\nvo 0.1.0\n",
+    )
+    .unwrap();
     fs::write(root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
     fs::write(
         root.join("vo.ext.toml"),

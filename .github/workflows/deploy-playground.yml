@@ -26,9 +26,7 @@ jobs:
           path: ../vogui
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+        uses: ./.github/actions/setup-rust
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2

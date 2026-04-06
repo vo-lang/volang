@@ -23,8 +23,7 @@ pub(super) fn log_dependency_version_cached(module: &str, version: &str) {
 
 pub(super) fn log_dependency_version_resolve_start(module: &str) {
     emit_log(
-        HostLogRecord::new("vo-web", "dependency_version_resolve_start", "system")
-            .module(module),
+        HostLogRecord::new("vo-web", "dependency_version_resolve_start", "system").module(module),
     );
 }
 
@@ -105,4 +104,3 @@ pub(super) fn log_extension_load_error(module: &str, version: &str, error: impl 
         .into(),
     );
 }
-

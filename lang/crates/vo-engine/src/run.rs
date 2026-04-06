@@ -213,8 +213,7 @@ fn vm_err_to_run_err(vm: &Vm, e: &VmError) -> RunError {
 /// and load the module with extensions.
 pub fn build_gui_vm(compiled: CompileOutput) -> Result<Vm, String> {
     ensure_toolchain_host_installed();
-    let ext_loader = load_extensions(&compiled.extensions)
-        .map_err(|e| e.to_string())?;
+    let ext_loader = load_extensions(&compiled.extensions).map_err(|e| e.to_string())?;
     let mut vm = Vm::new();
     vm.enable_external_island_transport();
     vm.load_with_extensions(compiled.module, ext_loader);

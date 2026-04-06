@@ -12,7 +12,9 @@ use vo_common::vfs::{FileSet, FileSystem, RealFs, ZipFs};
 use vo_module::project::ProjectDeps;
 use vo_stdlib::EmbeddedStdlib;
 
-use super::native::{prepare_native_extension_specs_for_frozen_build, validate_locked_modules_installed};
+use super::native::{
+    prepare_native_extension_specs_for_frozen_build, validate_locked_modules_installed,
+};
 use super::{CompileError, CompileOutput};
 
 struct PreparedProject<F> {
@@ -81,7 +83,7 @@ impl<F: FileSystem> PreparedProject<F> {
             self.local_root,
             current_module,
         )
-            .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
+        .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
         Ok(AnalyzedCompilation {
             project,
             source_root: self.source_root,
@@ -118,8 +120,8 @@ impl AnalyzedCompilation {
         )
         .map_err(CompileError::ModuleSystem)?;
 
-        let module = compile_project(&self.project)
-            .map_err(|e| CompileError::Codegen(format!("{}", e)))?;
+        let module =
+            compile_project(&self.project).map_err(|e| CompileError::Codegen(format!("{}", e)))?;
 
         Ok(CompileOutput {
             module,
@@ -263,7 +265,9 @@ pub(super) fn compile_zip(
         None => ZipFs::from_path(zip_path),
     }?;
 
-    let abs_root = zip_path.canonicalize().unwrap_or_else(|_| zip_path.to_path_buf());
+    let abs_root = zip_path
+        .canonicalize()
+        .unwrap_or_else(|_| zip_path.to_path_buf());
     let mod_cache = super::default_mod_cache_root();
     let project_deps = vo_module::project::read_project_deps(&zip_fs, &[])
         .map_err(super::module_system_error_from_project)?;

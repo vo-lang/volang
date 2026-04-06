@@ -177,10 +177,22 @@ fn stage_release_excludes_output_directory_from_source_package() {
 fn strip_cargo_patch_sections_removes_quoted_patch() {
     let input = "[workspace]\nmembers = [\"ext\"]\n\n[patch.\"https://github.com/vo-lang/volang\"]\nvo-common = { path = \"../../volang/lang/crates/vo-common\" }\nvo-ext = { path = \"../../volang/lang/crates/vo-ext\" }\n\n[dependencies]\nserde = \"1\"\n";
     let result = strip_cargo_patch_sections(input);
-    assert!(!result.contains("[patch."), "patch section should be removed");
-    assert!(!result.contains("vo-common"), "patch entries should be removed");
-    assert!(result.contains("[workspace]"), "workspace section should remain");
-    assert!(result.contains("[dependencies]"), "dependencies section should remain");
+    assert!(
+        !result.contains("[patch."),
+        "patch section should be removed"
+    );
+    assert!(
+        !result.contains("vo-common"),
+        "patch entries should be removed"
+    );
+    assert!(
+        result.contains("[workspace]"),
+        "workspace section should remain"
+    );
+    assert!(
+        result.contains("[dependencies]"),
+        "dependencies section should remain"
+    );
     assert!(result.contains("serde"), "non-patch content should remain");
 }
 
@@ -188,9 +200,18 @@ fn strip_cargo_patch_sections_removes_quoted_patch() {
 fn strip_cargo_patch_sections_removes_dotted_patch() {
     let input = "[package]\nname = \"foo\"\n\n[patch.crates-io]\nsome-dep = { path = \"../some-dep\" }\n\n[lib]\ncrate-type = [\"cdylib\"]\n";
     let result = strip_cargo_patch_sections(input);
-    assert!(!result.contains("[patch"), "patch section should be removed");
-    assert!(!result.contains("some-dep"), "patch entries should be removed");
-    assert!(result.contains("[package]"), "package section should remain");
+    assert!(
+        !result.contains("[patch"),
+        "patch section should be removed"
+    );
+    assert!(
+        !result.contains("some-dep"),
+        "patch entries should be removed"
+    );
+    assert!(
+        result.contains("[package]"),
+        "package section should remain"
+    );
     assert!(result.contains("[lib]"), "lib section should remain");
 }
 

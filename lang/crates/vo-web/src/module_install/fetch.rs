@@ -43,12 +43,14 @@ pub(crate) async fn fetch_bytes(url: &str) -> ModuleInstallResult<Vec<u8>> {
     let opts = web_sys::RequestInit::new();
     opts.set_method("GET");
     opts.set_cache(web_sys::RequestCache::NoStore);
-    let request = web_sys::Request::new_with_str_and_init(&effective_url, &opts)
-        .map_err(|error| {
+    let request =
+        web_sys::Request::new_with_str_and_init(&effective_url, &opts).map_err(|error| {
             ModuleInstallError::new(
                 ModuleInstallStage::Fetch,
                 ModuleInstallErrorKind::NetworkFailed,
-                error.as_string().unwrap_or_else(|| "request error".to_string()),
+                error
+                    .as_string()
+                    .unwrap_or_else(|| "request error".to_string()),
             )
             .with_path(url)
         })?;
@@ -59,31 +61,29 @@ pub(crate) async fn fetch_bytes(url: &str) -> ModuleInstallResult<Vec<u8>> {
             ModuleInstallError::new(
                 ModuleInstallStage::Fetch,
                 ModuleInstallErrorKind::NetworkFailed,
-                error.as_string().unwrap_or_else(|| "fetch error".to_string()),
+                error
+                    .as_string()
+                    .unwrap_or_else(|| "fetch error".to_string()),
             )
             .with_path(url)
         })?;
 
-    let resp: web_sys::Response = resp_value
-        .dyn_into()
-        .map_err(|_| {
-            ModuleInstallError::new(
-                ModuleInstallStage::Fetch,
-                ModuleInstallErrorKind::ParseFailed,
-                "response cast error",
-            )
-            .with_path(url)
-        })?;
+    let resp: web_sys::Response = resp_value.dyn_into().map_err(|_| {
+        ModuleInstallError::new(
+            ModuleInstallStage::Fetch,
+            ModuleInstallErrorKind::ParseFailed,
+            "response cast error",
+        )
+        .with_path(url)
+    })?;
 
     if !resp.ok() {
-        return Err(
-            ModuleInstallError::new(
-                ModuleInstallStage::Fetch,
-                ModuleInstallErrorKind::NetworkFailed,
-                format!("HTTP {} for {}", resp.status(), url),
-            )
-            .with_path(url),
-        );
+        return Err(ModuleInstallError::new(
+            ModuleInstallStage::Fetch,
+            ModuleInstallErrorKind::NetworkFailed,
+            format!("HTTP {} for {}", resp.status(), url),
+        )
+        .with_path(url));
     }
 
     let ab_promise = resp.array_buffer().map_err(|e| {
@@ -192,15 +192,19 @@ async fn fetch_release_manifest_checked(
         .with_module_version(module, version)
     })?;
     if let Some(locked) = locked {
-        vo_module::lock::validate_locked_module_against_manifest(locked, &manifest, &manifest_digest)
-            .map_err(|error| {
-                ModuleInstallError::new(
-                    ModuleInstallStage::Manifest,
-                    ModuleInstallErrorKind::ValidationFailed,
-                    error.to_string(),
-                )
-                .with_module_version(module, version)
-            })?;
+        vo_module::lock::validate_locked_module_against_manifest(
+            locked,
+            &manifest,
+            &manifest_digest,
+        )
+        .map_err(|error| {
+            ModuleInstallError::new(
+                ModuleInstallStage::Manifest,
+                ModuleInstallErrorKind::ValidationFailed,
+                error.to_string(),
+            )
+            .with_module_version(module, version)
+        })?;
     }
     Ok((manifest, manifest_content))
 }
@@ -211,8 +215,8 @@ fn extract_release_source_package_files(
     source_package: &[u8],
     manifest: &ReleaseManifest,
 ) -> ModuleInstallResult<Vec<(PathBuf, String)>> {
-    let entries = vo_module::cache::install::extract_source_entries(source_package)
-        .map_err(|error| {
+    let entries =
+        vo_module::cache::install::extract_source_entries(source_package).map_err(|error| {
             ModuleInstallError::new(
                 ModuleInstallStage::Fetch,
                 ModuleInstallErrorKind::ParseFailed,
@@ -221,17 +225,15 @@ fn extract_release_source_package_files(
             .with_module_version(manifest.module.as_str(), manifest.version.to_string())
         })?;
     if entries.is_empty() {
-        return Err(
-            ModuleInstallError::new(
-                ModuleInstallStage::Fetch,
-                ModuleInstallErrorKind::Missing,
-                format!(
-                    "no Vo files found in source package for {}@{}",
-                    manifest.module, manifest.version,
-                ),
-            )
-            .with_module_version(manifest.module.as_str(), manifest.version.to_string()),
-        );
+        return Err(ModuleInstallError::new(
+            ModuleInstallStage::Fetch,
+            ModuleInstallErrorKind::Missing,
+            format!(
+                "no Vo files found in source package for {}@{}",
+                manifest.module, manifest.version,
+            ),
+        )
+        .with_module_version(manifest.module.as_str(), manifest.version.to_string()));
     }
     let module = manifest.module.as_str();
     Ok(entries
@@ -361,7 +363,12 @@ pub(crate) async fn fetch_module_files(
 pub(crate) async fn fetch_locked_module_files(
     locked: &LockedModule,
 ) -> ModuleInstallResult<Vec<(PathBuf, String)>> {
-    fetch_source_files_inner(locked.path.as_str(), &locked.version.to_string(), Some(locked)).await
+    fetch_source_files_inner(
+        locked.path.as_str(),
+        &locked.version.to_string(),
+        Some(locked),
+    )
+    .await
 }
 
 fn find_manifest_artifact<'a>(
@@ -440,19 +447,34 @@ pub(crate) async fn fetch_locked_wasm_binary(
     locked: &LockedModule,
     asset_name: &str,
 ) -> ModuleInstallResult<Vec<u8>> {
-    fetch_artifact_bytes_with_locked_manifest(locked, "wasm32-unknown-unknown", asset_name, "wasm artifact").await
+    fetch_artifact_bytes_with_locked_manifest(
+        locked,
+        "wasm32-unknown-unknown",
+        asset_name,
+        "wasm artifact",
+    )
+    .await
 }
 
 pub(crate) async fn fetch_locked_wasm_js_glue_text(
     locked: &LockedModule,
     asset_name: &str,
 ) -> ModuleInstallResult<String> {
-    let bytes = fetch_artifact_bytes_with_locked_manifest(locked, "wasm32-unknown-unknown", asset_name, "wasm JS glue").await?;
+    let bytes = fetch_artifact_bytes_with_locked_manifest(
+        locked,
+        "wasm32-unknown-unknown",
+        asset_name,
+        "wasm JS glue",
+    )
+    .await?;
     String::from_utf8(bytes).map_err(|error| {
         ModuleInstallError::new(
             ModuleInstallStage::Extension,
             ModuleInstallErrorKind::ParseFailed,
-            format!("wasm JS glue for {}@{} is not valid UTF-8: {}", locked.path, locked.version, error),
+            format!(
+                "wasm JS glue for {}@{} is not valid UTF-8: {}",
+                locked.path, locked.version, error
+            ),
         )
         .with_module_version(locked.path.as_str(), locked.version.to_string())
     })
@@ -464,12 +486,23 @@ pub(crate) async fn fetch_wasm_js_glue_text_from_manifest(
     manifest: &ReleaseManifest,
     asset_name: &str,
 ) -> ModuleInstallResult<String> {
-    let bytes = fetch_artifact_bytes(module, version, manifest, "wasm32-unknown-unknown", asset_name, "wasm JS glue").await?;
+    let bytes = fetch_artifact_bytes(
+        module,
+        version,
+        manifest,
+        "wasm32-unknown-unknown",
+        asset_name,
+        "wasm JS glue",
+    )
+    .await?;
     String::from_utf8(bytes).map_err(|error| {
         ModuleInstallError::new(
             ModuleInstallStage::Extension,
             ModuleInstallErrorKind::ParseFailed,
-            format!("wasm JS glue for {}@{} is not valid UTF-8: {}", module, version, error),
+            format!(
+                "wasm JS glue for {}@{} is not valid UTF-8: {}",
+                module, version, error
+            ),
         )
         .with_module_version(module, version)
     })
@@ -486,7 +519,10 @@ pub(crate) async fn fetch_wasm_binary_from_manifest(
             ModuleInstallError::new(
                 ModuleInstallStage::Fetch,
                 ModuleInstallErrorKind::NetworkFailed,
-                format!("failed to fetch local wasm override for {}@{}: {}", module, version, error),
+                format!(
+                    "failed to fetch local wasm override for {}@{}: {}",
+                    module, version, error
+                ),
             )
             .with_module_version(module, version)
         });
@@ -507,17 +543,23 @@ pub(crate) async fn fetch_wasm_binary_from_manifest(
             .with_module_version(module, version)
         })?;
     if artifact.id.name != asset_name {
-        return Err(
-            ModuleInstallError::new(
-                ModuleInstallStage::Manifest,
-                ModuleInstallErrorKind::ValidationFailed,
-                format!(
-                    "release manifest for {}@{} declares wasm artifact {}, but vo.ext.toml requests {}",
-                    module, version, artifact.id.name, asset_name,
-                ),
-            )
-            .with_module_version(module, version),
-        );
+        return Err(ModuleInstallError::new(
+            ModuleInstallStage::Manifest,
+            ModuleInstallErrorKind::ValidationFailed,
+            format!(
+                "release manifest for {}@{} declares wasm artifact {}, but vo.ext.toml requests {}",
+                module, version, artifact.id.name, asset_name,
+            ),
+        )
+        .with_module_version(module, version));
     }
-    fetch_artifact_bytes(module, version, manifest, "wasm32-unknown-unknown", asset_name, "wasm artifact").await
+    fetch_artifact_bytes(
+        module,
+        version,
+        manifest,
+        "wasm32-unknown-unknown",
+        asset_name,
+        "wasm artifact",
+    )
+    .await
 }

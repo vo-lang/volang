@@ -131,14 +131,16 @@ pub fn validate_installed_module<F: FileSystem>(
 
     // 2. vo.mod exists, parses, and fields match
     let mod_file_path = module_dir.join("vo.mod");
-    let mod_content = fs.read_file(&mod_file_path).map_err(|_| InstalledModuleError {
-        module: module.to_string(),
-        version: version.clone(),
-        field: InstalledModuleField::ModFile,
-        kind: InstalledModuleErrorKind::Missing {
-            detail: "cached module is missing vo.mod".to_string(),
-        },
-    })?;
+    let mod_content = fs
+        .read_file(&mod_file_path)
+        .map_err(|_| InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::ModFile,
+            kind: InstalledModuleErrorKind::Missing {
+                detail: "cached module is missing vo.mod".to_string(),
+            },
+        })?;
     let mod_file =
         crate::schema::modfile::ModFile::parse(&mod_content).map_err(|e| InstalledModuleError {
             module: module.to_string(),
@@ -227,14 +229,16 @@ pub fn validate_installed_module<F: FileSystem>(
 
     // 5. vo.release.json manifest digest matches
     let manifest_path = module_dir.join("vo.release.json");
-    let manifest_bytes = fs.read_bytes(&manifest_path).map_err(|_| InstalledModuleError {
-        module: module.to_string(),
-        version: version.clone(),
-        field: InstalledModuleField::ReleaseManifest,
-        kind: InstalledModuleErrorKind::Missing {
-            detail: "cached module is missing vo.release.json".to_string(),
-        },
-    })?;
+    let manifest_bytes = fs
+        .read_bytes(&manifest_path)
+        .map_err(|_| InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::ReleaseManifest,
+            kind: InstalledModuleErrorKind::Missing {
+                detail: "cached module is missing vo.release.json".to_string(),
+            },
+        })?;
     let manifest_digest = Digest::from_sha256(&manifest_bytes);
     if manifest_digest != locked.release_manifest {
         return Err(InstalledModuleError {

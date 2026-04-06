@@ -74,7 +74,10 @@ fn create_unique_stage_dir(parent: &Path, stem: &str) -> Result<TempPathGuard, E
     )))
 }
 
-fn create_unique_temp_file(parent: &Path, stem: &str) -> Result<(std::fs::File, TempPathGuard), Error> {
+fn create_unique_temp_file(
+    parent: &Path,
+    stem: &str,
+) -> Result<(std::fs::File, TempPathGuard), Error> {
     for _ in 0..64 {
         let path = next_temp_path(parent, stem);
         match std::fs::OpenOptions::new()
@@ -94,9 +97,9 @@ fn create_unique_temp_file(parent: &Path, stem: &str) -> Result<(std::fs::File, 
 }
 
 fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    let parent = path.parent().ok_or_else(|| {
-        Error::SourceScan(format!("path has no parent: {}", path.display()))
-    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::SourceScan(format!("path has no parent: {}", path.display())))?;
     std::fs::create_dir_all(parent)?;
     let stem = path
         .file_name()
@@ -261,11 +264,7 @@ fn is_source_cached(cache_root: &Path, locked: &LockedModule) -> bool {
 }
 
 /// Check if a specific artifact is cached and valid.
-fn is_artifact_cached(
-    cache_root: &Path,
-    locked: &LockedModule,
-    artifact: &LockedArtifact,
-) -> bool {
+fn is_artifact_cached(cache_root: &Path, locked: &LockedModule, artifact: &LockedArtifact) -> bool {
     validate_artifact_cache_entry(cache_root, locked, artifact).is_ok()
 }
 
@@ -366,7 +365,10 @@ fn download_artifact(
         &data,
         artifact.size,
         &artifact.digest,
-        format!("artifact {} for {} {}", artifact.id.name, locked.path, locked.version),
+        format!(
+            "artifact {} for {} {}",
+            artifact.id.name, locked.path, locked.version
+        ),
     )?;
 
     let dir = crate::cache::layout::cache_dir(cache_root, &locked.path, &locked.version);
@@ -589,7 +591,8 @@ fn download_jobs_parallel(
 }
 
 fn validate_source_cache_entry(cache_root: &Path, locked: &LockedModule) -> Result<(), Error> {
-    let module_dir = crate::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
+    let module_dir =
+        crate::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
     let fs = vo_common::vfs::RealFs::new(cache_root);
     crate::cache::validate::validate_installed_module(&fs, &module_dir, locked).map_err(|e| {
         Error::MissingArtifact {
@@ -605,7 +608,8 @@ fn validate_artifact_cache_entry(
     locked: &LockedModule,
     artifact: &LockedArtifact,
 ) -> Result<(), Error> {
-    let module_dir = crate::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
+    let module_dir =
+        crate::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
     let artifact_path = module_dir.join("artifacts").join(&artifact.id.name);
     let fs = vo_common::vfs::RealFs::new(cache_root);
     crate::cache::validate::validate_installed_artifact(&fs, &artifact_path, locked, artifact)
@@ -644,10 +648,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     use crate::digest::Digest;
-    use crate::identity::ModulePath;
     use crate::identity::ArtifactId;
-    use crate::schema::manifest::ReleaseManifest;
+    use crate::identity::ModulePath;
     use crate::schema::lockfile::LockedArtifact;
+    use crate::schema::manifest::ReleaseManifest;
     use crate::version::ExactVersion;
     use crate::version::ToolchainConstraint;
 
@@ -698,7 +702,12 @@ mod tests {
         }
     }
 
-    fn test_locked_module(module: &str, version: &str, manifest_raw: &[u8], source_digest: &Digest) -> LockedModule {
+    fn test_locked_module(
+        module: &str,
+        version: &str,
+        manifest_raw: &[u8],
+        source_digest: &Digest,
+    ) -> LockedModule {
         LockedModule {
             path: ModulePath::parse(module).unwrap(),
             version: ExactVersion::parse(version).unwrap(),
@@ -718,7 +727,11 @@ mod tests {
             format!("module {}\nvo 0.1.0\n", locked.path),
         )
         .unwrap();
-        std::fs::write(module_dir.join(VERSION_MARKER), format!("{}\n", locked.version)).unwrap();
+        std::fs::write(
+            module_dir.join(VERSION_MARKER),
+            format!("{}\n", locked.version),
+        )
+        .unwrap();
         std::fs::write(
             module_dir.join(SOURCE_DIGEST_MARKER),
             format!("{}\n", locked.source),
@@ -819,7 +832,8 @@ mod tests {
             manifest_raw,
             &source_digest,
         );
-        let module_dir = crate::cache::layout::cache_dir(temp.path(), &locked.path, &locked.version);
+        let module_dir =
+            crate::cache::layout::cache_dir(temp.path(), &locked.path, &locked.version);
         write_cached_source(&module_dir, &locked, manifest_raw);
         let registry = CountingRegistry::new(b"unused-source".to_vec());
 
@@ -849,7 +863,8 @@ mod tests {
             manifest_raw,
             &source_digest,
         );
-        let module_dir = crate::cache::layout::cache_dir(temp.path(), &locked.path, &locked.version);
+        let module_dir =
+            crate::cache::layout::cache_dir(temp.path(), &locked.path, &locked.version);
         write_cached_source(&module_dir, &locked, manifest_raw);
 
         let artifact_bytes = b"fresh-artifact";
@@ -951,9 +966,13 @@ mod tests {
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
         let version = ExactVersion::parse("v1.2.3").unwrap();
 
-        let installed = install_exact_module(temp.path(), &registry, &module, &version, "vo test").unwrap();
+        let installed =
+            install_exact_module(temp.path(), &registry, &module, &version, "vo test").unwrap();
 
-        assert_eq!(installed.cache_dir, crate::cache::layout::cache_dir(temp.path(), &module, &version));
+        assert_eq!(
+            installed.cache_dir,
+            crate::cache::layout::cache_dir(temp.path(), &module, &version)
+        );
         assert_eq!(installed.locked.path, module);
         assert_eq!(installed.locked.version, version);
         assert_eq!(registry.source_fetches.load(AtomicOrdering::Relaxed), 1);

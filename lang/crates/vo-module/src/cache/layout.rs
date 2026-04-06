@@ -125,7 +125,11 @@ mod tests {
         let result = discover_installed_version(&fs, Path::new(""), "github.com/acme/lib");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("multiple installed versions"), "error was: {}", err);
+        assert!(
+            err.contains("multiple installed versions"),
+            "error was: {}",
+            err
+        );
         assert!(err.contains("github.com/acme/lib"), "error was: {}", err);
     }
 

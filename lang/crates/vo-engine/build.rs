@@ -71,7 +71,10 @@ fn should_skip_dir(path: &Path) -> bool {
 }
 
 fn should_hash_file(path: &Path) -> bool {
-    if matches!(path.file_name().and_then(|name| name.to_str()), Some("Cargo.toml") | Some("Cargo.lock") | Some("build.rs") | Some("stdlib.toml")) {
+    if matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("Cargo.toml") | Some("Cargo.lock") | Some("build.rs") | Some("stdlib.toml")
+    ) {
         return true;
     }
     matches!(

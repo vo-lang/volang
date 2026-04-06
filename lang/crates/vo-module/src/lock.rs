@@ -1,7 +1,7 @@
 use crate::digest::Digest;
 use crate::identity::ModulePath;
-use crate::schema::manifest::ReleaseManifest;
 use crate::schema::lockfile::{LockFile, LockRoot, LockedArtifact, LockedModule};
+use crate::schema::manifest::ReleaseManifest;
 use crate::schema::modfile::ModFile;
 use crate::solver::ResolvedGraph;
 use crate::Error;

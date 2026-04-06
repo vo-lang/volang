@@ -265,9 +265,7 @@ impl Vm {
 
         validate_externs_registered(&self.state.extern_registry, &module.externs);
 
-        self.extension_specs = ext_loader
-            .as_ref()
-            .map(|loader| loader.specs().to_vec());
+        self.extension_specs = ext_loader.as_ref().map(|loader| loader.specs().to_vec());
         self.extension_loader = ext_loader;
 
         self.finish_load(module);

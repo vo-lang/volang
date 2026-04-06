@@ -109,12 +109,7 @@ impl ToolchainHost for EngineToolchainHost {
         mode: ToolchainRunMode,
     ) -> Result<String, String> {
         let sink = CaptureSink::new();
-        let result = run_with_output(
-            module.clone(),
-            run_mode(mode),
-            Vec::new(),
-            sink.clone(),
-        );
+        let result = run_with_output(module.clone(), run_mode(mode), Vec::new(), sink.clone());
         let output = sink.take();
         match result {
             Ok(()) => Ok(output),
@@ -145,7 +140,8 @@ impl ToolchainHost for EngineToolchainHost {
 
     fn load_bytecode_text(&self, path: &str) -> Result<ToolchainModule, String> {
         let _text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let module: Result<Module, String> = Err("bytecode text format parsing not yet implemented".into());
+        let module: Result<Module, String> =
+            Err("bytecode text format parsing not yet implemented".into());
         let module = module?;
         let source_root = Path::new(path)
             .parent()
@@ -212,22 +208,17 @@ pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf,
 
     let registry = GitHubRegistry::new();
     let mod_cache = crate::compile::default_mod_cache_root();
-    let installed = vo_module::cache::install::install_exact_module(
-        &mod_cache,
-        &registry,
-        &mp,
-        &ev,
-        "vo get",
-    )
-    .map_err(|e| format!("{e}"))?;
-    let manifests =
-        vo_module::ext_manifest::discover_extensions(&installed.cache_dir).map_err(|e| e.to_string())?;
+    let installed =
+        vo_module::cache::install::install_exact_module(&mod_cache, &registry, &mp, &ev, "vo get")
+            .map_err(|e| format!("{e}"))?;
+    let manifests = vo_module::ext_manifest::discover_extensions(&installed.cache_dir)
+        .map_err(|e| e.to_string())?;
     let _ = crate::compile::prepare_native_extension_specs(
         &manifests,
         std::slice::from_ref(&installed.locked),
         &mod_cache,
     )
-        .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?;
 
     Ok(installed.cache_dir)
 }

@@ -8,11 +8,11 @@ use vo_module::schema::lockfile::LockedModule;
 use vo_runtime::ext_loader::NativeExtensionSpec;
 use vo_vm::bytecode::Module;
 
-use super::{
-    CompileError, CompileOutput, COMPILE_CACHE_NATIVE_NAMESPACE,
-    COMPILE_CACHE_SCHEMA_VERSION, COMPILE_CACHE_SLOT_NAMESPACE,
-};
 use super::native::current_target_triple;
+use super::{
+    CompileError, CompileOutput, COMPILE_CACHE_NATIVE_NAMESPACE, COMPILE_CACHE_SCHEMA_VERSION,
+    COMPILE_CACHE_SLOT_NAMESPACE,
+};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedNativeExtensionSpec {
@@ -76,9 +76,15 @@ pub(super) fn compute_compile_cache_fingerprint(
     single_file: Option<&Path>,
     replaces: &HashMap<String, PathBuf>,
 ) -> Result<String, CompileError> {
-    let canonical_source_root = source_root.canonicalize().unwrap_or_else(|_| source_root.to_path_buf());
-    let canonical_project_root = project_root.canonicalize().unwrap_or_else(|_| project_root.to_path_buf());
-    let canonical_mod_cache = mod_cache.canonicalize().unwrap_or_else(|_| mod_cache.to_path_buf());
+    let canonical_source_root = source_root
+        .canonicalize()
+        .unwrap_or_else(|_| source_root.to_path_buf());
+    let canonical_project_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let canonical_mod_cache = mod_cache
+        .canonicalize()
+        .unwrap_or_else(|_| mod_cache.to_path_buf());
     let mut hasher = StableHasher::new(COMPILE_CACHE_NATIVE_NAMESPACE);
     hasher.update_str("schema", COMPILE_CACHE_SCHEMA_VERSION);
     hasher.update_str("compiler_version", env!("CARGO_PKG_VERSION"));
@@ -208,7 +214,11 @@ pub(super) fn try_load_cache(
     })
 }
 
-pub(super) fn save_compile_cache(slot: &CompileCacheSlot, fingerprint: &str, output: &CompileOutput) {
+pub(super) fn save_compile_cache(
+    slot: &CompileCacheSlot,
+    fingerprint: &str,
+    output: &CompileOutput,
+) {
     let ok = fs::create_dir_all(&slot.dir).is_ok()
         && fs::write(&slot.module_file, output.module.serialize()).is_ok()
         && save_extensions(&slot.extensions_file, &output.extensions)
@@ -233,7 +243,12 @@ fn load_extensions(path: &Path) -> Option<Vec<NativeExtensionSpec>> {
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice::<Vec<CachedNativeExtensionSpec>>(&bytes)
             .ok()
-            .map(|extensions| extensions.into_iter().map(NativeExtensionSpec::from).collect()),
+            .map(|extensions| {
+                extensions
+                    .into_iter()
+                    .map(NativeExtensionSpec::from)
+                    .collect()
+            }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
         Err(_) => None,
     }
