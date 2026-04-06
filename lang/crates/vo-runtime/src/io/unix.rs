@@ -52,11 +52,11 @@ impl UnixDriver {
             if epoll_fd < 0 {
                 return Err(io::Error::last_os_error());
             }
-            return Ok(Self {
+            Ok(Self {
                 fd_states: HashMap::new(),
                 timers: HashMap::new(),
                 epoll_fd,
-            });
+            })
         }
 
         #[cfg(any(
@@ -178,8 +178,8 @@ impl UnixDriver {
                     tv_nsec: 0,
                 },
                 it_value: libc::timespec {
-                    tv_sec: secs as i64,
-                    tv_nsec: nsecs as i64,
+                    tv_sec: secs,
+                    tv_nsec: nsecs,
                 },
             };
             let ret = unsafe { libc::timerfd_settime(timerfd, 0, &its, std::ptr::null_mut()) };
@@ -207,7 +207,7 @@ impl UnixDriver {
             }
 
             self.timers.insert(token, TimerState { token, timerfd });
-            return SubmitResult::Pending;
+            SubmitResult::Pending
         }
 
         #[cfg(any(
@@ -409,13 +409,13 @@ impl UnixDriver {
             let mut events: [libc::epoll_event; 64] = unsafe { std::mem::zeroed() };
             let n = unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), 64, 0) };
             if n > 0 {
-                for i in 0..n as usize {
-                    let fd = events[i].u64 as i32;
+                for event in events.iter().take(n as usize) {
+                    let fd = event.u64 as i32;
                     // Check if this is a timer fd
                     if let Some(&token) = timerfd_to_token.get(&fd) {
                         ready_timers.push(token);
                     } else {
-                        let ev = events[i].events;
+                        let ev = event.events;
                         let readable =
                             (ev & libc::EPOLLIN as u32) != 0 || (ev & libc::EPOLLERR as u32) != 0;
                         let writable =
