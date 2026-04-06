@@ -200,7 +200,7 @@ def main():
         sys.exit(run_vo_cli(['run'] + rest_args, jit_mode=jit_mode))
     elif command == 'vo':
         sys.exit(run_vo_cli(rest_args))
-    elif command in ('bench', 'loc', 'clean', 'play', 'studio', 'studio-native'):
+    elif command in ('bench', 'loc', 'clean', 'play', 'studio', 'studio-native', 'ci'):
         sys.exit(run_other_command(command, rest_args))
     elif command in ('-h', '--help', 'help'):
         print(__doc__)

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+MODE="${VO_LOCAL_CI_MODE:-pr}"
+
+"${REPO_ROOT}/d.py" ci "${MODE}"

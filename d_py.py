@@ -1617,6 +1617,120 @@ class LocStats:
 # CLI
 # =============================================================================
 
+def sibling_repo_path(repo_name: str) -> Path:
+    return PROJECT_ROOT.parent / repo_name
+
+
+def run_ci_step(title: str, cmd: list[str], cwd: Path = PROJECT_ROOT):
+    print(f'\n==> {title}')
+    result = subprocess.run(cmd, cwd=cwd)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+
+
+def ci_step(title: str, cmd: list[str], cwd: Path = PROJECT_ROOT) -> tuple[str, list[str], Path]:
+    return title, cmd, cwd
+
+
+def release_verify_ci_steps() -> list[tuple[str, list[str], Path]]:
+    steps = []
+    for repo_name in ('vogui', 'voplay', 'vopack', 'vostore'):
+        repo_path = sibling_repo_path(repo_name)
+        steps.append(
+            ci_step(
+                f'cargo run -p vo --release -- release verify {repo_path}',
+                ['cargo', 'run', '-p', 'vo', '--release', '--', 'release', 'verify', str(repo_path)],
+            )
+        )
+    return steps
+
+
+def run_local_ci(mode: str):
+    vogui_js_dir = sibling_repo_path('vogui') / 'js'
+    quality_steps = [
+        ci_step('cargo fmt --all -- --check', ['cargo', 'fmt', '--all', '--', '--check']),
+        ci_step(
+            'cargo clippy --workspace --all-targets --exclude vo-playground -- -D warnings',
+            ['cargo', 'clippy', '--workspace', '--all-targets', '--exclude', 'vo-playground', '--', '-D', 'warnings'],
+        ),
+        ci_step(
+            'cargo check --workspace --all-targets --exclude vo-playground',
+            ['cargo', 'check', '--workspace', '--all-targets', '--exclude', 'vo-playground'],
+        ),
+        ci_step(
+            'cargo check -p vo-web --target wasm32-unknown-unknown',
+            ['cargo', 'check', '-p', 'vo-web', '--target', 'wasm32-unknown-unknown'],
+        ),
+    ]
+    test_steps = [
+        ci_step(
+            'cargo test --workspace --release --exclude vo-playground',
+            ['cargo', 'test', '--workspace', '--release', '--exclude', 'vo-playground'],
+        ),
+        ci_step(
+            'cargo check -p vo-web --target wasm32-unknown-unknown --release',
+            ['cargo', 'check', '-p', 'vo-web', '--target', 'wasm32-unknown-unknown', '--release'],
+        ),
+    ]
+    release_verify_steps = release_verify_ci_steps()
+    site_steps = [
+        ci_step(
+            'wasm-pack build --target web --release',
+            ['wasm-pack', 'build', '--target', 'web', '--release'],
+            PROJECT_ROOT / 'lang' / 'crates' / 'vo-web',
+        ),
+        ci_step(
+            'wasm-pack build wasm --target web --release --out-dir ../public/wasm --out-name vo_studio_wasm',
+            ['wasm-pack', 'build', 'wasm', '--target', 'web', '--release', '--out-dir', '../public/wasm', '--out-name', 'vo_studio_wasm'],
+            PROJECT_ROOT / 'studio',
+        ),
+        ci_step('npm ci', ['npm', 'ci'], vogui_js_dir),
+        ci_step('npm run build', ['npm', 'run', 'build'], vogui_js_dir),
+        ci_step('npm ci', ['npm', 'ci'], PROJECT_ROOT / 'studio'),
+        ci_step(
+            f'npm install --no-save {vogui_js_dir}',
+            ['npm', 'install', '--no-save', str(vogui_js_dir)],
+            PROJECT_ROOT / 'studio',
+        ),
+        ci_step('npm run build', ['npm', 'run', 'build'], PROJECT_ROOT / 'studio'),
+    ]
+    playground_steps = [
+        ci_step(
+            'wasm-pack build --target web --release',
+            ['wasm-pack', 'build', '--target', 'web', '--release'],
+            PROJECT_ROOT / 'lang' / 'crates' / 'vo-web',
+        ),
+        ci_step(
+            'wasm-pack build wasm --target web --release --out-dir ../public/wasm --out-name vo_studio_wasm',
+            ['wasm-pack', 'build', 'wasm', '--target', 'web', '--release', '--out-dir', '../public/wasm', '--out-name', 'vo_studio_wasm'],
+            PROJECT_ROOT / 'studio',
+        ),
+        ci_step('npm ci', ['npm', 'ci'], vogui_js_dir),
+        ci_step('npm run build', ['npm', 'run', 'build'], vogui_js_dir),
+        ci_step('npm ci', ['npm', 'ci'], PROJECT_ROOT / 'playground'),
+        ci_step('wasm-pack build rust --target web --release', ['wasm-pack', 'build', 'rust', '--target', 'web', '--release'], PROJECT_ROOT / 'playground'),
+        ci_step('npm run build', ['npm', 'run', 'build'], PROJECT_ROOT / 'playground'),
+        ci_step('npm ci', ['npm', 'ci'], PROJECT_ROOT / 'studio'),
+        ci_step('npm run build', ['npm', 'run', 'build'], PROJECT_ROOT / 'studio'),
+        ci_step(
+            'mkdir -p site/vs && cp -r playground/dist/. site/ && cp -r studio/dist/. site/vs/',
+            ['bash', '-lc', 'mkdir -p site/vs && cp -r playground/dist/. site/ && cp -r studio/dist/. site/vs/'],
+        ),
+    ]
+    steps_by_mode = {
+        'quality': quality_steps,
+        'test': test_steps,
+        'release-verify': release_verify_steps,
+        'pr': [*quality_steps, *test_steps, *release_verify_steps],
+        'site': site_steps,
+        'playground': playground_steps,
+        'full': [*quality_steps, *test_steps, *release_verify_steps, *site_steps],
+    }
+
+    for title, cmd, cwd in steps_by_mode[mode]:
+        run_ci_step(title, cmd, cwd=cwd)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog='d.py',
@@ -1643,7 +1757,7 @@ def main():
     bench_parser.add_argument('--all-langs', action='store_true',
                               help='Include Python and Ruby')
     bench_parser.add_argument('--arch', choices=['32', '64'], default='64',
-                              help='Target architecture (default: 64)')
+                             help='Target architecture (default: 64)')
     bench_parser.add_argument('--jit-hot', action='store_true',
                               help='Run JIT benchmark with hot thresholds (call=1, loop=999999 by default)')
     bench_parser.add_argument('--jit-call-threshold', type=int,
@@ -1687,13 +1801,9 @@ def main():
     studio_native_parser.add_argument('launch_url_arg', nargs='?',
                                       help='Optional launch URL to auto-open or run in Studio')
 
-    # run
-    run_parser = subparsers.add_parser('run', help='Run a .vo file')
-    run_parser.add_argument('file', help='.vo file to run')
-    run_parser.add_argument('--mode', choices=['vm', 'jit'], default='vm',
-                            help='Execution mode (default: vm)')
-    run_parser.add_argument('--codegen', action='store_true',
-                            help='Print bytecode only, do not run')
+    # ci
+    ci_parser = subparsers.add_parser('ci', help='Run local CI checks')
+    ci_parser.add_argument('mode', nargs='?', default='pr', choices=['quality', 'test', 'release-verify', 'pr', 'site', 'playground', 'full'])
 
     args = parser.parse_args()
 
@@ -1729,6 +1839,9 @@ def main():
 
     elif args.command == 'clean':
         clean_caches(args.target)
+
+    elif args.command == 'ci':
+        run_local_ci(args.mode)
 
     elif args.command == 'play':
         run_playground(build_only=args.build_only)
