@@ -1673,6 +1673,10 @@ def run_local_ci(mode: str):
         ),
     ]
     release_verify_steps = release_verify_ci_steps()
+    mirror_vogui_release_assets_step = ci_step(
+        'python3 scripts/mirror_release_assets.py studio/public/gh-release github.com/vo-lang/vogui',
+        ['python3', 'scripts/mirror_release_assets.py', 'studio/public/gh-release', 'github.com/vo-lang/vogui'],
+    )
     site_steps = [
         ci_step(
             'wasm-pack build --target web --release',
@@ -1686,6 +1690,7 @@ def run_local_ci(mode: str):
         ),
         ci_step('npm ci', ['npm', 'ci'], vogui_js_dir),
         ci_step('npm run build', ['npm', 'run', 'build'], vogui_js_dir),
+        mirror_vogui_release_assets_step,
         ci_step('npm ci', ['npm', 'ci'], PROJECT_ROOT / 'studio'),
         ci_step(
             f'npm install --no-save {vogui_js_dir}',
@@ -1707,6 +1712,7 @@ def run_local_ci(mode: str):
         ),
         ci_step('npm ci', ['npm', 'ci'], vogui_js_dir),
         ci_step('npm run build', ['npm', 'run', 'build'], vogui_js_dir),
+        mirror_vogui_release_assets_step,
         ci_step('npm ci', ['npm', 'ci'], PROJECT_ROOT / 'playground'),
         ci_step('wasm-pack build rust --target web --release', ['wasm-pack', 'build', 'rust', '--target', 'web', '--release'], PROJECT_ROOT / 'playground'),
         ci_step('npm run build', ['npm', 'run', 'build'], PROJECT_ROOT / 'playground'),

@@ -60,6 +60,9 @@ jobs:
         working-directory: ../vogui/js
         run: npm ci && npm run build
 
+      - name: Mirror published vogui release assets
+        run: python3 scripts/mirror_release_assets.py studio/public/gh-release github.com/vo-lang/vogui
+
       - name: Install Playground Dependencies
         working-directory: playground
         run: npm ci

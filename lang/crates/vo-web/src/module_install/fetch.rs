@@ -21,7 +21,7 @@ use super::{ModuleInstallError, ModuleInstallErrorKind, ModuleInstallResult, Mod
 /// browser fetches fail.  The proxy follows the redirect server-side.
 fn cors_proxy_url(url: &str) -> String {
     const GITHUB_PREFIX: &str = "https://github.com/";
-    const PROXY_PREFIX: &str = "/gh-release/";
+    const PROXY_PREFIX: &str = "gh-release/";
     if url.starts_with(GITHUB_PREFIX) && url.contains("/releases/download/") {
         return format!("{}{}", PROXY_PREFIX, &url[GITHUB_PREFIX.len()..]);
     }
@@ -78,10 +78,15 @@ pub(crate) async fn fetch_bytes(url: &str) -> ModuleInstallResult<Vec<u8>> {
     })?;
 
     if !resp.ok() {
+        let request_target = if effective_url == url {
+            url.to_string()
+        } else {
+            format!("{} (source {})", effective_url, url)
+        };
         return Err(ModuleInstallError::new(
             ModuleInstallStage::Fetch,
             ModuleInstallErrorKind::NetworkFailed,
-            format!("HTTP {} for {}", resp.status(), url),
+            format!("HTTP {} for {}", resp.status(), request_target),
         )
         .with_path(url));
     }
