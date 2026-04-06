@@ -65,6 +65,21 @@ impl NativeGuiRuntime {
         self.install_host_bridge(bridge);
     }
 
+    pub(crate) fn install_host_capabilities_with_timer(
+        &mut self,
+        tick_provider: crate::NativeTickProvider,
+        timer_provider: crate::NativeTimerProvider,
+        capabilities: &[&str],
+    ) {
+        let mut bridge = vo_ext::host::HostBridge::new()
+            .with_tick(Box::new(tick_provider))
+            .with_timer(Box::new(timer_provider));
+        for cap in capabilities {
+            bridge = bridge.with_capability(*cap);
+        }
+        self.install_host_bridge(bridge);
+    }
+
     pub fn vm(&self) -> &Vm {
         self.session.vm()
     }

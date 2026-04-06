@@ -5172,6 +5172,7 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "vo-common",
+ "vo-module",
  "vo-syntax",
 ]
 

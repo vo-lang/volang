@@ -1,11 +1,11 @@
 import { get, type Readable } from 'svelte/store';
 
-import { findExternalWidgetHandlerIdInBytes } from '@vogui/runtime';
+import type { ProtocolModule } from '../gui/renderer_bridge';
 import type { Backend } from '../backend/backend';
 import type { GuiRunOutput, RunEvent, RunOpts, StreamHandle } from '../types';
 import { formatError } from '../format_error';
 import { consoleClear, consolePush } from '../../stores/console';
-import { runtime, IDLE_RUNTIME, type RuntimeState } from '../../stores/runtime';
+import { runtime, IDLE_RUNTIME, IDLE_GUI, type RuntimeState } from '../../stores/runtime';
 
 export type { RuntimeKind, RuntimeStatus, RuntimeState } from '../../stores/runtime';
 
@@ -29,7 +29,25 @@ export class RuntimeService {
   private guiSessionActive = false;
   private guiOperationChain: Promise<void> = Promise.resolve();
 
+  private protocolModule: ProtocolModule | null = null;
+
   constructor(private readonly backend: Backend) {}
+
+  setProtocolModule(mod: ProtocolModule | null): void {
+    this.protocolModule = mod;
+    runtime.update((state) => {
+      if (state.kind !== 'gui' || !state.isRunning || !state.gui.renderBytes) {
+        return state;
+      }
+      return {
+        ...state,
+        gui: {
+          ...state.gui,
+          externalWidgetHandlerId: mod?.findExternalWidgetHandlerId(state.gui.renderBytes) ?? null,
+        },
+      };
+    });
+  }
 
   get state(): Readable<RuntimeState> {
     return { subscribe: runtime.subscribe };
@@ -128,19 +146,23 @@ export class RuntimeService {
         this.assertGuiSessionCurrent(sessionId);
         const output = await this.backend.runGui(target);
         this.assertGuiSessionCurrent(sessionId);
-        const externalWidgetHandlerId = output.externalWidgetHandlerId ?? findExternalWidgetHandlerIdInBytes(output.renderBytes);
+        const externalWidgetHandlerId = output.externalWidgetHandlerId
+          ?? this.protocolModule?.findExternalWidgetHandlerId(output.renderBytes)
+          ?? null;
         runtime.set({
           ...IDLE_RUNTIME,
           status: 'ready',
           kind: 'gui',
           target,
           isRunning: true,
-          guiEntryPath: output.entryPath,
-          guiModuleBytes: output.moduleBytes,
-          guiRenderBytes: output.renderBytes,
-          guiFramework: output.framework,
-          guiSessionId: sessionId,
-          guiExternalWidgetHandlerId: externalWidgetHandlerId,
+          gui: {
+            entryPath: output.entryPath,
+            moduleBytes: output.moduleBytes,
+            renderBytes: output.renderBytes,
+            framework: output.framework,
+            sessionId,
+            externalWidgetHandlerId,
+          },
         });
         return {
           ...output,
@@ -304,7 +326,8 @@ export class RuntimeService {
     const sessionId = this.guiSessionId + 1;
     this.guiSessionId = sessionId;
     this.guiSessionActive = true;
-    runtime.set({ ...IDLE_RUNTIME, status: 'running', kind: 'gui', target, isRunning: true, guiSessionId: sessionId });
+    this.protocolModule = null;
+    runtime.set({ ...IDLE_RUNTIME, status: 'running', kind: 'gui', target, isRunning: true, gui: { ...IDLE_GUI, sessionId } });
     return sessionId;
   }
 
@@ -312,6 +335,7 @@ export class RuntimeService {
     const sessionId = this.guiSessionId + 1;
     this.guiSessionId = sessionId;
     this.guiSessionActive = false;
+    this.protocolModule = null;
     return sessionId;
   }
 
@@ -369,14 +393,17 @@ export class RuntimeService {
       return;
     }
     runtime.update((state) => {
-      const externalWidgetHandlerId = findExternalWidgetHandlerIdInBytes(bytes);
+      const externalWidgetHandlerId = this.protocolModule?.findExternalWidgetHandlerId(bytes) ?? null;
       return {
         ...state,
         kind: 'gui',
         status: 'ready',
         isRunning: true,
-        guiRenderBytes: bytes,
-        guiExternalWidgetHandlerId: externalWidgetHandlerId ?? state.guiExternalWidgetHandlerId,
+        gui: {
+          ...state.gui,
+          renderBytes: bytes,
+          externalWidgetHandlerId: externalWidgetHandlerId ?? state.gui.externalWidgetHandlerId,
+        },
       };
     });
   }

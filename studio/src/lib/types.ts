@@ -115,6 +115,8 @@ export interface FrameworkContract {
   entry: string;
   capabilities: string[];
   rendererPath: string | null;
+  protocolPath: string | null;
+  hostBridgePath: string | null;
 }
 
 export interface GuiSession {
@@ -182,12 +184,12 @@ export interface StreamHandle<T> {
   cancel(): void;
 }
 
-export interface RenderIslandVfsFile {
+export interface RendererBridgeVfsFile {
   path: string;
   bytes: Uint8Array;
 }
 
-export interface RenderIslandVfsSnapshot {
+export interface RendererBridgeVfsSnapshot {
   rootPath: string;
-  files: RenderIslandVfsFile[];
+  files: RendererBridgeVfsFile[];
 }

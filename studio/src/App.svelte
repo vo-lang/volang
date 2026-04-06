@@ -418,8 +418,8 @@
   $: isSingleFileSession = $session.projectMode === 'single-file';
   $: outputExpanded = $ide.outputExpanded;
   $: previewCollapsed = $ide.previewCollapsed;
-  $: previewTitle = $runtime.guiEntryPath
-    ? ($runtime.guiEntryPath.split('/').pop() ?? '')
+  $: previewTitle = $runtime.gui.entryPath
+    ? ($runtime.gui.entryPath.split('/').pop() ?? '')
     : $session.entryPath
       ? ($session.entryPath.split('/').pop() ?? '')
       : $session.projectName;

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vo_app_runtime::SyncRenderBuffer;
@@ -114,13 +114,18 @@ impl ConsoleRunHandle {
 // AppState
 // ---------------------------------------------------------------------------
 
+struct GuestRuntime {
+    handle: GuestHandle,
+    render_buffer: Arc<SyncRenderBuffer>,
+}
+
 pub struct AppState {
     workspace_root: PathBuf,
     launch: LaunchConfig,
     session: Mutex<SessionConfig>,
     console_run: Arc<Mutex<Option<Arc<AtomicBool>>>>,
-    guest: Mutex<Option<GuestHandle>>,
-    push_rx: Mutex<Option<Arc<SyncRenderBuffer>>>,
+    gui_session_id: AtomicU64,
+    guest_runtime: Mutex<Option<GuestRuntime>>,
     last_extensions: Mutex<Vec<PreparedNativeExtension>>,
 }
 
@@ -135,8 +140,8 @@ impl AppState {
                 single_file_run: false,
             }),
             console_run: Arc::new(Mutex::new(None)),
-            guest: Mutex::new(None),
-            push_rx: Mutex::new(None),
+            gui_session_id: AtomicU64::new(0),
+            guest_runtime: Mutex::new(None),
             last_extensions: Mutex::new(Vec::new()),
             workspace_root,
             launch,
@@ -189,9 +194,19 @@ impl AppState {
         }
     }
 
-    pub fn install_guest_runtime(&self, guest: GuestHandle, push_rx: Arc<SyncRenderBuffer>) {
-        *self.guest.lock().unwrap() = Some(guest);
-        *self.push_rx.lock().unwrap() = Some(push_rx);
+    pub fn set_gui_session(&self, session_id: u64) {
+        self.gui_session_id.store(session_id, Ordering::SeqCst);
+    }
+
+    pub fn gui_session_id(&self) -> u64 {
+        self.gui_session_id.load(Ordering::SeqCst)
+    }
+
+    pub fn install_guest_runtime(&self, session_id: u64, guest: GuestHandle, render_buffer: Arc<SyncRenderBuffer>) {
+        if self.gui_session_id.load(Ordering::SeqCst) != session_id {
+            return;
+        }
+        *self.guest_runtime.lock().unwrap() = Some(GuestRuntime { handle: guest, render_buffer });
     }
 
     pub fn set_last_extensions(&self, extensions: Vec<PreparedNativeExtension>) {
@@ -203,24 +218,24 @@ impl AppState {
     }
 
     pub fn clear_guest_runtime(&self) {
-        let _ = self.guest.lock().unwrap().take();
-        let _ = self.push_rx.lock().unwrap().take();
+        let _ = self.guest_runtime.lock().unwrap().take();
+        self.last_extensions.lock().unwrap().clear();
     }
 
     pub fn with_guest<R>(&self, f: impl FnOnce(&GuestHandle) -> Result<R, String>) -> Result<R, String> {
-        let guest = self.guest.lock().unwrap();
-        let handle = guest
+        let rt = self.guest_runtime.lock().unwrap();
+        let runtime = rt
             .as_ref()
             .ok_or_else(|| "guest VM not running".to_string())?;
-        f(handle)
+        f(&runtime.handle)
     }
 
     pub fn poll_gui_render(&self) -> Vec<u8> {
-        self.push_rx
+        self.guest_runtime
             .lock()
             .unwrap()
             .as_ref()
-            .and_then(|rx| rx.poll())
+            .and_then(|rt| rt.render_buffer.poll())
             .unwrap_or_default()
     }
 }
@@ -366,24 +381,24 @@ fn query_get(query: &Option<HashMap<String, String>>, keys: &[&str]) -> Option<S
 }
 
 fn url_decode(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '%' {
-            let h1 = chars.next().and_then(|c| c.to_digit(16));
-            let h2 = chars.next().and_then(|c| c.to_digit(16));
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut chars = input.as_bytes().iter();
+    while let Some(&b) = chars.next() {
+        if b == b'%' {
+            let h1 = chars.next().and_then(|c| (*c as char).to_digit(16));
+            let h2 = chars.next().and_then(|c| (*c as char).to_digit(16));
             if let (Some(h1), Some(h2)) = (h1, h2) {
-                result.push(char::from_u32(h1 * 16 + h2).unwrap_or(ch));
+                bytes.push((h1 * 16 + h2) as u8);
             } else {
-                result.push(ch);
+                bytes.push(b);
             }
-        } else if ch == '+' {
-            result.push(' ');
+        } else if b == b'+' {
+            bytes.push(b' ');
         } else {
-            result.push(ch);
+            bytes.push(b);
         }
     }
-    result
+    String::from_utf8(bytes).unwrap_or_else(|_| input.to_string())
 }
 
 fn detect_project_mode(path: &Path) -> ProjectMode {

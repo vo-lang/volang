@@ -6,7 +6,7 @@
 
   export let registry: ServiceRegistry;
 
-  $: guiEntryPath = $runtime.guiEntryPath;
+  $: guiEntryPath = $runtime.gui.entryPath;
   $: isRunning = $runtime.status === 'running';
   $: isReady = $runtime.status === 'ready' && $runtime.kind === 'gui';
   $: hasError = $runtime.lastError != null;

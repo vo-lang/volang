@@ -17,7 +17,7 @@ import type {
   InstalledModule,
   ProcEvent,
   ReadManyResult,
-  RenderIslandVfsSnapshot,
+  RendererBridgeVfsSnapshot,
   RunEvent,
   RunOpts,
   SessionInfo,
@@ -70,7 +70,7 @@ export interface Backend {
   pushIslandTransport(data: Uint8Array): Promise<void>;
   pollGuiRender(): Promise<Uint8Array>;
   stopGui(): Promise<void>;
-  getRenderIslandVfsSnapshot(path: string): Promise<RenderIslandVfsSnapshot>;
+  getRendererBridgeVfsSnapshot(path: string): Promise<RendererBridgeVfsSnapshot>;
 
   // Toolchain
   voGet(spec: string): StreamHandle<InstallEvent>;

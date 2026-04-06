@@ -4,6 +4,15 @@ import type { FrameworkContract } from '../lib/types';
 export type RuntimeKind = 'console' | 'gui' | null;
 export type RuntimeStatus = 'idle' | 'running' | 'ready';
 
+export interface GuiRuntimeState {
+  entryPath: string | null;
+  moduleBytes: Uint8Array | null;
+  renderBytes: Uint8Array | null;
+  framework: FrameworkContract | null;
+  sessionId: number | null;
+  externalWidgetHandlerId: number | null;
+}
+
 export interface RuntimeState {
   status: RuntimeStatus;
   kind: RuntimeKind;
@@ -12,13 +21,17 @@ export interface RuntimeState {
   isRunning: boolean;
   consoleLines: string[];
   lastError: string | null;
-  guiEntryPath: string | null;
-  guiModuleBytes: Uint8Array | null;
-  guiRenderBytes: Uint8Array | null;
-  guiFramework: FrameworkContract | null;
-  guiSessionId: number | null;
-  guiExternalWidgetHandlerId: number | null;
+  gui: GuiRuntimeState;
 }
+
+export const IDLE_GUI: GuiRuntimeState = {
+  entryPath: null,
+  moduleBytes: null,
+  renderBytes: null,
+  framework: null,
+  sessionId: null,
+  externalWidgetHandlerId: null,
+};
 
 export const IDLE_RUNTIME: RuntimeState = {
   status: 'idle',
@@ -28,12 +41,7 @@ export const IDLE_RUNTIME: RuntimeState = {
   isRunning: false,
   consoleLines: [],
   lastError: null,
-  guiEntryPath: null,
-  guiModuleBytes: null,
-  guiRenderBytes: null,
-  guiFramework: null,
-  guiSessionId: null,
-  guiExternalWidgetHandlerId: null,
+  gui: { ...IDLE_GUI },
 };
 
 export const runtime = writable<RuntimeState>({ ...IDLE_RUNTIME });

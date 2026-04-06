@@ -18,13 +18,14 @@ import type {
   InstalledModule,
   ProcEvent,
   ReadManyResult,
-  RenderIslandVfsSnapshot,
+  RendererBridgeVfsSnapshot,
   RunEvent,
   RunOpts,
   SessionInfo,
   StreamHandle,
 } from '../types';
 import { loadStudioWasm, setStandaloneGuiEventDispatcher, type StudioWasm } from '../studio_wasm';
+import { executeGuiFromCompileOutput, type GuiCompileOutput } from '../gui/gui_pipeline';
 import { consolePush } from '../../stores/console';
 import { formatDurationMs, pushUiConsole, renderStudioLogRecord, type StudioLogRecord } from './gui_console';
 import { makeErrorStreamHandle, makeResolvedStreamHandle, makeStreamHandleFromProducer } from './stream_handle';
@@ -462,25 +463,26 @@ export class WebBackend implements Backend {
       await wasm.prepareEntry(normalized);
       const prepareDurationMs = performance.now() - prepareStart;
       consolePush('system', `Prepared dependencies for ${targetLabel} in ${formatDurationMs(prepareDurationMs)}`);
-      console.info(`[studio-gui] prepareEntry ${normalized} ${Math.round(prepareDurationMs)}ms`);
       this.assertGuiSessionCurrent(sessionId);
       this.installStandaloneGuiDispatcher(sessionId);
-      try {
-        consolePush('system', `Compiling and starting GUI ${targetLabel}...`);
-        const runStart = performance.now();
-        const output = wasm.runGui(normalized);
-        const runDurationMs = performance.now() - runStart;
-        const totalDurationMs = performance.now() - totalStart;
-        consolePush('success', `Opened GUI ${targetLabel} in ${formatDurationMs(totalDurationMs)}`);
-        console.info(`[studio-gui] runGui ${normalized} ${Math.round(runDurationMs)}ms`);
-        console.info(`[studio-gui] total open ${normalized} ${Math.round(totalDurationMs)}ms`);
-        return output;
-      } catch (error) {
-        if (sessionId === this.guiSessionId) {
-          setStandaloneGuiEventDispatcher(null);
-        }
-        throw error;
-      }
+      consolePush('system', `Compiling and starting GUI ${targetLabel}...`);
+      const compileStart = performance.now();
+      const compileResult = wasm.compileGui(normalized);
+      const compileDurationMs = performance.now() - compileStart;
+      console.info(`[studio-gui] compileGui ${normalized} ${Math.round(compileDurationMs)}ms`);
+      this.assertGuiSessionCurrent(sessionId);
+      const compiled: GuiCompileOutput = {
+        bytecode: compileResult.bytecode,
+        entryPath: compileResult.entryPath,
+        framework: compileResult.framework,
+        wasmExtensions: [],
+      };
+      const assertCurrent = (id: number) => { this.assertGuiSessionCurrent(id); };
+      const output = await executeGuiFromCompileOutput(compiled, this, wasm, sessionId, assertCurrent);
+      const totalDurationMs = performance.now() - totalStart;
+      consolePush('success', `Opened GUI ${targetLabel} in ${formatDurationMs(totalDurationMs)}`);
+      console.info(`[studio-gui] total open ${normalized} ${Math.round(totalDurationMs)}ms`);
+      return output;
     });
   }
 
@@ -518,7 +520,7 @@ export class WebBackend implements Backend {
     });
   }
 
-  async getRenderIslandVfsSnapshot(path: string): Promise<RenderIslandVfsSnapshot> {
+  async getRendererBridgeVfsSnapshot(path: string): Promise<RendererBridgeVfsSnapshot> {
     const wasm = await getStudioWasm();
     return wasm.getRenderIslandVfsSnapshot(normalizePath(path));
   }

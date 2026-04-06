@@ -15,6 +15,8 @@ use wasm_bindgen::JsValue;
 use vo_common::stable_hash::StableHasher;
 use vo_common::vfs::{normalize_fs_path, FileSystem, MemoryFs};
 use vo_app_runtime::{GuestRuntime, RenderBuffer, RenderIslandRuntime, SessionError};
+mod studio_manifest;
+use studio_manifest::parse_studio_manifest;
 
 fn session_error_to_js(error: SessionError) -> JsValue {
     JsValue::from_str(&error.to_string())
@@ -26,7 +28,21 @@ fn ensure_panic_hook() {
     INIT.call_once(|| console_error_panic_hook::set_once());
 }
 
+struct EmbeddedFile {
+    path: &'static str,
+    bytes: &'static [u8],
+}
+
+struct EmbeddedLocalFrameworkModule {
+    module_path: &'static str,
+    version: &'static str,
+    files: &'static [EmbeddedFile],
+}
+
 include!(concat!(env!("OUT_DIR"), "/term_embedded.rs"));
+include!(concat!(env!("OUT_DIR"), "/local_framework_modules_embedded.rs"));
+
+const LOCAL_FRAMEWORK_COMMIT: &str = "0000000000000000000000000000000000000000";
 
 fn emit_host_log(record: vo_web::HostLogRecord) {
     let source = record.core.source.clone();
@@ -206,9 +222,141 @@ impl StudioVoVm {
 // preloadExtModule is provided by vo-web (3-param version with optional jsGlueUrl).
 // =============================================================================
 
+fn embedded_local_file<'a>(
+    module: &'a EmbeddedLocalFrameworkModule,
+    path: &str,
+) -> Option<&'a EmbeddedFile> {
+    module.files.iter().find(|file| file.path == path)
+}
+
+fn embedded_local_text(module: &EmbeddedLocalFrameworkModule, path: &str) -> Result<String, String> {
+    let file = embedded_local_file(module, path)
+        .ok_or_else(|| format!("local framework {} missing {}", module.module_path, path))?;
+    std::str::from_utf8(file.bytes)
+        .map(|content| content.to_string())
+        .map_err(|error| format!("utf8 decode local framework {} {}: {}", module.module_path, path, error))
+}
+
+fn local_framework_vfs_root(module_path: &str, version: &str) -> String {
+    format!(
+        "/{}",
+        vo_module::cache::layout::relative_module_dir(module_path, version).display()
+    )
+}
+
+fn local_framework_source_digest(module: &EmbeddedLocalFrameworkModule) -> vo_module::digest::Digest {
+    let mut raw = Vec::new();
+    for file in module.files {
+        raw.extend_from_slice(file.path.as_bytes());
+        raw.push(0);
+        raw.extend_from_slice(file.bytes);
+        raw.push(0xff);
+    }
+    vo_module::digest::Digest::from_sha256(&raw)
+}
+
+fn build_local_framework_manifest(
+    module: &EmbeddedLocalFrameworkModule,
+    mod_file: &vo_module::schema::modfile::ModFile,
+    source_digest: vo_module::digest::Digest,
+) -> Result<vo_module::schema::manifest::ReleaseManifest, String> {
+    let version = vo_module::version::ExactVersion::parse(module.version)
+        .map_err(|error| format!("local framework {} version {}: {}", module.module_path, module.version, error))?;
+    let mut require = mod_file.require.iter().map(|req| {
+        vo_module::schema::manifest::ManifestRequire {
+            module: req.module.clone(),
+            constraint: req.constraint.clone(),
+        }
+    }).collect::<Vec<_>>();
+    require.sort_by(|a, b| a.module.cmp(&b.module));
+    let ext_content = embedded_local_text(module, "vo.ext.toml")?;
+    let mut artifacts = Vec::new();
+    if let Some(ext) = vo_module::ext_manifest::wasm_extension_from_content(&ext_content) {
+        let wasm_file = embedded_local_file(module, &ext.wasm)
+            .ok_or_else(|| format!("local framework {} missing wasm asset {}", module.module_path, ext.wasm))?;
+        artifacts.push(vo_module::schema::manifest::ManifestArtifact {
+            id: vo_module::identity::ArtifactId {
+                kind: "extension-wasm".to_string(),
+                target: "wasm32-unknown-unknown".to_string(),
+                name: ext.wasm.clone(),
+            },
+            size: wasm_file.bytes.len() as u64,
+            digest: vo_module::digest::Digest::from_sha256(wasm_file.bytes),
+        });
+    }
+    artifacts.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(vo_module::schema::manifest::ReleaseManifest {
+        schema_version: 1,
+        module: mod_file.module.clone(),
+        version,
+        commit: LOCAL_FRAMEWORK_COMMIT.to_string(),
+        module_root: ".".to_string(),
+        vo: mod_file.vo.clone(),
+        require,
+        source: vo_module::schema::manifest::ManifestSource {
+            name: format!(
+                "{}-{}-local-source.tar.gz",
+                mod_file.module.as_str().rsplit('/').next().unwrap_or("module"),
+                module.version,
+            ),
+            size: module.files.iter().map(|file| file.bytes.len() as u64).sum(),
+            digest: source_digest,
+        },
+        artifacts,
+    })
+}
+
+fn seed_local_framework_module(module: &EmbeddedLocalFrameworkModule) -> Result<(), String> {
+    let vo_mod_content = embedded_local_text(module, "vo.mod")?;
+    let mod_file = vo_module::schema::modfile::ModFile::parse(&vo_mod_content)
+        .map_err(|error| format!("parse local framework vo.mod {}: {}", module.module_path, error))?;
+    let source_digest = local_framework_source_digest(module);
+    let manifest = build_local_framework_manifest(module, &mod_file, source_digest.clone())?;
+    let manifest_raw = manifest.render();
+    let module_root = local_framework_vfs_root(mod_file.module.as_str(), module.version);
+    for file in module.files {
+        let path = join_vfs_path(&module_root, file.path);
+        write_vfs_bytes(&path, file.bytes)?;
+    }
+    let ext_content = embedded_local_text(module, "vo.ext.toml")?;
+    if let Some(ext) = vo_module::ext_manifest::wasm_extension_from_content(&ext_content) {
+        let artifact_root = join_vfs_path(&module_root, ".vo-artifacts");
+        let wasm_file = embedded_local_file(module, &ext.wasm)
+            .ok_or_else(|| format!("local framework {} missing wasm asset {}", module.module_path, ext.wasm))?;
+        write_vfs_bytes(&join_vfs_path(&artifact_root, &ext.wasm), wasm_file.bytes)?;
+        if let Some(js_glue) = ext.js_glue.as_deref() {
+            let js_file = embedded_local_file(module, js_glue)
+                .ok_or_else(|| format!("local framework {} missing wasm js glue {}", module.module_path, js_glue))?;
+            write_vfs_bytes(&join_vfs_path(&artifact_root, js_glue), js_file.bytes)?;
+        }
+    }
+    write_vfs_text(
+        &join_vfs_path(&module_root, vo_module::cache::layout::VERSION_MARKER),
+        &format!("{}\n", module.version),
+    )?;
+    write_vfs_text(
+        &join_vfs_path(&module_root, vo_module::cache::layout::SOURCE_DIGEST_MARKER),
+        &format!("{}\n", source_digest),
+    )?;
+    write_vfs_text(&join_vfs_path(&module_root, "vo.release.json"), &manifest_raw)?;
+    Ok(())
+}
+
+fn seed_local_framework_modules() -> Result<(), String> {
+    for module in LOCAL_FRAMEWORK_MODULES {
+        seed_local_framework_module(module)?;
+    }
+    Ok(())
+}
+
 #[wasm_bindgen(js_name = "initVFS")]
 pub fn init_vfs() -> js_sys::Promise {
-    js_sys::Promise::resolve(&JsValue::UNDEFINED)
+    ensure_panic_hook();
+    wasm_bindgen_futures::future_to_promise(async move {
+        seed_local_framework_modules()
+            .map_err(|error| JsValue::from_str(&error))?;
+        Ok(JsValue::UNDEFINED)
+    })
 }
 
 // =============================================================================
@@ -238,18 +386,13 @@ struct SingleFileEntry {
 }
 
 #[derive(Clone)]
-struct StudioManifest {
-    entry: String,
-    capabilities: Vec<String>,
-    renderer_path: Option<String>,
-}
-
-#[derive(Clone)]
 struct FrameworkContract {
     name: String,
     entry: String,
     capabilities: Vec<String>,
     renderer_path: Option<String>,
+    protocol_path: Option<String>,
+    host_bridge_path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -638,46 +781,6 @@ fn framework_module_root(locked: &vo_module::schema::lockfile::LockedModule) -> 
     )
 }
 
-fn parse_studio_manifest(content: &str, manifest_path: &str) -> Result<Option<StudioManifest>, String> {
-    let value: Value = toml::from_str(content)
-        .map_err(|e| format!("parse {}: {}", manifest_path, e))?;
-    let Some(studio) = value.get("studio").and_then(Value::as_table) else {
-        return Ok(None);
-    };
-    let entry = studio
-        .get("entry")
-        .and_then(Value::as_str)
-        .unwrap_or("Run")
-        .to_string();
-    let capabilities = studio
-        .get("capabilities")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let renderer_path = studio
-        .get("renderer")
-        .and_then(Value::as_str)
-        .map(|renderer| {
-            if renderer.starts_with('/') {
-                normalize_vfs_path(renderer)
-            } else {
-                let base = vfs_parent_dir(manifest_path).unwrap_or_else(|| "/".to_string());
-                join_vfs_path(&base, renderer)
-            }
-        });
-    Ok(Some(StudioManifest {
-        entry,
-        capabilities,
-        renderer_path,
-    }))
-}
-
 fn parse_framework_module(manifest_path: &str) -> Result<Option<FrameworkModule>, String> {
     let content = read_vfs_text(manifest_path)?;
     let Some(studio) = parse_studio_manifest(&content, manifest_path)? else {
@@ -704,12 +807,23 @@ fn parse_framework_module(manifest_path: &str) -> Result<Option<FrameworkModule>
         .and_then(Value::as_str)
         .map(str::to_string);
     let module_root = vfs_parent_dir(manifest_path).unwrap_or_else(|| "/".to_string());
+    let resolve_artifact = |rel: Option<&str>| -> Option<String> {
+        rel.map(|rel| {
+            if rel.starts_with('/') {
+                normalize_vfs_path(rel)
+            } else {
+                join_vfs_path(&module_root, rel)
+            }
+        })
+    };
     Ok(Some(FrameworkModule {
         contract: FrameworkContract {
             name,
             entry: studio.entry,
             capabilities: studio.capabilities,
-            renderer_path: studio.renderer_path,
+            renderer_path: resolve_artifact(studio.renderer_path.as_deref()),
+            protocol_path: resolve_artifact(studio.protocol_path.as_deref()),
+            host_bridge_path: resolve_artifact(studio.host_bridge_path.as_deref()),
         },
         module_root,
         wasm_asset,
@@ -776,12 +890,13 @@ fn framework_contract_to_js(contract: &FrameworkContract) -> JsValue {
         capabilities.push(&JsValue::from_str(capability));
     }
     let _ = Reflect::set(&obj, &JsValue::from_str("capabilities"), &capabilities);
-    let renderer_value = contract
-        .renderer_path
-        .as_ref()
-        .map(|path| JsValue::from_str(path))
-        .unwrap_or(JsValue::NULL);
-    let _ = Reflect::set(&obj, &JsValue::from_str("rendererPath"), &renderer_value);
+    let set_optional_str = |key: &str, value: &Option<String>| {
+        let js = value.as_ref().map(|s| JsValue::from_str(s)).unwrap_or(JsValue::NULL);
+        let _ = Reflect::set(&obj, &JsValue::from_str(key), &js);
+    };
+    set_optional_str("rendererPath", &contract.renderer_path);
+    set_optional_str("protocolPath", &contract.protocol_path);
+    set_optional_str("hostBridgePath", &contract.host_bridge_path);
     obj.into()
 }
 
@@ -900,10 +1015,17 @@ fn collect_render_island_snapshot(entry_path: &str) -> Result<JsValue, String> {
         vec![(target.entry_path.clone(), read_vfs_bytes(&target.entry_path)?)]
     };
     for module in discover_framework_modules(&target)? {
-        if let Some(renderer_path) = module.contract.renderer_path.as_ref() {
-            let renderer_dir = vfs_parent_dir(renderer_path).unwrap_or_else(|| module.module_root.clone());
-            if is_vfs_dir(&renderer_dir) {
-                files.extend(collect_vfs_files(&renderer_dir, None)?);
+        // Collect directories containing all framework artifacts (renderer, protocol, host_bridge).
+        let artifact_paths = [
+            module.contract.renderer_path.as_ref(),
+            module.contract.protocol_path.as_ref(),
+            module.contract.host_bridge_path.as_ref(),
+        ];
+        let mut collected_dirs = std::collections::HashSet::new();
+        for artifact_path in artifact_paths.into_iter().flatten() {
+            let artifact_dir = vfs_parent_dir(artifact_path).unwrap_or_else(|| module.module_root.clone());
+            if collected_dirs.insert(artifact_dir.clone()) && is_vfs_dir(&artifact_dir) {
+                files.extend(collect_vfs_files(&artifact_dir, None)?);
             }
         }
         let artifact_dir = join_vfs_path(&module.module_root, ".vo-artifact");
@@ -1027,6 +1149,46 @@ pub fn run_gui(entry_path: &str) -> Result<JsValue, JsValue> {
     GUEST.with(|g| *g.borrow_mut() = Some(guest));
     log_wasm_path("gui_total_done", &target.entry_path, "system", Some(total_start));
     Ok(gui_run_output_to_js(step.render_output.unwrap_or_default(), bytecode, &target.entry_path, framework.as_ref()))
+}
+
+/// Compile a GUI entry point without running it.
+/// Returns `{ bytecode: Uint8Array, entryPath: string, framework: FrameworkContract | null }`.
+/// Intended for the web backend unified compile path: call prepareEntry first, then compileGui,
+/// then use the shared post-compile pipeline (preload exts, load host bridge, runGuiFromBytecode).
+#[wasm_bindgen(js_name = "compileGui")]
+pub fn compile_gui(entry_path: &str) -> Result<JsValue, JsValue> {
+    ensure_panic_hook();
+    let compile_start = js_sys::Date::now();
+    let (target, bytecode, framework) = compile_gui_run_output(entry_path)
+        .map_err(|e| JsValue::from_str(&e))?;
+    log_wasm_path("gui_compile_done", &target.entry_path, "system", Some(compile_start));
+    let obj = Object::new();
+    let bytes = js_sys::Uint8Array::from(bytecode.as_slice());
+    let _ = Reflect::set(&obj, &JsValue::from_str("bytecode"), &bytes);
+    let _ = Reflect::set(&obj, &JsValue::from_str("entryPath"), &JsValue::from_str(&target.entry_path));
+    let framework_value = framework.as_ref().map(framework_contract_to_js).unwrap_or(JsValue::NULL);
+    let _ = Reflect::set(&obj, &JsValue::from_str("framework"), &framework_value);
+    Ok(obj.into())
+}
+
+/// Run a GUI app from pre-compiled bytecode (compiled by the native Rust backend via cmd_compile_gui).
+/// Returns the initial render bytes. Framework metadata is provided separately by the caller.
+#[wasm_bindgen(js_name = "runGuiFromBytecode")]
+pub fn run_gui_from_bytecode(bytecode: &[u8]) -> Result<Vec<u8>, JsValue> {
+    ensure_panic_hook();
+    GUEST.with(|g| *g.borrow_mut() = None);
+    GUI_RENDER.with(|r| { r.borrow_mut().poll(); });
+    let load_start = js_sys::Date::now();
+    let mut guest = load_gui_app_from_bytecode(bytecode)?;
+    log_wasm_path("gui_load_vm_done", "native-bytecode", "system", Some(load_start));
+    let start_start = js_sys::Date::now();
+    let step = guest
+        .start_gui_app()
+        .map_err(session_error_to_js)?;
+    log_wasm_path("gui_start_done", "native-bytecode", "system", Some(start_start));
+    flush_stdout("guest", step.stdout.as_deref());
+    GUEST.with(|g| *g.borrow_mut() = Some(guest));
+    Ok(step.render_output.unwrap_or_default())
 }
 
 /// Send an event to the running guest app, returning the new render bytes.

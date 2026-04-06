@@ -27,6 +27,7 @@
   import exGuiTetris from '../assets/examples/gui_tetris.vo?raw';
   import exGuiShowcase from '../assets/examples/gui_showcase.vo?raw';
   import exDashboard from '../assets/examples/dashboard.vo?raw';
+  import exGuiChat from '../assets/examples/gui_chat.vo?raw';
 
   interface Example {
     name: string;
@@ -35,16 +36,6 @@
     source: string;
     hasGui: boolean;
   }
-
-  interface LocalDemo {
-    name: string;
-    subPath: string;
-    desc: string;
-  }
-
-  const localDemos: LocalDemo[] = [
-    { name: 'Streaming Chat', subPath: 'chat_demo', desc: 'VirtualScroll + MeasureText' },
-  ];
 
   const examples: Example[] = [
     { name: 'Channels',        file: 'channels.vo',        desc: 'Goroutine communication',       source: exChannels,      hasGui: false },
@@ -61,6 +52,7 @@
     { name: 'Tetris',          file: 'gui_tetris.vo',      desc: 'Canvas 2D game loop',           source: exGuiTetris,     hasGui: true },
     { name: 'Showcase',        file: 'gui_showcase.vo',    desc: 'All GUI components',            source: exGuiShowcase,   hasGui: true },
     { name: 'Dashboard',       file: 'dashboard.vo',       desc: 'Composition patterns',          source: exDashboard,     hasGui: true },
+    { name: 'Streaming Chat',  file: 'gui_chat.vo',        desc: 'VirtualScroll + MeasureText',  source: exGuiChat,       hasGui: true },
   ];
 
   $: langExamples = examples.filter((e) => !e.hasGui);
@@ -387,21 +379,6 @@
             </button>
           {/each}
         </div>
-        {#if isNative && localDemos.length > 0}
-          <span class="quick-try-label quick-try-label-demo">Demos</span>
-          <div class="ex-list">
-            {#each localDemos as demo}
-              <button
-                class="ex-link ex-link-demo"
-                on:click={() => onOpenLocalPath(`${$catalogStore.root}/${demo.subPath}`)}
-              >
-                <span class="ex-link-name">{demo.name}</span>
-                <span class="ex-link-dot">·</span>
-                <span class="ex-link-desc">{demo.desc}</span>
-              </button>
-            {/each}
-          </div>
-        {/if}
       </div>
 
     </aside>
@@ -735,11 +712,6 @@
     color: #a6e3a1;
     padding-top: 8px;
   }
-  .quick-try-label-demo {
-    color: #cba6f7;
-    padding-top: 8px;
-  }
-
   .ex-list {
     display: flex;
     flex-direction: column;
@@ -765,9 +737,6 @@
   }
   .ex-link-gui:hover {
     background: rgba(166, 227, 161, 0.06);
-  }
-  .ex-link-demo:hover {
-    background: rgba(203, 166, 247, 0.06);
   }
   .ex-link-name {
     font-size: 12px;

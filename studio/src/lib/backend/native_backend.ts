@@ -18,7 +18,7 @@ import type {
   InstalledModule,
   ProcEvent,
   ReadManyResult,
-  RenderIslandVfsSnapshot,
+  RendererBridgeVfsSnapshot,
   RunEvent,
   RunOpts,
   SessionInfo,
@@ -29,8 +29,15 @@ import { consolePush } from '../../stores/console';
 import { formatDurationMs, pushUiConsole, renderStudioLogRecord, type StudioLogRecord } from './gui_console';
 import { makeTauriStreamHandle } from './stream_handle';
 
-type GuiFatalErrorEvent = { sessionId: number; message: string };
 type StudioLogEvent = { sessionId: number; record: StudioLogRecord };
+
+type NativeGuiRunResult = {
+  renderBytes: number[];
+  moduleBytes: number[];
+  entryPath: string;
+  framework: { name: string; entry: string; capabilities: string[]; rendererPath: string | null; protocolPath: string | null; hostBridgePath: string | null } | null;
+  externalWidgetHandlerId: number | null;
+};
 
 function displayPath(path: string): string {
   const normalized = path.trim().replace(/\\/g, '/');
@@ -54,8 +61,6 @@ function pushNativeStudioLog(record: StudioLogRecord): void {
 export class NativeBackend implements Backend {
   readonly platform = 'native' as const;
   private guiSessionId = 0;
-  private guiFatalError: Error | null = null;
-  private guiFatalListenerPromise: Promise<void> | null = null;
   private guiLogListenerPromise: Promise<void> | null = null;
 
   async getBootstrapContext(): Promise<BootstrapContext> {
@@ -162,66 +167,55 @@ export class NativeBackend implements Backend {
   async runGui(path: string): Promise<GuiRunOutput> {
     const sessionId = this.guiSessionId + 1;
     this.guiSessionId = sessionId;
-    this.guiFatalError = null;
     const targetLabel = displayPath(path);
     consolePush('system', `Opening GUI ${targetLabel}`);
     consolePush('system', `Preparing dependencies and compiling GUI ${targetLabel}...`);
     await waitForNextUiFrame();
-    await this.ensureGuiListeners();
+    await this.ensureGuiLogListener();
     const totalStart = performance.now();
-    const raw = await this.invoke<{
-      renderBytes: number[];
-      moduleBytes: number[];
-      entryPath: string;
-      framework: { name: string; entry: string; capabilities: string[]; rendererPath: string | null } | null;
-      externalWidgetHandlerId: number | null;
-    }>('cmd_run_gui', { entryPath: path, sessionId });
-    this.assertNoGuiFatalError();
+
+    const result = await this.invoke<NativeGuiRunResult>('cmd_run_gui', { entryPath: path, sessionId });
+
+    if (this.guiSessionId !== sessionId) {
+      throw new Error('GUI session superseded');
+    }
+
     consolePush('success', `Opened GUI ${targetLabel} in ${formatDurationMs(performance.now() - totalStart)}`);
     return {
-      renderBytes: new Uint8Array(raw.renderBytes),
-      moduleBytes: new Uint8Array(raw.moduleBytes),
-      entryPath: raw.entryPath,
-      framework: raw.framework,
-      externalWidgetHandlerId: raw.externalWidgetHandlerId ?? null,
+      renderBytes: new Uint8Array(result.renderBytes),
+      moduleBytes: new Uint8Array(result.moduleBytes),
+      entryPath: result.entryPath,
+      framework: result.framework,
+      externalWidgetHandlerId: result.externalWidgetHandlerId,
     };
   }
 
   async sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
-    this.assertNoGuiFatalError();
-    const raw = await this.invoke<number[]>('cmd_send_gui_event', { handlerId, payload });
-    this.assertNoGuiFatalError();
+    const raw = await this.invoke<ArrayBuffer>('cmd_send_gui_event', { handlerId, payload });
     return new Uint8Array(raw);
   }
 
   async sendGuiEventAsync(handlerId: number, payload: string): Promise<void> {
-    this.assertNoGuiFatalError();
     await this.invoke<void>('cmd_send_gui_event_async', { handlerId, payload });
-    this.assertNoGuiFatalError();
   }
 
   async pushIslandTransport(data: Uint8Array): Promise<void> {
-    this.assertNoGuiFatalError();
-    await this.invoke<void>('__island_transport_push', { data: Array.from(data) });
-    this.assertNoGuiFatalError();
+    await this.invoke<void>('cmd_push_island_transport', { data: Array.from(data) });
   }
 
   async pollGuiRender(): Promise<Uint8Array> {
-    this.assertNoGuiFatalError();
-    const raw = await this.invoke<number[]>('cmd_poll_gui_render');
-    this.assertNoGuiFatalError();
+    const raw = await this.invoke<ArrayBuffer>('cmd_poll_gui_render');
     return new Uint8Array(raw);
   }
 
   async stopGui(): Promise<void> {
     this.guiSessionId += 1;
-    this.guiFatalError = null;
     await this.invoke<void>('cmd_stop_gui');
   }
 
-  async getRenderIslandVfsSnapshot(path: string): Promise<RenderIslandVfsSnapshot> {
+  async getRendererBridgeVfsSnapshot(path: string): Promise<RendererBridgeVfsSnapshot> {
     const raw = await this.invoke<{ rootPath: string; files: Array<{ path: string; bytes: number[] }> }>(
-      'cmd_get_render_island_vfs_snapshot',
+      'cmd_get_renderer_bridge_vfs_snapshot',
       { entryPath: path },
     );
     return {
@@ -288,15 +282,7 @@ export class NativeBackend implements Backend {
     return tauriInvoke<T>(command, args);
   }
 
-  private async ensureGuiListeners(): Promise<void> {
-    if (!this.guiFatalListenerPromise) {
-      this.guiFatalListenerPromise = tauriListen<GuiFatalErrorEvent>('gui_fatal_error', (event) => {
-        if (event.payload.sessionId !== this.guiSessionId) {
-          return;
-        }
-        this.guiFatalError = new Error(event.payload.message);
-      }).then(() => undefined);
-    }
+  private async ensureGuiLogListener(): Promise<void> {
     if (!this.guiLogListenerPromise) {
       this.guiLogListenerPromise = tauriListen<StudioLogEvent>('studio_log', (event) => {
         if (event.payload.sessionId !== this.guiSessionId) {
@@ -305,13 +291,6 @@ export class NativeBackend implements Backend {
         pushNativeStudioLog(event.payload.record);
       }).then(() => undefined);
     }
-    await this.guiFatalListenerPromise;
     await this.guiLogListenerPromise;
-  }
-
-  private assertNoGuiFatalError(): void {
-    if (this.guiFatalError) {
-      throw this.guiFatalError;
-    }
   }
 }

@@ -12,7 +12,10 @@ use std::sync::{mpsc, Arc};
 use vo_vm::vm::Vm;
 
 use crate::protocol::event_ids;
-use crate::{NativeGuiRuntime, NativeTickProvider, SyncRenderBuffer, TickLoopControl};
+use crate::{
+    NativeGuiRuntime, NativeTickProvider, NativeTimerProvider, SyncRenderBuffer,
+    TickLoopControl, TimerControl,
+};
 
 // ── Internal event enum ─────────────────────────────────────────────────────
 
@@ -24,6 +27,10 @@ enum GuestEvent {
     AsyncEvent {
         handler_id: i32,
         payload: String,
+    },
+    TimerFired {
+        timer_id: i32,
+        control: Arc<TimerControl>,
     },
     GameLoopTick {
         loop_id: i32,
@@ -212,11 +219,15 @@ fn run_event_loop(
 
     let mut runtime = NativeGuiRuntime::new(vm, island_sink);
 
+    let tick_tx = platform_tx.clone();
     let tick_provider = NativeTickProvider::new(move |loop_id, control| {
-        let _ = platform_tx.send(GuestEvent::GameLoopTick { loop_id, control });
+        let _ = tick_tx.send(GuestEvent::GameLoopTick { loop_id, control });
+    });
+    let timer_provider = NativeTimerProvider::new(move |timer_id, control| {
+        let _ = platform_tx.send(GuestEvent::TimerFired { timer_id, control });
     });
     let cap_refs: Vec<&str> = capabilities.iter().map(|s| s.as_str()).collect();
-    runtime.install_host_capabilities(tick_provider.clone(), &cap_refs);
+    runtime.install_host_capabilities_with_timer(tick_provider.clone(), timer_provider, &cap_refs);
 
     // ── start ───────────────────────────────────────────────────────────
     let step = match runtime.start() {
@@ -265,6 +276,27 @@ fn run_event_loop(
                     );
                     runtime.shutdown();
                     return;
+                }
+            },
+            GuestEvent::TimerFired { timer_id, control } => {
+                if !control.take_pending_event() {
+                    continue;
+                }
+                let payload = format!(r#"{{"id":{}}}"#, timer_id);
+                match runtime.try_dispatch_event(event_ids::TIMER, &payload) {
+                    Ok(Some(step)) => {
+                        flush_stdout(&on_stdout, "event", step.stdout.as_deref());
+                        buffer.push(step.render_output.unwrap_or_default());
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        report_error(
+                            &on_error,
+                            &format!("guest VM error on timer event: {}", error),
+                        );
+                        runtime.shutdown();
+                        return;
+                    }
                 }
             },
             GuestEvent::GameLoopTick { loop_id, control } => {

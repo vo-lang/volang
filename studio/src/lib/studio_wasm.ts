@@ -2,7 +2,10 @@
 // The wasm-pack output is expected at /wasm/ (served from studio/public/wasm/).
 // Build: wasm-pack build studio/wasm --target web --out-dir ../public/wasm
 
-import { getRef, measureText, measureTextLines } from '@vogui/runtime';
+// Framework-specific host bridge imports (focus, blur, scrollTo, measureText, etc.)
+// are injected dynamically via setActiveHostBridge() before WASM instantiation.
+// No static import of any framework package.
+import type { HostBridgeModule } from './gui/renderer_bridge';
 
 // ── VoVm instance interface (matches VoVm wasm-bindgen class exports) ────────
 
@@ -20,11 +23,12 @@ export interface VoVmInstance {
 
 export interface StudioWasm {
   // Legacy singleton-based island API (still used for non-VoWebModule paths)
+  runGuiFromBytecode(bytecode: Uint8Array): Uint8Array;
   runGui(entryPath: string): {
     renderBytes: Uint8Array;
     moduleBytes: Uint8Array;
     entryPath: string;
-    framework: { name: string; entry: string; capabilities: string[]; rendererPath: string | null } | null;
+    framework: { name: string; entry: string; capabilities: string[]; rendererPath: string | null; protocolPath: string | null; hostBridgePath: string | null } | null;
     externalWidgetHandlerId: number | null;
   };
   runGuiEntry(entryPath: string): Uint8Array;
@@ -47,6 +51,11 @@ export interface StudioWasm {
   VoVm: { withExterns(bytecode: Uint8Array): VoVmInstance };
   preloadExtModule(path: string, bytes: Uint8Array, jsGlueUrl?: string): Promise<void>;
   prepareEntry(entryPath: string): Promise<void>;
+  compileGui(entryPath: string): {
+    bytecode: Uint8Array;
+    entryPath: string;
+    framework: { name: string; entry: string; capabilities: string[]; rendererPath: string | null; protocolPath: string | null; hostBridgePath: string | null } | null;
+  };
   initVFS(): Promise<void>;
 }
 
@@ -192,8 +201,45 @@ const standaloneRunningIntervalHandlers = new Set<number>();
 const standaloneAnimFrames = new Map<number, number>();
 const standaloneGameLoops = new Map<number, StandaloneGameLoopState>();
 
+// Host bridge module injected by the framework at render-island launch time.
+// buildStandaloneImports() always includes lazy bridge wrappers so standalone WASM
+// can always instantiate; wrappers forward to the active bridge once it is set.
+let activeHostBridgeModule: HostBridgeModule | null = null;
+let _measureTextFirstCallLogged = false;
+
+export function setActiveHostBridge(mod: HostBridgeModule | null): void {
+  activeHostBridgeModule = mod;
+}
+
+export function clearActiveHostBridge(): void {
+  activeHostBridgeModule = null;
+}
+
 function buildStandaloneImports(): WebAssembly.Imports {
   const ref: StandaloneRef = { instance: null };
+
+  // Per-instance bridge context and lazy-rebuild cache.
+  // bridgeCtx captures ref so host functions share this instance's WASM memory.
+  // getBridgeImports() rebuilds only when activeHostBridgeModule changes.
+  const bridgeCtx = {
+    readString: (ptr: number, len: number) => readWasmString(ref, ptr, len),
+    alloc: (size: number) => wasmAlloc(ref, size),
+    writeBytes: (destPtr: number, bytes: Uint8Array) => {
+      new Uint8Array((ref.instance!.exports.memory as WebAssembly.Memory).buffer, destPtr, bytes.length).set(bytes);
+    },
+    writeU32: (ptr: number, value: number) => {
+      new Uint32Array((ref.instance!.exports.memory as WebAssembly.Memory).buffer, ptr, 1)[0] = value;
+    },
+  };
+  let cachedBridgeMod: HostBridgeModule | null = null;
+  let cachedBridgeImports: Record<string, (...args: number[]) => number | void> | null = null;
+  function getBridgeImports() {
+    if (activeHostBridgeModule !== cachedBridgeMod) {
+      cachedBridgeMod = activeHostBridgeModule;
+      cachedBridgeImports = activeHostBridgeModule ? activeHostBridgeModule.buildImports(bridgeCtx) : null;
+    }
+    return cachedBridgeImports;
+  }
 
   // Stash the ref so the caller can bind it after instantiation.
   // We use a convention: the returned object has a hidden __ref property.
@@ -260,34 +306,6 @@ function buildStandaloneImports(): WebAssembly.Imports {
         new Uint8Array(mem, destPtr, encoded.length).set(encoded);
         new Uint32Array(mem, outLenPtr, 1)[0] = encoded.length;
         return destPtr;
-      },
-      host_focus(ptr: number, len: number): void {
-        const name = readWasmString(ref, ptr, len);
-        const el = getRef(name);
-        if (el instanceof HTMLElement) {
-          el.focus();
-        }
-      },
-      host_blur(ptr: number, len: number): void {
-        const name = readWasmString(ref, ptr, len);
-        const el = getRef(name);
-        if (el instanceof HTMLElement) {
-          el.blur();
-        }
-      },
-      host_scroll_to(ptr: number, len: number, top: number): void {
-        const name = readWasmString(ref, ptr, len);
-        const el = getRef(name);
-        el?.scrollTo({ top });
-      },
-      host_scroll_into_view(ptr: number, len: number): void {
-        const name = readWasmString(ref, ptr, len);
-        getRef(name)?.scrollIntoView();
-      },
-      host_select_text(ptr: number, len: number): void {
-        const name = readWasmString(ref, ptr, len);
-        const el = getRef(name);
-        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) { el.select(); }
       },
       host_set_title(ptr: number, len: number): void {
         document.title = readWasmString(ref, ptr, len);
@@ -356,6 +374,23 @@ function buildStandaloneImports(): WebAssembly.Imports {
         const loop = standaloneGameLoops.get(id);
         if (loop !== undefined) { cancelAnimationFrame(loop.rafId); standaloneGameLoops.delete(id); }
       },
+      // Bridge functions — always present so standalone WASM can always instantiate.
+      // Forward to activeHostBridgeModule lazily; safe zero-fallbacks when not yet set.
+      host_focus(ptr: number, len: number): void {
+        getBridgeImports()?.host_focus?.(ptr, len);
+      },
+      host_blur(ptr: number, len: number): void {
+        getBridgeImports()?.host_blur?.(ptr, len);
+      },
+      host_scroll_to(ptr: number, len: number, top: number): void {
+        getBridgeImports()?.host_scroll_to?.(ptr, len, top);
+      },
+      host_scroll_into_view(ptr: number, len: number): void {
+        getBridgeImports()?.host_scroll_into_view?.(ptr, len);
+      },
+      host_select_text(ptr: number, len: number): void {
+        getBridgeImports()?.host_select_text?.(ptr, len);
+      },
       host_measure_text(
         textPtr: number, textLen: number,
         fontPtr: number, fontLen: number,
@@ -363,14 +398,17 @@ function buildStandaloneImports(): WebAssembly.Imports {
         whiteSpace: number,
         outLenPtr: number,
       ): number {
-        const text = readWasmString(ref, textPtr, textLen);
-        const font = readWasmString(ref, fontPtr, fontLen);
-        const result = measureText(text, font, maxWidth, lineHeight, whiteSpace);
-        const destPtr = wasmAlloc(ref, result.length);
-        const mem = (ref.instance!.exports.memory as WebAssembly.Memory).buffer;
-        new Uint8Array(mem, destPtr, result.length).set(result);
-        new Uint32Array(mem, outLenPtr, 1)[0] = result.length;
-        return destPtr;
+        const bridge = getBridgeImports();
+        if (!_measureTextFirstCallLogged) {
+          _measureTextFirstCallLogged = true;
+          console.log('[host_measure_text] first call, bridge=', bridge ? 'loaded' : 'null', 'activeHostBridgeModule=', activeHostBridgeModule ? 'set' : 'null');
+        }
+        if (bridge?.host_measure_text) {
+          return (bridge.host_measure_text as (...args: number[]) => number)(
+            textPtr, textLen, fontPtr, fontLen, maxWidth, lineHeight, whiteSpace, outLenPtr,
+          );
+        }
+        throw new Error('host_measure_text bridge missing');
       },
       host_measure_text_lines(
         textPtr: number, textLen: number,
@@ -379,14 +417,13 @@ function buildStandaloneImports(): WebAssembly.Imports {
         whiteSpace: number,
         outLenPtr: number,
       ): number {
-        const text = readWasmString(ref, textPtr, textLen);
-        const font = readWasmString(ref, fontPtr, fontLen);
-        const result = measureTextLines(text, font, maxWidth, lineHeight, whiteSpace);
-        const destPtr = wasmAlloc(ref, result.length);
-        const mem = (ref.instance!.exports.memory as WebAssembly.Memory).buffer;
-        new Uint8Array(mem, destPtr, result.length).set(result);
-        new Uint32Array(mem, outLenPtr, 1)[0] = result.length;
-        return destPtr;
+        const bridge = getBridgeImports();
+        if (bridge?.host_measure_text_lines) {
+          return (bridge.host_measure_text_lines as (...args: number[]) => number)(
+            textPtr, textLen, fontPtr, fontLen, maxWidth, lineHeight, whiteSpace, outLenPtr,
+          );
+        }
+        throw new Error('host_measure_text_lines bridge missing');
       },
     },
   };
@@ -595,6 +632,7 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
     throw new Error('studio/wasm missing VM export: StudioVoVm, VoVm, or VoVmIsland');
   }
   return {
+    runGuiFromBytecode: requireStudioExport(mod.runGuiFromBytecode as StudioWasm['runGuiFromBytecode'], 'runGuiFromBytecode'),
     runGui: requireStudioExport(mod.runGui, 'runGui'),
     runGuiEntry: requireStudioExport(mod.runGuiEntry, 'runGuiEntry'),
     sendGuiEvent: requireStudioExport(mod.sendGuiEvent, 'sendGuiEvent'),
@@ -610,6 +648,7 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
     preloadExtModule: requireStudioExport(mod.preloadExtModule, 'preloadExtModule'),
     compileRunEntry: requireStudioExport(mod.compileRunEntry as StudioWasm['compileRunEntry'], 'compileRunEntry'),
     prepareEntry: requireStudioExport(mod.prepareEntry, 'prepareEntry'),
+    compileGui: requireStudioExport(mod.compileGui as StudioWasm['compileGui'], 'compileGui'),
     initVFS: requireStudioExport(mod.initVFS, 'initVFS'),
     VoVm: {
       withExterns: (bytecode) => vmExport.withExterns(bytecode),
@@ -630,8 +669,10 @@ export async function loadStudioWasm(): Promise<StudioWasm> {
     await mod.default('/wasm/vo_studio_wasm_bg.wasm');
     // Install window.voSetupExtModule / voCallExt / voCallExtReplay so that
     // preloadExtModule and VoVm.with_externs can dispatch ext module calls.
+    const normalized = normalizeStudioWasmModule(mod);
+    await normalized.initVFS();
     installExtBridgeGlobals();
-    instance = normalizeStudioWasmModule(mod);
+    instance = normalized;
     return instance;
   })();
   return initPromise;

@@ -42,13 +42,13 @@ impl StudioLogRecord {
         }
     }
 
-    pub(crate) fn text(mut self, text: impl Into<String>) -> Self {
-        self.text = Some(text.into());
+    pub(crate) fn path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
         self
     }
 
-    pub(crate) fn path(mut self, path: impl Into<String>) -> Self {
-        self.path = Some(path.into());
+    pub(crate) fn text(mut self, text: impl Into<String>) -> Self {
+        self.text = Some(text.into());
         self
     }
 
@@ -96,6 +96,7 @@ struct StudioLogEvent {
     session_id: u64,
     record: StudioLogRecord,
 }
+
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

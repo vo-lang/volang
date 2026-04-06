@@ -86,3 +86,4 @@ studio/wasm/pkg/
 .tmp/
 /.examples/
 
+__pycache__/

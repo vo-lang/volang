@@ -259,10 +259,57 @@ def run_playground(build_only: bool = False):
 
 
 STUDIO_WASM_FILE = PROJECT_ROOT / 'studio' / 'public' / 'wasm' / 'vo_studio_wasm_bg.wasm'
+STUDIO_WASM_LOCAL_FRAMEWORK_INPUTS_FILE = PROJECT_ROOT / 'studio' / 'public' / 'wasm' / 'vo_studio_wasm.local_framework_inputs'
 STUDIO_WASM_SOURCE_CRATES = [
     'vo-codegen', 'vo-analysis', 'vo-runtime', 'vo-vm', 'vo-common-core',
     'vo-stdlib', 'vo-web', 'vo-web/runtime-wasm', 'vo-ffi-macro', 'vo-common',
 ]
+
+
+def studio_wasm_local_framework_discovery_mtime() -> float:
+    newest = 0.0
+    workspace_root = PROJECT_ROOT.parent
+    if not workspace_root.exists():
+        return newest
+    for repo in workspace_root.iterdir():
+        if not repo.is_dir():
+            continue
+        newest = max(newest, get_newest_mtime(repo / 'vo.mod', repo / 'vo.ext.toml'))
+    return newest
+
+
+def tracked_glob_has_matches(base: Path, pattern: str) -> bool:
+    return any(path.is_file() for path in base.rglob(pattern))
+
+
+def studio_wasm_tracked_local_framework_inputs_changed(wasm_mtime: float) -> bool:
+    if not STUDIO_WASM_LOCAL_FRAMEWORK_INPUTS_FILE.exists():
+        return True
+    workspace_root = PROJECT_ROOT.parent
+    for raw_line in STUDIO_WASM_LOCAL_FRAMEWORK_INPUTS_FILE.read_text().splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith('file:'):
+            path = workspace_root / line.removeprefix('file:')
+            if not path.exists() or get_newest_mtime(path) > wasm_mtime:
+                return True
+            continue
+        if line.startswith('dir:'):
+            path = workspace_root / line.removeprefix('dir:')
+            if not path.exists() or get_newest_mtime(path) > wasm_mtime:
+                return True
+            continue
+        if line.startswith('glob:'):
+            base_rel, pattern = line.removeprefix('glob:').split('|', 1)
+            base = workspace_root / base_rel
+            if not base.exists() or not tracked_glob_has_matches(base, pattern):
+                return True
+            if get_newest_mtime(base, pattern=pattern) > wasm_mtime:
+                return True
+            continue
+        raise RuntimeError(f'Unsupported studio WASM tracked input: {line}')
+    return False
 
 
 def studio_wasm_needs_build() -> bool:
@@ -287,9 +334,10 @@ def studio_wasm_needs_build() -> bool:
     if get_newest_mtime(vogui_src, pattern='*.rs') > wasm_mtime:
         return True
 
-    # vogui/*.vo — embedded into studio WASM for user imports
-    vogui_vo = PROJECT_ROOT.parent / 'vogui'
-    if get_newest_mtime(vogui_vo, pattern='*.vo') > wasm_mtime:
+    if studio_wasm_local_framework_discovery_mtime() > wasm_mtime:
+        return True
+
+    if studio_wasm_tracked_local_framework_inputs_changed(wasm_mtime):
         return True
 
     # studio/vo/shell/*.vo — embedded as shell handler sources

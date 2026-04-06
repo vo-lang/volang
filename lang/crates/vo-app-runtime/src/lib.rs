@@ -21,6 +21,8 @@ mod scheduler;
 mod session;
 #[cfg(feature = "std")]
 mod tick;
+#[cfg(feature = "std")]
+mod timer;
 mod web;
 
 pub use app_session::AppSession;
@@ -49,4 +51,6 @@ pub use session::{
 };
 #[cfg(feature = "std")]
 pub use tick::{NativeTickProvider, TickLoopControl};
+#[cfg(feature = "std")]
+pub(crate) use timer::{NativeTimerProvider, TimerControl};
 pub use web::{GuestRuntime, RenderIslandRuntime};

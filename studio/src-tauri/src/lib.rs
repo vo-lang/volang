@@ -40,10 +40,10 @@ pub fn run() {
             commands::gui::cmd_send_gui_event,
             commands::gui::cmd_send_gui_event_async,
             commands::gui::cmd_debug_log,
-            commands::gui::__island_transport_push,
+            commands::gui::cmd_push_island_transport,
             commands::gui::cmd_poll_gui_render,
             commands::gui::cmd_stop_gui,
-            commands::gui::cmd_get_render_island_vfs_snapshot,
+            commands::gui::cmd_get_renderer_bridge_vfs_snapshot,
             // Extension / Toolchain
             commands::extension::cmd_vo_get_stream,
             commands::extension::cmd_vo_init,

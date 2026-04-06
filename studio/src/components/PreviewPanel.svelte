@@ -11,11 +11,15 @@
   import { onDestroy, tick } from 'svelte';
   import { isGuiSessionSupersededError } from '../lib/services/runtime_service';
   import { runtime } from '../stores/runtime';
-  import GuiRuntimeSurface from './GuiRuntimeSurface.svelte';
   import {
-    startRenderIsland, stopRenderIsland, deliverRenderBytes,
-    isRenderIslandActive,
-  } from '../lib/gui/render_island';
+    startRendererBridge, stopRendererBridge, deliverRenderBytes,
+    isRendererBridgeActive,
+    loadProtocolModule, unloadProtocolModule,
+    loadHostBridgeModule, unloadHostBridgeModule,
+    fetchVfsSnapshot,
+    type VfsFile,
+  } from '../lib/gui/renderer_bridge';
+  import { setActiveHostBridge, clearActiveHostBridge } from '../lib/studio_wasm';
   import type { ServiceRegistry } from '../lib/services/service_registry';
 
   export let registry: ServiceRegistry | null = null;
@@ -35,59 +39,70 @@
   let isResizing = false;
   let resizeStartX = 0;
   let resizeStartW = 0;
-  let renderIslandActive = false;
-  let renderIslandLaunching = false;
-  let renderIslandLaunchGeneration = 0;
-  let renderIslandSessionId: number | null = null;
-  let renderIslandError: string | null = null;
+  let rendererBridgeActive = false;
+  let rendererBridgeLaunching = false;
+  let rendererBridgeLaunchGeneration = 0;
+  let rendererBridgeSessionId: number | null = null;
+  let rendererBridgeFailedSessionId: number | null = null;
+  let rendererBridgeError: string | null = null;
   let rendererContainer: HTMLDivElement | undefined;
+  let rendererSurface: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | null = null;
   let pendingResizeFrame: number | null = null;
   let pendingResizeWidth = 0;
   let pendingResizeHeight = 0;
 
   $: isGuiApp = $runtime.kind === 'gui' && $runtime.isRunning;
-  $: guiFramework = $runtime.guiFramework;
-  $: hasRenderIsland = guiFramework?.rendererPath != null;
+  $: guiFramework = $runtime.gui.framework;
+  $: hasRendererBridge = guiFramework?.rendererPath != null;
   $: capabilities = guiFramework?.capabilities ?? [];
   $: isRenderSurface = capabilities.includes('render_surface');
   $: isIslandTransport = capabilities.includes('island_transport');
+  $: needsManagedCanvas = isRenderSurface || isIslandTransport;
   $: effectiveCollapsed = !fullscreen && !chromeless && collapsed;
+  $: frameworkPending = isGuiApp && guiFramework == null;
+  $: showRendererBridgeLoading = isGuiApp && hasRendererBridge && !rendererBridgeError && (!rendererBridgeActive || rendererBridgeLaunching);
 
   $: if (!isGuiApp) {
-    renderIslandError = null;
+    rendererBridgeError = null;
+    rendererBridgeFailedSessionId = null;
   }
 
-  // Launch render island when GUI app with renderer becomes active.
-  // If the render island survived a layout transition (e.g. preview→fullscreen),
+  // Launch renderer bridge when GUI app with renderer becomes active.
+  // If the renderer bridge survived a layout transition (e.g. preview→fullscreen),
   // just re-adopt the canvas without re-launching.
-  $: if (renderIslandActive && renderIslandSessionId != null && $runtime.guiSessionId !== renderIslandSessionId) {
+  $: if (rendererBridgeActive && rendererBridgeSessionId != null && $runtime.gui.sessionId !== rendererBridgeSessionId) {
     externalWidgetMounted = false;
-    teardownIsland(renderIslandSessionId);
+    teardownRendererBridge(rendererBridgeSessionId);
   }
-  $: if (isGuiApp && hasRenderIsland && registry && $runtime.guiModuleBytes && $runtime.guiEntryPath && $runtime.guiSessionId != null && !renderIslandActive && !renderIslandLaunching) {
-    if (isRenderIslandActive($runtime.guiSessionId)) {
-      console.log('[PreviewPanel] re-adopt: render island still active, re-attaching canvas');
-      renderIslandActive = true;
-      renderIslandSessionId = $runtime.guiSessionId;
-      tick().then(() => attachCanvas());
+  $: if (isGuiApp && hasRendererBridge && registry && $runtime.gui.moduleBytes && $runtime.gui.entryPath && $runtime.gui.sessionId != null && $runtime.gui.sessionId !== rendererBridgeFailedSessionId && !rendererBridgeActive && !rendererBridgeLaunching) {
+    if (isRendererBridgeActive($runtime.gui.sessionId)) {
+      console.log('[PreviewPanel] re-adopt: renderer bridge still active, re-attaching canvas');
+      rendererBridgeActive = true;
+      rendererBridgeSessionId = $runtime.gui.sessionId;
+      rendererBridgeFailedSessionId = null;
+      tick().then(() => {
+        if (needsManagedCanvas) {
+          attachCanvas();
+        }
+      });
     } else {
-      console.log('[PreviewPanel] fresh launch: no active render island');
-      void launchRenderIsland();
+      console.log('[PreviewPanel] fresh launch: no active renderer bridge');
+      void launchRendererBridge();
     }
   }
-  $: if (!isGuiApp && renderIslandActive) {
+  $: if (!isGuiApp && rendererBridgeActive) {
     externalWidgetMounted = false;
-    teardownIsland();
+    teardownRendererBridge();
   }
 
-  $: if (renderIslandActive && isIslandTransport && !externalWidgetMounted && $runtime.guiExternalWidgetHandlerId != null) {
+  $: if (rendererBridgeActive && isIslandTransport && !externalWidgetMounted && $runtime.gui.externalWidgetHandlerId != null) {
     void ensureExternalWidgetMounted();
   }
 
   // Deliver render bytes for non-island render paths (render_byte_stream)
-  $: if (renderIslandActive && !isIslandTransport && $runtime.guiRenderBytes && rendererContainer) {
-    deliverRenderBytes(rendererContainer, $runtime.guiRenderBytes);
+  $: if (rendererBridgeActive && !isIslandTransport && $runtime.gui.renderBytes && rendererSurface) {
+    deliverRenderBytes(rendererSurface, $runtime.gui.renderBytes);
   }
 
   // ---- Canvas management ----
@@ -116,19 +131,19 @@
   }
 
   function attachCanvas(): void {
-    if (!rendererContainer) {
-      console.warn('[PreviewPanel] attachCanvas: rendererContainer not ready, retrying after tick');
+    if (!rendererSurface) {
+      console.warn('[PreviewPanel] attachCanvas: rendererSurface not ready, retrying after tick');
       tick().then(() => attachCanvas());
       return;
     }
     const canvas = ensureCanvas();
     applyCanvasStyle(canvas);
-    if (canvas.parentElement !== rendererContainer) {
-      rendererContainer.appendChild(canvas);
+    if (canvas.parentElement !== rendererSurface) {
+      rendererSurface.appendChild(canvas);
     }
     if (chromeless || fullscreen) {
       requestAnimationFrame(() => {
-        if (canvas.parentElement === rendererContainer) {
+        if (canvas.parentElement === rendererSurface) {
           canvas.focus();
         }
       });
@@ -154,59 +169,89 @@
 
   // ---- Lifecycle ----
 
-  async function launchRenderIsland(): Promise<void> {
-    if (!registry || renderIslandLaunching) return;
-    const launchGeneration = ++renderIslandLaunchGeneration;
-    const sessionId = $runtime.guiSessionId;
-    renderIslandLaunching = true;
+  async function launchRendererBridge(): Promise<void> {
+    if (!registry || rendererBridgeLaunching) return;
+    const launchGeneration = ++rendererBridgeLaunchGeneration;
+    const sessionId = $runtime.gui.sessionId;
+    rendererBridgeLaunching = true;
     try {
-      const moduleBytes = $runtime.guiModuleBytes;
-      const entryPath = $runtime.guiEntryPath;
+      const moduleBytes = $runtime.gui.moduleBytes;
+      const entryPath = $runtime.gui.entryPath;
       if (!moduleBytes || !entryPath || sessionId == null) {
-        throw new Error('Render-island host context missing gui runtime data');
+        throw new Error('Renderer bridge host context missing gui runtime data');
       }
-      renderIslandError = null;
+      rendererBridgeError = null;
       await tick();
-      if ($runtime.guiSessionId !== sessionId || !($runtime.kind === 'gui' && $runtime.isRunning)) {
+      if ($runtime.gui.sessionId !== sessionId || !($runtime.kind === 'gui' && $runtime.isRunning)) {
         return;
       }
-      attachCanvas();
-      await startRenderIsland(CANVAS_ID, registry.backend, registry.runtime, sessionId, {
+      // Fetch VFS snapshot once and share across all framework module loaders.
+      const framework = $runtime.gui.framework;
+      let vfsFiles: VfsFile[] | undefined;
+      const needsVfs = framework?.protocolPath || framework?.hostBridgePath || framework?.rendererPath;
+      if (needsVfs && registry) {
+        vfsFiles = await fetchVfsSnapshot(registry.backend, entryPath);
+      }
+      if (framework?.protocolPath && registry) {
+        try {
+          const protocol = await loadProtocolModule(framework.protocolPath, registry.backend, entryPath, vfsFiles);
+          registry.runtime.setProtocolModule(protocol);
+        } catch (e) {
+          console.warn('[PreviewPanel] protocol module load failed, external widget detection may be unavailable:', e);
+        }
+      }
+      if (framework?.hostBridgePath && registry) {
+        try {
+          const bridge = await loadHostBridgeModule(framework.hostBridgePath, registry.backend, entryPath, vfsFiles);
+          setActiveHostBridge(bridge);
+        } catch (e) {
+          console.warn('[PreviewPanel] host bridge module load failed, WASM host functions may be unavailable:', e);
+        }
+      }
+      if (needsManagedCanvas) {
+        attachCanvas();
+      }
+      await startRendererBridge(CANVAS_ID, registry.backend, registry.runtime, sessionId, {
         entryPath,
         moduleBytes,
-        framework: $runtime.guiFramework,
+        framework,
         onError: (message) => {
-          renderIslandError = message;
+          rendererBridgeError = message;
         },
-      });
-      if (launchGeneration !== renderIslandLaunchGeneration || !($runtime.kind === 'gui' && $runtime.isRunning) || $runtime.guiSessionId !== sessionId) {
-        stopRenderIsland(sessionId);
-        if (!isRenderIslandActive(sessionId)) {
+      }, vfsFiles);
+      if (launchGeneration !== rendererBridgeLaunchGeneration || !($runtime.kind === 'gui' && $runtime.isRunning) || $runtime.gui.sessionId !== sessionId) {
+        stopRendererBridge(sessionId);
+        if (!isRendererBridgeActive(sessionId)) {
           removeCanvas();
         }
         return;
       }
-      renderIslandActive = true;
-      renderIslandSessionId = sessionId;
+      if (!isIslandTransport && rendererSurface && $runtime.gui.renderBytes && $runtime.gui.renderBytes.length > 0) {
+        deliverRenderBytes(rendererSurface, $runtime.gui.renderBytes);
+      }
+      rendererBridgeActive = true;
+      rendererBridgeSessionId = sessionId;
+      rendererBridgeFailedSessionId = null;
       maybeObserveRendererSize();
     } catch (e) {
-      renderIslandError = e instanceof Error ? e.message : String(e);
-      console.error('[PreviewPanel] render island start failed:', e);
+      rendererBridgeFailedSessionId = sessionId;
+      rendererBridgeError = e instanceof Error ? e.message : String(e);
+      console.error('[PreviewPanel] renderer bridge start failed:', e);
     } finally {
-      renderIslandLaunching = false;
+      rendererBridgeLaunching = false;
     }
   }
 
   async function mountExternalWidget(): Promise<boolean> {
     if (!registry) return false;
-    const externalHandlerId = $runtime.guiExternalWidgetHandlerId;
+    const externalHandlerId = $runtime.gui.externalWidgetHandlerId;
     if (externalHandlerId == null) {
       console.error('[PreviewPanel] external widget: missing handler id');
       return false;
     }
     await tick();
-    const width = rendererContainer?.clientWidth ?? 800;
-    const height = rendererContainer?.clientHeight ?? 600;
+    const width = rendererSurface?.clientWidth ?? rendererContainer?.clientWidth ?? 800;
+    const height = rendererSurface?.clientHeight ?? rendererContainer?.clientHeight ?? 600;
 
     // Notify logic island that the external widget canvas is mounted
     const mountPayload = JSON.stringify({ type: 'mount', width, height });
@@ -217,20 +262,20 @@
       if (isGuiSessionSupersededError(e)) {
         return false;
       }
-      renderIslandError = e instanceof Error ? e.message : String(e);
+      rendererBridgeError = e instanceof Error ? e.message : String(e);
       throw e;
     }
   }
 
   async function ensureExternalWidgetMounted(): Promise<void> {
-    if (!renderIslandActive || !isIslandTransport || externalWidgetMounted) return;
+    if (!rendererBridgeActive || !isIslandTransport || externalWidgetMounted) return;
     externalWidgetMounted = await mountExternalWidget();
     maybeObserveRendererSize();
   }
 
   function sendExternalWidgetResize(width: number, height: number): void {
     if (!registry || !isIslandTransport || !externalWidgetMounted) return;
-    const externalHandlerId = $runtime.guiExternalWidgetHandlerId;
+    const externalHandlerId = $runtime.gui.externalWidgetHandlerId;
     if (externalHandlerId == null || width <= 0 || height <= 0) return;
     pendingResizeWidth = width;
     pendingResizeHeight = height;
@@ -252,7 +297,7 @@
   }
 
   function maybeObserveRendererSize(): void {
-    if (!rendererContainer || !isIslandTransport || !externalWidgetMounted) return;
+    if (!rendererSurface || !isIslandTransport || !externalWidgetMounted) return;
     if (resizeObserver) return;
     resizeObserver = new ResizeObserver((entries) => {
       const entry = entries[0];
@@ -262,8 +307,8 @@
         Math.round(entry.contentRect.height),
       );
     });
-    resizeObserver.observe(rendererContainer);
-    sendExternalWidgetResize(rendererContainer.clientWidth, rendererContainer.clientHeight);
+    resizeObserver.observe(rendererSurface);
+    sendExternalWidgetResize(rendererSurface.clientWidth, rendererSurface.clientHeight);
   }
 
   function stopObservingRendererSize(): void {
@@ -275,40 +320,45 @@
     }
   }
 
-  function teardownIsland(sessionId = renderIslandSessionId): void {
-    renderIslandLaunchGeneration++;
+  function teardownRendererBridge(sessionId = rendererBridgeSessionId): void {
+    rendererBridgeLaunchGeneration++;
     stopObservingRendererSize();
-    renderIslandActive = false;
-    renderIslandSessionId = null;
-    stopRenderIsland(sessionId);
+    rendererBridgeActive = false;
+    rendererBridgeSessionId = null;
+    stopRendererBridge(sessionId);
     removeCanvas();
+    // Clean up framework artifact modules.
+    unloadProtocolModule();
+    registry?.runtime.setProtocolModule(null);
+    unloadHostBridgeModule();
+    clearActiveHostBridge();
   }
 
-  $: if (renderIslandActive && rendererContainer && isIslandTransport && externalWidgetMounted) {
+  $: if (rendererBridgeActive && rendererSurface && isIslandTransport && externalWidgetMounted) {
     maybeObserveRendererSize();
   }
-  $: if (effectiveCollapsed && renderIslandActive) {
+  $: if (effectiveCollapsed && rendererBridgeActive && needsManagedCanvas) {
     stopObservingRendererSize();
     parkCanvas();
   }
-  $: if (!effectiveCollapsed && renderIslandActive && rendererContainer) {
+  $: if (!effectiveCollapsed && rendererBridgeActive && rendererSurface && needsManagedCanvas) {
     attachCanvas();
   }
 
   onDestroy(() => {
     stopObservingRendererSize();
-    const sessionId = renderIslandSessionId;
+    const sessionId = rendererBridgeSessionId;
     const running = $runtime.isRunning;
-    const active = sessionId != null && isRenderIslandActive(sessionId);
+    const active = sessionId != null && isRendererBridgeActive(sessionId);
     console.log('[PreviewPanel] onDestroy', { running, active, externalWidgetMounted });
-    if (running && active && $runtime.guiSessionId === sessionId) {
-      // Layout transition (e.g. preview → fullscreen): keep the render island
+    if (running && active && $runtime.gui.sessionId === sessionId) {
+      // Layout transition (e.g. preview → fullscreen): keep the renderer bridge
       // alive and park the canvas off-screen so the WebGPU surface stays valid.
       parkCanvas();
       console.log('[PreviewPanel] onDestroy: parked canvas for layout transition');
     } else {
       externalWidgetMounted = false;
-      teardownIsland(sessionId);
+      teardownRendererBridge(sessionId);
       console.log('[PreviewPanel] onDestroy: full teardown');
     }
   });
@@ -376,8 +426,8 @@
       <div class="panel-title" class:collapsed-title={effectiveCollapsed}>
         {#if effectiveCollapsed}
           <span class="label">GUI</span>
-        {:else if hasRenderIsland}
-          <span class="badge">Render Island</span>
+        {:else if hasRendererBridge}
+          <span class="badge">Renderer</span>
         {/if}
       </div>
       <div class="panel-trailing" class:collapsed-trailing={effectiveCollapsed}>
@@ -398,16 +448,32 @@
 
   <div class="preview-body" class:hidden={effectiveCollapsed}>
     {#if isGuiApp && registry}
-      {#if hasRenderIsland}
+      {#if frameworkPending}
+        <div class="preview-loading">
+          <div class="preview-loading-inner">
+            <div class="preview-spinner"></div>
+            <span>Preparing GUI framework…</span>
+          </div>
+        </div>
+      {:else if hasRendererBridge}
         <div bind:this={rendererContainer} class="renderer-container">
-          {#if renderIslandError}
-            <div class="render-error">{renderIslandError}</div>
+          <div bind:this={rendererSurface} class="renderer-surface"></div>
+          {#if showRendererBridgeLoading}
+            <div class="preview-loading preview-loading-overlay">
+              <div class="preview-loading-inner">
+                <div class="preview-spinner"></div>
+                <span>Launching GUI preview…</span>
+              </div>
+            </div>
+          {/if}
+          {#if rendererBridgeError}
+            <div class="render-error">{rendererBridgeError}</div>
           {/if}
         </div>
       {:else if isRenderSurface}
         <canvas id={CANVAS_ID} class="render-canvas"></canvas>
       {:else}
-        <GuiRuntimeSurface runtimeService={registry.runtime} />
+        <div class="render-error">GUI framework does not declare a renderer path. Update vo.ext.toml [studio] section.</div>
       {/if}
     {:else}
       <div class="idle-hint">
@@ -565,19 +631,65 @@
     flex: 1;
     display: flex;
     flex-direction: column;
+    min-width: 0;
+    min-height: 0;
     overflow: hidden;
     position: relative;
   }
   .preview-body.hidden {
     display: none;
   }
+  .preview-loading {
+    flex: 1;
+    display: grid;
+    place-items: center;
+    min-width: 0;
+    min-height: 0;
+    background: linear-gradient(180deg, #181825 0%, #11111b 100%);
+  }
+  .preview-loading-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+  }
+  .preview-loading-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    color: #7f849c;
+    font-size: 13px;
+  }
+  .preview-spinner {
+    width: 28px;
+    height: 28px;
+    border: 3px solid #313244;
+    border-top-color: #89b4fa;
+    border-radius: 50%;
+    animation: preview-spin 0.8s linear infinite;
+  }
+  @keyframes preview-spin {
+    to { transform: rotate(360deg); }
+  }
   .renderer-container {
     width: 100%;
     height: 100%;
     display: flex;
     flex-direction: column;
+    min-width: 0;
+    min-height: 0;
     overflow: hidden;
     position: relative;
+    background: #181825;
+  }
+  .renderer-surface {
+    width: 100%;
+    height: 100%;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
   }
   .render-canvas {
     width: 100%;

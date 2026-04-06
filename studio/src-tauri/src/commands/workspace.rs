@@ -1,5 +1,6 @@
 use crate::state::AppState;
 use super::pathing::resolve_path;
+use super::run_blocking;
 use std::path::{Path, PathBuf};
 
 #[derive(serde::Serialize)]
@@ -45,15 +46,6 @@ pub async fn cmd_list_dir(path: String, state: tauri::State<'_, AppState>) -> Re
     run_blocking(move || list_dir_impl(session_root, path)).await
 }
 
-async fn run_blocking<T, F>(task: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    tauri::async_runtime::spawn_blocking(task)
-        .await
-        .map_err(|err| format!("blocking task failed: {}", err))?
-}
 
 fn list_dir_impl(session_root: PathBuf, path: String) -> Result<Vec<FsEntry>, String> {
     let resolved = resolve_path(&session_root, &path)?;
