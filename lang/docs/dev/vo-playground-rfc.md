@@ -1,13 +1,13 @@
 ---
 Title: Vo Playground (Web-first + WASM + Tauri) RFC
-Status: Draft
+Status: Archived
 Owner: Vibe Studio
 ---
 
 # 1. Summary
-This RFC defines a cross-platform Vo Playground that runs in the browser and on desktop with a single Web UI, using a WASM-compiled Vo runtime and a Tauri shell for desktop distribution.
+This RFC captured an earlier Playground-focused direction. The current web entry point is Studio, and Playground is now a legacy surface rather than the primary deployed experience.
 
-The goal is a focused Playground (not an IDE) that provides:
+The original goal was a focused Playground (not an IDE) that provides:
 - A code editor
 - One-click run
 - Deterministic output capture

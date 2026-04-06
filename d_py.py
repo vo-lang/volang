@@ -6,7 +6,9 @@ Usage:
     ./d.py test [vm|jit|gc|nostd|wasm] [-v] [file.vo]
     ./d.py bench [all|vo|<name>|score] [--all-langs] [--jit-hot]
     ./d.py loc [--with-tests]
-    ./d.py play [--build-only]  Build WASM and start playground
+    ./d.py play [--build-only]  Legacy playground dev flow (deprecated)
+    ./d.py studio [--build-wasm] [--build-only]
+    ./d.py studio-native [--build-wasm]
 """
 
 from __future__ import annotations
@@ -236,10 +238,9 @@ def ensure_vo_web_wasm_built():
 
 
 def run_playground(build_only: bool = False):
-    """Build WASM and optionally start the playground dev server."""
+    """Build WASM and optionally start the legacy playground dev server."""
     build_test_data_zip()
     build_wasm()
-
     if build_only:
         return
     
@@ -248,14 +249,14 @@ def run_playground(build_only: bool = False):
         print(f"{Colors.RED}Playground directory not found: {playground_dir}{Colors.NC}")
         sys.exit(1)
     
-    print(f"\n{Colors.BOLD}Starting Playground...{Colors.NC}")
-    print(f"{Colors.DIM}Press Ctrl+C to stop{Colors.NC}\n")
+    print(f"\n{Colors.BOLD}Starting legacy Playground (deprecated)...{Colors.NC}")
+    print(f"{Colors.DIM}Press Ctrl+C to stop (Legacy Playground only, use Vibe Studio for new projects){Colors.NC}\n")
     
     try:
         ensure_vo_web_wasm_built()
         subprocess.run(['zsh', '-lc', 'npm run dev'], cwd=playground_dir, check=True)
     except KeyboardInterrupt:
-        print(f"\n{Colors.GREEN}Playground stopped{Colors.NC}")
+        print(f"\n{Colors.GREEN}Legacy Playground stopped{Colors.NC}")
 
 
 STUDIO_WASM_FILE = PROJECT_ROOT / 'studio' / 'public' / 'wasm' / 'vo_studio_wasm_bg.wasm'
@@ -1699,37 +1700,12 @@ def run_local_ci(mode: str):
         ),
         ci_step('npm run build', ['npm', 'run', 'build'], PROJECT_ROOT / 'studio'),
     ]
-    playground_steps = [
-        ci_step(
-            'wasm-pack build --target web --release',
-            ['wasm-pack', 'build', '--target', 'web', '--release'],
-            PROJECT_ROOT / 'lang' / 'crates' / 'vo-web',
-        ),
-        ci_step('npm ci', ['npm', 'ci'], vogui_js_dir),
-        ci_step('npm run build', ['npm', 'run', 'build'], vogui_js_dir),
-        ci_step(
-            'wasm-pack build wasm --target web --release --out-dir ../public/wasm --out-name vo_studio_wasm',
-            ['wasm-pack', 'build', 'wasm', '--target', 'web', '--release', '--out-dir', '../public/wasm', '--out-name', 'vo_studio_wasm'],
-            PROJECT_ROOT / 'studio',
-        ),
-        mirror_vogui_release_assets_step,
-        ci_step('npm ci', ['npm', 'ci'], PROJECT_ROOT / 'playground'),
-        ci_step('wasm-pack build rust --target web --release', ['wasm-pack', 'build', 'rust', '--target', 'web', '--release'], PROJECT_ROOT / 'playground'),
-        ci_step('npm run build', ['npm', 'run', 'build'], PROJECT_ROOT / 'playground'),
-        ci_step('npm ci', ['npm', 'ci'], PROJECT_ROOT / 'studio'),
-        ci_step('npm run build', ['npm', 'run', 'build'], PROJECT_ROOT / 'studio'),
-        ci_step(
-            'mkdir -p site/vs && cp -r playground/dist/. site/ && cp -r studio/dist/. site/vs/',
-            ['bash', '-lc', 'mkdir -p site/vs && cp -r playground/dist/. site/ && cp -r studio/dist/. site/vs/'],
-        ),
-    ]
     steps_by_mode = {
         'quality': quality_steps,
         'test': test_steps,
         'release-verify': release_verify_steps,
         'pr': [*quality_steps, *test_steps, *release_verify_steps],
         'site': site_steps,
-        'playground': playground_steps,
         'full': [*quality_steps, *test_steps, *release_verify_steps, *site_steps],
     }
 
@@ -1783,7 +1759,7 @@ def main():
                               help='all (default), vo (.vo-cache), rust (cargo clean)')
 
     # play
-    play_parser = subparsers.add_parser('play', help='Build WASM and start playground')
+    play_parser = subparsers.add_parser('play', help='Legacy playground dev server (deprecated)')
     play_parser.add_argument('--build-only', action='store_true',
                              help='Only build WASM, do not start dev server')
 
@@ -1809,7 +1785,7 @@ def main():
 
     # ci
     ci_parser = subparsers.add_parser('ci', help='Run local CI checks')
-    ci_parser.add_argument('mode', nargs='?', default='pr', choices=['quality', 'test', 'release-verify', 'pr', 'site', 'playground', 'full'])
+    ci_parser.add_argument('mode', nargs='?', default='pr', choices=['quality', 'test', 'release-verify', 'pr', 'site', 'full'])
 
     args = parser.parse_args()
 

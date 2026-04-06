@@ -1,11 +1,10 @@
-![logo](playground/public/favicon.svg)
 # Vo Programming Language
 
 > **Go-like Syntax. Rust Power. Vibe Ready.**
 
 The scripting language for the Rust world. Statically typed, low ceremony, and built for the AI coding era. **Most Go programs run with minimal changes.**
 
-🎮 **[Try it in the Playground](https://volang.dev)**
+💻 **[Open Studio](https://volang.dev)**
 
 ## Why Vo?
 
@@ -26,7 +25,7 @@ Just remember these 4 differences:
 |--------|--------|------|
 | VM | ✅ Functional | Bytecode interpreter |
 | JIT | ✅ Functional | Cranelift-based JIT |
-| WASM | ✅ Functional | Runs in browser playground |
+| WASM | ✅ Functional | Runs in browser Studio |
 | AOT | 📋 Planned | Not implemented yet |
 
 ## Performance (Table 1, reference only)
@@ -117,7 +116,8 @@ func main() {
 ./d.py bench <name>                       # single benchmark
 ./d.py bench score                        # analyze existing results
 
-./d.py play                               # build WASM + start playground
+./d.py studio                             # start Studio dev server
+./d.py studio-native                      # start Studio native shell
 ./d.py loc                                # code statistics
 ./d.py clean                              # clean caches
 ```

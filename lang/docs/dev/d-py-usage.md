@@ -5,7 +5,9 @@
 ./d.py bench [all|vo|score|<name>] [--all-langs] [--arch=32|64]
 ./d.py loc [--with-tests]
 ./d.py clean [all|vo|rust]
-./d.py play [--build-only]
+./d.py play [--build-only]                      # deprecated legacy playground flow
+./d.py studio [--build-wasm] [--build-only]
+./d.py studio-native [--build-wasm]
 ./d.py run <file.vo> [--mode=vm|jit] [--codegen]
 ```
 

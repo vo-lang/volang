@@ -2147,7 +2147,7 @@ cp ../pkg/vo_wgpu_bg.wasm ../wgpu.wasm
 ### Native (cargo)
 
 ```bash
-# Static linking (Tauri playground — just add as Cargo dependency)
+# Static linking (Studio Native shell — just add as Cargo dependency)
 # No separate build step needed.
 
 # Dynamic library (standalone `vo` CLI)
@@ -2278,15 +2278,15 @@ Each test:
 ### 15.4 Cross-Platform Parity
 
 ```bash
-# Web: via playground
-./d.py play
+# Web: via Studio
+./d.py studio
 # Load test program, verify no errors in console
 
 # Native: via CLI
 ./d.py run tests/wgpu/07_triangle.vo --mode=vm
 
-# Native: via Tauri playground
-cd apps/playground-desktop && cargo tauri dev
+# Native: via Studio Native
+./d.py studio-native
 ```
 
 ### 15.5 Visual Regression
