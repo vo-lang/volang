@@ -125,71 +125,86 @@ fn collect_dir_files(
     }
 }
 
-fn discover_local_framework_modules(workspace_root: &Path) -> Vec<LocalFrameworkModuleSpec> {
-    let mut repos: Vec<_> = match fs::read_dir(workspace_root) {
-        Ok(rd) => rd.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect(),
-        Err(_) => Vec::new(),
-    };
-    repos.sort();
+fn discover_local_framework_modules(
+    search_roots: &[PathBuf],
+    tracked_base_root: &Path,
+) -> Vec<LocalFrameworkModuleSpec> {
     let mut modules = Vec::new();
-    for repo in repos {
-        let vo_mod_path = repo.join("vo.mod");
-        let vo_ext_path = repo.join("vo.ext.toml");
-        if !vo_mod_path.is_file() || !vo_ext_path.is_file() {
-            continue;
-        }
-        let vo_mod_content = fs::read_to_string(&vo_mod_path).unwrap();
-        let mod_file = ModFile::parse(&vo_mod_content).unwrap();
-        let vo_ext_content = fs::read_to_string(&vo_ext_path).unwrap();
-        let Some(studio_manifest) = parse_studio_manifest(&vo_ext_content, vo_ext_path.to_str().unwrap()).unwrap() else {
-            continue;
+    let mut seen_module_paths = BTreeSet::new();
+    let mut seen_repo_paths = BTreeSet::new();
+    for search_root in search_roots {
+        let mut repos: Vec<_> = match fs::read_dir(search_root) {
+            Ok(rd) => rd.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect(),
+            Err(_) => Vec::new(),
         };
-        let mut files = BTreeSet::new();
-        let mut tracked_inputs = BTreeSet::new();
-        collect_vo_source_files(&repo, &repo, &mut files);
-        tracked_inputs.insert(tracked_glob_entry(&workspace_relative_path(&repo, workspace_root), "*.vo"));
-        for required in ["vo.mod", "vo.lock", "vo.ext.toml"] {
-            let path = repo.join(required);
-            if path.is_file() {
-                files.insert(required.to_string());
-                tracked_inputs.insert(tracked_file_entry(&workspace_relative_path(&path, workspace_root)));
+        repos.sort();
+        for repo in repos {
+            let repo_key = normalize_path(&repo);
+            if !seen_repo_paths.insert(repo_key) {
+                continue;
             }
-        }
-        for asset in [
-            studio_manifest.renderer_path.as_deref(),
-            studio_manifest.protocol_path.as_deref(),
-            studio_manifest.host_bridge_path.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let asset_path = repo.join(asset);
-            assert!(asset_path.is_file(), "missing studio asset {}", asset_path.display());
-            let parent = asset_path.parent().unwrap();
-            collect_dir_files(parent, &repo, &mut files);
-            tracked_inputs.insert(tracked_dir_entry(&workspace_relative_path(parent, workspace_root)));
-        }
-        if let Some(ext) = wasm_extension_from_content(&vo_ext_content) {
-            let wasm_path = repo.join(&ext.wasm);
-            assert!(wasm_path.is_file(), "missing wasm asset {}", wasm_path.display());
-            files.insert(normalize_path(wasm_path.strip_prefix(&repo).unwrap()));
-            tracked_inputs.insert(tracked_file_entry(&workspace_relative_path(&wasm_path, workspace_root)));
-            if let Some(js_glue) = ext.js_glue {
-                let js_glue_path = repo.join(&js_glue);
-                assert!(js_glue_path.is_file(), "missing wasm js glue {}", js_glue_path.display());
-                files.insert(normalize_path(js_glue_path.strip_prefix(&repo).unwrap()));
-                tracked_inputs.insert(tracked_file_entry(&workspace_relative_path(&js_glue_path, workspace_root)));
+            let vo_mod_path = repo.join("vo.mod");
+            let vo_ext_path = repo.join("vo.ext.toml");
+            if !vo_mod_path.is_file() || !vo_ext_path.is_file() {
+                continue;
             }
+            let vo_mod_content = fs::read_to_string(&vo_mod_path).unwrap();
+            let mod_file = ModFile::parse(&vo_mod_content).unwrap();
+            let module_path = mod_file.module.as_str().to_string();
+            let vo_ext_content = fs::read_to_string(&vo_ext_path).unwrap();
+            let Some(studio_manifest) = parse_studio_manifest(&vo_ext_content, vo_ext_path.to_str().unwrap()).unwrap() else {
+                continue;
+            };
+            if !seen_module_paths.insert(module_path.clone()) {
+                continue;
+            }
+            let mut files = BTreeSet::new();
+            let mut tracked_inputs = BTreeSet::new();
+            collect_vo_source_files(&repo, &repo, &mut files);
+            tracked_inputs.insert(tracked_glob_entry(&workspace_relative_path(&repo, tracked_base_root), "*.vo"));
+            for required in ["vo.mod", "vo.lock", "vo.ext.toml"] {
+                let path = repo.join(required);
+                if path.is_file() {
+                    files.insert(required.to_string());
+                    tracked_inputs.insert(tracked_file_entry(&workspace_relative_path(&path, tracked_base_root)));
+                }
+            }
+            for asset in [
+                studio_manifest.renderer_path.as_deref(),
+                studio_manifest.protocol_path.as_deref(),
+                studio_manifest.host_bridge_path.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let asset_path = repo.join(asset);
+                assert!(asset_path.is_file(), "missing studio asset {}", asset_path.display());
+                let parent = asset_path.parent().unwrap();
+                collect_dir_files(parent, &repo, &mut files);
+                tracked_inputs.insert(tracked_dir_entry(&workspace_relative_path(parent, tracked_base_root)));
+            }
+            if let Some(ext) = wasm_extension_from_content(&vo_ext_content) {
+                let wasm_path = repo.join(&ext.wasm);
+                assert!(wasm_path.is_file(), "missing wasm asset {}", wasm_path.display());
+                files.insert(normalize_path(wasm_path.strip_prefix(&repo).unwrap()));
+                tracked_inputs.insert(tracked_file_entry(&workspace_relative_path(&wasm_path, tracked_base_root)));
+                if let Some(js_glue) = ext.js_glue {
+                    let js_glue_path = repo.join(&js_glue);
+                    assert!(js_glue_path.is_file(), "missing wasm js glue {}", js_glue_path.display());
+                    files.insert(normalize_path(js_glue_path.strip_prefix(&repo).unwrap()));
+                    tracked_inputs.insert(tracked_file_entry(&workspace_relative_path(&js_glue_path, tracked_base_root)));
+                }
+            }
+            if files.is_empty() {
+                continue;
+            }
+            modules.push(LocalFrameworkModuleSpec {
+                module_path,
+                repo_path: repo,
+                files,
+                tracked_inputs,
+            });
         }
-        if files.is_empty() {
-            continue;
-        }
-        modules.push(LocalFrameworkModuleSpec {
-            module_path: mod_file.module.as_str().to_string(),
-            repo_path: repo,
-            files,
-            tracked_inputs,
-        });
     }
     modules
 }
@@ -201,32 +216,32 @@ fn write_local_framework_modules(repo_root: &Path, out_dir: &str) {
         .join("public")
         .join("wasm")
         .join(LOCAL_FRAMEWORK_TRACKED_INPUTS_FILE);
-    let Some(workspace_root) = repo_root.parent() else {
-        fs::write(&out_path, "static LOCAL_FRAMEWORK_MODULES: &[EmbeddedLocalFrameworkModule] = &[];\n").unwrap();
-        let tracked_parent = tracked_inputs_path.parent().unwrap();
-        fs::create_dir_all(tracked_parent).unwrap();
-        fs::write(&tracked_inputs_path, "").unwrap();
-        return;
-    };
-    let modules = discover_local_framework_modules(workspace_root);
+    let tracked_base_root = repo_root.parent().unwrap_or(repo_root);
+    let mut search_roots = vec![repo_root.to_path_buf()];
+    if tracked_base_root != repo_root {
+        search_roots.push(tracked_base_root.to_path_buf());
+    }
+    let modules = discover_local_framework_modules(&search_roots, tracked_base_root);
     let mut entries = String::new();
     let mut tracked_inputs = BTreeSet::new();
     let mut watched_paths = BTreeSet::new();
-    watched_paths.insert(workspace_root.display().to_string());
+    for search_root in &search_roots {
+        watched_paths.insert(search_root.display().to_string());
+    }
     for module in modules {
         tracked_inputs.extend(module.tracked_inputs.iter().cloned());
         for tracked_input in &module.tracked_inputs {
             if let Some(path) = tracked_input.strip_prefix("file:") {
-                watched_paths.insert(workspace_root.join(path).display().to_string());
+                watched_paths.insert(tracked_base_root.join(path).display().to_string());
                 continue;
             }
             if let Some(path) = tracked_input.strip_prefix("dir:") {
-                watched_paths.insert(workspace_root.join(path).display().to_string());
+                watched_paths.insert(tracked_base_root.join(path).display().to_string());
                 continue;
             }
             if let Some(rest) = tracked_input.strip_prefix("glob:") {
                 let (base, _) = rest.split_once('|').unwrap();
-                watched_paths.insert(workspace_root.join(base).display().to_string());
+                watched_paths.insert(tracked_base_root.join(base).display().to_string());
             }
         }
         entries.push_str("    EmbeddedLocalFrameworkModule {\n");

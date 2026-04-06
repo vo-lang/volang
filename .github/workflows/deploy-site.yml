@@ -56,13 +56,13 @@ jobs:
         working-directory: lang/crates/vo-web
         run: wasm-pack build --target web --release
 
-      - name: Build studio WASM
-        working-directory: studio
-        run: wasm-pack build wasm --target web --release --out-dir ../public/wasm --out-name vo_studio_wasm
-
       - name: Build VoGUI JS
         working-directory: vogui/js
         run: npm ci && npm run build
+
+      - name: Build studio WASM
+        working-directory: studio
+        run: wasm-pack build wasm --target web --release --out-dir ../public/wasm --out-name vo_studio_wasm
 
       - name: Mirror published vogui release assets
         run: python3 scripts/mirror_release_assets.py studio/public/gh-release github.com/vo-lang/vogui
