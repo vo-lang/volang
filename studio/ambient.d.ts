@@ -2,6 +2,8 @@ declare module 'vite' {
   export function defineConfig(config: unknown): unknown;
 }
 
+declare const __STUDIO_BUILD_ID__: string;
+
 declare module '@sveltejs/vite-plugin-svelte' {
   export function svelte(config?: unknown): unknown;
   export function vitePreprocess(config?: unknown): unknown;

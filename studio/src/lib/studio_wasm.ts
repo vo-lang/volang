@@ -74,6 +74,11 @@ export interface VoWebModule {
   preloadExtModule(path: string, bytes: Uint8Array, jsGlueUrl?: string): Promise<void>;
 }
 
+function withBuildId(path: string): string {
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}build=${encodeURIComponent(__STUDIO_BUILD_ID__)}`;
+}
+
 // ── Ext-bridge JS globals (mirrors playground/src/wasm/vo.ts) ─────────────────
 
 type BindgenModule = Record<string, unknown> & {
@@ -660,15 +665,9 @@ export async function loadStudioWasm(): Promise<StudioWasm> {
   if (instance) return instance;
   if (initPromise) return initPromise;
   initPromise = (async () => {
-    // Dynamic import of the wasm-bindgen JS glue file from public/wasm/.
-    // Path is constructed at runtime to bypass Vite static analysis and TS resolution.
-    const jsPath = ['', 'wasm', 'vo_studio_wasm.js'].join('/');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const jsPath = withBuildId(['', 'wasm', 'vo_studio_wasm.js'].join('/'));
     const mod = await (Function('p', 'return import(p)')(jsPath)) as RawStudioWasmModule;
-    // Initialize the WASM module (fetches vo_studio_wasm_bg.wasm)
-    await mod.default('/wasm/vo_studio_wasm_bg.wasm');
-    // Install window.voSetupExtModule / voCallExt / voCallExtReplay so that
-    // preloadExtModule and VoVm.with_externs can dispatch ext module calls.
+    await mod.default(withBuildId('/wasm/vo_studio_wasm_bg.wasm'));
     const normalized = normalizeStudioWasmModule(mod);
     await normalized.initVFS();
     installExtBridgeGlobals();

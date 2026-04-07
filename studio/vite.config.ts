@@ -107,11 +107,25 @@ function studioManualChunks(id: string): string | undefined {
   return 'vendor';
 }
 
+const buildEnv = (globalThis as typeof globalThis & {
+  process?: { env?: Record<string, string | undefined> };
+}).process?.env ?? {};
+
+const studioBuildId = [
+  buildEnv.GITHUB_SHA,
+  buildEnv.GITHUB_RUN_ID,
+  buildEnv.GITHUB_RUN_ATTEMPT,
+].filter((value): value is string => typeof value === 'string' && value.length > 0).join('-')
+  || Date.now().toString(36);
+
 export default defineConfig({
   plugins: [ghReleaseProxy(), svelte({ preprocess: vitePreprocess() })],
   server: {
     port: 5174,
     strictPort: true,
+  },
+  define: {
+    __STUDIO_BUILD_ID__: JSON.stringify(studioBuildId),
   },
   build: {
     outDir: 'dist',

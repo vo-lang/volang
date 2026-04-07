@@ -1023,12 +1023,14 @@ fn collect_render_island_snapshot(entry_path: &str) -> Result<JsValue, String> {
         ];
         let mut collected_dirs = std::collections::HashSet::new();
         for artifact_path in artifact_paths.into_iter().flatten() {
-            let artifact_dir = vfs_parent_dir(artifact_path).unwrap_or_else(|| module.module_root.clone());
-            if collected_dirs.insert(artifact_dir.clone()) && is_vfs_dir(&artifact_dir) {
-                files.extend(collect_vfs_files(&artifact_dir, None)?);
+            let full_path = join_vfs_path(&module.module_root, artifact_path);
+            if let Some(dir) = vfs_parent_dir(&full_path) {
+                if collected_dirs.insert(dir.clone()) && is_vfs_dir(&dir) {
+                    files.extend(collect_vfs_files(&dir, None)?);
+                }
             }
         }
-        let artifact_dir = join_vfs_path(&module.module_root, ".vo-artifact");
+        let artifact_dir = join_vfs_path(&module.module_root, ".vo-artifacts");
         if is_vfs_dir(&artifact_dir) {
             files.extend(collect_vfs_files(&artifact_dir, None)?);
             files.extend(collect_vfs_files(&artifact_dir, Some("wasm"))?);
