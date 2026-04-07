@@ -2,6 +2,14 @@ declare module 'vite' {
   export function defineConfig(config: unknown): unknown;
 }
 
+declare module 'node:fs' {
+  export function readFileSync(path: string, encoding: string): string;
+}
+
+declare module 'node:path' {
+  export function resolve(...paths: string[]): string;
+}
+
 declare const __STUDIO_BUILD_ID__: string;
 
 declare module '@sveltejs/vite-plugin-svelte' {

@@ -41,6 +41,7 @@ struct EmbeddedLocalFrameworkModule {
 
 include!(concat!(env!("OUT_DIR"), "/term_embedded.rs"));
 include!(concat!(env!("OUT_DIR"), "/local_framework_modules_embedded.rs"));
+include!(concat!(env!("OUT_DIR"), "/studio_build_info.rs"));
 
 const LOCAL_FRAMEWORK_COMMIT: &str = "0000000000000000000000000000000000000000";
 
@@ -221,6 +222,11 @@ impl StudioVoVm {
 // VoWebModule exports — initVFS
 // preloadExtModule is provided by vo-web (3-param version with optional jsGlueUrl).
 // =============================================================================
+
+#[wasm_bindgen(js_name = "getBuildId")]
+pub fn get_build_id() -> String {
+    STUDIO_WASM_BUILD_ID.to_string()
+}
 
 fn embedded_local_file<'a>(
     module: &'a EmbeddedLocalFrameworkModule,
@@ -427,7 +433,15 @@ fn vfs_parent_dir(path: &str) -> Option<String> {
 }
 
 fn join_vfs_path(base: &str, child: &str) -> String {
+    let normalized_child = normalize_vfs_path(child);
+    if child.trim().starts_with('/') {
+        return normalized_child;
+    }
     let normalized_base = normalize_vfs_path(base);
+    if normalized_child == "/" {
+        return normalized_base;
+    }
+    let child = normalized_child.trim_start_matches('/');
     if normalized_base == "/" {
         format!("/{}", child)
     } else {

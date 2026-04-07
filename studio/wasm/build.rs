@@ -9,6 +9,7 @@ use std::{
     env,
     fs,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[path = "src/studio_manifest.rs"]
@@ -31,6 +32,7 @@ func handleHttp(id, workspace, cwd, kind string, op any) error {
 const TERM_HANDLER_VFS_ROOT: &str = "studio/vo/term";
 const LOCAL_FRAMEWORK_VERSION: &str = "v0.0.0-local";
 const LOCAL_FRAMEWORK_TRACKED_INPUTS_FILE: &str = "vo_studio_wasm.local_framework_inputs";
+const STUDIO_WASM_BUILD_ID_FILE: &str = "vo_studio_wasm.build_id";
 
 // Term handler files to substitute with stubs in WASM (avoid heavy stdlib deps).
 const WASM_STUB_TERM_HANDLER_FILES: &[&str] = &[
@@ -62,6 +64,55 @@ fn tracked_dir_entry(path: &str) -> String {
 
 fn tracked_glob_entry(base: &str, pattern: &str) -> String {
     format!("glob:{}|{}", base, pattern)
+}
+
+fn studio_wasm_build_id() -> String {
+    if let Ok(value) = env::var("VIBE_STUDIO_BUILD_ID") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let github_parts = [
+        env::var("GITHUB_SHA").ok(),
+        env::var("GITHUB_RUN_ID").ok(),
+        env::var("GITHUB_RUN_ATTEMPT").ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>();
+    if !github_parts.is_empty() {
+        return github_parts.join("-");
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_millis();
+    format!("local-{:x}", now)
+}
+
+fn write_studio_wasm_build_info(repo_root: &Path, out_dir: &str) {
+    println!("cargo:rerun-if-env-changed=VIBE_STUDIO_BUILD_ID");
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    println!("cargo:rerun-if-env-changed=GITHUB_RUN_ID");
+    println!("cargo:rerun-if-env-changed=GITHUB_RUN_ATTEMPT");
+    let build_id = studio_wasm_build_id();
+    let build_id_path = repo_root
+        .join("studio")
+        .join("public")
+        .join("wasm")
+        .join(STUDIO_WASM_BUILD_ID_FILE);
+    if let Some(parent) = build_id_path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(&build_id_path, format!("{}\n", build_id)).unwrap();
+    fs::write(
+        Path::new(out_dir).join("studio_build_info.rs"),
+        format!("const STUDIO_WASM_BUILD_ID: &str = {:?};\n", build_id),
+    )
+    .unwrap();
 }
 
 fn should_skip_embedded_dir(name: &str) -> bool {
@@ -320,6 +371,7 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     // studio/wasm -> studio -> repo root
     let repo_root = manifest_dir.join("../..").canonicalize().unwrap();
+    write_studio_wasm_build_info(&repo_root, &out_dir);
 
     // ── term handler source files + manifests ───────────────────────────────
     let mut term_handler_entries = String::new();

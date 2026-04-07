@@ -56,6 +56,7 @@ export interface StudioWasm {
     entryPath: string;
     framework: { name: string; entry: string; capabilities: string[]; rendererPath: string | null; protocolPath: string | null; hostBridgePath: string | null } | null;
   };
+  getBuildId(): string;
   initVFS(): Promise<void>;
 }
 
@@ -77,6 +78,14 @@ export interface VoWebModule {
 function withBuildId(path: string): string {
   const separator = path.includes('?') ? '&' : '?';
   return `${path}${separator}build=${encodeURIComponent(__STUDIO_BUILD_ID__)}`;
+}
+
+function assertStudioBuildMatch(wasmBuildId: string): void {
+  if (wasmBuildId !== __STUDIO_BUILD_ID__) {
+    throw new Error(
+      `Studio web asset mismatch: frontend expects ${__STUDIO_BUILD_ID__}, wasm provides ${wasmBuildId}. Reload after the latest deploy or restart the local web dev server after rebuilding studio/wasm.`,
+    );
+  }
 }
 
 // ── Ext-bridge JS globals (mirrors playground/src/wasm/vo.ts) ─────────────────
@@ -654,6 +663,7 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
     compileRunEntry: requireStudioExport(mod.compileRunEntry as StudioWasm['compileRunEntry'], 'compileRunEntry'),
     prepareEntry: requireStudioExport(mod.prepareEntry, 'prepareEntry'),
     compileGui: requireStudioExport(mod.compileGui as StudioWasm['compileGui'], 'compileGui'),
+    getBuildId: requireStudioExport(mod.getBuildId as StudioWasm['getBuildId'], 'getBuildId'),
     initVFS: requireStudioExport(mod.initVFS, 'initVFS'),
     VoVm: {
       withExterns: (bytecode) => vmExport.withExterns(bytecode),
@@ -665,14 +675,21 @@ export async function loadStudioWasm(): Promise<StudioWasm> {
   if (instance) return instance;
   if (initPromise) return initPromise;
   initPromise = (async () => {
-    const jsPath = withBuildId(['', 'wasm', 'vo_studio_wasm.js'].join('/'));
-    const mod = await (Function('p', 'return import(p)')(jsPath)) as RawStudioWasmModule;
-    await mod.default(withBuildId('/wasm/vo_studio_wasm_bg.wasm'));
-    const normalized = normalizeStudioWasmModule(mod);
-    await normalized.initVFS();
-    installExtBridgeGlobals();
-    instance = normalized;
-    return instance;
+    try {
+      const jsPath = withBuildId(['', 'wasm', 'vo_studio_wasm.js'].join('/'));
+      const mod = await (Function('p', 'return import(p)')(jsPath)) as RawStudioWasmModule;
+      await mod.default(withBuildId('/wasm/vo_studio_wasm_bg.wasm'));
+      const normalized = normalizeStudioWasmModule(mod);
+      assertStudioBuildMatch(normalized.getBuildId());
+      await normalized.initVFS();
+      installExtBridgeGlobals();
+      instance = normalized;
+      return instance;
+    } catch (error) {
+      initPromise = null;
+      instance = null;
+      throw error;
+    }
   })();
   return initPromise;
 }

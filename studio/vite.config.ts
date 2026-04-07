@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import { svelte, vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 
@@ -111,11 +113,21 @@ const buildEnv = (globalThis as typeof globalThis & {
   process?: { env?: Record<string, string | undefined> };
 }).process?.env ?? {};
 
-const studioBuildId = [
-  buildEnv.GITHUB_SHA,
-  buildEnv.GITHUB_RUN_ID,
-  buildEnv.GITHUB_RUN_ATTEMPT,
-].filter((value): value is string => typeof value === 'string' && value.length > 0).join('-')
+function readStudioWasmBuildId(): string | null {
+  try {
+    const value = readFileSync(resolve('public/wasm/vo_studio_wasm.build_id'), 'utf8').trim();
+    return value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+const studioBuildId = readStudioWasmBuildId()
+  || [
+    buildEnv.GITHUB_SHA,
+    buildEnv.GITHUB_RUN_ID,
+    buildEnv.GITHUB_RUN_ATTEMPT,
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0).join('-')
   || Date.now().toString(36);
 
 export default defineConfig({
