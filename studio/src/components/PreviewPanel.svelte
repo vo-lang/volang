@@ -59,6 +59,7 @@
   $: isRenderSurface = capabilities.includes('render_surface');
   $: isIslandTransport = capabilities.includes('island_transport');
   $: needsManagedCanvas = isRenderSurface || isIslandTransport;
+  $: previewSurfaceScrollable = hasRendererBridge && !isIslandTransport;
   $: effectiveCollapsed = !fullscreen && !chromeless && collapsed;
   $: frameworkPending = isGuiApp && guiFramework == null;
   $: showRendererBridgeLoading = isGuiApp && hasRendererBridge && !rendererBridgeError && (!rendererBridgeActive || rendererBridgeLaunching);
@@ -457,7 +458,7 @@
         </div>
       {:else if hasRendererBridge}
         <div bind:this={rendererContainer} class="renderer-container">
-          <div bind:this={rendererSurface} class="renderer-surface"></div>
+          <div bind:this={rendererSurface} class="renderer-surface" class:renderer-surface-scrollable={previewSurfaceScrollable}></div>
           {#if showRendererBridgeLoading}
             <div class="preview-loading preview-loading-overlay">
               <div class="preview-loading-inner">
@@ -690,6 +691,9 @@
     min-width: 0;
     min-height: 0;
     overflow: hidden;
+  }
+  .renderer-surface.renderer-surface-scrollable {
+    overflow: auto;
   }
   .render-canvas {
     width: 100%;
