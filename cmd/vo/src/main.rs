@@ -100,7 +100,7 @@ fn print_usage() {
 }
 
 fn print_version() {
-    print!("vo version 0.1.0");
+    print!("vo version 0.1.1");
     if let Some(hash) = option_env!("VO_BUILD_COMMIT") {
         print!(" ({})", hash);
     }
