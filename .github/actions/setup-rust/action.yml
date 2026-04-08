@@ -6,7 +6,7 @@ runs:
     - id: toolchain
       shell: bash
       run: |
-        python - <<'PY' >> "$GITHUB_OUTPUT"
+        python3 - <<'PY' >> "$GITHUB_OUTPUT"
         import os
         import tomllib
         from pathlib import Path
@@ -19,7 +19,7 @@ runs:
         print(f"components={','.join(toolchain.get('components', []))}")
         print(f"targets={','.join(toolchain.get('targets', []))}")
         PY
-    - uses: dtolnay/rust-toolchain@master
+    - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
       with:
         toolchain: ${{ steps.toolchain.outputs.channel }}
         profile: ${{ steps.toolchain.outputs.profile }}

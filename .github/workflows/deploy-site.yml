@@ -6,6 +6,12 @@ on:
     paths:
       - "studio/**"
       - "lang/crates/**"
+      - ".github/workflows/deploy-site.yml"
+      - ".github/actions/setup-rust/**"
+      - "scripts/mirror_release_assets.py"
+      - "rust-toolchain.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
   workflow_dispatch:
 
 permissions:
@@ -22,10 +28,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout volang
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Checkout vogui
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: vo-lang/vogui
           path: vogui
@@ -41,12 +47,12 @@ jobs:
             studio/wasm -> target
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        run: cargo install wasm-pack --locked --version 0.13.1
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: |
             studio/package-lock.json
@@ -79,10 +85,25 @@ jobs:
         working-directory: studio
         run: npm run build
 
+      - name: Archive Pages artifact
+        run: |
+          test -d studio/dist
+          find studio/dist -mindepth 1 -print -quit | grep -q .
+          tar \
+            --dereference --hard-dereference \
+            --directory studio/dist \
+            -cvf "$RUNNER_TEMP/artifact.tar" \
+            --exclude=.git \
+            --exclude=.github \
+            --exclude=".[^/]*" \
+            .
+
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-artifact@v6
         with:
-          path: studio/dist
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
 
   deploy:
     needs: build
@@ -93,4 +114,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

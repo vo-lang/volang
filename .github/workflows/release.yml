@@ -8,9 +8,6 @@ on:
 permissions:
   contents: write
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     name: Build ${{ matrix.target }}
@@ -33,12 +30,13 @@ jobs:
             use_cross: true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+        uses: ./.github/actions/setup-rust
+
+      - name: Install requested Rust target
+        run: rustup target add ${{ matrix.target }}
 
       - name: Install cross
         if: matrix.use_cross
@@ -71,7 +69,7 @@ jobs:
           echo "TARBALL=$TARBALL" >> $GITHUB_ENV
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: vo-${{ matrix.target }}
           path: |
@@ -86,38 +84,55 @@ jobs:
       version: ${{ steps.version.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Extract version
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Vo ${{ github.ref_name }}
-          body: |
-            ## Vo ${{ github.ref_name }}
+      - name: Write release notes
+        run: |
+          cat > RELEASE_NOTES.md <<'EOF'
+          ## Vo ${{ github.ref_name }}
 
-            ### Install via Homebrew
-            ```sh
-            brew tap vo-lang/vo
-            brew install vo
-            ```
+          ### Install via Homebrew
+          ```sh
+          brew tap vo-lang/vo
+          brew install vo
+          ```
 
-            ### Manual install
-            Download the binary for your platform below, extract, and place `vo` in your `$PATH`.
-          files: |
-            artifacts/*.tar.gz
-            artifacts/*.sha256
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          ### Manual install
+          Download the binary for your platform below, extract, and place `vo` on your PATH.
+          EOF
+
+      - name: Create or update release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          prerelease_args=()
+          if [[ "$TAG" == *-* ]]; then
+            prerelease_args+=(--prerelease)
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --title "Vo $TAG" \
+              --notes-file RELEASE_NOTES.md \
+              "${prerelease_args[@]}"
+            gh release upload "$TAG" artifacts/*.tar.gz artifacts/*.sha256 --clobber
+          else
+            gh release create "$TAG" artifacts/*.tar.gz artifacts/*.sha256 \
+              --title "Vo $TAG" \
+              --notes-file RELEASE_NOTES.md \
+              "${prerelease_args[@]}"
+          fi
 
   update-homebrew:
     name: Update Homebrew Formula
@@ -126,7 +141,7 @@ jobs:
 
     steps:
       - name: Download SHA256 files
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
           merge-multiple: true
@@ -140,7 +155,7 @@ jobs:
           echo "aarch64_linux=$(awk '{print $1}' artifacts/vo-aarch64-unknown-linux-gnu.tar.gz.sha256)" >> $GITHUB_OUTPUT
 
       - name: Checkout homebrew-vo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: vo-lang/homebrew-vo
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -155,11 +170,37 @@ jobs:
           SHA_AARCH64_LINUX: ${{ steps.sha.outputs.aarch64_linux }}
         run: |
           cd homebrew-vo
-          sed -i "s/version \".*\"/version \"$VERSION\"/" Formula/vo.rb
-          sed -i "s/PLACEHOLDER_AARCH64_APPLE_DARWIN/$SHA_AARCH64_APPLE/" Formula/vo.rb
-          sed -i "s/PLACEHOLDER_X86_64_APPLE_DARWIN/$SHA_X86_64_APPLE/" Formula/vo.rb
-          sed -i "s/PLACEHOLDER_X86_64_UNKNOWN_LINUX_GNU/$SHA_X86_64_LINUX/" Formula/vo.rb
-          sed -i "s/PLACEHOLDER_AARCH64_UNKNOWN_LINUX_GNU/$SHA_AARCH64_LINUX/" Formula/vo.rb
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("Formula/vo.rb")
+          text = path.read_text()
+
+          version = os.environ["VERSION"]
+          version_token = "#{version}"
+          replacements = {
+              "vo-aarch64-apple-darwin.tar.gz": os.environ["SHA_AARCH64_APPLE"],
+              "vo-x86_64-apple-darwin.tar.gz": os.environ["SHA_X86_64_APPLE"],
+              "vo-x86_64-unknown-linux-gnu.tar.gz": os.environ["SHA_X86_64_LINUX"],
+              "vo-aarch64-unknown-linux-gnu.tar.gz": os.environ["SHA_AARCH64_LINUX"],
+          }
+
+          text, count = re.subn(r'(?m)^  version ".*"$', f'  version "{version}"', text, count=1)
+          if count != 1:
+              raise SystemExit("failed to update Formula version")
+
+          for asset, sha in replacements.items():
+              pattern = re.compile(
+                  rf'(url "https://github\.com/vo-lang/volang/releases/download/v{re.escape(version_token)}/{re.escape(asset)}"\n\s+sha256 ")([^"]+)(")'
+              )
+              text, count = pattern.subn(lambda match, sha=sha: f'{match.group(1)}{sha}{match.group(3)}', text, count=1)
+              if count != 1:
+                  raise SystemExit(f"failed to update SHA256 for {asset}")
+
+          path.write_text(text)
+          PY
 
       - name: Commit and push Formula update
         run: |
@@ -167,5 +208,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/vo.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date"
+            exit 0
+          fi
           git commit -m "vo ${{ needs.release.outputs.version }}"
           git push
