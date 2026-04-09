@@ -1,50 +1,30 @@
 # Vo Programming Language
 
-> **Go-like Syntax. Rust Power. Vibe Ready.**
+> **The scripting language for the Rust ecosystem.**
 
-The scripting language for the Rust world. Statically typed, low ceremony, and built for the AI coding era. **Most Go programs run with minimal changes.**
+Vo is the Python of the Rust world — a statically typed, low-ceremony language designed to be embedded in Rust applications. The compiler and VM are pure Rust libraries with built-in island concurrency. Programs run on a bytecode VM, a Cranelift JIT, or compile to WASM for the browser.
 
-💻 **[Open Studio](https://volang.dev)**
+💻 **[Open Studio](https://volang.dev)** — docs are there too.
 
-## Why Vo?
+## What Vo Is For
 
-Go's appeal is **low ceremony**: it writes like a scripting language but ships like a compiled one. Vo doubles down on this strength—adding flexible execution modes (VM/JIT/AOT) and error handling sugar, while keeping the language simple. Target niche: where you might reach for Go, Python, or Lua.
+- **Embed in Rust apps** — Vo's VM is a Rust library. Add a scripting layer to your Rust project without shipping a separate runtime.
+- **Run in the browser** — First-class WASM target. Vo programs run in the browser with the same semantics as on native.
+- **Almost Go** — Vo stays very close to Go. Most Go programs run with minimal changes.
+- **AI-friendly** — AI already knows Go well, and because Vo stays close to Go and can be run directly in normal use, it is easy for AI to read, write, and use.
 
-### If you know Go, you already know 95% of Vo
+## If you know Go, you already know 95% of Vo
 
 Just remember these 4 differences:
 
-1. **Error Handling**: Use `?` instead of `if err != nil`. Use `errdefer` for error-only cleanup.
-2. **No Generics**: Use `any` (interface{}) and type assertions.
-3. **Restricted Pointers**: Only structs can be pointers (`*User`). No `*int` or `*string`.
-4. **Dynamic Access**: Use `~>` operator for duck-typing (JSON, maps, untyped data).
+1. **Error Handling** — Use `?` instead of `if err != nil`. Use `errdefer` for error-only cleanup.
+2. **No Generics** — Use `any` (interface{}) and type assertions.
+3. **Restricted Pointers** — Only structs can be pointers (`*User`). No `*int` or `*string`.
+4. **Dynamic Access** — Use `~>` operator for duck-typing (JSON, maps, untyped data).
 
-## Execution Backends
+## Studio
 
-| Backend | Status | Notes |
-|--------|--------|------|
-| VM | ✅ Functional | Bytecode interpreter |
-| JIT | ✅ Functional | Cranelift-based JIT |
-| WASM | ✅ Functional | Runs in browser Studio |
-| AOT | 📋 Planned | Not implemented yet |
-
-## Performance (Table 1, reference only)
-
-*Note: results are from an informal / non-strict benchmarking environment. Numbers are not authoritative.*
-
-Relative time ranking (lower is faster, `1.0x` = fastest):
-
-| Rank | Language | Relative |
-|------|----------|----------|
-| 1 | C | 1.80x |
-| 2 | Go | 2.01x |
-| 3 | LuaJIT | 2.95x |
-| 4 | Java | 5.39x |
-| 5 | Vo-JIT | 5.69x |
-| 6 | Lua | 39.52x |
-| 7 | Vo-VM | 40.48x |
-| 8 | Ruby | 119.05x |
-| 9 | Python | 132.59x |
+**Vo Studio** is the official IDE for Vo. It is currently a work in progress, available as both a desktop app (via Tauri) and a web app at [volang.dev](https://volang.dev).
 
 ## Quick Examples
 
@@ -56,10 +36,10 @@ Use `?` to propagate errors, `errdefer` for error-only cleanup:
 func readConfig(path string) (Config, error) {
     file := open(path)?           // propagate error with ?
     errdefer file.Close()         // cleanup only if later steps fail
-    
+
     data := readAll(file)?
     config := parse(data)?
-    
+
     if config.Version < 1 {
         fail errors.New("invalid version")
     }
@@ -94,35 +74,48 @@ func (u *User) Greet() string {
 func main() {
     user := User{name: "Alice", age: 30}
     println(user.Greet())
-    
+
     for i, v := range []int{1, 2, 3} {
         println(i, v)
     }
 }
 ```
 
-## Development
+## Execution Backends
 
-```bash
-./d.py test                               # VM + JIT
-./d.py test vm                            # VM only
-./d.py test jit                           # JIT only
-./d.py test gc                            # gc_*.vo only (VO_GC_DEBUG=1)
-./d.py test nostd                         # vo-embed no_std mode
-./d.py test wasm                          # WASM tests
+Vo compiles to a single bytecode format; backends differ only in how that bytecode is executed:
 
-./d.py bench                              # all benchmarks
-./d.py bench vo                           # Vo-only scoring (Vo-VM = 100)
-./d.py bench <name>                       # single benchmark
-./d.py bench score                        # analyze existing results
+| Backend | Status | Use Case |
+|---------|--------|----------|
+| VM | Stable | Development, scripting, embedding, `no_std` |
+| JIT | Stable | Performance-sensitive native execution (Cranelift) |
+| WASM | Stable | Browser, sandboxed environments |
+| AOT | Planned | Ahead-of-time native binaries |
 
-./d.py studio                             # start Studio dev server
-./d.py studio-native                      # start Studio native shell
-./d.py loc                                # code statistics
-./d.py clean                              # clean caches
-```
+**VM** — register-based bytecode interpreter with fiber-based goroutines, island concurrency, and an incremental tri-color GC.
 
-Full command reference: `lang/docs/dev/d-py-usage.md`.
+**JIT** — mixed-mode: starts in the VM, selectively compiles hot functions and loops to native code via [Cranelift](https://cranelift.dev). Supports loop OSR and direct JIT-to-JIT calls.
+
+**WASM** — `vo-runtime` and `vo-vm` compiled to `wasm32-unknown-unknown` in `no_std` mode. Runs in-browser in Studio and Playground; no JIT in this path.
+
+## Performance
+
+Geometric-mean relative time across 12 benchmarks (lower is faster). Measured on Apple M1, single-core, `--release`:
+
+| Rank | Language | Geometric Mean |
+|------|----------|---------------|
+| 1 | C | 1.11× |
+| 2 | Go | 1.80× |
+| 3 | LuaJIT | 2.37× |
+| 4 | Java | 3.59× |
+| 5 | **Vo-JIT** | **4.25×** |
+| 6 | Node | 5.46× |
+| 7 | Lua | 24.48× |
+| 8 | **Vo-VM** | **34.96×** |
+
+Vo-JIT is competitive with Go and Java on tight integer/array loops (e.g. sieve 2.46×, task-queue 1.67×, sum-array 2.56×). GC-heavy benchmarks show a wider gap due to allocation pressure on the incremental collector.
+
+*Results are informal and hardware-dependent; not authoritative. Run `./d.py bench all` to reproduce.*
 
 ## License
 

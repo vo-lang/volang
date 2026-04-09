@@ -2,14 +2,14 @@
 
 > **The scripting language for the Rust ecosystem.**
 
-Vo is the Python of the Rust world — a statically typed, low-ceremony language designed to be embedded in Rust applications. The compiler and VM are pure Rust libraries with no GIL. Programs run on a bytecode VM, a Cranelift JIT, or compile to WASM for the browser.
+Vo is the Python of the Rust world — a statically typed, low-ceremony language designed to be embedded in Rust applications. The compiler and VM are pure Rust libraries with built-in island concurrency. Programs run on a bytecode VM, a Cranelift JIT, or compile to WASM for the browser.
 
 ## What Vo Is For
 
 - **Embed in Rust apps** — Vo's VM is a Rust library. Add a scripting layer to your Rust project without shipping a separate runtime.
 - **Run in the browser** — First-class WASM target. Vo programs run in the browser with the same semantics as on native. This page is proof: the Studio editor and all examples execute Vo via WASM.
-- **Rapid prototyping** — Go-like syntax means near-zero learning curve for anyone who has written Go, TypeScript, or Python. Most Go programs run with minimal changes.
-- **AI-friendly** — Simple grammar, explicit types, no metaprogramming magic. LLMs can read and write Vo reliably.
+- **Almost Go** — Vo stays very close to Go. Most Go programs run with minimal changes.
+- **AI-friendly** — AI already knows Go well, and because Vo stays close to Go and can be run directly in normal use, it is easy for AI to read, write, and use.
 
 ## Execution Backends
 
