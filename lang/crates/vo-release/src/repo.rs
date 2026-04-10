@@ -30,7 +30,7 @@ const IGNORED_DIR_NAMES: &[&str] = &[
     "pkg",
     "__pycache__",
 ];
-const IGNORED_FILE_NAMES: &[&str] = &["vo.release.json", ".DS_Store"];
+const IGNORED_FILE_NAMES: &[&str] = &["vo.release.json", "vo.work", ".DS_Store"];
 const IGNORED_SUFFIXES: &[&str] = &[".a", ".dll", ".dylib", ".lib", ".pdb", ".so", ".wasm"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

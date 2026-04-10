@@ -174,11 +174,45 @@ fn stage_release_excludes_output_directory_from_source_package() {
 }
 
 #[test]
+fn stage_release_excludes_vo_work_from_source_package() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    fs::write(
+        temp.path().join("vo.work"),
+        "version = 1\n\n[[use]]\npath = \"../vopack\"\n",
+    )
+    .unwrap();
+
+    let staged = stage_release(
+        temp.path(),
+        &StageReleaseOptions {
+            version: "v0.1.0".to_string(),
+            commit: Some(TEST_COMMIT.to_string()),
+            artifacts: Vec::new(),
+            out_dir: temp.path().join(".dist"),
+        },
+    )
+    .unwrap();
+
+    let file = fs::File::open(&staged.source_path).unwrap();
+    let decoder = GzDecoder::new(file);
+    let mut archive = Archive::new(decoder);
+    let mut entries = archive
+        .entries()
+        .unwrap()
+        .map(|entry| entry.unwrap().path().unwrap().display().to_string())
+        .collect::<Vec<_>>();
+    entries.sort();
+
+    assert!(entries.iter().all(|entry| !entry.ends_with("/vo.work")));
+}
+
+#[test]
 fn strip_cargo_patch_sections_removes_quoted_patch() {
     let input = "[workspace]\nmembers = [\"ext\"]\n\n[patch.\"https://github.com/vo-lang/volang\"]\nvo-common = { path = \"../../volang/lang/crates/vo-common\" }\nvo-ext = { path = \"../../volang/lang/crates/vo-ext\" }\n\n[dependencies]\nserde = \"1\"\n";
     let result = strip_cargo_patch_sections(input);
     assert!(
-        !result.contains("[patch."),
+        !result.contains("[patch"),
         "patch section should be removed"
     );
     assert!(
