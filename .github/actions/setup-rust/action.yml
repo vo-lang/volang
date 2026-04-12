@@ -6,19 +6,108 @@ runs:
     - id: toolchain
       shell: bash
       run: |
-        python3 - <<'PY' >> "$GITHUB_OUTPUT"
-        import os
-        import tomllib
-        from pathlib import Path
+        shopt -s extglob
 
-        repo_root = Path(os.environ["GITHUB_ACTION_PATH"]).resolve().parents[2]
-        data = tomllib.loads((repo_root / "rust-toolchain.toml").read_text())
-        toolchain = data["toolchain"]
-        print(f"channel={toolchain['channel']}")
-        print(f"profile={toolchain.get('profile', 'default')}")
-        print(f"components={','.join(toolchain.get('components', []))}")
-        print(f"targets={','.join(toolchain.get('targets', []))}")
-        PY
+        trim() {
+          local value="$1"
+          value="${value##+([[:space:]])}"
+          value="${value%%+([[:space:]])}"
+          printf '%s' "$value"
+        }
+
+        parse_string() {
+          local key="$1"
+          local value
+          value="$(trim "$2")"
+          if [[ ! "$value" =~ ^\".*\"$ ]]; then
+            echo "$key must be a string in rust-toolchain.toml" >&2
+            exit 1
+          fi
+          value="${value:1:${#value}-2}"
+          printf '%s' "$value"
+        }
+
+        parse_string_array() {
+          local key="$1"
+          local value
+          value="$(trim "$2")"
+          if [[ "$value" != \[*\] ]]; then
+            echo "$key must be an array in rust-toolchain.toml" >&2
+            exit 1
+          fi
+          value="${value:1:${#value}-2}"
+          value="${value//\"/}"
+          value="$(printf '%s' "$value" | tr -d '[:space:]')"
+          printf '%s' "$value"
+        }
+
+        repo_root="$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)"
+        toolchain_file="$repo_root/rust-toolchain.toml"
+
+        channel=""
+        profile="default"
+        components=""
+        targets=""
+        in_toolchain=0
+
+        while IFS= read -r raw_line; do
+          line="${raw_line%%#*}"
+          line="$(trim "$line")"
+          if [ -z "$line" ]; then
+            continue
+          fi
+          if [[ "$line" == \[*\] ]]; then
+            if [ "$line" = "[toolchain]" ]; then
+              in_toolchain=1
+            else
+              in_toolchain=0
+            fi
+            continue
+          fi
+          if [ "$in_toolchain" -ne 1 ]; then
+            continue
+          fi
+          if [[ "$line" != *=* ]]; then
+            echo "invalid rust-toolchain.toml line: $raw_line" >&2
+            exit 1
+          fi
+
+          key="${line%%=*}"
+          value="${line#*=}"
+          key="$(trim "$key")"
+          value="$(trim "$value")"
+
+          case "$key" in
+            channel)
+              channel="$(parse_string "$key" "$value")"
+              ;;
+            profile)
+              profile="$(parse_string "$key" "$value")"
+              ;;
+            components)
+              components="$(parse_string_array "$key" "$value")"
+              ;;
+            targets)
+              targets="$(parse_string_array "$key" "$value")"
+              ;;
+            *)
+              echo "unsupported rust-toolchain key: $key" >&2
+              exit 1
+              ;;
+          esac
+        done < "$toolchain_file"
+
+        if [ -z "$channel" ]; then
+          echo "missing toolchain.channel in rust-toolchain.toml" >&2
+          exit 1
+        fi
+
+        {
+          printf 'channel=%s\n' "$channel"
+          printf 'profile=%s\n' "$profile"
+          printf 'components=%s\n' "$components"
+          printf 'targets=%s\n' "$targets"
+        } >> "$GITHUB_OUTPUT"
     - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
       with:
         toolchain: ${{ steps.toolchain.outputs.channel }}
