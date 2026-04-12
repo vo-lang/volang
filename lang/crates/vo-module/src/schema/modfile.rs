@@ -8,6 +8,7 @@ pub struct ModFile {
     pub module: ModulePath,
     pub vo: ToolchainConstraint,
     pub require: Vec<Require>,
+    pub replace: Vec<Replace>,
 }
 
 #[derive(Debug, Clone)]
@@ -16,19 +17,26 @@ pub struct Require {
     pub constraint: DepConstraint,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replace {
+    pub module: ModulePath,
+    pub path: String,
+}
+
 impl ModFile {
     /// Parse a `vo.mod` file from its text content.
     pub fn parse(content: &str) -> Result<Self, Error> {
         let mut module: Option<ModulePath> = None;
         let mut vo: Option<ToolchainConstraint> = None;
         let mut require: Vec<Require> = Vec::new();
+        let mut replace: Vec<Replace> = Vec::new();
 
         for (line_num, raw_line) in content.lines().enumerate() {
             let line = raw_line.trim();
             if line.is_empty() || line.starts_with("//") {
                 continue;
             }
-            let parts: Vec<&str> = line.splitn(3, ' ').collect();
+            let parts: Vec<&str> = line.split_whitespace().collect();
             let directive = parts[0];
             match directive {
                 "module" => {
@@ -104,10 +112,25 @@ impl ModFile {
                     });
                 }
                 "replace" => {
-                    return Err(Error::ModFileParse(format!(
-                        "line {}: 'replace' directive is not supported in vo.mod",
-                        line_num + 1
-                    )));
+                    if parts.len() != 4 || parts[2] != "=>" {
+                        return Err(Error::ModFileParse(format!(
+                            "line {}: 'replace' needs <module-path> => <path>",
+                            line_num + 1
+                        )));
+                    }
+                    let mp = ModulePath::parse(parts[1])
+                        .map_err(|e| Error::ModFileParse(format!("line {}: {e}", line_num + 1)))?;
+                    if replace.iter().any(|r| r.module == mp) {
+                        return Err(Error::ModFileParse(format!(
+                            "line {}: duplicate replace for {}",
+                            line_num + 1,
+                            mp
+                        )));
+                    }
+                    replace.push(Replace {
+                        module: mp,
+                        path: parts[3].to_string(),
+                    });
                 }
                 _ => {
                     return Err(Error::ModFileParse(format!(
@@ -126,6 +149,7 @@ impl ModFile {
             module,
             vo,
             require,
+            replace,
         })
     }
 
@@ -141,6 +165,14 @@ impl ModFile {
             sorted.sort_by(|a, b| a.module.cmp(&b.module));
             for req in sorted {
                 out.push_str(&format!("require {} {}\n", req.module, req.constraint));
+            }
+        }
+        if !self.replace.is_empty() {
+            out.push('\n');
+            let mut sorted: Vec<&Replace> = self.replace.iter().collect();
+            sorted.sort_by(|a, b| a.module.cmp(&b.module));
+            for replace in sorted {
+                out.push_str(&format!("replace {} => {}\n", replace.module, replace.path));
             }
         }
         out
@@ -164,6 +196,7 @@ require github.com/acme/http v1.3.1
         assert_eq!(mf.module.as_str(), "github.com/acme/app");
         assert_eq!(mf.vo.to_string(), "^1.0.0");
         assert_eq!(mf.require.len(), 2);
+        assert!(mf.replace.is_empty());
     }
 
     #[test]
@@ -180,13 +213,16 @@ require github.com/vo-lang/vogui ^0.4.0
     }
 
     #[test]
-    fn test_reject_replace() {
+    fn test_parse_replace() {
         let content = "\
 module github.com/acme/app
 vo ^1.0.0
-replace github.com/vo-lang/vogui ../vogui
+replace github.com/vo-lang/vogui => ../vogui
 ";
-        assert!(ModFile::parse(content).is_err());
+        let mf = ModFile::parse(content).unwrap();
+        assert_eq!(mf.replace.len(), 1);
+        assert_eq!(mf.replace[0].module.as_str(), "github.com/vo-lang/vogui");
+        assert_eq!(mf.replace[0].path, "../vogui");
     }
 
     #[test]
@@ -211,6 +247,17 @@ require github.com/vo-lang/vogui ^0.5.0
     }
 
     #[test]
+    fn test_reject_duplicate_replace() {
+        let content = "\
+module github.com/acme/app
+vo ^1.0.0
+replace github.com/vo-lang/vogui => ../vogui
+replace github.com/vo-lang/vogui => ../vogui-local
+";
+        assert!(ModFile::parse(content).is_err());
+    }
+
+    #[test]
     fn test_reject_unknown_directive() {
         let content = "\
 module github.com/acme/app
@@ -229,6 +276,9 @@ vo ^1.0.0
 require github.com/vo-lang/voplay ~0.7.2
 require github.com/acme/http v1.3.1
 require github.com/vo-lang/vogui ^0.4.0
+
+replace github.com/vo-lang/resvg => ../resvg
+replace github.com/vo-lang/voplay => ../voplay
 ";
         let mf = ModFile::parse(content).unwrap();
         let rendered = mf.render();
@@ -241,6 +291,14 @@ require github.com/vo-lang/vogui ^0.4.0
         );
         assert_eq!(
             reparsed.require[2].module.as_str(),
+            "github.com/vo-lang/voplay"
+        );
+        assert_eq!(
+            reparsed.replace[0].module.as_str(),
+            "github.com/vo-lang/resvg"
+        );
+        assert_eq!(
+            reparsed.replace[1].module.as_str(),
             "github.com/vo-lang/voplay"
         );
     }

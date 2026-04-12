@@ -228,9 +228,21 @@ pub fn verify_root_consistency(mod_file: &ModFile, lock_file: &LockFile) -> Resu
 
 /// Verify that all direct requirements in `vo.mod` are present in `vo.lock`,
 /// and that no orphaned modules remain.
-pub fn verify_graph_completeness(mod_file: &ModFile, lock_file: &LockFile) -> Result<(), Error> {
+pub fn verify_graph_completeness(
+    mod_file: &ModFile,
+    lock_file: &LockFile,
+    excluded_modules: &[String],
+) -> Result<(), Error> {
+    let excluded = excluded_modules
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+
     // Every direct requirement must have a resolved entry
     for req in &mod_file.require {
+        if excluded.contains(req.module.as_str()) {
+            continue;
+        }
         if lock_file.find(&req.module).is_none() {
             return Err(Error::LockFileParse(format!(
                 "vo.mod requires {} but it is not in vo.lock",
@@ -242,7 +254,14 @@ pub fn verify_graph_completeness(mod_file: &ModFile, lock_file: &LockFile) -> Re
     // Every resolved module must be reachable from root's direct requirements,
     // and every dep listed in a locked module must itself be present in the lock.
     let mut reachable = std::collections::HashSet::new();
-    let mut stack: Vec<&ModulePath> = mod_file.require.iter().map(|r| &r.module).collect();
+    let mut stack: Vec<&ModulePath> = mod_file
+        .require
+        .iter()
+        .filter(|require| {
+            !excluded.contains(require.module.as_str()) || lock_file.find(&require.module).is_some()
+        })
+        .map(|require| &require.module)
+        .collect();
     while let Some(mp) = stack.pop() {
         if !reachable.insert(mp.as_str()) {
             continue;
@@ -254,6 +273,9 @@ pub fn verify_graph_completeness(mod_file: &ModFile, lock_file: &LockFile) -> Re
             ))
         })?;
         for dep in &lm.deps {
+            if excluded.contains(dep.as_str()) && lock_file.find(dep).is_none() {
+                continue;
+            }
             stack.push(dep);
         }
     }
@@ -353,7 +375,7 @@ source = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 deps = ["github.com/acme/util"]
 "#;
         let lf = LockFile::parse(lf_content).unwrap();
-        let result = verify_graph_completeness(&mf, &lf);
+        let result = verify_graph_completeness(&mf, &lf, &[]);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -382,7 +404,7 @@ source = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 deps = []
 "#;
         let lf = LockFile::parse(lf_content).unwrap();
-        let result = verify_graph_completeness(&mf, &lf);
+        let result = verify_graph_completeness(&mf, &lf, &[]);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -413,7 +435,57 @@ source = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 deps = []
 "#;
         let lf = LockFile::parse(lf_content).unwrap();
-        assert!(verify_graph_completeness(&mf, &lf).is_ok());
+        assert!(verify_graph_completeness(&mf, &lf, &[]).is_ok());
+    }
+
+    #[test]
+    fn test_verify_graph_completeness_ignores_excluded_direct_requirements() {
+        let mf = ModFile::parse(
+            "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.0.0\nreplace github.com/acme/lib => ../lib\n",
+        )
+        .unwrap();
+        let lf_content = r#"version = 1
+created_by = "vo 1.0.0"
+[root]
+module = "github.com/acme/app"
+vo = "^1.0.0"
+"#;
+        let lf = LockFile::parse(lf_content).unwrap();
+        assert!(verify_graph_completeness(&mf, &lf, &["github.com/acme/lib".to_string()],).is_ok());
+    }
+
+    #[test]
+    fn test_verify_graph_completeness_keeps_transitive_lock_coverage_through_excluded_module() {
+        let mf = ModFile::parse(
+            "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.0.0\nreplace github.com/acme/lib => ../lib\n",
+        )
+        .unwrap();
+        let lf_content = r#"version = 1
+created_by = "vo 1.0.0"
+[root]
+module = "github.com/acme/app"
+vo = "^1.0.0"
+
+[[resolved]]
+path = "github.com/acme/core"
+version = "v1.0.0"
+vo = "^1.0.0"
+commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+release_manifest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+source = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+deps = []
+
+[[resolved]]
+path = "github.com/acme/lib"
+version = "v1.0.0"
+vo = "^1.0.0"
+commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+release_manifest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+source = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+deps = ["github.com/acme/core"]
+"#;
+        let lf = LockFile::parse(lf_content).unwrap();
+        assert!(verify_graph_completeness(&mf, &lf, &["github.com/acme/lib".to_string()],).is_ok());
     }
 
     #[test]
