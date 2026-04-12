@@ -379,7 +379,8 @@ fn read_project_deps_from_mod_file<F: FileSystem>(
             )
             .with_path(lock_candidate)
         })?;
-        lock::verify_graph_completeness(&mod_file, &lock_file).map_err(|error| {
+        let excluded_vec: Vec<String> = excluded_modules.iter().map(|s| s.to_string()).collect();
+        lock::verify_graph_completeness(&mod_file, &lock_file, &excluded_vec).map_err(|error| {
             ProjectDepsError::new(
                 ProjectDepsStage::LockFile,
                 ProjectDepsErrorKind::ValidationFailed,
@@ -570,6 +571,7 @@ pub fn build_synthetic_project_files(
         module: module.clone(),
         vo: vo.clone(),
         require,
+        replace: vec![],
     };
     let lock_file = LockFile {
         version: 1,

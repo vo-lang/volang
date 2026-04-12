@@ -23,6 +23,7 @@ pub fn mod_init(dir: &Path, module_path: &str, vo_constraint: &str) -> Result<()
         module: mp,
         vo,
         require: vec![],
+        replace: vec![],
     };
     project::write_mod_file(dir, &mf)
 }
