@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use flate2::{Compression, GzBuilder};
@@ -307,8 +307,77 @@ fn prepare_artifacts(
     Ok(prepared)
 }
 
+fn included_source_files(repo_root: &Path) -> ReleaseResult<Vec<PathBuf>> {
+    let manifest_path = repo_root.join("vo.ext.toml");
+    if !manifest_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(&manifest_path)
+        .map_err(|error| ReleaseError::IoError(manifest_path.clone(), error.to_string()))?;
+    let include_paths = vo_module::ext_manifest::include_paths_from_content(&content)?;
+    if include_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut files = BTreeSet::new();
+    for include_path in &include_paths {
+        let normalized = normalize_include_path(&manifest_path, include_path)?;
+        let full_path = repo_root.join(&normalized);
+        if !full_path.is_file() {
+            return Err(ReleaseError::IoError(
+                full_path,
+                format!(
+                    "included file referenced by {} is missing",
+                    manifest_path.display()
+                ),
+            ));
+        }
+        let canonical = fs::canonicalize(&full_path)
+            .map_err(|error| ReleaseError::IoError(full_path.clone(), error.to_string()))?;
+        let _ = canonical.strip_prefix(repo_root).map_err(|_| {
+            ReleaseError::IoError(
+                canonical.clone(),
+                format!(
+                    "included file referenced by {} must stay within the module root",
+                    manifest_path.display()
+                ),
+            )
+        })?;
+        files.insert(canonical);
+    }
+    Ok(files.into_iter().collect())
+}
+
+fn normalize_include_path(manifest_path: &Path, path: &Path) -> ReleaseResult<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            _ => {
+                return Err(ReleaseError::IoError(
+                    manifest_path.to_path_buf(),
+                    format!(
+                        "include path must be a relative path inside the module: {}",
+                        path.display()
+                    ),
+                ))
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(ReleaseError::IoError(
+            manifest_path.to_path_buf(),
+            "include path must not be empty".to_string(),
+        ));
+    }
+    Ok(normalized)
+}
+
 fn build_source_package(repo_root: &Path, top_dir: &str, out_dir: &Path) -> ReleaseResult<Vec<u8>> {
-    let files = collect_source_files(repo_root, repo_root, out_dir)?;
+    let mut files = collect_source_files(repo_root, repo_root, out_dir)?;
+    files.extend(included_source_files(repo_root)?);
+    files.sort();
+    files.dedup();
     let encoder = GzBuilder::new()
         .mtime(0)
         .write(Vec::new(), Compression::default());

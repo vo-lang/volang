@@ -23,6 +23,19 @@ fn write_basic_repo(root: &Path) {
     fs::write(root.join("main.vo"), "fn main() {}\n").unwrap();
 }
 
+fn source_archive_entries(path: &Path) -> Vec<String> {
+    let file = fs::File::open(path).unwrap();
+    let decoder = GzDecoder::new(file);
+    let mut archive = Archive::new(decoder);
+    let mut entries = archive
+        .entries()
+        .unwrap()
+        .map(|entry| entry.unwrap().path().unwrap().display().to_string())
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
 #[test]
 fn verify_repo_rejects_vo_sum() {
     let temp = TempDir::new().unwrap();
@@ -135,6 +148,170 @@ fn stage_release_writes_manifest_and_artifacts() {
         .artifacts
         .iter()
         .any(|a| a.id.kind == "extension-wasm" && a.id.target == "wasm32-unknown-unknown"));
+}
+
+#[test]
+fn stage_release_canonicalizes_manifest_order_from_unsorted_inputs() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("vo.mod"),
+        "module github.com/acme/app\n\nvo 0.1.0\n\nrequire github.com/vo-lang/vopack v0.1.0\nrequire github.com/vo-lang/vogui v0.1.2\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("vo.lock"),
+        r#"version = 1
+created_by = "vo test"
+
+[root]
+module = "github.com/acme/app"
+vo = "0.1.0"
+
+[[resolved]]
+path = "github.com/vo-lang/vopack"
+version = "v0.1.0"
+vo = "^0.1.0"
+commit = "0123456789abcdef0123456789abcdef01234567"
+release_manifest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+source = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+deps = []
+
+[[resolved]]
+path = "github.com/vo-lang/vogui"
+version = "v0.1.2"
+vo = "^0.1.0"
+commit = "89abcdef0123456789abcdef0123456789abcdef"
+release_manifest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+source = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+deps = []
+"#,
+    )
+    .unwrap();
+    fs::write(temp.path().join("main.vo"), "fn main() {}\n").unwrap();
+
+    let wasm_artifact_path = temp.path().join("z-demo.wasm");
+    let js_artifact_path = temp.path().join("a-demo.js");
+    fs::write(&wasm_artifact_path, b"wasm-bits").unwrap();
+    fs::write(&js_artifact_path, b"js-bits").unwrap();
+
+    let staged = stage_release(
+        temp.path(),
+        &StageReleaseOptions {
+            version: "v0.1.0".to_string(),
+            commit: Some(TEST_COMMIT.to_string()),
+            artifacts: vec![
+                ArtifactInput {
+                    kind: "extension-wasm".to_string(),
+                    target: "wasm32-unknown-unknown".to_string(),
+                    name: "z-demo.wasm".to_string(),
+                    path: wasm_artifact_path.clone(),
+                },
+                ArtifactInput {
+                    kind: "extension-js-glue".to_string(),
+                    target: "wasm32-unknown-unknown".to_string(),
+                    name: "a-demo.js".to_string(),
+                    path: js_artifact_path.clone(),
+                },
+            ],
+            out_dir: temp.path().join(".dist"),
+        },
+    )
+    .unwrap();
+
+    let manifest_json = fs::read_to_string(&staged.manifest_path).unwrap();
+    let vogui_pos = manifest_json
+        .find("\"module\": \"github.com/vo-lang/vogui\"")
+        .unwrap();
+    let vopack_pos = manifest_json
+        .find("\"module\": \"github.com/vo-lang/vopack\"")
+        .unwrap();
+    let js_pos = manifest_json.find("\"name\": \"a-demo.js\"").unwrap();
+    let wasm_pos = manifest_json.find("\"name\": \"z-demo.wasm\"").unwrap();
+
+    assert!(vogui_pos < vopack_pos);
+    assert!(js_pos < wasm_pos);
+}
+
+#[test]
+fn stage_release_includes_declared_include_files_from_dist_dirs() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    fs::write(
+        temp.path().join("vo.ext.toml"),
+        concat!(
+            "[extension]\n",
+            "name = \"demo\"\n",
+            "path = \"rust/target/{profile}/libdemo\"\n",
+            "include = [\n",
+            "  \"js/dist/studio_renderer.js\",\n",
+            "  \"js/dist/studio_host_bridge.js\",\n",
+            "]\n",
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(temp.path().join("js/dist")).unwrap();
+    fs::write(
+        temp.path().join("js/dist/studio_renderer.js"),
+        "export const renderer = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("js/dist/studio_host_bridge.js"),
+        "export const hostBridge = 1;\n",
+    )
+    .unwrap();
+
+    let staged = stage_release(
+        temp.path(),
+        &StageReleaseOptions {
+            version: "v0.1.0".to_string(),
+            commit: Some(TEST_COMMIT.to_string()),
+            artifacts: Vec::new(),
+            out_dir: temp.path().join(".dist"),
+        },
+    )
+    .unwrap();
+
+    let entries = source_archive_entries(&staged.source_path);
+    assert!(entries.iter().any(|entry| entry.ends_with("/vo.ext.toml")));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.ends_with("/js/dist/studio_renderer.js")));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.ends_with("/js/dist/studio_host_bridge.js")));
+}
+
+#[test]
+fn stage_release_fails_when_declared_include_file_is_missing() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    fs::write(
+        temp.path().join("vo.ext.toml"),
+        concat!(
+            "[extension]\n",
+            "name = \"demo\"\n",
+            "path = \"rust/target/{profile}/libdemo\"\n",
+            "include = [\"js/dist/studio_renderer.js\"]\n",
+        ),
+    )
+    .unwrap();
+
+    let err = stage_release(
+        temp.path(),
+        &StageReleaseOptions {
+            version: "v0.1.0".to_string(),
+            commit: Some(TEST_COMMIT.to_string()),
+            artifacts: Vec::new(),
+            out_dir: temp.path().join(".dist"),
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ReleaseError::IoError(_, ref message) if message.contains("included file referenced")
+    ));
 }
 
 #[test]

@@ -1,5 +1,6 @@
+use std::collections::BTreeSet;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -147,28 +148,84 @@ enum ArchiveEntry {
 /// Extract source entries from a tar.gz release source package.
 ///
 /// Strips the top-level archive directory (standard release convention),
-/// filters to allowed file types (`.vo`, `vo.mod`, `vo.lock`, `vo.ext.toml`),
-/// and skips non-UTF-8 entries.
+/// filters to allowed module files plus any paths declared in
+/// `[extension].include` of `vo.ext.toml`, and skips non-UTF-8 entries
+/// except for declared include paths.
 ///
 /// Returns entries with paths relative to the module root.
 pub fn extract_source_entries(archive_bytes: &[u8]) -> Result<Vec<(PathBuf, String)>, String> {
+    let archive_entries = read_archive_entries(archive_bytes)?;
+    let include_paths = source_package_include_paths(&archive_entries)?;
     let mut entries = Vec::new();
 
-    for entry in read_archive_entries(archive_bytes)? {
+    for entry in archive_entries {
         let ArchiveEntry::File(relative_path, bytes) = entry else {
             continue;
         };
-        if !source_entry_allowed(&relative_path) {
+        if !source_entry_allowed(&relative_path, &include_paths) {
             continue;
         }
         let content = match String::from_utf8(bytes) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(error) => {
+                if include_paths.contains(&relative_path) {
+                    return Err(format!(
+                        "included file {} is not valid UTF-8: {}",
+                        relative_path.display(),
+                        error
+                    ));
+                }
+                continue;
+            }
         };
         entries.push((relative_path, content));
     }
 
     Ok(entries)
+}
+
+fn source_package_include_paths(entries: &[ArchiveEntry]) -> Result<BTreeSet<PathBuf>, String> {
+    let Some(bytes) = entries.iter().find_map(|entry| match entry {
+        ArchiveEntry::File(relative_path, bytes) if relative_path == Path::new("vo.ext.toml") => {
+            Some(bytes.as_slice())
+        }
+        _ => None,
+    }) else {
+        return Ok(BTreeSet::new());
+    };
+    let content = std::str::from_utf8(bytes).map_err(|error| {
+        format!(
+            "vo.ext.toml in source package is not valid UTF-8: {}",
+            error
+        )
+    })?;
+    let declared = crate::ext_manifest::include_paths_from_content(content)
+        .map_err(|error| error.to_string())?;
+    let mut paths = BTreeSet::new();
+    for p in declared {
+        paths.insert(normalize_source_relative_path(&p)?);
+    }
+    Ok(paths)
+}
+
+fn normalize_source_relative_path(path: &Path) -> Result<PathBuf, String> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            _ => {
+                return Err(format!(
+                    "include path must be a relative path inside the module: {}",
+                    path.display()
+                ))
+            }
+        };
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err("include path must not be empty".to_string());
+    }
+    Ok(normalized)
 }
 
 fn strip_archive_root(
@@ -201,10 +258,14 @@ fn strip_archive_root(
     Ok(Some(stripped.to_path_buf()))
 }
 
-fn source_entry_allowed(path: &Path) -> bool {
+fn source_entry_allowed(path: &Path, studio_asset_paths: &BTreeSet<PathBuf>) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let path_str = path.to_string_lossy();
-    path_str.ends_with(".vo") || name == "vo.mod" || name == "vo.lock" || name == "vo.ext.toml"
+    path_str.ends_with(".vo")
+        || name == "vo.mod"
+        || name == "vo.lock"
+        || name == "vo.ext.toml"
+        || studio_asset_paths.contains(path)
 }
 
 fn read_archive_entries(data: &[u8]) -> Result<Vec<ArchiveEntry>, String> {
@@ -755,6 +816,40 @@ mod tests {
                 .unwrap();
         }
         builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn test_extract_source_entries_keeps_declared_include_files() {
+        let archive = build_source_archive(
+            "demo-v1.0.0",
+            &[
+                ("vo.mod", "module github.com/acme/demo\nvo 0.1.0\n"),
+                (
+                    "vo.ext.toml",
+                    concat!(
+                        "[extension]\n",
+                        "name = \"demo\"\n",
+                        "path = \"rust/target/{profile}/libdemo\"\n",
+                        "include = [\"js/dist/studio_renderer.js\"]\n",
+                    ),
+                ),
+                ("main.vo", "package main\nfunc main() {}\n"),
+                ("js/dist/studio_renderer.js", "export const renderer = 1;\n"),
+                ("js/dist/ignored.js", "export const ignored = 1;\n"),
+            ],
+        );
+
+        let entries = extract_source_entries(&archive).unwrap();
+        let paths = entries
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&PathBuf::from("vo.mod")));
+        assert!(paths.contains(&PathBuf::from("vo.ext.toml")));
+        assert!(paths.contains(&PathBuf::from("main.vo")));
+        assert!(paths.contains(&PathBuf::from("js/dist/studio_renderer.js")));
+        assert!(!paths.contains(&PathBuf::from("js/dist/ignored.js")));
     }
 
     struct ExactInstallRegistry {

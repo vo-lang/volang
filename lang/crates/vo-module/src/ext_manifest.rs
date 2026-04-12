@@ -110,6 +110,40 @@ pub fn wasm_extension_from_content(content: &str) -> Option<WasmExtensionManifes
     parse_wasm_extension_from_value(&value).ok().flatten()
 }
 
+/// Read the generic `include` list from `[extension]` in a `vo.ext.toml` string.
+///
+/// Returns the declared paths that must ship with the source package.
+/// The release/install layer uses this — it never needs to know about
+/// host-specific sections like `[studio]`.
+pub fn include_paths_from_content(content: &str) -> Result<Vec<PathBuf>, Error> {
+    let value: toml::Value =
+        toml::from_str(content).map_err(|e| Error::ExtManifestParse(e.to_string()))?;
+    let Some(extension) = value.get("extension").and_then(toml::Value::as_table) else {
+        return Ok(Vec::new());
+    };
+    let Some(include) = extension.get("include") else {
+        return Ok(Vec::new());
+    };
+    let items = include.as_array().ok_or_else(|| {
+        Error::ExtManifestParse("'include' in [extension] must be an array".to_string())
+    })?;
+    let mut paths = Vec::new();
+    for item in items {
+        let s = item.as_str().ok_or_else(|| {
+            Error::ExtManifestParse(
+                "each entry in [extension].include must be a string".to_string(),
+            )
+        })?;
+        if s.trim().is_empty() {
+            return Err(Error::ExtManifestParse(
+                "[extension].include entries must not be empty".to_string(),
+            ));
+        }
+        paths.push(PathBuf::from(s));
+    }
+    Ok(paths)
+}
+
 pub fn is_bindgen_ext_content(vo_ext_toml_content: &str) -> bool {
     matches!(
         wasm_extension_from_content(vo_ext_toml_content),
@@ -249,5 +283,49 @@ path = "rust/target/release/libvo_vogui"
 "#,
         );
         assert_eq!(name.as_deref(), Some("vogui"));
+    }
+
+    #[test]
+    fn test_include_paths_from_content() {
+        let paths = include_paths_from_content(
+            r#"
+[extension]
+name = "vogui"
+path = "rust/target/{profile}/libvo_vogui"
+include = [
+  "js/dist/studio_renderer.js",
+  "js/dist/studio_protocol.js",
+  "js/dist/studio_host_bridge.js",
+]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("js/dist/studio_renderer.js"),
+                PathBuf::from("js/dist/studio_protocol.js"),
+                PathBuf::from("js/dist/studio_host_bridge.js"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_include_paths_from_content_absent() {
+        let paths = include_paths_from_content(
+            r#"
+[extension]
+name = "vogui"
+path = "rust/target/{profile}/libvo_vogui"
+"#,
+        )
+        .unwrap();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_include_paths_from_content_no_extension() {
+        let paths = include_paths_from_content("").unwrap();
+        assert!(paths.is_empty());
     }
 }
