@@ -75,6 +75,52 @@ struct RawArtifact {
     digest: String,
 }
 
+fn validate_requires_sorted_unique(require: &[ManifestRequire]) -> Result<(), Error> {
+    for w in require.windows(2) {
+        if w[0].module >= w[1].module {
+            return Err(Error::ManifestParse(
+                "require must be unique and sorted by module path".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_artifacts_sorted_unique(artifacts: &[ManifestArtifact]) -> Result<(), Error> {
+    for w in artifacts.windows(2) {
+        if w[0].id >= w[1].id {
+            return Err(Error::ManifestParse(
+                "artifacts must be unique and sorted by (kind, target, name)".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonicalize_requires(require: &mut [ManifestRequire]) -> Result<(), Error> {
+    require.sort_by(|a, b| a.module.cmp(&b.module));
+    for w in require.windows(2) {
+        if w[0].module == w[1].module {
+            return Err(Error::ManifestParse(
+                "require must be unique by module path".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonicalize_artifacts(artifacts: &mut [ManifestArtifact]) -> Result<(), Error> {
+    artifacts.sort_by(|a, b| a.id.cmp(&b.id));
+    for w in artifacts.windows(2) {
+        if w[0].id == w[1].id {
+            return Err(Error::ManifestParse(
+                "artifacts must be unique by (kind, target, name)".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl ReleaseManifest {
     /// Parse from JSON string.
     pub fn parse(json: &str) -> Result<Self, Error> {
@@ -110,14 +156,7 @@ impl ReleaseManifest {
                 constraint,
             });
         }
-        // Validate sorted and unique
-        for w in require.windows(2) {
-            if w[0].module >= w[1].module {
-                return Err(Error::ManifestParse(
-                    "require must be unique and sorted by module path".into(),
-                ));
-            }
-        }
+        validate_requires_sorted_unique(&require)?;
 
         let source = ManifestSource {
             name: raw.source.name.clone(),
@@ -141,14 +180,7 @@ impl ReleaseManifest {
                 digest,
             });
         }
-        // Validate sorted and unique
-        for w in artifacts.windows(2) {
-            if w[0].id >= w[1].id {
-                return Err(Error::ManifestParse(
-                    "artifacts must be unique and sorted by (kind, target, name)".into(),
-                ));
-            }
-        }
+        validate_artifacts_sorted_unique(&artifacts)?;
 
         Ok(ReleaseManifest {
             schema_version: raw.schema_version,
@@ -165,6 +197,13 @@ impl ReleaseManifest {
 
     /// Serialize to JSON string.
     pub fn render(&self) -> String {
+        let mut require = self.require.clone();
+        canonicalize_requires(&mut require)
+            .expect("release manifest.require must be unique by module path");
+        let mut artifacts = self.artifacts.clone();
+        canonicalize_artifacts(&mut artifacts)
+            .expect("release manifest.artifacts must be unique by (kind, target, name)");
+
         let raw = RawManifest {
             schema_version: self.schema_version,
             module: self.module.as_str().to_string(),
@@ -172,8 +211,7 @@ impl ReleaseManifest {
             commit: self.commit.clone(),
             module_root: self.module_root.clone(),
             vo: self.vo.to_string(),
-            require: self
-                .require
+            require: require
                 .iter()
                 .map(|r| RawRequire {
                     module: r.module.as_str().to_string(),
@@ -185,8 +223,7 @@ impl ReleaseManifest {
                 size: self.source.size,
                 digest: self.source.digest.as_str().to_string(),
             },
-            artifacts: self
-                .artifacts
+            artifacts: artifacts
                 .iter()
                 .map(|a| RawArtifact {
                     kind: a.id.kind.clone(),
@@ -280,5 +317,152 @@ mod tests {
   "artifacts": []
 }"#;
         assert!(ReleaseManifest::parse(json).is_err());
+    }
+
+    #[test]
+    fn test_reject_unsorted_artifacts() {
+        let json = r#"{
+  "schema_version": 1,
+  "module": "github.com/acme/app",
+  "version": "v1.0.0",
+  "commit": "1111111111111111111111111111111111111111",
+  "module_root": ".",
+  "vo": "^1.0.0",
+  "require": [],
+  "source": {
+    "name": "app-v1.0.0-source.tar.gz",
+    "size": 100,
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "artifacts": [
+    {
+      "kind": "extension-wasm",
+      "target": "wasm32-unknown-unknown",
+      "name": "z-demo.wasm",
+      "size": 100,
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "kind": "extension-js-glue",
+      "target": "wasm32-unknown-unknown",
+      "name": "a-demo.js",
+      "size": 200,
+      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ]
+}"#;
+        assert!(ReleaseManifest::parse(json).is_err());
+    }
+
+    #[test]
+    fn test_reject_duplicate_require() {
+        let json = r#"{
+  "schema_version": 1,
+  "module": "github.com/acme/app",
+  "version": "v1.0.0",
+  "commit": "1111111111111111111111111111111111111111",
+  "module_root": ".",
+  "vo": "^1.0.0",
+  "require": [
+    { "module": "github.com/a/a", "constraint": "^1.0.0" },
+    { "module": "github.com/a/a", "constraint": "^1.1.0" }
+  ],
+  "source": {
+    "name": "app-v1.0.0-source.tar.gz",
+    "size": 100,
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "artifacts": []
+}"#;
+        assert!(ReleaseManifest::parse(json).is_err());
+    }
+
+    #[test]
+    fn test_reject_duplicate_artifacts() {
+        let json = r#"{
+  "schema_version": 1,
+  "module": "github.com/acme/app",
+  "version": "v1.0.0",
+  "commit": "1111111111111111111111111111111111111111",
+  "module_root": ".",
+  "vo": "^1.0.0",
+  "require": [],
+  "source": {
+    "name": "app-v1.0.0-source.tar.gz",
+    "size": 100,
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "artifacts": [
+    {
+      "kind": "extension-wasm",
+      "target": "wasm32-unknown-unknown",
+      "name": "demo.wasm",
+      "size": 100,
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "kind": "extension-wasm",
+      "target": "wasm32-unknown-unknown",
+      "name": "demo.wasm",
+      "size": 200,
+      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ]
+}"#;
+        assert!(ReleaseManifest::parse(json).is_err());
+    }
+
+    #[test]
+    fn test_render_canonicalizes_unsorted_fields() {
+        let mut manifest = ReleaseManifest::parse(&sample_json()).unwrap();
+        manifest.require = vec![
+            ManifestRequire {
+                module: ModulePath::parse("github.com/vo-lang/voplay").unwrap(),
+                constraint: DepConstraint::parse("^0.7.0").unwrap(),
+            },
+            ManifestRequire {
+                module: ModulePath::parse("github.com/acme/core").unwrap(),
+                constraint: DepConstraint::parse("^1.0.0").unwrap(),
+            },
+        ];
+        manifest.artifacts = vec![
+            ManifestArtifact {
+                id: ArtifactId {
+                    kind: "extension-wasm".to_string(),
+                    target: "wasm32-unknown-unknown".to_string(),
+                    name: "z-demo.wasm".to_string(),
+                },
+                size: 123,
+                digest: Digest::parse(
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .unwrap(),
+            },
+            ManifestArtifact {
+                id: ArtifactId {
+                    kind: "extension-js-glue".to_string(),
+                    target: "wasm32-unknown-unknown".to_string(),
+                    name: "a-demo.js".to_string(),
+                },
+                size: 456,
+                digest: Digest::parse(
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                )
+                .unwrap(),
+            },
+        ];
+
+        let rendered = manifest.render();
+        let core_pos = rendered
+            .find("\"module\": \"github.com/acme/core\"")
+            .unwrap();
+        let voplay_pos = rendered
+            .find("\"module\": \"github.com/vo-lang/voplay\"")
+            .unwrap();
+        let js_pos = rendered.find("\"name\": \"a-demo.js\"").unwrap();
+        let wasm_pos = rendered.find("\"name\": \"z-demo.wasm\"").unwrap();
+
+        assert!(core_pos < voplay_pos);
+        assert!(js_pos < wasm_pos);
     }
 }

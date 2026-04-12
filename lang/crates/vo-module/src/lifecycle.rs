@@ -146,10 +146,11 @@ pub fn prepare_lock_file(
     prefs: &SolvePreferences,
     created_by: &str,
 ) -> Result<Option<LockFile>, Error> {
-    if mod_file.require.is_empty() {
+    let reqs = solved_requirements(mod_file);
+    if reqs.is_empty() {
         return Ok(None);
     }
-    let graph = solve_from_modfile(mod_file, registry, prefs)?;
+    let graph = solve_from_requirements(mod_file, &reqs, registry, prefs)?;
     Ok(Some(crate::lock::generate_lock(
         mod_file, &graph, created_by,
     )?))
@@ -160,8 +161,13 @@ pub fn verify_locked_dependencies(
     mod_file: &ModFile,
     lock_file: &LockFile,
 ) -> Result<(), Error> {
+    let excluded_modules = mod_file
+        .replace
+        .iter()
+        .map(|replace| replace.module.as_str().to_string())
+        .collect::<Vec<_>>();
     crate::lock::verify_root_consistency(mod_file, lock_file)?;
-    crate::lock::verify_graph_completeness(mod_file, lock_file)?;
+    crate::lock::verify_graph_completeness(mod_file, lock_file, &excluded_modules)?;
     crate::cache::install::verify_locked_cache(cache_root, lock_file)
 }
 
@@ -280,17 +286,27 @@ pub fn clean_cache(cache_root: &Path, lock_file: Option<&LockFile>) -> Result<u6
     Ok(removed)
 }
 
-fn solve_from_modfile(
+fn solved_requirements(mod_file: &ModFile) -> Vec<(ModulePath, crate::version::DepConstraint)> {
+    let replaced = mod_file
+        .replace
+        .iter()
+        .map(|replace| replace.module.as_str())
+        .collect::<BTreeSet<_>>();
+    mod_file
+        .require
+        .iter()
+        .filter(|require| !replaced.contains(require.module.as_str()))
+        .map(|require| (require.module.clone(), require.constraint.clone()))
+        .collect::<Vec<_>>()
+}
+
+fn solve_from_requirements(
     mod_file: &ModFile,
+    reqs: &[(ModulePath, crate::version::DepConstraint)],
     registry: &dyn Registry,
     prefs: &SolvePreferences,
 ) -> Result<ResolvedGraph, Error> {
-    let reqs = mod_file
-        .require
-        .iter()
-        .map(|require| (require.module.clone(), require.constraint.clone()))
-        .collect::<Vec<_>>();
-    solver::solve(&mod_file.module, &mod_file.vo, &reqs, registry, prefs)
+    solver::solve(&mod_file.module, &mod_file.vo, reqs, registry, prefs)
 }
 
 pub fn normalize_locked_modules(
