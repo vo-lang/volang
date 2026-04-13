@@ -321,28 +321,11 @@ fn included_source_files(repo_root: &Path) -> ReleaseResult<Vec<PathBuf>> {
     let mut files = BTreeSet::new();
     for include_path in &include_paths {
         let normalized = normalize_include_path(&manifest_path, include_path)?;
-        let full_path = repo_root.join(&normalized);
-        if !full_path.is_file() {
-            return Err(ReleaseError::IoError(
-                full_path,
-                format!(
-                    "included file referenced by {} is missing",
-                    manifest_path.display()
-                ),
-            ));
-        }
-        let canonical = fs::canonicalize(&full_path)
-            .map_err(|error| ReleaseError::IoError(full_path.clone(), error.to_string()))?;
-        let _ = canonical.strip_prefix(repo_root).map_err(|_| {
-            ReleaseError::IoError(
-                canonical.clone(),
-                format!(
-                    "included file referenced by {} must stay within the module root",
-                    manifest_path.display()
-                ),
-            )
-        })?;
-        files.insert(canonical);
+        files.extend(collect_included_source_paths(
+            repo_root,
+            &manifest_path,
+            &normalized,
+        )?);
     }
     Ok(files.into_iter().collect())
 }
@@ -371,6 +354,99 @@ fn normalize_include_path(manifest_path: &Path, path: &Path) -> ReleaseResult<Pa
         ));
     }
     Ok(normalized)
+}
+
+fn collect_included_source_paths(
+    repo_root: &Path,
+    manifest_path: &Path,
+    include_path: &Path,
+) -> ReleaseResult<Vec<PathBuf>> {
+    let full_path = repo_root.join(include_path);
+    if !full_path.exists() {
+        return Err(ReleaseError::IoError(
+            full_path,
+            format!(
+                "included path referenced by {} is missing",
+                manifest_path.display()
+            ),
+        ));
+    }
+    if full_path.is_file() {
+        return Ok(vec![canonicalize_included_source_path(
+            repo_root,
+            manifest_path,
+            &full_path,
+        )?]);
+    }
+    if full_path.is_dir() {
+        return collect_included_source_directory(repo_root, manifest_path, &full_path);
+    }
+    Err(ReleaseError::IoError(
+        full_path,
+        format!(
+            "included path referenced by {} must be a file or directory",
+            manifest_path.display()
+        ),
+    ))
+}
+
+fn collect_included_source_directory(
+    repo_root: &Path,
+    manifest_path: &Path,
+    dir: &Path,
+) -> ReleaseResult<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut entries = fs::read_dir(dir)
+        .map_err(|error| ReleaseError::IoError(dir.to_path_buf(), error.to_string()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| ReleaseError::IoError(dir.to_path_buf(), error.to_string()))?;
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            files.extend(collect_included_source_directory(
+                repo_root,
+                manifest_path,
+                &path,
+            )?);
+            continue;
+        }
+        if path.is_file() {
+            files.push(canonicalize_included_source_path(
+                repo_root,
+                manifest_path,
+                &path,
+            )?);
+            continue;
+        }
+        return Err(ReleaseError::IoError(
+            path,
+            format!(
+                "included path referenced by {} must contain only files and directories",
+                manifest_path.display()
+            ),
+        ));
+    }
+    Ok(files)
+}
+
+fn canonicalize_included_source_path(
+    repo_root: &Path,
+    manifest_path: &Path,
+    full_path: &Path,
+) -> ReleaseResult<PathBuf> {
+    let canonical = fs::canonicalize(full_path)
+        .map_err(|error| ReleaseError::IoError(full_path.to_path_buf(), error.to_string()))?;
+    let _ = canonical.strip_prefix(repo_root).map_err(|_| {
+        ReleaseError::IoError(
+            canonical.clone(),
+            format!(
+                "included path referenced by {} must stay within the module root",
+                manifest_path.display()
+            ),
+        )
+    })?;
+    Ok(canonical)
 }
 
 fn build_source_package(repo_root: &Path, top_dir: &str, out_dir: &Path) -> ReleaseResult<Vec<u8>> {

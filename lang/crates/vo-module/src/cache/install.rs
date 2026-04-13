@@ -168,7 +168,7 @@ pub fn extract_source_entries(archive_bytes: &[u8]) -> Result<Vec<(PathBuf, Stri
         let content = match String::from_utf8(bytes) {
             Ok(c) => c,
             Err(error) => {
-                if include_paths.contains(&relative_path) {
+                if included_source_path_matches(&relative_path, &include_paths) {
                     return Err(format!(
                         "included file {} is not valid UTF-8: {}",
                         relative_path.display(),
@@ -265,7 +265,13 @@ fn source_entry_allowed(path: &Path, studio_asset_paths: &BTreeSet<PathBuf>) -> 
         || name == "vo.mod"
         || name == "vo.lock"
         || name == "vo.ext.toml"
-        || studio_asset_paths.contains(path)
+        || included_source_path_matches(path, studio_asset_paths)
+}
+
+fn included_source_path_matches(path: &Path, include_paths: &BTreeSet<PathBuf>) -> bool {
+    include_paths
+        .iter()
+        .any(|include_path| path == include_path || path.starts_with(include_path))
 }
 
 fn read_archive_entries(data: &[u8]) -> Result<Vec<ArchiveEntry>, String> {
@@ -850,6 +856,48 @@ mod tests {
         assert!(paths.contains(&PathBuf::from("main.vo")));
         assert!(paths.contains(&PathBuf::from("js/dist/studio_renderer.js")));
         assert!(!paths.contains(&PathBuf::from("js/dist/ignored.js")));
+    }
+
+    #[test]
+    fn test_extract_source_entries_keeps_declared_include_directories() {
+        let archive = build_source_archive(
+            "demo-v1.0.0",
+            &[
+                ("vo.mod", "module github.com/acme/demo\nvo 0.1.0\n"),
+                (
+                    "vo.ext.toml",
+                    concat!(
+                        "[extension]\n",
+                        "name = \"demo\"\n",
+                        "path = \"rust/target/{profile}/libdemo\"\n",
+                        "include = [\"js/dist\"]\n",
+                    ),
+                ),
+                ("main.vo", "package main\nfunc main() {}\n"),
+                (
+                    "js/dist/voplay-render-island.js",
+                    "export { bootstrapWebView } from './bootstrap_webview.js';\n",
+                ),
+                (
+                    "js/dist/bootstrap_webview.js",
+                    "export const bootstrapWebView = 1;\n",
+                ),
+                ("js/dist/nested/helper.js", "export const helper = 1;\n"),
+            ],
+        );
+
+        let entries = extract_source_entries(&archive).unwrap();
+        let paths = entries
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&PathBuf::from("vo.mod")));
+        assert!(paths.contains(&PathBuf::from("vo.ext.toml")));
+        assert!(paths.contains(&PathBuf::from("main.vo")));
+        assert!(paths.contains(&PathBuf::from("js/dist/voplay-render-island.js")));
+        assert!(paths.contains(&PathBuf::from("js/dist/bootstrap_webview.js")));
+        assert!(paths.contains(&PathBuf::from("js/dist/nested/helper.js")));
     }
 
     struct ExactInstallRegistry {

@@ -283,6 +283,62 @@ fn stage_release_includes_declared_include_files_from_dist_dirs() {
 }
 
 #[test]
+fn stage_release_includes_declared_include_directories_recursively() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    fs::write(
+        temp.path().join("vo.ext.toml"),
+        concat!(
+            "[extension]\n",
+            "name = \"demo\"\n",
+            "path = \"rust/target/{profile}/libdemo\"\n",
+            "include = [\n",
+            "  \"js/dist\",\n",
+            "]\n",
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(temp.path().join("js/dist/nested")).unwrap();
+    fs::write(
+        temp.path().join("js/dist/voplay-render-island.js"),
+        "export { bootstrapWebView } from './bootstrap_webview.js';\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("js/dist/bootstrap_webview.js"),
+        "export const bootstrapWebView = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("js/dist/nested/helper.js"),
+        "export const helper = 1;\n",
+    )
+    .unwrap();
+
+    let staged = stage_release(
+        temp.path(),
+        &StageReleaseOptions {
+            version: "v0.1.0".to_string(),
+            commit: Some(TEST_COMMIT.to_string()),
+            artifacts: Vec::new(),
+            out_dir: temp.path().join(".dist"),
+        },
+    )
+    .unwrap();
+
+    let entries = source_archive_entries(&staged.source_path);
+    assert!(entries
+        .iter()
+        .any(|entry| entry.ends_with("/js/dist/voplay-render-island.js")));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.ends_with("/js/dist/bootstrap_webview.js")));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.ends_with("/js/dist/nested/helper.js")));
+}
+
+#[test]
 fn stage_release_fails_when_declared_include_file_is_missing() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
@@ -310,7 +366,7 @@ fn stage_release_fails_when_declared_include_file_is_missing() {
 
     assert!(matches!(
         err,
-        ReleaseError::IoError(_, ref message) if message.contains("included file referenced")
+        ReleaseError::IoError(_, ref message) if message.contains("included path referenced")
     ));
 }
 
