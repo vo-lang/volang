@@ -160,6 +160,7 @@ export class RuntimeService {
             moduleBytes: output.moduleBytes,
             renderBytes: output.renderBytes,
             framework: output.framework,
+            providerFrameworks: output.providerFrameworks,
             sessionId,
             externalWidgetHandlerId,
           },
@@ -238,6 +239,31 @@ export class RuntimeService {
         const sessionError = this.coerceGuiSessionError(error, sessionId);
         if (isGuiSessionSupersededError(sessionError)) {
           return;
+        }
+        throw sessionError;
+      }
+    });
+  }
+
+  async pollIslandTransport(): Promise<Uint8Array> {
+    if (!this.guiSessionActive) {
+      return new Uint8Array(0);
+    }
+    const sessionId = this.guiSessionId;
+    return this.serializeGuiOperation(async () => {
+      if (!this.isGuiSessionActiveFor(sessionId)) {
+        return new Uint8Array(0);
+      }
+      try {
+        const bytes = await this.backend.pollIslandTransport();
+        if (!this.isGuiSessionActiveFor(sessionId)) {
+          return new Uint8Array(0);
+        }
+        return bytes;
+      } catch (error) {
+        const sessionError = this.coerceGuiSessionError(error, sessionId);
+        if (isGuiSessionSupersededError(sessionError)) {
+          return new Uint8Array(0);
         }
         throw sessionError;
       }

@@ -188,7 +188,7 @@ impl fmt::Display for Error {
                 importer,
                 import_path,
             } => {
-                write!(f, "workspace override imports an external module not in root lockfile: {importer} imports {import_path}\n  run: vo mod sync or disable vo.work")
+                write!(f, "local override imports an external module not in root lockfile: {importer} imports {import_path}\n  run: vo mod sync or remove the local replace/override")
             }
             Self::SelfOverride => {
                 write!(f, "root module must not override itself via vo.work")

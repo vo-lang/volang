@@ -54,6 +54,23 @@ impl GuestSession {
         }
     }
 
+    pub fn start_gui_app_step(&mut self) -> Result<StepResult, SessionError> {
+        match self {
+            Self::GuiApp(session) => session.start_step(),
+            Self::RenderIsland(_) => Err(unexpected_session_kind(
+                GUI_APP_SESSION_KIND,
+                RENDER_ISLAND_SESSION_KIND,
+            )),
+        }
+    }
+
+    pub fn run_scheduled(&mut self) -> Result<StepResult, SessionError> {
+        match self {
+            Self::GuiApp(session) => session.run_scheduled(),
+            Self::RenderIsland(session) => session.run_scheduled(),
+        }
+    }
+
     pub fn dispatch_gui_event(
         &mut self,
         handler_id: i32,

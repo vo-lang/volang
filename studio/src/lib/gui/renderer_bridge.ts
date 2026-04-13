@@ -2,12 +2,13 @@
 // Studio is framework-neutral: renderer modules are loaded dynamically
 // from the VFS snapshot using a blob URL — no framework-specific imports.
 
-import { listen as tauriListen } from '../tauri';
+import { invoke as tauriInvoke, listen as tauriListen } from '../tauri';
 import type { Backend } from '../backend/backend';
 import { isGuiSessionSupersededError, type RuntimeService } from '../services/runtime_service';
 import type { FrameworkContract } from '../types';
 import type { VoWebModule } from '../studio_wasm';
-import { loadStudioWasm, makeVoWebModule } from '../studio_wasm';
+import { loadStudioWasm, makeVoWebModule, resetStudioWasmInstance, setStudioWindowVfsBackendFactory } from '../studio_wasm';
+import { createInMemoryWindowVfsBackend } from '../in_memory_window_vfs';
 
 // ---- Protocol & HostBridge module contracts ----
 
@@ -78,6 +79,7 @@ export interface CapabilityMap {
 }
 
 export interface RendererHost {
+  moduleBytes: Uint8Array;
   sendEvent(handlerId: number, payload: string): Promise<Uint8Array>;
   log(message: string): void;
   reportError(message: string): void;
@@ -105,27 +107,75 @@ export interface RendererModule {
   init(host: RendererHost): Promise<void>;
   render(container: HTMLElement, bytes: Uint8Array): void;
   stop(): void;
+  registerWidget?(name: string, factory: WidgetFactory): void;
+  destroyWidgets?(): void;
 }
 
 export type RendererBridgeContext = {
   moduleBytes: Uint8Array;
   entryPath: string;
   framework: FrameworkContract | null;
+  providerFrameworks: FrameworkContract[];
   onError?: (message: string) => void;
 };
 
 type ActiveRendererBridge = {
-  renderer: RendererModule;
+  primaryRenderer: RendererModule | null;
+  renderers: RendererModule[];
   blobUrls: string[];
   sessionId: number;
 } | null;
+
+export type VfsFile = { path: string; bytes: Uint8Array };
 
 type RendererBlobGraph = {
   entryUrl: string;
   urls: string[];
 };
+
 let activeRendererBridge: ActiveRendererBridge = null;
 const widgetRegistry = new Map<string, WidgetFactory>();
+
+function revokeBlobUrls(urls: string[]): void {
+  for (const url of urls) {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function emitRendererBridgeDebug(backend: Backend, message: string): void {
+  if (backend.platform === 'native') {
+    void tauriInvoke('cmd_debug_log', { message: `[RendererBridge] ${message}` }).catch(() => {});
+    return;
+  }
+  console.debug('[RendererBridge]', message);
+}
+
+function frameworkModuleKey(framework: FrameworkContract): string {
+  return [
+    framework.name,
+    framework.entry,
+    framework.rendererPath ?? '',
+    framework.protocolPath ?? '',
+    framework.hostBridgePath ?? '',
+  ].join('\0');
+}
+
+function collectRendererFrameworks(context: RendererBridgeContext): FrameworkContract[] {
+  const ordered = context.framework
+    ? [context.framework, ...context.providerFrameworks]
+    : [...context.providerFrameworks];
+  const seen = new Set<string>();
+  const frameworks: FrameworkContract[] = [];
+  for (const framework of ordered) {
+    const key = frameworkModuleKey(framework);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    frameworks.push(framework);
+  }
+  return frameworks;
+}
 
 // Whether the renderer bridge is currently alive.
 // Used by PreviewPanel to avoid re-launching during layout transitions.
@@ -135,14 +185,6 @@ export function isRendererBridgeActive(sessionId?: number | null): boolean {
   }
   return activeRendererBridge?.sessionId === sessionId;
 }
-
-function revokeBlobUrls(urls: string[]): void {
-  for (const url of urls) {
-    URL.revokeObjectURL(url);
-  }
-}
-
-export type VfsFile = { path: string; bytes: Uint8Array };
 
 function normalizeVfsPath(path: string): string {
   const normalized = path.replace(/\\/g, '/');
@@ -241,22 +283,11 @@ function makeRendererHost(
   runtime: RuntimeService,
   moduleBytes: Uint8Array,
   vfsFiles: VfsFile[],
+  getVoWebLazy: () => Promise<VoWebModule>,
   declaredCapabilities: string[],
   onError?: (message: string) => void,
+  registerWidgetWithRenderers?: (name: string, factory: WidgetFactory) => void,
 ): RendererHost {
-  // Lazy VoWebModule — only loaded when a renderer actually requests it.
-  let voWebPromise: Promise<VoWebModule> | null = null;
-  function getVoWebLazy(): Promise<VoWebModule> {
-    if (!voWebPromise) {
-      voWebPromise = (async () => {
-        (globalThis as Record<string, unknown>).__voStudioLogRecord = (_record: unknown) => {};
-        const wasm = await loadStudioWasm();
-        return makeVoWebModule(wasm);
-      })();
-    }
-    return voWebPromise;
-  }
-
   const capSet = new Set(declaredCapabilities);
 
   // Build capability map — only capabilities declared by the framework are available.
@@ -272,17 +303,48 @@ function makeRendererHost(
   if (capSet.has('island_transport')) {
     capabilities.island_transport = {
       async createChannel(): Promise<StudioIslandChannel> {
-        if (backend.platform !== 'native') {
-          throw new Error('External island transport is only available on native backend');
-        }
         let handler: ((frame: Uint8Array) => void) | null = null;
         let unlisten: (() => void) | null = null;
+        let closed = false;
+        const waitForPollTick = (): Promise<void> => new Promise((resolve) => {
+          if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+            window.requestAnimationFrame(() => resolve());
+            return;
+          }
+          setTimeout(resolve, 16);
+        });
+        const startWebPolling = (): void => {
+          void (async () => {
+            while (!closed) {
+              try {
+                const frame = await runtime.pollIslandTransport();
+                if (closed) {
+                  return;
+                }
+                if (frame.length > 0) {
+                  handler?.(frame);
+                  continue;
+                }
+              } catch (error) {
+                if (!closed && !isGuiSessionSupersededError(error)) {
+                  console.error('[RendererBridge] island transport poll failed:', error);
+                }
+                return;
+              }
+              await waitForPollTick();
+            }
+          })();
+        };
         return {
           async init(): Promise<void> {
-            unlisten = await tauriListen<number[]>('island_data', (event) => {
-              const frame = new Uint8Array(event.payload);
-              handler?.(frame);
-            });
+            if (backend.platform === 'native') {
+              unlisten = await tauriListen<number[]>('island_data', (event) => {
+                const frame = new Uint8Array(event.payload);
+                handler?.(frame);
+              });
+              return;
+            }
+            startWebPolling();
           },
           send(frame: Uint8Array): void {
             runtime.pushIslandTransport(frame).catch((error) => {
@@ -296,6 +358,7 @@ function makeRendererHost(
             handler = nextHandler;
           },
           close(): void {
+            closed = true;
             unlisten?.();
             unlisten = null;
             handler = null;
@@ -311,25 +374,35 @@ function makeRendererHost(
     };
   }
 
-  capabilities.vfs = {
-    getBytes(path: string): Uint8Array | null {
-      const f = vfsFiles.find((x) => x.path === path || x.path.endsWith('/' + path));
-      return f ? f.bytes : null;
-    },
-  };
+  if (capSet.has('vfs')) {
+    capabilities.vfs = {
+      getBytes(path: string): Uint8Array | null {
+        const f = vfsFiles.find((x) => x.path === path || x.path.endsWith('/' + path));
+        return f ? f.bytes : null;
+      },
+    };
+  }
 
-  capabilities.widget = {
-    register(name: string, factory: WidgetFactory): void {
-      widgetRegistry.set(name, factory);
-    },
-  };
+  if (capSet.has('widget')) {
+    capabilities.widget = {
+      register(name: string, factory: WidgetFactory): void {
+        widgetRegistry.set(name, factory);
+        registerWidgetWithRenderers?.(name, factory);
+        emitRendererBridgeDebug(backend, `widget.register name=${name}`);
+      },
+    };
+  }
 
   return {
+    moduleBytes,
     async sendEvent(handlerId: number, payload: string): Promise<Uint8Array> {
       return runtime.sendGuiEvent(handlerId, payload);
     },
-    log(_message: string): void {},
+    log(message: string): void {
+      emitRendererBridgeDebug(backend, message);
+    },
     reportError(message: string): void {
+      emitRendererBridgeDebug(backend, `error ${message}`);
       console.error('[RendererBridge]', message);
       onError?.(message);
     },
@@ -361,21 +434,49 @@ function matchesVfsPath(filePath: string, searchPath: string): boolean {
 
 // Load renderer module + full VFS snapshot (framework-neutral).
 // Returns [renderer, all snapshot files] so the host can serve getVfsBytes.
-async function loadRendererAndSnapshot(
+async function loadRendererModule(
   rendererPath: string,
-  backend: Backend,
-  entryPath: string,
-  prefetchedFiles?: VfsFile[],
-): Promise<[RendererModule, VfsFile[], string[]]> {
-  const files: VfsFile[] = prefetchedFiles ?? await fetchVfsSnapshot(backend, entryPath);
+  files: VfsFile[],
+): Promise<[RendererModule, string[]]> {
   const { module: renderer, blobUrls } = await loadVfsModule<RendererModule>(rendererPath, files, (raw) =>
-    raw.default as RendererModule ?? {
-      init: (raw.init as RendererModule['init']) ?? (() => Promise.resolve()),
-      render: (raw.render as RendererModule['render']) ?? (() => {}),
-      stop: (raw.stop as RendererModule['stop']) ?? (() => {}),
-    },
+    ({
+      init: (raw.default as RendererModule | undefined)?.init ?? (raw.init as RendererModule['init']) ?? (() => Promise.resolve()),
+      render: (raw.default as RendererModule | undefined)?.render ?? (raw.render as RendererModule['render']) ?? (() => {}),
+      stop: (raw.default as RendererModule | undefined)?.stop ?? (raw.stop as RendererModule['stop']) ?? (() => {}),
+      registerWidget: (raw.default as RendererModule | undefined)?.registerWidget ?? (raw.registerWidget as RendererModule['registerWidget']),
+      destroyWidgets: (raw.default as RendererModule | undefined)?.destroyWidgets ?? (raw.destroyWidgets as RendererModule['destroyWidgets']),
+    }),
   );
-  return [renderer, files, blobUrls];
+  return [renderer, blobUrls];
+}
+
+type LoadedRendererModule = {
+  framework: FrameworkContract;
+  renderer: RendererModule;
+  blobUrls: string[];
+};
+
+async function loadRendererModules(
+  frameworks: FrameworkContract[],
+  files: VfsFile[],
+): Promise<LoadedRendererModule[]> {
+  const loaded: LoadedRendererModule[] = [];
+  const seenRendererPaths = new Set<string>();
+  try {
+    for (const framework of frameworks) {
+      const rendererPath = framework.rendererPath;
+      if (!rendererPath || seenRendererPaths.has(rendererPath)) {
+        continue;
+      }
+      seenRendererPaths.add(rendererPath);
+      const [renderer, blobUrls] = await loadRendererModule(rendererPath, files);
+      loaded.push({ framework, renderer, blobUrls });
+    }
+    return loaded;
+  } catch (error) {
+    revokeBlobUrls(loaded.flatMap((entry) => entry.blobUrls));
+    throw error;
+  }
 }
 
 export function getWidgetFactory(name: string): WidgetFactory | undefined {
@@ -393,26 +494,100 @@ export async function startRendererBridge(
   vfsFiles?: VfsFile[],
 ): Promise<void> {
   stopRendererBridge();
-  if (!context.framework) {
+  const frameworks = collectRendererFrameworks(context);
+  if (frameworks.length === 0) {
     throw new Error('No framework contract available');
   }
 
-  const { rendererPath } = context.framework;
-  if (!rendererPath) {
-    throw new Error('Framework does not declare a renderer path');
+  const rendererFrameworks = frameworks.filter((framework) => framework.rendererPath != null);
+  if (rendererFrameworks.length === 0) {
+    throw new Error('No framework declares a renderer path');
   }
 
-  const [renderer, resolvedVfsFiles, blobUrls] = await loadRendererAndSnapshot(rendererPath, backend, context.entryPath, vfsFiles);
-  const host = makeRendererHost(
-    canvasId, backend, runtime,
-    context.moduleBytes, resolvedVfsFiles,
-    context.framework.capabilities ?? [],
-    context.onError,
+  widgetRegistry.clear();
+  const resolvedVfsFiles: VfsFile[] = vfsFiles ?? await fetchVfsSnapshot(backend, context.entryPath);
+  let sharedVoWebPromise: Promise<VoWebModule> | null = null;
+  const getVoWebLazy = (): Promise<VoWebModule> => {
+    if (!sharedVoWebPromise) {
+      sharedVoWebPromise = (async () => {
+        try {
+          (globalThis as Record<string, unknown>).__voStudioLogRecord = (record: unknown) => {
+            const source = typeof (record as { source?: unknown } | null)?.source === 'string'
+              ? (record as { source: string }).source
+              : 'studio-wasm';
+            const code = typeof (record as { code?: unknown } | null)?.code === 'string'
+              ? (record as { code: string }).code
+              : 'log';
+            const text = typeof (record as { text?: unknown } | null)?.text === 'string'
+              ? (record as { text: string }).text
+              : '';
+            emitRendererBridgeDebug(backend, `[${source}:${code}]${text ? ` ${text}` : ''}`);
+          };
+          if (backend.platform === 'native') {
+            emitRendererBridgeDebug(backend, `studio_wasm.host_vfs.install files=${resolvedVfsFiles.length}`);
+            setStudioWindowVfsBackendFactory(() => createInMemoryWindowVfsBackend({
+              files: resolvedVfsFiles.map((file) => ({ path: file.path, bytes: file.bytes })),
+            }));
+            resetStudioWasmInstance();
+          }
+          const wasm = await loadStudioWasm();
+          return makeVoWebModule(wasm);
+        } catch (error) {
+          sharedVoWebPromise = null;
+          throw error;
+        }
+      })();
+    }
+    return sharedVoWebPromise;
+  };
+  const loadedRenderers = await loadRendererModules(rendererFrameworks, resolvedVfsFiles);
+  emitRendererBridgeDebug(
+    backend,
+    `start session=${sessionId} renderers=${loadedRenderers.map((entry) => `${entry.framework.name}:${entry.framework.rendererPath}`).join(',')}`,
   );
+  const registerWidgetWithRenderers = (name: string, factory: WidgetFactory): void => {
+    let bridged = 0;
+    for (const entry of loadedRenderers) {
+      if (entry.renderer.registerWidget) {
+        entry.renderer.registerWidget(name, factory);
+        bridged += 1;
+      }
+    }
+    emitRendererBridgeDebug(backend, `widget.bridge name=${name} bridged=${bridged}`);
+  };
+  const primaryRendererPath = context.framework?.rendererPath ?? loadedRenderers[0]?.framework.rendererPath ?? null;
+  const primaryRenderer = primaryRendererPath
+    ? loadedRenderers.find((entry) => entry.framework.rendererPath === primaryRendererPath)?.renderer ?? loadedRenderers[0]?.renderer ?? null
+    : loadedRenderers[0]?.renderer ?? null;
+  const blobUrls = loadedRenderers.flatMap((entry) => entry.blobUrls);
+  const initializedRenderers: RendererModule[] = [];
   try {
-    await renderer.init(host);
-    activeRendererBridge = { renderer, blobUrls, sessionId };
+    for (const entry of loadedRenderers) {
+      const host = makeRendererHost(
+        canvasId,
+        backend,
+        runtime,
+        context.moduleBytes,
+        resolvedVfsFiles,
+        getVoWebLazy,
+        entry.framework.capabilities ?? [],
+        context.onError,
+        registerWidgetWithRenderers,
+      );
+      await entry.renderer.init(host);
+      emitRendererBridgeDebug(backend, `renderer.init name=${entry.framework.name}`);
+      initializedRenderers.push(entry.renderer);
+    }
+    activeRendererBridge = { primaryRenderer, renderers: initializedRenderers, blobUrls, sessionId };
   } catch (error) {
+    for (const renderer of initializedRenderers.reverse()) {
+      try {
+        renderer.stop();
+      } catch (stopError) {
+        console.error('[RendererBridge] renderer stop failed during init rollback:', stopError);
+      }
+    }
+    widgetRegistry.clear();
     revokeBlobUrls(blobUrls);
     throw error;
   }
@@ -427,8 +602,16 @@ export function stopRendererBridge(sessionId?: number | null): boolean {
   }
   activeRendererBridge = null;
   try {
-    active.renderer.stop();
+    for (const renderer of [...active.renderers].reverse()) {
+      try {
+        renderer.destroyWidgets?.();
+        renderer.stop();
+      } catch (error) {
+        console.error('[RendererBridge] renderer stop failed:', error);
+      }
+    }
   } finally {
+    widgetRegistry.clear();
     revokeBlobUrls(active.blobUrls);
   }
   return true;
@@ -436,7 +619,7 @@ export function stopRendererBridge(sessionId?: number | null): boolean {
 
 // Deliver render bytes to the active renderer
 export function deliverRenderBytes(container: HTMLElement, bytes: Uint8Array): void {
-  const renderer = activeRendererBridge?.renderer;
+  const renderer = activeRendererBridge?.primaryRenderer;
   if (!renderer || bytes.length === 0) return;
   renderer.render(container, bytes);
 }
@@ -461,19 +644,23 @@ async function loadVfsModule<T>(
 
 // ---- Cached module slot helpers ----
 
-type CachedModule<T> = { key: string; module: T; blobUrls: string[] } | null;
+type CachedModule<T> = { module: T; blobUrls: string[] };
+type CachedModuleMap<T> = Map<string, CachedModule<T>>;
 
 function moduleCacheKey(entryPath: string, modulePath: string): string {
   return `${entryPath}\0${modulePath}`;
 }
 
-function evictCache<T>(slot: CachedModule<T>): void {
-  if (slot) revokeBlobUrls(slot.blobUrls);
+function clearCachedModules<T>(slots: CachedModuleMap<T>): void {
+  for (const slot of slots.values()) {
+    revokeBlobUrls(slot.blobUrls);
+  }
+  slots.clear();
 }
 
 // ---- Protocol module loader ----
 
-let activeProtocol: CachedModule<ProtocolModule> = null;
+let activeProtocols: CachedModuleMap<ProtocolModule> = new Map();
 
 export async function loadProtocolModule(
   protocolPath: string,
@@ -482,8 +669,8 @@ export async function loadProtocolModule(
   prefetchedFiles?: VfsFile[],
 ): Promise<ProtocolModule> {
   const key = moduleCacheKey(entryPath, protocolPath);
-  if (activeProtocol?.key === key) return activeProtocol.module;
-  evictCache(activeProtocol);
+  const cached = activeProtocols.get(key);
+  if (cached) return cached.module;
 
   const files: VfsFile[] = prefetchedFiles ?? await fetchVfsSnapshot(backend, entryPath);
   const { module, blobUrls } = await loadVfsModule<ProtocolModule>(protocolPath, files, (raw) =>
@@ -491,19 +678,17 @@ export async function loadProtocolModule(
       findExternalWidgetHandlerId: (raw.findExternalWidgetHandlerId as ProtocolModule['findExternalWidgetHandlerId']) ?? (() => null),
     },
   );
-  activeProtocol = { key, module, blobUrls };
+  activeProtocols.set(key, { module, blobUrls });
   return module;
 }
 
 export function unloadProtocolModule(): void {
-  if (!activeProtocol) return;
-  revokeBlobUrls(activeProtocol.blobUrls);
-  activeProtocol = null;
+  clearCachedModules(activeProtocols);
 }
 
 // ---- Host bridge module loader ----
 
-let activeHostBridge: CachedModule<HostBridgeModule> = null;
+let activeHostBridges: CachedModuleMap<HostBridgeModule> = new Map();
 
 export async function loadHostBridgeModule(
   hostBridgePath: string,
@@ -512,8 +697,8 @@ export async function loadHostBridgeModule(
   prefetchedFiles?: VfsFile[],
 ): Promise<HostBridgeModule> {
   const key = moduleCacheKey(entryPath, hostBridgePath);
-  if (activeHostBridge?.key === key) return activeHostBridge.module;
-  evictCache(activeHostBridge);
+  const cached = activeHostBridges.get(key);
+  if (cached) return cached.module;
 
   const files: VfsFile[] = prefetchedFiles ?? await fetchVfsSnapshot(backend, entryPath);
   const { module, blobUrls } = await loadVfsModule<HostBridgeModule>(hostBridgePath, files, (raw) =>
@@ -521,12 +706,10 @@ export async function loadHostBridgeModule(
       buildImports: (raw.buildImports as HostBridgeModule['buildImports']) ?? (() => ({})),
     },
   );
-  activeHostBridge = { key, module, blobUrls };
+  activeHostBridges.set(key, { module, blobUrls });
   return module;
 }
 
 export function unloadHostBridgeModule(): void {
-  if (!activeHostBridge) return;
-  revokeBlobUrls(activeHostBridge.blobUrls);
-  activeHostBridge = null;
+  clearCachedModules(activeHostBridges);
 }

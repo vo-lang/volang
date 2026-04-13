@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use vo_common::vfs::RealFs;
+
 use crate::identity::{find_owning_module, ModulePath};
 use crate::lifecycle;
 use crate::project;
@@ -158,6 +160,7 @@ pub fn mod_download(
 /// Verify root `vo.mod` / `vo.lock` consistency and cached artifacts.
 pub fn mod_verify(project_dir: &Path, cache_root: &Path) -> Result<(), Error> {
     let mf = read_mod_file(project_dir)?;
+    let _ = crate::workspace::load_mod_file_replaces(&RealFs::new("."), &mf, project_dir)?;
     let lf = read_lock_file(project_dir)?;
     lifecycle::verify_locked_dependencies(cache_root, &mf, &lf)?;
     Ok(())

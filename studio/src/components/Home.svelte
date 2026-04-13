@@ -317,6 +317,22 @@
     window.open(url, '_blank', 'noopener,noreferrer');
   }
 
+  async function shareProject(project: ManagedProject): Promise<void> {
+    actionError = '';
+    try {
+      const share = await projectCatalog.getProjectShareInfo(project);
+      if (!share.shareable || !share.canonicalUrl) {
+        throw new Error(share.reason ?? 'Project is not shareable');
+      }
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('Clipboard API is unavailable');
+      }
+      await navigator.clipboard.writeText(share.canonicalUrl);
+    } catch (error) {
+      actionError = formatError(error);
+    }
+  }
+
 </script>
 
 <svelte:window
@@ -510,6 +526,10 @@
       checkingSync={checkingSync(project)}
       on:close={() => (menuState = null)}
       on:open={() => openProject(project)}
+      on:share={() => {
+        menuState = null;
+        void shareProject(project);
+      }}
       on:rename={() => {
         renameTarget = project;
         menuState = null;

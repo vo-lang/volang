@@ -1,5 +1,5 @@
 import type { Backend } from '../backend/backend';
-import type { BootstrapContext, SessionInfo } from '../types';
+import type { BootstrapContext, LaunchSpec, SessionInfo } from '../types';
 import { WorkspaceService } from './workspace_service';
 
 export class ProjectService {
@@ -27,20 +27,8 @@ export class ProjectService {
     return this.bootstrap;
   }
 
-  async openWorkspace(): Promise<SessionInfo> {
-    const session = await this.backend.openWorkspaceSession();
-    this.bindSession(session);
-    return session;
-  }
-
-  async openRunSession(path: string): Promise<SessionInfo> {
-    const session = await this.backend.openRunSession(path);
-    this.bindSession(session);
-    return session;
-  }
-
-  async openUrl(url: string): Promise<SessionInfo> {
-    const session = await this.backend.openUrlSession(url);
+  async openSession(spec: LaunchSpec): Promise<SessionInfo> {
+    const session = await this.backend.openSession(spec);
     this.bindSession(session);
     return session;
   }

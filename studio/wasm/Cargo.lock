@@ -1160,7 +1160,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vo-analysis"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "num-bigint",
  "num-rational",
@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "vo-app-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "vo-runtime",
  "vo-vm",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "vo-codegen"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "vo-analysis",
  "vo-common",
@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "vo-common"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "codespan-reporting",
  "rustc-hash",
@@ -1208,7 +1208,7 @@ dependencies = [
 
 [[package]]
 name = "vo-common-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hashbrown 0.15.5",
  "num_enum",
@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "vo-ffi-macro"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "vo-module"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "flate2",
  "js-sys",
@@ -1240,6 +1240,7 @@ dependencies = [
  "toml",
  "ureq",
  "vo-common",
+ "vo-syntax",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -1247,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "vo-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hashbrown 0.15.5",
  "paste",
@@ -1257,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "vo-stdlib"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "js-sys",
  "paste",
@@ -1294,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "vo-syntax"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "logos",
  "num-bigint",
@@ -1306,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "vo-vm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fastrand",
  "hashbrown 0.15.5",
@@ -1317,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "vo-web"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "console_error_panic_hook",
  "flate2",
@@ -1342,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "vo-web-runtime-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "js-sys",
  "vo-runtime",
@@ -1716,12 +1717,12 @@ dependencies = [
 
 [[patch.unused]]
 name = "vo-engine"
-version = "0.1.0"
+version = "0.1.1"
 
 [[patch.unused]]
 name = "vo-ext"
-version = "0.1.0"
+version = "0.1.1"
 
 [[patch.unused]]
 name = "vo-release"
-version = "0.1.0"
+version = "0.1.1"

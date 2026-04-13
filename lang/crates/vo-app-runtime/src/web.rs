@@ -71,6 +71,14 @@ impl GuestRuntime {
         self.session.start_gui_app()
     }
 
+    pub fn start_gui_app_step(&mut self) -> Result<StepResult, SessionError> {
+        self.session.start_gui_app_step()
+    }
+
+    pub fn run_scheduled(&mut self) -> Result<StepResult, SessionError> {
+        self.session.run_scheduled()
+    }
+
     pub fn dispatch_gui_event(
         &mut self,
         handler_id: i32,

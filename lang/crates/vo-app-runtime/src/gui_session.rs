@@ -30,8 +30,12 @@ impl GuiAppSession {
 
     // ── Core step methods ───────────────────────────────────────────────
 
+    pub fn start_step(&mut self) -> Result<StepResult, SessionError> {
+        self.session.run(GUI_SESSION_PANIC_MESSAGE)
+    }
+
     pub fn start(&mut self) -> Result<StepResult, SessionError> {
-        let step = self.session.run(GUI_SESSION_PANIC_MESSAGE)?;
+        let step = self.start_step()?;
         if step.render_output.is_none() {
             return Err(SessionError::MissingRenderOutput(
                 MISSING_INITIAL_RENDER_OUTPUT,
@@ -133,6 +137,10 @@ impl GuiAppSession {
             .emit_outbound_frames(emit_outbound)
             .map_err(SessionDispatchError::Host)?;
         Ok(step)
+    }
+
+    pub fn run_scheduled(&mut self) -> Result<StepResult, SessionError> {
+        self.session.run_scheduled(GUI_SESSION_PANIC_MESSAGE)
     }
 
     // ── Delegated accessors ─────────────────────────────────────────────

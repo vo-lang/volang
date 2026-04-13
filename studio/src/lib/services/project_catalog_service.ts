@@ -28,7 +28,8 @@ import type {
 } from '../project_catalog/types';
 import { hashContent, hashFiles, projectKey, syncStateFromHashes } from '../project_catalog/types';
 import type { Backend } from '../backend/backend';
-import type { SessionInfo } from '../types';
+import { buildGitHubRepoShareInfo } from '../session_share';
+import type { SessionInfo, ShareInfo } from '../types';
 import type { WorkspaceService } from './workspace_service';
 import { formatError } from '../format_error';
 
@@ -346,6 +347,24 @@ export class ProjectCatalogService {
 
   trackRecentProject(project: { name: string; type: ManagedProject['type']; localPath: string; entryPath: string | null }): void {
     addRecentProject(project);
+  }
+
+  async getProjectShareInfo(project: ManagedProject): Promise<ShareInfo> {
+    if (project.remote?.kind !== 'repo' || !project.remote.owner || !project.remote.repo) {
+      return {
+        canonicalUrl: '',
+        shareable: false,
+        reason: 'Only GitHub repo projects can be shared',
+      };
+    }
+    const token = this.requireToken();
+    const head = await this.remote.resolveRepoHead(token, project.remote.owner, project.remote.repo);
+    return buildGitHubRepoShareInfo({
+      owner: project.remote.owner,
+      repo: project.remote.repo,
+      commit: head.commit,
+      mode: 'runner',
+    });
   }
 
   getSessionProjectConfig(
@@ -905,7 +924,7 @@ function mergeProjects(
       name: manifestProject.name,
       type: manifestProject.type,
       localPath: null,
-      entryPath: null,
+      entryPath: manifestProject.entryPath ?? null,
       remote: manifestProject.remote,
       pushedAt: manifestProject.pushedAt,
       remoteUpdatedAt: metadata?.updatedAt ?? previousProject?.remoteUpdatedAt ?? null,
@@ -970,6 +989,22 @@ function stampProject(project: ManagedProject, contentHash: string, timestamp: s
 function basename(path: string): string {
   const index = path.lastIndexOf('/');
   return index >= 0 ? path.slice(index + 1) : path;
+}
+
+function projectShareEntryPath(project: Pick<ManagedProject, 'type' | 'localPath' | 'entryPath'>): string | null {
+  if (!project.entryPath) {
+    return null;
+  }
+  if (!project.localPath) {
+    return project.entryPath;
+  }
+  if (project.type === 'module') {
+    const root = normalizePath(project.localPath);
+    const entry = normalizePath(project.entryPath);
+    const prefix = `${root}/`;
+    return entry.startsWith(prefix) ? entry.slice(prefix.length) : null;
+  }
+  return basename(project.entryPath);
 }
 
 function chooseSingleRemoteFile(files: Record<string, string>): string {

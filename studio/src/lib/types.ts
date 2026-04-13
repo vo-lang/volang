@@ -3,14 +3,36 @@ export type SessionOrigin = 'workspace' | 'run-target' | 'url';
 export type ProjectMode = 'single-file' | 'module';
 export type BackendPlatform = 'native' | 'wasm';
 
+export interface LaunchSpec {
+  proj: string | null;
+  mode: StudioMode;
+}
+
 export interface BootstrapContext {
   workspaceRoot: string;
-  launchUrl: string | null;
-  initialPath: string | null;
-  initialUrl: string | null;
-  initialRunTarget: string | null;
+  launch: LaunchSpec | null;
   mode: StudioMode;
   platform: BackendPlatform;
+}
+
+export type SessionSource =
+  | { kind: 'workspace' }
+  | { kind: 'path'; path: string }
+  | {
+      kind: 'github_repo';
+      owner: string;
+      repo: string;
+      requestedRef: string | null;
+      resolvedCommit: string | null;
+      subdir: string | null;
+      htmlUrl: string;
+      sourceCacheRoot: string;
+    };
+
+export interface ShareInfo {
+  canonicalUrl: string;
+  shareable: boolean;
+  reason?: string;
 }
 
 export interface SessionInfo {
@@ -19,6 +41,8 @@ export interface SessionInfo {
   projectMode: ProjectMode;
   entryPath: string | null;
   singleFileRun: boolean;
+  source: SessionSource | null;
+  share: ShareInfo | null;
 }
 
 export interface DiscoveredProject {
@@ -124,9 +148,11 @@ export interface GuiSession {
   moduleBytes: Uint8Array;
   entryPath: string;
   framework: FrameworkContract | null;
+  providerFrameworks: FrameworkContract[];
   sendEvent(handlerId: number, payload: string): Promise<Uint8Array>;
   sendEventAsync(handlerId: number, payload: string): Promise<void>;
   pushIslandData(data: Uint8Array): Promise<void>;
+  pollIslandData(): Promise<Uint8Array>;
   pollRender(): Promise<Uint8Array>;
   stop(): Promise<void>;
 }
@@ -136,6 +162,7 @@ export interface GuiRunOutput {
   moduleBytes: Uint8Array;
   entryPath: string;
   framework: FrameworkContract | null;
+  providerFrameworks: FrameworkContract[];
   externalWidgetHandlerId: number | null;
 }
 

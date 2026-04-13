@@ -48,6 +48,7 @@ export interface ManifestProject {
   remote: GitHubRemoteRef;
   pushedAt: string;
   contentHash?: string;
+  entryPath?: string;
   hasGui?: boolean;
   appKind?: 'code' | 'gui';
 }

@@ -10,10 +10,11 @@
 import type { Backend } from '../backend/backend';
 import type { FrameworkContract, GuiRunOutput } from '../types';
 import { setActiveHostBridge, type StudioWasm } from '../studio_wasm';
-import { loadHostBridgeModule } from './renderer_bridge';
+import { loadHostBridgeModule, type HostBridgeModule } from './renderer_bridge';
 
 export interface WasmExtCompileSpec {
   name: string;
+  moduleKey: string;
   wasmBytes: Uint8Array;
   jsGlueBytes: Uint8Array | null;
 }
@@ -22,7 +23,25 @@ export interface GuiCompileOutput {
   bytecode: Uint8Array;
   entryPath: string;
   framework: FrameworkContract | null;
+  providerFrameworks: FrameworkContract[];
   wasmExtensions: WasmExtCompileSpec[];
+}
+
+function combineHostBridgeModules(modules: HostBridgeModule[]): HostBridgeModule {
+  return {
+    buildImports(ctx) {
+      const imports: Record<string, (...args: number[]) => number | void> = {};
+      for (const module of modules) {
+        const next = module.buildImports(ctx);
+        for (const [name, handler] of Object.entries(next)) {
+          if (!(name in imports)) {
+            imports[name] = handler;
+          }
+        }
+      }
+      return imports;
+    },
+  };
 }
 
 export async function executeGuiFromCompileOutput(
@@ -39,7 +58,12 @@ export async function executeGuiFromCompileOutput(
       jsGlueUrl = URL.createObjectURL(blob);
     }
     try {
-      await wasm.preloadExtModule(ext.name, ext.wasmBytes, jsGlueUrl);
+      const preloadKey = ext.moduleKey || ext.name;
+      console.info(
+        `[studio-gui] preload wasm extension name=${ext.name} moduleKey=${preloadKey} wasmBytes=${ext.wasmBytes.length} jsGlueBytes=${ext.jsGlueBytes?.length ?? 0}`,
+      );
+      await wasm.preloadExtModule(preloadKey, ext.wasmBytes, jsGlueUrl);
+      console.info(`[studio-gui] preload wasm extension ready name=${ext.name} moduleKey=${preloadKey}`);
     } finally {
       if (jsGlueUrl) URL.revokeObjectURL(jsGlueUrl);
     }
@@ -52,22 +76,32 @@ export async function executeGuiFromCompileOutput(
   // returns real values during the initial render. Without this, VirtualScroll
   // computes zero item heights (maxScrollTop=0) and calls ScrollTo(ref,0) on
   // every Recompute, causing the chat-style scroll regression.
-  if (compiled.framework?.hostBridgePath) {
-    const bridge = await loadHostBridgeModule(
-      compiled.framework.hostBridgePath,
+  const hostBridgeFrameworks = compiled.framework
+    ? [compiled.framework, ...compiled.providerFrameworks]
+    : [...compiled.providerFrameworks];
+  const hostBridgeModules: HostBridgeModule[] = [];
+  for (const framework of hostBridgeFrameworks) {
+    if (!framework.hostBridgePath) {
+      continue;
+    }
+    hostBridgeModules.push(await loadHostBridgeModule(
+      framework.hostBridgePath,
       backend,
       compiled.entryPath,
-    );
-    setActiveHostBridge(bridge);
+    ));
     assertSessionCurrent(sessionId);
   }
+  if (hostBridgeModules.length > 0) {
+    setActiveHostBridge(combineHostBridgeModules(hostBridgeModules));
+  }
 
-  const renderBytes = wasm.runGuiFromBytecode(compiled.bytecode);
+  const renderBytes = wasm.startGuiFromBytecode(compiled.bytecode);
   return {
     renderBytes,
     moduleBytes: compiled.bytecode,
     entryPath: compiled.entryPath,
     framework: compiled.framework,
+    providerFrameworks: compiled.providerFrameworks,
     externalWidgetHandlerId: null,
   };
 }

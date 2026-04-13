@@ -88,3 +88,6 @@ studio/wasm/pkg/
 /.examples/
 
 __pycache__/
+
+.studio-sessions/
+.studio-sources/

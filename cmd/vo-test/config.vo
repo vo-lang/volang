@@ -14,15 +14,8 @@ type TestConfig struct {
 }
 
 func loadTestConfig(configPath string) (map[string]TestConfig, error) {
-	content, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := toml.Decode(content)
-	if err != nil {
-		return nil, err
-	}
+	content := os.ReadFile(configPath)?
+	data := toml.Decode(content)?
 
 	configs := make(map[string]TestConfig)
 
@@ -69,6 +62,13 @@ func loadTestConfig(configPath string) (map[string]TestConfig, error) {
 		}
 	}
 	return configs, nil
+}
+
+func loadOptionalTestConfig(configPath string) (map[string]TestConfig, error) {
+	if _, err := os.Stat(configPath); err != nil {
+		return make(map[string]TestConfig), nil
+	}
+	return loadTestConfig(configPath)
 }
 
 func (tc TestConfig) shouldSkip(mode string) bool {

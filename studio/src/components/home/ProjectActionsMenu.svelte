@@ -13,6 +13,7 @@
   const dispatch = createEventDispatcher<{
     close: void;
     open: void;
+    share: void;
     rename: void;
     diff: void;
     push: void;
@@ -24,7 +25,7 @@
     forget: void;
   }>();
 
-  function doAction(type: 'open' | 'rename' | 'diff' | 'push' | 'pull' | 'remote' | 'delete' | 'deleteRemote' | 'deleteEverywhere' | 'forget'): void {
+  function doAction(type: 'open' | 'share' | 'rename' | 'diff' | 'push' | 'pull' | 'remote' | 'delete' | 'deleteRemote' | 'deleteEverywhere' | 'forget'): void {
     if (busy) return;
     dispatch('close');
     dispatch(type);
@@ -41,6 +42,9 @@
 >
   <div class="menu" style={`left:${x}px;top:${y}px`} role="menu" tabindex="-1" aria-label="Project actions">
     <button class="item" on:click={() => doAction('open')} disabled={busy}>Open</button>
+    {#if project.remote?.kind === 'repo' && project.remote.owner && project.remote.repo}
+      <button class="item" on:click={() => doAction('share')} disabled={busy}>Copy Share Link</button>
+    {/if}
     <button class="item" on:click={() => doAction('rename')} disabled={busy}>Rename</button>
     {#if project.localPath && project.remote}
       <button class="item" on:click={() => doAction('diff')} disabled={busy}>Compare Local vs Cloud</button>

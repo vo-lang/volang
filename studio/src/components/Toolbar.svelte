@@ -4,6 +4,7 @@
   import { session } from '../stores/session';
 
   export let onSave: () => void = () => {};
+  export let onShare: () => void = () => {};
   export let onRun: () => void = () => {};
   export let onRunFullscreen: () => void = () => {};
   export let onStop: () => void = () => {};
@@ -20,6 +21,8 @@
   $: projectModeLabel = projectMode === 'single-file' ? 'Single File' : projectMode === 'module' ? 'Project' : 'Session';
   $: isGuiProject = projectHasGui;
   $: sessionRoot = $session.root || '/';
+  $: share = $session.share;
+  $: canShare = Boolean(share?.shareable && share.canonicalUrl);
 </script>
 
 <div class="toolbar">
@@ -27,6 +30,11 @@
     <button class="btn btn-save" on:click={onSave} disabled={!dirty || isRunning}>
       💾 Save
     </button>
+    {#if canShare}
+      <button class="btn btn-share" on:click={onShare}>
+        🔗 Share
+      </button>
+    {/if}
     <button class="btn btn-run" on:click={onRun} disabled={isRunning}>
       {isRunning ? '▶ Running…' : '▶ Run'}
     </button>
@@ -100,6 +108,8 @@
   .btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .btn-save { color: #11111b; background: #f9e2af; }
   .btn-save:hover:not(:disabled) { background: #fab387; }
+  .btn-share { color: #fff; background: #8b5cf6; }
+  .btn-share:hover:not(:disabled) { background: #7c3aed; }
   .btn-run  { color: #fff; background: #22c55e; }
   .btn-run:hover:not(:disabled)    { background: #16a34a; }
   .btn-launch { color: #fff; background: #3b82f6; }

@@ -1,15 +1,5 @@
-<script context="module" lang="ts">
-  // Module-level state shared across PreviewPanel instances.
-  // Tracks whether the external widget on the logic island has received
-  // the initial "mount" event.  This survives component destroy/recreate
-  // during fullscreen transitions so we don't re-send mount to a VM that
-  // is already running its render loop.
-  let externalWidgetMounted = false;
-</script>
-
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
-  import { isGuiSessionSupersededError } from '../lib/services/runtime_service';
   import { runtime } from '../stores/runtime';
   import {
     startRendererBridge, stopRendererBridge, deliverRenderBytes,
@@ -17,10 +7,28 @@
     loadProtocolModule, unloadProtocolModule,
     loadHostBridgeModule, unloadHostBridgeModule,
     fetchVfsSnapshot,
+    type HostBridgeModule,
+    type ProtocolModule,
     type VfsFile,
   } from '../lib/gui/renderer_bridge';
   import { setActiveHostBridge, clearActiveHostBridge } from '../lib/studio_wasm';
   import type { ServiceRegistry } from '../lib/services/service_registry';
+  import type { FrameworkContract } from '../lib/types';
+
+  type PreviewPanelSharedState = {
+    rendererSurfaceHost: HTMLDivElement | null;
+  };
+
+  const previewPanelGlobal = globalThis as Record<string, unknown>;
+  const previewPanelSharedState = (() => {
+    const existing = previewPanelGlobal.__studioPreviewPanelState as PreviewPanelSharedState | undefined;
+    if (existing) {
+      return existing;
+    }
+    const created: PreviewPanelSharedState = { rendererSurfaceHost: null };
+    previewPanelGlobal.__studioPreviewPanelState = created;
+    return created;
+  })();
 
   export let registry: ServiceRegistry | null = null;
   export let chromeless = false;
@@ -47,21 +55,125 @@
   let rendererBridgeError: string | null = null;
   let rendererContainer: HTMLDivElement | undefined;
   let rendererSurface: HTMLDivElement | undefined;
-  let resizeObserver: ResizeObserver | null = null;
-  let pendingResizeFrame: number | null = null;
-  let pendingResizeWidth = 0;
-  let pendingResizeHeight = 0;
+
+  function ensureRendererSurfaceHost(): HTMLDivElement {
+    let host = previewPanelSharedState.rendererSurfaceHost;
+    if (!host) {
+      host = document.createElement('div');
+      previewPanelSharedState.rendererSurfaceHost = host;
+    }
+    host.style.width = '100%';
+    host.style.height = '100%';
+    host.style.flex = '1 1 auto';
+    host.style.display = 'block';
+    host.style.minHeight = '0';
+    host.style.position = '';
+    host.style.left = '';
+    host.style.top = '';
+    host.style.overflow = previewSurfaceScrollable ? 'auto' : 'hidden';
+    return host;
+  }
+
+  function attachRendererSurfaceHost(): HTMLDivElement | null {
+    if (!rendererSurface) {
+      return null;
+    }
+    const host = ensureRendererSurfaceHost();
+    if (host.parentElement !== rendererSurface) {
+      rendererSurface.replaceChildren();
+      rendererSurface.appendChild(host);
+    }
+    return host;
+  }
+
+  function parkRendererSurfaceHost(): void {
+    const host = previewPanelSharedState.rendererSurfaceHost;
+    if (!host) {
+      return;
+    }
+    const rect = host.getBoundingClientRect();
+    host.style.width = `${Math.max(1, Math.round(rect.width))}px`;
+    host.style.height = `${Math.max(1, Math.round(rect.height))}px`;
+    host.style.position = 'fixed';
+    host.style.left = '-9999px';
+    host.style.top = '0';
+    host.style.overflow = 'hidden';
+    document.body.appendChild(host);
+  }
+
+  function removeRendererSurfaceHost(): void {
+    previewPanelSharedState.rendererSurfaceHost?.remove();
+    previewPanelSharedState.rendererSurfaceHost = null;
+  }
+
+  function frameworkKey(framework: FrameworkContract): string {
+    return [
+      framework.name,
+      framework.entry,
+      framework.rendererPath ?? '',
+      framework.protocolPath ?? '',
+      framework.hostBridgePath ?? '',
+    ].join('\0');
+  }
+
+  function collectBridgeFrameworks(primary: FrameworkContract | null, providers: FrameworkContract[]): FrameworkContract[] {
+    const seen = new Set<string>();
+    const frameworks: FrameworkContract[] = [];
+    const ordered = primary ? [primary, ...providers] : [...providers];
+    for (const framework of ordered) {
+      const key = frameworkKey(framework);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      frameworks.push(framework);
+    }
+    return frameworks;
+  }
+
+  function combineProtocolModules(modules: ProtocolModule[]): ProtocolModule {
+    return {
+      findExternalWidgetHandlerId(bytes: Uint8Array): number | null {
+        for (const module of modules) {
+          const handlerId = module.findExternalWidgetHandlerId(bytes);
+          if (handlerId != null) {
+            return handlerId;
+          }
+        }
+        return null;
+      },
+    };
+  }
+
+  function combineHostBridgeModules(modules: HostBridgeModule[]): HostBridgeModule {
+    return {
+      buildImports(ctx) {
+        const imports: Record<string, (...args: number[]) => number | void> = {};
+        for (const module of modules) {
+          const next = module.buildImports(ctx);
+          for (const [name, handler] of Object.entries(next)) {
+            if (!(name in imports)) {
+              imports[name] = handler;
+            }
+          }
+        }
+        return imports;
+      },
+    };
+  }
 
   $: isGuiApp = $runtime.kind === 'gui' && $runtime.isRunning;
   $: guiFramework = $runtime.gui.framework;
-  $: hasRendererBridge = guiFramework?.rendererPath != null;
-  $: capabilities = guiFramework?.capabilities ?? [];
+  $: providerFrameworks = $runtime.gui.providerFrameworks;
+  $: bridgeFrameworks = collectBridgeFrameworks(guiFramework, providerFrameworks);
+  $: hasRendererBridge = bridgeFrameworks.some((framework) => framework.rendererPath != null);
+  $: capabilities = Array.from(new Set(bridgeFrameworks.flatMap((framework) => framework.capabilities ?? [])));
   $: isRenderSurface = capabilities.includes('render_surface');
   $: isIslandTransport = capabilities.includes('island_transport');
-  $: needsManagedCanvas = isRenderSurface || isIslandTransport;
+  $: needsManagedCanvas = isRenderSurface;
   $: previewSurfaceScrollable = hasRendererBridge && !isIslandTransport;
   $: effectiveCollapsed = !fullscreen && !chromeless && collapsed;
-  $: frameworkPending = isGuiApp && guiFramework == null;
+  $: frameworkPending = isGuiApp && bridgeFrameworks.length === 0;
   $: showRendererBridgeLoading = isGuiApp && hasRendererBridge && !rendererBridgeError && (!rendererBridgeActive || rendererBridgeLaunching);
 
   $: if (!isGuiApp) {
@@ -73,7 +185,6 @@
   // If the renderer bridge survived a layout transition (e.g. preview→fullscreen),
   // just re-adopt the canvas without re-launching.
   $: if (rendererBridgeActive && rendererBridgeSessionId != null && $runtime.gui.sessionId !== rendererBridgeSessionId) {
-    externalWidgetMounted = false;
     teardownRendererBridge(rendererBridgeSessionId);
   }
   $: if (isGuiApp && hasRendererBridge && registry && $runtime.gui.moduleBytes && $runtime.gui.entryPath && $runtime.gui.sessionId != null && $runtime.gui.sessionId !== rendererBridgeFailedSessionId && !rendererBridgeActive && !rendererBridgeLaunching) {
@@ -83,8 +194,12 @@
       rendererBridgeSessionId = $runtime.gui.sessionId;
       rendererBridgeFailedSessionId = null;
       tick().then(() => {
+        const surface = attachRendererSurfaceHost();
         if (needsManagedCanvas) {
           attachCanvas();
+        }
+        if (surface && $runtime.gui.renderBytes && $runtime.gui.renderBytes.length > 0) {
+          deliverRenderBytes(surface, $runtime.gui.renderBytes);
         }
       });
     } else {
@@ -93,17 +208,11 @@
     }
   }
   $: if (!isGuiApp && rendererBridgeActive) {
-    externalWidgetMounted = false;
     teardownRendererBridge();
   }
 
-  $: if (rendererBridgeActive && isIslandTransport && !externalWidgetMounted && $runtime.gui.externalWidgetHandlerId != null) {
-    void ensureExternalWidgetMounted();
-  }
-
-  // Deliver render bytes for non-island render paths (render_byte_stream)
-  $: if (rendererBridgeActive && !isIslandTransport && $runtime.gui.renderBytes && rendererSurface) {
-    deliverRenderBytes(rendererSurface, $runtime.gui.renderBytes);
+  $: if (rendererBridgeActive && $runtime.gui.renderBytes && previewPanelSharedState.rendererSurfaceHost) {
+    deliverRenderBytes(previewPanelSharedState.rendererSurfaceHost, $runtime.gui.renderBytes);
   }
 
   // ---- Canvas management ----
@@ -132,35 +241,25 @@
   }
 
   function attachCanvas(): void {
-    if (!rendererSurface) {
+    const surface = attachRendererSurfaceHost();
+    if (!surface) {
       console.warn('[PreviewPanel] attachCanvas: rendererSurface not ready, retrying after tick');
       tick().then(() => attachCanvas());
       return;
     }
     const canvas = ensureCanvas();
     applyCanvasStyle(canvas);
-    if (canvas.parentElement !== rendererSurface) {
-      rendererSurface.appendChild(canvas);
+    if (canvas.parentElement !== surface) {
+      surface.appendChild(canvas);
     }
-    if (chromeless || fullscreen) {
-      requestAnimationFrame(() => {
-        if (canvas.parentElement === rendererSurface) {
-          canvas.focus();
-        }
-      });
-    }
-    maybeObserveRendererSize();
-  }
-
-  function parkCanvas(): void {
-    const canvas = document.getElementById(CANVAS_ID);
-    if (!canvas) return;
-    // Move canvas off-screen but keep it in the DOM so the WebGPU surface
-    // remains valid.  It will be re-adopted by the next PreviewPanel instance.
-    canvas.style.position = 'fixed';
-    canvas.style.left = '-9999px';
-    canvas.style.top = '0';
-    document.body.appendChild(canvas);
+    console.warn(`[PreviewPanel] attachCanvas canvas=${canvas.id} active=${document.activeElement instanceof HTMLElement ? `${document.activeElement.tagName}#${document.activeElement.id}` : '<none>'}`);
+    requestAnimationFrame(() => {
+      if (canvas.parentElement === surface) {
+        canvas.focus();
+        const active = document.activeElement instanceof HTMLElement ? `${document.activeElement.tagName}#${document.activeElement.id}` : '<none>';
+        console.warn(`[PreviewPanel] focusCanvas canvas=${canvas.id} active=${active}`);
+      }
+    });
   }
 
   function removeCanvas(): void {
@@ -188,27 +287,40 @@
       }
       // Fetch VFS snapshot once and share across all framework module loaders.
       const framework = $runtime.gui.framework;
+      const providerFrameworks = $runtime.gui.providerFrameworks;
+      const bridgeFrameworks = collectBridgeFrameworks(framework, providerFrameworks);
       let vfsFiles: VfsFile[] | undefined;
-      const needsVfs = framework?.protocolPath || framework?.hostBridgePath || framework?.rendererPath;
+      const needsVfs = bridgeFrameworks.some((provider) =>
+        provider.protocolPath || provider.hostBridgePath || provider.rendererPath,
+      );
       if (needsVfs && registry) {
         vfsFiles = await fetchVfsSnapshot(registry.backend, entryPath);
       }
-      if (framework?.protocolPath && registry) {
+      const protocolModules: ProtocolModule[] = [];
+      for (const provider of bridgeFrameworks) {
+        if (!provider.protocolPath || !registry) {
+          continue;
+        }
         try {
-          const protocol = await loadProtocolModule(framework.protocolPath, registry.backend, entryPath, vfsFiles);
-          registry.runtime.setProtocolModule(protocol);
+          protocolModules.push(await loadProtocolModule(provider.protocolPath, registry.backend, entryPath, vfsFiles));
         } catch (e) {
           console.warn('[PreviewPanel] protocol module load failed, external widget detection may be unavailable:', e);
         }
       }
-      if (framework?.hostBridgePath && registry) {
+      registry.runtime.setProtocolModule(protocolModules.length > 0 ? combineProtocolModules(protocolModules) : null);
+      const hostBridgeModules: HostBridgeModule[] = [];
+      for (const provider of bridgeFrameworks) {
+        if (!provider.hostBridgePath || !registry) {
+          continue;
+        }
         try {
-          const bridge = await loadHostBridgeModule(framework.hostBridgePath, registry.backend, entryPath, vfsFiles);
-          setActiveHostBridge(bridge);
+          hostBridgeModules.push(await loadHostBridgeModule(provider.hostBridgePath, registry.backend, entryPath, vfsFiles));
         } catch (e) {
           console.warn('[PreviewPanel] host bridge module load failed, WASM host functions may be unavailable:', e);
         }
       }
+      setActiveHostBridge(hostBridgeModules.length > 0 ? combineHostBridgeModules(hostBridgeModules) : null);
+      const surface = attachRendererSurfaceHost();
       if (needsManagedCanvas) {
         attachCanvas();
       }
@@ -216,6 +328,7 @@
         entryPath,
         moduleBytes,
         framework,
+        providerFrameworks,
         onError: (message) => {
           rendererBridgeError = message;
         },
@@ -224,110 +337,39 @@
         stopRendererBridge(sessionId);
         if (!isRendererBridgeActive(sessionId)) {
           removeCanvas();
+          removeRendererSurfaceHost();
         }
         return;
       }
-      if (!isIslandTransport && rendererSurface && $runtime.gui.renderBytes && $runtime.gui.renderBytes.length > 0) {
-        deliverRenderBytes(rendererSurface, $runtime.gui.renderBytes);
+      if (surface && $runtime.gui.renderBytes && $runtime.gui.renderBytes.length > 0) {
+        deliverRenderBytes(surface, $runtime.gui.renderBytes);
       }
       rendererBridgeActive = true;
       rendererBridgeSessionId = sessionId;
       rendererBridgeFailedSessionId = null;
-      maybeObserveRendererSize();
     } catch (e) {
       rendererBridgeFailedSessionId = sessionId;
       rendererBridgeError = e instanceof Error ? e.message : String(e);
+      stopRendererBridge(sessionId);
+      removeCanvas();
+      removeRendererSurfaceHost();
+      unloadProtocolModule();
+      registry?.runtime.setProtocolModule(null);
+      unloadHostBridgeModule();
+      clearActiveHostBridge();
       console.error('[PreviewPanel] renderer bridge start failed:', e);
     } finally {
       rendererBridgeLaunching = false;
     }
   }
 
-  async function mountExternalWidget(): Promise<boolean> {
-    if (!registry) return false;
-    const externalHandlerId = $runtime.gui.externalWidgetHandlerId;
-    if (externalHandlerId == null) {
-      console.error('[PreviewPanel] external widget: missing handler id');
-      return false;
-    }
-    await tick();
-    const width = rendererSurface?.clientWidth ?? rendererContainer?.clientWidth ?? 800;
-    const height = rendererSurface?.clientHeight ?? rendererContainer?.clientHeight ?? 600;
-
-    // Notify logic island that the external widget canvas is mounted
-    const mountPayload = JSON.stringify({ type: 'mount', width, height });
-    try {
-      await registry.runtime.sendGuiEvent(externalHandlerId, mountPayload);
-      return true;
-    } catch (e) {
-      if (isGuiSessionSupersededError(e)) {
-        return false;
-      }
-      rendererBridgeError = e instanceof Error ? e.message : String(e);
-      throw e;
-    }
-  }
-
-  async function ensureExternalWidgetMounted(): Promise<void> {
-    if (!rendererBridgeActive || !isIslandTransport || externalWidgetMounted) return;
-    externalWidgetMounted = await mountExternalWidget();
-    maybeObserveRendererSize();
-  }
-
-  function sendExternalWidgetResize(width: number, height: number): void {
-    if (!registry || !isIslandTransport || !externalWidgetMounted) return;
-    const externalHandlerId = $runtime.gui.externalWidgetHandlerId;
-    if (externalHandlerId == null || width <= 0 || height <= 0) return;
-    pendingResizeWidth = width;
-    pendingResizeHeight = height;
-    if (pendingResizeFrame !== null) return;
-    pendingResizeFrame = requestAnimationFrame(() => {
-      pendingResizeFrame = null;
-      const payload = JSON.stringify({
-        type: 'resize',
-        width: pendingResizeWidth,
-        height: pendingResizeHeight,
-      });
-      registry?.runtime.sendGuiEventAsync(externalHandlerId, payload).catch((e) => {
-        if (isGuiSessionSupersededError(e)) {
-          return;
-        }
-        console.error('[PreviewPanel] external widget resize failed:', e);
-      });
-    });
-  }
-
-  function maybeObserveRendererSize(): void {
-    if (!rendererSurface || !isIslandTransport || !externalWidgetMounted) return;
-    if (resizeObserver) return;
-    resizeObserver = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) return;
-      sendExternalWidgetResize(
-        Math.round(entry.contentRect.width),
-        Math.round(entry.contentRect.height),
-      );
-    });
-    resizeObserver.observe(rendererSurface);
-    sendExternalWidgetResize(rendererSurface.clientWidth, rendererSurface.clientHeight);
-  }
-
-  function stopObservingRendererSize(): void {
-    resizeObserver?.disconnect();
-    resizeObserver = null;
-    if (pendingResizeFrame !== null) {
-      cancelAnimationFrame(pendingResizeFrame);
-      pendingResizeFrame = null;
-    }
-  }
-
   function teardownRendererBridge(sessionId = rendererBridgeSessionId): void {
     rendererBridgeLaunchGeneration++;
-    stopObservingRendererSize();
     rendererBridgeActive = false;
     rendererBridgeSessionId = null;
     stopRendererBridge(sessionId);
     removeCanvas();
+    removeRendererSurfaceHost();
     // Clean up framework artifact modules.
     unloadProtocolModule();
     registry?.runtime.setProtocolModule(null);
@@ -335,30 +377,27 @@
     clearActiveHostBridge();
   }
 
-  $: if (rendererBridgeActive && rendererSurface && isIslandTransport && externalWidgetMounted) {
-    maybeObserveRendererSize();
+  $: if (effectiveCollapsed && rendererBridgeActive) {
+    parkRendererSurfaceHost();
   }
-  $: if (effectiveCollapsed && rendererBridgeActive && needsManagedCanvas) {
-    stopObservingRendererSize();
-    parkCanvas();
-  }
-  $: if (!effectiveCollapsed && rendererBridgeActive && rendererSurface && needsManagedCanvas) {
-    attachCanvas();
+  $: if (!effectiveCollapsed && rendererBridgeActive && rendererSurface) {
+    attachRendererSurfaceHost();
+    if (needsManagedCanvas) {
+      attachCanvas();
+    }
   }
 
   onDestroy(() => {
-    stopObservingRendererSize();
     const sessionId = rendererBridgeSessionId;
     const running = $runtime.isRunning;
     const active = sessionId != null && isRendererBridgeActive(sessionId);
-    console.log('[PreviewPanel] onDestroy', { running, active, externalWidgetMounted });
+    console.log('[PreviewPanel] onDestroy', { running, active });
     if (running && active && $runtime.gui.sessionId === sessionId) {
       // Layout transition (e.g. preview → fullscreen): keep the renderer bridge
       // alive and park the canvas off-screen so the WebGPU surface stays valid.
-      parkCanvas();
-      console.log('[PreviewPanel] onDestroy: parked canvas for layout transition');
+      parkRendererSurfaceHost();
+      console.log('[PreviewPanel] onDestroy: parked renderer surface for layout transition');
     } else {
-      externalWidgetMounted = false;
       teardownRendererBridge(sessionId);
       console.log('[PreviewPanel] onDestroy: full teardown');
     }

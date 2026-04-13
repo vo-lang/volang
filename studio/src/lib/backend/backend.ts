@@ -15,6 +15,7 @@ import type {
   HttpResult,
   InstallEvent,
   InstalledModule,
+  LaunchSpec,
   ProcEvent,
   ReadManyResult,
   RendererBridgeVfsSnapshot,
@@ -23,6 +24,7 @@ import type {
   SessionInfo,
   StreamHandle,
 } from '../types';
+
 
 export interface FileDialogFilter {
   name: string;
@@ -36,9 +38,7 @@ export interface Backend {
   getBootstrapContext(): Promise<BootstrapContext>;
 
   // Session
-  openWorkspaceSession(): Promise<SessionInfo>;
-  openRunSession(path: string): Promise<SessionInfo>;
-  openUrlSession(url: string): Promise<SessionInfo>;
+  openSession(spec: LaunchSpec): Promise<SessionInfo>;
 
   // Filesystem
   discoverProjects(root: string): Promise<DiscoveredProject[]>;
@@ -68,6 +68,7 @@ export interface Backend {
   sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array>;
   sendGuiEventAsync(handlerId: number, payload: string): Promise<void>;
   pushIslandTransport(data: Uint8Array): Promise<void>;
+  pollIslandTransport(): Promise<Uint8Array>;
   pollGuiRender(): Promise<Uint8Array>;
   stopGui(): Promise<void>;
   getRendererBridgeVfsSnapshot(path: string): Promise<RendererBridgeVfsSnapshot>;

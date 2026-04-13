@@ -171,7 +171,21 @@ fn studio_declares_vo_web(studio: &StudioManifest) -> bool {
     studio.capabilities.iter().any(|capability| capability == "vo_web")
 }
 
-#[derive(serde::Serialize)]
+fn split_primary_framework_contract(
+    mut frameworks: Vec<FrameworkContract>,
+) -> (Option<FrameworkContract>, Vec<FrameworkContract>) {
+    if frameworks.is_empty() {
+        return (None, frameworks);
+    }
+    let primary_index = frameworks
+        .iter()
+        .position(|framework| framework.protocol_path.is_some() || framework.host_bridge_path.is_some())
+        .unwrap_or(0);
+    let primary = frameworks.remove(primary_index);
+    (Some(primary), frameworks)
+}
+
+#[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FrameworkContract {
     pub name: String,
@@ -189,6 +203,7 @@ pub struct GuiRunOutput {
     module_bytes: Vec<u8>,
     entry_path: String,
     framework: Option<FrameworkContract>,
+    provider_frameworks: Vec<FrameworkContract>,
     external_widget_handler_id: Option<i32>,
 }
 
@@ -316,7 +331,8 @@ pub async fn cmd_run_gui(
                 .duration_ms(compile_start.elapsed().as_millis()),
         );
         let module_bytes = compile_output.module.serialize();
-        let framework = extract_framework_contract(&compile_output.extensions);
+        let frameworks = extract_framework_contracts(&compile_output.extensions);
+        let (framework, provider_frameworks) = split_primary_framework_contract(frameworks);
         let extensions = compile_output.extensions.clone();
         prepare_wasm_extensions(&compile_output.extensions)?;
         let start_start = Instant::now();
@@ -336,6 +352,7 @@ pub async fn cmd_run_gui(
                 module_bytes,
                 entry_path: task_entry_path,
                 framework,
+                provider_frameworks,
                 external_widget_handler_id,
             },
             extensions,
@@ -807,10 +824,11 @@ fn collect_renderer_bridge_vfs_files_virtual(
     Ok(files)
 }
 
-fn extract_framework_contract(extensions: &[vo_engine::PreparedNativeExtension]) -> Option<FrameworkContract> {
+fn extract_framework_contracts(extensions: &[vo_engine::PreparedNativeExtension]) -> Vec<FrameworkContract> {
+    let mut frameworks = Vec::new();
     for ext in extensions {
         if let Some(studio) = parse_studio_manifest(&ext.manifest_path) {
-            return Some(FrameworkContract {
+            frameworks.push(FrameworkContract {
                 name: ext.name.clone(),
                 entry: studio.entry,
                 capabilities: studio.capabilities,
@@ -820,5 +838,5 @@ fn extract_framework_contract(extensions: &[vo_engine::PreparedNativeExtension])
             });
         }
     }
-    None
+    frameworks
 }

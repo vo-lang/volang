@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use vo_common::vfs::{normalize_fs_path, FileSystem, RealFs};
 
-use crate::identity::ModulePath;
+use crate::identity::{classify_import, ImportClass, ModulePath};
 use crate::schema::modfile::ModFile;
 use crate::schema::workfile::WorkFile;
 use crate::Error;
@@ -131,6 +131,9 @@ pub fn load_workspace_overrides_in<F: FileSystem>(
     project_dir: &Path,
     root_module: Option<&ModulePath>,
 ) -> Result<Vec<Override>, Error> {
+    if std::env::var("VOWORK").ok().as_deref() == Some("off") {
+        return Ok(Vec::new());
+    }
     let Some(workfile_path) = discover_workfile_in(fs, project_dir) else {
         return Ok(Vec::new());
     };
@@ -198,6 +201,22 @@ pub fn check_override_imports_covered(
     overrides: &[Override],
     locked_modules: &[ModulePath],
 ) -> Result<(), Error> {
+    check_override_imports_covered_by(
+        "workspace override",
+        import_path,
+        root_module,
+        overrides,
+        locked_modules,
+    )
+}
+
+fn check_override_imports_covered_by(
+    importer: &str,
+    import_path: &str,
+    root_module: &ModulePath,
+    overrides: &[Override],
+    locked_modules: &[ModulePath],
+) -> Result<(), Error> {
     // Check if owned by root module
     if root_module.owns_import(import_path).is_some() {
         return Ok(());
@@ -217,9 +236,101 @@ pub fn check_override_imports_covered(
     }
 
     Err(Error::OverrideUnlockedDep {
-        importer: "workspace override".to_string(),
+        importer: importer.to_string(),
         import_path: import_path.to_string(),
     })
+}
+
+pub fn validate_override_external_imports<F: FileSystem>(
+    fs: &F,
+    root_module: &ModulePath,
+    overrides_to_scan: &[Override],
+    active_overrides: &[Override],
+    locked_modules: &[ModulePath],
+    importer_prefix: &str,
+) -> Result<(), Error> {
+    for override_entry in overrides_to_scan {
+        let imports = scan_external_imports_in(fs, &override_entry.local_dir)?;
+        let importer = format!("{} {}", importer_prefix, override_entry.module);
+        for import_path in imports {
+            check_override_imports_covered_by(
+                &importer,
+                &import_path,
+                root_module,
+                active_overrides,
+                locked_modules,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn scan_external_imports_in<F: FileSystem>(fs: &F, dir: &Path) -> Result<BTreeSet<String>, Error> {
+    let mut imports = BTreeSet::new();
+    scan_external_imports_dir_in(fs, dir, &mut imports)?;
+    Ok(imports)
+}
+
+fn scan_external_imports_dir_in<F: FileSystem>(
+    fs: &F,
+    dir: &Path,
+    imports: &mut BTreeSet<String>,
+) -> Result<(), Error> {
+    for entry in fs.read_dir(dir).map_err(Error::Io)? {
+        if fs.is_dir(&entry) {
+            let name = entry
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            if name.starts_with('.')
+                || name == "vendor"
+                || name == "testdata"
+                || name == "node_modules"
+                || name == "target"
+                || name == "dist"
+            {
+                continue;
+            }
+            scan_external_imports_dir_in(fs, &entry, imports)?;
+            continue;
+        }
+        if entry
+            .extension()
+            .map(|value| value == "vo")
+            .unwrap_or(false)
+        {
+            scan_external_imports_file_in(fs, &entry, imports)?;
+        }
+    }
+    Ok(())
+}
+
+fn scan_external_imports_file_in<F: FileSystem>(
+    fs: &F,
+    path: &Path,
+    imports: &mut BTreeSet<String>,
+) -> Result<(), Error> {
+    let content = fs.read_file(path).map_err(Error::Io)?;
+    let (file, diagnostics, _) = vo_syntax::parse(&content, 0);
+    if diagnostics.has_errors() {
+        let detail = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(Error::SourceScan(format!(
+            "failed to parse {} while scanning imports: {}",
+            path.display(),
+            detail,
+        )));
+    }
+    for import in &file.imports {
+        let import_path = import.path.value.clone();
+        if classify_import(&import_path)? == ImportClass::External {
+            imports.insert(import_path);
+        }
+    }
+    Ok(())
 }
 
 /// Load workspace replaces as a module-path → local-directory map.
@@ -235,8 +346,26 @@ pub fn load_workspace_replaces<F: FileSystem>(
     project_root: &Path,
     root_module: Option<&ModulePath>,
 ) -> Result<HashMap<String, PathBuf>, Error> {
+    let overrides = load_workspace_overrides(fs, project_root, root_module)?;
+    let normalized_root = normalize_fs_path(project_root);
+    let mut replaces = HashMap::new();
+    for ov in overrides {
+        let local_dir = normalize_fs_path(&ov.local_dir);
+        if local_dir == normalized_root {
+            continue;
+        }
+        replaces.insert(ov.module.as_str().to_string(), local_dir);
+    }
+    Ok(replaces)
+}
+
+pub fn load_workspace_overrides<F: FileSystem>(
+    fs: &F,
+    project_root: &Path,
+    root_module: Option<&ModulePath>,
+) -> Result<Vec<Override>, Error> {
     if std::env::var("VOWORK").ok().as_deref() == Some("off") {
-        return Ok(HashMap::new());
+        return Ok(Vec::new());
     }
     let auto_root_module;
     let effective_root_module = match root_module {
@@ -256,15 +385,64 @@ pub fn load_workspace_replaces<F: FileSystem>(
             auto_root_module.as_ref()
         }
     };
-    let overrides = load_workspace_overrides_in(fs, project_root, effective_root_module)?;
-    let normalized_root = normalize_fs_path(project_root);
+    load_workspace_overrides_in(fs, project_root, effective_root_module)
+}
+
+pub fn load_mod_file_replaces<F: FileSystem>(
+    fs: &F,
+    mod_file: &ModFile,
+    mod_file_dir: &Path,
+) -> Result<HashMap<String, PathBuf>, Error> {
+    let overrides = mod_file
+        .replace
+        .iter()
+        .map(|replace| Override {
+            module: replace.module.clone(),
+            local_dir: resolve_path(mod_file_dir, &replace.path),
+        })
+        .collect::<Vec<_>>();
+    if overrides
+        .iter()
+        .any(|override_entry| override_entry.module == mod_file.module)
+    {
+        return Err(Error::ModFileParse(
+            "root module must not replace itself via vo.mod".to_string(),
+        ));
+    }
+    for override_entry in &overrides {
+        let mod_path = override_entry.local_dir.join("vo.mod");
+        let content = fs.read_file(&mod_path).map_err(|error| {
+            Error::ModFileParse(format!(
+                "replace {}: cannot read {}: {}",
+                override_entry.module,
+                mod_path.display(),
+                error
+            ))
+        })?;
+        let target_mod = ModFile::parse(&content).map_err(|error| {
+            Error::ModFileParse(format!(
+                "replace {}: error parsing {}: {}",
+                override_entry.module,
+                mod_path.display(),
+                error
+            ))
+        })?;
+        if target_mod.module != override_entry.module {
+            return Err(Error::ModFileParse(format!(
+                "replace {} points to {} but that directory declares {}",
+                override_entry.module,
+                override_entry.local_dir.display(),
+                target_mod.module,
+            )));
+        }
+    }
+
     let mut replaces = HashMap::new();
     for ov in overrides {
-        let local_dir = normalize_fs_path(&ov.local_dir);
-        if local_dir == normalized_root {
-            continue;
-        }
-        replaces.insert(ov.module.as_str().to_string(), local_dir);
+        replaces.insert(
+            ov.module.as_str().to_string(),
+            normalize_fs_path(&ov.local_dir),
+        );
     }
     Ok(replaces)
 }
@@ -281,6 +459,7 @@ fn resolve_path(base: &Path, relative: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_resolve_path_relative() {
@@ -356,5 +535,36 @@ mod tests {
             &locked
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_load_workspace_overrides_in_honors_vowork_off() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("VOWORK").ok();
+        std::env::set_var("VOWORK", "off");
+
+        let mut fs = vo_common::vfs::MemoryFs::new();
+        fs.add_file(
+            "workspace/vo.work",
+            "version = 1\n\n[[use]]\npath = \".\"\n",
+        );
+        fs.add_file(
+            "workspace/vo.mod",
+            "module github.com/acme/app\nvo ^0.1.0\n",
+        );
+
+        let result = load_workspace_overrides_in(
+            &fs,
+            Path::new("workspace"),
+            Some(&ModulePath::parse("github.com/acme/app").unwrap()),
+        )
+        .unwrap();
+
+        match old {
+            Some(value) => std::env::set_var("VOWORK", value),
+            None => std::env::remove_var("VOWORK"),
+        }
+
+        assert!(result.is_empty());
     }
 }

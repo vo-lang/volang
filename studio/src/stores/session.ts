@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import type { ProjectMode, StudioMode } from '../lib/types';
+import type { ProjectMode, SessionSource, ShareInfo, StudioMode } from '../lib/types';
 
 export interface SessionState {
   root: string;
@@ -7,6 +7,8 @@ export interface SessionState {
   mode: StudioMode;
   entryPath: string | null;
   projectMode: ProjectMode | null;
+  source: SessionSource | null;
+  share: ShareInfo | null;
 }
 
 export const session = writable<SessionState>({
@@ -15,9 +17,18 @@ export const session = writable<SessionState>({
   mode: 'dev',
   entryPath: null,
   projectMode: null,
+  source: null,
+  share: null,
 });
 
-export function sessionOpen(root: string, mode: StudioMode, entryPath: string | null, projectMode: ProjectMode): void {
+export function sessionOpen(
+  root: string,
+  mode: StudioMode,
+  entryPath: string | null,
+  projectMode: ProjectMode,
+  source: SessionSource | null,
+  share: ShareInfo | null,
+): void {
   const projectName = displayName(root, entryPath, projectMode);
   session.set({
     root,
@@ -25,6 +36,8 @@ export function sessionOpen(root: string, mode: StudioMode, entryPath: string | 
     mode,
     entryPath,
     projectMode,
+    source,
+    share,
   });
 }
 

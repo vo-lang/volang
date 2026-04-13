@@ -379,15 +379,20 @@ fn read_project_deps_from_mod_file<F: FileSystem>(
             )
             .with_path(lock_candidate)
         })?;
-        let excluded_vec: Vec<String> = excluded_modules.iter().map(|s| s.to_string()).collect();
-        lock::verify_graph_completeness(&mod_file, &lock_file, &excluded_vec).map_err(|error| {
-            ProjectDepsError::new(
-                ProjectDepsStage::LockFile,
-                ProjectDepsErrorKind::ValidationFailed,
-                format!("vo.lock validation error: {}", error),
-            )
-            .with_path(lock_candidate)
-        })?;
+        let excluded_modules_vec = excluded_modules
+            .iter()
+            .map(|module| (*module).to_string())
+            .collect::<Vec<_>>();
+        lock::verify_graph_completeness(&mod_file, &lock_file, &excluded_modules_vec).map_err(
+            |error| {
+                ProjectDepsError::new(
+                    ProjectDepsStage::LockFile,
+                    ProjectDepsErrorKind::ValidationFailed,
+                    format!("vo.lock validation error: {}", error),
+                )
+                .with_path(lock_candidate)
+            },
+        )?;
 
         let mut allowed_modules = Vec::new();
         let mut locked_modules = Vec::new();
@@ -527,7 +532,42 @@ pub fn load_project_context<F: FileSystem>(
 ) -> Result<ProjectContext, ProjectDepsError> {
     let project_root = find_project_root_in(fs, dir);
     let root_mod = read_mod_file_in(fs, &project_root)?;
-    let workspace_replaces = crate::workspace::load_workspace_replaces(
+    let mod_path = if project_root == Path::new(".") || project_root.as_os_str().is_empty() {
+        PathBuf::from("vo.mod")
+    } else {
+        project_root.join("vo.mod")
+    };
+    let mod_file_replaces = if let Some(root_mod) = root_mod.as_ref() {
+        crate::workspace::load_mod_file_replaces(fs, root_mod, &project_root).map_err(|error| {
+            let kind = match &error {
+                crate::Error::Io(_) => ProjectDepsErrorKind::ReadFailed,
+                crate::Error::ModFileParse(_) | crate::Error::WorkFileParse(_) => {
+                    ProjectDepsErrorKind::ParseFailed
+                }
+                _ => ProjectDepsErrorKind::ValidationFailed,
+            };
+            ProjectDepsError::new(ProjectDepsStage::ModFile, kind, error.to_string())
+                .with_path(&mod_path)
+        })?
+    } else {
+        HashMap::new()
+    };
+    let mod_file_overrides = if let Some(root_mod) = root_mod.as_ref() {
+        root_mod
+            .replace
+            .iter()
+            .map(|replace| crate::workspace::Override {
+                module: replace.module.clone(),
+                local_dir: mod_file_replaces
+                    .get(replace.module.as_str())
+                    .cloned()
+                    .expect("validated vo.mod replace must exist in replace map"),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let workspace_overrides = crate::workspace::load_workspace_overrides_in(
         fs,
         &project_root,
         root_mod.as_ref().map(|mf| &mf.module),
@@ -540,8 +580,69 @@ pub fn load_project_context<F: FileSystem>(
         };
         ProjectDepsError::new(ProjectDepsStage::Workspace, kind, error.to_string())
     })?;
-    let excluded_modules = workspace_replaces.keys().cloned().collect::<Vec<_>>();
+    let mut excluded_modules = mod_file_overrides
+        .iter()
+        .map(|override_entry| override_entry.module.as_str().to_string())
+        .collect::<Vec<_>>();
+    excluded_modules.extend(
+        workspace_overrides
+            .iter()
+            .map(|override_entry| override_entry.module.as_str().to_string()),
+    );
     let project_deps = read_project_deps_near(fs, &project_root, &excluded_modules)?;
+    if let Some(root_mod) = root_mod.as_ref() {
+        let locked_modules = project_deps
+            .locked_modules()
+            .iter()
+            .map(|locked| locked.path.clone())
+            .collect::<Vec<_>>();
+        let mut active_overrides = mod_file_overrides.clone();
+        active_overrides.extend(workspace_overrides.iter().cloned());
+        crate::workspace::validate_override_external_imports(
+            fs,
+            &root_mod.module,
+            &mod_file_overrides,
+            &active_overrides,
+            &locked_modules,
+            "vo.mod replace",
+        )
+        .map_err(|error| {
+            let kind = match &error {
+                crate::Error::Io(_) => ProjectDepsErrorKind::ReadFailed,
+                crate::Error::ModFileParse(_)
+                | crate::Error::WorkFileParse(_)
+                | crate::Error::SourceScan(_) => ProjectDepsErrorKind::ParseFailed,
+                _ => ProjectDepsErrorKind::ValidationFailed,
+            };
+            ProjectDepsError::new(ProjectDepsStage::ModFile, kind, error.to_string())
+                .with_path(&mod_path)
+        })?;
+        crate::workspace::validate_override_external_imports(
+            fs,
+            &root_mod.module,
+            &workspace_overrides,
+            &active_overrides,
+            &locked_modules,
+            "workspace override",
+        )
+        .map_err(|error| {
+            let kind = match &error {
+                crate::Error::Io(_) => ProjectDepsErrorKind::ReadFailed,
+                crate::Error::WorkFileParse(_) | crate::Error::SourceScan(_) => {
+                    ProjectDepsErrorKind::ParseFailed
+                }
+                _ => ProjectDepsErrorKind::ValidationFailed,
+            };
+            ProjectDepsError::new(ProjectDepsStage::Workspace, kind, error.to_string())
+        })?;
+    }
+    let mut workspace_replaces = mod_file_replaces;
+    for override_entry in workspace_overrides {
+        workspace_replaces.insert(
+            override_entry.module.as_str().to_string(),
+            normalize_fs_path(&override_entry.local_dir),
+        );
+    }
     Ok(ProjectContext {
         project_root,
         project_deps,
@@ -571,7 +672,7 @@ pub fn build_synthetic_project_files(
         module: module.clone(),
         vo: vo.clone(),
         require,
-        replace: vec![],
+        replace: Vec::new(),
     };
     let lock_file = LockFile {
         version: 1,
@@ -804,6 +905,87 @@ artifacts = []
         assert_eq!(deps.locked_modules().len(), 1);
         assert_eq!(
             deps.locked_modules()[0].path.as_str(),
+            "github.com/vo-lang/core"
+        );
+    }
+
+    #[test]
+    fn load_project_context_allows_missing_lock_when_vo_mod_replaces_all_direct_external_modules() {
+        let mut fs = MemoryFs::new();
+        fs.add_file(
+            "workspace/lib/vo.mod",
+            "module github.com/vo-lang/lib\nvo ^0.1.0\n",
+        );
+        fs.add_file(
+            "workspace/tests/vo.mod",
+            "module github.com/vo-lang/lib/tests\nvo ^0.1.0\nrequire github.com/vo-lang/lib v0.1.0\nreplace github.com/vo-lang/lib => ../lib\n",
+        );
+
+        let context = load_project_context(&fs, Path::new("workspace/tests"))
+            .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+        assert!(context.project_deps.has_mod_file());
+        assert!(context.project_deps.locked_modules().is_empty());
+        assert_eq!(context.project_deps.lock_file_path(), None);
+    }
+
+    #[test]
+    fn load_project_context_rejects_unlocked_external_import_from_vo_mod_replace() {
+        let mut fs = MemoryFs::new();
+        fs.add_file(
+            "workspace/lib/vo.mod",
+            "module github.com/vo-lang/lib\nvo ^0.1.0\nrequire github.com/vo-lang/core v0.1.0\n",
+        );
+        fs.add_file(
+            "workspace/lib/lib.vo",
+            "package lib\nimport \"github.com/vo-lang/core\"\nfunc Hello(){core.Hello()}\n",
+        );
+        fs.add_file(
+            "workspace/tests/vo.mod",
+            "module github.com/vo-lang/lib/tests\nvo ^0.1.0\nrequire github.com/vo-lang/lib v0.1.0\nreplace github.com/vo-lang/lib => ../lib\n",
+        );
+
+        let error = match load_project_context(&fs, Path::new("workspace/tests")) {
+            Ok(_) => panic!("expected unlocked external import validation error"),
+            Err(error) => error,
+        };
+        assert_eq!(error.stage, ProjectDepsStage::ModFile);
+        assert_eq!(error.kind, ProjectDepsErrorKind::ValidationFailed);
+        assert_eq!(error.path.as_deref(), Some("workspace/tests/vo.mod"));
+        assert!(
+            error
+                .detail
+                .contains("vo.mod replace github.com/vo-lang/lib imports github.com/vo-lang/core"),
+            "{}",
+            error.detail
+        );
+    }
+
+    #[test]
+    fn load_project_context_merges_vo_mod_replace_into_resolver_map() {
+        let mut fs = MemoryFs::new();
+        fs.add_file(
+            "workspace/lib/vo.mod",
+            "module github.com/vo-lang/lib\nvo ^0.1.0\n",
+        );
+        fs.add_file(
+            "workspace/tests/vo.mod",
+            "module github.com/vo-lang/lib/tests\nvo ^0.1.0\nrequire github.com/vo-lang/core v0.1.0\nrequire github.com/vo-lang/lib v0.1.0\nreplace github.com/vo-lang/lib => ../lib\n",
+        );
+        fs.add_file(
+            "workspace/tests/vo.lock",
+            "version = 1\ncreated_by = \"vo test\"\n[root]\nmodule = \"github.com/vo-lang/lib/tests\"\nvo = \"^0.1.0\"\n\n[[resolved]]\npath = \"github.com/vo-lang/core\"\nversion = \"v0.1.0\"\nvo = \"^0.1.0\"\ncommit = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\nrelease_manifest = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\nsource = \"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\ndeps = []\nartifacts = []\n",
+        );
+
+        let context = load_project_context(&fs, Path::new("workspace/tests"))
+            .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+        assert_eq!(context.project_root, PathBuf::from("workspace/tests"));
+        assert_eq!(
+            context.workspace_replaces.get("github.com/vo-lang/lib"),
+            Some(&PathBuf::from("workspace/lib"))
+        );
+        assert_eq!(context.project_deps.locked_modules().len(), 1);
+        assert_eq!(
+            context.project_deps.locked_modules()[0].path.as_str(),
             "github.com/vo-lang/core"
         );
     }

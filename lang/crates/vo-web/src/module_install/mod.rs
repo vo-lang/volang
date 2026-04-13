@@ -15,10 +15,12 @@ mod vfs_io;
 
 use vo_common::vfs::MemoryFs;
 use vo_module::cache::layout::{SOURCE_DIGEST_MARKER, VERSION_MARKER};
+use vo_module::identity::ModulePath;
 use vo_module::lifecycle::{ModuleSelection, ModuleSelectionPlanner};
 use vo_module::operation_error::OperationError;
 use vo_module::project::{ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage};
 use vo_module::schema::lockfile::LockedModule;
+use vo_module::version::{ConstraintOp, DepConstraint, ExactVersion};
 
 use extension::*;
 use log::*;
@@ -309,16 +311,91 @@ async fn ensure_vfs_deps_from_fs_typed(
 
 // ── Version resolution ──────────────────────────────────────────────────────
 
-/// Fetch the latest release version for a module from the GitHub API.
-async fn fetch_latest_module_version_typed(module: &str) -> ModuleInstallResult<String> {
-    let module_path = vo_module::identity::ModulePath::parse(module).map_err(|error| {
+fn parse_module_path_for_version_resolution(module: &str) -> ModuleInstallResult<ModulePath> {
+    ModulePath::parse(module).map_err(|error| {
         ModuleInstallError::new(
             ModuleInstallStage::VersionResolve,
             ModuleInstallErrorKind::ParseFailed,
             format!("{error}"),
         )
         .with_module(module)
+    })
+}
+
+async fn fetch_module_release_versions_typed(
+    module: &str,
+    module_path: &ModulePath,
+) -> ModuleInstallResult<Vec<ExactVersion>> {
+    let repo = vo_module::registry::repository_id(module_path);
+    let api_url = format!(
+        "https://api.github.com/repos/{}/{}/releases?per_page=100",
+        repo.owner, repo.repo,
+    );
+    let bytes = fetch::fetch_bytes(&api_url).await?;
+    let text = String::from_utf8(bytes).map_err(|error| {
+        ModuleInstallError::new(
+            ModuleInstallStage::VersionResolve,
+            ModuleInstallErrorKind::ParseFailed,
+            format!("invalid UTF-8 in GitHub API response: {}", error),
+        )
+        .with_module(module)
     })?;
+    let releases: Vec<serde_json::Value> = serde_json::from_str(&text).map_err(|error| {
+        ModuleInstallError::new(
+            ModuleInstallStage::VersionResolve,
+            ModuleInstallErrorKind::ParseFailed,
+            format!("invalid JSON from GitHub API for {}: {}", module, error),
+        )
+        .with_module(module)
+    })?;
+    let mut versions = releases
+        .iter()
+        .filter_map(|release| release["tag_name"].as_str())
+        .filter_map(|tag| vo_module::registry::version_from_tag(module_path, tag))
+        .collect::<Vec<_>>();
+    versions.sort_by(|a, b| b.cmp(a));
+    versions.dedup();
+    if versions.is_empty() {
+        return Err(ModuleInstallError::new(
+            ModuleInstallStage::VersionResolve,
+            ModuleInstallErrorKind::Missing,
+            format!("no published GitHub releases found for module {}", module),
+        )
+        .with_module(module));
+    }
+    Ok(versions)
+}
+
+async fn fetch_module_version_matching_constraint_typed(
+    module: &str,
+    constraint: &DepConstraint,
+) -> ModuleInstallResult<String> {
+    let module_path = parse_module_path_for_version_resolution(module)?;
+    let fetch_start = crate::now_ms();
+    log_dependency_version_resolve_start(module);
+    let version = fetch_module_release_versions_typed(module, &module_path)
+        .await?
+        .into_iter()
+        .find(|version| constraint.satisfies(version))
+        .ok_or_else(|| {
+            ModuleInstallError::new(
+                ModuleInstallStage::VersionResolve,
+                ModuleInstallErrorKind::Missing,
+                format!(
+                    "no published release of {} satisfies dependency constraint {}",
+                    module, constraint,
+                ),
+            )
+            .with_module(module)
+        })?
+        .to_string();
+    log_dependency_version_resolved(module, &version, fetch_start);
+    Ok(version)
+}
+
+/// Fetch the latest release version for a module from the GitHub API.
+async fn fetch_latest_module_version_typed(module: &str) -> ModuleInstallResult<String> {
+    let module_path = parse_module_path_for_version_resolution(module)?;
     let repo = vo_module::registry::repository_id(&module_path);
     let module_root = module_path.module_root();
     let fetch_start = crate::now_ms();
@@ -447,6 +524,13 @@ async fn resolve_module_version_typed(module: &str) -> ModuleInstallResult<Strin
     fetch_latest_module_version_typed(module).await
 }
 
+async fn resolve_module_version_with_constraint_typed(
+    module: &str,
+    constraint: &DepConstraint,
+) -> ModuleInstallResult<String> {
+    fetch_module_version_matching_constraint_typed(module, constraint).await
+}
+
 /// Resolve, install, and return `(module, version)` for a single external module.
 pub async fn resolve_and_install_module(module: &str) -> Result<(String, String), String> {
     resolve_and_install_module_typed(module)
@@ -456,6 +540,40 @@ pub async fn resolve_and_install_module(module: &str) -> Result<(String, String)
 
 async fn resolve_and_install_module_typed(module: &str) -> ModuleInstallResult<(String, String)> {
     let version = resolve_module_version_typed(module).await?;
+    ensure_vfs_versioned_module_closure(vec![(module.to_string(), version.clone())]).await?;
+    Ok((module.to_string(), version))
+}
+
+pub async fn resolve_and_install_module_with_constraint(
+    module: &str,
+    constraint: &str,
+) -> Result<(String, String), String> {
+    resolve_and_install_module_with_constraint_typed(module, constraint)
+        .await
+        .map_err(stringify_module_install_error)
+}
+
+async fn resolve_and_install_module_with_constraint_typed(
+    module: &str,
+    constraint: &str,
+) -> ModuleInstallResult<(String, String)> {
+    let constraint = DepConstraint::parse(constraint).map_err(|error| {
+        ModuleInstallError::new(
+            ModuleInstallStage::Spec,
+            ModuleInstallErrorKind::ParseFailed,
+            format!("invalid dependency constraint {:?}: {}", constraint, error),
+        )
+        .with_module(module)
+    })?;
+    if constraint.op == ConstraintOp::Exact {
+        let version = constraint.to_string();
+        let resolve_start = crate::now_ms();
+        log_dependency_version_resolve_start(module);
+        log_dependency_version_resolved(module, &version, resolve_start);
+        ensure_vfs_versioned_module_closure(vec![(module.to_string(), version.clone())]).await?;
+        return Ok((module.to_string(), version));
+    }
+    let version = resolve_module_version_with_constraint_typed(module, &constraint).await?;
     ensure_vfs_versioned_module_closure(vec![(module.to_string(), version.clone())]).await?;
     Ok((module.to_string(), version))
 }

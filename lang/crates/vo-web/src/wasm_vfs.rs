@@ -7,7 +7,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use vo_common::vfs::FileSystem;
+use vo_common::vfs::{normalize_fs_path, FileSystem};
 
 /// A `FileSystem` that delegates to the JS VirtualFS via `vo_web_runtime_wasm::vfs`.
 ///
@@ -22,11 +22,17 @@ pub struct WasmVfs {
 impl WasmVfs {
     /// Create a WasmVfs rooted at the given VFS directory.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: normalize_fs_path(&root.into()),
+        }
     }
 
     fn full_path(&self, path: &Path) -> String {
-        let joined = self.root.join(path);
+        let joined = if path == Path::new(".") || path.as_os_str().is_empty() {
+            self.root.clone()
+        } else {
+            normalize_fs_path(&self.root.join(path))
+        };
         format!("/{}", joined.display())
     }
 }

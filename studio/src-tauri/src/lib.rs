@@ -11,9 +11,7 @@ pub fn run() {
             // Bootstrap
             commands::bootstrap::cmd_get_bootstrap_context,
             // Session
-            commands::session::cmd_open_workspace_session,
-            commands::session::cmd_open_run_session,
-            commands::session::cmd_open_url_session,
+            commands::session::cmd_open_session,
             // Workspace / Filesystem
             commands::workspace::cmd_discover_projects,
             commands::workspace::cmd_list_dir,

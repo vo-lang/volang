@@ -6,6 +6,8 @@
 // are injected dynamically via setActiveHostBridge() before WASM instantiation.
 // No static import of any framework package.
 import type { HostBridgeModule } from './gui/renderer_bridge';
+import { createInMemoryWindowVfsBackend } from './in_memory_window_vfs';
+import { hasWindowVfsBindings, installWindowVfsBackend, type WindowVfsBackend } from './window_vfs_bindings';
 
 // ── VoVm instance interface (matches VoVm wasm-bindgen class exports) ────────
 
@@ -24,11 +26,13 @@ export interface VoVmInstance {
 export interface StudioWasm {
   // Legacy singleton-based island API (still used for non-VoWebModule paths)
   runGuiFromBytecode(bytecode: Uint8Array): Uint8Array;
+  startGuiFromBytecode(bytecode: Uint8Array): Uint8Array;
   runGui(entryPath: string): {
     renderBytes: Uint8Array;
     moduleBytes: Uint8Array;
     entryPath: string;
     framework: { name: string; entry: string; capabilities: string[]; rendererPath: string | null; protocolPath: string | null; hostBridgePath: string | null } | null;
+    providerFrameworks: Array<{ name: string; entry: string; capabilities: string[]; rendererPath: string | null; protocolPath: string | null; hostBridgePath: string | null }>;
     externalWidgetHandlerId: number | null;
   };
   runGuiEntry(entryPath: string): Uint8Array;
@@ -55,6 +59,8 @@ export interface StudioWasm {
     bytecode: Uint8Array;
     entryPath: string;
     framework: { name: string; entry: string; capabilities: string[]; rendererPath: string | null; protocolPath: string | null; hostBridgePath: string | null } | null;
+    providerFrameworks: Array<{ name: string; entry: string; capabilities: string[]; rendererPath: string | null; protocolPath: string | null; hostBridgePath: string | null }>;
+    wasmExtensions: Array<{ name: string; moduleKey: string; wasmBytes: Uint8Array; jsGlueBytes: Uint8Array | null }>;
   };
   getBuildId(): string;
   initVFS(): Promise<void>;
@@ -75,17 +81,138 @@ export interface VoWebModule {
   preloadExtModule(path: string, bytes: Uint8Array, jsGlueUrl?: string): Promise<void>;
 }
 
-function withBuildId(path: string): string {
-  const separator = path.includes('?') ? '&' : '?';
-  return `${path}${separator}build=${encodeURIComponent(__STUDIO_BUILD_ID__)}`;
+const bundledStudioBuildId = __STUDIO_BUILD_ID__;
+let studioAssetBuildIdPromise: Promise<string> | null = null;
+
+type StudioHostLogRecord = {
+  source: string;
+  code: string;
+  level: string;
+  text?: string;
+};
+
+function emitStudioHostLog(record: StudioHostLogRecord): void {
+  const hook = (globalThis as Record<string, unknown>).__voStudioLogRecord;
+  if (typeof hook === 'function') {
+    (hook as (record: StudioHostLogRecord) => void)(record);
+    return;
+  }
+  if (record.text) {
+    console.debug(`[${record.source}:${record.code}] ${record.text}`);
+    return;
+  }
+  console.debug(`[${record.source}:${record.code}]`);
 }
 
-function assertStudioBuildMatch(wasmBuildId: string): void {
-  if (wasmBuildId !== __STUDIO_BUILD_ID__) {
+function shouldTraceStandaloneExtern(externName: string): boolean {
+  return externName.includes('HasHostCapability') || externName.endsWith('waitForEvent');
+}
+
+async function resolveJsGlueImportUrl(jsGlueUrl: string): Promise<{ importUrl: string; revoke(): void }> {
+  if (!jsGlueUrl) {
+    return { importUrl: '', revoke() {} };
+  }
+  if (jsGlueUrl.startsWith('blob:') || jsGlueUrl.startsWith('data:')) {
+    return {
+      importUrl: jsGlueUrl,
+      revoke(): void {},
+    };
+  }
+  const response = await fetch(jsGlueUrl, { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch JS glue: HTTP ${response.status}`);
+  }
+  const jsText = await response.text();
+  const blobUrl = URL.createObjectURL(new Blob([jsText], { type: 'application/javascript' }));
+  return {
+    importUrl: blobUrl,
+    revoke(): void {
+      URL.revokeObjectURL(blobUrl);
+    },
+  };
+}
+
+function withBuildId(path: string, buildId: string): string {
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}build=${encodeURIComponent(buildId)}`;
+}
+
+async function getStudioAssetBuildId(): Promise<string> {
+  if (!import.meta.env.DEV) {
+    return bundledStudioBuildId;
+  }
+  if (studioAssetBuildIdPromise) {
+    return studioAssetBuildIdPromise;
+  }
+  studioAssetBuildIdPromise = (async () => {
+    emitStudioHostLog({
+      source: 'studio-wasm',
+      code: 'asset_build_id_fetch_begin',
+      level: 'system',
+    });
+    const response = await fetch(withBuildId('/wasm/vo_studio_wasm.build_id', Date.now().toString(36)), {
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to load Studio WASM build id: ${response.status} ${response.statusText}`);
+    }
+    const buildId = (await response.text()).trim();
+    if (!buildId) {
+      throw new Error('Failed to load Studio WASM build id: empty response');
+    }
+    emitStudioHostLog({
+      source: 'studio-wasm',
+      code: 'asset_build_id_fetch_ready',
+      level: 'system',
+      text: `buildId=${buildId}`,
+    });
+    return buildId;
+  })();
+  return studioAssetBuildIdPromise;
+}
+
+function assertStudioBuildMatch(expectedBuildId: string, wasmBuildId: string, expectedSource: string): void {
+  if (wasmBuildId !== expectedBuildId) {
     throw new Error(
-      `Studio web asset mismatch: frontend expects ${__STUDIO_BUILD_ID__}, wasm provides ${wasmBuildId}. Reload after the latest deploy or restart the local web dev server after rebuilding studio/wasm.`,
+      `Studio web asset mismatch: ${expectedSource} expects ${expectedBuildId}, wasm provides ${wasmBuildId}. Reload after the latest deploy. In local dev, rebuild studio/wasm and retry; a dev server restart should only be needed if the mismatch persists.`,
     );
   }
+}
+
+type StudioWindowVfsFactory = () => WindowVfsBackend;
+
+let studioWindowVfsFactory: StudioWindowVfsFactory | null = null;
+let studioWindowVfsRevision = 0;
+let studioWindowVfsInstalledRevision = -1;
+
+function ensureStudioWindowVfsBindings(): void {
+  if (studioWindowVfsFactory) {
+    if (studioWindowVfsInstalledRevision !== studioWindowVfsRevision) {
+      installWindowVfsBackend(studioWindowVfsFactory());
+      studioWindowVfsInstalledRevision = studioWindowVfsRevision;
+      emitStudioHostLog({
+        source: 'studio-wasm',
+        code: 'host_vfs_provider_ready',
+        level: 'system',
+      });
+    }
+    return;
+  }
+  if (hasWindowVfsBindings()) {
+    return;
+  }
+  installWindowVfsBackend(createInMemoryWindowVfsBackend());
+  studioWindowVfsInstalledRevision = studioWindowVfsRevision;
+  emitStudioHostLog({
+    source: 'studio-wasm',
+    code: 'host_vfs_fallback_ready',
+    level: 'system',
+  });
+}
+
+export function setStudioWindowVfsBackendFactory(factory: StudioWindowVfsFactory | null): void {
+  studioWindowVfsFactory = factory;
+  studioWindowVfsRevision += 1;
 }
 
 // ── Ext-bridge JS globals (mirrors playground/src/wasm/vo.ts) ─────────────────
@@ -306,6 +433,19 @@ function buildStandaloneImports(): WebAssembly.Imports {
         if (handle !== undefined) { clearInterval(handle); standaloneIntervals.delete(id); }
         standaloneRunningIntervalHandlers.delete(id);
       },
+      host_has_host_capability(ptr: number, len: number): number {
+        const name = readWasmString(ref, ptr, len);
+        const result = name === 'external_island_host' && standaloneGuiEventDispatcher ? 1 : 0;
+        if (name === 'external_island_host') {
+          emitStudioHostLog({
+            source: 'studio-extbridge',
+            code: 'host_capability_query',
+            level: result === 1 ? 'success' : 'error',
+            text: `name=${name} dispatcher=${standaloneGuiEventDispatcher ? 'set' : 'null'} result=${result}`,
+          });
+        }
+        return result;
+      },
       host_navigate(ptr: number, len: number): void {
         const path = readWasmString(ref, ptr, len);
         if (window.location.pathname !== path) {
@@ -483,6 +623,16 @@ function decodeWaitForEventReplayOutput(resumeData: Uint8Array): Uint8Array {
   return output;
 }
 
+function throwVoCallExtFailure(message: string, cause?: unknown): never {
+  if (cause !== undefined) {
+    console.error(message, cause);
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    throw new Error(`${message}: ${detail}`);
+  }
+  console.error(message);
+  throw new Error(message);
+}
+
 function installExtBridgeGlobals(): void {
   if (extBridgeInstalled) return;
   extBridgeInstalled = true;
@@ -493,24 +643,67 @@ function installExtBridgeGlobals(): void {
     jsGlueUrl?: string,
   ): Promise<void> => {
     unloadExtModule(key);
+    emitStudioHostLog({
+      source: 'studio-extbridge',
+      code: 'ext_module_setup_begin',
+      level: 'system',
+      text: `key=${key} bindgen=${jsGlueUrl ? 'yes' : 'no'} bytes=${bytes.byteLength}`,
+    });
     if (jsGlueUrl) {
-      const resp = await fetch(jsGlueUrl, { cache: 'no-store' });
-      if (!resp.ok) throw new Error(`Failed to fetch JS glue: HTTP ${resp.status}`);
-      const jsText = await resp.text();
-      const blob = new Blob([jsText], { type: 'application/javascript' });
-      const blobUrl = URL.createObjectURL(blob);
+      const { importUrl, revoke } = await resolveJsGlueImportUrl(jsGlueUrl);
       try {
-        const glue = await import(/* @vite-ignore */ blobUrl) as BindgenModule;
+        emitStudioHostLog({
+          source: 'studio-extbridge',
+          code: 'ext_module_glue_import_begin',
+          level: 'system',
+          text: `key=${key}`,
+        });
+        const glue = await import(/* @vite-ignore */ importUrl) as BindgenModule;
+        emitStudioHostLog({
+          source: 'studio-extbridge',
+          code: 'ext_module_glue_import_ready',
+          level: 'system',
+          text: `key=${key}`,
+        });
+        emitStudioHostLog({
+          source: 'studio-extbridge',
+          code: 'ext_module_bindgen_instantiate_begin',
+          level: 'system',
+          text: `key=${key}`,
+        });
         await (glue.default as (opts: { module_or_path: Uint8Array }) => Promise<void>)({
           module_or_path: bytes.slice(),
         });
+        emitStudioHostLog({
+          source: 'studio-extbridge',
+          code: 'ext_module_bindgen_instantiate_ready',
+          level: 'system',
+          text: `key=${key}`,
+        });
         if (typeof glue.__voInit === 'function') {
+          emitStudioHostLog({
+            source: 'studio-extbridge',
+            code: 'ext_module_async_init_begin',
+            level: 'system',
+            text: `key=${key}`,
+          });
           await (glue.__voInit as () => Promise<void>)();
+          emitStudioHostLog({
+            source: 'studio-extbridge',
+            code: 'ext_module_async_init_ready',
+            level: 'system',
+            text: `key=${key}`,
+          });
         }
         extBindgenModules.set(key, glue);
-        console.log('[voSetupExtModule] bindgen module ready:', key);
+        emitStudioHostLog({
+          source: 'studio-extbridge',
+          code: 'ext_module_setup_ready',
+          level: 'system',
+          text: `key=${key} mode=bindgen`,
+        });
       } finally {
-        URL.revokeObjectURL(blobUrl);
+        revoke();
       }
     } else {
       const imports = buildStandaloneImports();
@@ -519,6 +712,12 @@ function installExtBridgeGlobals(): void {
       const ref = (imports as { __ref?: { instance: WebAssembly.Instance | null } }).__ref;
       if (ref) ref.instance = instance;
       extInstances.set(key, instance);
+      emitStudioHostLog({
+        source: 'studio-extbridge',
+        code: 'ext_module_setup_ready',
+        level: 'system',
+        text: `key=${key} mode=standalone`,
+      });
     }
   };
 
@@ -547,6 +746,7 @@ function installExtBridgeGlobals(): void {
     externName: string,
     input: Uint8Array,
   ): Uint8Array => {
+    const traceExtern = shouldTraceStandaloneExtern(externName);
     // Try wasm-bindgen modules first
     let bindgenModule: Record<string, unknown> | undefined;
     let bindgenKey = '';
@@ -558,21 +758,29 @@ function installExtBridgeGlobals(): void {
     }
     if (bindgenModule) {
       const funcName = externName.substring(bindgenKey.length + 1);
+      if (traceExtern) {
+        emitStudioHostLog({
+          source: 'studio-extbridge',
+          code: 'ext_call_bindgen_match',
+          level: 'system',
+          text: `extern=${externName} key=${bindgenKey} func=${funcName}`,
+        });
+      }
       if (typeof bindgenModule[funcName] === 'function') {
         let result: unknown;
         try {
           result = (bindgenModule[funcName] as (i: Uint8Array) => unknown)(input);
         } catch (e) {
-          console.error('[voCallExt] Exception calling:', externName, e);
-          return new Uint8Array(0);
+          throwVoCallExtFailure(`[voCallExt] Exception calling ${externName}`, e);
         }
-        if (result instanceof Promise) { result.catch(() => {}); return new Uint8Array(0); }
+        if (result instanceof Promise) {
+          throwVoCallExtFailure(`[voCallExt] Async bindgen export is not supported for ${externName}`);
+        }
         if (result instanceof Uint8Array) return result;
         if (typeof result === 'string') return new TextEncoder().encode(result);
-        return new Uint8Array(0);
+        throwVoCallExtFailure(`[voCallExt] Unsupported bindgen return for ${externName}: ${typeof result}`);
       }
-      console.error('[voCallExt] Bindgen export not found:', funcName, 'in module:', bindgenKey);
-      return new Uint8Array(0);
+      throwVoCallExtFailure(`[voCallExt] Bindgen export not found: ${funcName} in module: ${bindgenKey}`);
     }
 
     // Fall back to standalone C-ABI modules
@@ -585,32 +793,60 @@ function installExtBridgeGlobals(): void {
       }
     }
     if (!instance) {
-      console.error('[voCallExt] No loaded module for extern:', externName);
-      return new Uint8Array(0);
+      emitStudioHostLog({
+        source: 'studio-extbridge',
+        code: 'ext_call_no_module',
+        level: 'error',
+        text: `extern=${externName} standalone=[${Array.from(extInstances.keys()).join(',')}] bindgen=[${Array.from(extBindgenModules.keys()).join(',')}]`,
+      });
+      throwVoCallExtFailure(`[voCallExt] No loaded module for extern: ${externName}`);
     }
     const exp = instance.exports as Record<string, unknown>;
     const funcName = externName.substring(matchedKey.length + 1);
+    if (traceExtern) {
+      emitStudioHostLog({
+        source: 'studio-extbridge',
+        code: 'ext_call_standalone_match',
+        level: 'system',
+        text: `extern=${externName} key=${matchedKey} func=${funcName}`,
+      });
+    }
     let extFunc: ((ptr: number, len: number, outLen: number) => number) | undefined;
     if (typeof exp[funcName] === 'function') {
       extFunc = exp[funcName] as typeof extFunc;
     } else if (typeof exp[externName] === 'function') {
       extFunc = exp[externName] as typeof extFunc;
     }
-    if (!extFunc) { console.error('[voCallExt] Export not found:', externName); return new Uint8Array(0); }
+    if (!extFunc) {
+      throwVoCallExtFailure(`[voCallExt] Export not found: ${externName}`);
+    }
     const allocFn = exp.vo_alloc as ((size: number) => number) | undefined;
     const deallocFn = exp.vo_dealloc as ((ptr: number, size: number) => void) | undefined;
-    if (!allocFn || !deallocFn) { console.error('[voCallExt] Alloc not found:', matchedKey); return new Uint8Array(0); }
+    if (!allocFn || !deallocFn) {
+      throwVoCallExtFailure(`[voCallExt] Alloc not found: ${matchedKey}`);
+    }
     const mem = exp.memory as WebAssembly.Memory;
     const inputPtr = allocFn(input.length);
     new Uint8Array(mem.buffer).set(input, inputPtr);
     const outLenPtr = allocFn(4);
     const outPtr = extFunc(inputPtr, input.length, outLenPtr);
     deallocFn(inputPtr, input.length);
-    if (outPtr === 0) { deallocFn(outLenPtr, 4); return new Uint8Array(0); }
+    if (outPtr === 0) {
+      deallocFn(outLenPtr, 4);
+      throwVoCallExtFailure(`[voCallExt] Export returned null output pointer: ${externName}`);
+    }
     const outLen = new Uint32Array(mem.buffer, outLenPtr, 1)[0];
     const result = new Uint8Array(mem.buffer, outPtr, outLen).slice();
     deallocFn(outPtr, outLen);
     deallocFn(outLenPtr, 4);
+    if (traceExtern) {
+      emitStudioHostLog({
+        source: 'studio-extbridge',
+        code: 'ext_call_result',
+        level: 'system',
+        text: `extern=${externName} key=${matchedKey} func=${funcName} outLen=${result.length} firstTag=${result.length > 0 ? result[0] : -1}`,
+      });
+    }
     return result;
   };
 
@@ -628,14 +864,15 @@ function installExtBridgeGlobals(): void {
   };
 }
 
-// ── Loader ────────────────────────────────────────────────────────────────────
+ // ── Loader ────────────────────────────────────────────────────────────────────
 
-let instance: StudioWasm | null = null;
-let initPromise: Promise<StudioWasm> | null = null;
+ let instance: StudioWasm | null = null;
+ let initPromise: Promise<StudioWasm> | null = null;
+ let loadGeneration = 0;
 
-function requireStudioExport<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`studio/wasm missing export: ${name}`);
+ function requireStudioExport<T>(value: T | undefined, name: string): T {
+   if (value === undefined) {
+     throw new Error(`studio/wasm missing export: ${name}`);
   }
   return value;
 }
@@ -647,6 +884,7 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
   }
   return {
     runGuiFromBytecode: requireStudioExport(mod.runGuiFromBytecode as StudioWasm['runGuiFromBytecode'], 'runGuiFromBytecode'),
+    startGuiFromBytecode: requireStudioExport(mod.startGuiFromBytecode as StudioWasm['startGuiFromBytecode'], 'startGuiFromBytecode'),
     runGui: requireStudioExport(mod.runGui, 'runGui'),
     runGuiEntry: requireStudioExport(mod.runGuiEntry, 'runGuiEntry'),
     sendGuiEvent: requireStudioExport(mod.sendGuiEvent, 'sendGuiEvent'),
@@ -672,20 +910,97 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
 }
 
 export async function loadStudioWasm(): Promise<StudioWasm> {
+  ensureStudioWindowVfsBindings();
   if (instance) return instance;
   if (initPromise) return initPromise;
+  const generation = loadGeneration;
   initPromise = (async () => {
     try {
-      const jsPath = withBuildId(['', 'wasm', 'vo_studio_wasm.js'].join('/'));
+      emitStudioHostLog({
+        source: 'studio-wasm',
+        code: 'load_begin',
+        level: 'system',
+      });
+      const assetBuildId = await getStudioAssetBuildId();
+      emitStudioHostLog({
+        source: 'studio-wasm',
+        code: 'load_build_id_ready',
+        level: 'system',
+        text: `buildId=${assetBuildId}`,
+      });
+      const jsPath = withBuildId(['', 'wasm', 'vo_studio_wasm.js'].join('/'), assetBuildId);
+      emitStudioHostLog({
+        source: 'studio-wasm',
+        code: 'js_import_begin',
+        level: 'system',
+        text: `path=${jsPath}`,
+      });
       const mod = await (Function('p', 'return import(p)')(jsPath)) as RawStudioWasmModule;
-      await mod.default(withBuildId('/wasm/vo_studio_wasm_bg.wasm'));
+      emitStudioHostLog({
+        source: 'studio-wasm',
+        code: 'js_import_ready',
+        level: 'system',
+      });
+      const wasmPath = withBuildId('/wasm/vo_studio_wasm_bg.wasm', assetBuildId);
+      emitStudioHostLog({
+        source: 'studio-wasm',
+        code: 'wasm_init_begin',
+        level: 'system',
+        text: `path=${wasmPath}`,
+      });
+      await mod.default(wasmPath);
+      emitStudioHostLog({
+        source: 'studio-wasm',
+        code: 'wasm_init_ready',
+        level: 'system',
+      });
       const normalized = normalizeStudioWasmModule(mod);
-      assertStudioBuildMatch(normalized.getBuildId());
+      const expectedBuildId = import.meta.env.DEV ? assetBuildId : bundledStudioBuildId;
+      const expectedSource = import.meta.env.DEV ? 'asset manifest' : 'frontend';
+      assertStudioBuildMatch(expectedBuildId, normalized.getBuildId(), expectedSource);
+      emitStudioHostLog({
+        source: 'studio-wasm',
+        code: 'init_vfs_begin',
+        level: 'system',
+      });
       await normalized.initVFS();
+      emitStudioHostLog({
+        source: 'studio-wasm',
+        code: 'init_vfs_ready',
+        level: 'system',
+      });
       installExtBridgeGlobals();
+      emitStudioHostLog({
+        source: 'studio-wasm',
+        code: 'ext_bridge_ready',
+        level: 'system',
+      });
+      if (generation !== loadGeneration) {
+        emitStudioHostLog({
+          source: 'studio-wasm',
+          code: 'load_superseded',
+          level: 'system',
+        });
+        return initPromise ?? loadStudioWasm();
+      }
       instance = normalized;
+      emitStudioHostLog({
+        source: 'studio-wasm',
+        code: 'load_ready',
+        level: 'system',
+      });
       return instance;
     } catch (error) {
+      if (generation !== loadGeneration) {
+        return initPromise ?? loadStudioWasm();
+      }
+      emitStudioHostLog({
+        source: 'studio-wasm',
+        code: 'load_failed',
+        level: 'error',
+        text: error instanceof Error ? (error.stack ?? error.message) : String(error),
+      });
+      studioAssetBuildIdPromise = null;
       initPromise = null;
       instance = null;
       throw error;
@@ -695,7 +1010,9 @@ export async function loadStudioWasm(): Promise<StudioWasm> {
 }
 
 export function resetStudioWasmInstance(): void {
+  loadGeneration += 1;
   unloadAllExtModules();
+  studioAssetBuildIdPromise = null;
   instance = null;
   initPromise = null;
 }

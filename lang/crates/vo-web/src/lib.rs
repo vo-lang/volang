@@ -84,6 +84,7 @@ pub use host_log::{emit_host_log, HostLogRecord};
 pub use module_install::{
     collect_installed_vfs_module_specs, collect_vfs_locked_module_closure, ensure_vfs_deps,
     ensure_vfs_deps_from_fs, install_module_to_vfs, resolve_and_install_module,
+    resolve_and_install_module_with_constraint,
 };
 
 // ── Init ────────────────────────────────────────────────────────────────────

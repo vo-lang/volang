@@ -9,6 +9,7 @@ export interface GuiRuntimeState {
   moduleBytes: Uint8Array | null;
   renderBytes: Uint8Array | null;
   framework: FrameworkContract | null;
+  providerFrameworks: FrameworkContract[];
   sessionId: number | null;
   externalWidgetHandlerId: number | null;
 }
@@ -29,6 +30,7 @@ export const IDLE_GUI: GuiRuntimeState = {
   moduleBytes: null,
   renderBytes: null,
   framework: null,
+  providerFrameworks: [],
   sessionId: null,
   externalWidgetHandlerId: null,
 };

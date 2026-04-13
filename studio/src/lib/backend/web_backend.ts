@@ -16,6 +16,7 @@ import type {
   HttpResult,
   InstallEvent,
   InstalledModule,
+  LaunchSpec,
   ProcEvent,
   ReadManyResult,
   RendererBridgeVfsSnapshot,
@@ -24,15 +25,24 @@ import type {
   SessionInfo,
   StreamHandle,
 } from '../types';
+import { buildShareInfo } from '../session_share';
 import { loadStudioWasm, setStandaloneGuiEventDispatcher, type StudioWasm } from '../studio_wasm';
 import { executeGuiFromCompileOutput, type GuiCompileOutput } from '../gui/gui_pipeline';
 import { consolePush } from '../../stores/console';
 import { formatDurationMs, pushUiConsole, renderStudioLogRecord, type StudioLogRecord } from './gui_console';
 import { makeErrorStreamHandle, makeResolvedStreamHandle, makeStreamHandleFromProducer } from './stream_handle';
+import { installWindowVfsBackend } from '../window_vfs_bindings';
 
 const WORKSPACE_ROOT = '/workspace';
 const ROOT = '/';
+const SOURCE_CACHE_ROOT = `${WORKSPACE_ROOT}/.studio-sources`;
 const URL_SESSION_ROOT = `${WORKSPACE_ROOT}/.studio-sessions/url`;
+const GITHUB_SOURCE_ROOT = `${SOURCE_CACHE_ROOT}/github`;
+const GITHUB_SESSION_ROOT = `${WORKSPACE_ROOT}/.studio-sessions/github`;
+const GITHUB_API_ROOT = 'https://api.github.com';
+const GITHUB_BLOB_FETCH_CONCURRENCY = 8;
+const DISPLAY_PULSE_DELAY_MS = 0xFFFFFFFF;
+const MISSING_INITIAL_GUI_RENDER = 'guest app did not emit a render';
 const defaultWorkspaceFiles = new Map<string, string>([
   [`${WORKSPACE_ROOT}/README.md`, '# Studio\n\nThe web backend is running in an in-memory workspace.\n'],
   [`${WORKSPACE_ROOT}/main.vo`, 'package main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println("Studio rewrite bootstrap")\n}\n'],
@@ -48,6 +58,52 @@ const textEncoder = new TextEncoder();
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 let studioWasmPromise: Promise<StudioWasm> | null = null;
 let vfsBindingsInstalled = false;
+
+interface GitHubRepoInput {
+  owner: string;
+  repo: string;
+  ref: string | null;
+  commit: string | null;
+  subdir: string | null;
+}
+
+interface GitHubRepoMetadata {
+  default_branch?: string;
+  html_url?: string;
+}
+
+interface GitHubCommitMetadata {
+  sha?: string;
+}
+
+interface GitHubTreeItem {
+  path?: string;
+  type?: string;
+  sha?: string;
+  mode?: string;
+}
+
+interface GitHubTreeMetadata {
+  tree?: GitHubTreeItem[];
+  truncated?: boolean;
+}
+
+interface GitHubBlobMetadata {
+  content?: string;
+  encoding?: string;
+}
+
+interface ResolvedGitHubSource {
+  owner: string;
+  repo: string;
+  requestedRef: string | null;
+  resolvedCommit: string;
+  subdir: string | null;
+  htmlUrl: string;
+  sourceCacheRoot: string;
+  sessionRoot: string;
+  projectRoot: string;
+}
 
 function displayPath(path: string): string {
   const normalized = normalizePath(path);
@@ -91,6 +147,118 @@ export class WebBackend implements Backend {
   private guiOperationChain: Promise<void> = Promise.resolve();
   private guiSessionId = 0;
   private guiFatalError: Error | null = null;
+  private guiHostTimers = new Map<string, { kind: 'timeout' | 'raf'; id: number }>();
+  private guiFirstRenderWaiter: { sessionId: number; resolve: (bytes: Uint8Array) => void; reject: (error: unknown) => void } | null = null;
+
+  private clearGuiHostTimers(): void {
+    for (const handle of this.guiHostTimers.values()) {
+      if (handle.kind === 'raf') {
+        cancelAnimationFrame(handle.id);
+      } else {
+        clearTimeout(handle.id);
+      }
+    }
+    this.guiHostTimers.clear();
+  }
+
+  private rejectGuiFirstRenderWaiter(error: unknown): void {
+    if (!this.guiFirstRenderWaiter) {
+      return;
+    }
+    const waiter = this.guiFirstRenderWaiter;
+    this.guiFirstRenderWaiter = null;
+    waiter.reject(error);
+  }
+
+  private createGuiFirstRenderWaiter(sessionId: number): Promise<Uint8Array> {
+    this.rejectGuiFirstRenderWaiter(new Error('GUI session superseded'));
+    return new Promise<Uint8Array>((resolve, reject) => {
+      this.guiFirstRenderWaiter = { sessionId, resolve, reject };
+    });
+  }
+
+  private resolveGuiFirstRenderWaiter(sessionId: number, bytes: Uint8Array): void {
+    if (bytes.length === 0 || !this.guiFirstRenderWaiter || this.guiFirstRenderWaiter.sessionId !== sessionId) {
+      return;
+    }
+    const waiter = this.guiFirstRenderWaiter;
+    this.guiFirstRenderWaiter = null;
+    waiter.resolve(bytes);
+  }
+
+  private drainPendingGuiHostEvents(wasm: StudioWasm, sessionId = this.guiSessionId): void {
+    while (true) {
+      const event = wasm.pollPendingHostEvent();
+      if (!event) {
+        return;
+      }
+      this.scheduleGuiHostEvent(event.token, event.delayMs, sessionId);
+    }
+  }
+
+  private scheduleGuiHostEvent(token: string, delayMs: number, sessionId: number): void {
+    if (sessionId !== this.guiSessionId || this.guiFatalError) {
+      return;
+    }
+    const existing = this.guiHostTimers.get(token);
+    if (existing) {
+      if (existing.kind === 'raf') {
+        cancelAnimationFrame(existing.id);
+      } else {
+        clearTimeout(existing.id);
+      }
+    }
+    const fire = (): void => {
+      this.guiHostTimers.delete(token);
+      void this.runGuiEventSerialized(
+        (wasm) => {
+          wasm.wakeHostEvent(token);
+          this.drainPendingGuiHostEvents(wasm, sessionId);
+          const renderBytes = this.guiFirstRenderWaiter?.sessionId === sessionId
+            ? wasm.pollGuiRender()
+            : new Uint8Array(0);
+          if (
+            renderBytes.length === 0
+            && this.guiFirstRenderWaiter?.sessionId === sessionId
+            && this.guiHostTimers.size === 0
+          ) {
+            throw new Error(MISSING_INITIAL_GUI_RENDER);
+          }
+          return renderBytes;
+        },
+        new Uint8Array(0),
+        sessionId,
+      ).then((renderBytes) => {
+        this.resolveGuiFirstRenderWaiter(sessionId, renderBytes);
+      }).catch(() => {});
+    };
+    const handle = delayMs === DISPLAY_PULSE_DELAY_MS
+      ? { kind: 'raf' as const, id: requestAnimationFrame(() => fire()) }
+      : { kind: 'timeout' as const, id: window.setTimeout(fire, Math.max(0, delayMs)) };
+    this.guiHostTimers.set(token, handle);
+  }
+
+  private prepareFirstGuiRender(
+    wasm: StudioWasm,
+    initialRender: Uint8Array,
+    sessionId: number,
+  ): { renderBytes: Uint8Array; waitForRender: Promise<Uint8Array> | null } {
+    if (initialRender.length > 0) {
+      return { renderBytes: initialRender, waitForRender: null };
+    }
+    this.drainPendingGuiHostEvents(wasm, sessionId);
+    const bufferedRender = wasm.pollGuiRender();
+    if (bufferedRender.length > 0) {
+      return { renderBytes: bufferedRender, waitForRender: null };
+    }
+    if (this.guiHostTimers.size === 0) {
+      throw new Error(MISSING_INITIAL_GUI_RENDER);
+    }
+    return {
+      renderBytes: new Uint8Array(0),
+      waitForRender: this.createGuiFirstRenderWaiter(sessionId),
+    };
+  }
 
   private installStandaloneGuiDispatcher(sessionId: number): void {
     setStandaloneGuiEventDispatcher(async (handlerId, payload) => {
@@ -131,6 +299,8 @@ export class WebBackend implements Backend {
           return staleValue;
         }
         this.guiFatalError = error instanceof Error ? error : new Error(String(error));
+        this.clearGuiHostTimers();
+        this.rejectGuiFirstRenderWaiter(this.guiFatalError);
         setStandaloneGuiEventDispatcher(null);
         throw this.guiFatalError;
       }
@@ -157,7 +327,11 @@ export class WebBackend implements Backend {
     sessionId = this.guiSessionId,
   ): Promise<Uint8Array> {
     return this.runGuiEventSerialized(
-      (wasm) => wasm.sendGuiEvent(handlerId, payload),
+      (wasm) => {
+        const renderBytes = wasm.sendGuiEvent(handlerId, payload);
+        this.drainPendingGuiHostEvents(wasm, sessionId);
+        return renderBytes;
+      },
       new Uint8Array(0),
       sessionId,
     );
@@ -171,6 +345,7 @@ export class WebBackend implements Backend {
     await this.runGuiEventSerialized<void>(
       (wasm) => {
         wasm.sendGuiEventAsync(handlerId, payload);
+        this.drainPendingGuiHostEvents(wasm, sessionId);
       },
       undefined,
       sessionId,
@@ -181,46 +356,30 @@ export class WebBackend implements Backend {
     const params = new URLSearchParams(window.location.search);
     const rawMode = params.get('mode');
     const mode: import('../types').StudioMode = rawMode === 'runner' ? 'runner' : 'dev';
-    const initialUrl = mode === 'runner'
-      ? params.get('url')
-      : params.get('project') ?? params.get('url');
-    const launchUrl = window.location.href.includes('?') ? window.location.href : null;
+    const proj = params.get('proj') ?? null;
+    const launch: LaunchSpec | null = proj != null || rawMode != null
+      ? { proj, mode }
+      : null;
     return {
       workspaceRoot: WORKSPACE_ROOT,
-      launchUrl,
-      initialPath: null,
-      initialUrl,
-      initialRunTarget: null,
+      launch,
       mode,
       platform: 'wasm',
     };
   }
 
-  async openWorkspaceSession(): Promise<SessionInfo> {
-    if (!directories.has(WORKSPACE_ROOT)) {
-      resetWorkspaceState();
+  async openSession(spec: LaunchSpec): Promise<SessionInfo> {
+    if (spec.proj == null) {
+      return openWorkspaceSession();
     }
-    return buildSessionInfo(WORKSPACE_ROOT, 'workspace');
-  }
-
-  async openRunSession(path: string): Promise<SessionInfo> {
-    const normalized = normalizePath(path);
-    if (normalized.endsWith('.vo') && hasVfsFile(normalized)) {
-      const parent = normalized.substring(0, normalized.lastIndexOf('/')) || WORKSPACE_ROOT;
-      return {
-        root: parent,
-        origin: 'workspace',
-        projectMode: 'single-file',
-        entryPath: normalized,
-        singleFileRun: false,
-      };
+    if (spec.proj.startsWith('/')) {
+      return openPathSession(spec.proj);
     }
-    return buildSessionInfo(normalized, 'workspace');
-  }
-
-  async openUrlSession(url: string): Promise<SessionInfo> {
-    const importedRoot = await importProjectFromUrl(url);
-    return buildSessionInfo(importedRoot, 'url');
+    const githubInput = parseGitHubRepoUrl(spec.proj);
+    if (githubInput) {
+      return openGitHubRepoSession(githubInput);
+    }
+    throw new Error(`Unsupported project URL: ${spec.proj}`);
   }
 
   async discoverWorkspaceProjects(): Promise<DiscoveredProject[]> {
@@ -452,10 +611,12 @@ export class WebBackend implements Backend {
     const sessionId = this.guiSessionId + 1;
     this.guiSessionId = sessionId;
     this.guiFatalError = null;
+    this.clearGuiHostTimers();
+    this.rejectGuiFirstRenderWaiter(new Error('GUI session superseded'));
     setStandaloneGuiEventDispatcher(null);
-    return this.serializeGuiOperation(async () => {
+    const totalStart = performance.now();
+    const startup = await this.serializeGuiOperation(async () => {
       consolePush('system', `Opening GUI ${targetLabel}`);
-      const totalStart = performance.now();
       const wasm = await getStudioWasm();
       this.assertGuiSessionCurrent(sessionId);
       consolePush('system', `Preparing dependencies for ${targetLabel}...`);
@@ -470,20 +631,42 @@ export class WebBackend implements Backend {
       const compileResult = wasm.compileGui(normalized);
       const compileDurationMs = performance.now() - compileStart;
       console.info(`[studio-gui] compileGui ${normalized} ${Math.round(compileDurationMs)}ms`);
+      const wasmExtensionLabels = compileResult.wasmExtensions.map((ext) => `${ext.name}=>${ext.moduleKey ?? ext.name}`);
+      const wasmExtensionSummary = wasmExtensionLabels.length > 0 ? wasmExtensionLabels.join(', ') : 'none';
+      console.info(`[studio-gui] wasmExtensions ${normalized} count=${wasmExtensionLabels.length} names=${wasmExtensionSummary}`);
+      consolePush(
+        'system',
+        wasmExtensionLabels.length > 0
+          ? `GUI compile discovered WASM extensions: ${wasmExtensionSummary}`
+          : 'GUI compile discovered no WASM extensions',
+      );
       this.assertGuiSessionCurrent(sessionId);
       const compiled: GuiCompileOutput = {
         bytecode: compileResult.bytecode,
         entryPath: compileResult.entryPath,
         framework: compileResult.framework,
-        wasmExtensions: [],
+        providerFrameworks: compileResult.providerFrameworks,
+        wasmExtensions: compileResult.wasmExtensions,
       };
       const assertCurrent = (id: number) => { this.assertGuiSessionCurrent(id); };
       const output = await executeGuiFromCompileOutput(compiled, this, wasm, sessionId, assertCurrent);
-      const totalDurationMs = performance.now() - totalStart;
-      consolePush('success', `Opened GUI ${targetLabel} in ${formatDurationMs(totalDurationMs)}`);
-      console.info(`[studio-gui] total open ${normalized} ${Math.round(totalDurationMs)}ms`);
-      return output;
+      this.assertGuiSessionCurrent(sessionId);
+      const firstRender = this.prepareFirstGuiRender(wasm, output.renderBytes, sessionId);
+      return {
+        output,
+        renderBytes: firstRender.renderBytes,
+        waitForRender: firstRender.waitForRender,
+      };
     });
+    const renderBytes = startup.waitForRender ? await startup.waitForRender : startup.renderBytes;
+    this.assertGuiSessionCurrent(sessionId);
+    const totalDurationMs = performance.now() - totalStart;
+    consolePush('success', `Opened GUI ${targetLabel} in ${formatDurationMs(totalDurationMs)}`);
+    console.info(`[studio-gui] total open ${normalized} ${Math.round(totalDurationMs)}ms`);
+    return {
+      ...startup.output,
+      renderBytes,
+    };
   }
 
   async sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
@@ -498,8 +681,16 @@ export class WebBackend implements Backend {
     await this.runGuiEventSerialized<void>(
       (wasm) => {
         wasm.pushIslandData(data);
+        this.drainPendingGuiHostEvents(wasm);
       },
       undefined,
+    );
+  }
+
+  async pollIslandTransport(): Promise<Uint8Array> {
+    return this.runGuiEventSerialized(
+      (wasm) => wasm.pollIslandData(),
+      new Uint8Array(0),
     );
   }
 
@@ -513,6 +704,8 @@ export class WebBackend implements Backend {
   async stopGui(): Promise<void> {
     this.guiSessionId += 1;
     this.guiFatalError = null;
+    this.clearGuiHostTimers();
+    this.rejectGuiFirstRenderWaiter(new Error('GUI session superseded'));
     setStandaloneGuiEventDispatcher(null);
     await this.serializeGuiOperation(async () => {
       const wasm = await getStudioWasm();
@@ -573,7 +766,7 @@ export class WebBackend implements Backend {
   }
 
   async gitExec(_op: GitOp): Promise<GitResult> {
-    throw new Error('git operations are not available in WASM mode');
+    return { ok: false, output: 'git is not available in WASM mode' };
   }
 }
 
@@ -614,41 +807,30 @@ function ensureVfsBindings(): void {
   if (vfsBindingsInstalled) {
     return;
   }
+  installWindowVfsBackend({
+    openFile: vfsOpenFile,
+    read: vfsRead,
+    write: vfsWrite,
+    readAt: vfsReadAt,
+    writeAt: vfsWriteAt,
+    seek: vfsSeek,
+    close: vfsClose,
+    sync: vfsSync,
+    fstat: vfsFstat,
+    ftruncate: vfsFtruncate,
+    mkdir: vfsMkdir,
+    mkdirAll: vfsMkdirAll,
+    remove: vfsRemove,
+    removeAll: vfsRemoveAll,
+    rename: vfsRename,
+    stat: vfsStat,
+    readDir: vfsReadDir,
+    chmod: vfsChmod,
+    truncate: vfsTruncate,
+    readFile: vfsReadFile,
+    writeFile: vfsWriteFile,
+  });
   vfsBindingsInstalled = true;
-  const windowWithVfs = window as unknown as Record<string, unknown>;
-  windowWithVfs._vfsOpenFile = (path: string, flags: number | bigint, mode: number | bigint) =>
-    vfsOpenFile(path, toNum(flags), toNum(mode));
-  windowWithVfs._vfsRead = (fd: number | bigint, length: number | bigint) =>
-    vfsRead(toNum(fd), toNum(length));
-  windowWithVfs._vfsWrite = (fd: number | bigint, data: Uint8Array) =>
-    vfsWrite(toNum(fd), data);
-  windowWithVfs._vfsReadAt = (fd: number | bigint, length: number | bigint, offset: number | bigint) =>
-    vfsReadAt(toNum(fd), toNum(length), toNum(offset));
-  windowWithVfs._vfsWriteAt = (fd: number | bigint, data: Uint8Array, offset: number | bigint) =>
-    vfsWriteAt(toNum(fd), data, toNum(offset));
-  windowWithVfs._vfsSeek = (fd: number | bigint, offset: number | bigint, whence: number | bigint) =>
-    vfsSeek(toNum(fd), toNum(offset), toNum(whence));
-  windowWithVfs._vfsClose = (fd: number | bigint) => vfsClose(toNum(fd));
-  windowWithVfs._vfsSync = (fd: number | bigint) => vfsSync(toNum(fd));
-  windowWithVfs._vfsFstat = (fd: number | bigint) => vfsFstat(toNum(fd));
-  windowWithVfs._vfsFtruncate = (fd: number | bigint, size: number | bigint) =>
-    vfsFtruncate(toNum(fd), toNum(size));
-  windowWithVfs._vfsMkdir = (path: string, mode: number | bigint) => vfsMkdir(path, toNum(mode));
-  windowWithVfs._vfsMkdirAll = (path: string, mode: number | bigint) => vfsMkdirAll(path, toNum(mode));
-  windowWithVfs._vfsRemove = (path: string) => vfsRemove(path);
-  windowWithVfs._vfsRemoveAll = (path: string) => vfsRemoveAll(path);
-  windowWithVfs._vfsRename = (oldPath: string, newPath: string) => vfsRename(oldPath, newPath);
-  windowWithVfs._vfsStat = (path: string) => vfsStat(path);
-  windowWithVfs._vfsReadDir = (path: string) => vfsReadDir(path);
-  windowWithVfs._vfsChmod = (path: string, mode: number | bigint) => vfsChmod(path, toNum(mode));
-  windowWithVfs._vfsTruncate = (path: string, size: number | bigint) => vfsTruncate(path, toNum(size));
-  windowWithVfs._vfsReadFile = (path: string) => vfsReadFile(path);
-  windowWithVfs._vfsWriteFile = (path: string, data: Uint8Array, mode: number | bigint) =>
-    vfsWriteFile(path, data, toNum(mode));
-}
-
-function toNum(value: number | bigint): number {
-  return typeof value === 'bigint' ? Number(value) : value;
 }
 
 function readTextFile(path: string): string | null {
@@ -1094,15 +1276,18 @@ function listDirEntries(path: string): FsEntry[] {
   return sortEntries([...entries.values()]);
 }
 
-function buildSessionInfo(root: string, origin: SessionInfo['origin']): SessionInfo {
+function buildSessionInfo(root: string, origin: SessionInfo['origin'], source: SessionInfo['source']): SessionInfo {
   const normalizedRoot = normalizePath(root);
   const entryPath = detectEntryPath(normalizedRoot);
+  const share = buildShareInfo({ root: normalizedRoot, entryPath, source });
   return {
     root: normalizedRoot,
     origin,
     projectMode: hasVfsFile(`${normalizedRoot}/vo.mod`) ? 'module' : 'single-file',
     entryPath,
     singleFileRun: false,
+    source,
+    share,
   };
 }
 
@@ -1115,19 +1300,266 @@ function detectEntryPath(root: string): string | null {
   return first ?? null;
 }
 
-async function importProjectFromUrl(url: string): Promise<string> {
-  const response = await fetch(url);
+function openWorkspaceSession(): SessionInfo {
+  if (!directories.has(WORKSPACE_ROOT)) {
+    resetWorkspaceState();
+  }
+  return buildSessionInfo(WORKSPACE_ROOT, 'workspace', { kind: 'workspace' });
+}
+
+function openPathSession(path: string): SessionInfo {
+  const normalized = normalizePath(path);
+  if (normalized.endsWith('.vo') && hasVfsFile(normalized)) {
+    const parent = normalized.substring(0, normalized.lastIndexOf('/')) || WORKSPACE_ROOT;
+    const source: SessionInfo['source'] = { kind: 'path', path: normalized };
+    return {
+      root: parent,
+      origin: 'workspace',
+      projectMode: 'single-file',
+      entryPath: normalized,
+      singleFileRun: false,
+      source,
+      share: buildShareInfo({ root: parent, entryPath: normalized, source }),
+    };
+  }
+  return buildSessionInfo(normalized, 'workspace', { kind: 'path', path: normalized });
+}
+
+function parseGitHubRepoUrl(value: string): GitHubRepoInput | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(value, window.location.href);
+  } catch {
+    return null;
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (host !== 'github.com' && host !== 'www.github.com') {
+    return null;
+  }
+  const parts = parsed.pathname.split('/').filter(Boolean);
+  if (parts.length < 2) {
+    return null;
+  }
+  const owner = parts[0];
+  const repo = parts[1].replace(/\.git$/i, '');
+  if (!owner || !repo) {
+    return null;
+  }
+  if (parts.length === 2) {
+    return { owner, repo, ref: null, commit: null, subdir: null };
+  }
+  if (parts[2] !== 'tree' || !parts[3]) {
+    return null;
+  }
+  return {
+    owner,
+    repo,
+    ref: parts[3],
+    commit: null,
+    subdir: parts.length > 4 ? parts.slice(4).join('/') : null,
+  };
+}
+
+async function openGitHubRepoSession(source: GitHubRepoInput): Promise<SessionInfo> {
+  const resolved = await resolveGitHubSource(source);
+  await populateGitHubSourceCache(resolved);
+  materializeGitHubSession(resolved);
+  return buildSessionInfo(resolved.projectRoot, 'url', {
+    kind: 'github_repo',
+    owner: resolved.owner,
+    repo: resolved.repo,
+    requestedRef: resolved.requestedRef,
+    resolvedCommit: resolved.resolvedCommit,
+    subdir: resolved.subdir,
+    htmlUrl: resolved.htmlUrl,
+    sourceCacheRoot: resolved.sourceCacheRoot,
+  });
+}
+
+async function resolveGitHubSource(source: GitHubRepoInput): Promise<ResolvedGitHubSource> {
+  const repoApi = `${GITHUB_API_ROOT}/repos/${encodeURIComponent(source.owner)}/${encodeURIComponent(source.repo)}`;
+  const repoUrl = `https://github.com/${source.owner}/${source.repo}`;
+  let requestedRef = source.ref ?? null;
+  let resolvedCommit = source.commit ?? null;
+  let htmlUrl = repoUrl;
+  if (!resolvedCommit) {
+    const repoInfo = await fetchGitHubJson<GitHubRepoMetadata>(repoApi);
+    htmlUrl = typeof repoInfo.html_url === 'string' && repoInfo.html_url ? repoInfo.html_url : repoUrl;
+    requestedRef = requestedRef ?? (typeof repoInfo.default_branch === 'string' ? repoInfo.default_branch : null);
+    if (!requestedRef) {
+      throw new Error(`Could not resolve a GitHub ref for ${source.owner}/${source.repo}`);
+    }
+    const commitInfo = await fetchGitHubJson<GitHubCommitMetadata>(`${repoApi}/commits/${encodeURIComponent(requestedRef)}`);
+    resolvedCommit = typeof commitInfo.sha === 'string' ? commitInfo.sha : null;
+    if (!resolvedCommit) {
+      throw new Error(`Could not resolve commit for ${source.owner}/${source.repo}`);
+    }
+  }
+  const sourceCacheRoot = `${GITHUB_SOURCE_ROOT}/${source.owner}/${source.repo}/${resolvedCommit}`;
+  const sessionRoot = `${GITHUB_SESSION_ROOT}/${source.owner}/${source.repo}/${resolvedCommit}/${sessionNonce()}`;
+  const projectRoot = source.subdir ? `${sessionRoot}/${normalizeRelativePath(source.subdir)}` : sessionRoot;
+  return {
+    owner: source.owner,
+    repo: source.repo,
+    requestedRef,
+    resolvedCommit,
+    subdir: source.subdir ?? null,
+    htmlUrl,
+    sourceCacheRoot,
+    sessionRoot,
+    projectRoot,
+  };
+}
+
+async function populateGitHubSourceCache(resolved: ResolvedGitHubSource): Promise<void> {
+  if (hasTreeAt(resolved.sourceCacheRoot)) {
+    return;
+  }
+  await clearImportedRoot(resolved.sourceCacheRoot);
+  ensureDir(resolved.sourceCacheRoot);
+  const tree = await fetchGitHubTree(resolved.owner, resolved.repo, resolved.resolvedCommit);
+  if (tree.truncated) {
+    throw new Error(`GitHub repository is too large to open in the browser: ${resolved.owner}/${resolved.repo}`);
+  }
+  const blobs = (tree.tree ?? []).filter((entry): entry is GitHubTreeItem & { path: string; sha: string } => (
+    entry.type === 'blob'
+      && typeof entry.path === 'string'
+      && entry.path.length > 0
+      && typeof entry.sha === 'string'
+      && entry.sha.length > 0
+  ));
+  if (blobs.length === 0) {
+    throw new Error(`GitHub repository contains no files: ${resolved.owner}/${resolved.repo}`);
+  }
+  await runWithConcurrency(
+    blobs,
+    GITHUB_BLOB_FETCH_CONCURRENCY,
+    async (entry) => {
+      const bytes = await fetchGitHubBlobBytes(resolved.owner, resolved.repo, entry.sha);
+      setVfsFile(
+        `${resolved.sourceCacheRoot}/${entry.path}`,
+        bytes,
+        parseGitFileMode(entry.mode),
+      );
+    },
+  );
+}
+
+function materializeGitHubSession(resolved: ResolvedGitHubSource): void {
+  clearImportedRootSync(resolved.sessionRoot);
+  copyVfsTree(resolved.sourceCacheRoot, resolved.sessionRoot);
+  if (!hasTreeAt(resolved.projectRoot)) {
+    throw new Error(`GitHub project root not found: ${resolved.projectRoot}`);
+  }
+}
+
+async function fetchGitHubJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`GitHub request failed with HTTP ${response.status}: ${url}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function fetchGitHubTree(owner: string, repo: string, commit: string): Promise<GitHubTreeMetadata> {
+  return fetchGitHubJson<GitHubTreeMetadata>(
+    `${GITHUB_API_ROOT}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(commit)}?recursive=1`,
+  );
+}
+
+async function fetchGitHubBlobBytes(owner: string, repo: string, sha: string): Promise<Uint8Array> {
+  const blob = await fetchGitHubJson<GitHubBlobMetadata>(
+    `${GITHUB_API_ROOT}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/blobs/${encodeURIComponent(sha)}`,
+  );
+  if (blob.encoding !== 'base64' || typeof blob.content !== 'string') {
+    throw new Error(`GitHub blob payload is not base64 encoded: ${owner}/${repo}@${sha}`);
+  }
+  return decodeBase64Bytes(blob.content);
+}
+
+async function fetchBytesFromUrl(url: string, headers?: Record<string, string>): Promise<Uint8Array> {
+  const response = await fetch(url, { headers });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${url}`);
   }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+function hasTreeAt(root: string): boolean {
+  const normalized = normalizePath(root);
+  if (directories.has(normalized) || vfsFiles.has(normalized)) {
+    return true;
+  }
+  for (const dir of directories) {
+    if (dir.startsWith(`${normalized}/`)) {
+      return true;
+    }
+  }
+  for (const filePath of vfsFiles.keys()) {
+    if (filePath.startsWith(`${normalized}/`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function copyVfsTree(sourceRoot: string, sessionRoot: string): void {
+  const srcNorm = normalizePath(sourceRoot);
+  const dstNorm = normalizePath(sessionRoot);
+  ensureDir(dstNorm);
+  for (const dir of [...directories]
+    .filter((dir) => dir === srcNorm || dir.startsWith(`${srcNorm}/`))
+    .sort((a, b) => a.length - b.length)) {
+    const moved = dir === srcNorm ? dstNorm : `${dstNorm}${dir.slice(srcNorm.length)}`;
+    ensureDir(moved);
+  }
+  for (const [filePath, bytes] of vfsFiles) {
+    if (filePath.startsWith(`${srcNorm}/`)) {
+      setVfsFile(`${dstNorm}${filePath.slice(srcNorm.length)}`, bytes, vfsFileModes.get(filePath) ?? 0o644);
+    }
+  }
+}
+
+function clearImportedRootSync(root: string): void {
+  for (const filePath of [...vfsFiles.keys()]) {
+    if (filePath.startsWith(`${root}/`)) {
+      deleteFile(filePath);
+    }
+  }
+  for (const dir of [...directories].sort((a, b) => b.length - a.length)) {
+    if (dir.startsWith(`${root}/`) || dir === root) {
+      directories.delete(dir);
+      vfsDirModes.delete(dir);
+      vfsDirModTimes.delete(dir);
+    }
+  }
+}
+
+function normalizeRelativePath(path: string): string {
+  const parts = path.split('/').filter(Boolean);
+  if (parts.length === 0 || parts.some((part) => part === '.' || part === '..')) {
+    throw new Error(`Invalid GitHub subdir: ${path}`);
+  }
+  return parts.join('/');
+}
+
+function sessionNonce(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function importProjectFromUrl(url: string): Promise<string> {
   const sessionRoot = buildImportedRoot(url);
   await clearImportedRoot(sessionRoot);
   ensureDir(sessionRoot);
-  const bytes = new Uint8Array(await response.arrayBuffer());
+  const bytes = await fetchBytesFromUrl(url);
   if (looksLikeTarGz(url, bytes)) {
-    const extracted = await extractTarGzTextFiles(bytes);
+    const extracted = await extractTarGzFiles(bytes);
     if (extracted.length === 0) {
-      throw new Error('archive contains no UTF-8 files');
+      throw new Error('archive contains no files');
     }
     const prefix = sharedPrefix(extracted.map((file) => file.path));
     for (const file of extracted) {
@@ -1135,7 +1567,7 @@ async function importProjectFromUrl(url: string): Promise<string> {
         ? file.path.slice(prefix.length + 1)
         : file.path;
       if (!relative) continue;
-      setFile(`${sessionRoot}/${relative}`, file.content);
+      setVfsFile(`${sessionRoot}/${relative}`, file.bytes);
     }
   } else {
     const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -1201,7 +1633,7 @@ function looksLikeTarGz(url: string, bytes: Uint8Array): boolean {
   return lowered.endsWith('.tar.gz') || lowered.endsWith('.tgz') || (bytes[0] === 0x1f && bytes[1] === 0x8b);
 }
 
-async function extractTarGzTextFiles(bytes: Uint8Array): Promise<Array<{ path: string; content: string }>> {
+async function extractTarGzFiles(bytes: Uint8Array): Promise<Array<{ path: string; bytes: Uint8Array }>> {
   const ab = new ArrayBuffer(bytes.byteLength);
   new Uint8Array(ab).set(bytes);
   const stream = new Response(ab).body;
@@ -1210,13 +1642,12 @@ async function extractTarGzTextFiles(bytes: Uint8Array): Promise<Array<{ path: s
   }
   const decompressed = stream.pipeThrough(new DecompressionStream('gzip'));
   const tarBytes = new Uint8Array(await new Response(decompressed).arrayBuffer());
-  return parseTarTextFiles(tarBytes);
+  return parseTarFiles(tarBytes);
 }
 
-function parseTarTextFiles(bytes: Uint8Array): Array<{ path: string; content: string }> {
+function parseTarFiles(bytes: Uint8Array): Array<{ path: string; bytes: Uint8Array }> {
   const decoder = new TextDecoder();
-  const utf8 = new TextDecoder('utf-8', { fatal: true });
-  const filesOut: Array<{ path: string; content: string }> = [];
+  const filesOut: Array<{ path: string; bytes: Uint8Array }> = [];
   let offset = 0;
   while (offset + 512 <= bytes.length) {
     const header = bytes.subarray(offset, offset + 512);
@@ -1229,9 +1660,7 @@ function parseTarTextFiles(bytes: Uint8Array): Array<{ path: string; content: st
     const bodyStart = offset + 512;
     const bodyEnd = bodyStart + size;
     if (path && (typeFlag === 0 || typeFlag === 48)) {
-      try {
-        filesOut.push({ path, content: utf8.decode(bytes.subarray(bodyStart, bodyEnd)) });
-      } catch {}
+      filesOut.push({ path, bytes: bytes.slice(bodyStart, bodyEnd) });
     }
     offset = bodyStart + Math.ceil(size / 512) * 512;
   }
@@ -1245,8 +1674,15 @@ function readTarString(decoder: TextDecoder, header: Uint8Array, start: number, 
 }
 
 function parseTarSize(value: string): number {
-  const trimmed = value.replace(/\0.*$/, '').trim();
-  return trimmed ? Number.parseInt(trimmed, 8) : 0;
+  const trimmed = value.replace(/\0/g, '').trim();
+  if (!trimmed) {
+    return 0;
+  }
+  const parsed = Number.parseInt(trimmed, 8);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`Invalid tar entry size: ${value}`);
+  }
+  return parsed;
 }
 
 function sanitizeTarPath(path: string): string | null {
@@ -1255,6 +1691,41 @@ function sanitizeTarPath(path: string): string | null {
     return null;
   }
   return parts.join('/');
+}
+
+function parseGitFileMode(mode: string | undefined): number {
+  if (!mode) {
+    return 0o644;
+  }
+  const parsed = Number.parseInt(mode, 8);
+  return Number.isFinite(parsed) ? parsed : 0o644;
+}
+
+function decodeBase64Bytes(value: string): Uint8Array {
+  const normalized = value.replace(/\s+/g, '');
+  const binary = atob(normalized);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function runWithConcurrency<T>(
+  values: T[],
+  concurrency: number,
+  worker: (value: T) => Promise<void>,
+): Promise<void> {
+  let nextIndex = 0;
+  const runnerCount = Math.max(1, Math.min(concurrency, values.length));
+  const runners = Array.from({ length: runnerCount }, async () => {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      await worker(values[index]!);
+    }
+  });
+  await Promise.all(runners);
 }
 
 function sharedPrefix(paths: string[]): string | null {

@@ -4,6 +4,8 @@ import 'monaco-editor/min/vs/editor/editor.main.css';
 import '@xterm/xterm/css/xterm.css';
 import App from './App.svelte';
 
+applyLaunchEnvDefaults();
+
 const target = document.getElementById('app');
 
 if (!target) {
@@ -15,3 +17,22 @@ const StudioApp = App as unknown as new (options: { target: HTMLElement }) => un
 new StudioApp({
   target,
 });
+
+function applyLaunchEnvDefaults(): void {
+  if (window.location.search.length > 1) {
+    return;
+  }
+  const proj = import.meta.env.VITE_STUDIO_PROJ?.trim();
+  const mode = import.meta.env.VITE_STUDIO_MODE?.trim();
+  if (!proj && !mode) {
+    return;
+  }
+  const url = new URL(window.location.href);
+  if (proj) {
+    url.searchParams.set('proj', proj);
+  }
+  if (mode) {
+    url.searchParams.set('mode', mode);
+  }
+  window.history.replaceState(null, '', url.toString());
+}

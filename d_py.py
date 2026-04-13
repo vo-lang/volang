@@ -7,8 +7,8 @@ Usage:
     ./d.py bench [all|vo|<name>|score] [--all-langs] [--jit-hot]
     ./d.py loc [--with-tests]
     ./d.py play [--build-only]  Legacy playground dev flow (deprecated)
-    ./d.py studio [--build-wasm] [--build-only]
-    ./d.py studio-native [--build-wasm]
+    ./d.py studio [--build-wasm] [--build-only] [--runner] [project]
+    ./d.py studio-native [--build-wasm] [--runner] [project]
 """
 
 from __future__ import annotations
@@ -16,13 +16,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List, Tuple
 
 # 32-bit target (ARM 32-bit for ARM64 host)
 TARGET_32 = 'armv7-unknown-linux-gnueabihf'
@@ -381,7 +384,40 @@ def build_studio_wasm():
         print(f"{Colors.GREEN}✓ vo-studio:{Colors.NC} {size_kb:.1f} KB")
 
 
-def run_studio(build_wasm: bool = False, build_only: bool = False, launch_url: Optional[str] = None):
+def configure_studio_launch_env(env: dict[str, str], project: Optional[str], runner: bool, *, native: bool) -> None:
+    prefix = 'VIBE' if native else 'VITE'
+    if project:
+        env[f'{prefix}_STUDIO_PROJ'] = project
+    if project or runner:
+        env[f'{prefix}_STUDIO_MODE'] = 'runner' if runner else 'dev'
+
+
+def studio_dev_server_url() -> str:
+    return 'http://localhost:5174'
+
+
+def studio_dev_server_available() -> bool:
+    try:
+        with urllib.request.urlopen(studio_dev_server_url(), timeout=1.0) as response:
+            body = response.read(4096).decode('utf-8', errors='ignore')
+            return '<title>Studio</title>' in body and 'id="app"' in body
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return False
+
+
+def tauri_dev_command(reuse_existing_dev_server: bool) -> str:
+    if not reuse_existing_dev_server:
+        return 'npm run tauri dev'
+    override = json.dumps({
+        'build': {
+            'beforeDevCommand': None,
+            'devUrl': studio_dev_server_url(),
+        },
+    })
+    return f'npm run tauri -- dev --config {shlex.quote(override)}'
+
+
+def run_studio(build_wasm: bool = False, build_only: bool = False, project: Optional[str] = None, runner: bool = False):
     """Auto-rebuild studio WASM when stale, then start the dev server."""
     if build_wasm or build_only or studio_wasm_needs_build():
         build_studio_wasm()
@@ -402,14 +438,13 @@ def run_studio(build_wasm: bool = False, build_only: bool = False, launch_url: O
     try:
         ensure_vo_web_wasm_built()
         env = os.environ.copy()
-        if launch_url:
-            env['VITE_STUDIO_LAUNCH_URL'] = launch_url
+        configure_studio_launch_env(env, project, runner, native=False)
         subprocess.run(['zsh', '-lc', 'npm run dev'], cwd=studio_dir, check=True, env=env)
     except KeyboardInterrupt:
         print(f"\n{Colors.GREEN}Studio stopped{Colors.NC}")
 
 
-def run_studio_native(build_wasm: bool = False, launch_url: Optional[str] = None):
+def run_studio_native(build_wasm: bool = False, project: Optional[str] = None, runner: bool = False):
     """Build studio WASM when stale, then launch the native Tauri app (tauri dev)."""
     if build_wasm or studio_wasm_needs_build():
         build_studio_wasm()
@@ -430,10 +465,12 @@ def run_studio_native(build_wasm: bool = False, launch_url: Optional[str] = None
         STUDIO_NATIVE_DEBUG_LOG.write_text('')
         env['VIBE_STUDIO_DEBUG_LOG'] = str(STUDIO_NATIVE_DEBUG_LOG)
         env.setdefault('VIBE_STUDIO_WORKSPACE', str(PROJECT_ROOT))
-        if launch_url:
-            env['VIBE_STUDIO_LAUNCH_URL'] = launch_url
+        configure_studio_launch_env(env, project, runner, native=True)
+        reuse_existing_dev_server = studio_dev_server_available()
+        if reuse_existing_dev_server:
+            print(f"{Colors.DIM}Reusing Studio dev server: {studio_dev_server_url()}{Colors.NC}")
         print(f"{Colors.DIM}Native debug log: {STUDIO_NATIVE_DEBUG_LOG}{Colors.NC}")
-        subprocess.run(['zsh', '-lc', 'npm run tauri dev'], cwd=studio_dir, check=True, env=env)
+        subprocess.run(['zsh', '-lc', tauri_dev_command(reuse_existing_dev_server)], cwd=studio_dir, check=True, env=env)
     except KeyboardInterrupt:
         print(f"\n{Colors.GREEN}Studio (native) stopped{Colors.NC}")
 
@@ -1769,19 +1806,19 @@ def main():
                                help='Build studio WASM before starting')
     studio_parser.add_argument('--build-only', action='store_true',
                                help='Only build studio WASM, do not start dev server')
-    studio_parser.add_argument('--launch-url', dest='launch_url',
-                               help='Optional launch URL to auto-open or run in Studio')
-    studio_parser.add_argument('launch_url_arg', nargs='?',
-                               help='Optional launch URL to auto-open or run in Studio')
+    studio_parser.add_argument('--runner', action='store_true',
+                               help='Launch Studio in runner mode')
+    studio_parser.add_argument('project', nargs='?',
+                               help='Optional project URL or local path to open')
 
     # studio-native
     studio_native_parser = subparsers.add_parser('studio-native', help='Launch Vibe Studio as native Tauri app')
     studio_native_parser.add_argument('--build-wasm', action='store_true',
                                       help='Force rebuild studio WASM before launching')
-    studio_native_parser.add_argument('--launch-url', dest='launch_url',
-                                      help='Optional launch URL to auto-open or run in Studio')
-    studio_native_parser.add_argument('launch_url_arg', nargs='?',
-                                      help='Optional launch URL to auto-open or run in Studio')
+    studio_native_parser.add_argument('--runner', action='store_true',
+                                      help='Launch Studio in runner mode')
+    studio_native_parser.add_argument('project', nargs='?',
+                                      help='Optional project URL or local path to open')
 
     # ci
     ci_parser = subparsers.add_parser('ci', help='Run local CI checks')
@@ -1829,12 +1866,19 @@ def main():
         run_playground(build_only=args.build_only)
 
     elif args.command == 'studio':
-        launch_url = args.launch_url or args.launch_url_arg
-        run_studio(build_wasm=args.build_wasm, build_only=args.build_only, launch_url=launch_url)
+        run_studio(
+            build_wasm=args.build_wasm,
+            build_only=args.build_only,
+            project=args.project,
+            runner=args.runner,
+        )
 
     elif args.command == 'studio-native':
-        launch_url = args.launch_url or args.launch_url_arg
-        run_studio_native(build_wasm=args.build_wasm, launch_url=launch_url)
+        run_studio_native(
+            build_wasm=args.build_wasm,
+            project=args.project,
+            runner=args.runner,
+        )
 
     elif args.command == 'run':
         run_vo_file(args.file, mode=args.mode, codegen=args.codegen)

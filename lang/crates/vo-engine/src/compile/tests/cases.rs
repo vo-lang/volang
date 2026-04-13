@@ -29,6 +29,86 @@ fn test_compile_source_without_external_modules() {
 }
 
 #[test]
+fn test_compile_all_modfile_replaced_external_deps_succeeds_without_vo_lock() {
+    let root = temp_dir("vo_compile_all_modfile_replaced_no_lock");
+    let app_root = root.join("app");
+    let local_voplay = root.join("voplay");
+
+    fs::create_dir_all(&app_root).unwrap();
+    fs::create_dir_all(&local_voplay).unwrap();
+
+    fs::write(
+        app_root.join("vo.mod"),
+        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/vo-lang/voplay ^0.1.0\nreplace github.com/vo-lang/voplay => ../voplay\n",
+    )
+    .unwrap();
+    fs::write(
+        app_root.join("main.vo"),
+        "package main\nimport \"github.com/vo-lang/voplay\"\nfunc main(){voplay.Hello()}\n",
+    )
+    .unwrap();
+    fs::write(
+        local_voplay.join("vo.mod"),
+        "module github.com/vo-lang/voplay\nvo 0.1.0\n",
+    )
+    .unwrap();
+    fs::write(
+        local_voplay.join("hello.vo"),
+        "package voplay\nfunc Hello(){}\n",
+    )
+    .unwrap();
+
+    let result = compile(app_root.to_str().unwrap());
+    assert!(
+        result.is_ok(),
+        "expected success when all external deps are replaced via vo.mod, got: {result:?}"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn test_compile_rejects_modfile_replace_identity_mismatch() {
+    let root = temp_dir("vo_compile_modfile_replace_identity_mismatch");
+    let app_root = root.join("app");
+    let local_lib = root.join("lib");
+
+    fs::create_dir_all(&app_root).unwrap();
+    fs::create_dir_all(&local_lib).unwrap();
+
+    fs::write(
+        app_root.join("vo.mod"),
+        "module github.com/acme/app\nvo 0.1.0\nreplace github.com/example/declared => ../lib\n",
+    )
+    .unwrap();
+    fs::write(app_root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
+    fs::write(
+        local_lib.join("vo.mod"),
+        "module github.com/example/actual\nvo 0.1.0\n",
+    )
+    .unwrap();
+    fs::write(local_lib.join("lib.vo"), "package lib\n").unwrap();
+
+    let result = compile(app_root.to_str().unwrap());
+    match result {
+        Err(CompileError::ModuleSystem(error)) => {
+            assert_eq!(error.stage(), ModuleSystemStage::ModFile);
+            assert_eq!(error.kind(), ModuleSystemErrorKind::ParseFailed);
+            assert!(
+                error
+                    .detail()
+                    .contains("replace github.com/example/declared points to"),
+                "{}",
+                error.detail()
+            );
+        }
+        other => panic!("expected vo.mod replace validation error, got {other:?}"),
+    }
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn test_compile_with_cache_fingerprint_tracks_ancestor_project_manifest() {
     let root = temp_dir("vo_compile_cache_ancestor_project_manifest");
     let app_root = root.join("app");
@@ -663,6 +743,50 @@ fn test_compile_with_cache_fingerprint_tracks_workspace_replace_sources() {
     fs::write(
         app_root.join("vo.work"),
         "version = 1\n\n[[use]]\npath = \"../lib\"\n",
+    )
+    .unwrap();
+    fs::write(
+        app_root.join("main.vo"),
+        "package main\nimport \"github.com/example/lib\"\nfunc main(){lib.Hello()}\n",
+    )
+    .unwrap();
+
+    fs::write(
+        local_lib.join("vo.mod"),
+        "module github.com/example/lib\nvo 0.1.0\n",
+    )
+    .unwrap();
+    fs::write(local_lib.join("lib.vo"), "package lib\nfunc Hello(){}\n").unwrap();
+
+    compile_with_cache(app_root.to_string_lossy().as_ref()).unwrap();
+    let first = read_saved_cache_fingerprint(&app_root, None);
+
+    fs::write(
+        local_lib.join("lib.vo"),
+        "package lib\nfunc Hello(){}\nfunc Extra(){}\n",
+    )
+    .unwrap();
+
+    compile_with_cache(app_root.to_string_lossy().as_ref()).unwrap();
+    let second = read_saved_cache_fingerprint(&app_root, None);
+
+    assert_ne!(first, second);
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn test_compile_with_cache_fingerprint_tracks_modfile_replace_sources() {
+    let root = temp_dir("vo_compile_cache_modfile_replace_source");
+    let app_root = root.join("app");
+    let local_lib = root.join("lib");
+
+    fs::create_dir_all(&app_root).unwrap();
+    fs::create_dir_all(&local_lib).unwrap();
+
+    fs::write(
+        app_root.join("vo.mod"),
+        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/example/lib ^0.1.0\nreplace github.com/example/lib => ../lib\n",
     )
     .unwrap();
     fs::write(

@@ -10,6 +10,7 @@
   import { editor, editorMarkSaved, editorOpen } from './stores/editor';
   import { session, sessionOpen } from './stores/session';
   import { runtime } from './stores/runtime';
+  import { buildShareInfo } from './lib/session_share';
   import Sidebar from './components/Sidebar.svelte';
   import DevWorkbench from './components/DevWorkbench.svelte';
   import Home from './components/Home.svelte';
@@ -37,40 +38,35 @@
     error: '',
   });
 
+  function launchLoading(proj: string | null): string {
+    if (!proj) return 'Opening workspace session…';
+    if (proj.includes('github.com/')) {
+      const match = proj.match(/github\.com\/([^/]+\/[^/]+)/);
+      if (match) return `Opening ${match[1]}…`;
+    }
+    const name = proj.split('/').pop() ?? proj;
+    return `Opening ${name}…`;
+  }
+
   onMount(async () => {
     try {
       registry = await createServiceRegistry();
       githubStore = registry.projectCatalog.github;
       bootstrap = registry.project.bootstrapContext;
-      const isRunner = bootstrap.mode === 'runner';
-      const runTarget = bootstrap.initialRunTarget;
-      const initialPath = bootstrap.initialPath;
-      let openedSession: SessionInfo;
-      if (isRunner && runTarget) {
-        loading = `Running ${runTarget.split('/').pop()}…`;
-        openedSession = await registry.project.openRunSession(runTarget);
-      } else if (initialPath) {
-        loading = `Opening ${initialPath.split('/').pop()}…`;
-        openedSession = await registry.project.openRunSession(initialPath);
-      } else if (bootstrap.initialUrl) {
-        loading = `Importing ${bootstrap.initialUrl}…`;
-        openedSession = await registry.project.openUrl(bootstrap.initialUrl);
-      } else {
-        loading = 'Opening workspace session…';
-        openedSession = await registry.project.openWorkspace();
-      }
+      const launch = bootstrap.launch;
+      const spec = launch ?? { proj: null, mode: bootstrap.mode };
+      const isRunner = spec.mode === 'runner';
+      const hasProj = spec.proj != null;
+      loading = launchLoading(spec.proj);
+      const openedSession = await registry.project.openSession(spec);
       if (isRunner) {
         await bindRunnerSession(openedSession);
         ide.update((s) => ({ ...s, appMode: 'runner' }));
       } else {
         await bindDevSession(openedSession, {
-          openEntry: Boolean((bootstrap.initialPath || bootstrap.initialUrl) && openedSession.entryPath),
+          openEntry: Boolean(hasProj && openedSession.entryPath),
         });
-        if (!bootstrap.initialPath && !bootstrap.initialUrl) {
-          ide.update((s) => ({ ...s, appMode: 'manage' }));
-        } else {
-          ide.update((s) => ({ ...s, appMode: 'develop' }));
-        }
+        ide.update((s) => ({ ...s, appMode: hasProj ? 'develop' : 'manage' }));
       }
       loading = '';
       if (!isRunner) {
@@ -78,8 +74,7 @@
           consolePush('stderr', formatError(catalogError));
         });
       }
-      const shouldAutoRunGui = Boolean(openedSession.entryPath && isRunner);
-      if (shouldAutoRunGui && openedSession.entryPath) {
+      if (isRunner && openedSession.entryPath) {
         await autoRunGui(openedSession.entryPath);
       }
     } catch (err) {
@@ -129,7 +124,7 @@
     sessionInfo = nextSessionInfo;
     registry.term.syncCwd(nextSessionInfo.root);
     registry.runtime.clearConsole();
-    sessionOpen(nextSessionInfo.root, 'runner', nextSessionInfo.entryPath ?? null, nextSessionInfo.projectMode);
+    sessionOpen(nextSessionInfo.root, 'runner', nextSessionInfo.entryPath ?? null, nextSessionInfo.projectMode, nextSessionInfo.source, nextSessionInfo.share);
     currentDir = nextSessionInfo.root;
     explorerEntries = [];
     editorOpen('', '');
@@ -143,7 +138,7 @@
     sessionInfo = nextSessionInfo;
     registry.term.syncCwd(nextSessionInfo.root);
     registry.runtime.clearConsole();
-    sessionOpen(nextSessionInfo.root, 'dev', nextSessionInfo.entryPath ?? null, nextSessionInfo.projectMode);
+    sessionOpen(nextSessionInfo.root, 'dev', nextSessionInfo.entryPath ?? null, nextSessionInfo.projectMode, nextSessionInfo.source, nextSessionInfo.share);
     sessionProjectHasGui = registry.projectCatalog.getSessionProjectConfig(nextSessionInfo).hasGui;
     ide.update((s) => ({ ...s, outputExpanded: false, previewCollapsed: false }));
     currentDir = nextSessionInfo.root;
@@ -225,6 +220,8 @@
       projectMode: 'single-file',
       entryPath: filePath,
       singleFileRun: false,
+      source: null,
+      share: null,
     };
     await registry.projectCatalog.updateSessionProjectConfig(exSession, hasGui);
     await bindDevSession(exSession, { openEntry: true });
@@ -238,7 +235,7 @@
     const openPath = project.type === 'single'
       ? (project.entryPath ?? project.localPath)
       : project.localPath;
-    const openedSession = await registry.project.openRunSession(openPath);
+    const openedSession = await registry.project.openSession({ proj: openPath, mode: 'dev' });
     registry.projectCatalog.trackRecentSessionTarget(openPath, openedSession);
     await bindDevSession(openedSession, { openEntry: true });
     ide.update((s) => ({ ...s, appMode: 'develop' }));
@@ -248,7 +245,7 @@
     if (!registry) return;
     stopRuntimePolling();
     await registry.runtime.stop().catch(() => undefined);
-    const openedSession = await registry.project.openRunSession(path);
+    const openedSession = await registry.project.openSession({ proj: path, mode: 'dev' });
     registry.projectCatalog.trackRecentSessionTarget(path, openedSession);
     await bindDevSession(openedSession, { openEntry: true });
     ide.update((s) => ({ ...s, appMode: 'develop' }));
@@ -309,6 +306,23 @@
       return;
     }
     await runCode();
+  }
+
+  async function shareSession(): Promise<void> {
+    if (!sessionInfo) {
+      throw new Error('No active session to share');
+    }
+    const share = buildShareInfo(sessionInfo, {
+      mode: 'runner',
+    });
+    if (!share.shareable || !share.canonicalUrl) {
+      throw new Error(share.reason ?? 'Session is not shareable');
+    }
+    if (!navigator.clipboard?.writeText) {
+      throw new Error('Clipboard API is unavailable');
+    }
+    await navigator.clipboard.writeText(share.canonicalUrl);
+    consolePush('system', 'Copied share link');
   }
 
   function openGitHubConnectModal(): void {
@@ -489,6 +503,7 @@
           {outputExpanded}
           {previewTitle}
           onSave={() => void saveActiveEditor().catch((error) => consolePush('stderr', formatError(error)))}
+          onShare={() => void shareSession().catch((error) => consolePush('stderr', formatError(error)))}
           onRun={runProject}
           onRunFullscreen={runFullscreen}
           onStop={stopCode}

@@ -190,6 +190,26 @@ export class GitHubRemoteClient {
     };
   }
 
+  async resolveRepoHead(
+    token: string,
+    owner: string,
+    repo: string,
+  ): Promise<{ defaultBranch: string; commit: string; htmlUrl: string }> {
+    const repoPath = `/repos/${owner}/${repo}`;
+    const repoInfo = await this.requestJson<Record<string, unknown>>(token, 'GET', repoPath);
+    const defaultBranch = String(repoInfo.default_branch ?? 'main').trim() || 'main';
+    const commitInfo = await this.requestJson<{ sha?: string }>(token, 'GET', `${repoPath}/commits/${encodeURIComponent(defaultBranch)}`);
+    const commit = String(commitInfo.sha ?? '').trim();
+    if (!commit) {
+      throw new Error(`Could not resolve a commit for ${owner}/${repo}`);
+    }
+    return {
+      defaultBranch,
+      commit,
+      htmlUrl: String(repoInfo.html_url ?? `https://github.com/${owner}/${repo}`),
+    };
+  }
+
   async pushRepoFiles(token: string, owner: string, repo: string, files: Record<string, string>, message = 'Update via Vo Studio'): Promise<void> {
     const repoPath = `/repos/${owner}/${repo}`;
     let defaultBranch = 'main';
@@ -375,7 +395,9 @@ export function buildManifest(projects: ManagedProject[]): ProjectManifest {
         remote: project.remote,
         pushedAt: project.pushedAt ?? new Date().toISOString(),
         contentHash: project.syncedHash ?? project.currentRemoteHash ?? undefined,
+        entryPath: manifestEntryPath(project),
         hasGui: project.hasGui || undefined,
+        appKind: project.hasGui ? 'gui' : 'code',
       })),
   };
 }
@@ -386,6 +408,27 @@ export function emptyManifest(): ProjectManifest {
 
 export function manifestKey(name: string, type: string): string {
   return `${type}:${name}`;
+}
+
+function manifestEntryPath(project: Pick<ManagedProject, 'type' | 'localPath' | 'entryPath'>): string | undefined {
+  if (!project.entryPath) {
+    return undefined;
+  }
+  if (project.type === 'module' && project.localPath) {
+    const root = stripTrailingSlash(project.localPath);
+    const prefix = `${root}/`;
+    if (!project.entryPath.startsWith(prefix)) {
+      return undefined;
+    }
+    const relative = project.entryPath.slice(prefix.length);
+    return relative || undefined;
+  }
+  const filename = project.entryPath.split('/').pop() ?? project.entryPath;
+  return filename || undefined;
+}
+
+function stripTrailingSlash(path: string): string {
+  return path.length > 1 ? path.replace(/\/+$/g, '') : path;
 }
 
 function safeParseJson(text: string): unknown {

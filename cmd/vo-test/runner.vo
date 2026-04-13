@@ -212,6 +212,38 @@ type TestStats struct {
 	failedTests []string
 }
 
+func resolveExplicitTestPath(path string) string {
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	if strings.HasPrefix(path, "/") || path == "lang/test_data" || strings.HasPrefix(path, "lang/test_data/") {
+		return path
+	}
+	return "lang/test_data/" + path
+}
+
+func runCollectedJobs(testDir string, mode string, workers int, verbose bool, configs map[string]TestConfig) int {
+	jobs := collectTestJobs(testDir, mode, configs)
+
+	if len(jobs) == 0 {
+		fmt.Println("[VO-TEST] No tests found")
+		return 1
+	}
+
+	fmt.Println(colorize("Running Vo integration tests...", ansiBold))
+	fmt.Println("")
+
+	results := runTestsParallel(jobs, workers, verbose)
+	stats := calculateStats(results)
+	printResults(stats, verbose)
+
+	totalFailed := stats.vmFailed + stats.jitFailed + stats.nostdFailed
+	if totalFailed > 0 {
+		return 1
+	}
+	return 0
+}
+
 func runTests(mode string, args []string) int {
 	// Parse options
 	verbose := false
@@ -266,43 +298,41 @@ func runTests(mode string, args []string) int {
 		_ = os.Setenv("VO_JIT_LOOP_THRESHOLD", "1")
 	}
 
-	// Load test configuration
-	testDataDir := "lang/test_data"
-	configPath := testDataDir + "/_config.toml"
-	configs, err := loadTestConfig(configPath)
+	// Single file mode
+	if singleFile != "" {
+		testPath := resolveExplicitTestPath(singleFile)
+		info, err := os.Stat(testPath)
+		if err != nil {
+			fmt.Println("Error: file not found: " + testPath)
+			fmt.Println("Hint: use relative path under lang/test_data/, e.g., net/net_conn.vo")
+			return 1
+		}
+		if info.IsDir() {
+			configs, err := loadOptionalTestConfig(testPath + "/_config.toml")
+			if err != nil {
+				fmt.Println("[VO-TEST] could not load _config.toml: " + err.Error())
+				return 1
+			}
+			return runCollectedJobs(testPath, mode, workers, verbose, configs)
+		}
+
+		configs := make(map[string]TestConfig)
+		if strings.HasPrefix(testPath, "lang/test_data/") {
+			configs, err = loadTestConfig("lang/test_data/_config.toml")
+			if err != nil {
+				fmt.Println("[VO-TEST] could not load _config.toml: " + err.Error())
+				return 1
+			}
+		}
+		return runSingleFile(singleFile, testPath, mode, verbose, configs)
+	}
+
+	configs, err := loadTestConfig("lang/test_data/_config.toml")
 	if err != nil {
 		fmt.Println("[VO-TEST] could not load _config.toml: " + err.Error())
 		return 1
 	}
-
-	// Single file mode
-	if singleFile != "" {
-		return runSingleFile(singleFile, mode, verbose, configs)
-	}
-
-	// Collect test files
-	jobs := collectTestJobs(testDataDir, mode, configs)
-	
-	if len(jobs) == 0 {
-		fmt.Println("[VO-TEST] No tests found")
-		return 1
-	}
-
-	fmt.Println(colorize("Running Vo integration tests...", ansiBold))
-	fmt.Println("")
-
-	// Run tests in parallel
-	results := runTestsParallel(jobs, workers, verbose)
-
-	// Print results
-	stats := calculateStats(results)
-	printResults(stats, verbose)
-
-	totalFailed := stats.vmFailed + stats.jitFailed + stats.nostdFailed
-	if totalFailed > 0 {
-		return 1
-	}
-	return 0
+	return runCollectedJobs("lang/test_data", mode, workers, verbose, configs)
 }
 
 func collectTestJobs(testDir string, mode string, configs map[string]TestConfig) []TestJob {
@@ -754,25 +784,13 @@ func runShouldFailTest(job TestJob, start time.Time) TestResult {
 	}
 }
 
-func runSingleFile(file string, mode string, verbose bool, configs map[string]TestConfig) int {
-	fmt.Println("[VO-TEST] Running single file: " + file)
-	
-	// Determine full path - relative paths are under lang/test_data/
-	testPath := file
-	if !strings.HasPrefix(file, "/") && !strings.HasPrefix(file, "lang/test_data/") {
-		testPath = "lang/test_data/" + file
-	}
 
-	// Check if file exists
-	if _, err := os.Stat(testPath); err != nil {
-		fmt.Println("Error: file not found: " + testPath)
-		fmt.Println("Hint: use relative path under lang/test_data/, e.g., net/net_conn.vo")
-		return 1
-	}
+func runSingleFile(file string, testPath string, mode string, verbose bool, configs map[string]TestConfig) int {
+	fmt.Println("[VO-TEST] Running single file: " + testPath)
 
 	relPath := file
-	if strings.HasPrefix(file, "lang/test_data/") {
-		relPath = file[len("lang/test_data/"):]
+	if strings.HasPrefix(testPath, "lang/test_data/") {
+		relPath = testPath[len("lang/test_data/"):]
 	}
 	config := configs[relPath]
 	if config.shouldFail {
@@ -815,7 +833,7 @@ func runSingleFile(file string, mode string, verbose bool, configs map[string]Te
 			file: testPath,
 			mode: "vm",
 			shouldFail: false,
-			gcDebug: strings.Contains(file, "gc_"),
+			gcDebug: strings.Contains(testPath, "gc_"),
 		}
 		result := runSingleTest(job, verbose)
 		printSingleResult(result, verbose)
@@ -833,7 +851,7 @@ func runSingleFile(file string, mode string, verbose bool, configs map[string]Te
 			file: testPath,
 			mode: jitModeName,
 			shouldFail: false,
-			gcDebug: strings.Contains(file, "gc_"),
+			gcDebug: strings.Contains(testPath, "gc_"),
 		}
 		result := runSingleTest(job, verbose)
 		printSingleResult(result, verbose)

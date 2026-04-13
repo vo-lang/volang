@@ -52,6 +52,7 @@
   export let outputExpanded = false;
   export let previewTitle = '';
   export let onSave: () => void = () => {};
+  export let onShare: () => void = () => {};
   export let onRun: () => void = () => {};
   export let onRunFullscreen: () => void = () => {};
   export let onStop: () => void = () => {};
@@ -295,6 +296,7 @@
 <div class="dev-workbench" class:single-file={isSingleFileSession}>
   <Toolbar
     onSave={onSave}
+    onShare={onShare}
     onRun={onRun}
     onRunFullscreen={onRunFullscreen}
     onStop={onStop}

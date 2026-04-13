@@ -14,7 +14,7 @@ use crate::gui_runtime::GuestHandle;
 // Domain enums
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StudioMode {
     Dev,
@@ -44,6 +44,46 @@ pub enum Platform {
     Wasm,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchSpec {
+    pub proj: Option<String>,
+    pub mode: StudioMode,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "kind")]
+pub enum SessionSource {
+    #[serde(rename = "workspace")]
+    Workspace,
+    #[serde(rename = "path")]
+    Path {
+        path: String,
+    },
+    #[serde(rename = "github_repo")]
+    GithubRepo {
+        owner: String,
+        repo: String,
+        #[serde(rename = "requestedRef")]
+        requested_ref: Option<String>,
+        #[serde(rename = "resolvedCommit")]
+        resolved_commit: Option<String>,
+        subdir: Option<String>,
+        #[serde(rename = "htmlUrl")]
+        html_url: String,
+        #[serde(rename = "sourceCacheRoot")]
+        source_cache_root: String,
+    },
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareInfo {
+    pub canonical_url: String,
+    pub shareable: bool,
+    pub reason: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Serialized types (sent to frontend)
 // ---------------------------------------------------------------------------
@@ -52,10 +92,7 @@ pub enum Platform {
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapContext {
     pub workspace_root: String,
-    pub launch_url: Option<String>,
-    pub initial_path: Option<String>,
-    pub initial_url: Option<String>,
-    pub initial_run_target: Option<String>,
+    pub launch: Option<LaunchSpec>,
     pub mode: StudioMode,
     pub platform: Platform,
 }
@@ -68,6 +105,8 @@ pub struct SessionInfo {
     pub project_mode: ProjectMode,
     pub entry_path: Option<String>,
     pub single_file_run: bool,
+    pub source: Option<SessionSource>,
+    pub share: Option<ShareInfo>,
 }
 
 // ---------------------------------------------------------------------------
@@ -75,10 +114,7 @@ pub struct SessionInfo {
 // ---------------------------------------------------------------------------
 
 struct LaunchConfig {
-    launch_url: Option<String>,
-    initial_path: Option<String>,
-    initial_url: Option<String>,
-    initial_run_target: Option<String>,
+    launch: Option<LaunchSpec>,
     mode: StudioMode,
 }
 
@@ -151,10 +187,7 @@ impl AppState {
     pub fn bootstrap_context(&self) -> BootstrapContext {
         BootstrapContext {
             workspace_root: self.workspace_root.to_string_lossy().to_string(),
-            launch_url: self.launch.launch_url.clone(),
-            initial_path: self.launch.initial_path.clone(),
-            initial_url: self.launch.initial_url.clone(),
-            initial_run_target: self.launch.initial_run_target.clone(),
+            launch: self.launch.launch.clone(),
             mode: self.launch.mode,
             platform: Platform::Native,
         }
@@ -245,6 +278,7 @@ pub fn session_info(
     origin: SessionOrigin,
     explicit_entry: Option<&Path>,
     single_file_run: bool,
+    source: Option<SessionSource>,
 ) -> SessionInfo {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let project_mode = if single_file_run {
@@ -255,13 +289,67 @@ pub fn session_info(
     let entry_path = explicit_entry
         .map(|entry| entry.to_string_lossy().to_string())
         .or_else(|| detect_entry_path(&canonical));
+    let share = build_share_info(source.as_ref());
     SessionInfo {
         root: canonical.to_string_lossy().to_string(),
         origin,
         project_mode,
         entry_path,
         single_file_run,
+        source,
+        share,
     }
+}
+
+fn build_share_info(source: Option<&SessionSource>) -> Option<ShareInfo> {
+    let SessionSource::GithubRepo {
+        owner,
+        repo,
+        resolved_commit,
+        subdir,
+        ..
+    } = source? else {
+        return Some(ShareInfo {
+            canonical_url: String::new(),
+            shareable: false,
+            reason: Some("Only GitHub sessions can be shared".to_string()),
+        });
+    };
+    let Some(commit) = resolved_commit.as_deref() else {
+        return Some(ShareInfo {
+            canonical_url: String::new(),
+            shareable: false,
+            reason: Some("GitHub session is not pinned to a commit".to_string()),
+        });
+    };
+    let mut url = url::Url::parse("https://volang.dev/")
+        .expect("share base URL must be valid");
+    let project_url = build_pinned_github_project_url(owner, repo, commit, subdir.as_deref());
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("mode", "runner");
+        query.append_pair("proj", &project_url);
+    }
+    Some(ShareInfo {
+        canonical_url: url.to_string(),
+        shareable: true,
+        reason: None,
+    })
+}
+
+fn build_pinned_github_project_url(owner: &str, repo: &str, commit: &str, subdir: Option<&str>) -> String {
+    let mut url = url::Url::parse(&format!("https://github.com/{owner}/{repo}"))
+        .expect("GitHub project URL must be valid");
+    let trimmed_subdir = subdir
+        .map(|value| value.trim().trim_matches('/'))
+        .filter(|value| !value.is_empty());
+    let mut path = format!("/{owner}/{repo}/tree/{commit}");
+    if let Some(value) = trimmed_subdir {
+        path.push('/');
+        path.push_str(value);
+    }
+    url.set_path(&path);
+    url.to_string()
 }
 
 fn default_workspace() -> PathBuf {
@@ -287,34 +375,64 @@ fn parse_launch_config() -> LaunchConfig {
     let launch_url = parse_launch_url(&args);
     let query = launch_url.as_deref().and_then(extract_query_map);
 
-    let initial_path = parse_env("STUDIO_PATH")
-        .or_else(|| parse_arg(&args, "--path"))
-        .or_else(|| query_get(&query, &["path"]))
-        .map(|v| strip_file_prefix(&v));
-
-    let initial_url = parse_env("STUDIO_URL")
-        .or_else(|| parse_arg(&args, "--url"))
-        .or_else(|| query_get(&query, &["project", "url"]));
-
-    let initial_run_target = parse_env("STUDIO_RUN")
-        .or_else(|| parse_arg(&args, "--run"))
-        .or_else(|| query_get(&query, &["run"]))
-        .map(|v| strip_file_prefix(&v));
-
-    let explicit_runner = parse_env("STUDIO_MODE")
+    let mode = parse_env_any(&["STUDIO_MODE", "VIBE_STUDIO_MODE"])
         .or_else(|| parse_arg_eq(&args, "--mode"))
         .or_else(|| query_get(&query, &["mode"]))
-        .map(|v| v.eq_ignore_ascii_case("runner"))
-        .unwrap_or(false)
-        || args.iter().any(|a| a == "--runner");
+        .and_then(|value| parse_studio_mode(&value))
+        .or_else(|| {
+            if args.iter().any(|arg| arg == "--runner") {
+                Some(StudioMode::Runner)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(StudioMode::Dev);
 
-    let mode = if explicit_runner || initial_run_target.is_some() {
-        StudioMode::Runner
-    } else {
-        StudioMode::Dev
-    };
+    let proj = parse_env_any(&["STUDIO_PROJ", "VIBE_STUDIO_PROJ"])
+        .or_else(|| parse_arg(&args, "--proj"))
+        .or_else(|| parse_project_arg(&args))
+        .or_else(|| query_get(&query, &["proj"]))
+        .map(|value| strip_file_prefix(&value));
 
-    LaunchConfig { launch_url, initial_path, initial_url, initial_run_target, mode }
+    let launch = proj.map(|proj| LaunchSpec {
+        proj: Some(proj),
+        mode,
+    });
+
+    LaunchConfig { launch, mode }
+}
+
+fn parse_studio_mode(value: &str) -> Option<StudioMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "dev" => Some(StudioMode::Dev),
+        "runner" => Some(StudioMode::Runner),
+        _ => None,
+    }
+}
+
+fn parse_project_arg(args: &[String]) -> Option<String> {
+    let mut skip_value = false;
+    for arg in args {
+        let trimmed = arg.trim();
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if matches!(trimmed, "--launch-url" | "--mode" | "--proj") {
+            skip_value = true;
+            continue;
+        }
+        if trimmed == "--runner"
+            || trimmed.starts_with("--launch-url=")
+            || trimmed.starts_with("--mode=")
+            || trimmed.starts_with("--proj=")
+            || trimmed.starts_with('-')
+        {
+            continue;
+        }
+        return Some(trimmed.to_string());
+    }
+    None
 }
 
 fn parse_launch_url(args: &[String]) -> Option<String> {
@@ -427,7 +545,8 @@ fn detect_entry_path(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_workspace_root;
+    use super::{parse_project_arg, parse_studio_mode, resolve_workspace_root, StudioMode};
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     #[test]
@@ -443,5 +562,36 @@ mod tests {
     fn resolve_workspace_root_defaults_under_home_directory() {
         let resolved = resolve_workspace_root(None, PathBuf::from("/Users/example"));
         assert_eq!(resolved, PathBuf::from("/Users/example/.studio/workspace"));
+    }
+
+    #[test]
+    fn parse_studio_mode_accepts_dev_and_runner() {
+        assert_eq!(parse_studio_mode("dev"), Some(StudioMode::Dev));
+        assert_eq!(parse_studio_mode("runner"), Some(StudioMode::Runner));
+        assert_eq!(parse_studio_mode("weird"), None);
+    }
+
+    #[test]
+    fn parse_project_arg_skips_known_flags_and_returns_positional_project() {
+        let args = vec![
+            "--runner".to_string(),
+            "--mode".to_string(),
+            "runner".to_string(),
+            "https://github.com/vo-lang/MarbleRush".to_string(),
+        ];
+        let proj = parse_project_arg(&args);
+        assert_eq!(proj.as_deref(), Some("https://github.com/vo-lang/MarbleRush"));
+    }
+
+    #[test]
+    fn query_map_can_feed_proj_launch() {
+        let query = Some(HashMap::from([
+            ("proj".to_string(), "https://github.com/vo-lang/MarbleRush/tree/abc123".to_string()),
+            ("mode".to_string(), "runner".to_string()),
+        ]));
+        let proj = super::query_get(&query, &["proj"]);
+        let mode = super::query_get(&query, &["mode"]).and_then(|value| parse_studio_mode(&value));
+        assert_eq!(proj.as_deref(), Some("https://github.com/vo-lang/MarbleRush/tree/abc123"));
+        assert_eq!(mode, Some(StudioMode::Runner));
     }
 }

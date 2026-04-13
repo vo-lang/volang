@@ -16,6 +16,7 @@ import type {
   HttpResult,
   InstallEvent,
   InstalledModule,
+  LaunchSpec,
   ProcEvent,
   ReadManyResult,
   RendererBridgeVfsSnapshot,
@@ -24,6 +25,7 @@ import type {
   SessionInfo,
   StreamHandle,
 } from '../types';
+
 import { invoke as tauriInvoke, listen as tauriListen } from '../tauri';
 import { consolePush } from '../../stores/console';
 import { formatDurationMs, pushUiConsole, renderStudioLogRecord, type StudioLogRecord } from './gui_console';
@@ -31,11 +33,21 @@ import { makeTauriStreamHandle } from './stream_handle';
 
 type StudioLogEvent = { sessionId: number; record: StudioLogRecord };
 
+type NativeFrameworkContract = {
+  name: string;
+  entry: string;
+  capabilities: string[];
+  rendererPath: string | null;
+  protocolPath: string | null;
+  hostBridgePath: string | null;
+};
+
 type NativeGuiRunResult = {
   renderBytes: number[];
   moduleBytes: number[];
   entryPath: string;
-  framework: { name: string; entry: string; capabilities: string[]; rendererPath: string | null; protocolPath: string | null; hostBridgePath: string | null } | null;
+  framework: NativeFrameworkContract | null;
+  providerFrameworks: NativeFrameworkContract[];
   externalWidgetHandlerId: number | null;
 };
 
@@ -67,16 +79,8 @@ export class NativeBackend implements Backend {
     return this.invoke<BootstrapContext>('cmd_get_bootstrap_context');
   }
 
-  async openWorkspaceSession(): Promise<SessionInfo> {
-    return this.invoke<SessionInfo>('cmd_open_workspace_session');
-  }
-
-  async openRunSession(path: string): Promise<SessionInfo> {
-    return this.invoke<SessionInfo>('cmd_open_run_session', { path });
-  }
-
-  async openUrlSession(url: string): Promise<SessionInfo> {
-    return this.invoke<SessionInfo>('cmd_open_url_session', { url });
+  async openSession(spec: LaunchSpec): Promise<SessionInfo> {
+    return this.invoke<SessionInfo>('cmd_open_session', { spec });
   }
 
   async discoverProjects(root: string): Promise<DiscoveredProject[]> {
@@ -186,6 +190,7 @@ export class NativeBackend implements Backend {
       moduleBytes: new Uint8Array(result.moduleBytes),
       entryPath: result.entryPath,
       framework: result.framework,
+      providerFrameworks: result.providerFrameworks,
       externalWidgetHandlerId: result.externalWidgetHandlerId,
     };
   }
@@ -201,6 +206,10 @@ export class NativeBackend implements Backend {
 
   async pushIslandTransport(data: Uint8Array): Promise<void> {
     await this.invoke<void>('cmd_push_island_transport', { data: Array.from(data) });
+  }
+
+  async pollIslandTransport(): Promise<Uint8Array> {
+    return new Uint8Array(0);
   }
 
   async pollGuiRender(): Promise<Uint8Array> {
