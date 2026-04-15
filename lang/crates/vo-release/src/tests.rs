@@ -241,11 +241,15 @@ fn stage_release_includes_declared_include_files_from_dist_dirs() {
         concat!(
             "[extension]\n",
             "name = \"demo\"\n",
-            "path = \"rust/target/{profile}/libdemo\"\n",
             "include = [\n",
             "  \"js/dist/studio_renderer.js\",\n",
             "  \"js/dist/studio_host_bridge.js\",\n",
-            "]\n",
+            "]\n\n",
+            "[extension.native]\n",
+            "path = \"rust/target/{profile}/libdemo\"\n\n",
+            "[[extension.native.targets]]\n",
+            "target = \"aarch64-apple-darwin\"\n",
+            "library = \"libdemo.dylib\"\n",
         ),
     )
     .unwrap();
@@ -291,10 +295,14 @@ fn stage_release_includes_declared_include_directories_recursively() {
         concat!(
             "[extension]\n",
             "name = \"demo\"\n",
-            "path = \"rust/target/{profile}/libdemo\"\n",
             "include = [\n",
             "  \"js/dist\",\n",
-            "]\n",
+            "]\n\n",
+            "[extension.native]\n",
+            "path = \"rust/target/{profile}/libdemo\"\n\n",
+            "[[extension.native.targets]]\n",
+            "target = \"aarch64-apple-darwin\"\n",
+            "library = \"libdemo.dylib\"\n",
         ),
     )
     .unwrap();
@@ -347,8 +355,12 @@ fn stage_release_fails_when_declared_include_file_is_missing() {
         concat!(
             "[extension]\n",
             "name = \"demo\"\n",
-            "path = \"rust/target/{profile}/libdemo\"\n",
-            "include = [\"js/dist/studio_renderer.js\"]\n",
+            "include = [\"js/dist/studio_renderer.js\"]\n\n",
+            "[extension.native]\n",
+            "path = \"rust/target/{profile}/libdemo\"\n\n",
+            "[[extension.native.targets]]\n",
+            "target = \"aarch64-apple-darwin\"\n",
+            "library = \"libdemo.dylib\"\n",
         ),
     )
     .unwrap();

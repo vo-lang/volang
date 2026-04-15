@@ -329,7 +329,9 @@ fn build_local_framework_manifest(
     if let Some(ext_content) = embedded_local_file(module, "vo.ext.toml") {
         let ext_content = std::str::from_utf8(ext_content.bytes)
             .map_err(|error| format!("utf8 decode local framework {} vo.ext.toml: {}", module.module_path, error))?;
-        if let Some(ext) = vo_module::ext_manifest::wasm_extension_from_content(ext_content) {
+        if let Some(ext) = vo_module::ext_manifest::wasm_extension_from_content(ext_content)
+            .map_err(|error| format!("parse local framework {} vo.ext.toml: {}", module.module_path, error))?
+        {
             let wasm_file = embedded_local_wasm_asset_file(module, &ext.wasm)
                 .ok_or_else(|| format!("local framework {} missing wasm asset {}", module.module_path, ext.wasm))?;
             artifacts.push(vo_module::schema::manifest::ManifestArtifact {
@@ -516,7 +518,9 @@ fn seed_local_framework_module(module: &EmbeddedLocalFrameworkModule) -> Result<
     if let Some(ext_content) = embedded_local_file(module, "vo.ext.toml") {
         let ext_content = std::str::from_utf8(ext_content.bytes)
             .map_err(|error| format!("utf8 decode local framework {} vo.ext.toml: {}", module.module_path, error))?;
-        if let Some(ext) = vo_module::ext_manifest::wasm_extension_from_content(ext_content) {
+        if let Some(ext) = vo_module::ext_manifest::wasm_extension_from_content(ext_content)
+            .map_err(|error| format!("parse local framework {} vo.ext.toml: {}", module.module_path, error))?
+        {
             let artifact_root = join_vfs_path(&module_root, ".vo-artifacts");
             let wasm_file = embedded_local_wasm_asset_file(module, &ext.wasm)
                 .ok_or_else(|| format!("local framework {} missing wasm asset {}", module.module_path, ext.wasm))?;
@@ -1231,11 +1235,13 @@ fn read_module_artifact_bytes(module_root: &str, asset_path: &str) -> Result<Vec
 
 fn parse_wasm_extension_module(manifest_path: &str, locked_module_path: Option<&str>) -> Result<Option<WasmExtensionModule>, String> {
     let content = read_vfs_text(manifest_path)?;
-    let Some(wasm) = vo_module::ext_manifest::wasm_extension_from_content(&content) else {
+    let Some(wasm) = vo_module::ext_manifest::wasm_extension_from_content(&content)
+        .map_err(|error| format!("{}: {}", manifest_path, error))?
+    else {
         return Ok(None);
     };
     let name = vo_module::ext_manifest::extension_name_from_content(&content)
-        .ok_or_else(|| format!("{} missing extension.name", manifest_path))?;
+        .map_err(|error| format!("{}: {}", manifest_path, error))?;
     let module_key = locked_module_path.unwrap_or(&name).to_string();
     let module_root = vfs_parent_dir(manifest_path).unwrap_or_else(|| "/".to_string());
     Ok(Some(WasmExtensionModule {

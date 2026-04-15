@@ -72,8 +72,12 @@ pub(super) fn prepare_native_extension_specs_for_frozen_build(
         .canonicalize()
         .unwrap_or_else(|_| mod_root.to_path_buf());
     let mut prepared: BTreeMap<PathBuf, NativeExtensionSpec> = BTreeMap::new();
+    let native_manifests = manifests
+        .iter()
+        .filter(|manifest| manifest.native.is_some())
+        .collect::<Vec<_>>();
 
-    for manifest in manifests {
+    for manifest in &native_manifests {
         let module_dir = extension_manifest_module_dir(manifest)?;
         if prepared.contains_key(&module_dir) {
             continue;
@@ -82,16 +86,23 @@ pub(super) fn prepare_native_extension_specs_for_frozen_build(
         prepared.insert(module_dir, resolved);
     }
 
-    Ok(manifests
-        .iter()
-        .map(|m| {
-            let dir = extension_manifest_module_dir(m).unwrap();
-            prepared
-                .get(&dir)
-                .cloned()
-                .unwrap_or_else(|| native_extension_spec(m, m.native_path.clone()))
+    native_manifests
+        .into_iter()
+        .map(|manifest| {
+            let module_dir = extension_manifest_module_dir(manifest)?;
+            prepared.get(&module_dir).cloned().ok_or_else(|| {
+                ModuleSystemError::new(
+                    ModuleSystemStage::NativeExtension,
+                    ModuleSystemErrorKind::ValidationFailed,
+                    format!(
+                        "missing prepared native extension spec for {}",
+                        manifest.manifest_path.display(),
+                    ),
+                )
+                .with_path(&manifest.manifest_path)
+            })
         })
-        .collect())
+        .collect()
 }
 
 fn module_identity_from_cache_dir(mod_root: &Path, module_dir: &Path) -> Option<(String, String)> {
@@ -125,6 +136,25 @@ fn native_extension_spec(
     )
 }
 
+fn manifest_local_native_path(
+    manifest: &ExtensionManifest,
+    module_dir: &Path,
+) -> Result<PathBuf, ModuleSystemError> {
+    manifest
+        .resolve_local_native_path(module_dir)
+        .ok_or_else(|| {
+            ModuleSystemError::new(
+                ModuleSystemStage::NativeExtension,
+                ModuleSystemErrorKind::ValidationFailed,
+                format!(
+                    "native extension manifest does not declare [extension.native]: {}",
+                    manifest.manifest_path.display(),
+                ),
+            )
+            .with_path(&manifest.manifest_path)
+        })
+}
+
 fn extension_manifest_module_dir(
     manifest: &ExtensionManifest,
 ) -> Result<PathBuf, ModuleSystemError> {
@@ -154,7 +184,7 @@ fn prepare_extension_spec(
         ensure_local_native_extension_built(&module_dir)?;
         return Ok(native_extension_spec(
             manifest,
-            manifest.native_path.clone(),
+            manifest_local_native_path(manifest, &module_dir)?,
         ));
     }
 
@@ -214,23 +244,21 @@ fn native_extension_artifact_name(
     locked: &LockedModule,
 ) -> Result<String, ModuleSystemError> {
     manifest
-        .native_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_string)
+        .declared_native_target(current_target_triple())
+        .map(|target| target.library.clone())
         .ok_or_else(|| {
             ModuleSystemError::new(
                 ModuleSystemStage::NativeExtension,
-                ModuleSystemErrorKind::ValidationFailed,
+                ModuleSystemErrorKind::Missing,
                 format!(
-                    "invalid native extension artifact path for {}@{}: {}",
+                    "vo.ext.toml does not declare extension-native support for target {} in {}@{}",
+                    current_target_triple(),
                     locked.path,
                     locked.version,
-                    manifest.native_path.display(),
                 ),
             )
             .with_module_version(locked.path.as_str(), locked.version.to_string())
-            .with_path(&manifest.native_path)
+            .with_path(&manifest.manifest_path)
         })
 }
 
@@ -304,8 +332,11 @@ pub(super) fn ensure_local_native_extension_built(
     let Some(manifest) = manifests.into_iter().next() else {
         return Ok(());
     };
-    if manifest.native_path.is_file() {
-        if let Ok(lib_mtime) = manifest.native_path.metadata().and_then(|m| m.modified()) {
+    let Some(native_path) = manifest.resolve_local_native_path(module_dir) else {
+        return Ok(());
+    };
+    if native_path.is_file() {
+        if let Ok(lib_mtime) = native_path.metadata().and_then(|m| m.modified()) {
             let rust_dir = module_dir.join("rust").join("src");
             if rust_dir.is_dir() {
                 let source_files = walkdir_files(&rust_dir).map_err(|e| {
@@ -329,7 +360,7 @@ pub(super) fn ensure_local_native_extension_built(
                 if all_older {
                     emit_compile_log(
                         CompileLogRecord::new("vo-engine", "native_extension_cached")
-                            .path(manifest.native_path.display().to_string()),
+                            .path(native_path.display().to_string()),
                     );
                     return Ok(());
                 }

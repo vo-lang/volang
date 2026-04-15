@@ -17,6 +17,43 @@ use vo_module::identity::{ArtifactId, ModulePath};
 use vo_module::schema::lockfile::LockedArtifact;
 use vo_module::version::ExactVersion;
 
+fn current_platform_library_name(stem: &str) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        format!("{}.so", stem)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        format!("{}.dylib", stem)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        format!("{}.dll", stem.strip_prefix("lib").unwrap_or(stem))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        format!("{}.so", stem)
+    }
+}
+
+fn canonical_native_ext_manifest(name: &str, path: &str, library_stem: &str) -> String {
+    format!(
+        concat!(
+            "[extension]\n",
+            "name = \"{}\"\n\n",
+            "[extension.native]\n",
+            "path = \"{}\"\n\n",
+            "[[extension.native.targets]]\n",
+            "target = \"{}\"\n",
+            "library = \"{}\"\n",
+        ),
+        name,
+        path,
+        current_target_triple(),
+        current_platform_library_name(library_stem),
+    )
+}
+
 #[test]
 fn test_compile_source_without_external_modules() {
     let root = temp_dir("vo_compile_plain");
@@ -282,7 +319,7 @@ fn test_validate_locked_extension_manifests_require_locked_native_artifact() {
     fs::write(module_dir.join("vo.release.json"), manifest_content).unwrap();
     fs::write(
         module_dir.join("vo.ext.toml"),
-        "[extension]\nname = \"demo\"\npath = \"rust/target/{profile}/libdemo\"\n",
+        canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
     )
     .unwrap();
 
@@ -354,7 +391,7 @@ fn test_resolve_extension_manifests_uses_cached_native_artifact_path() {
     .unwrap();
     fs::write(
         module_dir.join("vo.ext.toml"),
-        "[extension]\nname = \"demo\"\npath = \"rust/target/{profile}/libdemo\"\n",
+        canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
     )
     .unwrap();
 
@@ -364,11 +401,10 @@ fn test_resolve_extension_manifests_uses_cached_native_artifact_path() {
         .next()
         .unwrap();
     let artifact_name = manifest
-        .native_path
-        .file_name()
-        .and_then(|name| name.to_str())
+        .declared_native_target(current_target_triple())
         .unwrap()
-        .to_string();
+        .library
+        .clone();
     let artifact_path = module_dir.join("artifacts").join(&artifact_name);
     fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
     let artifact_bytes = b"fake-native-artifact";
@@ -462,7 +498,7 @@ fn test_compile_prefers_local_replace_extension_manifest_paths() {
     .unwrap();
     fs::write(
         local_vogui.join("vo.ext.toml"),
-        "[extension]\nname = \"vogui\"\npath = \"rust/target/{profile}/libvo_vogui\"\n",
+        canonical_native_ext_manifest("vogui", "rust/target/{profile}/libvo_vogui", "libvo_vogui"),
     )
     .unwrap();
     fs::write(
@@ -516,7 +552,7 @@ fn test_compile_single_file_without_vo_mod_uses_ancestor_workfile_extension_mani
     .unwrap();
     fs::write(
         local_vogui.join("vo.ext.toml"),
-        "[extension]\nname = \"vogui\"\npath = \"rust/target/{profile}/libvo_vogui\"\n",
+        canonical_native_ext_manifest("vogui", "rust/target/{profile}/libvo_vogui", "libvo_vogui"),
     )
     .unwrap();
     fs::write(
@@ -705,7 +741,7 @@ fn test_compile_with_cache_fingerprint_tracks_extension_manifest() {
     fs::write(root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
     fs::write(
         root.join("vo.ext.toml"),
-        "[extension]\nname = \"demo\"\npath = \"rust/target/{profile}/libdemo\"\n",
+        canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
     )
     .unwrap();
 
@@ -714,7 +750,7 @@ fn test_compile_with_cache_fingerprint_tracks_extension_manifest() {
 
     fs::write(
         root.join("vo.ext.toml"),
-        "[extension]\nname = \"demo2\"\npath = \"rust/target/{profile}/libdemo2\"\n",
+        canonical_native_ext_manifest("demo2", "rust/target/{profile}/libdemo2", "libdemo2"),
     )
     .unwrap();
 
@@ -947,7 +983,7 @@ fn test_compile_single_file_ignores_unimported_workspace_native_extension() {
     .unwrap();
     fs::write(
         bad_ext.join("vo.ext.toml"),
-        "[extension]\nname = \"badext\"\npath = \"rust/target/{profile}/libbadext\"\n",
+        canonical_native_ext_manifest("badext", "rust/target/{profile}/libbadext", "libbadext"),
     )
     .unwrap();
     fs::write(

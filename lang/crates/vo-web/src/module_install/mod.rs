@@ -118,7 +118,7 @@ async fn install_module_to_vfs_typed(spec: &str) -> ModuleInstallResult<String> 
         &format!("{}\n", manifest.source.digest),
     )?;
 
-    if let Some(wasm_extension) = read_wasm_extension_from_vfs(&module, &version) {
+    if let Some(wasm_extension) = read_wasm_extension_from_vfs(&module, &version)? {
         let assets = fetch_and_cache_extension_assets(
             &module,
             &version,
@@ -175,7 +175,7 @@ async fn install_locked_module_to_vfs(locked: &LockedModule) -> ModuleInstallRes
         &format!("{}\n", locked.source),
     )?;
 
-    if let Some(wasm_extension) = read_wasm_extension_from_vfs(module, &version) {
+    if let Some(wasm_extension) = read_wasm_extension_from_vfs(module, &version)? {
         fetch_and_cache_extension_assets(
             module,
             &version,

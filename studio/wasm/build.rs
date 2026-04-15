@@ -272,7 +272,9 @@ fn discover_local_framework_modules(
             }
         }
         if let Some(vo_ext_content) = vo_ext_content.as_deref() {
-            if let Some(ext) = wasm_extension_from_content(vo_ext_content) {
+            if let Some(ext) = wasm_extension_from_content(vo_ext_content)
+                .unwrap_or_else(|error| panic!("invalid vo.ext.toml in {}: {}", repo.display(), error))
+            {
                 let wasm_path = resolve_local_wasm_asset_path(repo, &ext.wasm);
                 assert!(wasm_path.is_file(), "missing wasm asset {}", wasm_path.display());
                 files.insert(normalize_path(wasm_path.strip_prefix(repo).unwrap()));

@@ -60,7 +60,7 @@ impl<F: FileSystem> StdSource<F> {
         Self { fs }
     }
 
-    pub fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
+    pub fn resolve(&self, import_path: &str) -> Result<Option<VfsPackage>, String> {
         resolve_package(&self.fs, Path::new(import_path), import_path)
     }
 
@@ -147,9 +147,9 @@ impl<F: FileSystem> ModSource<F> {
             .with_project_locked_module_roots(deps)
     }
 
-    pub fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
+    pub fn resolve(&self, import_path: &str) -> Result<Option<VfsPackage>, String> {
         if !self.is_allowed(import_path) {
-            return None;
+            return Ok(None);
         }
         if let Some((module, root)) = self.match_module_root(import_path) {
             let fs_path = if import_path == module {
@@ -214,7 +214,7 @@ pub trait Resolver: Send + Sync {
     /// Resolve an import path.
     ///
     /// `import_path` - the import path (e.g., "fmt", "encoding/json", "github.com/acme/lib")
-    fn resolve(&self, import_path: &str) -> Option<VfsPackage>;
+    fn resolve(&self, import_path: &str) -> Result<Option<VfsPackage>, String>;
 }
 
 /// Package resolver with potentially different file systems for each source.
@@ -307,7 +307,7 @@ pub fn project_package_resolver_with_layout_and_replaces<
 impl<S: FileSystem + Send + Sync, M: FileSystem + Send + Sync> Resolver
     for PackageResolverMixed<S, M>
 {
-    fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
+    fn resolve(&self, import_path: &str) -> Result<Option<VfsPackage>, String> {
         if import_path.contains('.') {
             return self.r#mod.resolve(import_path);
         }
@@ -317,13 +317,19 @@ impl<S: FileSystem + Send + Sync, M: FileSystem + Send + Sync> Resolver
 }
 
 /// Helper to resolve a package from a file system.
-fn resolve_package<F: FileSystem>(fs: &F, fs_path: &Path, import_path: &str) -> Option<VfsPackage> {
+fn resolve_package<F: FileSystem>(
+    fs: &F,
+    fs_path: &Path,
+    import_path: &str,
+) -> Result<Option<VfsPackage>, String> {
     let pkg_path = fs_path;
     if !fs.is_dir(pkg_path) {
-        return None;
+        return Ok(None);
     }
 
-    let files = load_vo_files(fs, pkg_path)?;
+    let Some(files) = load_vo_files(fs, pkg_path) else {
+        return Ok(None);
+    };
 
     let fs_path_abs = match fs.root() {
         Some(root) => root.join(pkg_path),
@@ -333,7 +339,7 @@ fn resolve_package<F: FileSystem>(fs: &F, fs_path: &Path, import_path: &str) -> 
     let (module_path, canonical_path) =
         resolve_canonical_package_path(fs, pkg_path, &fs_path_abs, import_path);
     let extension_name =
-        find_extension_name_abs(&fs_path_abs).or_else(|| find_extension_name_in_fs(fs, pkg_path));
+        find_extension_name_abs(&fs_path_abs)?.or(find_extension_name_in_fs(fs, pkg_path)?);
     let abi_path = package_abi_path(
         &canonical_path,
         module_path.as_deref(),
@@ -341,14 +347,14 @@ fn resolve_package<F: FileSystem>(fs: &F, fs_path: &Path, import_path: &str) -> 
     );
     let name = abi_path.rsplit('/').next().unwrap_or(&abi_path).to_string();
 
-    Some(VfsPackage {
+    Ok(Some(VfsPackage {
         name,
         path: canonical_path,
         abi_path,
         module_path,
         fs_path: fs_path_abs,
         files,
-    })
+    }))
 }
 
 fn resolve_canonical_package_path<F: FileSystem>(
@@ -410,29 +416,37 @@ pub(crate) fn read_module_path_from_disk(dir: &Path) -> Option<String> {
     None
 }
 
-fn find_extension_name_in_fs<F: FileSystem>(fs: &F, pkg_path: &Path) -> Option<String> {
+fn find_extension_name_in_fs<F: FileSystem>(
+    fs: &F,
+    pkg_path: &Path,
+) -> Result<Option<String>, String> {
     for ancestor in relative_path_ancestors(pkg_path) {
-        if let Ok(content) = fs.read_file(&ancestor.join("vo.ext.toml")) {
-            if let Some(name) = extension_name_from_content(&content) {
-                return Some(name);
-            }
+        let manifest_path = ancestor.join("vo.ext.toml");
+        if let Ok(content) = fs.read_file(&manifest_path) {
+            return extension_name_from_content(&content)
+                .map(Some)
+                .map_err(|error| format!("{}: {}", manifest_path.display(), error));
         }
     }
-    None
+    Ok(None)
 }
 
-fn find_extension_name_abs(abs_pkg_path: &Path) -> Option<String> {
+fn find_extension_name_abs(abs_pkg_path: &Path) -> Result<Option<String>, String> {
     if !abs_pkg_path.is_absolute() {
-        return None;
+        return Ok(None);
     }
     let mut dir = abs_pkg_path;
     loop {
-        if let Ok(content) = std::fs::read_to_string(dir.join("vo.ext.toml")) {
-            if let Some(name) = extension_name_from_content(&content) {
-                return Some(name);
-            }
+        let manifest_path = dir.join("vo.ext.toml");
+        if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+            return extension_name_from_content(&content)
+                .map(Some)
+                .map_err(|error| format!("{}: {}", manifest_path.display(), error));
         }
-        dir = dir.parent()?;
+        let Some(parent) = dir.parent() else {
+            return Ok(None);
+        };
+        dir = parent;
     }
 }
 
@@ -578,7 +592,7 @@ impl<R, F> ReplacingResolver<R, F> {
 }
 
 impl<R: Resolver, F: FileSystem> Resolver for ReplacingResolver<R, F> {
-    fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
+    fn resolve(&self, import_path: &str) -> Result<Option<VfsPackage>, String> {
         if let Some((_module, local_dir, sub)) = self.match_replace(import_path) {
             let resolve_dir = if sub.is_empty() {
                 local_dir.clone()
@@ -626,7 +640,7 @@ impl<R, F> CurrentModuleResolver<R, F> {
 }
 
 impl<R: Resolver, F: FileSystem> Resolver for CurrentModuleResolver<R, F> {
-    fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
+    fn resolve(&self, import_path: &str) -> Result<Option<VfsPackage>, String> {
         if let Some(module) = &self.current_module {
             let sub_path = if import_path == module {
                 Some("")
@@ -644,8 +658,8 @@ impl<R: Resolver, F: FileSystem> Resolver for CurrentModuleResolver<R, F> {
                 } else {
                     normalize_fs_path(&self.local_root.join(sub_path))
                 };
-                if let Some(pkg) = resolve_package(&self.local_fs, &local_path, import_path) {
-                    return Some(pkg);
+                if let Some(pkg) = resolve_package(&self.local_fs, &local_path, import_path)? {
+                    return Ok(Some(pkg));
                 }
             }
         }
@@ -692,7 +706,7 @@ mod tests {
         fs.add_file("shared/utils.vo", "package utils\n");
 
         let resolver = PackageResolver::with_fs(fs);
-        assert!(resolver.resolve("../../shared").is_none());
+        assert!(resolver.resolve("../../shared").unwrap().is_none());
     }
 
     #[test]
@@ -708,6 +722,7 @@ mod tests {
 
         let root = resolver
             .resolve("github.com/acme/game")
+            .unwrap()
             .expect("root package should resolve");
         assert_eq!(root.path, "github.com/acme/game");
         assert_eq!(root.name, "game");
@@ -715,6 +730,7 @@ mod tests {
 
         let sub = resolver
             .resolve("github.com/acme/game/codec")
+            .unwrap()
             .expect("subpackage should resolve");
         assert_eq!(sub.path, "github.com/acme/game/codec");
         assert_eq!(sub.name, "codec");
@@ -741,11 +757,13 @@ mod tests {
 
         let root = resolver
             .resolve("github.com/acme/game")
+            .unwrap()
             .expect("root package should resolve from prefixed local root");
         assert_eq!(root.fs_path, PathBuf::from("workspace/game"));
 
         let sub = resolver
             .resolve("github.com/acme/game/codec")
+            .unwrap()
             .expect("subpackage should resolve from prefixed local root");
         assert_eq!(sub.fs_path, PathBuf::from("workspace/game/codec"));
     }
@@ -773,6 +791,7 @@ mod tests {
 
         let root = mod_source
             .resolve("github.com/acme/game")
+            .unwrap()
             .expect("root package should resolve from mapped version dir");
         assert_eq!(root.path, "github.com/acme/game");
         assert_eq!(
@@ -782,6 +801,7 @@ mod tests {
 
         let sub = mod_source
             .resolve("github.com/acme/game/codec")
+            .unwrap()
             .expect("subpackage should resolve from mapped version dir");
         assert_eq!(sub.path, "github.com/acme/game/codec");
         assert_eq!(
@@ -822,6 +842,7 @@ mod tests {
         let mod_source = project_mod_source_with_layout(fs, &deps, ProjectModLayout::ImportPaths);
         let root = mod_source
             .resolve("github.com/acme/game")
+            .unwrap()
             .expect("root package should resolve from canonical import path layout");
         assert_eq!(root.path, "github.com/acme/game");
         assert_eq!(root.fs_path, PathBuf::from("github.com/acme/game"));
@@ -849,14 +870,35 @@ mod tests {
 
         let root = resolver
             .resolve("github.com/vo-lang/voplay")
+            .unwrap()
             .expect("root package should resolve from replacement");
         assert_eq!(root.path, "github.com/vo-lang/voplay");
         assert_eq!(root.fs_path, PathBuf::from("workspace/voplay"));
 
         let sub = resolver
             .resolve("github.com/vo-lang/voplay/codec")
+            .unwrap()
             .expect("subpackage should resolve from replacement");
         assert_eq!(sub.path, "github.com/vo-lang/voplay/codec");
         assert_eq!(sub.fs_path, PathBuf::from("workspace/voplay/codec"));
+    }
+
+    #[test]
+    fn test_resolve_propagates_invalid_extension_manifest() {
+        let fs = MemoryFs::new()
+            .with_file("github.com/acme/game/game.vo", "package game\n")
+            .with_file(
+                "github.com/acme/game/vo.ext.toml",
+                concat!(
+                    "[extension]\n",
+                    "name = \"game\"\n",
+                    "path = \"rust/target/release/libgame\"\n",
+                ),
+            );
+
+        let resolver = PackageResolver::with_fs(fs);
+        let error = resolver.resolve("github.com/acme/game").unwrap_err();
+        assert!(error.contains("vo.ext.toml"));
+        assert!(error.contains("[extension].path is invalid"));
     }
 }

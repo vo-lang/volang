@@ -533,8 +533,14 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
         }
 
         let vfs_pkg = match self.vfs.resolve(import_path) {
-            Some(pkg) => pkg,
-            None => return ImportResult::Err(format!("package not found: {}", import_path)),
+            Ok(Some(pkg)) => pkg,
+            Ok(None) => return ImportResult::Err(format!("package not found: {}", import_path)),
+            Err(error) => {
+                return ImportResult::Err(format!(
+                    "failed to resolve package {}: {}",
+                    import_path, error,
+                ))
+            }
         };
 
         // Mark as in progress

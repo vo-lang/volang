@@ -55,15 +55,35 @@ pub(super) async fn load_wasm_extension_bytes(
 pub(super) fn read_wasm_extension_from_vfs(
     module: &str,
     version: &str,
-) -> Option<WasmExtensionManifest> {
+) -> ModuleInstallResult<Option<WasmExtensionManifest>> {
     let path = vfs_module_file_path(module, version, "vo.ext.toml");
     let (data, err) = vo_web_runtime_wasm::vfs::read_file(&path);
     if err.is_some() {
-        return None;
+        return Ok(None);
     }
     match String::from_utf8(data) {
-        Ok(content) => vo_module::ext_manifest::wasm_extension_from_content(&content),
-        Err(_) => None,
+        Ok(content) => {
+            vo_module::ext_manifest::wasm_extension_from_content(&content).map_err(|error| {
+                ModuleInstallError::new(
+                    ModuleInstallStage::Extension,
+                    ModuleInstallErrorKind::ParseFailed,
+                    format!(
+                        "failed to parse vo.ext.toml for {}@{}: {}",
+                        module, version, error
+                    ),
+                )
+                .with_module_version(module, version)
+            })
+        }
+        Err(error) => Err(ModuleInstallError::new(
+            ModuleInstallStage::Extension,
+            ModuleInstallErrorKind::ParseFailed,
+            format!(
+                "cached vo.ext.toml for {}@{} is not valid UTF-8: {}",
+                module, version, error
+            ),
+        )
+        .with_module_version(module, version)),
     }
 }
 
@@ -111,7 +131,7 @@ pub(super) async fn load_cached_ext_from_vfs(
     module: &str,
     version: &str,
 ) -> ModuleInstallResult<bool> {
-    let Some(ext) = read_wasm_extension_from_vfs(module, version) else {
+    let Some(ext) = read_wasm_extension_from_vfs(module, version)? else {
         return Ok(false);
     };
     let Some(wasm_bytes) =
@@ -168,7 +188,7 @@ fn verify_locked_artifact_bytes(
 pub(super) async fn load_locked_ext_from_vfs(locked: &LockedModule) -> ModuleInstallResult<()> {
     let module = locked.path.as_str();
     let version = locked.version.to_string();
-    let Some(ext) = read_wasm_extension_from_vfs(module, &version) else {
+    let Some(ext) = read_wasm_extension_from_vfs(module, &version)? else {
         return Ok(());
     };
     let wasm_bytes = read_vfs_bytes(&vfs_artifact_path(module, &version, &ext.wasm))?;
@@ -262,8 +282,13 @@ where
 /// Determines whether the module uses wasm-bindgen by reading `vo.ext.toml`
 /// from the VFS (already installed by fetch or OPFS persistence).
 pub async fn load_ext_if_present(module: &str, version: &str) {
-    let Some(wasm_extension) = read_wasm_extension_from_vfs(module, version) else {
-        return;
+    let wasm_extension = match read_wasm_extension_from_vfs(module, version) {
+        Ok(Some(wasm_extension)) => wasm_extension,
+        Ok(None) => return,
+        Err(error) => {
+            log_extension_load_error(module, version, stringify_module_install_error(error));
+            return;
+        }
     };
     let manifest = match read_release_manifest_from_vfs(module, version) {
         Ok(manifest) => manifest,

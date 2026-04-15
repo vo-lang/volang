@@ -97,7 +97,7 @@ Rules:
 - For monorepos, tags should include module name, e.g. `core/v1.2.3`.
 - A release must publish a machine-readable `vo.release.json` asset.
 - A release must publish a canonical source-package asset for the module version.
-- If the module ships target-specific binary artifacts, they must be published as release assets and listed in `vo.release.json`.
+- If `vo.ext.toml` declares target-specific artifacts, every required artifact implied by that declared target-support contract must be published as a release asset and listed in `vo.release.json`.
 
 ## 6. CI Baseline
 
@@ -108,25 +108,24 @@ Minimum CI checks per module:
 
 Additional required checks when `vo.ext.toml` is present:
 
-3. `./d.py check --target=wasm <module-root>`
+3. If `[extension.wasm]` is declared: `./d.py check --target=wasm <module-root>`.
 
-   This check verifies one of two outcomes:
-   - **Pass**: all `extern func` in the module have `//go:build wasm` file counterparts with Vo implementations.
-   - **Fail**: WASM build fails with a missing-implementation error. This is also acceptable — it means the module intentionally does not support WASM, and the CI result documents that fact.
+   A declared WASM target is an explicit support claim. This check is expected to pass.
 
-   Either outcome is deterministic. The point is that CI runs the check so the result is explicit and not discovered by a downstream user.
+4. If `[[extension.native.targets]]` entries are declared: CI should build or otherwise verify the native extension artifact for each declared target before release staging.
 
 Additional recommended checks:
 
 - `vo.lock` integrity consistency (no dependency or artifact drift without corresponding lock update)
 - no forbidden committed directories (`.vodeps`, `.vo-cache`, `target/`)
-- If `vo.ext.toml` is present: at least one native test that invokes an extern function to verify the dylib loads correctly
+- If `vo.ext.toml` declares native targets: at least one native test on each covered host platform should invoke an extern function to verify the shared library loads correctly
 
 ## 7. Publishing Checklist
 
 Before tagging a release:
 
 1. `vo.mod` and `vo.lock` are up-to-date and committed.
-2. README states which targets are supported (native / wasm), verified by CI results, not by declaration.
-3. If `vo.ext.toml` exists: confirm `native.path` resolves correctly on each target OS; build the dylib in CI before running tests.
-4. All CI jobs pass on the release commit.
+2. If `vo.ext.toml` exists: its declared target-support set is authoritative for published extension support. README text may summarize support, but must not contradict the manifest.
+3. If `vo.ext.toml` exists: confirm every declared `[[extension.native.targets]]` and `[extension.wasm]` artifact is built or staged with the exact asset names declared in the manifest and recorded in `vo.release.json`.
+4. If `vo.ext.toml` exists: it must use the canonical schema from `spec/native-ffi.md`; legacy schema shapes are a hard error.
+5. All CI jobs pass on the release commit.

@@ -445,9 +445,19 @@ Rules:
 
 A module may contain `vo.ext.toml` to declare extension metadata.
 That file is part of the source package and versioned with the module.
-Its semantics are defined in `native-ffi.md`.
+Its detailed schema and ABI semantics are defined in `native-ffi.md`.
 
 The module system treats extension metadata as part of a module's published contents, not as a separate dependency system.
+
+Module-protocol rules:
+
+- `vo.ext.toml` MAY declare target-specific extension assets such as WASM artifacts, native dynamic libraries, or generated bridge files.
+- A published module that contains Rust-backed extension code MUST describe that extension in `vo.ext.toml`.
+- If a module publishes Rust-backed extension code, `vo.ext.toml` MUST explicitly declare the set of supported published targets for that module version.
+- Supported targets MUST use canonical target identifiers such as Rust target triples or `wasm32-unknown-unknown`; coarse labels such as `mac`, `linux`, or `win` are not sufficient protocol identifiers.
+- A module version MAY support only a subset of targets. Omission of a target means that target is unsupported for that version.
+- For every target explicitly declared as supported by a Rust-backed extension, the published release MUST include the required binary artifact set for that target.
+- Legacy `vo.ext.toml` schema shapes are invalid under this protocol and MUST be rejected rather than rewritten or interpreted compatibly.
 
 ## 6. GitHub Registry Model
 
@@ -478,7 +488,7 @@ The release manifest must contain, at minimum:
 - `vo`: toolchain constraint from `vo.mod`
 - `require`: direct dependency constraints from `vo.mod`
 - `source`: source-package asset name, size, and digest
-- `artifacts`: optional target-specific artifact metadata and digests
+- `artifacts`: target-specific artifact metadata and digests; this list MAY be empty for pure-source modules but MUST include every published artifact required by the module's declared target-support contract
 
 The release manifest is registry metadata.
 It allows dependency resolution and integrity verification without interpreting arbitrary repository layout as package protocol.
@@ -490,6 +500,7 @@ Rules:
 - `require` MUST list only direct dependencies.
 - `require` MUST be unique and sorted by module path.
 - `artifacts` MUST be unique and sorted by `(kind, target, name)`.
+- If the packaged module contains `vo.ext.toml`, the published `artifacts` set MUST satisfy the declared target-support contract for that module version.
 - `module_root` MUST match the canonical module-path suffix inside the backing repository.
 
 ### 6.3 Source Package
@@ -513,11 +524,13 @@ Content rules:
 - The source package digest must match both the release manifest and `vo.lock`.
 - The `module` line in the packaged `vo.mod` must match the `module` field in `vo.release.json`.
 - The packaged `vo.mod` `vo` line and `require` set MUST match the release manifest.
+- If the packaged source contains `vo.ext.toml`, its declared published target-support set MUST be consistent with the artifacts recorded in `vo.release.json`.
 - If the source package contains a dependency-local `vo.lock`, consumers MUST ignore it when using this module as a dependency.
 
 ### 6.4 Target-Specific Artifacts
 
 A release may provide target-specific binary artifacts.
+If a module's published extension metadata declares support for a target-specific runtime artifact, the corresponding published artifacts are required for that target.
 Examples include:
 
 - prebuilt native extension libraries
@@ -527,6 +540,9 @@ Examples include:
 Rules:
 
 - Target-specific artifacts must be listed in `vo.release.json`.
+- Artifact targets MUST use canonical target identifiers. For Rust-backed native binaries, the identifier MUST be the Rust target triple. For WASM artifacts, the identifier MUST be `wasm32-unknown-unknown`.
+- A module version MAY support only a subset of targets. Unsupported targets simply do not appear in the declared target-support set.
+- If `vo.ext.toml` declares support for a target that requires a published binary artifact, `vo.release.json` MUST include that artifact set for the same target.
 - Binary artifacts must be verified by size and digest before use.
 - Binary artifacts do not change module identity or dependency resolution.
 - A module remains source-defined even when binary artifacts are present.
@@ -668,11 +684,14 @@ Rules:
 ### 8.4 Published Native Artifacts
 
 Published modules are source-defined, but a module version MAY publish target-specific binary artifacts such as native extension libraries.
+For modules that declare supported Rust-backed published targets, those binary artifacts are part of the release contract for each declared target.
 
 Rules:
 
 - Frozen builds MAY compile pure Vo source from a verified locked source package.
 - If a frozen build requires a published target-specific binary artifact, the toolchain MUST use the exact locked published artifact.
+- If the active build target requires a published dependency's target-specific binary artifact and that dependency version does not declare support for the active target, the build MUST fail rather than attempting an implicit local native build.
+- If a published dependency declares support for the active target but the required locked artifact is absent or invalid, the build MUST fail.
 - A frozen build MUST NOT build a published dependency's native extension from source as an implicit fallback.
 - Local workspace override modules MAY build local artifacts from local source because they are not acting as published registry materializations.
 
@@ -806,6 +825,7 @@ The toolchain must verify:
 - root `vo.mod` vs root `vo.lock` equality for `module` and `vo`
 - locked module `deps` equality with `vo.release.json.require[*].module`
 - locked module artifact equality with `vo.release.json.artifacts`
+- packaged `vo.ext.toml` consistency with the published target-support contract and `vo.release.json.artifacts`, when `vo.ext.toml` is present
 - packaged `vo.mod` consistency with `vo.release.json`
 
 Any mismatch is a hard error.
@@ -951,6 +971,16 @@ error: workspace override imports an external module that is not present in the 
   importer: github.com/acme/app/devtools
   import:   github.com/acme/newdep
   run: vo mod sync (from the root project) or disable vo.work
+```
+
+### 15.9 Missing Required Published Target Artifact
+
+```text
+error: vo.release.json is missing a required published artifact
+  module: github.com/acme/lib
+  version: v1.2.3
+  target: x86_64-unknown-linux-gnu
+  declared by: vo.ext.toml
 ```
 
 ## 16. Related Specifications
