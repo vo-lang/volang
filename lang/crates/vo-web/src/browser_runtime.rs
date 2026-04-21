@@ -307,7 +307,7 @@ pub fn split_primary_provider_view(view: &BrowserRuntimeView) -> LegacyFramework
         .providers_for("protocol")
         .first()
         .or_else(|| view.roles.providers_for("host_bridge").first())
-        .or_else(|| view.roles.entry_framework.as_ref())
+        .or(view.roles.entry_framework.as_ref())
         .or_else(|| view.frameworks.first().map(|framework| &framework.id));
     let Some(primary_id) = primary_id else {
         return LegacyFrameworkSplit::default();
@@ -477,9 +477,9 @@ pub fn plan_ready_browser_runtime_at(
     ))
 }
 
-fn ready_wasm_artifacts<'a>(
-    ready: &'a ReadyModule,
-) -> std::result::Result<Option<(&'a ResolvedArtifact, Option<&'a ResolvedArtifact>)>, String> {
+fn ready_wasm_artifacts(
+    ready: &ReadyModule,
+) -> std::result::Result<Option<(&ResolvedArtifact, Option<&ResolvedArtifact>)>, String> {
     let wasm = ready
         .artifacts
         .iter()

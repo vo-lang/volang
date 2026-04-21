@@ -96,7 +96,7 @@ pub(crate) fn raw_fd_from_handle(fd: i32) -> Option<i32> {
 fn file_mode_bits(meta: &fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
-        return meta.permissions().mode();
+        meta.permissions().mode()
     }
 
     #[cfg(not(unix))]

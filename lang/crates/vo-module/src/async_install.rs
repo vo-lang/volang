@@ -3,7 +3,7 @@ use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 
-use vo_common::vfs::{FileSystem, MemoryFs, RealFs};
+use vo_common::vfs::{FileSystem, RealFs};
 
 use crate::artifact::required_artifacts_for_target;
 use crate::cache::layout::{
@@ -155,6 +155,83 @@ fn read_installed_locked_module<F: FileSystem>(
     })?;
     let manifest = parse_requested_manifest_bytes(&manifest_raw, module, version)?;
     Ok(locked_module_from_manifest_raw(&manifest, &manifest_raw))
+}
+
+fn parse_requested_manifest_bytes(
+    manifest_raw: &[u8],
+    module: &ModulePath,
+    version: &ExactVersion,
+) -> Result<ReleaseManifest> {
+    let manifest_content = std::str::from_utf8(manifest_raw).map_err(|error| {
+        Error::InvalidReleaseMetadata(format!(
+            "invalid UTF-8 in vo.release.json for {} {}: {}",
+            module, version, error,
+        ))
+    })?;
+    parse_requested_release_manifest(manifest_content, module, version)
+}
+
+fn read_installed_project_locked_modules<F: FileSystem>(
+    fs: &F,
+    locked: &LockedModule,
+) -> Result<Vec<LockedModule>> {
+    let module_dir = relative_module_dir(locked.path.as_str(), &locked.version);
+    let lock_path = module_dir.join("vo.lock");
+    if !fs.exists(&lock_path) {
+        if locked.deps.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(Error::LockFileParse(format!(
+            "cached module {} {} is missing vo.lock for declared dependencies",
+            locked.path, locked.version,
+        )));
+    }
+    let content = fs.read_file(&lock_path).map_err(|error| {
+        Error::LockFileParse(format!(
+            "read {} for {} {}: {}",
+            lock_path.display(),
+            locked.path,
+            locked.version,
+            error,
+        ))
+    })?;
+    let lock_file = crate::schema::lockfile::LockFile::parse(&content)?;
+    if lock_file.root.module.as_str() != locked.path.as_str() {
+        return Err(Error::RootMismatch {
+            field: "module".to_string(),
+            mod_value: locked.path.to_string(),
+            lock_value: lock_file.root.module.as_str().to_string(),
+        });
+    }
+    if lock_file.root.vo != locked.vo {
+        return Err(Error::RootMismatch {
+            field: "vo".to_string(),
+            mod_value: locked.vo.to_string(),
+            lock_value: lock_file.root.vo.to_string(),
+        });
+    }
+    Ok(lock_file.resolved)
+}
+
+fn read_installed_extension_manifest<F: FileSystem>(
+    fs: &F,
+    module_dir: &Path,
+) -> Result<Option<ExtensionManifest>> {
+    let manifest_rel = module_dir.join("vo.ext.toml");
+    if !fs.exists(&manifest_rel) {
+        return Ok(None);
+    }
+    let content = fs.read_file(&manifest_rel).map_err(|error| {
+        Error::SourceScan(format!("read {}: {}", manifest_rel.display(), error))
+    })?;
+    parse_ext_manifest_content(&content, &scoped_path(fs, &manifest_rel)).map(Some)
+}
+
+fn scoped_path<F: FileSystem>(fs: &F, path: &Path) -> PathBuf {
+    match fs.root() {
+        Some(root) => root.join(path),
+        None => path.to_path_buf(),
+    }
 }
 
 impl InstallSurface for RealFs {
@@ -535,7 +612,7 @@ async fn ensure_locked_module_ready<S: InstallSurface, R: AsyncRegistry>(
     }
 
     match check_module_readiness(surface, locked, ext_manifest.as_ref(), target) {
-        ModuleReadiness::Ready(ready) => Ok(ready),
+        ModuleReadiness::Ready(ready) => Ok(*ready),
         ModuleReadiness::NotReady(failure) => Err(readiness_failure_to_error(failure)),
     }
 }
@@ -616,88 +693,35 @@ fn validate_relative_source_path(path: &Path) -> Result<()> {
     }
     for component in path.components() {
         match component {
-            Component::Normal(_) => {}
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => {
                 return Err(Error::SourceScan(format!(
-                    "source package contained an invalid path {}",
+                    "source package path must not contain '..': {}",
                     path.display(),
-                )));
+                )))
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(Error::SourceScan(format!(
+                    "source package path must be relative: {}",
+                    path.display(),
+                )))
             }
         }
     }
     Ok(())
 }
 
-fn read_installed_extension_manifest<S: InstallSurface>(
-    surface: &S,
-    module_dir: &Path,
-) -> Result<Option<ExtensionManifest>> {
-    let manifest_rel = module_dir.join("vo.ext.toml");
-    if !surface.exists(&manifest_rel) {
-        return Ok(None);
-    }
-    let manifest_path = scoped_path(surface, &manifest_rel);
-    let content = surface.read_file(&manifest_rel)?;
-    parse_ext_manifest_content(&content, &manifest_path)
-        .map(Some)
-        .map_err(|error| Error::ExtManifestParse(error.to_string()))
-}
-
-fn read_installed_project_locked_modules<F: FileSystem>(
-    surface: &F,
-    locked: &LockedModule,
-) -> Result<Vec<LockedModule>> {
-    let module_dir = relative_module_dir(locked.path.as_str(), &locked.version);
-    let mut fs =
-        MemoryFs::new().with_file("vo.mod", surface.read_file(&module_dir.join("vo.mod"))?);
-    let lock_path = module_dir.join("vo.lock");
-    if surface.exists(&lock_path) {
-        fs.add_file("vo.lock", surface.read_file(&lock_path)?);
-    }
-    let project_deps = project::read_project_deps(&fs, &[]).map_err(|error| {
-        Error::SourceScan(format!("{} for {}@{}", error, locked.path, locked.version))
-    })?;
-    Ok(project_deps.into_locked_modules())
-}
-
-fn parse_requested_manifest_bytes(
-    manifest_raw: &[u8],
-    module: &ModulePath,
-    version: &ExactVersion,
-) -> Result<ReleaseManifest> {
-    let manifest_content = std::str::from_utf8(manifest_raw)
-        .map_err(|error| Error::ManifestParse(format!("vo.release.json utf-8 error: {error}")))?;
-    parse_requested_release_manifest(manifest_content, module, version)
-}
-
 fn write_bytes<S: InstallSurface>(surface: &S, path: &Path, bytes: &[u8]) -> Result<()> {
-    let Some(parent) = path.parent() else {
-        return Err(Error::SourceScan(format!(
-            "path has no parent: {}",
-            path.display()
-        )));
-    };
-    surface.mkdir_all(parent)?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            surface.mkdir_all(parent)?;
+        }
+    }
     surface.write_bytes(path, bytes)
 }
 
 fn write_text<S: InstallSurface>(surface: &S, path: &Path, content: &str) -> Result<()> {
-    let Some(parent) = path.parent() else {
-        return Err(Error::SourceScan(format!(
-            "path has no parent: {}",
-            path.display()
-        )));
-    };
-    surface.mkdir_all(parent)?;
-    surface.write_text(path, content)
-}
-
-fn scoped_path<F: FileSystem>(fs: &F, path: &Path) -> PathBuf {
-    match fs.root() {
-        Some(root) if root != Path::new(".") && !root.as_os_str().is_empty() => root.join(path),
-        _ => path.to_path_buf(),
-    }
+    write_bytes(surface, path, content.as_bytes())
 }
 
 fn installed_module_error_to_error(error: InstalledModuleError) -> Error {
@@ -706,7 +730,7 @@ fn installed_module_error_to_error(error: InstalledModuleError) -> Error {
 
 fn readiness_failure_to_error(failure: ReadinessFailure) -> Error {
     match failure {
-        ReadinessFailure::SourceNotReady { error } => installed_module_error_to_error(error),
+        ReadinessFailure::SourceNotReady { error } => installed_module_error_to_error(*error),
         ReadinessFailure::ArtifactNotReady {
             module,
             version,
@@ -730,18 +754,17 @@ fn readiness_failure_to_error(failure: ReadinessFailure) -> Error {
             "vo.ext.toml does not declare extension-native support for target {} in {}@{}",
             target, module, version,
         )),
-        ReadinessFailure::ArtifactResolutionFailed { error, .. } => error,
+        ReadinessFailure::ArtifactResolutionFailed { error, .. } => *error,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vo_common::vfs::MemoryFs;
-
     use crate::digest::Digest;
     use crate::schema::manifest::{ManifestRequire, ManifestSource, ReleaseManifest};
     use crate::version::{DepConstraint, ToolchainConstraint};
+    use vo_common::vfs::MemoryFs;
 
     fn render_mod_file(module: &ModulePath, requires: &[(&str, &str)]) -> String {
         let mut content = format!("module {}\nvo ^0.1.0\n", module);

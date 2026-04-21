@@ -36,7 +36,7 @@ pub(super) fn check_frozen_dependency_readiness(
 
 fn installed_module_error_to_module_system(e: InstalledModuleError) -> ModuleSystemError {
     use vo_module::cache::validate::InstalledModuleErrorKind;
-    let (kind, detail) = match &e.kind {
+    let (kind, detail) = match e.kind.as_ref() {
         InstalledModuleErrorKind::Missing { .. } => (
             ModuleSystemErrorKind::Missing,
             format!("{}: frozen builds do not auto-install dependencies", e,),
@@ -62,7 +62,7 @@ pub(super) fn module_readiness_failure_to_module_system(
 ) -> ModuleSystemError {
     match failure {
         ReadinessFailure::SourceNotReady { error } => {
-            installed_module_error_to_module_system(error)
+            installed_module_error_to_module_system(*error)
         }
         ReadinessFailure::ExtensionManifestReadFailed {
             module,
@@ -108,7 +108,7 @@ pub(super) fn module_readiness_failure_to_module_system(
             version,
             manifest_path,
             error,
-        } => match error {
+        } => match *error {
             vo_module::Error::MissingLockedArtifact { detail, .. } => ModuleSystemError::new(
                 ModuleSystemStage::NativeExtension,
                 ModuleSystemErrorKind::Missing,
@@ -128,7 +128,7 @@ pub(super) fn module_readiness_failure_to_module_system(
             artifact_path,
             error,
             ..
-        } => installed_module_error_to_module_system(error)
+        } => installed_module_error_to_module_system(*error)
             .with_stage(ModuleSystemStage::NativeExtension)
             .with_path(&artifact_path),
     }

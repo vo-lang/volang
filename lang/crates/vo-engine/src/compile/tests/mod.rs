@@ -158,7 +158,7 @@ impl MockRegistry {
             .collect::<Vec<_>>();
         require.sort_by(|left, right| left.module.cmp(&right.module));
 
-        let archive_root = format!("{}-{}", module.replace('/', "-"), exact_version.to_string());
+        let archive_root = format!("{}-{}", module.replace('/', "-"), exact_version);
         let source_name = format!("{}-source.tar.gz", exact_version);
         let source_bytes = build_source_archive(&archive_root, files);
         let manifest = ReleaseManifest {

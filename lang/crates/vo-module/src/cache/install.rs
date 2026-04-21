@@ -691,7 +691,7 @@ fn installed_module_error_to_cache_error(
         field,
         kind,
     } = error;
-    match (field, kind) {
+    match (field, *kind) {
         (
             InstalledModuleField::ReleaseManifest,
             InstalledModuleErrorKind::LockedModuleMismatch {

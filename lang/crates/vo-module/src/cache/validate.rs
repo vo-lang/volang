@@ -23,7 +23,7 @@ pub struct InstalledModuleError {
     pub module: String,
     pub version: String,
     pub field: InstalledModuleField,
-    pub kind: InstalledModuleErrorKind,
+    pub kind: Box<InstalledModuleErrorKind>,
 }
 
 /// Which part of the installed module failed validation.
@@ -72,7 +72,7 @@ impl fmt::Display for InstalledModuleError {
             InstalledModuleField::ExtManifest => "vo.ext.toml",
             InstalledModuleField::Artifact => "artifact",
         };
-        match &self.kind {
+        match self.kind.as_ref() {
             InstalledModuleErrorKind::Missing { detail } => {
                 write!(
                     f,
@@ -152,9 +152,9 @@ fn parse_installed_release_manifest<F: FileSystem>(
             module: module.to_string(),
             version: version.to_string(),
             field: InstalledModuleField::ReleaseManifest,
-            kind: InstalledModuleErrorKind::Missing {
+            kind: Box::new(InstalledModuleErrorKind::Missing {
                 detail: "cached module is missing vo.release.json".to_string(),
-            },
+            }),
         })?;
     let manifest_digest = Digest::from_sha256(&manifest_bytes);
     if manifest_digest != locked.release_manifest {
@@ -162,10 +162,10 @@ fn parse_installed_release_manifest<F: FileSystem>(
             module: module.to_string(),
             version: version.to_string(),
             field: InstalledModuleField::ReleaseManifest,
-            kind: InstalledModuleErrorKind::Mismatch {
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
                 expected: locked.release_manifest.as_str().to_string(),
                 found: manifest_digest.as_str().to_string(),
-            },
+            }),
         });
     }
     let manifest_content =
@@ -173,9 +173,9 @@ fn parse_installed_release_manifest<F: FileSystem>(
             module: module.to_string(),
             version: version.to_string(),
             field: InstalledModuleField::ReleaseManifest,
-            kind: InstalledModuleErrorKind::ParseFailed {
+            kind: Box::new(InstalledModuleErrorKind::ParseFailed {
                 detail: format!("cached vo.release.json is not valid UTF-8: {}", error),
-            },
+            }),
         })?;
     let manifest = crate::registry::parse_requested_release_manifest(
         manifest_content,
@@ -186,9 +186,9 @@ fn parse_installed_release_manifest<F: FileSystem>(
         module: module.to_string(),
         version: version.to_string(),
         field: InstalledModuleField::ReleaseManifest,
-        kind: InstalledModuleErrorKind::ParseFailed {
+        kind: Box::new(InstalledModuleErrorKind::ParseFailed {
             detail: error.to_string(),
-        },
+        }),
     })?;
     Ok((manifest, manifest_digest))
 }
@@ -209,9 +209,9 @@ fn read_installed_extension_manifest<F: FileSystem>(
             module: module.to_string(),
             version: version.to_string(),
             field: InstalledModuleField::ExtManifest,
-            kind: InstalledModuleErrorKind::Missing {
+            kind: Box::new(InstalledModuleErrorKind::Missing {
                 detail: "cached module is missing readable vo.ext.toml".to_string(),
-            },
+            }),
         })?;
     crate::ext_manifest::parse_ext_manifest_content(&content, &manifest_path)
         .map(Some)
@@ -219,9 +219,9 @@ fn read_installed_extension_manifest<F: FileSystem>(
             module: module.to_string(),
             version: version.to_string(),
             field: InstalledModuleField::ExtManifest,
-            kind: InstalledModuleErrorKind::ParseFailed {
+            kind: Box::new(InstalledModuleErrorKind::ParseFailed {
                 detail: error.to_string(),
-            },
+            }),
         })
 }
 
@@ -251,9 +251,9 @@ pub fn validate_installed_module<F: FileSystem>(
             module: module.to_string(),
             version,
             field: InstalledModuleField::Directory,
-            kind: InstalledModuleErrorKind::Missing {
+            kind: Box::new(InstalledModuleErrorKind::Missing {
                 detail: "source package not in cache".to_string(),
-            },
+            }),
         });
     }
 
@@ -265,18 +265,18 @@ pub fn validate_installed_module<F: FileSystem>(
             module: module.to_string(),
             version: version.clone(),
             field: InstalledModuleField::ModFile,
-            kind: InstalledModuleErrorKind::Missing {
+            kind: Box::new(InstalledModuleErrorKind::Missing {
                 detail: "cached module is missing vo.mod".to_string(),
-            },
+            }),
         })?;
     let mod_file =
         crate::schema::modfile::ModFile::parse(&mod_content).map_err(|e| InstalledModuleError {
             module: module.to_string(),
             version: version.clone(),
             field: InstalledModuleField::ModFile,
-            kind: InstalledModuleErrorKind::ParseFailed {
+            kind: Box::new(InstalledModuleErrorKind::ParseFailed {
                 detail: e.to_string(),
-            },
+            }),
         })?;
     // Cached modules are fetched from the registry and therefore always
     // carry a canonical github identity; `local/*` could not be installed.
@@ -285,10 +285,10 @@ pub fn validate_installed_module<F: FileSystem>(
             module: module.to_string(),
             version: version.clone(),
             field: InstalledModuleField::ModFile,
-            kind: InstalledModuleErrorKind::Mismatch {
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
                 expected: locked.path.to_string(),
                 found: mod_file.module.to_string(),
-            },
+            }),
         });
     }
     if mod_file.vo != locked.vo {
@@ -296,10 +296,10 @@ pub fn validate_installed_module<F: FileSystem>(
             module: module.to_string(),
             version: version.clone(),
             field: InstalledModuleField::ModFile,
-            kind: InstalledModuleErrorKind::Mismatch {
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
                 expected: locked.vo.to_string(),
                 found: mod_file.vo.to_string(),
-            },
+            }),
         });
     }
 
@@ -314,19 +314,19 @@ pub fn validate_installed_module<F: FileSystem>(
             module: module.to_string(),
             version: version.clone(),
             field: InstalledModuleField::VersionMarker,
-            kind: InstalledModuleErrorKind::Missing {
+            kind: Box::new(InstalledModuleErrorKind::Missing {
                 detail: "cached version metadata is missing".to_string(),
-            },
+            }),
         })?;
     if installed_version != version {
         return Err(InstalledModuleError {
             module: module.to_string(),
             version: version.clone(),
             field: InstalledModuleField::VersionMarker,
-            kind: InstalledModuleErrorKind::Mismatch {
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
                 expected: version.clone(),
                 found: installed_version,
-            },
+            }),
         });
     }
 
@@ -341,19 +341,19 @@ pub fn validate_installed_module<F: FileSystem>(
             module: module.to_string(),
             version: version.clone(),
             field: InstalledModuleField::SourceDigest,
-            kind: InstalledModuleErrorKind::Missing {
+            kind: Box::new(InstalledModuleErrorKind::Missing {
                 detail: "cached source digest metadata is missing".to_string(),
-            },
+            }),
         })?;
     if installed_source_digest != locked.source.as_str() {
         return Err(InstalledModuleError {
             module: module.to_string(),
             version: version.clone(),
             field: InstalledModuleField::SourceDigest,
-            kind: InstalledModuleErrorKind::Mismatch {
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
                 expected: locked.source.as_str().to_string(),
                 found: installed_source_digest,
-            },
+            }),
         });
     }
 
@@ -370,19 +370,19 @@ pub fn validate_installed_module<F: FileSystem>(
                 module: module.to_string(),
                 version: version.clone(),
                 field: InstalledModuleField::ReleaseManifest,
-                kind: InstalledModuleErrorKind::LockedModuleMismatch {
+                kind: Box::new(InstalledModuleErrorKind::LockedModuleMismatch {
                     field,
                     expected,
                     found,
-                },
+                }),
             },
             error => InstalledModuleError {
                 module: module.to_string(),
                 version: version.clone(),
                 field: InstalledModuleField::ReleaseManifest,
-                kind: InstalledModuleErrorKind::ValidationFailed {
+                kind: Box::new(InstalledModuleErrorKind::ValidationFailed {
                     detail: error.to_string(),
-                },
+                }),
             },
         })?;
 
@@ -395,10 +395,62 @@ pub fn validate_installed_module<F: FileSystem>(
         module: module.to_string(),
         version,
         field: InstalledModuleField::ExtManifest,
-        kind: InstalledModuleErrorKind::ValidationFailed {
+        kind: Box::new(InstalledModuleErrorKind::ValidationFailed {
             detail: error.to_string(),
-        },
+        }),
     })?;
+
+    Ok(())
+}
+
+/// Validate that an installed artifact matches its `LockedArtifact` metadata.
+///
+/// `fs` is rooted at whatever directory contains the module cache.
+/// `artifact_path` is the path (relative to `fs` root) of the artifact file.
+pub fn validate_installed_artifact<F: FileSystem>(
+    fs: &F,
+    artifact_path: &Path,
+    locked_module: &LockedModule,
+    artifact: &LockedArtifact,
+) -> Result<(), InstalledModuleError> {
+    let module = locked_module.path.as_str();
+    let version = locked_module.version.to_string();
+
+    let bytes = fs
+        .read_bytes(artifact_path)
+        .map_err(|_| InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::Artifact,
+            kind: Box::new(InstalledModuleErrorKind::Missing {
+                detail: format!("artifact {} not in cache", artifact.id.name),
+            }),
+        })?;
+
+    if bytes.len() as u64 != artifact.size {
+        return Err(InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::Artifact,
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
+                expected: format!("{} bytes", artifact.size),
+                found: format!("{} bytes", bytes.len()),
+            }),
+        });
+    }
+
+    let digest = Digest::from_sha256(&bytes);
+    if digest != artifact.digest {
+        return Err(InstalledModuleError {
+            module: module.to_string(),
+            version,
+            field: InstalledModuleField::Artifact,
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
+                expected: artifact.digest.as_str().to_string(),
+                found: digest.as_str().to_string(),
+            }),
+        });
+    }
 
     Ok(())
 }
@@ -485,7 +537,7 @@ mod tests {
 
         assert_eq!(err.field, InstalledModuleField::ReleaseManifest);
         assert!(matches!(
-            err.kind,
+            err.kind.as_ref(),
             InstalledModuleErrorKind::LockedModuleMismatch { ref field, .. } if field == "artifacts"
         ));
     }
@@ -501,7 +553,7 @@ mod tests {
 
         assert_eq!(err.field, InstalledModuleField::ExtManifest);
         assert!(matches!(
-            err.kind,
+            err.kind.as_ref(),
             InstalledModuleErrorKind::ValidationFailed { ref detail }
                 if detail.contains("missing declared artifacts")
         ));
@@ -515,61 +567,9 @@ mod tests {
 
         assert_eq!(err.field, InstalledModuleField::ExtManifest);
         assert!(matches!(
-            err.kind,
+            err.kind.as_ref(),
             InstalledModuleErrorKind::ValidationFailed { ref detail }
                 if detail.contains("undeclared published artifacts")
         ));
     }
-}
-
-/// Validate that an installed artifact matches its `LockedArtifact` metadata.
-///
-/// `fs` is rooted at whatever directory contains the module cache.
-/// `artifact_path` is the path (relative to `fs` root) of the artifact file.
-pub fn validate_installed_artifact<F: FileSystem>(
-    fs: &F,
-    artifact_path: &Path,
-    locked_module: &LockedModule,
-    artifact: &LockedArtifact,
-) -> Result<(), InstalledModuleError> {
-    let module = locked_module.path.as_str();
-    let version = locked_module.version.to_string();
-
-    let bytes = fs
-        .read_bytes(artifact_path)
-        .map_err(|_| InstalledModuleError {
-            module: module.to_string(),
-            version: version.clone(),
-            field: InstalledModuleField::Artifact,
-            kind: InstalledModuleErrorKind::Missing {
-                detail: format!("artifact {} not in cache", artifact.id.name),
-            },
-        })?;
-
-    if bytes.len() as u64 != artifact.size {
-        return Err(InstalledModuleError {
-            module: module.to_string(),
-            version: version.clone(),
-            field: InstalledModuleField::Artifact,
-            kind: InstalledModuleErrorKind::Mismatch {
-                expected: format!("{} bytes", artifact.size),
-                found: format!("{} bytes", bytes.len()),
-            },
-        });
-    }
-
-    let digest = Digest::from_sha256(&bytes);
-    if digest != artifact.digest {
-        return Err(InstalledModuleError {
-            module: module.to_string(),
-            version,
-            field: InstalledModuleField::Artifact,
-            kind: InstalledModuleErrorKind::Mismatch {
-                expected: artifact.digest.as_str().to_string(),
-                found: digest.as_str().to_string(),
-            },
-        });
-    }
-
-    Ok(())
 }

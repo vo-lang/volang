@@ -37,14 +37,14 @@ pub struct ReadyModule {
 
 #[derive(Debug)]
 pub enum ModuleReadiness {
-    Ready(ReadyModule),
+    Ready(Box<ReadyModule>),
     NotReady(ReadinessFailure),
 }
 
 #[derive(Debug)]
 pub enum ReadinessFailure {
     SourceNotReady {
-        error: InstalledModuleError,
+        error: Box<InstalledModuleError>,
     },
     ExtensionManifestReadFailed {
         module: String,
@@ -68,13 +68,13 @@ pub enum ReadinessFailure {
         module: String,
         version: String,
         manifest_path: PathBuf,
-        error: Error,
+        error: Box<Error>,
     },
     ArtifactNotReady {
         module: String,
         version: String,
         artifact_path: PathBuf,
-        error: InstalledModuleError,
+        error: Box<InstalledModuleError>,
     },
 }
 
@@ -86,11 +86,18 @@ pub fn check_module_readiness<F: FileSystem>(
 ) -> ModuleReadiness {
     let module_dir = layout::relative_module_dir(locked.path.as_str(), &locked.version);
     if let Err(error) = validate_installed_module(fs, &module_dir, locked) {
-        return ModuleReadiness::NotReady(ReadinessFailure::SourceNotReady { error });
+        return ModuleReadiness::NotReady(ReadinessFailure::SourceNotReady {
+            error: Box::new(error),
+        });
     }
 
     let Some(ext_manifest) = ext_manifest else {
-        return ModuleReadiness::Ready(ready_module(locked, module_dir, Vec::new(), None));
+        return ModuleReadiness::Ready(Box::new(ready_module(
+            locked,
+            module_dir,
+            Vec::new(),
+            None,
+        )));
     };
 
     if requires_declared_native_target(ext_manifest, target) {
@@ -109,7 +116,7 @@ pub fn check_module_readiness<F: FileSystem>(
                 module: locked.path.as_str().to_string(),
                 version: locked.version.to_string(),
                 manifest_path: ext_manifest.manifest_path.clone(),
-                error,
+                error: Box::new(error),
             });
         }
     };
@@ -127,7 +134,7 @@ pub fn check_module_readiness<F: FileSystem>(
                 module: locked.path.as_str().to_string(),
                 version: locked.version.to_string(),
                 artifact_path: scoped_path(fs, &artifact_path),
-                error,
+                error: Box::new(error),
             });
         }
         artifacts.push(ResolvedArtifact {
@@ -138,12 +145,12 @@ pub fn check_module_readiness<F: FileSystem>(
         });
     }
 
-    ModuleReadiness::Ready(ready_module(
+    ModuleReadiness::Ready(Box::new(ready_module(
         locked,
         module_dir,
         artifacts,
         Some(ext_manifest.clone()),
-    ))
+    )))
 }
 
 pub fn check_project_readiness<F: FileSystem>(
@@ -182,7 +189,7 @@ pub fn check_project_readiness<F: FileSystem>(
     for locked in locked_modules {
         let module_dir = layout::relative_module_dir(locked.path.as_str(), &locked.version);
         match check_module_readiness(fs, locked, manifests.get(&module_dir), target) {
-            ModuleReadiness::Ready(module) => ready.push(module),
+            ModuleReadiness::Ready(module) => ready.push(*module),
             ModuleReadiness::NotReady(failure) => return Err(failure),
         }
     }
@@ -637,7 +644,7 @@ js_glue = "{js_glue}"
     fn check_project_readiness_checks_all_locked_modules() {
         let (pure_locked, pure_release_manifest_content) = locked_module("v1.2.3", Vec::new());
         let library = "libdemo.dylib";
-        let (mut native_locked, native_release_manifest_content) = locked_module(
+        let (native_locked, native_release_manifest_content) = locked_module(
             "v1.2.4",
             vec![locked_artifact(
                 "extension-native",
