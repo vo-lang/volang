@@ -19,7 +19,7 @@ use vo_syntax::ast::File;
 use vo_syntax::parser;
 
 use crate::check::Checker;
-use crate::importer::{validate_import_path, ImportKey, ImportResult, Importer};
+use crate::importer::{ImportKey, ImportResult, Importer};
 use crate::objects::{PackageKey, TCObjects, TypeKey};
 
 /// Analysis error.
@@ -507,7 +507,7 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
     fn import(&mut self, key: &ImportKey) -> ImportResult {
         let import_path = &key.path;
 
-        if let Err(e) = validate_import_path(import_path) {
+        if let Err(e) = identity::classify_import(import_path) {
             return ImportResult::Err(format!("invalid import path \"{}\": {}", import_path, e));
         }
         if let Some(current_package_path) = self.current_package_path.as_deref() {

@@ -66,10 +66,6 @@ impl RunResult {
     }
 }
 
-pub fn make_run_result_js(status: &str, stdout: &str, stderr: &str) -> JsValue {
-    make_run_result_obj(status, stdout, stderr)
-}
-
 pub fn make_run_result_obj(status: &str, stdout: &str, stderr: &str) -> JsValue {
     let obj = js_sys::Object::new();
     js_sys::Reflect::set(

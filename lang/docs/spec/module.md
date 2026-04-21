@@ -147,7 +147,8 @@ Examples:
 The following path spaces are reserved by the module system:
 
 - `std` and `std/...` are reserved for the standard library namespace and MUST NOT be used as module paths or external import prefixes
-- non-stdlib module paths MUST begin with `github.com/`
+- `local` and `local/...` are reserved for ephemeral single-file modules that embed inline `vo.mod` metadata (see Section 5.6). A `local/*` path is a module-identity namespace only and MUST NOT appear in any `require` line, any published `vo.release.json`, any `vo.lock` entry, or any `import` statement
+- non-stdlib, non-ephemeral module paths MUST begin with `github.com/`
 - the `@` marker is not part of source-level import syntax
 
 ## 4. Imports
@@ -459,6 +460,97 @@ Module-protocol rules:
 - For every target explicitly declared as supported by a Rust-backed extension, the published release MUST include the required binary artifact set for that target.
 - Legacy `vo.ext.toml` schema shapes are invalid under this protocol and MUST be rejected rather than rewritten or interpreted compatibly.
 
+### 5.6 Inline `vo.mod` Metadata
+
+A single `.vo` source file MAY embed `vo.mod` metadata directly in its source text.
+This inline form exists to let an ad hoc, single-file program declare external dependencies without creating a project directory.
+
+See also: [`module-inline-mod-tutorial.md`](./module-inline-mod-tutorial.md) for a practical guide to writing, running, caching, and promoting inline-mod scripts.
+
+Inline metadata produces an *ephemeral single-file module*.
+It participates in the module protocol using the same rules as a regular `vo.mod`, except where explicitly narrowed by this section.
+
+#### 5.6.1 Placement and Syntax
+
+Inline metadata is a single block comment with the exact opening sentinel `/*vo:mod`.
+
+Normative form:
+
+```vo
+/*vo:mod
+module local/<name>
+vo <toolchain-constraint>
+
+require <module-path> <version-constraint>
+...
+*/
+
+package main
+
+func main() { ... }
+```
+
+Rules:
+
+- The inline mod block MUST appear before the first non-whitespace, non-comment token of the file.
+- Only a single inline mod block is permitted per file; a second occurrence is an error.
+- The opening sentinel MUST be exactly `/*vo:mod`. A leading line break inside the block is permitted.
+- The block is terminated by the first `*/` token after the opening sentinel.
+- The characters between the opening sentinel and the closing `*/` are the *inline mod body*.
+- The inline mod body MUST parse, verbatim, under the `vo.mod` grammar defined in Section 5.1.
+- The sentinel `/*vo:mod` is reserved; a leading block comment starting with `/*vo:` but using any other directive name is an error.
+
+#### 5.6.2 Module Identity
+
+- The `module` line of an inline mod MUST use the reserved `local/<name>` namespace defined in Section 3.5.
+- `<name>` MUST match `[a-z0-9][a-z0-9._-]*` and MUST NOT contain `/`.
+- `local/<name>` identities are file-local and non-publishable. They are not a canonical path for any purpose other than naming the ephemeral module itself.
+- Two inline mods with the same `local/<name>` in different files are distinct ephemeral modules.
+
+#### 5.6.3 Content Rules
+
+- The inline mod body follows all rules in Section 5.1 (`vo.mod`) and Section 5.2 (version constraints) except as narrowed below.
+- `require` MAY name any canonical external module path. `local/*` MUST NOT appear in `require`.
+- `replace` directives MUST NOT appear in an inline mod.
+- Unknown directives MUST be rejected; they MUST NOT be silently ignored because the block is embedded in source.
+
+#### 5.6.4 Precedence
+
+- If the file's enclosing directory tree (the file itself, or any ancestor directory) contains a `vo.mod`, any inline mod block in that file MUST be rejected as an error. Project-level `vo.mod` is the single source of truth for module identity within a project.
+- If no enclosing `vo.mod` exists and the file contains an inline mod block, the toolchain MUST treat that file as a single-file ephemeral module (see Section 10.2).
+- If no enclosing `vo.mod` exists and the file contains no inline mod block, the toolchain MUST treat that file as an ad hoc program (see Section 10.1).
+
+#### 5.6.5 Relationship to `vo.lock`
+
+- An inline mod does not persist a user-visible `vo.lock`. The ephemeral module has no committed lock artifact.
+- The toolchain MAY materialize a cache-local ephemeral lock for reproducibility and integrity verification. The location, naming, and format of such an ephemeral lock are implementation-defined and are not part of the module protocol.
+- Every integrity rule in Section 12 applies identically to the ephemeral module's resolved graph, whether the lock is materialized on disk or only in memory.
+- Dependencies of an inline mod MUST be resolved against the public registry (Section 6) using canonical module paths. They MUST NOT be resolved against repository trees, raw file URLs, or snapshot archives outside the declared release protocol.
+
+#### 5.6.6 Workspace and Overrides
+
+- `vo.work` MUST NOT be consulted for a single-file ephemeral module.
+- An inline mod MUST NOT declare workspace overrides.
+
+#### 5.6.7 Illustrative Example
+
+```vo
+/*vo:mod
+module local/gui_chat
+vo ^0.1.0
+
+require github.com/vo-lang/vogui ^0.4.0
+*/
+
+package main
+
+import "github.com/vo-lang/vogui"
+
+func main() {
+    vogui.Run()
+}
+```
+
 ## 6. GitHub Registry Model
 
 ### 6.1 Registry Source
@@ -761,17 +853,48 @@ Build constraint syntax and semantics are defined in the language specification.
 
 The module system does not alter build constraint behavior; it applies uniformly to all packages regardless of their origin (stdlib, intra-module, or external dependency).
 
-## 10. Projects Without `vo.mod`
+## 10. Ad Hoc Programs and Single-File Ephemeral Modules
 
-A single-file or single-package program without `vo.mod` is an ad hoc program, not a published module.
+A `.vo` source file that is not contained in a project with `vo.mod` is not a published module.
+It is either an *ad hoc program* (no module metadata of any kind) or a *single-file ephemeral module* (declares its own dependencies via inline `vo.mod` metadata, see Section 5.6).
+
+The toolchain MUST classify such a file using the precedence defined in Section 5.6.4.
+
+### 10.1 Ad Hoc Programs
+
+A `.vo` file that is not inside any project with `vo.mod` and that contains no inline mod block is an ad hoc program.
 
 Rules:
 
-- It may import only standard-library packages.
-- It may not declare external module dependencies.
-- It may not import sibling directories as packages.
-- It may not use `vo.work`.
-- Any multi-package project or project with external dependencies must define `vo.mod`.
+- It MAY import only standard-library packages.
+- It MUST NOT declare external module dependencies.
+- It MUST NOT import sibling directories as packages.
+- It MUST NOT use `vo.work`.
+- Any multi-package program or program with external dependencies MUST either define a project-level `vo.mod` or embed an inline mod per Section 5.6.
+
+### 10.2 Single-File Ephemeral Modules
+
+A `.vo` file that is not inside any project with `vo.mod` and that contains a valid inline mod block (Section 5.6) is a single-file ephemeral module.
+
+Rules:
+
+- The ephemeral module's identity is the `module local/<name>` line of the inline mod.
+- The ephemeral module MAY declare external dependencies via `require` lines in the inline mod.
+- External dependencies MUST be canonical module paths and MUST resolve against the public registry per Section 6.
+- The ephemeral module MUST NOT be imported by any other module.
+- The ephemeral module MUST NOT contain or reference `vo.work`.
+- Build and run commands (Section 8.1) MUST remain frozen with respect to the ephemeral module's resolved graph.
+- A toolchain MAY offer a single-file auto-install entry point that resolves the inline module's `require` set before invoking the frozen build for that file.
+- If the toolchain does not offer such an entry point and the graph has not yet been resolved, the run/build command MUST fail and instruct the user to run a resolution command.
+- An integrity failure against the ephemeral module's resolved graph MUST fail hard. It MUST NOT fall back to raw repository fetches, uncached source snapshots, or alternate unpublished artifact sources.
+
+### 10.3 Scope of Ephemerality
+
+A single-file ephemeral module is *ephemeral* only in the sense that it has no on-disk `vo.mod` / `vo.lock` files owned by the user:
+
+- all module-protocol integrity, publication, and resolution rules still apply
+- the toolchain MAY materialize a cache-local ephemeral lock as described in Section 5.6.5
+- the ephemeral module's dependencies are full first-class locked modules with verified digests, identical to those used by regular projects
 
 ## 11. Workspace Overrides
 

@@ -10,6 +10,7 @@
 pub mod ast;
 pub mod display;
 pub mod errors;
+pub mod inline_mod;
 pub mod lexer;
 pub mod parser;
 pub mod token;

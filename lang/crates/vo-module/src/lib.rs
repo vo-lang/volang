@@ -1,16 +1,21 @@
+pub mod artifact;
+pub mod async_install;
 pub mod cache;
-pub mod compat;
 pub mod digest;
+pub mod ephemeral;
 pub mod ext_manifest;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod github_registry;
 pub mod identity;
+pub mod inline_mod;
 pub mod lifecycle;
 pub mod lock;
 pub mod operation_error;
 pub mod ops;
 pub mod project;
+pub mod readiness;
 pub mod registry;
+pub mod resolved_extension;
 pub mod schema;
 pub mod solver;
 pub mod version;
@@ -79,6 +84,11 @@ pub enum Error {
         found: String,
     },
     MissingArtifact {
+        module: String,
+        version: String,
+        detail: String,
+    },
+    MissingLockedArtifact {
         module: String,
         version: String,
         detail: String,
@@ -176,6 +186,16 @@ impl fmt::Display for Error {
                 detail,
             } => {
                 write!(f, "required locked artifact is missing from cache: {module} {version}: {detail}\n  run: vo mod download")
+            }
+            Self::MissingLockedArtifact {
+                module,
+                version,
+                detail,
+            } => {
+                write!(
+                    f,
+                    "vo.lock is missing required artifact metadata: {module} {version}: {detail}"
+                )
             }
             Self::WorkspaceIdentityMismatch {
                 expected,

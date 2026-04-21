@@ -136,11 +136,26 @@ export interface InstalledModule {
 
 export interface FrameworkContract {
   name: string;
-  entry: string;
+  entry: string | null;
   capabilities: string[];
-  rendererPath: string | null;
-  protocolPath: string | null;
-  hostBridgePath: string | null;
+  jsModules: Record<string, string>;
+}
+
+export function frameworkJsModulePath(framework: FrameworkContract, moduleName: string): string | null {
+  return framework.jsModules[moduleName] ?? null;
+}
+
+export function frameworkContractKey(framework: FrameworkContract): string {
+  const capabilities = [...framework.capabilities].sort();
+  const jsModules = Object.entries(framework.jsModules)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .flatMap(([name, path]) => [name, path]);
+  return [
+    framework.name,
+    framework.entry ?? '',
+    ...capabilities,
+    ...jsModules,
+  ].join('\0');
 }
 
 export interface GuiSession {

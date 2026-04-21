@@ -88,6 +88,7 @@ pub enum SyntaxError {
     ExpectedInterfaceMethod = 1123,
     /// Keyword used as identifier.
     KeywordAsIdent = 1124,
+    InvalidInlineMod = 1125,
 }
 
 impl SyntaxError {
@@ -142,6 +143,7 @@ impl SyntaxError {
             SyntaxError::ExpectedStructField => "expected struct field",
             SyntaxError::ExpectedInterfaceMethod => "expected interface method",
             SyntaxError::KeywordAsIdent => "cannot use keyword as identifier",
+            SyntaxError::InvalidInlineMod => "invalid inline mod",
         }
     }
 

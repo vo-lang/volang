@@ -3,46 +3,62 @@ use std::path::{Path, PathBuf};
 
 use vo_common::vfs::{normalize_fs_path, FileSystem, MemoryFs, RealFs};
 
+use crate::inline_mod::{self, InlineMod, INLINE_MOD_OPEN};
 use crate::lock;
 use crate::operation_error::OperationError;
 use crate::schema::lockfile::{LockFile, LockRoot, LockedModule};
-use crate::schema::modfile::{ModFile, Require};
+use crate::schema::modfile::ModFile;
 use crate::Error;
 
 #[derive(Debug, Clone, Default)]
-pub enum ProjectDeps {
+pub struct ProjectDeps {
+    kind: ProjectDepsKind,
+}
+
+#[derive(Debug, Clone, Default)]
+enum ProjectDepsKind {
     #[default]
     NoModule,
     WithModule(Box<ProjectModuleContext>),
 }
 
 #[derive(Debug, Clone)]
-pub struct ProjectModuleContext {
-    pub current_module: String,
-    pub mod_file_path: PathBuf,
-    pub mod_file: ModFile,
-    pub lock_state: LockState,
+struct ProjectModuleContext {
+    mod_file: ModFile,
+    current_module: String,
+    lock_state: LockState,
 }
 
 #[derive(Debug, Clone)]
-pub enum LockState {
+enum LockState {
     NoLock,
     Locked(Box<LockedProjectContext>),
 }
 
 #[derive(Debug, Clone)]
-pub struct LockedProjectContext {
-    pub lock_file_path: PathBuf,
-    pub lock_file: LockFile,
-    pub allowed_modules: Vec<String>,
-    pub locked_modules: Vec<LockedModule>,
+struct LockedProjectContext {
+    lock_file: LockFile,
+    allowed_modules: Vec<String>,
+    locked_modules: Vec<LockedModule>,
 }
 
 impl ProjectDeps {
+    fn no_module() -> Self {
+        Self {
+            kind: ProjectDepsKind::NoModule,
+        }
+    }
+
+    fn with_module(context: ProjectModuleContext) -> Self {
+        Self {
+            kind: ProjectDepsKind::WithModule(Box::new(context)),
+        }
+    }
+
     fn module_context(&self) -> Option<&ProjectModuleContext> {
-        match self {
-            ProjectDeps::NoModule => None,
-            ProjectDeps::WithModule(context) => Some(context.as_ref()),
+        match &self.kind {
+            ProjectDepsKind::NoModule => None,
+            ProjectDepsKind::WithModule(context) => Some(context.as_ref()),
         }
     }
 
@@ -53,6 +69,10 @@ impl ProjectDeps {
     pub fn current_module(&self) -> Option<&str> {
         self.module_context()
             .map(|context| context.current_module.as_str())
+    }
+
+    pub fn mod_file(&self) -> Option<&ModFile> {
+        self.module_context().map(|context| &context.mod_file)
     }
 
     pub fn allowed_modules(&self) -> &[String] {
@@ -69,29 +89,15 @@ impl ProjectDeps {
         }
     }
 
-    pub fn mod_file(&self) -> Option<&ModFile> {
-        self.module_context().map(|context| &context.mod_file)
-    }
-
-    pub fn mod_file_path(&self) -> Option<&Path> {
-        self.module_context()
-            .map(|context| context.mod_file_path.as_path())
-    }
-
     pub fn lock_file(&self) -> Option<&LockFile> {
         self.module_context()
             .and_then(|context| context.lock_state.lock_file())
     }
 
-    pub fn lock_file_path(&self) -> Option<&Path> {
-        self.module_context()
-            .and_then(|context| context.lock_state.lock_file_path())
-    }
-
     pub fn into_locked_modules(self) -> Vec<LockedModule> {
-        match self {
-            ProjectDeps::NoModule => Vec::new(),
-            ProjectDeps::WithModule(context) => context.lock_state.into_locked_modules(),
+        match self.kind {
+            ProjectDepsKind::NoModule => Vec::new(),
+            ProjectDepsKind::WithModule(context) => context.lock_state.into_locked_modules(),
         }
     }
 }
@@ -104,30 +110,25 @@ impl LockState {
         }
     }
 
-    pub fn allowed_modules(&self) -> &[String] {
+    fn allowed_modules(&self) -> &[String] {
         match self.locked_context() {
             Some(context) => &context.allowed_modules,
             None => &[],
         }
     }
 
-    pub fn locked_modules(&self) -> &[LockedModule] {
+    fn locked_modules(&self) -> &[LockedModule] {
         match self.locked_context() {
             Some(context) => &context.locked_modules,
             None => &[],
         }
     }
 
-    pub fn lock_file(&self) -> Option<&LockFile> {
+    fn lock_file(&self) -> Option<&LockFile> {
         self.locked_context().map(|context| &context.lock_file)
     }
 
-    pub fn lock_file_path(&self) -> Option<&Path> {
-        self.locked_context()
-            .map(|context| context.lock_file_path.as_path())
-    }
-
-    pub fn into_locked_modules(self) -> Vec<LockedModule> {
+    fn into_locked_modules(self) -> Vec<LockedModule> {
         match self {
             LockState::NoLock => Vec::new(),
             LockState::Locked(context) => context.locked_modules,
@@ -143,7 +144,7 @@ pub enum ProjectDepsStage {
 }
 
 impl ProjectDepsStage {
-    pub fn as_str(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             ProjectDepsStage::Workspace => "workspace",
             ProjectDepsStage::ModFile => "mod_file",
@@ -160,17 +161,6 @@ pub enum ProjectDepsErrorKind {
     ValidationFailed,
 }
 
-impl ProjectDepsErrorKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ProjectDepsErrorKind::Missing => "missing",
-            ProjectDepsErrorKind::ReadFailed => "read_failed",
-            ProjectDepsErrorKind::ParseFailed => "parse_failed",
-            ProjectDepsErrorKind::ValidationFailed => "validation_failed",
-        }
-    }
-}
-
 pub type ProjectDepsError = OperationError<ProjectDepsStage, ProjectDepsErrorKind>;
 
 pub fn read_mod_file(project_dir: &Path) -> Result<ModFile, Error> {
@@ -185,19 +175,19 @@ pub fn read_lock_file(project_dir: &Path) -> Result<LockFile, Error> {
     LockFile::parse(&content)
 }
 
-pub fn write_mod_file(project_dir: &Path, mod_file: &ModFile) -> Result<(), Error> {
+pub(crate) fn write_mod_file(project_dir: &Path, mod_file: &ModFile) -> Result<(), Error> {
     let path = project_dir.join("vo.mod");
     std::fs::write(&path, mod_file.render())?;
     Ok(())
 }
 
-pub fn write_lock_file(project_dir: &Path, lock_file: &LockFile) -> Result<(), Error> {
+pub(crate) fn write_lock_file(project_dir: &Path, lock_file: &LockFile) -> Result<(), Error> {
     let path = project_dir.join("vo.lock");
     std::fs::write(&path, lock_file.render())?;
     Ok(())
 }
 
-pub fn remove_lock_file_if_exists(project_dir: &Path) -> Result<(), Error> {
+pub(crate) fn remove_lock_file_if_exists(project_dir: &Path) -> Result<(), Error> {
     let path = project_dir.join("vo.lock");
     if path.exists() {
         std::fs::remove_file(path)?;
@@ -205,7 +195,7 @@ pub fn remove_lock_file_if_exists(project_dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn write_or_remove_lock_file(
+pub(crate) fn write_or_remove_lock_file(
     project_dir: &Path,
     lock_file: Option<&LockFile>,
 ) -> Result<(), Error> {
@@ -227,7 +217,7 @@ pub fn read_project_deps<F: FileSystem>(
     )
 }
 
-pub fn read_project_deps_at_root_in<F: FileSystem>(
+fn read_project_deps_at_root_in<F: FileSystem>(
     fs: &F,
     dir: &Path,
     excluded_modules: &[String],
@@ -259,7 +249,7 @@ pub fn read_project_deps_at_root_in<F: FileSystem>(
         dir.join("vo.lock")
     };
     let lock_candidates = [lock_path];
-    read_project_deps_from_mod_file(fs, &mod_path, mod_file, &lock_candidates, excluded_modules)
+    read_project_deps_from_mod_file(fs, mod_file, &lock_candidates, excluded_modules)
 }
 
 pub fn read_project_deps_at_root(
@@ -281,7 +271,42 @@ pub fn read_inline_project_deps(
     read_project_deps(&fs, excluded_modules)
 }
 
-pub fn read_project_deps_near<F: FileSystem>(
+pub fn build_lock_file_from_mod_file(
+    mod_file: &ModFile,
+    mut locked_modules: Vec<LockedModule>,
+    created_by: &str,
+) -> LockFile {
+    locked_modules.sort_by(|a, b| a.path.cmp(&b.path));
+    locked_modules.dedup_by(|a, b| a.path == b.path && a.version == b.version);
+    LockFile {
+        version: 1,
+        created_by: created_by.to_string(),
+        root: LockRoot {
+            module: mod_file.module.clone(),
+            vo: mod_file.vo.clone(),
+        },
+        resolved: locked_modules,
+    }
+}
+
+pub fn build_lock_file_for_project_deps(
+    project_deps: &ProjectDeps,
+    locked_modules: Vec<LockedModule>,
+    created_by: &str,
+) -> Result<LockFile, Error> {
+    let Some(mod_file) = project_deps.mod_file() else {
+        return Err(Error::ModFileParse(
+            "cannot build lock file without vo.mod project metadata".to_string(),
+        ));
+    };
+    Ok(build_lock_file_from_mod_file(
+        mod_file,
+        locked_modules,
+        created_by,
+    ))
+}
+
+fn read_project_deps_near<F: FileSystem>(
     fs: &F,
     dir: &Path,
     excluded_modules: &[String],
@@ -325,21 +350,14 @@ fn read_project_deps_with_candidates<F: FileSystem>(
             )
             .with_path(mod_candidate)
         })?;
-        return read_project_deps_from_mod_file(
-            fs,
-            mod_candidate,
-            mod_file,
-            lock_candidates,
-            excluded_modules,
-        );
+        return read_project_deps_from_mod_file(fs, mod_file, lock_candidates, excluded_modules);
     }
 
-    Ok(ProjectDeps::NoModule)
+    Ok(ProjectDeps::no_module())
 }
 
 fn read_project_deps_from_mod_file<F: FileSystem>(
     fs: &F,
-    mod_candidate: &Path,
     mod_file: ModFile,
     lock_candidates: &[PathBuf],
     excluded_modules: &[String],
@@ -405,17 +423,15 @@ fn read_project_deps_from_mod_file<F: FileSystem>(
             locked_modules.push(locked.clone());
         }
 
-        return Ok(ProjectDeps::WithModule(Box::new(ProjectModuleContext {
-            current_module,
-            mod_file_path: mod_candidate.to_path_buf(),
+        return Ok(ProjectDeps::with_module(ProjectModuleContext {
             mod_file,
+            current_module,
             lock_state: LockState::Locked(Box::new(LockedProjectContext {
-                lock_file_path: lock_candidate.clone(),
                 lock_file,
                 allowed_modules,
                 locked_modules,
             })),
-        })));
+        }));
     }
 
     if has_unexcluded_external {
@@ -430,12 +446,11 @@ fn read_project_deps_from_mod_file<F: FileSystem>(
         return Err(error);
     }
 
-    Ok(ProjectDeps::WithModule(Box::new(ProjectModuleContext {
-        current_module,
-        mod_file_path: mod_candidate.to_path_buf(),
+    Ok(ProjectDeps::with_module(ProjectModuleContext {
         mod_file,
+        current_module,
         lock_state: LockState::NoLock,
-    })))
+    }))
 }
 
 fn read_optional_file<F: FileSystem>(
@@ -457,7 +472,7 @@ fn read_optional_file<F: FileSystem>(
 
 /// Find the nearest project root by walking up from `dir` looking for `vo.mod`.
 /// Returns `dir` itself (normalized) if no `vo.mod` is found.
-pub fn find_project_root_in<F: FileSystem>(fs: &F, dir: &Path) -> PathBuf {
+fn find_project_root_in<F: FileSystem>(fs: &F, dir: &Path) -> PathBuf {
     try_find_project_root_in(fs, dir).unwrap_or_else(|| normalize_fs_path(dir))
 }
 
@@ -516,10 +531,33 @@ fn read_mod_file_in<F: FileSystem>(
 ///
 /// This is the canonical result of project discovery and should be used by both
 /// native (vo-engine) and web (vo-web) compilation paths.
+#[derive(Debug)]
 pub struct ProjectContext {
-    pub project_root: PathBuf,
-    pub project_deps: ProjectDeps,
-    pub workspace_replaces: HashMap<String, PathBuf>,
+    project_root: PathBuf,
+    project_deps: ProjectDeps,
+    workspace_replaces: HashMap<String, PathBuf>,
+}
+
+impl ProjectContext {
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    pub fn project_deps(&self) -> &ProjectDeps {
+        &self.project_deps
+    }
+
+    pub fn workspace_replaces(&self) -> &HashMap<String, PathBuf> {
+        &self.workspace_replaces
+    }
+
+    pub fn into_parts(self) -> (PathBuf, ProjectDeps, HashMap<String, PathBuf>) {
+        (
+            self.project_root,
+            self.project_deps,
+            self.workspace_replaces,
+        )
+    }
 }
 
 /// Load the full project context for a directory.
@@ -650,45 +688,155 @@ pub fn load_project_context<F: FileSystem>(
     })
 }
 
-pub fn build_synthetic_project_files(
-    synthetic_module: &str,
-    synthetic_vo: &str,
-    created_by: &str,
-    installed: &[(String, String)],
-    locked_modules: &[LockedModule],
-) -> Result<(String, String), crate::Error> {
-    let module = crate::identity::ModulePath::parse(synthetic_module)?;
-    let vo = crate::version::ToolchainConstraint::parse(synthetic_vo)?;
-    let require = installed
-        .iter()
-        .map(|(module, version)| {
-            Ok(Require {
-                module: crate::identity::ModulePath::parse(module)?,
-                constraint: crate::version::DepConstraint::parse(version)?,
-            })
-        })
-        .collect::<Result<Vec<_>, crate::Error>>()?;
-    let mod_file = ModFile {
-        module: module.clone(),
-        vo: vo.clone(),
-        require,
-        replace: Vec::new(),
-    };
-    let lock_file = LockFile {
-        version: 1,
-        created_by: created_by.to_string(),
-        root: LockRoot { module, vo },
-        resolved: locked_modules.to_vec(),
-    };
-    Ok((mod_file.render(), lock_file.render()))
+// ============================================================
+// Single-file project classification (spec §5.6, §10)
+// ============================================================
+
+/// Classification of a single `.vo` source file relative to the module system.
+///
+/// Implements the precedence rules in spec §5.6.4:
+///
+/// - If an ancestor directory contains `vo.mod`, the file belongs to that
+///   project. An inline mod block inside the file is a hard error.
+/// - Else, if the file begins with a `/*vo:mod ... */` block, the file is a
+///   *single-file ephemeral module* (spec §10.2).
+/// - Else, the file is an *ad hoc program* (spec §10.1).
+#[derive(Debug)]
+pub enum SingleFileContext {
+    /// The file is inside a project with a `vo.mod` ancestor.
+    Project(ProjectContext),
+
+    /// The file is a single-file ephemeral module carrying inline mod metadata.
+    EphemeralInlineMod {
+        /// Directory containing the file, used as the compile root.
+        project_root: PathBuf,
+        /// Leaf file name of the source file (relative to `project_root`).
+        file_name: PathBuf,
+        /// Parsed inline mod declaration.
+        inline_mod: InlineMod,
+    },
+
+    /// The file is an ad hoc program with no module metadata of any kind.
+    AdHoc {
+        /// Directory containing the file, used as the compile root.
+        project_root: PathBuf,
+        /// Leaf file name of the source file (relative to `project_root`).
+        file_name: PathBuf,
+    },
+}
+
+impl SingleFileContext {
+    pub fn has_inline_mod(&self) -> bool {
+        matches!(self, SingleFileContext::EphemeralInlineMod { .. })
+    }
+
+    pub fn inline_mod(&self) -> Option<&InlineMod> {
+        match self {
+            SingleFileContext::EphemeralInlineMod { inline_mod, .. } => Some(inline_mod),
+            _ => None,
+        }
+    }
+}
+
+/// Classify a single source file and return its `SingleFileContext` per spec
+/// §5.6.4 precedence rules.
+///
+/// `file_path` is the path of the `.vo` source file as seen by `fs`. It must
+/// point to a regular file, not a directory.
+pub fn load_single_file_context<F: FileSystem>(
+    fs: &F,
+    file_path: &Path,
+) -> Result<SingleFileContext, ProjectDepsError> {
+    let file_name_os = file_path.file_name().ok_or_else(|| {
+        ProjectDepsError::new(
+            ProjectDepsStage::ModFile,
+            ProjectDepsErrorKind::ReadFailed,
+            "single-file source path has no file name",
+        )
+        .with_path(file_path)
+    })?;
+    let file_name = PathBuf::from(file_name_os);
+    let file_dir = file_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let file_dir = normalize_fs_path(&file_dir);
+
+    let source = fs.read_file(file_path).map_err(|error| {
+        ProjectDepsError::new(
+            ProjectDepsStage::ModFile,
+            ProjectDepsErrorKind::ReadFailed,
+            format!("single-file source read error: {}", error),
+        )
+        .with_path(file_path)
+    })?;
+    let leading_reserved_span = inline_mod::leading_reserved_block_span(&source, 0);
+
+    if let Some(project_root) = try_find_project_root_in(fs, &file_dir) {
+        if let Some(span) = leading_reserved_span {
+            return Err(ProjectDepsError::new(
+                ProjectDepsStage::ModFile,
+                ProjectDepsErrorKind::ValidationFailed,
+                format!(
+                    "inline '{}' block is not allowed in a file inside a project with vo.mod",
+                    INLINE_MOD_OPEN
+                ),
+            )
+            .with_path(file_path)
+            .with_span(span));
+        }
+        let context = load_project_context(fs, &project_root)?;
+        return Ok(SingleFileContext::Project(context));
+    }
+
+    let inline_mod =
+        inline_mod::parse_inline_mod_from_source_with_span(&source, 0).map_err(|error| {
+            ProjectDepsError::new(
+                ProjectDepsStage::ModFile,
+                ProjectDepsErrorKind::ParseFailed,
+                format!("inline vo.mod parse error: {}", error),
+            )
+            .with_path(file_path)
+            .with_span(error.span)
+        })?;
+
+    if inline_mod.is_some() {
+        let ext_manifest_path = normalize_fs_path(&file_dir.join("vo.ext.toml"));
+        if fs.exists(&ext_manifest_path) {
+            return Err(ProjectDepsError::new(
+                ProjectDepsStage::ModFile,
+                ProjectDepsErrorKind::ValidationFailed,
+                format!(
+                    "inline '{}' single-file module cannot coexist with '{}' in the same directory",
+                    INLINE_MOD_OPEN,
+                    ext_manifest_path.display(),
+                ),
+            )
+            .with_path(file_path)
+            .with_span(
+                leading_reserved_span
+                    .expect("inline mod classification requires a reserved-block span"),
+            ));
+        }
+    }
+
+    Ok(match inline_mod {
+        Some(inline_mod) => SingleFileContext::EphemeralInlineMod {
+            project_root: file_dir,
+            file_name,
+            inline_mod,
+        },
+        None => SingleFileContext::AdHoc {
+            project_root: file_dir,
+            file_name,
+        },
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::digest::Digest;
     use crate::schema::lockfile::LockedModule;
-    use crate::version::{ExactVersion, ToolchainConstraint};
     use vo_common::vfs::MemoryFs;
 
     fn lock_file_for_workspace_replace() -> String {
@@ -730,33 +878,10 @@ artifacts = []
         fs
     }
 
-    fn sample_locked_module() -> LockedModule {
-        LockedModule {
-            path: crate::identity::ModulePath::parse("github.com/vo-lang/voplay").unwrap(),
-            version: ExactVersion::parse("v0.1.0").unwrap(),
-            vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
-            commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-            release_manifest: Digest::parse(
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            )
-            .unwrap(),
-            source: Digest::parse(
-                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            )
-            .unwrap(),
-            deps: Vec::new(),
-            artifacts: Vec::new(),
-        }
-    }
-
     #[test]
-    fn read_project_deps_requires_lock_for_unexcluded_external_modules() {
+    fn read_project_deps_reports_missing_lock_when_external_modules_present() {
         let fs = root_project_fs();
-        let result = read_project_deps(&fs, &[]);
-        let error = match result {
-            Ok(_) => panic!("expected missing vo.lock error"),
-            Err(error) => error,
-        };
+        let error = read_project_deps(&fs, &[]).unwrap_err();
         assert_eq!(error.stage, ProjectDepsStage::LockFile);
         assert_eq!(error.kind, ProjectDepsErrorKind::Missing);
         assert_eq!(error.path.as_deref(), Some("vo.lock"));
@@ -774,8 +899,6 @@ artifacts = []
         assert_eq!(deps.current_module(), Some("github.com/acme/app"));
         assert!(deps.allowed_modules().is_empty());
         assert!(deps.locked_modules().is_empty());
-        assert_eq!(deps.mod_file_path(), Some(Path::new("vo.mod")));
-        assert_eq!(deps.lock_file_path(), None);
     }
 
     #[test]
@@ -791,7 +914,6 @@ artifacts = []
         assert_eq!(deps.locked_modules().len(), 1);
         let locked: &LockedModule = &deps.locked_modules()[0];
         assert_eq!(locked.path.as_str(), "github.com/vo-lang/core");
-        assert_eq!(deps.lock_file_path(), Some(Path::new("vo.lock")));
     }
 
     #[test]
@@ -837,51 +959,6 @@ artifacts = []
             deps.allowed_modules(),
             &["github.com/vo-lang/local".to_string()]
         );
-        assert_eq!(
-            deps.mod_file_path(),
-            Some(Path::new("workspace/app/vo.mod"))
-        );
-        assert_eq!(
-            deps.lock_file_path(),
-            Some(Path::new("workspace/app/vo.lock"))
-        );
-    }
-
-    #[test]
-    fn build_synthetic_project_files_renders_canonical_files() {
-        let locked = sample_locked_module();
-        let (mod_content, lock_content) = build_synthetic_project_files(
-            "github.com/vo-lang/studio-examples",
-            "0.1.0",
-            "vo-studio",
-            &[(locked.path.as_str().to_string(), locked.version.to_string())],
-            std::slice::from_ref(&locked),
-        )
-        .unwrap();
-
-        let mod_file = ModFile::parse(&mod_content).unwrap();
-        assert_eq!(
-            mod_file.module.as_str(),
-            "github.com/vo-lang/studio-examples"
-        );
-        assert_eq!(mod_file.require.len(), 1);
-        assert_eq!(mod_file.require[0].module, locked.path);
-        assert_eq!(
-            mod_file.require[0].constraint.to_string(),
-            locked.version.to_string()
-        );
-
-        let lock_file = LockFile::parse(&lock_content).unwrap();
-        assert_eq!(lock_file.created_by, "vo-studio");
-        assert_eq!(
-            lock_file.root.module.as_str(),
-            "github.com/vo-lang/studio-examples"
-        );
-        assert_eq!(lock_file.resolved.len(), 1);
-        assert_eq!(
-            lock_file.resolved[0].path.as_str(),
-            "github.com/vo-lang/voplay"
-        );
     }
 
     #[test]
@@ -923,9 +1000,8 @@ artifacts = []
 
         let context = load_project_context(&fs, Path::new("workspace/tests"))
             .unwrap_or_else(|error| panic!("unexpected error: {error}"));
-        assert!(context.project_deps.has_mod_file());
-        assert!(context.project_deps.locked_modules().is_empty());
-        assert_eq!(context.project_deps.lock_file_path(), None);
+        assert!(context.project_deps().has_mod_file());
+        assert!(context.project_deps().locked_modules().is_empty());
     }
 
     #[test]
@@ -978,15 +1054,154 @@ artifacts = []
 
         let context = load_project_context(&fs, Path::new("workspace/tests"))
             .unwrap_or_else(|error| panic!("unexpected error: {error}"));
-        assert_eq!(context.project_root, PathBuf::from("workspace/tests"));
+        assert_eq!(context.project_root(), Path::new("workspace/tests"));
         assert_eq!(
-            context.workspace_replaces.get("github.com/vo-lang/lib"),
+            context.workspace_replaces().get("github.com/vo-lang/lib"),
             Some(&PathBuf::from("workspace/lib"))
         );
-        assert_eq!(context.project_deps.locked_modules().len(), 1);
+        assert_eq!(context.project_deps().locked_modules().len(), 1);
         assert_eq!(
-            context.project_deps.locked_modules()[0].path.as_str(),
+            context.project_deps().locked_modules()[0].path.as_str(),
             "github.com/vo-lang/core"
         );
+    }
+
+    #[test]
+    fn load_single_file_context_ad_hoc_when_no_mod_and_no_inline() {
+        let mut fs = MemoryFs::new();
+        fs.add_file("main.vo", "package main\nfunc main() {}\n");
+        let ctx = load_single_file_context(&fs, Path::new("main.vo")).unwrap();
+        match ctx {
+            SingleFileContext::AdHoc {
+                project_root,
+                file_name,
+            } => {
+                assert_eq!(project_root, PathBuf::from("."));
+                assert_eq!(file_name, PathBuf::from("main.vo"));
+            }
+            other => panic!("expected AdHoc, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn load_single_file_context_parses_ephemeral_inline_mod() {
+        let mut fs = MemoryFs::new();
+        fs.add_file(
+            "main.vo",
+            "/*vo:mod\nmodule local/demo\nvo ^0.1.0\n*/\npackage main\nfunc main() {}\n",
+        );
+        let ctx = load_single_file_context(&fs, Path::new("main.vo")).unwrap();
+        match ctx {
+            SingleFileContext::EphemeralInlineMod {
+                project_root,
+                file_name,
+                inline_mod,
+            } => {
+                assert_eq!(project_root, PathBuf::from("."));
+                assert_eq!(file_name, PathBuf::from("main.vo"));
+                assert_eq!(inline_mod.module.as_str(), "local/demo");
+                assert!(inline_mod.require.is_empty());
+            }
+            other => panic!("expected EphemeralInlineMod, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn load_single_file_context_rejects_inline_mod_inside_project() {
+        let mut fs = root_project_fs();
+        fs.add_file(
+            "scripts/tool.vo",
+            "/*vo:mod\nmodule local/tool\nvo ^0.1.0\n*/\npackage main\n",
+        );
+        let error = load_single_file_context(&fs, Path::new("scripts/tool.vo")).unwrap_err();
+        assert_eq!(error.stage, ProjectDepsStage::ModFile);
+        assert_eq!(error.kind, ProjectDepsErrorKind::ValidationFailed);
+        assert!(
+            error
+                .detail
+                .contains("not allowed in a file inside a project with vo.mod"),
+            "{}",
+            error.detail
+        );
+        assert_eq!(error.span().map(|span| span.start.0), Some(0));
+    }
+
+    #[test]
+    fn load_single_file_context_project_when_ancestor_mod_exists_and_no_inline() {
+        let mut fs = root_project_fs();
+        fs.add_file("vo.lock", lock_file_for_workspace_replace());
+        fs.add_file("scripts/tool.vo", "package main\nfunc main() {}\n");
+        let ctx = load_single_file_context(&fs, Path::new("scripts/tool.vo")).unwrap();
+        match ctx {
+            SingleFileContext::Project(context) => {
+                assert_eq!(
+                    context.project_deps().current_module(),
+                    Some("github.com/acme/app")
+                );
+            }
+            other => panic!("expected Project, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn load_single_file_context_surfaces_malformed_inline_mod() {
+        let mut fs = MemoryFs::new();
+        fs.add_file("main.vo", "/*vo:mod\nmodule local/demo\n*/\npackage main\n");
+        let error = load_single_file_context(&fs, Path::new("main.vo")).unwrap_err();
+        assert_eq!(error.stage, ProjectDepsStage::ModFile);
+        assert_eq!(error.kind, ProjectDepsErrorKind::ParseFailed);
+        assert!(
+            error.detail.contains("inline vo.mod parse error"),
+            "{}",
+            error.detail
+        );
+        assert!(error.span().is_some());
+    }
+
+    #[test]
+    fn load_single_file_context_surfaces_reserved_sentinel_error() {
+        let mut fs = MemoryFs::new();
+        fs.add_file("main.vo", "/*vo:script\n*/\npackage main\n");
+        let error = load_single_file_context(&fs, Path::new("main.vo")).unwrap_err();
+        assert_eq!(error.stage, ProjectDepsStage::ModFile);
+        assert_eq!(error.kind, ProjectDepsErrorKind::ParseFailed);
+        assert_eq!(error.span().map(|span| span.start.0), Some(0));
+    }
+
+    #[test]
+    fn load_single_file_context_surfaces_duplicate_inline_directive() {
+        let mut fs = MemoryFs::new();
+        let source =
+            "/*vo:mod\nmodule local/demo\nmodule local/other\nvo ^0.1.0\n*/\npackage main\n";
+        fs.add_file("main.vo", source);
+
+        let error = load_single_file_context(&fs, Path::new("main.vo")).unwrap_err();
+        assert_eq!(error.stage, ProjectDepsStage::ModFile);
+        assert_eq!(error.kind, ProjectDepsErrorKind::ParseFailed);
+        assert!(error.detail.contains("duplicate 'module' directive"));
+        assert_eq!(
+            error.span().map(|span| &source[span.to_range()]),
+            Some("module")
+        );
+    }
+
+    #[test]
+    fn load_single_file_context_rejects_inline_mod_with_ext_manifest_in_same_dir() {
+        let mut fs = MemoryFs::new();
+        fs.add_file(
+            "main.vo",
+            "/*vo:mod\nmodule local/demo\nvo ^0.1.0\n*/\npackage main\nfunc main() {}\n",
+        );
+        fs.add_file(
+            "vo.ext.toml",
+            "[extension]\nname = \"demo\"\n\n[extension.native]\npath = \"rust/target/{profile}/libdemo\"\n\n[[extension.native.targets]]\ntarget = \"aarch64-apple-darwin\"\nlibrary = \"libdemo.dylib\"\n",
+        );
+
+        let error = load_single_file_context(&fs, Path::new("main.vo")).unwrap_err();
+        assert_eq!(error.stage, ProjectDepsStage::ModFile);
+        assert_eq!(error.kind, ProjectDepsErrorKind::ValidationFailed);
+        assert!(error.detail.contains("vo.ext.toml"), "{}", error.detail);
+        assert_eq!(error.path.as_deref(), Some("main.vo"));
+        assert_eq!(error.span().map(|span| span.start.0), Some(0));
     }
 }

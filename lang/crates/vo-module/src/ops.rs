@@ -7,7 +7,6 @@ use crate::identity::{find_owning_module, ModulePath};
 use crate::lifecycle;
 use crate::project;
 use crate::registry::Registry;
-use crate::schema::lockfile::LockFile;
 use crate::schema::modfile::{ModFile, Require};
 use crate::solver::SolvePreferences;
 use crate::version::DepConstraint;
@@ -19,10 +18,13 @@ use crate::Error;
 
 /// Create a new `vo.mod` file at the given directory.
 pub fn mod_init(dir: &Path, module_path: &str, vo_constraint: &str) -> Result<(), Error> {
+    // `vo mod init` is for on-disk projects only. Ephemeral `local/*`
+    // identities are synthesized by the toolchain and never initialized via
+    // this command (spec §5.6.2).
     let mp = ModulePath::parse(module_path)?;
     let vo = crate::version::ToolchainConstraint::parse(vo_constraint)?;
     let mf = ModFile {
-        module: mp,
+        module: mp.into(),
         vo,
         require: vec![],
         replace: vec![],
@@ -45,7 +47,7 @@ pub fn mod_add(
     registry: &dyn Registry,
     created_by: &str,
 ) -> Result<(), Error> {
-    let mut mf = read_mod_file(project_dir)?;
+    let mut mf = project::read_mod_file(project_dir)?;
     let dep_mp = ModulePath::parse(dep_path)?;
 
     let dep_constraint = match constraint {
@@ -73,9 +75,11 @@ pub fn mod_add(
 
     let lock_file =
         lifecycle::prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
-    write_mod_file(project_dir, &mf)?;
-    write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
-    ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;
+    project::write_mod_file(project_dir, &mf)?;
+    project::write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
+    if let Some(lock_file) = lock_file.as_ref() {
+        lifecycle::download_locked_dependencies(cache_root, lock_file, registry)?;
+    }
 
     Ok(())
 }
@@ -93,11 +97,11 @@ pub fn mod_update(
     registry: &dyn Registry,
     created_by: &str,
 ) -> Result<(), Error> {
-    let mf = read_mod_file(project_dir)?;
+    let mf = project::read_mod_file(project_dir)?;
 
     let prefs = if let Some(target_str) = target {
         let target_mp = ModulePath::parse(target_str)?;
-        let existing_lock = read_lock_file(project_dir).ok();
+        let existing_lock = project::read_lock_file(project_dir).ok();
         let mut locked = BTreeMap::new();
         if let Some(ref lf) = existing_lock {
             for lm in &lf.resolved {
@@ -113,8 +117,10 @@ pub fn mod_update(
     };
 
     let lock_file = lifecycle::prepare_lock_file(&mf, registry, &prefs, created_by)?;
-    write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
-    ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;
+    project::write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
+    if let Some(lock_file) = lock_file.as_ref() {
+        lifecycle::download_locked_dependencies(cache_root, lock_file, registry)?;
+    }
 
     Ok(())
 }
@@ -130,11 +136,13 @@ pub fn mod_sync(
     registry: &dyn Registry,
     created_by: &str,
 ) -> Result<(), Error> {
-    let mf = read_mod_file(project_dir)?;
+    let mf = project::read_mod_file(project_dir)?;
     let lock_file =
         lifecycle::prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
-    write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
-    ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;
+    project::write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
+    if let Some(lock_file) = lock_file.as_ref() {
+        lifecycle::download_locked_dependencies(cache_root, lock_file, registry)?;
+    }
     Ok(())
 }
 
@@ -148,7 +156,7 @@ pub fn mod_download(
     cache_root: &Path,
     registry: &dyn Registry,
 ) -> Result<(), Error> {
-    let lf = read_lock_file(project_dir)?;
+    let lf = project::read_lock_file(project_dir)?;
     lifecycle::download_locked_dependencies(cache_root, &lf, registry)?;
     Ok(())
 }
@@ -159,9 +167,9 @@ pub fn mod_download(
 
 /// Verify root `vo.mod` / `vo.lock` consistency and cached artifacts.
 pub fn mod_verify(project_dir: &Path, cache_root: &Path) -> Result<(), Error> {
-    let mf = read_mod_file(project_dir)?;
+    let mf = project::read_mod_file(project_dir)?;
     let _ = crate::workspace::load_mod_file_replaces(&RealFs::new("."), &mf, project_dir)?;
-    let lf = read_lock_file(project_dir)?;
+    let lf = project::read_lock_file(project_dir)?;
     lifecycle::verify_locked_dependencies(cache_root, &mf, &lf)?;
     Ok(())
 }
@@ -178,7 +186,7 @@ pub fn mod_remove(
     registry: &dyn Registry,
     created_by: &str,
 ) -> Result<(), Error> {
-    let mut mf = read_mod_file(project_dir)?;
+    let mut mf = project::read_mod_file(project_dir)?;
     let dep_mp = ModulePath::parse(dep_path)?;
 
     let orig_len = mf.require.len();
@@ -191,9 +199,11 @@ pub fn mod_remove(
 
     let lock_file =
         lifecycle::prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
-    write_mod_file(project_dir, &mf)?;
-    write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
-    ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;
+    project::write_mod_file(project_dir, &mf)?;
+    project::write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
+    if let Some(lock_file) = lock_file.as_ref() {
+        lifecycle::download_locked_dependencies(cache_root, lock_file, registry)?;
+    }
 
     Ok(())
 }
@@ -217,8 +227,8 @@ pub fn mod_tidy(
     registry: &dyn Registry,
     created_by: &str,
 ) -> Result<TidyResult, Error> {
-    let mut mf = read_mod_file(project_dir)?;
-    let existing_lock = read_lock_file(project_dir).ok();
+    let mut mf = project::read_mod_file(project_dir)?;
+    let existing_lock = project::read_lock_file(project_dir).ok();
 
     // Determine which modules are actually needed by imports.
     let mut needed_modules: BTreeSet<ModulePath> = BTreeSet::new();
@@ -263,9 +273,11 @@ pub fn mod_tidy(
 
     let lock_file =
         lifecycle::prepare_lock_file(&mf, registry, &SolvePreferences::default(), created_by)?;
-    write_mod_file(project_dir, &mf)?;
-    write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
-    ensure_locked_modules_cached(cache_root, lock_file.as_ref(), registry)?;
+    project::write_mod_file(project_dir, &mf)?;
+    project::write_or_remove_lock_file(project_dir, lock_file.as_ref())?;
+    if let Some(lock_file) = lock_file.as_ref() {
+        lifecycle::download_locked_dependencies(cache_root, lock_file, registry)?;
+    }
 
     Ok(TidyResult {
         added: added.iter().map(|m| m.as_str().to_string()).collect(),
@@ -289,8 +301,8 @@ pub struct TidyResult {
 /// Returns the shortest dependency chain from the root module to the target,
 /// or an error if the target is not in the lock file.
 pub fn mod_why(project_dir: &Path, target: &str) -> Result<Vec<String>, Error> {
-    let mf = read_mod_file(project_dir)?;
-    let lf = read_lock_file(project_dir)?;
+    let mf = project::read_mod_file(project_dir)?;
+    let lf = project::read_lock_file(project_dir)?;
     let target_mp = ModulePath::parse(target)?;
 
     if lf.find(&target_mp).is_none() {
@@ -351,7 +363,7 @@ pub fn mod_clean(
     keep_locked: bool,
 ) -> Result<CleanResult, Error> {
     let lock_file = if keep_locked {
-        read_lock_file(project_dir).ok()
+        project::read_lock_file(project_dir).ok()
     } else {
         None
     };
@@ -369,36 +381,6 @@ pub struct CleanResult {
 // ============================================================
 // File I/O helpers
 // ============================================================
-
-fn read_mod_file(project_dir: &Path) -> Result<ModFile, Error> {
-    project::read_mod_file(project_dir)
-}
-
-fn read_lock_file(project_dir: &Path) -> Result<LockFile, Error> {
-    project::read_lock_file(project_dir)
-}
-
-fn write_mod_file(project_dir: &Path, mf: &ModFile) -> Result<(), Error> {
-    project::write_mod_file(project_dir, mf)
-}
-
-fn write_or_remove_lock_file(
-    project_dir: &Path,
-    lock_file: Option<&LockFile>,
-) -> Result<(), Error> {
-    project::write_or_remove_lock_file(project_dir, lock_file)
-}
-
-pub fn ensure_locked_modules_cached(
-    cache_root: &Path,
-    lock_file: Option<&LockFile>,
-    registry: &dyn Registry,
-) -> Result<(), Error> {
-    if let Some(lock_file) = lock_file {
-        lifecycle::download_locked_dependencies(cache_root, lock_file, registry)?;
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

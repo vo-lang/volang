@@ -9,7 +9,7 @@ pub mod http;
 mod tcp;
 #[cfg(feature = "std")]
 mod udp;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 mod unix;
 
 #[cfg(feature = "std")]

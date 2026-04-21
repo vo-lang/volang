@@ -8,7 +8,11 @@ use vo_common::vfs::{MemoryFs, RealFs, ScopedFs};
 use vo_common_core::LogRecordCore;
 use vo_module::ext_manifest::ExtensionManifest;
 use vo_module::operation_error::OperationError;
-use vo_module::project::{ProjectDeps, ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage};
+use vo_module::project::{
+    ProjectContext, ProjectDeps, ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage,
+    SingleFileContext,
+};
+use vo_module::registry::Registry;
 use vo_module::schema::lockfile::LockedModule;
 use vo_runtime::ext_loader::NativeExtensionSpec;
 
@@ -32,6 +36,11 @@ type CompileLogSink = dyn Fn(CompileLogRecord) + Send + Sync;
 
 thread_local! {
     static COMPILE_LOG_SINK: RefCell<Option<Arc<CompileLogSink>>> = RefCell::new(None);
+}
+
+#[cfg(test)]
+thread_local! {
+    static MOD_CACHE_ROOT_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
 pub fn with_compile_log_sink<T, S, F>(sink: S, f: F) -> T
@@ -60,6 +69,27 @@ pub(super) fn emit_compile_log(record: CompileLogRecord) {
             sink(record);
         }
     });
+}
+
+#[cfg(test)]
+fn with_mod_cache_root_override<T, F>(root: &Path, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    struct RestoreModCacheRoot(Option<PathBuf>);
+
+    impl Drop for RestoreModCacheRoot {
+        fn drop(&mut self) {
+            MOD_CACHE_ROOT_OVERRIDE.with(|slot| {
+                *slot.borrow_mut() = self.0.take();
+            });
+        }
+    }
+
+    let previous =
+        MOD_CACHE_ROOT_OVERRIDE.with(|slot| slot.borrow_mut().replace(root.to_path_buf()));
+    let _restore = RestoreModCacheRoot(previous);
+    f()
 }
 
 #[derive(Debug)]
@@ -238,23 +268,150 @@ fn load_real_path_compile_context(path: &Path) -> Result<RealPathCompileContext,
     let source_root = pipeline::source_root(path);
     let mod_cache = default_mod_cache_root();
     let base_fs = RealFs::new(".");
+
+    // Single-file entries go through the spec §5.6 single-file classifier so
+    // that inline `/*vo:mod ... */` metadata is recognized and the spec §5.6.4
+    // precedence rules are enforced uniformly for real-path compiles.
+    if path.is_file() {
+        let ctx = vo_module::project::load_single_file_context(&base_fs, path)
+            .map_err(module_system_error_from_project)?;
+        return real_path_compile_context_for_single_file(ctx, path, source_root, mod_cache);
+    }
+
     let context = vo_module::project::load_project_context(&base_fs, &source_root)
         .map_err(module_system_error_from_project)?;
-    let package_dir = relative_package_dir(&context.project_root, &source_root);
-    let single_file = if path.is_file() {
-        relative_single_file_path(&package_dir, path)
-    } else {
-        None
-    };
+    let project_root = context.project_root().to_path_buf();
+    let package_dir = relative_package_dir(&project_root, &source_root);
+    let (_, project_deps, workspace_replaces) = context.into_parts();
     Ok(RealPathCompileContext {
         source_root,
-        project_root: context.project_root,
+        project_root,
+        mod_cache,
+        package_dir,
+        single_file: None,
+        project_deps,
+        workspace_replaces,
+    })
+}
+
+fn real_path_compile_context_for_single_file(
+    ctx: SingleFileContext,
+    path: &Path,
+    source_root: PathBuf,
+    mod_cache: PathBuf,
+) -> Result<RealPathCompileContext, CompileError> {
+    match ctx {
+        SingleFileContext::Project(project_context) => Ok(real_path_context_from_project_context(
+            project_context,
+            path,
+            source_root,
+            mod_cache,
+        )),
+        SingleFileContext::EphemeralInlineMod {
+            file_name,
+            inline_mod,
+            ..
+        } => {
+            // Spec §10.2, §5.6.6: ephemeral single-file modules run in strict
+            // isolation — no workspace overrides, no ancestor vo.mod/vo.lock.
+            //
+            // When the inline block has no `require` entries, the build sees
+            // only the stdlib and the compile context is trivial. When it
+            // does have require entries, a prior call to
+            // `ensure_ephemeral_deps_installed` should have materialized a
+            // cache-local `vo.mod`/`vo.lock` pair under
+            // `<mod_cache>/ephemeral/<hash>/`; we load it read-only here so
+            // the normal project-deps pipeline can take over.
+            if inline_mod.require.is_empty() {
+                return Ok(RealPathCompileContext {
+                    source_root: source_root.clone(),
+                    project_root: source_root,
+                    mod_cache,
+                    package_dir: PathBuf::from("."),
+                    single_file: Some(file_name),
+                    project_deps: ProjectDeps::default(),
+                    workspace_replaces: HashMap::new(),
+                });
+            }
+
+            let cached = vo_module::ephemeral::load_cached_ephemeral(&mod_cache, &inline_mod)
+                .map_err(|error| {
+                    ModuleSystemError::new(
+                        ModuleSystemStage::LockFile,
+                        ModuleSystemErrorKind::Missing,
+                        format!("ephemeral cache read error: {}", error),
+                    )
+                })?
+                .ok_or_else(|| {
+                    ModuleSystemError::new(
+                        ModuleSystemStage::LockFile,
+                        ModuleSystemErrorKind::Missing,
+                        format!(
+                            "ephemeral dependencies for '{}' not yet resolved; run this file \
+                             via `vo run` (auto-install) or `vo check --install`",
+                            inline_mod.module,
+                        ),
+                    )
+                })?;
+
+            let base_fs = RealFs::new(".");
+            let context = vo_module::project::load_project_context(&base_fs, &cached.cache_dir)
+                .map_err(module_system_error_from_project)?;
+            let (_, project_deps, _) = context.into_parts();
+            Ok(RealPathCompileContext {
+                source_root: source_root.clone(),
+                project_root: source_root,
+                mod_cache,
+                package_dir: PathBuf::from("."),
+                single_file: Some(file_name),
+                project_deps,
+                // Ephemeral single-file modules cannot declare `replace`
+                // (spec §5.6.3) and must not consult ancestor `vo.work`
+                // (spec §10.1), so workspace overrides are always empty.
+                workspace_replaces: HashMap::new(),
+            })
+        }
+        SingleFileContext::AdHoc { file_name, .. } => {
+            // Spec §10.1: ad hoc programs see only the stdlib. No ancestor
+            // `vo.mod`, no ancestor `vo.work`, no workspace overrides. The
+            // single-file classifier has already enforced the spec §5.6.4
+            // precedence rule (rejecting inline mod inside a project).
+            Ok(RealPathCompileContext {
+                source_root: source_root.clone(),
+                project_root: source_root,
+                mod_cache,
+                package_dir: PathBuf::from("."),
+                single_file: Some(file_name),
+                project_deps: ProjectDeps::default(),
+                workspace_replaces: HashMap::new(),
+            })
+        }
+    }
+}
+
+fn real_path_context_from_project_context(
+    context: ProjectContext,
+    path: &Path,
+    source_root: PathBuf,
+    mod_cache: PathBuf,
+) -> RealPathCompileContext {
+    let (project_root_raw, project_deps, workspace_replaces) = context.into_parts();
+    // `source_root` is canonicalized by `pipeline::source_root`; ensure
+    // `project_root` matches the same canonical form so that
+    // `relative_package_dir` can strip the prefix reliably across
+    // platforms with symlinked temp dirs (e.g. `/var` vs `/private/var`).
+    let project_root = project_root_raw.canonicalize().unwrap_or(project_root_raw);
+    let package_dir = relative_package_dir(&project_root, &source_root);
+    let single_file = relative_single_file_path(&package_dir, path);
+    RealPathCompileContext {
+        source_root,
+        project_root,
         mod_cache,
         package_dir,
         single_file,
-        project_deps: context.project_deps,
-        workspace_replaces: context.workspace_replaces,
-    })
+        project_deps,
+        workspace_replaces,
+    }
 }
 
 fn scoped_project_fs(project_root: &Path) -> ScopedFs<RealFs> {
@@ -300,6 +457,7 @@ pub fn compile_with_cache(path: &str) -> Result<CompileOutput, CompileError> {
         &context.project_root,
         &context.mod_cache,
         context.single_file.as_deref(),
+        &context.project_deps,
         &context.workspace_replaces,
     )?;
 
@@ -318,13 +476,13 @@ pub fn compile_with_cache(path: &str) -> Result<CompileOutput, CompileError> {
 }
 
 pub fn compile_from_memory(fs: MemoryFs, root: &Path) -> Result<CompileOutput, CompileError> {
-    pipeline::compile_with_fs(fs, root, None)
+    pipeline::compile_prepared_project(fs, root, None)
 }
 
 pub fn compile_source_at(source: &str, root: &Path) -> Result<CompileOutput, CompileError> {
     let mut mem = MemoryFs::new();
     mem.add_file("main.vo", source);
-    pipeline::compile_with_fs(mem, root, Some(std::ffi::OsStr::new("main.vo")))
+    pipeline::compile_prepared_project(mem, root, Some(std::ffi::OsStr::new("main.vo")))
 }
 
 pub fn compile_string(code: &str) -> Result<CompileOutput, CompileError> {
@@ -334,28 +492,101 @@ pub fn compile_string(code: &str) -> Result<CompileOutput, CompileError> {
 }
 
 pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileError> {
-    let p = Path::new(path);
-    let root = pipeline::source_root(p);
-    let mod_cache = default_mod_cache_root();
-    auto_download_locked_modules(&root, &mod_cache)?;
-    compile_with_cache(path)
+    use vo_module::github_registry::GitHubRegistry;
+
+    let registry = GitHubRegistry::new();
+    compile_with_auto_install_using_registry(path, &registry)
 }
 
 pub fn check_with_auto_install(path: &str) -> Result<(), CompileError> {
+    use vo_module::github_registry::GitHubRegistry;
+
+    let registry = GitHubRegistry::new();
+    check_with_auto_install_using_registry(path, &registry)
+}
+
+fn compile_with_auto_install_using_registry(
+    path: &str,
+    registry: &dyn Registry,
+) -> Result<CompileOutput, CompileError> {
     let p = Path::new(path);
-    let root = pipeline::source_root(p);
     let mod_cache = default_mod_cache_root();
-    auto_download_locked_modules(&root, &mod_cache)?;
+    auto_install_dependencies(p, &mod_cache, registry)?;
+    compile_with_cache(path)
+}
+
+fn check_with_auto_install_using_registry(
+    path: &str,
+    registry: &dyn Registry,
+) -> Result<(), CompileError> {
+    let p = Path::new(path);
+    let mod_cache = default_mod_cache_root();
+    auto_install_dependencies(p, &mod_cache, registry)?;
     check(path)
 }
 
-fn auto_download_locked_modules(root: &Path, mod_cache: &Path) -> Result<(), CompileError> {
-    use vo_module::github_registry::GitHubRegistry;
+/// Pre-flight ephemeral dependency resolution (spec §5.6, §10.2).
+///
+/// When `path` is a single file whose leading `/*vo:mod*/` block declares
+/// `require` entries, this runs the solver, writes a canonical
+/// `vo.mod`/`vo.lock` pair under `<mod_cache>/ephemeral/<hash>/`, and
+/// populates the shared module cache with the resolved dependencies — all
+/// idempotent, so a second invocation with the same inline body is a no-op.
+/// For any other input (projects, ad hoc files, inline mods with no
+/// require entries), this is a no-op.
+fn auto_install_dependencies(
+    path: &Path,
+    mod_cache: &Path,
+    registry: &dyn Registry,
+) -> Result<(), CompileError> {
+    if path.is_file() {
+        let ctx = vo_module::project::load_single_file_context(&RealFs::new("."), path)
+            .map_err(module_system_error_from_project)?;
+        return match ctx {
+            SingleFileContext::Project(project_context) => {
+                let (_, project_deps, _) = project_context.into_parts();
+                auto_download_project_deps(&project_deps, mod_cache, registry)
+            }
+            SingleFileContext::EphemeralInlineMod { inline_mod, .. } => {
+                if inline_mod.require.is_empty() {
+                    return Ok(());
+                }
+                vo_module::ephemeral::resolve_and_cache_ephemeral(
+                    mod_cache,
+                    &inline_mod,
+                    registry,
+                    "vo compile",
+                )
+                .map_err(|error| {
+                    ModuleSystemError::new(
+                        ModuleSystemStage::DependencyDownload,
+                        ModuleSystemErrorKind::DownloadFailed,
+                        format!(
+                            "ephemeral dependency resolution failed for {}: {}",
+                            path.display(),
+                            error
+                        ),
+                    )
+                    .with_path(path)
+                })?;
+                Ok(())
+            }
+            SingleFileContext::AdHoc { .. } => Ok(()),
+        };
+    }
 
-    let plan = vo_module::lifecycle::load_project_locked_dependency_plan(root, mod_cache)
+    let root = pipeline::source_root(path);
+    let context = vo_module::project::load_project_context(&RealFs::new("."), &root)
         .map_err(module_system_error_from_project)?;
-    let project_deps = plan.project_deps;
+    let (_, project_deps, _) = context.into_parts();
+    auto_download_project_deps(&project_deps, mod_cache, registry)
+}
 
+fn auto_download_project_deps(
+    project_deps: &ProjectDeps,
+    mod_cache: &Path,
+    registry: &dyn Registry,
+) -> Result<(), CompileError> {
     if !project_deps.has_mod_file() || project_deps.locked_modules().is_empty() {
         return Ok(());
     }
@@ -363,25 +594,56 @@ fn auto_download_locked_modules(root: &Path, mod_cache: &Path) -> Result<(), Com
         return Ok(());
     };
 
-    let dependency_state = plan.dependency_state;
-    for dependency in &dependency_state {
-        if dependency.cached {
+    let cache_fs = RealFs::new(mod_cache);
+    let dependency_state = project_deps
+        .locked_modules()
+        .iter()
+        .map(|locked| {
+            let module_dir = vo_module::cache::layout::relative_module_dir(
+                locked.path.as_str(),
+                &locked.version,
+            );
+            let cached = vo_module::cache::validate::validate_installed_module(
+                &cache_fs,
+                &module_dir,
+                locked,
+            )
+            .is_ok()
+                && locked.artifacts.iter().all(|artifact| {
+                    let artifact_path = module_dir.join("artifacts").join(&artifact.id.name);
+                    vo_module::cache::validate::validate_installed_artifact(
+                        &cache_fs,
+                        &artifact_path,
+                        locked,
+                        artifact,
+                    )
+                    .is_ok()
+                });
+            (
+                locked.path.as_str().to_string(),
+                locked.version.to_string(),
+                cached,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for (module, version, cached) in &dependency_state {
+        if *cached {
             emit_compile_log(
                 CompileLogRecord::new("vo-engine", "dependency_cached")
-                    .module(&dependency.module)
-                    .version(&dependency.version),
+                    .module(module)
+                    .version(version),
             );
         } else {
             emit_compile_log(
                 CompileLogRecord::new("vo-engine", "dependency_fetch_start")
-                    .module(&dependency.module)
-                    .version(&dependency.version),
+                    .module(module)
+                    .version(version),
             );
         }
     }
 
-    let registry = GitHubRegistry::new();
-    vo_module::lifecycle::download_locked_dependencies(mod_cache, lock_file, &registry).map_err(
+    vo_module::lifecycle::download_locked_dependencies(mod_cache, lock_file, registry).map_err(
         |e| {
             ModuleSystemError::new(
                 ModuleSystemStage::DependencyDownload,
@@ -392,12 +654,12 @@ fn auto_download_locked_modules(root: &Path, mod_cache: &Path) -> Result<(), Com
         },
     )?;
 
-    for dependency in dependency_state {
-        if !dependency.cached {
+    for (module, version, cached) in dependency_state {
+        if !cached {
             emit_compile_log(
                 CompileLogRecord::new("vo-engine", "dependency_fetch_done")
-                    .module(dependency.module)
-                    .version(dependency.version),
+                    .module(module)
+                    .version(version),
             );
         }
     }
@@ -406,6 +668,10 @@ fn auto_download_locked_modules(root: &Path, mod_cache: &Path) -> Result<(), Com
 }
 
 pub fn default_mod_cache_root() -> PathBuf {
+    #[cfg(test)]
+    if let Some(root) = MOD_CACHE_ROOT_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return root;
+    }
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|home| home.join(MOD_CACHE_DIR))

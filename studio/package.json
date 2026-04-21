@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "build:wasm": "wasm-pack build wasm --target web --out-dir ../public/wasm --out-name vo_studio_wasm"
+    "build:wasm": "node ./scripts/build_wasm.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^3.0.0",

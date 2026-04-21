@@ -1,6 +1,8 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use vo_module::ext_manifest::DeclaredArtifactId;
+
 pub type ReleaseResult<T> = Result<T, ReleaseError>;
 
 #[derive(Debug, Clone)]
@@ -19,6 +21,11 @@ pub enum ReleaseError {
         paths: Vec<PathBuf>,
     },
     LegacyAliasImports(Vec<String>),
+    ArtifactContractViolation {
+        manifest_path: Option<PathBuf>,
+        missing: Vec<DeclaredArtifactId>,
+        undeclared: Vec<DeclaredArtifactId>,
+    },
     Module(String),
 }
 
@@ -26,6 +33,14 @@ impl From<vo_module::Error> for ReleaseError {
     fn from(e: vo_module::Error) -> Self {
         ReleaseError::Module(e.to_string())
     }
+}
+
+fn format_declared_artifacts(artifacts: &[DeclaredArtifactId]) -> String {
+    artifacts
+        .iter()
+        .map(|artifact| format!("{}:{}:{}", artifact.kind, artifact.target, artifact.name))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl fmt::Display for ReleaseError {
@@ -75,6 +90,30 @@ impl fmt::Display for ReleaseError {
                 write!(f, "old alias import syntax remains")?;
                 for violation in violations {
                     write!(f, "\n{}", violation)?;
+                }
+                Ok(())
+            }
+            ReleaseError::ArtifactContractViolation {
+                manifest_path,
+                missing,
+                undeclared,
+            } => {
+                match manifest_path {
+                    Some(path) => write!(
+                        f,
+                        "staged artifacts do not match the declared release artifact contract in {}",
+                        path.display()
+                    )?,
+                    None => write!(
+                        f,
+                        "staged artifacts were provided, but the module does not declare any release artifacts because vo.ext.toml is absent"
+                    )?,
+                }
+                if !missing.is_empty() {
+                    write!(f, "\nmissing: {}", format_declared_artifacts(missing))?;
+                }
+                if !undeclared.is_empty() {
+                    write!(f, "\nundeclared: {}", format_declared_artifacts(undeclared))?;
                 }
                 Ok(())
             }

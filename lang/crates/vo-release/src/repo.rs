@@ -117,7 +117,20 @@ pub fn stage_release(
         Some(commit) => commit.clone(),
         None => infer_commit(&repo_root)?,
     };
-    let module_str = mod_file.module.as_str();
+    // Spec §5.6.2: only canonical github-hosted modules are publishable;
+    // `local/*` ephemeral identities are toolchain-internal and MUST NOT
+    // reach release staging.
+    let module_path = mod_file.module.as_github().ok_or_else(|| {
+        ReleaseError::IoError(
+            repo_root.clone(),
+            format!(
+                "release staging requires a canonical github module path; vo.mod declares an \
+                 ephemeral '{}' identity which cannot be published",
+                mod_file.module,
+            ),
+        )
+    })?;
+    let module_str = module_path.as_str();
     let source_top_dir = source_package_base_name(module_str).ok_or_else(|| {
         ReleaseError::IoError(
             repo_root.clone(),
@@ -129,6 +142,7 @@ pub fn stage_release(
     let source_size = source_bytes.len() as u64;
     let source_digest = sha256_digest(&source_bytes);
     let prepared_artifacts = prepare_artifacts(&options.artifacts, &out_dir)?;
+    validate_artifact_contract(&repo_root, &prepared_artifacts)?;
 
     let version = ExactVersion::parse(&options.version)
         .map_err(|e| ReleaseError::ManifestSerialize(format!("invalid version: {e}")))?;
@@ -137,10 +151,10 @@ pub fn stage_release(
 
     let manifest = ReleaseManifest {
         schema_version: 1,
-        module: mod_file.module.clone(),
+        module: module_path.clone(),
         version,
         commit: commit.clone(),
-        module_root: mod_file.module.module_root().to_string(),
+        module_root: module_path.module_root().to_string(),
         vo: mod_file.vo.clone(),
         require: mod_file
             .require
@@ -305,6 +319,45 @@ fn prepare_artifacts(
         });
     }
     Ok(prepared)
+}
+
+fn validate_artifact_contract(
+    repo_root: &Path,
+    prepared: &[PreparedArtifact],
+) -> ReleaseResult<()> {
+    let manifest_path = repo_root.join("vo.ext.toml");
+    let (manifest_path, declared) = if manifest_path.is_file() {
+        let content = fs::read_to_string(&manifest_path)
+            .map_err(|error| ReleaseError::IoError(manifest_path.clone(), error.to_string()))?;
+        let manifest =
+            vo_module::ext_manifest::parse_ext_manifest_content(&content, &manifest_path)?;
+        (Some(manifest_path), manifest.declared_artifact_ids())
+    } else {
+        (None, Vec::new())
+    };
+
+    let declared = declared.into_iter().collect::<BTreeSet<_>>();
+    let staged = prepared
+        .iter()
+        .map(|artifact| vo_module::ext_manifest::DeclaredArtifactId {
+            kind: artifact.staged.kind.clone(),
+            target: artifact.staged.target.clone(),
+            name: artifact.staged.name.clone(),
+        })
+        .collect::<BTreeSet<_>>();
+
+    let missing = declared.difference(&staged).cloned().collect::<Vec<_>>();
+    let undeclared = staged.difference(&declared).cloned().collect::<Vec<_>>();
+
+    if missing.is_empty() && undeclared.is_empty() {
+        return Ok(());
+    }
+
+    Err(ReleaseError::ArtifactContractViolation {
+        manifest_path,
+        missing,
+        undeclared,
+    })
 }
 
 fn included_source_files(repo_root: &Path) -> ReleaseResult<Vec<PathBuf>> {

@@ -13,7 +13,9 @@ mod expr;
 mod stmt;
 mod types;
 
+use crate::ast::InlineModMetadata;
 use crate::ast::{ExprId, Ident, IdentId, TypeExprId};
+use crate::inline_mod::parse_leading_inline_mod;
 use vo_common::diagnostics::DiagnosticSink;
 use vo_common::span::{BytePos, Span};
 use vo_common::symbol::SymbolInterner;
@@ -40,6 +42,7 @@ pub struct Parser<'a> {
     base: u32,
     /// The source text.
     source: &'a str,
+    inline_mod: Option<InlineModMetadata>,
     /// The current token.
     current: Token,
     /// The peek token (one ahead).
@@ -62,6 +65,7 @@ impl<'a> Parser<'a> {
     /// The base offset should come from `SourceMap::file_base()` to ensure
     /// all positions are globally unique.
     pub fn new(source: &'a str, base: u32) -> Self {
+        let (inline_mod_output, diagnostics) = parse_leading_inline_mod(source, base);
         let mut lexer = Lexer::new(source, base);
         let current = lexer.next_token();
         let peek = lexer.next_token();
@@ -69,11 +73,12 @@ impl<'a> Parser<'a> {
         Self {
             base,
             source,
+            inline_mod: inline_mod_output.inline_mod,
             current,
             peek,
             lexer,
             interner: SymbolInterner::new(),
-            diagnostics: DiagnosticSink::new(),
+            diagnostics,
             allow_composite_lit: true,
             next_ids: IdState::default(),
         }
@@ -91,6 +96,7 @@ impl<'a> Parser<'a> {
         interner: SymbolInterner,
         ids: IdState,
     ) -> Self {
+        let (inline_mod_output, diagnostics) = parse_leading_inline_mod(source, base);
         let mut lexer = Lexer::new(source, base);
         let current = lexer.next_token();
         let peek = lexer.next_token();
@@ -98,11 +104,12 @@ impl<'a> Parser<'a> {
         Self {
             base,
             source,
+            inline_mod: inline_mod_output.inline_mod,
             current,
             peek,
             lexer,
             interner,
-            diagnostics: DiagnosticSink::new(),
+            diagnostics,
             allow_composite_lit: true,
             next_ids: ids,
         }
@@ -120,7 +127,9 @@ impl<'a> Parser<'a> {
 
     /// Takes the diagnostics, leaving an empty sink.
     pub fn take_diagnostics(&mut self) -> DiagnosticSink {
-        std::mem::take(&mut self.diagnostics)
+        let mut diagnostics = self.lexer.take_diagnostics();
+        diagnostics.extend(std::mem::take(&mut self.diagnostics));
+        diagnostics
     }
 
     /// Returns the symbol interner.
@@ -208,6 +217,7 @@ impl<'a> Parser<'a> {
         let end = self.current.span.end;
         Ok(File {
             package,
+            inline_mod: self.inline_mod.clone(),
             imports,
             decls,
             span: Span::new(start, end),
@@ -616,6 +626,7 @@ pub fn parse(source: &str, base: u32) -> (File, DiagnosticSink, SymbolInterner) 
     let mut parser = Parser::new(source, base);
     let file = parser.parse_file().unwrap_or_else(|()| File {
         package: None,
+        inline_mod: parser.inline_mod.clone(),
         imports: Vec::new(),
         decls: Vec::new(),
         span: Span::dummy(),
@@ -634,6 +645,7 @@ pub fn parse_with_interner(
     let mut parser = Parser::with_interner(source, base, interner);
     let file = parser.parse_file().unwrap_or_else(|()| File {
         package: None,
+        inline_mod: parser.inline_mod.clone(),
         imports: Vec::new(),
         decls: Vec::new(),
         span: Span::dummy(),
@@ -653,6 +665,7 @@ pub fn parse_with_state(
     let mut parser = Parser::with_interner_and_ids(source, base, interner, ids);
     let file = parser.parse_file().unwrap_or_else(|()| File {
         package: None,
+        inline_mod: parser.inline_mod.clone(),
         imports: Vec::new(),
         decls: Vec::new(),
         span: Span::dummy(),
@@ -719,6 +732,34 @@ mod tests {
         );
         assert!(file.package.is_some());
         assert_eq!(file.imports.len(), 1);
+    }
+
+    #[test]
+    fn test_file_exposes_inline_mod_metadata() {
+        let file = parse_ok(
+            "/*vo:mod\nmodule local/demo\nvo ^0.1.0\nrequire github.com/acme/lib ^1.2.0\n*/\npackage main\n",
+        );
+        let inline_mod = file.inline_mod.expect("expected inline mod metadata");
+        assert_eq!(inline_mod.module.value, "local/demo");
+        assert_eq!(inline_mod.vo.value, "^0.1.0");
+        assert_eq!(inline_mod.require.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_reports_inline_mod_error_with_span() {
+        let (_, diagnostics) = parse_str("/*vo:mod\nmodule local/demo\n*/\npackage main\n");
+        assert!(diagnostics.has_errors());
+        let diagnostic = diagnostics.iter().next().unwrap();
+        assert_eq!(diagnostic.code, Some(SyntaxError::InvalidInlineMod.code()));
+        assert!(!diagnostic.labels.is_empty());
+        assert!(!diagnostic.labels[0].span.is_dummy());
+    }
+
+    #[test]
+    fn test_parse_surfaces_lexer_diagnostics() {
+        let (_, diagnostics) = parse_str("package main\nvar s = \"unterminated\n");
+        assert!(diagnostics.has_errors());
+        assert!(diagnostics.iter().any(|diag| diag.code == Some(1010)));
     }
 
     #[test]

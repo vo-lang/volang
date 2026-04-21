@@ -8,7 +8,7 @@ on:
       - "lang/crates/**"
       - ".github/workflows/deploy-site.yml"
       - ".github/actions/setup-rust/**"
-      - "scripts/mirror_release_assets.py"
+      - "studio/scripts/build_wasm.mjs"
       - "rust-toolchain.toml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -68,10 +68,7 @@ jobs:
 
       - name: Build studio WASM
         working-directory: studio
-        run: wasm-pack build wasm --target web --release --out-dir ../public/wasm --out-name vo_studio_wasm
-
-      - name: Mirror published vogui release assets
-        run: python3 scripts/mirror_release_assets.py studio/public/gh-release github.com/vo-lang/vogui
+        run: npm run build:wasm
 
       - name: Install Studio dependencies
         working-directory: studio

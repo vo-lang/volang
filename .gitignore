@@ -81,7 +81,6 @@ benchmarks/sieve/go_bench
 
 studio/node_modules/
 studio/dist/
-studio/public/gh-release/
 studio/wasm/pkg/
 
 .tmp/

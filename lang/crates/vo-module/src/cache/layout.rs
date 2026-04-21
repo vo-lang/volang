@@ -45,6 +45,23 @@ pub fn cache_dir(cache_root: &Path, module: &ModulePath, version: &ExactVersion)
     cache_root.join(relative_module_dir(module.as_str(), version))
 }
 
+pub fn module_identity_from_cache_dir(
+    cache_root: &Path,
+    module_dir: &Path,
+) -> Option<(ModulePath, ExactVersion)> {
+    let rel = module_dir.strip_prefix(cache_root).ok()?;
+    let components = rel
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()?;
+    if components.len() != 2 {
+        return None;
+    }
+    let module_path = ModulePath::parse(&components[0].replace('@', "/")).ok()?;
+    let version = ExactVersion::parse(components[1]).ok()?;
+    Some((module_path, version))
+}
+
 /// Discover the unique installed version for a module under `cache_root`.
 ///
 /// Scans `<cache_root>/<cache_key(module)>/` for version directories (names
@@ -149,5 +166,28 @@ mod tests {
         fs.add_file(marker, "  \n".to_string());
         let result = discover_installed_version(&fs, Path::new(""), "github.com/acme/lib").unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn module_identity_from_cache_dir_round_trips_canonical_layout() {
+        let cache_root = Path::new("cache");
+        let module = ModulePath::parse("github.com/acme/lib").unwrap();
+        let version = ExactVersion::parse("v1.2.3").unwrap();
+        let module_dir = cache_dir(cache_root, &module, &version);
+
+        let resolved = module_identity_from_cache_dir(cache_root, &module_dir).unwrap();
+
+        assert_eq!(resolved.0, module);
+        assert_eq!(resolved.1, version);
+    }
+
+    #[test]
+    fn module_identity_from_cache_dir_rejects_non_canonical_layout() {
+        let cache_root = Path::new("cache");
+        let invalid_dir = cache_root.join("github.com@acme@lib").join("not-a-version");
+
+        let resolved = module_identity_from_cache_dir(cache_root, &invalid_dir);
+
+        assert!(resolved.is_none());
     }
 }

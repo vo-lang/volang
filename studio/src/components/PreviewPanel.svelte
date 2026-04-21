@@ -13,7 +13,7 @@
   } from '../lib/gui/renderer_bridge';
   import { setActiveHostBridge, clearActiveHostBridge } from '../lib/studio_wasm';
   import type { ServiceRegistry } from '../lib/services/service_registry';
-  import type { FrameworkContract } from '../lib/types';
+  import { frameworkContractKey, frameworkJsModulePath, type FrameworkContract } from '../lib/types';
 
   type PreviewPanelSharedState = {
     rendererSurfaceHost: HTMLDivElement | null;
@@ -107,13 +107,7 @@
   }
 
   function frameworkKey(framework: FrameworkContract): string {
-    return [
-      framework.name,
-      framework.entry,
-      framework.rendererPath ?? '',
-      framework.protocolPath ?? '',
-      framework.hostBridgePath ?? '',
-    ].join('\0');
+    return frameworkContractKey(framework);
   }
 
   function collectBridgeFrameworks(primary: FrameworkContract | null, providers: FrameworkContract[]): FrameworkContract[] {
@@ -166,7 +160,7 @@
   $: guiFramework = $runtime.gui.framework;
   $: providerFrameworks = $runtime.gui.providerFrameworks;
   $: bridgeFrameworks = collectBridgeFrameworks(guiFramework, providerFrameworks);
-  $: hasRendererBridge = bridgeFrameworks.some((framework) => framework.rendererPath != null);
+  $: hasRendererBridge = bridgeFrameworks.some((framework) => frameworkJsModulePath(framework, 'renderer') != null);
   $: capabilities = Array.from(new Set(bridgeFrameworks.flatMap((framework) => framework.capabilities ?? [])));
   $: isRenderSurface = capabilities.includes('render_surface');
   $: isIslandTransport = capabilities.includes('island_transport');
@@ -291,18 +285,21 @@
       const bridgeFrameworks = collectBridgeFrameworks(framework, providerFrameworks);
       let vfsFiles: VfsFile[] | undefined;
       const needsVfs = bridgeFrameworks.some((provider) =>
-        provider.protocolPath || provider.hostBridgePath || provider.rendererPath,
+        frameworkJsModulePath(provider, 'protocol')
+          || frameworkJsModulePath(provider, 'host_bridge')
+          || frameworkJsModulePath(provider, 'renderer'),
       );
       if (needsVfs && registry) {
         vfsFiles = await fetchVfsSnapshot(registry.backend, entryPath);
       }
       const protocolModules: ProtocolModule[] = [];
       for (const provider of bridgeFrameworks) {
-        if (!provider.protocolPath || !registry) {
+        const protocolPath = frameworkJsModulePath(provider, 'protocol');
+        if (!protocolPath || !registry) {
           continue;
         }
         try {
-          protocolModules.push(await loadProtocolModule(provider.protocolPath, registry.backend, entryPath, vfsFiles));
+          protocolModules.push(await loadProtocolModule(protocolPath, registry.backend, entryPath, vfsFiles));
         } catch (e) {
           console.warn('[PreviewPanel] protocol module load failed, external widget detection may be unavailable:', e);
         }
@@ -310,11 +307,12 @@
       registry.runtime.setProtocolModule(protocolModules.length > 0 ? combineProtocolModules(protocolModules) : null);
       const hostBridgeModules: HostBridgeModule[] = [];
       for (const provider of bridgeFrameworks) {
-        if (!provider.hostBridgePath || !registry) {
+        const hostBridgePath = frameworkJsModulePath(provider, 'host_bridge');
+        if (!hostBridgePath || !registry) {
           continue;
         }
         try {
-          hostBridgeModules.push(await loadHostBridgeModule(provider.hostBridgePath, registry.backend, entryPath, vfsFiles));
+          hostBridgeModules.push(await loadHostBridgeModule(hostBridgePath, registry.backend, entryPath, vfsFiles));
         } catch (e) {
           console.warn('[PreviewPanel] host bridge module load failed, WASM host functions may be unavailable:', e);
         }

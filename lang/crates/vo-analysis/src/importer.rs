@@ -5,7 +5,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::objects::PackageKey;
-use vo_module::identity;
 
 /// Configuration for tracing/debugging.
 #[derive(Debug, Default, Clone)]
@@ -26,11 +25,6 @@ impl ImportKey {
             path: path.to_string(),
         }
     }
-}
-
-pub fn validate_import_path(path: &str) -> Result<&str, String> {
-    identity::classify_import(path).map_err(|error| error.to_string())?;
-    Ok(path)
 }
 
 /// Result of an import operation.
@@ -79,27 +73,5 @@ impl Importer for NullImporter {
 
     fn base_dir(&self) -> Option<&Path> {
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_import_path;
-
-    #[test]
-    fn test_validate_import_path_accepts_canonical_forms() {
-        assert!(validate_import_path("fmt").is_ok());
-        assert!(validate_import_path("encoding/json").is_ok());
-        assert!(validate_import_path("github.com/vo-lang/vogui").is_ok());
-        assert!(validate_import_path("github.com/vo-lang/vogui/app").is_ok());
-    }
-
-    #[test]
-    fn test_validate_import_path_rejects_legacy_forms() {
-        assert!(validate_import_path("./codec").is_err());
-        assert!(validate_import_path("../shared").is_err());
-        assert!(validate_import_path("std/io").is_err());
-        assert!(validate_import_path("github.com/vo-lang/zip@v0.1.0").is_err());
-        assert!(validate_import_path("example.com/acme/lib").is_err());
     }
 }

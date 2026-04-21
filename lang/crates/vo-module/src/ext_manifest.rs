@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Component;
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,7 @@ pub struct ExtensionManifest {
     pub include: Vec<PathBuf>,
     pub native: Option<NativeExtensionConfig>,
     pub wasm: Option<WasmExtensionManifest>,
+    pub web: Option<WebRuntimeManifest>,
     pub manifest_path: PathBuf,
 }
 
@@ -49,12 +50,31 @@ pub struct WasmExtensionManifest {
     pub kind: WasmExtensionKind,
     pub wasm: String,
     pub js_glue: Option<String>,
+    pub local_wasm: Option<String>,
+    pub local_js_glue: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebRuntimeManifest {
+    pub entry: Option<String>,
+    pub capabilities: Vec<String>,
+    pub js_modules: BTreeMap<String, String>,
+}
+
+impl WebRuntimeManifest {
+    pub fn js_module_path(&self, name: &str) -> Option<&str> {
+        self.js_modules.get(name).map(|path| path.as_str())
+    }
 }
 
 impl ExtensionManifest {
     pub fn resolve_local_native_path(&self, module_root: &Path) -> Option<PathBuf> {
         let native = self.native.as_ref()?;
         Some(resolve_library_path(module_root.join(&native.path)))
+    }
+
+    pub fn web_runtime(&self) -> Option<&WebRuntimeManifest> {
+        self.web.as_ref()
     }
 
     pub fn declared_artifact_ids(&self) -> Vec<DeclaredArtifactId> {
@@ -144,13 +164,14 @@ fn parse_manifest_value(
     }
     reject_unknown_keys(
         extension,
-        &["name", "include", "native", "wasm"],
+        &["name", "include", "native", "wasm", "web"],
         "[extension]",
     )?;
     let name = required_string(extension, "name", "[extension]")?;
     let include = parse_include_paths(extension)?;
     let native = parse_native_extension_from_value(extension)?;
     let wasm = parse_wasm_extension_from_value(extension)?;
+    let web = parse_web_runtime_from_value(value, extension)?;
     if native.is_none() && wasm.is_none() {
         return Err(Error::ExtManifestParse(
             "extension manifest must declare at least one of [extension.native] or [extension.wasm]"
@@ -162,6 +183,7 @@ fn parse_manifest_value(
         include,
         native,
         wasm,
+        web,
         manifest_path: manifest_path.to_path_buf(),
     })
 }
@@ -205,10 +227,6 @@ pub fn extension_name_from_content(content: &str) -> Result<String, Error> {
     Ok(parse_ext_manifest_content(content, Path::new("vo.ext.toml"))?.name)
 }
 
-pub fn wasm_extension_from_content(content: &str) -> Result<Option<WasmExtensionManifest>, Error> {
-    Ok(parse_ext_manifest_content(content, Path::new("vo.ext.toml"))?.wasm)
-}
-
 /// Read the generic `include` list from `[extension]` in a `vo.ext.toml` string.
 ///
 /// Returns the declared paths that must ship with the source package.
@@ -218,14 +236,99 @@ pub fn include_paths_from_content(content: &str) -> Result<Vec<PathBuf>, Error> 
     Ok(parse_ext_manifest_content(content, Path::new("vo.ext.toml"))?.include)
 }
 
-pub fn is_bindgen_ext_content(vo_ext_toml_content: &str) -> Result<bool, Error> {
-    Ok(matches!(
-        wasm_extension_from_content(vo_ext_toml_content)?,
-        Some(WasmExtensionManifest {
-            kind: WasmExtensionKind::Bindgen,
-            ..
-        })
-    ))
+fn parse_web_runtime_from_value(
+    value: &toml::Value,
+    extension: &toml::value::Table,
+) -> Result<Option<WebRuntimeManifest>, Error> {
+    let web = extension.get("web");
+    let legacy_studio = value.get("studio");
+    if web.is_some() && legacy_studio.is_some() {
+        return Err(Error::ExtManifestParse(
+            "cannot declare both [extension.web] and legacy [studio] in vo.ext.toml".to_string(),
+        ));
+    }
+    if let Some(web) = web {
+        let table = web.as_table().ok_or_else(|| {
+            Error::ExtManifestParse("[extension.web] must be a table".to_string())
+        })?;
+        return Ok(Some(parse_canonical_web_runtime_table(table)?));
+    }
+    if let Some(studio) = legacy_studio {
+        let table = studio
+            .as_table()
+            .ok_or_else(|| Error::ExtManifestParse("[studio] must be a table".to_string()))?;
+        return Ok(Some(parse_legacy_studio_runtime_table(table)?));
+    }
+    Ok(None)
+}
+
+fn parse_canonical_web_runtime_table(
+    table: &toml::value::Table,
+) -> Result<WebRuntimeManifest, Error> {
+    reject_unknown_keys(table, &["entry", "capabilities", "js"], "[extension.web]")?;
+    Ok(WebRuntimeManifest {
+        entry: optional_nonempty_string(table, "entry", "[extension.web]")?,
+        capabilities: parse_string_array(table, "capabilities", "[extension.web]")?,
+        js_modules: parse_web_runtime_js_modules(table, "[extension.web]")?,
+    })
+}
+
+fn parse_legacy_studio_runtime_table(
+    table: &toml::value::Table,
+) -> Result<WebRuntimeManifest, Error> {
+    reject_unknown_keys(
+        table,
+        &[
+            "entry",
+            "capabilities",
+            "renderer",
+            "protocol",
+            "host_bridge",
+        ],
+        "[studio]",
+    )?;
+    let mut js_modules = BTreeMap::new();
+    insert_legacy_web_runtime_js_module(&mut js_modules, table, "renderer")?;
+    insert_legacy_web_runtime_js_module(&mut js_modules, table, "protocol")?;
+    insert_legacy_web_runtime_js_module(&mut js_modules, table, "host_bridge")?;
+    Ok(WebRuntimeManifest {
+        entry: optional_nonempty_string(table, "entry", "[studio]")?,
+        capabilities: parse_string_array(table, "capabilities", "[studio]")?,
+        js_modules,
+    })
+}
+
+fn parse_web_runtime_js_modules(
+    table: &toml::value::Table,
+    scope: &str,
+) -> Result<BTreeMap<String, String>, Error> {
+    let Some(value) = table.get("js") else {
+        return Ok(BTreeMap::new());
+    };
+    let js_table = value
+        .as_table()
+        .ok_or_else(|| Error::ExtManifestParse(format!("'js' in {} must be a table", scope)))?;
+    let mut js_modules = BTreeMap::new();
+    for (name, value) in js_table {
+        validate_web_runtime_module_name(name, &format!("{}.js", scope))?;
+        let path = value.as_str().ok_or_else(|| {
+            Error::ExtManifestParse(format!("'{}.js.{}' must be a string", scope, name))
+        })?;
+        validate_relative_path(path, &format!("{}.js.{}", scope, name))?;
+        js_modules.insert(name.clone(), path.to_string());
+    }
+    Ok(js_modules)
+}
+
+fn insert_legacy_web_runtime_js_module(
+    js_modules: &mut BTreeMap<String, String>,
+    table: &toml::value::Table,
+    key: &str,
+) -> Result<(), Error> {
+    if let Some(path) = optional_relative_path(table, key, "[studio]")? {
+        js_modules.insert(key.to_string(), path);
+    }
+    Ok(())
 }
 
 fn parse_wasm_extension_from_value(
@@ -237,7 +340,11 @@ fn parse_wasm_extension_from_value(
     let wasm = wasm
         .as_table()
         .ok_or_else(|| Error::ExtManifestParse("[extension.wasm] must be a table".to_string()))?;
-    reject_unknown_keys(wasm, &["type", "wasm", "js_glue"], "[extension.wasm]")?;
+    reject_unknown_keys(
+        wasm,
+        &["type", "wasm", "js_glue", "local_wasm", "local_js_glue"],
+        "[extension.wasm]",
+    )?;
     Ok(Some(parse_wasm_extension_table(wasm)?))
 }
 
@@ -260,11 +367,14 @@ fn parse_wasm_extension_table(table: &toml::value::Table) -> Result<WasmExtensio
     let wasm = required_string(table, "wasm", "[extension.wasm]")?;
     validate_file_name(&wasm, "[extension.wasm].wasm")?;
     let js_glue = optional_string(table, "js_glue", "[extension.wasm]")?;
+    let local_wasm = optional_relative_path(table, "local_wasm", "[extension.wasm]")?;
+    let local_js_glue = optional_relative_path(table, "local_js_glue", "[extension.wasm]")?;
     match kind {
         WasmExtensionKind::Standalone => {
-            if js_glue.is_some() {
+            if js_glue.is_some() || local_js_glue.is_some() {
                 return Err(Error::ExtManifestParse(
-                    "'js_glue' is only valid for bindgen [extension.wasm]".to_string(),
+                    "'js_glue' and 'local_js_glue' are only valid for bindgen [extension.wasm]"
+                        .to_string(),
                 ));
             }
         }
@@ -281,6 +391,8 @@ fn parse_wasm_extension_table(table: &toml::value::Table) -> Result<WasmExtensio
         kind,
         wasm,
         js_glue,
+        local_wasm,
+        local_js_glue,
     })
 }
 
@@ -406,6 +518,82 @@ fn optional_string(
         Error::ExtManifestParse(format!("'{}' in {} must be a string", key, scope))
     })?;
     Ok(Some(value.to_string()))
+}
+
+fn optional_nonempty_string(
+    table: &toml::value::Table,
+    key: &str,
+    scope: &str,
+) -> Result<Option<String>, Error> {
+    let value = optional_string(table, key, scope)?;
+    if let Some(value_str) = value.as_deref() {
+        if value_str.trim().is_empty() {
+            return Err(Error::ExtManifestParse(format!(
+                "'{}' in {} must not be empty",
+                key, scope,
+            )));
+        }
+    }
+    Ok(value)
+}
+
+fn optional_relative_path(
+    table: &toml::value::Table,
+    key: &str,
+    scope: &str,
+) -> Result<Option<String>, Error> {
+    let value = optional_string(table, key, scope)?;
+    if let Some(value_str) = value.as_deref() {
+        validate_relative_path(value_str, &format!("{}.{}", scope, key))?;
+    }
+    Ok(value)
+}
+
+fn parse_string_array(
+    table: &toml::value::Table,
+    key: &str,
+    scope: &str,
+) -> Result<Vec<String>, Error> {
+    let Some(value) = table.get(key) else {
+        return Ok(Vec::new());
+    };
+    let items = value.as_array().ok_or_else(|| {
+        Error::ExtManifestParse(format!("'{}' in {} must be an array", key, scope))
+    })?;
+    let mut parsed = Vec::with_capacity(items.len());
+    for item in items {
+        let value = item.as_str().ok_or_else(|| {
+            Error::ExtManifestParse(format!("each entry in {}.{} must be a string", scope, key,))
+        })?;
+        if value.trim().is_empty() {
+            return Err(Error::ExtManifestParse(format!(
+                "entries in {}.{} must not be empty",
+                scope, key,
+            )));
+        }
+        parsed.push(value.to_string());
+    }
+    Ok(parsed)
+}
+
+fn validate_web_runtime_module_name(name: &str, field: &str) -> Result<(), Error> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(Error::ExtManifestParse(format!(
+            "{} keys must not be empty",
+            field,
+        )));
+    }
+    if trimmed
+        .chars()
+        .any(|ch| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+    {
+        return Err(Error::ExtManifestParse(format!(
+            "{} keys must be normalized identifiers",
+            field,
+        )));
+    }
+    Ok(())
 }
 
 fn validate_relative_path(value: &str, field: &str) -> Result<(), Error> {
@@ -571,54 +759,6 @@ js_glue = "vogui.js"
     }
 
     #[test]
-    fn test_is_bindgen_ext_content() {
-        assert!(is_bindgen_ext_content(
-            r#"
-[extension]
-name = "vogui"
-
-[extension.wasm]
-type = "bindgen"
-wasm = "vogui.wasm"
-js_glue = "vogui.js"
-"#
-        )
-        .unwrap());
-        assert!(!is_bindgen_ext_content(
-            r#"
-[extension]
-name = "zip"
-
-[extension.wasm]
-type = "standalone"
-wasm = "zip.wasm"
-"#
-        )
-        .unwrap());
-        assert!(is_bindgen_ext_content("").is_err());
-    }
-
-    #[test]
-    fn test_wasm_extension_from_content() {
-        let wasm = wasm_extension_from_content(
-            r#"
-[extension]
-name = "vogui"
-
-[extension.wasm]
-type = "bindgen"
-wasm = "vogui.wasm"
-js_glue = "vogui.js"
-"#,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(wasm.kind, WasmExtensionKind::Bindgen);
-        assert_eq!(wasm.wasm, "vogui.wasm");
-        assert_eq!(wasm.js_glue.as_deref(), Some("vogui.js"));
-    }
-
-    #[test]
     fn test_extension_name_from_content() {
         let name = extension_name_from_content(
             r#"
@@ -626,7 +766,7 @@ js_glue = "vogui.js"
 name = "vogui"
 
 [extension.native]
-path = "rust/target/release/libvo_vogui"
+path = "rust/target/{profile}/libvo_vogui"
 
 [[extension.native.targets]]
 target = "aarch64-apple-darwin"
@@ -635,6 +775,182 @@ library = "libvo_vogui.dylib"
         )
         .unwrap();
         assert_eq!(name, "vogui");
+    }
+
+    #[test]
+    fn test_wasm_manifest_parses_explicit_local_paths() {
+        let manifest = parse_ext_manifest_content(
+            r#"
+[extension]
+name = "vogui"
+
+[extension.wasm]
+type = "bindgen"
+wasm = "vogui_bg.wasm"
+js_glue = "vogui.js"
+local_wasm = "rust/pkg-web/vogui_bg.wasm"
+local_js_glue = "rust/pkg-web/vogui.js"
+"#,
+            Path::new("vo.ext.toml"),
+        )
+        .unwrap();
+        let wasm = manifest.wasm.as_ref().unwrap();
+        assert_eq!(
+            wasm.local_wasm.as_deref(),
+            Some("rust/pkg-web/vogui_bg.wasm")
+        );
+        assert_eq!(wasm.local_js_glue.as_deref(), Some("rust/pkg-web/vogui.js"));
+    }
+
+    #[test]
+    fn test_parse_extension_web_manifest() {
+        let manifest = parse_ext_manifest_content(
+            r#"
+[extension]
+name = "vogui"
+
+[extension.wasm]
+type = "standalone"
+wasm = "vogui.wasm"
+
+[extension.web]
+entry = "Run"
+capabilities = ["widget", "render_surface"]
+
+[extension.web.js]
+renderer = "js/dist/studio_renderer.js"
+protocol = "js/dist/studio_protocol.js"
+host_bridge = "js/dist/studio_host_bridge.js"
+"#,
+            Path::new("vo.ext.toml"),
+        )
+        .unwrap();
+        let web = manifest.web.as_ref().unwrap();
+        assert_eq!(web.entry.as_deref(), Some("Run"));
+        assert_eq!(web.capabilities, vec!["widget", "render_surface"]);
+        assert_eq!(
+            web.js_module_path("renderer"),
+            Some("js/dist/studio_renderer.js")
+        );
+        assert_eq!(
+            web.js_module_path("protocol"),
+            Some("js/dist/studio_protocol.js")
+        );
+        assert_eq!(
+            web.js_module_path("host_bridge"),
+            Some("js/dist/studio_host_bridge.js")
+        );
+    }
+
+    #[test]
+    fn test_extension_web_manifest_entry_is_optional() {
+        let manifest = parse_ext_manifest_content(
+            r#"
+[extension]
+name = "vogui"
+
+[extension.wasm]
+type = "standalone"
+wasm = "vogui.wasm"
+
+[extension.web]
+capabilities = ["widget", "render_surface"]
+
+[extension.web.js]
+renderer = "js/dist/studio_renderer.js"
+"#,
+            Path::new("vo.ext.toml"),
+        )
+        .unwrap();
+        let web = manifest.web.as_ref().unwrap();
+        assert!(web.entry.is_none());
+        assert_eq!(
+            web.js_module_path("renderer"),
+            Some("js/dist/studio_renderer.js")
+        );
+    }
+
+    #[test]
+    fn test_legacy_studio_manifest_maps_to_web_runtime() {
+        let manifest = parse_ext_manifest_content(
+            r#"
+[extension]
+name = "voplay"
+
+[extension.wasm]
+type = "bindgen"
+wasm = "voplay_island_bg.wasm"
+js_glue = "voplay_island.js"
+
+[studio]
+entry = "Run"
+capabilities = ["widget", "island_transport", "browser_runtime", "vfs"]
+renderer = "js/dist/voplay-render-island.js"
+"#,
+            Path::new("vo.ext.toml"),
+        )
+        .unwrap();
+        let web = manifest.web.as_ref().unwrap();
+        assert_eq!(web.entry.as_deref(), Some("Run"));
+        assert_eq!(
+            web.capabilities,
+            vec!["widget", "island_transport", "browser_runtime", "vfs"]
+        );
+        assert_eq!(
+            web.js_module_path("renderer"),
+            Some("js/dist/voplay-render-island.js")
+        );
+    }
+
+    #[test]
+    fn test_extension_web_rejects_flat_js_role_keys() {
+        let error = parse_ext_manifest_content(
+            r#"
+[extension]
+name = "vogui"
+
+[extension.wasm]
+type = "standalone"
+wasm = "vogui.wasm"
+
+[extension.web]
+renderer = "js/dist/studio_renderer.js"
+"#,
+            Path::new("vo.ext.toml"),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::ExtManifestParse(message)
+                if message.contains("unsupported key(s) in [extension.web]: renderer")
+        ));
+    }
+
+    #[test]
+    fn test_rejects_mixed_extension_web_and_legacy_studio_sections() {
+        let error = parse_ext_manifest_content(
+            r#"
+[extension]
+name = "vogui"
+
+[extension.wasm]
+type = "standalone"
+wasm = "vogui.wasm"
+
+[extension.web.js]
+renderer = "js/dist/studio_renderer.js"
+
+[studio]
+renderer = "js/dist/legacy_renderer.js"
+"#,
+            Path::new("vo.ext.toml"),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::ExtManifestParse(message)
+                if message.contains("cannot declare both [extension.web] and legacy [studio]")
+        ));
     }
 
     #[test]

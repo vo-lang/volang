@@ -596,6 +596,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2083,6 +2093,25 @@ checksum = "3acae9609540aa318d1bc588455225fb2085b9ed0c4f6bd0d9d5bcd86f1a0344"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "include_dir"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
+dependencies = [
+ "include_dir_macros",
+]
+
+[[package]]
+name = "include_dir_macros"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
+dependencies = [
+ "proc-macro2",
+ "quote",
 ]
 
 [[package]]
@@ -4191,8 +4220,10 @@ dependencies = [
  "ureq",
  "url",
  "vo-app-runtime",
+ "vo-common",
  "vo-engine",
  "vo-module",
+ "vo-web",
  "vogui-protocol",
 ]
 
@@ -5278,6 +5309,41 @@ dependencies = [
  "vo-jit",
  "vo-runtime",
  "vo-stdlib",
+]
+
+[[package]]
+name = "vo-web"
+version = "0.1.1"
+dependencies = [
+ "console_error_panic_hook",
+ "include_dir",
+ "js-sys",
+ "serde_json",
+ "toml 0.8.2",
+ "vo-analysis",
+ "vo-codegen",
+ "vo-common",
+ "vo-common-core",
+ "vo-module",
+ "vo-runtime",
+ "vo-stdlib",
+ "vo-syntax",
+ "vo-vm",
+ "vo-web-runtime-wasm",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "vo-web-runtime-wasm"
+version = "0.1.1"
+dependencies = [
+ "js-sys",
+ "vo-runtime",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

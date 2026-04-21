@@ -26,6 +26,12 @@ Just remember these 4 differences:
 
 **Vo Studio** is the official IDE for Vo. It is currently a work in progress, available as both a desktop app (via Tauri) and a web app at [volang.dev](https://volang.dev).
 
+## Getting Started
+
+- If you want a normal module with committed `vo.mod` / `vo.lock`, start with a project directory.
+- If you want a single-file script with external dependencies, see [`lang/docs/spec/module-inline-mod-tutorial.md`](lang/docs/spec/module-inline-mod-tutorial.md).
+- If you know Go already, see [`lang/docs/vo-for-gophers.md`](lang/docs/vo-for-gophers.md).
+
 ## Quick Examples
 
 ### Error Handling

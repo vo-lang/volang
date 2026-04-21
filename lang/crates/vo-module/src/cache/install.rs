@@ -393,6 +393,16 @@ fn download_source(
     )?;
     std::fs::write(stage.path().join("vo.release.json"), manifest_raw)?;
 
+    let stage_module_dir = stage.path().strip_prefix(parent).map_err(|error| {
+        Error::SourceScan(format!(
+            "failed to derive staged cache path for {} {}: {}",
+            locked.path, locked.version, error,
+        ))
+    })?;
+    let stage_fs = vo_common::vfs::RealFs::new(parent);
+    crate::cache::validate::validate_installed_module(&stage_fs, stage_module_dir, locked)
+        .map_err(installed_module_error_to_cache_error)?;
+
     if is_source_cached(cache_root, locked) {
         return Ok(());
     }
@@ -488,7 +498,7 @@ pub fn install_exact_module(
         version: 1,
         created_by: created_by.to_string(),
         root: LockRoot {
-            module: module.clone(),
+            module: module.clone().into(),
             vo: manifest.vo.clone(),
         },
         resolved: vec![locked.clone()],
@@ -531,6 +541,11 @@ pub fn populate_locked_cache(
                 &raw,
                 &locked.release_manifest,
                 format!("release manifest for {} {}", locked.path, locked.version),
+            )?;
+            crate::lock::validate_locked_module_against_manifest(
+                locked,
+                &manifest,
+                &crate::digest::Digest::from_sha256(&raw),
             )?;
             (Some(manifest.source.name.clone()), Some(raw))
         } else {
@@ -661,13 +676,65 @@ fn validate_source_cache_entry(cache_root: &Path, locked: &LockedModule) -> Resu
     let module_dir =
         crate::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
     let fs = vo_common::vfs::RealFs::new(cache_root);
-    crate::cache::validate::validate_installed_module(&fs, &module_dir, locked).map_err(|e| {
-        Error::MissingArtifact {
-            module: e.module,
-            version: e.version,
-            detail: format!("{}", e.kind),
+    crate::cache::validate::validate_installed_module(&fs, &module_dir, locked)
+        .map_err(installed_module_error_to_cache_error)
+}
+
+fn installed_module_error_to_cache_error(
+    error: crate::cache::validate::InstalledModuleError,
+) -> Error {
+    use crate::cache::validate::{InstalledModuleErrorKind, InstalledModuleField};
+
+    let crate::cache::validate::InstalledModuleError {
+        module,
+        version,
+        field,
+        kind,
+    } = error;
+    match (field, kind) {
+        (
+            InstalledModuleField::ReleaseManifest,
+            InstalledModuleErrorKind::LockedModuleMismatch {
+                field,
+                expected,
+                found,
+            },
+        ) => Error::LockedModuleMismatch {
+            module,
+            field,
+            expected,
+            found,
+        },
+        (
+            InstalledModuleField::ReleaseManifest,
+            InstalledModuleErrorKind::Mismatch { expected, found },
+        ) => Error::LockedModuleMismatch {
+            module,
+            field: "release_manifest".to_string(),
+            expected,
+            found,
+        },
+        (
+            InstalledModuleField::ReleaseManifest,
+            InstalledModuleErrorKind::ParseFailed { detail },
+        ) => Error::ManifestParse(detail),
+        (
+            InstalledModuleField::ReleaseManifest,
+            InstalledModuleErrorKind::ValidationFailed { detail },
+        ) => Error::InvalidReleaseMetadata(detail),
+        (InstalledModuleField::ExtManifest, InstalledModuleErrorKind::ParseFailed { detail }) => {
+            Error::ExtManifestParse(detail)
         }
-    })
+        (
+            InstalledModuleField::ExtManifest,
+            InstalledModuleErrorKind::ValidationFailed { detail },
+        ) => Error::InvalidReleaseMetadata(detail),
+        (_, kind) => Error::MissingArtifact {
+            module,
+            version,
+            detail: kind.to_string(),
+        },
+    }
 }
 
 fn validate_artifact_cache_entry(
@@ -718,7 +785,7 @@ mod tests {
     use crate::identity::ArtifactId;
     use crate::identity::ModulePath;
     use crate::schema::lockfile::LockedArtifact;
-    use crate::schema::manifest::ReleaseManifest;
+    use crate::schema::manifest::{ManifestSource, ReleaseManifest};
     use crate::version::ExactVersion;
     use crate::version::ToolchainConstraint;
 
@@ -772,26 +839,33 @@ mod tests {
     fn test_locked_module(
         module: &str,
         version: &str,
-        manifest_raw: &[u8],
-        source_digest: &Digest,
-    ) -> LockedModule {
-        LockedModule {
-            path: ModulePath::parse(module).unwrap(),
+        source_raw: &[u8],
+    ) -> (LockedModule, Vec<u8>) {
+        let manifest = ReleaseManifest {
+            schema_version: 1,
+            module: ModulePath::parse(module).unwrap(),
             version: ExactVersion::parse(version).unwrap(),
-            vo: ToolchainConstraint::parse("0.1.0").unwrap(),
             commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
-            release_manifest: Digest::from_sha256(manifest_raw),
-            source: source_digest.clone(),
-            deps: Vec::new(),
+            module_root: ModulePath::parse(module).unwrap().module_root().to_string(),
+            vo: ToolchainConstraint::parse("0.1.0").unwrap(),
+            require: Vec::new(),
+            source: ManifestSource {
+                name: format!("{}-source.tar.gz", version),
+                size: source_raw.len() as u64,
+                digest: Digest::from_sha256(source_raw),
+            },
             artifacts: Vec::new(),
-        }
+        };
+        let manifest_raw = format!("{}\n", manifest.render()).into_bytes();
+        let locked = crate::lock::locked_module_from_manifest_raw(&manifest, &manifest_raw);
+        (locked, manifest_raw)
     }
 
     fn write_cached_source(module_dir: &Path, locked: &LockedModule, manifest_raw: &[u8]) {
         std::fs::create_dir_all(module_dir).unwrap();
         std::fs::write(
             module_dir.join("vo.mod"),
-            format!("module {}\nvo 0.1.0\n", locked.path),
+            format!("module {}\nvo {}\n", locked.path, locked.vo),
         )
         .unwrap();
         std::fs::write(
@@ -972,20 +1046,12 @@ mod tests {
     #[test]
     fn test_download_source_skips_fetch_when_cache_is_already_valid() {
         let temp = tempfile::tempdir().unwrap();
-        let manifest_raw = b"{\"module\":\"github.com/acme/lib\"}\n";
-        let source_digest = Digest::parse(
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
-        .unwrap();
-        let locked = test_locked_module(
-            "github.com/acme/lib",
-            "v1.0.0",
-            manifest_raw,
-            &source_digest,
-        );
+        let source_raw = b"source-package";
+        let (locked, manifest_raw) =
+            test_locked_module("github.com/acme/lib", "v1.0.0", source_raw);
         let module_dir =
             crate::cache::layout::cache_dir(temp.path(), &locked.path, &locked.version);
-        write_cached_source(&module_dir, &locked, manifest_raw);
+        write_cached_source(&module_dir, &locked, &manifest_raw);
         let registry = CountingRegistry::new(b"unused-source".to_vec());
 
         download_source(
@@ -993,7 +1059,7 @@ mod tests {
             &locked,
             &registry,
             "source.tar.gz",
-            manifest_raw,
+            &manifest_raw,
         )
         .unwrap();
 
@@ -1003,20 +1069,12 @@ mod tests {
     #[test]
     fn test_download_artifact_replaces_invalid_existing_cache_file() {
         let temp = tempfile::tempdir().unwrap();
-        let manifest_raw = b"{\"module\":\"github.com/acme/lib\"}\n";
-        let source_digest = Digest::parse(
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
-        .unwrap();
-        let mut locked = test_locked_module(
-            "github.com/acme/lib",
-            "v1.0.0",
-            manifest_raw,
-            &source_digest,
-        );
+        let source_raw = b"source-package";
+        let (mut locked, manifest_raw) =
+            test_locked_module("github.com/acme/lib", "v1.0.0", source_raw);
         let module_dir =
             crate::cache::layout::cache_dir(temp.path(), &locked.path, &locked.version);
-        write_cached_source(&module_dir, &locked, manifest_raw);
+        write_cached_source(&module_dir, &locked, &manifest_raw);
 
         let artifact_bytes = b"fresh-artifact";
         let artifact = LockedArtifact {
@@ -1076,6 +1134,101 @@ mod tests {
         download_artifact(temp.path(), &locked, &artifact, &registry).unwrap();
 
         assert_eq!(std::fs::read(&art_path).unwrap(), artifact_bytes);
+    }
+
+    #[test]
+    fn test_validate_source_cache_entry_preserves_locked_module_mismatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_raw = b"source-package";
+        let (mut locked, manifest_raw) =
+            test_locked_module("github.com/acme/lib", "v1.0.0", source_raw);
+        let module_dir =
+            crate::cache::layout::cache_dir(temp.path(), &locked.path, &locked.version);
+        write_cached_source(&module_dir, &locked, &manifest_raw);
+
+        locked.artifacts.push(LockedArtifact {
+            id: ArtifactId {
+                kind: "extension-native".to_string(),
+                target: "aarch64-apple-darwin".to_string(),
+                name: "libdemo.dylib".to_string(),
+            },
+            size: 5,
+            digest: Digest::parse(
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            )
+            .unwrap(),
+        });
+
+        let error = validate_source_cache_entry(temp.path(), &locked).unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::LockedModuleMismatch { ref field, .. } if field == "artifacts"
+        ));
+    }
+
+    #[test]
+    fn test_install_exact_module_rejects_packaged_ext_contract_mismatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_bytes = build_source_archive(
+            "lib-v1.2.3",
+            &[
+                ("vo.mod", "module github.com/acme/lib\nvo ^0.1.0\n"),
+                (
+                    "vo.ext.toml",
+                    concat!(
+                        "[extension]\n",
+                        "name = \"lib\"\n\n",
+                        "[extension.wasm]\n",
+                        "type = \"bindgen\"\n",
+                        "wasm = \"lib.wasm\"\n",
+                        "js_glue = \"lib.js\"\n",
+                    ),
+                ),
+                ("lib.vo", "package lib\nfunc Hello() {}\n"),
+            ],
+        );
+        let source_digest = Digest::from_sha256(&source_bytes);
+        let manifest = ReleaseManifest::parse(&format!(
+            r#"{{
+  "schema_version": 1,
+  "module": "github.com/acme/lib",
+  "version": "v1.2.3",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "module_root": ".",
+  "vo": "^0.1.0",
+  "require": [],
+  "source": {{
+    "name": "lib-v1.2.3-source.tar.gz",
+    "size": {},
+    "digest": "{}"
+  }},
+  "artifacts": [
+    {{
+      "kind": "extension-wasm",
+      "target": "wasm32-unknown-unknown",
+      "name": "lib.wasm",
+      "size": 4,
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }}
+  ]
+}}"#,
+            source_bytes.len(),
+            source_digest,
+        ))
+        .unwrap();
+        let registry = ExactInstallRegistry {
+            manifest,
+            source_bytes,
+            source_fetches: AtomicUsize::new(0),
+        };
+        let module = ModulePath::parse("github.com/acme/lib").unwrap();
+        let version = ExactVersion::parse("v1.2.3").unwrap();
+
+        let error =
+            install_exact_module(temp.path(), &registry, &module, &version, "vo test").unwrap_err();
+
+        assert!(matches!(error, Error::InvalidReleaseMetadata(_)));
     }
 
     #[test]

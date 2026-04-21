@@ -14,6 +14,7 @@ import type {
   GuiRunOutput,
   HttpOpts,
   HttpResult,
+  FrameworkContract,
   InstallEvent,
   InstalledModule,
   LaunchSpec,
@@ -33,21 +34,12 @@ import { makeTauriStreamHandle } from './stream_handle';
 
 type StudioLogEvent = { sessionId: number; record: StudioLogRecord };
 
-type NativeFrameworkContract = {
-  name: string;
-  entry: string;
-  capabilities: string[];
-  rendererPath: string | null;
-  protocolPath: string | null;
-  hostBridgePath: string | null;
-};
-
 type NativeGuiRunResult = {
   renderBytes: number[];
   moduleBytes: number[];
   entryPath: string;
-  framework: NativeFrameworkContract | null;
-  providerFrameworks: NativeFrameworkContract[];
+  framework: FrameworkContract | null;
+  providerFrameworks: FrameworkContract[];
   externalWidgetHandlerId: number | null;
 };
 

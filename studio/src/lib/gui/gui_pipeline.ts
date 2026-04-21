@@ -8,7 +8,7 @@
 // The native backend uses cmd_run_gui (native VM) and does NOT use this pipeline.
 
 import type { Backend } from '../backend/backend';
-import type { FrameworkContract, GuiRunOutput } from '../types';
+import { frameworkJsModulePath, type FrameworkContract, type GuiRunOutput } from '../types';
 import { setActiveHostBridge, type StudioWasm } from '../studio_wasm';
 import { loadHostBridgeModule, type HostBridgeModule } from './renderer_bridge';
 
@@ -81,11 +81,12 @@ export async function executeGuiFromCompileOutput(
     : [...compiled.providerFrameworks];
   const hostBridgeModules: HostBridgeModule[] = [];
   for (const framework of hostBridgeFrameworks) {
-    if (!framework.hostBridgePath) {
+    const hostBridgePath = frameworkJsModulePath(framework, 'host_bridge');
+    if (!hostBridgePath) {
       continue;
     }
     hostBridgeModules.push(await loadHostBridgeModule(
-      framework.hostBridgePath,
+      hostBridgePath,
       backend,
       compiled.entryPath,
     ));

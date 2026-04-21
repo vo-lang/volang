@@ -9,13 +9,17 @@ use vo_analysis::vfs::{
 };
 use vo_codegen::compile_project;
 use vo_common::vfs::{FileSet, FileSystem, RealFs, ZipFs};
-use vo_module::project::ProjectDeps;
+use vo_module::inline_mod::InlineMod;
+use vo_module::project::{ProjectDeps, SingleFileContext};
+use vo_module::readiness::ReadyModule;
 use vo_stdlib::EmbeddedStdlib;
 
 use super::native::{
-    prepare_native_extension_specs_for_frozen_build, validate_locked_modules_installed,
+    check_frozen_dependency_readiness, prepare_native_extension_specs_with_readiness,
 };
-use super::{CompileError, CompileOutput};
+use super::{
+    CompileError, CompileOutput, ModuleSystemError, ModuleSystemErrorKind, ModuleSystemStage,
+};
 
 struct PreparedProject<F> {
     fs: F,
@@ -25,6 +29,7 @@ struct PreparedProject<F> {
     mod_cache: PathBuf,
     replaces: HashMap<String, PathBuf>,
     project_deps: ProjectDeps,
+    ready_modules: Vec<ReadyModule>,
 }
 
 struct AnalyzedCompilation {
@@ -32,6 +37,7 @@ struct AnalyzedCompilation {
     source_root: PathBuf,
     mod_cache: PathBuf,
     locked_modules: Vec<vo_module::schema::lockfile::LockedModule>,
+    ready_modules: Vec<ReadyModule>,
 }
 
 pub(super) struct ProjectCompileContext {
@@ -57,10 +63,11 @@ impl<F: FileSystem> PreparedProject<F> {
             context.project_root.clone(),
             empty_message,
         )?;
-        validate_locked_modules_installed(
+        let ready_modules = check_frozen_dependency_readiness(
             context.project_deps.locked_modules(),
             &context.mod_cache,
-        )?;
+        )
+        .map_err(CompileError::ModuleSystem)?;
         Ok(Self {
             fs,
             file_set,
@@ -69,6 +76,7 @@ impl<F: FileSystem> PreparedProject<F> {
             mod_cache: context.mod_cache,
             replaces: context.replaces,
             project_deps: context.project_deps,
+            ready_modules,
         })
     }
 
@@ -95,6 +103,7 @@ impl<F: FileSystem> PreparedProject<F> {
             source_root: self.source_root,
             mod_cache: self.mod_cache,
             locked_modules,
+            ready_modules: self.ready_modules,
         })
     }
 
@@ -109,9 +118,9 @@ impl<F: FileSystem> PreparedProject<F> {
 
 impl AnalyzedCompilation {
     fn prepare_extensions_for_frozen_build(&self) -> Result<(), CompileError> {
-        prepare_native_extension_specs_for_frozen_build(
+        prepare_native_extension_specs_with_readiness(
             &self.project.extensions,
-            &self.locked_modules,
+            &self.ready_modules,
             &self.mod_cache,
         )
         .map_err(CompileError::ModuleSystem)?;
@@ -119,9 +128,9 @@ impl AnalyzedCompilation {
     }
 
     fn into_output(self) -> Result<CompileOutput, CompileError> {
-        let extensions = prepare_native_extension_specs_for_frozen_build(
+        let extensions = prepare_native_extension_specs_with_readiness(
             &self.project.extensions,
-            &self.locked_modules,
+            &self.ready_modules,
             &self.mod_cache,
         )
         .map_err(CompileError::ModuleSystem)?;
@@ -196,14 +205,26 @@ pub(super) fn check_with_project_context<F: FileSystem>(
     PreparedProject::load_prepared(fs, context, "no .vo files found")?.check()
 }
 
-pub(super) fn compile_with_fs<F: FileSystem>(
+pub(super) fn compile_prepared_project<F: FileSystem>(
     fs: F,
     root: &Path,
     single_file: Option<&OsStr>,
 ) -> Result<CompileOutput, CompileError> {
     let mod_cache = super::default_mod_cache_root();
+
+    // Single-file entries go through the spec §5.6 single-file classifier so
+    // that inline `/*vo:mod ... */` metadata is recognized and the spec §5.6.4
+    // precedence rules are enforced.
+    if let Some(single_file_os) = single_file {
+        let file_path = PathBuf::from(single_file_os);
+        let ctx = vo_module::project::load_single_file_context(&fs, &file_path)
+            .map_err(super::module_system_error_from_project)?;
+        return compile_from_single_file_context(fs, ctx, root, file_path, mod_cache);
+    }
+
     let context = vo_module::project::load_project_context(&fs, root)
         .map_err(super::module_system_error_from_project)?;
+    let (_, project_deps, workspace_replaces) = context.into_parts();
     PreparedProject::load_prepared(
         fs,
         ProjectCompileContext {
@@ -211,13 +232,93 @@ pub(super) fn compile_with_fs<F: FileSystem>(
             mod_cache,
             source_root: root.to_path_buf(),
             package_dir: PathBuf::from("."),
-            single_file: single_file.map(PathBuf::from),
-            project_deps: context.project_deps,
-            replaces: context.workspace_replaces,
+            single_file: None,
+            project_deps,
+            replaces: workspace_replaces,
         },
         "no .vo files found",
     )?
     .compile()
+}
+
+fn compile_from_single_file_context<F: FileSystem>(
+    fs: F,
+    ctx: SingleFileContext,
+    compile_root: &Path,
+    file_path: PathBuf,
+    mod_cache: PathBuf,
+) -> Result<CompileOutput, CompileError> {
+    let project_context =
+        single_file_context_to_project_compile_context(ctx, compile_root, file_path, mod_cache)?;
+    PreparedProject::load_prepared(fs, project_context, "no .vo files found")?.compile()
+}
+
+fn single_file_context_to_project_compile_context(
+    ctx: SingleFileContext,
+    compile_root: &Path,
+    file_path: PathBuf,
+    mod_cache: PathBuf,
+) -> Result<ProjectCompileContext, CompileError> {
+    match ctx {
+        SingleFileContext::Project(project_context) => {
+            let (_, project_deps, workspace_replaces) = project_context.into_parts();
+            Ok(ProjectCompileContext {
+                project_root: compile_root.to_path_buf(),
+                mod_cache,
+                source_root: compile_root.to_path_buf(),
+                package_dir: PathBuf::from("."),
+                single_file: Some(file_path),
+                project_deps,
+                replaces: workspace_replaces,
+            })
+        }
+        SingleFileContext::EphemeralInlineMod { inline_mod, .. } => {
+            ensure_inline_mod_ephemeral_build_is_supported(&inline_mod)?;
+            Ok(ProjectCompileContext {
+                project_root: compile_root.to_path_buf(),
+                mod_cache,
+                source_root: compile_root.to_path_buf(),
+                package_dir: PathBuf::from("."),
+                single_file: Some(file_path),
+                project_deps: ProjectDeps::default(),
+                replaces: HashMap::new(),
+            })
+        }
+        SingleFileContext::AdHoc { .. } => Ok(ProjectCompileContext {
+            project_root: compile_root.to_path_buf(),
+            mod_cache,
+            source_root: compile_root.to_path_buf(),
+            package_dir: PathBuf::from("."),
+            single_file: Some(file_path),
+            project_deps: ProjectDeps::default(),
+            replaces: HashMap::new(),
+        }),
+    }
+}
+
+/// Reject ephemeral single-file modules whose inline mod declares external
+/// `require` entries, until ephemeral dependency resolution is wired up.
+///
+/// Spec §10.2 requires a resolved graph for every frozen build; because the
+/// toolchain does not yet materialize a cache-local ephemeral lock (spec
+/// §5.6.5), we fail fast with a diagnostic instead of silently compiling
+/// against stdlib only.
+pub(super) fn ensure_inline_mod_ephemeral_build_is_supported(
+    inline: &InlineMod,
+) -> Result<(), CompileError> {
+    if inline.require.is_empty() {
+        return Ok(());
+    }
+    Err(CompileError::ModuleSystem(ModuleSystemError::new(
+        ModuleSystemStage::ModFile,
+        ModuleSystemErrorKind::Missing,
+        format!(
+            "inline '/*vo:mod*/' declares {} require entry(ies), but ephemeral dependency \
+             resolution is not yet implemented in this toolchain; remove the 'require' lines \
+             or promote the script to a project with vo.mod",
+            inline.require.len()
+        ),
+    )))
 }
 
 pub(super) fn compile_with_project_context<F: FileSystem>(

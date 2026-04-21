@@ -4,42 +4,34 @@ use std::path::{Path, PathBuf};
 use vo_common::vfs::RealFs;
 use vo_module::cache::validate::InstalledModuleError;
 use vo_module::ext_manifest::ExtensionManifest;
-use vo_module::schema::lockfile::{LockedArtifact, LockedModule};
+use vo_module::readiness::{check_project_readiness, ReadinessFailure, ReadyModule};
+use vo_module::schema::lockfile::LockedModule;
 use vo_runtime::ext_loader::NativeExtensionSpec;
 
+#[cfg(test)]
+use super::CompileError;
 use super::{
-    emit_compile_log, CompileError, CompileLogRecord, ModuleSystemError, ModuleSystemErrorKind,
-    ModuleSystemStage,
+    emit_compile_log, CompileLogRecord, ModuleSystemError, ModuleSystemErrorKind, ModuleSystemStage,
 };
 
+#[cfg(test)]
 pub(super) fn validate_locked_modules_installed(
     locked_modules: &[LockedModule],
     mod_root: &Path,
 ) -> Result<(), CompileError> {
-    for locked in locked_modules {
-        validate_locked_module_installed(locked, mod_root)?;
-    }
+    check_frozen_dependency_readiness(locked_modules, mod_root)
+        .map(|_| ())
+        .map_err(CompileError::ModuleSystem)?;
     Ok(())
 }
 
-fn validate_locked_module_installed(
-    locked: &LockedModule,
+pub(super) fn check_frozen_dependency_readiness(
+    locked_modules: &[LockedModule],
     mod_root: &Path,
-) -> Result<(), CompileError> {
-    let module_dir =
-        vo_module::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
+) -> Result<Vec<ReadyModule>, ModuleSystemError> {
     let fs = RealFs::new(mod_root);
-    vo_module::cache::validate::validate_installed_module(&fs, &module_dir, locked)
-        .map_err(|e| CompileError::ModuleSystem(installed_module_error_to_module_system(e)))
-}
-
-fn validate_installed_module_at_dir(
-    module_dir: &Path,
-    locked: &LockedModule,
-) -> Result<(), ModuleSystemError> {
-    let fs = RealFs::new(module_dir);
-    vo_module::cache::validate::validate_installed_module(&fs, Path::new("."), locked)
-        .map_err(installed_module_error_to_module_system)
+    check_project_readiness(&fs, locked_modules, current_target_triple())
+        .map_err(module_readiness_failure_to_module_system)
 }
 
 fn installed_module_error_to_module_system(e: InstalledModuleError) -> ModuleSystemError {
@@ -56,14 +48,104 @@ fn installed_module_error_to_module_system(e: InstalledModuleError) -> ModuleSys
         InstalledModuleErrorKind::ParseFailed { .. } => {
             (ModuleSystemErrorKind::ParseFailed, e.to_string())
         }
+        InstalledModuleErrorKind::ValidationFailed { .. }
+        | InstalledModuleErrorKind::LockedModuleMismatch { .. } => {
+            (ModuleSystemErrorKind::ValidationFailed, e.to_string())
+        }
     };
     ModuleSystemError::new(ModuleSystemStage::CachedModule, kind, detail)
         .with_module_version(e.module, e.version.to_string())
 }
 
+pub(super) fn module_readiness_failure_to_module_system(
+    failure: ReadinessFailure,
+) -> ModuleSystemError {
+    match failure {
+        ReadinessFailure::SourceNotReady { error } => {
+            installed_module_error_to_module_system(error)
+        }
+        ReadinessFailure::ExtensionManifestReadFailed {
+            module,
+            version,
+            detail,
+            manifest_path,
+        } => ModuleSystemError::new(
+            ModuleSystemStage::NativeExtension,
+            ModuleSystemErrorKind::ReadFailed,
+            detail,
+        )
+        .with_module_version(module, version)
+        .with_path(&manifest_path),
+        ReadinessFailure::ExtensionManifestParseFailed {
+            module,
+            version,
+            detail,
+            manifest_path,
+        } => ModuleSystemError::new(
+            ModuleSystemStage::NativeExtension,
+            ModuleSystemErrorKind::ParseFailed,
+            detail,
+        )
+        .with_module_version(module, version)
+        .with_path(&manifest_path),
+        ReadinessFailure::UnsupportedNativeTarget {
+            module,
+            version,
+            target,
+            manifest_path,
+        } => ModuleSystemError::new(
+            ModuleSystemStage::NativeExtension,
+            ModuleSystemErrorKind::Missing,
+            format!(
+                "vo.ext.toml does not declare extension-native support for target {} in {}@{}",
+                target, module, version,
+            ),
+        )
+        .with_module_version(module, version)
+        .with_path(&manifest_path),
+        ReadinessFailure::ArtifactResolutionFailed {
+            module,
+            version,
+            manifest_path,
+            error,
+        } => match error {
+            vo_module::Error::MissingLockedArtifact { detail, .. } => ModuleSystemError::new(
+                ModuleSystemStage::NativeExtension,
+                ModuleSystemErrorKind::Missing,
+                detail,
+            )
+            .with_module_version(module, version)
+            .with_path(&manifest_path),
+            error => ModuleSystemError::new(
+                ModuleSystemStage::NativeExtension,
+                ModuleSystemErrorKind::ValidationFailed,
+                error.to_string(),
+            )
+            .with_module_version(module, version)
+            .with_path(&manifest_path),
+        },
+        ReadinessFailure::ArtifactNotReady {
+            artifact_path,
+            error,
+            ..
+        } => installed_module_error_to_module_system(error)
+            .with_stage(ModuleSystemStage::NativeExtension)
+            .with_path(&artifact_path),
+    }
+}
+
 pub(super) fn prepare_native_extension_specs_for_frozen_build(
     manifests: &[ExtensionManifest],
     locked_modules: &[LockedModule],
+    mod_root: &Path,
+) -> Result<Vec<NativeExtensionSpec>, ModuleSystemError> {
+    let ready_modules = check_frozen_dependency_readiness(locked_modules, mod_root)?;
+    prepare_native_extension_specs_with_readiness(manifests, &ready_modules, mod_root)
+}
+
+pub(super) fn prepare_native_extension_specs_with_readiness(
+    manifests: &[ExtensionManifest],
+    ready_modules: &[ReadyModule],
     mod_root: &Path,
 ) -> Result<Vec<NativeExtensionSpec>, ModuleSystemError> {
     use std::collections::BTreeMap;
@@ -82,7 +164,7 @@ pub(super) fn prepare_native_extension_specs_for_frozen_build(
         if prepared.contains_key(&module_dir) {
             continue;
         }
-        let resolved = prepare_extension_spec(manifest, locked_modules, &mod_root)?;
+        let resolved = prepare_extension_spec(manifest, ready_modules, &mod_root)?;
         prepared.insert(module_dir, resolved);
     }
 
@@ -103,22 +185,6 @@ pub(super) fn prepare_native_extension_specs_for_frozen_build(
             })
         })
         .collect()
-}
-
-fn module_identity_from_cache_dir(mod_root: &Path, module_dir: &Path) -> Option<(String, String)> {
-    let rel = module_dir.strip_prefix(mod_root).ok()?;
-    let components: Vec<&str> = rel
-        .components()
-        .map(|component| component.as_os_str().to_str().unwrap_or(""))
-        .collect();
-    if components.len() >= 2 {
-        let module_path = components[0].replace('@', "/");
-        let version = components[1].to_string();
-        if module_path.starts_with("github.com/") && version.starts_with('v') {
-            return Some((module_path, version));
-        }
-    }
-    None
 }
 
 pub(super) fn current_target_triple() -> &'static str {
@@ -176,7 +242,7 @@ fn extension_manifest_module_dir(
 
 fn prepare_extension_spec(
     manifest: &ExtensionManifest,
-    locked_modules: &[LockedModule],
+    ready_modules: &[ReadyModule],
     mod_root: &Path,
 ) -> Result<NativeExtensionSpec, ModuleSystemError> {
     let module_dir = extension_manifest_module_dir(manifest)?;
@@ -188,64 +254,19 @@ fn prepare_extension_spec(
         ));
     }
 
-    let locked = locked_module_for_cached_extension(&module_dir, mod_root, locked_modules)?;
-    validate_installed_module_at_dir(&module_dir, locked)?;
-    prepare_cached_extension_spec(manifest, locked, &module_dir)
+    let ready = ready_module_for_cached_extension(&module_dir, mod_root, ready_modules)?;
+    prepare_cached_extension_spec(manifest, ready, &module_dir)
 }
 
 fn prepare_cached_extension_spec(
     manifest: &ExtensionManifest,
-    locked: &LockedModule,
+    ready: &ReadyModule,
     module_dir: &Path,
 ) -> Result<NativeExtensionSpec, ModuleSystemError> {
-    let artifact = find_locked_native_artifact(manifest, locked)?;
-    validate_locked_native_artifact_bytes(module_dir, locked, artifact)?;
-    Ok(native_extension_spec(
-        manifest,
-        locked_native_artifact_path(module_dir, artifact),
-    ))
-}
-
-fn locked_module_for_cached_extension<'a>(
-    module_dir: &Path,
-    mod_root: &Path,
-    locked_modules: &'a [LockedModule],
-) -> Result<&'a LockedModule, ModuleSystemError> {
-    let (module_path, version) =
-        module_identity_from_cache_dir(mod_root, module_dir).ok_or_else(|| {
-            ModuleSystemError::new(
-                ModuleSystemStage::NativeExtension,
-                ModuleSystemErrorKind::ValidationFailed,
-                format!(
-                    "failed to infer module path for cached extension at {}",
-                    module_dir.display(),
-                ),
-            )
-            .with_path(module_dir)
-        })?;
-    locked_modules
+    let artifact = ready
+        .artifacts
         .iter()
-        .find(|locked| locked.path.as_str() == module_path && locked.version.to_string() == version)
-        .ok_or_else(|| {
-            ModuleSystemError::new(
-                ModuleSystemStage::NativeExtension,
-                ModuleSystemErrorKind::ValidationFailed,
-                format!(
-                    "missing locked module metadata for cached extension {}@{}",
-                    module_path, version,
-                ),
-            )
-            .with_path(module_dir)
-        })
-}
-
-fn native_extension_artifact_name(
-    manifest: &ExtensionManifest,
-    locked: &LockedModule,
-) -> Result<String, ModuleSystemError> {
-    manifest
-        .declared_native_target(current_target_triple())
-        .map(|target| target.library.clone())
+        .find(|artifact| artifact.id.kind == "extension-native")
         .ok_or_else(|| {
             ModuleSystemError::new(
                 ModuleSystemStage::NativeExtension,
@@ -253,60 +274,57 @@ fn native_extension_artifact_name(
                 format!(
                     "vo.ext.toml does not declare extension-native support for target {} in {}@{}",
                     current_target_triple(),
-                    locked.path,
-                    locked.version,
+                    ready.module,
+                    ready.version,
                 ),
             )
-            .with_module_version(locked.path.as_str(), locked.version.to_string())
+            .with_module_version(ready.module.as_str(), ready.version.to_string())
             .with_path(&manifest.manifest_path)
-        })
+        })?;
+    Ok(native_extension_spec(
+        manifest,
+        module_dir.join(&artifact.cache_relative_path),
+    ))
 }
 
-fn find_locked_native_artifact<'a>(
-    manifest: &ExtensionManifest,
-    locked: &'a LockedModule,
-) -> Result<&'a LockedArtifact, ModuleSystemError> {
-    let artifact_name = native_extension_artifact_name(manifest, locked)?;
-    locked
-        .artifacts
-        .iter()
-        .find(|artifact| {
-            artifact.id.kind == "extension-native"
-                && artifact.id.target == current_target_triple()
-                && artifact.id.name == artifact_name
-        })
-        .ok_or_else(|| {
-            ModuleSystemError::new(
-                ModuleSystemStage::NativeExtension,
-                ModuleSystemErrorKind::Missing,
-                format!(
-                    "vo.lock does not pin an extension-native artifact for {}@{} ({})",
-                    locked.path, locked.version, artifact_name,
-                ),
-            )
-            .with_module_version(locked.path.as_str(), locked.version.to_string())
-            .with_path(&manifest.manifest_path)
-        })
-}
-
-fn locked_native_artifact_path(module_dir: &Path, artifact: &LockedArtifact) -> PathBuf {
-    module_dir.join("artifacts").join(&artifact.id.name)
-}
-
-fn validate_locked_native_artifact_bytes(
+fn ready_module_for_cached_extension<'a>(
     module_dir: &Path,
-    locked: &LockedModule,
-    artifact: &LockedArtifact,
-) -> Result<(), ModuleSystemError> {
-    let artifact_path = locked_native_artifact_path(module_dir, artifact);
-    let fs = RealFs::new(module_dir);
-    let rel_path = Path::new("artifacts").join(&artifact.id.name);
-    vo_module::cache::validate::validate_installed_artifact(&fs, &rel_path, locked, artifact)
-        .map_err(|e| {
-            installed_module_error_to_module_system(e)
-                .with_stage(ModuleSystemStage::NativeExtension)
-                .with_path(&artifact_path)
-        })
+    mod_root: &Path,
+    ready_modules: &'a [ReadyModule],
+) -> Result<&'a ReadyModule, ModuleSystemError> {
+    if let Some((module_path, version)) =
+        vo_module::cache::layout::module_identity_from_cache_dir(mod_root, module_dir)
+    {
+        if let Some(ready) = ready_modules
+            .iter()
+            .find(|ready| ready.module == module_path && ready.version == version)
+        {
+            return Ok(ready);
+        }
+    }
+    let (module_path, version) = vo_module::cache::layout::module_identity_from_cache_dir(
+        mod_root, module_dir,
+    )
+    .ok_or_else(|| {
+        ModuleSystemError::new(
+            ModuleSystemStage::NativeExtension,
+            ModuleSystemErrorKind::ValidationFailed,
+            format!(
+                "failed to infer module path for cached extension at {}",
+                module_dir.display(),
+            ),
+        )
+        .with_path(module_dir)
+    })?;
+    Err(ModuleSystemError::new(
+        ModuleSystemStage::NativeExtension,
+        ModuleSystemErrorKind::ValidationFailed,
+        format!(
+            "missing locked module metadata for cached extension {}@{}",
+            module_path, version,
+        ),
+    )
+    .with_path(module_dir))
 }
 
 pub(super) fn ensure_local_native_extension_built(

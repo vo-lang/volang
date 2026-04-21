@@ -8,7 +8,7 @@
 //! - **`island`** — Island transport VM wrapper for render islands
 //! - **`js_types`** — JS interop types (`CompileResult`, `RunResult`)
 //! - **`host_log`** — Structured logging from WASM to JS host
-//! - **`module_install`** — Module fetching/installation into browser VFS
+//! - **`browser_registry`** — Browser `AsyncRegistry` for module downloads
 //! - **`wasm_vfs`** — `FileSystem` backed by JS VirtualFS
 //!
 //! # Features
@@ -26,29 +26,38 @@ mod vm;
 mod compile;
 
 #[cfg(feature = "compiler")]
+mod browser_runtime;
+
+#[cfg(all(feature = "compiler", not(target_arch = "wasm32")))]
+mod browser_runtime_dev;
+
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
+mod browser_registry;
+
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
+mod wasm_ext_runtime;
+
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 mod wasm_vfs;
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 mod host_log;
 
-#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
-mod module_install;
-
 // ── Public re-exports: JS types ─────────────────────────────────────────────
 
-pub use js_types::{make_run_result_js, make_run_result_obj, CompileResult, RunResult};
+pub use js_types::{CompileResult, RunResult};
 
 // ── Public re-exports: VM ───────────────────────────────────────────────────
 
 pub use vm::{
-    alloc_string, call_closure, create_loaded_vm, create_loaded_vm_from_module, create_vm,
-    create_vm_from_module, ext_bridge, run, run_with_args, take_output, ExternCallContext,
-    ExternDef, ExternRegistrar, ExternRegistry, ExternResult, GcRef, Module, Vm,
+    call_closure, create_loaded_vm, create_loaded_vm_from_module, create_vm, ext_bridge, run,
+    run_with_args, take_output, ExternCallContext, ExternDef, ExternRegistrar, ExternRegistry,
+    ExternResult, GcRef, Module, Vm,
 };
 
 // ── Public re-exports: async runner ─────────────────────────────────────────
 
-pub use async_runner::{preload_ext_module, run_bytecode_async_with_externs};
+pub use async_runner::preload_ext_module;
 
 #[cfg(feature = "compiler")]
 pub use async_runner::compile_and_run;
@@ -64,13 +73,57 @@ pub use island::VoVm;
 
 #[cfg(feature = "compiler")]
 pub use compile::{
-    build_stdlib_fs, compile, compile_entry_with_mod_fs, compile_entry_with_std_fs,
-    compile_entry_with_vfs, compile_source_with_mod_fs, compile_source_with_std_fs,
-    compile_source_with_vfs, compile_web, extract_external_module_paths,
-    reject_single_file_external_imports, CompileSource, EmbeddedStdlib, ModuleSource,
+    build_stdlib_fs, compile, compile_source_with_mod_fs, extract_external_module_paths,
 };
 
 #[cfg(feature = "compiler")]
+pub use browser_runtime::{
+    browser_artifact_intent_from_runtime_plan, browser_runtime_graph_from_manifest,
+    browser_runtime_module_from_manifest, browser_runtime_plan_from_manifest,
+    browser_runtime_view_from_graph, browser_snapshot_plan_from_runtime_plan,
+    browser_wasm_extension_from_manifest, merge_browser_runtime_graphs,
+    merge_browser_runtime_plans, plan_ready_browser_runtime, plan_ready_browser_runtime_at,
+    ready_browser_runtime_graph, ready_browser_runtime_module, ready_browser_runtime_modules,
+    ready_browser_wasm_extension, ready_browser_wasm_extensions, split_primary_provider_view,
+    BrowserArtifactAssetBinding, BrowserArtifactFamily, BrowserArtifactIntent,
+    BrowserArtifactSource, BrowserFrameworkBinding, BrowserFrameworkId, BrowserFrameworkPlan,
+    BrowserRoleIndex, BrowserRuntimeContract, BrowserRuntimeGraph, BrowserRuntimeModule,
+    BrowserRuntimePlan, BrowserRuntimeView, BrowserRuntimeViewFramework, BrowserSnapshotFile,
+    BrowserSnapshotMount, BrowserSnapshotMountKind, BrowserSnapshotPlan, BrowserSnapshotRoot,
+    BrowserSnapshotSourceRef, BrowserWasmExtensionBinding, BrowserWasmExtensionSpec,
+    LegacyFrameworkSplit, RequiredBrowserArtifact,
+};
+
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
+pub use browser_runtime::{
+    debug_local_project_browser_runtime_plan_from_vfs, locked_browser_runtime_plan_from_vfs,
+    materialize_browser_snapshot_from_vfs, published_browser_runtime_plan_from_vfs,
+};
+
+#[cfg(all(feature = "compiler", not(target_arch = "wasm32")))]
+pub use browser_runtime_dev::{
+    browser_artifact_plan_from_fs, debug_local_project_browser_runtime_plan_from_fs,
+    execute_browser_artifact_plan, locked_browser_runtime_plan_from_fs,
+    materialize_browser_snapshot_from_fs, published_browser_runtime_plan_from_fs,
+    ArtifactActionSpec, BrowserArtifactPlan, EnsurePkgIslandAction, EnsureStandaloneWasmAction,
+};
+
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
+pub use compile::{compile_entry_with_vfs, compile_source_with_vfs};
+
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
+pub use browser_registry::{fetch_bytes, BrowserRegistry};
+
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
+pub use wasm_ext_runtime::{
+    collect_browser_wasm_extensions_from_vfs, collect_ready_wasm_extensions_from_vfs,
+    load_browser_wasm_extensions_from_vfs, load_ready_wasm_extension_from_vfs,
+    load_ready_wasm_extensions_from_vfs, load_wasm_extension_bytes,
+    read_browser_wasm_extension_spec_from_vfs, read_ready_wasm_extension_from_vfs,
+    ReadyWasmExtensionBytes,
+};
+
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use wasm_vfs::WasmVfs;
 
 // ── Public re-exports: host log ─────────────────────────────────────────────
@@ -78,14 +131,7 @@ pub use wasm_vfs::WasmVfs;
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use host_log::{emit_host_log, HostLogRecord};
 
-// ── Public re-exports: module install ───────────────────────────────────────
-
-#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
-pub use module_install::{
-    collect_installed_vfs_module_specs, collect_vfs_locked_module_closure, ensure_vfs_deps,
-    ensure_vfs_deps_from_fs, install_module_to_vfs, resolve_and_install_module,
-    resolve_and_install_module_with_constraint,
-};
+// ── Public re-exports: browser compiler adapters ────────────────────────────
 
 // ── Init ────────────────────────────────────────────────────────────────────
 

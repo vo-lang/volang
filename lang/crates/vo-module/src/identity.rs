@@ -5,6 +5,13 @@ use std::fmt;
 use crate::version::ExactVersion;
 use crate::Error;
 
+/// Reserved prefix (spec §3.5) that introduces an ephemeral single-file
+/// module identity. `local/<name>` paths are only valid as the `module`
+/// directive of an inline `/*vo:mod*/` block (or of a toolchain-synthesized
+/// ephemeral `vo.mod` that mirrors it); they MUST NOT appear in import
+/// statements, `require` entries, or published registry metadata.
+pub const LOCAL_NAMESPACE_PREFIX: &str = "local/";
+
 // ============================================================
 // ModulePath — canonical module path per spec §2
 // ============================================================
@@ -316,6 +323,217 @@ pub fn check_internal_visibility(importer_path: &str, target_path: &str) -> bool
     }
     // No internal marker — always visible
     true
+}
+
+// ============================================================
+// LocalName — ephemeral single-file module name (spec §3.5, §5.6.2)
+// ============================================================
+
+/// A validated `local/<name>` identity for an ephemeral single-file module.
+///
+/// `<name>` MUST match `[a-z0-9][a-z0-9._-]*` and MUST NOT contain `/`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LocalName {
+    raw: String,
+}
+
+impl LocalName {
+    pub fn parse(s: &str) -> Result<Self, Error> {
+        let Some(name) = s.strip_prefix(LOCAL_NAMESPACE_PREFIX) else {
+            return Err(Error::InvalidModulePath(format!(
+                "local module path must start with '{LOCAL_NAMESPACE_PREFIX}': {s}"
+            )));
+        };
+        if name.is_empty() {
+            return Err(Error::InvalidModulePath(format!(
+                "local module path must have a name after '{LOCAL_NAMESPACE_PREFIX}': {s}"
+            )));
+        }
+        if name.contains('/') {
+            return Err(Error::InvalidModulePath(format!(
+                "local module path must not contain '/' after '{LOCAL_NAMESPACE_PREFIX}': {s}"
+            )));
+        }
+        validate_local_name_segment(name, s)?;
+        Ok(LocalName { raw: s.to_string() })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// The `<name>` portion after the `local/` prefix.
+    pub fn name(&self) -> &str {
+        &self.raw[LOCAL_NAMESPACE_PREFIX.len()..]
+    }
+}
+
+impl PartialOrd for LocalName {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for LocalName {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl fmt::Display for LocalName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.raw)
+    }
+}
+
+impl Serialize for LocalName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.raw)
+    }
+}
+
+impl<'de> Deserialize<'de> for LocalName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        LocalName::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+fn validate_local_name_segment(name: &str, full: &str) -> Result<(), Error> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err(Error::InvalidModulePath(format!(
+            "local name is empty in: {full}"
+        )));
+    };
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return Err(Error::InvalidModulePath(format!(
+            "local name '{name}' must start with [a-z0-9] in: {full}"
+        )));
+    }
+    for c in std::iter::once(first).chain(chars) {
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-') {
+            return Err(Error::InvalidModulePath(format!(
+                "local name '{name}' contains invalid character '{c}' in: {full}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+// ============================================================
+// ModIdentity — root-module identity for `vo.mod` / `vo.lock`
+// ============================================================
+
+/// Identity of a root module (spec §5.6.2). `Github` covers canonical
+/// published module paths (`github.com/<owner>/<repo>/...`). `Local` covers
+/// the reserved ephemeral namespace and MUST NOT appear anywhere other than
+/// the `module` directive of an inline `/*vo:mod*/` block (or a
+/// toolchain-synthesized ephemeral `vo.mod` that mirrors it).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ModIdentity {
+    Github(ModulePath),
+    Local(LocalName),
+}
+
+impl ModIdentity {
+    /// Parse a root-module identity from its canonical string form.
+    ///
+    /// Accepts either `local/<name>` (ephemeral) or `github.com/<owner>/<repo>[...]`
+    /// (canonical published path). Any other shape is rejected.
+    pub fn parse(s: &str) -> Result<Self, Error> {
+        if s.starts_with(LOCAL_NAMESPACE_PREFIX) {
+            return LocalName::parse(s).map(ModIdentity::Local);
+        }
+        ModulePath::parse(s).map(ModIdentity::Github)
+    }
+
+    /// Canonical string form (e.g. `github.com/acme/app` or `local/gui_chat`).
+    pub fn as_str(&self) -> &str {
+        match self {
+            ModIdentity::Github(mp) => mp.as_str(),
+            ModIdentity::Local(name) => name.as_str(),
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self, ModIdentity::Local(_))
+    }
+
+    pub fn is_github(&self) -> bool {
+        matches!(self, ModIdentity::Github(_))
+    }
+
+    /// Borrow the underlying canonical github path, if any.
+    pub fn as_github(&self) -> Option<&ModulePath> {
+        match self {
+            ModIdentity::Github(mp) => Some(mp),
+            ModIdentity::Local(_) => None,
+        }
+    }
+
+    /// Borrow the underlying local name, if any.
+    pub fn as_local(&self) -> Option<&LocalName> {
+        match self {
+            ModIdentity::Local(name) => Some(name),
+            ModIdentity::Github(_) => None,
+        }
+    }
+}
+
+impl PartialOrd for ModIdentity {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ModIdentity {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl fmt::Display for ModIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<ModulePath> for ModIdentity {
+    fn from(mp: ModulePath) -> Self {
+        ModIdentity::Github(mp)
+    }
+}
+
+impl From<LocalName> for ModIdentity {
+    fn from(name: LocalName) -> Self {
+        ModIdentity::Local(name)
+    }
+}
+
+impl Serialize for ModIdentity {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ModIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        ModIdentity::parse(&raw).map_err(serde::de::Error::custom)
+    }
 }
 
 // ============================================================

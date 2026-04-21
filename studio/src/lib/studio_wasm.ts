@@ -6,6 +6,7 @@
 // are injected dynamically via setActiveHostBridge() before WASM instantiation.
 // No static import of any framework package.
 import type { HostBridgeModule } from './gui/renderer_bridge';
+import type { FrameworkContract } from './types';
 import { createInMemoryWindowVfsBackend } from './in_memory_window_vfs';
 import { hasWindowVfsBindings, installWindowVfsBackend, type WindowVfsBackend } from './window_vfs_bindings';
 
@@ -31,8 +32,8 @@ export interface StudioWasm {
     renderBytes: Uint8Array;
     moduleBytes: Uint8Array;
     entryPath: string;
-    framework: { name: string; entry: string; capabilities: string[]; rendererPath: string | null; protocolPath: string | null; hostBridgePath: string | null } | null;
-    providerFrameworks: Array<{ name: string; entry: string; capabilities: string[]; rendererPath: string | null; protocolPath: string | null; hostBridgePath: string | null }>;
+    framework: FrameworkContract | null;
+    providerFrameworks: FrameworkContract[];
     externalWidgetHandlerId: number | null;
   };
   runGuiEntry(entryPath: string): Uint8Array;
@@ -58,8 +59,8 @@ export interface StudioWasm {
   compileGui(entryPath: string): {
     bytecode: Uint8Array;
     entryPath: string;
-    framework: { name: string; entry: string; capabilities: string[]; rendererPath: string | null; protocolPath: string | null; hostBridgePath: string | null } | null;
-    providerFrameworks: Array<{ name: string; entry: string; capabilities: string[]; rendererPath: string | null; protocolPath: string | null; hostBridgePath: string | null }>;
+    framework: FrameworkContract | null;
+    providerFrameworks: FrameworkContract[];
     wasmExtensions: Array<{ name: string; moduleKey: string; wasmBytes: Uint8Array; jsGlueBytes: Uint8Array | null }>;
   };
   getBuildId(): string;

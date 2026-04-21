@@ -7,21 +7,14 @@
 //! Source files are read from the JS VirtualFS (via vo_web_runtime_wasm::vfs).
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use js_sys::{Object, Reflect};
-use toml::Value;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
 use vo_common::stable_hash::StableHasher;
 use vo_common::vfs::{FileSystem, MemoryFs};
 use vo_app_runtime::{GuestRuntime, RenderBuffer, RenderIslandRuntime, SessionError, StepResult};
-mod studio_manifest;
-use studio_manifest::parse_studio_manifest;
-
-enum SyntheticProjectLockStrategy {
-    WorkspaceInstalled,
-    ImportedConstraintMatched,
-}
 
 fn session_error_to_js(error: SessionError) -> JsValue {
     JsValue::from_str(&error.to_string())
@@ -33,22 +26,11 @@ fn ensure_panic_hook() {
     INIT.call_once(|| console_error_panic_hook::set_once());
 }
 
-struct EmbeddedFile {
-    path: &'static str,
-    bytes: &'static [u8],
-}
-
-struct EmbeddedLocalFrameworkModule {
-    module_path: &'static str,
-    version: &'static str,
-    files: &'static [EmbeddedFile],
-}
-
 include!(concat!(env!("OUT_DIR"), "/term_embedded.rs"));
-include!(concat!(env!("OUT_DIR"), "/local_framework_modules_embedded.rs"));
 include!(concat!(env!("OUT_DIR"), "/studio_build_info.rs"));
 
-const LOCAL_FRAMEWORK_COMMIT: &str = "0000000000000000000000000000000000000000";
+const STUDIO_IMPORTED_SYNTHETIC_LOCK_CREATED_BY: &str = "studio wasm imported synthetic vo.lock";
+const STUDIO_SINGLE_FILE_SYNTHETIC_LOCK_CREATED_BY: &str = "studio wasm single-file synthetic vo.lock";
 
 fn emit_host_log(record: vo_web::HostLogRecord) {
     let source = record.core.source.clone();
@@ -266,300 +248,10 @@ pub fn get_build_id() -> String {
     STUDIO_WASM_BUILD_ID.to_string()
 }
 
-fn embedded_local_file<'a>(
-    module: &'a EmbeddedLocalFrameworkModule,
-    path: &str,
-) -> Option<&'a EmbeddedFile> {
-    module.files.iter().find(|file| file.path == path)
-}
-
-fn embedded_local_wasm_asset_file<'a>(
-    module: &'a EmbeddedLocalFrameworkModule,
-    asset_name: &str,
-) -> Option<&'a EmbeddedFile> {
-    embedded_local_file(module, asset_name).or_else(|| {
-        if asset_name.contains('/') {
-            return None;
-        }
-        embedded_local_file(module, &format!("rust/pkg-island/{}", asset_name))
-    })
-}
-
-fn embedded_local_text(module: &EmbeddedLocalFrameworkModule, path: &str) -> Result<String, String> {
-    let file = embedded_local_file(module, path)
-        .ok_or_else(|| format!("local framework {} missing {}", module.module_path, path))?;
-    std::str::from_utf8(file.bytes)
-        .map(|content| content.to_string())
-        .map_err(|error| format!("utf8 decode local framework {} {}: {}", module.module_path, path, error))
-}
-
-fn local_framework_vfs_root(module_path: &str, version: &str) -> String {
-    format!(
-        "/{}",
-        vo_module::cache::layout::relative_module_dir(module_path, version).display()
-    )
-}
-
-fn local_framework_source_digest(module: &EmbeddedLocalFrameworkModule) -> vo_module::digest::Digest {
-    let mut raw = Vec::new();
-    for file in module.files {
-        raw.extend_from_slice(file.path.as_bytes());
-        raw.push(0);
-        raw.extend_from_slice(file.bytes);
-        raw.push(0xff);
-    }
-    vo_module::digest::Digest::from_sha256(&raw)
-}
-
-fn build_local_framework_manifest(
-    module: &EmbeddedLocalFrameworkModule,
-    mod_file: &vo_module::schema::modfile::ModFile,
-    source_digest: vo_module::digest::Digest,
-) -> Result<vo_module::schema::manifest::ReleaseManifest, String> {
-    let version = vo_module::version::ExactVersion::parse(module.version)
-        .map_err(|error| format!("local framework {} version {}: {}", module.module_path, module.version, error))?;
-    let mut require = mod_file.require.iter().map(|req| {
-        vo_module::schema::manifest::ManifestRequire {
-            module: req.module.clone(),
-            constraint: req.constraint.clone(),
-        }
-    }).collect::<Vec<_>>();
-    require.sort_by(|a, b| a.module.cmp(&b.module));
-    let mut artifacts = Vec::new();
-    if let Some(ext_content) = embedded_local_file(module, "vo.ext.toml") {
-        let ext_content = std::str::from_utf8(ext_content.bytes)
-            .map_err(|error| format!("utf8 decode local framework {} vo.ext.toml: {}", module.module_path, error))?;
-        if let Some(ext) = vo_module::ext_manifest::wasm_extension_from_content(ext_content)
-            .map_err(|error| format!("parse local framework {} vo.ext.toml: {}", module.module_path, error))?
-        {
-            let wasm_file = embedded_local_wasm_asset_file(module, &ext.wasm)
-                .ok_or_else(|| format!("local framework {} missing wasm asset {}", module.module_path, ext.wasm))?;
-            artifacts.push(vo_module::schema::manifest::ManifestArtifact {
-                id: vo_module::identity::ArtifactId {
-                    kind: "extension-wasm".to_string(),
-                    target: "wasm32-unknown-unknown".to_string(),
-                    name: ext.wasm.clone(),
-                },
-                size: wasm_file.bytes.len() as u64,
-                digest: vo_module::digest::Digest::from_sha256(wasm_file.bytes),
-            });
-            if let Some(js_glue) = ext.js_glue.as_deref() {
-                let js_file = embedded_local_wasm_asset_file(module, js_glue)
-                    .ok_or_else(|| format!("local framework {} missing wasm js glue {}", module.module_path, js_glue))?;
-                artifacts.push(vo_module::schema::manifest::ManifestArtifact {
-                    id: vo_module::identity::ArtifactId {
-                        kind: "extension-js-glue".to_string(),
-                        target: "wasm32-unknown-unknown".to_string(),
-                        name: js_glue.to_string(),
-                    },
-                    size: js_file.bytes.len() as u64,
-                    digest: vo_module::digest::Digest::from_sha256(js_file.bytes),
-                });
-            }
-        }
-    }
-    artifacts.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(vo_module::schema::manifest::ReleaseManifest {
-        schema_version: 1,
-        module: mod_file.module.clone(),
-        version,
-        commit: LOCAL_FRAMEWORK_COMMIT.to_string(),
-        module_root: ".".to_string(),
-        vo: mod_file.vo.clone(),
-        require,
-        source: vo_module::schema::manifest::ManifestSource {
-            name: format!(
-                "{}-{}-local-source.tar.gz",
-                mod_file.module.as_str().rsplit('/').next().unwrap_or("module"),
-                module.version,
-            ),
-            size: module.files.iter().map(|file| file.bytes.len() as u64).sum(),
-            digest: source_digest,
-        },
-        artifacts,
-    })
-}
-
-fn parse_embedded_local_mod_file(
-    module: &EmbeddedLocalFrameworkModule,
-) -> Result<vo_module::schema::modfile::ModFile, String> {
-    let vo_mod_content = embedded_local_text(module, "vo.mod")?;
-    vo_module::schema::modfile::ModFile::parse(&vo_mod_content)
-        .map_err(|error| format!("parse local framework vo.mod {}: {}", module.module_path, error))
-}
-
-fn parse_embedded_local_lock_file(
-    module: &EmbeddedLocalFrameworkModule,
-) -> Result<Option<vo_module::schema::lockfile::LockFile>, String> {
-    let Some(lock_file) = embedded_local_file(module, "vo.lock") else {
-        return Ok(None);
-    };
-    let content = std::str::from_utf8(lock_file.bytes)
-        .map_err(|error| format!("utf8 decode local framework {} vo.lock: {}", module.module_path, error))?;
-    let lock_file = vo_module::schema::lockfile::LockFile::parse(content)
-        .map_err(|error| format!("parse local framework vo.lock {}: {}", module.module_path, error))?;
-    Ok(Some(lock_file))
-}
-
-fn build_local_framework_locked_module(
-    module: &EmbeddedLocalFrameworkModule,
-) -> Result<vo_module::schema::lockfile::LockedModule, String> {
-    let mod_file = parse_embedded_local_mod_file(module)?;
-    let source_digest = local_framework_source_digest(module);
-    let manifest = build_local_framework_manifest(module, &mod_file, source_digest)?;
-    let manifest_raw = manifest.render();
-    vo_module::lock::locked_module_from_requested_manifest_raw(
-        manifest_raw.as_bytes(),
-        mod_file.module.as_str(),
-        module.version,
-    )
-    .map_err(|error| format!("build local framework locked module {}: {}", module.module_path, error))
-}
-
-fn append_repo_locked_module_closure(
-    lock_file: &vo_module::schema::lockfile::LockFile,
-    module_path: &vo_module::identity::ModulePath,
-    visited: &mut std::collections::HashSet<String>,
-    resolved: &mut Vec<vo_module::schema::lockfile::LockedModule>,
-) -> Result<(), String> {
-    let locked = lock_file
-        .find(module_path)
-        .cloned()
-        .ok_or_else(|| format!("synthetic local lock missing dependency {}", module_path))?;
-    if !visited.insert(locked.path.as_str().to_string()) {
-        return Ok(());
-    }
-    for dep in &locked.deps {
-        append_repo_locked_module_closure(lock_file, dep, visited, resolved)?;
-    }
-    resolved.push(locked);
-    Ok(())
-}
-
-fn append_local_framework_locked_module_closure(
-    module: &EmbeddedLocalFrameworkModule,
-    visited: &mut std::collections::HashSet<String>,
-    resolved: &mut Vec<vo_module::schema::lockfile::LockedModule>,
-) -> Result<(), String> {
-    let locked = build_local_framework_locked_module(module)?;
-    if !visited.insert(locked.path.as_str().to_string()) {
-        return Ok(());
-    }
-    let mod_file = parse_embedded_local_mod_file(module)?;
-    let repo_lock = parse_embedded_local_lock_file(module)?;
-    for req in &mod_file.require {
-        if let Some(dep_module) = LOCAL_FRAMEWORK_MODULES
-            .iter()
-            .find(|candidate| candidate.module_path == req.module.as_str())
-        {
-            append_local_framework_locked_module_closure(dep_module, visited, resolved)?;
-            continue;
-        }
-        let repo_lock = repo_lock.as_ref().ok_or_else(|| {
-            format!(
-                "local framework {} missing vo.lock for external dependency {}",
-                module.module_path, req.module
-            )
-        })?;
-        append_repo_locked_module_closure(repo_lock, &req.module, visited, resolved)?;
-    }
-    resolved.push(locked);
-    Ok(())
-}
-
-fn build_local_framework_lockfile(
-    module: &EmbeddedLocalFrameworkModule,
-) -> Result<Option<vo_module::schema::lockfile::LockFile>, String> {
-    let mod_file = parse_embedded_local_mod_file(module)?;
-    if mod_file.require.is_empty() {
-        return Ok(None);
-    }
-    let mut visited = std::collections::HashSet::new();
-    let mut resolved = Vec::new();
-    let repo_lock = parse_embedded_local_lock_file(module)?;
-    for req in &mod_file.require {
-        if let Some(dep_module) = LOCAL_FRAMEWORK_MODULES
-            .iter()
-            .find(|candidate| candidate.module_path == req.module.as_str())
-        {
-            append_local_framework_locked_module_closure(dep_module, &mut visited, &mut resolved)?;
-            continue;
-        }
-        let repo_lock = repo_lock.as_ref().ok_or_else(|| {
-            format!(
-                "local framework {} missing vo.lock for external dependency {}",
-                module.module_path, req.module
-            )
-        })?;
-        append_repo_locked_module_closure(repo_lock, &req.module, &mut visited, &mut resolved)?;
-    }
-    resolved.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(Some(vo_module::schema::lockfile::LockFile {
-        version: 1,
-        created_by: "studio wasm local framework synthetic vo.lock".to_string(),
-        root: vo_module::schema::lockfile::LockRoot {
-            module: mod_file.module,
-            vo: mod_file.vo,
-        },
-        resolved,
-    }))
-}
-
-fn seed_local_framework_module(module: &EmbeddedLocalFrameworkModule) -> Result<(), String> {
-    let mod_file = parse_embedded_local_mod_file(module)?;
-    let source_digest = local_framework_source_digest(module);
-    let manifest = build_local_framework_manifest(module, &mod_file, source_digest.clone())?;
-    let manifest_raw = manifest.render();
-    let module_root = local_framework_vfs_root(mod_file.module.as_str(), module.version);
-    for file in module.files {
-        let path = join_vfs_path(&module_root, file.path);
-        write_vfs_bytes(&path, file.bytes)?;
-    }
-    if let Some(ext_content) = embedded_local_file(module, "vo.ext.toml") {
-        let ext_content = std::str::from_utf8(ext_content.bytes)
-            .map_err(|error| format!("utf8 decode local framework {} vo.ext.toml: {}", module.module_path, error))?;
-        if let Some(ext) = vo_module::ext_manifest::wasm_extension_from_content(ext_content)
-            .map_err(|error| format!("parse local framework {} vo.ext.toml: {}", module.module_path, error))?
-        {
-            let artifact_root = join_vfs_path(&module_root, ".vo-artifacts");
-            let wasm_file = embedded_local_wasm_asset_file(module, &ext.wasm)
-                .ok_or_else(|| format!("local framework {} missing wasm asset {}", module.module_path, ext.wasm))?;
-            write_vfs_bytes(&join_vfs_path(&artifact_root, &ext.wasm), wasm_file.bytes)?;
-            if let Some(js_glue) = ext.js_glue.as_deref() {
-                let js_file = embedded_local_wasm_asset_file(module, js_glue)
-                    .ok_or_else(|| format!("local framework {} missing wasm js glue {}", module.module_path, js_glue))?;
-                write_vfs_bytes(&join_vfs_path(&artifact_root, js_glue), js_file.bytes)?;
-            }
-        }
-    }
-    write_vfs_text(
-        &join_vfs_path(&module_root, vo_module::cache::layout::VERSION_MARKER),
-        &format!("{}\n", module.version),
-    )?;
-    write_vfs_text(
-        &join_vfs_path(&module_root, vo_module::cache::layout::SOURCE_DIGEST_MARKER),
-        &format!("{}\n", source_digest),
-    )?;
-    write_vfs_text(&join_vfs_path(&module_root, "vo.release.json"), &manifest_raw)?;
-    if let Some(lock_file) = build_local_framework_lockfile(module)? {
-        write_vfs_text(&join_vfs_path(&module_root, "vo.lock"), &lock_file.render())?;
-    }
-    Ok(())
-}
-
-fn seed_local_framework_modules() -> Result<(), String> {
-    for module in LOCAL_FRAMEWORK_MODULES {
-        seed_local_framework_module(module)?;
-    }
-    Ok(())
-}
-
 #[wasm_bindgen(js_name = "initVFS")]
 pub fn init_vfs() -> js_sys::Promise {
     ensure_panic_hook();
     wasm_bindgen_futures::future_to_promise(async move {
-        seed_local_framework_modules()
-            .map_err(|error| JsValue::from_str(&error))?;
         Ok(JsValue::UNDEFINED)
     })
 }
@@ -587,42 +279,18 @@ struct SingleFileEntry {
     entry_clean: String,
     content: String,
     external_modules: Vec<String>,
+    inline_mod: Option<vo_module::inline_mod::InlineMod>,
 }
 
 #[derive(Clone)]
 struct FrameworkContract {
     name: String,
-    entry: String,
+    entry: Option<String>,
     capabilities: Vec<String>,
-    renderer_path: Option<String>,
-    protocol_path: Option<String>,
-    host_bridge_path: Option<String>,
+    js_modules: BTreeMap<String, String>,
 }
 
-#[derive(Clone)]
-struct FrameworkModule {
-    contract: FrameworkContract,
-    module_root: String,
-    wasm_asset: Option<String>,
-    js_glue_asset: Option<String>,
-    locked_module_path: Option<String>,
-}
-
-fn split_primary_framework_contract(
-    mut frameworks: Vec<FrameworkContract>,
-) -> (Option<FrameworkContract>, Vec<FrameworkContract>) {
-    if frameworks.is_empty() {
-        return (None, frameworks);
-    }
-    let primary_index = frameworks
-        .iter()
-        .position(|framework| {
-            framework.protocol_path.is_some() || framework.host_bridge_path.is_some()
-        })
-        .unwrap_or(0);
-    let primary = frameworks.remove(primary_index);
-    (Some(primary), frameworks)
-}
+type WasmExtensionCompileSpec = vo_web::ReadyWasmExtensionBytes;
 
 fn normalize_vfs_path(path: &str) -> String {
     let trimmed = path.trim();
@@ -661,6 +329,36 @@ fn join_vfs_path(base: &str, child: &str) -> String {
         format!("/{}", child)
     } else {
         format!("{}/{}", normalized_base, child)
+    }
+}
+
+fn single_file_project_dir(entry_clean: &str) -> PathBuf {
+    let parent = Path::new(entry_clean)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    if parent.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        parent.to_path_buf()
+    }
+}
+
+fn parse_single_file_inline_mod(
+    entry_clean: &str,
+    content: &str,
+) -> Result<Option<vo_module::inline_mod::InlineMod>, String> {
+    let mut local_fs = MemoryFs::new();
+    local_fs.add_file(PathBuf::from(entry_clean), content.to_string());
+    match vo_module::project::load_single_file_context(&local_fs, Path::new(entry_clean)) {
+        Ok(vo_module::project::SingleFileContext::EphemeralInlineMod { inline_mod, .. }) => {
+            Ok(Some(inline_mod))
+        }
+        Ok(vo_module::project::SingleFileContext::AdHoc { .. }) => Ok(None),
+        Ok(vo_module::project::SingleFileContext::Project(_)) => Err(format!(
+            "single-file target {} unexpectedly resolved as a project",
+            entry_clean
+        )),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -718,30 +416,31 @@ fn resolve_vfs_compile_target(entry_path: &str) -> Result<ResolvedVfsCompileTarg
     })
 }
 
-fn read_vfs_package(pkg_dir: &str, local_fs: &mut MemoryFs) -> Result<(), String> {
-    let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(pkg_dir);
-    if let Some(e) = err {
-        return Err(format!("read dir '{}': {}", pkg_dir, e));
-    }
-    for (name, is_dir, _mode) in entries {
-        let full = if pkg_dir == "/" {
-            format!("/{}", name)
-        } else {
-            format!("{}/{}", pkg_dir, name)
-        };
-        if is_dir {
-            read_vfs_package(&full, local_fs)?;
-        } else if name.ends_with(".vo") || name == "vo.mod" || name == "vo.lock" || name == "vo.ext.toml" {
-            let (data, err) = vo_web_runtime_wasm::vfs::read_file(&full);
-            if let Some(e) = err {
-                return Err(format!("read file '{}': {}", full, e));
+fn read_vfs_package(project_root: &str, local_fs: &mut MemoryFs) -> Result<(), String> {
+    fn walk(dir: &str, local_fs: &mut MemoryFs) -> Result<(), String> {
+        let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(dir);
+        if let Some(error) = err {
+            return Err(format!("read dir '{}': {}", dir, error));
+        }
+        for (name, is_dir, _mode) in entries {
+            let full = join_vfs_path(dir, &name);
+            if is_dir {
+                walk(&full, local_fs)?;
+                continue;
             }
+            let keep = name.ends_with(".vo") || matches!(name.as_str(), "vo.mod" | "vo.lock" | "vo.work");
+            if !keep {
+                continue;
+            }
+            let data = read_vfs_bytes(&full)?;
             let content = String::from_utf8(data)
-                .map_err(|e| format!("utf8 '{}': {}", full, e))?;
+                .map_err(|error| format!("utf8 '{}': {}", full, error))?;
             local_fs.add_file(PathBuf::from(full.trim_start_matches('/')), content);
         }
+        Ok(())
     }
-    Ok(())
+
+    walk(project_root, local_fs)
 }
 
 fn build_workspace_project_from_vfs(
@@ -750,7 +449,6 @@ fn build_workspace_project_from_vfs(
     let project_dir = Path::new(project_root.trim_start_matches('/'));
     let mut local_fs = MemoryFs::new();
     read_vfs_package(project_root, &mut local_fs)?;
-    maybe_add_synthetic_project_lockfile(project_root, &mut local_fs)?;
     let context = vo_module::project::load_project_context(&local_fs, project_dir)
         .map_err(|error| error.to_string())?;
     Ok((local_fs, context))
@@ -761,9 +459,10 @@ fn target_locked_modules(
 ) -> Result<Vec<vo_module::schema::lockfile::LockedModule>, String> {
     if let Some(project_root) = &target.project_root {
         let (_, context) = build_workspace_project_from_vfs(project_root)?;
-        return Ok(context.project_deps.locked_modules().to_vec());
+        return Ok(context.project_deps().locked_modules().to_vec());
     }
-    SingleFileEntry::load(target)?.locked_modules()
+    let single_file = SingleFileEntry::load(target)?;
+    single_file.collect_locked_modules()
 }
 
 fn read_vfs_text(path: &str) -> Result<String, String> {
@@ -782,86 +481,101 @@ fn read_vfs_bytes(path: &str) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
-fn is_studio_imported_vfs_project_root(project_root: &str) -> bool {
-    let normalized = normalize_vfs_path(project_root);
-    normalized == "/workspace"
-        || normalized.starts_with("/workspace/")
-}
-
 fn is_studio_session_project_root(project_root: &str) -> bool {
     let normalized = normalize_vfs_path(project_root);
     normalized.starts_with("/workspace/.studio-sessions/")
         || normalized.starts_with("/workspace/.studio-sources/")
 }
 
-fn synthetic_project_lock_strategy(project_root: &str) -> Option<SyntheticProjectLockStrategy> {
-    if !is_studio_imported_vfs_project_root(project_root) {
-        return None;
+fn is_studio_imported_synthetic_lock(lock_path: &str) -> Result<bool, String> {
+    if !vfs_exists(lock_path) {
+        return Ok(false);
     }
-    if is_studio_session_project_root(project_root) {
-        return Some(SyntheticProjectLockStrategy::ImportedConstraintMatched);
-    }
-    Some(SyntheticProjectLockStrategy::WorkspaceInstalled)
+    let lock_content = read_vfs_text(lock_path)?;
+    let lock_file = vo_module::schema::lockfile::LockFile::parse(&lock_content)
+        .map_err(|error| format!("parse {}: {}", lock_path, error))?;
+    Ok(lock_file.created_by == STUDIO_IMPORTED_SYNTHETIC_LOCK_CREATED_BY)
 }
 
-fn discover_installed_vfs_versions(module: &str) -> Result<Vec<String>, String> {
-    let module_root = format!("/{}", vo_module::cache::layout::cache_key(module));
-    if !vfs_exists(&module_root) {
-        return Ok(Vec::new());
-    }
-    let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(&module_root);
-    if let Some(error) = err {
-        return Err(format!("read dir '{}': {}", module_root, error));
-    }
-    let mut versions = Vec::new();
-    for (name, is_dir, _mode) in entries {
-        if !is_dir || !name.starts_with('v') {
-            continue;
-        }
-        let marker_path = join_vfs_path(
-            &join_vfs_path(&module_root, &name),
-            vo_module::cache::layout::VERSION_MARKER,
-        );
-        if !vfs_exists(&marker_path) {
-            continue;
-        }
-        let version = read_vfs_text(&marker_path)?.trim().to_string();
-        if !version.is_empty() {
-            versions.push(version);
-        }
-    }
-    versions.sort();
-    versions.dedup();
-    Ok(versions)
+const WASM_INSTALL_TARGET: &str = "wasm32-unknown-unknown";
+
+fn single_file_prepared_lock_path(entry_clean: &str) -> String {
+    normalize_vfs_path(&format!("/{}.studio.lock", entry_clean))
 }
 
-fn collect_constraint_matched_vfs_module_specs(
+async fn ensure_project_deps_for_studio(
+    project_deps: &vo_module::project::ProjectDeps,
+) -> Result<Vec<vo_module::readiness::ReadyModule>, String> {
+    let registry = vo_web::BrowserRegistry;
+    let surface = vo_web::WasmVfs::new("");
+    vo_module::async_install::ensure_project_deps(
+        &surface,
+        &registry,
+        project_deps,
+        WASM_INSTALL_TARGET,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+async fn ensure_module_requests_for_studio(
+    requests: Vec<vo_module::async_install::ModuleLoadRequest>,
+) -> Result<Vec<vo_module::readiness::ReadyModule>, String> {
+    vo_module::async_install::ensure_module_requests(
+        &vo_web::WasmVfs::new(""),
+        &vo_web::BrowserRegistry,
+        requests,
+        WASM_INSTALL_TARGET,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+async fn load_ready_wasm_extensions_for_studio(
+    ready: &[vo_module::readiness::ReadyModule],
+) -> Result<(), String> {
+    vo_web::load_ready_wasm_extensions_from_vfs(ready)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn log_prepare_entry_resolve_install_done<'a>(modules: impl IntoIterator<Item = &'a str>) {
+    for module in modules {
+        log_wasm_module("prepare_entry_resolve_install_done", module, js_sys::Date::now());
+    }
+}
+
+async fn write_prepared_mod_lock_for_studio(
     mod_file: &vo_module::schema::modfile::ModFile,
-) -> Result<Vec<(String, String)>, String> {
-    let mut installed = Vec::with_capacity(mod_file.require.len());
-    for req in &mod_file.require {
-        let mut matches = discover_installed_vfs_versions(req.module.as_str())?
-            .into_iter()
-            .filter_map(|version| {
-                let exact = vo_module::version::ExactVersion::parse(&version).ok()?;
-                if req.constraint.satisfies(&exact) {
-                    Some((exact, version))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        matches.sort_by(|a, b| b.0.cmp(&a.0));
-        let Some((_, version)) = matches.into_iter().next() else {
-            return Err(format!(
-                "module {} has no installed version satisfying {}",
-                req.module,
-                req.constraint,
-            ));
-        };
-        installed.push((req.module.as_str().to_string(), version));
-    }
-    Ok(installed)
+    created_by: &str,
+    lock_path: &str,
+) -> Result<(), String> {
+    let registry = vo_web::BrowserRegistry;
+    let surface = vo_web::WasmVfs::new("");
+    let ready = vo_module::async_install::ensure_mod_file_requirements(
+        &surface,
+        &registry,
+        mod_file,
+        WASM_INSTALL_TARGET,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let initial = ready
+        .iter()
+        .map(|module| (module.module.clone(), module.version.clone()))
+        .collect::<Vec<_>>();
+    let locked_modules = vo_module::async_install::collect_locked_modules_from_exact_versions(
+        &surface,
+        &initial,
+    )
+    .map_err(|error| error.to_string())?;
+    load_ready_wasm_extensions_for_studio(&ready).await?;
+    let lock_file = vo_module::project::build_lock_file_from_mod_file(
+        mod_file,
+        locked_modules,
+        created_by,
+    );
+    write_vfs_text(lock_path, &lock_file.render())
 }
 
 async fn prepare_imported_project_dependencies(project_root: &str) -> Result<(), String> {
@@ -869,7 +583,7 @@ async fn prepare_imported_project_dependencies(project_root: &str) -> Result<(),
         return Ok(());
     }
     let lock_path = join_vfs_path(project_root, "vo.lock");
-    if vfs_exists(&lock_path) {
+    if vfs_exists(&lock_path) && !is_studio_imported_synthetic_lock(&lock_path)? {
         return Ok(());
     }
     let mod_path = join_vfs_path(project_root, "vo.mod");
@@ -879,81 +593,13 @@ async fn prepare_imported_project_dependencies(project_root: &str) -> Result<(),
     let mod_content = read_vfs_text(&mod_path)?;
     let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content)
         .map_err(|error| format!("parse {}: {}", mod_path, error))?;
-    for req in &mod_file.require {
-        let module_start = js_sys::Date::now();
-        vo_web::resolve_and_install_module_with_constraint(
-            req.module.as_str(),
-            &req.constraint.to_string(),
-        )
-        .await
-        .map_err(|error| {
-            format!(
-                "resolve/install {} {} for {}: {}",
-                req.module,
-                req.constraint,
-                project_root,
-                error,
-            )
-        })?;
-        log_wasm_module("prepare_entry_resolve_install_done", req.module.as_str(), module_start);
-    }
-    Ok(())
-}
-
-fn maybe_add_synthetic_project_lockfile(
-    project_root: &str,
-    local_fs: &mut MemoryFs,
-) -> Result<(), String> {
-    let Some(strategy) = synthetic_project_lock_strategy(project_root) else {
-        return Ok(());
-    };
-    let project_dir = Path::new(project_root.trim_start_matches('/'));
-    let lock_path = project_dir.join("vo.lock");
-    if local_fs.exists(&lock_path) {
-        return Ok(());
-    }
-    let mod_path = join_vfs_path(project_root, "vo.mod");
-    let mod_content = read_vfs_text(&mod_path)?;
-    let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content)
-        .map_err(|error| format!("parse {}: {}", mod_path, error))?;
-    if mod_file.require.is_empty() {
-        return Ok(());
-    }
-    let installed = match strategy {
-        SyntheticProjectLockStrategy::WorkspaceInstalled => {
-            let required_modules = mod_file
-                .require
-                .iter()
-                .map(|req| req.module.as_str().to_string())
-                .collect::<Vec<_>>();
-            vo_web::collect_installed_vfs_module_specs(&required_modules)
-                .map_err(|error| format!("collect installed modules for {}: {}", project_root, error))?
-        }
-        SyntheticProjectLockStrategy::ImportedConstraintMatched => {
-            collect_constraint_matched_vfs_module_specs(&mod_file)
-                .map_err(|error| format!("collect imported module versions for {}: {}", project_root, error))?
-        }
-    };
-    if installed.is_empty() {
-        return Ok(());
-    }
-    let mut resolved = vo_web::collect_vfs_locked_module_closure(&installed)
-        .map_err(|error| format!("collect local module closure for {}: {}", project_root, error))?;
-    resolved.sort_by(|a, b| a.path.cmp(&b.path));
-    let created_by = match strategy {
-        SyntheticProjectLockStrategy::WorkspaceInstalled => "studio wasm synthetic root vo.lock",
-        SyntheticProjectLockStrategy::ImportedConstraintMatched => "studio wasm imported synthetic vo.lock",
-    };
-    let lock_file = vo_module::schema::lockfile::LockFile {
-        version: 1,
-        created_by: created_by.to_string(),
-        root: vo_module::schema::lockfile::LockRoot {
-            module: mod_file.module,
-            vo: mod_file.vo,
-        },
-        resolved,
-    };
-    local_fs.add_file(lock_path, lock_file.render());
+    write_prepared_mod_lock_for_studio(
+        &mod_file,
+        STUDIO_IMPORTED_SYNTHETIC_LOCK_CREATED_BY,
+        &lock_path,
+    )
+    .await?;
+    log_prepare_entry_resolve_install_done(mod_file.require.iter().map(|req| req.module.as_str()));
     Ok(())
 }
 
@@ -962,28 +608,77 @@ impl SingleFileEntry {
         let entry_clean = target.entry_path.trim_start_matches('/').to_string();
         let content = read_vfs_text(&target.entry_path)?;
         let external_modules = vo_web::extract_external_module_paths(&content);
+        let inline_mod = parse_single_file_inline_mod(&entry_clean, &content)?;
         Ok(Self {
             entry_clean,
             content,
             external_modules,
+            inline_mod,
         })
     }
 
-    fn installed_modules(&self) -> Result<Vec<(String, String)>, String> {
-        vo_web::collect_installed_vfs_module_specs(&self.external_modules)
-            .map_err(|error| format!("{}; call prepareEntry before compiling", error))
+    fn requested_modules(&self) -> Result<Vec<vo_module::identity::ModulePath>, String> {
+        if let Some(inline_mod) = self.inline_mod.as_ref() {
+            return Ok(inline_mod
+                .require
+                .iter()
+                .map(|req| req.module.clone())
+                .collect());
+        }
+        self.external_modules
+            .iter()
+            .map(|module| {
+                vo_module::identity::ModulePath::parse(module).map_err(|error| error.to_string())
+            })
+            .collect()
     }
 
-    fn locked_modules(&self) -> Result<Vec<vo_module::schema::lockfile::LockedModule>, String> {
-        let installed = self.installed_modules()?;
-        if installed.is_empty() {
+    fn collect_locked_modules(&self) -> Result<Vec<vo_module::schema::lockfile::LockedModule>, String> {
+        if self.inline_mod.is_some() {
+            if self.inline_mod.as_ref().is_some_and(|inline_mod| inline_mod.require.is_empty()) {
+                return Ok(Vec::new());
+            }
+            let lock_path = single_file_prepared_lock_path(&self.entry_clean);
+            if !vfs_exists(&lock_path) {
+                return Err(format!("missing prepared lock {}; call prepareEntry before compiling", lock_path));
+            }
+            let lock_content = read_vfs_text(&lock_path)?;
+            let lock_file = vo_module::schema::lockfile::LockFile::parse(&lock_content)
+                .map_err(|error| format!("parse {}: {}", lock_path, error))?;
+            return Ok(lock_file.resolved);
+        }
+        let modules = self.requested_modules()?;
+        if modules.is_empty() {
             return Ok(Vec::new());
         }
-        vo_web::collect_vfs_locked_module_closure(&installed)
+        vo_module::async_install::collect_installed_locked_module_closure(&vo_web::WasmVfs::new(""), &modules)
+            .map_err(|error| format!("{}; call prepareEntry before compiling", error))
     }
 
     fn populate_compile_fs(&self, local_fs: &mut MemoryFs) -> Result<(), String> {
         local_fs.add_file(PathBuf::from(&self.entry_clean), self.content.clone());
+        let Some(inline_mod) = self.inline_mod.as_ref() else {
+            return Ok(());
+        };
+        let mod_file = vo_module::ephemeral::synthesize_mod_file(inline_mod);
+        let project_dir = single_file_project_dir(&self.entry_clean);
+        let mod_path = if project_dir == Path::new(".") {
+            PathBuf::from("vo.mod")
+        } else {
+            project_dir.join("vo.mod")
+        };
+        let lock_path = if project_dir == Path::new(".") {
+            PathBuf::from("vo.lock")
+        } else {
+            project_dir.join("vo.lock")
+        };
+        let lock_file = vo_module::project::build_lock_file_from_mod_file(
+            &mod_file,
+            self.collect_locked_modules()?,
+            STUDIO_SINGLE_FILE_SYNTHETIC_LOCK_CREATED_BY,
+        );
+        local_fs.add_file(mod_path, mod_file.render());
+        local_fs.add_file(lock_path, lock_file.render());
         Ok(())
     }
 }
@@ -1096,270 +791,20 @@ fn vfs_exists(path: &str) -> bool {
     err.is_none()
 }
 
-fn framework_module_root(locked: &vo_module::schema::lockfile::LockedModule) -> String {
-    format!(
-        "/{}",
-        vo_module::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version).display()
-    )
-}
-
-fn parse_framework_module(manifest_path: &str) -> Result<Option<FrameworkModule>, String> {
-    let content = read_vfs_text(manifest_path)?;
-    let Some(studio) = parse_studio_manifest(&content, manifest_path)? else {
-        return Ok(None);
-    };
-    let manifest: Value = toml::from_str(&content)
-        .map_err(|e| format!("parse {}: {}", manifest_path, e))?;
-    let extension = manifest
-        .get("extension")
-        .and_then(Value::as_table)
-        .ok_or_else(|| format!("{} missing [extension] section", manifest_path))?;
-    let name = extension
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("{} missing extension.name", manifest_path))?
-        .to_string();
-    let wasm_table = extension.get("wasm").and_then(Value::as_table);
-    let wasm_asset = wasm_table
-        .and_then(|table| table.get("wasm"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let js_glue_asset = wasm_table
-        .and_then(|table| table.get("js_glue"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let module_root = vfs_parent_dir(manifest_path).unwrap_or_else(|| "/".to_string());
-    let resolve_artifact = |rel: Option<&str>| -> Option<String> {
-        rel.map(|rel| {
-            if rel.starts_with('/') {
-                normalize_vfs_path(rel)
-            } else {
-                join_vfs_path(&module_root, rel)
-            }
-        })
-    };
-    Ok(Some(FrameworkModule {
-        contract: FrameworkContract {
-            name,
-            entry: studio.entry,
-            capabilities: studio.capabilities,
-            renderer_path: resolve_artifact(studio.renderer_path.as_deref()),
-            protocol_path: resolve_artifact(studio.protocol_path.as_deref()),
-            host_bridge_path: resolve_artifact(studio.host_bridge_path.as_deref()),
-        },
-        module_root,
-        wasm_asset,
-        js_glue_asset,
-        locked_module_path: None,
-    }))
-}
-
-fn append_framework_module_if_present(
-    modules: &mut Vec<FrameworkModule>,
-    seen_roots: &mut std::collections::HashSet<String>,
-    manifest_path: &str,
-    locked_module_path: Option<&str>,
-) -> Result<(), String> {
-    if !vfs_exists(manifest_path) {
-        return Ok(());
+fn framework_contract_from_vo_web(contract: vo_web::BrowserRuntimeContract) -> FrameworkContract {
+    FrameworkContract {
+        name: contract.name,
+        entry: contract.entry,
+        capabilities: contract.capabilities,
+        js_modules: contract.js_modules,
     }
-    if let Some(mut module) = parse_framework_module(manifest_path)? {
-        module.locked_module_path = locked_module_path.map(str::to_string);
-        if seen_roots.insert(module.module_root.clone()) {
-            modules.push(module);
-        }
-    }
-    Ok(())
-}
-
-fn append_locked_framework_modules(
-    modules: &mut Vec<FrameworkModule>,
-    seen_roots: &mut std::collections::HashSet<String>,
-    locked_modules: &[vo_module::schema::lockfile::LockedModule],
-) -> Result<(), String> {
-    for locked in locked_modules {
-        let manifest_path = join_vfs_path(&framework_module_root(locked), "vo.ext.toml");
-        append_framework_module_if_present(modules, seen_roots, &manifest_path, Some(locked.path.as_str()))?;
-    }
-    Ok(())
-}
-
-fn discover_framework_modules(target: &ResolvedVfsCompileTarget) -> Result<Vec<FrameworkModule>, String> {
-    let mut modules = Vec::new();
-    let mut seen_roots = std::collections::HashSet::new();
-    if let Some(project_root) = &target.project_root {
-        let project_manifest = join_vfs_path(project_root, "vo.ext.toml");
-        append_framework_module_if_present(&mut modules, &mut seen_roots, &project_manifest, None)?;
-    }
-    let locked_modules = target_locked_modules(target)?;
-    append_locked_framework_modules(&mut modules, &mut seen_roots, &locked_modules)?;
-    Ok(modules)
-}
-
-#[derive(Clone)]
-struct WasmExtensionModule {
-    name: String,
-    module_key: String,
-    module_root: String,
-    wasm_asset: String,
-    js_glue_asset: Option<String>,
-}
-
-#[derive(Clone)]
-struct WasmExtensionCompileSpec {
-    name: String,
-    module_key: String,
-    wasm_bytes: Vec<u8>,
-    js_glue_bytes: Option<Vec<u8>>,
-}
-
-fn read_module_artifact_bytes(module_root: &str, asset_path: &str) -> Result<Vec<u8>, String> {
-    let candidates = if asset_path.starts_with('/') {
-        vec![normalize_vfs_path(asset_path)]
-    } else {
-        vec![
-            join_vfs_path(&join_vfs_path(module_root, ".vo-artifacts"), asset_path),
-            join_vfs_path(module_root, asset_path),
-        ]
-    };
-    for candidate in candidates {
-        if vfs_exists(&candidate) {
-            return read_vfs_bytes(&candidate);
-        }
-    }
-    Err(format!(
-        "missing wasm extension asset {} under {}",
-        asset_path, module_root
-    ))
-}
-
-fn parse_wasm_extension_module(manifest_path: &str, locked_module_path: Option<&str>) -> Result<Option<WasmExtensionModule>, String> {
-    let content = read_vfs_text(manifest_path)?;
-    let Some(wasm) = vo_module::ext_manifest::wasm_extension_from_content(&content)
-        .map_err(|error| format!("{}: {}", manifest_path, error))?
-    else {
-        return Ok(None);
-    };
-    let name = vo_module::ext_manifest::extension_name_from_content(&content)
-        .map_err(|error| format!("{}: {}", manifest_path, error))?;
-    let module_key = locked_module_path.unwrap_or(&name).to_string();
-    let module_root = vfs_parent_dir(manifest_path).unwrap_or_else(|| "/".to_string());
-    Ok(Some(WasmExtensionModule {
-        name,
-        module_key,
-        module_root,
-        wasm_asset: wasm.wasm,
-        js_glue_asset: wasm.js_glue,
-    }))
-}
-
-fn append_wasm_extension_module_if_present(
-    modules: &mut Vec<WasmExtensionModule>,
-    seen_roots: &mut std::collections::HashSet<String>,
-    manifest_path: &str,
-    locked_module_path: Option<&str>,
-) -> Result<(), String> {
-    if !vfs_exists(manifest_path) {
-        return Ok(());
-    }
-    if let Some(module) = parse_wasm_extension_module(manifest_path, locked_module_path)? {
-        if seen_roots.insert(module.module_root.clone()) {
-            modules.push(module);
-        }
-    }
-    Ok(())
-}
-
-fn discover_wasm_extension_modules(
-    target: &ResolvedVfsCompileTarget,
-) -> Result<Vec<WasmExtensionModule>, String> {
-    let mut modules = Vec::new();
-    let mut seen_roots = std::collections::HashSet::new();
-    if let Some(project_root) = &target.project_root {
-        let project_manifest = join_vfs_path(project_root, "vo.ext.toml");
-        append_wasm_extension_module_if_present(&mut modules, &mut seen_roots, &project_manifest, None)?;
-    }
-    let locked_modules = target_locked_modules(target)?;
-    append_locked_wasm_extension_modules(&mut modules, &mut seen_roots, &locked_modules)?;
-    for framework_module in discover_framework_modules(target)? {
-        append_pkg_island_wasm_extension_module(&mut modules, &mut seen_roots, &framework_module)?;
-    }
-    Ok(modules)
 }
 
 fn build_wasm_extension_compile_specs(
-    target: &ResolvedVfsCompileTarget,
+    plan: &vo_web::BrowserRuntimePlan,
 ) -> Result<Vec<WasmExtensionCompileSpec>, String> {
-    discover_wasm_extension_modules(target)?
-        .into_iter()
-        .map(|module| {
-            let wasm_bytes = read_module_artifact_bytes(&module.module_root, &module.wasm_asset)?;
-            let js_glue_bytes = module
-                .js_glue_asset
-                .as_ref()
-                .map(|asset| read_module_artifact_bytes(&module.module_root, asset))
-                .transpose()?;
-            Ok(WasmExtensionCompileSpec {
-                name: module.name,
-                module_key: module.module_key,
-                wasm_bytes,
-                js_glue_bytes,
-            })
-        })
-        .collect()
-}
-
-fn append_locked_wasm_extension_modules(
-    modules: &mut Vec<WasmExtensionModule>,
-    seen_roots: &mut std::collections::HashSet<String>,
-    locked_modules: &[vo_module::schema::lockfile::LockedModule],
-) -> Result<(), String> {
-    for locked in locked_modules {
-        let manifest_path = join_vfs_path(&framework_module_root(locked), "vo.ext.toml");
-        append_wasm_extension_module_if_present(modules, seen_roots, &manifest_path, Some(locked.path.as_str()))?;
-    }
-    Ok(())
-}
-
-fn append_pkg_island_wasm_extension_module(
-    modules: &mut Vec<WasmExtensionModule>,
-    seen_roots: &mut std::collections::HashSet<String>,
-    module: &FrameworkModule,
-) -> Result<(), String> {
-    if !framework_declares_vo_web(module) || seen_roots.contains(&module.module_root) {
-        return Ok(());
-    }
-    let wasm_asset = format!("rust/pkg-island/{}_island_bg.wasm", module.contract.name);
-    let wasm_path = join_vfs_path(&module.module_root, &wasm_asset);
-    if !vfs_exists(&wasm_path) {
-        return Ok(());
-    }
-    let js_glue_asset = format!("rust/pkg-island/{}_island.js", module.contract.name);
-    let js_glue_path = join_vfs_path(&module.module_root, &js_glue_asset);
-    if !vfs_exists(&js_glue_path) {
-        return Err(format!(
-            "missing vo_web pkg-island JS glue {} for framework {}",
-            js_glue_path,
-            module.contract.name,
-        ));
-    }
-    seen_roots.insert(module.module_root.clone());
-    let module_key = module.locked_module_path
-        .as_deref()
-        .unwrap_or(&module.contract.name)
-        .to_string();
-    modules.push(WasmExtensionModule {
-        name: module.contract.name.clone(),
-        module_key,
-        module_root: module.module_root.clone(),
-        wasm_asset,
-        js_glue_asset: Some(js_glue_asset),
-    });
-    Ok(())
-}
-
-fn framework_declares_vo_web(module: &FrameworkModule) -> bool {
-    module.contract.capabilities.iter().any(|capability| capability == "vo_web")
+    vo_web::collect_browser_wasm_extensions_from_vfs(&plan.wasm_extensions)
+        .map_err(|error| error.to_string())
 }
 
 fn collect_render_island_snapshot(entry_path: &str) -> Result<JsValue, String> {
@@ -1368,50 +813,25 @@ fn collect_render_island_snapshot(entry_path: &str) -> Result<JsValue, String> {
         .project_root
         .clone()
         .unwrap_or_else(|| vfs_parent_dir(&target.entry_path).unwrap_or_else(|| "/".to_string()));
-    let mut files = if target.project_root.is_some() {
-        collect_vfs_files(&root_path, None)?
+    let locked_modules = target_locked_modules(&target)?;
+    // Normal Studio browser runtime discovery is published-only. Debug-only
+    // local project manifest helpers must not participate in this path.
+    let plan = vo_web::published_browser_runtime_plan_from_vfs(&locked_modules, "")?;
+    let snapshot = if target.project_root.is_some() {
+        plan.snapshot_plan(vo_web::BrowserSnapshotRoot::ProjectRoot)
     } else {
-        vec![(target.entry_path.clone(), read_vfs_bytes(&target.entry_path)?)]
-    };
-    for module in discover_framework_modules(&target)? {
-        // Collect directories containing all framework artifacts (renderer, protocol, host_bridge).
-        let artifact_paths = [
-            module.contract.renderer_path.as_ref(),
-            module.contract.protocol_path.as_ref(),
-            module.contract.host_bridge_path.as_ref(),
-        ];
-        let mut collected_dirs = std::collections::HashSet::new();
-        for artifact_path in artifact_paths.into_iter().flatten() {
-            let full_path = join_vfs_path(&module.module_root, artifact_path);
-            if let Some(dir) = vfs_parent_dir(&full_path) {
-                if collected_dirs.insert(dir.clone()) && is_vfs_dir(&dir) {
-                    files.extend(collect_vfs_files(&dir, None)?);
-                }
-            }
-        }
-        let artifact_dir = join_vfs_path(&module.module_root, ".vo-artifacts");
-        if is_vfs_dir(&artifact_dir) {
-            files.extend(collect_vfs_files(&artifact_dir, None)?);
-            files.extend(collect_vfs_files(&artifact_dir, Some("wasm"))?);
-        }
-        let pkg_island_dir = join_vfs_path(&module.module_root, "rust/pkg-island");
-        if framework_declares_vo_web(&module) && is_vfs_dir(&pkg_island_dir) {
-            files.extend(collect_vfs_files(&pkg_island_dir, None)?);
-            files.extend(collect_vfs_files(&pkg_island_dir, Some("wasm"))?);
-        }
-        if let Some(wasm_asset) = module.wasm_asset.as_ref() {
-            let asset_path = join_vfs_path(&artifact_dir, wasm_asset);
-            if vfs_exists(&asset_path) {
-                files.push((format!("wasm/{}", wasm_asset), read_vfs_bytes(&asset_path)?));
-            }
-        }
-        if let Some(js_glue_asset) = module.js_glue_asset.as_ref() {
-            let asset_path = join_vfs_path(&artifact_dir, js_glue_asset);
-            if vfs_exists(&asset_path) {
-                files.push((format!("wasm/{}", js_glue_asset), read_vfs_bytes(&asset_path)?));
-            }
-        }
-    }
+        plan.snapshot_plan(vo_web::BrowserSnapshotRoot::EntryFile)
+    }?;
+    let files = vo_web::materialize_browser_snapshot_from_vfs(
+        &snapshot,
+        &plan,
+        target.project_root.as_deref(),
+        &target.entry_path,
+    )
+    .map_err(|error| error.to_string())?
+    .into_iter()
+    .map(|file| (file.path, file.bytes))
+    .collect();
     Ok(render_island_snapshot_to_js(&root_path, files))
 }
 
@@ -1487,12 +907,18 @@ fn compile_gui_run_output(
 ), String> {
     let target = resolve_vfs_compile_target(entry_path)?;
     let bytecode = compile_from_vfs(entry_path)?;
-    let frameworks = discover_framework_modules(&target)?
+    let locked_modules = target_locked_modules(&target)?;
+    // Normal Studio browser runtime discovery is published-only. Debug-only
+    // local project manifest helpers must not participate in GUI compile/run.
+    let plan = vo_web::published_browser_runtime_plan_from_vfs(&locked_modules, "")?;
+    let split = plan.legacy_framework_split();
+    let wasm_extensions = build_wasm_extension_compile_specs(&plan)?;
+    let framework = split.primary_framework.map(framework_contract_from_vo_web);
+    let provider_frameworks = split
+        .provider_frameworks
         .into_iter()
-        .map(|module| module.contract)
-        .collect::<Vec<_>>();
-    let (framework, provider_frameworks) = split_primary_framework_contract(frameworks);
-    let wasm_extensions = build_wasm_extension_compile_specs(&target)?;
+        .map(framework_contract_from_vo_web)
+        .collect();
     Ok((
         target,
         bytecode,
@@ -1505,65 +931,23 @@ fn compile_gui_run_output(
 fn framework_contract_to_js(contract: &FrameworkContract) -> JsValue {
     let obj = Object::new();
     let _ = Reflect::set(&obj, &JsValue::from_str("name"), &JsValue::from_str(&contract.name));
-    let _ = Reflect::set(&obj, &JsValue::from_str("entry"), &JsValue::from_str(&contract.entry));
+    let entry = contract
+        .entry
+        .as_ref()
+        .map(|value| JsValue::from_str(value))
+        .unwrap_or(JsValue::NULL);
+    let _ = Reflect::set(&obj, &JsValue::from_str("entry"), &entry);
     let capabilities = js_sys::Array::new();
     for capability in &contract.capabilities {
         capabilities.push(&JsValue::from_str(capability));
     }
     let _ = Reflect::set(&obj, &JsValue::from_str("capabilities"), &capabilities);
-    let set_optional_str = |key: &str, value: &Option<String>| {
-        let js = value.as_ref().map(|s| JsValue::from_str(s)).unwrap_or(JsValue::NULL);
-        let _ = Reflect::set(&obj, &JsValue::from_str(key), &js);
-    };
-    set_optional_str("rendererPath", &contract.renderer_path);
-    set_optional_str("protocolPath", &contract.protocol_path);
-    set_optional_str("hostBridgePath", &contract.host_bridge_path);
-    obj.into()
-}
-
-fn collect_vfs_files(root: &str, virtual_prefix: Option<&str>) -> Result<Vec<(String, Vec<u8>)>, String> {
-    fn walk(
-        dir: &str,
-        root: &str,
-        virtual_prefix: Option<&str>,
-        out: &mut Vec<(String, Vec<u8>)>,
-    ) -> Result<(), String> {
-        let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(dir);
-        if let Some(e) = err {
-            return Err(format!("read dir '{}': {}", dir, e));
-        }
-        for (name, is_dir, _mode) in entries {
-            let full = if dir == "/" {
-                format!("/{}", name)
-            } else {
-                format!("{}/{}", dir, name)
-            };
-            if is_dir {
-                walk(&full, root, virtual_prefix, out)?;
-                continue;
-            }
-            let bytes = read_vfs_bytes(&full)?;
-            let path = match virtual_prefix {
-                Some(prefix) => {
-                    let rel = full.trim_start_matches(root).trim_start_matches('/');
-                    if prefix.is_empty() {
-                        rel.to_string()
-                    } else if rel.is_empty() {
-                        prefix.trim_end_matches('/').to_string()
-                    } else {
-                        format!("{}/{}", prefix.trim_end_matches('/'), rel)
-                    }
-                }
-                None => full.clone(),
-            };
-            out.push((path, bytes));
-        }
-        Ok(())
+    let js_modules = Object::new();
+    for (name, path) in &contract.js_modules {
+        let _ = Reflect::set(&js_modules, &JsValue::from_str(name), &JsValue::from_str(path));
     }
-
-    let mut files = Vec::new();
-    walk(root, root, virtual_prefix, &mut files)?;
-    Ok(files)
+    let _ = Reflect::set(&obj, &JsValue::from_str("jsModules"), &js_modules);
+    obj.into()
 }
 
 fn wasm_extension_compile_spec_to_js(spec: &WasmExtensionCompileSpec) -> JsValue {
@@ -1604,26 +988,55 @@ pub fn prepare_entry(entry_path: &str) -> js_sys::Promise {
                 );
             }
             let read_start = js_sys::Date::now();
-            let (local_fs, _context) = build_workspace_project_from_vfs(project_root)
+            let (_local_fs, context) = build_workspace_project_from_vfs(project_root)
                 .map_err(|e| JsValue::from_str(&e))?;
             log_wasm_path("prepare_entry_read_package_done", project_root, "system", Some(read_start));
-            let entry_clean = target.entry_path.trim_start_matches('/').to_string();
             let deps_start = js_sys::Date::now();
-            vo_web::ensure_vfs_deps_from_fs(&local_fs, &entry_clean)
-                .await
-                .map_err(|e| JsValue::from_str(&e))?;
-            log_wasm_path("prepare_entry_ensure_deps_done", &entry_clean, "system", Some(deps_start));
+            if context.project_deps().has_mod_file() {
+                let ready = ensure_project_deps_for_studio(context.project_deps())
+                    .await
+                    .map_err(|e| JsValue::from_str(&e))?;
+                load_ready_wasm_extensions_for_studio(&ready)
+                    .await
+                    .map_err(|e| JsValue::from_str(&e))?;
+            }
+            log_wasm_path("prepare_entry_ensure_deps_done", &target.entry_path, "system", Some(deps_start));
         } else {
             let single_file_start = js_sys::Date::now();
             let single_file = SingleFileEntry::load(&target)
                 .map_err(|e| JsValue::from_str(&e))?;
             log_wasm_path("prepare_entry_load_single_file_done", &target.entry_path, "system", Some(single_file_start));
-            for module in &single_file.external_modules {
-                let module_start = js_sys::Date::now();
-                vo_web::resolve_and_install_module(module)
-                    .await
-                    .map_err(|e| JsValue::from_str(&e))?;
-                log_wasm_module("prepare_entry_resolve_install_done", module, module_start);
+            if let Some(inline_mod) = single_file.inline_mod.as_ref() {
+                let mod_file = vo_module::ephemeral::synthesize_mod_file(inline_mod);
+                if !mod_file.require.is_empty() {
+                    write_prepared_mod_lock_for_studio(
+                        &mod_file,
+                        STUDIO_SINGLE_FILE_SYNTHETIC_LOCK_CREATED_BY,
+                        &single_file_prepared_lock_path(&single_file.entry_clean),
+                    )
+                        .await
+                        .map_err(|e| JsValue::from_str(&e))?;
+                    log_prepare_entry_resolve_install_done(mod_file.require.iter().map(|req| req.module.as_str()));
+                }
+            } else {
+                if !single_file.external_modules.is_empty() {
+                    let requests = single_file
+                        .external_modules
+                        .iter()
+                        .map(|module| {
+                            vo_module::identity::ModulePath::parse(module)
+                                .map(vo_module::async_install::ModuleLoadRequest::InstalledOrLatest)
+                                .map_err(|error| JsValue::from_str(&error.to_string()))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let ready = ensure_module_requests_for_studio(requests)
+                        .await
+                        .map_err(|e| JsValue::from_str(&e))?;
+                    load_ready_wasm_extensions_for_studio(&ready)
+                        .await
+                        .map_err(|e| JsValue::from_str(&e))?;
+                }
+                log_prepare_entry_resolve_install_done(single_file.external_modules.iter().map(|module| module.as_str()));
             }
         }
 
@@ -1938,9 +1351,8 @@ pub fn get_term_dep_modules() -> js_sys::Array {
 
 /// Install all dependencies declared in the term handler's embedded `vo.mod`.
 ///
-/// Extracts the `vo.mod` that was embedded at build time and delegates to
-/// `vo_web::ensure_vfs_deps` — the module system handles parsing, checking
-/// whether each module is already in VFS, and fetching missing ones.
+/// Extracts the embedded `vo.mod` and `vo.lock`, builds `ProjectDeps`, and
+/// ensures that dependency closure through `vo_module::async_install`.
 ///
 /// Adding a new term dependency is a one-line change to `studio/vo/term/vo.mod`.
 #[wasm_bindgen(js_name = "preloadTermDeps")]
@@ -1951,29 +1363,19 @@ pub fn preload_term_deps() -> js_sys::Promise {
         let lock_content = term_handler_vo_lock_content()
             .map_err(|e| JsValue::from_str(&e))?;
 
-        vo_web::ensure_vfs_deps(&mod_content, &lock_content)
-            .await
-            .map_err(|e| JsValue::from_str(&e))?;
+        let project_deps = vo_module::project::read_inline_project_deps(&mod_content, &lock_content, &[])
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        if project_deps.has_mod_file() {
+            let ready = ensure_project_deps_for_studio(&project_deps)
+                .await
+                .map_err(|e| JsValue::from_str(&e))?;
+            load_ready_wasm_extensions_for_studio(&ready)
+                .await
+                .map_err(|e| JsValue::from_str(&e))?;
+        }
 
         Ok(JsValue::from_str("ok"))
     })
-}
-
-/// Download a module from GitHub, write its source files to the JS VFS,
-/// and load the pre-built WASM extension (if any).
-///
-/// `spec` is `"<module>@<version>"`, e.g. `"github.com/vo-lang/zip@v0.1.0"`.
-/// Returns the VFS install path (`"/<module>"`) on success.
-/// On error the Promise is rejected with a plain string describing the failure.
-///
-/// All GitHub fetch + VFS write + ext-WASM load logic lives in `vo_web::install_module_to_vfs`.
-/// TypeScript is a thin bridge that just awaits this Promise.
-#[wasm_bindgen(js_name = "preloadModule")]
-pub fn preload_module(spec: &str) -> js_sys::Promise {
-    js_sys::Promise::reject(&JsValue::from_str(&format!(
-        "preloadModule({}) is no longer supported; declare dependencies in vo.mod and vo.lock and install them through the project dependency flow",
-        spec,
-    )))
 }
 
 /// Return a content hash of all embedded term handler source files.

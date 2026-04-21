@@ -4,6 +4,7 @@ use std::path::Path;
 use flate2::read::GzDecoder;
 use tar::Archive;
 use tempfile::TempDir;
+use vo_module::ext_manifest::DeclaredArtifactId;
 use vo_module::schema::manifest::ReleaseManifest;
 
 use crate::repo::strip_cargo_patch_sections;
@@ -21,6 +22,100 @@ fn write_basic_repo(root: &Path) {
     let lock_content = "version = 1\ncreated_by = \"vo test\"\n\n[root]\nmodule = \"github.com/acme/app\"\nvo = \"0.1.0\"\n";
     fs::write(root.join("vo.lock"), lock_content).unwrap();
     fs::write(root.join("main.vo"), "fn main() {}\n").unwrap();
+}
+
+fn stage_options(temp: &TempDir, artifacts: Vec<ArtifactInput>) -> StageReleaseOptions {
+    StageReleaseOptions {
+        version: "v0.1.0".to_string(),
+        commit: Some(TEST_COMMIT.to_string()),
+        artifacts,
+        out_dir: temp.path().join(".dist"),
+    }
+}
+
+fn write_artifact_input(
+    root: &Path,
+    kind: &str,
+    target: &str,
+    name: &str,
+    bytes: &[u8],
+) -> ArtifactInput {
+    let path = root.join(name);
+    fs::write(&path, bytes).unwrap();
+    ArtifactInput {
+        kind: kind.to_string(),
+        target: target.to_string(),
+        name: name.to_string(),
+        path,
+    }
+}
+
+fn render_include_lines(include: &[&str]) -> String {
+    if include.is_empty() {
+        return String::new();
+    }
+    let mut rendered = String::from("include = [\n");
+    for path in include {
+        rendered.push_str(&format!("  \"{}\",\n", path));
+    }
+    rendered.push_str("]\n\n");
+    rendered
+}
+
+fn standalone_wasm_manifest(name: &str, wasm: &str, include: &[&str]) -> String {
+    format!(
+        "[extension]\nname = \"{}\"\n{}[extension.wasm]\ntype = \"standalone\"\nwasm = \"{}\"\n",
+        name,
+        render_include_lines(include),
+        wasm,
+    )
+}
+
+fn bindgen_wasm_manifest(name: &str, wasm: &str, js_glue: &str, include: &[&str]) -> String {
+    format!(
+        "[extension]\nname = \"{}\"\n{}[extension.wasm]\ntype = \"bindgen\"\nwasm = \"{}\"\njs_glue = \"{}\"\n",
+        name,
+        render_include_lines(include),
+        wasm,
+        js_glue,
+    )
+}
+
+fn native_manifest(
+    name: &str,
+    include: &[&str],
+    native_path: &str,
+    native_targets: &[(&str, &str)],
+) -> String {
+    let mut rendered = format!(
+        "[extension]\nname = \"{}\"\n{}[extension.native]\npath = \"{}\"\n\n",
+        name,
+        render_include_lines(include),
+        native_path,
+    );
+    for (target, library) in native_targets {
+        rendered.push_str(&format!(
+            "[[extension.native.targets]]\ntarget = \"{}\"\nlibrary = \"{}\"\n\n",
+            target, library,
+        ));
+    }
+    rendered
+}
+
+fn bindgen_manifest(
+    name: &str,
+    include: &[&str],
+    native_path: &str,
+    native_targets: &[(&str, &str)],
+    wasm: &str,
+    js_glue: &str,
+) -> String {
+    let mut rendered = native_manifest(name, include, native_path, native_targets);
+    rendered.push_str(&format!(
+        "[extension.wasm]\ntype = \"bindgen\"\nwasm = \"{}\"\njs_glue = \"{}\"\n",
+        wasm, js_glue,
+    ));
+    rendered
 }
 
 fn source_archive_entries(path: &Path) -> Vec<String> {
@@ -114,6 +209,11 @@ artifacts = []
 fn stage_release_writes_manifest_and_artifacts() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
+    fs::write(
+        temp.path().join("vo.ext.toml"),
+        standalone_wasm_manifest("demo", "demo.wasm", &[]),
+    )
+    .unwrap();
     let artifact_path = temp.path().join("demo.wasm");
     fs::write(&artifact_path, b"wasm-bits").unwrap();
 
@@ -148,6 +248,326 @@ fn stage_release_writes_manifest_and_artifacts() {
         .artifacts
         .iter()
         .any(|a| a.id.kind == "extension-wasm" && a.id.target == "wasm32-unknown-unknown"));
+}
+
+#[test]
+fn stage_release_succeeds_for_pure_source_module_without_ext_manifest() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+
+    let staged = stage_release(temp.path(), &stage_options(&temp, Vec::new())).unwrap();
+
+    let manifest_json = fs::read_to_string(&staged.manifest_path).unwrap();
+    let manifest = ReleaseManifest::parse(&manifest_json).unwrap();
+    assert!(manifest.artifacts.is_empty());
+}
+
+#[test]
+fn stage_release_succeeds_when_all_declared_artifacts_are_present() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    fs::write(
+        temp.path().join("vo.ext.toml"),
+        bindgen_manifest(
+            "demo",
+            &[],
+            "rust/target/{profile}/libdemo",
+            &[
+                ("aarch64-apple-darwin", "libdemo.dylib"),
+                ("x86_64-unknown-linux-gnu", "libdemo.so"),
+            ],
+            "demo.wasm",
+            "demo.js",
+        ),
+    )
+    .unwrap();
+
+    let staged = stage_release(
+        temp.path(),
+        &stage_options(
+            &temp,
+            vec![
+                write_artifact_input(
+                    temp.path(),
+                    "extension-native",
+                    "aarch64-apple-darwin",
+                    "libdemo.dylib",
+                    b"mac-native",
+                ),
+                write_artifact_input(
+                    temp.path(),
+                    "extension-native",
+                    "x86_64-unknown-linux-gnu",
+                    "libdemo.so",
+                    b"linux-native",
+                ),
+                write_artifact_input(
+                    temp.path(),
+                    "extension-wasm",
+                    "wasm32-unknown-unknown",
+                    "demo.wasm",
+                    b"wasm-bits",
+                ),
+                write_artifact_input(
+                    temp.path(),
+                    "extension-js-glue",
+                    "wasm32-unknown-unknown",
+                    "demo.js",
+                    b"js-bits",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+
+    let manifest_json = fs::read_to_string(&staged.manifest_path).unwrap();
+    let manifest = ReleaseManifest::parse(&manifest_json).unwrap();
+    assert_eq!(manifest.artifacts.len(), 4);
+}
+
+#[test]
+fn stage_release_rejects_missing_declared_native_artifact() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    fs::write(
+        temp.path().join("vo.ext.toml"),
+        native_manifest(
+            "demo",
+            &[],
+            "rust/target/{profile}/libdemo",
+            &[
+                ("aarch64-apple-darwin", "libdemo.dylib"),
+                ("x86_64-unknown-linux-gnu", "libdemo.so"),
+            ],
+        ),
+    )
+    .unwrap();
+
+    let err = stage_release(
+        temp.path(),
+        &stage_options(
+            &temp,
+            vec![write_artifact_input(
+                temp.path(),
+                "extension-native",
+                "aarch64-apple-darwin",
+                "libdemo.dylib",
+                b"mac-native",
+            )],
+        ),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ReleaseError::ArtifactContractViolation {
+            ref missing,
+            ref undeclared,
+            ..
+        } if missing == &vec![DeclaredArtifactId {
+            kind: "extension-native".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            name: "libdemo.so".to_string(),
+        }] && undeclared.is_empty()
+    ));
+}
+
+#[test]
+fn stage_release_rejects_missing_declared_wasm_artifact() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    fs::write(
+        temp.path().join("vo.ext.toml"),
+        standalone_wasm_manifest("demo", "demo.wasm", &[]),
+    )
+    .unwrap();
+
+    let err = stage_release(temp.path(), &stage_options(&temp, Vec::new())).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ReleaseError::ArtifactContractViolation {
+            ref missing,
+            ref undeclared,
+            ..
+        } if missing == &vec![DeclaredArtifactId {
+            kind: "extension-wasm".to_string(),
+            target: "wasm32-unknown-unknown".to_string(),
+            name: "demo.wasm".to_string(),
+        }] && undeclared.is_empty()
+    ));
+}
+
+#[test]
+fn stage_release_rejects_undeclared_artifact() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    fs::write(
+        temp.path().join("vo.ext.toml"),
+        standalone_wasm_manifest("demo", "demo.wasm", &[]),
+    )
+    .unwrap();
+
+    let err = stage_release(
+        temp.path(),
+        &stage_options(
+            &temp,
+            vec![
+                write_artifact_input(
+                    temp.path(),
+                    "extension-wasm",
+                    "wasm32-unknown-unknown",
+                    "demo.wasm",
+                    b"wasm-bits",
+                ),
+                write_artifact_input(
+                    temp.path(),
+                    "extension-native",
+                    "aarch64-apple-darwin",
+                    "libdemo.dylib",
+                    b"mac-native",
+                ),
+            ],
+        ),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ReleaseError::ArtifactContractViolation {
+            ref missing,
+            ref undeclared,
+            ..
+        } if missing.is_empty() && undeclared == &vec![DeclaredArtifactId {
+            kind: "extension-native".to_string(),
+            target: "aarch64-apple-darwin".to_string(),
+            name: "libdemo.dylib".to_string(),
+        }]
+    ));
+}
+
+#[test]
+fn stage_release_rejects_artifacts_without_ext_manifest() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+
+    let err = stage_release(
+        temp.path(),
+        &stage_options(
+            &temp,
+            vec![write_artifact_input(
+                temp.path(),
+                "extension-wasm",
+                "wasm32-unknown-unknown",
+                "demo.wasm",
+                b"wasm-bits",
+            )],
+        ),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ReleaseError::ArtifactContractViolation {
+            manifest_path: None,
+            ref missing,
+            ref undeclared,
+        } if missing.is_empty() && undeclared == &vec![DeclaredArtifactId {
+            kind: "extension-wasm".to_string(),
+            target: "wasm32-unknown-unknown".to_string(),
+            name: "demo.wasm".to_string(),
+        }]
+    ));
+}
+
+#[test]
+fn stage_release_rejects_legacy_ext_manifest_schema() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    fs::write(
+        temp.path().join("vo.ext.toml"),
+        concat!(
+            "[extension]\n",
+            "name = \"demo\"\n",
+            "path = \"rust/target/{profile}/libdemo\"\n",
+        ),
+    )
+    .unwrap();
+
+    let err = stage_release(
+        temp.path(),
+        &stage_options(
+            &temp,
+            vec![write_artifact_input(
+                temp.path(),
+                "extension-native",
+                "aarch64-apple-darwin",
+                "libdemo.dylib",
+                b"mac-native",
+            )],
+        ),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ReleaseError::Module(ref message) if message.contains("[extension].path is invalid")
+    ));
+}
+
+#[test]
+fn stage_release_rejects_bindgen_wasm_missing_js_glue_artifact() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    fs::write(
+        temp.path().join("vo.ext.toml"),
+        bindgen_manifest(
+            "demo",
+            &[],
+            "rust/target/{profile}/libdemo",
+            &[("aarch64-apple-darwin", "libdemo.dylib")],
+            "demo.wasm",
+            "demo.js",
+        ),
+    )
+    .unwrap();
+
+    let err = stage_release(
+        temp.path(),
+        &stage_options(
+            &temp,
+            vec![
+                write_artifact_input(
+                    temp.path(),
+                    "extension-native",
+                    "aarch64-apple-darwin",
+                    "libdemo.dylib",
+                    b"mac-native",
+                ),
+                write_artifact_input(
+                    temp.path(),
+                    "extension-wasm",
+                    "wasm32-unknown-unknown",
+                    "demo.wasm",
+                    b"wasm-bits",
+                ),
+            ],
+        ),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ReleaseError::ArtifactContractViolation {
+            ref missing,
+            ref undeclared,
+            ..
+        } if missing == &vec![DeclaredArtifactId {
+            kind: "extension-js-glue".to_string(),
+            target: "wasm32-unknown-unknown".to_string(),
+            name: "demo.js".to_string(),
+        }] && undeclared.is_empty()
+    ));
 }
 
 #[test]
@@ -188,6 +608,11 @@ deps = []
     )
     .unwrap();
     fs::write(temp.path().join("main.vo"), "fn main() {}\n").unwrap();
+    fs::write(
+        temp.path().join("vo.ext.toml"),
+        bindgen_wasm_manifest("demo", "z-demo.wasm", "a-demo.js", &[]),
+    )
+    .unwrap();
 
     let wasm_artifact_path = temp.path().join("z-demo.wasm");
     let js_artifact_path = temp.path().join("a-demo.js");
@@ -238,18 +663,13 @@ fn stage_release_includes_declared_include_files_from_dist_dirs() {
     write_basic_repo(temp.path());
     fs::write(
         temp.path().join("vo.ext.toml"),
-        concat!(
-            "[extension]\n",
-            "name = \"demo\"\n",
-            "include = [\n",
-            "  \"js/dist/studio_renderer.js\",\n",
-            "  \"js/dist/studio_host_bridge.js\",\n",
-            "]\n\n",
-            "[extension.native]\n",
-            "path = \"rust/target/{profile}/libdemo\"\n\n",
-            "[[extension.native.targets]]\n",
-            "target = \"aarch64-apple-darwin\"\n",
-            "library = \"libdemo.dylib\"\n",
+        standalone_wasm_manifest(
+            "demo",
+            "demo.wasm",
+            &[
+                "js/dist/studio_renderer.js",
+                "js/dist/studio_host_bridge.js",
+            ],
         ),
     )
     .unwrap();
@@ -267,12 +687,16 @@ fn stage_release_includes_declared_include_files_from_dist_dirs() {
 
     let staged = stage_release(
         temp.path(),
-        &StageReleaseOptions {
-            version: "v0.1.0".to_string(),
-            commit: Some(TEST_COMMIT.to_string()),
-            artifacts: Vec::new(),
-            out_dir: temp.path().join(".dist"),
-        },
+        &stage_options(
+            &temp,
+            vec![write_artifact_input(
+                temp.path(),
+                "extension-wasm",
+                "wasm32-unknown-unknown",
+                "demo.wasm",
+                b"wasm-bits",
+            )],
+        ),
     )
     .unwrap();
 
@@ -292,18 +716,7 @@ fn stage_release_includes_declared_include_directories_recursively() {
     write_basic_repo(temp.path());
     fs::write(
         temp.path().join("vo.ext.toml"),
-        concat!(
-            "[extension]\n",
-            "name = \"demo\"\n",
-            "include = [\n",
-            "  \"js/dist\",\n",
-            "]\n\n",
-            "[extension.native]\n",
-            "path = \"rust/target/{profile}/libdemo\"\n\n",
-            "[[extension.native.targets]]\n",
-            "target = \"aarch64-apple-darwin\"\n",
-            "library = \"libdemo.dylib\"\n",
-        ),
+        standalone_wasm_manifest("demo", "demo.wasm", &["js/dist"]),
     )
     .unwrap();
     fs::create_dir_all(temp.path().join("js/dist/nested")).unwrap();
@@ -325,12 +738,16 @@ fn stage_release_includes_declared_include_directories_recursively() {
 
     let staged = stage_release(
         temp.path(),
-        &StageReleaseOptions {
-            version: "v0.1.0".to_string(),
-            commit: Some(TEST_COMMIT.to_string()),
-            artifacts: Vec::new(),
-            out_dir: temp.path().join(".dist"),
-        },
+        &stage_options(
+            &temp,
+            vec![write_artifact_input(
+                temp.path(),
+                "extension-wasm",
+                "wasm32-unknown-unknown",
+                "demo.wasm",
+                b"wasm-bits",
+            )],
+        ),
     )
     .unwrap();
 
@@ -352,27 +769,22 @@ fn stage_release_fails_when_declared_include_file_is_missing() {
     write_basic_repo(temp.path());
     fs::write(
         temp.path().join("vo.ext.toml"),
-        concat!(
-            "[extension]\n",
-            "name = \"demo\"\n",
-            "include = [\"js/dist/studio_renderer.js\"]\n\n",
-            "[extension.native]\n",
-            "path = \"rust/target/{profile}/libdemo\"\n\n",
-            "[[extension.native.targets]]\n",
-            "target = \"aarch64-apple-darwin\"\n",
-            "library = \"libdemo.dylib\"\n",
-        ),
+        standalone_wasm_manifest("demo", "demo.wasm", &["js/dist/studio_renderer.js"]),
     )
     .unwrap();
 
     let err = stage_release(
         temp.path(),
-        &StageReleaseOptions {
-            version: "v0.1.0".to_string(),
-            commit: Some(TEST_COMMIT.to_string()),
-            artifacts: Vec::new(),
-            out_dir: temp.path().join(".dist"),
-        },
+        &stage_options(
+            &temp,
+            vec![write_artifact_input(
+                temp.path(),
+                "extension-wasm",
+                "wasm32-unknown-unknown",
+                "demo.wasm",
+                b"wasm-bits",
+            )],
+        ),
     )
     .unwrap_err();
 

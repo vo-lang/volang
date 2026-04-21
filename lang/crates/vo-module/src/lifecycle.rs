@@ -1,136 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 
-use vo_common::vfs::{FileSystem, RealFs};
-
 use crate::identity::ModulePath;
 use crate::registry::Registry;
-use crate::schema::lockfile::{LockFile, LockedModule};
+use crate::schema::lockfile::LockFile;
 use crate::schema::modfile::ModFile;
 use crate::solver::{self, ResolvedGraph, SolvePreferences};
 use crate::version::{ExactVersion, ToolchainConstraint};
 use crate::Error;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModuleSelection {
-    pub module: ModulePath,
-    pub version: ExactVersion,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LockedDependencyState {
-    pub module: String,
-    pub version: String,
-    pub cached: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct ProjectLockedDependencyPlan {
-    pub project_deps: crate::project::ProjectDeps,
-    pub dependency_state: Vec<LockedDependencyState>,
-}
-
-impl ModuleSelection {
-    pub fn new(module: ModulePath, version: ExactVersion) -> Self {
-        Self { module, version }
-    }
-
-    pub fn parse(module: &str, version: &str) -> Result<Self, Error> {
-        Ok(Self::new(
-            ModulePath::parse(module)?,
-            ExactVersion::parse(version)?,
-        ))
-    }
-
-    pub fn from_locked_module(locked: &LockedModule) -> Self {
-        Self::new(locked.path.clone(), locked.version.clone())
-    }
-
-    pub fn spec(&self) -> String {
-        format!("{}@{}", self.module.as_str(), self.version)
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct ModuleSelectionPlanner {
-    stack: Vec<ModuleSelection>,
-    visited: BTreeSet<String>,
-    selected_versions: BTreeMap<String, String>,
-}
-
-impl ModuleSelectionPlanner {
-    pub fn new(initial: Vec<ModuleSelection>) -> Result<Self, Error> {
-        let mut planner = Self::default();
-        planner.push_all(initial)?;
-        Ok(planner)
-    }
-
-    pub fn push_all<I>(&mut self, selections: I) -> Result<(), Error>
-    where
-        I: IntoIterator<Item = ModuleSelection>,
-    {
-        for selection in selections {
-            remember_selected_version(&mut self.selected_versions, &selection)?;
-            self.stack.push(selection);
-        }
-        Ok(())
-    }
-}
-
-impl Iterator for ModuleSelectionPlanner {
-    type Item = ModuleSelection;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some(selection) = self.stack.pop() {
-            if self.visited.insert(selection.spec()) {
-                return Some(selection);
-            }
-        }
-        None
-    }
-}
-
-pub fn locked_module_selections(locked_modules: &[LockedModule]) -> Vec<ModuleSelection> {
-    locked_modules
-        .iter()
-        .map(ModuleSelection::from_locked_module)
-        .collect()
-}
-
-pub fn plan_locked_dependencies<F: FileSystem>(
-    cache_fs: &F,
-    locked_modules: &[LockedModule],
-) -> Vec<LockedDependencyState> {
-    locked_modules
-        .iter()
-        .map(|locked| LockedDependencyState {
-            module: locked.path.as_str().to_string(),
-            version: locked.version.to_string(),
-            cached: locked_module_fully_cached(cache_fs, locked),
-        })
-        .collect()
-}
-
-pub fn plan_locked_dependencies_in(
-    cache_root: &Path,
-    locked_modules: &[LockedModule],
-) -> Vec<LockedDependencyState> {
-    plan_locked_dependencies(&RealFs::new(cache_root), locked_modules)
-}
-
-pub fn load_project_locked_dependency_plan(
-    project_root: &Path,
-    cache_root: &Path,
-) -> Result<ProjectLockedDependencyPlan, crate::project::ProjectDepsError> {
-    let project_deps =
-        crate::project::load_project_context(&RealFs::new("."), project_root)?.project_deps;
-    let dependency_state = plan_locked_dependencies_in(cache_root, project_deps.locked_modules());
-    Ok(ProjectLockedDependencyPlan {
-        project_deps,
-        dependency_state,
-    })
-}
 
 pub fn download_locked_dependencies(
     cache_root: &Path,
@@ -140,7 +18,7 @@ pub fn download_locked_dependencies(
     crate::cache::install::populate_locked_cache(cache_root, lock_file, registry)
 }
 
-pub fn prepare_lock_file(
+pub(crate) fn prepare_lock_file(
     mod_file: &ModFile,
     registry: &dyn Registry,
     prefs: &SolvePreferences,
@@ -156,7 +34,7 @@ pub fn prepare_lock_file(
     )?))
 }
 
-pub fn verify_locked_dependencies(
+pub(crate) fn verify_locked_dependencies(
     cache_root: &Path,
     mod_file: &ModFile,
     lock_file: &LockFile,
@@ -171,7 +49,7 @@ pub fn verify_locked_dependencies(
     crate::cache::install::verify_locked_cache(cache_root, lock_file)
 }
 
-pub fn latest_supported_requirement_version(
+pub(crate) fn latest_supported_requirement_version(
     project_vo: &ToolchainConstraint,
     module: &ModulePath,
     registry: &dyn Registry,
@@ -209,7 +87,10 @@ pub fn latest_supported_requirement_version(
     })
 }
 
-pub fn infer_module_path(import_path: &str, registry: &dyn Registry) -> Result<ModulePath, Error> {
+pub(crate) fn infer_module_path(
+    import_path: &str,
+    registry: &dyn Registry,
+) -> Result<ModulePath, Error> {
     let segments: Vec<&str> = import_path.split('/').collect();
     if segments.len() < 3 {
         return Err(Error::InvalidImportPath(format!(
@@ -245,7 +126,7 @@ pub fn infer_module_path(import_path: &str, registry: &dyn Registry) -> Result<M
     })
 }
 
-pub fn clean_cache(cache_root: &Path, lock_file: Option<&LockFile>) -> Result<u64, Error> {
+pub(crate) fn clean_cache(cache_root: &Path, lock_file: Option<&LockFile>) -> Result<u64, Error> {
     if !cache_root.exists() {
         return Ok(0);
     }
@@ -306,231 +187,11 @@ fn solve_from_requirements(
     registry: &dyn Registry,
     prefs: &SolvePreferences,
 ) -> Result<ResolvedGraph, Error> {
-    solver::solve(&mod_file.module, &mod_file.vo, reqs, registry, prefs)
-}
-
-pub fn normalize_locked_modules(
-    locked_modules: Vec<LockedModule>,
-) -> Result<Vec<LockedModule>, Error> {
-    let mut selected_versions = BTreeMap::new();
-    let mut visited = BTreeSet::new();
-    let mut normalized = Vec::new();
-
-    for locked in locked_modules {
-        let selection = ModuleSelection::from_locked_module(&locked);
-        remember_selected_version(&mut selected_versions, &selection)?;
-        if !visited.insert(selection.spec()) {
-            continue;
-        }
-        normalized.push(locked);
-    }
-
-    Ok(normalized)
-}
-
-pub fn walk_module_selection_closure<F>(
-    initial: Vec<ModuleSelection>,
-    mut dependencies_of: F,
-) -> Result<Vec<ModuleSelection>, Error>
-where
-    F: FnMut(&ModuleSelection) -> Result<Vec<ModuleSelection>, Error>,
-{
-    let mut planner = ModuleSelectionPlanner::new(initial)?;
-    let mut resolved = Vec::new();
-
-    loop {
-        let Some(selection) = planner.next() else {
-            break;
-        };
-        let deps = dependencies_of(&selection)?;
-        planner.push_all(deps)?;
-        resolved.push(selection);
-    }
-
-    Ok(resolved)
-}
-
-fn remember_selected_version(
-    selected_versions: &mut BTreeMap<String, String>,
-    selection: &ModuleSelection,
-) -> Result<(), Error> {
-    let module = selection.module.as_str();
-    let version = selection.version.to_string();
-    match selected_versions.get(module) {
-        Some(existing) if existing != &version => Err(Error::SelectedVersionConflict {
-            module: module.to_string(),
-            existing: existing.clone(),
-            requested: version,
-        }),
-        Some(_) => Ok(()),
-        None => {
-            selected_versions.insert(module.to_string(), version);
-            Ok(())
-        }
-    }
-}
-
-fn locked_module_fully_cached<F: FileSystem>(cache_fs: &F, locked: &LockedModule) -> bool {
-    let module_dir =
-        crate::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
-    if crate::cache::validate::validate_installed_module(cache_fs, &module_dir, locked).is_err() {
-        return false;
-    }
-    locked.artifacts.iter().all(|artifact| {
-        let artifact_path = module_dir.join("artifacts").join(&artifact.id.name);
-        crate::cache::validate::validate_installed_artifact(
-            cache_fs,
-            &artifact_path,
-            locked,
-            artifact,
-        )
-        .is_ok()
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::digest::Digest;
-    use crate::schema::lockfile::LockedModule;
-    use crate::version::ToolchainConstraint;
-    use vo_common::vfs::MemoryFs;
-
-    fn selection(module: &str, version: &str) -> ModuleSelection {
-        ModuleSelection::parse(module, version).unwrap()
-    }
-
-    fn locked(module: &str, version: &str) -> LockedModule {
-        LockedModule {
-            path: ModulePath::parse(module).unwrap(),
-            version: ExactVersion::parse(version).unwrap(),
-            vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
-            commit: "1111111111111111111111111111111111111111".to_string(),
-            release_manifest: Digest::parse(
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            )
-            .unwrap(),
-            source: Digest::parse(
-                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            )
-            .unwrap(),
-            deps: Vec::new(),
-            artifacts: Vec::new(),
-        }
-    }
-
-    fn locked_cached(
-        module: &str,
-        version: &str,
-        manifest_raw: &[u8],
-        source_raw: &[u8],
-    ) -> LockedModule {
-        LockedModule {
-            path: ModulePath::parse(module).unwrap(),
-            version: ExactVersion::parse(version).unwrap(),
-            vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
-            commit: "2222222222222222222222222222222222222222".to_string(),
-            release_manifest: Digest::from_sha256(manifest_raw),
-            source: Digest::from_sha256(source_raw),
-            deps: Vec::new(),
-            artifacts: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn test_normalize_locked_modules_rejects_conflicting_versions() {
-        let err = normalize_locked_modules(vec![
-            locked("github.com/acme/lib", "v1.0.0"),
-            locked("github.com/acme/lib", "v2.0.0"),
-        ])
-        .unwrap_err();
-
-        assert!(matches!(err, Error::SelectedVersionConflict { .. }));
-    }
-
-    #[test]
-    fn test_walk_module_selection_closure_dedupes_revisited_modules() {
-        let resolved = walk_module_selection_closure(
-            vec![selection("github.com/acme/app", "v1.0.0")],
-            |current| match current.module.as_str() {
-                "github.com/acme/app" => Ok(vec![
-                    selection("github.com/acme/lib", "v1.0.0"),
-                    selection("github.com/acme/util", "v1.0.0"),
-                ]),
-                "github.com/acme/lib" => Ok(vec![selection("github.com/acme/util", "v1.0.0")]),
-                _ => Ok(Vec::new()),
-            },
-        )
-        .unwrap();
-
-        let specs = resolved
-            .into_iter()
-            .map(|selection| selection.spec())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            specs,
-            vec![
-                "github.com/acme/app@v1.0.0",
-                "github.com/acme/util@v1.0.0",
-                "github.com/acme/lib@v1.0.0",
-            ]
-        );
-    }
-
-    #[test]
-    fn test_walk_module_selection_closure_rejects_conflicting_versions() {
-        let err = walk_module_selection_closure(
-            vec![selection("github.com/acme/app", "v1.0.0")],
-            |current| match current.module.as_str() {
-                "github.com/acme/app" => Ok(vec![
-                    selection("github.com/acme/lib", "v1.0.0"),
-                    selection("github.com/acme/lib", "v2.0.0"),
-                ]),
-                _ => Ok(Vec::new()),
-            },
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, Error::SelectedVersionConflict { .. }));
-    }
-
-    #[test]
-    fn test_plan_locked_dependencies_reports_uncached_module() {
-        let locked = locked("github.com/acme/lib", "v1.0.0");
-        let planned = plan_locked_dependencies(&MemoryFs::new(), std::slice::from_ref(&locked));
-        assert_eq!(planned.len(), 1);
-        assert_eq!(planned[0].module, "github.com/acme/lib");
-        assert_eq!(planned[0].version, "v1.0.0");
-        assert!(!planned[0].cached);
-    }
-
-    #[test]
-    fn test_plan_locked_dependencies_reports_cached_module() {
-        let manifest_raw = br#"{"schema_version":1}"#;
-        let source_raw = b"source-package";
-        let locked = locked_cached("github.com/acme/lib", "v1.0.0", manifest_raw, source_raw);
-        let module_dir =
-            crate::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
-        let mut fs = MemoryFs::new();
-        fs.add_file(
-            module_dir.join("vo.mod"),
-            format!("module {}\nvo {}\n", locked.path, locked.vo),
-        );
-        fs.add_file(
-            module_dir.join(crate::cache::layout::VERSION_MARKER),
-            format!("{}\n", locked.version),
-        );
-        fs.add_file(
-            module_dir.join(crate::cache::layout::SOURCE_DIGEST_MARKER),
-            format!("{}\n", locked.source),
-        );
-        fs.add_file(
-            module_dir.join("vo.release.json"),
-            String::from_utf8(manifest_raw.to_vec()).unwrap(),
-        );
-
-        let planned = plan_locked_dependencies(&fs, std::slice::from_ref(&locked));
-        assert_eq!(planned.len(), 1);
-        assert!(planned[0].cached);
-    }
+    solver::solve(
+        mod_file.module.as_str(),
+        &mod_file.vo,
+        reqs,
+        registry,
+        prefs,
+    )
 }

@@ -1321,11 +1321,10 @@ name = "vo-web"
 version = "0.1.1"
 dependencies = [
  "console_error_panic_hook",
- "flate2",
  "include_dir",
  "js-sys",
  "serde_json",
- "tar",
+ "toml",
  "vo-analysis",
  "vo-codegen",
  "vo-common",

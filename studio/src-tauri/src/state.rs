@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vo_app_runtime::SyncRenderBuffer;
-use vo_engine::PreparedNativeExtension;
+use vo_web::BrowserRuntimePlan;
 
 use crate::commands::pathing::is_module_root;
 use crate::gui_runtime::GuestHandle;
@@ -162,7 +162,7 @@ pub struct AppState {
     console_run: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     gui_session_id: AtomicU64,
     guest_runtime: Mutex<Option<GuestRuntime>>,
-    last_extensions: Mutex<Vec<PreparedNativeExtension>>,
+    last_browser_runtime: Mutex<Option<BrowserRuntimePlan>>,
 }
 
 impl AppState {
@@ -178,7 +178,7 @@ impl AppState {
             console_run: Arc::new(Mutex::new(None)),
             gui_session_id: AtomicU64::new(0),
             guest_runtime: Mutex::new(None),
-            last_extensions: Mutex::new(Vec::new()),
+            last_browser_runtime: Mutex::new(None),
             workspace_root,
             launch,
         }
@@ -242,17 +242,17 @@ impl AppState {
         *self.guest_runtime.lock().unwrap() = Some(GuestRuntime { handle: guest, render_buffer });
     }
 
-    pub fn set_last_extensions(&self, extensions: Vec<PreparedNativeExtension>) {
-        *self.last_extensions.lock().unwrap() = extensions;
+    pub fn set_last_browser_runtime(&self, runtime: BrowserRuntimePlan) {
+        *self.last_browser_runtime.lock().unwrap() = Some(runtime);
     }
 
-    pub fn last_extensions(&self) -> Vec<PreparedNativeExtension> {
-        self.last_extensions.lock().unwrap().clone()
+    pub fn last_browser_runtime(&self) -> Option<BrowserRuntimePlan> {
+        self.last_browser_runtime.lock().unwrap().clone()
     }
 
     pub fn clear_guest_runtime(&self) {
         let _ = self.guest_runtime.lock().unwrap().take();
-        self.last_extensions.lock().unwrap().clear();
+        *self.last_browser_runtime.lock().unwrap() = None;
     }
 
     pub fn with_guest<R>(&self, f: impl FnOnce(&GuestHandle) -> Result<R, String>) -> Result<R, String> {

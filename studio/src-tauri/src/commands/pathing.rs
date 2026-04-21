@@ -3,6 +3,8 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 
+use vo_common::vfs::RealFs;
+use vo_module::identity::ModIdentity;
 use vo_module::project;
 use vo_module::schema::workfile::WorkFile;
 
@@ -239,7 +241,7 @@ fn materialize_workspace_context(source_root: &Path, materialized_root: &Path) -
         .map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
     let workfile_dir = workfile_path.parent().unwrap_or(source_root);
     let root_module = try_read_workspace_root_module(source_root);
-    vo_module::workspace::resolve_validated_overrides(&workfile, workfile_dir, root_module.as_ref())
+    vo_module::workspace::load_workspace_overrides_in(&RealFs::new("."), source_root, root_module.as_ref())
         .map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
     for entry in &mut workfile.uses {
         let resolved = resolve_workspace_use_path(workfile_dir, &entry.path);
@@ -259,7 +261,7 @@ fn resolve_workspace_use_path(base: &Path, raw_path: &str) -> PathBuf {
     }
 }
 
-fn try_read_workspace_root_module(source_root: &Path) -> Option<vo_module::identity::ModulePath> {
+fn try_read_workspace_root_module(source_root: &Path) -> Option<ModIdentity> {
     project::read_mod_file(source_root).ok().map(|mod_file| mod_file.module)
 }
 

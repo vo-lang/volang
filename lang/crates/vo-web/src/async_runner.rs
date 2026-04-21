@@ -10,10 +10,10 @@ use core::cell::Cell;
 use vo_vm::vm::SchedulingOutcome;
 use wasm_bindgen::prelude::*;
 
-#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
-use crate::js_types::make_run_result_js;
 use crate::js_types::make_run_result_obj;
-use crate::vm::{register_wasm_runtime_externs, ExternRegistrar, Module};
+use crate::vm::register_wasm_runtime_externs;
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
+use crate::vm::{ExternRegistrar, Module};
 
 // ── Outcome helpers ─────────────────────────────────────────────────────────
 
@@ -144,6 +144,7 @@ async fn run_vm_async(bytecode: &[u8]) -> (String, String, String) {
 /// This is the WASM equivalent of `create_vm_from_module` but uses the full
 /// async event loop so WaitIo/Sleep/HTTP work correctly.
 /// Returns `(status, stdout, stderr)`.
+#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub async fn run_bytecode_async_with_externs(
     bytecode: &[u8],
     extra_reg: ExternRegistrar,
@@ -292,7 +293,7 @@ pub fn compile_and_run_with_modules(source: &str) -> js_sys::Promise {
     let source = source.to_string();
     wasm_bindgen_futures::future_to_promise(async move {
         let (status, stdout, stderr) = run_with_modules_inner(&source).await;
-        Ok(make_run_result_js(&status, &stdout, &stderr))
+        Ok(make_run_result_obj(&status, &stdout, &stderr))
     })
 }
 

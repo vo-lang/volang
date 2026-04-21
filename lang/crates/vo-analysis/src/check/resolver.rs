@@ -6,13 +6,14 @@
 use std::collections::HashSet;
 
 use vo_common::span::Span;
+use vo_module::identity;
 use vo_syntax::ast::{Decl, Expr, FuncDecl, TypeExpr};
 
 use crate::objects::{ObjKey, PackageKey, ScopeKey};
 
 use super::checker::Checker;
 use super::errors::TypeError;
-use crate::importer::{validate_import_path, Importer};
+use crate::importer::Importer;
 
 /// DeclInfo for const declarations.
 #[derive(Debug, Clone)]
@@ -592,16 +593,11 @@ impl Checker {
         }
     }
 
-    /// Validates an import path.
-    fn valid_import_path<'a>(&self, path: &'a str) -> Result<&'a str, String> {
-        validate_import_path(path)
-    }
-
     /// Imports a package (fallback when no importer is available).
     /// First tries to find an already loaded package, then creates empty package.
     fn import_package(&mut self, path: &str, span: Span) -> PackageKey {
         // Validate import path
-        if let Err(e) = self.valid_import_path(path) {
+        if let Err(e) = identity::classify_import(path) {
             self.error_code_msg(
                 TypeError::InvalidImportPath,
                 span,

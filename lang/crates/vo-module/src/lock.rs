@@ -1,4 +1,7 @@
+use std::collections::BTreeSet;
+
 use crate::digest::Digest;
+use crate::ext_manifest::{DeclaredArtifactId, ExtensionManifest};
 use crate::identity::ModulePath;
 use crate::schema::lockfile::{LockFile, LockRoot, LockedArtifact, LockedModule};
 use crate::schema::manifest::ReleaseManifest;
@@ -26,11 +29,73 @@ fn manifest_artifacts(manifest: &ReleaseManifest) -> Vec<LockedArtifact> {
     artifacts
 }
 
+fn manifest_declared_artifact_ids(manifest: &ReleaseManifest) -> Vec<DeclaredArtifactId> {
+    let mut artifacts = manifest
+        .artifacts
+        .iter()
+        .map(|artifact| DeclaredArtifactId {
+            kind: artifact.id.kind.clone(),
+            target: artifact.id.target.clone(),
+            name: artifact.id.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    artifacts.sort();
+    artifacts
+}
+
 fn format_deps(deps: &[ModulePath]) -> String {
     deps.iter()
         .map(|dep| dep.as_str().to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn format_declared_artifacts(artifacts: &[DeclaredArtifactId]) -> String {
+    artifacts
+        .iter()
+        .map(|artifact| format!("{} {} {}", artifact.kind, artifact.target, artifact.name,))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub(crate) fn validate_extension_manifest_against_release_manifest(
+    ext_manifest: Option<&ExtensionManifest>,
+    manifest: &ReleaseManifest,
+) -> Result<(), Error> {
+    let declared = ext_manifest
+        .map(ExtensionManifest::declared_artifact_ids)
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let published = manifest_declared_artifact_ids(manifest)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+    let missing = declared.difference(&published).cloned().collect::<Vec<_>>();
+    let undeclared = published.difference(&declared).cloned().collect::<Vec<_>>();
+    if missing.is_empty() && undeclared.is_empty() {
+        return Ok(());
+    }
+
+    let mut detail = Vec::new();
+    if !missing.is_empty() {
+        detail.push(format!(
+            "missing declared artifacts [{}]",
+            format_declared_artifacts(&missing)
+        ));
+    }
+    if !undeclared.is_empty() {
+        detail.push(format!(
+            "undeclared published artifacts [{}]",
+            format_declared_artifacts(&undeclared)
+        ));
+    }
+    Err(Error::InvalidReleaseMetadata(format!(
+        "artifact contract mismatch for {}@{} between packaged vo.ext.toml and vo.release.json: {}",
+        manifest.module,
+        manifest.version,
+        detail.join("; "),
+    )))
 }
 
 fn format_artifacts(artifacts: &[LockedArtifact]) -> String {
@@ -50,7 +115,7 @@ fn format_artifacts(artifacts: &[LockedArtifact]) -> String {
         .join(", ")
 }
 
-pub fn locked_module_from_release_manifest(
+fn locked_module_from_release_manifest(
     manifest: &ReleaseManifest,
     manifest_digest: Digest,
 ) -> LockedModule {
@@ -66,26 +131,11 @@ pub fn locked_module_from_release_manifest(
     }
 }
 
-pub fn locked_module_from_manifest_raw(
+pub(crate) fn locked_module_from_manifest_raw(
     manifest: &ReleaseManifest,
     manifest_raw: &[u8],
 ) -> LockedModule {
     locked_module_from_release_manifest(manifest, Digest::from_sha256(manifest_raw))
-}
-
-pub fn locked_module_from_requested_manifest_raw(
-    manifest_raw: &[u8],
-    module: &str,
-    version: &str,
-) -> Result<LockedModule, Error> {
-    let manifest_content = std::str::from_utf8(manifest_raw)
-        .map_err(|error| Error::ManifestParse(format!("vo.release.json utf-8 error: {error}")))?;
-    let manifest = crate::registry::parse_requested_release_manifest_for_spec(
-        module,
-        version,
-        manifest_content,
-    )?;
-    Ok(locked_module_from_manifest_raw(&manifest, manifest_raw))
 }
 
 pub fn validate_locked_module_against_manifest(
@@ -178,7 +228,7 @@ pub fn validate_locked_module_against_manifest(
 }
 
 /// Generate a `vo.lock` from a resolved graph and the root module file.
-pub fn generate_lock(
+pub(crate) fn generate_lock(
     root_mod: &ModFile,
     graph: &ResolvedGraph,
     created_by: &str,
@@ -208,7 +258,10 @@ pub fn generate_lock(
 
 /// Verify that root `vo.mod` and root `vo.lock` are consistent.
 /// Per spec §12.1: root.module and root.vo MUST exactly match.
-pub fn verify_root_consistency(mod_file: &ModFile, lock_file: &LockFile) -> Result<(), Error> {
+pub(crate) fn verify_root_consistency(
+    mod_file: &ModFile,
+    lock_file: &LockFile,
+) -> Result<(), Error> {
     if mod_file.module != lock_file.root.module {
         return Err(Error::RootMismatch {
             field: "module".to_string(),
@@ -228,7 +281,7 @@ pub fn verify_root_consistency(mod_file: &ModFile, lock_file: &LockFile) -> Resu
 
 /// Verify that all direct requirements in `vo.mod` are present in `vo.lock`,
 /// and that no orphaned modules remain.
-pub fn verify_graph_completeness(
+pub(crate) fn verify_graph_completeness(
     mod_file: &ModFile,
     lock_file: &LockFile,
     excluded_modules: &[String],
@@ -294,6 +347,9 @@ pub fn verify_graph_completeness(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use crate::ext_manifest::parse_ext_manifest_content;
 
     fn sample_manifest() -> ReleaseManifest {
         ReleaseManifest::parse(
@@ -322,6 +378,21 @@ mod tests {
     }
   ]
 }"#,
+        )
+        .unwrap()
+    }
+
+    fn sample_bindgen_ext_manifest() -> ExtensionManifest {
+        parse_ext_manifest_content(
+            concat!(
+                "[extension]\n",
+                "name = \"lib\"\n\n",
+                "[extension.wasm]\n",
+                "type = \"bindgen\"\n",
+                "wasm = \"lib.wasm\"\n",
+                "js_glue = \"lib.js\"\n",
+            ),
+            Path::new("vo.ext.toml"),
         )
         .unwrap()
     }
@@ -501,34 +572,6 @@ deps = ["github.com/acme/core"]
     }
 
     #[test]
-    fn test_locked_module_from_requested_manifest_raw() {
-        let manifest = sample_manifest();
-        let raw = manifest.render();
-        let locked = locked_module_from_requested_manifest_raw(
-            raw.as_bytes(),
-            manifest.module.as_str(),
-            &manifest.version.to_string(),
-        )
-        .unwrap();
-        assert_eq!(locked.path.as_str(), manifest.module.as_str());
-        assert_eq!(locked.version.to_string(), manifest.version.to_string());
-        assert_eq!(locked.release_manifest, Digest::from_sha256(raw.as_bytes()));
-    }
-
-    #[test]
-    fn test_locked_module_from_requested_manifest_raw_rejects_mismatched_spec() {
-        let manifest = sample_manifest();
-        let raw = manifest.render();
-        let err = locked_module_from_requested_manifest_raw(
-            raw.as_bytes(),
-            "github.com/acme/other",
-            &manifest.version.to_string(),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("does not match expected"));
-    }
-
-    #[test]
     fn test_validate_locked_module_against_manifest_detects_commit_mismatch() {
         let manifest = sample_manifest();
         let raw = manifest.render();
@@ -537,5 +580,76 @@ deps = ["github.com/acme/core"]
         locked.commit = "ffffffffffffffffffffffffffffffffffffffff".to_string();
         let err = validate_locked_module_against_manifest(&locked, &manifest, &digest).unwrap_err();
         assert!(err.to_string().contains("commit"));
+    }
+
+    #[test]
+    fn test_validate_extension_manifest_against_release_manifest_rejects_missing_declared_artifact()
+    {
+        let manifest = sample_manifest();
+        let ext_manifest = sample_bindgen_ext_manifest();
+
+        let err =
+            validate_extension_manifest_against_release_manifest(Some(&ext_manifest), &manifest)
+                .unwrap_err();
+
+        assert!(err.to_string().contains("missing declared artifacts"));
+        assert!(err
+            .to_string()
+            .contains("extension-js-glue wasm32-unknown-unknown lib.js"));
+    }
+
+    #[test]
+    fn test_validate_extension_manifest_against_release_manifest_rejects_undeclared_published_artifact(
+    ) {
+        let manifest = sample_manifest();
+
+        let err =
+            validate_extension_manifest_against_release_manifest(None, &manifest).unwrap_err();
+
+        assert!(err.to_string().contains("undeclared published artifacts"));
+        assert!(err
+            .to_string()
+            .contains("extension-wasm wasm32-unknown-unknown lib.wasm"));
+    }
+
+    #[test]
+    fn test_validate_extension_manifest_against_release_manifest_accepts_matching_contract() {
+        let manifest = ReleaseManifest::parse(
+            r#"{
+  "schema_version": 1,
+  "module": "github.com/acme/lib",
+  "version": "v1.2.3",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "module_root": ".",
+  "vo": "^0.1.0",
+  "require": [],
+  "source": {
+    "name": "lib-v1.2.3-source.tar.gz",
+    "size": 3,
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "artifacts": [
+    {
+      "kind": "extension-js-glue",
+      "target": "wasm32-unknown-unknown",
+      "name": "lib.js",
+      "size": 5,
+      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    {
+      "kind": "extension-wasm",
+      "target": "wasm32-unknown-unknown",
+      "name": "lib.wasm",
+      "size": 4,
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+        let ext_manifest = sample_bindgen_ext_manifest();
+
+        validate_extension_manifest_against_release_manifest(Some(&ext_manifest), &manifest)
+            .unwrap();
     }
 }

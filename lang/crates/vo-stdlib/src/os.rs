@@ -8,11 +8,13 @@ use std::collections::HashMap;
 #[cfg(feature = "std")]
 use std::fs::{self, File, OpenOptions};
 #[cfg(feature = "std")]
-use std::io::{Read, Seek, SeekFrom, Write};
-#[cfg(feature = "std")]
-use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
-#[cfg(feature = "std")]
+use std::io::{IsTerminal, Read, Seek, SeekFrom, Write};
+#[cfg(all(feature = "std", unix))]
+use std::os::unix::fs::{symlink, PermissionsExt};
+#[cfg(all(feature = "std", unix))]
 use std::os::unix::io::AsRawFd;
+#[cfg(all(feature = "std", windows))]
+use std::os::windows::fs::FileExt;
 #[cfg(feature = "std")]
 use std::sync::Mutex;
 
@@ -81,13 +83,69 @@ fn remove_file(fd: i32) -> Option<File> {
     FILE_HANDLES.lock().unwrap().remove(&fd)
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub(crate) fn raw_fd_from_handle(fd: i32) -> Option<i32> {
     if fd == 0 || fd == 1 || fd == 2 {
         return Some(fd);
     }
     let handles = FILE_HANDLES.lock().unwrap();
     handles.get(&fd).map(|f| f.as_raw_fd())
+}
+
+#[cfg(feature = "std")]
+fn file_mode_bits(meta: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        return meta.permissions().mode();
+    }
+
+    #[cfg(not(unix))]
+    {
+        if meta.permissions().readonly() {
+            0o444
+        } else {
+            0o666
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+fn file_modified_time_secs(meta: &fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "std")]
+fn set_path_permissions(path: &str, perm: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(perm))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_readonly(perm & 0o222 == 0);
+        fs::set_permissions(path, permissions)
+    }
+}
+
+#[cfg(feature = "std")]
+fn set_file_permissions(file: &File, perm: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        file.set_permissions(fs::Permissions::from_mode(perm))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut permissions = file.metadata()?.permissions();
+        permissions.set_readonly(perm & 0o222 == 0);
+        file.set_permissions(permissions)
+    }
 }
 
 #[cfg(feature = "std")]
@@ -174,14 +232,14 @@ fn metadata_to_file_info(call: &mut ExternCallContext, name: &str, meta: &fs::Me
     let file_info = call.gc_alloc_struct("os.FileInfo");
     let name_ref = call.alloc_str(name);
     let size = meta.len() as i64;
-    let mut mode = meta.permissions().mode();
+    let mut mode = file_mode_bits(meta);
     if meta.is_dir() {
         mode |= MODE_DIR;
     }
     if meta.file_type().is_symlink() {
         mode |= MODE_SYMLINK;
     }
-    let mod_time = meta.mtime();
+    let mod_time = file_modified_time_secs(meta);
     let is_dir = if meta.is_dir() { 1u64 } else { 0u64 };
 
     unsafe {
@@ -241,7 +299,6 @@ fn handle_write_completion(
 
 #[vostd_fn("os", "blocking_fileRead", std)]
 fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
-    let resume_token = call.take_resume_io_token();
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
     let buf_len = slice::len(buf_ref);
@@ -276,9 +333,47 @@ fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
         return ExternResult::Ok;
     }
 
-    let raw_fd = {
-        let handles = FILE_HANDLES.lock().unwrap();
-        let file = match handles.get(&fd) {
+    #[cfg(unix)]
+    {
+        let resume_token = call.take_resume_io_token();
+        let raw_fd = {
+            let handles = FILE_HANDLES.lock().unwrap();
+            let file = match handles.get(&fd) {
+                Some(f) => f,
+                None => {
+                    call.ret_i64(slots::RET_0, 0);
+                    write_error_to(call, slots::RET_1, "invalid file descriptor");
+                    return ExternResult::Ok;
+                }
+            };
+            file.as_raw_fd()
+        };
+
+        let token = match resume_token {
+            Some(token) => token,
+            None => {
+                let token = call
+                    .io_mut()
+                    .submit_read(raw_fd as IoHandle, buf_ptr, buf_len);
+                match call.io_mut().try_take_completion(token) {
+                    Some(c) => {
+                        handle_read_completion(call, c, slots::RET_0, slots::RET_1);
+                        return ExternResult::Ok;
+                    }
+                    None => return ExternResult::WaitIo { token },
+                }
+            }
+        };
+
+        let c = call.io_mut().take_completion(token);
+        handle_read_completion(call, c, slots::RET_0, slots::RET_1);
+        return ExternResult::Ok;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut handles = FILE_HANDLES.lock().unwrap();
+        let file = match handles.get_mut(&fd) {
             Some(f) => f,
             None => {
                 call.ret_i64(slots::RET_0, 0);
@@ -286,33 +381,28 @@ fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
                 return ExternResult::Ok;
             }
         };
-        file.as_raw_fd()
-    };
 
-    let token = match resume_token {
-        Some(token) => token,
-        None => {
-            let token = call
-                .io_mut()
-                .submit_read(raw_fd as IoHandle, buf_ptr, buf_len);
-            match call.io_mut().try_take_completion(token) {
-                Some(c) => {
-                    handle_read_completion(call, c, slots::RET_0, slots::RET_1);
-                    return ExternResult::Ok;
-                }
-                None => return ExternResult::WaitIo { token },
+        match file.read(buf) {
+            Ok(0) => {
+                call.ret_i64(slots::RET_0, 0);
+                let eof_pair = crate::io::io_sentinel_error(call, crate::io::IoErrorKind::EOF);
+                call.ret_interface_pair(slots::RET_1, eof_pair);
+            }
+            Ok(n) => {
+                call.ret_i64(slots::RET_0, n as i64);
+                write_nil_error(call, slots::RET_1);
+            }
+            Err(e) => {
+                call.ret_i64(slots::RET_0, 0);
+                write_io_error(call, slots::RET_1, e);
             }
         }
-    };
-
-    let c = call.io_mut().take_completion(token);
-    handle_read_completion(call, c, slots::RET_0, slots::RET_1);
-    ExternResult::Ok
+        ExternResult::Ok
+    }
 }
 
 #[vostd_fn("os", "blocking_fileWrite", std)]
 fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
-    let resume_token = call.take_resume_io_token();
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
     let buf_len = slice::len(buf_ref);
@@ -347,9 +437,47 @@ fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
         return ExternResult::Ok;
     }
 
-    let raw_fd = {
-        let handles = FILE_HANDLES.lock().unwrap();
-        let file = match handles.get(&fd) {
+    #[cfg(unix)]
+    {
+        let resume_token = call.take_resume_io_token();
+        let raw_fd = {
+            let handles = FILE_HANDLES.lock().unwrap();
+            let file = match handles.get(&fd) {
+                Some(f) => f,
+                None => {
+                    call.ret_i64(slots::RET_0, 0);
+                    write_error_to(call, slots::RET_1, "invalid file descriptor");
+                    return ExternResult::Ok;
+                }
+            };
+            file.as_raw_fd()
+        };
+
+        let token = match resume_token {
+            Some(token) => token,
+            None => {
+                let token = call
+                    .io_mut()
+                    .submit_write(raw_fd as IoHandle, buf_ptr, buf_len);
+                match call.io_mut().try_take_completion(token) {
+                    Some(c) => {
+                        handle_write_completion(call, c, slots::RET_0, slots::RET_1);
+                        return ExternResult::Ok;
+                    }
+                    None => return ExternResult::WaitIo { token },
+                }
+            }
+        };
+
+        let c = call.io_mut().take_completion(token);
+        handle_write_completion(call, c, slots::RET_0, slots::RET_1);
+        return ExternResult::Ok;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut handles = FILE_HANDLES.lock().unwrap();
+        let file = match handles.get_mut(&fd) {
             Some(f) => f,
             None => {
                 call.ret_i64(slots::RET_0, 0);
@@ -357,40 +485,80 @@ fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
                 return ExternResult::Ok;
             }
         };
-        file.as_raw_fd()
-    };
 
-    let token = match resume_token {
-        Some(token) => token,
-        None => {
-            let token = call
-                .io_mut()
-                .submit_write(raw_fd as IoHandle, buf_ptr, buf_len);
-            match call.io_mut().try_take_completion(token) {
-                Some(c) => {
-                    handle_write_completion(call, c, slots::RET_0, slots::RET_1);
-                    return ExternResult::Ok;
-                }
-                None => return ExternResult::WaitIo { token },
+        match file.write(buf) {
+            Ok(n) => {
+                call.ret_i64(slots::RET_0, n as i64);
+                write_nil_error(call, slots::RET_1);
+            }
+            Err(e) => {
+                call.ret_i64(slots::RET_0, 0);
+                write_io_error(call, slots::RET_1, e);
             }
         }
-    };
-
-    let c = call.io_mut().take_completion(token);
-    handle_write_completion(call, c, slots::RET_0, slots::RET_1);
-    ExternResult::Ok
+        ExternResult::Ok
+    }
 }
 
 #[vostd_fn("os", "blocking_fileReadAt", std)]
 fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
-    let resume_token = call.take_resume_io_token();
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
     let offset = call.arg_i64(slots::ARG_OFF);
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
 
-    let raw_fd = {
+    #[cfg(unix)]
+    {
+        let resume_token = call.take_resume_io_token();
+        let raw_fd = {
+            let handles = FILE_HANDLES.lock().unwrap();
+            let file = match handles.get(&fd) {
+                Some(f) => f,
+                None => {
+                    call.ret_i64(slots::RET_0, 0);
+                    write_error_to(call, slots::RET_1, "invalid file descriptor");
+                    return ExternResult::Ok;
+                }
+            };
+            file.as_raw_fd()
+        };
+
+        let token = match resume_token {
+            Some(token) => token,
+            None => {
+                let token =
+                    call.io_mut()
+                        .submit_read_at(raw_fd as IoHandle, buf_ptr, buf_len, offset);
+                match call.io_mut().try_take_completion(token) {
+                    Some(c) => {
+                        handle_read_completion(call, c, slots::RET_0, slots::RET_1);
+                        return ExternResult::Ok;
+                    }
+                    None => return ExternResult::WaitIo { token },
+                }
+            }
+        };
+
+        let c = call.io_mut().take_completion(token);
+        handle_read_completion(call, c, slots::RET_0, slots::RET_1);
+        return ExternResult::Ok;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let buf = if buf_len == 0 {
+            &mut [] as &mut [u8]
+        } else {
+            unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_len) }
+        };
+
+        if offset < 0 {
+            call.ret_i64(slots::RET_0, 0);
+            write_error_to(call, slots::RET_1, "invalid offset");
+            return ExternResult::Ok;
+        }
+
         let handles = FILE_HANDLES.lock().unwrap();
         let file = match handles.get(&fd) {
             Some(f) => f,
@@ -400,40 +568,85 @@ fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
                 return ExternResult::Ok;
             }
         };
-        file.as_raw_fd()
-    };
 
-    let token = match resume_token {
-        Some(token) => token,
-        None => {
-            let token = call
-                .io_mut()
-                .submit_read_at(raw_fd as IoHandle, buf_ptr, buf_len, offset);
-            match call.io_mut().try_take_completion(token) {
-                Some(c) => {
-                    handle_read_completion(call, c, slots::RET_0, slots::RET_1);
-                    return ExternResult::Ok;
-                }
-                None => return ExternResult::WaitIo { token },
+        match file.seek_read(buf, offset as u64) {
+            Ok(0) => {
+                call.ret_i64(slots::RET_0, 0);
+                let eof_pair = crate::io::io_sentinel_error(call, crate::io::IoErrorKind::EOF);
+                call.ret_interface_pair(slots::RET_1, eof_pair);
+            }
+            Ok(n) => {
+                call.ret_i64(slots::RET_0, n as i64);
+                write_nil_error(call, slots::RET_1);
+            }
+            Err(e) => {
+                call.ret_i64(slots::RET_0, 0);
+                write_io_error(call, slots::RET_1, e);
             }
         }
-    };
-
-    let c = call.io_mut().take_completion(token);
-    handle_read_completion(call, c, slots::RET_0, slots::RET_1);
-    ExternResult::Ok
+        ExternResult::Ok
+    }
 }
 
 #[vostd_fn("os", "blocking_fileWriteAt", std)]
 fn os_file_write_at(call: &mut ExternCallContext) -> ExternResult {
-    let resume_token = call.take_resume_io_token();
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
     let offset = call.arg_i64(slots::ARG_OFF);
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
 
-    let raw_fd = {
+    #[cfg(unix)]
+    {
+        let resume_token = call.take_resume_io_token();
+        let raw_fd = {
+            let handles = FILE_HANDLES.lock().unwrap();
+            let file = match handles.get(&fd) {
+                Some(f) => f,
+                None => {
+                    call.ret_i64(slots::RET_0, 0);
+                    write_error_to(call, slots::RET_1, "invalid file descriptor");
+                    return ExternResult::Ok;
+                }
+            };
+            file.as_raw_fd()
+        };
+
+        let token = match resume_token {
+            Some(token) => token,
+            None => {
+                let token =
+                    call.io_mut()
+                        .submit_write_at(raw_fd as IoHandle, buf_ptr, buf_len, offset);
+                match call.io_mut().try_take_completion(token) {
+                    Some(c) => {
+                        handle_write_completion(call, c, slots::RET_0, slots::RET_1);
+                        return ExternResult::Ok;
+                    }
+                    None => return ExternResult::WaitIo { token },
+                }
+            }
+        };
+
+        let c = call.io_mut().take_completion(token);
+        handle_write_completion(call, c, slots::RET_0, slots::RET_1);
+        return ExternResult::Ok;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let buf = if buf_len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) }
+        };
+
+        if offset < 0 {
+            call.ret_i64(slots::RET_0, 0);
+            write_error_to(call, slots::RET_1, "invalid offset");
+            return ExternResult::Ok;
+        }
+
         let handles = FILE_HANDLES.lock().unwrap();
         let file = match handles.get(&fd) {
             Some(f) => f,
@@ -443,28 +656,19 @@ fn os_file_write_at(call: &mut ExternCallContext) -> ExternResult {
                 return ExternResult::Ok;
             }
         };
-        file.as_raw_fd()
-    };
 
-    let token = match resume_token {
-        Some(token) => token,
-        None => {
-            let token = call
-                .io_mut()
-                .submit_write_at(raw_fd as IoHandle, buf_ptr, buf_len, offset);
-            match call.io_mut().try_take_completion(token) {
-                Some(c) => {
-                    handle_write_completion(call, c, slots::RET_0, slots::RET_1);
-                    return ExternResult::Ok;
-                }
-                None => return ExternResult::WaitIo { token },
+        match file.seek_write(buf, offset as u64) {
+            Ok(n) => {
+                call.ret_i64(slots::RET_0, n as i64);
+                write_nil_error(call, slots::RET_1);
+            }
+            Err(e) => {
+                call.ret_i64(slots::RET_0, 0);
+                write_io_error(call, slots::RET_1, e);
             }
         }
-    };
-
-    let c = call.io_mut().take_completion(token);
-    handle_write_completion(call, c, slots::RET_0, slots::RET_1);
-    ExternResult::Ok
+        ExternResult::Ok
+    }
 }
 
 #[vostd_fn("os", "fileSeek", std)]
@@ -600,9 +804,8 @@ fn os_open_file(call: &mut ExternCallContext) -> ExternResult {
 
     match opts.open(name) {
         Ok(file) => {
-            #[cfg(unix)]
             if flag & O_CREATE as i32 != 0 {
-                let _ = file.set_permissions(fs::Permissions::from_mode(perm));
+                let _ = set_file_permissions(&file, perm);
             }
             let fd = register_file(file);
             call.ret_i64(slots::RET_0, fd as i64);
@@ -622,10 +825,7 @@ fn os_mkdir(call: &mut ExternCallContext) -> ExternResult {
     let perm = call.arg_u64(slots::ARG_PERM) as u32;
     match fs::create_dir(path) {
         Ok(_) => {
-            #[cfg(unix)]
-            {
-                let _ = fs::set_permissions(path, fs::Permissions::from_mode(perm));
-            }
+            let _ = set_path_permissions(path, perm);
             write_nil_error(call, slots::RET_0);
         }
         Err(e) => write_io_error(call, slots::RET_0, e),
@@ -639,10 +839,7 @@ fn os_mkdir_all(call: &mut ExternCallContext) -> ExternResult {
     let perm = call.arg_u64(slots::ARG_PERM) as u32;
     match fs::create_dir_all(path) {
         Ok(_) => {
-            #[cfg(unix)]
-            {
-                let _ = fs::set_permissions(path, fs::Permissions::from_mode(perm));
-            }
+            let _ = set_path_permissions(path, perm);
             write_nil_error(call, slots::RET_0);
         }
         Err(e) => write_io_error(call, slots::RET_0, e),
@@ -751,7 +948,7 @@ fn os_read_dir(call: &mut ExternCallContext) -> ExternResult {
                 let mode = entry
                     .metadata()
                     .map(|m| {
-                        let mut mode = m.permissions().mode();
+                        let mut mode = file_mode_bits(&m);
                         if m.is_dir() {
                             mode |= MODE_DIR;
                         }
@@ -786,16 +983,9 @@ fn os_read_dir(call: &mut ExternCallContext) -> ExternResult {
 fn os_chmod(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(slots::ARG_NAME);
     let mode = call.arg_u64(slots::ARG_MODE) as u32;
-    #[cfg(unix)]
-    {
-        match fs::set_permissions(name, fs::Permissions::from_mode(mode)) {
-            Ok(_) => write_nil_error(call, slots::RET_0),
-            Err(e) => write_io_error(call, slots::RET_0, e),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        write_error_to(call, slots::RET_0, "chmod not supported");
+    match set_path_permissions(name, mode) {
+        Ok(_) => write_nil_error(call, slots::RET_0),
+        Err(e) => write_io_error(call, slots::RET_0, e),
     }
     ExternResult::Ok
 }
@@ -902,10 +1092,7 @@ fn os_write_file_native(call: &mut ExternCallContext) -> ExternResult {
     let perm = call.arg_u64(slots::ARG_PERM) as u32;
     match fs::write(name, data) {
         Ok(_) => {
-            #[cfg(unix)]
-            {
-                let _ = fs::set_permissions(name, fs::Permissions::from_mode(perm));
-            }
+            let _ = set_path_permissions(name, perm);
             write_nil_error(call, slots::RET_0);
         }
         Err(e) => write_io_error(call, slots::RET_0, e),
@@ -1167,31 +1354,20 @@ fn os_get_args(call: &mut ExternCallContext) -> ExternResult {
 #[vostd_fn("os", "nativeIsTerminal", std)]
 fn os_is_terminal(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
-
-    #[cfg(unix)]
-    {
-        if (0..=2).contains(&fd) {
-            let ok = unsafe { libc::isatty(fd) == 1 };
-            call.ret_bool(slots::RET_0, ok);
-            return ExternResult::Ok;
+    let ok = match fd {
+        0 => std::io::stdin().is_terminal(),
+        1 => std::io::stdout().is_terminal(),
+        2 => std::io::stderr().is_terminal(),
+        _ => {
+            let handles = FILE_HANDLES.lock().unwrap();
+            handles
+                .get(&fd)
+                .map(|file| file.is_terminal())
+                .unwrap_or(false)
         }
-
-        let handles = FILE_HANDLES.lock().unwrap();
-        if let Some(file) = handles.get(&fd) {
-            let raw_fd = file.as_raw_fd();
-            let ok = unsafe { libc::isatty(raw_fd) == 1 };
-            call.ret_bool(slots::RET_0, ok);
-        } else {
-            call.ret_bool(slots::RET_0, false);
-        }
-        return ExternResult::Ok;
-    }
-
-    #[cfg(not(unix))]
-    {
-        call.ret_bool(slots::RET_0, false);
-        ExternResult::Ok
-    }
+    };
+    call.ret_bool(slots::RET_0, ok);
+    ExternResult::Ok
 }
 
 #[vostd_fn("os", "nativeHostname", std)]
@@ -1302,7 +1478,7 @@ fn os_mkdir_temp(call: &mut ExternCallContext) -> ExternResult {
 
 // ==================== Pipe ====================
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 #[vostd_fn("os", "nativePipe", std)]
 fn os_native_pipe(call: &mut ExternCallContext) -> ExternResult {
     use std::os::unix::io::{FromRawFd, IntoRawFd};
@@ -1329,6 +1505,15 @@ fn os_native_pipe(call: &mut ExternCallContext) -> ExternResult {
             write_error_to(call, slots::RET_2, &e.to_string());
         }
     }
+    ExternResult::Ok
+}
+
+#[cfg(all(feature = "std", not(unix)))]
+#[vostd_fn("os", "nativePipe", std)]
+fn os_native_pipe(call: &mut ExternCallContext) -> ExternResult {
+    call.ret_i64(slots::RET_0, -1);
+    call.ret_i64(slots::RET_1, -1);
+    write_error_to(call, slots::RET_2, "pipe not supported on this platform");
     ExternResult::Ok
 }
 
@@ -1368,7 +1553,7 @@ fn os_native_chtimes(call: &mut ExternCallContext) -> ExternResult {
 
 // ==================== FindProcess / Kill ====================
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 #[vostd_fn("os", "nativeFindProcess", std)]
 fn os_native_find_process(call: &mut ExternCallContext) -> ExternResult {
     let pid = call.arg_i64(slots::ARG_PID) as i32;
@@ -1381,7 +1566,19 @@ fn os_native_find_process(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", not(unix)))]
+#[vostd_fn("os", "nativeFindProcess", std)]
+fn os_native_find_process(call: &mut ExternCallContext) -> ExternResult {
+    let _pid = call.arg_i64(slots::ARG_PID) as i32;
+    write_error_to(
+        call,
+        slots::RET_0,
+        "FindProcess not supported on this platform",
+    );
+    ExternResult::Ok
+}
+
+#[cfg(all(feature = "std", unix))]
 #[vostd_fn("os", "nativeKillProcess", std)]
 fn os_native_kill_process(call: &mut ExternCallContext) -> ExternResult {
     let pid = call.arg_i64(slots::ARG_PID) as i32;
@@ -1399,6 +1596,19 @@ fn os_native_kill_process(call: &mut ExternCallContext) -> ExternResult {
         Ok(_) => write_nil_error(call, slots::RET_0),
         Err(e) => write_error_to(call, slots::RET_0, &e.to_string()),
     }
+    ExternResult::Ok
+}
+
+#[cfg(all(feature = "std", not(unix)))]
+#[vostd_fn("os", "nativeKillProcess", std)]
+fn os_native_kill_process(call: &mut ExternCallContext) -> ExternResult {
+    let _pid = call.arg_i64(slots::ARG_PID) as i32;
+    let _sig = call.arg_i64(slots::ARG_SIG) as i32;
+    write_error_to(
+        call,
+        slots::RET_0,
+        "KillProcess not supported on this platform",
+    );
     ExternResult::Ok
 }
 

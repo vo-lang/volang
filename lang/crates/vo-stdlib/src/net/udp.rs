@@ -1,18 +1,21 @@
 //! UDP connection implementations.
 
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 
 use vo_ffi_macro::vostd_fn;
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
-use vo_runtime::io::{CompletionData, IoHandle};
+#[cfg(unix)]
+use vo_runtime::io::{Completion, CompletionData, IoHandle};
 use vo_runtime::objects::slice;
 
 use super::{next_handle, write_io_error, UDP_CONN_HANDLES};
 
 fn register_udp_conn(conn: UdpSocket) -> i32 {
     // Set non-blocking for async I/O
+    #[cfg(unix)]
     conn.set_nonblocking(true).ok();
     let h = next_handle();
     UDP_CONN_HANDLES.lock().unwrap().insert(h, conn);
@@ -46,53 +49,93 @@ pub fn net_listen_packet(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_fn("net", "blocking_udpConnReadFrom", std)]
 pub fn net_udp_conn_read_from(call: &mut ExternCallContext) -> ExternResult {
-    let resume_token = call.take_resume_io_token();
-    let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
-    let buf_ref = call.arg_ref(slots::ARG_P);
-    let buf_len = slice::len(buf_ref);
-    let buf_ptr = slice::data_ptr(buf_ref);
+    #[cfg(unix)]
+    {
+        let resume_token = call.take_resume_io_token();
+        let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
+        let buf_ref = call.arg_ref(slots::ARG_P);
+        let buf_len = slice::len(buf_ref);
+        let buf_ptr = slice::data_ptr(buf_ref);
 
-    let fd = {
-        let handles = UDP_CONN_HANDLES.lock().unwrap();
-        match handles.get(&handle) {
-            Some(c) => c.as_raw_fd(),
+        let fd = {
+            let handles = UDP_CONN_HANDLES.lock().unwrap();
+            match handles.get(&handle) {
+                Some(c) => c.as_raw_fd(),
+                None => {
+                    call.ret_i64(slots::RET_0, 0);
+                    call.ret_nil(slots::RET_1);
+                    write_error_to(call, slots::RET_2, "use of closed network connection");
+                    return ExternResult::Ok;
+                }
+            }
+        };
+
+        let token = match resume_token {
+            Some(token) => token,
+            None => {
+                let token = call
+                    .io_mut()
+                    .submit_recv_from(fd as IoHandle, buf_ptr, buf_len);
+                match call.io_mut().try_take_completion(token) {
+                    Some(c) => {
+                        return handle_recv_from_completion(
+                            call,
+                            c,
+                            slots::RET_0,
+                            slots::RET_1,
+                            slots::RET_2,
+                        )
+                    }
+                    None => return ExternResult::WaitIo { token },
+                }
+            }
+        };
+
+        let c = call.io_mut().take_completion(token);
+        handle_recv_from_completion(call, c, slots::RET_0, slots::RET_1, slots::RET_2)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
+        let buf_ref = call.arg_ref(slots::ARG_P);
+        let buf_len = slice::len(buf_ref);
+        let buf_ptr = slice::data_ptr(buf_ref);
+        let buf = if buf_len == 0 {
+            &mut [] as &mut [u8]
+        } else {
+            unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_len) }
+        };
+
+        let mut handles = UDP_CONN_HANDLES.lock().unwrap();
+        match handles.get_mut(&handle) {
+            Some(conn) => match conn.recv_from(buf) {
+                Ok((n, addr)) => {
+                    call.ret_i64(slots::RET_0, n as i64);
+                    let addr_str = call.alloc_str(&addr.to_string());
+                    call.ret_ref(slots::RET_1, addr_str);
+                    write_nil_error(call, slots::RET_2);
+                }
+                Err(e) => {
+                    call.ret_i64(slots::RET_0, 0);
+                    call.ret_nil(slots::RET_1);
+                    write_io_error(call, slots::RET_2, e);
+                }
+            },
             None => {
                 call.ret_i64(slots::RET_0, 0);
                 call.ret_nil(slots::RET_1);
                 write_error_to(call, slots::RET_2, "use of closed network connection");
-                return ExternResult::Ok;
             }
         }
-    };
-
-    let token = match resume_token {
-        Some(token) => token,
-        None => {
-            let token = call
-                .io_mut()
-                .submit_recv_from(fd as IoHandle, buf_ptr, buf_len);
-            match call.io_mut().try_take_completion(token) {
-                Some(c) => {
-                    return handle_recv_from_completion(
-                        call,
-                        c,
-                        slots::RET_0,
-                        slots::RET_1,
-                        slots::RET_2,
-                    )
-                }
-                None => return ExternResult::WaitIo { token },
-            }
-        }
-    };
-
-    let c = call.io_mut().take_completion(token);
-    handle_recv_from_completion(call, c, slots::RET_0, slots::RET_1, slots::RET_2)
+        ExternResult::Ok
+    }
 }
 
+#[cfg(unix)]
 fn handle_recv_from_completion(
     call: &mut ExternCallContext,
-    c: vo_runtime::io::Completion,
+    c: Completion,
     ret_n: u16,
     ret_addr: u16,
     ret_err: u16,
@@ -116,62 +159,117 @@ fn handle_recv_from_completion(
 
 #[vostd_fn("net", "blocking_udpConnWriteTo", std)]
 pub fn net_udp_conn_write_to(call: &mut ExternCallContext) -> ExternResult {
-    let resume_token = call.take_resume_io_token();
-    let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
-    let buf_ref = call.arg_ref(slots::ARG_P);
-    let addr_str = call.arg_str(slots::ARG_ADDR);
-    let buf_len = slice::len(buf_ref);
-    let buf_ptr = slice::data_ptr(buf_ref);
+    #[cfg(unix)]
+    {
+        let resume_token = call.take_resume_io_token();
+        let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
+        let buf_ref = call.arg_ref(slots::ARG_P);
+        let addr_str = call.arg_str(slots::ARG_ADDR);
+        let buf_len = slice::len(buf_ref);
+        let buf_ptr = slice::data_ptr(buf_ref);
 
-    // Parse address first (blocking, but fast)
-    let dest_addr: SocketAddr = match addr_str.to_socket_addrs() {
-        Ok(mut addrs) => match addrs.next() {
-            Some(addr) => addr,
-            None => {
+        // Parse address first (blocking, but fast)
+        let dest_addr: SocketAddr = match addr_str.to_socket_addrs() {
+            Ok(mut addrs) => match addrs.next() {
+                Some(addr) => addr,
+                None => {
+                    call.ret_i64(slots::RET_0, 0);
+                    write_error_to(call, slots::RET_1, "invalid address");
+                    return ExternResult::Ok;
+                }
+            },
+            Err(e) => {
                 call.ret_i64(slots::RET_0, 0);
-                write_error_to(call, slots::RET_1, "invalid address");
+                write_io_error(call, slots::RET_1, e);
                 return ExternResult::Ok;
             }
-        },
-        Err(e) => {
-            call.ret_i64(slots::RET_0, 0);
-            write_io_error(call, slots::RET_1, e);
-            return ExternResult::Ok;
-        }
-    };
+        };
 
-    let fd = {
-        let handles = UDP_CONN_HANDLES.lock().unwrap();
-        match handles.get(&handle) {
-            Some(c) => c.as_raw_fd(),
+        let fd = {
+            let handles = UDP_CONN_HANDLES.lock().unwrap();
+            match handles.get(&handle) {
+                Some(c) => c.as_raw_fd(),
+                None => {
+                    call.ret_i64(slots::RET_0, 0);
+                    write_error_to(call, slots::RET_1, "use of closed network connection");
+                    return ExternResult::Ok;
+                }
+            }
+        };
+
+        let token = match resume_token {
+            Some(token) => token,
+            None => {
+                let token =
+                    call.io_mut()
+                        .submit_send_to(fd as IoHandle, buf_ptr, buf_len, dest_addr);
+                match call.io_mut().try_take_completion(token) {
+                    Some(c) => {
+                        return handle_send_to_completion(call, c, slots::RET_0, slots::RET_1)
+                    }
+                    None => return ExternResult::WaitIo { token },
+                }
+            }
+        };
+
+        let c = call.io_mut().take_completion(token);
+        handle_send_to_completion(call, c, slots::RET_0, slots::RET_1)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
+        let buf_ref = call.arg_ref(slots::ARG_P);
+        let addr_str = call.arg_str(slots::ARG_ADDR);
+        let buf_len = slice::len(buf_ref);
+        let buf_ptr = slice::data_ptr(buf_ref);
+        let buf = if buf_len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) }
+        };
+
+        let dest_addr: SocketAddr = match addr_str.to_socket_addrs() {
+            Ok(mut addrs) => match addrs.next() {
+                Some(addr) => addr,
+                None => {
+                    call.ret_i64(slots::RET_0, 0);
+                    write_error_to(call, slots::RET_1, "invalid address");
+                    return ExternResult::Ok;
+                }
+            },
+            Err(e) => {
+                call.ret_i64(slots::RET_0, 0);
+                write_io_error(call, slots::RET_1, e);
+                return ExternResult::Ok;
+            }
+        };
+
+        let mut handles = UDP_CONN_HANDLES.lock().unwrap();
+        match handles.get_mut(&handle) {
+            Some(conn) => match conn.send_to(buf, dest_addr) {
+                Ok(n) => {
+                    call.ret_i64(slots::RET_0, n as i64);
+                    write_nil_error(call, slots::RET_1);
+                }
+                Err(e) => {
+                    call.ret_i64(slots::RET_0, 0);
+                    write_io_error(call, slots::RET_1, e);
+                }
+            },
             None => {
                 call.ret_i64(slots::RET_0, 0);
                 write_error_to(call, slots::RET_1, "use of closed network connection");
-                return ExternResult::Ok;
             }
         }
-    };
-
-    let token = match resume_token {
-        Some(token) => token,
-        None => {
-            let token = call
-                .io_mut()
-                .submit_send_to(fd as IoHandle, buf_ptr, buf_len, dest_addr);
-            match call.io_mut().try_take_completion(token) {
-                Some(c) => return handle_send_to_completion(call, c, slots::RET_0, slots::RET_1),
-                None => return ExternResult::WaitIo { token },
-            }
-        }
-    };
-
-    let c = call.io_mut().take_completion(token);
-    handle_send_to_completion(call, c, slots::RET_0, slots::RET_1)
+        ExternResult::Ok
+    }
 }
 
+#[cfg(unix)]
 fn handle_send_to_completion(
     call: &mut ExternCallContext,
-    c: vo_runtime::io::Completion,
+    c: Completion,
     ret_n: u16,
     ret_err: u16,
 ) -> ExternResult {

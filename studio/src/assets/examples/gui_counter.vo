@@ -1,3 +1,9 @@
+/*vo:mod
+module local/gui_counter
+vo ^0.1.0
+require github.com/vo-lang/vogui v0.1.5
+*/
+
 // Counter - minimal TEA demo using VoGUI v2
 package main
 

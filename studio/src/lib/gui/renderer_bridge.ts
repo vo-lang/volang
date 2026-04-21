@@ -5,7 +5,7 @@
 import { invoke as tauriInvoke, listen as tauriListen } from '../tauri';
 import type { Backend } from '../backend/backend';
 import { isGuiSessionSupersededError, type RuntimeService } from '../services/runtime_service';
-import type { FrameworkContract } from '../types';
+import { frameworkContractKey, frameworkJsModulePath, type FrameworkContract } from '../types';
 import type { VoWebModule } from '../studio_wasm';
 import { loadStudioWasm, makeVoWebModule, resetStudioWasmInstance, setStudioWindowVfsBackendFactory } from '../studio_wasm';
 import { createInMemoryWindowVfsBackend } from '../in_memory_window_vfs';
@@ -151,13 +151,7 @@ function emitRendererBridgeDebug(backend: Backend, message: string): void {
 }
 
 function frameworkModuleKey(framework: FrameworkContract): string {
-  return [
-    framework.name,
-    framework.entry,
-    framework.rendererPath ?? '',
-    framework.protocolPath ?? '',
-    framework.hostBridgePath ?? '',
-  ].join('\0');
+  return frameworkContractKey(framework);
 }
 
 function collectRendererFrameworks(context: RendererBridgeContext): FrameworkContract[] {
@@ -464,7 +458,7 @@ async function loadRendererModules(
   const seenRendererPaths = new Set<string>();
   try {
     for (const framework of frameworks) {
-      const rendererPath = framework.rendererPath;
+      const rendererPath = frameworkJsModulePath(framework, 'renderer');
       if (!rendererPath || seenRendererPaths.has(rendererPath)) {
         continue;
       }
@@ -499,7 +493,7 @@ export async function startRendererBridge(
     throw new Error('No framework contract available');
   }
 
-  const rendererFrameworks = frameworks.filter((framework) => framework.rendererPath != null);
+  const rendererFrameworks = frameworks.filter((framework) => frameworkJsModulePath(framework, 'renderer') != null);
   if (rendererFrameworks.length === 0) {
     throw new Error('No framework declares a renderer path');
   }
@@ -543,7 +537,7 @@ export async function startRendererBridge(
   const loadedRenderers = await loadRendererModules(rendererFrameworks, resolvedVfsFiles);
   emitRendererBridgeDebug(
     backend,
-    `start session=${sessionId} renderers=${loadedRenderers.map((entry) => `${entry.framework.name}:${entry.framework.rendererPath}`).join(',')}`,
+    `start session=${sessionId} renderers=${loadedRenderers.map((entry) => `${entry.framework.name}:${frameworkJsModulePath(entry.framework, 'renderer')}`).join(',')}`,
   );
   const registerWidgetWithRenderers = (name: string, factory: WidgetFactory): void => {
     let bridged = 0;
@@ -555,9 +549,13 @@ export async function startRendererBridge(
     }
     emitRendererBridgeDebug(backend, `widget.bridge name=${name} bridged=${bridged}`);
   };
-  const primaryRendererPath = context.framework?.rendererPath ?? loadedRenderers[0]?.framework.rendererPath ?? null;
+  const primaryRendererPath = context.framework
+    ? frameworkJsModulePath(context.framework, 'renderer')
+    : loadedRenderers[0]
+      ? frameworkJsModulePath(loadedRenderers[0].framework, 'renderer')
+      : null;
   const primaryRenderer = primaryRendererPath
-    ? loadedRenderers.find((entry) => entry.framework.rendererPath === primaryRendererPath)?.renderer ?? loadedRenderers[0]?.renderer ?? null
+    ? loadedRenderers.find((entry) => frameworkJsModulePath(entry.framework, 'renderer') === primaryRendererPath)?.renderer ?? loadedRenderers[0]?.renderer ?? null
     : loadedRenderers[0]?.renderer ?? null;
   const blobUrls = loadedRenderers.flatMap((entry) => entry.blobUrls);
   const initializedRenderers: RendererModule[] = [];

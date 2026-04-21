@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
-use crate::identity::{ArtifactId, ModulePath};
+use crate::identity::{ArtifactId, ModIdentity, ModulePath};
 use crate::version::{ExactVersion, ToolchainConstraint};
 use crate::Error;
 
@@ -16,7 +16,10 @@ pub struct LockFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LockRoot {
-    pub module: ModulePath,
+    /// Root module identity: canonical github path for published projects,
+    /// or `local/<name>` for toolchain-synthesized ephemeral single-file
+    /// module lock files (spec §5.6.2, §10.2).
+    pub module: ModIdentity,
     pub vo: ToolchainConstraint,
 }
 
@@ -62,7 +65,7 @@ impl LockFile {
             .and_then(|v| v.as_table())
             .ok_or_else(|| Error::LockFileParse("missing [root] table".into()))?;
         let root = LockRoot {
-            module: ModulePath::parse(get_str(root_table, "module")?)
+            module: ModIdentity::parse(get_str(root_table, "module")?)
                 .map_err(|e| Error::LockFileParse(format!("root.module: {e}")))?,
             vo: ToolchainConstraint::parse(get_str(root_table, "vo")?)
                 .map_err(|e| Error::LockFileParse(format!("root.vo: {e}")))?,

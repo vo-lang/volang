@@ -8,6 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use vo_common::vfs::{normalize_fs_path, FileSystem};
+use vo_module::async_install::InstallSurface;
 
 /// A `FileSystem` that delegates to the JS VirtualFS via `vo_web_runtime_wasm::vfs`.
 ///
@@ -78,5 +79,23 @@ impl FileSystem for WasmVfs {
         let full = self.full_path(path);
         let (_name, _size, _mode, _mtime, is_dir, err) = vo_web_runtime_wasm::vfs::stat(&full);
         err.is_none() && is_dir
+    }
+}
+
+impl InstallSurface for WasmVfs {
+    fn mkdir_all(&self, path: &Path) -> vo_module::Result<()> {
+        let full = self.full_path(path);
+        if let Some(error) = vo_web_runtime_wasm::vfs::mkdir_all(&full, 0o755) {
+            return Err(vo_module::Error::Io(std::io::Error::other(error)));
+        }
+        Ok(())
+    }
+
+    fn write_bytes(&self, path: &Path, bytes: &[u8]) -> vo_module::Result<()> {
+        let full = self.full_path(path);
+        if let Some(error) = vo_web_runtime_wasm::vfs::write_file(&full, bytes, 0o644) {
+            return Err(vo_module::Error::Io(std::io::Error::other(error)));
+        }
+        Ok(())
     }
 }

@@ -1,11 +1,19 @@
-use crate::identity::ModulePath;
+use crate::identity::{ModIdentity, ModulePath};
 use crate::version::{DepConstraint, ToolchainConstraint};
 use crate::Error;
 
 /// Parsed representation of a `vo.mod` file.
+///
+/// The root `module` directive MAY be either a canonical github path (for
+/// published / on-disk projects) or a reserved `local/<name>` identity (for
+/// toolchain-synthesized ephemeral single-file modules, spec §5.6.2). The
+/// dispatch between the two is handled by `ModIdentity`; downstream
+/// operations that require a github path (e.g. release staging, registry
+/// fetches) MUST call `ModIdentity::as_github()` and error on the `Local`
+/// variant.
 #[derive(Debug, Clone)]
 pub struct ModFile {
-    pub module: ModulePath,
+    pub module: ModIdentity,
     pub vo: ToolchainConstraint,
     pub require: Vec<Require>,
     pub replace: Vec<Replace>,
@@ -26,7 +34,7 @@ pub struct Replace {
 impl ModFile {
     /// Parse a `vo.mod` file from its text content.
     pub fn parse(content: &str) -> Result<Self, Error> {
-        let mut module: Option<ModulePath> = None;
+        let mut module: Option<ModIdentity> = None;
         let mut vo: Option<ToolchainConstraint> = None;
         let mut require: Vec<Require> = Vec::new();
         let mut replace: Vec<Replace> = Vec::new();
@@ -59,7 +67,7 @@ impl ModFile {
                         )));
                     }
                     module =
-                        Some(ModulePath::parse(parts[1]).map_err(|e| {
+                        Some(ModIdentity::parse(parts[1]).map_err(|e| {
                             Error::ModFileParse(format!("line {}: {e}", line_num + 1))
                         })?);
                 }

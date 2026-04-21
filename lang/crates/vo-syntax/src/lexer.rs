@@ -1191,6 +1191,26 @@ mod tests {
     }
 
     #[test]
+    fn test_inline_mod_block_is_skipped_as_block_comment() {
+        // Inline vo.mod metadata per module spec §5.6 is a reserved block
+        // comment (`/*vo:mod ... */`). The lexer MUST treat it as an ordinary
+        // block comment and produce no tokens for its contents; validation of
+        // the inline mod body is owned by the module layer.
+        let src = "\
+/*vo:mod
+module local/demo
+vo ^0.1.0
+
+require github.com/vo-lang/vogui ^0.4.0
+*/
+package main";
+        assert_eq!(
+            lex(src),
+            vec![TokenKind::Package, TokenKind::Ident, TokenKind::Eof]
+        );
+    }
+
+    #[test]
     fn test_complex_expression() {
         let tokens = lex("x := 1 + 2 * 3");
         assert_eq!(

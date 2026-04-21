@@ -154,7 +154,7 @@ fn run_ureq(
 
 // ── Extern implementation ────────────────────────────────────────────
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 #[vostd_fn("http", "nativeHttpsRequest", std)]
 fn http_native_https_request(call: &mut ExternCallContext) -> ExternResult {
     // ── Resume path: background thread completed ──
@@ -231,6 +231,18 @@ fn http_native_https_request(call: &mut ExternCallContext) -> ExternResult {
     });
 
     ExternResult::WaitIo { token }
+}
+
+#[cfg(all(feature = "std", not(unix)))]
+#[vostd_fn("http", "nativeHttpsRequest", std)]
+fn http_native_https_request(call: &mut ExternCallContext) -> ExternResult {
+    let method = call.arg_str(0).to_string();
+    let url = call.arg_str(1).to_string();
+    let headers = read_string_slice(call.arg_ref(2));
+    let body = call.arg_bytes(3).to_vec();
+    let timeout_ns = call.arg_i64(4);
+    let resp = run_ureq(method, url, headers, body, timeout_ns);
+    write_http_response(call, resp)
 }
 
 // ── Response writing helpers ─────────────────────────────────────────

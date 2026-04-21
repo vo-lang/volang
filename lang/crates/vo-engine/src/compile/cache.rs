@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use vo_common::stable_hash::StableHasher;
+use vo_module::project::ProjectDeps;
 use vo_module::schema::lockfile::LockedModule;
 use vo_runtime::ext_loader::NativeExtensionSpec;
 use vo_vm::bytecode::Module;
@@ -74,6 +75,7 @@ pub(super) fn compute_compile_cache_fingerprint(
     project_root: &Path,
     mod_cache: &Path,
     single_file: Option<&Path>,
+    project_deps: &ProjectDeps,
     replaces: &HashMap<String, PathBuf>,
 ) -> Result<String, CompileError> {
     let canonical_source_root = source_root
@@ -101,6 +103,7 @@ pub(super) fn compute_compile_cache_fingerprint(
     }
 
     hash_compile_input_tree(&mut hasher, "project_root", &canonical_project_root)?;
+    hash_project_deps(&mut hasher, project_deps);
 
     if let Some(workfile_path) = vo_module::workspace::discover_workfile(&canonical_project_root) {
         let canonical_workfile = workfile_path.canonicalize().unwrap_or(workfile_path);
@@ -129,6 +132,28 @@ pub(super) fn compute_compile_cache_fingerprint(
     }
 
     Ok(hasher.finish())
+}
+
+fn hash_project_deps(hasher: &mut StableHasher, project_deps: &ProjectDeps) {
+    hasher.update_bool("project_deps_has_mod_file", project_deps.has_mod_file());
+    hasher.update_str(
+        "project_deps_current_module",
+        project_deps.current_module().unwrap_or(""),
+    );
+    hasher.update_str(
+        "project_deps_mod_file",
+        &project_deps
+            .mod_file()
+            .map(|mod_file| mod_file.render())
+            .unwrap_or_default(),
+    );
+    hasher.update_str(
+        "project_deps_lock_file",
+        &project_deps
+            .lock_file()
+            .map(|lock_file| lock_file.render())
+            .unwrap_or_default(),
+    );
 }
 
 fn hash_compile_input_tree(

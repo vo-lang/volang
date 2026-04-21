@@ -127,11 +127,6 @@ pub fn call_closure(vm: &mut Vm, closure: GcRef, args: &[u64]) -> Result<(), Str
     Ok(())
 }
 
-/// Allocate a string in the VM's GC heap.
-pub fn alloc_string(vm: &mut Vm, s: &str) -> GcRef {
-    vo_runtime::objects::string::from_rust_str(&mut vm.state.gc, s)
-}
-
 /// Take captured output since last clear.
 pub fn take_output() -> String {
     vo_runtime::output::take_output()

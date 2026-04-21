@@ -10,6 +10,8 @@
 
 use std::path::{Path, PathBuf};
 
+use vo_common::span::Span;
+
 // ── PathLike trait ───────────────────────────────────────────────────────────
 
 /// Anything that can be stored as a `String` path inside an `OperationError`.
@@ -53,6 +55,7 @@ pub struct OperationError<S, K> {
     pub module_path: Option<String>,
     pub version: Option<String>,
     pub path: Option<String>,
+    pub span: Option<Span>,
     pub detail: String,
 }
 
@@ -64,12 +67,18 @@ impl<S, K> OperationError<S, K> {
             module_path: None,
             version: None,
             path: None,
+            span: None,
             detail: detail.into(),
         }
     }
 
     pub fn with_path(mut self, path: &(impl PathLike + ?Sized)) -> Self {
         self.path = Some(path.to_path_string());
+        self
+    }
+
+    pub fn with_span(mut self, span: impl Into<Span>) -> Self {
+        self.span = Some(span.into());
         self
     }
 
@@ -110,6 +119,10 @@ impl<S, K> OperationError<S, K> {
         self.path.as_deref()
     }
 
+    pub fn span(&self) -> Option<Span> {
+        self.span
+    }
+
     pub fn detail(&self) -> &str {
         &self.detail
     }
@@ -140,6 +153,7 @@ impl<S, K> OperationError<S, K> {
             module_path: other.module_path,
             version: other.version,
             path: other.path,
+            span: other.span,
             detail: other.detail,
         }
     }

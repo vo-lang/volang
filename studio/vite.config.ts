@@ -3,10 +3,6 @@ import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import { svelte, vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 
-// GitHub release asset downloads redirect to Azure blob storage which lacks
-// CORS headers.  This plugin proxies /gh-release/* requests server-side,
-// following redirects and returning the final response with permissive CORS.
-
 interface ProxyRequest {
   url?: string;
 }

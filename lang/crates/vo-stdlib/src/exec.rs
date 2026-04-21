@@ -124,12 +124,20 @@ fn configure_stdio(
     stderr_fd: i32,
 ) -> std::io::Result<()> {
     cmd.stdin(fd_to_stdio(stdin_fd)?);
-    cmd.stdout(fd_to_stdio(stdout_fd)?);
-    cmd.stderr(fd_to_stdio(stderr_fd)?);
+    #[cfg(unix)]
+    {
+        cmd.stdout(fd_to_stdio(stdout_fd)?);
+        cmd.stderr(fd_to_stdio(stderr_fd)?);
+    }
+    #[cfg(not(unix))]
+    {
+        cmd.stdout(Stdio::inherit());
+        cmd.stderr(Stdio::inherit());
+    }
     Ok(())
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 fn fd_to_stdio(fd: i32) -> std::io::Result<Stdio> {
     if fd < 0 {
         return Ok(Stdio::inherit());
@@ -138,6 +146,17 @@ fn fd_to_stdio(fd: i32) -> std::io::Result<Stdio> {
         std::io::Error::new(std::io::ErrorKind::NotFound, "invalid file descriptor")
     })?;
     dup_fd_to_stdio(raw_fd)
+}
+
+#[cfg(all(feature = "std", not(unix)))]
+fn fd_to_stdio(fd: i32) -> std::io::Result<Stdio> {
+    if fd < 0 {
+        return Ok(Stdio::inherit());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "fd-based stdio redirection is only supported on unix",
+    ))
 }
 
 #[cfg(all(feature = "std", unix))]

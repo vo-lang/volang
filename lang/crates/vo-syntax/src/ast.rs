@@ -107,12 +107,34 @@ impl fmt::Debug for Ident {
 pub struct File {
     /// The package declaration, if present.
     pub package: Option<Ident>,
+    pub inline_mod: Option<InlineModMetadata>,
     /// Import declarations.
     pub imports: Vec<ImportDecl>,
     /// Top-level declarations.
     pub decls: Vec<Decl>,
     /// The span of the entire file.
     pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct InlineDirectiveValue {
+    pub value: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct InlineModRequire {
+    pub span: Span,
+    pub module: InlineDirectiveValue,
+    pub constraint: InlineDirectiveValue,
+}
+
+#[derive(Debug, Clone)]
+pub struct InlineModMetadata {
+    pub span: Span,
+    pub module: InlineDirectiveValue,
+    pub vo: InlineDirectiveValue,
+    pub require: Vec<InlineModRequire>,
 }
 
 /// An import declaration.

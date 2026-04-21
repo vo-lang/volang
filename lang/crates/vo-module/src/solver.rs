@@ -34,6 +34,13 @@ pub struct SolvePreferences {
 
 /// Solve the dependency graph deterministically.
 ///
+/// `root_source` is a human-readable label for the root module used only for
+/// attribution in conflict error messages (e.g. "github.com/acme/app" for a
+/// published project, or "local/demo" for a toolchain-synthesized ephemeral
+/// single-file module). It is never resolved, fetched, or compared against
+/// any registry entry, so ephemeral roots with reserved `local/*` identities
+/// can pass through unchanged.
+///
 /// Algorithm:
 /// 1. Start with root module's direct requirements.
 /// 2. For each unresolved module, fetch candidate versions from registry.
@@ -47,7 +54,7 @@ pub struct SolvePreferences {
 ///
 /// Single-version rule: each module path appears at most once.
 pub fn solve(
-    root_module: &ModulePath,
+    root_source: &str,
     root_vo: &ToolchainConstraint,
     root_requires: &[(ModulePath, DepConstraint)],
     registry: &dyn Registry,
@@ -58,7 +65,7 @@ pub fn solve(
         constraints
             .entry(mp.clone())
             .or_default()
-            .push((root_module.as_str().to_string(), constraint.clone()));
+            .push((root_source.to_string(), constraint.clone()));
     }
 
     solve_search(root_vo, registry, prefs, BTreeMap::new(), constraints)
@@ -417,7 +424,14 @@ mod tests {
         )];
 
         let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
-        let graph = solve(&root, &root_vo, &reqs, &reg, &SolvePreferences::default()).unwrap();
+        let graph = solve(
+            root.as_str(),
+            &root_vo,
+            &reqs,
+            &reg,
+            &SolvePreferences::default(),
+        )
+        .unwrap();
         assert_eq!(graph.modules.len(), 1);
         let lib = &graph.modules[&ModulePath::parse("github.com/acme/lib").unwrap()];
         assert_eq!(lib.version.to_string(), "v1.3.0"); // highest
@@ -441,7 +455,14 @@ mod tests {
         )];
 
         let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
-        let graph = solve(&root, &root_vo, &reqs, &reg, &SolvePreferences::default()).unwrap();
+        let graph = solve(
+            root.as_str(),
+            &root_vo,
+            &reqs,
+            &reg,
+            &SolvePreferences::default(),
+        )
+        .unwrap();
         assert_eq!(graph.modules.len(), 2);
         let util = &graph.modules[&ModulePath::parse("github.com/acme/util").unwrap()];
         assert_eq!(util.version.to_string(), "v1.1.0"); // highest
@@ -456,7 +477,14 @@ mod tests {
             DepConstraint::parse("^1.0.0").unwrap(),
         )];
         let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
-        assert!(solve(&root, &root_vo, &reqs, &reg, &SolvePreferences::default()).is_err());
+        assert!(solve(
+            root.as_str(),
+            &root_vo,
+            &reqs,
+            &reg,
+            &SolvePreferences::default()
+        )
+        .is_err());
     }
 
     #[test]
@@ -495,7 +523,7 @@ mod tests {
         };
 
         let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
-        let graph = solve(&root, &root_vo, &reqs, &reg, &prefs).unwrap();
+        let graph = solve(root.as_str(), &root_vo, &reqs, &reg, &prefs).unwrap();
         // lib should stay at locked v1.0.0
         let lib = &graph.modules[&ModulePath::parse("github.com/acme/lib").unwrap()];
         assert_eq!(lib.version.to_string(), "v1.0.0");
@@ -516,7 +544,13 @@ mod tests {
             ModulePath::parse("github.com/acme/lib").unwrap(),
             DepConstraint::parse("^1.0.0").unwrap(),
         )];
-        let result = solve(&root, &root_vo, &reqs, &reg, &SolvePreferences::default());
+        let result = solve(
+            root.as_str(),
+            &root_vo,
+            &reqs,
+            &reg,
+            &SolvePreferences::default(),
+        );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -538,7 +572,14 @@ mod tests {
             DepConstraint::parse("^1.0.0").unwrap(),
         )];
 
-        let graph = solve(&root, &root_vo, &reqs, &reg, &SolvePreferences::default()).unwrap();
+        let graph = solve(
+            root.as_str(),
+            &root_vo,
+            &reqs,
+            &reg,
+            &SolvePreferences::default(),
+        )
+        .unwrap();
         let lib = &graph.modules[&ModulePath::parse("github.com/acme/lib").unwrap()];
         assert_eq!(lib.version.to_string(), "v1.0.0");
     }
@@ -584,7 +625,14 @@ mod tests {
             DepConstraint::parse("^1.0.0").unwrap(),
         )];
 
-        let graph = solve(&root, &root_vo, &reqs, &reg, &SolvePreferences::default()).unwrap();
+        let graph = solve(
+            root.as_str(),
+            &root_vo,
+            &reqs,
+            &reg,
+            &SolvePreferences::default(),
+        )
+        .unwrap();
         assert_eq!(graph.modules.len(), 3);
 
         // C should be v1.1.0 (v1.2.0 excluded by backtrack)
@@ -608,7 +656,14 @@ mod tests {
             ModulePath::parse("github.com/acme/lib").unwrap(),
             DepConstraint::parse("^1.0.0").unwrap(),
         )];
-        let graph = solve(&root, &root_vo, &reqs, &reg, &SolvePreferences::default()).unwrap();
+        let graph = solve(
+            root.as_str(),
+            &root_vo,
+            &reqs,
+            &reg,
+            &SolvePreferences::default(),
+        )
+        .unwrap();
         assert_eq!(graph.modules.len(), 1);
     }
 }

@@ -34,15 +34,31 @@ pub enum InstalledModuleField {
     VersionMarker,
     SourceDigest,
     ReleaseManifest,
+    ExtManifest,
     Artifact,
 }
 
 /// What went wrong.
 #[derive(Debug)]
 pub enum InstalledModuleErrorKind {
-    Missing { detail: String },
-    Mismatch { expected: String, found: String },
-    ParseFailed { detail: String },
+    Missing {
+        detail: String,
+    },
+    Mismatch {
+        expected: String,
+        found: String,
+    },
+    ParseFailed {
+        detail: String,
+    },
+    ValidationFailed {
+        detail: String,
+    },
+    LockedModuleMismatch {
+        field: String,
+        expected: String,
+        found: String,
+    },
 }
 
 impl fmt::Display for InstalledModuleError {
@@ -53,6 +69,7 @@ impl fmt::Display for InstalledModuleError {
             InstalledModuleField::VersionMarker => ".vo-version",
             InstalledModuleField::SourceDigest => ".vo-source-digest",
             InstalledModuleField::ReleaseManifest => "vo.release.json",
+            InstalledModuleField::ExtManifest => "vo.ext.toml",
             InstalledModuleField::Artifact => "artifact",
         };
         match &self.kind {
@@ -77,6 +94,24 @@ impl fmt::Display for InstalledModuleError {
                     self.module, self.version, field, detail,
                 )
             }
+            InstalledModuleErrorKind::ValidationFailed { detail } => {
+                write!(
+                    f,
+                    "installed module {}@{} {} validation failed: {}",
+                    self.module, self.version, field, detail,
+                )
+            }
+            InstalledModuleErrorKind::LockedModuleMismatch {
+                field,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "vo.lock entry for {} does not match published release manifest: {}: expected {}, found {}",
+                    self.module, field, expected, found,
+                )
+            }
         }
     }
 }
@@ -91,11 +126,104 @@ impl fmt::Display for InstalledModuleErrorKind {
                 write!(f, "expected {}, found {}", expected, found)
             }
             Self::ParseFailed { detail } => write!(f, "{}", detail),
+            Self::ValidationFailed { detail } => write!(f, "{}", detail),
+            Self::LockedModuleMismatch {
+                field,
+                expected,
+                found,
+            } => write!(f, "{}: expected {}, found {}", field, expected, found,),
         }
     }
 }
 
 // ── Validation ───────────────────────────────────────────────────────────────
+
+fn parse_installed_release_manifest<F: FileSystem>(
+    fs: &F,
+    module_dir: &Path,
+    locked: &LockedModule,
+    module: &str,
+    version: &str,
+) -> Result<(crate::schema::manifest::ReleaseManifest, Digest), InstalledModuleError> {
+    let manifest_path = module_dir.join("vo.release.json");
+    let manifest_bytes = fs
+        .read_bytes(&manifest_path)
+        .map_err(|_| InstalledModuleError {
+            module: module.to_string(),
+            version: version.to_string(),
+            field: InstalledModuleField::ReleaseManifest,
+            kind: InstalledModuleErrorKind::Missing {
+                detail: "cached module is missing vo.release.json".to_string(),
+            },
+        })?;
+    let manifest_digest = Digest::from_sha256(&manifest_bytes);
+    if manifest_digest != locked.release_manifest {
+        return Err(InstalledModuleError {
+            module: module.to_string(),
+            version: version.to_string(),
+            field: InstalledModuleField::ReleaseManifest,
+            kind: InstalledModuleErrorKind::Mismatch {
+                expected: locked.release_manifest.as_str().to_string(),
+                found: manifest_digest.as_str().to_string(),
+            },
+        });
+    }
+    let manifest_content =
+        std::str::from_utf8(&manifest_bytes).map_err(|error| InstalledModuleError {
+            module: module.to_string(),
+            version: version.to_string(),
+            field: InstalledModuleField::ReleaseManifest,
+            kind: InstalledModuleErrorKind::ParseFailed {
+                detail: format!("cached vo.release.json is not valid UTF-8: {}", error),
+            },
+        })?;
+    let manifest = crate::registry::parse_requested_release_manifest(
+        manifest_content,
+        &locked.path,
+        &locked.version,
+    )
+    .map_err(|error| InstalledModuleError {
+        module: module.to_string(),
+        version: version.to_string(),
+        field: InstalledModuleField::ReleaseManifest,
+        kind: InstalledModuleErrorKind::ParseFailed {
+            detail: error.to_string(),
+        },
+    })?;
+    Ok((manifest, manifest_digest))
+}
+
+fn read_installed_extension_manifest<F: FileSystem>(
+    fs: &F,
+    module_dir: &Path,
+    module: &str,
+    version: &str,
+) -> Result<Option<crate::ext_manifest::ExtensionManifest>, InstalledModuleError> {
+    let manifest_path = module_dir.join("vo.ext.toml");
+    if !fs.exists(&manifest_path) {
+        return Ok(None);
+    }
+    let content = fs
+        .read_file(&manifest_path)
+        .map_err(|_| InstalledModuleError {
+            module: module.to_string(),
+            version: version.to_string(),
+            field: InstalledModuleField::ExtManifest,
+            kind: InstalledModuleErrorKind::Missing {
+                detail: "cached module is missing readable vo.ext.toml".to_string(),
+            },
+        })?;
+    crate::ext_manifest::parse_ext_manifest_content(&content, &manifest_path)
+        .map(Some)
+        .map_err(|error| InstalledModuleError {
+            module: module.to_string(),
+            version: version.to_string(),
+            field: InstalledModuleField::ExtManifest,
+            kind: InstalledModuleErrorKind::ParseFailed {
+                detail: error.to_string(),
+            },
+        })
+}
 
 /// Validate that an installed module matches its `LockedModule` metadata.
 ///
@@ -150,7 +278,9 @@ pub fn validate_installed_module<F: FileSystem>(
                 detail: e.to_string(),
             },
         })?;
-    if mod_file.module != locked.path {
+    // Cached modules are fetched from the registry and therefore always
+    // carry a canonical github identity; `local/*` could not be installed.
+    if mod_file.module.as_github() != Some(&locked.path) {
         return Err(InstalledModuleError {
             module: module.to_string(),
             version: version.clone(),
@@ -227,32 +357,169 @@ pub fn validate_installed_module<F: FileSystem>(
         });
     }
 
-    // 5. vo.release.json manifest digest matches
-    let manifest_path = module_dir.join("vo.release.json");
-    let manifest_bytes = fs
-        .read_bytes(&manifest_path)
-        .map_err(|_| InstalledModuleError {
-            module: module.to_string(),
-            version: version.clone(),
-            field: InstalledModuleField::ReleaseManifest,
-            kind: InstalledModuleErrorKind::Missing {
-                detail: "cached module is missing vo.release.json".to_string(),
+    let (manifest, manifest_digest) =
+        parse_installed_release_manifest(fs, module_dir, locked, module, &version)?;
+    crate::lock::validate_locked_module_against_manifest(locked, &manifest, &manifest_digest)
+        .map_err(|error| match error {
+            crate::Error::LockedModuleMismatch {
+                field,
+                expected,
+                found,
+                ..
+            } => InstalledModuleError {
+                module: module.to_string(),
+                version: version.clone(),
+                field: InstalledModuleField::ReleaseManifest,
+                kind: InstalledModuleErrorKind::LockedModuleMismatch {
+                    field,
+                    expected,
+                    found,
+                },
+            },
+            error => InstalledModuleError {
+                module: module.to_string(),
+                version: version.clone(),
+                field: InstalledModuleField::ReleaseManifest,
+                kind: InstalledModuleErrorKind::ValidationFailed {
+                    detail: error.to_string(),
+                },
             },
         })?;
-    let manifest_digest = Digest::from_sha256(&manifest_bytes);
-    if manifest_digest != locked.release_manifest {
-        return Err(InstalledModuleError {
-            module: module.to_string(),
-            version,
-            field: InstalledModuleField::ReleaseManifest,
-            kind: InstalledModuleErrorKind::Mismatch {
-                expected: locked.release_manifest.as_str().to_string(),
-                found: manifest_digest.as_str().to_string(),
-            },
-        });
-    }
+
+    let ext_manifest = read_installed_extension_manifest(fs, module_dir, module, &version)?;
+    crate::lock::validate_extension_manifest_against_release_manifest(
+        ext_manifest.as_ref(),
+        &manifest,
+    )
+    .map_err(|error| InstalledModuleError {
+        module: module.to_string(),
+        version,
+        field: InstalledModuleField::ExtManifest,
+        kind: InstalledModuleErrorKind::ValidationFailed {
+            detail: error.to_string(),
+        },
+    })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    use vo_common::vfs::MemoryFs;
+
+    fn sample_manifest_with_wasm_only() -> &'static str {
+        r#"{
+  "schema_version": 1,
+  "module": "github.com/acme/lib",
+  "version": "v1.2.3",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "module_root": ".",
+  "vo": "^0.1.0",
+  "require": [],
+  "source": {
+    "name": "lib-v1.2.3-source.tar.gz",
+    "size": 3,
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "artifacts": [
+    {
+      "kind": "extension-wasm",
+      "target": "wasm32-unknown-unknown",
+      "name": "lib.wasm",
+      "size": 4,
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}"#
+    }
+
+    fn bindgen_ext_manifest() -> &'static str {
+        concat!(
+            "[extension]\n",
+            "name = \"lib\"\n\n",
+            "[extension.wasm]\n",
+            "type = \"bindgen\"\n",
+            "wasm = \"lib.wasm\"\n",
+            "js_glue = \"lib.js\"\n",
+        )
+    }
+
+    fn cached_module_fs(
+        manifest_raw: &str,
+        ext_manifest: Option<&str>,
+    ) -> (MemoryFs, LockedModule, PathBuf) {
+        let manifest = crate::schema::manifest::ReleaseManifest::parse(manifest_raw).unwrap();
+        let locked =
+            crate::lock::locked_module_from_manifest_raw(&manifest, manifest_raw.as_bytes());
+        let module_dir =
+            crate::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
+        let mut fs = MemoryFs::new();
+        fs.add_file(
+            module_dir.join("vo.mod"),
+            format!("module {}\nvo {}\n", locked.path, locked.vo),
+        );
+        fs.add_file(
+            module_dir.join(super::super::layout::VERSION_MARKER),
+            format!("{}\n", locked.version),
+        );
+        fs.add_file(
+            module_dir.join(super::super::layout::SOURCE_DIGEST_MARKER),
+            format!("{}\n", locked.source),
+        );
+        fs.add_file(module_dir.join("vo.release.json"), manifest_raw);
+        if let Some(ext_manifest) = ext_manifest {
+            fs.add_file(module_dir.join("vo.ext.toml"), ext_manifest);
+        }
+        (fs, locked, module_dir)
+    }
+
+    #[test]
+    fn validate_installed_module_rejects_locked_artifact_set_mismatch() {
+        let (fs, mut locked, module_dir) = cached_module_fs(sample_manifest_with_wasm_only(), None);
+        locked.artifacts.clear();
+
+        let err = validate_installed_module(&fs, &module_dir, &locked).unwrap_err();
+
+        assert_eq!(err.field, InstalledModuleField::ReleaseManifest);
+        assert!(matches!(
+            err.kind,
+            InstalledModuleErrorKind::LockedModuleMismatch { ref field, .. } if field == "artifacts"
+        ));
+    }
+
+    #[test]
+    fn validate_installed_module_rejects_packaged_ext_contract_mismatch() {
+        let (fs, locked, module_dir) = cached_module_fs(
+            sample_manifest_with_wasm_only(),
+            Some(bindgen_ext_manifest()),
+        );
+
+        let err = validate_installed_module(&fs, &module_dir, &locked).unwrap_err();
+
+        assert_eq!(err.field, InstalledModuleField::ExtManifest);
+        assert!(matches!(
+            err.kind,
+            InstalledModuleErrorKind::ValidationFailed { ref detail }
+                if detail.contains("missing declared artifacts")
+        ));
+    }
+
+    #[test]
+    fn validate_installed_module_rejects_published_artifacts_without_packaged_ext_manifest() {
+        let (fs, locked, module_dir) = cached_module_fs(sample_manifest_with_wasm_only(), None);
+
+        let err = validate_installed_module(&fs, &module_dir, &locked).unwrap_err();
+
+        assert_eq!(err.field, InstalledModuleField::ExtManifest);
+        assert!(matches!(
+            err.kind,
+            InstalledModuleErrorKind::ValidationFailed { ref detail }
+                if detail.contains("undeclared published artifacts")
+        ));
+    }
 }
 
 /// Validate that an installed artifact matches its `LockedArtifact` metadata.
