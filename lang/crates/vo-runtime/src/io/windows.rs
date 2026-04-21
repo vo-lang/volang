@@ -22,6 +22,10 @@ impl WindowsDriver {
         unreachable!("Windows IOCP driver not yet implemented")
     }
 
+    pub fn submit_timer(&mut self, _token: IoToken, _duration_ns: i64) -> SubmitResult {
+        unreachable!("Windows IOCP driver not yet implemented")
+    }
+
     pub fn poll(&mut self) -> Vec<Completion> {
         unreachable!("Windows IOCP driver not yet implemented")
     }
