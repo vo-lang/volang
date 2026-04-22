@@ -43,7 +43,7 @@ export class RuntimeService {
         ...state,
         gui: {
           ...state.gui,
-          externalWidgetHandlerId: mod?.findExternalWidgetHandlerId(state.gui.renderBytes) ?? null,
+          hostWidgetHandlerId: mod?.findHostWidgetHandlerId(state.gui.renderBytes) ?? null,
         },
       };
     });
@@ -146,8 +146,8 @@ export class RuntimeService {
         this.assertGuiSessionCurrent(sessionId);
         const output = await this.backend.runGui(target);
         this.assertGuiSessionCurrent(sessionId);
-        const externalWidgetHandlerId = output.externalWidgetHandlerId
-          ?? this.protocolModule?.findExternalWidgetHandlerId(output.renderBytes)
+        const hostWidgetHandlerId = output.hostWidgetHandlerId
+          ?? this.protocolModule?.findHostWidgetHandlerId(output.renderBytes)
           ?? null;
         runtime.set({
           ...IDLE_RUNTIME,
@@ -162,12 +162,12 @@ export class RuntimeService {
             framework: output.framework,
             providerFrameworks: output.providerFrameworks,
             sessionId,
-            externalWidgetHandlerId,
+            hostWidgetHandlerId,
           },
         });
         return {
           ...output,
-          externalWidgetHandlerId,
+          hostWidgetHandlerId,
         };
       } catch (error) {
         const sessionError = this.coerceGuiSessionError(error, sessionId);
@@ -419,7 +419,7 @@ export class RuntimeService {
       return;
     }
     runtime.update((state) => {
-      const externalWidgetHandlerId = this.protocolModule?.findExternalWidgetHandlerId(bytes) ?? null;
+      const hostWidgetHandlerId = this.protocolModule?.findHostWidgetHandlerId(bytes) ?? null;
       return {
         ...state,
         kind: 'gui',
@@ -428,7 +428,7 @@ export class RuntimeService {
         gui: {
           ...state.gui,
           renderBytes: bytes,
-          externalWidgetHandlerId: externalWidgetHandlerId ?? state.gui.externalWidgetHandlerId,
+          hostWidgetHandlerId: hostWidgetHandlerId ?? state.gui.hostWidgetHandlerId,
         },
       };
     });

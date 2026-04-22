@@ -127,9 +127,9 @@
 
   function combineProtocolModules(modules: ProtocolModule[]): ProtocolModule {
     return {
-      findExternalWidgetHandlerId(bytes: Uint8Array): number | null {
+      findHostWidgetHandlerId(bytes: Uint8Array): number | null {
         for (const module of modules) {
-          const handlerId = module.findExternalWidgetHandlerId(bytes);
+          const handlerId = module.findHostWidgetHandlerId(bytes);
           if (handlerId != null) {
             return handlerId;
           }
@@ -511,7 +511,7 @@
       {:else if isRenderSurface}
         <canvas id={CANVAS_ID} class="render-canvas"></canvas>
       {:else}
-        <div class="render-error">GUI framework does not declare a renderer path. Update vo.ext.toml [studio] section.</div>
+        <div class="render-error">GUI framework does not declare a renderer path. Update vo.ext.toml [extension.web] section.</div>
       {/if}
     {:else}
       <div class="idle-hint">

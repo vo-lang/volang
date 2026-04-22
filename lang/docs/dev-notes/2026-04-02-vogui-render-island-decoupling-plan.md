@@ -8,7 +8,7 @@
 Studio is currently hard-coupled to `@vogui/runtime` via three direct imports:
 
 1. `GuiRuntimeSurface.svelte` — imports `render`, `decodeBinaryRender`, `injectStyles`, `setupKeyHandler`, `getRef`
-2. `runtime_service.ts` — imports `findExternalWidgetHandlerIdInBytes` (protocol parsing)
+2. `runtime_service.ts` — imports `findHostWidgetHandlerIdInBytes` (protocol parsing)
 3. `studio_wasm.ts` — imports `getRef`, `measureText`, `measureTextLines` (web WASM host bridge)
 
 This creates two rendering paths (GuiRuntimeSurface vs render-island), prevents Studio from being
@@ -17,11 +17,11 @@ even when the framework doesn't need it.
 
 ## Design: 3 Orthogonal Artifacts
 
-Each framework (e.g. vogui) declares up to 3 artifacts in `vo.ext.toml [studio]`. Studio loads them
+Each framework (e.g. vogui) declares up to 3 artifacts in `vo.ext.toml `[extension.web]``. Studio loads them
 dynamically via VFS blob URLs — zero static imports of any framework package.
 
 ```toml
-[studio]
+[extension.web]
 renderer = "js/dist/renderer.js"
 protocol = "js/dist/protocol.js"
 host_bridge = "js/dist/host_bridge.js"
@@ -42,13 +42,13 @@ export interface RendererModule {
 
 ### Artifact B: ProtocolModule
 
-Lightweight (~2KB) binary protocol parser. Replaces the `findExternalWidgetHandlerIdInBytes` import
+Lightweight (~2KB) binary protocol parser. Replaces the `findHostWidgetHandlerIdInBytes` import
 in `runtime_service.ts`. Loaded early (before renderer) so Studio can extract metadata from initial
 render bytes.
 
 ```typescript
 export interface ProtocolModule {
-  findExternalWidgetHandlerId(bytes: Uint8Array): number | null;
+  findHostWidgetHandlerId(bytes: Uint8Array): number | null;
 }
 ```
 
@@ -96,7 +96,7 @@ interface CapabilityMap {
 Frameworks declare needed capabilities in `vo.ext.toml`:
 
 ```toml
-[studio]
+[extension.web]
 capabilities = ["canvas", "island_transport"]  # only these are available
 ```
 
@@ -118,7 +118,7 @@ The host_bridge shares ref registry logic with the renderer (same package, built
 Update `vogui/vo.ext.toml`:
 
 ```toml
-[studio]
+[extension.web]
 renderer = "js/dist/renderer.js"
 protocol = "js/dist/protocol.js"
 host_bridge = "js/dist/host_bridge.js"
@@ -131,7 +131,7 @@ host_bridge = "js/dist/host_bridge.js"
 In `studio/src-tauri/src/commands/gui.rs`:
 
 - `StudioManifest` gains `protocol_path: Option<PathBuf>` and `host_bridge_path: Option<PathBuf>`
-- `parse_studio_manifest` reads `[studio].protocol` and `[studio].host_bridge`
+- `parse_web_manifest` reads `[extension.web].protocol` and `[extension.web].host_bridge`
 - `FrameworkContract` gains `protocolPath` and `hostBridgePath` fields
 - `collect_render_island_vfs_files` includes all 3 artifact directories
 - `studio/wasm` VFS snapshot collection also includes protocol + host_bridge paths
@@ -143,7 +143,7 @@ In `studio/src-tauri/src/commands/gui.rs`:
 In `studio/src/lib/gui/render_island.ts`:
 
 - Define `RendererHost` and `CapabilityMap` interfaces
-- Replace `StudioGuiHost` with `RendererHost`
+- Replace `RendererHost` with `RendererHost`
 - `makeRendererHost()` builds capabilities lazily — `vo_web` only triggers `loadStudioWasm()` on access
 - `startRenderIsland()` no longer calls `loadStudioWasm()` unconditionally
 - Framework capabilities from contract determine which capabilities are available
@@ -159,11 +159,11 @@ In `studio/src/lib/gui/render_island.ts` or a new `protocol_loader.ts`:
 
 In `runtime_service.ts`:
 
-- Remove `import { findExternalWidgetHandlerIdInBytes } from '@vogui/runtime'`
+- Remove `import { findHostWidgetHandlerIdInBytes } from '@vogui/runtime'`
 - Add `private protocolModule: ProtocolModule | null = null`
 - `setProtocolModule(mod)` called by PreviewPanel after framework contract is available
-- `applyGuiRender()` and `runGui()` use `this.protocolModule?.findExternalWidgetHandlerId(bytes)`
-- Fallback: if no protocol module loaded, use `externalWidgetHandlerId` from `GuiRunOutput`
+- `applyGuiRender()` and `runGui()` use `this.protocolModule?.findHostWidgetHandlerId(bytes)`
+- Fallback: if no protocol module loaded, use `hostWidgetHandlerId` from `GuiRunOutput`
 
 **Validation**: `npm run build`, gui_chat + external widget demos work on native + web.
 
@@ -222,7 +222,7 @@ In `studio_wasm.ts`:
 - `js/vite.bridge.config.ts`
 
 ### vogui (modified)
-- `vo.ext.toml` — add [studio] section
+- `vo.ext.toml` — add [extension.web] section
 - `js/package.json` — add build scripts for 3 artifacts
 
 ### volang/studio (modified)

@@ -225,15 +225,6 @@ impl IoRuntime {
     pub fn has_pending(&self) -> bool {
         self.driver.has_pending()
     }
-
-    // Legacy API compatibility
-    pub fn cancel_handle(&mut self, handle: IoHandle) {
-        self.cancel(handle);
-    }
-
-    pub fn has_waiters(&self) -> bool {
-        self.has_pending()
-    }
 }
 
 /// Result of submitting an operation.

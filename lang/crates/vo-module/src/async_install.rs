@@ -331,22 +331,16 @@ pub async fn ensure_project_deps<S: InstallSurface, R: AsyncRegistry>(
     project_deps: &project::ProjectDeps,
     target: &str,
 ) -> Result<Vec<ReadyModule>> {
-    if !project_deps.has_mod_file() {
+    if !project_deps.has_mod_file() || project_deps.locked_modules().is_empty() {
         return Ok(Vec::new());
     }
-    if !project_deps.locked_modules().is_empty() {
-        return ensure_locked_modules(
-            surface,
-            registry,
-            project_deps.locked_modules().to_vec(),
-            target,
-        )
-        .await;
-    }
-    let Some(mod_file) = project_deps.mod_file() else {
-        return Ok(Vec::new());
-    };
-    ensure_mod_file_requirements(surface, registry, mod_file, target).await
+    ensure_locked_modules(
+        surface,
+        registry,
+        project_deps.locked_modules().to_vec(),
+        target,
+    )
+    .await
 }
 
 pub async fn ensure_mod_file_requirements<S: InstallSurface, R: AsyncRegistry>(

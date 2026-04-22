@@ -13,7 +13,7 @@ import { createInMemoryWindowVfsBackend } from '../in_memory_window_vfs';
 // ---- Protocol & HostBridge module contracts ----
 
 export interface ProtocolModule {
-  findExternalWidgetHandlerId(bytes: Uint8Array): number | null;
+  findHostWidgetHandlerId(bytes: Uint8Array): number | null;
 }
 
 export interface HostBridgeContext {
@@ -27,9 +27,8 @@ export interface HostBridgeModule {
   buildImports(ctx: HostBridgeContext): Record<string, (...args: number[]) => number | void>;
 }
 
-// ---- StudioGuiHost ----
-// Passed to renderer module's init(); renderer uses it to register widgets,
-// access the canvas, and dispatch events back to the guest VM.
+// ---- RendererHost ----
+// Passed to renderer module init() for capabilities and event dispatch.
 
 export interface WidgetFactory {
   create(
@@ -86,22 +85,9 @@ export interface RendererHost {
   getCapability<K extends keyof CapabilityMap>(name: K): CapabilityMap[K] | null;
 }
 
-// Legacy alias — existing renderer modules that typed against StudioGuiHost
-// continue to work because RendererHost is a structural superset of what they
-// actually use (sendEvent + debugLog).
-export type StudioGuiHost = RendererHost & {
-  registerWidget(name: string, factory: WidgetFactory): void;
-  getCanvas(): HTMLCanvasElement | null;
-  debugLog(message: string): void;
-  voWeb: VoWebModule;
-  moduleBytes: Uint8Array;
-  getVfsBytes(path: string): Uint8Array | null;
-  createIslandChannel(): Promise<StudioIslandChannel>;
-};
-
 // ---- RendererModule contract ----
 // Frameworks must export an object implementing this interface from their
-// renderer JS entry (declared in vo.ext.toml [studio] renderer = "...").
+// renderer JS entry (declared in vo.ext.toml [extension.web.js] renderer = "...").
 
 export interface RendererModule {
   init(host: RendererHost): Promise<void>;
@@ -132,6 +118,23 @@ type RendererBlobGraph = {
   entryUrl: string;
   urls: string[];
 };
+
+function requireFunction<T>(value: unknown, label: string): T {
+  if (typeof value !== 'function') {
+    throw new Error(`${label} must be a function`);
+  }
+  return value as T;
+}
+
+function optionalFunction<T>(value: unknown, label: string): T | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'function') {
+    throw new Error(`${label} must be a function when declared`);
+  }
+  return value as T;
+}
 
 let activeRendererBridge: ActiveRendererBridge = null;
 const widgetRegistry = new Map<string, WidgetFactory>();
@@ -432,15 +435,19 @@ async function loadRendererModule(
   rendererPath: string,
   files: VfsFile[],
 ): Promise<[RendererModule, string[]]> {
-  const { module: renderer, blobUrls } = await loadVfsModule<RendererModule>(rendererPath, files, (raw) =>
-    ({
-      init: (raw.default as RendererModule | undefined)?.init ?? (raw.init as RendererModule['init']) ?? (() => Promise.resolve()),
-      render: (raw.default as RendererModule | undefined)?.render ?? (raw.render as RendererModule['render']) ?? (() => {}),
-      stop: (raw.default as RendererModule | undefined)?.stop ?? (raw.stop as RendererModule['stop']) ?? (() => {}),
-      registerWidget: (raw.default as RendererModule | undefined)?.registerWidget ?? (raw.registerWidget as RendererModule['registerWidget']),
-      destroyWidgets: (raw.default as RendererModule | undefined)?.destroyWidgets ?? (raw.destroyWidgets as RendererModule['destroyWidgets']),
-    }),
-  );
+  const { module: renderer, blobUrls } = await loadVfsModule<RendererModule>(rendererPath, files, (raw) => {
+    const mod = raw.default as Record<string, unknown> | undefined;
+    if (!mod || typeof mod !== 'object') {
+      throw new Error(`Renderer module ${rendererPath} must export a default renderer object`);
+    }
+    return {
+      init: requireFunction<RendererModule['init']>(mod.init, `${rendererPath}.default.init`),
+      render: requireFunction<RendererModule['render']>(mod.render, `${rendererPath}.default.render`),
+      stop: requireFunction<RendererModule['stop']>(mod.stop, `${rendererPath}.default.stop`),
+      registerWidget: optionalFunction<NonNullable<RendererModule['registerWidget']>>(mod.registerWidget, `${rendererPath}.default.registerWidget`),
+      destroyWidgets: optionalFunction<NonNullable<RendererModule['destroyWidgets']>>(mod.destroyWidgets, `${rendererPath}.default.destroyWidgets`),
+    };
+  });
   return [renderer, blobUrls];
 }
 
@@ -555,8 +562,11 @@ export async function startRendererBridge(
       ? frameworkJsModulePath(loadedRenderers[0].framework, 'renderer')
       : null;
   const primaryRenderer = primaryRendererPath
-    ? loadedRenderers.find((entry) => frameworkJsModulePath(entry.framework, 'renderer') === primaryRendererPath)?.renderer ?? loadedRenderers[0]?.renderer ?? null
-    : loadedRenderers[0]?.renderer ?? null;
+    ? loadedRenderers.find((entry) => frameworkJsModulePath(entry.framework, 'renderer') === primaryRendererPath)?.renderer ?? null
+    : null;
+  if (!primaryRenderer) {
+    throw new Error(primaryRendererPath ? `Primary renderer was not loaded: ${primaryRendererPath}` : 'No primary renderer available');
+  }
   const blobUrls = loadedRenderers.flatMap((entry) => entry.blobUrls);
   const initializedRenderers: RendererModule[] = [];
   try {
@@ -671,11 +681,12 @@ export async function loadProtocolModule(
   if (cached) return cached.module;
 
   const files: VfsFile[] = prefetchedFiles ?? await fetchVfsSnapshot(backend, entryPath);
-  const { module, blobUrls } = await loadVfsModule<ProtocolModule>(protocolPath, files, (raw) =>
-    raw.default as ProtocolModule ?? {
-      findExternalWidgetHandlerId: (raw.findExternalWidgetHandlerId as ProtocolModule['findExternalWidgetHandlerId']) ?? (() => null),
-    },
-  );
+  const { module, blobUrls } = await loadVfsModule<ProtocolModule>(protocolPath, files, (raw) => ({
+    findHostWidgetHandlerId: requireFunction<ProtocolModule['findHostWidgetHandlerId']>(
+      raw.findHostWidgetHandlerId,
+      `${protocolPath}.findHostWidgetHandlerId`,
+    ),
+  }));
   activeProtocols.set(key, { module, blobUrls });
   return module;
 }
@@ -699,11 +710,12 @@ export async function loadHostBridgeModule(
   if (cached) return cached.module;
 
   const files: VfsFile[] = prefetchedFiles ?? await fetchVfsSnapshot(backend, entryPath);
-  const { module, blobUrls } = await loadVfsModule<HostBridgeModule>(hostBridgePath, files, (raw) =>
-    raw.default as HostBridgeModule ?? {
-      buildImports: (raw.buildImports as HostBridgeModule['buildImports']) ?? (() => ({})),
-    },
-  );
+  const { module, blobUrls } = await loadVfsModule<HostBridgeModule>(hostBridgePath, files, (raw) => ({
+    buildImports: requireFunction<HostBridgeModule['buildImports']>(
+      raw.buildImports,
+      `${hostBridgePath}.buildImports`,
+    ),
+  }));
   activeHostBridges.set(key, { module, blobUrls });
   return module;
 }

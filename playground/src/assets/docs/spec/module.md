@@ -18,7 +18,7 @@ The landed Module System 1.0 architecture is defined by the following rules:
 - GitHub Releases, `vo.release.json`, canonical source packages, and optional target artifacts define the registry protocol.
 - `vo build`, `vo check`, `vo test`, and `vo run` are frozen consumers of already-resolved state and do not silently access the network.
 
-## Removed Legacy Concepts
+## Removed Removed Concepts
 
 The current system does not use:
 

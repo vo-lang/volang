@@ -32,7 +32,7 @@ fn framework_contract_from_runtime_contract(contract: vo_web::BrowserRuntimeCont
 fn split_framework_contracts(
     runtime: &vo_web::BrowserRuntimePlan,
 ) -> (Option<FrameworkContract>, Vec<FrameworkContract>) {
-    let split = runtime.legacy_framework_split();
+    let split = runtime.primary_framework_split();
     (
         split
             .primary_framework
@@ -53,13 +53,13 @@ pub struct GuiRunOutput {
     entry_path: String,
     framework: Option<FrameworkContract>,
     provider_frameworks: Vec<FrameworkContract>,
-    external_widget_handler_id: Option<i32>,
+    host_widget_handler_id: Option<i32>,
 }
 
-/// Decode binary render bytes and find the `onWidget` handler ID of a `vo-external-widget` node.
+/// Decode binary render bytes and find the `onWidget` handler ID of a `vo-host-widget` node.
 fn find_on_widget_handler_id(bytes: &[u8]) -> Option<i32> {
     let frame = vogui_protocol::decode_binary_render(bytes).ok()?;
-    vogui_protocol::query::find_external_widget_handler_id(&frame)
+    vogui_protocol::query::find_host_widget_handler_id(&frame)
 }
 
 #[tauri::command]
@@ -113,7 +113,7 @@ pub async fn cmd_run_gui(
                 .path(task_entry_path.clone())
                 .duration_ms(start_start.elapsed().as_millis()),
         );
-        let external_widget_handler_id = find_on_widget_handler_id(&render_bytes);
+        let host_widget_handler_id = find_on_widget_handler_id(&render_bytes);
         Ok((
             GuiRunOutput {
                 render_bytes,
@@ -121,7 +121,7 @@ pub async fn cmd_run_gui(
                 entry_path: task_entry_path,
                 framework,
                 provider_frameworks,
-                external_widget_handler_id,
+                host_widget_handler_id,
             },
             runtime_plan,
             handle,

@@ -545,4 +545,4 @@ That work ensures the old system is stable enough to remain in service during Ph
 - 9 implementation phases: core → schema → registry → solver → lock → materialization → workspace → ops → consumer adaptation.
 - The new crate is developed and fully self-tested before any consumer is changed.
 - Consumer adaptation is a separate final phase, not interleaved with core development.
-- No dual-path coexistence. No incremental migration. No compatibility fallbacks.
+- No dual-path coexistence. No incremental migration. No dual-path fallbacks.

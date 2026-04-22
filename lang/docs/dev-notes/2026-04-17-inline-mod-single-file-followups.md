@@ -46,7 +46,7 @@ IDE-facing surfaces.
 | # | Area | Current state | Gap | Severity |
 |---|---|---|---|---|
 | G1 | `vo-web` single-file compile (`prepare_single_file_input`) | Rejects external imports by syntactic inspection of parsed `import` statements; calls `load_project_context`, not `load_single_file_context`. | No §5.6 classification; inline `/*vo:mod*/` is silently tolerated as a block comment but its `module` / `require` lines are never consulted; error taxonomy is `Policy` instead of `ModFile`. | **High** — user-visible divergence between native and web toolchains. |
-| G2 | Spec §10.1 compliance for `AdHoc` | `vo-engine` keeps the legacy behavior of applying ancestor `vo.work` overrides to ad hoc files (two existing tests rely on this). | Spec §10.1 forbids `vo.work` usage from ad hoc programs; this path silently violates the spec. | **High** — spec conformance + test hygiene. |
+| G2 | Spec §10.1 compliance for `AdHoc` | `vo-engine` keeps the removed behavior of applying ancestor `vo.work` overrides to ad hoc files (two existing tests rely on this). | Spec §10.1 forbids `vo.work` usage from ad hoc programs; this path silently violates the spec. | **High** — spec conformance + test hygiene. |
 | G3 | Ephemeral dependency resolution (spec §5.6.5) | Non-empty `require` entries in `/*vo:mod*/` raise `Missing`. | No resolver, no cache-local ephemeral lock, no fetch path. | **Medium** — blocks the canonical use case of single-file scripts with third-party deps. |
 | G4 | AST / LSP surface for inline mod | Lexer treats the block as a comment; parser/AST have no record of it. | No spans, no diagnostics with source positions, no `vo fmt` round-trip, no `vo.ext.toml`-style discoverability in IDE. | **Medium** — affects tooling quality. |
 | G5 | Cache fingerprint coverage | Compile cache fingerprints source bytes (so inline mod content changes invalidate implicitly). | No explicit test that edits to the inline `require` list invalidate the cache; no guarantee the fingerprint hashes the classified context. | **Low** — defensive, but worth a targeted regression test. |
@@ -112,7 +112,7 @@ but with a `ModFile` / `LockFile` diagnostic instead of the current
    in `real_path_compile_context_for_single_file` (see
    `lang/crates/vo-engine/src/compile/mod.rs`). Ad hoc programs must
    see no ancestor `vo.work` and no ancestor `vo.mod` overrides.
-2. Migrate the two legacy tests that depend on the old behavior:
+2. Migrate the two removed tests that depend on the old behavior:
    - `test_compile_prefers_local_replace_extension_manifest_paths`
    - `test_compile_single_file_without_vo_mod_uses_ancestor_workfile_extension_manifest`
 
@@ -128,7 +128,7 @@ but with a `ModFile` / `LockFile` diagnostic instead of the current
 **Why.** Keeping the fallback is an explicit deviation from spec that
 will silently allow misconfigured projects to appear to work. We locked
 the deviation in the initial SingleFileContext wiring with a
-`// Ad hoc single-file entries preserve legacy behavior` comment; this
+`// Ad hoc single-file entries preserve removed behavior` comment; this
 step retires that deviation.
 
 **Risk.** External users in the wild may have scripts under

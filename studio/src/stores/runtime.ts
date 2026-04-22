@@ -11,7 +11,7 @@ export interface GuiRuntimeState {
   framework: FrameworkContract | null;
   providerFrameworks: FrameworkContract[];
   sessionId: number | null;
-  externalWidgetHandlerId: number | null;
+  hostWidgetHandlerId: number | null;
 }
 
 export interface RuntimeState {
@@ -32,7 +32,7 @@ export const IDLE_GUI: GuiRuntimeState = {
   framework: null,
   providerFrameworks: [],
   sessionId: null,
-  externalWidgetHandlerId: null,
+  hostWidgetHandlerId: null,
 };
 
 export const IDLE_RUNTIME: RuntimeState = {

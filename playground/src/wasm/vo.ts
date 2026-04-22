@@ -514,40 +514,15 @@ const extBindgenModules = new Map<string, any>();
   // Extract function name from externName (e.g., "nativePack" from "github_com_vo_lang_zip_nativePack")
   const funcName = externName.substring(matchedKey.length + 1);
 
-  // Resolve the extern function. Try in order:
-  // 1. Short name (e.g., "nativePack") — preferred; decouples WASM exports from module path.
-  // 2. Full extern name (e.g., "github_com_vo_lang_resvg_Render") — legacy full-name exports.
-  // 3. Legacy: {shortModule}_{lowercase_func} (e.g., "resvg_render") — oldest convention.
-  let extFunc: Function | undefined;
-  if (typeof exp[funcName] === 'function') {
-    extFunc = exp[funcName];
-  } else if (typeof exp[externName] === 'function') {
-    extFunc = exp[externName];
-  } else {
-    const parts = matchedKey.split('_');
-    const shortName = parts[parts.length - 1];
-    const legacyName = `${shortName}_${funcName.toLowerCase()}`;
-    if (typeof exp[legacyName] === 'function') {
-      extFunc = exp[legacyName];
-    }
-  }
+  // Standalone modules export extension functions by their short Vo function name.
+  const extFunc: Function | undefined = typeof exp[funcName] === 'function' ? exp[funcName] : undefined;
   if (!extFunc) {
     console.error('[voCallExt] Export not found:', externName);
     return new Uint8Array(0);
   }
 
-  // Resolve alloc/dealloc: standard (vo_alloc) or legacy ({shortModule}_alloc)
-  let allocFn: Function | undefined;
-  let deallocFn: Function | undefined;
-  if (typeof exp.vo_alloc === 'function') {
-    allocFn = exp.vo_alloc;
-    deallocFn = exp.vo_dealloc;
-  } else {
-    const parts = matchedKey.split('_');
-    const shortName = parts[parts.length - 1];
-    allocFn = exp[`${shortName}_alloc`];
-    deallocFn = exp[`${shortName}_dealloc`];
-  }
+  const allocFn: Function | undefined = typeof exp.vo_alloc === 'function' ? exp.vo_alloc : undefined;
+  const deallocFn: Function | undefined = typeof exp.vo_dealloc === 'function' ? exp.vo_dealloc : undefined;
   if (!allocFn || !deallocFn) {
     console.error('[voCallExt] Alloc/dealloc not found for module:', matchedKey);
     return new Uint8Array(0);

@@ -20,7 +20,7 @@ pub enum ReleaseError {
         repo_root: PathBuf,
         paths: Vec<PathBuf>,
     },
-    LegacyAliasImports(Vec<String>),
+    InvalidAliasImports(Vec<String>),
     ArtifactContractViolation {
         manifest_path: Option<PathBuf>,
         missing: Vec<DeclaredArtifactId>,
@@ -86,7 +86,7 @@ impl fmt::Display for ReleaseError {
                     formatted
                 )
             }
-            ReleaseError::LegacyAliasImports(violations) => {
+            ReleaseError::InvalidAliasImports(violations) => {
                 write!(f, "old alias import syntax remains")?;
                 for violation in violations {
                     write!(f, "\n{}", violation)?;

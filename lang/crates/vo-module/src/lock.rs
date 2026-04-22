@@ -291,15 +291,21 @@ pub(crate) fn verify_graph_completeness(
         .map(String::as_str)
         .collect::<std::collections::HashSet<_>>();
 
-    // Every direct requirement must have a resolved entry
+    // Every direct requirement must have a resolved entry that satisfies vo.mod.
     for req in &mod_file.require {
         if excluded.contains(req.module.as_str()) {
             continue;
         }
-        if lock_file.find(&req.module).is_none() {
-            return Err(Error::LockFileParse(format!(
+        let locked = lock_file.find(&req.module).ok_or_else(|| {
+            Error::LockFileParse(format!(
                 "vo.mod requires {} but it is not in vo.lock",
                 req.module
+            ))
+        })?;
+        if !req.constraint.satisfies(&locked.version) {
+            return Err(Error::LockFileParse(format!(
+                "vo.mod requires {} {} but vo.lock pins {} {}",
+                req.module, req.constraint, locked.path, locked.version
             )));
         }
     }
@@ -452,6 +458,37 @@ deps = ["github.com/acme/util"]
         assert!(
             msg.contains("github.com/acme/util"),
             "expected error about missing util, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_verify_graph_completeness_rejects_stale_direct_requirement_version() {
+        let mf = ModFile::parse(
+            "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.1.0\n",
+        )
+        .unwrap();
+        let lf_content = r#"version = 1
+created_by = "vo 1.0.0"
+[root]
+module = "github.com/acme/app"
+vo = "^1.0.0"
+
+[[resolved]]
+path = "github.com/acme/lib"
+version = "v1.0.0"
+vo = "^1.0.0"
+commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+release_manifest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+source = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+deps = []
+"#;
+        let lf = LockFile::parse(lf_content).unwrap();
+        let result = verify_graph_completeness(&mf, &lf, &[]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("vo.mod requires github.com/acme/lib ^1.1.0 but vo.lock pins github.com/acme/lib v1.0.0"),
+            "expected stale lock error, got: {msg}"
         );
     }
 

@@ -564,7 +564,7 @@ impl<'a> Parser<'a> {
 
     /// Convert a type expression to an expression (for make/new first argument)
     fn type_to_expr(&mut self, ty: TypeExpr, span: Span) -> ParseResult<Expr> {
-        // For identifier types, keep as Ident for backward compatibility
+        // For identifier types, keep the expression shape as Ident
         if let TypeExprKind::Ident(ident) = ty.kind {
             return Ok(self.make_expr(ExprKind::Ident(ident), span));
         }

@@ -152,7 +152,7 @@ pub fn run_gui(output: CompileOutput, app: AppHandle, session_id: u64) -> Result
                     .map_err(|e| format!("failed to emit island_data: {}", e))
             })
         }),
-        capabilities: vec!["external_island_host".to_string()],
+        capabilities: vec!["render_island_host".to_string()],
         on_stdout: Some(Box::new({
             let app = app.clone();
             move |label, text| {

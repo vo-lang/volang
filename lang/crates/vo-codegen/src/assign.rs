@@ -376,7 +376,7 @@ pub fn emit_store_to_storage(
 }
 
 // =============================================================================
-// Convenience re-exports for backward compatibility during migration
+// Assignment helper wrappers
 // =============================================================================
 
 /// Emit IfaceAssign from concrete type value already in a register.

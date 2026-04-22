@@ -158,8 +158,7 @@ fn parse_manifest_value(
         .ok_or_else(|| Error::ExtManifestParse("missing [extension] section".to_string()))?;
     if extension.contains_key("path") {
         return Err(Error::ExtManifestParse(
-            "vo.ext.toml uses legacy schema: [extension].path is invalid; use [extension.native].path instead"
-                .to_string(),
+            "[extension].path is invalid; use [extension.native].path instead".to_string(),
         ));
     }
     reject_unknown_keys(
@@ -231,7 +230,7 @@ pub fn extension_name_from_content(content: &str) -> Result<String, Error> {
 ///
 /// Returns the declared paths that must ship with the source package.
 /// The release/install layer uses this — it never needs to know about
-/// host-specific sections like `[studio]`.
+/// host-specific sections like `[extension.web]`.
 pub fn include_paths_from_content(content: &str) -> Result<Vec<PathBuf>, Error> {
     Ok(parse_ext_manifest_content(content, Path::new("vo.ext.toml"))?.include)
 }
@@ -240,26 +239,18 @@ fn parse_web_runtime_from_value(
     value: &toml::Value,
     extension: &toml::value::Table,
 ) -> Result<Option<WebRuntimeManifest>, Error> {
-    let web = extension.get("web");
-    let legacy_studio = value.get("studio");
-    if web.is_some() && legacy_studio.is_some() {
+    if value.get("studio").is_some() {
         return Err(Error::ExtManifestParse(
-            "cannot declare both [extension.web] and legacy [studio] in vo.ext.toml".to_string(),
+            "top-level Studio manifest table is invalid; use [extension.web] instead".to_string(),
         ));
     }
-    if let Some(web) = web {
-        let table = web.as_table().ok_or_else(|| {
-            Error::ExtManifestParse("[extension.web] must be a table".to_string())
-        })?;
-        return Ok(Some(parse_canonical_web_runtime_table(table)?));
-    }
-    if let Some(studio) = legacy_studio {
-        let table = studio
-            .as_table()
-            .ok_or_else(|| Error::ExtManifestParse("[studio] must be a table".to_string()))?;
-        return Ok(Some(parse_legacy_studio_runtime_table(table)?));
-    }
-    Ok(None)
+    let Some(web) = extension.get("web") else {
+        return Ok(None);
+    };
+    let table = web
+        .as_table()
+        .ok_or_else(|| Error::ExtManifestParse("[extension.web] must be a table".to_string()))?;
+    Ok(Some(parse_canonical_web_runtime_table(table)?))
 }
 
 fn parse_canonical_web_runtime_table(
@@ -270,31 +261,6 @@ fn parse_canonical_web_runtime_table(
         entry: optional_nonempty_string(table, "entry", "[extension.web]")?,
         capabilities: parse_string_array(table, "capabilities", "[extension.web]")?,
         js_modules: parse_web_runtime_js_modules(table, "[extension.web]")?,
-    })
-}
-
-fn parse_legacy_studio_runtime_table(
-    table: &toml::value::Table,
-) -> Result<WebRuntimeManifest, Error> {
-    reject_unknown_keys(
-        table,
-        &[
-            "entry",
-            "capabilities",
-            "renderer",
-            "protocol",
-            "host_bridge",
-        ],
-        "[studio]",
-    )?;
-    let mut js_modules = BTreeMap::new();
-    insert_legacy_web_runtime_js_module(&mut js_modules, table, "renderer")?;
-    insert_legacy_web_runtime_js_module(&mut js_modules, table, "protocol")?;
-    insert_legacy_web_runtime_js_module(&mut js_modules, table, "host_bridge")?;
-    Ok(WebRuntimeManifest {
-        entry: optional_nonempty_string(table, "entry", "[studio]")?,
-        capabilities: parse_string_array(table, "capabilities", "[studio]")?,
-        js_modules,
     })
 }
 
@@ -318,17 +284,6 @@ fn parse_web_runtime_js_modules(
         js_modules.insert(name.clone(), path.to_string());
     }
     Ok(js_modules)
-}
-
-fn insert_legacy_web_runtime_js_module(
-    js_modules: &mut BTreeMap<String, String>,
-    table: &toml::value::Table,
-    key: &str,
-) -> Result<(), Error> {
-    if let Some(path) = optional_relative_path(table, key, "[studio]")? {
-        js_modules.insert(key.to_string(), path);
-    }
-    Ok(())
 }
 
 fn parse_wasm_extension_from_value(
@@ -871,38 +826,6 @@ renderer = "js/dist/studio_renderer.js"
     }
 
     #[test]
-    fn test_legacy_studio_manifest_maps_to_web_runtime() {
-        let manifest = parse_ext_manifest_content(
-            r#"
-[extension]
-name = "voplay"
-
-[extension.wasm]
-type = "bindgen"
-wasm = "voplay_island_bg.wasm"
-js_glue = "voplay_island.js"
-
-[studio]
-entry = "Run"
-capabilities = ["widget", "island_transport", "browser_runtime", "vfs"]
-renderer = "js/dist/voplay-render-island.js"
-"#,
-            Path::new("vo.ext.toml"),
-        )
-        .unwrap();
-        let web = manifest.web.as_ref().unwrap();
-        assert_eq!(web.entry.as_deref(), Some("Run"));
-        assert_eq!(
-            web.capabilities,
-            vec!["widget", "island_transport", "browser_runtime", "vfs"]
-        );
-        assert_eq!(
-            web.js_module_path("renderer"),
-            Some("js/dist/voplay-render-island.js")
-        );
-    }
-
-    #[test]
     fn test_extension_web_rejects_flat_js_role_keys() {
         let error = parse_ext_manifest_content(
             r#"
@@ -927,8 +850,9 @@ renderer = "js/dist/studio_renderer.js"
     }
 
     #[test]
-    fn test_rejects_mixed_extension_web_and_legacy_studio_sections() {
-        let error = parse_ext_manifest_content(
+    fn test_studio_section_is_rejected() {
+        let removed_table = "studio";
+        let manifest = format!(
             r#"
 [extension]
 name = "vogui"
@@ -937,19 +861,16 @@ name = "vogui"
 type = "standalone"
 wasm = "vogui.wasm"
 
-[extension.web.js]
+[{}]
 renderer = "js/dist/studio_renderer.js"
-
-[studio]
-renderer = "js/dist/legacy_renderer.js"
 "#,
-            Path::new("vo.ext.toml"),
-        )
-        .unwrap_err();
+            removed_table
+        );
+        let error = parse_ext_manifest_content(&manifest, Path::new("vo.ext.toml")).unwrap_err();
         assert!(matches!(
             error,
             Error::ExtManifestParse(message)
-                if message.contains("cannot declare both [extension.web] and legacy [studio]")
+                if message.contains("top-level Studio manifest table is invalid; use [extension.web] instead")
         ));
     }
 
@@ -1009,7 +930,7 @@ library = "libvo_vogui.dylib"
     }
 
     #[test]
-    fn test_legacy_extension_path_is_rejected() {
+    fn test_extension_path_is_rejected() {
         let error = parse_ext_manifest_content(
             r#"
 [extension]

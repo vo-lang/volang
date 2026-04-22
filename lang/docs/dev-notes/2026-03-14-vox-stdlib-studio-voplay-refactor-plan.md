@@ -60,7 +60,7 @@ That means Studio is not acting as a neutral host. It is acting as a partially h
 
 `voplay` correctly owns split-island behavior today, but it still relies on Studio-specific host signaling:
 
-- `voplay/host.vo` calls `useStudioExternalWidget()`
+- `voplay/host.vo` calls `useHostWidget()`
 - `voplay/rust/src/lib.rs` exports `vo_voplay_set_studio_mode`
 
 That is backwards. `voplay` should depend on **generic host capabilities**, not a Studio-specific mode toggle.
@@ -176,7 +176,7 @@ Current facts:
 
 - `voplay/host.vo` owns split-host behavior and widget event handling
 - `voplay/game.vo` owns split-island setup and resource proxy wiring
-- `voplay/rust/src/externs/render.rs` exposes `useStudioExternalWidget`
+- `voplay/rust/src/externs/render.rs` exposes `useHostWidget`
 - `voplay/rust/src/lib.rs` exports `vo_voplay_set_studio_mode`
 
 This confirms that `voplay` already owns the business semantics, but host capability discovery is still wrong.
@@ -329,7 +329,7 @@ That means these APIs do not belong in stdlib `toolchain` as public compiler-fac
 - `SendGuiEvent`
 - `StopGui`
 
-If temporary compatibility shims are needed during migration, they must be clearly marked as host-private transitional APIs, not core stdlib design. If a temporary `package vox` alias exists at all, it must be treated as deprecated migration glue rather than the final public surface.
+If temporary temporary adapters are needed during migration, they must be clearly marked as host-private transitional APIs, not core stdlib design. If a temporary `package vox` alias exists at all, it must be treated as deprecated migration glue rather than the final public surface.
 
 ### 6.6 Step 1 deliverables
 
@@ -340,7 +340,7 @@ If temporary compatibility shims are needed during migration, they must be clear
 5. Move compile/parse/format/bytecode/project APIs behind that abstraction.
 6. Remove GUI session hosting from the architectural definition of `toolchain`.
 7. Update internal users in `volang` to stop treating the external `vo-vox` repo as the source of truth for the public package surface.
-8. If a temporary `vox` compatibility layer is kept, mark it deprecated and remove it once downstream callers are migrated.
+8. If a temporary `vox` adapter layer is kept, mark it deprecated and remove it once downstream callers are migrated.
 
 ### 6.7 Step 1 acceptance criteria
 
@@ -424,7 +424,7 @@ After Step 3:
 
 These patterns must disappear from `voplay`:
 
-- `useStudioExternalWidget()` as a Studio-specific capability test
+- `useHostWidget()` as a Studio-specific capability test
 - `vo_voplay_set_studio_mode`
 - any host discovery based on “am I running inside Studio?”
 
@@ -462,7 +462,7 @@ These rules apply throughout all three steps.
 
 ### 9.1 Cleanliness beats temporary compatibility
 
-If a temporary compatibility layer keeps the old design alive in the wrong place, delete it.
+If a temporary adapter layer keeps the old design alive in the wrong place, delete it.
 
 Temporary Studio breakage is acceptable.
 

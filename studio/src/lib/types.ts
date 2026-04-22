@@ -178,7 +178,7 @@ export interface GuiRunOutput {
   entryPath: string;
   framework: FrameworkContract | null;
   providerFrameworks: FrameworkContract[];
-  externalWidgetHandlerId: number | null;
+  hostWidgetHandlerId: number | null;
 }
 
 export type ProcEvent =

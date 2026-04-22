@@ -198,7 +198,7 @@ ScrollIntoViewSmooth(refName)      // el.scrollIntoView({ behavior: 'smooth' })
 
 ## Layer 3: Host Widget Protocol (Phase 3a) ✅
 
-Upgraded `ExternalWidget` → `HostWidget` with children support and cleaner API:
+Upgraded `HostWidget` → `HostWidget` with children support and cleaner API:
 
 ```vo
 // New API — typed config + child slots
@@ -213,7 +213,7 @@ Children passed to `HostWidget` are rendered as Preact-managed nodes inside the
 widget container. The JS factory coexists with them — it can ignore, wrap, or
 reposition the slot content.
 
-`ExternalWidget` remains for backward compat.
+`HostWidget` remains for old API preservation.
 
 ## VirtualList: JS-native Preact Component (Phase 3b) ✅
 
@@ -300,13 +300,13 @@ Configurable timing per transition name (fade=200ms, scale=250ms, etc.).
 | `vogui/event.vo` | +ScrollEvent, +IntersectEvent, +OnScrollState, +OnIntersect, +invokeHandler cases |
 | `vogui/node.vo` | +ObserveScroll, +ObserveIntersect |
 | `vogui/measure.vo` | NEW: Rect, RequestMeasure, invokeMeasureCallback |
-| `vogui/widget.vo` | +HostWidget (children), +ObserveWidget, ExternalWidget kept for compat |
+| `vogui/widget.vo` | +HostWidget (children), +ObserveWidget, HostWidget kept for compat |
 | `vogui/ref.vo` | +MeasureID fields, +ScrollToSmooth, +ScrollToBottomSmooth, +ScrollIntoViewSmooth |
 | `vogui/encode.vo` | Encode measureID in refAction wire format |
 | `vogui/app.vo` | +eventIDMeasure case in processEvent |
 | `vogui/gui.vo` | Updated API documentation for all new features |
 | `vogui/js/src/events.ts` | +onScrollState handler in propsToHandlers |
-| `vogui/js/src/renderer.tsx` | +IntersectionObserver binding, +children support in ExternalWidgetHost |
+| `vogui/js/src/renderer.tsx` | +IntersectionObserver binding, +children support in HostWidgetHost |
 | `vogui/js/src/refs.ts` | +measure, +scrollToSmooth, +scrollToBottomSmooth, +scrollIntoViewSmooth |
 | `vogui/js/src/types.ts` | +measure/smooth commands in RefActionCommand, +measureId in RefAction |
 | `vogui/js/src/decoder.ts` | +measure/smooth in command validation, +measureId decoding |

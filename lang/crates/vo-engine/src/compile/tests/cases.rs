@@ -1155,7 +1155,7 @@ fn test_compile_adhoc_file_with_ancestor_vo_work_does_not_apply_workspace_replac
         "expected error to mention the undeclared external import, got: {}",
         err
     );
-    // Guard against regression to the legacy fallthrough: the diagnostic must
+    // Guard against regression to the incorrect fallthrough: the diagnostic must
     // NOT claim the extension manifest was picked up from the local vogui
     // rust target directory.
     let local_vogui_target = local_vogui.join("rust").join("target");

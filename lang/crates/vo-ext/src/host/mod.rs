@@ -30,7 +30,7 @@ use std::cell::RefCell;
 /// Constructed via the builder pattern:
 /// ```ignore
 /// let bridge = HostBridge::new()
-///     .with_capability("external_island_host")
+///     .with_capability("render_island_host")
 ///     .with_tick(Box::new(my_tick_provider));
 /// vo_ext::host::install(bridge);
 /// ```

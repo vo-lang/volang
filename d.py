@@ -7,7 +7,6 @@ Usage:
     ./d.py bench [all|vo|<name>|score] [--all-langs]
     ./d.py loc [--with-tests]
     ./d.py clean [all|vo|rust]
-    ./d.py play [--build-only]  # deprecated legacy playground flow
     ./d.py studio [--build-wasm] [--build-only]
     ./d.py studio-native [--build-wasm]
     ./d.py run <file.vo> [--mode=vm|jit] [--codegen]
@@ -200,7 +199,7 @@ def main():
         sys.exit(run_vo_cli(['run'] + rest_args, jit_mode=jit_mode))
     elif command == 'vo':
         sys.exit(run_vo_cli(rest_args))
-    elif command in ('bench', 'loc', 'clean', 'play', 'studio', 'studio-native', 'ci'):
+    elif command in ('bench', 'loc', 'clean', 'studio', 'studio-native', 'ci'):
         sys.exit(run_other_command(command, rest_args))
     elif command in ('-h', '--help', 'help'):
         print(__doc__)

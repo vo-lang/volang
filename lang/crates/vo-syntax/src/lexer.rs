@@ -535,8 +535,8 @@ impl<'src> Lexer<'src> {
                     return self.scan_float_exponent();
                 }
                 Some(c) if c.is_ascii_digit() => {
-                    // Legacy octal: 0644 style (Go compatible)
-                    return self.scan_legacy_octal_number();
+                    // Go-style octal: 0644
+                    return self.scan_go_style_octal_number();
                 }
                 _ => return TokenKind::IntLit,
             }
@@ -621,8 +621,8 @@ impl<'src> Lexer<'src> {
         TokenKind::IntLit
     }
 
-    /// Scans a legacy octal number (0644 style, Go compatible).
-    fn scan_legacy_octal_number(&mut self) -> TokenKind {
+    /// Scans a Go-style octal number (0644 style, Go compatible).
+    fn scan_go_style_octal_number(&mut self) -> TokenKind {
         self.scan_octal_digits();
         TokenKind::IntLit
     }

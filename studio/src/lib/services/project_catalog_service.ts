@@ -1126,12 +1126,8 @@ function resolveHasGui(
   previousProject: ManagedProject | undefined,
 ): ManagedProject['hasGui'] {
   const storedConfig = localProject ? readStoredProjectConfig(projectConfigKey(localProject)) : null;
-  const legacyManifestHasGui = manifestProject?.appKind != null
-    ? manifestProject.appKind === 'gui'
-    : undefined;
   return storedConfig?.hasGui
     ?? manifestProject?.hasGui
-    ?? legacyManifestHasGui
     ?? previousProject?.hasGui
     ?? localProject?.hasGui
     ?? false;

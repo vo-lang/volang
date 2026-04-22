@@ -503,7 +503,7 @@ All tests verified in both VM and JIT modes via `./d.py test both --release`.
 
 **Architecture decisions (locked for this plan):**
 1. **Do not enable `std` just for WASM**. Build a platform-agnostic suspend/resume path that works in `no_std + alloc`.
-2. **For HTTP, move directly to the final ABI** (`nativeHttpDo`) across both native and WASM implementations; do not keep a compatibility layer.
+2. **For HTTP, move directly to the final ABI** (`nativeHttpDo`) across both native and WASM implementations; do not keep a adapter layer.
 3. **For regexp, move directly to the final unified backend** in `vo-stdlib`; remove WASM-specific regexp module and registrations in the same phase.
 
 #### Phase W0: Async Suspension Substrate for WASM/no_std (~4-6 days)

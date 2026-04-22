@@ -40,7 +40,7 @@ type NativeGuiRunResult = {
   entryPath: string;
   framework: FrameworkContract | null;
   providerFrameworks: FrameworkContract[];
-  externalWidgetHandlerId: number | null;
+  hostWidgetHandlerId: number | null;
 };
 
 function displayPath(path: string): string {
@@ -183,7 +183,7 @@ export class NativeBackend implements Backend {
       entryPath: result.entryPath,
       framework: result.framework,
       providerFrameworks: result.providerFrameworks,
-      externalWidgetHandlerId: result.externalWidgetHandlerId,
+      hostWidgetHandlerId: result.hostWidgetHandlerId,
     };
   }
 

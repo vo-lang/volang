@@ -458,7 +458,7 @@ Module-protocol rules:
 - Supported targets MUST use canonical target identifiers such as Rust target triples or `wasm32-unknown-unknown`; coarse labels such as `mac`, `linux`, or `win` are not sufficient protocol identifiers.
 - A module version MAY support only a subset of targets. Omission of a target means that target is unsupported for that version.
 - For every target explicitly declared as supported by a Rust-backed extension, the published release MUST include the required binary artifact set for that target.
-- Legacy `vo.ext.toml` schema shapes are invalid under this protocol and MUST be rejected rather than rewritten or interpreted compatibly.
+- Removed `vo.ext.toml` schema shapes are invalid under this protocol and MUST be rejected rather than rewritten or interpreted compatibly.
 
 ### 5.6 Inline `vo.mod` Metadata
 

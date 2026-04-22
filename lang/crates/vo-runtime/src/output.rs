@@ -125,7 +125,7 @@ pub fn default_sink() -> Arc<dyn OutputSink> {
 }
 
 // =============================================================================
-// WASM global buffer (no_std only) — kept for GlobalBufferSink and legacy API
+// WASM global buffer (no_std only)
 // =============================================================================
 
 #[cfg(not(feature = "std"))]
@@ -200,7 +200,7 @@ impl OutputSink for GlobalBufferSink {
 }
 
 // =============================================================================
-// Legacy global API — kept for WASM (no_std) paths
+// Global output API for WASM (no_std) paths
 // =============================================================================
 
 /// Take all captured output and clear the buffer (WASM global buffer).

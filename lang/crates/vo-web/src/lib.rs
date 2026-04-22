@@ -91,7 +91,7 @@ pub use browser_runtime::{
     BrowserRuntimePlan, BrowserRuntimeView, BrowserRuntimeViewFramework, BrowserSnapshotFile,
     BrowserSnapshotMount, BrowserSnapshotMountKind, BrowserSnapshotPlan, BrowserSnapshotRoot,
     BrowserSnapshotSourceRef, BrowserWasmExtensionBinding, BrowserWasmExtensionSpec,
-    LegacyFrameworkSplit, RequiredBrowserArtifact,
+    PrimaryFrameworkSplit, RequiredBrowserArtifact,
 };
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]

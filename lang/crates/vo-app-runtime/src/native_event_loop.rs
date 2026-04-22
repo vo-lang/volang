@@ -108,7 +108,7 @@ pub struct NativeGuiEventLoopConfig {
     /// Callback for outbound island frames.  `None` if the app does not use
     /// external island transport.
     pub island_sink: Option<IslandSink>,
-    /// Host capabilities to advertise (e.g. `"external_island_host"`).
+    /// Host capabilities to advertise (e.g. `"render_island_host"`).
     pub capabilities: Vec<String>,
     /// Called when the guest produces stdout.
     ///

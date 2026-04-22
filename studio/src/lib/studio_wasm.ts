@@ -7,7 +7,6 @@
 // No static import of any framework package.
 import type { HostBridgeModule } from './gui/renderer_bridge';
 import type { FrameworkContract } from './types';
-import { createInMemoryWindowVfsBackend } from './in_memory_window_vfs';
 import { hasWindowVfsBindings, installWindowVfsBackend, type WindowVfsBackend } from './window_vfs_bindings';
 
 // ── VoVm instance interface (matches VoVm wasm-bindgen class exports) ────────
@@ -25,7 +24,7 @@ export interface VoVmInstance {
 // ── StudioWasm — full set of wasm-bindgen exports from vo-studio-wasm ────────
 
 export interface StudioWasm {
-  // Legacy singleton-based island API (still used for non-VoWebModule paths)
+  // Direct GUI VM API.
   runGuiFromBytecode(bytecode: Uint8Array): Uint8Array;
   startGuiFromBytecode(bytecode: Uint8Array): Uint8Array;
   runGui(entryPath: string): {
@@ -34,7 +33,7 @@ export interface StudioWasm {
     entryPath: string;
     framework: FrameworkContract | null;
     providerFrameworks: FrameworkContract[];
-    externalWidgetHandlerId: number | null;
+    hostWidgetHandlerId: number | null;
   };
   runGuiEntry(entryPath: string): Uint8Array;
   sendGuiEvent(handlerId: number, payload: string): Uint8Array;
@@ -70,8 +69,6 @@ export interface StudioWasm {
 type RawStudioWasmModule = Partial<StudioWasm> & {
   default: (wasmPath?: string) => Promise<void>;
   StudioVoVm?: { withExterns(bytecode: Uint8Array): VoVmInstance };
-  VoVm?: { withExterns(bytecode: Uint8Array): VoVmInstance };
-  VoVmIsland?: { withExterns(bytecode: Uint8Array): VoVmInstance };
 };
 
 // ── VoWebModule — framework-neutral VM capability surface ─────────────────────
@@ -202,13 +199,7 @@ function ensureStudioWindowVfsBindings(): void {
   if (hasWindowVfsBindings()) {
     return;
   }
-  installWindowVfsBackend(createInMemoryWindowVfsBackend());
-  studioWindowVfsInstalledRevision = studioWindowVfsRevision;
-  emitStudioHostLog({
-    source: 'studio-wasm',
-    code: 'host_vfs_fallback_ready',
-    level: 'system',
-  });
+  throw new Error('Studio Window VFS backend is not installed');
 }
 
 export function setStudioWindowVfsBackendFactory(factory: StudioWindowVfsFactory | null): void {
@@ -254,12 +245,16 @@ function clearStandaloneHostState(): void {
   standaloneGameLoops.clear();
 }
 
-function dispatchStandaloneGuiEventAsync(handlerId: number, payload: string): Promise<void> {
+function requireStandaloneGuiEventDispatcher(label: string): StandaloneGuiEventDispatcher {
   const dispatcher = standaloneGuiEventDispatcher;
   if (!dispatcher) {
-    return Promise.resolve();
+    throw new Error(`render island host event dispatcher is not installed for ${label}`);
   }
-  return dispatcher(handlerId, payload);
+  return dispatcher;
+}
+
+function dispatchStandaloneGuiEventAsync(handlerId: number, payload: string): Promise<void> {
+  return requireStandaloneGuiEventDispatcher(`handler:${handlerId}`)(handlerId, payload);
 }
 
 function fireAndForgetStandaloneGuiEvent(handlerId: number, payload: string, label: string): void {
@@ -375,7 +370,7 @@ function buildStandaloneImports(): WebAssembly.Imports {
   };
   let cachedBridgeMod: HostBridgeModule | null = null;
   let cachedBridgeImports: Record<string, (...args: number[]) => number | void> | null = null;
-  function getBridgeImports() {
+  function getBridgeImports(): Record<string, (...args: number[]) => number | void> | null {
     if (activeHostBridgeModule !== cachedBridgeMod) {
       cachedBridgeMod = activeHostBridgeModule;
       cachedBridgeImports = activeHostBridgeModule ? activeHostBridgeModule.buildImports(bridgeCtx) : null;
@@ -383,14 +378,20 @@ function buildStandaloneImports(): WebAssembly.Imports {
     return cachedBridgeImports;
   }
 
+  function requireBridgeImport(name: string): (...args: number[]) => number | void {
+    const handler = getBridgeImports()?.[name];
+    if (typeof handler !== 'function') {
+      throw new Error(`host bridge import is not installed: ${name}`);
+    }
+    return handler;
+  }
+
   // Stash the ref so the caller can bind it after instantiation.
   // We use a convention: the returned object has a hidden __ref property.
   const imports: WebAssembly.Imports & { __ref?: StandaloneRef } = {
     env: {
       host_start_timeout(id: number, ms: number): void {
-        if (!standaloneGuiEventDispatcher) {
-          return;
-        }
+        requireStandaloneGuiEventDispatcher(`timeout:${id}`);
         const existing = standaloneTimers.get(id);
         if (existing !== undefined) {
           clearTimeout(existing);
@@ -406,9 +407,7 @@ function buildStandaloneImports(): WebAssembly.Imports {
         if (handle !== undefined) { clearTimeout(handle); standaloneTimers.delete(id); }
       },
       host_start_interval(id: number, ms: number): void {
-        if (!standaloneGuiEventDispatcher) {
-          return;
-        }
+        requireStandaloneGuiEventDispatcher(`interval:${id}`);
         const existing = standaloneIntervals.get(id);
         if (existing !== undefined) {
           clearInterval(existing);
@@ -436,13 +435,14 @@ function buildStandaloneImports(): WebAssembly.Imports {
       },
       host_has_host_capability(ptr: number, len: number): number {
         const name = readWasmString(ref, ptr, len);
-        const result = name === 'external_island_host' && standaloneGuiEventDispatcher ? 1 : 0;
-        if (name === 'external_island_host') {
+        const result = name === 'render_island_host' ? 1 : 0;
+        if (name === 'render_island_host') {
+          requireStandaloneGuiEventDispatcher('render_island_host capability');
           emitStudioHostLog({
             source: 'studio-extbridge',
             code: 'host_capability_query',
-            level: result === 1 ? 'success' : 'error',
-            text: `name=${name} dispatcher=${standaloneGuiEventDispatcher ? 'set' : 'null'} result=${result}`,
+            level: 'success',
+            text: `name=${name} dispatcher=set result=${result}`,
           });
         }
         return result;
@@ -477,9 +477,7 @@ function buildStandaloneImports(): WebAssembly.Imports {
         console.log('[vogui host] toast:', msg);
       },
       host_start_anim_frame(id: number): void {
-        if (!standaloneGuiEventDispatcher) {
-          return;
-        }
+        requireStandaloneGuiEventDispatcher(`anim_frame:${id}`);
         const existing = standaloneAnimFrames.get(id);
         if (existing !== undefined) {
           cancelAnimationFrame(existing);
@@ -495,9 +493,7 @@ function buildStandaloneImports(): WebAssembly.Imports {
         if (handle !== undefined) { cancelAnimationFrame(handle); standaloneAnimFrames.delete(id); }
       },
       host_start_game_loop(id: number): void {
-        if (!standaloneGuiEventDispatcher) {
-          return;
-        }
+        requireStandaloneGuiEventDispatcher(`game_loop:${id}`);
         const existing = standaloneGameLoops.get(id);
         if (existing) {
           cancelAnimationFrame(existing.rafId);
@@ -529,22 +525,21 @@ function buildStandaloneImports(): WebAssembly.Imports {
         const loop = standaloneGameLoops.get(id);
         if (loop !== undefined) { cancelAnimationFrame(loop.rafId); standaloneGameLoops.delete(id); }
       },
-      // Bridge functions — always present so standalone WASM can always instantiate.
-      // Forward to activeHostBridgeModule lazily; safe zero-fallbacks when not yet set.
+      // Bridge functions are resolved through the active host bridge module.
       host_focus(ptr: number, len: number): void {
-        getBridgeImports()?.host_focus?.(ptr, len);
+        requireBridgeImport('host_focus')(ptr, len);
       },
       host_blur(ptr: number, len: number): void {
-        getBridgeImports()?.host_blur?.(ptr, len);
+        requireBridgeImport('host_blur')(ptr, len);
       },
       host_scroll_to(ptr: number, len: number, top: number): void {
-        getBridgeImports()?.host_scroll_to?.(ptr, len, top);
+        requireBridgeImport('host_scroll_to')(ptr, len, top);
       },
       host_scroll_into_view(ptr: number, len: number): void {
-        getBridgeImports()?.host_scroll_into_view?.(ptr, len);
+        requireBridgeImport('host_scroll_into_view')(ptr, len);
       },
       host_select_text(ptr: number, len: number): void {
-        getBridgeImports()?.host_select_text?.(ptr, len);
+        requireBridgeImport('host_select_text')(ptr, len);
       },
       host_measure_text(
         textPtr: number, textLen: number,
@@ -553,17 +548,14 @@ function buildStandaloneImports(): WebAssembly.Imports {
         whiteSpace: number,
         outLenPtr: number,
       ): number {
-        const bridge = getBridgeImports();
+        const bridge = requireBridgeImport('host_measure_text') as (...args: number[]) => number;
         if (!_measureTextFirstCallLogged) {
           _measureTextFirstCallLogged = true;
-          console.log('[host_measure_text] first call, bridge=', bridge ? 'loaded' : 'null', 'activeHostBridgeModule=', activeHostBridgeModule ? 'set' : 'null');
+          console.log('[host_measure_text] first call, bridge=loaded');
         }
-        if (bridge?.host_measure_text) {
-          return (bridge.host_measure_text as (...args: number[]) => number)(
-            textPtr, textLen, fontPtr, fontLen, maxWidth, lineHeight, whiteSpace, outLenPtr,
-          );
-        }
-        throw new Error('host_measure_text bridge missing');
+        return bridge(
+          textPtr, textLen, fontPtr, fontLen, maxWidth, lineHeight, whiteSpace, outLenPtr,
+        );
       },
       host_measure_text_lines(
         textPtr: number, textLen: number,
@@ -572,13 +564,10 @@ function buildStandaloneImports(): WebAssembly.Imports {
         whiteSpace: number,
         outLenPtr: number,
       ): number {
-        const bridge = getBridgeImports();
-        if (bridge?.host_measure_text_lines) {
-          return (bridge.host_measure_text_lines as (...args: number[]) => number)(
-            textPtr, textLen, fontPtr, fontLen, maxWidth, lineHeight, whiteSpace, outLenPtr,
-          );
-        }
-        throw new Error('host_measure_text_lines bridge missing');
+        const bridge = requireBridgeImport('host_measure_text_lines') as (...args: number[]) => number;
+        return bridge(
+          textPtr, textLen, fontPtr, fontLen, maxWidth, lineHeight, whiteSpace, outLenPtr,
+        );
       },
     },
   };
@@ -784,7 +773,7 @@ function installExtBridgeGlobals(): void {
       throwVoCallExtFailure(`[voCallExt] Bindgen export not found: ${funcName} in module: ${bindgenKey}`);
     }
 
-    // Fall back to standalone C-ABI modules
+    // Then try standalone C-ABI modules.
     let instance: WebAssembly.Instance | undefined;
     let matchedKey = '';
     for (const [key, inst] of extInstances) {
@@ -879,9 +868,9 @@ function installExtBridgeGlobals(): void {
 }
 
 function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
-  const vmExport = mod.StudioVoVm ?? mod.VoVm ?? mod.VoVmIsland;
+  const vmExport = mod.StudioVoVm;
   if (!vmExport) {
-    throw new Error('studio/wasm missing VM export: StudioVoVm, VoVm, or VoVmIsland');
+    throw new Error('studio/wasm missing VM export: StudioVoVm');
   }
   return {
     runGuiFromBytecode: requireStudioExport(mod.runGuiFromBytecode as StudioWasm['runGuiFromBytecode'], 'runGuiFromBytecode'),

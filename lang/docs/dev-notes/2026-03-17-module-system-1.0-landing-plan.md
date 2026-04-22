@@ -28,9 +28,9 @@ The key policy decisions are:
 - **No long-term support** for `files(...)` as a separate WASM-only module distribution protocol.
 - **No implicit network access** during `build`, `check`, `test`, or `run`.
 - **No published `replace` semantics** inside `vo.mod`.
-- **No hidden compatibility fallback** that keeps the old architecture alive under the new names.
+- **No hidden dual-path fallback** that keeps the old architecture alive under the new names.
 
-No compatibility fallback is part of the plan. Legacy state is removed directly by authoritative parser/CI cutover, not kept alive behind helper commands.
+No dual-path fallback is part of the plan. Removed state is removed directly by authoritative parser/CI cutover, not kept alive behind helper commands.
 
 Temporary breakage policy:
 
@@ -47,7 +47,7 @@ The previous review established that the current module system is not merely unf
 The most important current contradictions are:
 
 - The old spec describes alias-based external imports such as `@"gin"`, while the actual implementation is centered on full module-path imports.
-- `vo.mod` currently mixes direct dependency intent with local override concepts (`replace`) and legacy WASM fetch details (`files(...)`).
+- `vo.mod` currently mixes direct dependency intent with local override concepts (`replace`) and removed WASM fetch details (`files(...)`).
 - `vo.sum` is written during install but is not the true build contract and is not consistently verified during build/check.
 - Native and WASM dependency acquisition do not follow one registry protocol.
 - `vo get` / prepare / auto-install behavior does not define a clean module lifecycle.
@@ -287,7 +287,7 @@ After Phase 2:
    - do not keep `vo.sum` alive under a different role
    - remove code paths that imply it is the source of truth
 
-### 6.3 Legacy State Policy
+### 6.3 Removed State Policy
 
 Phase 2 does not depend on a dedicated migration command.
 
@@ -296,7 +296,7 @@ Instead:
 - alias-based `require` lines are rejected by the authoritative parser
 - local override semantics live only in `vo.work`
 - `vo.sum` is deleted instead of preserved under another role
-- repositories carrying legacy imports or manifest syntax must be fixed explicitly before they pass CI or release verification
+- repositories carrying removed imports or manifest syntax must be fixed explicitly before they pass CI or release verification
 
 ### 6.4 Primary files to touch
 
@@ -317,7 +317,7 @@ Instead:
 
 - `cargo test -p vo-module --release`
 - lockfile golden tests
-- assert-based tests for rejecting legacy alias-require, `replace`, and `files(...)` state
+- assert-based tests for rejecting removed alias-require, `replace`, and `files(...)` state
 
 ### 6.7 Bootstrapping Note
 
@@ -560,7 +560,7 @@ After Phase 6:
 
 ### 10.3 Acceptance criteria
 
-- first-party modules build under the new rules without compatibility fallbacks
+- first-party modules build under the new rules without dual-path fallbacks
 - release CI emits the standardized assets
 - docs, CLI, and implementation describe the same lifecycle
 
@@ -576,7 +576,7 @@ After Phase 6:
 
 These rules apply throughout all phases.
 
-### 11.1 Clean cutovers beat long-lived compatibility layers
+### 11.1 Clean cutovers beat long-lived adapter layers
 
 If a temporary layer keeps the old architecture semantically alive, delete it.
 
@@ -599,9 +599,9 @@ No concept should be split across two equally authoritative files.
 Build/check/run should not contain dependency-management policy.
 Module-management commands should not be hidden inside compile preparation.
 
-### 11.4 Fail fast on ambiguous legacy state
+### 11.4 Fail fast on ambiguous removed state
 
-When legacy state is ambiguous:
+When removed state is ambiguous:
 
 - do not guess
 - do not silently preserve old semantics
@@ -636,7 +636,7 @@ The practical execution order should be:
 5. Implement deterministic solver + explicit lifecycle commands on top of the new registry protocol.
 6. Integrate artifact verification and workspace rules.
 7. Cut over first-party repositories and CI.
-8. Remove remaining legacy codepaths and docs.
+8. Remove remaining removed codepaths and docs.
 
 This order is intentional:
 
@@ -671,6 +671,6 @@ This order is intentional:
   5. frozen builds + verified artifacts + local-only workspace overrides
   6. first-party cutover + CI enforcement
 - `vo.sum`, alias import identity, published `replace`, and WASM-only `files(...)` protocol are **not** part of the final system.
-- Legacy state is cleaned directly; the landed design does not depend on a dedicated migration command.
+- Removed state is cleaned directly; the landed design does not depend on a dedicated migration command.
 - Native and WASM must converge on **one registry protocol and one lock contract**.
 - Extension loading must stay **manifest-driven and reference-driven**, not eager.

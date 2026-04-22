@@ -6,7 +6,6 @@ Usage:
     ./d.py test [vm|jit|gc|nostd|wasm] [-v] [file.vo]
     ./d.py bench [all|vo|<name>|score] [--all-langs] [--jit-hot]
     ./d.py loc [--with-tests]
-    ./d.py play [--build-only]  Legacy playground dev flow (deprecated)
     ./d.py studio [--build-wasm] [--build-only] [--runner] [project]
     ./d.py studio-native [--build-wasm] [--runner] [project]
 """
@@ -158,48 +157,6 @@ def clean_caches(target: str = 'all'):
         print("Nothing to clean.")
 
 
-def build_wasm():
-    """Build vo-playground WASM (includes vo-web and vogui)."""
-    print(f"{Colors.BOLD}Building vo-playground WASM...{Colors.NC}")
-    playground_rust_dir = PROJECT_ROOT / 'playground' / 'rust'
-    build_cmd = ['wasm-pack', 'build', str(playground_rust_dir), '--target', 'web', '--release']
-    code, stdout, stderr = run_cmd(build_cmd, capture=False)
-    if code != 0:
-        print(f"{Colors.RED}vo-playground WASM build failed{Colors.NC}")
-        sys.exit(1)
-    
-    pkg_dir = playground_rust_dir / 'pkg'
-    wasm_file = pkg_dir / 'vo_playground_bg.wasm'
-    if wasm_file.exists():
-        size_kb = wasm_file.stat().st_size / 1024
-        print(f"{Colors.GREEN}✓ vo-playground:{Colors.NC} {size_kb:.1f} KB")
-
-
-def build_test_data_zip():
-    """Rebuild playground/public/test_data.zip from lang/test_data/ and tests/."""
-    import zipfile
-
-    out_path = PROJECT_ROOT / 'playground' / 'public' / 'test_data.zip'
-    print(f"{Colors.BOLD}Building test_data.zip...{Colors.NC}")
-
-    with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        # lang/test_data/**/*.vo  (flat name — existing behaviour)
-        for vo_file in sorted(TEST_DIR.rglob('*.vo')):
-            arcname = vo_file.relative_to(TEST_DIR).as_posix()
-            zf.write(vo_file, arcname)
-
-        # tests/<module>/main.vo  (stored as tests/<module>/main.vo)
-        tests_dir = PROJECT_ROOT / 'tests'
-        if tests_dir.exists():
-            for vo_file in sorted(tests_dir.rglob('*.vo')):
-                arcname = 'tests/' + vo_file.relative_to(tests_dir).as_posix()
-                zf.write(vo_file, arcname)
-
-    count = len(zipfile.ZipFile(out_path).namelist())
-    size_kb = out_path.stat().st_size / 1024
-    print(f"{Colors.GREEN}✓ test_data.zip:{Colors.NC} {count} files, {size_kb:.1f} KB")
-
-
 def ensure_vo_web_wasm_built():
     """Build lang/crates/vo-web WASM pkg if missing or stale."""
     pkg_dir = PROJECT_ROOT / 'lang' / 'crates' / 'vo-web' / 'pkg'
@@ -238,28 +195,6 @@ def ensure_vo_web_wasm_built():
         if code != 0:
             print(f"{Colors.RED}wasm-pack build failed{Colors.NC}")
             sys.exit(1)
-
-
-def run_playground(build_only: bool = False):
-    """Build WASM and optionally start the legacy playground dev server."""
-    build_test_data_zip()
-    build_wasm()
-    if build_only:
-        return
-    
-    playground_dir = PROJECT_ROOT / 'playground'
-    if not playground_dir.exists():
-        print(f"{Colors.RED}Playground directory not found: {playground_dir}{Colors.NC}")
-        sys.exit(1)
-    
-    print(f"\n{Colors.BOLD}Starting legacy Playground (deprecated)...{Colors.NC}")
-    print(f"{Colors.DIM}Press Ctrl+C to stop (Legacy Playground only, use Vibe Studio for new projects){Colors.NC}\n")
-    
-    try:
-        ensure_vo_web_wasm_built()
-        subprocess.run(['zsh', '-lc', 'npm run dev'], cwd=playground_dir, check=True)
-    except KeyboardInterrupt:
-        print(f"\n{Colors.GREEN}Legacy Playground stopped{Colors.NC}")
 
 
 STUDIO_WASM_FILE = PROJECT_ROOT / 'studio' / 'public' / 'wasm' / 'vo_studio_wasm_bg.wasm'
@@ -337,12 +272,21 @@ def build_studio_wasm():
         print(f"{Colors.GREEN}✓ vo-studio:{Colors.NC} {size_kb:.1f} KB")
 
 
+def is_local_studio_project(project: Optional[str]) -> bool:
+    if not project:
+        return False
+    raw = project.removeprefix('file://')
+    return raw.startswith('/') or Path(raw).exists()
+
+
 def configure_studio_launch_env(env: dict[str, str], project: Optional[str], runner: bool, *, native: bool) -> None:
     prefix = 'VIBE' if native else 'VITE'
     if project:
         env[f'{prefix}_STUDIO_PROJ'] = project
     if project or runner:
         env[f'{prefix}_STUDIO_MODE'] = 'runner' if runner else 'dev'
+    if not native and is_local_studio_project(project):
+        env['VITE_STUDIO_LOCAL_PROJECTS'] = '1'
 
 
 def studio_dev_server_url() -> str:
@@ -449,7 +393,7 @@ def get_vo_bench_bin(arch: str = '64') -> Path:
         return PROJECT_ROOT / 'target' / TARGET_32 / 'release' / 'vo'
     return PROJECT_ROOT / 'target' / 'release' / 'vo'
 
-# Legacy paths for backward compatibility
+# Canonical development paths
 VO_BIN_DEBUG = PROJECT_ROOT / 'target' / 'debug' / 'vo'
 VO_BIN_RELEASE = PROJECT_ROOT / 'target' / 'release' / 'vo'
 STDLIB_DIR = PROJECT_ROOT / 'lang' / 'stdlib'
@@ -1743,11 +1687,6 @@ def main():
                               choices=['all', 'vo', 'rust'],
                               help='all (default), vo (.vo-cache), rust (cargo clean)')
 
-    # play
-    play_parser = subparsers.add_parser('play', help='Legacy playground dev server (deprecated)')
-    play_parser.add_argument('--build-only', action='store_true',
-                             help='Only build WASM, do not start dev server')
-
     # studio
     studio_parser = subparsers.add_parser('studio', help='Start Vibe Studio dev server')
     studio_parser.add_argument('--build-wasm', action='store_true',
@@ -1809,9 +1748,6 @@ def main():
 
     elif args.command == 'ci':
         run_local_ci(args.mode)
-
-    elif args.command == 'play':
-        run_playground(build_only=args.build_only)
 
     elif args.command == 'studio':
         run_studio(

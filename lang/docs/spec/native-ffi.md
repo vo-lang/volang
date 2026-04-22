@@ -18,7 +18,7 @@ This specification does not define:
 
 - source-language syntax for `extern func`
 - non-Rust extension backends
-- host-application tables such as `[studio]`
+- host-application tables such as `[extension.web]`
 - low-level ABI details beyond the extension entry table contract
 
 ## 2. Design Principles
@@ -101,7 +101,7 @@ The module protocol interprets only these tables:
 - `[[extension.native.targets]]`
 - `[extension.wasm]`
 
-Other top-level tables such as `[studio]` MAY exist for host-specific tooling.
+Other top-level tables such as `[extension.web]` MAY exist for host-specific tooling.
 The module system MUST ignore tables it does not own.
 
 ### 4.3 Canonical Shape
@@ -132,7 +132,7 @@ library = "vo_vogui.dll"
 type = "standalone"
 wasm = "vogui.wasm"
 
-[studio]
+[extension.web]
 renderer = "js/dist/studio_renderer.js"
 protocol = "js/dist/studio_protocol.js"
 host_bridge = "js/dist/studio_host_bridge.js"
@@ -236,7 +236,7 @@ Rules:
 - A published release MUST include every artifact implied by the declared native target entries and the declared WASM section.
 - Build tools MUST fail on manifest/release mismatches rather than inferring missing target support.
 
-### 4.10 Legacy Schema Rejection
+### 4.10 Removed Schema Rejection
 
 Historically, some Vo modules used a reduced manifest shape in which the local native build hint lived at `[extension].path`.
 
@@ -252,10 +252,10 @@ wasm = "vogui.wasm"
 
 Rejection rules:
 
-- The legacy shape above is invalid for this specification.
+- The removed shape above is invalid for this specification.
 - Tools MUST reject manifests that use `[extension].path` instead of `[extension.native].path`.
 - Tools MUST reject manifests that attempt to infer published native target support from a single host-local path.
-- Tools MUST NOT implement compatibility shims, silent rewrites, or fallback parsing for the legacy shape.
+- Tools MUST NOT implement temporary adapters, implicit rewrites, or alternate parsing for the removed shape.
 - Publication validation MUST fail if the manifest does not use the canonical schema defined in this document.
 
 ### 4.11 Examples

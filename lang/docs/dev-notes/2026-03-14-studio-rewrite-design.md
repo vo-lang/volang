@@ -2,7 +2,7 @@
 
 > Status: Draft  
 > Date: 2026-03-14  
-> Supersedes: `2026-03-14-studio-first-principles-refactor-plan.md` (partial), `2026-03-14-vox-stdlib-studio-voplay-refactor-plan.md` (Studio section)
+> Supersedes: `2026-03-14-studio-first-principles-refactor-plan.md` (partial), `2026-03-14-vox-stdlib-studio-voplay-refactor-plan.md` (Extension.web section)
 
 ---
 
@@ -579,7 +579,7 @@ free to ignore this entirely — they just run as console apps from Studio's per
 In `vo.ext.toml`:
 
 ```toml
-[studio]
+[extension.web]
 entry = "Run"                      # function Studio calls to start the app
 capabilities = [
   "timer",                         # setTimeout, setInterval, requestAnimationFrame
@@ -591,7 +591,7 @@ capabilities = [
 ]
 ```
 
-If no `[studio]` section exists, Studio treats the app as a console app.
+If no `[extension.web]` section exists, Studio treats the app as a console app.
 
 ### 8.3 Capability Definitions
 
@@ -623,7 +623,7 @@ event dispatch and forwards them to the preview panel.
 The JS renderer module is declared in `vo.ext.toml`:
 
 ```toml
-[studio]
+[extension.web]
 renderer = "js/dist/renderer.js"   # JS module that receives render bytes
 ```
 
@@ -685,7 +685,7 @@ can reference.
 
 ```typescript
 // In the framework's renderer.js
-export function init(host: StudioGuiHost): void {
+export function init(host: RendererHost): void {
   host.registerWidget('my-framework-canvas', {
     create(container, props, onEvent) { ... },
   });
@@ -696,10 +696,10 @@ export function render(container: HTMLElement, bytes: Uint8Array): void {
 }
 ```
 
-Studio's `StudioGuiHost` interface:
+Studio's `RendererHost` interface:
 
 ```typescript
-interface StudioGuiHost {
+interface RendererHost {
   registerWidget(name: string, factory: WidgetFactory): void;
   getCanvas(): HTMLCanvasElement | null;  // for render_surface capability
   sendEvent(handlerId: number, payload: string): Promise<Uint8Array>;
@@ -715,7 +715,7 @@ When `RuntimeService.runGui(path)` is called:
 
 1. Compile the project
 2. Inspect `vo.ext.toml` of the main module (and its dependencies)
-3. Collect `[studio]` declarations → determine capabilities needed
+3. Collect `[extension.web]` declarations → determine capabilities needed
 4. Configure the preview panel:
    - If `render_byte_stream` + `renderer`: load the renderer JS module
    - If `render_surface`: create canvas element
@@ -1044,7 +1044,7 @@ Result: same functionality, but services + backend abstraction in place.
 
 ### Phase 4: Preview Panel + GUI Contract
 
-1. Define `vo.ext.toml` `[studio]` section format
+1. Define `vo.ext.toml` `[extension.web]` section format
 2. Implement framework renderer dynamic loading
 3. Create generic `PreviewPanel` with capability-driven rendering
 4. Migrate vogui renderer to a standalone JS module (loaded by Studio, not bundled)

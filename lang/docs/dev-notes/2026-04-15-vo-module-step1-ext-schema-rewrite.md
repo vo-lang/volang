@@ -1,4 +1,4 @@
-# Step 1: Canonical `vo.ext.toml` Schema Rewrite and Legacy Rejection
+# Step 1: Canonical `vo.ext.toml` Schema Rewrite and Removed Rejection
 
 **Date**: 2026-04-15
 **Status**: Planning
@@ -12,7 +12,7 @@
 Rewrite `vo-module/src/ext_manifest.rs` so that:
 
 1. It parses only the canonical schema defined in `native-ffi.md` §4.3–4.9.
-2. Legacy `vo.ext.toml` shapes (`[extension].path` instead of `[extension.native].path`) produce a hard parse error.
+2. Removed `vo.ext.toml` shapes (`[extension].path` instead of `[extension.native].path`) produce a hard parse error.
 3. The typed output exposes the full target-support contract needed by downstream steps (release validation, artifact resolution, readiness checks).
 
 ---
@@ -24,13 +24,13 @@ Rewrite `vo-module/src/ext_manifest.rs` so that:
 ```rust
 pub struct ExtensionManifest {
     pub name: String,
-    pub native_path: PathBuf,      // resolved from [extension].path — LEGACY
+    pub native_path: PathBuf,      // resolved from [extension].path — REMOVED
     pub manifest_path: PathBuf,
     pub wasm: Option<WasmExtensionManifest>,
 }
 ```
 
-- `native_path` is derived from `[extension].path` — the legacy flat schema.
+- `native_path` is derived from `[extension].path` — the removed flat schema.
 - There is no `NativeTargetDeclaration` or `[[extension.native.targets]]` concept.
 - `resolve_library_path` uses `#[cfg(target_os)]` to append platform extensions — a host-specific inference, not a declared published artifact name.
 - `WasmExtensionManifest` structure is close to canonical but lacks `target = "wasm32-unknown-unknown"` awareness.
@@ -140,14 +140,14 @@ impl ExtensionManifest {
 
 ## 4. Parsing Logic
 
-### 4.1 Legacy rejection (must come first in parse flow)
+### 4.1 Removed rejection (must come first in parse flow)
 
 After reading `[extension]`, immediately check for `path` at the `[extension]` level:
 
 ```rust
 if extension_table.contains_key("path") {
     return Err(ExtManifestParse(
-        "vo.ext.toml uses legacy schema: [extension].path is invalid; \
+        "vo.ext.toml uses removed schema: [extension].path is invalid; \
          use [extension.native].path instead (see spec/native-ffi.md §4.10)"
     ));
 }
@@ -231,7 +231,7 @@ After rewrite: same flow, but `prepare_native_extension_specs` receives the new 
 
 ### 6.3 `vo-engine/src/compile/tests/cases.rs`
 
-Update test fixture `vo.ext.toml` files from legacy shape to canonical shape.
+Update test fixture `vo.ext.toml` files from removed shape to canonical shape.
 
 ### 6.4 `vo-analysis/src/project.rs`
 
@@ -307,11 +307,11 @@ wasm = "vogui.wasm"
 js_glue = "vogui.js"
 ```
 
-### 7.2 Legacy rejection tests
+### 7.2 Removed rejection tests
 
 ```rust
 #[test]
-fn test_reject_legacy_schema_extension_path() {
+fn test_reject_removed_schema_extension_path() {
     let content = r#"
 [extension]
 name = "vogui"
@@ -322,7 +322,7 @@ type = "standalone"
 wasm = "vogui.wasm"
 "#;
     let err = parse_ext_manifest_content(content, Path::new("vo.ext.toml")).unwrap_err();
-    assert!(err.to_string().contains("legacy schema"));
+    assert!(err.to_string().contains("removed schema"));
 }
 ```
 
@@ -345,10 +345,10 @@ wasm = "vogui.wasm"
 
 1. Define `NativeExtensionConfig`, `NativeTargetDeclaration`, `DeclaredArtifactId`
 2. Rewrite `ExtensionManifest` struct
-3. Implement `parse_ext_manifest_content` with legacy rejection as the first check
+3. Implement `parse_ext_manifest_content` with removed rejection as the first check
 4. Implement `resolve_local_native_path` as a method
 5. Update `discover_extensions` to call new parser
-6. Update `extension_name_from_content` — add legacy rejection
+6. Update `extension_name_from_content` — add removed rejection
 7. Write all new unit tests inside `ext_manifest.rs`
 
 ### Phase B — Consumer migration (vo-module internal)
@@ -378,8 +378,8 @@ wasm = "vogui.wasm"
 |---|---|
 | `vo-engine` native path resolution breaks for local dev | `resolve_local_native_path` preserves existing `{profile}` and platform-suffix logic |
 | `vo-web` extension loading breaks | `WasmExtensionManifest` type is preserved; `wasm_extension_from_content` still works |
-| Existing `vo.ext.toml` files in the monorepo use legacy schema | Phase D explicitly updates all real fixtures |
-| `extension_name_from_content` callers see errors on legacy TOML | Strict — fail fast everywhere |
+| Existing `vo.ext.toml` files in the monorepo use removed schema | Phase D explicitly updates all real fixtures |
+| `extension_name_from_content` callers see errors on removed TOML | Strict — fail fast everywhere |
 
 ---
 
@@ -407,7 +407,7 @@ Full integration:
 
 ## 11. Deliverables
 
-- Rewritten `lang/crates/vo-module/src/ext_manifest.rs` with canonical types and legacy rejection
+- Rewritten `lang/crates/vo-module/src/ext_manifest.rs` with canonical types and removed rejection
 - Updated consumer code in `vo-engine`, `vo-analysis`
 - Updated test fixtures (both inline and real `vo.ext.toml` files)
 - All tests green

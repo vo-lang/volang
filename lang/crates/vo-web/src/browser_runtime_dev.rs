@@ -277,7 +277,7 @@ fn execute_standalone_wasm_action(action: &EnsureStandaloneWasmAction) -> Result
         &action.build_output,
     )? {
         eprintln!(
-            "[studio] building standalone wasm for {} from {}",
+            "[vo-web] building standalone wasm for {} from {}",
             action.extension_name,
             action.crate_root.display(),
         );
@@ -317,7 +317,7 @@ fn execute_pkg_island_action(action: &EnsurePkgIslandAction) -> Result<(), Strin
         return Ok(());
     }
     eprintln!(
-        "[studio] building render-island wasm for {} from {}",
+        "[vo-web] building render-island wasm for {} from {}",
         action.extension_name,
         action.crate_root.display(),
     );
@@ -1189,7 +1189,7 @@ renderer = "js/dist/demo-renderer.js"
             Some(expected_js_glue_path.as_str()),
         );
         assert_eq!(
-            plan.legacy_framework_split()
+            plan.primary_framework_split()
                 .primary_framework
                 .as_ref()
                 .unwrap()

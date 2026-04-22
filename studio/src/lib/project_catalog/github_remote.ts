@@ -397,7 +397,6 @@ export function buildManifest(projects: ManagedProject[]): ProjectManifest {
         contentHash: project.syncedHash ?? project.currentRemoteHash ?? undefined,
         entryPath: manifestEntryPath(project),
         hasGui: project.hasGui || undefined,
-        appKind: project.hasGui ? 'gui' : 'code',
       })),
   };
 }

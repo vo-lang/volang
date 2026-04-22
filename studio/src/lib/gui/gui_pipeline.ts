@@ -103,6 +103,6 @@ export async function executeGuiFromCompileOutput(
     entryPath: compiled.entryPath,
     framework: compiled.framework,
     providerFrameworks: compiled.providerFrameworks,
-    externalWidgetHandlerId: null,
+    hostWidgetHandlerId: null,
   };
 }

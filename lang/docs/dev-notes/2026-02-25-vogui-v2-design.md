@@ -93,7 +93,7 @@ DOM event → JSON payload → Vo handler → mutate State → re-render
 6. **ForEach/ForEachKeyed**: List rendering with keys for stable DOM
 7. **Router**: Basic SPA routing with path params
 8. **Timers**: SetTimeout/SetInterval with proper cleanup
-9. **ExternalWidget**: Escape hatch for JS-native components (CodeMirror, etc.)
+9. **HostWidget**: Escape hatch for JS-native components (CodeMirror, etc.)
 
 ### 2.3 Pain Points (from real examples)
 
@@ -202,9 +202,9 @@ If only the UI cares, it's JS state.**
 
 ### P3: Clean Slate Rewrite
 
-vogui v2 is a full rewrite. There is no backward compatibility with v1. Existing
+vogui v2 is a full rewrite. There is no old API preservation with v1. Existing
 vogui apps will be rewritten to use the new API. This gives us freedom to make
-breaking changes and design the best possible API without legacy constraints.
+breaking changes and design the best possible API without removed constraints.
 The core TEA model (State → View → Action) is preserved as the foundation.
 
 ### P4: Platform-Native Where Possible

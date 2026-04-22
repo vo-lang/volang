@@ -295,7 +295,7 @@ fn detect_int_radix(lit: &str) -> (u32, usize) {
         && lit.starts_with('0')
         && lit.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
     {
-        // Legacy octal: 0644 style (Go compatible)
+        // Go-style octal: 0644
         (8, 1)
     } else {
         (10, 0)
@@ -1017,7 +1017,7 @@ impl Value {
         matches!(self, Value::Str(_))
     }
 
-    /// Returns the integer value as i64 if possible (legacy).
+    /// Returns the integer value as i64 if possible.
     pub fn int_val(&self) -> Option<i64> {
         match self {
             Value::Int64(i) => Some(*i),

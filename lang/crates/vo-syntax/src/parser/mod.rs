@@ -694,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reject_legacy_external_import_syntax() {
+    fn test_reject_removed_external_import_syntax() {
         let (_, diags) = parse_str(r#"import @"github.com/vo-lang/zip""#);
         assert!(diags.has_errors());
         let messages: Vec<_> = diags.iter().map(|diag| diag.message.as_str()).collect();

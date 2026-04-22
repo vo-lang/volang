@@ -16,7 +16,7 @@ A working Tauri desktop app where:
 5. GUI apps render in a preview panel (vogui/js renderer in a Svelte component)
 6. A file tree lets you switch between example files
 
-The same Svelte app also runs in the browser (WASM mode) with VFS instead of real filesystem. No Host VM, no ExternalWidget system, no Vo source for the IDE itself.
+The same Svelte app also runs in the browser (WASM mode) with VFS instead of real filesystem. No Host VM, no HostWidget system, no Vo source for the IDE itself.
 
 ---
 

@@ -99,7 +99,7 @@ impl BrowserRuntimeGraph {
         browser_runtime_view_from_graph(self)
     }
 
-    pub fn legacy_framework_split(&self) -> LegacyFrameworkSplit {
+    pub fn primary_framework_split(&self) -> PrimaryFrameworkSplit {
         split_primary_provider_view(&self.runtime_view())
     }
 }
@@ -216,7 +216,7 @@ pub struct BrowserArtifactIntent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct LegacyFrameworkSplit {
+pub struct PrimaryFrameworkSplit {
     pub primary_framework: Option<BrowserRuntimeContract>,
     pub provider_frameworks: Vec<BrowserRuntimeContract>,
 }
@@ -234,8 +234,8 @@ impl BrowserRuntimePlan {
         self.graph.runtime_view()
     }
 
-    pub fn legacy_framework_split(&self) -> LegacyFrameworkSplit {
-        self.graph.legacy_framework_split()
+    pub fn primary_framework_split(&self) -> PrimaryFrameworkSplit {
+        self.graph.primary_framework_split()
     }
 
     pub fn snapshot_plan(
@@ -259,7 +259,7 @@ pub fn browser_runtime_graph_from_manifest(
         let resolved = resolve_extension_manifest(&owner, manifest);
         browser_framework_plan_from_resolved(module_root, module_key, &resolved)
     } else {
-        browser_framework_plan_from_manifest_legacy(module_root, module_key, manifest)
+        browser_framework_plan_from_manifest_local(module_root, module_key, manifest)
     };
     browser_runtime_graph_from_frameworks(framework.into_iter().collect())
 }
@@ -301,7 +301,7 @@ pub fn browser_runtime_view_from_graph(graph: &BrowserRuntimeGraph) -> BrowserRu
     }
 }
 
-pub fn split_primary_provider_view(view: &BrowserRuntimeView) -> LegacyFrameworkSplit {
+pub fn split_primary_provider_view(view: &BrowserRuntimeView) -> PrimaryFrameworkSplit {
     let primary_id = view
         .roles
         .providers_for("protocol")
@@ -310,7 +310,7 @@ pub fn split_primary_provider_view(view: &BrowserRuntimeView) -> LegacyFramework
         .or(view.roles.entry_framework.as_ref())
         .or_else(|| view.frameworks.first().map(|framework| &framework.id));
     let Some(primary_id) = primary_id else {
-        return LegacyFrameworkSplit::default();
+        return PrimaryFrameworkSplit::default();
     };
 
     let mut primary_framework = None;
@@ -322,7 +322,7 @@ pub fn split_primary_provider_view(view: &BrowserRuntimeView) -> LegacyFramework
             provider_frameworks.push(framework.contract.clone());
         }
     }
-    LegacyFrameworkSplit {
+    PrimaryFrameworkSplit {
         primary_framework,
         provider_frameworks,
     }
@@ -402,7 +402,7 @@ pub fn browser_wasm_extension_from_manifest(
     manifest: &ExtensionManifest,
 ) -> Option<BrowserWasmExtensionSpec> {
     let Some(owner) = module_key.and_then(parse_module_key_owner) else {
-        return browser_wasm_extension_from_manifest_legacy(module_root, module_key, manifest);
+        return browser_wasm_extension_from_manifest_local(module_root, module_key, manifest);
     };
     let resolved = resolve_extension_manifest(&owner, manifest);
     browser_wasm_binding_from_resolved(module_root, module_key, &resolved)
@@ -845,7 +845,7 @@ fn project_browser_wasm_extension_specs(
         .collect()
 }
 
-fn browser_framework_plan_from_manifest_legacy(
+fn browser_framework_plan_from_manifest_local(
     module_root: &str,
     module_key: Option<&str>,
     manifest: &ExtensionManifest,
@@ -885,7 +885,7 @@ fn project_browser_runtime_module(framework: &BrowserFrameworkPlan) -> BrowserRu
     }
 }
 
-fn browser_wasm_extension_from_manifest_legacy(
+fn browser_wasm_extension_from_manifest_local(
     module_root: &str,
     module_key: Option<&str>,
     manifest: &ExtensionManifest,
@@ -1737,7 +1737,7 @@ protocol = "js/dist/studio_protocol.js"
     }
 
     #[test]
-    fn browser_runtime_view_and_legacy_split_project_from_graph() {
+    fn browser_runtime_view_and_primary_split_project_from_graph() {
         let manifest = parse_manifest(
             r#"
 [extension]

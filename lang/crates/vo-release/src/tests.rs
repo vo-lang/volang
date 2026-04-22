@@ -135,7 +135,7 @@ fn source_archive_entries(path: &Path) -> Vec<String> {
 fn verify_repo_rejects_vo_sum() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
-    fs::write(temp.path().join("vo.sum"), "legacy\n").unwrap();
+    fs::write(temp.path().join("vo.sum"), "stale\n").unwrap();
 
     let err = verify_repo(temp.path()).unwrap_err();
     assert!(matches!(
@@ -145,7 +145,7 @@ fn verify_repo_rejects_vo_sum() {
 }
 
 #[test]
-fn verify_repo_rejects_legacy_alias_imports_in_blocks() {
+fn verify_repo_rejects_invalid_alias_imports_in_blocks() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
     fs::write(
@@ -157,7 +157,7 @@ fn verify_repo_rejects_legacy_alias_imports_in_blocks() {
     let err = verify_repo(temp.path()).unwrap_err();
     assert!(matches!(
         err,
-        ReleaseError::LegacyAliasImports(ref violations)
+        ReleaseError::InvalidAliasImports(ref violations)
             if violations == &vec![
                 "main.vo:2: @\"gin\"".to_string(),
                 "main.vo:3: api @\"jwt\"".to_string(),
@@ -481,7 +481,7 @@ fn stage_release_rejects_artifacts_without_ext_manifest() {
 }
 
 #[test]
-fn stage_release_rejects_legacy_ext_manifest_schema() {
+fn stage_release_rejects_invalid_ext_manifest_schema() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
     fs::write(

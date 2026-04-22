@@ -37,7 +37,7 @@ The implementation must preserve these rules throughout the pass:
 - `vo.work` remains local-only and never changes published identity
 - old `@version` import semantics are removed from authoritative compiler/runtime paths
 - native and web must converge on the same module contract instead of keeping parallel semantics
-- ambiguous legacy state must fail fast instead of silently falling back
+- ambiguous removed state must fail fast instead of silently falling back
 
 ---
 
@@ -104,11 +104,11 @@ No duplicate local rule sets remain authoritative.
 
 - one invalid path yields the same decision regardless of parser/consumer
 - non-canonical module roots stop passing one layer and failing later in another
-- tests cover both valid canonical forms and fast failure for legacy forms
+- tests cover both valid canonical forms and fast failure for removed forms
 
 ---
 
-## Phase B — Remove Legacy Versioned-Import / Ad Hoc Web Resolution Paths
+## Phase B — Remove Removed Versioned-Import / Ad Hoc Web Resolution Paths
 
 ### Goal
 
@@ -116,7 +116,7 @@ The authoritative module system must stop treating source imports as a dependenc
 
 ### Required changes
 
-- remove or hard-fail the legacy `@version` import path in web/playground-facing compiler flows
+- remove or hard-fail the removed `@version` import path in web/playground-facing compiler flows
 - stop using source scanning as the authoritative dependency acquisition model for real module builds
 - require `vo.mod` / `vo.lock` for external-module builds in the same way native frozen paths already do
 - keep any purely local/preloaded VFS helpers only if they follow the same lock-based contract
@@ -132,7 +132,7 @@ The authoritative module system must stop treating source imports as a dependenc
 
 - no authoritative compile path depends on `import "github.com/...@vX.Y.Z"`
 - web/native external-module semantics converge on `vo.mod` + `vo.lock`
-- legacy versioned import syntax fails fast with a precise migration message
+- removed versioned import syntax fails fast with a precise migration message
 
 ---
 
@@ -175,7 +175,7 @@ The exposed module-management surface must match the spec and the implementation
 - centralize module lifecycle validation and command semantics
 - align `init` with the canonical module-path rules
 - review `vo mod update [module]` semantics and either implement targeted behavior or remove the false specificity
-- preserve the hard removal of legacy `vo get`
+- preserve the hard removal of removed `vo get`
 
 ### Expected file groups
 
@@ -223,7 +223,7 @@ This pass should land in the following order:
 2. land the shared validation layer
 3. switch parsers/analysis/release verification to the shared validator
 4. enforce missing import-policy rules in the real analysis pipeline
-5. remove legacy versioned-import / ad hoc web dependency paths
+5. remove removed versioned-import / ad hoc web dependency paths
 6. align CLI semantics around the hardened core
 7. finish with targeted tests and CI validation updates
 

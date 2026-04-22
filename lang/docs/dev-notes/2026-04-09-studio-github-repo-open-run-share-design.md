@@ -829,7 +829,7 @@ Known risks:
 
 - **Rust↔TS serialization**: `LaunchSpec` must be serializable as JSON across the Tauri boundary. Use `serde` on the Rust side with `#[serde(tag = "kind")]` for the `ProjectSourceSpec` discriminated union. Test round-trip serialization.
 - **No breakage contract**: Phase 1 must pass all existing Studio startup paths unchanged. The new `openSession` path is additive. Verify by testing: workspace open, `--path`, `--url`, `--run`, `?mode=runner&url=...`.
-- **`initialLaunch` is `null` for all legacy inputs initially**: the old fields still drive the old branches. `initialLaunch` only becomes non-null when the new query params (`source=`, `repo=`, etc.) are present.
+- **`initialLaunch` is `null` for all removed inputs initially**: the old fields still drive the old branches. `initialLaunch` only becomes non-null when the new query params (`source=`, `repo=`, etc.) are present.
 
 ### Phase 2 — Byte-preserving remote import
 
@@ -867,7 +867,7 @@ Files to change:
 
 1. **`src/lib/types.ts`**
    - add `SessionSource` type (discriminated union: `workspace | path | github_repo | archive_url`)
-   - extend `SessionInfo` with `source: SessionSource | null` (nullable for backward compat during migration)
+   - extend `SessionInfo` with `source: SessionSource | null` (nullable for old API preservation during migration)
 
 2. **`src-tauri/src/state.rs`**
    - add `SessionSource` enum (serde-tagged) and `source: Option<SessionSource>` to `SessionInfo` struct

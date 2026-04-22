@@ -332,6 +332,24 @@ fn join_vfs_path(base: &str, child: &str) -> String {
     }
 }
 
+fn normalize_vfs_dot_segments(path: &str) -> String {
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            value => parts.push(value),
+        }
+    }
+    if parts.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", parts.join("/"))
+    }
+}
+
 fn single_file_project_dir(entry_clean: &str) -> PathBuf {
     let parent = Path::new(entry_clean)
         .parent()
@@ -417,6 +435,10 @@ fn resolve_vfs_compile_target(entry_path: &str) -> Result<ResolvedVfsCompileTarg
 }
 
 fn read_vfs_package(project_root: &str, local_fs: &mut MemoryFs) -> Result<(), String> {
+    fn should_keep_source_file(name: &str) -> bool {
+        name.ends_with(".vo") || matches!(name, "vo.mod" | "vo.lock" | "vo.ext.toml")
+    }
+
     fn walk(dir: &str, local_fs: &mut MemoryFs) -> Result<(), String> {
         let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(dir);
         if let Some(error) = err {
@@ -428,8 +450,7 @@ fn read_vfs_package(project_root: &str, local_fs: &mut MemoryFs) -> Result<(), S
                 walk(&full, local_fs)?;
                 continue;
             }
-            let keep = name.ends_with(".vo") || matches!(name.as_str(), "vo.mod" | "vo.lock" | "vo.work");
-            if !keep {
+            if !should_keep_source_file(&name) {
                 continue;
             }
             let data = read_vfs_bytes(&full)?;
@@ -440,7 +461,11 @@ fn read_vfs_package(project_root: &str, local_fs: &mut MemoryFs) -> Result<(), S
         Ok(())
     }
 
-    walk(project_root, local_fs)
+    let root = normalize_vfs_dot_segments(&normalize_vfs_path(project_root));
+    if !is_vfs_dir(&root) {
+        return Ok(());
+    }
+    walk(&root, local_fs)
 }
 
 fn build_workspace_project_from_vfs(
@@ -463,6 +488,13 @@ fn target_locked_modules(
     }
     let single_file = SingleFileEntry::load(target)?;
     single_file.collect_locked_modules()
+}
+
+fn browser_runtime_plan_for_target(
+    target: &ResolvedVfsCompileTarget,
+) -> Result<vo_web::BrowserRuntimePlan, String> {
+    let locked_modules = target_locked_modules(target)?;
+    vo_web::published_browser_runtime_plan_from_vfs(&locked_modules, "")
 }
 
 fn read_vfs_text(path: &str) -> Result<String, String> {
@@ -813,10 +845,7 @@ fn collect_render_island_snapshot(entry_path: &str) -> Result<JsValue, String> {
         .project_root
         .clone()
         .unwrap_or_else(|| vfs_parent_dir(&target.entry_path).unwrap_or_else(|| "/".to_string()));
-    let locked_modules = target_locked_modules(&target)?;
-    // Normal Studio browser runtime discovery is published-only. Debug-only
-    // local project manifest helpers must not participate in this path.
-    let plan = vo_web::published_browser_runtime_plan_from_vfs(&locked_modules, "")?;
+    let plan = browser_runtime_plan_for_target(&target)?;
     let snapshot = if target.project_root.is_some() {
         plan.snapshot_plan(vo_web::BrowserSnapshotRoot::ProjectRoot)
     } else {
@@ -876,7 +905,7 @@ fn gui_run_output_to_js(
         &JsValue::from_str("providerFrameworks"),
         &provider_frameworks_value,
     );
-    let _ = Reflect::set(&obj, &JsValue::from_str("externalWidgetHandlerId"), &JsValue::NULL);
+    let _ = Reflect::set(&obj, &JsValue::from_str("hostWidgetHandlerId"), &JsValue::NULL);
     obj.into()
 }
 
@@ -907,11 +936,8 @@ fn compile_gui_run_output(
 ), String> {
     let target = resolve_vfs_compile_target(entry_path)?;
     let bytecode = compile_from_vfs(entry_path)?;
-    let locked_modules = target_locked_modules(&target)?;
-    // Normal Studio browser runtime discovery is published-only. Debug-only
-    // local project manifest helpers must not participate in GUI compile/run.
-    let plan = vo_web::published_browser_runtime_plan_from_vfs(&locked_modules, "")?;
-    let split = plan.legacy_framework_split();
+    let plan = browser_runtime_plan_for_target(&target)?;
+    let split = plan.primary_framework_split();
     let wasm_extensions = build_wasm_extension_compile_specs(&plan)?;
     let framework = split.primary_framework.map(framework_contract_from_vo_web);
     let provider_frameworks = split

@@ -127,5 +127,5 @@ Before tagging a release:
 1. `vo.mod` and `vo.lock` are up-to-date and committed.
 2. If `vo.ext.toml` exists: its declared target-support set is authoritative for published extension support. README text may summarize support, but must not contradict the manifest.
 3. If `vo.ext.toml` exists: confirm every declared `[[extension.native.targets]]` and `[extension.wasm]` artifact is built or staged with the exact asset names declared in the manifest and recorded in `vo.release.json`.
-4. If `vo.ext.toml` exists: it must use the canonical schema from `spec/native-ffi.md`; legacy schema shapes are a hard error.
+4. If `vo.ext.toml` exists: it must use the canonical schema from `spec/native-ffi.md`; removed schema shapes are a hard error.
 5. All CI jobs pass on the release commit.

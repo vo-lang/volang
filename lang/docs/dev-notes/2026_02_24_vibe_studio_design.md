@@ -21,7 +21,7 @@ User code that uses `vogui` still works — the guest app's render JSON is displ
 | **Guest VM** | User code runs in a Rust-managed VM (thread-per-guest); vox API |
 | **Bridge abstraction** | `bridge.ts` abstracts Tauri IPC vs WASM exports with identical API |
 | **Cross-platform** | Same Svelte source → Tauri native (fast, JIT, real FS) or WASM web (browser, VFS) |
-| **Simplicity** | No ExternalWidget, no VoguiPlatform trait, no Host VM lifecycle |
+| **Simplicity** | No HostWidget, no VoguiPlatform trait, no Host VM lifecycle |
 
 ---
 
@@ -180,7 +180,7 @@ export async function createBridge(): Promise<Bridge> {
 
 ## 6. Guest App Rendering (PreviewPanel)
 
-When user code uses `vogui`, the guest VM emits render JSON. `PreviewPanel.svelte` renders it using the `vogui/js` renderer directly — no ExternalWidget, no widget registry, just a direct call to `renderNode`:
+When user code uses `vogui`, the guest VM emits render JSON. `PreviewPanel.svelte` renders it using the `vogui/js` renderer directly — no HostWidget, no widget registry, just a direct call to `renderNode`:
 
 ```svelte
 <!-- PreviewPanel.svelte -->
@@ -361,10 +361,10 @@ No changes to `libs/vogui/` — vogui is unchanged. Its JS renderer is used by `
 | IDE frontend | vogui Vo app | Svelte components |
 | IDE state | Vo State struct in Host VM | TypeScript IdeState in Svelte store |
 | Host VM | Yes (runs IDE) | No |
-| Editor integration | ExternalWidget + widget registry | Native CodeMirror Svelte component |
-| Guest app display | ExternalWidget("vogui-guest") | Direct `renderNode()` in PreviewPanel.svelte |
+| Editor integration | HostWidget + widget registry | Native CodeMirror Svelte component |
+| Guest app display | HostWidget("vogui-guest") | Direct `renderNode()` in PreviewPanel.svelte |
 | VoguiPlatform trait | Required (IDE timer/nav) | Not needed (IDE has no timers via vogui) |
-| ExternalWidget in vogui | New feature required | Not needed |
+| HostWidget in vogui | New feature required | Not needed |
 | Studio Vo source | `studio/app/*.vo` | None |
 | Complexity | Vo + Rust + minimal TS | Svelte + TS + Rust |
 | IDE UI iteration | Recompile Vo, restart VM | Vite HMR |

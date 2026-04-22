@@ -198,7 +198,7 @@ pub(crate) enum ObjColor {
     Gray(usize),
 }
 
-/// Position type for backward compatibility.
+/// Position type used by analysis objects.
 pub type Pos = usize;
 
 /// A LangObj describes a named language entity.

@@ -5,7 +5,7 @@ Owner: Vibe Studio
 ---
 
 # 1. Summary
-This RFC captured an earlier Playground-focused direction. The current web entry point is Studio, and Playground is now a legacy surface rather than the primary deployed experience.
+This RFC captured an earlier Playground-focused direction. The current web entry point is Studio, and Playground is now a removed surface rather than the primary deployed experience.
 
 The original goal was a focused Playground (not an IDE) that provides:
 - A code editor

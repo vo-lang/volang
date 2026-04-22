@@ -96,7 +96,7 @@ pub fn verify_repo(repo_root: &Path) -> ReleaseResult<()> {
 
     let alias_imports = find_alias_imports(&repo_root)?;
     if !alias_imports.is_empty() {
-        return Err(ReleaseError::LegacyAliasImports(alias_imports));
+        return Err(ReleaseError::InvalidAliasImports(alias_imports));
     }
 
     project::read_project_deps_at_root(&repo_root, &[])
@@ -679,7 +679,7 @@ fn find_alias_imports_inner(repo_root: &Path, dir: &Path) -> ReleaseResult<Vec<S
                 if trimmed.is_empty() || trimmed.starts_with("//") {
                     continue;
                 }
-                if contains_legacy_alias_import_spec(trimmed) {
+                if contains_invalid_alias_import_spec(trimmed) {
                     violations.push(format!("{}:{}: {}", rel.display(), index + 1, trimmed));
                 }
                 continue;
@@ -692,13 +692,13 @@ fn find_alias_imports_inner(repo_root: &Path, dir: &Path) -> ReleaseResult<Vec<S
                 let block_spec = block_rest.trim_start();
                 if !block_spec.is_empty()
                     && !block_spec.starts_with("//")
-                    && contains_legacy_alias_import_spec(block_spec)
+                    && contains_invalid_alias_import_spec(block_spec)
                 {
                     violations.push(format!("{}:{}: {}", rel.display(), index + 1, trimmed));
                 }
                 continue;
             }
-            if contains_legacy_alias_import_spec(spec) {
+            if contains_invalid_alias_import_spec(spec) {
                 violations.push(format!("{}:{}: {}", rel.display(), index + 1, line.trim()));
             }
         }
@@ -720,7 +720,7 @@ fn import_spec_from_line(line: &str) -> Option<&str> {
     Some(rest.trim_start())
 }
 
-fn contains_legacy_alias_import_spec(spec: &str) -> bool {
+fn contains_invalid_alias_import_spec(spec: &str) -> bool {
     let spec = spec.split("//").next().unwrap_or(spec).trim();
     if spec.is_empty() {
         return false;

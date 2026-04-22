@@ -201,9 +201,9 @@ func myApp(state *AppState) vogui.Node {
 
 ### G5: Clean-slate JS renderer
 
-- Old `libs/vogui/js/` renamed to `libs/vogui/js-legacy/` as reference
+- Old `libs/vogui/js/` renamed to `libs/vogui/js-reference/` as reference
 - New `libs/vogui/js/` built from scratch with Preact + Radix + Tailwind
-- No migration code, no compatibility shims, no morphdom
+- No migration code, no temporary adapters, no morphdom
 - Same public API surface (`render`, `decodeBinaryRender`, `injectStyles`) so Studio integration is unchanged
 
 ---
@@ -854,8 +854,8 @@ keep that option.
 
 ## 11. Implementation Plan (Fresh Start)
 
-Old renderer renamed to `libs/vogui/js-legacy/` as read-only reference.
-New `libs/vogui/js/` is built from scratch. No migration, no compatibility shims.
+Old renderer renamed to `libs/vogui/js-reference/` as read-only reference.
+New `libs/vogui/js/` is built from scratch. No migration, no temporary adapters.
 
 ### P0: Scaffold & Core ✅ COMPLETE
 
@@ -872,7 +872,7 @@ New `libs/vogui/js/` is built from scratch. No migration, no compatibility shims
 | `src/styles.ts` — injectStyles(), applyTheme(), dark mode toggle | styles | ✅ |
 | `src/refs.ts` — ref registry | refs | ✅ |
 | `src/mapping.ts` — typeToTag, typeToBaseClass, variantClass, propsToStyle | mapping | ✅ |
-| `src/index.ts` — public exports matching + extending legacy API surface | entry | ✅ |
+| `src/index.ts` — public exports matching + extending removed API surface | entry | ✅ |
 
 ### P1: Components ✅ COMPLETE
 
@@ -966,12 +966,12 @@ conflict with Tailwind's utility classes.
 This is a non-issue — inline styles from the Style combinator will override Tailwind
 classes, which is the expected behavior.
 
-### R6: Legacy reference drift
+### R6: Removed reference drift
 
-**Risk**: `js-legacy/` diverges from understanding as new renderer evolves.
+**Risk**: `js-reference/` diverges from understanding as new renderer evolves.
 
-**Mitigation**: `js-legacy/` is read-only reference. Once new renderer passes all
-example apps, `js-legacy/` can be deleted.
+**Mitigation**: `js-reference/` is read-only reference. Once new renderer passes all
+example apps, `js-reference/` can be deleted.
 
 ---
 
@@ -1098,7 +1098,7 @@ example apps, `js-legacy/` can be deleted.
 | UnsafeHTML | `UnsafeHTML()` | Exists |
 | Transition | `Transition()` | Exists |
 | TransitionGroup | `TransitionGroup()` | Exists |
-| ExternalWidget | `Widget()` | Exists |
+| HostWidget | `Widget()` | Exists |
 
 ### Grand total: 81 components
 

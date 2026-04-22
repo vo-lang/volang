@@ -160,7 +160,7 @@ This is a small issue, but it is a classic sign of boundary noise:
 - external consumers can learn the wrong crate as the owner of the concept
 - later refactors have to maintain two public names for one shared contract
 
-### P7. `vo-engine::toolchain::install_module` preserves a legacy install surface outside the authoritative lifecycle
+### P7. `vo-engine::toolchain::install_module` preserves a removed install surface outside the authoritative lifecycle
 
 `install_module` still performs a special-case flow:
 
@@ -307,7 +307,7 @@ After the cleanup pass:
 - internal users should prefer typed identity / project APIs directly
 - `vo-module::compat` should become a narrow interop shim instead of a growing public surface
 - `vo-web` should stop publicly fronting `ProjectContext` as if it owns that concept
-- engine-side exact-module install helpers should route through authoritative module lifecycle code, not preserve legacy `vo get` semantics in place
+- engine-side exact-module install helpers should route through authoritative module lifecycle code, not preserve removed `vo get` semantics in place
 
 ---
 
@@ -441,7 +441,7 @@ Keep the existing public convenience entry points while eliminating copy-structu
 
 ### Goal
 
-Stop teaching new code to depend on transitional wrappers and legacy install paths.
+Stop teaching new code to depend on transitional wrappers and removed install paths.
 
 ### Required changes
 
@@ -449,7 +449,7 @@ Stop teaching new code to depend on transitional wrappers and legacy install pat
 - leave `compat` only as a narrow boundary helper for string-oriented consumers that genuinely need it
 - stop publicly fronting `vo_module::project::ProjectContext` through `vo-web` unless a web-specific semantic wrapper is added
 - move exact module-install behavior needed by toolchain integration onto an authoritative `vo-module` lifecycle or cache-install API
-- delete or narrow engine-side legacy install helpers once the authoritative path exists
+- delete or narrow engine-side removed install helpers once the authoritative path exists
 
 ### Expected file groups
 
@@ -464,7 +464,7 @@ Stop teaching new code to depend on transitional wrappers and legacy install pat
 
 - typed APIs are the default internal path
 - `vo-web` no longer appears to own shared project-context concepts
-- toolchain exact-install behavior no longer preserves legacy `vo get` architecture by accident
+- toolchain exact-install behavior no longer preserves removed `vo get` architecture by accident
 
 ---
 
@@ -477,7 +477,7 @@ Remove remaining small duplicated contracts only after the larger architectural 
 ### Required changes
 
 - review compile-log vs host-log schema overlap and either document intentional divergence or define a small shared record core
-- delete temporary re-exports or compatibility shims introduced during the cleanup pass
+- delete temporary re-exports or temporary adapters introduced during the cleanup pass
 
 ### Acceptance criteria
 

@@ -191,7 +191,7 @@ Keep JSON path available via build flag for debugging. Binary is default for pro
 
 #### Migration
 
-This is **backward compatible at the JS renderer level** — the decoder produces the
+This is **unchanged for existing callers at the JS renderer level** — the decoder produces the
 same `VoNode` / `RenderMessage` that JSON parsing produces. Only the transport changes.
 
 ---
@@ -548,7 +548,7 @@ Generates:
 
 #### Coexistence with existing system
 
-- `.P(16)`, `.Bg(...)` etc. still work as inline styles (backward compatible)
+- `.P(16)`, `.Bg(...)` etc. still work as inline styles (unchanged for existing callers)
 - `.Class("...")` still works for external CSS classes
 - `.ApplyStyle(s)` is the new recommended way for app-level styling
 - Built-in component styles (vo-button, vo-input) remain in `styles.ts`

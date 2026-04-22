@@ -798,7 +798,7 @@ This migration is intentionally staged so that every stage is testable.
 
 - Old macros and old FFI types removed.
 - Dual `linkme` tables (`EXTERN_TABLE` / `EXTERN_TABLE_WITH_CONTEXT`) collapsed to single `EXTERN_TABLE`.
-- Legacy "C ABI" terminology in comments replaced with "Extension ABI".
+- Removed "C ABI" terminology in comments replaced with "Extension ABI".
 - Symbol names standardized: `__vo_ext_trampoline_*`, `__VO_EXT_ENTRY_*`.
 
 ### Semantic regression checklist (verified at each stage)

@@ -50,7 +50,6 @@ export interface ManifestProject {
   contentHash?: string;
   entryPath?: string;
   hasGui?: boolean;
-  appKind?: 'code' | 'gui';
 }
 
 export interface ProjectManifest {

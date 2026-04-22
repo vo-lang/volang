@@ -96,24 +96,7 @@
       } else {
         // Regular code execution
         const result = await runCode(code);
-        let output = result.stdout;
-        
-        // Check for VoGUI output (legacy path)
-        if (output.startsWith('__VOGUI__')) {
-          guiMode = true;
-          const jsonStr = output.slice(9).trim();
-          try {
-            renderData = JSON.parse(jsonStr) as RenderMessage;
-            stdout = '';
-          } catch (parseErr) {
-            stderr = 'Failed to parse GUI output: ' + parseErr;
-            status = 'error';
-            return;
-          }
-        } else {
-          stdout = output;
-        }
-        
+        stdout = result.stdout;
         stderr = result.stderr;
         status = result.status === 'ok' ? 'success' : 'error';
         activePanel = 'console';

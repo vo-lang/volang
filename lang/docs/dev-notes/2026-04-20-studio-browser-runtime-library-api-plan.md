@@ -206,7 +206,7 @@ The exact type is less important than the semantics:
 
 `vo-module` should own:
 
-- manifest schema and legacy compatibility
+- manifest schema and removed compatibility
 - relative-path resolution rules
 - ownership assignment for resolved assets
 - conversion from parsed manifests to resolved web/wasm extension specs
@@ -274,7 +274,7 @@ If the current Studio IPC still needs the old split, expose it as a helper:
 ```rust
 pub fn split_primary_provider_view(
     graph: &BrowserRuntimeGraph,
-) -> LegacyFrameworkSplit
+) -> RemovedFrameworkSplit
 ```
 
 That helper is allowed to exist, but it must be clearly marked as a temporary
@@ -295,9 +295,9 @@ pub struct BrowserRuntimeView {
 
 Possible compatibility adapters:
 
-- `legacy_primary_framework()`
-- `legacy_provider_frameworks()`
-- `legacy_framework_contracts()`
+- `removed_primary_framework()`
+- `removed_provider_frameworks()`
+- `removed_framework_contracts()`
 
 The important rule is:
 
@@ -412,7 +412,7 @@ That keeps the architecture clean:
 Owns:
 
 - manifest schema
-- legacy compatibility
+- removed compatibility
 - resolved extension truth
 - asset ownership and logical asset references
 

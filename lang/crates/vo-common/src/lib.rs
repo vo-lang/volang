@@ -22,7 +22,7 @@ pub use span::{BytePos, Span, Spanned};
 pub use vfs::ZipFs;
 pub use vfs::{FileSet, FileSystem, MemoryFs, OverlayFs, RealFs};
 
-// Re-export from vo-common-core for backwards compatibility
+// Re-export from vo-common-core
 pub use vo_common_core::symbol::{
     self, builtin_consts, builtin_funcs, builtin_types, kw, Symbol, SymbolInterner, BLANK,
 };

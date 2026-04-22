@@ -118,7 +118,7 @@ Checks (in order):
 
 - Move `cache_key`, `cache_dir`, `relative_module_dir`, `cache_relative_dir`,
   `VERSION_MARKER`, `SOURCE_DIGEST_MARKER` to `cache::layout`.
-- Re-export them from `materialize` for backward compatibility.
+- Re-export them from `materialize` for old API preservation.
 - Replace internal `validate_source_cache_entry` call with
   `cache::validate::validate_installed_module(RealFs, ...)`.
 - `is_source_cached` delegates to the new function.

@@ -391,7 +391,7 @@ unsupported capabilities or add granularity (`git.read` vs `git.write`).
 - `src/lib/shell/wasm/proc_handler.ts` — constructor still used? (router imports type)
 - `src/lib/shell/wasm/fs_handler.ts` — `VfsLike` type imported but class unused
 
-These are pre-WasmVoRunner legacy code. `WasmShellRouter` routes all non-vo ops to
+These are pre-WasmVoRunner removed code. `WasmShellRouter` routes all non-vo ops to
 `WasmVoRunner`, not to these handlers.
 
 **Action**: Delete unused handler classes. Keep `VfsLike` type if still imported.

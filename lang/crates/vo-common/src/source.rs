@@ -501,7 +501,7 @@ impl SourceProvider for SourceMap {
 /// A location in a source file, combining file ID and span.
 ///
 /// Note: With global position space, Span alone is usually sufficient.
-/// This type is kept for backward compatibility.
+/// This type pairs a file id with a span.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceLocation {
     /// The file containing this location.

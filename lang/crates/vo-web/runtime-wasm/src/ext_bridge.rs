@@ -86,8 +86,7 @@ extern "C" {
 thread_local! {
     static LOADED_PREFIXES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 
-    /// Maps extern_id → (name, param_kinds).
-    /// param_kinds is non-empty for v2 externs; empty for legacy externs.
+    /// Maps extern_id to its name and tagged input slots.
     static EXTERN_ID_TO_INFO: RefCell<HashMap<u32, (String, Vec<ExtSlotKind>)>> = RefCell::new(HashMap::new());
 }
 

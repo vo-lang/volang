@@ -37,6 +37,8 @@ const WORKSPACE_ROOT = '/workspace';
 const ROOT = '/';
 const SOURCE_CACHE_ROOT = `${WORKSPACE_ROOT}/.studio-sources`;
 const URL_SESSION_ROOT = `${WORKSPACE_ROOT}/.studio-sessions/url`;
+const LOCAL_SESSION_ROOT = `${WORKSPACE_ROOT}/.studio-sessions/local`;
+const LOCAL_PROJECT_ENDPOINT = '/__vo_studio_local_project';
 const GITHUB_SOURCE_ROOT = `${SOURCE_CACHE_ROOT}/github`;
 const GITHUB_SESSION_ROOT = `${WORKSPACE_ROOT}/.studio-sessions/github`;
 const GITHUB_API_ROOT = 'https://api.github.com';
@@ -103,6 +105,18 @@ interface ResolvedGitHubSource {
   sourceCacheRoot: string;
   sessionRoot: string;
   projectRoot: string;
+}
+
+interface LocalProjectSnapshotFile {
+  path: string;
+  contentBase64: string;
+  mode?: number;
+}
+
+interface LocalProjectSnapshot {
+  projectPath: string;
+  projectRelativePath: string;
+  files: LocalProjectSnapshotFile[];
 }
 
 function displayPath(path: string): string {
@@ -354,9 +368,10 @@ export class WebBackend implements Backend {
 
   async getBootstrapContext(): Promise<BootstrapContext> {
     const params = new URLSearchParams(window.location.search);
-    const rawMode = params.get('mode');
+    const env = import.meta.env as Record<string, string | undefined>;
+    const rawMode = params.get('mode') ?? env.VITE_STUDIO_MODE ?? null;
     const mode: import('../types').StudioMode = rawMode === 'runner' ? 'runner' : 'dev';
-    const proj = params.get('proj') ?? null;
+    const proj = params.get('proj') ?? env.VITE_STUDIO_PROJ ?? null;
     const launch: LaunchSpec | null = proj != null || rawMode != null
       ? { proj, mode }
       : null;
@@ -372,8 +387,15 @@ export class WebBackend implements Backend {
     if (spec.proj == null) {
       return openWorkspaceSession();
     }
+    const filePath = localFileUrlPath(spec.proj);
+    if (filePath) {
+      return openLocalProjectSession(filePath);
+    }
     if (spec.proj.startsWith('/')) {
-      return openPathSession(spec.proj);
+      if (isWorkspaceVfsPath(spec.proj)) {
+        return openPathSession(spec.proj);
+      }
+      return openLocalProjectSession(spec.proj);
     }
     const githubInput = parseGitHubRepoUrl(spec.proj);
     if (githubInput) {
@@ -1323,6 +1345,48 @@ function openPathSession(path: string): SessionInfo {
     };
   }
   return buildSessionInfo(normalized, 'workspace', { kind: 'path', path: normalized });
+}
+
+async function openLocalProjectSession(path: string): Promise<SessionInfo> {
+  const snapshot = await fetchLocalProjectSnapshot(path);
+  const projectName = snapshot.projectRelativePath.split('/').filter(Boolean).pop() ?? 'project';
+  const sessionRoot = `${LOCAL_SESSION_ROOT}/${sanitizeSlug(projectName)}-${hashString(snapshot.projectPath)}-${sessionNonce()}`;
+  clearImportedRootSync(sessionRoot);
+  ensureDir(sessionRoot);
+  for (const file of snapshot.files) {
+    setVfsFile(`${sessionRoot}/${file.path}`, decodeBase64Bytes(file.contentBase64), file.mode ?? 0o644);
+  }
+  const projectRoot = normalizePath(`${sessionRoot}/${snapshot.projectRelativePath}`);
+  if (!hasTreeAt(projectRoot)) {
+    throw new Error(`Local project snapshot did not contain ${snapshot.projectRelativePath}`);
+  }
+  return buildSessionInfo(projectRoot, 'run-target', { kind: 'path', path: snapshot.projectPath });
+}
+
+async function fetchLocalProjectSnapshot(path: string): Promise<LocalProjectSnapshot> {
+  const url = new URL(LOCAL_PROJECT_ENDPOINT, window.location.origin);
+  url.searchParams.set('path', path);
+  const response = await fetch(url.toString(), { cache: 'no-store' });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(detail || `Local project bridge failed with HTTP ${response.status}`);
+  }
+  return response.json() as Promise<LocalProjectSnapshot>;
+}
+
+function localFileUrlPath(value: string): string | null {
+  if (!value.startsWith('file://')) {
+    return null;
+  }
+  return decodeURIComponent(new URL(value).pathname);
+}
+
+function isWorkspaceVfsPath(path: string): boolean {
+  const normalized = normalizePath(path);
+  return normalized === WORKSPACE_ROOT
+    || normalized.startsWith(`${WORKSPACE_ROOT}/`)
+    || hasTreeAt(normalized)
+    || hasVfsFile(normalized);
 }
 
 function parseGitHubRepoUrl(value: string): GitHubRepoInput | null {

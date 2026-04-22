@@ -14,7 +14,7 @@
 ## 1. Purpose
 
 `lang/docs/spec/module.md` defines the complete module system contract.
-The current `vo-module` crate implements large portions of it, but several areas remain incomplete, legacy-shaped, or scattered across consumer crates.
+The current `vo-module` crate implements large portions of it, but several areas remain incomplete, removed-shaped, or scattered across consumer crates.
 
 This document defines the steps required to bring `vo-module` to its **final authoritative state** — the single crate that fully owns every rule described in the spec.
 
@@ -27,7 +27,7 @@ It is the convergence plan for making `vo-module` the one source of truth for th
 
 | Spec area | Current state | Gap |
 |---|---|---|
-| `vo.ext.toml` schema (§5.5, native-ffi.md) | `ext_manifest.rs` parses the legacy flat schema (`[extension].path`) | Must be rewritten to canonical schema; legacy shapes must be hard-rejected |
+| `vo.ext.toml` schema (§5.5, native-ffi.md) | `ext_manifest.rs` parses the removed flat schema (`[extension].path`) | Must be rewritten to canonical schema; removed shapes must be hard-rejected |
 | Target-support contract (§6.4) | Not enforced at publication time | `vo-release` must validate declared targets against published artifacts |
 | Dependency readiness (§8.1–8.4) | Scattered across `vo-engine` compile pipeline and `vo-web` install pipeline | `vo-module` must own a unified readiness API |
 | Native artifact resolution (§8.4) | Lives in `vo-engine/src/compile/native.rs` | Must be governed by `vo-module`'s target-support contract |
@@ -39,9 +39,9 @@ It is the convergence plan for making `vo-module` the one source of truth for th
 
 ## 3. Steps
 
-### Step 1 — Canonical `vo.ext.toml` Schema and Legacy Rejection
+### Step 1 — Canonical `vo.ext.toml` Schema and Removed Rejection
 
-**What**: Rewrite `vo-module/src/ext_manifest.rs` to parse only the canonical schema defined in `native-ffi.md`. Hard-reject every legacy shape. Update all test fixtures and consumer call sites.
+**What**: Rewrite `vo-module/src/ext_manifest.rs` to parse only the canonical schema defined in `native-ffi.md`. Hard-reject every removed shape. Update all test fixtures and consumer call sites.
 
 **Why first**: Every downstream step depends on `vo-module` producing typed, validated extension metadata in the canonical shape. Nothing else can land cleanly until this foundation is correct.
 
@@ -51,7 +51,7 @@ It is the convergence plan for making `vo-module` the one source of truth for th
 - consumer imports in `vo-engine`, `vo-web`, `vo-release`
 
 **Acceptance**:
-- Parsing a legacy-shaped `vo.ext.toml` produces a hard error, not a compatibility fallback
+- Parsing a removed-shaped `vo.ext.toml` produces a hard error, not a dual-path fallback
 - The parsed type exposes `native.targets[]`, `native.path`, `wasm.target`, `wasm.file`, `wasm.js_glue`
 - All existing tests pass or are rewritten to use canonical fixtures
 
@@ -73,8 +73,8 @@ It is the convergence plan for making `vo-module` the one source of truth for th
 
 **Acceptance**:
 - `stage_release` fails if `vo.ext.toml` declares a target but the artifact set for that target is absent
-- `stage_release` fails if `vo.ext.toml` uses a legacy schema shape
-- New test cases cover: all targets present, one target missing, legacy schema rejection, pure-source module (no `vo.ext.toml`)
+- `stage_release` fails if `vo.ext.toml` uses a removed schema shape
+- New test cases cover: all targets present, one target missing, removed schema rejection, pure-source module (no `vo.ext.toml`)
 
 ---
 
@@ -219,7 +219,7 @@ The two plans reinforce each other. This plan can be read as the `vo-module`-int
 - Changing the solver algorithm
 - Redesigning browser fetch transport
 - Introducing fallback semantics or weaker validation modes
-- Supporting legacy `vo.ext.toml` schema in any form
+- Supporting removed `vo.ext.toml` schema in any form
 
 ---
 

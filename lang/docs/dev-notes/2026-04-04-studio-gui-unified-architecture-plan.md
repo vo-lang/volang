@@ -52,7 +52,7 @@ exts → install dispatcher → load host bridge → `runGuiFromBytecode`.
 dispatcher → `wasm.runGui(path)` (compile + ext load + run, all internal).
 
 All GUI lifecycle concerns (session guards, host bridge timing, protocol
-module loading, externalWidgetHandlerId extraction) must be implemented and
+module loading, hostWidgetHandlerId extraction) must be implemented and
 maintained in two places. The behavior has already started diverging.
 
 ### Issue 2: Host bridge loaded twice on Native, zero times before initial render on Web
@@ -89,9 +89,9 @@ On Native, each of `loadHostBridgeModule`, `loadProtocolModule`, and
 filesystem walk. On Web, same 3 calls but via in-memory WASM (cheaper but
 still redundant).
 
-### Issue 5: `externalWidgetHandlerId` lost on initial frame (Native WASM path)
+### Issue 5: `hostWidgetHandlerId` lost on initial frame (Native WASM path)
 
-`NativeBackend.runGui()` returns `externalWidgetHandlerId: null`.
+`NativeBackend.runGui()` returns `hostWidgetHandlerId: null`.
 `RuntimeService` tries to recover via `protocolModule`, but protocol module
 is only loaded in `PreviewPanel.launchRenderIsland()` — after `runGui`
 returns. The old `cmd_run_gui` Rust path correctly called
@@ -178,7 +178,7 @@ Native-only sidecar:
 
 5. **Protocol module ownership**: the shared post-compile function is
    responsible for loading the protocol module and calling
-   `runtime.setProtocolModule(protocol)` so that `externalWidgetHandlerId`
+   `runtime.setProtocolModule(protocol)` so that `hostWidgetHandlerId`
    is available immediately from the first render frame. `PreviewPanel`
    retains responsibility for **teardown only** (`unloadProtocolModule` +
    `runtime.setProtocolModule(null)`). The module loaders (`loadProtocolModule`,
@@ -281,7 +281,7 @@ ext preloading, host bridge, protocol module, and `runGuiFromBytecode`.
   3. `loadHostBridgeModule(snapshot)` + `setActiveHostBridge()` if declared
   4. `loadProtocolModule(snapshot)` + `runtime.setProtocolModule()` if declared
   5. `wasm.runGuiFromBytecode(bytecode)`
-  6. Extract `externalWidgetHandlerId` via protocol module from render bytes
+  6. Extract `hostWidgetHandlerId` via protocol module from render bytes
   7. Return complete `GuiRunOutput`
 
 - `studio/src/lib/backend/native_backend.ts` — `runGui()` becomes:
@@ -345,7 +345,7 @@ calls. `cmd_get_render_island_vfs_snapshot` contains no build calls.
 
 2. **Should the protocol module be loaded in the shared post-compile flow
    or remain in `PreviewPanel`?** Loading it earlier (Phase 2) fixes the
-   `externalWidgetHandlerId` issue. But it means the shared flow needs
+   `hostWidgetHandlerId` issue. But it means the shared flow needs
    access to `Backend` for VFS snapshot, coupling compile-time and
    render-time concerns.
 

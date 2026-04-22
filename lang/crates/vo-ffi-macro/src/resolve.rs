@@ -434,7 +434,7 @@ fn resolve_pkg_path(project_root: &Path, pkg_path: &str) -> Option<(PathBuf, boo
         return None;
     }
 
-    // Also check stdlib without prefix (for backwards compatibility)
+    // Also check stdlib without prefix
     let stdlib_candidates = [
         project_root.join("stdlib").join(pkg_path),
         project_root.join("../stdlib").join(pkg_path),

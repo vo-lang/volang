@@ -14,7 +14,7 @@ Update the release-staging pipeline (`vo-release`) so that `stage_release` cross
 
 1. Every target declared in `vo.ext.toml` must have its complete artifact set present in the staged artifacts.
 2. No artifact may claim a target that is not declared in `vo.ext.toml`.
-3. If `vo.ext.toml` uses a legacy schema shape, `stage_release` fails via the Step 1 parser (already enforced).
+3. If `vo.ext.toml` uses a removed schema shape, `stage_release` fails via the Step 1 parser (already enforced).
 4. Pure-source modules (no `vo.ext.toml`) continue to stage without artifacts as before.
 
 ---
@@ -85,7 +85,7 @@ fn validate_artifact_contract(
 This function:
 
 1. Reads `vo.ext.toml` from `repo_root`. If absent, return `Ok(())` — pure-source module.
-2. Parses via `parse_ext_manifest_content` (Step 1 canonical parser). Legacy schema triggers hard error here.
+2. Parses via `parse_ext_manifest_content` (Step 1 canonical parser). Removed schema triggers hard error here.
 3. Calls `manifest.declared_artifact_ids()` to get the declared set.
 4. Builds the staged set from `prepared` as `BTreeSet<(kind, target, name)>`.
 5. Computes:
@@ -206,12 +206,12 @@ fn stage_release_rejects_artifacts_without_ext_manifest() {
 }
 ```
 
-### 5.7 Legacy `vo.ext.toml` schema — fail
+### 5.7 Removed `vo.ext.toml` schema — fail
 
 ```rust
 #[test]
-fn stage_release_rejects_legacy_ext_manifest_schema() {
-    // vo.ext.toml uses [extension].path (legacy)
+fn stage_release_rejects_removed_ext_manifest_schema() {
+    // vo.ext.toml uses [extension].path (removed)
     // stage_release fails via Step 1 parser error propagation
 }
 ```
@@ -299,5 +299,5 @@ cargo test -p vo-analysis --release
 - `ArtifactContractViolation` error variant in `vo-release`
 - `validate_artifact_contract` function in `repo.rs`
 - Cross-validation wired into `stage_release` between artifact preparation and manifest construction
-- Comprehensive test suite covering all declared/undeclared/missing/legacy/pure-source scenarios
+- Comprehensive test suite covering all declared/undeclared/missing/removed/pure-source scenarios
 - Existing test fixtures updated to satisfy the new contract

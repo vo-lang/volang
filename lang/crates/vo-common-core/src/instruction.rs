@@ -4,7 +4,7 @@
 // Hint instruction constants (for JIT loop analysis)
 // =============================================================================
 
-/// Hint type: pure NOP (backward compatible)
+/// Hint type: pure NOP
 pub const HINT_NOP: u8 = 0;
 /// Hint type: loop marker (encodes depth, end_offset, flags, exit_pc)
 pub const HINT_LOOP: u8 = 1;

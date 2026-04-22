@@ -235,7 +235,7 @@ The core architectural shift is:
 - **UI/actions talk to `StudioBackend` services**
 - **Terminal uses `TerminalService`**
 - **App run / GUI run / preview use runtime services**
-- **The old `bridge.ts` becomes only a temporary compatibility shell during migration**
+- **The old `bridge.ts` becomes only a temporary temporary bridge during migration**
 
 ## 5.2 Service Boundaries
 

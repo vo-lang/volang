@@ -4,15 +4,15 @@ import type { ManagedProject, ManagedProjectConfig } from './types';
 const PROJECT_CONFIG_STORAGE_KEY = 'vo_studio_project_config_v1';
 
 type ProjectConfigMap = Record<string, ManagedProjectConfig>;
-type LegacyProjectConfig = Partial<ManagedProjectConfig> & { appKind?: 'code' | 'gui' };
+type ProjectConfigInput = Partial<ManagedProjectConfig>;
 
 export function defaultProjectConfig(): ManagedProjectConfig {
   return { hasGui: false };
 }
 
-export function normalizeProjectConfig(config: LegacyProjectConfig | null | undefined): ManagedProjectConfig {
+export function normalizeProjectConfig(config: ProjectConfigInput | null | undefined): ManagedProjectConfig {
   return {
-    hasGui: config?.hasGui ?? config?.appKind === 'gui',
+    hasGui: config?.hasGui ?? false,
   };
 }
 
@@ -82,7 +82,7 @@ function loadStoredProjectConfigs(): ProjectConfigMap {
     return {};
   }
   try {
-    const parsed = JSON.parse(raw) as Record<string, LegacyProjectConfig>;
+    const parsed = JSON.parse(raw) as Record<string, ProjectConfigInput>;
     return Object.fromEntries(
       Object.entries(parsed).map(([key, config]) => [key, normalizeProjectConfig(config)]),
     );
