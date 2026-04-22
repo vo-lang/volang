@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use flate2::read::GzDecoder;
 use tar::Archive;
@@ -22,6 +23,39 @@ fn write_basic_repo(root: &Path) {
     let lock_content = "version = 1\ncreated_by = \"vo test\"\n\n[root]\nmodule = \"github.com/acme/app\"\nvo = \"0.1.0\"\n";
     fs::write(root.join("vo.lock"), lock_content).unwrap();
     fs::write(root.join("main.vo"), "fn main() {}\n").unwrap();
+    init_test_git_repo(root);
+    git_add(root, Path::new("vo.mod"));
+    git_add(root, Path::new("vo.lock"));
+    git_add(root, Path::new("main.vo"));
+}
+
+fn init_test_git_repo(root: &Path) {
+    git(root, &["init"]);
+    git(
+        root,
+        &["config", "user.email", "vo-release-tests@example.invalid"],
+    );
+    git(root, &["config", "user.name", "Vo Release Tests"]);
+}
+
+fn git_add(root: &Path, path: &Path) {
+    git(root, &["add", path.to_str().unwrap()]);
+}
+
+fn git(root: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 fn stage_options(temp: &TempDir, artifacts: Vec<ArtifactInput>) -> StageReleaseOptions {
@@ -42,6 +76,7 @@ fn write_artifact_input(
 ) -> ArtifactInput {
     let path = root.join(name);
     fs::write(&path, bytes).unwrap();
+    git_add(root, Path::new(name));
     ArtifactInput {
         kind: kind.to_string(),
         target: target.to_string(),
@@ -216,6 +251,7 @@ fn stage_release_writes_manifest_and_artifacts() {
     .unwrap();
     let artifact_path = temp.path().join("demo.wasm");
     fs::write(&artifact_path, b"wasm-bits").unwrap();
+    git_add(temp.path(), Path::new("demo.wasm"));
 
     let staged = stage_release(
         temp.path(),
@@ -618,6 +654,9 @@ deps = []
     let js_artifact_path = temp.path().join("a-demo.js");
     fs::write(&wasm_artifact_path, b"wasm-bits").unwrap();
     fs::write(&js_artifact_path, b"js-bits").unwrap();
+    init_test_git_repo(temp.path());
+    git_add(temp.path(), Path::new("z-demo.wasm"));
+    git_add(temp.path(), Path::new("a-demo.js"));
 
     let staged = stage_release(
         temp.path(),

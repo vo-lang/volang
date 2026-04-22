@@ -2033,6 +2033,7 @@ dependencies = [
  "console_error_panic_hook",
  "include_dir",
  "js-sys",
+ "serde",
  "serde_json",
  "toml",
  "vo-analysis",

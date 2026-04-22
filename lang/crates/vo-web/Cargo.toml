@@ -23,6 +23,7 @@ compiler = [
     "console_error_panic_hook",
     "web-sys",
     "include_dir",
+    "serde",
     "serde_json",
     "toml",
 ]
@@ -43,6 +44,7 @@ vo-syntax = { path = "../vo-syntax", optional = true }
 vo-analysis = { path = "../vo-analysis", optional = true }
 vo-codegen = { path = "../vo-codegen", optional = true }
 vo-module = { path = "../vo-module", optional = true }
+serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
 toml = { version = "0.8", optional = true }
 

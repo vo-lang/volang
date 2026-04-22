@@ -32,6 +32,7 @@ const IGNORED_DIR_NAMES: &[&str] = &[
 ];
 const IGNORED_FILE_NAMES: &[&str] = &["vo.release.json", "vo.work", ".DS_Store"];
 const IGNORED_SUFFIXES: &[&str] = &[".a", ".dll", ".dylib", ".lib", ".pdb", ".so", ".wasm"];
+const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactInput {
@@ -143,6 +144,7 @@ pub fn stage_release(
     let source_digest = sha256_digest(&source_bytes);
     let prepared_artifacts = prepare_artifacts(&options.artifacts, &out_dir)?;
     validate_artifact_contract(&repo_root, &prepared_artifacts)?;
+    validate_web_artifact_sources(&repo_root, &prepared_artifacts)?;
 
     let version = ExactVersion::parse(&options.version)
         .map_err(|e| ReleaseError::ManifestSerialize(format!("invalid version: {e}")))?;
@@ -358,6 +360,113 @@ fn validate_artifact_contract(
         missing,
         undeclared,
     })
+}
+
+fn validate_web_artifact_sources(
+    repo_root: &Path,
+    prepared: &[PreparedArtifact],
+) -> ReleaseResult<()> {
+    let manifest_path = repo_root.join("vo.ext.toml");
+    if !manifest_path.is_file() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(&manifest_path)
+        .map_err(|error| ReleaseError::IoError(manifest_path.clone(), error.to_string()))?;
+    let manifest = vo_module::ext_manifest::parse_ext_manifest_content(&content, &manifest_path)?;
+    let Some(wasm) = manifest.wasm.as_ref() else {
+        return Ok(());
+    };
+
+    validate_web_artifact_source(
+        repo_root,
+        &manifest_path,
+        prepared,
+        "extension-wasm",
+        &wasm.wasm,
+        wasm.local_wasm.as_deref().unwrap_or(&wasm.wasm),
+    )?;
+    if let Some(js_glue) = wasm.js_glue.as_deref() {
+        validate_web_artifact_source(
+            repo_root,
+            &manifest_path,
+            prepared,
+            "extension-js-glue",
+            js_glue,
+            wasm.local_js_glue.as_deref().unwrap_or(js_glue),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_web_artifact_source(
+    repo_root: &Path,
+    manifest_path: &Path,
+    prepared: &[PreparedArtifact],
+    kind: &str,
+    artifact_name: &str,
+    source_rel: &str,
+) -> ReleaseResult<()> {
+    let source_rel = normalize_include_path(manifest_path, Path::new(source_rel))?;
+    let source_path = repo_root.join(&source_rel);
+    if !source_path.is_file() {
+        return Err(ReleaseError::InvalidArtifactPath(source_path));
+    }
+    ensure_web_artifact_source_is_tracked(repo_root, &source_rel, &source_path)?;
+    let source_bytes = fs::read(&source_path)
+        .map_err(|error| ReleaseError::IoError(source_path.clone(), error.to_string()))?;
+    let staged = prepared
+        .iter()
+        .find(|artifact| {
+            artifact.staged.kind == kind
+                && artifact.staged.target == WASM_TARGET
+                && artifact.staged.name == artifact_name
+        })
+        .ok_or_else(|| {
+            ReleaseError::IoError(
+                manifest_path.to_path_buf(),
+                format!(
+                    "missing staged web artifact {}:{}:{}",
+                    kind, WASM_TARGET, artifact_name
+                ),
+            )
+        })?;
+    if source_bytes != staged.bytes {
+        return Err(ReleaseError::IoError(
+            source_path,
+            format!(
+                "web artifact source declared by {} must byte-match staged release artifact {}:{}:{} from {}",
+                manifest_path.display(),
+                kind,
+                WASM_TARGET,
+                artifact_name,
+                staged.staged.source_path.display(),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_web_artifact_source_is_tracked(
+    repo_root: &Path,
+    source_rel: &Path,
+    source_path: &Path,
+) -> ReleaseResult<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("ls-files")
+        .arg("--error-unmatch")
+        .arg("--")
+        .arg(source_rel)
+        .output()
+        .map_err(|error| ReleaseError::IoError(repo_root.to_path_buf(), error.to_string()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(ReleaseError::IoError(
+        source_path.to_path_buf(),
+        "web artifact source must be checked into git so Studio web can fetch it from the release tag".to_string(),
+    ))
 }
 
 fn included_source_files(repo_root: &Path) -> ReleaseResult<Vec<PathBuf>> {
