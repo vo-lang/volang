@@ -1,7 +1,7 @@
 /*vo:mod
 module local/gui_tetris
 vo ^0.1.0
-require github.com/vo-lang/vogui v0.1.5
+require github.com/vo-lang/vogui v0.1.6
 */
 
 // Tetris Game - demonstrates Canvas 2D API and RunGameLoop
