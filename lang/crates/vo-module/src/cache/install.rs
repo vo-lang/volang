@@ -106,10 +106,12 @@ fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), Error> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("artifact");
-    let (mut file, temp) = create_unique_temp_file(parent, stem)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
+    let temp = {
+        let (mut file, temp) = create_unique_temp_file(parent, stem)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        temp
+    };
 
     match std::fs::rename(temp.path(), path) {
         Ok(()) => Ok(()),

@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use futures_util::future::join_all;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use wasm_bindgen::JsCast;
@@ -18,9 +19,10 @@ use vo_module::{Error, Result};
 
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 const VO_WEB_FILE: &str = "vo.web.json";
+const SOURCE_FETCH_BATCH_SIZE: usize = 16;
 
 thread_local! {
-    static WEB_MANIFEST_CACHE: RefCell<BTreeMap<String, WebManifest>> = RefCell::new(BTreeMap::new());
+    static WEB_MANIFEST_CACHE: RefCell<BTreeMap<String, WebManifest>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -287,28 +289,45 @@ async fn fetch_source_files(
         )));
     }
 
-    let mut files = Vec::new();
-    for entry in &web.source {
-        validate_web_relative_path(&entry.path)?;
-        let content = fetch_module_file_text(module, &web.commit, &entry.path).await?;
-        let digest = Digest::from_sha256(content.as_bytes());
-        let expected = Digest::parse(&entry.digest).map_err(|error| {
-            Error::InvalidReleaseMetadata(format!(
-                "vo.web.json source digest for {}: {}",
-                entry.path, error
-            ))
-        })?;
-        if content.len() as u64 != entry.size || digest != expected {
-            return Err(Error::DigestMismatch {
-                context: format!("source file {} for {} {}", entry.path, module, version),
-                expected: format!("{} ({} bytes)", expected, entry.size),
-                found: format!("{} ({} bytes)", digest, content.len()),
-            });
+    let mut files = Vec::with_capacity(web.source.len());
+    for batch in web.source.chunks(SOURCE_FETCH_BATCH_SIZE) {
+        let results = join_all(
+            batch
+                .iter()
+                .map(|entry| fetch_source_entry(module, version, &web.commit, entry)),
+        )
+        .await;
+        for result in results {
+            files.push(result?);
         }
-        files.push((PathBuf::from(&entry.path), content));
     }
 
     Ok(SourcePayload::Files(files))
+}
+
+async fn fetch_source_entry(
+    module: &ModulePath,
+    version: &ExactVersion,
+    commit: &str,
+    entry: &WebManifestSource,
+) -> Result<(PathBuf, String)> {
+    validate_web_relative_path(&entry.path)?;
+    let content = fetch_module_file_text(module, commit, &entry.path).await?;
+    let digest = Digest::from_sha256(content.as_bytes());
+    let expected = Digest::parse(&entry.digest).map_err(|error| {
+        Error::InvalidReleaseMetadata(format!(
+            "vo.web.json source digest for {}: {}",
+            entry.path, error
+        ))
+    })?;
+    if content.len() as u64 != entry.size || digest != expected {
+        return Err(Error::DigestMismatch {
+            context: format!("source file {} for {} {}", entry.path, module, version),
+            expected: format!("{} ({} bytes)", expected, entry.size),
+            found: format!("{} ({} bytes)", digest, content.len()),
+        });
+    }
+    Ok((PathBuf::from(&entry.path), content))
 }
 
 async fn fetch_web_artifact(

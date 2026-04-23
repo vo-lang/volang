@@ -212,7 +212,7 @@ pub fn take_output() -> String {
 
 #[cfg(not(feature = "std"))]
 pub fn take_output() -> String {
-    OUTPUT_BUFFER.with(|buf| core::mem::take(buf))
+    OUTPUT_BUFFER.with(core::mem::take)
 }
 
 /// Clear the output buffer without returning contents.
