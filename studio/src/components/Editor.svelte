@@ -64,26 +64,26 @@
     });
   }
 
-  function syncEditorState(monacoModule: Monaco): void {
+  function syncEditorState(monacoModule: Monaco, filePath: string, nextCode: string): void {
     if (!monacoEditor) {
       return;
     }
-    if (!activeFile) {
+    if (!filePath) {
       if (model) {
         monacoEditor.setModel(null);
         disposeModel();
       }
       return;
     }
-    if (!model || boundPath !== activeFile) {
-      bindModel(monacoModule, activeFile, code);
+    if (!model || boundPath !== filePath) {
+      bindModel(monacoModule, filePath, nextCode);
       void tick().then(() => monacoEditor?.layout());
       return;
     }
-    monacoModule.editor.setModelLanguage(model, resolveMonacoLanguage(activeFile));
-    if (model.getValue() !== code) {
+    monacoModule.editor.setModelLanguage(model, resolveMonacoLanguage(filePath));
+    if (model.getValue() !== nextCode) {
       suppressStoreSync = true;
-      model.setValue(code);
+      model.setValue(nextCode);
       suppressStoreSync = false;
     }
   }
@@ -119,7 +119,7 @@
       monacoEditor?.layout();
     });
     resizeObserver.observe(editorHost);
-    syncEditorState(monacoModule);
+    syncEditorState(monacoModule, activeFile, code);
   }
 
   onMount(() => {
@@ -144,7 +144,7 @@
   }
 
   $: if (monacoEditor && monaco) {
-    syncEditorState(monaco);
+    syncEditorState(monaco, activeFile, code);
   }
 </script>
 
