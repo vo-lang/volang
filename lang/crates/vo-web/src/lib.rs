@@ -104,8 +104,9 @@ pub use browser_runtime::{
 pub use browser_runtime_dev::{
     browser_artifact_plan_from_fs, debug_local_project_browser_runtime_plan_from_fs,
     execute_browser_artifact_plan, locked_browser_runtime_plan_from_fs,
-    materialize_browser_snapshot_from_fs, published_browser_runtime_plan_from_fs,
-    ArtifactActionSpec, BrowserArtifactPlan, EnsurePkgIslandAction, EnsureStandaloneWasmAction,
+    materialize_browser_snapshot_from_fs, native_gui_browser_runtime_plan_from_fs,
+    published_browser_runtime_plan_from_fs, ArtifactActionSpec, BrowserArtifactPlan,
+    EnsurePkgIslandAction, EnsureStandaloneWasmAction,
 };
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]

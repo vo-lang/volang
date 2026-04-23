@@ -12,9 +12,9 @@ use vo_module::schema::lockfile::LockedModule;
 
 use crate::browser_runtime::{
     browser_runtime_module_root_for_owner, browser_runtime_plan_from_manifest,
-    plan_ready_browser_runtime_at, BrowserArtifactFamily, BrowserArtifactIntent,
-    BrowserArtifactSource, BrowserRuntimePlan, BrowserSnapshotFile, BrowserSnapshotMount,
-    BrowserSnapshotMountKind, BrowserSnapshotPlan, BrowserSnapshotSourceRef,
+    merge_browser_runtime_plans, plan_ready_browser_runtime_at, BrowserArtifactFamily,
+    BrowserArtifactIntent, BrowserArtifactSource, BrowserRuntimePlan, BrowserSnapshotFile,
+    BrowserSnapshotMount, BrowserSnapshotMountKind, BrowserSnapshotPlan, BrowserSnapshotSourceRef,
     RequiredBrowserArtifact,
 };
 
@@ -50,6 +50,8 @@ pub struct EnsurePkgIslandAction {
     pub crate_root: PathBuf,
     pub out_dir: PathBuf,
     pub out_name: String,
+    pub runtime_wasm_path: PathBuf,
+    pub runtime_js_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +88,63 @@ pub fn debug_local_project_browser_runtime_plan_from_fs(
         Some(module.as_str()),
         manifest,
     ))
+}
+
+/// Native Studio GUI runtime discovery for local development paths.
+///
+/// The native runner already knows exactly which native extensions were linked
+/// into the compiled program. Use those manifests as the local source of truth,
+/// then merge any remaining published locked-module runtime metadata from the
+/// shared module cache.
+pub fn native_gui_browser_runtime_plan_from_fs(
+    local_extension_manifests: &[PathBuf],
+    locked_modules: &[LockedModule],
+    mod_cache_root: &Path,
+) -> Result<BrowserRuntimePlan, String> {
+    let mut plans = vec![published_browser_runtime_plan_from_fs(
+        locked_modules,
+        mod_cache_root,
+    )?];
+    let mut seen_module_roots = BTreeSet::new();
+
+    for manifest_path in local_extension_manifests {
+        let manifest_path = manifest_path
+            .canonicalize()
+            .unwrap_or_else(|_| manifest_path.clone());
+        let module_root = manifest_path.parent().ok_or_else(|| {
+            format!(
+                "extension manifest path has no parent: {}",
+                manifest_path.display()
+            )
+        })?;
+        let module_root = module_root
+            .canonicalize()
+            .unwrap_or_else(|_| module_root.to_path_buf());
+        if !seen_module_roots.insert(module_root.clone()) {
+            continue;
+        }
+        let mod_file = project::read_mod_file(&module_root)
+            .map_err(|error| format!("{}: {}", module_root.join("vo.mod").display(), error))?;
+        let manifest = mod_file.extension.as_ref().ok_or_else(|| {
+            format!(
+                "{}: missing [extension] metadata for native GUI runtime",
+                module_root.join("vo.mod").display()
+            )
+        })?;
+        let module = mod_file.module.as_github().ok_or_else(|| {
+            format!(
+                "{}: extension module must be a github module path",
+                module_root.display()
+            )
+        })?;
+        plans.push(browser_runtime_plan_from_manifest(
+            &module_root.to_string_lossy(),
+            Some(module.as_str()),
+            manifest,
+        ));
+    }
+
+    Ok(merge_browser_runtime_plans(plans))
 }
 
 pub fn locked_browser_runtime_plan_from_fs(
@@ -232,28 +291,11 @@ fn plan_pkg_island_action(
     let build = select_wasm_build_candidate(rust_root, &artifact.extension_name, "wasm-island")?;
     let out_dir = rust_root.join("pkg-island");
     let out_name = format!("{}_island", artifact.extension_name);
-    let expected_wasm_path = out_dir.join(format!("{}_bg.wasm", out_name));
     let runtime_wasm_path = resolve_fs_asset_path(module_root, &artifact.wasm.runtime_asset);
-    if runtime_wasm_path != expected_wasm_path {
-        return Err(format!(
-            "bindgen island wasm path for {} must be {}, got {}",
-            artifact.extension_name,
-            expected_wasm_path.display(),
-            runtime_wasm_path.display(),
-        ));
-    }
-    if let Some(js_glue) = &artifact.js_glue {
-        let expected_js_path = out_dir.join(format!("{}.js", out_name));
-        let runtime_js_path = resolve_fs_asset_path(module_root, &js_glue.runtime_asset);
-        if runtime_js_path != expected_js_path {
-            return Err(format!(
-                "bindgen island js glue path for {} must be {}, got {}",
-                artifact.extension_name,
-                expected_js_path.display(),
-                runtime_js_path.display(),
-            ));
-        }
-    }
+    let runtime_js_path = artifact
+        .js_glue
+        .as_ref()
+        .map(|js_glue| resolve_fs_asset_path(module_root, &js_glue.runtime_asset));
     Ok(EnsurePkgIslandAction {
         module_key: artifact.module_key.clone(),
         extension_name: artifact.extension_name.clone(),
@@ -261,6 +303,8 @@ fn plan_pkg_island_action(
         crate_root: build.crate_root,
         out_dir,
         out_name,
+        runtime_wasm_path,
+        runtime_js_path,
     })
 }
 
@@ -303,47 +347,56 @@ fn execute_standalone_wasm_action(action: &EnsureStandaloneWasmAction) -> Result
 }
 
 fn execute_pkg_island_action(action: &EnsurePkgIslandAction) -> Result<(), String> {
-    if !pkg_island_needs_build(
+    if pkg_island_needs_build(
         &action.rust_root,
         &action.crate_root,
         &action.extension_name,
     )? {
-        return Ok(());
+        eprintln!(
+            "[vo-web] building render-island wasm for {} from {}",
+            action.extension_name,
+            action.crate_root.display(),
+        );
+        let output = Command::new("wasm-pack")
+            .args([
+                "build",
+                "--target",
+                "web",
+                "--out-dir",
+                &action.out_dir.to_string_lossy(),
+                "--out-name",
+                &action.out_name,
+                "--release",
+                &action.crate_root.to_string_lossy(),
+                "--",
+                "--no-default-features",
+                "--features",
+                "wasm-island",
+            ])
+            .output()
+            .map_err(|error| format!("wasm-pack: {}", error))?;
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "failed to build render-island wasm for {}:\n{}\n{}",
+                action.extension_name,
+                stdout.trim_end(),
+                stderr.trim_end(),
+            ));
+        }
     }
-    eprintln!(
-        "[vo-web] building render-island wasm for {} from {}",
-        action.extension_name,
-        action.crate_root.display(),
-    );
-    let output = Command::new("wasm-pack")
-        .args([
-            "build",
-            "--target",
-            "web",
-            "--out-dir",
-            &action.out_dir.to_string_lossy(),
-            "--out-name",
-            &action.out_name,
-            "--release",
-            &action.crate_root.to_string_lossy(),
-            "--",
-            "--no-default-features",
-            "--features",
-            "wasm-island",
-        ])
-        .output()
-        .map_err(|error| format!("wasm-pack: {}", error))?;
-    if output.status.success() {
-        return Ok(());
+    let build_wasm_path = action.out_dir.join(format!("{}_bg.wasm", action.out_name));
+    sync_generated_output(
+        &build_wasm_path,
+        &action.runtime_wasm_path,
+        "render-island wasm",
+    )?;
+    if let Some(runtime_js_path) = &action.runtime_js_path {
+        let build_js_path = action.out_dir.join(format!("{}.js", action.out_name));
+        sync_generated_output(&build_js_path, runtime_js_path, "render-island js glue")?;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(format!(
-        "failed to build render-island wasm for {}:\n{}\n{}",
-        action.extension_name,
-        stdout.trim_end(),
-        stderr.trim_end(),
-    ))
+    Ok(())
 }
 
 fn materialize_snapshot_directory_mount_from_fs(
@@ -719,32 +772,41 @@ fn standalone_wasm_target_needs_build(
         .unwrap_or(false))
 }
 
-fn sync_standalone_wasm_output(target_output: &Path, wasm_path: &Path) -> Result<(), String> {
+fn sync_generated_output(
+    target_output: &Path,
+    runtime_path: &Path,
+    label: &str,
+) -> Result<(), String> {
     let Some(target_mtime) = file_modified(target_output)? else {
         return Err(format!(
-            "missing standalone wasm build output {}",
+            "missing {} build output {}",
+            label,
             target_output.display(),
         ));
     };
-    let wasm_mtime = file_modified(wasm_path)?;
-    if wasm_mtime
+    let runtime_mtime = file_modified(runtime_path)?;
+    if runtime_mtime
         .map(|mtime| mtime >= target_mtime)
         .unwrap_or(false)
     {
         return Ok(());
     }
-    if let Some(parent) = wasm_path.parent() {
+    if let Some(parent) = runtime_path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("{}: {}", parent.display(), error))?;
     }
-    fs::copy(target_output, wasm_path).map_err(|error| {
+    fs::copy(target_output, runtime_path).map_err(|error| {
         format!(
             "{} -> {}: {}",
             target_output.display(),
-            wasm_path.display(),
+            runtime_path.display(),
             error,
         )
     })?;
     Ok(())
+}
+
+fn sync_standalone_wasm_output(target_output: &Path, wasm_path: &Path) -> Result<(), String> {
+    sync_generated_output(target_output, wasm_path, "standalone wasm")
 }
 
 fn pkg_island_needs_build(
@@ -1247,6 +1309,202 @@ protocol = "js/dist/app-protocol.js"
         );
 
         fs::remove_dir_all(&project_root).unwrap();
+    }
+
+    #[test]
+    fn native_gui_browser_runtime_plan_from_fs_merges_local_and_locked_modules() {
+        let cache_root = temp_dir("native-gui-runtime-cache").canonicalize().unwrap();
+        let remote_wasm_bytes = b"\0asm-remote";
+        let (locked, release_manifest_content) = locked_module(
+            "github.com/acme/remote",
+            "v1.2.3",
+            vec![locked_artifact(
+                "extension-wasm",
+                BROWSER_WASM_TARGET,
+                "remote.wasm",
+                remote_wasm_bytes,
+            )],
+        );
+        populate_cached_module(
+            &cache_root,
+            &locked,
+            &release_manifest_content,
+            Some(
+                r#"
+[extension]
+name = "remote"
+
+[extension.wasm]
+type = "standalone"
+wasm = "remote.wasm"
+
+[extension.web]
+capabilities = ["widget", "protocol"]
+
+[extension.web.js]
+protocol = "js/dist/remote-protocol.js"
+"#,
+            ),
+            &[
+                ("artifacts/remote.wasm", remote_wasm_bytes),
+                (
+                    "js/dist/remote-protocol.js",
+                    b"export const protocol = 1;\n",
+                ),
+            ],
+        );
+
+        let local_root = temp_dir("native-gui-runtime-local").canonicalize().unwrap();
+        fs::create_dir_all(local_root.join("js").join("dist")).unwrap();
+        fs::create_dir_all(local_root.join("web-artifacts")).unwrap();
+        fs::write(
+            local_root.join("vo.mod"),
+            r#"module github.com/acme/local
+vo 0.1.0
+
+[extension]
+name = "local"
+
+[extension.wasm]
+type = "bindgen"
+wasm = "local_bg.wasm"
+js_glue = "local.js"
+local_wasm = "web-artifacts/local_bg.wasm"
+local_js_glue = "web-artifacts/local.js"
+
+[extension.web]
+capabilities = ["widget", "island_transport"]
+
+[extension.web.js]
+renderer = "js/dist/local-renderer.js"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            local_root.join("js").join("dist").join("local-renderer.js"),
+            "export const renderer = 1;\n",
+        )
+        .unwrap();
+
+        let plan = native_gui_browser_runtime_plan_from_fs(
+            &[local_root.join("vo.mod")],
+            &[locked],
+            &cache_root,
+        )
+        .unwrap();
+
+        let module_keys = plan
+            .runtime_modules
+            .iter()
+            .map(|module| module.module_key.as_str())
+            .collect::<Vec<_>>();
+        assert!(module_keys.contains(&"github.com/acme/local"));
+        assert!(module_keys.contains(&"github.com/acme/remote"));
+
+        let artifact_sources = plan
+            .artifact_intent()
+            .unwrap()
+            .required_artifacts
+            .into_iter()
+            .map(|artifact| (artifact.module_key, artifact.source))
+            .collect::<Vec<_>>();
+        assert!(artifact_sources.contains(&(
+            "github.com/acme/local".to_string(),
+            BrowserArtifactSource::LocalManifest,
+        )));
+        assert!(artifact_sources.contains(&(
+            "github.com/acme/remote".to_string(),
+            BrowserArtifactSource::ReadyModule,
+        )));
+
+        fs::remove_dir_all(&cache_root).unwrap();
+        fs::remove_dir_all(&local_root).unwrap();
+    }
+
+    #[test]
+    fn browser_artifact_plan_from_fs_accepts_bindgen_runtime_assets_outside_pkg_island() {
+        let root = temp_dir("bindgen-runtime-assets");
+        let rust_dir = root.join("rust");
+        let pkg_dir = rust_dir.join("pkg-island");
+        let web_artifacts_dir = root.join("web-artifacts");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::create_dir_all(&web_artifacts_dir).unwrap();
+        fs::write(
+            rust_dir.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+wasm-island = []
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("vo.mod"),
+            r#"module github.com/vo-lang/demo
+vo 0.1.0
+
+[extension]
+name = "demo"
+
+[extension.wasm]
+type = "bindgen"
+wasm = "demo_island_bg.wasm"
+js_glue = "demo_island.js"
+local_wasm = "web-artifacts/demo_island_bg.wasm"
+local_js_glue = "web-artifacts/demo_island.js"
+
+[extension.web]
+capabilities = ["widget", "island_transport"]
+
+[extension.web.js]
+renderer = "js/dist/demo-renderer.js"
+"#,
+        )
+        .unwrap();
+
+        let runtime = browser_runtime_plan_from_manifest(
+            &root.to_string_lossy(),
+            Some("github.com/vo-lang/demo"),
+            &parse_manifest(
+                r#"
+[extension]
+name = "demo"
+
+[extension.wasm]
+type = "bindgen"
+wasm = "demo_island_bg.wasm"
+js_glue = "demo_island.js"
+local_wasm = "web-artifacts/demo_island_bg.wasm"
+local_js_glue = "web-artifacts/demo_island.js"
+
+[extension.web]
+capabilities = ["widget", "island_transport"]
+
+[extension.web.js]
+renderer = "js/dist/demo-renderer.js"
+"#,
+            ),
+        );
+        let intent = runtime.artifact_intent().unwrap();
+        let plan = browser_artifact_plan_from_fs(&intent, &runtime).unwrap();
+
+        assert_eq!(plan.actions.len(), 1);
+        let ArtifactActionSpec::EnsurePkgIsland(action) = &plan.actions[0] else {
+            panic!("expected bindgen island action");
+        };
+        assert_eq!(
+            action.runtime_wasm_path,
+            web_artifacts_dir.join("demo_island_bg.wasm")
+        );
+        assert_eq!(
+            action.runtime_js_path.as_ref(),
+            Some(&web_artifacts_dir.join("demo_island.js"))
+        );
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

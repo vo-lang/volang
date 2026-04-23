@@ -2,7 +2,7 @@
 // Studio is framework-neutral: renderer modules are loaded dynamically
 // from the VFS snapshot using a blob URL — no framework-specific imports.
 
-import { invoke as tauriInvoke, listen as tauriListen } from '../tauri';
+import { listen as tauriListen } from '../tauri';
 import type { Backend } from '../backend/backend';
 import { isGuiSessionSupersededError, type RuntimeService } from '../services/runtime_service';
 import { frameworkContractKey, frameworkJsModulePath, type FrameworkContract } from '../types';
@@ -146,11 +146,8 @@ function revokeBlobUrls(urls: string[]): void {
 }
 
 function emitRendererBridgeDebug(backend: Backend, message: string): void {
-  if (backend.platform === 'native') {
-    void tauriInvoke('cmd_debug_log', { message: `[RendererBridge] ${message}` }).catch(() => {});
-    return;
-  }
-  console.debug('[RendererBridge]', message);
+  void backend;
+  void message;
 }
 
 function frameworkModuleKey(framework: FrameworkContract): string {

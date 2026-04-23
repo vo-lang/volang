@@ -50,11 +50,20 @@ function displayPath(path: string): string {
 
 function waitForNextUiFrame(): Promise<void> {
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve();
+    };
     if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-      window.requestAnimationFrame(() => resolve());
+      window.requestAnimationFrame(() => finish());
+      setTimeout(finish, 50);
       return;
     }
-    setTimeout(resolve, 0);
+    setTimeout(finish, 0);
   });
 }
 

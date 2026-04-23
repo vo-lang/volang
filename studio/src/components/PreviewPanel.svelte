@@ -183,7 +183,6 @@
   }
   $: if (isGuiApp && hasRendererBridge && registry && $runtime.gui.moduleBytes && $runtime.gui.entryPath && $runtime.gui.sessionId != null && $runtime.gui.sessionId !== rendererBridgeFailedSessionId && !rendererBridgeActive && !rendererBridgeLaunching) {
     if (isRendererBridgeActive($runtime.gui.sessionId)) {
-      console.log('[PreviewPanel] re-adopt: renderer bridge still active, re-attaching canvas');
       rendererBridgeActive = true;
       rendererBridgeSessionId = $runtime.gui.sessionId;
       rendererBridgeFailedSessionId = null;
@@ -197,7 +196,6 @@
         }
       });
     } else {
-      console.log('[PreviewPanel] fresh launch: no active renderer bridge');
       void launchRendererBridge();
     }
   }
@@ -237,7 +235,6 @@
   function attachCanvas(): void {
     const surface = attachRendererSurfaceHost();
     if (!surface) {
-      console.warn('[PreviewPanel] attachCanvas: rendererSurface not ready, retrying after tick');
       tick().then(() => attachCanvas());
       return;
     }
@@ -246,12 +243,9 @@
     if (canvas.parentElement !== surface) {
       surface.appendChild(canvas);
     }
-    console.warn(`[PreviewPanel] attachCanvas canvas=${canvas.id} active=${document.activeElement instanceof HTMLElement ? `${document.activeElement.tagName}#${document.activeElement.id}` : '<none>'}`);
     requestAnimationFrame(() => {
       if (canvas.parentElement === surface) {
         canvas.focus();
-        const active = document.activeElement instanceof HTMLElement ? `${document.activeElement.tagName}#${document.activeElement.id}` : '<none>';
-        console.warn(`[PreviewPanel] focusCanvas canvas=${canvas.id} active=${active}`);
       }
     });
   }
@@ -389,15 +383,12 @@
     const sessionId = rendererBridgeSessionId;
     const running = $runtime.isRunning;
     const active = sessionId != null && isRendererBridgeActive(sessionId);
-    console.log('[PreviewPanel] onDestroy', { running, active });
     if (running && active && $runtime.gui.sessionId === sessionId) {
       // Layout transition (e.g. preview → fullscreen): keep the renderer bridge
       // alive and park the canvas off-screen so the WebGPU surface stays valid.
       parkRendererSurfaceHost();
-      console.log('[PreviewPanel] onDestroy: parked renderer surface for layout transition');
     } else {
       teardownRendererBridge(sessionId);
-      console.log('[PreviewPanel] onDestroy: full teardown');
     }
   });
 

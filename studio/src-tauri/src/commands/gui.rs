@@ -92,10 +92,16 @@ pub async fn cmd_run_gui(
                 .duration_ms(compile_start.elapsed().as_millis()),
         );
         let module_bytes = compile_output.module.serialize();
-        // Normal Studio GUI execution resolves browser runtime strictly from
-        // locked published modules. Local project runtime helpers are reserved
-        // for explicit debug-only extension development flows.
-        let runtime_plan = vo_web::published_browser_runtime_plan_from_fs(
+        let local_extension_manifests = compile_output
+            .extensions
+            .iter()
+            .map(|spec| spec.manifest_path.clone())
+            .collect::<Vec<_>>();
+        // Native Studio must mirror the actual compiled GUI program. Derive
+        // browser runtime contracts from the native extensions that were
+        // linked into this build, then merge any remaining published modules.
+        let runtime_plan = vo_web::native_gui_browser_runtime_plan_from_fs(
+            &local_extension_manifests,
             &compile_output.locked_modules,
             &default_mod_cache_root(),
         )?;
@@ -106,6 +112,7 @@ pub async fn cmd_run_gui(
         let start_start = Instant::now();
         let (render_bytes, handle, push_rx) = gui_runtime::run_gui(compile_output, task_app.clone(), session_id)
             .map_err(|error| error.to_string())?;
+        let host_widget_handler_id = find_on_widget_handler_id(&render_bytes);
         gui_runtime::emit_studio_log(
             &task_app,
             session_id,
@@ -113,7 +120,6 @@ pub async fn cmd_run_gui(
                 .path(task_entry_path.clone())
                 .duration_ms(start_start.elapsed().as_millis()),
         );
-        let host_widget_handler_id = find_on_widget_handler_id(&render_bytes);
         Ok((
             GuiRunOutput {
                 render_bytes,
@@ -153,12 +159,6 @@ pub fn cmd_send_gui_event_async(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     state.with_guest(|handle| handle.send_event_async(handler_id, &payload))
-}
-
-#[tauri::command]
-pub fn cmd_debug_log(message: String) -> Result<(), String> {
-    crate::gui_runtime::debug_log(&format!("[studio-frontend] {}", message));
-    Ok(())
 }
 
 #[tauri::command]

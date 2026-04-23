@@ -37,7 +37,6 @@ pub fn run() {
             commands::gui::cmd_run_gui,
             commands::gui::cmd_send_gui_event,
             commands::gui::cmd_send_gui_event_async,
-            commands::gui::cmd_debug_log,
             commands::gui::cmd_push_island_transport,
             commands::gui::cmd_poll_gui_render,
             commands::gui::cmd_stop_gui,
