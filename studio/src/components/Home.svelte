@@ -36,6 +36,14 @@
     hasGui: boolean;
   }
 
+  interface FeaturedProject {
+    name: string;
+    desc: string;
+    url: string;
+    tags: string[];
+    hasGui: boolean;
+  }
+
   const examples: Example[] = [
     { name: 'Channels',        file: 'channels.vo',        desc: 'Goroutine communication',       source: exChannels,      hasGui: false },
     { name: 'Closures',        file: 'closures.vo',        desc: 'Captured variables',            source: exClosures,      hasGui: false },
@@ -53,6 +61,16 @@
     { name: 'Streaming Chat',  file: 'gui_chat.vo',        desc: 'VirtualScroll + MeasureText',  source: exGuiChat,       hasGui: true },
   ];
 
+  const featuredProjects: FeaturedProject[] = [
+    {
+      name: 'MarbleRush',
+      desc: 'Physics puzzle game built with VoGUI and VoPlay.',
+      url: 'https://github.com/vo-lang/MarbleRush',
+      tags: ['GitHub', 'VoGUI', 'VoPlay'],
+      hasGui: true,
+    },
+  ];
+
   $: langExamples = examples.filter((e) => !e.hasGui);
   $: guiExamples = examples.filter((e) => e.hasGui);
 
@@ -63,6 +81,7 @@
   export let platform: 'native' | 'wasm' = 'wasm';
   export let onOpenProject: (project: ManagedProject) => Promise<void> | void = () => {};
   export let onOpenLocalPath: (path: string) => Promise<void> | void = () => {};
+  export let onOpenFeaturedProject: (url: string, hasGui: boolean) => Promise<void> | void = () => {};
   export let onOpenExample: (source: string, filename: string, hasGui: boolean) => Promise<void> | void = () => {};
   export let onDocs: () => void = () => {};
   export let onDevelop: () => void = () => {};
@@ -86,6 +105,8 @@
   let openProjectError = '';
   let localRefreshRequested = false;
   let lastCreateLocation = '';
+  let featuredBusyUrl = '';
+  let featuredError = '';
 
   $: isNative = platform === 'native';
 
@@ -171,6 +192,18 @@
   }
 
   lastCreateLocation = localStorage.getItem(LAST_CREATE_LOCATION_KEY) ?? '';
+
+  async function openFeatured(project: FeaturedProject): Promise<void> {
+    featuredError = '';
+    featuredBusyUrl = project.url;
+    try {
+      await onOpenFeaturedProject(project.url, project.hasGui);
+    } catch (error) {
+      featuredError = formatError(error);
+    } finally {
+      featuredBusyUrl = '';
+    }
+  }
 
   async function openProject(project: ManagedProject): Promise<void> {
     actionError = '';
@@ -399,6 +432,42 @@
 
     <!-- ── Right: workspace (projects first, then extras) ── -->
     <main class="content">
+      <section class="featured-area" aria-label="Featured projects">
+        <div class="featured-header">
+          <span class="featured-title">Featured</span>
+          <span class="featured-subtitle">Ready-to-open Vo projects</span>
+        </div>
+        <div class="featured-grid">
+          {#each featuredProjects as project}
+            <button
+              class="featured-project"
+              disabled={featuredBusyUrl === project.url}
+              on:click={() => void openFeatured(project)}
+            >
+              <span class="featured-mark" aria-hidden="true">
+                <span class="featured-mark-main">MR</span>
+              </span>
+              <span class="featured-copy">
+                <span class="featured-name">{project.name}</span>
+                <span class="featured-desc">{project.desc}</span>
+                <span class="featured-tags">
+                  {#each project.tags as tag}
+                    <span class="featured-tag">{tag}</span>
+                  {/each}
+                </span>
+              </span>
+              <span class="featured-open">
+                {featuredBusyUrl === project.url ? 'Opening…' : 'Open'}
+                <svg class="btn-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg>
+              </span>
+            </button>
+          {/each}
+        </div>
+        {#if featuredError}
+          <div class="featured-error">{featuredError}</div>
+        {/if}
+      </section>
+
       <div class="projects-area">
         <div class="projects-header">
           <span class="projects-title">{isGitHubConnected ? 'Your Projects' : 'Projects'}</span>
@@ -849,6 +918,125 @@
     gap: 24px;
   }
 
+  /* ── Featured projects ── */
+  .featured-area {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  .featured-header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .featured-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #cdd6f4;
+  }
+  .featured-subtitle {
+    font-size: 11px;
+    color: #585b70;
+  }
+  .featured-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .featured-project {
+    min-height: 96px;
+    display: grid;
+    grid-template-columns: 56px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 14px;
+    padding: 14px;
+    border: 1px solid rgba(166, 227, 161, 0.16);
+    border-radius: 12px;
+    background:
+      linear-gradient(135deg, rgba(166, 227, 161, 0.08), rgba(249, 226, 175, 0.04)),
+      rgba(11, 11, 18, 0.62);
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.2s, background 0.2s, transform 0.2s;
+  }
+  .featured-project:hover {
+    border-color: rgba(166, 227, 161, 0.36);
+    background:
+      linear-gradient(135deg, rgba(166, 227, 161, 0.12), rgba(249, 226, 175, 0.06)),
+      rgba(11, 11, 18, 0.72);
+    transform: translateY(-1px);
+  }
+  .featured-project:disabled {
+    cursor: wait;
+    opacity: 0.75;
+    transform: none;
+  }
+  .featured-mark {
+    width: 52px;
+    height: 52px;
+    border-radius: 10px;
+    display: grid;
+    place-items: center;
+    border: 1px solid rgba(166, 227, 161, 0.2);
+    background: rgba(166, 227, 161, 0.07);
+    color: #a6e3a1;
+    flex-shrink: 0;
+  }
+  .featured-mark-main {
+    font-size: 15px;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+  }
+  .featured-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .featured-name {
+    color: #f9e2af;
+    font-size: 18px;
+    font-weight: 800;
+    line-height: 1.1;
+  }
+  .featured-desc {
+    color: #a6adc8;
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  .featured-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .featured-tag {
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(166, 227, 161, 0.08);
+    color: #94e2d5;
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .featured-open {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: #a6e3a1;
+    font-size: 12px;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+  .featured-error {
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(243, 139, 168, 0.12);
+    background: rgba(243, 139, 168, 0.04);
+    color: #f38ba8;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
   /* ── Projects area ── */
   .projects-area {
     display: flex;
@@ -1087,6 +1275,25 @@
     }
     .quick-try { display: none; }
     .content { padding: 16px; }
+    .featured-header {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 2px;
+    }
+    .featured-project {
+      grid-template-columns: 44px minmax(0, 1fr);
+      gap: 10px;
+      min-height: 112px;
+    }
+    .featured-mark {
+      width: 42px;
+      height: 42px;
+      border-radius: 8px;
+    }
+    .featured-open {
+      grid-column: 2;
+      justify-self: flex-start;
+    }
     .projects-title { font-size: 14px; }
   }
 </style>

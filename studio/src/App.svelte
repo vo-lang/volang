@@ -245,6 +245,18 @@
     ide.update((s) => ({ ...s, appMode: 'develop' }));
   }
 
+  async function openFeaturedProject(url: string, hasGui: boolean): Promise<void> {
+    if (!registry) return;
+    stopRuntimePolling();
+    await registry.runtime.stop().catch(() => undefined);
+    const openedSession = await registry.project.openSession({ proj: url, mode: 'dev' });
+    if (hasGui) {
+      await registry.projectCatalog.updateSessionProjectConfig(openedSession, true);
+    }
+    await bindDevSession(openedSession, { openEntry: true });
+    ide.update((s) => ({ ...s, appMode: 'develop' }));
+  }
+
   async function goParent(): Promise<void> {
     if (!sessionInfo || currentDir === sessionInfo.root) return;
     const idx = currentDir.lastIndexOf('/');
@@ -477,6 +489,7 @@
           platform={registry.backend.platform}
           onOpenProject={openManagedProject}
           onOpenLocalPath={openLocalPath}
+          onOpenFeaturedProject={openFeaturedProject}
           onOpenExample={openExample}
           onDocs={() => ide.update(s => ({ ...s, appMode: 'docs' }))}
           onDevelop={() => ide.update(s => ({ ...s, appMode: 'develop' }))}
