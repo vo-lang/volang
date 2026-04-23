@@ -1,7 +1,7 @@
 /*vo:mod
 module local/dashboard
 vo ^0.1.0
-require github.com/vo-lang/vogui v0.1.6
+require github.com/vo-lang/vogui v0.1.11
 */
 
 // Dashboard - analytics dashboard demonstrating VoGUI v4 composition patterns:
