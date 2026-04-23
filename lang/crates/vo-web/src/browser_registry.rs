@@ -1,4 +1,5 @@
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -21,6 +22,12 @@ const WASM_TARGET: &str = "wasm32-unknown-unknown";
 const VO_MOD_FILE: &str = "vo.mod";
 const VO_LOCK_FILE: &str = "vo.lock";
 const VO_EXT_FILE: &str = "vo.ext.toml";
+
+thread_local! {
+    static RELEASE_CONTEXT_CACHE: RefCell<BTreeMap<String, ReleaseContext>> = RefCell::new(BTreeMap::new());
+    static REPO_TREE_CACHE: RefCell<BTreeMap<String, GitHubTree>> = RefCell::new(BTreeMap::new());
+    static EXT_MANIFEST_CACHE: RefCell<BTreeMap<String, Option<ExtensionManifest>>> = RefCell::new(BTreeMap::new());
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BrowserRegistry;
@@ -215,6 +222,13 @@ async fn fetch_release_context(
     module: &ModulePath,
     version: &ExactVersion,
 ) -> Result<ReleaseContext> {
+    let cache_key = module_version_cache_key(module, version);
+    if let Some(context) =
+        RELEASE_CONTEXT_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned())
+    {
+        return Ok(context);
+    }
+
     let release = fetch_github_release_metadata(module, version).await?;
     let expected_tag = vo_module::registry::release_tag(module, version);
     if release.tag_name != expected_tag {
@@ -224,7 +238,11 @@ async fn fetch_release_context(
         )));
     }
     let commit = fetch_release_commit(module, &expected_tag).await?;
-    Ok(ReleaseContext { release, commit })
+    let context = ReleaseContext { release, commit };
+    RELEASE_CONTEXT_CACHE.with(|cache| {
+        cache.borrow_mut().insert(cache_key, context.clone());
+    });
+    Ok(context)
 }
 
 async fn fetch_github_release_metadata(
@@ -505,11 +523,25 @@ async fn fetch_extension_manifest(
     module: &ModulePath,
     commit: &str,
 ) -> Result<Option<ExtensionManifest>> {
+    let cache_key = module_commit_cache_key(module, commit);
+    if let Some(manifest) = EXT_MANIFEST_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned())
+    {
+        return Ok(manifest);
+    }
+
     let url = raw_module_file_url(module, commit, VO_EXT_FILE);
-    let Some(content) = fetch_optional_text(&url).await? else {
-        return Ok(None);
+    let manifest = if let Some(content) = fetch_optional_text(&url).await? {
+        Some(parse_ext_manifest_content(
+            &content,
+            Path::new(VO_EXT_FILE),
+        )?)
+    } else {
+        None
     };
-    parse_ext_manifest_content(&content, Path::new(VO_EXT_FILE)).map(Some)
+    EXT_MANIFEST_CACHE.with(|cache| {
+        cache.borrow_mut().insert(cache_key, manifest.clone());
+    });
+    Ok(manifest)
 }
 
 async fn fetch_extension_manifest_from_tree(
@@ -531,6 +563,11 @@ fn tree_has_module_file(module: &ModulePath, tree: &GitHubTree, rel_path: &str) 
 }
 
 async fn fetch_repo_tree(module: &ModulePath, commit: &str) -> Result<GitHubTree> {
+    let cache_key = module_commit_cache_key(module, commit);
+    if let Some(tree) = REPO_TREE_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned()) {
+        return Ok(tree);
+    }
+
     let repo = vo_module::registry::repository_id(module);
     let api_url = format!(
         "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
@@ -545,7 +582,18 @@ async fn fetch_repo_tree(module: &ModulePath, commit: &str) -> Result<GitHubTree
             module, commit,
         )));
     }
+    REPO_TREE_CACHE.with(|cache| {
+        cache.borrow_mut().insert(cache_key, tree.clone());
+    });
     Ok(tree)
+}
+
+fn module_version_cache_key(module: &ModulePath, version: &ExactVersion) -> String {
+    format!("{}@{}", module.as_str(), version)
+}
+
+fn module_commit_cache_key(module: &ModulePath, commit: &str) -> String {
+    format!("{}@{}", module.as_str(), commit)
 }
 
 async fn fetch_module_file_text(
