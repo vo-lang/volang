@@ -1,7 +1,7 @@
 import { writable } from 'svelte/store';
 
 // AppMode is UI-level navigation state — owned by the App frame
-export type AppMode = 'manage' | 'develop' | 'docs' | 'term' | 'runner';
+export type AppMode = 'manage' | 'develop' | 'docs' | 'runner';
 
 // RunStatus is shared with Console.svelte; runtime store owns canonical status
 export type RunStatus = 'idle' | 'preparing' | 'compiling' | 'running' | 'done' | 'error';

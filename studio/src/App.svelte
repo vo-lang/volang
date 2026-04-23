@@ -15,7 +15,6 @@
   import DevWorkbench from './components/DevWorkbench.svelte';
   import Home from './components/Home.svelte';
   import GitHubConnectModal from './components/home/GitHubConnectModal.svelte';
-  import TermPanel from './components/TermPanel.svelte';
   import RunnerModeLayout from './components/RunnerModeLayout.svelte';
   import DocsPanel from './components/DocsPanel.svelte';
 
@@ -99,9 +98,6 @@
       ide.update(s => ({ ...s, appMode: 'docs' }));
       return;
     }
-    if (r.mode === 'term' && $ide.appMode !== 'term') {
-      ide.update(s => ({ ...s, appMode: 'term' }));
-    }
   });
 
   // Sync appMode → hash (when user clicks sidebar)
@@ -122,7 +118,6 @@
   async function bindRunnerSession(nextSessionInfo: SessionInfo): Promise<void> {
     if (!registry) return;
     sessionInfo = nextSessionInfo;
-    registry.term.syncCwd(nextSessionInfo.root);
     registry.runtime.clearConsole();
     sessionOpen(nextSessionInfo.root, 'runner', nextSessionInfo.entryPath ?? null, nextSessionInfo.projectMode, nextSessionInfo.source, nextSessionInfo.share);
     currentDir = nextSessionInfo.root;
@@ -136,7 +131,6 @@
   ): Promise<void> {
     if (!registry) return;
     sessionInfo = nextSessionInfo;
-    registry.term.syncCwd(nextSessionInfo.root);
     registry.runtime.clearConsole();
     sessionOpen(nextSessionInfo.root, 'dev', nextSessionInfo.entryPath ?? null, nextSessionInfo.projectMode, nextSessionInfo.source, nextSessionInfo.share);
     sessionProjectHasGui = registry.projectCatalog.getSessionProjectConfig(nextSessionInfo).hasGui;
@@ -516,20 +510,6 @@
 
       {:else if appMode === 'docs'}
         <DocsPanel />
-
-      {:else if appMode === 'term'}
-        <!-- TERM: full term view -->
-        <div class="term-layout">
-          {#if registry}
-            <TermPanel
-              term={registry.term}
-              sessionRoot={$session.root}
-              currentDir={currentDir}
-              platform={registry.backend.platform}
-              afterExecute={() => {}}
-            />
-          {/if}
-        </div>
       {/if}
     </div>
   </div>
@@ -609,8 +589,6 @@
   .app { display: flex; height: 100%; overflow: hidden; }
   .main-area { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
 
-  /* Term layout */
-  .term-layout { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
   .confirm-backdrop {
     position: fixed;
     inset: 0;

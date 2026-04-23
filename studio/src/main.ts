@@ -1,7 +1,6 @@
 import './app.css';
 import 'golden-layout/dist/css/goldenlayout-base.css';
 import 'monaco-editor/min/vs/editor/editor.main.css';
-import '@xterm/xterm/css/xterm.css';
 import App from './App.svelte';
 
 applyLaunchEnvDefaults();

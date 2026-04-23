@@ -14,9 +14,6 @@ function parseHash(hash: string): Route {
   if (raw === 'docs') {
     return { mode: 'docs', docsPath: null };
   }
-  if (raw === 'term') {
-    return { mode: 'term', docsPath: null };
-  }
   if (raw === 'develop' || raw === 'dev') {
     return { mode: 'develop', docsPath: null };
   }

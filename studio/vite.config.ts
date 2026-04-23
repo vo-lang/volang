@@ -251,9 +251,6 @@ function studioManualChunks(id: string): string | undefined {
   if (normalized.includes('/golden-layout/')) {
     return 'vendor-layout';
   }
-  if (normalized.includes('/@xterm/')) {
-    return 'vendor-terminal';
-  }
   if (normalized.includes('/marked/') || normalized.includes('/highlight.js/')) {
     return 'vendor-docs';
   }
