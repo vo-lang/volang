@@ -570,41 +570,6 @@ pub fn load_project_context<F: FileSystem>(
 ) -> Result<ProjectContext, ProjectDepsError> {
     let project_root = find_project_root_in(fs, dir);
     let root_mod = read_mod_file_in(fs, &project_root)?;
-    let mod_path = if project_root == Path::new(".") || project_root.as_os_str().is_empty() {
-        PathBuf::from("vo.mod")
-    } else {
-        project_root.join("vo.mod")
-    };
-    let mod_file_replaces = if let Some(root_mod) = root_mod.as_ref() {
-        crate::workspace::load_mod_file_replaces(fs, root_mod, &project_root).map_err(|error| {
-            let kind = match &error {
-                crate::Error::Io(_) => ProjectDepsErrorKind::ReadFailed,
-                crate::Error::ModFileParse(_) | crate::Error::WorkFileParse(_) => {
-                    ProjectDepsErrorKind::ParseFailed
-                }
-                _ => ProjectDepsErrorKind::ValidationFailed,
-            };
-            ProjectDepsError::new(ProjectDepsStage::ModFile, kind, error.to_string())
-                .with_path(&mod_path)
-        })?
-    } else {
-        HashMap::new()
-    };
-    let mod_file_overrides = if let Some(root_mod) = root_mod.as_ref() {
-        root_mod
-            .replace
-            .iter()
-            .map(|replace| crate::workspace::Override {
-                module: replace.module.clone(),
-                local_dir: mod_file_replaces
-                    .get(replace.module.as_str())
-                    .cloned()
-                    .expect("validated vo.mod replace must exist in replace map"),
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
     let workspace_overrides = crate::workspace::load_workspace_overrides_in(
         fs,
         &project_root,
@@ -618,15 +583,10 @@ pub fn load_project_context<F: FileSystem>(
         };
         ProjectDepsError::new(ProjectDepsStage::Workspace, kind, error.to_string())
     })?;
-    let mut excluded_modules = mod_file_overrides
+    let excluded_modules = workspace_overrides
         .iter()
         .map(|override_entry| override_entry.module.as_str().to_string())
         .collect::<Vec<_>>();
-    excluded_modules.extend(
-        workspace_overrides
-            .iter()
-            .map(|override_entry| override_entry.module.as_str().to_string()),
-    );
     let project_deps = read_project_deps_near(fs, &project_root, &excluded_modules)?;
     if let Some(root_mod) = root_mod.as_ref() {
         let locked_modules = project_deps
@@ -634,32 +594,11 @@ pub fn load_project_context<F: FileSystem>(
             .iter()
             .map(|locked| locked.path.clone())
             .collect::<Vec<_>>();
-        let mut active_overrides = mod_file_overrides.clone();
-        active_overrides.extend(workspace_overrides.iter().cloned());
-        crate::workspace::validate_override_external_imports(
-            fs,
-            &root_mod.module,
-            &mod_file_overrides,
-            &active_overrides,
-            &locked_modules,
-            "vo.mod replace",
-        )
-        .map_err(|error| {
-            let kind = match &error {
-                crate::Error::Io(_) => ProjectDepsErrorKind::ReadFailed,
-                crate::Error::ModFileParse(_)
-                | crate::Error::WorkFileParse(_)
-                | crate::Error::SourceScan(_) => ProjectDepsErrorKind::ParseFailed,
-                _ => ProjectDepsErrorKind::ValidationFailed,
-            };
-            ProjectDepsError::new(ProjectDepsStage::ModFile, kind, error.to_string())
-                .with_path(&mod_path)
-        })?;
         crate::workspace::validate_override_external_imports(
             fs,
             &root_mod.module,
             &workspace_overrides,
-            &active_overrides,
+            &workspace_overrides,
             &locked_modules,
             "workspace override",
         )
@@ -674,7 +613,7 @@ pub fn load_project_context<F: FileSystem>(
             ProjectDepsError::new(ProjectDepsStage::Workspace, kind, error.to_string())
         })?;
     }
-    let mut workspace_replaces = mod_file_replaces;
+    let mut workspace_replaces = HashMap::new();
     for override_entry in workspace_overrides {
         workspace_replaces.insert(
             override_entry.module.as_str().to_string(),
@@ -799,26 +738,6 @@ pub fn load_single_file_context<F: FileSystem>(
             .with_path(file_path)
             .with_span(error.span)
         })?;
-
-    if inline_mod.is_some() {
-        let ext_manifest_path = normalize_fs_path(&file_dir.join("vo.ext.toml"));
-        if fs.exists(&ext_manifest_path) {
-            return Err(ProjectDepsError::new(
-                ProjectDepsStage::ModFile,
-                ProjectDepsErrorKind::ValidationFailed,
-                format!(
-                    "inline '{}' single-file module cannot coexist with '{}' in the same directory",
-                    INLINE_MOD_OPEN,
-                    ext_manifest_path.display(),
-                ),
-            )
-            .with_path(file_path)
-            .with_span(
-                leading_reserved_span
-                    .expect("inline mod classification requires a reserved-block span"),
-            ));
-        }
-    }
 
     Ok(match inline_mod {
         Some(inline_mod) => SingleFileContext::EphemeralInlineMod {
@@ -987,7 +906,8 @@ artifacts = []
     }
 
     #[test]
-    fn load_project_context_allows_missing_lock_when_vo_mod_replaces_all_direct_external_modules() {
+    fn load_project_context_allows_missing_lock_when_vo_work_overrides_all_direct_external_modules()
+    {
         let mut fs = MemoryFs::new();
         fs.add_file(
             "workspace/lib/vo.mod",
@@ -995,7 +915,11 @@ artifacts = []
         );
         fs.add_file(
             "workspace/tests/vo.mod",
-            "module github.com/vo-lang/lib/tests\nvo ^0.1.0\nrequire github.com/vo-lang/lib v0.1.0\nreplace github.com/vo-lang/lib => ../lib\n",
+            "module github.com/vo-lang/lib/tests\nvo ^0.1.0\nrequire github.com/vo-lang/lib v0.1.0\n",
+        );
+        fs.add_file(
+            "workspace/tests/vo.work",
+            "version = 1\n[[use]]\npath = \"../lib\"\n",
         );
 
         let context = load_project_context(&fs, Path::new("workspace/tests"))
@@ -1005,7 +929,7 @@ artifacts = []
     }
 
     #[test]
-    fn load_project_context_rejects_unlocked_external_import_from_vo_mod_replace() {
+    fn load_project_context_rejects_unlocked_external_import_from_vo_work_override() {
         let mut fs = MemoryFs::new();
         fs.add_file(
             "workspace/lib/vo.mod",
@@ -1017,27 +941,30 @@ artifacts = []
         );
         fs.add_file(
             "workspace/tests/vo.mod",
-            "module github.com/vo-lang/lib/tests\nvo ^0.1.0\nrequire github.com/vo-lang/lib v0.1.0\nreplace github.com/vo-lang/lib => ../lib\n",
+            "module github.com/vo-lang/lib/tests\nvo ^0.1.0\nrequire github.com/vo-lang/lib v0.1.0\n",
+        );
+        fs.add_file(
+            "workspace/tests/vo.work",
+            "version = 1\n[[use]]\npath = \"../lib\"\n",
         );
 
         let error = match load_project_context(&fs, Path::new("workspace/tests")) {
             Ok(_) => panic!("expected unlocked external import validation error"),
             Err(error) => error,
         };
-        assert_eq!(error.stage, ProjectDepsStage::ModFile);
+        assert_eq!(error.stage, ProjectDepsStage::Workspace);
         assert_eq!(error.kind, ProjectDepsErrorKind::ValidationFailed);
-        assert_eq!(error.path.as_deref(), Some("workspace/tests/vo.mod"));
         assert!(
-            error
-                .detail
-                .contains("vo.mod replace github.com/vo-lang/lib imports github.com/vo-lang/core"),
+            error.detail.contains(
+                "workspace override github.com/vo-lang/lib imports github.com/vo-lang/core"
+            ),
             "{}",
             error.detail
         );
     }
 
     #[test]
-    fn load_project_context_merges_vo_mod_replace_into_resolver_map() {
+    fn load_project_context_merges_vo_work_override_into_resolver_map() {
         let mut fs = MemoryFs::new();
         fs.add_file(
             "workspace/lib/vo.mod",
@@ -1045,7 +972,11 @@ artifacts = []
         );
         fs.add_file(
             "workspace/tests/vo.mod",
-            "module github.com/vo-lang/lib/tests\nvo ^0.1.0\nrequire github.com/vo-lang/core v0.1.0\nrequire github.com/vo-lang/lib v0.1.0\nreplace github.com/vo-lang/lib => ../lib\n",
+            "module github.com/vo-lang/lib/tests\nvo ^0.1.0\nrequire github.com/vo-lang/core v0.1.0\nrequire github.com/vo-lang/lib v0.1.0\n",
+        );
+        fs.add_file(
+            "workspace/tests/vo.work",
+            "version = 1\n[[use]]\npath = \"../lib\"\n",
         );
         fs.add_file(
             "workspace/tests/vo.lock",
@@ -1183,25 +1114,5 @@ artifacts = []
             error.span().map(|span| &source[span.to_range()]),
             Some("module")
         );
-    }
-
-    #[test]
-    fn load_single_file_context_rejects_inline_mod_with_ext_manifest_in_same_dir() {
-        let mut fs = MemoryFs::new();
-        fs.add_file(
-            "main.vo",
-            "/*vo:mod\nmodule local/demo\nvo ^0.1.0\n*/\npackage main\nfunc main() {}\n",
-        );
-        fs.add_file(
-            "vo.ext.toml",
-            "[extension]\nname = \"demo\"\n\n[extension.native]\npath = \"rust/target/{profile}/libdemo\"\n\n[[extension.native.targets]]\ntarget = \"aarch64-apple-darwin\"\nlibrary = \"libdemo.dylib\"\n",
-        );
-
-        let error = load_single_file_context(&fs, Path::new("main.vo")).unwrap_err();
-        assert_eq!(error.stage, ProjectDepsStage::ModFile);
-        assert_eq!(error.kind, ProjectDepsErrorKind::ValidationFailed);
-        assert!(error.detail.contains("vo.ext.toml"), "{}", error.detail);
-        assert_eq!(error.path.as_deref(), Some("main.vo"));
-        assert_eq!(error.span().map(|span| span.start.0), Some(0));
     }
 }

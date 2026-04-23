@@ -10,7 +10,7 @@ use crate::cache::validate::{
     validate_installed_artifact, validate_installed_module, InstalledModuleError,
 };
 use crate::digest::Digest;
-use crate::ext_manifest::{parse_ext_manifest_content, ExtensionManifest};
+use crate::ext_manifest::ExtensionManifest;
 use crate::identity::{ArtifactId, ModulePath};
 use crate::schema::lockfile::LockedModule;
 use crate::version::ExactVersion;
@@ -161,7 +161,7 @@ pub fn check_project_readiness<F: FileSystem>(
     let mut manifests = BTreeMap::new();
     for locked in locked_modules {
         let module_dir = layout::relative_module_dir(locked.path.as_str(), &locked.version);
-        let manifest_rel = module_dir.join("vo.ext.toml");
+        let manifest_rel = module_dir.join("vo.mod");
         if !fs.exists(&manifest_rel) {
             continue;
         }
@@ -174,7 +174,7 @@ pub fn check_project_readiness<F: FileSystem>(
                 detail: error.to_string(),
             }
         })?;
-        let manifest = parse_ext_manifest_content(&content, &manifest_path).map_err(|error| {
+        let manifest = crate::schema::modfile::ModFile::parse(&content).map_err(|error| {
             ReadinessFailure::ExtensionManifestParseFailed {
                 module: locked.path.as_str().to_string(),
                 version: locked.version.to_string(),
@@ -182,7 +182,9 @@ pub fn check_project_readiness<F: FileSystem>(
                 detail: error.to_string(),
             }
         })?;
-        manifests.insert(module_dir, manifest);
+        if let Some(extension) = manifest.extension {
+            manifests.insert(module_dir, extension);
+        }
     }
 
     let mut ready = Vec::with_capacity(locked_modules.len());
@@ -249,7 +251,7 @@ impl fmt::Display for ReadinessFailure {
             } => {
                 write!(
                     f,
-                    "failed to parse cached extension manifest {} for {}@{}: {}",
+                    "failed to parse cached vo.mod metadata {} for {}@{}: {}",
                     manifest_path.display(),
                     module,
                     version,
@@ -264,7 +266,7 @@ impl fmt::Display for ReadinessFailure {
             } => {
                 write!(
                     f,
-                    "vo.ext.toml does not declare extension-native support for target {} in {}@{}",
+                    "vo.mod does not declare extension-native support for target {} in {}@{}",
                     target, module, version,
                 )
             }
@@ -374,10 +376,12 @@ js_glue = "{js_glue}"
         ext_manifest_content: Option<&str>,
     ) -> PathBuf {
         let module_dir = layout::relative_module_dir(locked.path.as_str(), &locked.version);
-        fs.add_file(
-            module_dir.join("vo.mod"),
-            format!("module {}\nvo {}\n", locked.path, locked.vo),
-        );
+        let mut mod_content = format!("module {}\nvo {}\n", locked.path, locked.vo);
+        if let Some(ext_manifest_content) = ext_manifest_content {
+            mod_content.push('\n');
+            mod_content.push_str(ext_manifest_content);
+        }
+        fs.add_file(module_dir.join("vo.mod"), mod_content);
         fs.add_file(
             module_dir.join(".vo-version"),
             format!("{}\n", locked.version),
@@ -390,12 +394,6 @@ js_glue = "{js_glue}"
             module_dir.join("vo.release.json"),
             release_manifest_content.to_string(),
         );
-        if let Some(ext_manifest_content) = ext_manifest_content {
-            fs.add_file(
-                module_dir.join("vo.ext.toml"),
-                ext_manifest_content.to_string(),
-            );
-        }
         module_dir
     }
 
@@ -433,7 +431,7 @@ js_glue = "{js_glue}"
         );
         let manifest = parse_ext_manifest_content(
             &native_manifest("aarch64-apple-darwin", library),
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap();
         let mut fs = MemoryFs::new();
@@ -494,7 +492,7 @@ js_glue = "{js_glue}"
         );
         let manifest = parse_ext_manifest_content(
             &native_manifest("aarch64-apple-darwin", library),
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap();
         let mut fs = MemoryFs::new();
@@ -528,7 +526,7 @@ js_glue = "{js_glue}"
         let (locked, release_manifest_content) = locked_module("v1.2.3", Vec::new());
         let manifest = parse_ext_manifest_content(
             &native_manifest("aarch64-apple-darwin", library),
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap();
         let mut fs = MemoryFs::new();
@@ -569,7 +567,7 @@ js_glue = "{js_glue}"
         );
         let manifest = parse_ext_manifest_content(
             &native_manifest("aarch64-apple-darwin", library),
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap();
         let mut fs = MemoryFs::new();
@@ -620,7 +618,7 @@ js_glue = "{js_glue}"
         );
         let manifest = parse_ext_manifest_content(
             &wasm_manifest("demo_bg.wasm", "demo.js"),
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap();
         let mut fs = MemoryFs::new();

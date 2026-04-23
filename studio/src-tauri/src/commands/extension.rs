@@ -105,7 +105,17 @@ fn collect_installed_modules(base: &std::path::Path, dir: &std::path::Path, out:
             let spec = path.strip_prefix(base)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| path.to_string_lossy().to_string());
-            let has_native_ext = path.join("vo.ext.toml").is_file();
+            let mod_path = path.join("vo.mod");
+            let metadata = std::fs::read_to_string(&mod_path)
+                .ok()
+                .and_then(|content| {
+                    vo_module::ext_manifest::parse_mod_metadata_content(&content, &mod_path).ok()
+                });
+            let has_native_ext = metadata
+                .as_ref()
+                .and_then(|manifest| manifest.extension.as_ref())
+                .and_then(|extension| extension.native.as_ref())
+                .is_some();
             let has_wasm_ext = path.read_dir().ok()
                 .map(|entries| entries.filter_map(|e| e.ok())
                     .any(|e| e.path().extension().map(|ext| ext == "wasm").unwrap_or(false)))

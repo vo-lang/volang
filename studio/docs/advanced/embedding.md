@@ -243,4 +243,4 @@ match vm.run() {
 
 ## Native Extensions
 
-For larger integrations, Vo supports native extension modules distributed as shared libraries (`.dylib` / `.so` / `.dll`) or `.wasm` files. Extensions use `vo.ext.toml` and a `rust/` subdirectory with a standard Cargo project. See [Module System](./modules.md) for details.
+For larger integrations, Vo supports extension modules distributed as shared libraries (`.dylib` / `.so` / `.dll`) or browser-loadable `.wasm` files. Extensions declare metadata in `vo.mod` and can use a `rust/` subdirectory with a standard Cargo project. See [Module System](./modules.md) for details.

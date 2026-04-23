@@ -6,7 +6,7 @@ This document describes the native extension system for Vo, which allows Vo libr
 
 Similar to Python's C extensions, Vo supports native extensions written in Rust. Extensions are:
 - Compiled as dynamic libraries (`.so` on Linux, `.dylib` on macOS, `.dll` on Windows)
-- Discovered from `vo.ext.toml` manifests in library root directories
+- Declared in `vo.mod` extension metadata
 - Loaded at runtime by the Vo CLI
 
 ## Architecture
@@ -49,7 +49,6 @@ mylib/
 ├── mylib.vo             # Vo interface (extern declarations)
 ├── examples/
 │   └── hello.vo
-└── vo.ext.toml          # Optional manifest (auto-detection available)
 ```
 
 ### 2. Vo Interface (`mylib.vo`)
@@ -68,16 +67,23 @@ func SlowAdd(a, b int) int {
 }
 ```
 
-### 3. Extension Manifest (`vo.ext.toml`)
+### 3. Extension Metadata in `vo.mod`
 
-Optional - the runtime can auto-detect `lib*.so`/`.dylib`/`.dll` files in the library root.
+Declare extension metadata in the module manifest:
 
 ```toml
+module github.com/example/mylib
+vo ^0.1.0
+
 [extension]
 name = "mylib"
 
-# Optional - defaults to auto-detected library in root
-# path = "libmylib.so"
+[extension.native]
+path = "rust/target/{profile}/libmylib"
+
+[[extension.native.targets]]
+target = "aarch64-apple-darwin"
+library = "libmylib.dylib"
 ```
 
 ### 4. Rust Implementation

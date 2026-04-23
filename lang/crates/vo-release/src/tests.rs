@@ -29,6 +29,21 @@ fn write_basic_repo(root: &Path) {
     git_add(root, Path::new("main.vo"));
 }
 
+fn write_module_metadata(root: &Path, metadata: String) {
+    let mod_path = root.join("vo.mod");
+    let mut content = fs::read_to_string(&mod_path).unwrap();
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push('\n');
+    content.push_str(&metadata);
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    fs::write(&mod_path, content).unwrap();
+    git_add(root, Path::new("vo.mod"));
+}
+
 fn init_test_git_repo(root: &Path) {
     git(root, &["init"]);
     git(
@@ -244,11 +259,10 @@ artifacts = []
 fn stage_release_writes_manifest_and_artifacts() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
-    fs::write(
-        temp.path().join("vo.ext.toml"),
+    write_module_metadata(
+        temp.path(),
         standalone_wasm_manifest("demo", "demo.wasm", &[]),
-    )
-    .unwrap();
+    );
     let artifact_path = temp.path().join("demo.wasm");
     fs::write(&artifact_path, b"wasm-bits").unwrap();
     git_add(temp.path(), Path::new("demo.wasm"));
@@ -302,8 +316,8 @@ fn stage_release_succeeds_for_pure_source_module_without_ext_manifest() {
 fn stage_release_succeeds_when_all_declared_artifacts_are_present() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
-    fs::write(
-        temp.path().join("vo.ext.toml"),
+    write_module_metadata(
+        temp.path(),
         bindgen_manifest(
             "demo",
             &[],
@@ -315,8 +329,7 @@ fn stage_release_succeeds_when_all_declared_artifacts_are_present() {
             "demo.wasm",
             "demo.js",
         ),
-    )
-    .unwrap();
+    );
 
     let staged = stage_release(
         temp.path(),
@@ -359,14 +372,26 @@ fn stage_release_succeeds_when_all_declared_artifacts_are_present() {
     let manifest_json = fs::read_to_string(&staged.manifest_path).unwrap();
     let manifest = ReleaseManifest::parse(&manifest_json).unwrap();
     assert_eq!(manifest.artifacts.len(), 4);
+
+    let web_json = fs::read_to_string(staged.out_dir.join("vo.web.json")).unwrap();
+    let web: serde_json::Value = serde_json::from_str(&web_json).unwrap();
+    let artifacts = web
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .unwrap();
+    assert_eq!(artifacts.len(), 4);
+    assert!(artifacts.iter().any(|artifact| {
+        artifact.get("kind").and_then(serde_json::Value::as_str) == Some("extension-native")
+            && artifact.get("name").and_then(serde_json::Value::as_str) == Some("libdemo.dylib")
+    }));
 }
 
 #[test]
 fn stage_release_rejects_missing_declared_native_artifact() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
-    fs::write(
-        temp.path().join("vo.ext.toml"),
+    write_module_metadata(
+        temp.path(),
         native_manifest(
             "demo",
             &[],
@@ -376,8 +401,7 @@ fn stage_release_rejects_missing_declared_native_artifact() {
                 ("x86_64-unknown-linux-gnu", "libdemo.so"),
             ],
         ),
-    )
-    .unwrap();
+    );
 
     let err = stage_release(
         temp.path(),
@@ -412,11 +436,10 @@ fn stage_release_rejects_missing_declared_native_artifact() {
 fn stage_release_rejects_missing_declared_wasm_artifact() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
-    fs::write(
-        temp.path().join("vo.ext.toml"),
+    write_module_metadata(
+        temp.path(),
         standalone_wasm_manifest("demo", "demo.wasm", &[]),
-    )
-    .unwrap();
+    );
 
     let err = stage_release(temp.path(), &stage_options(&temp, Vec::new())).unwrap_err();
 
@@ -438,11 +461,10 @@ fn stage_release_rejects_missing_declared_wasm_artifact() {
 fn stage_release_rejects_undeclared_artifact() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
-    fs::write(
-        temp.path().join("vo.ext.toml"),
+    write_module_metadata(
+        temp.path(),
         standalone_wasm_manifest("demo", "demo.wasm", &[]),
-    )
-    .unwrap();
+    );
 
     let err = stage_release(
         temp.path(),
@@ -483,7 +505,7 @@ fn stage_release_rejects_undeclared_artifact() {
 }
 
 #[test]
-fn stage_release_rejects_artifacts_without_ext_manifest() {
+fn stage_release_rejects_artifacts_without_vo_mod_declarations() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
 
@@ -502,12 +524,13 @@ fn stage_release_rejects_artifacts_without_ext_manifest() {
     )
     .unwrap_err();
 
+    assert!(err.to_string().contains("vo.mod"));
     assert!(matches!(
-        err,
+        &err,
         ReleaseError::ArtifactContractViolation {
-            manifest_path: None,
-            ref missing,
-            ref undeclared,
+            missing,
+            undeclared,
+            ..
         } if missing.is_empty() && undeclared == &vec![DeclaredArtifactId {
             kind: "extension-wasm".to_string(),
             target: "wasm32-unknown-unknown".to_string(),
@@ -517,18 +540,18 @@ fn stage_release_rejects_artifacts_without_ext_manifest() {
 }
 
 #[test]
-fn stage_release_rejects_invalid_ext_manifest_schema() {
+fn stage_release_rejects_invalid_vo_mod_extension_schema() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
-    fs::write(
-        temp.path().join("vo.ext.toml"),
+    write_module_metadata(
+        temp.path(),
         concat!(
             "[extension]\n",
             "name = \"demo\"\n",
             "path = \"rust/target/{profile}/libdemo\"\n",
-        ),
-    )
-    .unwrap();
+        )
+        .to_string(),
+    );
 
     let err = stage_release(
         temp.path(),
@@ -555,8 +578,8 @@ fn stage_release_rejects_invalid_ext_manifest_schema() {
 fn stage_release_rejects_bindgen_wasm_missing_js_glue_artifact() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
-    fs::write(
-        temp.path().join("vo.ext.toml"),
+    write_module_metadata(
+        temp.path(),
         bindgen_manifest(
             "demo",
             &[],
@@ -565,8 +588,7 @@ fn stage_release_rejects_bindgen_wasm_missing_js_glue_artifact() {
             "demo.wasm",
             "demo.js",
         ),
-    )
-    .unwrap();
+    );
 
     let err = stage_release(
         temp.path(),
@@ -644,17 +666,20 @@ deps = []
     )
     .unwrap();
     fs::write(temp.path().join("main.vo"), "fn main() {}\n").unwrap();
-    fs::write(
-        temp.path().join("vo.ext.toml"),
-        bindgen_wasm_manifest("demo", "z-demo.wasm", "a-demo.js", &[]),
-    )
-    .unwrap();
+    let metadata = bindgen_wasm_manifest("demo", "z-demo.wasm", "a-demo.js", &[]);
+    let mut mod_content = fs::read_to_string(temp.path().join("vo.mod")).unwrap();
+    mod_content.push('\n');
+    mod_content.push_str(&metadata);
+    fs::write(temp.path().join("vo.mod"), mod_content).unwrap();
 
     let wasm_artifact_path = temp.path().join("z-demo.wasm");
     let js_artifact_path = temp.path().join("a-demo.js");
     fs::write(&wasm_artifact_path, b"wasm-bits").unwrap();
     fs::write(&js_artifact_path, b"js-bits").unwrap();
     init_test_git_repo(temp.path());
+    git_add(temp.path(), Path::new("vo.mod"));
+    git_add(temp.path(), Path::new("vo.lock"));
+    git_add(temp.path(), Path::new("main.vo"));
     git_add(temp.path(), Path::new("z-demo.wasm"));
     git_add(temp.path(), Path::new("a-demo.js"));
 
@@ -700,8 +725,8 @@ deps = []
 fn stage_release_includes_declared_include_files_from_dist_dirs() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
-    fs::write(
-        temp.path().join("vo.ext.toml"),
+    write_module_metadata(
+        temp.path(),
         standalone_wasm_manifest(
             "demo",
             "demo.wasm",
@@ -710,8 +735,7 @@ fn stage_release_includes_declared_include_files_from_dist_dirs() {
                 "js/dist/studio_host_bridge.js",
             ],
         ),
-    )
-    .unwrap();
+    );
     fs::create_dir_all(temp.path().join("js/dist")).unwrap();
     fs::write(
         temp.path().join("js/dist/studio_renderer.js"),
@@ -723,6 +747,8 @@ fn stage_release_includes_declared_include_files_from_dist_dirs() {
         "export const hostBridge = 1;\n",
     )
     .unwrap();
+    git_add(temp.path(), Path::new("js/dist/studio_renderer.js"));
+    git_add(temp.path(), Path::new("js/dist/studio_host_bridge.js"));
 
     let staged = stage_release(
         temp.path(),
@@ -740,7 +766,7 @@ fn stage_release_includes_declared_include_files_from_dist_dirs() {
     .unwrap();
 
     let entries = source_archive_entries(&staged.source_path);
-    assert!(entries.iter().any(|entry| entry.ends_with("/vo.ext.toml")));
+    assert!(entries.iter().any(|entry| entry.ends_with("/vo.web.json")));
     assert!(entries
         .iter()
         .any(|entry| entry.ends_with("/js/dist/studio_renderer.js")));
@@ -753,11 +779,10 @@ fn stage_release_includes_declared_include_files_from_dist_dirs() {
 fn stage_release_includes_declared_include_directories_recursively() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
-    fs::write(
-        temp.path().join("vo.ext.toml"),
+    write_module_metadata(
+        temp.path(),
         standalone_wasm_manifest("demo", "demo.wasm", &["js/dist"]),
-    )
-    .unwrap();
+    );
     fs::create_dir_all(temp.path().join("js/dist/nested")).unwrap();
     fs::write(
         temp.path().join("js/dist/voplay-render-island.js"),
@@ -774,6 +799,9 @@ fn stage_release_includes_declared_include_directories_recursively() {
         "export const helper = 1;\n",
     )
     .unwrap();
+    git_add(temp.path(), Path::new("js/dist/voplay-render-island.js"));
+    git_add(temp.path(), Path::new("js/dist/bootstrap_webview.js"));
+    git_add(temp.path(), Path::new("js/dist/nested/helper.js"));
 
     let staged = stage_release(
         temp.path(),
@@ -806,11 +834,10 @@ fn stage_release_includes_declared_include_directories_recursively() {
 fn stage_release_fails_when_declared_include_file_is_missing() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
-    fs::write(
-        temp.path().join("vo.ext.toml"),
+    write_module_metadata(
+        temp.path(),
         standalone_wasm_manifest("demo", "demo.wasm", &["js/dist/studio_renderer.js"]),
-    )
-    .unwrap();
+    );
 
     let err = stage_release(
         temp.path(),
@@ -834,10 +861,47 @@ fn stage_release_fails_when_declared_include_file_is_missing() {
 }
 
 #[test]
+fn stage_release_fails_when_declared_include_file_is_untracked() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    write_module_metadata(
+        temp.path(),
+        standalone_wasm_manifest("demo", "demo.wasm", &["js/dist/studio_renderer.js"]),
+    );
+    fs::create_dir_all(temp.path().join("js/dist")).unwrap();
+    fs::write(
+        temp.path().join("js/dist/studio_renderer.js"),
+        "export const renderer = 1;\n",
+    )
+    .unwrap();
+
+    let err = stage_release(
+        temp.path(),
+        &stage_options(
+            &temp,
+            vec![write_artifact_input(
+                temp.path(),
+                "extension-wasm",
+                "wasm32-unknown-unknown",
+                "demo.wasm",
+                b"wasm-bits",
+            )],
+        ),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ReleaseError::IoError(_, ref message) if message.contains("must be checked into git")
+    ));
+}
+
+#[test]
 fn stage_release_excludes_output_directory_from_source_package() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
     fs::write(temp.path().join("keep.txt"), "keep\n").unwrap();
+    git_add(temp.path(), Path::new("keep.txt"));
     let out_dir = temp.path().join(".dist");
     fs::create_dir_all(&out_dir).unwrap();
     fs::write(out_dir.join("preexisting.txt"), "do not package\n").unwrap();
@@ -867,6 +931,94 @@ fn stage_release_excludes_output_directory_from_source_package() {
     assert!(entries
         .iter()
         .all(|entry| !entry.contains(".dist/preexisting.txt")));
+}
+
+#[test]
+fn stage_release_excludes_untracked_files_from_source_package() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    fs::write(temp.path().join("untracked.txt"), "untracked\n").unwrap();
+    git_add(temp.path(), Path::new("tracked.txt"));
+
+    let staged = stage_release(
+        temp.path(),
+        &StageReleaseOptions {
+            version: "v0.1.0".to_string(),
+            commit: Some(TEST_COMMIT.to_string()),
+            artifacts: Vec::new(),
+            out_dir: temp.path().join(".dist"),
+        },
+    )
+    .unwrap();
+
+    let entries = source_archive_entries(&staged.source_path);
+    assert!(entries.iter().any(|entry| entry.ends_with("/tracked.txt")));
+    assert!(entries
+        .iter()
+        .all(|entry| !entry.ends_with("/untracked.txt")));
+}
+
+#[test]
+fn stage_release_excludes_binary_files_from_web_source_manifest() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    fs::write(temp.path().join("font.ttf"), [0, 159, 146, 150]).unwrap();
+    git_add(temp.path(), Path::new("font.ttf"));
+
+    let staged = stage_release(
+        temp.path(),
+        &StageReleaseOptions {
+            version: "v0.1.0".to_string(),
+            commit: Some(TEST_COMMIT.to_string()),
+            artifacts: Vec::new(),
+            out_dir: temp.path().join(".dist"),
+        },
+    )
+    .unwrap();
+
+    let entries = source_archive_entries(&staged.source_path);
+    assert!(entries.iter().any(|entry| entry.ends_with("/font.ttf")));
+
+    let web_json = fs::read_to_string(staged.out_dir.join("vo.web.json")).unwrap();
+    let web: serde_json::Value = serde_json::from_str(&web_json).unwrap();
+    let source = web
+        .get("source")
+        .and_then(serde_json::Value::as_array)
+        .unwrap();
+    assert!(source.iter().all(|entry| {
+        entry.get("path").and_then(serde_json::Value::as_str) != Some("font.ttf")
+    }));
+}
+
+#[test]
+fn stage_release_excludes_committed_release_output_dirs_from_source_package() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    fs::write(temp.path().join("keep.txt"), "keep\n").unwrap();
+    fs::create_dir_all(temp.path().join(".dist")).unwrap();
+    fs::write(temp.path().join(".dist/old.tar.gz"), "old\n").unwrap();
+    fs::create_dir_all(temp.path().join(".dist-v0.1.0")).unwrap();
+    fs::write(temp.path().join(".dist-v0.1.0/old.tar.gz"), "old\n").unwrap();
+    git_add(temp.path(), Path::new("keep.txt"));
+    git_add(temp.path(), Path::new(".dist/old.tar.gz"));
+    git_add(temp.path(), Path::new(".dist-v0.1.0/old.tar.gz"));
+
+    let staged = stage_release(
+        temp.path(),
+        &StageReleaseOptions {
+            version: "v0.1.0".to_string(),
+            commit: Some(TEST_COMMIT.to_string()),
+            artifacts: Vec::new(),
+            out_dir: temp.path().join("release-out"),
+        },
+    )
+    .unwrap();
+
+    let entries = source_archive_entries(&staged.source_path);
+    assert!(entries.iter().any(|entry| entry.ends_with("/keep.txt")));
+    assert!(entries.iter().all(|entry| !entry.contains(".dist/")));
+    assert!(entries.iter().all(|entry| !entry.contains(".dist-v")));
 }
 
 #[test]

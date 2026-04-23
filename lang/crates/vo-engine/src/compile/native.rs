@@ -97,7 +97,7 @@ pub(super) fn module_readiness_failure_to_module_system(
             ModuleSystemStage::NativeExtension,
             ModuleSystemErrorKind::Missing,
             format!(
-                "vo.ext.toml does not declare extension-native support for target {} in {}@{}",
+                "vo.mod does not declare extension-native support for target {} in {}@{}",
                 target, module, version,
             ),
         )
@@ -272,7 +272,7 @@ fn prepare_cached_extension_spec(
                 ModuleSystemStage::NativeExtension,
                 ModuleSystemErrorKind::Missing,
                 format!(
-                    "vo.ext.toml does not declare extension-native support for target {} in {}@{}",
+                    "vo.mod does not declare extension-native support for target {} in {}@{}",
                     current_target_triple(),
                     ready.module,
                     ready.version,

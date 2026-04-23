@@ -511,7 +511,7 @@
       {:else if isRenderSurface}
         <canvas id={CANVAS_ID} class="render-canvas"></canvas>
       {:else}
-        <div class="render-error">GUI framework does not declare a renderer path. Update vo.ext.toml [extension.web] section.</div>
+        <div class="render-error">GUI framework does not declare a renderer path. Update vo.mod [extension.web] section.</div>
       {/if}
     {:else}
       <div class="idle-hint">

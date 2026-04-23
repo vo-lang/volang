@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -9,80 +9,66 @@ use wasm_bindgen_futures::JsFuture;
 
 use vo_module::async_install::{AsyncRegistry, BoxFuture, SourcePayload};
 use vo_module::digest::Digest;
-use vo_module::ext_manifest::{parse_ext_manifest_content, ExtensionManifest};
 use vo_module::identity::{ArtifactId, ModulePath};
 use vo_module::schema::manifest::{
     ManifestArtifact, ManifestRequire, ManifestSource, ReleaseManifest,
 };
-use vo_module::schema::modfile::ModFile;
 use vo_module::version::ExactVersion;
 use vo_module::{Error, Result};
 
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
-const VO_MOD_FILE: &str = "vo.mod";
-const VO_LOCK_FILE: &str = "vo.lock";
-const VO_EXT_FILE: &str = "vo.ext.toml";
+const VO_WEB_FILE: &str = "vo.web.json";
 
 thread_local! {
-    static RELEASE_CONTEXT_CACHE: RefCell<BTreeMap<String, ReleaseContext>> = RefCell::new(BTreeMap::new());
-    static REPO_TREE_CACHE: RefCell<BTreeMap<String, GitHubTree>> = RefCell::new(BTreeMap::new());
-    static EXT_MANIFEST_CACHE: RefCell<BTreeMap<String, Option<ExtensionManifest>>> = RefCell::new(BTreeMap::new());
+    static WEB_MANIFEST_CACHE: RefCell<BTreeMap<String, WebManifest>> = RefCell::new(BTreeMap::new());
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BrowserRegistry;
 
-#[derive(Debug, Clone)]
-struct ReleaseContext {
-    release: GitHubRelease,
-    commit: String,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 struct GitHubRelease {
     tag_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WebManifest {
+    schema_version: u64,
+    module: String,
+    version: String,
+    commit: String,
+    module_root: String,
+    vo: String,
     #[serde(default)]
-    assets: Vec<GitHubReleaseAsset>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct GitHubReleaseAsset {
-    name: String,
-    size: u64,
-    digest: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct GitHubObject {
-    sha: String,
-    #[serde(rename = "type")]
-    kind: String,
-    url: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct GitHubRef {
-    object: GitHubObject,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct GitHubTag {
-    object: GitHubObject,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct GitHubTree {
+    require: Vec<WebManifestRequire>,
+    source_digest: String,
     #[serde(default)]
-    tree: Vec<GitHubTreeEntry>,
+    source: Vec<WebManifestSource>,
     #[serde(default)]
-    truncated: bool,
+    artifacts: Vec<WebManifestArtifact>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct GitHubTreeEntry {
+struct WebManifestRequire {
+    module: String,
+    constraint: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WebManifestSource {
     path: String,
-    #[serde(rename = "type")]
+    size: u64,
+    digest: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WebManifestArtifact {
     kind: String,
+    target: String,
+    name: String,
+    path: String,
+    size: u64,
+    digest: String,
 }
 
 pub async fn fetch_bytes(url: &str) -> std::result::Result<Vec<u8>, String> {
@@ -132,17 +118,6 @@ async fn fetch_bytes_typed(url: &str) -> Result<Vec<u8>> {
         return Err(http_error(url, &response));
     }
     response_bytes(url, &response).await
-}
-
-async fn fetch_optional_bytes_typed(url: &str) -> Result<Option<Vec<u8>>> {
-    let response = fetch_response(url).await?;
-    if response.status() == 404 {
-        return Ok(None);
-    }
-    if !response.ok() {
-        return Err(http_error(url, &response));
-    }
-    response_bytes(url, &response).await.map(Some)
 }
 
 async fn fetch_response(url: &str) -> Result<web_sys::Response> {
@@ -209,164 +184,77 @@ async fn fetch_text(url: &str) -> Result<String> {
         .map_err(|error| Error::RegistryError(format!("invalid UTF-8 from {}: {}", url, error)))
 }
 
-async fn fetch_optional_text(url: &str) -> Result<Option<String>> {
-    let Some(bytes) = fetch_optional_bytes_typed(url).await? else {
-        return Ok(None);
-    };
-    String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|error| Error::RegistryError(format!("invalid UTF-8 from {}: {}", url, error)))
-}
-
-async fn fetch_release_context(
-    module: &ModulePath,
-    version: &ExactVersion,
-) -> Result<ReleaseContext> {
-    let cache_key = module_version_cache_key(module, version);
-    if let Some(context) =
-        RELEASE_CONTEXT_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned())
-    {
-        return Ok(context);
-    }
-
-    let release = fetch_github_release_metadata(module, version).await?;
-    let expected_tag = vo_module::registry::release_tag(module, version);
-    if release.tag_name != expected_tag {
-        return Err(Error::InvalidReleaseMetadata(format!(
-            "GitHub release tag '{}' does not match expected '{}'",
-            release.tag_name, expected_tag,
-        )));
-    }
-    let commit = fetch_release_commit(module, &expected_tag).await?;
-    let context = ReleaseContext { release, commit };
-    RELEASE_CONTEXT_CACHE.with(|cache| {
-        cache.borrow_mut().insert(cache_key, context.clone());
-    });
-    Ok(context)
-}
-
-async fn fetch_github_release_metadata(
-    module: &ModulePath,
-    version: &ExactVersion,
-) -> Result<GitHubRelease> {
-    let repo = vo_module::registry::repository_id(module);
-    let tag = vo_module::registry::release_tag(module, version);
-    let api_url = format!(
-        "https://api.github.com/repos/{}/{}/releases/tags/{}",
-        encode_component(&repo.owner),
-        encode_component(&repo.repo),
-        encode_component(&tag),
-    );
-    fetch_json(&api_url).await
-}
-
-async fn fetch_release_commit(module: &ModulePath, tag: &str) -> Result<String> {
-    let repo = vo_module::registry::repository_id(module);
-    let tag_ref = format!("tags/{tag}");
-    let api_url = format!(
-        "https://api.github.com/repos/{}/{}/git/ref/{}",
-        encode_component(&repo.owner),
-        encode_component(&repo.repo),
-        encode_path(&tag_ref),
-    );
-    let github_ref: GitHubRef = fetch_json(&api_url).await?;
-    resolve_github_object_to_commit(github_ref.object).await
-}
-
-async fn resolve_github_object_to_commit(mut object: GitHubObject) -> Result<String> {
-    for _ in 0..5 {
-        match object.kind.as_str() {
-            "commit" => return Ok(object.sha),
-            "tag" => {
-                let tag: GitHubTag = fetch_json(&object.url).await?;
-                object = tag.object;
-            }
-            other => {
-                return Err(Error::InvalidReleaseMetadata(format!(
-                    "release tag points to unsupported GitHub object type '{}'",
-                    other,
-                )));
-            }
-        }
-    }
-    Err(Error::InvalidReleaseMetadata(
-        "release tag annotation chain is too deep".to_string(),
-    ))
-}
-
 async fn fetch_release_manifest(
     module: &ModulePath,
     version: &ExactVersion,
 ) -> Result<(ReleaseManifest, Vec<u8>)> {
-    let context = fetch_release_context(module, version).await?;
-    let mod_content = fetch_module_file_text(module, &context.commit, VO_MOD_FILE).await?;
-    let mod_file = parse_mod_file(module, version, &mod_content)?;
-    let tree = fetch_repo_tree(module, &context.commit).await?;
-    let ext_manifest = fetch_extension_manifest_from_tree(module, &context.commit, &tree).await?;
-
-    let source_name = source_package_name(module, version)?;
-    let source_asset = required_release_asset(&context.release, &source_name, module, version)?;
-    let source_digest = asset_digest(source_asset, module, version)?;
-
-    let mut artifacts = Vec::new();
-    if let Some(ext_manifest) = ext_manifest.as_ref() {
-        for declared in ext_manifest.declared_artifact_ids() {
-            let asset = required_release_asset(&context.release, &declared.name, module, version)?;
-            artifacts.push(ManifestArtifact {
-                id: ArtifactId {
-                    kind: declared.kind,
-                    target: declared.target,
-                    name: declared.name,
-                },
-                size: asset.size,
-                digest: asset_digest(asset, module, version)?,
-            });
-        }
-    }
-
+    let web = fetch_web_manifest(module, version).await?;
+    validate_web_manifest_identity(module, version, &web)?;
+    let source_digest = Digest::parse(&web.source_digest).map_err(|error| {
+        Error::InvalidReleaseMetadata(format!(
+            "vo.web.json source_digest for {} {} is invalid: {}",
+            module, version, error
+        ))
+    })?;
     let manifest = ReleaseManifest {
         schema_version: 1,
         module: module.clone(),
         version: version.clone(),
-        commit: context.commit,
-        module_root: module.module_root().to_string(),
-        vo: mod_file.vo,
-        require: mod_file
+        commit: web.commit.clone(),
+        module_root: web.module_root.clone(),
+        vo: vo_module::version::ToolchainConstraint::parse(&web.vo)
+            .map_err(|error| Error::InvalidReleaseMetadata(format!("vo.web.json vo: {}", error)))?,
+        require: web
             .require
-            .into_iter()
-            .map(|req| ManifestRequire {
-                module: req.module,
-                constraint: req.constraint,
+            .iter()
+            .map(|req| {
+                Ok(ManifestRequire {
+                    module: ModulePath::parse(&req.module).map_err(|error| {
+                        Error::InvalidReleaseMetadata(format!(
+                            "vo.web.json require module '{}': {}",
+                            req.module, error
+                        ))
+                    })?,
+                    constraint: vo_module::version::DepConstraint::parse(&req.constraint).map_err(
+                        |error| {
+                            Error::InvalidReleaseMetadata(format!(
+                                "vo.web.json require constraint '{}': {}",
+                                req.constraint, error
+                            ))
+                        },
+                    )?,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
         source: ManifestSource {
-            name: source_name,
-            size: source_asset.size,
+            name: VO_WEB_FILE.to_string(),
+            size: web.source.iter().map(|entry| entry.size).sum(),
             digest: source_digest,
         },
-        artifacts,
+        artifacts: web
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                Ok(ManifestArtifact {
+                    id: ArtifactId {
+                        kind: artifact.kind.clone(),
+                        target: artifact.target.clone(),
+                        name: artifact.name.clone(),
+                    },
+                    size: artifact.size,
+                    digest: Digest::parse(&artifact.digest).map_err(|error| {
+                        Error::InvalidReleaseMetadata(format!(
+                            "vo.web.json artifact digest for {}: {}",
+                            artifact.name, error
+                        ))
+                    })?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
     };
     let manifest_raw = format!("{}\n", manifest.render()).into_bytes();
-    validate_synthesized_manifest(&context.release, module, version, &manifest_raw)?;
     let manifest = parse_manifest_raw(module, version, &manifest_raw)?;
     Ok((manifest, manifest_raw))
-}
-
-fn parse_mod_file(module: &ModulePath, version: &ExactVersion, content: &str) -> Result<ModFile> {
-    let mod_file = ModFile::parse(content)?;
-    let Some(mod_module) = mod_file.module.as_github() else {
-        return Err(Error::InvalidReleaseMetadata(format!(
-            "vo.mod for {} {} declares non-publishable module '{}'",
-            module, version, mod_file.module,
-        )));
-    };
-    if mod_module != module {
-        return Err(Error::InvalidReleaseMetadata(format!(
-            "vo.mod module '{}' does not match requested '{}'",
-            mod_module, module,
-        )));
-    }
-    Ok(mod_file)
 }
 
 fn parse_manifest_raw(
@@ -379,69 +267,45 @@ fn parse_manifest_raw(
     vo_module::registry::parse_requested_release_manifest(manifest_content, module, version)
 }
 
-fn validate_synthesized_manifest(
-    release: &GitHubRelease,
-    module: &ModulePath,
-    version: &ExactVersion,
-    manifest_raw: &[u8],
-) -> Result<()> {
-    let Some(asset) = release_asset(release, "vo.release.json") else {
-        return Ok(());
-    };
-    let expected_digest = asset_digest(asset, module, version)?;
-    let found_digest = Digest::from_sha256(manifest_raw);
-    if found_digest != expected_digest {
-        return Err(Error::InvalidReleaseMetadata(format!(
-            "synthesized vo.release.json for {} {} does not match GitHub release asset digest: expected {}, found {}",
-            module, version, expected_digest, found_digest,
-        )));
-    }
-    if asset.size != manifest_raw.len() as u64 {
-        return Err(Error::InvalidReleaseMetadata(format!(
-            "synthesized vo.release.json for {} {} size does not match GitHub release asset: expected {} bytes, found {} bytes",
-            module,
-            version,
-            asset.size,
-            manifest_raw.len(),
-        )));
-    }
-    Ok(())
-}
-
 async fn fetch_source_files(
     module: &ModulePath,
     version: &ExactVersion,
     asset_name: &str,
 ) -> Result<SourcePayload> {
-    let context = fetch_release_context(module, version).await?;
-    required_release_asset(&context.release, asset_name, module, version)?;
-    let tree = fetch_repo_tree(module, &context.commit).await?;
-    let ext_manifest = fetch_extension_manifest_from_tree(module, &context.commit, &tree).await?;
-
-    let mut paths = BTreeSet::new();
-    for entry in tree.tree {
-        if entry.kind != "blob" {
-            continue;
-        }
-        let Some(module_rel) = module_relative_path(module, &entry.path) else {
-            continue;
-        };
-        if source_file_allowed(&module_rel, ext_manifest.as_ref()) {
-            paths.insert(module_rel);
-        }
+    if asset_name != VO_WEB_FILE {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "browser source payload for {} {} must be keyed by {}",
+            module, version, VO_WEB_FILE,
+        )));
     }
-
-    if !paths.contains(VO_MOD_FILE) {
+    let web = fetch_web_manifest(module, version).await?;
+    validate_web_manifest_identity(module, version, &web)?;
+    if !web.source.iter().any(|entry| entry.path == "vo.mod") {
         return Err(Error::SourceScan(format!(
-            "GitHub tag for {} {} is missing vo.mod",
+            "vo.web.json for {} {} is missing vo.mod",
             module, version,
         )));
     }
 
     let mut files = Vec::new();
-    for path in paths {
-        let content = fetch_module_file_text(module, &context.commit, &path).await?;
-        files.push((PathBuf::from(path), content));
+    for entry in &web.source {
+        validate_web_relative_path(&entry.path)?;
+        let content = fetch_module_file_text(module, &web.commit, &entry.path).await?;
+        let digest = Digest::from_sha256(content.as_bytes());
+        let expected = Digest::parse(&entry.digest).map_err(|error| {
+            Error::InvalidReleaseMetadata(format!(
+                "vo.web.json source digest for {}: {}",
+                entry.path, error
+            ))
+        })?;
+        if content.len() as u64 != entry.size || digest != expected {
+            return Err(Error::DigestMismatch {
+                context: format!("source file {} for {} {}", entry.path, module, version),
+                expected: format!("{} ({} bytes)", expected, entry.size),
+                found: format!("{} ({} bytes)", digest, content.len()),
+            });
+        }
+        files.push((PathBuf::from(&entry.path), content));
     }
 
     Ok(SourcePayload::Files(files))
@@ -452,23 +316,8 @@ async fn fetch_web_artifact(
     version: &ExactVersion,
     artifact: &ArtifactId,
 ) -> Result<Vec<u8>> {
-    let context = fetch_release_context(module, version).await?;
-    let ext_manifest = fetch_extension_manifest(module, &context.commit).await?;
-    let ext_manifest = ext_manifest.ok_or_else(|| Error::MissingArtifact {
-        module: module.as_str().to_string(),
-        version: version.to_string(),
-        detail: format!("{} requires vo.ext.toml", artifact.name),
-    })?;
-    let repo_path = web_artifact_source_path(&ext_manifest, artifact, module, version)?;
-    fetch_module_file_bytes(module, &context.commit, &repo_path).await
-}
-
-fn web_artifact_source_path(
-    ext_manifest: &ExtensionManifest,
-    artifact: &ArtifactId,
-    module: &ModulePath,
-    version: &ExactVersion,
-) -> Result<String> {
+    let web = fetch_web_manifest(module, version).await?;
+    validate_web_manifest_identity(module, version, &web)?;
     if artifact.target != WASM_TARGET {
         return Err(Error::MissingArtifact {
             module: module.as_str().to_string(),
@@ -479,121 +328,130 @@ fn web_artifact_source_path(
             ),
         });
     }
-    let wasm = ext_manifest
-        .wasm
-        .as_ref()
+    let web_artifact = web
+        .artifacts
+        .iter()
+        .find(|entry| {
+            entry.kind == artifact.kind
+                && entry.target == artifact.target
+                && entry.name == artifact.name
+        })
         .ok_or_else(|| Error::MissingArtifact {
             module: module.as_str().to_string(),
             version: version.to_string(),
-            detail: format!("vo.ext.toml does not declare {}", artifact.name),
+            detail: format!("vo.web.json does not declare {}", artifact.name),
         })?;
-    match artifact.kind.as_str() {
-        "extension-wasm" if artifact.name == wasm.wasm => {
-            Ok(wasm.local_wasm.clone().unwrap_or_else(|| wasm.wasm.clone()))
-        }
-        "extension-js-glue" => {
-            let Some(js_glue) = wasm.js_glue.as_ref() else {
-                return Err(Error::MissingArtifact {
-                    module: module.as_str().to_string(),
-                    version: version.to_string(),
-                    detail: format!("vo.ext.toml does not declare {}", artifact.name),
-                });
-            };
-            if artifact.name != *js_glue {
-                return Err(Error::MissingArtifact {
-                    module: module.as_str().to_string(),
-                    version: version.to_string(),
-                    detail: format!("vo.ext.toml does not declare {}", artifact.name),
-                });
-            }
-            Ok(wasm
-                .local_js_glue
-                .clone()
-                .unwrap_or_else(|| js_glue.clone()))
-        }
-        _ => Err(Error::MissingArtifact {
-            module: module.as_str().to_string(),
-            version: version.to_string(),
-            detail: format!("vo.ext.toml does not declare {}", artifact.name),
-        }),
+    validate_web_relative_path(&web_artifact.path)?;
+    let bytes = fetch_module_file_bytes(module, &web.commit, &web_artifact.path).await?;
+    let expected = Digest::parse(&web_artifact.digest).map_err(|error| {
+        Error::InvalidReleaseMetadata(format!(
+            "vo.web.json artifact digest for {}: {}",
+            web_artifact.name, error
+        ))
+    })?;
+    let found = Digest::from_sha256(&bytes);
+    if bytes.len() as u64 != web_artifact.size || found != expected {
+        return Err(Error::DigestMismatch {
+            context: format!("artifact {} for {} {}", artifact.name, module, version),
+            expected: format!("{} ({} bytes)", expected, web_artifact.size),
+            found: format!("{} ({} bytes)", found, bytes.len()),
+        });
     }
+    Ok(bytes)
 }
 
-async fn fetch_extension_manifest(
-    module: &ModulePath,
-    commit: &str,
-) -> Result<Option<ExtensionManifest>> {
-    let cache_key = module_commit_cache_key(module, commit);
-    if let Some(manifest) = EXT_MANIFEST_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned())
+async fn fetch_web_manifest(module: &ModulePath, version: &ExactVersion) -> Result<WebManifest> {
+    let cache_key = module_version_cache_key(module, version);
+    if let Some(manifest) = WEB_MANIFEST_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned())
     {
         return Ok(manifest);
     }
-
-    let url = raw_module_file_url(module, commit, VO_EXT_FILE);
-    let manifest = if let Some(content) = fetch_optional_text(&url).await? {
-        Some(parse_ext_manifest_content(
-            &content,
-            Path::new(VO_EXT_FILE),
-        )?)
-    } else {
-        None
-    };
-    EXT_MANIFEST_CACHE.with(|cache| {
+    let tag = vo_module::registry::release_tag(module, version);
+    let url = raw_module_file_url(module, &tag, VO_WEB_FILE);
+    let bytes = fetch_bytes_typed(&url).await?;
+    let manifest: WebManifest = serde_json::from_slice(&bytes).map_err(|error| {
+        Error::InvalidReleaseMetadata(format!("invalid vo.web.json from {}: {}", url, error))
+    })?;
+    WEB_MANIFEST_CACHE.with(|cache| {
         cache.borrow_mut().insert(cache_key, manifest.clone());
     });
     Ok(manifest)
 }
 
-async fn fetch_extension_manifest_from_tree(
+fn validate_web_manifest_identity(
     module: &ModulePath,
-    commit: &str,
-    tree: &GitHubTree,
-) -> Result<Option<ExtensionManifest>> {
-    if !tree_has_module_file(module, tree, VO_EXT_FILE) {
-        return Ok(None);
-    }
-    fetch_extension_manifest(module, commit).await
-}
-
-fn tree_has_module_file(module: &ModulePath, tree: &GitHubTree, rel_path: &str) -> bool {
-    tree.tree.iter().any(|entry| {
-        entry.kind == "blob"
-            && module_relative_path(module, &entry.path).as_deref() == Some(rel_path)
-    })
-}
-
-async fn fetch_repo_tree(module: &ModulePath, commit: &str) -> Result<GitHubTree> {
-    let cache_key = module_commit_cache_key(module, commit);
-    if let Some(tree) = REPO_TREE_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned()) {
-        return Ok(tree);
-    }
-
-    let repo = vo_module::registry::repository_id(module);
-    let api_url = format!(
-        "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
-        encode_component(&repo.owner),
-        encode_component(&repo.repo),
-        encode_component(commit),
-    );
-    let tree: GitHubTree = fetch_json(&api_url).await?;
-    if tree.truncated {
-        return Err(Error::SourceScan(format!(
-            "GitHub tree for {} at {} is truncated",
-            module, commit,
+    version: &ExactVersion,
+    manifest: &WebManifest,
+) -> Result<()> {
+    if manifest.schema_version != 1 {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "vo.web.json for {} {} has unsupported schema_version {}",
+            module, version, manifest.schema_version
         )));
     }
-    REPO_TREE_CACHE.with(|cache| {
-        cache.borrow_mut().insert(cache_key, tree.clone());
-    });
-    Ok(tree)
+    if manifest.module != module.as_str() {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "vo.web.json module '{}' does not match requested '{}'",
+            manifest.module, module
+        )));
+    }
+    if manifest.version != version.to_string() {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "vo.web.json version '{}' does not match requested '{}'",
+            manifest.version, version
+        )));
+    }
+    if manifest.module_root != module.module_root() {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "vo.web.json module_root '{}' does not match requested '{}'",
+            manifest.module_root,
+            module.module_root()
+        )));
+    }
+    validate_commit_hash(&manifest.commit)
+        .map_err(|error| Error::InvalidReleaseMetadata(format!("vo.web.json commit: {}", error)))
+}
+
+fn validate_commit_hash(commit: &str) -> std::result::Result<(), String> {
+    if commit.len() != 40 {
+        return Err(format!(
+            "commit must be 40-char hex, got {} chars",
+            commit.len()
+        ));
+    }
+    if !commit
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    {
+        return Err("commit must be lowercase hex".to_string());
+    }
+    Ok(())
+}
+
+fn validate_web_relative_path(path: &str) -> Result<()> {
+    let path = Path::new(path);
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "vo.web.json path must be module-relative: {}",
+            path.display()
+        )));
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) => {}
+            _ => {
+                return Err(Error::InvalidReleaseMetadata(format!(
+                    "vo.web.json path must be normalized and stay inside the module: {}",
+                    path.display()
+                )))
+            }
+        }
+    }
+    Ok(())
 }
 
 fn module_version_cache_key(module: &ModulePath, version: &ExactVersion) -> String {
     format!("{}@{}", module.as_str(), version)
-}
-
-fn module_commit_cache_key(module: &ModulePath, commit: &str) -> String {
-    format!("{}@{}", module.as_str(), commit)
 }
 
 async fn fetch_module_file_text(
@@ -631,105 +489,6 @@ fn repo_relative_path(module: &ModulePath, rel_path: &str) -> String {
     } else {
         format!("{}/{}", root.trim_end_matches('/'), rel_path)
     }
-}
-
-fn module_relative_path(module: &ModulePath, repo_path: &str) -> Option<String> {
-    let root = module.module_root();
-    if root == "." {
-        return Some(repo_path.to_string());
-    }
-    let prefix = format!("{}/", root.trim_end_matches('/'));
-    repo_path
-        .strip_prefix(&prefix)
-        .filter(|path| !path.is_empty())
-        .map(ToString::to_string)
-}
-
-fn source_file_allowed(path: &str, ext_manifest: Option<&ExtensionManifest>) -> bool {
-    let name = Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("");
-    if path.ends_with(".vo") || name == VO_MOD_FILE || name == VO_LOCK_FILE || name == VO_EXT_FILE {
-        return true;
-    }
-    let Some(ext_manifest) = ext_manifest else {
-        return false;
-    };
-    let path = Path::new(path);
-    ext_manifest
-        .include
-        .iter()
-        .any(|include| path == include || path.starts_with(include))
-}
-
-fn required_release_asset<'a>(
-    release: &'a GitHubRelease,
-    name: &str,
-    module: &ModulePath,
-    version: &ExactVersion,
-) -> Result<&'a GitHubReleaseAsset> {
-    release_asset(release, name).ok_or_else(|| {
-        Error::InvalidReleaseMetadata(format!(
-            "GitHub release for {} {} is missing asset '{}'",
-            module, version, name,
-        ))
-    })
-}
-
-fn release_asset<'a>(release: &'a GitHubRelease, name: &str) -> Option<&'a GitHubReleaseAsset> {
-    release.assets.iter().find(|asset| asset.name == name)
-}
-
-fn asset_digest(
-    asset: &GitHubReleaseAsset,
-    module: &ModulePath,
-    version: &ExactVersion,
-) -> Result<Digest> {
-    let digest = asset.digest.as_deref().ok_or_else(|| {
-        Error::InvalidReleaseMetadata(format!(
-            "GitHub release asset '{}' for {} {} has no digest",
-            asset.name, module, version,
-        ))
-    })?;
-    Digest::parse(digest).map_err(|error| {
-        Error::InvalidReleaseMetadata(format!(
-            "GitHub release asset '{}' for {} {} has invalid digest: {}",
-            asset.name, module, version, error,
-        ))
-    })
-}
-
-fn source_package_name(module: &ModulePath, version: &ExactVersion) -> Result<String> {
-    let base = source_package_base_name(module.as_str()).ok_or_else(|| {
-        Error::InvalidReleaseMetadata(format!("invalid module path '{}'", module))
-    })?;
-    Ok(format!("{}-{}.tar.gz", base, version))
-}
-
-fn source_package_base_name(module: &str) -> Option<&str> {
-    let parts: Vec<&str> = module.split('/').collect();
-    if parts.len() < 3 || parts[0] != "github.com" {
-        return None;
-    }
-    let tail = &parts[3..];
-    if tail.is_empty() {
-        return Some(parts[2]);
-    }
-    let last = tail[tail.len() - 1];
-    if is_major_version_suffix(last) {
-        if tail.len() == 1 {
-            Some(parts[2])
-        } else {
-            Some(tail[tail.len() - 2])
-        }
-    } else {
-        Some(last)
-    }
-}
-
-fn is_major_version_suffix(value: &str) -> bool {
-    value.len() > 1 && value.starts_with('v') && value[1..].chars().all(|ch| ch.is_ascii_digit())
 }
 
 async fn fetch_module_release_versions(module: &ModulePath) -> Result<Vec<ExactVersion>> {

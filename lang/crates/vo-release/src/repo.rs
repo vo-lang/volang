@@ -30,7 +30,7 @@ const IGNORED_DIR_NAMES: &[&str] = &[
     "pkg",
     "__pycache__",
 ];
-const IGNORED_FILE_NAMES: &[&str] = &["vo.release.json", "vo.work", ".DS_Store"];
+const IGNORED_FILE_NAMES: &[&str] = &["vo.release.json", "vo.web.json", "vo.work", ".DS_Store"];
 const IGNORED_SUFFIXES: &[&str] = &[".a", ".dll", ".dylib", ".lib", ".pdb", ".so", ".wasm"];
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
@@ -99,7 +99,6 @@ pub fn verify_repo(repo_root: &Path) -> ReleaseResult<()> {
     if !alias_imports.is_empty() {
         return Err(ReleaseError::InvalidAliasImports(alias_imports));
     }
-
     project::read_project_deps_at_root(&repo_root, &[])
         .map_err(map_project_deps_error_for_release_verify)?;
     Ok(())
@@ -138,13 +137,30 @@ pub fn stage_release(
             format!("invalid module path: {}", module_str),
         )
     })?;
+    let prepared_artifacts = prepare_artifacts(&options.artifacts, &out_dir)?;
+    validate_artifact_contract(&repo_root, &mod_file, &prepared_artifacts)?;
+    validate_web_artifact_sources(&repo_root, &mod_file, &prepared_artifacts)?;
+    let source_files = collect_publish_source_files(&repo_root, &out_dir, &mod_file)?;
+    let web_source_files = collect_web_source_files(&source_files)?;
+    let source_entries = web_source_entries(&repo_root, &web_source_files)?;
+    let source_set_digest = source_set_digest(&source_entries)?;
+    let web_manifest_json = build_web_manifest_json(
+        &mod_file,
+        &options.version,
+        &commit,
+        &prepared_artifacts,
+        &source_entries,
+        &source_set_digest,
+    )?;
     let source_name = format!("{}-{}.tar.gz", source_top_dir, options.version);
-    let source_bytes = build_source_package(&repo_root, source_top_dir, &out_dir)?;
+    let source_bytes = build_source_package(
+        &repo_root,
+        source_top_dir,
+        &source_files,
+        &web_manifest_json,
+    )?;
     let source_size = source_bytes.len() as u64;
     let source_digest = sha256_digest(&source_bytes);
-    let prepared_artifacts = prepare_artifacts(&options.artifacts, &out_dir)?;
-    validate_artifact_contract(&repo_root, &prepared_artifacts)?;
-    validate_web_artifact_sources(&repo_root, &prepared_artifacts)?;
 
     let version = ExactVersion::parse(&options.version)
         .map_err(|e| ReleaseError::ManifestSerialize(format!("invalid version: {e}")))?;
@@ -189,6 +205,9 @@ pub fn stage_release(
     let manifest_path = out_dir.join("vo.release.json");
     fs::write(&manifest_path, manifest_json.as_bytes())
         .map_err(|error| ReleaseError::IoError(manifest_path.clone(), error.to_string()))?;
+    let web_manifest_path = out_dir.join("vo.web.json");
+    fs::write(&web_manifest_path, web_manifest_json.as_bytes())
+        .map_err(|error| ReleaseError::IoError(web_manifest_path.clone(), error.to_string()))?;
 
     for artifact in &prepared_artifacts {
         fs::write(&artifact.staged.output_path, &artifact.bytes).map_err(|error| {
@@ -325,18 +344,15 @@ fn prepare_artifacts(
 
 fn validate_artifact_contract(
     repo_root: &Path,
+    mod_file: &ModFile,
     prepared: &[PreparedArtifact],
 ) -> ReleaseResult<()> {
-    let manifest_path = repo_root.join("vo.ext.toml");
-    let (manifest_path, declared) = if manifest_path.is_file() {
-        let content = fs::read_to_string(&manifest_path)
-            .map_err(|error| ReleaseError::IoError(manifest_path.clone(), error.to_string()))?;
-        let manifest =
-            vo_module::ext_manifest::parse_ext_manifest_content(&content, &manifest_path)?;
-        (Some(manifest_path), manifest.declared_artifact_ids())
-    } else {
-        (None, Vec::new())
-    };
+    let manifest_path = repo_root.join("vo.mod");
+    let declared = mod_file
+        .extension
+        .as_ref()
+        .map(vo_module::ext_manifest::ExtensionManifest::declared_artifact_ids)
+        .unwrap_or_default();
 
     let declared = declared.into_iter().collect::<BTreeSet<_>>();
     let staged = prepared
@@ -356,7 +372,7 @@ fn validate_artifact_contract(
     }
 
     Err(ReleaseError::ArtifactContractViolation {
-        manifest_path,
+        manifest_path: Some(manifest_path),
         missing,
         undeclared,
     })
@@ -364,15 +380,13 @@ fn validate_artifact_contract(
 
 fn validate_web_artifact_sources(
     repo_root: &Path,
+    mod_file: &ModFile,
     prepared: &[PreparedArtifact],
 ) -> ReleaseResult<()> {
-    let manifest_path = repo_root.join("vo.ext.toml");
-    if !manifest_path.is_file() {
+    let manifest_path = repo_root.join("vo.mod");
+    let Some(manifest) = mod_file.extension.as_ref() else {
         return Ok(());
-    }
-    let content = fs::read_to_string(&manifest_path)
-        .map_err(|error| ReleaseError::IoError(manifest_path.clone(), error.to_string()))?;
-    let manifest = vo_module::ext_manifest::parse_ext_manifest_content(&content, &manifest_path)?;
+    };
     let Some(wasm) = manifest.wasm.as_ref() else {
         return Ok(());
     };
@@ -469,14 +483,19 @@ fn ensure_web_artifact_source_is_tracked(
     ))
 }
 
-fn included_source_files(repo_root: &Path) -> ReleaseResult<Vec<PathBuf>> {
-    let manifest_path = repo_root.join("vo.ext.toml");
-    if !manifest_path.is_file() {
-        return Ok(Vec::new());
+fn included_source_files(
+    repo_root: &Path,
+    mod_file: &ModFile,
+    tracked_files: &HashSet<PathBuf>,
+) -> ReleaseResult<Vec<PathBuf>> {
+    let manifest_path = repo_root.join("vo.mod");
+    let mut include_paths = Vec::new();
+    if let Some(web) = &mod_file.web {
+        include_paths.extend(web.include.iter().cloned());
     }
-    let content = fs::read_to_string(&manifest_path)
-        .map_err(|error| ReleaseError::IoError(manifest_path.clone(), error.to_string()))?;
-    let include_paths = vo_module::ext_manifest::include_paths_from_content(&content)?;
+    if let Some(extension) = &mod_file.extension {
+        include_paths.extend(extension.include.iter().cloned());
+    }
     if include_paths.is_empty() {
         return Ok(Vec::new());
     }
@@ -487,6 +506,7 @@ fn included_source_files(repo_root: &Path) -> ReleaseResult<Vec<PathBuf>> {
             repo_root,
             &manifest_path,
             &normalized,
+            tracked_files,
         )?);
     }
     Ok(files.into_iter().collect())
@@ -522,6 +542,7 @@ fn collect_included_source_paths(
     repo_root: &Path,
     manifest_path: &Path,
     include_path: &Path,
+    tracked_files: &HashSet<PathBuf>,
 ) -> ReleaseResult<Vec<PathBuf>> {
     let full_path = repo_root.join(include_path);
     if !full_path.exists() {
@@ -538,10 +559,16 @@ fn collect_included_source_paths(
             repo_root,
             manifest_path,
             &full_path,
+            tracked_files,
         )?]);
     }
     if full_path.is_dir() {
-        return collect_included_source_directory(repo_root, manifest_path, &full_path);
+        return collect_included_source_directory(
+            repo_root,
+            manifest_path,
+            &full_path,
+            tracked_files,
+        );
     }
     Err(ReleaseError::IoError(
         full_path,
@@ -556,6 +583,7 @@ fn collect_included_source_directory(
     repo_root: &Path,
     manifest_path: &Path,
     dir: &Path,
+    tracked_files: &HashSet<PathBuf>,
 ) -> ReleaseResult<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut entries = fs::read_dir(dir)
@@ -570,6 +598,7 @@ fn collect_included_source_directory(
                 repo_root,
                 manifest_path,
                 &path,
+                tracked_files,
             )?);
             continue;
         }
@@ -578,6 +607,7 @@ fn collect_included_source_directory(
                 repo_root,
                 manifest_path,
                 &path,
+                tracked_files,
             )?);
             continue;
         }
@@ -596,10 +626,11 @@ fn canonicalize_included_source_path(
     repo_root: &Path,
     manifest_path: &Path,
     full_path: &Path,
+    tracked_files: &HashSet<PathBuf>,
 ) -> ReleaseResult<PathBuf> {
     let canonical = fs::canonicalize(full_path)
         .map_err(|error| ReleaseError::IoError(full_path.to_path_buf(), error.to_string()))?;
-    let _ = canonical.strip_prefix(repo_root).map_err(|_| {
+    let rel = canonical.strip_prefix(repo_root).map_err(|_| {
         ReleaseError::IoError(
             canonical.clone(),
             format!(
@@ -608,14 +639,216 @@ fn canonicalize_included_source_path(
             ),
         )
     })?;
+    if !tracked_files.contains(rel) {
+        return Err(ReleaseError::IoError(
+            canonical.clone(),
+            format!(
+                "included path referenced by {} must be checked into git so Studio web can fetch it from the release tag",
+                manifest_path.display()
+            ),
+        ));
+    }
     Ok(canonical)
 }
 
-fn build_source_package(repo_root: &Path, top_dir: &str, out_dir: &Path) -> ReleaseResult<Vec<u8>> {
-    let mut files = collect_source_files(repo_root, repo_root, out_dir)?;
-    files.extend(included_source_files(repo_root)?);
+fn collect_publish_source_files(
+    repo_root: &Path,
+    out_dir: &Path,
+    mod_file: &ModFile,
+) -> ReleaseResult<Vec<PathBuf>> {
+    let tracked_files = git_tracked_files(repo_root)?;
+    let mut files = collect_source_files(repo_root, out_dir, &tracked_files)?;
+    files.extend(included_source_files(repo_root, mod_file, &tracked_files)?);
     files.sort();
     files.dedup();
+    Ok(files)
+}
+
+fn collect_web_source_files(files: &[PathBuf]) -> ReleaseResult<Vec<PathBuf>> {
+    let mut web_files = Vec::new();
+    for path in files {
+        let raw = fs::read(path)
+            .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
+        if std::str::from_utf8(&raw).is_ok() {
+            web_files.push(path.clone());
+        }
+    }
+    Ok(web_files)
+}
+
+fn web_source_entries(
+    repo_root: &Path,
+    files: &[PathBuf],
+) -> ReleaseResult<Vec<serde_json::Value>> {
+    let mut entries = Vec::new();
+    for path in files {
+        let rel = path
+            .strip_prefix(repo_root)
+            .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        let raw = fs::read(path)
+            .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
+        entries.push(serde_json::json!({
+            "path": rel,
+            "size": raw.len() as u64,
+            "digest": sha256_digest(&raw),
+        }));
+    }
+    entries.sort_by(|a, b| {
+        a.get("path")
+            .and_then(serde_json::Value::as_str)
+            .cmp(&b.get("path").and_then(serde_json::Value::as_str))
+    });
+    Ok(entries)
+}
+
+fn source_set_digest(entries: &[serde_json::Value]) -> ReleaseResult<String> {
+    let bytes = serde_json::to_vec(entries)
+        .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))?;
+    Ok(sha256_digest(&bytes))
+}
+
+fn build_web_manifest_json(
+    mod_file: &ModFile,
+    version: &str,
+    commit: &str,
+    prepared_artifacts: &[PreparedArtifact],
+    source_entries: &[serde_json::Value],
+    source_set_digest: &str,
+) -> ReleaseResult<String> {
+    let module_path = mod_file.module.as_github().ok_or_else(|| {
+        ReleaseError::ManifestSerialize(format!(
+            "vo.web.json requires a canonical github module path; found {}",
+            mod_file.module
+        ))
+    })?;
+    let require = mod_file
+        .require
+        .iter()
+        .map(|req| {
+            serde_json::json!({
+                "module": req.module.as_str(),
+                "constraint": req.constraint.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let artifacts = web_manifest_artifacts(mod_file, prepared_artifacts)?;
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "module": module_path.as_str(),
+        "version": version,
+        "commit": commit,
+        "module_root": module_path.module_root(),
+        "vo": mod_file.vo.to_string(),
+        "require": require,
+        "source_digest": source_set_digest,
+        "source": source_entries,
+        "web": web_manifest_project_metadata(mod_file),
+        "extension": web_manifest_extension_metadata(mod_file),
+        "artifacts": artifacts,
+    });
+    serde_json::to_string_pretty(&manifest)
+        .map(|json| format!("{}\n", json))
+        .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))
+}
+
+fn web_manifest_project_metadata(mod_file: &ModFile) -> serde_json::Value {
+    match &mod_file.web {
+        Some(web) => serde_json::json!({
+            "entry": web.entry.as_ref(),
+            "include": web
+                .include
+                .iter()
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                .collect::<Vec<_>>(),
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn web_manifest_extension_metadata(mod_file: &ModFile) -> serde_json::Value {
+    let Some(extension) = &mod_file.extension else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "name": extension.name.as_str(),
+        "include": extension
+            .include
+            .iter()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect::<Vec<_>>(),
+        "wasm": extension.wasm.as_ref(),
+        "web": extension.web.as_ref(),
+    })
+}
+
+fn web_manifest_artifacts(
+    mod_file: &ModFile,
+    prepared_artifacts: &[PreparedArtifact],
+) -> ReleaseResult<Vec<serde_json::Value>> {
+    let wasm = mod_file
+        .extension
+        .as_ref()
+        .and_then(|extension| extension.wasm.as_ref());
+    let mut artifacts = prepared_artifacts
+        .iter()
+        .map(|artifact| {
+            serde_json::json!({
+                "kind": artifact.staged.kind.as_str(),
+                "target": artifact.staged.target.as_str(),
+                "name": artifact.staged.name.as_str(),
+                "path": web_manifest_artifact_path(wasm, artifact),
+                "size": artifact.staged.size,
+                "digest": artifact.staged.digest.as_str(),
+            })
+        })
+        .collect::<Vec<_>>();
+    artifacts.sort_by(|a, b| {
+        (
+            a.get("kind").and_then(serde_json::Value::as_str),
+            a.get("target").and_then(serde_json::Value::as_str),
+            a.get("name").and_then(serde_json::Value::as_str),
+        )
+            .cmp(&(
+                b.get("kind").and_then(serde_json::Value::as_str),
+                b.get("target").and_then(serde_json::Value::as_str),
+                b.get("name").and_then(serde_json::Value::as_str),
+            ))
+    });
+    Ok(artifacts)
+}
+
+fn web_manifest_artifact_path(
+    wasm: Option<&vo_module::ext_manifest::WasmExtensionManifest>,
+    artifact: &PreparedArtifact,
+) -> String {
+    let Some(wasm) = wasm else {
+        return artifact.staged.name.clone();
+    };
+    if artifact.staged.kind == "extension-wasm"
+        && artifact.staged.target == WASM_TARGET
+        && artifact.staged.name == wasm.wasm
+    {
+        return wasm.local_wasm.clone().unwrap_or_else(|| wasm.wasm.clone());
+    }
+    if artifact.staged.kind == "extension-js-glue"
+        && artifact.staged.target == WASM_TARGET
+        && wasm.js_glue.as_ref() == Some(&artifact.staged.name)
+    {
+        return wasm
+            .local_js_glue
+            .clone()
+            .unwrap_or_else(|| artifact.staged.name.clone());
+    }
+    artifact.staged.name.clone()
+}
+
+fn build_source_package(
+    repo_root: &Path,
+    top_dir: &str,
+    files: &[PathBuf],
+    web_manifest_json: &str,
+) -> ReleaseResult<Vec<u8>> {
     let encoder = GzBuilder::new()
         .mtime(0)
         .write(Vec::new(), Compression::default());
@@ -624,7 +857,7 @@ fn build_source_package(repo_root: &Path, top_dir: &str, out_dir: &Path) -> Rele
         let rel = path
             .strip_prefix(repo_root)
             .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
-        let raw = fs::read(&path)
+        let raw = fs::read(path)
             .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
         let data: Vec<u8> = if path.file_name().and_then(OsStr::to_str) == Some("Cargo.toml") {
             if let Ok(content) = std::str::from_utf8(&raw) {
@@ -637,7 +870,7 @@ fn build_source_package(repo_root: &Path, top_dir: &str, out_dir: &Path) -> Rele
         };
         let mut header = Header::new_gnu();
         header.set_size(data.len() as u64);
-        header.set_mode(file_mode(&path)?);
+        header.set_mode(file_mode(path)?);
         header.set_uid(0);
         header.set_gid(0);
         header.set_mtime(0);
@@ -651,11 +884,42 @@ fn build_source_package(repo_root: &Path, top_dir: &str, out_dir: &Path) -> Rele
             )
             .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
     }
+    append_virtual_file(
+        &mut builder,
+        repo_root,
+        top_dir,
+        Path::new("vo.web.json"),
+        web_manifest_json.as_bytes(),
+    )?;
     let encoder = builder
         .into_inner()
         .map_err(|error| ReleaseError::IoError(repo_root.to_path_buf(), error.to_string()))?;
     encoder
         .finish()
+        .map_err(|error| ReleaseError::IoError(repo_root.to_path_buf(), error.to_string()))
+}
+
+fn append_virtual_file<W: std::io::Write>(
+    builder: &mut Builder<W>,
+    repo_root: &Path,
+    top_dir: &str,
+    rel: &Path,
+    data: &[u8],
+) -> ReleaseResult<()> {
+    let mut header = Header::new_gnu();
+    header.set_size(data.len() as u64);
+    header.set_mode(0o644);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_cksum();
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    builder
+        .append_data(
+            &mut header,
+            format!("{}/{}", top_dir, rel),
+            Cursor::new(data),
+        )
         .map_err(|error| ReleaseError::IoError(repo_root.to_path_buf(), error.to_string()))
 }
 
@@ -689,23 +953,44 @@ pub(crate) fn strip_cargo_patch_sections(content: &str) -> String {
     out
 }
 
-fn collect_source_files(root: &Path, dir: &Path, out_dir: &Path) -> ReleaseResult<Vec<PathBuf>> {
+fn git_tracked_files(repo_root: &Path) -> ReleaseResult<HashSet<PathBuf>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("ls-files")
+        .arg("-z")
+        .output()
+        .map_err(|error| ReleaseError::IoError(repo_root.to_path_buf(), error.to_string()))?;
+    if !output.status.success() {
+        return Err(ReleaseError::IoError(
+            repo_root.to_path_buf(),
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| {
+            let path = std::str::from_utf8(raw).map_err(|error| {
+                ReleaseError::IoError(repo_root.to_path_buf(), error.to_string())
+            })?;
+            Ok(PathBuf::from(path))
+        })
+        .collect()
+}
+
+fn collect_source_files(
+    root: &Path,
+    out_dir: &Path,
+    tracked_files: &HashSet<PathBuf>,
+) -> ReleaseResult<Vec<PathBuf>> {
     let mut files = Vec::new();
-    let mut entries = fs::read_dir(dir)
-        .map_err(|error| ReleaseError::IoError(dir.to_path_buf(), error.to_string()))?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| ReleaseError::IoError(dir.to_path_buf(), error.to_string()))?;
-    entries.sort();
-    for path in entries {
+    let mut tracked = tracked_files.iter().collect::<Vec<_>>();
+    tracked.sort();
+    for rel in tracked {
+        let path = root.join(rel);
         if path.starts_with(out_dir) {
-            continue;
-        }
-        if path.is_dir() {
-            if is_ignored_dir(&path) {
-                continue;
-            }
-            files.extend(collect_source_files(root, &path, out_dir)?);
             continue;
         }
         if should_include_source_file(root, &path) {
@@ -870,7 +1155,8 @@ fn should_include_source_file(repo_root: &Path, path: &Path) -> bool {
         .parent()
         .map(|parent| {
             parent.components().any(|component| {
-                IGNORED_DIR_NAMES.contains(&component.as_os_str().to_string_lossy().as_ref())
+                let name = component.as_os_str().to_string_lossy();
+                IGNORED_DIR_NAMES.contains(&name.as_ref()) || is_release_output_dir_name(&name)
             })
         })
         .unwrap_or(false)
@@ -891,8 +1177,12 @@ fn should_include_source_file(repo_root: &Path, path: &Path) -> bool {
 fn is_ignored_dir(path: &Path) -> bool {
     path.file_name()
         .and_then(OsStr::to_str)
-        .map(|name| IGNORED_DIR_NAMES.contains(&name))
+        .map(|name| IGNORED_DIR_NAMES.contains(&name) || is_release_output_dir_name(name))
         .unwrap_or(false)
+}
+
+fn is_release_output_dir_name(name: &str) -> bool {
+    name == ".dist" || name.starts_with(".dist-")
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {

@@ -149,7 +149,7 @@ enum ArchiveEntry {
 ///
 /// Strips the top-level archive directory (standard release convention),
 /// filters to allowed module files plus any paths declared in
-/// `[extension].include` of `vo.ext.toml`, and skips non-UTF-8 entries
+/// `vo.mod` metadata include lists, and skips non-UTF-8 entries
 /// except for declared include paths.
 ///
 /// Returns entries with paths relative to the module root.
@@ -186,20 +186,16 @@ pub fn extract_source_entries(archive_bytes: &[u8]) -> Result<Vec<(PathBuf, Stri
 
 fn source_package_include_paths(entries: &[ArchiveEntry]) -> Result<BTreeSet<PathBuf>, String> {
     let Some(bytes) = entries.iter().find_map(|entry| match entry {
-        ArchiveEntry::File(relative_path, bytes) if relative_path == Path::new("vo.ext.toml") => {
+        ArchiveEntry::File(relative_path, bytes) if relative_path == Path::new("vo.mod") => {
             Some(bytes.as_slice())
         }
         _ => None,
     }) else {
         return Ok(BTreeSet::new());
     };
-    let content = std::str::from_utf8(bytes).map_err(|error| {
-        format!(
-            "vo.ext.toml in source package is not valid UTF-8: {}",
-            error
-        )
-    })?;
-    let declared = crate::ext_manifest::include_paths_from_content(content)
+    let content = std::str::from_utf8(bytes)
+        .map_err(|error| format!("vo.mod in source package is not valid UTF-8: {}", error))?;
+    let declared = crate::ext_manifest::source_include_paths_from_content(content)
         .map_err(|error| error.to_string())?;
     let mut paths = BTreeSet::new();
     for p in declared {
@@ -264,7 +260,7 @@ fn source_entry_allowed(path: &Path, studio_asset_paths: &BTreeSet<PathBuf>) -> 
     path_str.ends_with(".vo")
         || name == "vo.mod"
         || name == "vo.lock"
-        || name == "vo.ext.toml"
+        || name == "vo.web.json"
         || included_source_path_matches(path, studio_asset_paths)
 }
 
@@ -903,10 +899,11 @@ mod tests {
         let archive = build_source_archive(
             "demo-v1.0.0",
             &[
-                ("vo.mod", "module github.com/acme/demo\nvo 0.1.0\n"),
                 (
-                    "vo.ext.toml",
+                    "vo.mod",
                     concat!(
+                        "module github.com/acme/demo\n",
+                        "vo 0.1.0\n\n",
                         "[extension]\n",
                         "name = \"demo\"\n",
                         "include = [\"js/dist/studio_renderer.js\"]\n\n",
@@ -930,7 +927,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(paths.contains(&PathBuf::from("vo.mod")));
-        assert!(paths.contains(&PathBuf::from("vo.ext.toml")));
         assert!(paths.contains(&PathBuf::from("main.vo")));
         assert!(paths.contains(&PathBuf::from("js/dist/studio_renderer.js")));
         assert!(!paths.contains(&PathBuf::from("js/dist/ignored.js")));
@@ -941,10 +937,11 @@ mod tests {
         let archive = build_source_archive(
             "demo-v1.0.0",
             &[
-                ("vo.mod", "module github.com/acme/demo\nvo 0.1.0\n"),
                 (
-                    "vo.ext.toml",
+                    "vo.mod",
                     concat!(
+                        "module github.com/acme/demo\n",
+                        "vo 0.1.0\n\n",
                         "[extension]\n",
                         "name = \"demo\"\n",
                         "include = [\"js/dist\"]\n\n",
@@ -975,7 +972,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(paths.contains(&PathBuf::from("vo.mod")));
-        assert!(paths.contains(&PathBuf::from("vo.ext.toml")));
         assert!(paths.contains(&PathBuf::from("main.vo")));
         assert!(paths.contains(&PathBuf::from("js/dist/voplay-render-island.js")));
         assert!(paths.contains(&PathBuf::from("js/dist/bootstrap_webview.js")));
@@ -1173,10 +1169,11 @@ mod tests {
         let source_bytes = build_source_archive(
             "lib-v1.2.3",
             &[
-                ("vo.mod", "module github.com/acme/lib\nvo ^0.1.0\n"),
                 (
-                    "vo.ext.toml",
+                    "vo.mod",
                     concat!(
+                        "module github.com/acme/lib\n",
+                        "vo ^0.1.0\n\n",
                         "[extension]\n",
                         "name = \"lib\"\n\n",
                         "[extension.wasm]\n",

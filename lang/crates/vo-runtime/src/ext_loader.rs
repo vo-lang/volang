@@ -1,8 +1,7 @@
 //! Extension loader for dynamic loading of native extensions.
 //!
-//! Extensions are discovered from `vo.ext.toml` manifests and loaded
-//! at runtime via dlopen. Uses `ExtensionTable` at the dylib
-//! boundary for stable cross-compilation compatibility.
+//! Extensions are discovered from `vo.mod` extension metadata and loaded
+//! at runtime via dlopen. Uses `ExtensionTable` at the dylib boundary.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

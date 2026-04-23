@@ -134,7 +134,7 @@ target = "{target}"
 library = "{library}"
 "#,
             ),
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap()
     }
@@ -152,7 +152,7 @@ wasm = "{wasm}"
 js_glue = "{js_glue}"
 "#,
             ),
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap()
     }

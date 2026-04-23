@@ -13,7 +13,7 @@ use crate::cache::validate::{
     validate_installed_artifact, validate_installed_module, InstalledModuleError,
 };
 use crate::digest::{verify_size_and_digest, Digest};
-use crate::ext_manifest::{parse_ext_manifest_content, ExtensionManifest};
+use crate::ext_manifest::ExtensionManifest;
 use crate::identity::{ArtifactId, ModulePath};
 use crate::lock::{locked_module_from_manifest_raw, validate_locked_module_against_manifest};
 use crate::project;
@@ -217,14 +217,14 @@ fn read_installed_extension_manifest<F: FileSystem>(
     fs: &F,
     module_dir: &Path,
 ) -> Result<Option<ExtensionManifest>> {
-    let manifest_rel = module_dir.join("vo.ext.toml");
-    if !fs.exists(&manifest_rel) {
+    let mod_rel = module_dir.join("vo.mod");
+    if !fs.exists(&mod_rel) {
         return Ok(None);
     }
-    let content = fs.read_file(&manifest_rel).map_err(|error| {
-        Error::SourceScan(format!("read {}: {}", manifest_rel.display(), error))
-    })?;
-    parse_ext_manifest_content(&content, &scoped_path(fs, &manifest_rel)).map(Some)
+    let content = fs
+        .read_file(&mod_rel)
+        .map_err(|error| Error::SourceScan(format!("read {}: {}", mod_rel.display(), error)))?;
+    Ok(ModFile::parse(&content)?.extension)
 }
 
 fn scoped_path<F: FileSystem>(fs: &F, path: &Path) -> PathBuf {
@@ -745,7 +745,7 @@ fn readiness_failure_to_error(failure: ReadinessFailure) -> Error {
             target,
             ..
         } => Error::SourceScan(format!(
-            "vo.ext.toml does not declare extension-native support for target {} in {}@{}",
+            "vo.mod does not declare extension-native support for target {} in {}@{}",
             target, module, version,
         )),
         ReadinessFailure::ArtifactResolutionFailed { error, .. } => *error,

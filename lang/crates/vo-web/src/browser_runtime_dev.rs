@@ -6,7 +6,6 @@ use std::time::SystemTime;
 
 use toml::Value;
 use vo_common::vfs::RealFs;
-use vo_module::ext_manifest::parse_ext_manifest_content;
 use vo_module::project;
 use vo_module::resolved_extension::{AssetRef, AssetRoot};
 use vo_module::schema::lockfile::LockedModule;
@@ -62,7 +61,7 @@ struct WasmBuildCandidate {
 
 /// Debug-only helper for local extension/framework development.
 ///
-/// This reads `vo.ext.toml` directly from a local project root and bypasses
+/// This reads extension metadata from the local project's `vo.mod` and bypasses
 /// published dependency resolution. Normal Studio/example/runtime flows must
 /// use locked published modules instead.
 pub fn debug_local_project_browser_runtime_plan_from_fs(
@@ -71,26 +70,21 @@ pub fn debug_local_project_browser_runtime_plan_from_fs(
     let project_root = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
-    let manifest_path = project_root.join("vo.ext.toml");
-    if !manifest_path.is_file() {
-        return Ok(BrowserRuntimePlan::default());
-    }
     let mod_file = project::read_mod_file(&project_root)
         .map_err(|error| format!("{}: {}", project_root.join("vo.mod").display(), error))?;
+    let Some(manifest) = mod_file.extension.as_ref() else {
+        return Ok(BrowserRuntimePlan::default());
+    };
     let module = mod_file.module.as_github().ok_or_else(|| {
         format!(
             "{}: root module must be a github module path",
             project_root.display(),
         )
     })?;
-    let content = fs::read_to_string(&manifest_path)
-        .map_err(|error| format!("{}: {}", manifest_path.display(), error))?;
-    let manifest = parse_ext_manifest_content(&content, &manifest_path)
-        .map_err(|error| format!("{}: {}", manifest_path.display(), error))?;
     Ok(browser_runtime_plan_from_manifest(
         &project_root.to_string_lossy(),
         Some(module.as_str()),
-        &manifest,
+        manifest,
     ))
 }
 
@@ -883,7 +877,7 @@ mod tests {
     }
 
     fn parse_manifest(content: &str) -> vo_module::ext_manifest::ExtensionManifest {
-        parse_ext_manifest_content(content, Path::new("/tmp/vo.ext.toml")).unwrap()
+        parse_ext_manifest_content(content, Path::new("/tmp/vo.mod")).unwrap()
     }
 
     fn resolved_artifact(kind: &str, name: &str) -> ResolvedArtifact {
@@ -968,11 +962,12 @@ mod tests {
         let module_dir =
             vo_module::cache::layout::cache_dir(cache_root, &locked.path, &locked.version);
         fs::create_dir_all(&module_dir).unwrap();
-        fs::write(
-            module_dir.join("vo.mod"),
-            format!("module {}\n\nvo {}\n", locked.path, locked.vo),
-        )
-        .unwrap();
+        let mut mod_content = format!("module {}\n\nvo {}\n", locked.path, locked.vo);
+        if let Some(ext_manifest_content) = ext_manifest_content {
+            mod_content.push('\n');
+            mod_content.push_str(ext_manifest_content);
+        }
+        fs::write(module_dir.join("vo.mod"), mod_content).unwrap();
         fs::write(
             module_dir.join(".vo-version"),
             format!("{}\n", locked.version),
@@ -988,13 +983,6 @@ mod tests {
             release_manifest_content.as_bytes(),
         )
         .unwrap();
-        if let Some(ext_manifest_content) = ext_manifest_content {
-            fs::write(
-                module_dir.join("vo.ext.toml"),
-                ext_manifest_content.as_bytes(),
-            )
-            .unwrap();
-        }
         for (relative_path, bytes) in files {
             let path = module_dir.join(relative_path);
             if let Some(parent) = path.parent() {
@@ -1222,12 +1210,9 @@ renderer = "js/dist/demo-renderer.js"
         fs::create_dir_all(project_root.join("js").join("dist")).unwrap();
         fs::write(
             project_root.join("vo.mod"),
-            "module github.com/acme/app\n\nvo 0.1.0\n",
-        )
-        .unwrap();
-        fs::write(
-            project_root.join("vo.ext.toml"),
-            r#"
+            r#"module github.com/acme/app
+vo 0.1.0
+
 [extension]
 name = "app"
 

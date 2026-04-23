@@ -432,15 +432,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_run_target_materialized_single_file_keeps_workspace_extension_manifests_during_compile() {
-        let root = make_temp_dir("single-file-compile-ext");
+    fn resolve_run_target_materialized_project_file_keeps_workspace_extension_metadata_during_compile()
+    {
+        let root = make_temp_dir("project-file-compile-ext");
         let workspace_root = root.join("workspace");
         let repo_root = root.join("repo");
         let volang_root = repo_root.join("volang");
         let examples_root = volang_root.join("examples");
+        let app_root = examples_root.join("app");
         let vogui_root = repo_root.join("vogui");
         fs::create_dir_all(&workspace_root).unwrap();
-        fs::create_dir_all(&examples_root).unwrap();
+        fs::create_dir_all(&app_root).unwrap();
         fs::create_dir_all(vogui_root.join("rust")).unwrap();
         fs::write(
             volang_root.join("vo.work"),
@@ -448,13 +450,13 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            vogui_root.join("vo.mod"),
-            "module github.com/vo-lang/vogui\n\nvo ^0.1.0\n",
+            app_root.join("vo.mod"),
+            "module github.com/acme/example-app\n\nvo ^0.1.0\n\nrequire github.com/vo-lang/vogui ^0.1.0\n",
         )
         .unwrap();
         fs::write(
-            vogui_root.join("vo.ext.toml"),
-            "[extension]\nname = \"vogui\"\npath = \"rust/target/{profile}/libvo_vogui\"\n",
+            vogui_root.join("vo.mod"),
+            "module github.com/vo-lang/vogui\n\nvo ^0.1.0\n\n[extension]\nname = \"vogui\"\n\n[extension.native]\npath = \"rust/target/{profile}/libvo_vogui\"\n",
         )
         .unwrap();
         fs::write(
@@ -462,7 +464,7 @@ mod tests {
             "package vogui\nfunc Hello() {}\n",
         )
         .unwrap();
-        let entry = examples_root.join("tetris.vo");
+        let entry = app_root.join("tetris.vo");
         fs::write(
             &entry,
             "package main\nimport \"github.com/vo-lang/vogui\"\nfunc main() { vogui.Hello() }\n",
@@ -476,7 +478,7 @@ mod tests {
         assert_eq!(compiled.extensions[0].name, "vogui");
         assert_eq!(
             compiled.extensions[0].manifest_path.canonicalize().unwrap(),
-            vogui_root.join("vo.ext.toml").canonicalize().unwrap(),
+            vogui_root.join("vo.mod").canonicalize().unwrap(),
         );
 
         remove_temp_dir(&root);

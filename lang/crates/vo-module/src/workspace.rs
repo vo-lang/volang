@@ -334,65 +334,6 @@ pub fn load_workspace_replaces<F: FileSystem>(
     Ok(replaces)
 }
 
-pub fn load_mod_file_replaces<F: FileSystem>(
-    fs: &F,
-    mod_file: &ModFile,
-    mod_file_dir: &Path,
-) -> Result<HashMap<String, PathBuf>, Error> {
-    let overrides = mod_file
-        .replace
-        .iter()
-        .map(|replace| Override {
-            module: replace.module.clone(),
-            local_dir: resolve_path(mod_file_dir, &replace.path),
-        })
-        .collect::<Vec<_>>();
-    if overrides
-        .iter()
-        .any(|override_entry| mod_file.module.as_github() == Some(&override_entry.module))
-    {
-        return Err(Error::ModFileParse(
-            "root module must not replace itself via vo.mod".to_string(),
-        ));
-    }
-    for override_entry in &overrides {
-        let mod_path = override_entry.local_dir.join("vo.mod");
-        let content = fs.read_file(&mod_path).map_err(|error| {
-            Error::ModFileParse(format!(
-                "replace {}: cannot read {}: {}",
-                override_entry.module,
-                mod_path.display(),
-                error
-            ))
-        })?;
-        let target_mod = ModFile::parse(&content).map_err(|error| {
-            Error::ModFileParse(format!(
-                "replace {}: error parsing {}: {}",
-                override_entry.module,
-                mod_path.display(),
-                error
-            ))
-        })?;
-        if target_mod.module.as_github() != Some(&override_entry.module) {
-            return Err(Error::ModFileParse(format!(
-                "replace {} points to {} but that directory declares {}",
-                override_entry.module,
-                override_entry.local_dir.display(),
-                target_mod.module,
-            )));
-        }
-    }
-
-    let mut replaces = HashMap::new();
-    for ov in overrides {
-        replaces.insert(
-            ov.module.as_str().to_string(),
-            normalize_fs_path(&ov.local_dir),
-        );
-    }
-    Ok(replaces)
-}
-
 fn resolve_path(base: &Path, relative: &str) -> PathBuf {
     let p = Path::new(relative);
     if p.is_absolute() {

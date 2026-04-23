@@ -436,7 +436,7 @@ fn resolve_vfs_compile_target(entry_path: &str) -> Result<ResolvedVfsCompileTarg
 
 fn read_vfs_package(project_root: &str, local_fs: &mut MemoryFs) -> Result<(), String> {
     fn should_keep_source_file(name: &str) -> bool {
-        name.ends_with(".vo") || matches!(name, "vo.mod" | "vo.lock" | "vo.ext.toml")
+        name.ends_with(".vo") || matches!(name, "vo.mod" | "vo.lock" | "vo.web.json")
     }
 
     fn walk(dir: &str, local_fs: &mut MemoryFs) -> Result<(), String> {
@@ -517,16 +517,6 @@ fn is_studio_session_project_root(project_root: &str) -> bool {
     let normalized = normalize_vfs_path(project_root);
     normalized.starts_with("/workspace/.studio-sessions/")
         || normalized.starts_with("/workspace/.studio-sources/")
-}
-
-fn is_studio_imported_synthetic_lock(lock_path: &str) -> Result<bool, String> {
-    if !vfs_exists(lock_path) {
-        return Ok(false);
-    }
-    let lock_content = read_vfs_text(lock_path)?;
-    let lock_file = vo_module::schema::lockfile::LockFile::parse(&lock_content)
-        .map_err(|error| format!("parse {}: {}", lock_path, error))?;
-    Ok(lock_file.created_by == STUDIO_IMPORTED_SYNTHETIC_LOCK_CREATED_BY)
 }
 
 const WASM_INSTALL_TARGET: &str = "wasm32-unknown-unknown";
@@ -615,9 +605,6 @@ async fn prepare_imported_project_dependencies(project_root: &str) -> Result<(),
         return Ok(());
     }
     let lock_path = join_vfs_path(project_root, "vo.lock");
-    if vfs_exists(&lock_path) && !is_studio_imported_synthetic_lock(&lock_path)? {
-        return Ok(());
-    }
     let mod_path = join_vfs_path(project_root, "vo.mod");
     if !vfs_exists(&mod_path) {
         return Ok(());

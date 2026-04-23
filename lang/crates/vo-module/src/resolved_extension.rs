@@ -183,7 +183,7 @@ mod tests {
     use crate::version::ExactVersion;
 
     fn parse_manifest(content: &str) -> ExtensionManifest {
-        parse_ext_manifest_content(content, Path::new("/tmp/vo.ext.toml")).unwrap()
+        parse_ext_manifest_content(content, Path::new("/tmp/vo.mod")).unwrap()
     }
 
     fn resolved_artifact(kind: &str, name: &str) -> ResolvedArtifact {

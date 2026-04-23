@@ -125,7 +125,7 @@ impl fmt::Display for Error {
             Self::LockFileParse(msg) => write!(f, "vo.lock parse error: {msg}"),
             Self::WorkFileParse(msg) => write!(f, "vo.work parse error: {msg}"),
             Self::ManifestParse(msg) => write!(f, "vo.release.json parse error: {msg}"),
-            Self::ExtManifestParse(msg) => write!(f, "vo.ext.toml parse error: {msg}"),
+            Self::ExtManifestParse(msg) => write!(f, "vo.mod metadata parse error: {msg}"),
             Self::SourceScan(msg) => write!(f, "source scan error: {msg}"),
             Self::RegistryError(msg) => write!(f, "registry error: {msg}"),
             Self::InvalidReleaseMetadata(msg) => write!(f, "invalid release metadata: {msg}"),

@@ -224,7 +224,7 @@ function shouldIncludeLocalProjectFile(name: string, relFromRoot: string): boole
   if (name.endsWith('.vo')) {
     return true;
   }
-  if (name === 'vo.mod' || name === 'vo.lock' || name === 'vo.ext.toml') {
+  if (name === 'vo.mod' || name === 'vo.lock' || name === 'vo.web.json') {
     return true;
   }
   if (relFromRoot.startsWith('js/dist/')) {

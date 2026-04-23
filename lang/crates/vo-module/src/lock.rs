@@ -91,7 +91,7 @@ pub(crate) fn validate_extension_manifest_against_release_manifest(
         ));
     }
     Err(Error::InvalidReleaseMetadata(format!(
-        "artifact contract mismatch for {}@{} between packaged vo.ext.toml and vo.release.json: {}",
+        "artifact contract mismatch for {}@{} between packaged vo.mod and vo.release.json: {}",
         manifest.module,
         manifest.version,
         detail.join("; "),
@@ -398,7 +398,7 @@ mod tests {
                 "wasm = \"lib.wasm\"\n",
                 "js_glue = \"lib.js\"\n",
             ),
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap()
     }
@@ -549,7 +549,7 @@ deps = []
     #[test]
     fn test_verify_graph_completeness_ignores_excluded_direct_requirements() {
         let mf = ModFile::parse(
-            "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.0.0\nreplace github.com/acme/lib => ../lib\n",
+            "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.0.0\n",
         )
         .unwrap();
         let lf_content = r#"version = 1
@@ -565,7 +565,7 @@ vo = "^1.0.0"
     #[test]
     fn test_verify_graph_completeness_keeps_transitive_lock_coverage_through_excluded_module() {
         let mf = ModFile::parse(
-            "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.0.0\nreplace github.com/acme/lib => ../lib\n",
+            "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.0.0\n",
         )
         .unwrap();
         let lf_content = r#"version = 1

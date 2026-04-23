@@ -53,7 +53,6 @@ A module that ships native extension code should use:
 repo/
 ├── vo.mod
 ├── vo.lock
-├── vo.ext.toml
 ├── <vo packages>
 ├── rust/
 │   ├── Cargo.toml
@@ -64,7 +63,7 @@ repo/
 
 Rules:
 
-- `vo.ext.toml` must be in module root.
+- Extension metadata must be declared in the module root `vo.mod`.
 - Native dynamic library outputs (`*.so`, `*.dylib`, `*.dll`) are build products and must not be committed.
 - Extension source and Vo declarations must stay versioned together in the same release tag.
 
@@ -97,7 +96,7 @@ Rules:
 - For monorepos, tags should include module name, e.g. `core/v1.2.3`.
 - A release must publish a machine-readable `vo.release.json` asset.
 - A release must publish a canonical source-package asset for the module version.
-- If `vo.ext.toml` declares target-specific artifacts, every required artifact implied by that declared target-support contract must be published as a release asset and listed in `vo.release.json`.
+- If `vo.mod` declares target-specific artifacts, every required artifact implied by that declared target-support contract must be published as a release asset and listed in `vo.release.json`.
 
 ## 6. CI Baseline
 
@@ -106,7 +105,7 @@ Minimum CI checks per module:
 1. `./d.py check <module-root>`
 2. `./d.py test both --release <module-or-tests>`
 
-Additional required checks when `vo.ext.toml` is present:
+Additional required checks when extension metadata is present in `vo.mod`:
 
 3. If `[extension.wasm]` is declared: `./d.py check --target=wasm <module-root>`.
 
@@ -118,14 +117,14 @@ Additional recommended checks:
 
 - `vo.lock` integrity consistency (no dependency or artifact drift without corresponding lock update)
 - no forbidden committed directories (`.vodeps`, `.vo-cache`, `target/`)
-- If `vo.ext.toml` declares native targets: at least one native test on each covered host platform should invoke an extern function to verify the shared library loads correctly
+- If `vo.mod` declares native targets: at least one native test on each covered host platform should invoke an extern function to verify the shared library loads correctly
 
 ## 7. Publishing Checklist
 
 Before tagging a release:
 
 1. `vo.mod` and `vo.lock` are up-to-date and committed.
-2. If `vo.ext.toml` exists: its declared target-support set is authoritative for published extension support. README text may summarize support, but must not contradict the manifest.
-3. If `vo.ext.toml` exists: confirm every declared `[[extension.native.targets]]` and `[extension.wasm]` artifact is built or staged with the exact asset names declared in the manifest and recorded in `vo.release.json`.
-4. If `vo.ext.toml` exists: it must use the canonical schema from `spec/native-ffi.md`; removed schema shapes are a hard error.
+2. If `vo.mod` declares extension metadata: its declared target-support set is authoritative for published extension support. README text may summarize support, but must not contradict the manifest.
+3. If `vo.mod` declares extension artifacts: confirm every declared `[[extension.native.targets]]` and `[extension.wasm]` artifact is built or staged with the exact asset names declared in the manifest and recorded in `vo.release.json`.
+4. Extension metadata must use the canonical schema from `spec/native-ffi.md` and `spec/module.md`.
 5. All CI jobs pass on the release commit.

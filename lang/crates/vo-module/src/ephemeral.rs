@@ -85,6 +85,8 @@ pub fn synthesize_mod_file(inline: &InlineMod) -> ModFile {
         module: inline.module.clone(),
         vo: inline.vo.clone(),
         require,
+        web: None,
+        extension: None,
         replace: Vec::new(),
     }
 }

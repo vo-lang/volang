@@ -69,7 +69,7 @@ impl fmt::Display for InstalledModuleError {
             InstalledModuleField::VersionMarker => ".vo-version",
             InstalledModuleField::SourceDigest => ".vo-source-digest",
             InstalledModuleField::ReleaseManifest => "vo.release.json",
-            InstalledModuleField::ExtManifest => "vo.ext.toml",
+            InstalledModuleField::ExtManifest => "vo.mod metadata",
             InstalledModuleField::Artifact => "artifact",
         };
         match self.kind.as_ref() {
@@ -199,22 +199,20 @@ fn read_installed_extension_manifest<F: FileSystem>(
     module: &str,
     version: &str,
 ) -> Result<Option<crate::ext_manifest::ExtensionManifest>, InstalledModuleError> {
-    let manifest_path = module_dir.join("vo.ext.toml");
-    if !fs.exists(&manifest_path) {
+    let mod_path = module_dir.join("vo.mod");
+    if !fs.exists(&mod_path) {
         return Ok(None);
     }
-    let content = fs
-        .read_file(&manifest_path)
-        .map_err(|_| InstalledModuleError {
-            module: module.to_string(),
-            version: version.to_string(),
-            field: InstalledModuleField::ExtManifest,
-            kind: Box::new(InstalledModuleErrorKind::Missing {
-                detail: "cached module is missing readable vo.ext.toml".to_string(),
-            }),
-        })?;
-    crate::ext_manifest::parse_ext_manifest_content(&content, &manifest_path)
-        .map(Some)
+    let content = fs.read_file(&mod_path).map_err(|_| InstalledModuleError {
+        module: module.to_string(),
+        version: version.to_string(),
+        field: InstalledModuleField::ExtManifest,
+        kind: Box::new(InstalledModuleErrorKind::Missing {
+            detail: "cached module is missing readable vo.mod".to_string(),
+        }),
+    })?;
+    crate::schema::modfile::ModFile::parse(&content)
+        .map(|mod_file| mod_file.extension)
         .map_err(|error| InstalledModuleError {
             module: module.to_string(),
             version: version.to_string(),
@@ -509,10 +507,12 @@ mod tests {
         let module_dir =
             crate::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
         let mut fs = MemoryFs::new();
-        fs.add_file(
-            module_dir.join("vo.mod"),
-            format!("module {}\nvo {}\n", locked.path, locked.vo),
-        );
+        let mut mod_content = format!("module {}\nvo {}\n", locked.path, locked.vo);
+        if let Some(ext_manifest) = ext_manifest {
+            mod_content.push('\n');
+            mod_content.push_str(ext_manifest);
+        }
+        fs.add_file(module_dir.join("vo.mod"), mod_content);
         fs.add_file(
             module_dir.join(super::super::layout::VERSION_MARKER),
             format!("{}\n", locked.version),
@@ -522,9 +522,6 @@ mod tests {
             format!("{}\n", locked.source),
         );
         fs.add_file(module_dir.join("vo.release.json"), manifest_raw);
-        if let Some(ext_manifest) = ext_manifest {
-            fs.add_file(module_dir.join("vo.ext.toml"), ext_manifest);
-        }
         (fs, locked, module_dir)
     }
 

@@ -56,6 +56,20 @@ fn canonical_native_ext_manifest(name: &str, path: &str, library_stem: &str) -> 
     )
 }
 
+fn append_vo_mod_metadata(root: &std::path::Path, metadata: &str) {
+    let mod_path = root.join("vo.mod");
+    let mut content = fs::read_to_string(&mod_path).unwrap();
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push('\n');
+    content.push_str(metadata);
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    fs::write(mod_path, content).unwrap();
+}
+
 fn render_cached_release_manifest(locked: &vo_module::schema::lockfile::LockedModule) -> String {
     let manifest = ReleaseManifest {
         schema_version: 1,
@@ -95,8 +109,8 @@ fn test_compile_source_without_external_modules() {
 }
 
 #[test]
-fn test_compile_all_modfile_replaced_external_deps_succeeds_without_vo_lock() {
-    let root = temp_dir("vo_compile_all_modfile_replaced_no_lock");
+fn test_compile_all_workspace_replaced_external_deps_succeeds_without_vo_lock() {
+    let root = temp_dir("vo_compile_all_workspace_replaced_no_lock");
     let app_root = root.join("app");
     let local_voplay = root.join("voplay");
 
@@ -105,7 +119,12 @@ fn test_compile_all_modfile_replaced_external_deps_succeeds_without_vo_lock() {
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/vo-lang/voplay ^0.1.0\nreplace github.com/vo-lang/voplay => ../voplay\n",
+        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/vo-lang/voplay ^0.1.0\n",
+    )
+    .unwrap();
+    fs::write(
+        app_root.join("vo.work"),
+        "version = 1\n[[use]]\npath = \"../voplay\"\n",
     )
     .unwrap();
     fs::write(
@@ -127,15 +146,15 @@ fn test_compile_all_modfile_replaced_external_deps_succeeds_without_vo_lock() {
     let result = compile(app_root.to_str().unwrap());
     assert!(
         result.is_ok(),
-        "expected success when all external deps are replaced via vo.mod, got: {result:?}"
+        "expected success when all external deps are replaced via vo.work, got: {result:?}"
     );
 
     fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
-fn test_compile_rejects_modfile_replace_identity_mismatch() {
-    let root = temp_dir("vo_compile_modfile_replace_identity_mismatch");
+fn test_compile_rejects_workspace_override_identity_mismatch_with_declared_module() {
+    let root = temp_dir("vo_compile_workspace_override_identity_mismatch");
     let app_root = root.join("app");
     let local_lib = root.join("lib");
 
@@ -144,7 +163,12 @@ fn test_compile_rejects_modfile_replace_identity_mismatch() {
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo 0.1.0\nreplace github.com/example/declared => ../lib\n",
+        "module github.com/acme/app\nvo 0.1.0\nrequire github.com/example/declared v0.1.0\n",
+    )
+    .unwrap();
+    fs::write(
+        app_root.join("vo.work"),
+        "version = 1\n[[use]]\nmodule = \"github.com/example/declared\"\npath = \"../lib\"\n",
     )
     .unwrap();
     fs::write(app_root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
@@ -158,17 +182,17 @@ fn test_compile_rejects_modfile_replace_identity_mismatch() {
     let result = compile(app_root.to_str().unwrap());
     match result {
         Err(CompileError::ModuleSystem(error)) => {
-            assert_eq!(error.stage(), ModuleSystemStage::ModFile);
-            assert_eq!(error.kind(), ModuleSystemErrorKind::ParseFailed);
+            assert_eq!(error.stage(), ModuleSystemStage::Workspace);
+            assert_eq!(error.kind(), ModuleSystemErrorKind::ValidationFailed);
             assert!(
                 error
                     .detail()
-                    .contains("replace github.com/example/declared points to"),
+                    .contains("workspace override identity mismatch",),
                 "{}",
                 error.detail()
             );
         }
-        other => panic!("expected vo.mod replace validation error, got {other:?}"),
+        other => panic!("expected vo.work validation error, got {other:?}"),
     }
 
     fs::remove_dir_all(&root).unwrap();
@@ -482,11 +506,10 @@ fn test_validate_locked_extension_manifests_require_locked_native_artifact() {
         format!("{}\n", source_digest),
     )
     .unwrap();
-    fs::write(
-        module_dir.join("vo.ext.toml"),
-        canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
-    )
-    .unwrap();
+    append_vo_mod_metadata(
+        &module_dir,
+        &canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
+    );
 
     let manifest = vo_module::ext_manifest::discover_extensions(&module_dir)
         .unwrap()
@@ -576,11 +599,10 @@ fn test_resolve_extension_manifests_uses_cached_native_artifact_path() {
         format!("{}\n", source_digest),
     )
     .unwrap();
-    fs::write(
-        module_dir.join("vo.ext.toml"),
-        canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
-    )
-    .unwrap();
+    append_vo_mod_metadata(
+        &module_dir,
+        &canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
+    );
 
     let manifest = vo_module::ext_manifest::discover_extensions(&module_dir)
         .unwrap()
@@ -703,11 +725,10 @@ fn test_compile_prefers_local_replace_extension_manifest_paths() {
         "module github.com/vo-lang/vogui\nvo 0.1.0\n",
     )
     .unwrap();
-    fs::write(
-        local_vogui.join("vo.ext.toml"),
-        canonical_native_ext_manifest("vogui", "rust/target/{profile}/libvo_vogui", "libvo_vogui"),
-    )
-    .unwrap();
+    append_vo_mod_metadata(
+        &local_vogui,
+        &canonical_native_ext_manifest("vogui", "rust/target/{profile}/libvo_vogui", "libvo_vogui"),
+    );
     fs::write(
         local_vogui.join("vogui.vo"),
         "package vogui\nfunc Hello(){}\n",
@@ -769,11 +790,10 @@ fn test_compile_single_file_entry_in_project_uses_ancestor_workfile_extension_ma
         "module github.com/vo-lang/vogui\nvo 0.1.0\n",
     )
     .unwrap();
-    fs::write(
-        local_vogui.join("vo.ext.toml"),
-        canonical_native_ext_manifest("vogui", "rust/target/{profile}/libvo_vogui", "libvo_vogui"),
-    )
-    .unwrap();
+    append_vo_mod_metadata(
+        &local_vogui,
+        &canonical_native_ext_manifest("vogui", "rust/target/{profile}/libvo_vogui", "libvo_vogui"),
+    );
     fs::write(
         local_vogui.join("vogui.vo"),
         "package vogui\nfunc Hello(){}\n",
@@ -895,8 +915,8 @@ fn test_compile_single_file_inline_mod_duplicate_directive_is_parse_error() {
 }
 
 #[test]
-fn test_compile_single_file_inline_mod_rejects_ext_manifest_coexistence() {
-    let root = temp_dir("vo_compile_inline_mod_ext_manifest_conflict");
+fn test_compile_single_file_inline_mod_rejects_project_vo_mod_with_extension_metadata() {
+    let root = temp_dir("vo_compile_inline_mod_project_metadata_conflict");
     fs::create_dir_all(&root).unwrap();
 
     let file_path = root.join("demo.vo");
@@ -906,10 +926,14 @@ fn test_compile_single_file_inline_mod_rejects_ext_manifest_coexistence() {
     )
     .unwrap();
     fs::write(
-        root.join("vo.ext.toml"),
-        canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
+        root.join("vo.mod"),
+        "module github.com/acme/demo\nvo ^0.1.0\n",
     )
     .unwrap();
+    append_vo_mod_metadata(
+        &root,
+        &canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
+    );
 
     let err = compile(file_path.to_string_lossy().as_ref()).unwrap_err();
     let module_system = match &err {
@@ -922,7 +946,7 @@ fn test_compile_single_file_inline_mod_rejects_ext_manifest_coexistence() {
         ModuleSystemErrorKind::ValidationFailed
     );
     assert!(
-        module_system.detail().contains("vo.ext.toml"),
+        module_system.detail().contains("vo.mod"),
         "{}",
         module_system.detail()
     );
@@ -1330,18 +1354,20 @@ fn test_compile_with_cache_fingerprint_tracks_extension_manifest() {
     )
     .unwrap();
     fs::write(root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
-    fs::write(
-        root.join("vo.ext.toml"),
-        canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
-    )
-    .unwrap();
+    append_vo_mod_metadata(
+        &root,
+        &canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
+    );
 
     compile_with_cache(root.to_string_lossy().as_ref()).unwrap();
     let first = read_saved_cache_fingerprint(&root, None);
 
     fs::write(
-        root.join("vo.ext.toml"),
-        canonical_native_ext_manifest("demo2", "rust/target/{profile}/libdemo2", "libdemo2"),
+        root.join("vo.mod"),
+        format!(
+            "module github.com/acme/app\nvo ^0.1.0\n\n{}",
+            canonical_native_ext_manifest("demo2", "rust/target/{profile}/libdemo2", "libdemo2")
+        ),
     )
     .unwrap();
 
@@ -1403,8 +1429,8 @@ fn test_compile_with_cache_fingerprint_tracks_workspace_replace_sources() {
 }
 
 #[test]
-fn test_compile_with_cache_fingerprint_tracks_modfile_replace_sources() {
-    let root = temp_dir("vo_compile_cache_modfile_replace_source");
+fn test_compile_with_cache_fingerprint_tracks_workspace_override_sources_with_declared_module() {
+    let root = temp_dir("vo_compile_cache_workspace_override_source");
     let app_root = root.join("app");
     let local_lib = root.join("lib");
 
@@ -1413,7 +1439,12 @@ fn test_compile_with_cache_fingerprint_tracks_modfile_replace_sources() {
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/example/lib ^0.1.0\nreplace github.com/example/lib => ../lib\n",
+        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/example/lib ^0.1.0\n",
+    )
+    .unwrap();
+    fs::write(
+        app_root.join("vo.work"),
+        "version = 1\n[[use]]\npath = \"../lib\"\n",
     )
     .unwrap();
     fs::write(
@@ -1572,11 +1603,10 @@ fn test_compile_single_file_ignores_unimported_workspace_native_extension() {
         "module github.com/example/badext\nvo 0.1.0\n",
     )
     .unwrap();
-    fs::write(
-        bad_ext.join("vo.ext.toml"),
-        canonical_native_ext_manifest("badext", "rust/target/{profile}/libbadext", "libbadext"),
-    )
-    .unwrap();
+    append_vo_mod_metadata(
+        &bad_ext,
+        &canonical_native_ext_manifest("badext", "rust/target/{profile}/libbadext", "libbadext"),
+    );
     fs::write(
         bad_ext.join("rust").join("Cargo.toml"),
         "[package]\nname = \"badext\"\nversion = \"0.1.0\"\nthis is not valid toml\n",
@@ -1615,11 +1645,10 @@ fn test_compile_directory_ignores_unimported_workspace_native_extension() {
         "module github.com/example/badext\nvo 0.1.0\n",
     )
     .unwrap();
-    fs::write(
-        bad_ext.join("vo.ext.toml"),
-        "[extension]\nname = \"badext\"\npath = \"rust/target/{profile}/libbadext\"\n",
-    )
-    .unwrap();
+    append_vo_mod_metadata(
+        &bad_ext,
+        &canonical_native_ext_manifest("badext", "rust/target/{profile}/libbadext", "libbadext"),
+    );
     fs::write(
         bad_ext.join("rust").join("Cargo.toml"),
         "[package]\nname = \"badext\"\nversion = \"0.1.0\"\nthis is not valid toml\n",

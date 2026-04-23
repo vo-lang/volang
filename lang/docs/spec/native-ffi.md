@@ -8,7 +8,7 @@ Status: Draft
 This specification defines the native extension contract for Vo modules.
 It covers:
 
-- the canonical `vo.ext.toml` schema
+- the canonical `vo.mod` extension metadata schema
 - explicit published target declarations
 - mapping from manifest fields to `vo.release.json` artifact identities
 - the runtime entry-table contract for Rust-backed extensions
@@ -23,8 +23,8 @@ This specification does not define:
 
 ## 2. Design Principles
 
-- **Manifest-first publication**. Published extension support is declared by `vo.ext.toml`, not inferred from CI logs, repository layout, or artifact filenames alone.
-- **Explicit target support**. A target is supported only if it is explicitly declared in `vo.ext.toml`.
+- **Manifest-first publication**. Published extension support is declared in `vo.mod`, not inferred from CI logs, repository layout, or artifact filenames alone.
+- **Explicit target support**. A target is supported only if it is explicitly declared in `vo.mod`.
 - **Partial target support is normal**. A module version may support some targets and omit others.
 - **No implicit fallback for published dependencies**. If a published dependency needs a native artifact for the active target, the build uses the locked published artifact or fails.
 - **Separation of local hints and published identity**. Local build paths help workspace development; published artifact names are declared explicitly and recorded in `vo.release.json`.
@@ -83,14 +83,14 @@ pub enum ExternResult {
 | `AnySlot` | `any` |
 | `GcRef` | Reference types |
 
-## 4. Extension Manifest (`vo.ext.toml`)
+## 4. Extension Metadata in `vo.mod`
 
 ### 4.1 Location and Ownership
 
-- `vo.ext.toml` MUST be located at the module root.
+- Extension metadata MUST be declared in the module root `vo.mod`.
 - It is part of the published source package.
-- A module root MUST contain at most one `vo.ext.toml`.
-- If `vo.ext.toml` is absent, the module declares no extension metadata.
+- A module root has exactly one human-authored module manifest: `vo.mod`.
+- If `vo.mod` has no `[extension]` table, the module declares no extension metadata.
 
 ### 4.2 Protocol-owned Tables
 
@@ -101,8 +101,7 @@ The module protocol interprets only these tables:
 - `[[extension.native.targets]]`
 - `[extension.wasm]`
 
-Other top-level tables such as `[extension.web]` MAY exist for host-specific tooling.
-The module system MUST ignore tables it does not own.
+`[extension.web]` and `[extension.web.js]` are defined by `module.md` for browser hosts.
 
 ### 4.3 Canonical Shape
 
@@ -133,6 +132,9 @@ type = "standalone"
 wasm = "vogui.wasm"
 
 [extension.web]
+capabilities = ["render"]
+
+[extension.web.js]
 renderer = "js/dist/studio_renderer.js"
 protocol = "js/dist/studio_protocol.js"
 host_bridge = "js/dist/studio_host_bridge.js"
@@ -140,7 +142,7 @@ host_bridge = "js/dist/studio_host_bridge.js"
 
 ### 4.4 `[extension]`
 
-The `[extension]` table is required if `vo.ext.toml` exists.
+The `[extension]` table is required if the module declares extension metadata.
 
 Fields:
 
@@ -161,16 +163,16 @@ If present, the module declares native published targets backed by a Rust shared
 
 Fields:
 
-- `path` — required string; module-relative local build output hint for workspace/native development
+- `path` — optional string; module-relative local build output hint for workspace/native development
 
 Rules:
 
-- `path` MUST be non-empty.
-- `path` MUST be module-relative.
-- `path` MAY contain the placeholder `{profile}`.
-- `path` MAY omit the platform-specific library suffix for local development.
+- If present, `path` MUST be non-empty.
+- If present, `path` MUST be module-relative.
+- If present, `path` MAY contain the placeholder `{profile}`.
+- If present, `path` MAY omit the platform-specific library suffix for local development.
 - `path` is a local-development hint; it does not define the published artifact name for any target.
-- If `[extension.native]` is present, at least one `[[extension.native.targets]]` entry MUST be present.
+- If `[extension.native]` has no `[[extension.native.targets]]`, the module declares local native build metadata but publishes no native artifacts.
 
 ### 4.6 `[[extension.native.targets]]`
 
@@ -211,7 +213,7 @@ Rules:
 
 ### 4.8 Artifact Mapping
 
-`vo.ext.toml` determines the published artifact identities that must appear in `vo.release.json` and `vo.lock`.
+`vo.mod` determines the published artifact identities that must appear in `vo.release.json` and `vo.lock`.
 
 | Manifest field | Published target | Artifact kind | Artifact name |
 |---|---|---|---|
@@ -227,7 +229,7 @@ Rules:
 
 ### 4.9 Validation Rules
 
-- `vo.ext.toml` MUST declare at least one of `[extension.native]` or `[extension.wasm]`.
+- Extension metadata MAY declare `[extension.native]`, `[extension.wasm]`, or browser runtime metadata.
 - A module MAY declare both native and WASM support.
 - A module MAY declare only native support.
 - A module MAY declare only WASM support.
@@ -236,29 +238,7 @@ Rules:
 - A published release MUST include every artifact implied by the declared native target entries and the declared WASM section.
 - Build tools MUST fail on manifest/release mismatches rather than inferring missing target support.
 
-### 4.10 Removed Schema Rejection
-
-Historically, some Vo modules used a reduced manifest shape in which the local native build hint lived at `[extension].path`.
-
-```toml
-[extension]
-name = "vogui"
-path = "rust/target/{profile}/libvo_vogui"
-
-[extension.wasm]
-type = "standalone"
-wasm = "vogui.wasm"
-```
-
-Rejection rules:
-
-- The removed shape above is invalid for this specification.
-- Tools MUST reject manifests that use `[extension].path` instead of `[extension.native].path`.
-- Tools MUST reject manifests that attempt to infer published native target support from a single host-local path.
-- Tools MUST NOT implement temporary adapters, implicit rewrites, or alternate parsing for the removed shape.
-- Publication validation MUST fail if the manifest does not use the canonical schema defined in this document.
-
-### 4.11 Examples
+### 4.10 Examples
 
 Native-only extension:
 
@@ -351,4 +331,3 @@ Rules:
 - Local workspace/native development MAY use `[extension.native].path` to find the host build output.
 - Published dependencies MUST use the exact artifacts locked from `vo.release.json`.
 - A published dependency's native library MUST NOT be rebuilt implicitly during a frozen build.
-

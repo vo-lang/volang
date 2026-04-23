@@ -655,11 +655,15 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_entry_with_mod_fs_honors_modfile_replace_without_vo_lock() {
+    fn test_compile_entry_with_mod_fs_honors_vo_work_without_vo_lock() {
         let mut local_fs = MemoryFs::new();
         local_fs.add_file(
             "workspace/app/vo.mod",
-            "module github.com/acme/app\n\nvo 0.1.0\n\nrequire github.com/acme/replaced v0.1.0\nreplace github.com/acme/replaced => ../replaced\n",
+            "module github.com/acme/app\n\nvo 0.1.0\n\nrequire github.com/acme/replaced v0.1.0\n",
+        );
+        local_fs.add_file(
+            "workspace/app/vo.work",
+            "version = 1\n[[use]]\npath = \"../replaced\"\n",
         );
         local_fs.add_file(
             "workspace/app/main.vo",
@@ -776,14 +780,18 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_entry_with_mod_fs_keeps_locked_transitive_modules_for_modfile_replace() {
+    fn test_compile_entry_with_mod_fs_keeps_locked_transitive_modules_for_workspace_override() {
         let std_fs = build_stdlib_fs();
         let mut local_fs = MemoryFs::new();
         let mut mod_fs = MemoryFs::new();
 
         local_fs.add_file(
             "workspace/app/vo.mod",
-            "module github.com/acme/app\n\nvo 0.1.0\n\nrequire github.com/acme/replaced v0.1.0\nreplace github.com/acme/replaced => ../replaced\n",
+            "module github.com/acme/app\n\nvo 0.1.0\n\nrequire github.com/acme/replaced v0.1.0\n",
+        );
+        local_fs.add_file(
+            "workspace/app/vo.work",
+            "version = 1\n[[use]]\npath = \"../replaced\"\n",
         );
         local_fs.add_file(
             "workspace/app/vo.lock",

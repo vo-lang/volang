@@ -212,7 +212,7 @@ fn is_compile_input_file(path: &Path) -> bool {
     }
     matches!(
         path.file_name().and_then(|name| name.to_str()),
-        Some("vo.mod") | Some("vo.lock") | Some("vo.ext.toml") | Some("vo.work")
+        Some("vo.mod") | Some("vo.lock") | Some("vo.web.json") | Some("vo.work")
     )
 }
 

@@ -169,7 +169,7 @@ vo_ext::export_extensions!();
 ```bash
 cargo build --release
 # The resulting .so/.dylib/.dll is loaded by Vo runtime
-# (Configuration in vo.ext.toml matches Vo packages to library paths)
+# (Extension metadata in vo.mod matches Vo packages to library paths)
 ```
 
 ## Macro Expansion
@@ -199,5 +199,4 @@ fn __vo_wrapper_add(call: &mut ExternCall) -> ExternResult {
 | `&str` | `string` |
 | `AnySlot` | `any` |
 | `GcRef` | Reference types |
-
 

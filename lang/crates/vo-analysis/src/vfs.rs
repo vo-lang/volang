@@ -10,11 +10,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::project::{AnalysisError, Project};
 use vo_common::abi::package_abi_path;
 use vo_common::vfs::{normalize_fs_path, FileSet, FileSystem, RealFs};
-use vo_module::ext_manifest::extension_name_from_content;
-
-use crate::project::{AnalysisError, Project};
 
 /// A resolved package from the package resolver.
 #[derive(Debug, Clone)]
@@ -421,11 +419,11 @@ fn find_extension_name_in_fs<F: FileSystem>(
     pkg_path: &Path,
 ) -> Result<Option<String>, String> {
     for ancestor in relative_path_ancestors(pkg_path) {
-        let manifest_path = ancestor.join("vo.ext.toml");
-        if let Ok(content) = fs.read_file(&manifest_path) {
-            return extension_name_from_content(&content)
-                .map(Some)
-                .map_err(|error| format!("{}: {}", manifest_path.display(), error));
+        let mod_path = ancestor.join("vo.mod");
+        if let Ok(content) = fs.read_file(&mod_path) {
+            return vo_module::schema::modfile::ModFile::parse(&content)
+                .map(|mod_file| mod_file.extension.map(|extension| extension.name))
+                .map_err(|error| format!("{}: {}", mod_path.display(), error));
         }
     }
     Ok(None)
@@ -437,11 +435,11 @@ fn find_extension_name_abs(abs_pkg_path: &Path) -> Result<Option<String>, String
     }
     let mut dir = abs_pkg_path;
     loop {
-        let manifest_path = dir.join("vo.ext.toml");
-        if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-            return extension_name_from_content(&content)
-                .map(Some)
-                .map_err(|error| format!("{}: {}", manifest_path.display(), error));
+        let mod_path = dir.join("vo.mod");
+        if let Ok(content) = std::fs::read_to_string(&mod_path) {
+            return vo_module::schema::modfile::ModFile::parse(&content)
+                .map(|mod_file| mod_file.extension.map(|extension| extension.name))
+                .map_err(|error| format!("{}: {}", mod_path.display(), error));
         }
         let Some(parent) = dir.parent() else {
             return Ok(None);
@@ -742,7 +740,7 @@ mod tests {
         let mut fs = MemoryFs::new();
         fs.add_file(
             "workspace/game/vo.mod",
-            "module github.com/acme/game\n\nvo 0.1\n",
+            "module github.com/acme/game\n\nvo 0.1.0\n",
         );
         fs.add_file("workspace/game/main.vo", "package main\n");
         fs.add_file("workspace/game/codec/codec.vo", "package codec\n");
@@ -773,7 +771,7 @@ mod tests {
         let mut fs = MemoryFs::new();
         fs.add_file(
             "cache/github.com/acme/game/.vo/versions/v0.1.0/vo.mod",
-            "module github.com/acme/game\n\nvo 0.1\n",
+            "module github.com/acme/game\n\nvo 0.1.0\n",
         );
         fs.add_file(
             "cache/github.com/acme/game/.vo/versions/v0.1.0/game.vo",
@@ -853,7 +851,7 @@ mod tests {
         let mut workspace_fs = MemoryFs::new();
         workspace_fs.add_file(
             "workspace/voplay/vo.mod",
-            "module github.com/vo-lang/voplay\n\nvo 0.1\n",
+            "module github.com/vo-lang/voplay\n\nvo 0.1.0\n",
         );
         workspace_fs.add_file("workspace/voplay/voplay.vo", "package voplay\n");
         workspace_fs.add_file("workspace/voplay/codec/codec.vo", "package codec\n");
@@ -888,8 +886,10 @@ mod tests {
         let fs = MemoryFs::new()
             .with_file("github.com/acme/game/game.vo", "package game\n")
             .with_file(
-                "github.com/acme/game/vo.ext.toml",
+                "github.com/acme/game/vo.mod",
                 concat!(
+                    "module github.com/acme/game\n",
+                    "vo 0.1.0\n\n",
                     "[extension]\n",
                     "name = \"game\"\n",
                     "path = \"rust/target/release/libgame\"\n",
@@ -898,7 +898,7 @@ mod tests {
 
         let resolver = PackageResolver::with_fs(fs);
         let error = resolver.resolve("github.com/acme/game").unwrap_err();
-        assert!(error.contains("vo.ext.toml"));
+        assert!(error.contains("vo.mod"));
         assert!(error.contains("[extension].path is invalid"));
     }
 }

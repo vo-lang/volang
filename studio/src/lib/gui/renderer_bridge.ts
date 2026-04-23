@@ -87,7 +87,7 @@ export interface RendererHost {
 
 // ---- RendererModule contract ----
 // Frameworks must export an object implementing this interface from their
-// renderer JS entry (declared in vo.ext.toml [extension.web.js] renderer = "...").
+// renderer JS entry (declared in vo.mod [extension.web.js] renderer = "...").
 
 export interface RendererModule {
   init(host: RendererHost): Promise<void>;

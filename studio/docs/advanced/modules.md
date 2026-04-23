@@ -55,14 +55,17 @@ import (
 
 ## Native Extensions (FFI)
 
-Modules can include Rust native extensions via `vo.ext.toml`:
+Modules declare extension metadata in `vo.mod`:
 
 ```toml
 [extension]
 name = "myext"
+
+[extension.native]
+path = "rust/target/{profile}/libmyext"
 ```
 
-The native code lives in a `rust/` subdirectory with a standard Cargo project. The extension is compiled to a `.wasm` file for portability.
+The native code lives in a `rust/` subdirectory with a standard Cargo project. Modules may publish native shared libraries for CLI/native hosts and browser-loadable `.wasm` artifacts for web hosts.
 
 ## Workspaces
 

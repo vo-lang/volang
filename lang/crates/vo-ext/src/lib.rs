@@ -28,7 +28,7 @@
 //!
 //! ```text
 //! myext/
-//! ├── vo.ext.toml          # Extension manifest
+//! ├── vo.mod               # Module and extension metadata
 //! ├── math/
 //! │   └── math.vo          # Vo interface (extern declarations)
 //! └── native/

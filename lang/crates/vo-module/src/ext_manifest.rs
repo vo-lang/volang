@@ -9,7 +9,7 @@ use crate::Error;
 
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
-/// Parsed extension manifest from `vo.ext.toml`.
+/// Parsed extension metadata declared in `vo.mod`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtensionManifest {
     pub name: String,
@@ -22,7 +22,7 @@ pub struct ExtensionManifest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeExtensionConfig {
-    pub path: String,
+    pub path: Option<String>,
     pub targets: Vec<NativeTargetDeclaration>,
 }
 
@@ -61,6 +61,18 @@ pub struct WebRuntimeManifest {
     pub js_modules: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebProjectManifest {
+    pub entry: Option<String>,
+    pub include: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ModMetadata {
+    pub web: Option<WebProjectManifest>,
+    pub extension: Option<ExtensionManifest>,
+}
+
 impl WebRuntimeManifest {
     pub fn js_module_path(&self, name: &str) -> Option<&str> {
         self.js_modules.get(name).map(|path| path.as_str())
@@ -70,7 +82,8 @@ impl WebRuntimeManifest {
 impl ExtensionManifest {
     pub fn resolve_local_native_path(&self, module_root: &Path) -> Option<PathBuf> {
         let native = self.native.as_ref()?;
-        Some(resolve_library_path(module_root.join(&native.path)))
+        let path = native.path.as_ref()?;
+        Some(resolve_library_path(module_root.join(path)))
     }
 
     pub fn web_runtime(&self) -> Option<&WebRuntimeManifest> {
@@ -123,39 +136,73 @@ impl ExtensionManifest {
     }
 }
 
-/// Discover extension manifests from a package directory.
-/// Looks for `vo.ext.toml` and returns parsed manifests.
+/// Discover extension metadata from a package directory's `vo.mod`.
 pub fn discover_extensions(pkg_root: &Path) -> Result<Vec<ExtensionManifest>, Error> {
-    let manifest_path = pkg_root.join("vo.ext.toml");
-    if !manifest_path.exists() {
+    let mod_path = pkg_root.join("vo.mod");
+    if !mod_path.exists() {
         return Ok(Vec::new());
     }
-    let manifest = parse_manifest(&manifest_path)?;
-    Ok(vec![manifest])
-}
-
-fn parse_manifest(path: &Path) -> Result<ExtensionManifest, Error> {
-    let content = std::fs::read_to_string(path)?;
-    parse_ext_manifest_content(&content, path)
+    let content = std::fs::read_to_string(&mod_path)?;
+    Ok(parse_mod_metadata_content(&content, &mod_path)?
+        .extension
+        .into_iter()
+        .collect())
 }
 
 pub fn parse_ext_manifest_content(
     content: &str,
     manifest_path: &Path,
 ) -> Result<ExtensionManifest, Error> {
-    let value: toml::Value =
-        toml::from_str(content).map_err(|e| Error::ExtManifestParse(e.to_string()))?;
-    parse_manifest_value(&value, manifest_path)
+    parse_mod_metadata_content(content, manifest_path)?
+        .extension
+        .ok_or_else(|| Error::ExtManifestParse("missing [extension] section".to_string()))
 }
 
-fn parse_manifest_value(
+pub fn parse_mod_metadata_content(
+    content: &str,
+    manifest_path: &Path,
+) -> Result<ModMetadata, Error> {
+    let metadata = metadata_toml_from_content(content);
+    if metadata.trim().is_empty() {
+        return Ok(ModMetadata::default());
+    }
+    let value: toml::Value =
+        toml::from_str(metadata).map_err(|e| Error::ExtManifestParse(e.to_string()))?;
+    parse_metadata_value(&value, manifest_path)
+}
+
+fn metadata_toml_from_content(content: &str) -> &str {
+    content
+        .lines()
+        .position(|line| line.trim_start().starts_with('['))
+        .map(|idx| {
+            let byte_idx = content
+                .lines()
+                .take(idx)
+                .map(|line| line.len() + 1)
+                .sum::<usize>();
+            &content[byte_idx..]
+        })
+        .unwrap_or("")
+}
+
+fn parse_metadata_value(value: &toml::Value, manifest_path: &Path) -> Result<ModMetadata, Error> {
+    let root = value.as_table().ok_or_else(|| {
+        Error::ExtManifestParse("vo.mod metadata must be TOML tables".to_string())
+    })?;
+    reject_unknown_keys(root, &["web", "extension"], "vo.mod metadata")?;
+    let web = parse_web_project_from_value(root)?;
+    let extension = parse_extension_from_value(value, manifest_path)?;
+    Ok(ModMetadata { web, extension })
+}
+
+fn parse_extension_from_value(
     value: &toml::Value,
     manifest_path: &Path,
-) -> Result<ExtensionManifest, Error> {
-    let extension = value
-        .get("extension")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| Error::ExtManifestParse("missing [extension] section".to_string()))?;
+) -> Result<Option<ExtensionManifest>, Error> {
+    let Some(extension) = value.get("extension").and_then(toml::Value::as_table) else {
+        return Ok(None);
+    };
     if extension.contains_key("path") {
         return Err(Error::ExtManifestParse(
             "[extension].path is invalid; use [extension.native].path instead".to_string(),
@@ -171,20 +218,14 @@ fn parse_manifest_value(
     let native = parse_native_extension_from_value(extension)?;
     let wasm = parse_wasm_extension_from_value(extension)?;
     let web = parse_web_runtime_from_value(value, extension)?;
-    if native.is_none() && wasm.is_none() {
-        return Err(Error::ExtManifestParse(
-            "extension manifest must declare at least one of [extension.native] or [extension.wasm]"
-                .to_string(),
-        ));
-    }
-    Ok(ExtensionManifest {
+    Ok(Some(ExtensionManifest {
         name,
         include,
         native,
         wasm,
         web,
         manifest_path: manifest_path.to_path_buf(),
-    })
+    }))
 }
 
 fn resolve_library_path(path: PathBuf) -> PathBuf {
@@ -223,16 +264,44 @@ fn resolve_library_path(path: PathBuf) -> PathBuf {
 }
 
 pub fn extension_name_from_content(content: &str) -> Result<String, Error> {
-    Ok(parse_ext_manifest_content(content, Path::new("vo.ext.toml"))?.name)
+    Ok(parse_ext_manifest_content(content, Path::new("vo.mod"))?.name)
 }
 
-/// Read the generic `include` list from `[extension]` in a `vo.ext.toml` string.
+/// Read the generic `include` list from `[extension]` in `vo.mod` metadata.
 ///
 /// Returns the declared paths that must ship with the source package.
 /// The release/install layer uses this — it never needs to know about
 /// host-specific sections like `[extension.web]`.
 pub fn include_paths_from_content(content: &str) -> Result<Vec<PathBuf>, Error> {
-    Ok(parse_ext_manifest_content(content, Path::new("vo.ext.toml"))?.include)
+    Ok(parse_ext_manifest_content(content, Path::new("vo.mod"))?.include)
+}
+
+pub fn source_include_paths_from_content(content: &str) -> Result<Vec<PathBuf>, Error> {
+    let metadata = parse_mod_metadata_content(content, Path::new("vo.mod"))?;
+    let mut paths = Vec::new();
+    if let Some(web) = metadata.web {
+        paths.extend(web.include);
+    }
+    if let Some(extension) = metadata.extension {
+        paths.extend(extension.include);
+    }
+    Ok(paths)
+}
+
+fn parse_web_project_from_value(
+    root: &toml::value::Table,
+) -> Result<Option<WebProjectManifest>, Error> {
+    let Some(web) = root.get("web") else {
+        return Ok(None);
+    };
+    let table = web
+        .as_table()
+        .ok_or_else(|| Error::ExtManifestParse("[web] must be a table".to_string()))?;
+    reject_unknown_keys(table, &["entry", "include"], "[web]")?;
+    Ok(Some(WebProjectManifest {
+        entry: optional_nonempty_string(table, "entry", "[web]")?,
+        include: parse_include_path_array(table, "include", "[web]")?,
+    }))
 }
 
 fn parse_web_runtime_from_value(
@@ -352,20 +421,26 @@ fn parse_wasm_extension_table(table: &toml::value::Table) -> Result<WasmExtensio
 }
 
 fn parse_include_paths(extension: &toml::value::Table) -> Result<Vec<PathBuf>, Error> {
-    let Some(include) = extension.get("include") else {
+    parse_include_path_array(extension, "include", "[extension]")
+}
+
+fn parse_include_path_array(
+    table: &toml::value::Table,
+    key: &str,
+    scope: &str,
+) -> Result<Vec<PathBuf>, Error> {
+    let Some(include) = table.get(key) else {
         return Ok(Vec::new());
     };
     let items = include.as_array().ok_or_else(|| {
-        Error::ExtManifestParse("'include' in [extension] must be an array".to_string())
+        Error::ExtManifestParse(format!("'{}' in {} must be an array", key, scope))
     })?;
     let mut paths = Vec::new();
     for item in items {
         let s = item.as_str().ok_or_else(|| {
-            Error::ExtManifestParse(
-                "each entry in [extension].include must be a string".to_string(),
-            )
+            Error::ExtManifestParse(format!("each entry in {}.{} must be a string", scope, key))
         })?;
-        validate_relative_path(s, "[extension].include")?;
+        validate_relative_path(s, &format!("{}.{}", scope, key))?;
         paths.push(PathBuf::from(s));
     }
     Ok(paths)
@@ -381,26 +456,21 @@ fn parse_native_extension_from_value(
         .as_table()
         .ok_or_else(|| Error::ExtManifestParse("[extension.native] must be a table".to_string()))?;
     reject_unknown_keys(native, &["path", "targets"], "[extension.native]")?;
-    let path = required_string(native, "path", "[extension.native]")?;
-    validate_relative_path(&path, "[extension.native].path")?;
-    let targets = native.get("targets").ok_or_else(|| {
-        Error::ExtManifestParse(
-            "missing [[extension.native.targets]] in [extension.native]".to_string(),
-        )
-    })?;
-    let targets = targets.as_array().ok_or_else(|| {
-        Error::ExtManifestParse("[extension.native.targets] must be an array of tables".to_string())
-    })?;
-    if targets.is_empty() {
-        return Err(Error::ExtManifestParse(
-            "[extension.native] must declare at least one [[extension.native.targets]] entry"
-                .to_string(),
-        ));
-    }
+    let path = optional_relative_path(native, "path", "[extension.native]")?;
+    let targets = native
+        .get("targets")
+        .map(|targets| {
+            targets.as_array().ok_or_else(|| {
+                Error::ExtManifestParse(
+                    "[extension.native.targets] must be an array of tables".to_string(),
+                )
+            })
+        })
+        .transpose()?;
 
     let mut seen_targets = BTreeSet::new();
-    let mut parsed_targets = Vec::with_capacity(targets.len());
-    for item in targets {
+    let mut parsed_targets = Vec::with_capacity(targets.map_or(0, Vec::len));
+    for item in targets.into_iter().flatten() {
         let table = item.as_table().ok_or_else(|| {
             Error::ExtManifestParse("[[extension.native.targets]] must be a table".to_string())
         })?;
@@ -660,15 +730,15 @@ type = "bindgen"
 wasm = "vogui.wasm"
 js_glue = "vogui.js"
 "#,
-            Path::new("/tmp/vogui/vo.ext.toml"),
+            Path::new("/tmp/vogui/vo.mod"),
         )
         .unwrap();
 
         assert_eq!(manifest.name, "vogui");
         assert_eq!(manifest.include, vec![PathBuf::from("js/dist")]);
         assert_eq!(
-            manifest.native.as_ref().unwrap().path,
-            "rust/target/{profile}/libvo_vogui"
+            manifest.native.as_ref().unwrap().path.as_deref(),
+            Some("rust/target/{profile}/libvo_vogui")
         );
         assert_eq!(manifest.wasm.as_ref().unwrap().wasm, "vogui.wasm");
         assert_eq!(
@@ -746,7 +816,7 @@ js_glue = "vogui.js"
 local_wasm = "rust/pkg-web/vogui_bg.wasm"
 local_js_glue = "rust/pkg-web/vogui.js"
 "#,
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap();
         let wasm = manifest.wasm.as_ref().unwrap();
@@ -777,7 +847,7 @@ renderer = "js/dist/studio_renderer.js"
 protocol = "js/dist/studio_protocol.js"
 host_bridge = "js/dist/studio_host_bridge.js"
 "#,
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap();
         let web = manifest.web.as_ref().unwrap();
@@ -814,7 +884,7 @@ capabilities = ["widget", "render_surface"]
 [extension.web.js]
 renderer = "js/dist/studio_renderer.js"
 "#,
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap();
         let web = manifest.web.as_ref().unwrap();
@@ -839,7 +909,7 @@ wasm = "vogui.wasm"
 [extension.web]
 renderer = "js/dist/studio_renderer.js"
 "#,
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap_err();
         assert!(matches!(
@@ -866,11 +936,11 @@ renderer = "js/dist/studio_renderer.js"
 "#,
             removed_table
         );
-        let error = parse_ext_manifest_content(&manifest, Path::new("vo.ext.toml")).unwrap_err();
+        let error = parse_ext_manifest_content(&manifest, Path::new("vo.mod")).unwrap_err();
         assert!(matches!(
             error,
             Error::ExtManifestParse(message)
-                if message.contains("top-level Studio manifest table is invalid; use [extension.web] instead")
+                if message.contains("unsupported key(s) in vo.mod metadata: studio")
         ));
     }
 
@@ -937,7 +1007,7 @@ library = "libvo_vogui.dylib"
 name = "vogui"
 path = "rust/target/{profile}/libvo_vogui"
 "#,
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap_err();
         assert!(matches!(
@@ -964,7 +1034,7 @@ library = "libvo_vogui.dylib"
 target = "aarch64-apple-darwin"
 library = "libvo_vogui_second.dylib"
 "#,
-            Path::new("vo.ext.toml"),
+            Path::new("vo.mod"),
         )
         .unwrap_err();
         assert!(matches!(

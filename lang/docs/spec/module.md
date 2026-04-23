@@ -10,7 +10,7 @@ This specification defines the normative Vo module protocol. It fixes the behavi
 - canonical module and package identity
 - import-path classification and ownership
 - semantic-version syntax and constraint semantics
-- `vo.mod`, `vo.lock`, `vo.work`, and `vo.release.json`
+- `vo.mod`, `vo.lock`, `vo.work`, `vo.release.json`, and `vo.web.json`
 - GitHub-backed publication, discovery, and integrity verification
 - dependency resolution and lockfile generation
 - frozen-build materialization, cache validation, and workspace overrides
@@ -39,13 +39,15 @@ The Vo module system is defined by the following principles:
 
 - **Canonical identity**. Every published module and package has exactly one canonical path. The toolchain MUST reject alternate spellings rather than normalizing them silently.
 - **Deterministic builds**. A build uses an already-resolved dependency graph and MUST NOT silently change it.
-- **Separation of intent and resolution**. `vo.mod` records human-authored dependency intent. `vo.lock` records the exact published graph selected from that intent.
+- **Single authored module manifest**. `vo.mod` records human-authored dependency intent, extension metadata, web runtime metadata, and declared publication targets. Other module metadata files are generated from it.
+- **Separation of intent and resolution**. `vo.mod` records human-authored intent. `vo.lock` records the exact published graph selected from that intent.
 - **Root-lock authority**. Only the root project's `vo.lock` is authoritative for a build. Dependency-local lockfiles are not consulted when a module is consumed as a dependency.
 - **Frozen builds**. `vo build`, `vo check`, `vo test`, and `vo run` MUST NOT access the network, mutate `vo.mod`, mutate `vo.lock`, or re-solve dependencies.
 - **Target-neutral dependency graph**. Source dependency selection is independent of native or WASM target. Target-specific artifacts supplement a resolved module version; they do not change graph identity.
 - **Workspace isolation**. `vo.work` MAY replace a module's source tree locally, but it MUST NOT rewrite canonical module identity or published lockfile semantics.
 - **Hard failure on integrity mismatch**. The toolchain MUST fail on lock, manifest, source, or artifact mismatches. It MUST NOT fall back to unchecked behavior.
-- **GitHub-backed publication**. The publication protocol for version 1 is GitHub Releases plus a verified release manifest and source package.
+- **Generated consumption indexes**. `vo.release.json` is the complete release index for CLI and native tooling. `vo.web.json` is the browser index for Studio web and other web runtimes.
+- **GitHub-backed publication**. The publication protocol for version 1 is GitHub Releases plus verified generated manifests, a source package, and declared artifacts.
 
 ## 3. Module Identity
 
@@ -242,15 +244,21 @@ Every published module must contain a `vo.mod` file at its module root.
 - the module's canonical path
 - the supported Vo toolchain constraint
 - the module's direct dependency constraints
+- optional source files or directories that must be published with the module
+- optional extension metadata
+- optional browser runtime metadata
+- optional WASM and native target artifact declarations
 
 `vo.mod` does not contain:
 
 - transitive dependency resolution results
 - local workspace overrides
 - checksums for the resolved graph
-- release artifact listings
+- generated source-file listings
+- generated release artifact digests
 
-`vo.mod` is UTF-8, line-oriented text.
+`vo.mod` is UTF-8 text. Its top-level module directives are line-oriented.
+Optional metadata sections use TOML table syntax after the top-level directives.
 
 Format:
 
@@ -261,6 +269,33 @@ vo <toolchain-constraint>
 require <module-path> <version-constraint>
 require <module-path> <version-constraint>
 ...
+
+[web]
+entry = "main.vo"
+include = ["assets"]
+
+[extension]
+name = "module_extension_name"
+include = ["js/dist"]
+
+[extension.wasm]
+type = "standalone"
+wasm = "artifact.wasm"
+local_wasm = "web-artifacts/artifact.wasm"
+
+[extension.web]
+entry = "Run"
+capabilities = ["widget", "vo_web"]
+
+[extension.web.js]
+renderer = "js/dist/renderer.js"
+
+[extension.native]
+path = "rust/target/{target}/release/{library}"
+
+[[extension.native.targets]]
+target = "aarch64-apple-darwin"
+library = "libmodule.dylib"
 ```
 
 Example:
@@ -272,6 +307,10 @@ vo ^1.0.0
 require github.com/vo-lang/vogui ^0.4.0
 require github.com/vo-lang/voplay ~0.7.2
 require github.com/acme/http v1.3.1
+
+[web]
+entry = "main.vo"
+include = ["assets"]
 ```
 
 Rules:
@@ -279,15 +318,17 @@ Rules:
 - There must be exactly one `module` line.
 - There must be exactly one `vo` line.
 - `require` entries declare direct dependencies only.
+- Metadata sections are optional.
 - A given module path may appear at most once in the `require` list.
 - A dependency is identified only by canonical module path, never by alias.
-- Blank lines are ignored.
-- Full-line comments beginning with `//` are ignored.
-- Inline trailing comments are not part of the format.
+- Blank lines are ignored outside metadata sections.
+- Full-line comments beginning with `//` are ignored outside metadata sections.
+- Metadata sections follow TOML comment and value syntax.
+- Inline trailing comments are not part of top-level directive syntax.
 - Alias-based `require` syntax is not supported.
 - `replace` directives are not supported in `vo.mod`.
-- Unknown directives are errors.
-- Canonical formatting writes `module`, then `vo`, then `require` lines sorted lexicographically by module path.
+- Unknown top-level directives and unknown metadata tables are errors.
+- Canonical formatting writes `module`, then `vo`, then `require` lines sorted lexicographically by module path, followed by metadata tables in canonical table order.
 
 ### 5.2 Version Constraints in `vo.mod`
 
@@ -442,23 +483,114 @@ Rules:
 - Published modules MUST NOT rely on consumers reading the publisher's `vo.work`.
 - Tooling MUST provide a way to disable `vo.work` for CI and release workflows.
 
-### 5.5 `vo.ext.toml`
+### 5.5 Extension, Web, and Native Metadata in `vo.mod`
 
-A module may contain `vo.ext.toml` to declare extension metadata.
-That file is part of the source package and versioned with the module.
-Its detailed schema and ABI semantics are defined in `native-ffi.md`.
+Extension, web, and native publication metadata are declared in `vo.mod`.
+The module protocol defines one human-authored module configuration file.
 
-The module system treats extension metadata as part of a module's published contents, not as a separate dependency system.
+The detailed native ABI semantics are defined in `native-ffi.md`.
+This specification defines only the module-level declaration and publication contract.
 
-Module-protocol rules:
+#### 5.5.1 Source Includes
 
-- `vo.ext.toml` MAY declare target-specific extension assets such as WASM artifacts, native dynamic libraries, or generated bridge files.
-- A published module that contains Rust-backed extension code MUST describe that extension in `vo.ext.toml`.
-- If a module publishes Rust-backed extension code, `vo.ext.toml` MUST explicitly declare the set of supported published targets for that module version.
-- Supported targets MUST use canonical target identifiers such as Rust target triples or `wasm32-unknown-unknown`; coarse labels such as `mac`, `linux`, or `win` are not sufficient protocol identifiers.
-- A module version MAY support only a subset of targets. Omission of a target means that target is unsupported for that version.
-- For every target explicitly declared as supported by a Rust-backed extension, the published release MUST include the required binary artifact set for that target.
-- Removed `vo.ext.toml` schema shapes are invalid under this protocol and MUST be rejected rather than rewritten or interpreted compatibly.
+`include` entries under `[web]` or `[extension]` declare non-`.vo` files or directories that are part of the published module source for the corresponding runtime.
+
+Rules:
+
+- Include paths MUST be relative paths inside the module root.
+- Include paths MUST NOT be absolute.
+- Include paths MUST NOT contain empty, `.`, or `..` path components.
+- Include paths MUST be committed module contents at the published revision.
+- A release command MUST fail if a declared include path does not exist.
+
+#### 5.5.2 Browser Project Metadata
+
+`[web]` declares that the module can be opened or run by a browser runtime.
+
+Fields:
+
+- `entry`: optional browser entry `.vo` file or exported entry name, depending on the consuming runtime
+- `include`: optional list of source files or directories needed by the browser runtime
+
+Rules:
+
+- Browser metadata MUST describe source and web runtime inputs only.
+- Browser metadata MUST NOT declare native dynamic libraries.
+- Browser consumers MUST use `vo.web.json` rather than interpreting repository layout directly.
+
+#### 5.5.3 Extension Metadata
+
+`[extension]` declares extension identity and shared extension source includes.
+
+Fields:
+
+- `name`: required extension name
+- `include`: optional list of source files or directories needed by extension runtimes
+
+Rules:
+
+- A module that publishes extension artifacts MUST declare `[extension]`.
+- Extension metadata is part of the module's published contents.
+- Extension metadata does not create a separate dependency graph.
+
+#### 5.5.4 WASM Artifacts
+
+`[extension.wasm]` declares browser-loadable WASM artifacts.
+
+Fields:
+
+- `type`: required, either `"standalone"` or `"bindgen"`
+- `wasm`: required release artifact name for the WASM module
+- `js_glue`: required release artifact name for `"bindgen"`, absent for `"standalone"`
+- `local_wasm`: optional repository-relative path used by browser raw-file loading
+- `local_js_glue`: optional repository-relative path used by browser raw-file loading
+
+Rules:
+
+- A declared WASM artifact target is `wasm32-unknown-unknown`.
+- If `type = "bindgen"`, both `wasm` and `js_glue` MUST be declared.
+- If `local_wasm` or `local_js_glue` is declared, that path MUST exist at the published revision.
+- `vo.release.json` MUST include the declared WASM and JS glue artifacts.
+- `vo.web.json` MUST include only the browser-loadable artifact paths and metadata needed by web consumers.
+
+#### 5.5.5 Extension Web Runtime Metadata
+
+`[extension.web]` and `[extension.web.js]` declare browser runtime behavior for an extension.
+
+Fields:
+
+- `[extension.web].entry`: optional exported entry name
+- `[extension.web].capabilities`: optional list of runtime capabilities
+- `[extension.web.js]`: named JavaScript runtime modules, such as `renderer`, `protocol`, or `host_bridge`
+
+Rules:
+
+- JavaScript runtime module paths MUST be relative paths inside the module root.
+- JavaScript runtime module paths MUST be included in the published source set.
+- Browser consumers load these files through `vo.web.json`; they do not infer them from repository layout.
+
+#### 5.5.6 Native Artifacts
+
+`[extension.native]` declares optional published native dynamic-library artifacts.
+
+Fields:
+
+- `path`: optional local build-output pattern used by release tooling
+- `[[extension.native.targets]]`: zero or more supported native targets
+- `target`: required Rust target triple for each declared native target
+- `library`: required release artifact name for that target
+
+Rules:
+
+- Native support is optional. A module with no `[extension.native]` target declarations publishes no native artifacts.
+- If a native target is declared, the release for that module version MUST include the corresponding native artifact.
+- A declared native target MUST use a canonical Rust target triple such as `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, or `x86_64-pc-windows-msvc`.
+- Coarse labels such as `mac`, `linux`, or `win` are invalid target identifiers.
+- Native dynamic-library artifact names SHOULD use the platform's normal extension, such as `.dylib`, `.so`, or `.dll`.
+- `vo.release.json` MUST include every declared native artifact with size and digest.
+- `vo.web.json` MUST NOT include native artifacts.
+- Browser runtimes MUST NOT load or reason about native artifacts.
+- A module version MAY support only a subset of native targets. Omission of a target means that target is unsupported for that version.
 
 ### 5.6 Inline `vo.mod` Metadata
 
@@ -510,6 +642,7 @@ Rules:
 #### 5.6.3 Content Rules
 
 - The inline mod body follows all rules in Section 5.1 (`vo.mod`) and Section 5.2 (version constraints) except as narrowed below.
+- Inline metadata MAY contain only `module`, `vo`, and `require` directives. Metadata tables are not permitted in an inline mod.
 - `require` MAY name any canonical external module path. `local/*` MUST NOT appear in `require`.
 - `replace` directives MUST NOT appear in an inline mod.
 - Unknown directives MUST be rejected; they MUST NOT be silently ignored because the block is embedded in source.
@@ -564,6 +697,7 @@ Each published module version must map to:
 - a GitHub Release for that tag
 - a release manifest asset
 - a source-package asset
+- a generated browser manifest named `vo.web.json` committed at the module root for that tag
 
 A version is published only if all required publication artifacts exist and pass validation. A tag by itself is not a valid module release.
 
@@ -582,8 +716,8 @@ The release manifest must contain, at minimum:
 - `source`: source-package asset name, size, and digest
 - `artifacts`: target-specific artifact metadata and digests; this list MAY be empty for pure-source modules but MUST include every published artifact required by the module's declared target-support contract
 
-The release manifest is registry metadata.
-It allows dependency resolution and integrity verification without interpreting arbitrary repository layout as package protocol.
+The release manifest is complete release metadata for CLI and native tooling.
+It allows dependency resolution, native artifact selection, and integrity verification without interpreting arbitrary repository layout as package protocol.
 
 Rules:
 
@@ -592,10 +726,49 @@ Rules:
 - `require` MUST list only direct dependencies.
 - `require` MUST be unique and sorted by module path.
 - `artifacts` MUST be unique and sorted by `(kind, target, name)`.
-- If the packaged module contains `vo.ext.toml`, the published `artifacts` set MUST satisfy the declared target-support contract for that module version.
+- The published `artifacts` set MUST satisfy the target-support contract declared in `vo.mod`.
+- Native artifacts, WASM artifacts, and generated JS glue artifacts are all release artifacts when declared.
 - `module_root` MUST match the canonical module-path suffix inside the backing repository.
 
-### 6.3 Source Package
+### 6.3 Browser Manifest
+
+Each published module version must provide a generated browser manifest named `vo.web.json`.
+The browser manifest is committed at the module root for the published revision and is fetched by browser runtimes through raw Git content.
+
+`vo.web.json` is the authoritative browser consumption index for a module version.
+It is generated from `vo.mod`, `vo.lock`, the committed source tree, and the staged release artifact contract.
+It is not hand-authored.
+
+The browser manifest must contain, at minimum:
+
+- `schema_version`: manifest schema version, currently `1`
+- `module`: canonical module path
+- `version`: exact module version, or an explicit development snapshot identity for non-release project snapshots
+- `commit`: immutable Git revision
+- `module_root`: module root directory relative to repository root
+- `vo`: toolchain constraint from `vo.mod`
+- `require`: direct dependency constraints from `vo.mod`
+- `source_digest`: digest of the browser-readable source set listed in `source`
+- `source`: browser-readable source file list with path, size, and digest
+- `web`: browser project metadata, when declared
+- `extension`: browser-loadable extension metadata, when declared
+- `artifacts`: browser-loadable WASM and JS artifacts, when declared
+
+Rules:
+
+- Browser runtimes MUST prefer `vo.web.json` over GitHub API tree enumeration.
+- Browser runtimes MUST NOT require GitHub Release API calls to load a module version that provides `vo.web.json`.
+- Browser runtimes MUST load files listed in `vo.web.json` from immutable raw Git content for the recorded commit or tag.
+- `source_digest` is the digest of the browser source payload described by `source`; it is distinct from the source-package digest recorded in `vo.release.json`.
+- `vo.web.json` MUST NOT list itself in `source`; including the manifest in its own source set would make the digest circular.
+- `vo.web.json` MUST NOT list native dynamic-library artifacts.
+- `vo.web.json` MUST NOT contain local workspace overrides.
+- `vo.web.json` MUST NOT contain unpublished local filesystem paths.
+- `vo.web.json` source entries MUST match the files committed at the recorded revision.
+- `vo.web.json` artifact entries MUST match the browser-loadable artifacts declared in `vo.mod`.
+- A browser runtime MUST fail if any fetched source file or browser artifact does not match the manifest size or digest.
+
+### 6.4 Source Package
 
 Each release must provide a canonical source-package asset.
 The source package is the authoritative published source for the module version.
@@ -610,16 +783,18 @@ Format:
 Content rules:
 
 - The source package must include `vo.mod` at the archive root.
-- If present in the module, it must include `vo.lock` and `vo.ext.toml`.
+- If present in the module, it must include `vo.lock`.
+- It must include `vo.web.json`.
 - The source package must include all `.vo` files required to build the module.
+- The source package must include all source include paths declared by `vo.mod`.
 - The source package must not include build artifacts, caches, or version-control metadata.
 - The source package digest must match both the release manifest and `vo.lock`.
 - The `module` line in the packaged `vo.mod` must match the `module` field in `vo.release.json`.
 - The packaged `vo.mod` `vo` line and `require` set MUST match the release manifest.
-- If the packaged source contains `vo.ext.toml`, its declared published target-support set MUST be consistent with the artifacts recorded in `vo.release.json`.
+- The packaged `vo.mod` extension, web, and native target declarations MUST be consistent with `vo.release.json` and `vo.web.json`.
 - If the source package contains a dependency-local `vo.lock`, consumers MUST ignore it when using this module as a dependency.
 
-### 6.4 Target-Specific Artifacts
+### 6.5 Target-Specific Artifacts
 
 A release may provide target-specific binary artifacts.
 If a module's published extension metadata declares support for a target-specific runtime artifact, the corresponding published artifacts are required for that target.
@@ -634,12 +809,14 @@ Rules:
 - Target-specific artifacts must be listed in `vo.release.json`.
 - Artifact targets MUST use canonical target identifiers. For Rust-backed native binaries, the identifier MUST be the Rust target triple. For WASM artifacts, the identifier MUST be `wasm32-unknown-unknown`.
 - A module version MAY support only a subset of targets. Unsupported targets simply do not appear in the declared target-support set.
-- If `vo.ext.toml` declares support for a target that requires a published binary artifact, `vo.release.json` MUST include that artifact set for the same target.
+- If `vo.mod` declares support for a target that requires a published binary artifact, `vo.release.json` MUST include that artifact set for the same target.
 - Binary artifacts must be verified by size and digest before use.
 - Binary artifacts do not change module identity or dependency resolution.
 - A module remains source-defined even when binary artifacts are present.
+- Native artifacts are consumed only by native tooling.
+- WASM and JS glue artifacts are consumed by browser tooling only through `vo.web.json`.
 
-### 6.5 Repository Mapping and Version Discovery
+### 6.6 Repository Mapping and Version Discovery
 
 A canonical module path maps to a GitHub repository as follows:
 
@@ -948,7 +1125,8 @@ The toolchain must verify:
 - root `vo.mod` vs root `vo.lock` equality for `module` and `vo`
 - locked module `deps` equality with `vo.release.json.require[*].module`
 - locked module artifact equality with `vo.release.json.artifacts`
-- packaged `vo.ext.toml` consistency with the published target-support contract and `vo.release.json.artifacts`, when `vo.ext.toml` is present
+- packaged `vo.mod` extension, web, and native target declarations consistency with `vo.release.json.artifacts`
+- packaged `vo.web.json` consistency with `vo.mod`, committed source files, and browser-loadable artifacts
 - packaged `vo.mod` consistency with `vo.release.json`
 
 Any mismatch is a hard error.
@@ -1008,7 +1186,21 @@ Verifies root `vo.mod` and `vo.lock` consistency and verifies that any already-m
 Removes a direct dependency from `vo.mod`.
 This command refreshes `vo.lock` to prune orphaned transitive dependencies.
 
-### 13.8 `vo build`, `vo check`, `vo test`, `vo run`
+### 13.8 `vo release stage`
+
+Stages a module release from the current `vo.mod`, `vo.lock`, source tree, and declared artifacts.
+
+Rules:
+
+- It MUST generate `vo.release.json`.
+- It MUST generate `vo.web.json`.
+- It MUST verify that every declared include path exists.
+- It MUST verify that every declared browser-loadable artifact exists at its declared repository path.
+- It MUST verify that every declared native target artifact exists in the staged release inputs.
+- It MUST fail if generated release metadata does not match the declared `vo.mod` contract.
+- It MUST NOT read `vo.work`.
+
+### 13.9 `vo build`, `vo check`, `vo test`, `vo run`
 
 Use the exact graph pinned in `vo.lock`.
 Do not access the network.
@@ -1023,11 +1215,13 @@ The following are not part of the Vo module system:
 - filesystem-absolute package imports
 - `std/...` import prefixes
 - published `replace` directives inside `vo.mod`
+- extension, web, or native publication metadata outside `vo.mod`
 - multiple exact versions of the same canonical module path in one build graph
 - dependency-local lockfiles influencing a consuming build's dependency graph
 - source-building published dependency native artifacts during frozen builds
 - implicit registry access during build commands
 - interpreting arbitrary GitHub repository layout as the package protocol
+- browser module loading that requires GitHub API access when `vo.web.json` is available
 
 ## 15. Typical Errors
 
@@ -1103,7 +1297,7 @@ error: vo.release.json is missing a required published artifact
   module: github.com/acme/lib
   version: v1.2.3
   target: x86_64-unknown-linux-gnu
-  declared by: vo.ext.toml
+  declared by: vo.mod [extension.native]
 ```
 
 ## 16. Related Specifications

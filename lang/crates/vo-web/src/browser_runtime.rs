@@ -1054,15 +1054,15 @@ fn join_vfs_path(base: &str, child: &str) -> String {
 #[cfg(target_arch = "wasm32")]
 /// Debug-only helper for local extension/framework development.
 ///
-/// This reads `vo.ext.toml` directly from the project root VFS directory and
+/// This reads extension metadata from the project root `vo.mod` and
 /// bypasses published dependency resolution. Normal Studio/example/runtime
 /// flows must use locked published modules instead.
 pub fn debug_local_project_browser_runtime_plan_from_vfs(
     project_root: &str,
 ) -> std::result::Result<BrowserRuntimePlan, String> {
     let project_root = normalize_vfs_path(project_root);
-    let manifest_path = join_vfs_path(&project_root, "vo.ext.toml");
-    let Some(manifest) = read_browser_runtime_vfs_ext_manifest(&manifest_path)? else {
+    let mod_path = join_vfs_path(&project_root, "vo.mod");
+    let Some(manifest) = read_browser_runtime_vfs_ext_manifest(&mod_path)? else {
         return Ok(BrowserRuntimePlan::default());
     };
     let module_key = browser_runtime_project_root_module_key_from_vfs(&project_root)?;
@@ -1110,17 +1110,16 @@ pub fn published_browser_runtime_plan_from_vfs(
 
 #[cfg(target_arch = "wasm32")]
 fn read_browser_runtime_vfs_ext_manifest(
-    manifest_path: &str,
+    mod_path: &str,
 ) -> std::result::Result<Option<ExtensionManifest>, String> {
-    let (_name, _size, _mode, _mtime, _is_dir, err) = vo_web_runtime_wasm::vfs::stat(manifest_path);
+    let (_name, _size, _mode, _mtime, _is_dir, err) = vo_web_runtime_wasm::vfs::stat(mod_path);
     if err.is_some() {
         return Ok(None);
     }
-    let content = read_browser_runtime_vfs_text(manifest_path)?;
-    let manifest =
-        vo_module::ext_manifest::parse_ext_manifest_content(&content, Path::new(manifest_path))
-            .map_err(|error| format!("{}: {}", manifest_path, error))?;
-    Ok(Some(manifest))
+    let content = read_browser_runtime_vfs_text(mod_path)?;
+    let mod_file = vo_module::schema::modfile::ModFile::parse(&content)
+        .map_err(|error| format!("{}: {}", mod_path, error))?;
+    Ok(mod_file.extension)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1424,7 +1423,7 @@ mod tests {
     use vo_module::version::ExactVersion;
 
     fn parse_manifest(content: &str) -> ExtensionManifest {
-        parse_ext_manifest_content(content, Path::new("/tmp/vo.ext.toml")).unwrap()
+        parse_ext_manifest_content(content, Path::new("/tmp/vo.mod")).unwrap()
     }
 
     fn resolved_artifact(kind: &str, name: &str) -> ResolvedArtifact {

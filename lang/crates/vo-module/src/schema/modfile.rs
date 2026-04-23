@@ -1,3 +1,4 @@
+use crate::ext_manifest::{ExtensionManifest, ModMetadata, WebProjectManifest};
 use crate::identity::{ModIdentity, ModulePath};
 use crate::version::{DepConstraint, ToolchainConstraint};
 use crate::Error;
@@ -16,6 +17,8 @@ pub struct ModFile {
     pub module: ModIdentity,
     pub vo: ToolchainConstraint,
     pub require: Vec<Require>,
+    pub web: Option<WebProjectManifest>,
+    pub extension: Option<ExtensionManifest>,
     pub replace: Vec<Replace>,
 }
 
@@ -37,12 +40,15 @@ impl ModFile {
         let mut module: Option<ModIdentity> = None;
         let mut vo: Option<ToolchainConstraint> = None;
         let mut require: Vec<Require> = Vec::new();
-        let mut replace: Vec<Replace> = Vec::new();
+        let replace: Vec<Replace> = Vec::new();
 
         for (line_num, raw_line) in content.lines().enumerate() {
             let line = raw_line.trim();
             if line.is_empty() || line.starts_with("//") {
                 continue;
+            }
+            if line.starts_with('[') {
+                break;
             }
             let parts: Vec<&str> = line.split_whitespace().collect();
             let directive = parts[0];
@@ -120,25 +126,10 @@ impl ModFile {
                     });
                 }
                 "replace" => {
-                    if parts.len() != 4 || parts[2] != "=>" {
-                        return Err(Error::ModFileParse(format!(
-                            "line {}: 'replace' needs <module-path> => <path>",
-                            line_num + 1
-                        )));
-                    }
-                    let mp = ModulePath::parse(parts[1])
-                        .map_err(|e| Error::ModFileParse(format!("line {}: {e}", line_num + 1)))?;
-                    if replace.iter().any(|r| r.module == mp) {
-                        return Err(Error::ModFileParse(format!(
-                            "line {}: duplicate replace for {}",
-                            line_num + 1,
-                            mp
-                        )));
-                    }
-                    replace.push(Replace {
-                        module: mp,
-                        path: parts[3].to_string(),
-                    });
+                    return Err(Error::ModFileParse(format!(
+                        "line {}: replace directives are not supported in vo.mod; use vo.work for local development",
+                        line_num + 1
+                    )));
                 }
                 _ => {
                     return Err(Error::ModFileParse(format!(
@@ -152,11 +143,17 @@ impl ModFile {
         let module =
             module.ok_or_else(|| Error::ModFileParse("missing 'module' directive".to_string()))?;
         let vo = vo.ok_or_else(|| Error::ModFileParse("missing 'vo' directive".to_string()))?;
+        let ModMetadata { web, extension } = crate::ext_manifest::parse_mod_metadata_content(
+            content,
+            std::path::Path::new("vo.mod"),
+        )?;
 
         Ok(ModFile {
             module,
             vo,
             require,
+            web,
+            extension,
             replace,
         })
     }
@@ -175,16 +172,102 @@ impl ModFile {
                 out.push_str(&format!("require {} {}\n", req.module, req.constraint));
             }
         }
-        if !self.replace.is_empty() {
+        if let Some(web) = &self.web {
             out.push('\n');
-            let mut sorted: Vec<&Replace> = self.replace.iter().collect();
-            sorted.sort_by(|a, b| a.module.cmp(&b.module));
-            for replace in sorted {
-                out.push_str(&format!("replace {} => {}\n", replace.module, replace.path));
+            out.push_str("[web]\n");
+            if let Some(entry) = &web.entry {
+                out.push_str(&format!("entry = \"{}\"\n", entry));
+            }
+            if !web.include.is_empty() {
+                out.push_str(&format!(
+                    "include = [{}]\n",
+                    render_path_array(&web.include)
+                ));
+            }
+        }
+        if let Some(extension) = &self.extension {
+            out.push('\n');
+            out.push_str("[extension]\n");
+            out.push_str(&format!("name = \"{}\"\n", extension.name));
+            if !extension.include.is_empty() {
+                out.push_str(&format!(
+                    "include = [{}]\n",
+                    render_path_array(&extension.include)
+                ));
+            }
+            if let Some(wasm) = &extension.wasm {
+                out.push('\n');
+                out.push_str("[extension.wasm]\n");
+                out.push_str(&format!(
+                    "type = \"{}\"\n",
+                    match wasm.kind {
+                        crate::ext_manifest::WasmExtensionKind::Standalone => "standalone",
+                        crate::ext_manifest::WasmExtensionKind::Bindgen => "bindgen",
+                    }
+                ));
+                out.push_str(&format!("wasm = \"{}\"\n", wasm.wasm));
+                if let Some(js_glue) = &wasm.js_glue {
+                    out.push_str(&format!("js_glue = \"{}\"\n", js_glue));
+                }
+                if let Some(local_wasm) = &wasm.local_wasm {
+                    out.push_str(&format!("local_wasm = \"{}\"\n", local_wasm));
+                }
+                if let Some(local_js_glue) = &wasm.local_js_glue {
+                    out.push_str(&format!("local_js_glue = \"{}\"\n", local_js_glue));
+                }
+            }
+            if let Some(web_runtime) = &extension.web {
+                out.push('\n');
+                out.push_str("[extension.web]\n");
+                if let Some(entry) = &web_runtime.entry {
+                    out.push_str(&format!("entry = \"{}\"\n", entry));
+                }
+                if !web_runtime.capabilities.is_empty() {
+                    out.push_str(&format!(
+                        "capabilities = [{}]\n",
+                        render_string_array(&web_runtime.capabilities)
+                    ));
+                }
+                if !web_runtime.js_modules.is_empty() {
+                    out.push('\n');
+                    out.push_str("[extension.web.js]\n");
+                    for (name, path) in &web_runtime.js_modules {
+                        out.push_str(&format!("{} = \"{}\"\n", name, path));
+                    }
+                }
+            }
+            if let Some(native) = &extension.native {
+                out.push('\n');
+                out.push_str("[extension.native]\n");
+                if let Some(path) = &native.path {
+                    out.push_str(&format!("path = \"{}\"\n", path));
+                }
+                for target in &native.targets {
+                    out.push('\n');
+                    out.push_str("[[extension.native.targets]]\n");
+                    out.push_str(&format!("target = \"{}\"\n", target.target));
+                    out.push_str(&format!("library = \"{}\"\n", target.library));
+                }
             }
         }
         out
     }
+}
+
+fn render_path_array(paths: &[std::path::PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| format!("\"{}\"", path.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_string_array(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|item| format!("\"{}\"", item))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -221,16 +304,13 @@ require github.com/vo-lang/vogui ^0.4.0
     }
 
     #[test]
-    fn test_parse_replace() {
+    fn test_reject_replace() {
         let content = "\
 module github.com/acme/app
 vo ^1.0.0
 replace github.com/vo-lang/vogui => ../vogui
 ";
-        let mf = ModFile::parse(content).unwrap();
-        assert_eq!(mf.replace.len(), 1);
-        assert_eq!(mf.replace[0].module.as_str(), "github.com/vo-lang/vogui");
-        assert_eq!(mf.replace[0].path, "../vogui");
+        assert!(ModFile::parse(content).is_err());
     }
 
     #[test]
@@ -255,17 +335,6 @@ require github.com/vo-lang/vogui ^0.5.0
     }
 
     #[test]
-    fn test_reject_duplicate_replace() {
-        let content = "\
-module github.com/acme/app
-vo ^1.0.0
-replace github.com/vo-lang/vogui => ../vogui
-replace github.com/vo-lang/vogui => ../vogui-local
-";
-        assert!(ModFile::parse(content).is_err());
-    }
-
-    #[test]
     fn test_reject_unknown_directive() {
         let content = "\
 module github.com/acme/app
@@ -285,8 +354,6 @@ require github.com/vo-lang/voplay ~0.7.2
 require github.com/acme/http v1.3.1
 require github.com/vo-lang/vogui ^0.4.0
 
-replace github.com/vo-lang/resvg => ../resvg
-replace github.com/vo-lang/voplay => ../voplay
 ";
         let mf = ModFile::parse(content).unwrap();
         let rendered = mf.render();
@@ -299,14 +366,6 @@ replace github.com/vo-lang/voplay => ../voplay
         );
         assert_eq!(
             reparsed.require[2].module.as_str(),
-            "github.com/vo-lang/voplay"
-        );
-        assert_eq!(
-            reparsed.replace[0].module.as_str(),
-            "github.com/vo-lang/resvg"
-        );
-        assert_eq!(
-            reparsed.replace[1].module.as_str(),
             "github.com/vo-lang/voplay"
         );
     }

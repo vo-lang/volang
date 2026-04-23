@@ -106,7 +106,7 @@ impl fmt::Display for ReleaseError {
                     )?,
                     None => write!(
                         f,
-                        "staged artifacts were provided, but the module does not declare any release artifacts because vo.ext.toml is absent"
+                        "staged artifacts were provided, but vo.mod does not declare any release artifacts"
                     )?,
                 }
                 if !missing.is_empty() {

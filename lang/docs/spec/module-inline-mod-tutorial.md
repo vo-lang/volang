@@ -17,11 +17,11 @@ The module gets a reserved identity in the `local/<name>` namespace and can decl
 
 ## 2. Ad hoc vs inline mod vs real project
 
-| Form | External deps | `vo.work` | `replace` | `vo.ext.toml` | Committed `vo.mod` / `vo.lock` |
+| Form | External deps | `vo.work` | local overrides | extension metadata | Committed `vo.mod` / `vo.lock` |
 |---|---|---|---|---|---|
 | Ad hoc file | No | No | No | No | No |
 | Inline mod file | Yes | No | No | No | No |
-| Real project | Yes | Yes, if present | Yes | Yes | Yes |
+| Real project | Yes | Yes, if present | Yes, through `vo.work` | Yes, in `vo.mod` | Yes |
 
 Use an **ad hoc file** when the program only needs the standard library.
 Use an **inline mod file** when you still want a single file but need external modules.
@@ -157,7 +157,7 @@ They must not:
 - live inside a directory tree that already has `vo.mod`
 - use `vo.work`
 - declare `replace`
-- coexist with `vo.ext.toml` in the same directory
+- declare extension metadata
 - define a multi-package module layout
 
 Those restrictions keep single-file execution unambiguous.
@@ -177,7 +177,7 @@ Promote the script when any of these become true:
 - You want a committed `vo.lock` in version control.
 - You need `replace` for local development.
 - You need `vo.work` workspace overrides.
-- You need `vo.ext.toml` for native or WASM extension metadata.
+- You need native, WASM, or browser extension metadata in `vo.mod`.
 - The file now lives inside an existing module tree.
 
 A minimal project layout looks like this:
@@ -203,10 +203,10 @@ Remove the inline block and use the project's `vo.mod` instead.
 The inline block must behave like one canonical `vo.mod` root.
 Keep exactly one `module` line and exactly one `vo` line.
 
-### `vo.ext.toml` conflict
+### Project metadata conflict
 
-A single-file inline module cannot share a directory with `vo.ext.toml`.
-If you need extension metadata, promote the script to a real project.
+A single-file inline module cannot live inside a directory tree that already has `vo.mod`.
+If you need extension metadata, promote the script to a real project and declare it in `vo.mod`.
 
 ### `local/* paths are not allowed in require`
 
