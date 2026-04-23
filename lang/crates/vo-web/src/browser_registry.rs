@@ -283,7 +283,8 @@ async fn fetch_release_manifest(
     let context = fetch_release_context(module, version).await?;
     let mod_content = fetch_module_file_text(module, &context.commit, VO_MOD_FILE).await?;
     let mod_file = parse_mod_file(module, version, &mod_content)?;
-    let ext_manifest = fetch_extension_manifest(module, &context.commit).await?;
+    let tree = fetch_repo_tree(module, &context.commit).await?;
+    let ext_manifest = fetch_extension_manifest_from_tree(module, &context.commit, &tree).await?;
 
     let source_name = source_package_name(module, version)?;
     let source_asset = required_release_asset(&context.release, &source_name, module, version)?;
@@ -396,8 +397,8 @@ async fn fetch_source_files(
 ) -> Result<SourcePayload> {
     let context = fetch_release_context(module, version).await?;
     required_release_asset(&context.release, asset_name, module, version)?;
-    let ext_manifest = fetch_extension_manifest(module, &context.commit).await?;
     let tree = fetch_repo_tree(module, &context.commit).await?;
+    let ext_manifest = fetch_extension_manifest_from_tree(module, &context.commit, &tree).await?;
 
     let mut paths = BTreeSet::new();
     for entry in tree.tree {
@@ -509,6 +510,24 @@ async fn fetch_extension_manifest(
         return Ok(None);
     };
     parse_ext_manifest_content(&content, Path::new(VO_EXT_FILE)).map(Some)
+}
+
+async fn fetch_extension_manifest_from_tree(
+    module: &ModulePath,
+    commit: &str,
+    tree: &GitHubTree,
+) -> Result<Option<ExtensionManifest>> {
+    if !tree_has_module_file(module, tree, VO_EXT_FILE) {
+        return Ok(None);
+    }
+    fetch_extension_manifest(module, commit).await
+}
+
+fn tree_has_module_file(module: &ModulePath, tree: &GitHubTree, rel_path: &str) -> bool {
+    tree.tree.iter().any(|entry| {
+        entry.kind == "blob"
+            && module_relative_path(module, &entry.path).as_deref() == Some(rel_path)
+    })
 }
 
 async fn fetch_repo_tree(module: &ModulePath, commit: &str) -> Result<GitHubTree> {
