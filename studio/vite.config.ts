@@ -33,9 +33,17 @@ interface LocalProjectSnapshot {
   files: LocalProjectSnapshotFile[];
 }
 
+interface LocalProjectSnapshotPlan {
+  projectRoot: string;
+  snapshotBase: string;
+  roots: string[];
+  files: string[];
+}
+
 const LOCAL_PROJECT_ROUTE = '/__vo_studio_local_project';
 const LOCAL_PROJECT_MAX_FILES = 5000;
 const LOCAL_PROJECT_MAX_BYTES = 64 * 1024 * 1024;
+const ROOT_PATH = sep;
 const LOCAL_PROJECT_SKIP_DIRS = new Set([
   '.git',
   '.hg',
@@ -98,19 +106,192 @@ function localProjectErrorMessage(error: unknown): string {
 
 function readLocalProjectSnapshot(rawPath: string): LocalProjectSnapshot {
   const projectRoot = resolveLocalProjectRoot(stripFileUrl(rawPath));
-  const snapshotBase = dirname(projectRoot);
+  const plan = planLocalProjectSnapshot(projectRoot);
   const files: LocalProjectSnapshotFile[] = [];
   const seen = new Set<string>();
   const totals = { files: 0, bytes: 0 };
-  collectSnapshotFiles(projectRoot, snapshotBase, files, seen, totals);
+  for (const root of plan.roots) {
+    collectSnapshotFiles(root, plan.snapshotBase, files, seen, totals);
+  }
+  for (const file of plan.files) {
+    collectSnapshotFile(file, plan.snapshotBase, files, seen, totals);
+  }
   if (files.length === 0) {
     throw new Error(`No Studio-readable files found under ${projectRoot}`);
   }
   return {
-    projectPath: projectRoot,
-    projectRelativePath: toPosix(relative(snapshotBase, projectRoot)),
+    projectPath: plan.projectRoot,
+    projectRelativePath: toPosix(relative(plan.snapshotBase, plan.projectRoot)),
     files,
   };
+}
+
+function planLocalProjectSnapshot(projectRoot: string): LocalProjectSnapshotPlan {
+  const roots = new Map<string, string>();
+  const extraFiles = new Map<string, string>();
+  const queue = [projectRoot];
+
+  for (let index = 0; index < queue.length; index++) {
+    const root = queue[index];
+    if (roots.has(root)) {
+      continue;
+    }
+    roots.set(root, root);
+    for (const workPath of localVoWorkCandidates(root)) {
+      if (existsSync(workPath)) {
+        const realWorkPath = realpathSync(workPath);
+        if (!isPathWithin(realWorkPath, root)) {
+          extraFiles.set(realWorkPath, realWorkPath);
+        }
+      }
+    }
+    for (const moduleRoot of resolveVoWorkModuleRoots(root)) {
+      if (!roots.has(moduleRoot)) {
+        queue.push(moduleRoot);
+      }
+    }
+  }
+
+  const rootList = [...roots.values()];
+  const fileList = [...extraFiles.values()];
+  return {
+    projectRoot,
+    snapshotBase: commonAncestor([
+      ...rootList.map((root) => dirname(root)),
+      ...fileList.map((file) => dirname(file)),
+    ]),
+    roots: rootList,
+    files: fileList,
+  };
+}
+
+function resolveVoWorkModuleRoots(moduleRoot: string): string[] {
+  const roots: string[] = [];
+  for (const workPath of localVoWorkCandidates(moduleRoot)) {
+    if (!existsSync(workPath)) {
+      continue;
+    }
+    const workDir = dirname(workPath);
+    for (const usePath of parseVoWorkUsePaths(readFileSync(workPath, 'utf8'))) {
+      const resolved = resolve(workDir, usePath);
+      if (!existsSync(resolved)) {
+        continue;
+      }
+      const real = realpathSync(resolved);
+      if (!statSync(real).isDirectory() || !existsSync(join(real, 'vo.mod'))) {
+        continue;
+      }
+      roots.push(real);
+    }
+  }
+  return roots;
+}
+
+function localVoWorkCandidates(moduleRoot: string): string[] {
+  const candidates = [
+    join(moduleRoot, 'vo.work'),
+    join(dirname(moduleRoot), 'vo.work'),
+  ];
+  return [...new Set(candidates.map((path) => realpathIfExists(path) ?? path))];
+}
+
+function realpathIfExists(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+function parseVoWorkUsePaths(content: string): string[] {
+  const paths: string[] = [];
+  let inUseTable = false;
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = stripTomlComment(rawLine).trim();
+    if (!line) {
+      continue;
+    }
+    if (/^\[\[use\]\]$/.test(line)) {
+      inUseTable = true;
+      continue;
+    }
+    if (/^\[/.test(line)) {
+      inUseTable = false;
+      continue;
+    }
+    if (!inUseTable) {
+      continue;
+    }
+    const match = /^path\s*=\s*(['"])(.*)\1\s*$/.exec(line);
+    if (match) {
+      paths.push(unescapeTomlString(match[2], match[1]));
+    }
+  }
+  return paths;
+}
+
+function stripTomlComment(line: string): string {
+  let quote: string | null = null;
+  let escaped = false;
+  for (let index = 0; index < line.length; index++) {
+    const ch = line[index];
+    if (quote) {
+      if (quote === '"' && ch === '\\' && !escaped) {
+        escaped = true;
+        continue;
+      }
+      if (ch === quote && !escaped) {
+        quote = null;
+      }
+      escaped = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '#') {
+      return line.slice(0, index);
+    }
+  }
+  return line;
+}
+
+function unescapeTomlString(value: string, quote: string): string {
+  if (quote === "'") {
+    return value;
+  }
+  return value
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
+}
+
+function commonAncestor(paths: string[]): string {
+  if (paths.length === 0) {
+    return ROOT_PATH;
+  }
+  const splitPaths = paths.map((path) => realpathSync(path).split(sep).filter(Boolean));
+  const first = splitPaths[0];
+  let length = first.length;
+  for (const parts of splitPaths.slice(1)) {
+    length = Math.min(length, parts.length);
+    for (let index = 0; index < length; index++) {
+      if (parts[index] !== first[index]) {
+        length = index;
+        break;
+      }
+    }
+  }
+  const prefix = first.slice(0, length).join(sep);
+  return paths[0].startsWith(sep) ? `${sep}${prefix}` : prefix || ROOT_PATH;
+}
+
+function isPathWithin(path: string, root: string): boolean {
+  const rel = relative(root, path);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 function stripFileUrl(value: string): string {
@@ -189,6 +370,22 @@ function collectSnapshotFiles(
   walk(root);
 }
 
+function collectSnapshotFile(
+  abs: string,
+  snapshotBase: string,
+  files: LocalProjectSnapshotFile[],
+  seen: Set<string>,
+  totals: { files: number; bytes: number },
+) {
+  const snapshotPath = toPosix(relative(snapshotBase, abs));
+  if (!snapshotPath || snapshotPath.startsWith('../') || seen.has(snapshotPath)) {
+    return;
+  }
+  const bytes = readFileSync(abs);
+  const mode = statSync(abs).mode & 0o777;
+  addSnapshotFile(snapshotPath, bytes, mode, files, seen, totals);
+}
+
 function addSnapshotFile(
   path: string,
   bytes: Buffer,
@@ -224,10 +421,19 @@ function shouldIncludeLocalProjectFile(name: string, relFromRoot: string): boole
   if (name.endsWith('.vo')) {
     return true;
   }
-  if (name === 'vo.mod' || name === 'vo.lock' || name === 'vo.web.json') {
+  if (name === 'vo.mod' || name === 'vo.lock' || name === 'vo.web.json' || name === 'vo.work') {
+    return true;
+  }
+  if (name.endsWith('.vpak')) {
+    return true;
+  }
+  if (relFromRoot.startsWith('assets/') && /\.(png|jpe?g|webp)$/i.test(name)) {
     return true;
   }
   if (relFromRoot.startsWith('js/dist/')) {
+    return true;
+  }
+  if (/^web-artifacts\/.+\.(wasm|js)$/.test(relFromRoot)) {
     return true;
   }
   if (/^rust\/pkg[^/]*\/.+\.(wasm|js)$/.test(relFromRoot)) {

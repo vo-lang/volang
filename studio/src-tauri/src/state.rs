@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vo_app_runtime::SyncRenderBuffer;
+use vo_module::project::ProjectContextOptions;
+use vo_module::workspace::WorkspaceDiscovery;
 use vo_web::BrowserRuntimePlan;
 
 use crate::commands::pathing::is_module_root;
@@ -44,6 +46,23 @@ pub enum Platform {
     Wasm,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkspaceDiscoveryMode {
+    Auto,
+    Disabled,
+}
+
+impl WorkspaceDiscoveryMode {
+    pub fn project_context_options(self) -> ProjectContextOptions {
+        let workspace = match self {
+            Self::Auto => WorkspaceDiscovery::Auto,
+            Self::Disabled => WorkspaceDiscovery::Disabled,
+        };
+        ProjectContextOptions::new(workspace)
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchSpec {
@@ -57,9 +76,7 @@ pub enum SessionSource {
     #[serde(rename = "workspace")]
     Workspace,
     #[serde(rename = "path")]
-    Path {
-        path: String,
-    },
+    Path { path: String },
     #[serde(rename = "github_repo")]
     GithubRepo {
         owner: String,
@@ -105,6 +122,7 @@ pub struct SessionInfo {
     pub project_mode: ProjectMode,
     pub entry_path: Option<String>,
     pub single_file_run: bool,
+    pub workspace_discovery: WorkspaceDiscoveryMode,
     pub source: Option<SessionSource>,
     pub share: Option<ShareInfo>,
 }
@@ -121,6 +139,7 @@ struct LaunchConfig {
 struct SessionConfig {
     root: PathBuf,
     single_file_run: bool,
+    workspace_discovery: WorkspaceDiscoveryMode,
 }
 
 #[derive(Clone)]
@@ -174,6 +193,7 @@ impl AppState {
             session: Mutex::new(SessionConfig {
                 root: workspace_root.clone(),
                 single_file_run: false,
+                workspace_discovery: WorkspaceDiscoveryMode::Auto,
             }),
             console_run: Arc::new(Mutex::new(None)),
             gui_session_id: AtomicU64::new(0),
@@ -205,10 +225,24 @@ impl AppState {
         self.session.lock().unwrap().single_file_run
     }
 
-    pub fn set_session(&self, root: PathBuf, single_file_run: bool) {
+    pub fn workspace_discovery(&self) -> WorkspaceDiscoveryMode {
+        self.session.lock().unwrap().workspace_discovery
+    }
+
+    pub fn project_context_options(&self) -> ProjectContextOptions {
+        self.workspace_discovery().project_context_options()
+    }
+
+    pub fn set_session(
+        &self,
+        root: PathBuf,
+        single_file_run: bool,
+        workspace_discovery: WorkspaceDiscoveryMode,
+    ) {
         let mut session = self.session.lock().unwrap();
         session.root = root;
         session.single_file_run = single_file_run;
+        session.workspace_discovery = workspace_discovery;
     }
 
     pub fn begin_console_run(&self) -> ConsoleRunHandle {
@@ -235,11 +269,19 @@ impl AppState {
         self.gui_session_id.load(Ordering::SeqCst)
     }
 
-    pub fn install_guest_runtime(&self, session_id: u64, guest: GuestHandle, render_buffer: Arc<SyncRenderBuffer>) {
+    pub fn install_guest_runtime(
+        &self,
+        session_id: u64,
+        guest: GuestHandle,
+        render_buffer: Arc<SyncRenderBuffer>,
+    ) {
         if self.gui_session_id.load(Ordering::SeqCst) != session_id {
             return;
         }
-        *self.guest_runtime.lock().unwrap() = Some(GuestRuntime { handle: guest, render_buffer });
+        *self.guest_runtime.lock().unwrap() = Some(GuestRuntime {
+            handle: guest,
+            render_buffer,
+        });
     }
 
     pub fn set_last_browser_runtime(&self, runtime: BrowserRuntimePlan) {
@@ -255,7 +297,10 @@ impl AppState {
         *self.last_browser_runtime.lock().unwrap() = None;
     }
 
-    pub fn with_guest<R>(&self, f: impl FnOnce(&GuestHandle) -> Result<R, String>) -> Result<R, String> {
+    pub fn with_guest<R>(
+        &self,
+        f: impl FnOnce(&GuestHandle) -> Result<R, String>,
+    ) -> Result<R, String> {
         let rt = self.guest_runtime.lock().unwrap();
         let runtime = rt
             .as_ref()
@@ -278,6 +323,7 @@ pub fn session_info(
     origin: SessionOrigin,
     explicit_entry: Option<&Path>,
     single_file_run: bool,
+    workspace_discovery: WorkspaceDiscoveryMode,
     source: Option<SessionSource>,
 ) -> SessionInfo {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -296,6 +342,7 @@ pub fn session_info(
         project_mode,
         entry_path,
         single_file_run,
+        workspace_discovery,
         source,
         share,
     }
@@ -308,7 +355,8 @@ fn build_share_info(source: Option<&SessionSource>) -> Option<ShareInfo> {
         resolved_commit,
         subdir,
         ..
-    } = source? else {
+    } = source?
+    else {
         return Some(ShareInfo {
             canonical_url: String::new(),
             shareable: false,
@@ -322,8 +370,7 @@ fn build_share_info(source: Option<&SessionSource>) -> Option<ShareInfo> {
             reason: Some("GitHub session is not pinned to a commit".to_string()),
         });
     };
-    let mut url = url::Url::parse("https://volang.dev/")
-        .expect("share base URL must be valid");
+    let mut url = url::Url::parse("https://volang.dev/").expect("share base URL must be valid");
     let project_url = build_pinned_github_project_url(owner, repo, commit, subdir.as_deref());
     {
         let mut query = url.query_pairs_mut();
@@ -337,7 +384,12 @@ fn build_share_info(source: Option<&SessionSource>) -> Option<ShareInfo> {
     })
 }
 
-fn build_pinned_github_project_url(owner: &str, repo: &str, commit: &str, subdir: Option<&str>) -> String {
+fn build_pinned_github_project_url(
+    owner: &str,
+    repo: &str,
+    commit: &str,
+    subdir: Option<&str>,
+) -> String {
     let mut url = url::Url::parse(&format!("https://github.com/{owner}/{repo}"))
         .expect("GitHub project URL must be valid");
     let trimmed_subdir = subdir
@@ -490,7 +542,11 @@ fn extract_query_map(url: &str) -> Option<HashMap<String, String>> {
             }
         }
     }
-    if map.is_empty() { None } else { Some(map) }
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
 }
 
 fn query_get(query: &Option<HashMap<String, String>>, keys: &[&str]) -> Option<String> {
@@ -580,18 +636,27 @@ mod tests {
             "https://github.com/vo-lang/MarbleRush".to_string(),
         ];
         let proj = parse_project_arg(&args);
-        assert_eq!(proj.as_deref(), Some("https://github.com/vo-lang/MarbleRush"));
+        assert_eq!(
+            proj.as_deref(),
+            Some("https://github.com/vo-lang/MarbleRush")
+        );
     }
 
     #[test]
     fn query_map_can_feed_proj_launch() {
         let query = Some(HashMap::from([
-            ("proj".to_string(), "https://github.com/vo-lang/MarbleRush/tree/abc123".to_string()),
+            (
+                "proj".to_string(),
+                "https://github.com/vo-lang/MarbleRush/tree/abc123".to_string(),
+            ),
             ("mode".to_string(), "runner".to_string()),
         ]));
         let proj = super::query_get(&query, &["proj"]);
         let mode = super::query_get(&query, &["mode"]).and_then(|value| parse_studio_mode(&value));
-        assert_eq!(proj.as_deref(), Some("https://github.com/vo-lang/MarbleRush/tree/abc123"));
+        assert_eq!(
+            proj.as_deref(),
+            Some("https://github.com/vo-lang/MarbleRush/tree/abc123")
+        );
         assert_eq!(mode, Some(StudioMode::Runner));
     }
 }

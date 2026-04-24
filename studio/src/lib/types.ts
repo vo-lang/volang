@@ -2,6 +2,7 @@ export type StudioMode = 'dev' | 'runner';
 export type SessionOrigin = 'workspace' | 'run-target' | 'url';
 export type ProjectMode = 'single-file' | 'module';
 export type BackendPlatform = 'native' | 'wasm';
+export type WorkspaceDiscoveryMode = 'auto' | 'disabled';
 
 export interface LaunchSpec {
   proj: string | null;
@@ -41,6 +42,7 @@ export interface SessionInfo {
   projectMode: ProjectMode;
   entryPath: string | null;
   singleFileRun: boolean;
+  workspaceDiscovery: WorkspaceDiscoveryMode;
   source: SessionSource | null;
   share: ShareInfo | null;
 }

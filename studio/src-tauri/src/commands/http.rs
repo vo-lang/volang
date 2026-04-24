@@ -30,15 +30,16 @@ fn http_request_impl(
     url: String,
     opts: Option<HttpOpts>,
 ) -> Result<HttpResult, String> {
-    let timeout_secs = opts.as_ref()
-        .and_then(|o| o.timeout_ms)
-        .unwrap_or(30_000) / 1000;
+    let timeout_secs = opts.as_ref().and_then(|o| o.timeout_ms).unwrap_or(30_000) / 1000;
 
     let mut curl_args = vec![
         "-s".to_string(),
-        "--max-time".to_string(), timeout_secs.to_string(),
-        "-w".to_string(), "\n___STATUS___%{http_code}".to_string(),
-        "-X".to_string(), method.to_uppercase(),
+        "--max-time".to_string(),
+        timeout_secs.to_string(),
+        "-w".to_string(),
+        "\n___STATUS___%{http_code}".to_string(),
+        "-X".to_string(),
+        method.to_uppercase(),
     ];
 
     if let Some(ref o) = opts {

@@ -110,7 +110,9 @@ pub use browser_runtime_dev::{
 };
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
-pub use compile::{compile_entry_with_vfs, compile_source_with_vfs};
+pub use compile::{
+    compile_entry_with_vfs, compile_entry_with_vfs_with_options, compile_source_with_vfs,
+};
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use browser_registry::{fetch_bytes, BrowserRegistry};

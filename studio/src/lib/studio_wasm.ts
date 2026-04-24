@@ -6,7 +6,7 @@
 // are injected dynamically via setActiveHostBridge() before WASM instantiation.
 // No static import of any framework package.
 import type { HostBridgeModule } from './gui/renderer_bridge';
-import type { FrameworkContract } from './types';
+import type { DiagnosticError, FrameworkContract, WorkspaceDiscoveryMode } from './types';
 import { hasWindowVfsBindings, installWindowVfsBackend, type WindowVfsBackend } from './window_vfs_bindings';
 
 // ── VoVm instance interface (matches VoVm wasm-bindgen class exports) ────────
@@ -21,12 +21,18 @@ export interface VoVmInstance {
   takeOutput(): string;
 }
 
+export interface WasmCompileResult {
+  ok: boolean;
+  errors: DiagnosticError[];
+  bytecode: Uint8Array | null;
+}
+
 // ── StudioWasm — full set of wasm-bindgen exports from vo-studio-wasm ────────
 
 export interface StudioWasm {
   // Direct GUI VM API.
   runGuiFromBytecode(bytecode: Uint8Array): Uint8Array;
-  startGuiFromBytecode(bytecode: Uint8Array): Uint8Array;
+  startGuiFromBytecode(bytecode: Uint8Array, entryPath?: string): Uint8Array;
   runGui(entryPath: string): {
     renderBytes: Uint8Array;
     moduleBytes: Uint8Array;
@@ -41,7 +47,7 @@ export interface StudioWasm {
   startRenderIsland(bytecode: Uint8Array): void;
   pushIslandData(data: Uint8Array): void;
   pollGuiRender(): Uint8Array;
-  getRenderIslandVfsSnapshot(entryPath: string): {
+  getRenderIslandVfsSnapshot(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): {
     rootPath: string;
     files: Array<{ path: string; bytes: Uint8Array }>;
   };
@@ -49,13 +55,16 @@ export interface StudioWasm {
   pollPendingHostEvent(): { token: string; delayMs: number } | null;
   wakeHostEvent(token: string): void;
   stopGui(): void;
+  checkEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): WasmCompileResult;
+  compileEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): WasmCompileResult;
+  dumpEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): string;
   // Console run (compile + execute, returns stdout)
-  compileRunEntry(entryPath: string): string;
+  compileRunEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): string;
   // Instance-based VM (VoWebModule interface)
   VoVm: { withExterns(bytecode: Uint8Array): VoVmInstance };
   preloadExtModule(path: string, bytes: Uint8Array, jsGlueUrl?: string): Promise<void>;
-  prepareEntry(entryPath: string): Promise<void>;
-  compileGui(entryPath: string): {
+  prepareEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): Promise<void>;
+  compileGui(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): {
     bytecode: Uint8Array;
     entryPath: string;
     framework: FrameworkContract | null;
@@ -888,6 +897,9 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
     wakeHostEvent: requireStudioExport(mod.wakeHostEvent, 'wakeHostEvent'),
     stopGui: requireStudioExport(mod.stopGui, 'stopGui'),
     preloadExtModule: requireStudioExport(mod.preloadExtModule, 'preloadExtModule'),
+    checkEntry: requireStudioExport(mod.checkEntry as StudioWasm['checkEntry'], 'checkEntry'),
+    compileEntry: requireStudioExport(mod.compileEntry as StudioWasm['compileEntry'], 'compileEntry'),
+    dumpEntry: requireStudioExport(mod.dumpEntry as StudioWasm['dumpEntry'], 'dumpEntry'),
     compileRunEntry: requireStudioExport(mod.compileRunEntry as StudioWasm['compileRunEntry'], 'compileRunEntry'),
     prepareEntry: requireStudioExport(mod.prepareEntry, 'prepareEntry'),
     compileGui: requireStudioExport(mod.compileGui as StudioWasm['compileGui'], 'compileGui'),

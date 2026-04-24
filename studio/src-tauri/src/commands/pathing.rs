@@ -126,7 +126,12 @@ pub fn source_root_for_target(target_path: &Path) -> PathBuf {
     target_path.to_path_buf()
 }
 
-pub fn resolve_target(session_root: &Path, workspace_root: &Path, entry_path: &str, single_file_run: bool) -> Result<ResolvedTarget, String> {
+pub fn resolve_target(
+    session_root: &Path,
+    workspace_root: &Path,
+    entry_path: &str,
+    single_file_run: bool,
+) -> Result<ResolvedTarget, String> {
     let abs = resolve_path(session_root, entry_path)?;
     let output_base_path = resolve_compile_path(&abs);
 
@@ -134,7 +139,11 @@ pub fn resolve_target(session_root: &Path, workspace_root: &Path, entry_path: &s
     // This is the runner-mode path for `run=file://path/to/file.vo`.
     if single_file_run && abs.is_file() {
         let source_root = abs.parent().unwrap_or(&abs).to_path_buf();
-        return Ok(ResolvedTarget { compile_path: abs, output_base_path, source_root });
+        return Ok(ResolvedTarget {
+            compile_path: abs,
+            output_base_path,
+            source_root,
+        });
     }
 
     if is_standalone_single_file_target(&abs) {
@@ -142,10 +151,19 @@ pub fn resolve_target(session_root: &Path, workspace_root: &Path, entry_path: &s
     }
     let compile_path = resolve_compile_path(&abs);
     let source_root = source_root_for_target(&compile_path);
-    Ok(ResolvedTarget { compile_path, output_base_path, source_root })
+    Ok(ResolvedTarget {
+        compile_path,
+        output_base_path,
+        source_root,
+    })
 }
 
-pub fn resolve_run_target(session_root: &Path, workspace_root: &Path, entry_path: &str, single_file_run: bool) -> Result<ResolvedTarget, String> {
+pub fn resolve_run_target(
+    session_root: &Path,
+    workspace_root: &Path,
+    entry_path: &str,
+    single_file_run: bool,
+) -> Result<ResolvedTarget, String> {
     resolve_target(session_root, workspace_root, entry_path, single_file_run)
 }
 
@@ -176,15 +194,25 @@ fn resolve_standalone_single_file_target(
     let materialized_entry = materialized_root.join(relative);
     let compile_path = resolve_compile_path(&materialized_entry);
     let source_root = source_root_for_target(&materialized_entry);
-    Ok(ResolvedTarget { compile_path, output_base_path, source_root })
+    Ok(ResolvedTarget {
+        compile_path,
+        output_base_path,
+        source_root,
+    })
 }
 
 fn standalone_single_file_run_root(workspace_root: &Path, target_path: &Path) -> PathBuf {
-    let canonical_workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
-    let canonical_target = target_path.canonicalize().unwrap_or_else(|_| target_path.to_path_buf());
+    let canonical_workspace = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    let canonical_target = target_path
+        .canonicalize()
+        .unwrap_or_else(|_| target_path.to_path_buf());
 
     let mut workspace_hasher = DefaultHasher::new();
-    canonical_workspace.to_string_lossy().hash(&mut workspace_hasher);
+    canonical_workspace
+        .to_string_lossy()
+        .hash(&mut workspace_hasher);
 
     let mut target_hasher = DefaultHasher::new();
     canonical_target.to_string_lossy().hash(&mut target_hasher);
@@ -231,18 +259,25 @@ fn sanitize_path_component(input: &str) -> String {
     }
 }
 
-fn materialize_workspace_context(source_root: &Path, materialized_root: &Path) -> Result<(), String> {
+fn materialize_workspace_context(
+    source_root: &Path,
+    materialized_root: &Path,
+) -> Result<(), String> {
     let Some(workfile_path) = vo_module::workspace::discover_workfile(source_root) else {
         return Ok(());
     };
     let content = fs::read_to_string(&workfile_path)
         .map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
-    let mut workfile = WorkFile::parse(&content)
-        .map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
+    let mut workfile =
+        WorkFile::parse(&content).map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
     let workfile_dir = workfile_path.parent().unwrap_or(source_root);
     let root_module = try_read_workspace_root_module(source_root);
-    vo_module::workspace::load_workspace_overrides_in(&RealFs::new("."), source_root, root_module.as_ref())
-        .map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
+    vo_module::workspace::load_workspace_overrides_in(
+        &RealFs::new("."),
+        source_root,
+        root_module.as_ref(),
+    )
+    .map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
     for entry in &mut workfile.uses {
         let resolved = resolve_workspace_use_path(workfile_dir, &entry.path);
         let canonical = resolved.canonicalize().unwrap_or(resolved);
@@ -262,34 +297,30 @@ fn resolve_workspace_use_path(base: &Path, raw_path: &str) -> PathBuf {
 }
 
 fn try_read_workspace_root_module(source_root: &Path) -> Option<ModIdentity> {
-    project::read_mod_file(source_root).ok().map(|mod_file| mod_file.module)
+    project::read_mod_file(source_root)
+        .ok()
+        .map(|mod_file| mod_file.module)
 }
 
 fn remove_existing_path(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|err| format!("{}: {}", path.display(), err))?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|err| format!("{}: {}", path.display(), err))?;
     if metadata.is_dir() {
-        fs::remove_dir_all(path)
-            .map_err(|err| format!("{}: {}", path.display(), err))?;
+        fs::remove_dir_all(path).map_err(|err| format!("{}: {}", path.display(), err))?;
     } else {
-        fs::remove_file(path)
-            .map_err(|err| format!("{}: {}", path.display(), err))?;
+        fs::remove_file(path).map_err(|err| format!("{}: {}", path.display(), err))?;
     }
     Ok(())
 }
 
 fn copy_path_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     if src.is_dir() {
-        fs::create_dir_all(dst)
-            .map_err(|err| format!("{}: {}", dst.display(), err))?;
-        for entry in fs::read_dir(src)
-            .map_err(|err| format!("{}: {}", src.display(), err))?
-        {
-            let entry = entry
-                .map_err(|err| format!("{}: {}", src.display(), err))?;
+        fs::create_dir_all(dst).map_err(|err| format!("{}: {}", dst.display(), err))?;
+        for entry in fs::read_dir(src).map_err(|err| format!("{}: {}", src.display(), err))? {
+            let entry = entry.map_err(|err| format!("{}: {}", src.display(), err))?;
             let src_path = entry.path();
             let dst_path = dst.join(entry.file_name());
             copy_path_recursive(&src_path, &dst_path)?;
@@ -298,8 +329,7 @@ fn copy_path_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     }
 
     if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("{}: {}", parent.display(), err))?;
+        fs::create_dir_all(parent).map_err(|err| format!("{}: {}", parent.display(), err))?;
     }
     fs::copy(src, dst)
         .map(|_| ())
@@ -308,7 +338,7 @@ fn copy_path_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_target, resolve_run_target, standalone_single_file_run_root};
+    use super::{resolve_run_target, resolve_target, standalone_single_file_run_root};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -329,8 +359,20 @@ mod tests {
         fs::write(&beta, "package main\nfunc main() {}\n").unwrap();
         fs::write(&shared, "package shared\n").unwrap();
 
-        let alpha_target = resolve_run_target(&session_root, &workspace_root, alpha.to_string_lossy().as_ref(), false).unwrap();
-        let beta_target = resolve_run_target(&session_root, &workspace_root, beta.to_string_lossy().as_ref(), false).unwrap();
+        let alpha_target = resolve_run_target(
+            &session_root,
+            &workspace_root,
+            alpha.to_string_lossy().as_ref(),
+            false,
+        )
+        .unwrap();
+        let beta_target = resolve_run_target(
+            &session_root,
+            &workspace_root,
+            beta.to_string_lossy().as_ref(),
+            false,
+        )
+        .unwrap();
         let alpha_output_base = alpha.canonicalize().unwrap();
         let beta_output_base = beta.canonicalize().unwrap();
 
@@ -362,7 +404,13 @@ mod tests {
         fs::write(&entry, "package main\nfunc main() {}\n").unwrap();
         fs::write(session_root.join("shared.vo"), "package shared\n").unwrap();
 
-        let resolved = resolve_target(&session_root, &workspace_root, entry.to_string_lossy().as_ref(), false).unwrap();
+        let resolved = resolve_target(
+            &session_root,
+            &workspace_root,
+            entry.to_string_lossy().as_ref(),
+            false,
+        )
+        .unwrap();
         let output_base = entry.canonicalize().unwrap();
 
         assert!(resolved.compile_path.is_file());
@@ -385,7 +433,13 @@ mod tests {
         let main_file = project_root.join("main.vo");
         fs::write(&main_file, "package main\nfunc main() {}\n").unwrap();
 
-        let resolved = resolve_run_target(&project_root, &workspace_root, main_file.to_string_lossy().as_ref(), false).unwrap();
+        let resolved = resolve_run_target(
+            &project_root,
+            &workspace_root,
+            main_file.to_string_lossy().as_ref(),
+            false,
+        )
+        .unwrap();
         let canonical_project_root = project_root.canonicalize().unwrap();
 
         assert_eq!(resolved.compile_path, canonical_project_root);
@@ -419,7 +473,13 @@ mod tests {
         let entry = examples_root.join("tetris.vo");
         fs::write(&entry, "package main\nfunc main() {}\n").unwrap();
 
-        let resolved = resolve_run_target(&volang_root, &workspace_root, entry.to_string_lossy().as_ref(), false).unwrap();
+        let resolved = resolve_run_target(
+            &volang_root,
+            &workspace_root,
+            entry.to_string_lossy().as_ref(),
+            false,
+        )
+        .unwrap();
         let materialized_workfile = resolved.source_root.join("vo.work");
         let content = fs::read_to_string(&materialized_workfile).unwrap();
         let vogui_root_str = vogui_root.to_string_lossy().into_owned();
@@ -432,8 +492,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_run_target_materialized_project_file_keeps_workspace_extension_metadata_during_compile()
-    {
+    fn resolve_run_target_materialized_project_file_keeps_workspace_extension_metadata_during_compile(
+    ) {
         let root = make_temp_dir("project-file-compile-ext");
         let workspace_root = root.join("workspace");
         let repo_root = root.join("repo");
@@ -471,8 +531,15 @@ mod tests {
         )
         .unwrap();
 
-        let resolved = resolve_run_target(&volang_root, &workspace_root, entry.to_string_lossy().as_ref(), false).unwrap();
-        let compiled = compile_with_auto_install(resolved.compile_path.to_string_lossy().as_ref()).unwrap();
+        let resolved = resolve_run_target(
+            &volang_root,
+            &workspace_root,
+            entry.to_string_lossy().as_ref(),
+            false,
+        )
+        .unwrap();
+        let compiled =
+            compile_with_auto_install(resolved.compile_path.to_string_lossy().as_ref()).unwrap();
 
         assert_eq!(compiled.extensions.len(), 1);
         assert_eq!(compiled.extensions[0].name, "vogui");

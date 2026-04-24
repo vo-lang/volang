@@ -17,7 +17,9 @@ pub async fn cmd_pick_directory(default_path: Option<String>) -> Result<Option<S
                 dialog = dialog.set_directory(&p);
             }
         }
-        Ok(dialog.pick_folder().map(|p| p.to_string_lossy().to_string()))
+        Ok(dialog
+            .pick_folder()
+            .map(|p| p.to_string_lossy().to_string()))
     })
     .await
     .map_err(|err| format!("dialog task failed: {err}"))?

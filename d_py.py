@@ -8,6 +8,7 @@ Usage:
     ./d.py loc [--with-tests]
     ./d.py studio [--build-wasm] [--build-only] [--runner] [project]
     ./d.py studio-native [--build-wasm] [--runner] [project]
+    ./d.py studio-stop
 """
 
 from __future__ import annotations
@@ -44,7 +45,10 @@ if Path.cwd().resolve() != _expected_cwd:
 try:
     import tomllib
 except ImportError:
-    import tomli as tomllib
+    try:
+        import tomli as tomllib
+    except ImportError:
+        tomllib = None
 
 
 class Colors:
@@ -371,6 +375,42 @@ def run_studio_native(build_wasm: bool = False, project: Optional[str] = None, r
     except KeyboardInterrupt:
         print(f"\n{Colors.GREEN}Studio (native) stopped{Colors.NC}")
 
+
+def run_studio_stop():
+    """Stop the Studio Vite dev server if it owns the fixed Studio port."""
+    port = '5174'
+    result = subprocess.run(
+        ['lsof', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN', '-t'],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    pids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not pids:
+        print(f"{Colors.DIM}No Studio dev server is listening on port {port}.{Colors.NC}")
+        return
+
+    studio_vite = str(PROJECT_ROOT / 'studio' / 'node_modules' / '.bin' / 'vite')
+    stopped = 0
+    for pid in pids:
+        ps = subprocess.run(
+            ['ps', '-p', pid, '-o', 'command='],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        command = ps.stdout.strip()
+        if studio_vite not in command:
+            print(f"{Colors.YELLOW}Refusing to stop non-Studio process on {port}: pid={pid} {command}{Colors.NC}")
+            continue
+        subprocess.run(['kill', pid], cwd=PROJECT_ROOT, check=False)
+        print(f"{Colors.GREEN}Stopped Studio dev server:{Colors.NC} pid={pid}")
+        stopped += 1
+
+    if stopped == 0:
+        sys.exit(1)
+
+
 def get_vo_bin(release: bool = False, arch: str = '64', native: bool = False) -> Path:
     """Get the path to vo binary for the given architecture."""
     if native:
@@ -488,6 +528,12 @@ class TestRunner:
         """Load config, returns dict: file -> {skip: [], should_fail: bool}"""
         if not TEST_CONFIG.exists():
             return {}
+        if tomllib is None:
+            print(
+                f"{Colors.RED}Python TOML support is unavailable. Use Python 3.11+ or install tomli.{Colors.NC}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         
         with open(TEST_CONFIG, 'rb') as f:
             data = tomllib.load(f)
@@ -1707,6 +1753,9 @@ def main():
     studio_native_parser.add_argument('project', nargs='?',
                                       help='Optional project URL or local path to open')
 
+    # studio-stop
+    subparsers.add_parser('studio-stop', help='Stop the Studio Vite dev server on port 5174')
+
     # ci
     ci_parser = subparsers.add_parser('ci', help='Run local CI checks')
     ci_parser.add_argument('mode', nargs='?', default='pr', choices=['quality', 'test', 'release-verify', 'pr', 'site', 'full'])
@@ -1763,6 +1812,9 @@ def main():
             project=args.project,
             runner=args.runner,
         )
+
+    elif args.command == 'studio-stop':
+        run_studio_stop()
 
     elif args.command == 'run':
         run_vo_file(args.file, mode=args.mode, codegen=args.codegen)

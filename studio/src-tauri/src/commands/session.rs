@@ -8,8 +8,11 @@ use serde::de::DeserializeOwned;
 use tar::Archive;
 use url::Url;
 
-use crate::state::{session_info, AppState, LaunchSpec, SessionInfo, SessionOrigin, SessionSource};
 use super::pathing::{find_project_root, is_module_root};
+use crate::state::{
+    session_info, AppState, LaunchSpec, SessionInfo, SessionOrigin, SessionSource,
+    WorkspaceDiscoveryMode,
+};
 
 #[derive(serde::Deserialize)]
 struct GitHubRepoMetadata {
@@ -43,7 +46,10 @@ struct ResolvedGitHubSource {
 }
 
 #[tauri::command]
-pub fn cmd_open_session(spec: LaunchSpec, state: tauri::State<'_, AppState>) -> Result<SessionInfo, String> {
+pub fn cmd_open_session(
+    spec: LaunchSpec,
+    state: tauri::State<'_, AppState>,
+) -> Result<SessionInfo, String> {
     open_project_impl(spec.proj.as_deref(), state.inner())
 }
 
@@ -55,7 +61,14 @@ fn open_project_impl(proj: Option<&str>, state: &AppState) -> Result<SessionInfo
         return open_run_session_impl(strip_file_prefix(proj), state);
     }
     if let Some(source) = parse_github_repo_url(proj) {
-        return open_github_session_impl(source.owner, source.repo, source.ref_, source.commit, source.subdir, state);
+        return open_github_session_impl(
+            source.owner,
+            source.repo,
+            source.ref_,
+            source.commit,
+            source.subdir,
+            state,
+        );
     }
     Err(format!("Unsupported project URL: {proj}"))
 }
@@ -69,8 +82,8 @@ fn open_run_session_impl(path: String, state: &AppState) -> Result<SessionInfo, 
         .canonicalize()
         .map_err(|err| format!("{}: {}", target.display(), err))?;
 
-    let is_vo_file = canonical.is_file()
-        && canonical.extension().and_then(|e| e.to_str()) == Some("vo");
+    let is_vo_file =
+        canonical.is_file() && canonical.extension().and_then(|e| e.to_str()) == Some("vo");
 
     let module_root = if is_vo_file {
         find_project_root(&canonical)
@@ -95,15 +108,24 @@ fn open_run_session_impl(path: String, state: &AppState) -> Result<SessionInfo, 
         (canonical.clone(), false)
     };
 
-    state.set_session(session_root.clone(), is_single_file);
+    state.set_session(
+        session_root.clone(),
+        is_single_file,
+        WorkspaceDiscoveryMode::Auto,
+    );
 
-    let entry = if canonical.is_file() { Some(canonical.as_path()) } else { None };
+    let entry = if canonical.is_file() {
+        Some(canonical.as_path())
+    } else {
+        None
+    };
     let source_path = canonical.to_string_lossy().to_string();
     Ok(session_info(
         &session_root,
         SessionOrigin::RunTarget,
         entry,
         is_single_file,
+        WorkspaceDiscoveryMode::Auto,
         Some(SessionSource::Path { path: source_path }),
     ))
 }
@@ -111,12 +133,21 @@ fn open_run_session_impl(path: String, state: &AppState) -> Result<SessionInfo, 
 fn open_workspace_session_impl(state: &AppState) -> Result<SessionInfo, String> {
     let root = state.workspace_root().to_path_buf();
     std::fs::create_dir_all(&root).map_err(|err| format!("{}: {}", root.display(), err))?;
-    state.set_session(root.clone(), false);
-    Ok(session_info(&root, SessionOrigin::Workspace, None, false, Some(SessionSource::Workspace)))
+    state.set_session(root.clone(), false, WorkspaceDiscoveryMode::Auto);
+    Ok(session_info(
+        &root,
+        SessionOrigin::Workspace,
+        None,
+        false,
+        WorkspaceDiscoveryMode::Auto,
+        Some(SessionSource::Workspace),
+    ))
 }
 
 fn is_local_project_path(value: &str) -> bool {
-    value.starts_with('/') || value.starts_with("file://") || (!value.contains("://") && Path::new(value).exists())
+    value.starts_with('/')
+        || value.starts_with("file://")
+        || (!value.contains("://") && Path::new(value).exists())
 }
 
 fn strip_file_prefix(value: &str) -> String {
@@ -131,16 +162,28 @@ fn open_github_session_impl(
     subdir: Option<String>,
     state: &AppState,
 ) -> Result<SessionInfo, String> {
-    let resolved = resolve_github_source(&owner, &repo, ref_.as_deref(), commit.as_deref(), subdir.as_deref(), state.workspace_root())?;
+    let resolved = resolve_github_source(
+        &owner,
+        &repo,
+        ref_.as_deref(),
+        commit.as_deref(),
+        subdir.as_deref(),
+        state.workspace_root(),
+    )?;
     populate_github_source_cache(&resolved)?;
     materialize_github_session(&resolved)?;
     let entry_path = detect_import_entry(&resolved.project_root);
-    state.set_session(resolved.project_root.clone(), false);
+    state.set_session(
+        resolved.project_root.clone(),
+        false,
+        WorkspaceDiscoveryMode::Disabled,
+    );
     Ok(session_info(
         &resolved.project_root,
         SessionOrigin::Url,
         entry_path.as_deref(),
         false,
+        WorkspaceDiscoveryMode::Disabled,
         Some(SessionSource::GithubRepo {
             owner: resolved.owner.clone(),
             repo: resolved.repo.clone(),
@@ -158,8 +201,7 @@ fn fetch_bytes_blocking(url: &str) -> Result<Vec<u8>, String> {
 }
 
 fn fetch_bytes_with_headers(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, String> {
-    let mut request = ureq::get(url)
-        .set("User-Agent", "Vo-Studio");
+    let mut request = ureq::get(url).set("User-Agent", "Vo-Studio");
     for (name, value) in headers {
         request = request.set(name, value);
     }
@@ -201,12 +243,15 @@ fn resolve_github_source(
             }
         }
         if requested_ref.is_none() {
-            requested_ref = repo_info.default_branch.filter(|value| !value.trim().is_empty());
+            requested_ref = repo_info
+                .default_branch
+                .filter(|value| !value.trim().is_empty());
         }
         let target_ref = requested_ref
             .as_deref()
             .ok_or_else(|| format!("could not resolve a GitHub ref for {}/{}", owner, repo))?;
-        let commit_info: GitHubCommitMetadata = fetch_json_blocking(&format!("{}/commits/{}", repo_api, target_ref))?;
+        let commit_info: GitHubCommitMetadata =
+            fetch_json_blocking(&format!("{}/commits/{}", repo_api, target_ref))?;
         resolved_commit = commit_info.sha.filter(|value| !value.trim().is_empty());
     }
     let resolved_commit = resolved_commit
@@ -257,9 +302,7 @@ fn populate_github_source_cache(resolved: &ResolvedGitHubSource) -> Result<(), S
         .map_err(|err| format!("{}: {}", resolved.source_cache_root.display(), err))?;
     let archive_url = format!(
         "https://api.github.com/repos/{}/{}/tarball/{}",
-        resolved.owner,
-        resolved.repo,
-        resolved.resolved_commit,
+        resolved.owner, resolved.repo, resolved.resolved_commit,
     );
     let archive_bytes = fetch_bytes_blocking(&archive_url)?;
     extract_tar_gz_project(&archive_bytes, &resolved.source_cache_root)
@@ -272,32 +315,46 @@ fn materialize_github_session(resolved: &ResolvedGitHubSource) -> Result<(), Str
     }
     copy_dir_recursive(&resolved.source_cache_root, &resolved.session_root)?;
     if !path_has_tree(&resolved.project_root)? {
-        return Err(format!("GitHub project root not found: {}", resolved.project_root.display()));
+        return Err(format!(
+            "GitHub project root not found: {}",
+            resolved.project_root.display()
+        ));
     }
     let workfile = resolved.project_root.join("vo.work");
     if workfile.is_file() {
-        fs::remove_file(&workfile)
-            .map_err(|err| format!("{}: {}", workfile.display(), err))?;
+        fs::remove_file(&workfile).map_err(|err| format!("{}: {}", workfile.display(), err))?;
     }
     Ok(())
 }
 
 fn copy_dir_recursive(source_root: &Path, target_root: &Path) -> Result<(), String> {
     fs::create_dir_all(target_root).map_err(|err| format!("{}: {}", target_root.display(), err))?;
-    for entry in fs::read_dir(source_root).map_err(|err| format!("{}: {}", source_root.display(), err))? {
+    for entry in
+        fs::read_dir(source_root).map_err(|err| format!("{}: {}", source_root.display(), err))?
+    {
         let entry = entry.map_err(|err| format!("{}: {}", source_root.display(), err))?;
         let source_path = entry.path();
         let target_path = target_root.join(entry.file_name());
-        let file_type = entry.file_type().map_err(|err| format!("{}: {}", source_path.display(), err))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|err| format!("{}: {}", source_path.display(), err))?;
         if file_type.is_dir() {
             copy_dir_recursive(&source_path, &target_path)?;
         } else if file_type.is_file() {
             if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent).map_err(|err| format!("{}: {}", parent.display(), err))?;
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("{}: {}", parent.display(), err))?;
             }
             fs::copy(&source_path, &target_path)
                 .map(|_| ())
-                .map_err(|err| format!("{} -> {}: {}", source_path.display(), target_path.display(), err))?;
+                .map_err(|err| {
+                    format!(
+                        "{} -> {}: {}",
+                        source_path.display(),
+                        target_path.display(),
+                        err
+                    )
+                })?;
         }
     }
     Ok(())
@@ -311,12 +368,15 @@ fn path_has_tree(path: &Path) -> Result<bool, String> {
         return Ok(false);
     }
     let mut entries = fs::read_dir(path).map_err(|err| format!("{}: {}", path.display(), err))?;
-    Ok(entries.next().transpose().map_err(|err| format!("{}: {}", path.display(), err))?.is_some())
+    Ok(entries
+        .next()
+        .transpose()
+        .map_err(|err| format!("{}: {}", path.display(), err))?
+        .is_some())
 }
 
 fn normalize_relative_path(path: &str) -> Result<PathBuf, String> {
-    sanitize_archive_path(Path::new(path))
-        .ok_or_else(|| format!("invalid GitHub subdir: {}", path))
+    sanitize_archive_path(Path::new(path)).ok_or_else(|| format!("invalid GitHub subdir: {}", path))
 }
 
 fn session_nonce() -> String {
@@ -333,7 +393,10 @@ fn parse_github_repo_url(value: &str) -> Option<GitHubRepoInput> {
     if host != "github.com" && host != "www.github.com" {
         return None;
     }
-    let parts: Vec<_> = parsed.path_segments()?.filter(|segment| !segment.is_empty()).collect();
+    let parts: Vec<_> = parsed
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
     if parts.len() < 2 {
         return None;
     }
@@ -359,7 +422,11 @@ fn parse_github_repo_url(value: &str) -> Option<GitHubRepoInput> {
         repo,
         ref_: Some(parts[3].to_string()),
         commit: None,
-        subdir: if parts.len() > 4 { Some(parts[4..].join("/")) } else { None },
+        subdir: if parts.len() > 4 {
+            Some(parts[4..].join("/"))
+        } else {
+            None
+        },
     })
 }
 
@@ -477,8 +544,10 @@ mod tests {
             ("bundle/assets/logo.bin", vec![0, 159, 146, 150, 255, 1]),
         ]);
         let root = temp_test_dir("extract-binary");
-        extract_tar_gz_project(&archive_bytes, &root).expect("expected archive extraction to succeed");
-        let text = fs::read_to_string(root.join("main.vo")).expect("expected main.vo to be readable");
+        extract_tar_gz_project(&archive_bytes, &root)
+            .expect("expected archive extraction to succeed");
+        let text =
+            fs::read_to_string(root.join("main.vo")).expect("expected main.vo to be readable");
         assert_eq!(text, "package main\n");
         let bytes = fs::read(root.join("assets/logo.bin")).expect("expected binary file to exist");
         assert_eq!(bytes, vec![0, 159, 146, 150, 255, 1]);
@@ -507,7 +576,9 @@ mod tests {
                 .append_data(&mut header, path, bytes.as_slice())
                 .expect("expected tar append to succeed");
         }
-        let encoder = builder.into_inner().expect("expected tar finalize to succeed");
+        let encoder = builder
+            .into_inner()
+            .expect("expected tar finalize to succeed");
         encoder.finish().expect("expected gzip finalize to succeed")
     }
 }

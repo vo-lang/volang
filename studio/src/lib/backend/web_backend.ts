@@ -4,6 +4,7 @@ import type {
   BuildResult,
   CheckResult,
   CompileResult,
+  DiagnosticError,
   DiscoveredProject,
   FsEntry,
   FsStat,
@@ -24,6 +25,7 @@ import type {
   RunOpts,
   SessionInfo,
   StreamHandle,
+  WorkspaceDiscoveryMode,
 } from '../types';
 import { buildShareInfo } from '../session_share';
 import { loadStudioWasm, setStandaloneGuiEventDispatcher, type StudioWasm } from '../studio_wasm';
@@ -43,6 +45,7 @@ const GITHUB_SOURCE_ROOT = `${SOURCE_CACHE_ROOT}/github`;
 const GITHUB_SESSION_ROOT = `${WORKSPACE_ROOT}/.studio-sessions/github`;
 const JSDELIVR_GITHUB_CDN_ROOT = 'https://cdn.jsdelivr.net';
 const GITHUB_FILE_FETCH_CONCURRENCY = 8;
+const sessionWorkspaceDiscovery = new Map<string, WorkspaceDiscoveryMode>();
 const DISPLAY_PULSE_DELAY_MS = 0xFFFFFFFF;
 const MISSING_INITIAL_GUI_RENDER = 'guest app did not emit a render';
 const defaultWorkspaceFiles = new Map<string, string>([
@@ -560,34 +563,55 @@ export class WebBackend implements Backend {
     return results;
   }
 
-  async checkVo(_path: string): Promise<CheckResult> {
-    throw new Error('vo check is not wired in WASM mode yet');
+  async checkVo(path: string): Promise<CheckResult> {
+    const normalized = normalizePath(path);
+    const result = await compileEntryForCommand(normalized, false);
+    return { ok: result.ok, errors: result.errors };
   }
 
-  async compileVo(_path: string): Promise<CompileResult> {
-    throw new Error('vo compile is not wired in WASM mode yet');
+  async compileVo(path: string): Promise<CompileResult> {
+    const normalized = normalizePath(path);
+    const result = await compileEntryForCommand(normalized, true);
+    if (!result.ok || !result.bytecode) {
+      return { ok: false, errors: result.errors, outputPath: undefined };
+    }
+    const outputPath = defaultCompilerOutputPath(normalized);
+    setVfsFile(outputPath, result.bytecode, 0o644);
+    return { ok: true, errors: [], outputPath };
   }
 
   async formatVo(_path: string): Promise<string> {
     throw new Error('vo format is not wired in WASM mode yet');
   }
 
-  async buildVo(_path: string, _output?: string): Promise<BuildResult> {
-    throw new Error('vo build is not wired in WASM mode yet');
+  async buildVo(path: string, output?: string): Promise<BuildResult> {
+    const normalized = normalizePath(path);
+    const result = await compileEntryForCommand(normalized, true);
+    if (!result.ok || !result.bytecode) {
+      return { ok: false, errors: result.errors, outputPath: undefined };
+    }
+    const outputPath = output ? normalizePath(output) : defaultCompilerOutputPath(normalized);
+    setVfsFile(outputPath, result.bytecode, 0o644);
+    return { ok: true, errors: [], outputPath };
   }
 
-  async dumpVo(_path: string): Promise<string> {
-    throw new Error('vo dump is not wired in WASM mode yet');
+  async dumpVo(path: string): Promise<string> {
+    const normalized = normalizePath(path);
+    const workspaceDiscovery = workspaceDiscoveryForPath(normalized);
+    const wasm = await getStudioWasm();
+    await wasm.prepareEntry(normalized, workspaceDiscovery);
+    return wasm.dumpEntry(normalized, workspaceDiscovery);
   }
 
   runVo(path: string, _opts?: RunOpts): StreamHandle<RunEvent> {
     const normalized = normalizePath(path);
+    const workspaceDiscovery = workspaceDiscoveryForPath(normalized);
     return makeStreamHandleFromProducer<RunEvent>((emit, onDone, onError) => {
       (async () => {
         const start = performance.now();
         const wasm = await getStudioWasm();
-        await wasm.prepareEntry(normalized);
-        const output = wasm.compileRunEntry(normalized);
+        await wasm.prepareEntry(normalized, workspaceDiscovery);
+        const output = wasm.compileRunEntry(normalized, workspaceDiscovery);
         if (output) {
           for (const line of output.split('\n')) {
             emit({ kind: 'stdout', text: line });
@@ -609,6 +633,7 @@ export class WebBackend implements Backend {
 
   async runGui(path: string): Promise<GuiRunOutput> {
     const normalized = normalizePath(path);
+    const workspaceDiscovery = workspaceDiscoveryForPath(normalized);
     const targetLabel = displayPath(normalized);
     const sessionId = this.guiSessionId + 1;
     this.guiSessionId = sessionId;
@@ -623,14 +648,14 @@ export class WebBackend implements Backend {
       this.assertGuiSessionCurrent(sessionId);
       consolePush('system', `Preparing dependencies for ${targetLabel}...`);
       const prepareStart = performance.now();
-      await wasm.prepareEntry(normalized);
+      await wasm.prepareEntry(normalized, workspaceDiscovery);
       const prepareDurationMs = performance.now() - prepareStart;
       consolePush('system', `Prepared dependencies for ${targetLabel} in ${formatDurationMs(prepareDurationMs)}`);
       this.assertGuiSessionCurrent(sessionId);
       this.installStandaloneGuiDispatcher(sessionId);
       consolePush('system', `Compiling and starting GUI ${targetLabel}...`);
       const compileStart = performance.now();
-      const compileResult = wasm.compileGui(normalized);
+      const compileResult = wasm.compileGui(normalized, workspaceDiscovery);
       const compileDurationMs = performance.now() - compileStart;
       console.info(`[studio-gui] compileGui ${normalized} ${Math.round(compileDurationMs)}ms`);
       const wasmExtensionLabels = compileResult.wasmExtensions.map((ext) => `${ext.name}=>${ext.moduleKey ?? ext.name}`);
@@ -717,7 +742,8 @@ export class WebBackend implements Backend {
 
   async getRendererBridgeVfsSnapshot(path: string): Promise<RendererBridgeVfsSnapshot> {
     const wasm = await getStudioWasm();
-    return wasm.getRenderIslandVfsSnapshot(normalizePath(path));
+    const normalized = normalizePath(path);
+    return wasm.getRenderIslandVfsSnapshot(normalized, workspaceDiscoveryForPath(normalized));
   }
 
   voGet(_spec: string): StreamHandle<InstallEvent> {
@@ -803,6 +829,64 @@ function getStudioWasm(): Promise<StudioWasm> {
     studioWasmPromise = loadStudioWasm();
   }
   return studioWasmPromise;
+}
+
+async function compileEntryForCommand(
+  path: string,
+  includeBytecode: boolean,
+): Promise<{ ok: boolean; errors: DiagnosticError[]; bytecode: Uint8Array | null }> {
+  const normalized = normalizePath(path);
+  const workspaceDiscovery = workspaceDiscoveryForPath(normalized);
+  try {
+    const wasm = await getStudioWasm();
+    await wasm.prepareEntry(normalized, workspaceDiscovery);
+    return includeBytecode
+      ? wasm.compileEntry(normalized, workspaceDiscovery)
+      : wasm.checkEntry(normalized, workspaceDiscovery);
+  } catch (error) {
+    return {
+      ok: false,
+      errors: [diagnosticFromError(normalized, 'compile', error)],
+      bytecode: null,
+    };
+  }
+}
+
+function diagnosticFromError(path: string, category: string, error: unknown): DiagnosticError {
+  return {
+    file: normalizePath(path),
+    line: 0,
+    column: 0,
+    message: error instanceof Error ? error.message : String(error),
+    category,
+    moduleStage: null,
+    moduleKind: null,
+    modulePath: null,
+    moduleVersion: null,
+  };
+}
+
+function defaultCompilerOutputPath(path: string): string {
+  return withExtension(compilerOutputBasePath(path), 'vob');
+}
+
+function compilerOutputBasePath(path: string): string {
+  const normalized = normalizePath(path);
+  if (directories.has(normalized)) {
+    return findProjectRoot(normalized) ?? normalized;
+  }
+  const parent = dirname(normalized);
+  return findProjectRoot(parent) ?? normalized;
+}
+
+function withExtension(path: string, extension: string): string {
+  const normalized = normalizePath(path);
+  const slash = normalized.lastIndexOf('/');
+  const dot = normalized.lastIndexOf('.');
+  if (dot > slash) {
+    return `${normalized.slice(0, dot + 1)}${extension}`;
+  }
+  return `${normalized}.${extension}`;
 }
 
 function ensureVfsBindings(): void {
@@ -1278,16 +1362,42 @@ function listDirEntries(path: string): FsEntry[] {
   return sortEntries([...entries.values()]);
 }
 
-function buildSessionInfo(root: string, origin: SessionInfo['origin'], source: SessionInfo['source']): SessionInfo {
+function registerSessionWorkspaceDiscovery(root: string, workspaceDiscovery: WorkspaceDiscoveryMode): void {
+  sessionWorkspaceDiscovery.set(normalizePath(root), workspaceDiscovery);
+}
+
+function workspaceDiscoveryForPath(path: string): WorkspaceDiscoveryMode {
+  const normalized = normalizePath(path);
+  let bestRoot = '';
+  let bestMode: WorkspaceDiscoveryMode = 'auto';
+  for (const [root, mode] of sessionWorkspaceDiscovery) {
+    if (normalized === root || normalized.startsWith(`${root}/`)) {
+      if (root.length > bestRoot.length) {
+        bestRoot = root;
+        bestMode = mode;
+      }
+    }
+  }
+  return bestMode;
+}
+
+function buildSessionInfo(
+  root: string,
+  origin: SessionInfo['origin'],
+  source: SessionInfo['source'],
+  workspaceDiscovery: WorkspaceDiscoveryMode,
+): SessionInfo {
   const normalizedRoot = normalizePath(root);
   const entryPath = detectEntryPath(normalizedRoot);
   const share = buildShareInfo({ root: normalizedRoot, entryPath, source });
+  registerSessionWorkspaceDiscovery(normalizedRoot, workspaceDiscovery);
   return {
     root: normalizedRoot,
     origin,
     projectMode: hasVfsFile(`${normalizedRoot}/vo.mod`) ? 'module' : 'single-file',
     entryPath,
     singleFileRun: false,
+    workspaceDiscovery,
     source,
     share,
   };
@@ -1306,7 +1416,7 @@ function openWorkspaceSession(): SessionInfo {
   if (!directories.has(WORKSPACE_ROOT)) {
     resetWorkspaceState();
   }
-  return buildSessionInfo(WORKSPACE_ROOT, 'workspace', { kind: 'workspace' });
+  return buildSessionInfo(WORKSPACE_ROOT, 'workspace', { kind: 'workspace' }, 'auto');
 }
 
 function openPathSession(path: string): SessionInfo {
@@ -1314,17 +1424,19 @@ function openPathSession(path: string): SessionInfo {
   if (normalized.endsWith('.vo') && hasVfsFile(normalized)) {
     const parent = normalized.substring(0, normalized.lastIndexOf('/')) || WORKSPACE_ROOT;
     const source: SessionInfo['source'] = { kind: 'path', path: normalized };
+    registerSessionWorkspaceDiscovery(parent, 'auto');
     return {
       root: parent,
       origin: 'workspace',
       projectMode: 'single-file',
       entryPath: normalized,
       singleFileRun: false,
+      workspaceDiscovery: 'auto',
       source,
       share: buildShareInfo({ root: parent, entryPath: normalized, source }),
     };
   }
-  return buildSessionInfo(normalized, 'workspace', { kind: 'path', path: normalized });
+  return buildSessionInfo(normalized, 'workspace', { kind: 'path', path: normalized }, 'auto');
 }
 
 async function openLocalProjectSession(path: string): Promise<SessionInfo> {
@@ -1333,14 +1445,20 @@ async function openLocalProjectSession(path: string): Promise<SessionInfo> {
   const sessionRoot = `${LOCAL_SESSION_ROOT}/${sanitizeSlug(projectName)}-${hashString(snapshot.projectPath)}-${sessionNonce()}`;
   clearImportedRootSync(sessionRoot);
   ensureDir(sessionRoot);
+  let importedBytes = 0;
   for (const file of snapshot.files) {
-    setVfsFile(`${sessionRoot}/${file.path}`, decodeBase64Bytes(file.contentBase64), file.mode ?? 0o644);
+    const bytes = decodeBase64Bytes(file.contentBase64);
+    importedBytes += bytes.byteLength;
+    setVfsFile(`${sessionRoot}/${file.path}`, bytes, file.mode ?? 0o644);
+    if (importedBytes > 0 && importedBytes % (1024 * 1024) < bytes.byteLength) {
+      await yieldToBrowser();
+    }
   }
   const projectRoot = normalizePath(`${sessionRoot}/${snapshot.projectRelativePath}`);
   if (!hasTreeAt(projectRoot)) {
     throw new Error(`Local project snapshot did not contain ${snapshot.projectRelativePath}`);
   }
-  return buildSessionInfo(projectRoot, 'run-target', { kind: 'path', path: snapshot.projectPath });
+  return buildSessionInfo(projectRoot, 'run-target', { kind: 'path', path: snapshot.projectPath }, 'auto');
 }
 
 async function fetchLocalProjectSnapshot(path: string): Promise<LocalProjectSnapshot> {
@@ -1351,7 +1469,13 @@ async function fetchLocalProjectSnapshot(path: string): Promise<LocalProjectSnap
     const detail = await response.text().catch(() => '');
     throw new Error(detail || `Local project bridge failed with HTTP ${response.status}`);
   }
-  return response.json() as Promise<LocalProjectSnapshot>;
+  const body = await response.text();
+  await yieldToBrowser();
+  return JSON.parse(body) as LocalProjectSnapshot;
+}
+
+function yieldToBrowser(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
 function localFileUrlPath(value: string): string | null {
@@ -1409,16 +1533,21 @@ async function openGitHubRepoSession(source: GitHubRepoInput): Promise<SessionIn
   const resolved = await resolveGitHubSource(source);
   await populateGitHubSourceCache(resolved);
   materializeGitHubSession(resolved);
-  return buildSessionInfo(resolved.projectRoot, 'url', {
-    kind: 'github_repo',
-    owner: resolved.owner,
-    repo: resolved.repo,
-    requestedRef: resolved.requestedRef,
-    resolvedCommit: resolved.resolvedCommit,
-    subdir: resolved.subdir,
-    htmlUrl: resolved.htmlUrl,
-    sourceCacheRoot: resolved.sourceCacheRoot,
-  });
+  return buildSessionInfo(
+    resolved.projectRoot,
+    'url',
+    {
+      kind: 'github_repo',
+      owner: resolved.owner,
+      repo: resolved.repo,
+      requestedRef: resolved.requestedRef,
+      resolvedCommit: resolved.resolvedCommit,
+      subdir: resolved.subdir,
+      htmlUrl: resolved.htmlUrl,
+      sourceCacheRoot: resolved.sourceCacheRoot,
+    },
+    'disabled',
+  );
 }
 
 async function resolveGitHubSource(source: GitHubRepoInput): Promise<ResolvedGitHubSource> {

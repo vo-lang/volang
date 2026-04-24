@@ -9,8 +9,8 @@ use vo_common_core::LogRecordCore;
 use vo_module::ext_manifest::ExtensionManifest;
 use vo_module::operation_error::OperationError;
 use vo_module::project::{
-    ProjectContext, ProjectDeps, ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage,
-    SingleFileContext,
+    ProjectContext, ProjectContextOptions, ProjectDeps, ProjectDepsError, ProjectDepsErrorKind,
+    ProjectDepsStage, SingleFileContext,
 };
 use vo_module::registry::Registry;
 use vo_module::schema::lockfile::LockedModule;
@@ -264,7 +264,10 @@ fn relative_single_file_path(package_dir: &Path, entry_path: &Path) -> Option<Pa
     }
 }
 
-fn load_real_path_compile_context(path: &Path) -> Result<RealPathCompileContext, CompileError> {
+fn load_real_path_compile_context_with_options(
+    path: &Path,
+    options: &ProjectContextOptions,
+) -> Result<RealPathCompileContext, CompileError> {
     let source_root = pipeline::source_root(path);
     let mod_cache = default_mod_cache_root();
     let base_fs = RealFs::new(".");
@@ -273,13 +276,15 @@ fn load_real_path_compile_context(path: &Path) -> Result<RealPathCompileContext,
     // that inline `/*vo:mod ... */` metadata is recognized and the spec §5.6.4
     // precedence rules are enforced uniformly for real-path compiles.
     if path.is_file() {
-        let ctx = vo_module::project::load_single_file_context(&base_fs, path)
-            .map_err(module_system_error_from_project)?;
+        let ctx =
+            vo_module::project::load_single_file_context_with_options(&base_fs, path, options)
+                .map_err(module_system_error_from_project)?;
         return real_path_compile_context_for_single_file(ctx, path, source_root, mod_cache);
     }
 
-    let context = vo_module::project::load_project_context(&base_fs, &source_root)
-        .map_err(module_system_error_from_project)?;
+    let context =
+        vo_module::project::load_project_context_with_options(&base_fs, &source_root, options)
+            .map_err(module_system_error_from_project)?;
     let project_root = context.project_root().to_path_buf();
     let package_dir = relative_package_dir(&project_root, &source_root);
     let (_, project_deps, workspace_replaces) = context.into_parts();
@@ -419,13 +424,24 @@ fn scoped_project_fs(project_root: &Path) -> ScopedFs<RealFs> {
 }
 
 pub fn check(path: &str) -> Result<(), CompileError> {
+    check_with_options(path, &ProjectContextOptions::from_environment())
+}
+
+pub fn check_with_options(path: &str, options: &ProjectContextOptions) -> Result<(), CompileError> {
     let p = Path::new(path);
-    let context = load_real_path_compile_context(p)?;
+    let context = load_real_path_compile_context_with_options(p, options)?;
     let fs = scoped_project_fs(&context.project_root);
     pipeline::check_with_project_context(fs, context.into_pipeline_context())
 }
 
 pub fn compile(path: &str) -> Result<CompileOutput, CompileError> {
+    compile_with_options(path, &ProjectContextOptions::from_environment())
+}
+
+pub fn compile_with_options(
+    path: &str,
+    options: &ProjectContextOptions,
+) -> Result<CompileOutput, CompileError> {
     let p = Path::new(path);
 
     if path.ends_with(".voc") || path.ends_with(".vob") {
@@ -436,18 +452,25 @@ pub fn compile(path: &str) -> Result<CompileOutput, CompileError> {
         return pipeline::compile_zip(Path::new(&zip_path), internal_root.as_deref());
     }
 
-    let context = load_real_path_compile_context(p)?;
+    let context = load_real_path_compile_context_with_options(p, options)?;
     let fs = scoped_project_fs(&context.project_root);
     pipeline::compile_with_project_context(fs, context.into_pipeline_context())
 }
 
 pub fn compile_with_cache(path: &str) -> Result<CompileOutput, CompileError> {
+    compile_with_cache_with_options(path, &ProjectContextOptions::from_environment())
+}
+
+pub fn compile_with_cache_with_options(
+    path: &str,
+    options: &ProjectContextOptions,
+) -> Result<CompileOutput, CompileError> {
     let entry_path = Path::new(path);
     if path.ends_with(".voc") || path.ends_with(".vob") || pipeline::parse_zip_path(path).is_some()
     {
-        return compile(path);
+        return compile_with_options(path, options);
     }
-    let context = load_real_path_compile_context(entry_path)?;
+    let context = load_real_path_compile_context_with_options(entry_path, options)?;
     let cache_slot = cache::compile_cache_slot(
         &context.source_root,
         context.single_file.as_deref().and_then(Path::file_name),
@@ -492,37 +515,53 @@ pub fn compile_string(code: &str) -> Result<CompileOutput, CompileError> {
 }
 
 pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileError> {
+    compile_with_auto_install_with_options(path, &ProjectContextOptions::from_environment())
+}
+
+pub fn compile_with_auto_install_with_options(
+    path: &str,
+    options: &ProjectContextOptions,
+) -> Result<CompileOutput, CompileError> {
     use vo_module::github_registry::GitHubRegistry;
 
     let registry = GitHubRegistry::new();
-    compile_with_auto_install_using_registry(path, &registry)
+    compile_with_auto_install_using_registry(path, &registry, options)
 }
 
 pub fn check_with_auto_install(path: &str) -> Result<(), CompileError> {
+    check_with_auto_install_with_options(path, &ProjectContextOptions::from_environment())
+}
+
+pub fn check_with_auto_install_with_options(
+    path: &str,
+    options: &ProjectContextOptions,
+) -> Result<(), CompileError> {
     use vo_module::github_registry::GitHubRegistry;
 
     let registry = GitHubRegistry::new();
-    check_with_auto_install_using_registry(path, &registry)
+    check_with_auto_install_using_registry(path, &registry, options)
 }
 
 fn compile_with_auto_install_using_registry(
     path: &str,
     registry: &dyn Registry,
+    options: &ProjectContextOptions,
 ) -> Result<CompileOutput, CompileError> {
     let p = Path::new(path);
     let mod_cache = default_mod_cache_root();
-    auto_install_dependencies(p, &mod_cache, registry)?;
-    compile_with_cache(path)
+    auto_install_dependencies(p, &mod_cache, registry, options)?;
+    compile_with_cache_with_options(path, options)
 }
 
 fn check_with_auto_install_using_registry(
     path: &str,
     registry: &dyn Registry,
+    options: &ProjectContextOptions,
 ) -> Result<(), CompileError> {
     let p = Path::new(path);
     let mod_cache = default_mod_cache_root();
-    auto_install_dependencies(p, &mod_cache, registry)?;
-    check(path)
+    auto_install_dependencies(p, &mod_cache, registry, options)?;
+    check_with_options(path, options)
 }
 
 /// Pre-flight ephemeral dependency resolution (spec §5.6, §10.2).
@@ -538,10 +577,15 @@ fn auto_install_dependencies(
     path: &Path,
     mod_cache: &Path,
     registry: &dyn Registry,
+    options: &ProjectContextOptions,
 ) -> Result<(), CompileError> {
     if path.is_file() {
-        let ctx = vo_module::project::load_single_file_context(&RealFs::new("."), path)
-            .map_err(module_system_error_from_project)?;
+        let ctx = vo_module::project::load_single_file_context_with_options(
+            &RealFs::new("."),
+            path,
+            options,
+        )
+        .map_err(module_system_error_from_project)?;
         return match ctx {
             SingleFileContext::Project(project_context) => {
                 let (_, project_deps, _) = project_context.into_parts();
@@ -576,8 +620,9 @@ fn auto_install_dependencies(
     }
 
     let root = pipeline::source_root(path);
-    let context = vo_module::project::load_project_context(&RealFs::new("."), &root)
-        .map_err(module_system_error_from_project)?;
+    let context =
+        vo_module::project::load_project_context_with_options(&RealFs::new("."), &root, options)
+            .map_err(module_system_error_from_project)?;
     let (_, project_deps, _) = context.into_parts();
     auto_download_project_deps(&project_deps, mod_cache, registry)
 }

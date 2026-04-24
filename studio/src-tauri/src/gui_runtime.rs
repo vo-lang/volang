@@ -2,7 +2,9 @@ use std::io::Write;
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter};
-use vo_app_runtime::{NativeGuestHandle, NativeGuiEventLoopConfig, SyncRenderBuffer, spawn_native_gui};
+use vo_app_runtime::{
+    spawn_native_gui, NativeGuestHandle, NativeGuiEventLoopConfig, SyncRenderBuffer,
+};
 use vo_engine::{with_compile_log_sink, CompileLogRecord, CompileOutput};
 
 pub type GuestHandle = NativeGuestHandle;
@@ -28,7 +30,11 @@ pub(crate) struct StudioLogRecord {
 }
 
 impl StudioLogRecord {
-    pub(crate) fn new(source: impl Into<String>, code: impl Into<String>, level: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        source: impl Into<String>,
+        code: impl Into<String>,
+        level: impl Into<String>,
+    ) -> Self {
         Self {
             source: source.into(),
             code: code.into(),
@@ -73,7 +79,10 @@ impl StudioLogRecord {
 impl From<CompileLogRecord> for StudioLogRecord {
     fn from(record: CompileLogRecord) -> Self {
         let level = match record.code.as_str() {
-            "compile_cache_hit" | "dependency_cached" | "native_extension_cached" | "native_extension_build_done" => "success",
+            "compile_cache_hit"
+            | "dependency_cached"
+            | "native_extension_cached"
+            | "native_extension_build_done" => "success",
             _ => "system",
         };
         let mut studio_record = StudioLogRecord::new(record.source, record.code, level);
@@ -96,7 +105,6 @@ struct StudioLogEvent {
     session_id: u64,
     record: StudioLogRecord,
 }
-
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -123,26 +131,38 @@ pub(crate) fn debug_log(message: &str) {
 }
 
 pub(crate) fn emit_studio_log(app: &AppHandle, session_id: u64, record: StudioLogRecord) {
-    let _ = app.emit("studio_log", StudioLogEvent {
-        session_id,
-        record,
-    });
+    let _ = app.emit("studio_log", StudioLogEvent { session_id, record });
 }
 
-pub(crate) fn make_studio_log_sink(app: AppHandle, session_id: u64) -> impl Fn(CompileLogRecord) + Send + Sync + 'static {
+pub(crate) fn make_studio_log_sink(
+    app: AppHandle,
+    session_id: u64,
+) -> impl Fn(CompileLogRecord) + Send + Sync + 'static {
     move |record| {
         emit_studio_log(&app, session_id, record.into());
     }
 }
 
-pub fn run_gui(output: CompileOutput, app: AppHandle, session_id: u64) -> Result<(Vec<u8>, GuestHandle, Arc<SyncRenderBuffer>), String> {
-    let extension_names = output.extensions.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
+pub fn run_gui(
+    output: CompileOutput,
+    app: AppHandle,
+    session_id: u64,
+) -> Result<(Vec<u8>, GuestHandle, Arc<SyncRenderBuffer>), String> {
+    let extension_names = output
+        .extensions
+        .iter()
+        .map(|m| m.name.clone())
+        .collect::<Vec<_>>();
     emit_studio_log(
         &app,
         session_id,
-        StudioLogRecord::new("studio-native", "prepare_gui_extensions", "system").names(extension_names.clone()),
+        StudioLogRecord::new("studio-native", "prepare_gui_extensions", "system")
+            .names(extension_names.clone()),
     );
-    debug_log(&format!("[studio-native] prepare_gui_extensions {:?}", extension_names));
+    debug_log(&format!(
+        "[studio-native] prepare_gui_extensions {:?}",
+        extension_names
+    ));
     let error_app = app.clone();
     let config = NativeGuiEventLoopConfig {
         island_sink: Some({
@@ -166,16 +186,21 @@ pub fn run_gui(output: CompileOutput, app: AppHandle, session_id: u64) -> Result
         })),
         on_error: Some(Box::new(move |msg| {
             eprintln!("{}", msg);
-            let _ = error_app.emit("gui_fatal_error", GuiFatalErrorEvent {
-                session_id,
-                message: msg.to_string(),
-            });
+            let _ = error_app.emit(
+                "gui_fatal_error",
+                GuiFatalErrorEvent {
+                    session_id,
+                    message: msg.to_string(),
+                },
+            );
         })),
     };
     let build_app = app.clone();
     spawn_native_gui(
         move || {
-            with_compile_log_sink(make_studio_log_sink(build_app.clone(), session_id), || vo_engine::build_gui_vm(output))
+            with_compile_log_sink(make_studio_log_sink(build_app.clone(), session_id), || {
+                vo_engine::build_gui_vm(output)
+            })
         },
         config,
     )

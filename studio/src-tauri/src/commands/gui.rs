@@ -20,7 +20,9 @@ pub struct FrameworkContract {
     pub js_modules: BTreeMap<String, String>,
 }
 
-fn framework_contract_from_runtime_contract(contract: vo_web::BrowserRuntimeContract) -> FrameworkContract {
+fn framework_contract_from_runtime_contract(
+    contract: vo_web::BrowserRuntimeContract,
+) -> FrameworkContract {
     FrameworkContract {
         name: contract.name,
         entry: contract.entry,
@@ -74,15 +76,24 @@ pub async fn cmd_run_gui(
     let session_root = state.session_root();
     let workspace_root = state.workspace_root().to_path_buf();
     let single_file_run = state.single_file_run();
+    let project_options = state.project_context_options();
     let task_entry_path = entry_path.clone();
     let task_app = app.clone();
     let (run_output, runtime_plan, handle, push_rx) = run_blocking(move || {
-        let run_target = resolve_run_target(&session_root, &workspace_root, &task_entry_path, single_file_run)?;
+        let run_target = resolve_run_target(
+            &session_root,
+            &workspace_root,
+            &task_entry_path,
+            single_file_run,
+        )?;
         let compile_path = run_target.compile_path.to_string_lossy().to_string();
         let compile_start = Instant::now();
         let compile_output = with_compile_log_sink(
             gui_runtime::make_studio_log_sink(task_app.clone(), session_id),
-            || prepare_and_compile(&compile_path).map_err(|error| error.to_string()),
+            || {
+                prepare_and_compile(&compile_path, &project_options)
+                    .map_err(|error| error.to_string())
+            },
         )?;
         gui_runtime::emit_studio_log(
             &task_app,
@@ -110,8 +121,9 @@ pub async fn cmd_run_gui(
         vo_web::execute_browser_artifact_plan(&artifact_plan)?;
         let (framework, provider_frameworks) = split_framework_contracts(&runtime_plan);
         let start_start = Instant::now();
-        let (render_bytes, handle, push_rx) = gui_runtime::run_gui(compile_output, task_app.clone(), session_id)
-            .map_err(|error| error.to_string())?;
+        let (render_bytes, handle, push_rx) =
+            gui_runtime::run_gui(compile_output, task_app.clone(), session_id)
+                .map_err(|error| error.to_string())?;
         let host_widget_handler_id = find_on_widget_handler_id(&render_bytes);
         gui_runtime::emit_studio_log(
             &task_app,
@@ -133,7 +145,8 @@ pub async fn cmd_run_gui(
             handle,
             push_rx,
         ))
-    }).await?;
+    })
+    .await?;
     if state.gui_session_id() != session_id {
         return Err("GUI session superseded".to_string());
     }
@@ -201,7 +214,12 @@ pub fn cmd_get_renderer_bridge_vfs_snapshot(
     state: tauri::State<'_, AppState>,
 ) -> Result<RendererBridgeVfsSnapshot, String> {
     let session_root = state.session_root();
-    let run_target = resolve_run_target(&session_root, state.workspace_root(), &entry_path, state.single_file_run())?;
+    let run_target = resolve_run_target(
+        &session_root,
+        state.workspace_root(),
+        &entry_path,
+        state.single_file_run(),
+    )?;
     let root_path = run_target.source_root;
     let runtime = state
         .last_browser_runtime()

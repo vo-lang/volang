@@ -15,16 +15,69 @@ pub struct Override {
     pub local_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum WorkspaceDiscovery {
+    #[default]
+    Auto,
+    Disabled,
+    Explicit(PathBuf),
+}
+
+pub fn workspace_discovery_from_environment() -> WorkspaceDiscovery {
+    if std::env::var("VOWORK").ok().as_deref() == Some("off") {
+        WorkspaceDiscovery::Disabled
+    } else {
+        WorkspaceDiscovery::Auto
+    }
+}
+
 /// Discover the nearest ancestor `vo.work` file starting from `project_dir`.
 /// Returns None if no `vo.work` is found or if `VOWORK=off`.
 pub fn discover_workfile(project_dir: &Path) -> Option<PathBuf> {
-    if std::env::var("VOWORK").ok().as_deref() == Some("off") {
-        return None;
+    match workspace_discovery_from_environment() {
+        WorkspaceDiscovery::Disabled => None,
+        discovery => discover_workfile_in_with(&RealFs::new("."), project_dir, &discovery)
+            .ok()
+            .flatten(),
     }
-    discover_workfile_in(&RealFs::new("."), project_dir)
 }
 
 pub fn discover_workfile_in<F: FileSystem>(fs: &F, project_dir: &Path) -> Option<PathBuf> {
+    discover_nearest_workfile_in(fs, project_dir)
+}
+
+pub fn discover_workfile_in_with<F: FileSystem>(
+    fs: &F,
+    project_dir: &Path,
+    discovery: &WorkspaceDiscovery,
+) -> Result<Option<PathBuf>, Error> {
+    match discovery {
+        WorkspaceDiscovery::Disabled => Ok(None),
+        WorkspaceDiscovery::Auto => Ok(discover_nearest_workfile_in(fs, project_dir)),
+        WorkspaceDiscovery::Explicit(path) => {
+            let workfile_path = if path.is_absolute() {
+                normalize_fs_path(path)
+            } else {
+                normalize_fs_path(&project_dir.join(path))
+            };
+            if !fs.exists(&workfile_path) {
+                return Err(Error::WorkFileParse(format!(
+                    "explicit workspace file does not exist: {}",
+                    workfile_path.display()
+                )));
+            }
+            if fs.is_dir(&workfile_path) {
+                return Err(Error::WorkFileParse(format!(
+                    "explicit workspace file is a directory: {}",
+                    workfile_path.display()
+                )));
+            }
+            Ok(Some(workfile_path))
+        }
+    }
+}
+
+fn discover_nearest_workfile_in<F: FileSystem>(fs: &F, project_dir: &Path) -> Option<PathBuf> {
     let mut dir = normalize_fs_path(project_dir);
     loop {
         let candidate = dir.join("vo.work");
@@ -42,10 +95,21 @@ pub fn load_workspace_overrides_in<F: FileSystem>(
     project_dir: &Path,
     root_module: Option<&ModIdentity>,
 ) -> Result<Vec<Override>, Error> {
-    if std::env::var("VOWORK").ok().as_deref() == Some("off") {
-        return Ok(Vec::new());
-    }
-    let Some(workfile_path) = discover_workfile_in(fs, project_dir) else {
+    load_workspace_overrides_in_with(
+        fs,
+        project_dir,
+        root_module,
+        &workspace_discovery_from_environment(),
+    )
+}
+
+pub fn load_workspace_overrides_in_with<F: FileSystem>(
+    fs: &F,
+    project_dir: &Path,
+    root_module: Option<&ModIdentity>,
+    discovery: &WorkspaceDiscovery,
+) -> Result<Vec<Override>, Error> {
+    let Some(workfile_path) = discover_workfile_in_with(fs, project_dir, discovery)? else {
         return Ok(Vec::new());
     };
     let workfile_dir = workfile_path.parent().unwrap_or(project_dir);
@@ -300,9 +364,20 @@ pub fn load_workspace_replaces<F: FileSystem>(
     project_root: &Path,
     root_module: Option<&ModIdentity>,
 ) -> Result<HashMap<String, PathBuf>, Error> {
-    if std::env::var("VOWORK").ok().as_deref() == Some("off") {
-        return Ok(HashMap::new());
-    }
+    load_workspace_replaces_with_discovery(
+        fs,
+        project_root,
+        root_module,
+        &workspace_discovery_from_environment(),
+    )
+}
+
+pub fn load_workspace_replaces_with_discovery<F: FileSystem>(
+    fs: &F,
+    project_root: &Path,
+    root_module: Option<&ModIdentity>,
+    discovery: &WorkspaceDiscovery,
+) -> Result<HashMap<String, PathBuf>, Error> {
     let auto_root_module;
     let effective_root_module = match root_module {
         Some(module) => Some(module),
@@ -321,7 +396,8 @@ pub fn load_workspace_replaces<F: FileSystem>(
             auto_root_module.as_ref()
         }
     };
-    let overrides = load_workspace_overrides_in(fs, project_root, effective_root_module)?;
+    let overrides =
+        load_workspace_overrides_in_with(fs, project_root, effective_root_module, discovery)?;
     let normalized_root = normalize_fs_path(project_root);
     let mut replaces = HashMap::new();
     for ov in overrides {
@@ -447,6 +523,30 @@ mod tests {
             Some(value) => std::env::set_var("VOWORK", value),
             None => std::env::remove_var("VOWORK"),
         }
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_load_workspace_overrides_in_with_disabled_ignores_vo_work() {
+        let mut fs = vo_common::vfs::MemoryFs::new();
+        fs.add_file(
+            "workspace/vo.work",
+            "version = 1\n\n[[use]]\npath = \".\"\n",
+        );
+        fs.add_file(
+            "workspace/vo.mod",
+            "module github.com/acme/app\nvo ^0.1.0\n",
+        );
+
+        let root: ModIdentity = ModulePath::parse("github.com/acme/app").unwrap().into();
+        let result = load_workspace_overrides_in_with(
+            &fs,
+            Path::new("workspace"),
+            Some(&root),
+            &WorkspaceDiscovery::Disabled,
+        )
+        .unwrap();
 
         assert!(result.is_empty());
     }

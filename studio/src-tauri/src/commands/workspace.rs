@@ -1,6 +1,6 @@
-use crate::state::AppState;
 use super::pathing::resolve_path;
 use super::run_blocking;
+use crate::state::AppState;
 use std::path::{Path, PathBuf};
 
 #[derive(serde::Serialize)]
@@ -41,11 +41,13 @@ pub struct GrepMatch {
 }
 
 #[tauri::command]
-pub async fn cmd_list_dir(path: String, state: tauri::State<'_, AppState>) -> Result<Vec<FsEntry>, String> {
+pub async fn cmd_list_dir(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<FsEntry>, String> {
     let session_root = state.session_root();
     run_blocking(move || list_dir_impl(session_root, path)).await
 }
-
 
 fn list_dir_impl(session_root: PathBuf, path: String) -> Result<Vec<FsEntry>, String> {
     let resolved = resolve_path(&session_root, &path)?;
@@ -53,10 +55,14 @@ fn list_dir_impl(session_root: PathBuf, path: String) -> Result<Vec<FsEntry>, St
         return Err(format!("Not a directory: {}", resolved.display()));
     }
     let mut entries = Vec::new();
-    for entry in std::fs::read_dir(&resolved).map_err(|err| format!("{}: {}", resolved.display(), err))? {
+    for entry in
+        std::fs::read_dir(&resolved).map_err(|err| format!("{}: {}", resolved.display(), err))?
+    {
         let entry = entry.map_err(|err| format!("{}: {}", resolved.display(), err))?;
         let path = entry.path();
-        let metadata = entry.metadata().map_err(|err| format!("{}: {}", path.display(), err))?;
+        let metadata = entry
+            .metadata()
+            .map_err(|err| format!("{}: {}", path.display(), err))?;
         let modified_ms = metadata
             .modified()
             .ok()
@@ -66,7 +72,11 @@ fn list_dir_impl(session_root: PathBuf, path: String) -> Result<Vec<FsEntry>, St
             name: entry.file_name().to_string_lossy().to_string(),
             path: path.to_string_lossy().to_string(),
             is_dir: metadata.is_dir(),
-            size: if metadata.is_file() { Some(metadata.len()) } else { None },
+            size: if metadata.is_file() {
+                Some(metadata.len())
+            } else {
+                None
+            },
             modified_ms,
         });
     }
@@ -91,16 +101,22 @@ pub struct DiscoveredProject {
 const SKIP_DIRS: &[&str] = &[".vo-cache", ".git", "node_modules"];
 
 #[tauri::command]
-pub async fn cmd_discover_projects(root: String, state: tauri::State<'_, AppState>) -> Result<Vec<DiscoveredProject>, String> {
+pub async fn cmd_discover_projects(
+    root: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<DiscoveredProject>, String> {
     let session_root = state.session_root();
     run_blocking(move || {
         let resolved = resolve_path(&session_root, &root)?;
         scan_projects_in_dir(&resolved)
-    }).await
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn cmd_discover_workspace_projects(state: tauri::State<'_, AppState>) -> Result<Vec<DiscoveredProject>, String> {
+pub async fn cmd_discover_workspace_projects(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<DiscoveredProject>, String> {
     let workspace_root = state.workspace_root().to_path_buf();
     run_blocking(move || scan_projects_in_dir(&workspace_root)).await
 }
@@ -111,8 +127,7 @@ fn scan_projects_in_dir(dir: &Path) -> Result<Vec<DiscoveredProject>, String> {
     }
 
     let mut projects = Vec::new();
-    let entries = std::fs::read_dir(dir)
-        .map_err(|err| format!("{}: {}", dir.display(), err))?;
+    let entries = std::fs::read_dir(dir).map_err(|err| format!("{}: {}", dir.display(), err))?;
 
     for entry in entries {
         let entry = match entry {
@@ -172,15 +187,18 @@ fn scan_projects_in_dir(dir: &Path) -> Result<Vec<DiscoveredProject>, String> {
 }
 
 #[tauri::command]
-pub async fn cmd_stat_path(path: String, state: tauri::State<'_, AppState>) -> Result<FsStat, String> {
+pub async fn cmd_stat_path(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<FsStat, String> {
     let session_root = state.session_root();
     run_blocking(move || stat_path_impl(session_root, path)).await
 }
 
 fn stat_path_impl(session_root: PathBuf, path: String) -> Result<FsStat, String> {
     let resolved = resolve_path(&session_root, &path)?;
-    let metadata = std::fs::metadata(&resolved)
-        .map_err(|err| format!("{}: {}", resolved.display(), err))?;
+    let metadata =
+        std::fs::metadata(&resolved).map_err(|err| format!("{}: {}", resolved.display(), err))?;
     let modified_ms = metadata
         .modified()
         .ok()
@@ -191,13 +209,20 @@ fn stat_path_impl(session_root: PathBuf, path: String) -> Result<FsStat, String>
         path: resolved.to_string_lossy().to_string(),
         is_dir: metadata.is_dir(),
         is_file: metadata.is_file(),
-        size: if metadata.is_file() { metadata.len() } else { 0 },
+        size: if metadata.is_file() {
+            metadata.len()
+        } else {
+            0
+        },
         modified_ms,
     })
 }
 
 #[tauri::command]
-pub async fn cmd_read_file(path: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+pub async fn cmd_read_file(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
     let session_root = state.session_root();
     run_blocking(move || read_file_impl(session_root, path)).await
 }
@@ -211,29 +236,53 @@ fn read_file_impl(session_root: PathBuf, path: String) -> Result<String, String>
 }
 
 #[tauri::command]
-pub async fn cmd_read_many(paths: Vec<String>, state: tauri::State<'_, AppState>) -> Result<Vec<ReadManyResult>, String> {
+pub async fn cmd_read_many(
+    paths: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ReadManyResult>, String> {
     let session_root = state.session_root();
     run_blocking(move || read_many_impl(session_root, paths)).await
 }
 
-fn read_many_impl(session_root: PathBuf, paths: Vec<String>) -> Result<Vec<ReadManyResult>, String> {
+fn read_many_impl(
+    session_root: PathBuf,
+    paths: Vec<String>,
+) -> Result<Vec<ReadManyResult>, String> {
     Ok(paths
         .into_iter()
         .map(|path| {
             let resolved = match resolve_path(&session_root, &path) {
                 Ok(r) => r,
-                Err(err) => return ReadManyResult { path, content: None, error: Some(err) },
+                Err(err) => {
+                    return ReadManyResult {
+                        path,
+                        content: None,
+                        error: Some(err),
+                    }
+                }
             };
             match std::fs::read_to_string(&resolved) {
-                Ok(content) => ReadManyResult { path: resolved.to_string_lossy().to_string(), content: Some(content), error: None },
-                Err(err) => ReadManyResult { path, content: None, error: Some(err.to_string()) },
+                Ok(content) => ReadManyResult {
+                    path: resolved.to_string_lossy().to_string(),
+                    content: Some(content),
+                    error: None,
+                },
+                Err(err) => ReadManyResult {
+                    path,
+                    content: None,
+                    error: Some(err.to_string()),
+                },
             }
         })
         .collect())
 }
 
 #[tauri::command]
-pub async fn cmd_write_file(path: String, content: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub async fn cmd_write_file(
+    path: String,
+    content: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
     let session_root = state.session_root();
     run_blocking(move || write_file_impl(session_root, path, content)).await
 }
@@ -241,11 +290,9 @@ pub async fn cmd_write_file(path: String, content: String, state: tauri::State<'
 fn write_file_impl(session_root: PathBuf, path: String, content: String) -> Result<(), String> {
     let resolved = resolve_path(&session_root, &path)?;
     if let Some(parent) = resolved.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("{}: {}", parent.display(), err))?;
+        std::fs::create_dir_all(parent).map_err(|err| format!("{}: {}", parent.display(), err))?;
     }
-    std::fs::write(&resolved, content)
-        .map_err(|err| format!("{}: {}", resolved.display(), err))
+    std::fs::write(&resolved, content).map_err(|err| format!("{}: {}", resolved.display(), err))
 }
 
 #[tauri::command]
@@ -256,12 +303,15 @@ pub async fn cmd_mkdir(path: String, state: tauri::State<'_, AppState>) -> Resul
 
 fn mkdir_impl(session_root: PathBuf, path: String) -> Result<(), String> {
     let resolved = resolve_path(&session_root, &path)?;
-    std::fs::create_dir_all(&resolved)
-        .map_err(|err| format!("{}: {}", resolved.display(), err))
+    std::fs::create_dir_all(&resolved).map_err(|err| format!("{}: {}", resolved.display(), err))
 }
 
 #[tauri::command]
-pub async fn cmd_remove_entry(path: String, recursive: bool, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub async fn cmd_remove_entry(
+    path: String,
+    recursive: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
     let session_root = state.session_root();
     run_blocking(move || remove_entry_impl(session_root, path, recursive)).await
 }
@@ -276,26 +326,43 @@ fn remove_entry_impl(session_root: PathBuf, path: String, recursive: bool) -> Re
         }
         .map_err(|err| format!("{}: {}", resolved.display(), err))
     } else {
-        std::fs::remove_file(&resolved)
-            .map_err(|err| format!("{}: {}", resolved.display(), err))
+        std::fs::remove_file(&resolved).map_err(|err| format!("{}: {}", resolved.display(), err))
     }
 }
 
 #[tauri::command]
-pub async fn cmd_rename_entry(old_path: String, new_path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub async fn cmd_rename_entry(
+    old_path: String,
+    new_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
     let session_root = state.session_root();
     run_blocking(move || rename_entry_impl(session_root, old_path, new_path)).await
 }
 
-fn rename_entry_impl(session_root: PathBuf, old_path: String, new_path: String) -> Result<(), String> {
+fn rename_entry_impl(
+    session_root: PathBuf,
+    old_path: String,
+    new_path: String,
+) -> Result<(), String> {
     let old_resolved = resolve_path(&session_root, &old_path)?;
     let new_resolved = resolve_path(&session_root, &new_path)?;
-    std::fs::rename(&old_resolved, &new_resolved)
-        .map_err(|err| format!("{} -> {}: {}", old_resolved.display(), new_resolved.display(), err))
+    std::fs::rename(&old_resolved, &new_resolved).map_err(|err| {
+        format!(
+            "{} -> {}: {}",
+            old_resolved.display(),
+            new_resolved.display(),
+            err
+        )
+    })
 }
 
 #[tauri::command]
-pub async fn cmd_copy_entry(src: String, dst: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub async fn cmd_copy_entry(
+    src: String,
+    dst: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
     let session_root = state.session_root();
     run_blocking(move || copy_entry_impl(session_root, src, dst)).await
 }
@@ -304,12 +371,18 @@ fn copy_entry_impl(session_root: PathBuf, src: String, dst: String) -> Result<()
     let src_resolved = resolve_path(&session_root, &src)?;
     let dst_resolved = resolve_path(&session_root, &dst)?;
     if let Some(parent) = dst_resolved.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("{}: {}", parent.display(), err))?;
+        std::fs::create_dir_all(parent).map_err(|err| format!("{}: {}", parent.display(), err))?;
     }
     std::fs::copy(&src_resolved, &dst_resolved)
         .map(|_| ())
-        .map_err(|err| format!("{} -> {}: {}", src_resolved.display(), dst_resolved.display(), err))
+        .map_err(|err| {
+            format!(
+                "{} -> {}: {}",
+                src_resolved.display(),
+                dst_resolved.display(),
+                err
+            )
+        })
 }
 
 #[tauri::command]
@@ -335,7 +408,13 @@ fn grep_impl(
 ) -> Result<Vec<GrepMatch>, String> {
     let resolved = resolve_path(&session_root, &path)?;
     let mut results = Vec::new();
-    grep_dir(&resolved, &pattern, case_sensitive, max_results, &mut results)?;
+    grep_dir(
+        &resolved,
+        &pattern,
+        case_sensitive,
+        max_results,
+        &mut results,
+    )?;
     Ok(results)
 }
 
@@ -408,19 +487,30 @@ fn grep_file(
     results: &mut Vec<GrepMatch>,
 ) -> Result<(), String> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if !matches!(ext, "vo" | "md" | "txt" | "toml" | "json" | "ts" | "js" | "rs" | "html" | "css" | "svelte") {
+    if !matches!(
+        ext,
+        "vo" | "md" | "txt" | "toml" | "json" | "ts" | "js" | "rs" | "html" | "css" | "svelte"
+    ) {
         return Ok(());
     }
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return Ok(()),
     };
-    let pattern_cmp = if case_sensitive { pattern.to_string() } else { pattern.to_lowercase() };
+    let pattern_cmp = if case_sensitive {
+        pattern.to_string()
+    } else {
+        pattern.to_lowercase()
+    };
     for (line_idx, line) in content.lines().enumerate() {
         if results.len() >= max_results {
             break;
         }
-        let line_cmp = if case_sensitive { line.to_string() } else { line.to_lowercase() };
+        let line_cmp = if case_sensitive {
+            line.to_string()
+        } else {
+            line.to_lowercase()
+        };
         if let Some(col) = line_cmp.find(&pattern_cmp) {
             results.push(GrepMatch {
                 path: path.to_string_lossy().to_string(),
@@ -432,4 +522,3 @@ fn grep_file(
     }
     Ok(())
 }
-

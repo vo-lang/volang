@@ -16,6 +16,8 @@ use vo_analysis::vfs::{
 use vo_common::vfs::{FileSet, FileSystem, MemoryFs};
 use vo_module::inline_mod::InlineMod;
 use vo_module::operation_error::OperationError;
+#[cfg(any(test, target_arch = "wasm32"))]
+use vo_module::project::ProjectContextOptions;
 use vo_module::project::{
     ProjectDeps, ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage, SingleFileContext,
 };
@@ -234,9 +236,10 @@ fn reject_external_imports_in_source(
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
-fn prepare_entry_input(
+fn prepare_entry_input_with_options(
     entry: &str,
     local_fs: MemoryFs,
+    options: &ProjectContextOptions,
 ) -> Result<PreparedCompileInput, WebCompileError> {
     let file_set = FileSet::collect(&local_fs, entry_package_dir(entry), PathBuf::from("."))
         .map_err(|error| {
@@ -247,8 +250,12 @@ fn prepare_entry_input(
             )
             .with_path(entry_package_dir(entry))
         })?;
-    let context = vo_module::project::load_project_context(&local_fs, entry_package_dir(entry))
-        .map_err(web_compile_error_from_project)?;
+    let context = vo_module::project::load_project_context_with_options(
+        &local_fs,
+        entry_package_dir(entry),
+        options,
+    )
+    .map_err(web_compile_error_from_project)?;
     let (project_root, project_deps, workspace_replaces) = context.into_parts();
     Ok(PreparedCompileInput {
         local_fs,
@@ -328,7 +335,7 @@ pub fn extract_external_module_paths(source: &str) -> Vec<String> {
     imports.into_iter().collect()
 }
 
-#[cfg(any(test, target_arch = "wasm32"))]
+#[cfg(test)]
 fn compile_entry_with_external_fs<M: FileSystem + Send + Sync>(
     entry: &str,
     local_fs: MemoryFs,
@@ -336,7 +343,27 @@ fn compile_entry_with_external_fs<M: FileSystem + Send + Sync>(
     mod_fs: M,
     layout: ProjectModLayout,
 ) -> Result<Vec<u8>, String> {
-    let input = prepare_entry_input(entry, local_fs).map_err(|error| error.to_string())?;
+    compile_entry_with_external_fs_with_options(
+        entry,
+        local_fs,
+        std_fs,
+        mod_fs,
+        layout,
+        &ProjectContextOptions::default(),
+    )
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn compile_entry_with_external_fs_with_options<M: FileSystem + Send + Sync>(
+    entry: &str,
+    local_fs: MemoryFs,
+    std_fs: MemoryFs,
+    mod_fs: M,
+    layout: ProjectModLayout,
+    options: &ProjectContextOptions,
+) -> Result<Vec<u8>, String> {
+    let input = prepare_entry_input_with_options(entry, local_fs, options)
+        .map_err(|error| error.to_string())?;
     compile_with_fs_modules(input, std_fs, mod_fs, layout).map_err(|error| error.to_string())
 }
 
@@ -458,12 +485,28 @@ pub fn compile_entry_with_vfs(
     local_fs: MemoryFs,
     mod_root: &str,
 ) -> Result<Vec<u8>, String> {
-    compile_entry_with_external_fs(
+    compile_entry_with_vfs_with_options(
+        entry,
+        local_fs,
+        mod_root,
+        &ProjectContextOptions::default(),
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn compile_entry_with_vfs_with_options(
+    entry: &str,
+    local_fs: MemoryFs,
+    mod_root: &str,
+    options: &ProjectContextOptions,
+) -> Result<Vec<u8>, String> {
+    compile_entry_with_external_fs_with_options(
         entry,
         local_fs,
         build_stdlib_fs(),
         WasmVfs::new(mod_root),
         ProjectModLayout::VersionedCache,
+        options,
     )
 }
 
@@ -694,6 +737,52 @@ mod tests {
             Err(e) => panic!("compile_entry_with_mod_fs failed: {}", e),
             Ok(bytes) => assert!(!bytes.is_empty(), "empty bytecode"),
         }
+    }
+
+    #[test]
+    fn test_compile_entry_with_mod_fs_can_disable_workspace_discovery() {
+        let mut local_fs = MemoryFs::new();
+        local_fs.add_file(
+            "workspace/app/vo.mod",
+            "module github.com/acme/app\n\nvo 0.1.0\n\nrequire github.com/acme/replaced v0.1.0\n",
+        );
+        local_fs.add_file(
+            "workspace/app/vo.work",
+            "version = 1\n[[use]]\npath = \"../replaced\"\n",
+        );
+        local_fs.add_file(
+            "workspace/app/main.vo",
+            concat!(
+                "package main\n",
+                "import \"github.com/acme/replaced\"\n",
+                "func main() {\n",
+                "    replaced.Hello()\n",
+                "}\n",
+            ),
+        );
+        local_fs.add_file(
+            "workspace/replaced/vo.mod",
+            "module github.com/acme/replaced\n\nvo 0.1.0\n",
+        );
+        local_fs.add_file(
+            "workspace/replaced/replaced.vo",
+            concat!("package replaced\n", "func Hello() {}\n",),
+        );
+
+        let result = compile_entry_with_external_fs_with_options(
+            "workspace/app/main.vo",
+            local_fs,
+            build_stdlib_fs(),
+            MemoryFs::new(),
+            ProjectModLayout::ImportPaths,
+            &ProjectContextOptions::new(vo_module::workspace::WorkspaceDiscovery::Disabled),
+        );
+
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("vo.lock is missing"),
+            "expected missing lock error, got: {error}"
+        );
     }
 
     #[test]

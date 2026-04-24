@@ -221,13 +221,13 @@ fn nan() -> f64 {
 // ==================== Bit conversion ====================
 
 #[vostd_fn("math", "Float64bits")]
-fn float64bits(x: f64) -> i64 {
-    x.to_bits() as i64
+fn float64bits(x: f64) -> u64 {
+    x.to_bits()
 }
 
 #[vostd_fn("math", "Float64frombits")]
-fn float64frombits(b: i64) -> f64 {
-    f64::from_bits(b as u64)
+fn float64frombits(b: u64) -> f64 {
+    f64::from_bits(b)
 }
 
 #[vostd_fn("math", "Float32bits")]

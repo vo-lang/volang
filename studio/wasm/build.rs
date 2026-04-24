@@ -5,8 +5,7 @@
 //! runtime through the project dependency flow and resolved through `WasmVfs`.
 
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -24,9 +23,7 @@ func handleHttp(id, workspace, cwd, kind string, op any) error {
 const TERM_HANDLER_VFS_ROOT: &str = "studio/vo/term";
 
 // Term handler files to substitute with stubs in WASM (avoid heavy stdlib deps).
-const WASM_STUB_TERM_HANDLER_FILES: &[&str] = &[
-    "http.vo",
-];
+const WASM_STUB_TERM_HANDLER_FILES: &[&str] = &["http.vo"];
 
 fn studio_wasm_build_id() -> String {
     if let Ok(value) = env::var("VIBE_STUDIO_BUILD_ID") {
@@ -70,7 +67,8 @@ fn write_studio_wasm_build_info(out_dir: &str) {
 
 fn collect_vo_files(dir: &Path, prefix: &str, entries: &mut String, out_dir: &str) {
     if let Ok(rd) = fs::read_dir(dir) {
-        let mut paths: Vec<_> = rd.flatten()
+        let mut paths: Vec<_> = rd
+            .flatten()
             .map(|e| e.path())
             .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("vo"))
             .collect();
@@ -110,7 +108,12 @@ fn main() {
     // ── term handler source files + manifests ───────────────────────────────
     let mut term_handler_entries = String::new();
     let term_handler_dir = repo_root.join(TERM_HANDLER_VFS_ROOT);
-    collect_vo_files(&term_handler_dir, TERM_HANDLER_VFS_ROOT, &mut term_handler_entries, &out_dir);
+    collect_vo_files(
+        &term_handler_dir,
+        TERM_HANDLER_VFS_ROOT,
+        &mut term_handler_entries,
+        &out_dir,
+    );
 
     for manifest_name in ["vo.mod", "vo.lock"] {
         let manifest_path = term_handler_dir.join(manifest_name);
@@ -127,6 +130,10 @@ fn main() {
 
     fs::write(
         Path::new(&out_dir).join("term_embedded.rs"),
-        format!("pub static TERM_HANDLER_FILES: &[(&str, &[u8])] = &[\n{}];\n", term_handler_entries),
-    ).unwrap();
+        format!(
+            "pub static TERM_HANDLER_FILES: &[(&str, &[u8])] = &[\n{}];\n",
+            term_handler_entries
+        ),
+    )
+    .unwrap();
 }

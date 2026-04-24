@@ -3,10 +3,11 @@ use crate::state::AppState;
 use std::path::PathBuf;
 use vo_app_runtime::take_captured_stdout;
 use vo_engine::{
-    check_with_auto_install, compile_with_auto_install, format_text, run_with_output,
-    run_with_output_interruptible, CaptureSink, CompileError, CompileOutput, RunError, RunMode,
-    RuntimeErrorKind,
+    check_with_auto_install_with_options, compile_with_auto_install_with_options, format_text,
+    run_with_output, run_with_output_interruptible, CaptureSink, CompileError, CompileOutput,
+    RunError, RunMode, RuntimeErrorKind,
 };
+use vo_module::project::ProjectContextOptions;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,8 +49,12 @@ pub struct BuildResult {
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum RunEvent {
-    Stdout { text: String },
-    Stderr { text: String },
+    Stdout {
+        text: String,
+    },
+    Stderr {
+        text: String,
+    },
     Stopped,
     Done {
         #[serde(rename = "exitCode")]
@@ -57,11 +62,16 @@ pub enum RunEvent {
         #[serde(rename = "durationMs")]
         duration_ms: u64,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
-pub(crate) fn prepare_and_compile(target: &str) -> Result<CompileOutput, CompileError> {
-    compile_with_auto_install(target)
+pub(crate) fn prepare_and_compile(
+    target: &str,
+    options: &ProjectContextOptions,
+) -> Result<CompileOutput, CompileError> {
+    compile_with_auto_install_with_options(target, options)
 }
 
 fn diagnostic_from_compile_error(default_file: &str, error: &CompileError) -> DiagnosticError {
@@ -78,8 +88,10 @@ fn diagnostic_from_compile_error(default_file: &str, error: &CompileError) -> Di
         category: error.category().to_string(),
         module_stage: module_error.map(|module_error| module_error.stage().as_str().to_string()),
         module_kind: module_error.map(|module_error| module_error.kind().as_str().to_string()),
-        module_path: module_error.and_then(|module_error| module_error.module_path().map(str::to_string)),
-        module_version: module_error.and_then(|module_error| module_error.version().map(str::to_string)),
+        module_path: module_error
+            .and_then(|module_error| module_error.module_path().map(str::to_string)),
+        module_version: module_error
+            .and_then(|module_error| module_error.version().map(str::to_string)),
     }
 }
 
@@ -114,11 +126,18 @@ fn default_output_path(target: &ResolvedTarget) -> PathBuf {
 }
 
 #[tauri::command]
-pub fn cmd_check_vo(path: String, state: tauri::State<'_, AppState>) -> Result<CheckResult, String> {
+pub fn cmd_check_vo(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<CheckResult, String> {
     let target = resolve_command_target(&state, &path)?;
     let compile_str = target.compile_path.to_string_lossy().to_string();
-    match check_with_auto_install(&compile_str) {
-        Ok(_) => Ok(CheckResult { ok: true, errors: vec![] }),
+    let options = state.project_context_options();
+    match check_with_auto_install_with_options(&compile_str, &options) {
+        Ok(_) => Ok(CheckResult {
+            ok: true,
+            errors: vec![],
+        }),
         Err(error) => Ok(CheckResult {
             ok: false,
             errors: vec![diagnostic_from_compile_error(&compile_str, &error)],
@@ -127,10 +146,14 @@ pub fn cmd_check_vo(path: String, state: tauri::State<'_, AppState>) -> Result<C
 }
 
 #[tauri::command]
-pub fn cmd_compile_vo(path: String, state: tauri::State<'_, AppState>) -> Result<CompileResult, String> {
+pub fn cmd_compile_vo(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<CompileResult, String> {
     let target = resolve_command_target(&state, &path)?;
     let compile_str = target.compile_path.to_string_lossy().to_string();
-    match prepare_and_compile(&compile_str) {
+    let options = state.project_context_options();
+    match prepare_and_compile(&compile_str, &options) {
         Ok(output) => {
             let output_path = default_output_path(&target);
             if let Err(error) = std::fs::write(&output_path, output.module.serialize()) {
@@ -144,7 +167,11 @@ pub fn cmd_compile_vo(path: String, state: tauri::State<'_, AppState>) -> Result
                     output_path: None,
                 });
             }
-            Ok(CompileResult { ok: true, errors: vec![], output_path: Some(output_path.to_string_lossy().to_string()) })
+            Ok(CompileResult {
+                ok: true,
+                errors: vec![],
+                output_path: Some(output_path.to_string_lossy().to_string()),
+            })
         }
         Err(error) => Ok(CompileResult {
             ok: false,
@@ -160,12 +187,19 @@ pub fn cmd_format_vo(_path: String, _state: tauri::State<'_, AppState>) -> Resul
 }
 
 #[tauri::command]
-pub fn cmd_build_vo(path: String, output: Option<String>, state: tauri::State<'_, AppState>) -> Result<BuildResult, String> {
+pub fn cmd_build_vo(
+    path: String,
+    output: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<BuildResult, String> {
     let target = resolve_command_target(&state, &path)?;
     let compile_str = target.compile_path.to_string_lossy().to_string();
-    match prepare_and_compile(&compile_str) {
+    let options = state.project_context_options();
+    match prepare_and_compile(&compile_str, &options) {
         Ok(compiled) => {
-            let output_path = output.map(std::path::PathBuf::from).unwrap_or_else(|| default_output_path(&target));
+            let output_path = output
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| default_output_path(&target));
             if let Err(error) = std::fs::write(&output_path, compiled.module.serialize()) {
                 return Ok(BuildResult {
                     ok: false,
@@ -177,7 +211,11 @@ pub fn cmd_build_vo(path: String, output: Option<String>, state: tauri::State<'_
                     output_path: None,
                 });
             }
-            Ok(BuildResult { ok: true, errors: vec![], output_path: Some(output_path.to_string_lossy().to_string()) })
+            Ok(BuildResult {
+                ok: true,
+                errors: vec![],
+                output_path: Some(output_path.to_string_lossy().to_string()),
+            })
         }
         Err(error) => Ok(BuildResult {
             ok: false,
@@ -190,18 +228,34 @@ pub fn cmd_build_vo(path: String, output: Option<String>, state: tauri::State<'_
 #[tauri::command]
 pub fn cmd_dump_vo(path: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
     let target = resolve_command_target(&state, &path)?;
-    let output = prepare_and_compile(&target.compile_path.to_string_lossy())
+    let options = state.project_context_options();
+    let output = prepare_and_compile(&target.compile_path.to_string_lossy(), &options)
         .map_err(|error| error.to_string())?;
     Ok(format_text(&output.module))
 }
 
 #[tauri::command]
-pub fn cmd_run_vo(path: String, run_mode: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let run_target = resolve_run_target(&state.session_root(), state.workspace_root(), &path, state.single_file_run())?;
-    let compiled = prepare_and_compile(&run_target.compile_path.to_string_lossy())
+pub fn cmd_run_vo(
+    path: String,
+    run_mode: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let run_target = resolve_run_target(
+        &state.session_root(),
+        state.workspace_root(),
+        &path,
+        state.single_file_run(),
+    )?;
+    let options = state.project_context_options();
+    let compiled = prepare_and_compile(&run_target.compile_path.to_string_lossy(), &options)
         .map_err(|error| error.to_string())?;
     let sink = CaptureSink::new();
-    let result = run_with_output(compiled, parse_run_mode(&run_mode)?, Vec::new(), sink.clone());
+    let result = run_with_output(
+        compiled,
+        parse_run_mode(&run_mode)?,
+        Vec::new(),
+        sink.clone(),
+    );
     let captured = take_captured_stdout(sink.as_ref()).unwrap_or_default();
     match result {
         Ok(()) => Ok(captured),
@@ -222,10 +276,16 @@ pub async fn cmd_run_vo_stream(
     state: tauri::State<'_, AppState>,
     on_event: tauri::ipc::Channel<RunEvent>,
 ) -> Result<(), String> {
-    let run_target = resolve_run_target(&state.session_root(), state.workspace_root(), &path, state.single_file_run())?;
+    let run_target = resolve_run_target(
+        &state.session_root(),
+        state.workspace_root(),
+        &path,
+        state.single_file_run(),
+    )?;
     let compile_path: PathBuf = run_target.compile_path;
     let run_mode_str = run_mode.as_deref().unwrap_or("vm").to_string();
     let run_handle = state.begin_console_run();
+    let options = state.project_context_options();
     std::thread::spawn(move || {
         let compile_str = compile_path.to_string_lossy().to_string();
         let start = std::time::Instant::now();
@@ -235,11 +295,16 @@ pub async fn cmd_run_vo_stream(
             run_handle.clear_current();
             return;
         }
-        let compiled = match prepare_and_compile(&compile_str) {
+        let compiled = match prepare_and_compile(&compile_str, &options) {
             Ok(c) => c,
             Err(err) => {
-                let _ = on_event.send(RunEvent::Stderr { text: err.to_string() });
-                let _ = on_event.send(RunEvent::Done { exit_code: 1, duration_ms: start.elapsed().as_millis() as u64 });
+                let _ = on_event.send(RunEvent::Stderr {
+                    text: err.to_string(),
+                });
+                let _ = on_event.send(RunEvent::Done {
+                    exit_code: 1,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                });
                 run_handle.clear_current();
                 return;
             }
@@ -254,21 +319,37 @@ pub async fn cmd_run_vo_stream(
             "jit" => RunMode::Jit,
             _ => RunMode::Vm,
         };
-        let result = run_with_output_interruptible(compiled, mode, Vec::new(), sink.clone(), Some(interrupt_flag));
+        let result = run_with_output_interruptible(
+            compiled,
+            mode,
+            Vec::new(),
+            sink.clone(),
+            Some(interrupt_flag),
+        );
         if let Some(captured) = take_captured_stdout(sink.as_ref()) {
             let _ = on_event.send(RunEvent::Stdout { text: captured });
         }
         let duration_ms = start.elapsed().as_millis() as u64;
         match result {
             Ok(()) => {
-                let _ = on_event.send(RunEvent::Done { exit_code: 0, duration_ms });
+                let _ = on_event.send(RunEvent::Done {
+                    exit_code: 0,
+                    duration_ms,
+                });
             }
-            Err(RunError::Runtime(runtime_error)) if runtime_error.kind == RuntimeErrorKind::Interrupted => {
+            Err(RunError::Runtime(runtime_error))
+                if runtime_error.kind == RuntimeErrorKind::Interrupted =>
+            {
                 let _ = on_event.send(RunEvent::Stopped);
             }
             Err(err) => {
-                let _ = on_event.send(RunEvent::Stderr { text: err.to_string() });
-                let _ = on_event.send(RunEvent::Done { exit_code: 1, duration_ms });
+                let _ = on_event.send(RunEvent::Stderr {
+                    text: err.to_string(),
+                });
+                let _ = on_event.send(RunEvent::Done {
+                    exit_code: 1,
+                    duration_ms,
+                });
             }
         }
         run_handle.clear_current();

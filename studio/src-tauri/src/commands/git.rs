@@ -17,9 +17,15 @@ pub enum GitOp {
     #[serde(rename = "git.commit")]
     Commit { message: String },
     #[serde(rename = "git.push")]
-    Push { remote: Option<String>, branch: Option<String> },
+    Push {
+        remote: Option<String>,
+        branch: Option<String>,
+    },
     #[serde(rename = "git.pull")]
-    Pull { remote: Option<String>, branch: Option<String> },
+    Pull {
+        remote: Option<String>,
+        branch: Option<String>,
+    },
     #[serde(rename = "git.log")]
     Log { limit: Option<u32> },
     #[serde(rename = "git.diff")]
@@ -27,7 +33,11 @@ pub enum GitOp {
     #[serde(rename = "git.clone")]
     Clone { url: String, dest: String },
     #[serde(rename = "git.branch")]
-    Branch { list: Option<bool>, create: Option<String>, delete: Option<String> },
+    Branch {
+        list: Option<bool>,
+        create: Option<String>,
+        delete: Option<String>,
+    },
 }
 
 #[tauri::command]
@@ -42,30 +52,52 @@ pub fn cmd_git_exec(op: GitOp) -> GitResult {
         GitOp::Commit { message } => vec!["commit".to_string(), "-m".to_string(), message.clone()],
         GitOp::Push { remote, branch } => {
             let mut args = vec!["push".to_string()];
-            if let Some(r) = remote { args.push(r.clone()); }
-            if let Some(b) = branch { args.push(b.clone()); }
+            if let Some(r) = remote {
+                args.push(r.clone());
+            }
+            if let Some(b) = branch {
+                args.push(b.clone());
+            }
             args
         }
         GitOp::Pull { remote, branch } => {
             let mut args = vec!["pull".to_string()];
-            if let Some(r) = remote { args.push(r.clone()); }
-            if let Some(b) = branch { args.push(b.clone()); }
+            if let Some(r) = remote {
+                args.push(r.clone());
+            }
+            if let Some(b) = branch {
+                args.push(b.clone());
+            }
             args
         }
         GitOp::Log { limit } => {
             let n = limit.unwrap_or(20);
-            vec!["log".to_string(), format!("-{}", n), "--oneline".to_string()]
+            vec![
+                "log".to_string(),
+                format!("-{}", n),
+                "--oneline".to_string(),
+            ]
         }
         GitOp::Diff { path } => {
             let mut args = vec!["diff".to_string()];
-            if let Some(p) = path { args.push(p.clone()); }
+            if let Some(p) = path {
+                args.push(p.clone());
+            }
             args
         }
         GitOp::Clone { url, dest } => vec!["clone".to_string(), url.clone(), dest.clone()],
-        GitOp::Branch { list, create, delete } => {
+        GitOp::Branch {
+            list,
+            create,
+            delete,
+        } => {
             let mut args = vec!["branch".to_string()];
-            if list.unwrap_or(false) { args.push("-a".to_string()); }
-            if let Some(name) = create { args.push(name.clone()); }
+            if list.unwrap_or(false) {
+                args.push("-a".to_string());
+            }
+            if let Some(name) = create {
+                args.push(name.clone());
+            }
             if let Some(name) = delete {
                 args.push("-d".to_string());
                 args.push(name.clone());
@@ -88,8 +120,14 @@ fn run_git(args: &[String]) -> GitResult {
             } else {
                 format!("{}{}", stdout, stderr)
             };
-            GitResult { ok: output.status.success(), output: combined }
+            GitResult {
+                ok: output.status.success(),
+                output: combined,
+            }
         }
-        Err(err) => GitResult { ok: false, output: err.to_string() },
+        Err(err) => GitResult {
+            ok: false,
+            output: err.to_string(),
+        },
     }
 }

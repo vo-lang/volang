@@ -96,7 +96,7 @@ export async function executeGuiFromCompileOutput(
     setActiveHostBridge(combineHostBridgeModules(hostBridgeModules));
   }
 
-  const renderBytes = wasm.startGuiFromBytecode(compiled.bytecode);
+  const renderBytes = wasm.startGuiFromBytecode(compiled.bytecode, compiled.entryPath);
   return {
     renderBytes,
     moduleBytes: compiled.bytecode,

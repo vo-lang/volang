@@ -54,8 +54,8 @@
       bootstrap = registry.project.bootstrapContext;
       const launch = bootstrap.launch;
       const spec = launch ?? { proj: null, mode: bootstrap.mode };
-      const isRunner = spec.mode === 'runner';
       const hasProj = spec.proj != null;
+      const isRunner = spec.mode === 'runner' && hasProj;
       loading = launchLoading(spec.proj);
       const openedSession = await registry.project.openSession(spec);
       if (isRunner) {

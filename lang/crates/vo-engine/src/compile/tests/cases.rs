@@ -1005,6 +1005,7 @@ func main(){ lib.Hello() }
         let output = compile_with_auto_install_using_registry(
             file_path.to_string_lossy().as_ref(),
             &registry,
+            &vo_module::project::ProjectContextOptions::default(),
         )
         .expect("single-file inline mod with require must auto-install and compile");
         assert!(!output.module.functions.is_empty());
@@ -1037,6 +1038,7 @@ func main(){ lib.Hello() }
         let second = compile_with_auto_install_using_registry(
             file_path.to_string_lossy().as_ref(),
             &registry,
+            &vo_module::project::ProjectContextOptions::default(),
         )
         .expect("second auto-install compile should reuse cache");
         assert_eq!(output.module.functions.len(), second.module.functions.len());
@@ -1078,8 +1080,12 @@ func main(){ lib.Hello() }
     );
 
     with_mod_cache_root_override(&mod_cache, || {
-        compile_with_auto_install_using_registry(file_path.to_string_lossy().as_ref(), &registry)
-            .expect("initial auto-install compile should succeed");
+        compile_with_auto_install_using_registry(
+            file_path.to_string_lossy().as_ref(),
+            &registry,
+            &vo_module::project::ProjectContextOptions::default(),
+        )
+        .expect("initial auto-install compile should succeed");
         let first = read_saved_cache_fingerprint(&root, Some(file_path.file_name().unwrap()));
 
         let inline = vo_module::inline_mod::parse_inline_mod_from_source(source)

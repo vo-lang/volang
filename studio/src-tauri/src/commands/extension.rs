@@ -1,5 +1,5 @@
-use crate::state::AppState;
 use super::pathing::{is_module_root, resolve_path};
+use crate::state::AppState;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -26,12 +26,17 @@ pub async fn cmd_vo_get_stream(
 ) -> Result<(), String> {
     let spec_clone = spec.clone();
     std::thread::spawn(move || {
-        let _ = on_event.send(InstallEvent::Fetch { message: format!("Fetching {}...", spec_clone) });
+        let _ = on_event.send(InstallEvent::Fetch {
+            message: format!("Fetching {}...", spec_clone),
+        });
         let result = match spec_clone.rsplit_once('@') {
             Some((module, version)) if !module.is_empty() && !version.is_empty() => {
                 vo_engine::install_module(module, version).map(|_| ())
             }
-            _ => Err(format!("invalid spec: expected <module>@<version>, got {:?}", spec_clone)),
+            _ => Err(format!(
+                "invalid spec: expected <module>@<version>, got {:?}",
+                spec_clone
+            )),
         };
         match result {
             Ok(()) => {
@@ -46,7 +51,11 @@ pub async fn cmd_vo_get_stream(
 }
 
 #[tauri::command]
-pub fn cmd_vo_init(path: String, name: Option<String>, state: tauri::State<'_, AppState>) -> Result<String, String> {
+pub fn cmd_vo_init(
+    path: String,
+    name: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
     let session_root = state.session_root();
     let dir = resolve_path(&session_root, &path)?;
     if !dir.is_dir() {
@@ -68,8 +77,7 @@ pub fn cmd_vo_init(path: String, name: Option<String>, state: tauri::State<'_, A
     if !main_vo.exists() {
         let main_content = format!(
             "package {}\n\nimport \"fmt\"\n\nfunc main() {{\n    fmt.Println(\"Hello, {}!\")\n}}\n",
-            mod_name,
-            mod_name
+            mod_name, mod_name
         );
         std::fs::write(&main_vo, &main_content)
             .map_err(|err| format!("{}: {}", main_vo.display(), err))?;
@@ -83,7 +91,9 @@ pub fn cmd_vo_version() -> String {
 }
 
 #[tauri::command]
-pub fn cmd_list_installed_modules(state: tauri::State<'_, AppState>) -> Result<Vec<InstalledModule>, String> {
+pub fn cmd_list_installed_modules(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<InstalledModule>, String> {
     let _ = state;
     let mod_root = dirs::home_dir()
         .ok_or_else(|| "cannot determine home directory".to_string())?
@@ -97,28 +107,41 @@ pub fn cmd_list_installed_modules(state: tauri::State<'_, AppState>) -> Result<V
     Ok(modules)
 }
 
-fn collect_installed_modules(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<InstalledModule>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+fn collect_installed_modules(
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    out: &mut Vec<InstalledModule>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         if is_module_root(&path) {
-            let spec = path.strip_prefix(base)
+            let spec = path
+                .strip_prefix(base)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| path.to_string_lossy().to_string());
             let mod_path = path.join("vo.mod");
-            let metadata = std::fs::read_to_string(&mod_path)
-                .ok()
-                .and_then(|content| {
-                    vo_module::ext_manifest::parse_mod_metadata_content(&content, &mod_path).ok()
-                });
+            let metadata = std::fs::read_to_string(&mod_path).ok().and_then(|content| {
+                vo_module::ext_manifest::parse_mod_metadata_content(&content, &mod_path).ok()
+            });
             let has_native_ext = metadata
                 .as_ref()
                 .and_then(|manifest| manifest.extension.as_ref())
                 .and_then(|extension| extension.native.as_ref())
                 .is_some();
-            let has_wasm_ext = path.read_dir().ok()
-                .map(|entries| entries.filter_map(|e| e.ok())
-                    .any(|e| e.path().extension().map(|ext| ext == "wasm").unwrap_or(false)))
+            let has_wasm_ext = path
+                .read_dir()
+                .ok()
+                .map(|entries| {
+                    entries.filter_map(|e| e.ok()).any(|e| {
+                        e.path()
+                            .extension()
+                            .map(|ext| ext == "wasm")
+                            .unwrap_or(false)
+                    })
+                })
                 .unwrap_or(false);
             out.push(InstalledModule {
                 spec,

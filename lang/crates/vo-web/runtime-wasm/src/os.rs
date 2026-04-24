@@ -698,10 +698,14 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
         match def.name.as_str() {
             "os_getOsErrors" => registry.register(id as u32, os_get_errors),
             "os_getOsConsts" => registry.register(id as u32, os_get_consts),
-            "os_fileRead" => registry.register(id as u32, file_read),
-            "os_fileWrite" => registry.register(id as u32, file_write),
-            "os_fileReadAt" => registry.register(id as u32, file_read_at),
-            "os_fileWriteAt" => registry.register(id as u32, file_write_at),
+            "os_fileRead" | "os_blocking_fileRead" => registry.register(id as u32, file_read),
+            "os_fileWrite" | "os_blocking_fileWrite" => registry.register(id as u32, file_write),
+            "os_fileReadAt" | "os_blocking_fileReadAt" => {
+                registry.register(id as u32, file_read_at)
+            }
+            "os_fileWriteAt" | "os_blocking_fileWriteAt" => {
+                registry.register(id as u32, file_write_at)
+            }
             "os_fileSeek" => registry.register(id as u32, file_seek),
             "os_fileClose" => registry.register(id as u32, file_close),
             "os_fileSync" => registry.register(id as u32, file_sync),

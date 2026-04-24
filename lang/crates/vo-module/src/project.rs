@@ -8,6 +8,7 @@ use crate::lock;
 use crate::operation_error::OperationError;
 use crate::schema::lockfile::{LockFile, LockRoot, LockedModule};
 use crate::schema::modfile::ModFile;
+use crate::workspace::WorkspaceDiscovery;
 use crate::Error;
 
 #[derive(Debug, Clone, Default)]
@@ -132,6 +133,31 @@ impl LockState {
         match self {
             LockState::NoLock => Vec::new(),
             LockState::Locked(context) => context.locked_modules,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectContextOptions {
+    pub workspace: WorkspaceDiscovery,
+}
+
+impl ProjectContextOptions {
+    pub fn new(workspace: WorkspaceDiscovery) -> Self {
+        Self { workspace }
+    }
+
+    pub fn from_environment() -> Self {
+        Self {
+            workspace: crate::workspace::workspace_discovery_from_environment(),
+        }
+    }
+}
+
+impl Default for ProjectContextOptions {
+    fn default() -> Self {
+        Self {
+            workspace: WorkspaceDiscovery::Auto,
         }
     }
 }
@@ -568,12 +594,21 @@ pub fn load_project_context<F: FileSystem>(
     fs: &F,
     dir: &Path,
 ) -> Result<ProjectContext, ProjectDepsError> {
+    load_project_context_with_options(fs, dir, &ProjectContextOptions::from_environment())
+}
+
+pub fn load_project_context_with_options<F: FileSystem>(
+    fs: &F,
+    dir: &Path,
+    options: &ProjectContextOptions,
+) -> Result<ProjectContext, ProjectDepsError> {
     let project_root = find_project_root_in(fs, dir);
     let root_mod = read_mod_file_in(fs, &project_root)?;
-    let workspace_overrides = crate::workspace::load_workspace_overrides_in(
+    let workspace_overrides = crate::workspace::load_workspace_overrides_in_with(
         fs,
         &project_root,
         root_mod.as_ref().map(|mf| &mf.module),
+        &options.workspace,
     )
     .map_err(|error| {
         let kind = match &error {
@@ -686,6 +721,14 @@ pub fn load_single_file_context<F: FileSystem>(
     fs: &F,
     file_path: &Path,
 ) -> Result<SingleFileContext, ProjectDepsError> {
+    load_single_file_context_with_options(fs, file_path, &ProjectContextOptions::from_environment())
+}
+
+pub fn load_single_file_context_with_options<F: FileSystem>(
+    fs: &F,
+    file_path: &Path,
+    options: &ProjectContextOptions,
+) -> Result<SingleFileContext, ProjectDepsError> {
     let file_name_os = file_path.file_name().ok_or_else(|| {
         ProjectDepsError::new(
             ProjectDepsStage::ModFile,
@@ -724,7 +767,7 @@ pub fn load_single_file_context<F: FileSystem>(
             .with_path(file_path)
             .with_span(span));
         }
-        let context = load_project_context(fs, &project_root)?;
+        let context = load_project_context_with_options(fs, &project_root, options)?;
         return Ok(SingleFileContext::Project(context));
     }
 
@@ -926,6 +969,33 @@ artifacts = []
             .unwrap_or_else(|error| panic!("unexpected error: {error}"));
         assert!(context.project_deps().has_mod_file());
         assert!(context.project_deps().locked_modules().is_empty());
+    }
+
+    #[test]
+    fn load_project_context_with_disabled_workspace_requires_locked_external_modules() {
+        let mut fs = MemoryFs::new();
+        fs.add_file(
+            "workspace/lib/vo.mod",
+            "module github.com/vo-lang/lib\nvo ^0.1.0\n",
+        );
+        fs.add_file(
+            "workspace/tests/vo.mod",
+            "module github.com/vo-lang/lib/tests\nvo ^0.1.0\nrequire github.com/vo-lang/lib v0.1.0\n",
+        );
+        fs.add_file(
+            "workspace/tests/vo.work",
+            "version = 1\n[[use]]\npath = \"../lib\"\n",
+        );
+
+        let error = load_project_context_with_options(
+            &fs,
+            Path::new("workspace/tests"),
+            &ProjectContextOptions::new(WorkspaceDiscovery::Disabled),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.stage, ProjectDepsStage::LockFile);
+        assert_eq!(error.kind, ProjectDepsErrorKind::Missing);
     }
 
     #[test]

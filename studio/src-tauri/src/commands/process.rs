@@ -4,13 +4,19 @@ use std::process::{Command, Stdio};
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ProcEvent {
-    Stdout { text: String },
-    Stderr { text: String },
+    Stdout {
+        text: String,
+    },
+    Stderr {
+        text: String,
+    },
     Done {
         #[serde(rename = "exitCode")]
         exit_code: i32,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[tauri::command]
@@ -37,7 +43,9 @@ pub async fn cmd_spawn_process(
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(err) => {
-                let _ = on_event.send(ProcEvent::Error { message: format!("{}: {}", program, err) });
+                let _ = on_event.send(ProcEvent::Error {
+                    message: format!("{}: {}", program, err),
+                });
                 return;
             }
         };
