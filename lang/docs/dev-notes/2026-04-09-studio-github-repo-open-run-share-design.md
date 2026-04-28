@@ -14,7 +14,7 @@
 
 Studio should support this product flow as a first-class capability:
 
-1. a user opens a GitHub repository URL such as `https://github.com/vo-lang/MarbleRush`
+1. a user opens a GitHub repository URL such as `https://github.com/vo-lang/BlockKart`
 2. Studio fetches the repository, opens it as a normal session, and can run it immediately
 3. Studio exposes a **Share** action that generates a URL
 4. another user can open that URL in Studio and get the same runnable project
@@ -367,7 +367,7 @@ The canonical share URL should stay query-based because:
 Recommended format:
 
 ```text
-https://studio.vo-lang.org/?mode=runner&source=github&repo=vo-lang/MarbleRush&commit=<sha>&entry=main.vo&app=gui
+https://studio.vo-lang.org/?mode=runner&source=github&repo=vo-lang/BlockKart&commit=<sha>&entry=main.vo&app=gui
 ```
 
 Additional optional parameters:
@@ -422,9 +422,9 @@ Current compatibility inputs should continue to work during the migration and be
 Studio should support these inputs:
 
 1. raw GitHub repo URL
-   - `https://github.com/vo-lang/MarbleRush`
+   - `https://github.com/vo-lang/BlockKart`
 2. canonical Studio share URL
-   - `...?source=github&repo=vo-lang/MarbleRush&commit=<sha>...`
+   - `...?source=github&repo=vo-lang/BlockKart&commit=<sha>...`
 3. existing explicit archive URL
    - still supported through `archive_url`
 
@@ -450,7 +450,7 @@ For `github_repo`:
 
 ### 9.3 Why resolved commit is required
 
-If a user opens `https://github.com/vo-lang/MarbleRush`, that means “current default branch head”.
+If a user opens `https://github.com/vo-lang/BlockKart`, that means “current default branch head”.
 That is acceptable for a convenience open action.
 
 It is **not** acceptable as the default share representation because it is not deterministic.
@@ -534,7 +534,7 @@ Each materialized session root should contain or be associated with a metadata r
   "source": {
     "kind": "github_repo",
     "owner": "vo-lang",
-    "repo": "MarbleRush",
+    "repo": "BlockKart",
     "requestedRef": "main",
     "resolvedCommit": "abc123...",
     "subdir": null
@@ -739,7 +739,7 @@ Share should generate a URL pinned to the currently resolved commit.
 Example:
 
 ```text
-https://studio.vo-lang.org/?mode=runner&source=github&repo=vo-lang/MarbleRush&commit=8e9d...&entry=main.vo&app=gui
+https://studio.vo-lang.org/?mode=runner&source=github&repo=vo-lang/BlockKart&commit=8e9d...&entry=main.vo&app=gui
 ```
 
 ### 15.2 Why not share branch HEAD by default

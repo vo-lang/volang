@@ -63,9 +63,9 @@
 
   const featuredProjects: FeaturedProject[] = [
     {
-      name: 'MarbleRush',
-      desc: 'Physics puzzle game built with VoGUI and VoPlay.',
-      url: 'https://github.com/vo-lang/MarbleRush/tree/main',
+      name: 'BlockKart',
+      desc: 'Geometric kart racer built with VoGUI and VoPlay.',
+      url: 'https://github.com/vo-lang/BlockKart/tree/main',
       tags: ['GitHub', 'VoGUI', 'VoPlay'],
       hasGui: true,
     },

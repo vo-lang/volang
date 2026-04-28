@@ -633,12 +633,12 @@ mod tests {
             "--runner".to_string(),
             "--mode".to_string(),
             "runner".to_string(),
-            "https://github.com/vo-lang/MarbleRush".to_string(),
+            "https://github.com/vo-lang/BlockKart".to_string(),
         ];
         let proj = parse_project_arg(&args);
         assert_eq!(
             proj.as_deref(),
-            Some("https://github.com/vo-lang/MarbleRush")
+            Some("https://github.com/vo-lang/BlockKart")
         );
     }
 
@@ -647,7 +647,7 @@ mod tests {
         let query = Some(HashMap::from([
             (
                 "proj".to_string(),
-                "https://github.com/vo-lang/MarbleRush/tree/abc123".to_string(),
+                "https://github.com/vo-lang/BlockKart/tree/abc123".to_string(),
             ),
             ("mode".to_string(), "runner".to_string()),
         ]));
@@ -655,7 +655,7 @@ mod tests {
         let mode = super::query_get(&query, &["mode"]).and_then(|value| parse_studio_mode(&value));
         assert_eq!(
             proj.as_deref(),
-            Some("https://github.com/vo-lang/MarbleRush/tree/abc123")
+            Some("https://github.com/vo-lang/BlockKart/tree/abc123")
         );
         assert_eq!(mode, Some(StudioMode::Runner));
     }

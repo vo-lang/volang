@@ -760,7 +760,7 @@ across `InThreadTransport`.
    for input
 4. Test with InThreadTransport (two native threads, same process)
 
-**Validation**: MarbleRush runs correctly with split islands on native
+**Validation**: BlockKart runs correctly with split islands on native
 (two threads, same process, InThreadTransport).
 
 ### Phase 3: WebView Render Island — Studio (est. 2-3 days)
@@ -778,7 +778,7 @@ across `InThreadTransport`.
 6. Delete `native_gui_host.rs`, `native_surface.rs`, `host_api.rs`
 7. Delete PreviewPanel native canvas bridge code
 
-**Validation**: MarbleRush renders correctly in Studio with render island in WebView.
+**Validation**: BlockKart renders correctly in Studio with render island in WebView.
 Input works. Resize works. No OS SDK code.
 
 ### Phase 4: Web Worker Render Island — Playground (est. 2-3 days)
