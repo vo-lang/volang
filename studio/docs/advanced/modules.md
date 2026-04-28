@@ -21,7 +21,7 @@ Declares the module path and dependencies:
 module myapp
 
 require (
-    github.com/vo-lang/vopack v0.1.0
+    github.com/vo-lang/vopack v0.1.1
 )
 ```
 

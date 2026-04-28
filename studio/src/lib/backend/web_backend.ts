@@ -43,7 +43,7 @@ const LOCAL_SESSION_ROOT = `${WORKSPACE_ROOT}/.studio-sessions/local`;
 const LOCAL_PROJECT_ENDPOINT = '/__vo_studio_local_project';
 const GITHUB_SOURCE_ROOT = `${SOURCE_CACHE_ROOT}/github`;
 const GITHUB_SESSION_ROOT = `${WORKSPACE_ROOT}/.studio-sessions/github`;
-const JSDELIVR_GITHUB_CDN_ROOT = 'https://cdn.jsdelivr.net';
+const GITHUB_API_ROOT = 'https://api.github.com';
 const GITHUB_FILE_FETCH_CONCURRENCY = 8;
 const sessionWorkspaceDiscovery = new Map<string, WorkspaceDiscoveryMode>();
 const DISPLAY_PULSE_DELAY_MS = 0xFFFFFFFF;
@@ -59,6 +59,7 @@ const vfsFileModes = new Map<string, number>();
 const vfsFileModTimes = new Map<string, number>();
 const vfsDirModes = new Map<string, number>();
 const vfsDirModTimes = new Map<string, number>();
+const completedGitHubSourceCaches = new Set<string>();
 const textEncoder = new TextEncoder();
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 let studioWasmPromise: Promise<StudioWasm> | null = null;
@@ -72,9 +73,27 @@ interface GitHubRepoInput {
   subdir: string | null;
 }
 
-interface JsDelivrDirectoryEntry {
+interface GitHubTreeItem {
   path?: string;
-  isDir: boolean;
+  mode?: string;
+  sha?: string;
+  type?: string;
+}
+
+interface GitHubTreeMetadata {
+  tree?: GitHubTreeItem[];
+  truncated?: boolean;
+}
+
+interface GitHubSourceFile {
+  path: string;
+  mode: number;
+  sha: string;
+}
+
+interface GitHubBlobMetadata {
+  content?: string;
+  encoding?: string;
 }
 
 interface ResolvedGitHubSource {
@@ -1551,19 +1570,14 @@ async function openGitHubRepoSession(source: GitHubRepoInput): Promise<SessionIn
 }
 
 async function resolveGitHubSource(source: GitHubRepoInput): Promise<ResolvedGitHubSource> {
-  let requestedRef = source.ref?.trim() || null;
-  const resolvedCommit = source.commit?.trim() || null;
-  let fetchRef = resolvedCommit ?? requestedRef;
-  if (!fetchRef) {
-    const listing = await fetchJsDelivrDirectoryListing(source.owner, source.repo, null, '');
-    fetchRef = listing.resolvedRef;
-    requestedRef = fetchRef;
-  }
+  const requestedRef = source.ref?.trim() || 'main';
+  const fetchRef = source.commit?.trim() || requestedRef;
   if (!fetchRef) {
     throw new Error(`Could not resolve a GitHub ref for ${source.owner}/${source.repo}`);
   }
+  const resolvedCommit = isGitCommitSha(fetchRef) ? fetchRef : null;
   const normalizedSubdir = source.subdir ? normalizeRelativePath(source.subdir) : null;
-  const cacheKey = encodeGitHubSourceCacheKey(resolvedCommit ?? `ref:${fetchRef}`);
+  const cacheKey = encodeGitHubSourceCacheKey(resolvedCommit ?? `ref:${fetchRef}:${sessionNonce()}`);
   const sourceCacheRoot = `${GITHUB_SOURCE_ROOT}/${source.owner}/${source.repo}/${cacheKey}`;
   const sessionRoot = `${GITHUB_SESSION_ROOT}/${source.owner}/${source.repo}/${cacheKey}/${sessionNonce()}`;
   const projectRoot = normalizedSubdir ? `${sessionRoot}/${normalizedSubdir}` : sessionRoot;
@@ -1582,28 +1596,35 @@ async function resolveGitHubSource(source: GitHubRepoInput): Promise<ResolvedGit
 }
 
 async function populateGitHubSourceCache(resolved: ResolvedGitHubSource): Promise<void> {
-  if (hasTreeAt(resolved.sourceCacheRoot)) {
+  if (completedGitHubSourceCaches.has(resolved.sourceCacheRoot) && hasTreeAt(resolved.sourceCacheRoot)) {
     return;
   }
   await clearImportedRoot(resolved.sourceCacheRoot);
   ensureDir(resolved.sourceCacheRoot);
-  const filePaths = await collectJsDelivrFilePaths(
-    resolved.owner,
-    resolved.repo,
-    resolved.fetchRef,
-    resolved.subdir ?? '',
-  );
-  if (filePaths.length === 0) {
-    throw new Error(`GitHub repository contains no files: ${resolved.owner}/${resolved.repo}`);
+  try {
+    const files = await collectGitHubSourceFiles(
+      resolved.owner,
+      resolved.repo,
+      resolved.fetchRef,
+      resolved.subdir ?? '',
+    );
+    if (files.length === 0) {
+      throw new Error(`GitHub repository contains no files: ${resolved.owner}/${resolved.repo}`);
+    }
+    await runWithConcurrency(
+      files,
+      GITHUB_FILE_FETCH_CONCURRENCY,
+      async (file) => {
+        const bytes = await fetchGitHubBlobBytes(resolved.owner, resolved.repo, file.sha);
+        setVfsFile(`${resolved.sourceCacheRoot}/${file.path}`, bytes, file.mode);
+      },
+    );
+    completedGitHubSourceCaches.add(resolved.sourceCacheRoot);
+  } catch (error) {
+    completedGitHubSourceCaches.delete(resolved.sourceCacheRoot);
+    clearImportedRootSync(resolved.sourceCacheRoot);
+    throw error;
   }
-  await runWithConcurrency(
-    filePaths,
-    GITHUB_FILE_FETCH_CONCURRENCY,
-    async (relativePath) => {
-      const bytes = await fetchJsDelivrFileBytes(resolved.owner, resolved.repo, resolved.fetchRef, relativePath);
-      setVfsFile(`${resolved.sourceCacheRoot}/${relativePath}`, bytes);
-    },
-  );
 }
 
 function materializeGitHubSession(resolved: ResolvedGitHubSource): void {
@@ -1633,145 +1654,93 @@ function buildGitHubHtmlUrl(owner: string, repo: string, ref: string | null, sub
   return `${repoUrl}/tree/${encodeURIComponent(ref)}${encodedSubdir}`;
 }
 
-async function collectJsDelivrFilePaths(
+async function collectGitHubSourceFiles(
   owner: string,
   repo: string,
   ref: string,
   subdir: string,
-): Promise<string[]> {
-  const seenDirs = new Set<string>();
-  const seenFiles = new Set<string>();
-  const pendingDirs = [subdir];
-  while (pendingDirs.length > 0) {
-    const currentDir = pendingDirs.pop() ?? '';
-    const normalizedDir = currentDir ? normalizeRelativePath(currentDir) : '';
-    if (seenDirs.has(normalizedDir)) {
+): Promise<GitHubSourceFile[]> {
+  const normalizedSubdir = subdir ? normalizeRelativePath(subdir) : '';
+  const subdirPrefix = normalizedSubdir ? `${normalizedSubdir}/` : '';
+  const tree = await fetchJsonFromUrl<GitHubTreeMetadata>(
+    `${GITHUB_API_ROOT}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
+  );
+  if (tree.truncated) {
+    throw new Error(`GitHub tree is too large to import: ${owner}/${repo}@${ref}`);
+  }
+  const files: GitHubSourceFile[] = [];
+  for (const item of tree.tree ?? []) {
+    if (item.type !== 'blob' || !item.path || !item.sha) {
       continue;
     }
-    seenDirs.add(normalizedDir);
-    const listing = await fetchJsDelivrDirectoryListing(owner, repo, ref, normalizedDir);
-    for (const entry of listing.entries) {
-      if (!entry.path) {
-        continue;
-      }
-      const normalizedPath = normalizeRelativePath(entry.path);
-      if (entry.isDir) {
-        pendingDirs.push(normalizedPath);
-      } else {
-        seenFiles.add(normalizedPath);
-      }
-    }
-  }
-  return [...seenFiles].sort();
-}
-
-async function fetchJsDelivrDirectoryListing(
-  owner: string,
-  repo: string,
-  ref: string | null,
-  dir: string,
-): Promise<{ resolvedRef: string; entries: JsDelivrDirectoryEntry[] }> {
-  const html = await fetchTextFromUrl(buildJsDelivrDirectoryUrl(owner, repo, ref, dir));
-  const document = new DOMParser().parseFromString(html, 'text/html');
-  const resolvedRef = ref ?? extractJsDelivrResolvedRefFromHtml(html, owner, repo) ?? extractJsDelivrResolvedRef(document, owner, repo);
-  if (!resolvedRef) {
-    throw new Error(`Could not resolve a GitHub ref for ${owner}/${repo}`);
-  }
-  const currentPrefix = dir ? `${normalizeRelativePath(dir)}/` : '';
-  const hrefPrefix = `/gh/${owner}/${repo}@${encodeURIComponent(resolvedRef)}/`;
-  const entries: JsDelivrDirectoryEntry[] = [];
-  const seen = new Set<string>();
-  for (const anchor of document.querySelectorAll('.listing a[rel="nofollow"]')) {
-    const href = anchor.getAttribute('href')?.trim() ?? '';
-    if (!href.startsWith(hrefPrefix)) {
+    const normalizedPath = normalizeRelativePath(item.path);
+    if (subdirPrefix && !normalizedPath.startsWith(subdirPrefix)) {
       continue;
     }
-    let relativePath = safeDecodeURIComponent(href.slice(hrefPrefix.length)).replace(/^\/+/, '');
-    const isDir = relativePath.endsWith('/');
-    relativePath = relativePath.replace(/\/+$/, '');
-    if (!relativePath || relativePath.startsWith('../')) {
+    files.push({ path: normalizedPath, mode: parseGitFileMode(item.mode), sha: item.sha });
+  }
+  const selectedPaths = new Set(selectGitHubImportFilePaths(files.map((file) => file.path).sort()));
+  return files
+    .filter((file) => selectedPaths.has(file.path))
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function selectGitHubImportFilePaths(paths: string[]): string[] {
+  const assetPackRoots = new Set(
+    paths
+      .filter((path) => path.toLowerCase().endsWith('.vpak'))
+      .map((path) => dirnameRelativePath(path)),
+  );
+  if (assetPackRoots.size === 0) {
+    return paths;
+  }
+  return paths.filter((path) => shouldImportPackedGitHubPath(path, assetPackRoots));
+}
+
+function shouldImportPackedGitHubPath(path: string, assetPackRoots: Set<string>): boolean {
+  const normalized = normalizeRelativePath(path);
+  if (normalized === '.DS_Store' || normalized.endsWith('/.DS_Store')) {
+    return false;
+  }
+  if (normalized === 'docs' || normalized.startsWith('docs/') || normalized === 'tools' || normalized.startsWith('tools/')) {
+    return false;
+  }
+  for (const root of assetPackRoots) {
+    if (normalized === root || !normalized.startsWith(`${root}/`)) {
       continue;
     }
-    if (currentPrefix) {
-      if (!relativePath.startsWith(currentPrefix)) {
-        continue;
-      }
-      const childPath = relativePath.slice(currentPrefix.length);
-      if (!childPath || childPath.includes('/')) {
-        continue;
-      }
-    } else if (relativePath.includes('/')) {
-      continue;
-    }
-    if (seen.has(relativePath)) {
-      continue;
-    }
-    seen.add(relativePath);
-    entries.push({ path: relativePath, isDir });
+    return normalized.toLowerCase().endsWith('.vpak');
   }
-  return { resolvedRef, entries };
+  return true;
 }
 
-function extractJsDelivrResolvedRefFromHtml(html: string, owner: string, repo: string): string | null {
-  const escapedOwner = escapeRegExp(owner);
-  const escapedRepo = escapeRegExp(repo);
-  const hrefMatch = html.match(new RegExp(`/gh/${escapedOwner}/${escapedRepo}@([^/"?#]+)`));
-  if (hrefMatch?.[1]) {
-    return safeDecodeURIComponent(hrefMatch[1]);
+function dirnameRelativePath(path: string): string {
+  const normalized = normalizeRelativePath(path);
+  const index = normalized.lastIndexOf('/');
+  return index < 0 ? '' : normalized.slice(0, index);
+}
+
+async function fetchGitHubBlobBytes(owner: string, repo: string, sha: string): Promise<Uint8Array> {
+  const blob = await fetchJsonFromUrl<GitHubBlobMetadata>(
+    `${GITHUB_API_ROOT}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/blobs/${encodeURIComponent(sha)}`,
+  );
+  if (blob.encoding !== 'base64' || !blob.content) {
+    throw new Error(`GitHub blob is not base64 encoded: ${owner}/${repo}@${sha}`);
   }
-  const valueMatch = html.match(new RegExp(`${escapedOwner}/${escapedRepo}@([^"<\\s]+)`));
-  if (valueMatch?.[1]) {
-    return safeDecodeURIComponent(valueMatch[1]);
-  }
-  return null;
+  return decodeBase64Bytes(blob.content);
 }
 
-function extractJsDelivrResolvedRef(document: Document, owner: string, repo: string): string | null {
-  const option = document.querySelector('.versions option[selected], .versions option');
-  const value = option?.getAttribute('value')?.trim() ?? option?.textContent?.trim() ?? '';
-  const prefix = `${owner}/${repo}@`;
-  if (!value.startsWith(prefix) || value.length <= prefix.length) {
-    return null;
-  }
-  return safeDecodeURIComponent(value.slice(prefix.length));
-}
-
-async function fetchJsDelivrFileBytes(owner: string, repo: string, ref: string, path: string): Promise<Uint8Array> {
-  return fetchBytesFromUrl(buildJsDelivrFileUrl(owner, repo, ref, path));
-}
-
-function buildJsDelivrDirectoryUrl(owner: string, repo: string, ref: string | null, dir: string): string {
-  const refSegment = ref ? `@${encodeURIComponent(ref)}` : '';
-  const dirSegment = dir
-    ? `${normalizeRelativePath(dir).split('/').map((segment) => encodeURIComponent(segment)).join('/')}/`
-    : '';
-  return `${JSDELIVR_GITHUB_CDN_ROOT}/gh/${owner}/${repo}${refSegment}/${dirSegment}`;
-}
-
-function buildJsDelivrFileUrl(owner: string, repo: string, ref: string, path: string): string {
-  const normalizedPath = normalizeRelativePath(path);
-  const encodedPath = normalizedPath.split('/').map((segment) => encodeURIComponent(segment)).join('/');
-  return `${JSDELIVR_GITHUB_CDN_ROOT}/gh/${owner}/${repo}@${encodeURIComponent(ref)}/${encodedPath}`;
-}
-
-function safeDecodeURIComponent(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-async function fetchTextFromUrl(url: string, headers?: Record<string, string>): Promise<string> {
-  const response = await fetch(url, { headers });
+async function fetchJsonFromUrl<T>(url: string, headers?: Record<string, string>): Promise<T> {
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      ...headers,
+    },
+  });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${url}`);
   }
-  return response.text();
+  return response.json() as Promise<T>;
 }
 
 async function fetchBytesFromUrl(url: string, headers?: Record<string, string>): Promise<Uint8Array> {

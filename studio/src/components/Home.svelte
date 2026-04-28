@@ -65,7 +65,7 @@
     {
       name: 'MarbleRush',
       desc: 'Physics puzzle game built with VoGUI and VoPlay.',
-      url: 'https://github.com/vo-lang/MarbleRush',
+      url: 'https://github.com/vo-lang/MarbleRush/tree/main',
       tags: ['GitHub', 'VoGUI', 'VoPlay'],
       hasGui: true,
     },
