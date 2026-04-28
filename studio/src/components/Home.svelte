@@ -445,7 +445,7 @@
               on:click={() => void openFeatured(project)}
             >
               <span class="featured-mark" aria-hidden="true">
-                <span class="featured-mark-main">MR</span>
+                <span class="featured-mark-main">BK</span>
               </span>
               <span class="featured-copy">
                 <span class="featured-name">{project.name}</span>
