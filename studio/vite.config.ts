@@ -40,9 +40,13 @@ interface LocalProjectSnapshotPlan {
   files: string[];
 }
 
+const buildEnv = (globalThis as typeof globalThis & {
+  process?: { env?: Record<string, string | undefined> };
+}).process?.env ?? {};
+
 const LOCAL_PROJECT_ROUTE = '/__vo_studio_local_project';
-const LOCAL_PROJECT_MAX_FILES = 5000;
-const LOCAL_PROJECT_MAX_BYTES = 64 * 1024 * 1024;
+const LOCAL_PROJECT_MAX_FILES = readPositiveIntEnv('VITE_STUDIO_LOCAL_PROJECT_MAX_FILES', 5000);
+const LOCAL_PROJECT_MAX_BYTES = readByteSizeEnv('VITE_STUDIO_LOCAL_PROJECT_MAX_BYTES', 512 * 1024 * 1024);
 const ROOT_PATH = sep;
 const LOCAL_PROJECT_SKIP_DIRS = new Set([
   '.git',
@@ -53,6 +57,39 @@ const LOCAL_PROJECT_SKIP_DIRS = new Set([
   'node_modules',
   'target',
 ]);
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = buildEnv[name]?.trim();
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readByteSizeEnv(name: string, fallback: number): number {
+  const raw = buildEnv[name]?.trim();
+  if (!raw) {
+    return fallback;
+  }
+  const match = raw.match(/^(\d+(?:\.\d+)?)\s*(b|kb|kib|mb|mib|gb|gib)?$/i);
+  if (!match) {
+    return fallback;
+  }
+  const value = Number.parseFloat(match[1]);
+  if (!Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  const unit = (match[2] ?? 'b').toLowerCase();
+  const multiplier = unit === 'gb' || unit === 'gib'
+    ? 1024 * 1024 * 1024
+    : unit === 'mb' || unit === 'mib'
+      ? 1024 * 1024
+      : unit === 'kb' || unit === 'kib'
+        ? 1024
+        : 1;
+  return Math.floor(value * multiplier);
+}
 
 function localProjectSnapshotsEnabled(): boolean {
   return buildEnv.VITE_STUDIO_LOCAL_PROJECTS === '1';
@@ -400,7 +437,11 @@ function addSnapshotFile(
   totals.files += 1;
   totals.bytes += bytes.length;
   if (totals.files > LOCAL_PROJECT_MAX_FILES || totals.bytes > LOCAL_PROJECT_MAX_BYTES) {
-    throw new Error('local project snapshot is too large for Studio web local mode');
+    throw new Error(
+      `local project snapshot is too large for Studio web local mode `
+      + `(${totals.files}/${LOCAL_PROJECT_MAX_FILES} files, `
+      + `${formatBytes(totals.bytes)}/${formatBytes(LOCAL_PROJECT_MAX_BYTES)})`,
+    );
   }
   seen.add(path);
   files.push({
@@ -442,6 +483,19 @@ function shouldIncludeLocalProjectFile(name: string, relFromRoot: string): boole
   return !relFromRoot.includes('/') && (name.endsWith('.wasm') || name.endsWith('.js'));
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GiB`;
+  }
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)}MiB`;
+  }
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)}KiB`;
+  }
+  return `${bytes}B`;
+}
+
 function toPosix(path: string): string {
   return path.split(sep).filter(Boolean).join('/');
 }
@@ -468,10 +522,6 @@ function studioManualChunks(id: string): string | undefined {
   }
   return 'vendor';
 }
-
-const buildEnv = (globalThis as typeof globalThis & {
-  process?: { env?: Record<string, string | undefined> };
-}).process?.env ?? {};
 
 function readStudioWasmBuildId(): string | null {
   try {

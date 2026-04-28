@@ -1,0 +1,40 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+)
+
+type Point struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	Label string `json:"label"`
+}
+
+type Payload struct {
+	Points []Point `json:"points"`
+	Any []any `json:"any"`
+	Lookup map[string]Point `json:"lookup"`
+}
+
+func main() {
+	data := []byte(`{"points":[{"x":1.25,"y":2.5,"label":"a"},{"x":3.5,"y":4.75,"label":"b"}],"any":[1,"two",true],"lookup":{"start":{"x":9,"y":10,"label":"s"}}}`)
+	var payload Payload
+	err := json.Unmarshal(data, &payload)
+	if err != nil {
+		panic("unmarshal failed: " + err.Error())
+	}
+	if len(payload.Points) != 2 || payload.Points[1].Label != "b" || payload.Points[1].Y != 4.75 {
+		panic("slice of structs decoded incorrectly")
+	}
+	if len(payload.Any) != 3 {
+		panic("slice of any decoded incorrectly")
+	}
+	if payload.Lookup["start"].Label != "s" || payload.Lookup["start"].X != 9 {
+		panic("map of structs decoded incorrectly")
+	}
+	for i := 0; i < 20000; i++ {
+		_ = fmt.Sprintf("alloc-%d-%s", i, payload.Points[i % len(payload.Points)].Label)
+	}
+	fmt.Println("json_unmarshal_slice_struct_gc: ok")
+}

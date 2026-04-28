@@ -929,7 +929,7 @@ impl<'a> ExternCallContext<'a> {
                     _ => elem_slots * crate::slot::SLOT_BYTES,
                 };
 
-                let elem_meta = crate::ValueMeta::new(elem_value_rttid.rttid(), elem_vk);
+                let elem_meta = self.value_meta_for_value_rttid(elem_value_rttid);
                 let new_ref = array::create(self.gc, elem_meta, elem_bytes, array_len);
 
                 // Copy raw_slots to array data area
@@ -1230,6 +1230,26 @@ impl<'a> ExternCallContext<'a> {
                 elem_slots * (*len as u16)
             }
             _ => 1,
+        }
+    }
+
+    /// Build GC/container metadata for a runtime value type.
+    ///
+    /// `ValueRttid` carries a runtime type id, but `ValueMeta` carries GC scan metadata.
+    /// In particular, struct values must store `struct_meta_id`, not `rttid`; otherwise
+    /// the GC can read the wrong struct layout and treat ordinary numbers as GcRefs.
+    pub fn value_meta_for_value_rttid(&self, value_rttid: ValueRttid) -> ValueMeta {
+        let rttid = value_rttid.rttid();
+        let vk = value_rttid.value_kind();
+        match vk {
+            ValueKind::Struct => {
+                ValueMeta::new(self.get_struct_meta_id_from_rttid(rttid).unwrap_or(0), vk)
+            }
+            ValueKind::Interface => ValueMeta::new(
+                self.get_interface_meta_id_from_rttid(rttid).unwrap_or(0),
+                vk,
+            ),
+            _ => ValueMeta::new(0, vk),
         }
     }
 

@@ -291,6 +291,8 @@ def configure_studio_launch_env(env: dict[str, str], project: Optional[str], run
         env[f'{prefix}_STUDIO_MODE'] = 'runner' if runner else 'dev'
     if not native and is_local_studio_project(project):
         env['VITE_STUDIO_LOCAL_PROJECTS'] = '1'
+        env.setdefault('VITE_STUDIO_LOCAL_PROJECT_MAX_BYTES', '512MiB')
+        env.setdefault('VITE_STUDIO_LOCAL_PROJECT_MAX_FILES', '20000')
 
 
 def studio_dev_server_url() -> str:

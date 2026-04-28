@@ -145,9 +145,26 @@ function revokeBlobUrls(urls: string[]): void {
   }
 }
 
+function shouldEmitRendererBridgeDebug(): boolean {
+  try {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+    const params = new URLSearchParams(window.location.search);
+    return params.has('rendererDebug')
+      || params.has('debug')
+      || window.localStorage.getItem('studio.rendererDebug') === '1';
+  } catch {
+    return false;
+  }
+}
+
 function emitRendererBridgeDebug(backend: Backend, message: string): void {
   void backend;
-  void message;
+  if (!shouldEmitRendererBridgeDebug()) {
+    return;
+  }
+  console.debug(`[RendererBridge] ${message}`);
 }
 
 function frameworkModuleKey(framework: FrameworkContract): string {
@@ -390,6 +407,7 @@ function makeRendererHost(
   return {
     moduleBytes,
     async sendEvent(handlerId: number, payload: string): Promise<Uint8Array> {
+      emitRendererBridgeDebug(backend, `sendEvent handler=${handlerId} payload=${payload.slice(0, 160)}`);
       return runtime.sendGuiEvent(handlerId, payload);
     },
     log(message: string): void {

@@ -395,6 +395,33 @@ function buildStandaloneImports(): WebAssembly.Imports {
     return handler;
   }
 
+  function audioBridgeFunction(name: string): ((...args: unknown[]) => unknown) | null {
+    const handler = (window as unknown as Record<string, unknown>)[name];
+    if (typeof handler !== 'function') {
+      console.warn(`[vogui host] audio bridge function is not installed: ${name}`);
+      return null;
+    }
+    return handler as (...args: unknown[]) => unknown;
+  }
+
+  function readWasmBytes(ptr: number, len: number): Uint8Array {
+    const mem = (ref.instance!.exports.memory as WebAssembly.Memory).buffer;
+    return new Uint8Array(mem, ptr, len).slice();
+  }
+
+  function callAudioVoid(name: string, ...args: unknown[]): void {
+    const handler = audioBridgeFunction(name);
+    if (!handler) return;
+    handler(...args);
+  }
+
+  function callAudioNumber(name: string, ...args: unknown[]): number {
+    const handler = audioBridgeFunction(name);
+    if (!handler) return -1;
+    const result = handler(...args);
+    return typeof result === 'number' && Number.isFinite(result) ? result : -1;
+  }
+
   // Stash the ref so the caller can bind it after instantiation.
   // We use a convention: the returned object has a hidden __ref property.
   const imports: WebAssembly.Imports & { __ref?: StandaloneRef } = {
@@ -577,6 +604,70 @@ function buildStandaloneImports(): WebAssembly.Imports {
         return bridge(
           textPtr, textLen, fontPtr, fontLen, maxWidth, lineHeight, whiteSpace, outLenPtr,
         );
+      },
+      host_audio_load_bytes(ptr: number, len: number): number {
+        return callAudioNumber('voAudioLoad', readWasmBytes(ptr, len));
+      },
+      host_audio_free(clipId: number): void {
+        callAudioVoid('voAudioFree', clipId);
+      },
+      host_audio_play_sound(clipId: number, volume: number, pitch: number): void {
+        callAudioVoid('voAudioPlaySound', clipId, volume, pitch);
+      },
+      host_audio_set_listener(
+        px: number, py: number, pz: number,
+        fx: number, fy: number, fz: number,
+        ux: number, uy: number, uz: number,
+      ): void {
+        callAudioVoid('voAudioSetListener', px, py, pz, fx, fy, fz, ux, uy, uz);
+      },
+      host_audio_play_sound_3d(
+        clipId: number,
+        px: number, py: number, pz: number,
+        volume: number,
+        refDistance: number,
+        maxDistance: number,
+      ): void {
+        callAudioVoid('voAudioPlaySound3D', clipId, px, py, pz, volume, refDistance, maxDistance);
+      },
+      host_audio_create_source_3d(
+        clipId: number,
+        px: number, py: number, pz: number,
+        volume: number,
+        refDistance: number,
+        maxDistance: number,
+      ): number {
+        return callAudioNumber('voAudioCreateSource3D', clipId, px, py, pz, volume, refDistance, maxDistance);
+      },
+      host_audio_update_spatial(): void {
+        callAudioVoid('voAudioUpdateSpatial');
+      },
+      host_audio_set_source_3d_pos(sourceId: number, px: number, py: number, pz: number): void {
+        callAudioVoid('voAudioSetSource3DPos', sourceId, px, py, pz);
+      },
+      host_audio_set_source_3d_params(sourceId: number, volume: number, pitch: number): void {
+        callAudioVoid('voAudioSetSource3DParams', sourceId, volume, pitch);
+      },
+      host_audio_remove_source_3d(sourceId: number): void {
+        callAudioVoid('voAudioRemoveSource3D', sourceId);
+      },
+      host_audio_play_music(clipId: number, volume: number): void {
+        callAudioVoid('voAudioPlayMusic', clipId, volume);
+      },
+      host_audio_stop_music(): void {
+        callAudioVoid('voAudioStopMusic');
+      },
+      host_audio_pause_music(): void {
+        callAudioVoid('voAudioPauseMusic');
+      },
+      host_audio_resume_music(): void {
+        callAudioVoid('voAudioResumeMusic');
+      },
+      host_audio_set_sfx_volume(volume: number): void {
+        callAudioVoid('voAudioSetSFXVolume', volume);
+      },
+      host_audio_set_music_volume(volume: number): void {
+        callAudioVoid('voAudioSetMusicVolume', volume);
       },
     },
   };

@@ -1366,8 +1366,6 @@ fn unpack_args(
     params: &[vo_common_core::types::ValueRttid],
     is_variadic: bool,
 ) -> Result<Vec<u64>, ()> {
-    use vo_common_core::types::ValueMeta;
-
     let mut args = Vec::new();
 
     if args_slice_ref.is_null() {
@@ -1453,7 +1451,7 @@ fn unpack_args(
         };
         let elem_vk = elem_vr.value_kind();
         let elem_slots = call.get_type_slot_count(elem_vr.rttid()) as usize;
-        let elem_meta = ValueMeta::new(elem_vr.rttid(), elem_vk);
+        let elem_meta = call.value_meta_for_value_rttid(elem_vr);
 
         let variadic_count = arg_count.saturating_sub(non_variadic_count);
         if variadic_count == 0 {

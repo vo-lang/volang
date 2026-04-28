@@ -508,7 +508,7 @@ fn marshal_inline_array_value_depth<W: FormatWriter>(
 fn marshal_map_value_depth<W: FormatWriter>(
     call: &ExternCallContext,
     map_ref: GcRef,
-    _rttid: u32,
+    rttid: u32,
     writer: &mut W,
     depth: usize,
 ) -> Result<(), &'static str> {
@@ -519,7 +519,9 @@ fn marshal_map_value_depth<W: FormatWriter>(
 
     let key_vk = map::key_kind(map_ref);
     let val_vk = map::val_kind(map_ref);
-    let val_meta_id = map::val_meta(map_ref).meta_id();
+    let val_rttid = get_map_key_val_rttids(call, rttid)
+        .map(|(_, val)| val.rttid())
+        .unwrap_or_else(|_| map::val_meta(map_ref).meta_id());
 
     // JSON only supports string keys
     if key_vk != ValueKind::String {
@@ -542,7 +544,7 @@ fn marshal_map_value_depth<W: FormatWriter>(
         }
         first = false;
 
-        marshal_map_val_depth(call, val, val_vk, val_meta_id, writer, depth)?;
+        marshal_map_val_depth(call, val, val_vk, val_rttid, writer, depth)?;
         writer.write_field_end();
     }
     writer.write_object_end();
@@ -649,7 +651,7 @@ fn marshal_map_val_depth<W: FormatWriter>(
     call: &ExternCallContext,
     val: &[u64],
     val_vk: ValueKind,
-    val_meta_id: u32,
+    val_rttid: u32,
     writer: &mut W,
     depth: usize,
 ) -> Result<(), &'static str> {
@@ -681,14 +683,14 @@ fn marshal_map_val_depth<W: FormatWriter>(
         }
         ValueKind::Struct => {
             let ptr = val.as_ptr() as GcRef;
-            marshal_struct_value_depth(call, ptr, val_meta_id, writer, depth + 1)?;
+            marshal_struct_value_depth(call, ptr, val_rttid, writer, depth + 1)?;
         }
         ValueKind::Pointer => {
             let ptr_val = val[0] as GcRef;
             if ptr_val.is_null() {
                 writer.write_null();
             } else {
-                let elem_rttid = get_pointed_type_rttid(call, val_meta_id);
+                let elem_rttid = get_pointed_type_rttid(call, val_rttid);
                 marshal_struct_value_depth(call, ptr_val, elem_rttid, writer, depth + 1)?;
             }
         }
@@ -697,11 +699,11 @@ fn marshal_map_val_depth<W: FormatWriter>(
         }
         ValueKind::Slice => {
             let slice_ref = val[0] as GcRef;
-            marshal_slice_value_depth(call, slice_ref, val_meta_id, writer, depth + 1)?;
+            marshal_slice_value_depth(call, slice_ref, val_rttid, writer, depth + 1)?;
         }
         ValueKind::Map => {
             let map_ref = val[0] as GcRef;
-            marshal_map_value_depth(call, map_ref, val_meta_id, writer, depth + 1)?;
+            marshal_map_value_depth(call, map_ref, val_rttid, writer, depth + 1)?;
         }
         _ => writer.write_null(),
     }
@@ -1103,8 +1105,8 @@ fn unmarshal_map_value<'a, R: FormatReader<'a>>(
     let val_rttid_u32 = val_val_rttid.rttid();
 
     let key_meta = ValueMeta::new(0, ValueKind::String);
-    let val_meta = ValueMeta::new(val_rttid_u32, val_vk);
-    let val_slots: u16 = if val_vk == ValueKind::Interface { 2 } else { 1 };
+    let val_meta = call.value_meta_for_value_rttid(val_val_rttid);
+    let val_slots = value_slot_count(call, val_vk, val_rttid_u32);
 
     let m = call.alloc_map(key_meta, val_meta, 1, val_slots, 0);
 
@@ -1132,20 +1134,8 @@ fn unmarshal_slice_value<'a, R: FormatReader<'a>>(
     let elem_vk = elem_value_rttid.value_kind();
     let elem_rttid = elem_value_rttid.rttid();
 
-    let elem_bytes = match elem_vk {
-        ValueKind::Bool | ValueKind::Int8 | ValueKind::Uint8 => 1,
-        ValueKind::Int16 | ValueKind::Uint16 => 2,
-        ValueKind::Int32 | ValueKind::Uint32 | ValueKind::Float32 => 4,
-        ValueKind::Struct => {
-            let meta_id = get_struct_meta_id(call, elem_rttid).unwrap_or(0);
-            call.struct_meta(meta_id as usize)
-                .map(|m| m.slot_count() as usize * SLOT_BYTES)
-                .unwrap_or(SLOT_BYTES)
-        }
-        _ => SLOT_BYTES,
-    };
-
-    let elem_meta = ValueMeta::new(elem_rttid, elem_vk);
+    let elem_bytes = value_storage_bytes(call, elem_vk, elem_rttid);
+    let elem_meta = call.value_meta_for_value_rttid(elem_value_rttid);
     let s = call.alloc_slice(elem_meta, elem_bytes, elems.len());
     if elems.is_empty() {
         return Ok(s);
@@ -1158,6 +1148,27 @@ fn unmarshal_slice_value<'a, R: FormatReader<'a>>(
     }
 
     Ok(s)
+}
+
+fn value_slot_count(call: &ExternCallContext, vk: ValueKind, rttid: u32) -> u16 {
+    match vk {
+        ValueKind::Interface => 2,
+        ValueKind::Struct | ValueKind::Array => call.get_type_slot_count(rttid),
+        _ => 1,
+    }
+}
+
+fn value_storage_bytes(call: &ExternCallContext, vk: ValueKind, rttid: u32) -> usize {
+    match vk {
+        ValueKind::Bool | ValueKind::Int8 | ValueKind::Uint8 => 1,
+        ValueKind::Int16 | ValueKind::Uint16 => 2,
+        ValueKind::Int32 | ValueKind::Uint32 | ValueKind::Float32 => 4,
+        ValueKind::Interface => 2 * SLOT_BYTES,
+        ValueKind::Struct | ValueKind::Array => {
+            call.get_type_slot_count(rttid) as usize * SLOT_BYTES
+        }
+        _ => SLOT_BYTES,
+    }
 }
 
 // ==================== Helper Functions ====================
