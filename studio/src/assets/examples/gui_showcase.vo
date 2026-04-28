@@ -1,7 +1,7 @@
 /*vo:mod
 module local/gui_showcase
 vo ^0.1.0
-require github.com/vo-lang/vogui v0.1.13
+require github.com/vo-lang/vogui v0.1.14
 */
 
 // Showcase - comprehensive demo of all v2 components and features

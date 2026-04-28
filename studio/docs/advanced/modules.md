@@ -21,7 +21,7 @@ Declares the module path and dependencies:
 module myapp
 
 require (
-    github.com/vo-lang/vopack v0.1.1
+    github.com/vo-lang/vopack v0.1.2
 )
 ```
 
@@ -36,7 +36,7 @@ vo mod sync
 ## Adding Dependencies
 
 ```bash
-vo mod add github.com/vo-lang/vopack@v0.1.0
+vo mod add github.com/vo-lang/vopack@v0.1.2
 ```
 
 Or add manually to `vo.mod` and run:
