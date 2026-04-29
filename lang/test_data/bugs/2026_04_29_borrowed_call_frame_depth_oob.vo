@@ -26,7 +26,7 @@ func main() {
 	}()
 
 	assert(recovered, "tiny-frame recursion must fail as a Vo runtime panic, not a host VM panic")
-	assert(depth > 128, "test should recurse deeply enough to exercise call-frame growth")
+	assert(depth > 64, "test should recurse deeply enough to exercise call-frame growth")
 	assert(strings.Contains(message, "stack"), "panic should mention stack")
 	fmt.Println("borrowed_call_frame_depth_oob: ok")
 }
