@@ -150,7 +150,7 @@ tier = "fast"
 
 [tasks.vo-test]
 title = "vo language tests"
-command = ["./d.py", "test", "both"]
+command = ["env", "VOWORK=off", "./d.py", "test", "both"]
 tools = ["rust"]
 triggers = [
   "cmd/vo/**",
