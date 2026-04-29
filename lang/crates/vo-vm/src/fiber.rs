@@ -351,6 +351,13 @@ impl ClosureReplayState {
 
 /// Initial stack capacity in slots (64KB = 8192 slots).
 const INITIAL_STACK_CAPACITY: usize = 8192;
+/// Maximum stack capacity per fiber in slots (8 MiB).
+///
+/// Without a VM-owned limit, runaway recursion keeps doubling the Rust Vec
+/// until wasm memory allocation fails as a raw `memory access out of bounds`.
+/// Keep the failure at the VM stack boundary so the reported error points at
+/// the actual execution problem.
+const MAX_STACK_CAPACITY: usize = 1 << 20;
 
 const CALL_IFACE_IC_TABLE_SIZE: usize = 512;
 const CALL_IFACE_IC_TABLE_MASK: u32 = (CALL_IFACE_IC_TABLE_SIZE - 1) as u32;
@@ -713,13 +720,20 @@ impl Fiber {
     /// Grows by doubling if needed. Only call when sp might exceed capacity.
     #[inline]
     pub fn ensure_capacity(&mut self, required: usize) {
+        assert!(
+            required <= MAX_STACK_CAPACITY,
+            "vo vm stack overflow: required {} slots exceeds limit {}",
+            required,
+            MAX_STACK_CAPACITY
+        );
         if required > self.stack.len() {
             let new_cap = self
                 .stack
                 .len()
                 .max(INITIAL_STACK_CAPACITY)
                 .max(required)
-                .next_power_of_two();
+                .next_power_of_two()
+                .min(MAX_STACK_CAPACITY);
             self.stack.resize(new_cap, 0);
         }
     }
@@ -973,5 +987,28 @@ impl Fiber {
     #[inline]
     pub fn write_reg_abs(&mut self, idx: usize, val: u64) {
         self.stack[idx] = val;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Fiber, INITIAL_STACK_CAPACITY, MAX_STACK_CAPACITY};
+
+    #[test]
+    fn ensure_capacity_grows_stack_within_limit() {
+        let mut fiber = Fiber::new(1);
+
+        fiber.ensure_capacity(INITIAL_STACK_CAPACITY + 1);
+
+        assert!(fiber.stack.len() >= INITIAL_STACK_CAPACITY + 1);
+        assert!(fiber.stack.len() <= MAX_STACK_CAPACITY);
+    }
+
+    #[test]
+    #[should_panic(expected = "vo vm stack overflow")]
+    fn ensure_capacity_rejects_stack_overflow() {
+        let mut fiber = Fiber::new(1);
+
+        fiber.ensure_capacity(MAX_STACK_CAPACITY + 1);
     }
 }
