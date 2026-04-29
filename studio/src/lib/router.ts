@@ -17,6 +17,9 @@ function parseHash(hash: string): Route {
   if (raw === 'develop' || raw === 'dev') {
     return { mode: 'develop', docsPath: null };
   }
+  if (raw === 'runner') {
+    return { mode: 'runner', docsPath: null };
+  }
   // Default: no hash or unrecognized → null mode (don't override)
   return { mode: 'manage', docsPath: null };
 }
@@ -28,26 +31,35 @@ window.addEventListener('hashchange', () => {
   route.set(parseHash(window.location.hash));
 });
 
+function replaceHash(hash: string, options: { clearSearch?: boolean } = {}): void {
+  const url = new URL(window.location.href);
+  if (options.clearSearch) {
+    url.search = '';
+  }
+  url.hash = hash;
+  if (window.location.href !== url.toString()) {
+    window.history.replaceState(null, '', url.toString());
+    route.set(parseHash(url.hash));
+  }
+}
+
 // Set the hash without triggering a redundant hashchange
 export function setDocsHash(file: string): void {
   // Convert 'getting-started/introduction.md' → 'docs/getting-started/introduction'
   const slug = file.replace(/\.md$/, '');
-  const target = `#/docs/${slug}`;
-  if (window.location.hash !== target) {
-    window.location.hash = target;
-  }
+  replaceHash(`#/docs/${slug}`, { clearSearch: true });
 }
 
 export function setModeHash(mode: AppMode): void {
   if (mode === 'docs') {
     // Don't change docs path, just ensure prefix
     if (!window.location.hash.startsWith('#/docs')) {
-      window.location.hash = '#/docs';
+      replaceHash('#/docs', { clearSearch: true });
+    } else {
+      replaceHash(window.location.hash, { clearSearch: true });
     }
   } else if (mode === 'manage') {
-    if (window.location.hash && window.location.hash !== '#/' && window.location.hash !== '#') {
-      window.location.hash = '#/';
-    }
+    replaceHash('#/', { clearSearch: true });
   } else {
     window.location.hash = `#/${mode}`;
   }

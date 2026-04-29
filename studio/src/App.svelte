@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { readable, type Readable } from 'svelte/store';
   import { createServiceRegistry, type ServiceRegistry } from './lib/services/service_registry';
-  import type { BootstrapContext, FsEntry, SessionInfo } from './lib/types';
+  import type { BootstrapContext, FsEntry, SessionInfo, ShareInfo, StudioMode } from './lib/types';
   import type { GitHubAccountState, ManagedProject } from './lib/project_catalog/types';
   import { ide } from './stores/ide';
   import { route, setModeHash } from './lib/router';
@@ -116,11 +116,40 @@
     unsubIde();
   });
 
+  function shareInfoForMode(nextSessionInfo: SessionInfo, mode: StudioMode, baseUrl?: string): ShareInfo {
+    return buildShareInfo(nextSessionInfo, { mode, baseUrl });
+  }
+
+  function bareModeUrl(mode: StudioMode): string {
+    const url = new URL(window.location.href);
+    url.search = '';
+    url.hash = mode === 'runner' ? '#/runner' : '#/develop';
+    return url.toString();
+  }
+
+  function syncBrowserUrlToSession(nextSessionInfo: SessionInfo, mode: StudioMode): void {
+    const share = shareInfoForMode(nextSessionInfo, mode, window.location.href);
+    const nextUrl = share.shareable && share.canonicalUrl
+      ? share.canonicalUrl
+      : bareModeUrl(mode);
+    if (window.location.href !== nextUrl) {
+      window.history.replaceState(null, '', nextUrl);
+    }
+  }
+
   async function bindRunnerSession(nextSessionInfo: SessionInfo): Promise<void> {
     if (!registry) return;
     sessionInfo = nextSessionInfo;
     registry.runtime.clearConsole();
-    sessionOpen(nextSessionInfo.root, 'runner', nextSessionInfo.entryPath ?? null, nextSessionInfo.projectMode, nextSessionInfo.source, nextSessionInfo.share);
+    sessionOpen(
+      nextSessionInfo.root,
+      'runner',
+      nextSessionInfo.entryPath ?? null,
+      nextSessionInfo.projectMode,
+      nextSessionInfo.source,
+      shareInfoForMode(nextSessionInfo, 'runner'),
+    );
+    syncBrowserUrlToSession(nextSessionInfo, 'runner');
     currentDir = nextSessionInfo.root;
     explorerEntries = [];
     editorOpen('', '');
@@ -133,7 +162,15 @@
     if (!registry) return;
     sessionInfo = nextSessionInfo;
     registry.runtime.clearConsole();
-    sessionOpen(nextSessionInfo.root, 'dev', nextSessionInfo.entryPath ?? null, nextSessionInfo.projectMode, nextSessionInfo.source, nextSessionInfo.share);
+    sessionOpen(
+      nextSessionInfo.root,
+      'dev',
+      nextSessionInfo.entryPath ?? null,
+      nextSessionInfo.projectMode,
+      nextSessionInfo.source,
+      shareInfoForMode(nextSessionInfo, 'dev'),
+    );
+    syncBrowserUrlToSession(nextSessionInfo, 'dev');
     sessionProjectHasGui = registry.projectCatalog.getSessionProjectConfig(nextSessionInfo).hasGui;
     ide.update((s) => ({ ...s, outputExpanded: false, previewCollapsed: false }));
     currentDir = nextSessionInfo.root;
@@ -341,7 +378,7 @@
       throw new Error('No active session to share');
     }
     const share = buildShareInfo(sessionInfo, {
-      mode: 'runner',
+      mode: $session.mode,
     });
     if (!share.shareable || !share.canonicalUrl) {
       throw new Error(share.reason ?? 'Session is not shareable');

@@ -109,6 +109,10 @@ interface GitHubBlobMetadata {
   encoding?: string;
 }
 
+interface GitHubCommitMetadata {
+  sha?: string;
+}
+
 interface ResolvedGitHubSource {
   owner: string;
   repo: string;
@@ -1562,14 +1566,11 @@ async function openBlockKartQuickPlaySession(): Promise<SessionInfo> {
     sessionRoot,
     'url',
     {
-      kind: 'github_repo',
-      owner: 'vo-lang',
-      repo: 'BlockKart',
-      requestedRef: 'quickplay',
+      kind: 'quickplay',
+      id: 'blockkart',
+      spec: BLOCKKART_QUICKPLAY_SPEC,
       resolvedCommit: pack.commit,
-      subdir: null,
       htmlUrl: BLOCKKART_GITHUB_URL,
-      sourceCacheRoot: sessionRoot,
     },
     'disabled',
   );
@@ -1732,13 +1733,16 @@ async function openGitHubRepoSession(source: GitHubRepoInput): Promise<SessionIn
 
 async function resolveGitHubSource(source: GitHubRepoInput): Promise<ResolvedGitHubSource> {
   const requestedRef = source.ref?.trim() || 'main';
-  const fetchRef = source.commit?.trim() || requestedRef;
-  if (!fetchRef) {
+  const requestedFetchRef = source.commit?.trim() || requestedRef;
+  if (!requestedFetchRef) {
     throw new Error(`Could not resolve a GitHub ref for ${source.owner}/${source.repo}`);
   }
-  const resolvedCommit = isGitCommitSha(fetchRef) ? fetchRef : null;
+  const resolvedCommit = isGitCommitSha(requestedFetchRef)
+    ? requestedFetchRef
+    : await resolveGitHubCommit(source.owner, source.repo, requestedFetchRef);
+  const fetchRef = resolvedCommit;
   const normalizedSubdir = source.subdir ? normalizeRelativePath(source.subdir) : null;
-  const cacheKey = encodeGitHubSourceCacheKey(resolvedCommit ?? `ref:${fetchRef}:${sessionNonce()}`);
+  const cacheKey = encodeGitHubSourceCacheKey(resolvedCommit);
   const sourceCacheRoot = `${GITHUB_SOURCE_ROOT}/${source.owner}/${source.repo}/${cacheKey}`;
   const sessionRoot = `${GITHUB_SESSION_ROOT}/${source.owner}/${source.repo}/${cacheKey}/${sessionNonce()}`;
   const projectRoot = normalizedSubdir ? `${sessionRoot}/${normalizedSubdir}` : sessionRoot;
@@ -1749,11 +1753,21 @@ async function resolveGitHubSource(source: GitHubRepoInput): Promise<ResolvedGit
     fetchRef,
     resolvedCommit,
     subdir: normalizedSubdir,
-    htmlUrl: buildGitHubHtmlUrl(source.owner, source.repo, resolvedCommit ?? requestedRef, normalizedSubdir),
+    htmlUrl: buildGitHubHtmlUrl(source.owner, source.repo, resolvedCommit, normalizedSubdir),
     sourceCacheRoot,
     sessionRoot,
     projectRoot,
   };
+}
+
+async function resolveGitHubCommit(owner: string, repo: string, ref: string): Promise<string> {
+  const commit = await fetchJsonFromUrl<GitHubCommitMetadata>(
+    `${GITHUB_API_ROOT}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(ref)}`,
+  );
+  if (!commit.sha || !isGitCommitSha(commit.sha)) {
+    throw new Error(`Could not resolve GitHub commit: ${owner}/${repo}@${ref}`);
+  }
+  return commit.sha;
 }
 
 async function populateGitHubSourceCache(resolved: ResolvedGitHubSource): Promise<void> {

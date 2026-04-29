@@ -2,12 +2,26 @@ import type { SessionInfo, ShareInfo, StudioMode } from './types';
 
 const SHARE_BASE_URL = 'https://volang.dev/';
 
+export function buildStudioLaunchUrl(options: {
+  proj: string;
+  mode: StudioMode;
+  baseUrl?: string;
+}): string {
+  const url = new URL(options.baseUrl ?? SHARE_BASE_URL);
+  url.search = '';
+  url.hash = options.mode === 'runner' ? '#/runner' : '#/develop';
+  url.searchParams.set('mode', options.mode);
+  url.searchParams.set('proj', options.proj);
+  return url.toString();
+}
+
 export function buildGitHubRepoShareInfo(options: {
   owner: string;
   repo: string;
   commit: string | null;
   subdir?: string | null;
   mode?: StudioMode;
+  baseUrl?: string;
 }): ShareInfo {
   if (!options.commit) {
     return {
@@ -16,12 +30,13 @@ export function buildGitHubRepoShareInfo(options: {
       reason: 'GitHub session is not pinned to a commit',
     };
   }
-  const url = new URL(SHARE_BASE_URL);
   const projectUrl = buildPinnedGitHubProjectUrl(options.owner, options.repo, options.commit, options.subdir ?? null);
-  url.searchParams.set('mode', options.mode ?? 'runner');
-  url.searchParams.set('proj', projectUrl);
   return {
-    canonicalUrl: url.toString(),
+    canonicalUrl: buildStudioLaunchUrl({
+      proj: projectUrl,
+      mode: options.mode ?? 'runner',
+      baseUrl: options.baseUrl,
+    }),
     shareable: true,
   };
 }
@@ -30,6 +45,7 @@ export function buildShareInfo(
   session: Pick<SessionInfo, 'root' | 'entryPath' | 'source'>,
   options: {
     mode?: StudioMode;
+    baseUrl?: string;
   } = {},
 ): ShareInfo {
   const source = session.source;
@@ -38,6 +54,16 @@ export function buildShareInfo(
       canonicalUrl: '',
       shareable: false,
       reason: 'Session has no source provenance',
+    };
+  }
+  if (source.kind === 'quickplay') {
+    return {
+      canonicalUrl: buildStudioLaunchUrl({
+        proj: source.spec,
+        mode: options.mode ?? 'runner',
+        baseUrl: options.baseUrl,
+      }),
+      shareable: true,
     };
   }
   if (source.kind !== 'github_repo') {
@@ -53,6 +79,7 @@ export function buildShareInfo(
     commit: source.resolvedCommit,
     subdir: source.subdir,
     mode: options.mode,
+    baseUrl: options.baseUrl,
   });
 }
 

@@ -29,7 +29,7 @@ import type {
 import { hashContent, hashFiles, projectKey, syncStateFromHashes } from '../project_catalog/types';
 import type { Backend } from '../backend/backend';
 import { buildGitHubRepoShareInfo } from '../session_share';
-import type { SessionInfo, ShareInfo } from '../types';
+import type { SessionInfo, ShareInfo, StudioMode } from '../types';
 import type { WorkspaceService } from './workspace_service';
 import { formatError } from '../format_error';
 
@@ -349,7 +349,10 @@ export class ProjectCatalogService {
     addRecentProject(project);
   }
 
-  async getProjectShareInfo(project: ManagedProject): Promise<ShareInfo> {
+  async getProjectShareInfo(
+    project: ManagedProject,
+    options: { mode?: StudioMode } = {},
+  ): Promise<ShareInfo> {
     if (project.remote?.kind !== 'repo' || !project.remote.owner || !project.remote.repo) {
       return {
         canonicalUrl: '',
@@ -363,7 +366,7 @@ export class ProjectCatalogService {
       owner: project.remote.owner,
       repo: project.remote.repo,
       commit: head.commit,
-      mode: 'runner',
+      mode: options.mode ?? 'dev',
     });
   }
 
@@ -1154,4 +1157,3 @@ function singleFileTemplate(name: string): string {
 function moduleTemplate(moduleId: string, displayName: string): string {
   return `package ${moduleId}\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println("Hello, ${displayName}!")\n}\n`;
 }
-

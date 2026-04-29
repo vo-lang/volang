@@ -16,6 +16,7 @@
     BLOCKKART_PREFETCH_URLS,
     BLOCKKART_QUICKPLAY_SPEC,
   } from '../lib/quickplay';
+  import { buildStudioLaunchUrl } from '../lib/session_share';
 
   // Example source imports (raw strings)
   import exChannels from '../assets/examples/channels.vo?raw';
@@ -201,6 +202,14 @@
 
   lastCreateLocation = localStorage.getItem(LAST_CREATE_LOCATION_KEY) ?? '';
 
+  function featuredLaunchHref(project: FeaturedProject, mode: 'dev' | 'runner'): string {
+    return buildStudioLaunchUrl({
+      proj: mode === 'runner' ? project.playUrl : project.url,
+      mode,
+      baseUrl: window.location.href,
+    });
+  }
+
   async function playFeatured(project: FeaturedProject): Promise<void> {
     featuredError = '';
     featuredBusyKey = `${project.name}:play`;
@@ -373,7 +382,7 @@
   async function shareProject(project: ManagedProject): Promise<void> {
     actionError = '';
     try {
-      const share = await projectCatalog.getProjectShareInfo(project);
+      const share = await projectCatalog.getProjectShareInfo(project, { mode: 'dev' });
       if (!share.shareable || !share.canonicalUrl) {
         throw new Error(share.reason ?? 'Project is not shareable');
       }
@@ -481,21 +490,29 @@
                 </span>
               </span>
               <span class="featured-actions">
-                <button
+                <a
                   class="featured-play"
-                  disabled={featuredBusyKey !== ''}
-                  on:click={() => void playFeatured(project)}
+                  class:is-disabled={featuredBusyKey !== ''}
+                  aria-disabled={featuredBusyKey !== ''}
+                  href={featuredLaunchHref(project, 'runner')}
+                  on:click|preventDefault={() => {
+                    if (featuredBusyKey === '') void playFeatured(project);
+                  }}
                 >
                   {featuredBusyKey === `${project.name}:play` ? 'Starting…' : 'Play'}
                   <svg class="btn-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg>
-                </button>
-                <button
+                </a>
+                <a
                   class="featured-open"
-                  disabled={featuredBusyKey !== ''}
-                  on:click={() => void openFeatured(project)}
+                  class:is-disabled={featuredBusyKey !== ''}
+                  aria-disabled={featuredBusyKey !== ''}
+                  href={featuredLaunchHref(project, 'dev')}
+                  on:click|preventDefault={() => {
+                    if (featuredBusyKey === '') void openFeatured(project);
+                  }}
                 >
                   {featuredBusyKey === `${project.name}:open` ? 'Opening…' : 'Open project'}
-                </button>
+                </a>
               </span>
             </div>
           {/each}
@@ -1069,6 +1086,7 @@
     font-size: 12px;
     font-weight: 800;
     white-space: nowrap;
+    text-decoration: none;
     cursor: pointer;
     transition: border-color 0.15s, background 0.15s, color 0.15s, opacity 0.15s;
   }
@@ -1077,7 +1095,7 @@
     border-color: rgba(166, 227, 161, 0.32);
     color: #a6e3a1;
   }
-  .featured-play:hover:not(:disabled) {
+  .featured-play:hover:not(.is-disabled) {
     background: rgba(166, 227, 161, 0.2);
     border-color: rgba(166, 227, 161, 0.48);
   }
@@ -1086,12 +1104,12 @@
     border-color: rgba(166, 173, 200, 0.16);
     color: #bac2de;
   }
-  .featured-open:hover:not(:disabled) {
+  .featured-open:hover:not(.is-disabled) {
     background: rgba(88, 91, 112, 0.18);
     border-color: rgba(166, 173, 200, 0.28);
   }
-  .featured-play:disabled,
-  .featured-open:disabled {
+  .featured-play.is-disabled,
+  .featured-open.is-disabled {
     cursor: wait;
     opacity: 0.68;
   }
