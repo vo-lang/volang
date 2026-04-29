@@ -1648,7 +1648,7 @@ function normalizeStaticPackagePath(path: string): string {
 }
 
 async function fetchStaticJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { cache: 'force-cache' });
+  const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${url}`);
   }
