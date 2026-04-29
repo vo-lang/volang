@@ -1,0 +1,369 @@
+version = 1
+
+[settings]
+smart_default = ["cargo-fmt"]
+
+[groups]
+quality = [
+  "ci-self-check",
+  "cargo-fmt",
+  "cargo-clippy",
+  "cargo-check",
+  "wasm-check",
+]
+
+test = [
+  "vo-test",
+  "cargo-test-release",
+  "wasm-check-release",
+]
+
+release-verify = [
+  "release-verify-vogui",
+  "release-verify-voplay",
+  "release-verify-vopack",
+  "release-verify-vostore",
+]
+
+site = [
+  "vo-web-wasm-build",
+  "vogui-build",
+  "studio-wasm-build",
+  "studio-install-local-vogui",
+  "studio-build",
+  "quickplay-validate",
+  "blockkart-smoke-static",
+]
+
+pr = [
+  "ci-self-check",
+  "cargo-fmt",
+  "cargo-clippy",
+  "cargo-check",
+  "wasm-check",
+  "vo-test",
+  "cargo-test-release",
+  "wasm-check-release",
+  "quickplay-validate",
+  "blockkart-smoke-static",
+  "release-verify-vogui",
+  "release-verify-voplay",
+  "release-verify-vopack",
+  "release-verify-vostore",
+]
+
+full = [
+  "ci-self-check",
+  "cargo-fmt",
+  "cargo-clippy",
+  "cargo-check",
+  "wasm-check",
+  "vo-test",
+  "cargo-test-release",
+  "wasm-check-release",
+  "vo-web-wasm-build",
+  "vogui-build",
+  "studio-wasm-build",
+  "studio-install-local-vogui",
+  "studio-build",
+  "quickplay-validate",
+  "blockkart-smoke-static",
+  "release-verify-vogui",
+  "release-verify-voplay",
+  "release-verify-vopack",
+  "release-verify-vostore",
+]
+
+[tasks.ci-self-check]
+title = "ci self-check"
+command = ["python3", "scripts/ci/self_check.py"]
+triggers = [
+  "scripts/ci/**",
+  "scripts/ci-local.sh",
+  "d.py",
+  "d_py.py",
+  ".githooks/pre-push",
+  ".github/workflows/**",
+]
+tier = "fast"
+
+[tasks.cargo-fmt]
+title = "cargo fmt"
+command = ["cargo", "fmt", "--all", "--", "--check"]
+tools = ["rust"]
+triggers = [
+  "**/*.rs",
+  "Cargo.toml",
+  "**/Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+  ".github/actions/setup-rust/**",
+  ".github/workflows/**",
+  "scripts/ci/**",
+  "d.py",
+  "d_py.py",
+]
+tier = "fast"
+
+[tasks.cargo-clippy]
+title = "cargo clippy"
+command = ["cargo", "clippy", "--workspace", "--all-targets", "--exclude", "vo-playground", "--", "-D", "warnings"]
+tools = ["rust"]
+triggers = [
+  "**/*.rs",
+  "Cargo.toml",
+  "**/Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+  ".github/actions/setup-rust/**",
+]
+tier = "fast"
+
+[tasks.cargo-check]
+title = "cargo check"
+command = ["cargo", "check", "--workspace", "--all-targets", "--exclude", "vo-playground"]
+tools = ["rust"]
+triggers = [
+  "**/*.rs",
+  "Cargo.toml",
+  "**/Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+  ".github/actions/setup-rust/**",
+]
+tier = "fast"
+
+[tasks.wasm-check]
+title = "vo-web wasm check"
+command = ["cargo", "check", "-p", "vo-web", "--target", "wasm32-unknown-unknown"]
+tools = ["rust"]
+triggers = [
+  "lang/crates/**",
+  "lang/stdlib/**",
+  "studio/wasm/**",
+  "Cargo.toml",
+  "**/Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+]
+tier = "fast"
+
+[tasks.vo-test]
+title = "vo language tests"
+command = ["./d.py", "test", "both"]
+tools = ["rust"]
+triggers = [
+  "cmd/vo/**",
+  "cmd/vo-test/**",
+  "lang/crates/**",
+  "lang/stdlib/**",
+  "lang/test_data/**",
+  "Cargo.toml",
+  "**/Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+]
+tier = "test"
+
+[tasks.cargo-test-release]
+title = "cargo test release"
+command = ["cargo", "test", "--workspace", "--release", "--exclude", "vo-playground"]
+tools = ["rust"]
+triggers = [
+  "**/*.rs",
+  "Cargo.toml",
+  "**/Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+]
+tier = "test"
+
+[tasks.wasm-check-release]
+title = "vo-web wasm release check"
+command = ["cargo", "check", "-p", "vo-web", "--target", "wasm32-unknown-unknown", "--release"]
+tools = ["rust"]
+triggers = [
+  "lang/crates/**",
+  "lang/stdlib/**",
+  "studio/wasm/**",
+  "Cargo.toml",
+  "**/Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+]
+tier = "test"
+
+[tasks.vo-web-wasm-build]
+title = "build vo-web wasm"
+cwd = "lang/crates/vo-web"
+command = ["wasm-pack", "build", "--target", "web", "--release"]
+tools = ["rust", "wasm-pack"]
+triggers = [
+  "lang/crates/**",
+  "lang/stdlib/**",
+  "Cargo.toml",
+  "**/Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+]
+tier = "site"
+
+[tasks.vogui-npm-ci]
+title = "install vogui js dependencies"
+command = ["python3", "scripts/ci/run_in_first_party.py", "vogui", "js", "--", "npm", "ci"]
+tools = ["node"]
+repo = "vogui"
+internal = true
+tier = "site"
+
+[tasks.vogui-build]
+title = "build vogui js"
+command = ["python3", "scripts/ci/run_in_first_party.py", "vogui", "js", "--", "npm", "run", "build"]
+needs = ["vogui-npm-ci"]
+tools = ["node"]
+repo = "vogui"
+triggers = [
+  "studio/package.json",
+  "studio/package-lock.json",
+]
+tier = "site"
+
+[tasks.studio-wasm-build]
+title = "build studio wasm"
+cwd = "studio"
+command = ["npm", "run", "build:wasm"]
+tools = ["rust", "node", "wasm-pack"]
+triggers = [
+  "studio/wasm/**",
+  "studio/vo/**",
+  "studio/scripts/build_wasm.mjs",
+  "lang/crates/**",
+  "lang/stdlib/**",
+  "Cargo.toml",
+  "**/Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+]
+tier = "site"
+
+[tasks.studio-npm-ci]
+title = "install studio dependencies"
+cwd = "studio"
+command = ["npm", "ci"]
+tools = ["node"]
+internal = true
+triggers = [
+  "studio/package.json",
+  "studio/package-lock.json",
+]
+tier = "site"
+
+[tasks.studio-install-local-vogui]
+title = "install local @vogui/runtime"
+command = ["python3", "scripts/ci/install_local_vogui.py"]
+needs = ["studio-npm-ci", "vogui-build"]
+tools = ["node"]
+tier = "site"
+
+[tasks.studio-build]
+title = "build studio"
+cwd = "studio"
+command = ["npm", "run", "build"]
+needs = ["studio-npm-ci"]
+tools = ["node"]
+triggers = [
+  "studio/index.html",
+  "studio/package.json",
+  "studio/package-lock.json",
+  "studio/src/**",
+  "studio/public/**",
+  "studio/scripts/**",
+  "studio/vite.config.*",
+  "studio/tsconfig*.json",
+]
+tier = "site"
+
+[tasks.quickplay-validate]
+title = "validate BlockKart quickplay package"
+command = ["node", "scripts/ci/quickplay_validate.mjs"]
+tools = ["node"]
+triggers = [
+  "studio/public/quickplay/blockkart/**",
+  "studio/scripts/package_blockkart_quickplay.mjs",
+  "studio/src/lib/quickplay.ts",
+]
+tier = "site"
+
+[tasks.blockkart-smoke-static]
+title = "smoke BlockKart static package"
+command = ["node", "scripts/ci/smoke_blockkart.mjs"]
+tools = ["node"]
+triggers = [
+  "studio/public/quickplay/blockkart/**",
+  "studio/src/lib/quickplay.ts",
+]
+tier = "site"
+
+[tasks.release-verify-vogui]
+title = "release verify vogui"
+command = ["python3", "scripts/ci/release_verify.py", "vogui"]
+tools = ["rust"]
+repo = "vogui"
+triggers = [
+  "cmd/vo/**",
+  "lang/**",
+  "Cargo.toml",
+  "**/Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+  ".github/actions/setup-rust/**",
+]
+tier = "release"
+
+[tasks.release-verify-voplay]
+title = "release verify voplay"
+command = ["python3", "scripts/ci/release_verify.py", "voplay"]
+tools = ["rust"]
+repo = "voplay"
+triggers = [
+  "cmd/vo/**",
+  "lang/**",
+  "Cargo.toml",
+  "**/Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+  ".github/actions/setup-rust/**",
+]
+tier = "release"
+
+[tasks.release-verify-vopack]
+title = "release verify vopack"
+command = ["python3", "scripts/ci/release_verify.py", "vopack"]
+tools = ["rust"]
+repo = "vopack"
+triggers = [
+  "cmd/vo/**",
+  "lang/**",
+  "Cargo.toml",
+  "**/Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+  ".github/actions/setup-rust/**",
+]
+tier = "release"
+
+[tasks.release-verify-vostore]
+title = "release verify vostore"
+command = ["python3", "scripts/ci/release_verify.py", "vostore"]
+tools = ["rust"]
+repo = "vostore"
+triggers = [
+  "cmd/vo/**",
+  "lang/**",
+  "Cargo.toml",
+  "**/Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+  ".github/actions/setup-rust/**",
+]
+tier = "release"

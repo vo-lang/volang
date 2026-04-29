@@ -2,6 +2,6 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-MODE="${VO_LOCAL_CI_MODE:-pr}"
+MODE="${VO_LOCAL_CI_MODE:-smart}"
 
 "${REPO_ROOT}/d.py" ci "${MODE}"

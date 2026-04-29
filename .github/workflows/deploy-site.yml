@@ -9,6 +9,7 @@ on:
       - ".github/workflows/deploy-site.yml"
       - ".github/actions/setup-rust/**"
       - "studio/scripts/build_wasm.mjs"
+      - "scripts/ci/**"
       - "rust-toolchain.toml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -82,6 +83,12 @@ jobs:
         working-directory: studio
         run: npm run build
 
+      - name: Validate BlockKart quickplay package
+        run: python3 scripts/ci/run.py task quickplay-validate
+
+      - name: Smoke BlockKart static package
+        run: python3 scripts/ci/run.py task blockkart-smoke-static
+
       - name: Archive Pages artifact
         run: |
           test -d studio/dist
@@ -109,6 +116,17 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Checkout volang
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
+
+      - name: Smoke BlockKart deployment
+        run: node scripts/ci/smoke_blockkart.mjs --base-url "${{ steps.deployment.outputs.page_url }}" --build-id "${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"

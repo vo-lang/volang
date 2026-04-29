@@ -1605,7 +1605,7 @@ def sibling_repo_path(repo_name: str) -> Path:
 
 
 def run_ci_step(title: str, cmd: list[str], cwd: Path = PROJECT_ROOT):
-    print(f'\n==> {title}')
+    print(f'\n==> {title}', flush=True)
     result = subprocess.run(cmd, cwd=cwd)
     if result.returncode != 0:
         sys.exit(result.returncode)
@@ -1628,66 +1628,12 @@ def release_verify_ci_steps() -> list[tuple[str, list[str], Path]]:
     return steps
 
 
-def run_local_ci(mode: str):
-    vogui_js_dir = sibling_repo_path('vogui') / 'js'
-    quality_steps = [
-        ci_step('cargo fmt --all -- --check', ['cargo', 'fmt', '--all', '--', '--check']),
-        ci_step(
-            'cargo clippy --workspace --all-targets --exclude vo-playground -- -D warnings',
-            ['cargo', 'clippy', '--workspace', '--all-targets', '--exclude', 'vo-playground', '--', '-D', 'warnings'],
-        ),
-        ci_step(
-            'cargo check --workspace --all-targets --exclude vo-playground',
-            ['cargo', 'check', '--workspace', '--all-targets', '--exclude', 'vo-playground'],
-        ),
-        ci_step(
-            'cargo check -p vo-web --target wasm32-unknown-unknown',
-            ['cargo', 'check', '-p', 'vo-web', '--target', 'wasm32-unknown-unknown'],
-        ),
-    ]
-    test_steps = [
-        ci_step(
-            'cargo test --workspace --release --exclude vo-playground',
-            ['cargo', 'test', '--workspace', '--release', '--exclude', 'vo-playground'],
-        ),
-        ci_step(
-            'cargo check -p vo-web --target wasm32-unknown-unknown --release',
-            ['cargo', 'check', '-p', 'vo-web', '--target', 'wasm32-unknown-unknown', '--release'],
-        ),
-    ]
-    release_verify_steps = release_verify_ci_steps()
-    site_steps = [
-        ci_step(
-            'wasm-pack build --target web --release',
-            ['wasm-pack', 'build', '--target', 'web', '--release'],
-            PROJECT_ROOT / 'lang' / 'crates' / 'vo-web',
-        ),
-        ci_step('npm ci', ['npm', 'ci'], vogui_js_dir),
-        ci_step('npm run build', ['npm', 'run', 'build'], vogui_js_dir),
-        ci_step(
-            'npm run build:wasm',
-            ['npm', 'run', 'build:wasm'],
-            PROJECT_ROOT / 'studio',
-        ),
-        ci_step('npm ci', ['npm', 'ci'], PROJECT_ROOT / 'studio'),
-        ci_step(
-            f'npm install --no-save {vogui_js_dir}',
-            ['npm', 'install', '--no-save', str(vogui_js_dir)],
-            PROJECT_ROOT / 'studio',
-        ),
-        ci_step('npm run build', ['npm', 'run', 'build'], PROJECT_ROOT / 'studio'),
-    ]
-    steps_by_mode = {
-        'quality': quality_steps,
-        'test': test_steps,
-        'release-verify': release_verify_steps,
-        'pr': [*quality_steps, *test_steps, *release_verify_steps],
-        'site': site_steps,
-        'full': [*quality_steps, *test_steps, *release_verify_steps, *site_steps],
-    }
-
-    for title, cmd, cwd in steps_by_mode[mode]:
-        run_ci_step(title, cmd, cwd=cwd)
+def run_local_ci(selectors: list[str]):
+    selected = selectors or ['smart']
+    run_ci_step(
+        f'scripts/ci/run.py {" ".join(selected)}',
+        [sys.executable, str(PROJECT_ROOT / 'scripts' / 'ci' / 'run.py'), *selected],
+    )
 
 
 def main():
@@ -1760,7 +1706,11 @@ def main():
 
     # ci
     ci_parser = subparsers.add_parser('ci', help='Run local CI checks')
-    ci_parser.add_argument('mode', nargs='?', default='pr', choices=['quality', 'test', 'release-verify', 'pr', 'site', 'full'])
+    ci_parser.add_argument(
+        'selector',
+        nargs='*',
+        help='smart, quality, test, release-verify, pr, site, full, or task <name>',
+    )
 
     args = parser.parse_args()
 
@@ -1798,7 +1748,7 @@ def main():
         clean_caches(args.target)
 
     elif args.command == 'ci':
-        run_local_ci(args.mode)
+        run_local_ci(args.selector)
 
     elif args.command == 'studio':
         run_studio(
