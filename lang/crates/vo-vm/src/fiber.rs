@@ -1000,7 +1000,7 @@ mod tests {
 
         fiber.ensure_capacity(INITIAL_STACK_CAPACITY + 1);
 
-        assert!(fiber.stack.len() >= INITIAL_STACK_CAPACITY + 1);
+        assert!(fiber.stack.len() > INITIAL_STACK_CAPACITY);
         assert!(fiber.stack.len() <= MAX_STACK_CAPACITY);
     }
 
