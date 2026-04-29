@@ -1133,6 +1133,14 @@ class TestRunner:
         print(f"{Colors.CYAN}╚══════════════════════════════════════════════════════════╝{Colors.NC}")
 
         if total_failed > 0:
+            if os.environ.get('GITHUB_ACTIONS') == 'true':
+                for msg in self.failed_list:
+                    escaped = (
+                        msg.replace('%', '%25')
+                        .replace('\r', '%0D')
+                        .replace('\n', '%0A')
+                    )
+                    print(f"::error title=Vo test failed::{escaped}")
             sys.exit(1)
 
 
