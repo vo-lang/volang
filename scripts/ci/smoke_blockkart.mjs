@@ -68,7 +68,7 @@ function runStaticSmoke() {
 async function runHttpSmoke(baseUrl, buildId) {
   const appResponse = await fetchOk(baseUrl);
   const html = await appResponse.text();
-  const scriptMatch = html.match(/<script[^>]+type="module"[^>]+src="([^"]+\/assets\/index-[^"]+\.js)"/);
+  const scriptMatch = html.match(/<script[^>]+type="module"[^>]+src="([^"]*\/assets\/index-[^"]+\.js)"/);
   assert(scriptMatch, 'could not find Vite entry script');
 
   const scriptUrl = new URL(scriptMatch[1], baseUrl).toString();
