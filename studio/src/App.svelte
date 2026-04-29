@@ -11,6 +11,7 @@
   import { session, sessionOpen } from './stores/session';
   import { runtime } from './stores/runtime';
   import { buildShareInfo } from './lib/session_share';
+  import { BLOCKKART_GITHUB_URL, BLOCKKART_QUICKPLAY_SPEC } from './lib/quickplay';
   import Sidebar from './components/Sidebar.svelte';
   import DevWorkbench from './components/DevWorkbench.svelte';
   import Home from './components/Home.svelte';
@@ -257,6 +258,27 @@
     ide.update((s) => ({ ...s, appMode: 'develop' }));
   }
 
+  async function playFeaturedProject(url: string, hasGui: boolean): Promise<void> {
+    if (!registry || !hasGui) return;
+    stopRuntimePolling();
+    await registry.runtime.stop().catch(() => undefined);
+    const playUrl = registry.backend.platform === 'wasm' || url !== BLOCKKART_QUICKPLAY_SPEC
+      ? url
+      : BLOCKKART_GITHUB_URL;
+    const openedSession = await registry.project.openSession({ proj: playUrl, mode: 'runner' });
+    await bindRunnerSession(openedSession);
+    ide.update((s) => ({ ...s, appMode: 'runner' }));
+    if (!openedSession.entryPath) {
+      throw new Error('Featured project has no entry file');
+    }
+    registry.runtime.clearConsole();
+    try {
+      stopRuntimePolling();
+      await registry.runtime.runGui(openedSession.entryPath);
+      startRuntimePolling();
+    } catch (_) {}
+  }
+
   async function goParent(): Promise<void> {
     if (!sessionInfo || currentDir === sessionInfo.root) return;
     const idx = currentDir.lastIndexOf('/');
@@ -490,6 +512,7 @@
           onOpenProject={openManagedProject}
           onOpenLocalPath={openLocalPath}
           onOpenFeaturedProject={openFeaturedProject}
+          onPlayFeaturedProject={playFeaturedProject}
           onOpenExample={openExample}
           onDocs={() => ide.update(s => ({ ...s, appMode: 'docs' }))}
           onDevelop={() => ide.update(s => ({ ...s, appMode: 'develop' }))}

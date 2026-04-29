@@ -11,6 +11,11 @@
   import ProjectCard from './home/ProjectCard.svelte';
   import ProjectRenameModal from './home/ProjectRenameModal.svelte';
   import ProjectSyncModal from './home/ProjectSyncModal.svelte';
+  import {
+    BLOCKKART_GITHUB_URL,
+    BLOCKKART_PREFETCH_URLS,
+    BLOCKKART_QUICKPLAY_SPEC,
+  } from '../lib/quickplay';
 
   // Example source imports (raw strings)
   import exChannels from '../assets/examples/channels.vo?raw';
@@ -40,6 +45,7 @@
     name: string;
     desc: string;
     url: string;
+    playUrl: string;
     tags: string[];
     hasGui: boolean;
   }
@@ -65,8 +71,9 @@
     {
       name: 'BlockKart',
       desc: 'Geometric kart racer built with VoGUI and VoPlay.',
-      url: 'https://github.com/vo-lang/BlockKart/tree/main',
-      tags: ['GitHub', 'VoGUI', 'VoPlay'],
+      url: BLOCKKART_GITHUB_URL,
+      playUrl: BLOCKKART_QUICKPLAY_SPEC,
+      tags: ['Kart', 'VoGUI', 'VoPlay'],
       hasGui: true,
     },
   ];
@@ -82,6 +89,7 @@
   export let onOpenProject: (project: ManagedProject) => Promise<void> | void = () => {};
   export let onOpenLocalPath: (path: string) => Promise<void> | void = () => {};
   export let onOpenFeaturedProject: (url: string, hasGui: boolean) => Promise<void> | void = () => {};
+  export let onPlayFeaturedProject: (url: string, hasGui: boolean) => Promise<void> | void = () => {};
   export let onOpenExample: (source: string, filename: string, hasGui: boolean) => Promise<void> | void = () => {};
   export let onDocs: () => void = () => {};
   export let onDevelop: () => void = () => {};
@@ -105,7 +113,7 @@
   let openProjectError = '';
   let localRefreshRequested = false;
   let lastCreateLocation = '';
-  let featuredBusyUrl = '';
+  let featuredBusyKey = '';
   let featuredError = '';
 
   $: isNative = platform === 'native';
@@ -193,15 +201,27 @@
 
   lastCreateLocation = localStorage.getItem(LAST_CREATE_LOCATION_KEY) ?? '';
 
+  async function playFeatured(project: FeaturedProject): Promise<void> {
+    featuredError = '';
+    featuredBusyKey = `${project.name}:play`;
+    try {
+      await onPlayFeaturedProject(project.playUrl, project.hasGui);
+    } catch (error) {
+      featuredError = formatError(error);
+    } finally {
+      featuredBusyKey = '';
+    }
+  }
+
   async function openFeatured(project: FeaturedProject): Promise<void> {
     featuredError = '';
-    featuredBusyUrl = project.url;
+    featuredBusyKey = `${project.name}:open`;
     try {
       await onOpenFeaturedProject(project.url, project.hasGui);
     } catch (error) {
       featuredError = formatError(error);
     } finally {
-      featuredBusyUrl = '';
+      featuredBusyKey = '';
     }
   }
 
@@ -368,6 +388,12 @@
 
 </script>
 
+<svelte:head>
+  {#each BLOCKKART_PREFETCH_URLS as href}
+    <link rel="prefetch" href={href} as="fetch" crossorigin="anonymous" />
+  {/each}
+</svelte:head>
+
 <svelte:window
   on:keydown={(event) => {
     if (event.key !== 'Escape') return;
@@ -435,14 +461,12 @@
       <section class="featured-area" aria-label="Featured projects">
         <div class="featured-header">
           <span class="featured-title">Featured</span>
-          <span class="featured-subtitle">Ready-to-open Vo projects</span>
+          <span class="featured-subtitle">Ready to play</span>
         </div>
         <div class="featured-grid">
           {#each featuredProjects as project}
-            <button
+            <div
               class="featured-project"
-              disabled={featuredBusyUrl === project.url}
-              on:click={() => void openFeatured(project)}
             >
               <span class="featured-mark" aria-hidden="true">
                 <span class="featured-mark-main">BK</span>
@@ -456,11 +480,24 @@
                   {/each}
                 </span>
               </span>
-              <span class="featured-open">
-                {featuredBusyUrl === project.url ? 'Opening…' : 'Open'}
-                <svg class="btn-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg>
+              <span class="featured-actions">
+                <button
+                  class="featured-play"
+                  disabled={featuredBusyKey !== ''}
+                  on:click={() => void playFeatured(project)}
+                >
+                  {featuredBusyKey === `${project.name}:play` ? 'Starting…' : 'Play'}
+                  <svg class="btn-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg>
+                </button>
+                <button
+                  class="featured-open"
+                  disabled={featuredBusyKey !== ''}
+                  on:click={() => void openFeatured(project)}
+                >
+                  {featuredBusyKey === `${project.name}:open` ? 'Opening…' : 'Open project'}
+                </button>
               </span>
-            </button>
+            </div>
           {/each}
         </div>
         {#if featuredError}
@@ -951,12 +988,11 @@
     gap: 14px;
     padding: 14px;
     border: 1px solid rgba(166, 227, 161, 0.16);
-    border-radius: 12px;
+    border-radius: 8px;
     background:
       linear-gradient(135deg, rgba(166, 227, 161, 0.08), rgba(249, 226, 175, 0.04)),
       rgba(11, 11, 18, 0.62);
     color: inherit;
-    cursor: pointer;
     text-align: left;
     transition: border-color 0.2s, background 0.2s, transform 0.2s;
   }
@@ -967,15 +1003,10 @@
       rgba(11, 11, 18, 0.72);
     transform: translateY(-1px);
   }
-  .featured-project:disabled {
-    cursor: wait;
-    opacity: 0.75;
-    transform: none;
-  }
   .featured-mark {
     width: 52px;
     height: 52px;
-    border-radius: 10px;
+    border-radius: 8px;
     display: grid;
     place-items: center;
     border: 1px solid rgba(166, 227, 161, 0.2);
@@ -1018,14 +1049,51 @@
     font-size: 10px;
     font-weight: 700;
   }
-  .featured-open {
+  .featured-actions {
     display: inline-flex;
     align-items: center;
+    gap: 8px;
+    justify-self: end;
+  }
+  .featured-play,
+  .featured-open {
+    border: 1px solid transparent;
+    border-radius: 8px;
+    height: 36px;
+    padding: 0 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     gap: 5px;
-    color: #a6e3a1;
+    font: inherit;
     font-size: 12px;
     font-weight: 800;
     white-space: nowrap;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, color 0.15s, opacity 0.15s;
+  }
+  .featured-play {
+    background: rgba(166, 227, 161, 0.14);
+    border-color: rgba(166, 227, 161, 0.32);
+    color: #a6e3a1;
+  }
+  .featured-play:hover:not(:disabled) {
+    background: rgba(166, 227, 161, 0.2);
+    border-color: rgba(166, 227, 161, 0.48);
+  }
+  .featured-open {
+    background: rgba(88, 91, 112, 0.12);
+    border-color: rgba(166, 173, 200, 0.16);
+    color: #bac2de;
+  }
+  .featured-open:hover:not(:disabled) {
+    background: rgba(88, 91, 112, 0.18);
+    border-color: rgba(166, 173, 200, 0.28);
+  }
+  .featured-play:disabled,
+  .featured-open:disabled {
+    cursor: wait;
+    opacity: 0.68;
   }
   .featured-error {
     padding: 8px 10px;
@@ -1290,9 +1358,10 @@
       height: 42px;
       border-radius: 8px;
     }
-    .featured-open {
+    .featured-actions {
       grid-column: 2;
       justify-self: flex-start;
+      flex-wrap: wrap;
     }
     .projects-title { font-size: 14px; }
   }

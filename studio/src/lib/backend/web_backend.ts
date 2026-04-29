@@ -34,6 +34,12 @@ import { consolePush } from '../../stores/console';
 import { formatDurationMs, pushUiConsole, renderStudioLogRecord, type StudioLogRecord } from './gui_console';
 import { makeErrorStreamHandle, makeResolvedStreamHandle, makeStreamHandleFromProducer } from './stream_handle';
 import { installWindowVfsBackend } from '../window_vfs_bindings';
+import {
+  BLOCKKART_DEPS_PACKAGE_URL,
+  BLOCKKART_GITHUB_URL,
+  BLOCKKART_PROJECT_PACKAGE_URL,
+  BLOCKKART_QUICKPLAY_SPEC,
+} from '../quickplay';
 
 const WORKSPACE_ROOT = '/workspace';
 const ROOT = '/';
@@ -45,6 +51,12 @@ const GITHUB_SOURCE_ROOT = `${SOURCE_CACHE_ROOT}/github`;
 const GITHUB_SESSION_ROOT = `${WORKSPACE_ROOT}/.studio-sessions/github`;
 const GITHUB_API_ROOT = 'https://api.github.com';
 const GITHUB_FILE_FETCH_CONCURRENCY = 8;
+const QUICKPLAY_SESSION_ROOT = `${WORKSPACE_ROOT}/.studio-sessions/quickplay`;
+const BLOCKKART_PACKAGED_MODULE_MARKERS = [
+  '/github.com@vo-lang@vogui/v0.1.14/vo.release.json',
+  '/github.com@vo-lang@vopack/v0.1.2/vo.release.json',
+  '/github.com@vo-lang@voplay/v0.1.23/artifacts/voplay_island_bg.wasm',
+];
 const sessionWorkspaceDiscovery = new Map<string, WorkspaceDiscoveryMode>();
 const DISPLAY_PULSE_DELAY_MS = 0xFFFFFFFF;
 const MISSING_INITIAL_GUI_RENDER = 'guest app did not emit a render';
@@ -64,6 +76,7 @@ const textEncoder = new TextEncoder();
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 let studioWasmPromise: Promise<StudioWasm> | null = null;
 let vfsBindingsInstalled = false;
+let blockKartDepsInstallPromise: Promise<void> | null = null;
 
 interface GitHubRepoInput {
   owner: string;
@@ -119,6 +132,40 @@ interface LocalProjectSnapshot {
   projectPath: string;
   projectRelativePath: string;
   files: LocalProjectSnapshotFile[];
+}
+
+interface StaticTextFile {
+  path: string;
+  content: string;
+  mode?: number;
+}
+
+interface StaticArtifactFile {
+  path: string;
+  url: string;
+  mode?: number;
+}
+
+interface BlockKartProjectPackage {
+  schemaVersion: 1;
+  name: string;
+  module: string;
+  commit: string;
+  files: StaticTextFile[];
+}
+
+interface BlockKartDependencyModulePackage {
+  module: string;
+  version: string;
+  cacheDir: string;
+  files: StaticTextFile[];
+  artifacts: StaticArtifactFile[];
+}
+
+interface BlockKartDepsPackage {
+  schemaVersion: 1;
+  name: string;
+  modules: BlockKartDependencyModulePackage[];
 }
 
 function displayPath(path: string): string {
@@ -388,6 +435,9 @@ export class WebBackend implements Backend {
   async openSession(spec: LaunchSpec): Promise<SessionInfo> {
     if (spec.proj == null) {
       return openWorkspaceSession();
+    }
+    if (spec.proj === BLOCKKART_QUICKPLAY_SPEC) {
+      return openBlockKartQuickPlaySession();
     }
     const filePath = localFileUrlPath(spec.proj);
     if (filePath) {
@@ -664,6 +714,8 @@ export class WebBackend implements Backend {
     const startup = await this.serializeGuiOperation(async () => {
       consolePush('system', `Opening GUI ${targetLabel}`);
       const wasm = await getStudioWasm();
+      this.assertGuiSessionCurrent(sessionId);
+      await ensureBlockKartPackagedDependenciesForEntry(normalized);
       this.assertGuiSessionCurrent(sessionId);
       consolePush('system', `Preparing dependencies for ${targetLabel}...`);
       const prepareStart = performance.now();
@@ -1491,6 +1543,115 @@ async function fetchLocalProjectSnapshot(path: string): Promise<LocalProjectSnap
   const body = await response.text();
   await yieldToBrowser();
   return JSON.parse(body) as LocalProjectSnapshot;
+}
+
+async function openBlockKartQuickPlaySession(): Promise<SessionInfo> {
+  const pack = await fetchStaticJson<BlockKartProjectPackage>(BLOCKKART_PROJECT_PACKAGE_URL);
+  if (pack.schemaVersion !== 1 || pack.module !== 'github.com/vo-lang/blockkart') {
+    throw new Error('Invalid BlockKart quickplay package');
+  }
+  const sessionRoot = `${QUICKPLAY_SESSION_ROOT}/BlockKart/${sessionNonce()}`;
+  clearImportedRootSync(sessionRoot);
+  ensureDir(sessionRoot);
+  writeStaticTextFiles(sessionRoot, pack.files);
+  const entryPath = `${sessionRoot}/main.vo`;
+  if (!hasVfsFile(entryPath)) {
+    throw new Error('BlockKart quickplay package is missing main.vo');
+  }
+  return buildSessionInfo(
+    sessionRoot,
+    'url',
+    {
+      kind: 'github_repo',
+      owner: 'vo-lang',
+      repo: 'BlockKart',
+      requestedRef: 'quickplay',
+      resolvedCommit: pack.commit,
+      subdir: null,
+      htmlUrl: BLOCKKART_GITHUB_URL,
+      sourceCacheRoot: sessionRoot,
+    },
+    'disabled',
+  );
+}
+
+async function ensureBlockKartPackagedDependenciesForEntry(entryPath: string): Promise<void> {
+  const projectRoot = findProjectRootForEntry(entryPath);
+  if (!projectRoot || !isBlockKartProjectRoot(projectRoot) || hasBlockKartPackagedDependencies()) {
+    return;
+  }
+  if (!blockKartDepsInstallPromise) {
+    blockKartDepsInstallPromise = installBlockKartPackagedDependencies().finally(() => {
+      blockKartDepsInstallPromise = null;
+    });
+  }
+  await blockKartDepsInstallPromise;
+}
+
+function findProjectRootForEntry(entryPath: string): string | null {
+  let dir = dirname(entryPath);
+  while (dir && dir !== ROOT) {
+    if (hasVfsFile(`${dir}/vo.mod`)) {
+      return dir;
+    }
+    const next = dirname(dir);
+    if (next === dir) break;
+    dir = next;
+  }
+  return null;
+}
+
+function isBlockKartProjectRoot(projectRoot: string): boolean {
+  const modContent = readTextFile(`${projectRoot}/vo.mod`);
+  return modContent?.split(/\r?\n/).some((line) => line.trim() === 'module github.com/vo-lang/blockkart') ?? false;
+}
+
+function hasBlockKartPackagedDependencies(): boolean {
+  return BLOCKKART_PACKAGED_MODULE_MARKERS.every((path) => hasVfsFile(path));
+}
+
+async function installBlockKartPackagedDependencies(): Promise<void> {
+  consolePush('system', 'Loading BlockKart dependencies...');
+  const start = performance.now();
+  const pack = await fetchStaticJson<BlockKartDepsPackage>(BLOCKKART_DEPS_PACKAGE_URL);
+  if (pack.schemaVersion !== 1) {
+    throw new Error('Invalid BlockKart dependency package');
+  }
+  for (const modulePack of pack.modules) {
+    const moduleRoot = `/${modulePack.cacheDir}`;
+    writeStaticTextFiles(moduleRoot, modulePack.files);
+    await runWithConcurrency(modulePack.artifacts, 4, async (artifact) => {
+      const bytes = await fetchBytesFromUrl(artifact.url);
+      setVfsFile(`${moduleRoot}/${artifact.path}`, bytes, artifact.mode ?? 0o644);
+    });
+    await yieldToBrowser();
+  }
+  consolePush('system', `Loaded BlockKart dependencies in ${formatDurationMs(performance.now() - start)}`);
+}
+
+function writeStaticTextFiles(root: string, files: StaticTextFile[]): void {
+  const normalizedRoot = normalizePath(root);
+  ensureDir(normalizedRoot);
+  for (const file of files) {
+    const relative = normalizeStaticPackagePath(file.path);
+    setVfsFile(`${normalizedRoot}/${relative}`, textEncoder.encode(file.content), file.mode ?? 0o644);
+  }
+}
+
+function normalizeStaticPackagePath(path: string): string {
+  const parts = path.split('/').filter(Boolean);
+  if (parts.length === 0 || parts.some((part) => part === '.' || part === '..')) {
+    throw new Error(`Invalid static package path: ${path}`);
+  }
+  return parts.join('/');
+}
+
+async function fetchStaticJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { cache: 'force-cache' });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${url}`);
+  }
+  return response.json() as Promise<T>;
 }
 
 function yieldToBrowser(): Promise<void> {

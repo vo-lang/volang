@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "build:wasm": "node ./scripts/build_wasm.mjs"
+    "build:wasm": "node ./scripts/build_wasm.mjs",
+    "package:blockkart": "node ./scripts/package_blockkart_quickplay.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^3.0.0",
