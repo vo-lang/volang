@@ -165,6 +165,7 @@ triggers = [
   "d.py",
   "d_py.py",
   "scripts/ci/run.py",
+  "scripts/ci/tasks.toml",
 ]
 tier = "test"
 
