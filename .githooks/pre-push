@@ -2,6 +2,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-MODE="${VO_LOCAL_CI_MODE:-smart}"
+
+# Keep the local hook fast enough that GitHub's push connection does not sit
+# idle while long integration/site/release suites run. Full smart/full matrices
+# still run in GitHub Actions, and developers can opt in locally with
+# VO_LOCAL_CI_MODE=smart or VO_LOCAL_CI_MODE=full.
+MODE="${VO_LOCAL_CI_MODE:-quality}"
 
 "${REPO_ROOT}/d.py" ci "${MODE}"
