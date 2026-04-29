@@ -9,7 +9,7 @@ export function buildStudioLaunchUrl(options: {
 }): string {
   const url = new URL(options.baseUrl ?? SHARE_BASE_URL);
   url.search = '';
-  url.hash = options.mode === 'runner' ? '#/runner' : '#/develop';
+  url.hash = '';
   url.searchParams.set('mode', options.mode);
   url.searchParams.set('proj', options.proj);
   return url.toString();

@@ -43,6 +43,11 @@ function replaceHash(hash: string, options: { clearSearch?: boolean } = {}): voi
   }
 }
 
+function hasLaunchParams(): boolean {
+  const params = new URLSearchParams(window.location.search);
+  return params.has('mode') || params.has('proj');
+}
+
 // Set the hash without triggering a redundant hashchange
 export function setDocsHash(file: string): void {
   // Convert 'getting-started/introduction.md' → 'docs/getting-started/introduction'
@@ -60,6 +65,8 @@ export function setModeHash(mode: AppMode): void {
     }
   } else if (mode === 'manage') {
     replaceHash('#/', { clearSearch: true });
+  } else if (hasLaunchParams()) {
+    replaceHash('');
   } else {
     window.location.hash = `#/${mode}`;
   }
