@@ -162,6 +162,8 @@ triggers = [
   "**/Cargo.toml",
   "Cargo.lock",
   "rust-toolchain.toml",
+  "d.py",
+  "d_py.py",
 ]
 tier = "test"
 
