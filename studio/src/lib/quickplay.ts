@@ -8,6 +8,6 @@ export const BLOCKKART_PREFETCH_URLS = [
   BLOCKKART_PROJECT_PACKAGE_URL,
   BLOCKKART_DEPS_PACKAGE_URL,
   '/quickplay/blockkart/artifacts/github.com@vo-lang@vogui/v0.1.14/vogui.wasm',
-  '/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.23/voplay_island.js',
-  '/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.23/voplay_island_bg.wasm',
+  '/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.25/voplay_island.js',
+  '/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.25/voplay_island_bg.wasm',
 ];
