@@ -43,6 +43,18 @@ def display_cmd(cmd: list[str]) -> str:
     return " ".join(cmd)
 
 
+def github_escape(text: str) -> str:
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def github_failure_annotation(title: str, output: str) -> None:
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    lines = [line for line in output.splitlines() if line.strip()]
+    tail = "\n".join(lines[-80:]) or "(no output)"
+    print(f"::error title={github_escape(title)}::{github_escape(tail)}", flush=True)
+
+
 def task_tools(name: str, tasks: dict[str, Any], seen: set[str] | None = None) -> set[str]:
     seen = seen or set()
     if name in seen:
@@ -81,9 +93,26 @@ def run_task(name: str, config: dict[str, Any]) -> None:
     print(f"{Colors.DIM}{cwd.relative_to(ROOT)}$ {display_cmd(command)}{Colors.NC}", flush=True)
 
     start = time.monotonic()
-    result = subprocess.run(command, cwd=cwd, env=os.environ.copy())
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+    else:
+        result = subprocess.run(command, cwd=cwd, env=os.environ.copy())
     elapsed = time.monotonic() - start
     if result.returncode != 0:
+        output = ""
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            output = (result.stdout or "") + (result.stderr or "")
+            github_failure_annotation(f"{title} failed", output)
         print(f"{Colors.RED}failed:{Colors.NC} {name} ({elapsed:.1f}s)", file=sys.stderr)
         sys.exit(result.returncode)
     print(f"{Colors.GREEN}ok:{Colors.NC} {name} ({elapsed:.1f}s)")

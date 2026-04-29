@@ -164,6 +164,7 @@ triggers = [
   "rust-toolchain.toml",
   "d.py",
   "d_py.py",
+  "scripts/ci/run.py",
 ]
 tier = "test"
 
