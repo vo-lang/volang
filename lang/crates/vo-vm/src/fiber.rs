@@ -369,7 +369,7 @@ pub const MAX_STACK_CAPACITY: usize = 1 << 20;
 pub const MAX_JIT_NATIVE_STACK_SLOTS: usize = 1 << 15;
 /// Maximum nested direct JIT call depth before converting recursion into a
 /// recoverable Vo stack overflow.
-pub const MAX_JIT_CALL_DEPTH: usize = 4096;
+pub const MAX_JIT_CALL_DEPTH: usize = 1024;
 /// Maximum call frames per fiber.
 ///
 /// Small-frame recursion can keep reusing the same stack slots while growing
