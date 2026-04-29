@@ -302,7 +302,8 @@ impl Gc {
             return core::ptr::null_mut();
         }
 
-        // New object gets current white color
+        // New object gets current white color. During marking, queue it gray so
+        // its initialized slots are scanned before the cycle reaches sweep.
         let header = GcHeader::new_with_white(value_meta, header_slots, self.current_white);
         unsafe {
             core::ptr::write(ptr as *mut GcHeader, header);
@@ -315,6 +316,10 @@ impl Gc {
         self.object_index_dirty.set(true);
         self.total_bytes += total_size;
         self.debt += total_size as i64;
+        if matches!(self.state, GcState::Propagate | GcState::Atomic) {
+            Self::header_mut(data_ptr).set_gray();
+            self.gray.push(data_ptr);
+        }
 
         #[cfg(feature = "gc-debug")]
         crate::gc_debug::on_alloc(data_ptr);
@@ -439,28 +444,58 @@ impl Gc {
 
     /// Write barrier for incremental GC (backward barrier).
     /// Called when a black object writes a white reference.
+    #[track_caller]
     pub fn write_barrier(&mut self, parent: GcRef, child: GcRef) {
         #[cfg(feature = "gc-debug")]
         crate::gc_debug::on_barrier(parent, 0, child as u64);
 
-        if self.state != GcState::Propagate {
+        if !matches!(self.state, GcState::Propagate | GcState::Sweep) {
             return;
         }
         if parent.is_null() || child.is_null() {
             return;
         }
         let Some(parent) = self.canonicalize_ref(parent) else {
-            self.mark_gray_fail(parent);
+            self.write_barrier_parent_fail(parent, child);
         };
         let Some(child) = self.canonicalize_ref(child) else {
             return;
         };
-        let p_header = Self::header(parent);
-        let c_header = Self::header(child);
-        // Backward barrier: black parent writes white child → parent becomes gray
-        if p_header.is_black() && c_header.is_white() {
-            self.barrier_back(parent);
+        match self.state {
+            GcState::Propagate => {
+                let p_header = Self::header(parent);
+                let c_header = Self::header(child);
+                // Backward barrier: black parent writes white child -> parent becomes gray.
+                if p_header.is_black() && c_header.is_white() {
+                    self.barrier_back(parent);
+                }
+            }
+            GcState::Sweep => {
+                let dead_white = self.other_white();
+                let c_header = Self::header_mut(child);
+                if c_header.marked & WHITE_BITS == dead_white {
+                    c_header.set_black();
+                }
+            }
+            GcState::Pause | GcState::Atomic => {}
         }
+    }
+
+    #[cold]
+    #[track_caller]
+    #[inline(never)]
+    fn write_barrier_parent_fail(&self, parent: GcRef, child: GcRef) -> ! {
+        let loc = core::panic::Location::caller();
+        panic!(
+            "write_barrier: invalid parent {:p} (raw={:#x}) child={:p} child_raw={:#x} state={:?} caller={}:{}",
+            parent,
+            parent as usize,
+            child,
+            child as usize,
+            self.state,
+            loc.file(),
+            loc.line(),
+        );
     }
 
     /// Check if object is black (for gc-debug)
@@ -551,6 +586,11 @@ impl Gc {
                 }
 
                 GcState::Atomic => {
+                    // Roots are mutable during incremental marking. A stack slot or global
+                    // can start pointing at an old-white object after start_cycle() has
+                    // already scanned roots, so rescan roots at the atomic boundary before
+                    // finalizing the mark set.
+                    scan_roots(self);
                     self.atomic_phase(&mut scan_object);
                     self.state = GcState::Sweep;
                     self.sweep_pos = 0;
@@ -812,6 +852,115 @@ mod tests {
         assert_eq!(gc.object_count(), 0);
         assert!(!gc.base_objects.borrow().contains(&(obj as usize)));
         assert_eq!(gc.canonicalize_ref(obj), None);
+    }
+
+    #[test]
+    fn test_atomic_rescans_roots_added_after_cycle_start() {
+        let mut gc = Gc::new();
+        let meta = ValueMeta::new(1, ValueKind::Struct);
+        let keeper = gc.alloc(meta, 0);
+        let late_root = gc.alloc(meta, 0);
+        let late_root_slot = Cell::new(core::ptr::null_mut::<Slot>());
+        let mut finalized = Vec::new();
+
+        let work = gc.step(
+            |gc| {
+                gc.mark_gray(keeper);
+                let late = late_root_slot.get();
+                if !late.is_null() {
+                    gc.mark_gray(late);
+                }
+            },
+            |_, obj| {
+                if obj == keeper {
+                    late_root_slot.set(late_root);
+                }
+            },
+            |dead| finalized.push(dead),
+        );
+
+        assert!(work > 0);
+        assert!(
+            !finalized.contains(&late_root),
+            "object that became a root during mark must survive the same GC cycle"
+        );
+        assert_eq!(gc.state(), GcState::Pause);
+        assert_eq!(gc.object_count(), 2);
+        assert_eq!(gc.canonicalize_ref(late_root), Some(late_root));
+    }
+
+    #[test]
+    fn test_new_object_allocated_during_mark_scans_old_child() {
+        let mut gc = Gc::new();
+        let meta = ValueMeta::new(1, ValueKind::Struct);
+        let keeper = gc.alloc(meta, 0);
+        let child = gc.alloc(meta, 0);
+        let parent_slot = Cell::new(core::ptr::null_mut::<Slot>());
+        let mut finalized = Vec::new();
+
+        let work = gc.step(
+            |gc| {
+                gc.mark_gray(keeper);
+            },
+            |gc, obj| {
+                if obj == keeper {
+                    let parent = gc.alloc(meta, 1);
+                    unsafe {
+                        Gc::write_slot(parent, 0, child as u64);
+                    }
+                    gc.write_barrier(parent, child);
+                    parent_slot.set(parent);
+                }
+                if obj == parent_slot.get() {
+                    let raw_child = unsafe { Gc::read_slot(obj, 0) };
+                    if raw_child != 0 {
+                        gc.mark_gray(raw_child as GcRef);
+                    }
+                }
+            },
+            |dead| finalized.push(dead),
+        );
+
+        assert!(work > 0);
+        assert!(
+            !finalized.contains(&child),
+            "old child stored in a new object allocated during mark must be scanned"
+        );
+        assert_eq!(gc.state(), GcState::Pause);
+        assert_eq!(gc.object_count(), 3);
+        assert_eq!(gc.canonicalize_ref(child), Some(child));
+    }
+
+    #[test]
+    fn test_sweep_write_barrier_rescues_old_white_child() {
+        let mut gc = Gc::new();
+        let meta = ValueMeta::new(1, ValueKind::Struct);
+        let parent = gc.alloc(meta, 1);
+        let child = gc.alloc(meta, 0);
+        let mut finalized = Vec::new();
+
+        gc.current_white ^= WHITE_BITS;
+        gc.state = GcState::Sweep;
+        gc.sweep_pos = 0;
+        gc.sweep_write_pos = 0;
+        unsafe {
+            Gc::write_slot(parent, 0, child as u64);
+        }
+        Gc::header_mut(parent).set_black();
+
+        assert_eq!(Gc::header(child).marked & WHITE_BITS, gc.other_white());
+        gc.write_barrier(parent, child);
+        assert!(Gc::header(child).is_black());
+
+        let work = gc.sweep_step(&mut |dead| finalized.push(dead), usize::MAX);
+
+        assert!(work > 0);
+        assert!(
+            !finalized.contains(&child),
+            "old child written during sweep must be rescued before sweep reaches it"
+        );
+        assert_eq!(gc.object_count(), 2);
+        assert_eq!(gc.canonicalize_ref(child), Some(child));
     }
 }
 

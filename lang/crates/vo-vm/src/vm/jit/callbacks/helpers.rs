@@ -22,3 +22,8 @@ pub fn set_jit_panic(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber, msg: &str) 
     fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));
     JitResult::Panic
 }
+
+pub extern "C" fn jit_stack_overflow(ctx: *mut JitContext) -> JitResult {
+    let (vm, fiber) = unsafe { extract_context(ctx) };
+    set_jit_panic(&mut vm.state.gc, fiber, "runtime error: stack overflow")
+}

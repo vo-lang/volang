@@ -555,9 +555,15 @@ pub(crate) fn lower_func_lit(
     );
 
     // Box escaped parameters: allocate heap storage and copy param values
-    for (sym, type_key, slots, _slot_types) in escaped_params {
+    for (sym, type_key, slots, slot_types) in escaped_params {
         let meta_idx = ctx.get_boxing_meta(type_key, info);
-        closure_builder.emit_box_escaped_param(sym, slots, info.is_pointer(type_key), meta_idx);
+        closure_builder.emit_box_escaped_param(
+            sym,
+            slots,
+            info.is_pointer(type_key),
+            meta_idx,
+            &slot_types,
+        );
     }
 
     // Set return slots and types
@@ -648,7 +654,7 @@ pub(crate) fn lower_func_lit(
         let meta_idx = ctx.get_boxing_meta(er.result_type, info);
         let meta_reg = closure_builder.alloc_slots(&[SlotType::Value]);
         closure_builder.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-        closure_builder.emit_with_flags(Opcode::PtrNew, er.slots as u8, er.gcref_slot, meta_reg, 0);
+        closure_builder.emit_ptr_new(er.gcref_slot, meta_reg, er.slots);
     }
 
     // Compile closure body

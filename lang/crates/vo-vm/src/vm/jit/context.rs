@@ -124,10 +124,14 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         // Fiber stack access fields - will be updated before JIT call
         stack_ptr: fiber.stack_ptr(),
         stack_cap: fiber.stack.len() as u32,
+        stack_limit: crate::fiber::MAX_JIT_NATIVE_STACK_SLOTS as u32,
+        call_depth: 0,
+        call_depth_limit: crate::fiber::MAX_JIT_CALL_DEPTH as u32,
         jit_bp: 0, // Will be set in dispatch_jit_call
         fiber_sp: fiber.sp as u32,
         push_frame_fn: Some(jit_push_frame),
         pop_frame_fn: Some(jit_pop_frame),
+        stack_overflow_fn: Some(callbacks::jit_stack_overflow),
         push_resume_point_fn: Some(jit_push_resume_point),
         // Callbacks
         create_island_fn: Some(callbacks::jit_create_island),

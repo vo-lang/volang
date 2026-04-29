@@ -286,7 +286,7 @@ fn compile_builtin_call_impl(
             let meta_idx = ctx.get_or_create_value_meta(type_key, info);
             let meta_reg = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-            func.emit_with_flags(Opcode::PtrNew, slots as u8, dst, meta_reg, 0);
+            func.emit_ptr_new(dst, meta_reg, slots);
         }
         "append" => {
             // append(slice, elem...) - variadic, supports multiple elements

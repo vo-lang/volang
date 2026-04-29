@@ -1,0 +1,32 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+var depth int
+
+func recurseTinyFrame() {
+	depth++
+	recurseTinyFrame()
+}
+
+func main() {
+	recovered := false
+	message := ""
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				recovered = true
+				message = fmt.Sprint(r)
+			}
+		}()
+		recurseTinyFrame()
+	}()
+
+	assert(recovered, "tiny-frame recursion must fail as a Vo runtime panic, not a host VM panic")
+	assert(depth > 1000, "test should recurse deeply enough to exercise call-frame growth")
+	assert(strings.Contains(message, "stack"), "panic should mention stack")
+	fmt.Println("borrowed_call_frame_depth_oob: ok")
+}

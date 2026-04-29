@@ -187,8 +187,10 @@ fn emit_box_value(
     let meta_reg = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
     let boxed = func.alloc_slots(&[SlotType::GcRef]);
-    func.emit_with_flags(Opcode::PtrNew, slots as u8, boxed, meta_reg, 0);
-    func.emit_ptr_set(boxed, 0, reg, slots);
+    func.emit_ptr_new(boxed, meta_reg, slots);
+    let slot_types = info.type_slot_types(value_type);
+    debug_assert_eq!(slots as usize, slot_types.len());
+    func.emit_ptr_set_with_slot_types(boxed, 0, reg, &slot_types);
     boxed
 }
 

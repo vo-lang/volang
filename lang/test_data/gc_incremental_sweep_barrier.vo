@@ -1,0 +1,57 @@
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+type Node struct {
+	Value int
+	Label string
+}
+
+type Holder struct {
+	Child *Node
+}
+
+var live []*Holder
+var checksum int
+
+func churn(round int, count int) {
+	for i := 0; i < count; i++ {
+		buf := make([]int, 64)
+		buf[0] = round
+		buf[63] = i
+		checksum += buf[0] + buf[63]
+		if i % 32 == 0 {
+			time.Sleep(0 * time.Millisecond)
+		}
+	}
+}
+
+func install(round int) {
+	child := &Node{Value: 100000 + round, Label: fmt.Sprintf("node-%d", round)}
+	churn(round, 96)
+
+	holder := &Holder{}
+	holder.Child = child
+	live = append(live, holder)
+	child = nil
+
+	churn(round, 192)
+	assert(live[round].Child != nil, "holder child must stay live")
+	assert(live[round].Child.Value == 100000+round, "holder child value must stay live")
+}
+
+func main() {
+	live = make([]*Holder, 0, 80)
+	for round := 0; round < 80; round++ {
+		install(round)
+	}
+
+	for round := 0; round < len(live); round++ {
+		assert(live[round].Child != nil, "final child must stay live")
+		assert(live[round].Child.Value == 100000+round, "final child value must stay live")
+	}
+	fmt.Println("gc_incremental_sweep_barrier: ok", checksum)
+}

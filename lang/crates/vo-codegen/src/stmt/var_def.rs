@@ -15,7 +15,7 @@ use crate::type_info::TypeInfoWrapper;
 
 /// Deferred heap allocation info for loop variables (Go 1.22 per-iteration semantics).
 /// When a loop variable escapes, heap allocation must happen each iteration, not just once.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct DeferredHeapAlloc {
     /// The GcRef slot that holds the pointer to the heap object.
     pub gcref_slot: u16,
@@ -23,6 +23,8 @@ pub struct DeferredHeapAlloc {
     pub value_slots: u16,
     /// Constant index for the value metadata.
     pub meta_idx: u16,
+    /// Slot layout of the heap object's value payload.
+    pub slot_types: Vec<SlotType>,
 }
 
 impl DeferredHeapAlloc {
@@ -30,22 +32,15 @@ impl DeferredHeapAlloc {
     pub fn emit(&self, func: &mut FuncBuilder) {
         let meta_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, self.meta_idx, 0);
-        func.emit_with_flags(
-            Opcode::PtrNew,
-            self.value_slots as u8,
-            self.gcref_slot,
-            meta_reg,
-            0,
-        );
+        func.emit_ptr_new(self.gcref_slot, meta_reg, self.value_slots);
     }
 
     /// Emit PtrNew and copy value from stack slots to the new heap object.
     /// Used for Go 1.22 loop variable per-iteration semantics.
     pub fn emit_with_copy(&self, func: &mut FuncBuilder, src_slot: u16) {
         self.emit(func);
-        for i in 0..self.value_slots {
-            func.emit_op(Opcode::PtrSet, self.gcref_slot, i, src_slot + i);
-        }
+        debug_assert_eq!(self.value_slots as usize, self.slot_types.len());
+        func.emit_ptr_set_with_slot_types(self.gcref_slot, 0, src_slot, &self.slot_types);
     }
 }
 
@@ -249,6 +244,7 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
             gcref_slot,
             value_slots: slots,
             meta_idx,
+            slot_types: self.info.type_slot_types(type_key),
         };
 
         Ok((storage, Some(deferred)))

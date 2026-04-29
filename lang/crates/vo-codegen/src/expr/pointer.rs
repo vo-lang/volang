@@ -188,7 +188,7 @@ pub fn compile_addr_of(
         let meta_idx = ctx.get_or_create_value_meta(type_key, info);
         let meta_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-        func.emit_with_flags(Opcode::PtrNew, slots as u8, dst, meta_reg, 0);
+        func.emit_ptr_new(dst, meta_reg, slots);
 
         for (i, elem) in lit.elems.iter().enumerate() {
             let (offset, field_slots, field_type) = if let Some(key) = &elem.key {
@@ -219,13 +219,14 @@ pub fn compile_addr_of(
                     func,
                     info,
                 )?;
-                func.emit_ptr_set_with_barrier(dst, offset, tmp, field_slots, true);
+                debug_assert_eq!(field_slots as usize, field_slot_types.len());
+                func.emit_ptr_set_with_slot_types(dst, offset, tmp, &field_slot_types);
             } else {
-                let may_gc_ref = info.type_value_kind(field_type).may_contain_gc_refs();
                 let field_slot_types = info.type_slot_types(field_type);
                 let tmp = func.alloc_slots(&field_slot_types);
                 compile_expr_to(&elem.value, tmp, ctx, func, info)?;
-                func.emit_ptr_set_with_barrier(dst, offset, tmp, field_slots, may_gc_ref);
+                debug_assert_eq!(field_slots as usize, field_slot_types.len());
+                func.emit_ptr_set_with_slot_types(dst, offset, tmp, &field_slot_types);
             }
         }
         return Ok(());

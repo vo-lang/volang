@@ -64,16 +64,13 @@ fn emit_write_named_return(
     func: &mut FuncBuilder,
     dst_slot: u16,
     src: u16,
-    slots: u16,
+    slot_types: &[SlotType],
     escaped: bool,
 ) {
+    let slots = slot_types.len() as u16;
     if escaped {
         // Escaped: write to heap via GcRef
-        if slots == 1 {
-            func.emit_op(Opcode::PtrSet, dst_slot, 0, src);
-        } else {
-            func.emit_with_flags(Opcode::PtrSetN, slots as u8, dst_slot, 0, src);
-        }
+        func.emit_ptr_set_with_slot_types(dst_slot, 0, src, slot_types);
     } else {
         // Non-escaped: copy to stack
         func.emit_copy(dst_slot, src, slots);
@@ -131,7 +128,9 @@ pub fn emit_error_return(error_slot: u16, func: &mut FuncBuilder, info: &TypeInf
             let is_last = i == named_return_slots.len() - 1;
             if is_last && !ret_types.is_empty() && info.is_error_type(ret_types[i]) {
                 // This is the error return - store the propagated error
-                emit_write_named_return(func, gcref_slot, error_slot, slots, escaped);
+                let slot_types = info.type_slot_types(ret_types[i]);
+                debug_assert_eq!(slots as usize, slot_types.len());
+                emit_write_named_return(func, gcref_slot, error_slot, &slot_types, escaped);
             }
             // Non-error returns: keep their current heap values (already set by user code)
         }
@@ -265,12 +264,8 @@ pub(super) fn compile_return(
                     compile_expr_to(result, temp, ctx, func, info)?;
                 }
 
-                // Store to heap: PtrSet gcref[0..slots] = temp
-                if slots == 1 {
-                    func.emit_op(Opcode::PtrSet, gcref_slot, 0, temp);
-                } else {
-                    func.emit_with_flags(Opcode::PtrSetN, slots as u8, gcref_slot, 0, temp);
-                }
+                debug_assert_eq!(slots as usize, temp_slot_types.len());
+                func.emit_ptr_set_with_slot_types(gcref_slot, 0, temp, &temp_slot_types);
             }
 
             emit_heap_returns(func, &named_return_slots, false);

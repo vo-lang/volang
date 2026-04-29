@@ -214,6 +214,7 @@ pub enum RuntimeTrapKind {
     RecvOnNilChannel,
     CloseNilChannel,
     CloseClosedChannel,
+    StackOverflow,
 }
 
 /// Scheduling loop outcome - separates scheduling from deadlock handling.

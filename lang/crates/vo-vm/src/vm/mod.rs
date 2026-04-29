@@ -1476,9 +1476,7 @@ impl Vm {
                         }
                     }
                     // VM fallback path
-                    exec::exec_call(fiber, &inst, module);
-                    stack = fiber.stack_ptr(); // Re-fetch after potential stack growth
-                    refetch!();
+                    handle_panic_result!(exec::exec_call(&mut self.state.gc, fiber, &inst, module));
                 }
                 Opcode::CallExtern => {
                     use vo_runtime::ffi::{
@@ -1643,14 +1641,21 @@ impl Vm {
                             RuntimeTrapKind::NilFuncCall
                         ));
                     }
-                    exec::exec_call_closure(fiber, &inst, module);
-                    stack = fiber.stack_ptr(); // Re-fetch after potential stack growth
-                    refetch!();
+                    handle_panic_result!(exec::exec_call_closure(
+                        &mut self.state.gc,
+                        fiber,
+                        &inst,
+                        module
+                    ));
                 }
                 Opcode::CallIface => {
-                    exec::exec_call_iface(fiber, &inst, module, &self.state.itab_cache);
-                    stack = fiber.stack_ptr(); // Re-fetch after potential stack growth
-                    refetch!();
+                    handle_panic_result!(exec::exec_call_iface(
+                        &mut self.state.gc,
+                        fiber,
+                        &inst,
+                        module,
+                        &self.state.itab_cache
+                    ));
                 }
                 Opcode::Return => {
                     let result = if fiber.is_direct_defer_context() {

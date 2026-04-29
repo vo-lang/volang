@@ -1166,9 +1166,15 @@ fn compile_func_body(
     );
 
     // Box escaped parameters: allocate heap storage and copy param values
-    for (sym, type_key, slots, _slot_types) in escaped_params {
+    for (sym, type_key, slots, slot_types) in escaped_params {
         let meta_idx = ctx.get_boxing_meta(type_key, info);
-        builder.emit_box_escaped_param(sym, slots, info.is_pointer(type_key), meta_idx);
+        builder.emit_box_escaped_param(
+            sym,
+            slots,
+            info.is_pointer(type_key),
+            meta_idx,
+            &slot_types,
+        );
     }
 
     // Set return slots and types
@@ -1266,13 +1272,7 @@ fn compile_func_body(
         let meta_idx = ctx.get_boxing_meta(er.result_type, info);
         let meta_reg = builder.alloc_slots(&[vo_runtime::SlotType::Value]);
         builder.emit_op(vo_vm::instruction::Opcode::LoadConst, meta_reg, meta_idx, 0);
-        builder.emit_with_flags(
-            vo_vm::instruction::Opcode::PtrNew,
-            er.slots as u8,
-            er.gcref_slot,
-            meta_reg,
-            0,
-        );
+        builder.emit_ptr_new(er.gcref_slot, meta_reg, er.slots);
     }
 
     // Compile function body

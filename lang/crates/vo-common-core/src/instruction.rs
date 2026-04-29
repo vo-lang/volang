@@ -119,6 +119,7 @@ pub enum Opcode {
     GlobalSetN,
 
     // === PTR: Heap pointer operations ===
+    /// PtrNew: a=dst, b=meta register, c=slot count, flags=reserved.
     PtrNew,
     PtrGet,
     PtrSet,

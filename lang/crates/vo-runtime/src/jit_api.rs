@@ -48,6 +48,10 @@ pub type JitPushFrameFn = extern "C" fn(
 /// Takes caller_bp as parameter since we don't store it in resume_stack anymore.
 pub type JitPopFrameFn = extern "C" fn(ctx: *mut JitContext, caller_bp: u32);
 
+/// Function pointer type for converting a JIT stack guard failure into a
+/// recoverable runtime panic.
+pub type JitStackOverflowFn = extern "C" fn(ctx: *mut JitContext) -> JitResult;
+
 /// Function pointer type for pushing a resume point on side-exit (Call/WaitIo).
 /// Called by JIT code when callee returns non-OK, before propagating the result.
 /// This is the "lazy push" - only called on the slow path.
@@ -345,6 +349,15 @@ pub struct JitContext {
     /// Allows JIT to check if frame push needs reallocation.
     pub stack_cap: u32,
 
+    /// Maximum stack slots allowed for direct JIT native-stack call chains.
+    pub stack_limit: u32,
+
+    /// Current direct JIT call depth.
+    pub call_depth: u32,
+
+    /// Maximum direct JIT call depth before reporting stack overflow.
+    pub call_depth_limit: u32,
+
     /// Current JIT frame base pointer (index into fiber.stack).
     /// Updated by push_frame_fn / pop_frame_fn callbacks.
     pub jit_bp: u32,
@@ -360,6 +373,9 @@ pub struct JitContext {
     /// Callback to pop a JIT frame after callee returns.
     /// Set by VM when creating JitContext.
     pub pop_frame_fn: Option<JitPopFrameFn>,
+
+    /// Callback used by generated stack guards to report stack overflow.
+    pub stack_overflow_fn: Option<JitStackOverflowFn>,
 
     /// Callback to push a resume point on side-exit (Call/WaitIo).
     /// Only called on the slow path when callee returns non-OK.
@@ -544,10 +560,16 @@ impl JitContext {
     // Fiber stack access offsets
     pub const OFFSET_STACK_PTR: i32 = std::mem::offset_of!(JitContext, stack_ptr) as i32;
     pub const OFFSET_STACK_CAP: i32 = std::mem::offset_of!(JitContext, stack_cap) as i32;
+    pub const OFFSET_STACK_LIMIT: i32 = std::mem::offset_of!(JitContext, stack_limit) as i32;
+    pub const OFFSET_CALL_DEPTH: i32 = std::mem::offset_of!(JitContext, call_depth) as i32;
+    pub const OFFSET_CALL_DEPTH_LIMIT: i32 =
+        std::mem::offset_of!(JitContext, call_depth_limit) as i32;
     pub const OFFSET_JIT_BP: i32 = std::mem::offset_of!(JitContext, jit_bp) as i32;
     pub const OFFSET_FIBER_SP: i32 = std::mem::offset_of!(JitContext, fiber_sp) as i32;
     pub const OFFSET_PUSH_FRAME_FN: i32 = std::mem::offset_of!(JitContext, push_frame_fn) as i32;
     pub const OFFSET_POP_FRAME_FN: i32 = std::mem::offset_of!(JitContext, pop_frame_fn) as i32;
+    pub const OFFSET_STACK_OVERFLOW_FN: i32 =
+        std::mem::offset_of!(JitContext, stack_overflow_fn) as i32;
     pub const OFFSET_PUSH_RESUME_POINT_FN: i32 =
         std::mem::offset_of!(JitContext, push_resume_point_fn) as i32;
 

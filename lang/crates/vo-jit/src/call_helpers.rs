@@ -64,6 +64,122 @@ pub fn import_pop_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     })
 }
 
+/// Create signature for stack_overflow_fn callback: (ctx) -> JitResult
+pub fn import_stack_overflow_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
+    let call_conv = current_call_conv(emitter);
+    emitter.builder().func.import_signature({
+        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
+        sig.params
+            .push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
+        sig.returns
+            .push(cranelift_codegen::ir::AbiParam::new(types::I32)); // JitResult
+        sig
+    })
+}
+
+pub fn emit_stack_limit_guard<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value, new_sp: Value) {
+    let limit = emitter.builder().ins().load(
+        types::I32,
+        MemFlags::trusted(),
+        ctx,
+        JitContext::OFFSET_STACK_LIMIT,
+    );
+    let overflow = emitter
+        .builder()
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThan, new_sp, limit);
+
+    let overflow_block = emitter.builder().create_block();
+    let ok_block = emitter.builder().create_block();
+    emitter
+        .builder()
+        .ins()
+        .brif(overflow, overflow_block, &[], ok_block, &[]);
+
+    emitter.builder().switch_to_block(overflow_block);
+    emitter.builder().seal_block(overflow_block);
+    let stack_overflow_fn_ptr = emitter.builder().ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        ctx,
+        JitContext::OFFSET_STACK_OVERFLOW_FN,
+    );
+    let stack_overflow_sig = import_stack_overflow_sig(emitter);
+    let call =
+        emitter
+            .builder()
+            .ins()
+            .call_indirect(stack_overflow_sig, stack_overflow_fn_ptr, &[ctx]);
+    let result = emitter.builder().inst_results(call)[0];
+    emitter.builder().ins().return_(&[result]);
+
+    emitter.builder().switch_to_block(ok_block);
+    emitter.builder().seal_block(ok_block);
+}
+
+pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value) -> Value {
+    let depth = emitter.builder().ins().load(
+        types::I32,
+        MemFlags::trusted(),
+        ctx,
+        JitContext::OFFSET_CALL_DEPTH,
+    );
+    let limit = emitter.builder().ins().load(
+        types::I32,
+        MemFlags::trusted(),
+        ctx,
+        JitContext::OFFSET_CALL_DEPTH_LIMIT,
+    );
+    let overflow = emitter
+        .builder()
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, depth, limit);
+
+    let overflow_block = emitter.builder().create_block();
+    let ok_block = emitter.builder().create_block();
+    emitter
+        .builder()
+        .ins()
+        .brif(overflow, overflow_block, &[], ok_block, &[]);
+
+    emitter.builder().switch_to_block(overflow_block);
+    emitter.builder().seal_block(overflow_block);
+    let stack_overflow_fn_ptr = emitter.builder().ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        ctx,
+        JitContext::OFFSET_STACK_OVERFLOW_FN,
+    );
+    let stack_overflow_sig = import_stack_overflow_sig(emitter);
+    let call =
+        emitter
+            .builder()
+            .ins()
+            .call_indirect(stack_overflow_sig, stack_overflow_fn_ptr, &[ctx]);
+    let result = emitter.builder().inst_results(call)[0];
+    emitter.builder().ins().return_(&[result]);
+
+    emitter.builder().switch_to_block(ok_block);
+    emitter.builder().seal_block(ok_block);
+    let next_depth = emitter.builder().ins().iadd_imm(depth, 1);
+    emitter.builder().ins().store(
+        MemFlags::trusted(),
+        next_depth,
+        ctx,
+        JitContext::OFFSET_CALL_DEPTH,
+    );
+    depth
+}
+
+pub fn emit_call_depth_leave<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value, old_depth: Value) {
+    emitter.builder().ins().store(
+        MemFlags::trusted(),
+        old_depth,
+        ctx,
+        JitContext::OFFSET_CALL_DEPTH,
+    );
+}
+
 /// Create signature for push_resume_point_fn callback: (ctx, func_id, resume_pc, bp, caller_bp, ret_reg, ret_slots) -> ()
 pub fn import_push_resume_point_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     let call_conv = current_call_conv(emitter);
@@ -210,6 +326,8 @@ fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
     // Update ctx
     let new_bp = p.old_fiber_sp;
     let new_sp = emitter.builder().ins().iadd(new_bp, p.ic_local_slots);
+    emit_stack_limit_guard(emitter, p.ctx, new_sp);
+    let old_call_depth = emit_call_depth_enter(emitter, p.ctx);
     emitter.builder().ins().store(
         MemFlags::trusted(),
         new_bp,
@@ -231,6 +349,7 @@ fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
         &[p.ctx, p.ic_args_ptr, p.ret_ptr],
     );
     let jit_result = emitter.builder().inst_results(jit_call)[0];
+    emit_call_depth_leave(emitter, p.ctx, old_call_depth);
 
     // Check result
     let ok_val = emitter
@@ -1204,6 +1323,24 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(emitter: &mut E, p: PreparedCallPara
         .builder()
         .ins()
         .icmp(IntCC::Equal, p.jit_func_ptr, null_ptr);
+    let depth = emitter.builder().ins().load(
+        types::I32,
+        MemFlags::trusted(),
+        ctx,
+        JitContext::OFFSET_CALL_DEPTH,
+    );
+    let depth_limit = emitter.builder().ins().load(
+        types::I32,
+        MemFlags::trusted(),
+        ctx,
+        JitContext::OFFSET_CALL_DEPTH_LIMIT,
+    );
+    let depth_exhausted =
+        emitter
+            .builder()
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, depth, depth_limit);
+    let use_trampoline = emitter.builder().ins().bor(is_null, depth_exhausted);
 
     let trampoline_block = emitter.builder().create_block();
     let jit_call_block = emitter.builder().create_block();
@@ -1214,7 +1351,7 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(emitter: &mut E, p: PreparedCallPara
     emitter
         .builder()
         .ins()
-        .brif(is_null, trampoline_block, &[], jit_call_block, &[]);
+        .brif(use_trampoline, trampoline_block, &[], jit_call_block, &[]);
 
     // === Trampoline path: return JitResult::Call with CALL_KIND_PREPARED ===
     // prepare callback already did push_frame + arg layout on fiber.stack,
@@ -1275,6 +1412,7 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(emitter: &mut E, p: PreparedCallPara
     emitter.builder().switch_to_block(jit_call_block);
     emitter.builder().seal_block(jit_call_block);
 
+    let old_call_depth = emit_call_depth_enter(emitter, ctx);
     let jit_func_sig = import_jit_func_sig(emitter);
     let jit_call = emitter.builder().ins().call_indirect(
         jit_func_sig,
@@ -1282,6 +1420,7 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(emitter: &mut E, p: PreparedCallPara
         &[ctx, p.callee_args_ptr, p.ret_ptr],
     );
     let jit_result = emitter.builder().inst_results(jit_call)[0];
+    emit_call_depth_leave(emitter, ctx, old_call_depth);
 
     let ok_val = emitter
         .builder()
@@ -1680,6 +1819,8 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         .builder()
         .ins()
         .iadd_imm(new_bp, config.callee_local_slots as i64);
+    emit_stack_limit_guard(emitter, ctx, new_sp);
+    let old_call_depth = emit_call_depth_enter(emitter, ctx);
     emitter
         .builder()
         .ins()
@@ -1699,7 +1840,9 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         // Direct call (fast path - no null check needed)
         let call =
             crate::translator::emit_funcref_call_raw(emitter, func_ref, &[ctx, args_ptr, ret_ptr]);
-        emitter.builder().inst_results(call)[0]
+        let result = emitter.builder().inst_results(call)[0];
+        emit_call_depth_leave(emitter, ctx, old_call_depth);
+        result
     } else {
         // Indirect call with null check and VM fallback
         let jit_func_table = emitter.builder().ins().load(
@@ -1746,6 +1889,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
                 .ins()
                 .call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
         let jit_result_indirect = emitter.builder().inst_results(jit_call)[0];
+        emit_call_depth_leave(emitter, ctx, old_call_depth);
 
         // Check result for indirect path
         let ok_val = emitter
@@ -1820,6 +1964,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
             ctx,
             JitContext::OFFSET_FIBER_SP,
         );
+        emit_call_depth_leave(emitter, ctx, old_call_depth);
 
         // Spill SSA-only vars to fiber.stack so REGULAR handler can read args.
         // emit_variable_spill only spills slots < memory_only_start, preserving

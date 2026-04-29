@@ -561,6 +561,7 @@ pub(super) fn compile_for_three(
                 gcref_slot,
                 value_slots: lv.value_slots,
                 meta_idx: lv.meta_idx,
+                slot_types: info.type_slot_types(lv.type_key),
             };
             deferred.emit_with_copy(func, lv.ctrl_slot);
             let stores_pointer = info.is_pointer(lv.type_key);

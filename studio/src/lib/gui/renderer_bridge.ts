@@ -167,6 +167,24 @@ function emitRendererBridgeDebug(backend: Backend, message: string): void {
   console.debug(`[RendererBridge] ${message}`);
 }
 
+function islandFrameDebug(frame: Uint8Array): string {
+  const head = Array.from(frame.slice(0, Math.min(frame.length, 96)))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+  const target = frame.length >= 4
+    ? new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(0, true)
+    : null;
+  const tag = frame.length >= 5 ? frame[4] : null;
+  return `bytes=${frame.byteLength} target=${target ?? 'n/a'} tag=${tag ?? 'n/a'} head=${head}`;
+}
+
+function emitRendererBridgeFrameDebug(backend: Backend, direction: 'send' | 'recv', frame: Uint8Array): void {
+  if (!shouldEmitRendererBridgeDebug()) {
+    return;
+  }
+  emitRendererBridgeDebug(backend, `island transport ${direction} ${islandFrameDebug(frame)}`);
+}
+
 function frameworkModuleKey(framework: FrameworkContract): string {
   return frameworkContractKey(framework);
 }
@@ -333,6 +351,7 @@ function makeRendererHost(
                   return;
                 }
                 if (frame.length > 0) {
+                  emitRendererBridgeFrameDebug(backend, 'recv', frame);
                   handler?.(frame);
                   continue;
                 }
@@ -358,6 +377,7 @@ function makeRendererHost(
             startWebPolling();
           },
           send(frame: Uint8Array): void {
+            emitRendererBridgeFrameDebug(backend, 'send', frame);
             runtime.pushIslandTransport(frame).catch((error) => {
               if (isGuiSessionSupersededError(error)) {
                 return;

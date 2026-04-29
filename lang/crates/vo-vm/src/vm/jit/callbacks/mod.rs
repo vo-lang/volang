@@ -14,6 +14,7 @@ pub mod select;
 pub use closure_call::{jit_prepare_closure_call, jit_prepare_iface_call};
 pub use defer::{jit_defer_push, jit_recover};
 pub use goroutine::{jit_go_island, jit_go_start};
+pub use helpers::jit_stack_overflow;
 pub use island::jit_create_island;
 pub use queue::{jit_queue_close, jit_queue_recv, jit_queue_send};
 pub use select::{jit_select_begin, jit_select_exec, jit_select_recv, jit_select_send};

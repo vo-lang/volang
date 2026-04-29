@@ -222,13 +222,15 @@ fn emit_concrete_to_iface_from_slot(
     if src_vk.needs_boxing() {
         // Struct/Array: allocate box and copy data
         let src_slots = info.type_slot_count(src_type);
+        let src_slot_types = info.type_slot_types(src_type);
         let meta_idx = ctx.get_or_create_value_meta(src_type, info);
 
         let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
         let meta_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-        func.emit_with_flags(Opcode::PtrNew, src_slots as u8, gcref_slot, meta_reg, 0);
-        func.emit_ptr_set(gcref_slot, 0, src_slot, src_slots);
+        func.emit_ptr_new(gcref_slot, meta_reg, src_slots);
+        debug_assert_eq!(src_slots as usize, src_slot_types.len());
+        func.emit_ptr_set_with_slot_types(gcref_slot, 0, src_slot, &src_slot_types);
 
         func.emit_with_flags(
             Opcode::IfaceAssign,
@@ -320,8 +322,9 @@ fn compile_iface_assign_internal(
                 let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
                 let meta_reg = func.alloc_slots(&[SlotType::Value]);
                 func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-                func.emit_with_flags(Opcode::PtrNew, src_slots as u8, gcref_slot, meta_reg, 0);
-                func.emit_ptr_set(gcref_slot, 0, tmp_data, src_slots);
+                func.emit_ptr_new(gcref_slot, meta_reg, src_slots);
+                debug_assert_eq!(src_slots as usize, src_slot_types.len());
+                func.emit_ptr_set_with_slot_types(gcref_slot, 0, tmp_data, &src_slot_types);
 
                 func.emit_with_flags(
                     Opcode::IfaceAssign,

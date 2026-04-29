@@ -841,6 +841,8 @@ impl<'a> FunctionCompiler<'a> {
             .builder
             .ins()
             .iadd_imm(new_bp, callee_local_slots as i64);
+        crate::call_helpers::emit_stack_limit_guard(self, ctx, new_sp);
+        let old_call_depth = crate::call_helpers::emit_call_depth_enter(self, ctx);
         self.builder
             .ins()
             .store(MemFlags::trusted(), new_bp, ctx, JitContext::OFFSET_JIT_BP);
@@ -879,6 +881,7 @@ impl<'a> FunctionCompiler<'a> {
                     .call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
             self.builder.inst_results(call)[0]
         };
+        crate::call_helpers::emit_call_depth_leave(self, ctx, old_call_depth);
 
         // Check result
         let ok_val = self

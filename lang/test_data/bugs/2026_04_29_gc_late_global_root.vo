@@ -1,0 +1,57 @@
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+type Node struct {
+	Value int
+	Label string
+}
+
+type Holder struct {
+	Child *Node
+}
+
+var late *Node
+var checksum int
+
+func makeHolder() *Holder {
+	return &Holder{Child: &Node{Value: 4242, Label: "still-live"}}
+}
+
+func makeLargeRoot() []byte {
+	buf := make([]byte, 4194304)
+	buf[0] = 1
+	buf[len(buf)-1] = 2
+	return buf
+}
+
+func churn(n int) {
+	for i := 0; i < n; i++ {
+		s := fmt.Sprintf("alloc-%d-%d", i, checksum)
+		checksum += len(s)
+	}
+}
+
+func main() {
+	holder := makeHolder()
+	large := makeLargeRoot()
+
+	time.Sleep(time.Millisecond)
+
+	late = holder.Child
+	holder.Child = nil
+	assert(late != nil, "late root must be assigned")
+	assert(late.Value == 4242, "late root must be readable before collection")
+
+	churn(12000)
+	assert(late.Value == 4242, "late root must survive first collection")
+
+	churn(12000)
+	assert(late.Value == 4242, "late root must survive next root scan")
+	assert(large[0] == 1 && large[len(large)-1] == 2, "large root must stay live")
+
+	fmt.Println("gc_late_global_root: ok")
+}

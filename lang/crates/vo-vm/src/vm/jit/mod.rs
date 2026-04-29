@@ -31,8 +31,8 @@ use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::{JitContext, JitResult};
 use vo_runtime::objects::interface::InterfaceSlot;
 
-use crate::fiber::{CallFrame, Fiber};
-use crate::vm::{helpers, ExecResult, Vm};
+use crate::fiber::{CallFrame, Fiber, FiberCapacityError};
+use crate::vm::{helpers, ExecResult, RuntimeTrapKind, Vm};
 
 pub mod callbacks;
 mod context;
@@ -46,6 +46,28 @@ fn create_default_panic_msg(gc: &mut vo_runtime::gc::Gc) -> InterfaceSlot {
         vo_runtime::objects::string::new_from_string(gc, helpers::ERR_NIL_POINTER.to_string());
     let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
     InterfaceSlot::new(slot0, msg_str as u64)
+}
+
+fn stack_overflow_exec_result(
+    vm: &mut Vm,
+    fiber: &mut Fiber,
+    module: &Module,
+    err: FiberCapacityError,
+) -> ExecResult {
+    let stack = fiber.stack_ptr();
+    helpers::runtime_panic(
+        &mut vm.state.gc,
+        fiber,
+        stack,
+        module,
+        RuntimeTrapKind::StackOverflow,
+        err.message(),
+    )
+}
+
+fn set_stack_overflow_panic(vm: &mut Vm, fiber: &mut Fiber, err: FiberCapacityError) {
+    let msg = err.message();
+    callbacks::helpers::set_jit_panic(&mut vm.state.gc, fiber, &msg);
 }
 
 /// Shared JIT panic setup: materialize frames, capture source location, resolve panic message.
@@ -64,7 +86,7 @@ fn setup_jit_panic(
     fiber: &mut Fiber,
     gc: &mut vo_runtime::gc::Gc,
     module: &Module,
-) -> InterfaceSlot {
+) -> Result<InterfaceSlot, FiberCapacityError> {
     if ctx.is_user_panic() {
         fiber.set_recoverable_panic(ctx.panic_msg());
     }
@@ -72,7 +94,7 @@ fn setup_jit_panic(
         .take_recoverable_panic()
         .unwrap_or_else(|| create_default_panic_msg(gc));
 
-    materialize_jit_frames(fiber, module, 0);
+    materialize_jit_frames(fiber, module, 0)?;
 
     if fiber.panic_source_loc.is_none() {
         let resume_pc = ctx.call_resume_pc();
@@ -81,7 +103,7 @@ fn setup_jit_panic(
             .map(|f| (f.func_id, resume_pc.saturating_sub(1)));
     }
 
-    panic_msg
+    Ok(panic_msg)
 }
 
 /// Execute a JIT-compiled function call.
@@ -116,7 +138,7 @@ pub fn dispatch_jit_call(
     let local_slots = func_def.local_slots as usize;
     let gc_scan_slots = func_def.gc_scan_slots as usize;
 
-    let jit_bp = fiber.push_borrowed_call_frame(
+    let jit_bp = match fiber.try_push_borrowed_call_frame(
         func_id,
         arg_start as u16,
         (arg_start + arg_slots) as u16,
@@ -124,7 +146,10 @@ pub fn dispatch_jit_call(
         caller_scan_slots,
         local_slots as u16,
         func_def.gc_scan_slots,
-    );
+    ) {
+        Ok(bp) => bp,
+        Err(err) => return stack_overflow_exec_result(vm, fiber, module, err),
+    };
     fiber.zero_slots_tail_at(jit_bp, gc_scan_slots, arg_slots);
 
     invoke_jit_and_handle(vm, fiber, module, jit_func, jit_bp, ret_slots)
@@ -244,7 +269,10 @@ fn handle_jit_result(
             )
         }
         JitResult::Panic => {
-            let panic_msg = setup_jit_panic(&ctx, fiber, &mut vm.state.gc, module);
+            let panic_msg = match setup_jit_panic(&ctx, fiber, &mut vm.state.gc, module) {
+                Ok(msg) => msg,
+                Err(err) => return stack_overflow_exec_result(vm, fiber, module, err),
+            };
             fiber.set_recoverable_panic(panic_msg);
             let stack_ptr = fiber.stack_ptr();
             helpers::panic_unwind(fiber, stack_ptr, module)
@@ -268,7 +296,7 @@ fn handle_jit_result(
                 let callee_bp = ctx.call_resume_pc() as usize;
                 let caller_resume_pc = ctx.call_arg_start() as u32;
                 let call_ret_reg = ctx.call_ret_reg();
-                setup_prepared_call(
+                if let Err(err) = setup_prepared_call(
                     fiber,
                     module,
                     callee_func_id,
@@ -276,7 +304,9 @@ fn handle_jit_result(
                     call_ret_reg,
                     callee_bp,
                     caller_resume_pc,
-                );
+                ) {
+                    return stack_overflow_exec_result(vm, fiber, module, err);
+                }
                 // Trigger JIT compilation for callee so future dynamic calls
                 // can use the JIT-to-JIT fast path.
                 if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
@@ -289,7 +319,7 @@ fn handle_jit_result(
             // Regular call: JIT requests VM to execute a non-JIT function.
             let resume_pc = ctx.call_resume_pc();
             let call_ret_reg = ctx.call_ret_reg();
-            let callee_bp = setup_regular_call(
+            let callee_bp = match setup_regular_call(
                 fiber,
                 module,
                 callee_func_id,
@@ -297,7 +327,10 @@ fn handle_jit_result(
                 call_ret_reg,
                 call_arg_start,
                 resume_pc,
-            );
+            ) {
+                Ok(bp) => bp,
+                Err(err) => return stack_overflow_exec_result(vm, fiber, module, err),
+            };
 
             // Check if callee can be JIT-executed instead of interpreter fallback
             if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
@@ -320,7 +353,9 @@ fn handle_jit_result(
         }
         JitResult::WaitIo => {
             let resume_pc = ctx.call_resume_pc();
-            materialize_jit_frames(fiber, module, resume_pc);
+            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
+                return stack_overflow_exec_result(vm, fiber, module, err);
+            }
 
             #[cfg(feature = "std")]
             {
@@ -335,7 +370,9 @@ fn handle_jit_result(
         }
         JitResult::WaitQueue => {
             let resume_pc = ctx.call_resume_pc();
-            materialize_jit_frames(fiber, module, resume_pc);
+            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
+                return stack_overflow_exec_result(vm, fiber, module, err);
+            }
             ExecResult::Block(crate::fiber::BlockReason::Queue)
         }
         JitResult::Replay => {
@@ -343,7 +380,9 @@ fn handle_jit_result(
             // resume_pc points at the CallExtern instruction itself, so VM will
             // re-execute it and go through the suspend/replay path.
             let resume_pc = ctx.call_resume_pc();
-            materialize_jit_frames(fiber, module, resume_pc);
+            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
+                return stack_overflow_exec_result(vm, fiber, module, err);
+            }
             ExecResult::FrameChanged
         }
     }
@@ -365,7 +404,7 @@ fn setup_prepared_call(
     call_ret_reg: u16,
     callee_bp: usize,
     caller_resume_pc: u32,
-) {
+) -> Result<(), FiberCapacityError> {
     let callee_func_def = &module.functions[callee_func_id as usize];
     let param_slots = callee_func_def.param_slots as usize;
     let local_slots = callee_func_def.local_slots as usize;
@@ -373,7 +412,7 @@ fn setup_prepared_call(
 
     // Materialize any intermediate JIT frames from non-OK propagation
     if !fiber.resume_stack.is_empty() {
-        materialize_jit_frames(fiber, module, caller_resume_pc);
+        materialize_jit_frames(fiber, module, caller_resume_pc)?;
         // resume_stack already cleared by materialize_jit_frames
     } else {
         if let Some(frame) = fiber.frames.last_mut() {
@@ -381,16 +420,17 @@ fn setup_prepared_call(
         }
     }
 
-    fiber.reserve_slots_at(callee_bp, local_slots);
+    fiber.try_reserve_slots_at(callee_bp, local_slots)?;
     fiber.zero_slots_tail_at(callee_bp, gc_scan_slots, param_slots);
 
-    fiber.push_call_frame(
+    fiber.try_push_call_frame(
         callee_func_id,
         callee_bp,
         call_ret_reg,
         callee_ret_slots,
         callee_func_def.gc_scan_slots,
-    );
+    )?;
+    Ok(())
 }
 
 /// Set up a regular call frame (JIT requests VM to execute a non-JIT function).
@@ -406,8 +446,8 @@ fn setup_regular_call(
     call_ret_reg: u16,
     call_arg_start: usize,
     resume_pc: u32,
-) -> usize {
-    materialize_jit_frames(fiber, module, resume_pc);
+) -> Result<usize, FiberCapacityError> {
+    materialize_jit_frames(fiber, module, resume_pc)?;
 
     // After materialize_jit_frames, the last frame is the immediate caller.
     let caller_frame = fiber.frames.last().unwrap();
@@ -423,7 +463,7 @@ fn setup_regular_call(
     let arg_slots = callee_func_def.param_slots as usize;
     let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(call_arg_start as u16);
 
-    let callee_bp = fiber.push_borrowed_call_frame(
+    let callee_bp = fiber.try_push_borrowed_call_frame(
         callee_func_id,
         call_arg_start as u16,
         call_ret_reg,
@@ -431,10 +471,10 @@ fn setup_regular_call(
         caller_scan_slots,
         callee_local_slots as u16,
         callee_func_def.gc_scan_slots,
-    );
+    )?;
     fiber.zero_slots_tail_at(callee_bp, callee_gc_scan_slots, arg_slots);
 
-    callee_bp
+    Ok(callee_bp)
 }
 
 /// Convert resume_stack to fiber.frames when VM takes over from JIT.
@@ -469,7 +509,11 @@ fn setup_regular_call(
 /// # OSR Deduplication
 ///
 /// If a frame with same func_id AND bp already exists, just update pc.
-fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
+fn materialize_jit_frames(
+    fiber: &mut Fiber,
+    module: &Module,
+    resume_pc: u32,
+) -> Result<(), FiberCapacityError> {
     let len = fiber.resume_stack.len();
 
     if len == 0 {
@@ -477,8 +521,21 @@ fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
         if let Some(frame) = fiber.frames.last_mut() {
             frame.pc = resume_pc as usize;
         }
-        return;
+        return Ok(());
     }
+
+    fiber.try_reserve_call_frames(len)?;
+    let innermost = &fiber.resume_stack[0];
+    let innermost_local_slots = module.functions[innermost.func_id as usize].local_slots as usize;
+    let innermost_sp =
+        innermost
+            .bp
+            .checked_add(innermost_local_slots)
+            .ok_or(FiberCapacityError::StackSlots {
+                required: usize::MAX,
+                limit: crate::fiber::MAX_STACK_CAPACITY,
+            })?;
+    fiber.try_ensure_capacity(innermost_sp)?;
 
     // Step 1: Update entry frame's pc (the frame that was in fiber.frames before JIT ran)
     // The last element in resume_stack is the outermost caller's info, containing
@@ -539,12 +596,11 @@ fn materialize_jit_frames(fiber: &mut Fiber, module: &Module, resume_pc: u32) {
     // Step 3: Fix fiber.sp — must cover the innermost frame.
     // The non-OK propagation chain's push_frame calls overwrote fiber.sp with
     // progressively lower values. Restore it to the innermost callee's sp.
-    let innermost = &fiber.resume_stack[0];
-    let innermost_local_slots = module.functions[innermost.func_id as usize].local_slots as usize;
-    fiber.sp = innermost.bp + innermost_local_slots;
+    fiber.sp = innermost_sp;
 
     // Clear resume_stack since VM now owns the frames
     fiber.resume_stack.clear();
+    Ok(())
 }
 
 /// Callback for JIT code to call extern functions.
@@ -736,7 +792,13 @@ pub fn dispatch_loop_osr(
             OsrResult::ExitPc(ctx.ctx.loop_exit_pc as usize)
         }
         JitResult::Panic => {
-            let panic_msg = setup_jit_panic(&ctx, fiber, &mut vm.state.gc, module);
+            let panic_msg = match setup_jit_panic(&ctx, fiber, &mut vm.state.gc, module) {
+                Ok(msg) => msg,
+                Err(err) => {
+                    set_stack_overflow_panic(vm, fiber, err);
+                    return OsrResult::Panic;
+                }
+            };
             fiber.set_recoverable_panic(panic_msg);
             OsrResult::Panic
         }
@@ -751,7 +813,10 @@ pub fn dispatch_loop_osr(
             match call_kind {
                 JitContext::CALL_KIND_YIELD | JitContext::CALL_KIND_BLOCK => {
                     let resume_pc = ctx.call_resume_pc();
-                    materialize_jit_frames(fiber, module, resume_pc);
+                    if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
+                        set_stack_overflow_panic(vm, fiber, err);
+                        return OsrResult::Panic;
+                    }
                     return OsrResult::FrameChanged;
                 }
                 _ => {}
@@ -760,7 +825,7 @@ pub fn dispatch_loop_osr(
             if call_kind == JitContext::CALL_KIND_PREPARED {
                 let callee_bp = ctx.call_resume_pc() as usize;
                 let caller_resume_pc = ctx.call_arg_start() as u32;
-                setup_prepared_call(
+                if let Err(err) = setup_prepared_call(
                     fiber,
                     module,
                     callee_func_id,
@@ -768,7 +833,10 @@ pub fn dispatch_loop_osr(
                     call_ret_reg,
                     callee_bp,
                     caller_resume_pc,
-                );
+                ) {
+                    set_stack_overflow_panic(vm, fiber, err);
+                    return OsrResult::Panic;
+                }
                 // Hint: trigger JIT compilation for callee so future loop OSR
                 // iterations can use JIT-to-JIT fast path. Error ignored because
                 // this is best-effort — the VM fallback path works regardless.
@@ -779,7 +847,7 @@ pub fn dispatch_loop_osr(
                 OsrResult::FrameChanged
             } else {
                 let resume_pc = ctx.call_resume_pc();
-                setup_regular_call(
+                if let Err(err) = setup_regular_call(
                     fiber,
                     module,
                     callee_func_id,
@@ -787,7 +855,10 @@ pub fn dispatch_loop_osr(
                     call_ret_reg,
                     call_arg_start,
                     resume_pc,
-                );
+                ) {
+                    set_stack_overflow_panic(vm, fiber, err);
+                    return OsrResult::Panic;
+                }
                 OsrResult::FrameChanged
             }
         }
@@ -799,7 +870,10 @@ pub fn dispatch_loop_osr(
             // Materialize any intermediate JIT frames from nested calls.
             // Without this, resume_stack entries are lost and the fiber
             // resumes at the wrong PC (callee's PC in the loop function's frame).
-            materialize_jit_frames(fiber, module, resume_pc);
+            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
+                set_stack_overflow_panic(vm, fiber, err);
+                return OsrResult::Panic;
+            }
 
             // Store token for scheduler
             fiber.resume_io_token = Some(token);
@@ -812,12 +886,18 @@ pub fn dispatch_loop_osr(
         }
         JitResult::WaitQueue => {
             let resume_pc = ctx.call_resume_pc();
-            materialize_jit_frames(fiber, module, resume_pc);
+            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
+                set_stack_overflow_panic(vm, fiber, err);
+                return OsrResult::Panic;
+            }
             OsrResult::WaitQueue
         }
         JitResult::Replay => {
             let resume_pc = ctx.call_resume_pc();
-            materialize_jit_frames(fiber, module, resume_pc);
+            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
+                set_stack_overflow_panic(vm, fiber, err);
+                return OsrResult::Panic;
+            }
             OsrResult::FrameChanged
         }
     }

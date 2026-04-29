@@ -30,7 +30,7 @@ use crate::types::{SlotType, ValueMeta, ValueRttid};
 use crate::RuntimeType;
 
 const MAGIC: &[u8; 3] = b"VOB";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum SerializeError {

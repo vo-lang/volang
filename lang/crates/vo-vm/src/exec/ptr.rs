@@ -11,7 +11,7 @@ use crate::vm::helpers::{stack_get, stack_set};
 pub fn exec_ptr_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) {
     let meta_raw = stack_get(stack, bp + inst.b as usize) as u32;
     let value_meta = ValueMeta::from_raw(meta_raw);
-    let slots = inst.flags as u16;
+    let slots = inst.c;
     let ptr = gc.alloc(value_meta, slots);
     stack_set(stack, bp + inst.a as usize, ptr as u64);
 }

@@ -304,7 +304,7 @@ pub fn init_vfs() -> js_sys::Promise {
 // =============================================================================
 
 const VFS_MOD_ROOT: &str = "";
-const STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION: &str = "1";
+const STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION: &str = "2";
 const STUDIO_VFS_COMPILE_CACHE_SLOT_NAMESPACE: &str = "studio-vfs-compile-cache-slot";
 const STUDIO_VFS_COMPILE_CACHE_NAMESPACE: &str = "studio-vfs-compile-cache";
 
@@ -958,6 +958,8 @@ fn compute_vfs_compile_cache_fingerprint(
 ) -> Result<String, String> {
     let mut hasher = StableHasher::new(STUDIO_VFS_COMPILE_CACHE_NAMESPACE);
     hasher.update_str("schema", STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION);
+    hasher.update_str("compiler_version", env!("CARGO_PKG_VERSION"));
+    hasher.update_str("compiler_build_id", STUDIO_WASM_BUILD_ID);
     hasher.update_str("entry_path", &target.entry_path);
     hasher.update_str("project_root", target.project_root.as_deref().unwrap_or(""));
     let mut files = Vec::new();

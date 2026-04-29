@@ -1,0 +1,79 @@
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+type Theme struct {
+	Name string
+	Color int
+	Accent string
+}
+
+type HUD struct {
+	Time float64
+	Speed float64
+	Message string
+	LastReason string
+	Items []int
+	A int
+	B int
+	C int
+	D int
+	E int
+	F int
+	G int
+	H int
+}
+
+var checksum int
+
+func makeHUD(i int) HUD {
+	return HUD{
+		Time: float64(i) * 0.25,
+		Speed: float64(i * 3),
+		Message: fmt.Sprintf("message-%d", i),
+		LastReason: fmt.Sprintf("reason-%d", i),
+		Items: []int{i, i + 1, i + 2},
+		A: i,
+		B: i + 1,
+		C: i + 2,
+		D: i + 3,
+		E: i + 4,
+		F: i + 5,
+		G: i + 6,
+		H: i + 7,
+	}
+}
+
+func draw(theme *Theme, hud *HUD) {
+	checksum += theme.Color
+	checksum += len(theme.Name) + len(theme.Accent)
+	checksum += len(hud.Message) + len(hud.LastReason)
+	checksum += hud.Items[0] + hud.Items[1] + hud.Items[2]
+	checksum += hud.A + hud.H + int(hud.Speed)
+}
+
+func churn(i int) {
+	for n := 0; n < 64; n++ {
+		buf := make([]int, 64)
+		buf[0] = i
+		buf[63] = n
+		checksum += buf[0] + buf[63]
+		if n % 16 == 0 {
+			time.Sleep(0 * time.Millisecond)
+		}
+	}
+}
+
+func main() {
+	theme := Theme{Name: "BlockKart", Color: 17, Accent: "blue"}
+	for i := 0; i < 120; i++ {
+		hud := makeHUD(i)
+		draw(&theme, &hud)
+		churn(i)
+	}
+	assert(checksum > 0, "checksum should be positive")
+	fmt.Println("gc_addr_of_local_struct_pointer_arg: ok", checksum)
+}

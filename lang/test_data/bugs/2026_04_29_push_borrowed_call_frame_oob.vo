@@ -1,0 +1,34 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+var depth int
+
+func recurse() {
+	var pad [4096]int
+	pad[0] = depth
+	pad[4095] = depth
+	depth++
+	recurse()
+}
+
+func main() {
+	recovered := false
+	message := ""
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				recovered = true
+				message = fmt.Sprint(r)
+			}
+		}()
+		recurse()
+	}()
+
+	assert(recovered, "recursive borrowed calls must fail as a Vo runtime panic, not a host VM panic")
+	assert(strings.Contains(message, "stack"), "panic should mention stack")
+	fmt.Println("push_borrowed_call_frame_oob: ok")
+}

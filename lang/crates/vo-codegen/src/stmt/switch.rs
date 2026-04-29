@@ -94,6 +94,7 @@ fn emit_type_switch_binding(
             gcref_slot,
             value_slots: slots,
             meta_idx,
+            slot_types,
         }
         .emit_with_copy(func, value_slot);
     }

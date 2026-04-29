@@ -2212,7 +2212,7 @@ fn ptr_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let gc_ptr = e.gc_ptr();
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
-    let slots_i32 = e.builder().ins().iconst(types::I32, inst.flags as i64);
+    let slots_i32 = e.builder().ins().iconst(types::I32, inst.c as i64);
     let call = emit_funcref_call(e, func, &[gc_ptr, meta_i32, slots_i32]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);

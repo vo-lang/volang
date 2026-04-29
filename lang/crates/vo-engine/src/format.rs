@@ -171,7 +171,7 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::GlobalSetN => format!("GlobalSetN    global_{}, r{}, n={}", a, b, flags),
 
         // PTR
-        Opcode::PtrNew => format!("PtrNew        r{}, meta=r{}, slots={}", a, b, flags),
+        Opcode::PtrNew => format!("PtrNew        r{}, meta=r{}, slots={}", a, b, c),
         Opcode::PtrGet => format!("PtrGet        r{}, r{}[{}]", a, b, c),
         Opcode::PtrSet => format!("PtrSet        r{}[{}], r{}", a, b, c),
         Opcode::PtrGetN => format!("PtrGetN       r{}, r{}[{}], n={}", a, b, c, flags),

@@ -114,6 +114,7 @@ pub fn runtime_trap_message(kind: RuntimeTrapKind) -> &'static str {
         RuntimeTrapKind::RecvOnNilChannel => ERR_RECV_ON_NIL,
         RuntimeTrapKind::CloseNilChannel => ERR_CLOSE_NIL_CHANNEL,
         RuntimeTrapKind::CloseClosedChannel => ERR_CLOSE_CLOSED_CHANNEL,
+        RuntimeTrapKind::StackOverflow => "runtime error: stack overflow",
     }
 }
 

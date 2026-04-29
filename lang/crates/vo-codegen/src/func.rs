@@ -342,6 +342,7 @@ impl FuncBuilder {
         value_slots: u16,
         stores_pointer: bool,
         meta_idx: u16,
+        slot_types: &[SlotType],
     ) {
         let local = match self.locals.get(&sym) {
             Some(l) => l,
@@ -371,8 +372,9 @@ impl FuncBuilder {
         use vo_vm::instruction::Opcode;
         let meta_reg = self.alloc_slots(&[SlotType::Value]);
         self.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-        self.emit_with_flags(Opcode::PtrNew, value_slots as u8, gcref_slot, meta_reg, 0);
-        self.emit_ptr_set(gcref_slot, 0, param_slot, value_slots);
+        self.emit_ptr_new(gcref_slot, meta_reg, value_slots);
+        debug_assert_eq!(value_slots as usize, slot_types.len());
+        self.emit_ptr_set_with_slot_types(gcref_slot, 0, param_slot, slot_types);
     }
 
     // === Local variable definition ===
@@ -635,6 +637,11 @@ impl FuncBuilder {
 
     pub fn emit_with_flags(&mut self, op: Opcode, flags: u8, a: u16, b: u16, c: u16) {
         self.code.push(Instruction::with_flags(op, flags, a, b, c));
+    }
+
+    /// Emit PtrNew: a=dst, b=meta register, c=heap slot count.
+    pub fn emit_ptr_new(&mut self, dst: u16, meta_reg: u16, slots: u16) {
+        self.emit_op(Opcode::PtrNew, dst, meta_reg, slots);
     }
 
     /// Emit ClosureNew with proper func_id encoding (handles func_id > 65535)

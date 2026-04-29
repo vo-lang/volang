@@ -6,10 +6,11 @@ use vo_runtime::gc::GcRef;
 use vo_runtime::objects::closure;
 
 use crate::bytecode::Module;
-use crate::fiber::Fiber;
+use crate::fiber::{Fiber, FiberCapacityError};
 use crate::instruction::Instruction;
-use crate::vm::helpers::{stack_get, stack_set};
-use crate::vm::ExecResult;
+use crate::vm::helpers::{runtime_panic, stack_get, stack_set};
+use crate::vm::{ExecResult, RuntimeTrapKind};
+use vo_runtime::gc::Gc;
 use vo_runtime::itab::ItabCache;
 
 #[derive(Clone, Copy)]
@@ -115,7 +116,30 @@ fn resolve_call_iface_target(
     }
 }
 
-pub fn exec_call(fiber: &mut Fiber, inst: &Instruction, module: &Module) -> ExecResult {
+#[inline]
+fn stack_overflow_panic(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    module: &Module,
+    err: FiberCapacityError,
+) -> ExecResult {
+    let stack = fiber.stack_ptr();
+    runtime_panic(
+        gc,
+        fiber,
+        stack,
+        module,
+        RuntimeTrapKind::StackOverflow,
+        err.message(),
+    )
+}
+
+pub fn exec_call(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    inst: &Instruction,
+    module: &Module,
+) -> ExecResult {
     let func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
     let arg_start = inst.b as usize;
     let arg_slots = (inst.c >> 8) as usize;
@@ -131,7 +155,7 @@ pub fn exec_call(fiber: &mut Fiber, inst: &Instruction, module: &Module) -> Exec
     let func = &module.functions[func_id as usize];
     let local_slots = func.local_slots as usize;
     let gc_scan_slots = func.gc_scan_slots as usize;
-    let new_bp = fiber.push_borrowed_call_frame(
+    let new_bp = match fiber.try_push_borrowed_call_frame(
         func_id,
         arg_start as u16,
         inst.b + arg_slots as u16,
@@ -139,13 +163,21 @@ pub fn exec_call(fiber: &mut Fiber, inst: &Instruction, module: &Module) -> Exec
         caller_scan_slots,
         local_slots as u16,
         func.gc_scan_slots,
-    );
+    ) {
+        Ok(bp) => bp,
+        Err(err) => return stack_overflow_panic(gc, fiber, module, err),
+    };
     fiber.zero_slots_tail_at(new_bp, gc_scan_slots, arg_slots);
 
     ExecResult::FrameChanged
 }
 
-pub fn exec_call_closure(fiber: &mut Fiber, inst: &Instruction, module: &Module) -> ExecResult {
+pub fn exec_call_closure(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    inst: &Instruction,
+    module: &Module,
+) -> ExecResult {
     let caller_bp = fiber.frames.last().map_or(0, |f| f.bp);
     let stack = fiber.stack_ptr();
     let closure_ref = stack_get(stack, caller_bp + inst.a as usize) as GcRef;
@@ -189,7 +221,7 @@ pub fn exec_call_closure(fiber: &mut Fiber, inst: &Instruction, module: &Module)
     let caller_func = &module.functions[caller_frame.func_id as usize];
     let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(borrowed_start);
 
-    let new_bp = fiber.push_borrowed_call_frame(
+    let new_bp = match fiber.try_push_borrowed_call_frame(
         func_id,
         borrowed_start,
         inst.b + arg_slots as u16,
@@ -197,7 +229,10 @@ pub fn exec_call_closure(fiber: &mut Fiber, inst: &Instruction, module: &Module)
         caller_scan_slots,
         func.local_slots as u16,
         func.gc_scan_slots,
-    );
+    ) {
+        Ok(bp) => bp,
+        Err(err) => return stack_overflow_panic(gc, fiber, module, err),
+    };
     fiber.zero_slots_tail_at(
         new_bp,
         func.gc_scan_slots as usize,
@@ -213,6 +248,7 @@ pub fn exec_call_closure(fiber: &mut Fiber, inst: &Instruction, module: &Module)
 }
 
 pub fn exec_call_iface(
+    gc: &mut Gc,
     fiber: &mut Fiber,
     inst: &Instruction,
     module: &Module,
@@ -262,7 +298,7 @@ pub fn exec_call_iface(
             }
         };
 
-    let new_bp = fiber.push_borrowed_call_frame(
+    let new_bp = match fiber.try_push_borrowed_call_frame(
         target.func_id,
         borrowed_start,
         inst.b + arg_slots as u16,
@@ -270,7 +306,10 @@ pub fn exec_call_iface(
         caller_scan_slots,
         target.local_slots,
         target.gc_scan_slots,
-    );
+    ) {
+        Ok(bp) => bp,
+        Err(err) => return stack_overflow_panic(gc, fiber, module, err),
+    };
     fiber.zero_slots_tail_at(new_bp, target.gc_scan_slots as usize, 1 + arg_slots);
     let stack = fiber.stack_ptr();
 

@@ -1,0 +1,32 @@
+// Regression: PtrNew must encode the full heap slot count for structs larger
+// than 255 slots. A u8 slot-count encoding truncated this object to 5 slots,
+// which later corrupted nearby GC objects.
+
+package main
+
+import (
+	"strings"
+	"toolchain"
+)
+
+func main() {
+	source := "package main\n" +
+		"\n" +
+		"type Big struct {\n" +
+		"\tvalues [260]int\n" +
+		"\ttail int\n" +
+		"}\n" +
+		"\n" +
+		"func main() {\n" +
+		"\t_ = &Big{}\n" +
+		"}\n"
+
+	m, err := toolchain.CompileString(source)
+	assert(err == nil, "large struct source should compile")
+	defer toolchain.Free(m)
+
+	bytecode := toolchain.FormatBytecode(m)
+	assert(strings.Contains(bytecode, "PtrNew"), "compiled bytecode should allocate Big")
+	assert(strings.Contains(bytecode, "slots=261"), "PtrNew must allocate all 261 heap slots")
+	assert(!strings.Contains(bytecode, "slots=5"), "PtrNew slot count must not be truncated to u8")
+}
