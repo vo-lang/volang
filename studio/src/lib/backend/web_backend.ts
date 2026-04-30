@@ -55,7 +55,8 @@ const QUICKPLAY_SESSION_ROOT = `${WORKSPACE_ROOT}/.studio-sessions/quickplay`;
 const BLOCKKART_PACKAGED_MODULE_MARKERS = [
   '/github.com@vo-lang@vogui/v0.1.14/vo.release.json',
   '/github.com@vo-lang@vopack/v0.1.2/vo.release.json',
-  '/github.com@vo-lang@voplay/v0.1.25/artifacts/voplay_island_bg.wasm',
+  '/github.com@vo-lang@voplay/v0.1.26/vo.web.json',
+  '/github.com@vo-lang@voplay/v0.1.26/artifacts/voplay_island_bg.wasm',
 ];
 const sessionWorkspaceDiscovery = new Map<string, WorkspaceDiscoveryMode>();
 const DISPLAY_PULSE_DELAY_MS = 0xFFFFFFFF;
@@ -1561,6 +1562,9 @@ async function openBlockKartQuickPlaySession(): Promise<SessionInfo> {
   const entryPath = `${sessionRoot}/main.vo`;
   if (!hasVfsFile(entryPath)) {
     throw new Error('BlockKart quickplay package is missing main.vo');
+  }
+  if (!hasBlockKartPackagedDependencies()) {
+    await installBlockKartPackagedDependencies();
   }
   return buildSessionInfo(
     sessionRoot,

@@ -83,6 +83,7 @@ function shouldPackageDependencyFile(relativePath) {
     relativePath === 'vo.mod'
     || relativePath === 'vo.lock'
     || relativePath === 'vo.release.json'
+    || relativePath === 'vo.web.json'
     || relativePath === '.vo-version'
     || relativePath === '.vo-source-digest'
   ) {

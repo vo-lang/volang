@@ -60,8 +60,8 @@ function runStaticSmoke() {
   assert(quickplayTs.includes('?${params.toString()}'), 'manifest URLs must carry the build query');
 
   const artifactRoot = join(root, 'studio/public/quickplay/blockkart/artifacts');
-  assert(existsSync(join(artifactRoot, 'github.com@vo-lang@voplay/v0.1.25/voplay_island.js')), 'missing voplay quickplay JS artifact');
-  assert(existsSync(join(artifactRoot, 'github.com@vo-lang@voplay/v0.1.25/voplay_island_bg.wasm')), 'missing voplay quickplay WASM artifact');
+  assert(existsSync(join(artifactRoot, 'github.com@vo-lang@voplay/v0.1.26/voplay_island.js')), 'missing voplay quickplay JS artifact');
+  assert(existsSync(join(artifactRoot, 'github.com@vo-lang@voplay/v0.1.26/voplay_island_bg.wasm')), 'missing voplay quickplay WASM artifact');
   console.log('BlockKart smoke: static ok');
 }
 
@@ -75,7 +75,7 @@ async function runHttpSmoke(baseUrl, buildId) {
   const script = await (await fetchOk(scriptUrl)).text();
   assert(script.includes('/quickplay/blockkart/project.json'), 'entry bundle does not reference BlockKart project manifest');
   assert(script.includes('/quickplay/blockkart/deps.json'), 'entry bundle does not reference BlockKart deps manifest');
-  assert(script.includes('v0.1.25'), 'entry bundle does not reference current voplay quickplay artifacts');
+  assert(script.includes('v0.1.26'), 'entry bundle does not reference current voplay quickplay artifacts');
   assert(!script.includes('v0.1.23'), 'entry bundle still references stale voplay v0.1.23 artifacts');
   if (buildId) {
     assert(script.includes(buildId), `entry bundle does not contain build id ${buildId}`);
@@ -88,7 +88,7 @@ async function runHttpSmoke(baseUrl, buildId) {
   assert(project.module === 'github.com/vo-lang/blockkart', 'remote project manifest module is wrong');
 
   const voplay = deps.modules?.find((mod) => mod.module === 'github.com/vo-lang/voplay');
-  assert(voplay?.version === 'v0.1.25', 'remote deps manifest does not use voplay v0.1.25');
+  assert(voplay?.version === 'v0.1.26', 'remote deps manifest does not use voplay v0.1.26');
   for (const artifact of voplay.artifacts ?? []) {
     await fetchOk(joinUrl(baseUrl, artifact.url));
   }
