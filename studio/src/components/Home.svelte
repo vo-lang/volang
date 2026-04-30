@@ -97,6 +97,7 @@
   export let onConnectGitHub: () => void = () => {};
 
   const LAST_CREATE_LOCATION_KEY = 'vo_studio_last_create_location';
+  const VO_GITHUB_URL = 'https://github.com/vo-lang/volang';
   const VO_FILE_FILTERS: FileDialogFilter[] = [{ name: 'Vo source', extensions: ['vo'] }];
 
   let searchQuery = '';
@@ -438,6 +439,17 @@
           </span>
           <svg class="btn-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg>
         </button>
+        <a class="source-cta" href={VO_GITHUB_URL} target="_blank" rel="noreferrer" aria-label="Open vo-lang/volang on GitHub">
+          <svg class="source-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M4 3.5a1.7 1.7 0 1 1-3.4 0 1.7 1.7 0 0 1 3.4 0zM4 12.5a1.7 1.7 0 1 1-3.4 0 1.7 1.7 0 0 1 3.4 0zM15.4 12.5a1.7 1.7 0 1 1-3.4 0 1.7 1.7 0 0 1 3.4 0z"/>
+            <path d="M2.3 5.2v5.6M4 3.5h4.1c2.5 0 4.2 1.7 4.2 4.1v3.2"/>
+          </svg>
+          <span class="source-cta-text">
+            <span class="source-cta-title">Source on GitHub</span>
+            <span class="source-cta-desc">vo-lang/volang</span>
+          </span>
+          <svg class="external-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4h6v6M12 4l-7 7"/></svg>
+        </a>
       </div>
 
       <div class="quick-try">
@@ -953,6 +965,68 @@
     transition: stroke 0.2s;
   }
   .docs-cta:hover .btn-arrow { stroke: #89b4fa; }
+
+  .source-cta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    margin-top: 2px;
+    border: 1px solid rgba(148, 226, 213, 0.14);
+    border-radius: 8px;
+    background: rgba(148, 226, 213, 0.035);
+    color: inherit;
+    text-decoration: none;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  .source-cta:hover {
+    border-color: rgba(148, 226, 213, 0.32);
+    background: rgba(148, 226, 213, 0.07);
+  }
+  .source-icon {
+    width: 17px;
+    height: 17px;
+    stroke: #94e2d5;
+    fill: none;
+    stroke-width: 1.35;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    flex-shrink: 0;
+    transition: stroke 0.2s;
+  }
+  .source-cta:hover .source-icon { stroke: #b7f4e8; }
+  .source-cta-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1;
+    min-width: 0;
+  }
+  .source-cta-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #cdd6f4;
+  }
+  .source-cta-desc {
+    font-size: 10px;
+    color: #585b70;
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .source-cta .external-icon {
+    width: 12px;
+    height: 12px;
+    stroke: #45475a;
+    fill: none;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    flex-shrink: 0;
+    transition: stroke 0.2s;
+  }
+  .source-cta:hover .external-icon { stroke: #94e2d5; }
 
   .btn-arrow {
     width: 12px; height: 12px;
