@@ -203,7 +203,7 @@
     font-weight: 800;
     margin: 0 0 16px;
     color: #cdd6f4;
-    letter-spacing: -0.02em;
+    letter-spacing: 0;
   }
   .docs-article :global(h2) {
     font-size: 20px;
@@ -300,6 +300,83 @@
     border: none;
     border-top: 1px solid #313244;
     margin: 24px 0;
+  }
+
+  @media (max-width: 700px) {
+    .docs-layout {
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .docs-sidebar {
+      width: 100%;
+      max-height: min(38vh, 260px);
+      border-right: none;
+      border-bottom: 1px solid #1e1e2e;
+      flex: 0 0 auto;
+    }
+
+    .docs-sidebar-header {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #181825;
+      padding: 12px 16px 8px;
+    }
+
+    .docs-section-toggle {
+      padding: 8px 16px;
+    }
+
+    .docs-page-link {
+      padding: 7px 16px 7px 34px;
+    }
+
+    .docs-content {
+      width: 100%;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+
+    .docs-article {
+      max-width: none;
+      padding: 24px 20px 72px;
+    }
+
+    .docs-article :global(h1) {
+      font-size: 24px;
+    }
+
+    .docs-article :global(h2) {
+      font-size: 18px;
+      margin-top: 28px;
+    }
+
+    .docs-article :global(pre) {
+      margin-left: -4px;
+      margin-right: -4px;
+      border-radius: 6px;
+    }
+
+    .docs-article :global(table) {
+      display: block;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+  }
+
+  @media (max-width: 430px) {
+    .docs-sidebar {
+      max-height: 34vh;
+    }
+
+    .docs-article {
+      padding: 22px 16px 64px;
+    }
+
+    .docs-article :global(h1) {
+      font-size: 22px;
+    }
   }
 
   /* -- highlight.js Catppuccin Mocha tokens -- */

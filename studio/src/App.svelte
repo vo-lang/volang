@@ -57,6 +57,7 @@
       const spec = launch ?? { proj: null, mode: bootstrap.mode };
       const hasProj = spec.proj != null;
       const isRunner = spec.mode === 'runner' && hasProj;
+      const wantsDocs = !hasProj && $route.mode === 'docs';
       loading = launchLoading(spec.proj);
       const openedSession = await registry.project.openSession(spec);
       if (isRunner) {
@@ -65,8 +66,9 @@
       } else {
         await bindDevSession(openedSession, {
           openEntry: Boolean(hasProj && openedSession.entryPath),
+          syncUrl: !wantsDocs,
         });
-        ide.update((s) => ({ ...s, appMode: hasProj ? 'develop' : 'manage' }));
+        ide.update((s) => ({ ...s, appMode: wantsDocs ? 'docs' : hasProj ? 'develop' : 'manage' }));
       }
       loading = '';
       if (!isRunner) {
@@ -157,7 +159,7 @@
 
   async function bindDevSession(
     nextSessionInfo: SessionInfo,
-    options: { openEntry?: boolean; syncCatalogRoot?: boolean } = {},
+    options: { openEntry?: boolean; syncCatalogRoot?: boolean; syncUrl?: boolean } = {},
   ): Promise<void> {
     if (!registry) return;
     sessionInfo = nextSessionInfo;
@@ -170,7 +172,9 @@
       nextSessionInfo.source,
       shareInfoForMode(nextSessionInfo, 'dev'),
     );
-    syncBrowserUrlToSession(nextSessionInfo, 'dev');
+    if (options.syncUrl !== false) {
+      syncBrowserUrlToSession(nextSessionInfo, 'dev');
+    }
     sessionProjectHasGui = registry.projectCatalog.getSessionProjectConfig(nextSessionInfo).hasGui;
     ide.update((s) => ({ ...s, outputExpanded: false, previewCollapsed: false }));
     currentDir = nextSessionInfo.root;
