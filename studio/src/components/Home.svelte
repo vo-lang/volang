@@ -1426,15 +1426,82 @@
 
   /* ── Responsive ── */
   @media (max-width: 700px) {
-    .dashboard { grid-template-columns: 1fr; }
+    .dashboard {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto auto;
+      align-content: start;
+      overflow-y: auto;
+      overflow-x: hidden;
+      width: 100%;
+    }
     .sidebar {
       border-right: none;
       border-bottom: 1px solid rgba(88, 91, 112, 0.08);
       padding: 16px;
-      overflow-y: visible;
+      overflow: visible;
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
     }
-    .quick-try { display: none; }
-    .content { padding: 16px; }
+    .brand-block {
+      min-width: 0;
+      max-width: 100%;
+    }
+    .quick-try {
+      flex: 0 0 auto;
+      display: flex;
+      border-top: 1px solid rgba(88, 91, 112, 0.08);
+      padding-top: 12px;
+      gap: 6px;
+      overflow: visible;
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .quick-try-label {
+      padding: 0;
+    }
+    .quick-try-label-gui {
+      padding-top: 6px;
+    }
+    .ex-list {
+      flex-direction: row;
+      gap: 8px;
+      overflow-x: auto;
+      margin: 0 -16px;
+      padding: 0 16px 4px;
+      width: calc(100% + 32px);
+      min-width: 0;
+      max-width: calc(100% + 32px);
+      scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
+    }
+    .ex-list::-webkit-scrollbar {
+      display: none;
+    }
+    .ex-link {
+      flex: 0 0 auto;
+      margin: 0;
+      padding: 7px 10px;
+      border: 1px solid rgba(137, 180, 250, 0.14);
+      border-radius: 999px;
+      background: rgba(137, 180, 250, 0.05);
+    }
+    .ex-link-gui {
+      border-color: rgba(166, 227, 161, 0.14);
+      background: rgba(166, 227, 161, 0.05);
+    }
+    .ex-link-dot,
+    .ex-link-desc {
+      display: none;
+    }
+    .content {
+      padding: 16px;
+      overflow: visible;
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+    }
     .featured-header {
       flex-direction: column;
       align-items: flex-start;
