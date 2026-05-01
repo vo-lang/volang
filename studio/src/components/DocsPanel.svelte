@@ -9,6 +9,11 @@
   let renderedHtml = '';
   let expandedSections: Set<string> = new Set(manifest.sections.map(s => s.slug));
   let contentEl: HTMLElement | null = null;
+  let mobileNavOpen = false;
+
+  $: activeSection = manifest.sections.find((section) => section.pages.some((page) => page.file === activeFile));
+  $: activePage = activeSection?.pages.find((page) => page.file === activeFile);
+  $: activePageTitle = activePage?.title ?? 'Documentation';
 
   // Subscribe to route changes (e.g. browser back/forward, direct URL)
   const unsubRoute = route.subscribe(r => {
@@ -48,6 +53,7 @@
     if (contentEl) {
       contentEl.scrollTop = 0;
     }
+    mobileNavOpen = false;
   }
 
   function toggleSection(slug: string): void {
@@ -61,9 +67,54 @@
 
 </script>
 
+<svelte:window
+  on:keydown={(event) => {
+    if (event.key === 'Escape') {
+      mobileNavOpen = false;
+    }
+  }}
+/>
+
 <div class="docs-layout">
-  <nav class="docs-sidebar">
-    <div class="docs-sidebar-header">Documentation</div>
+  <div class="docs-mobile-bar">
+    <button
+      class="docs-mobile-menu"
+      aria-label="Open documentation menu"
+      aria-controls="docs-navigation"
+      aria-expanded={mobileNavOpen}
+      on:click={() => (mobileNavOpen = true)}
+    >
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M3 4h10M3 8h10M3 12h10" />
+      </svg>
+    </button>
+    <div class="docs-mobile-title">
+      <span class="docs-mobile-kicker">Documentation</span>
+      <span class="docs-mobile-current">{activePageTitle}</span>
+    </div>
+  </div>
+
+  {#if mobileNavOpen}
+    <button
+      class="docs-nav-backdrop"
+      aria-label="Close documentation menu"
+      on:click={() => (mobileNavOpen = false)}
+    ></button>
+  {/if}
+
+  <nav id="docs-navigation" class="docs-sidebar" class:mobile-open={mobileNavOpen}>
+    <div class="docs-sidebar-header">
+      <span>Documentation</span>
+      <button
+        class="docs-sidebar-close"
+        aria-label="Close documentation menu"
+        on:click={() => (mobileNavOpen = false)}
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M4 4l8 8M12 4l-8 8" />
+        </svg>
+      </button>
+    </div>
     {#each manifest.sections as section}
       <div class="docs-section">
         <button
@@ -104,6 +155,13 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
+    position: relative;
+  }
+
+  .docs-mobile-bar,
+  .docs-nav-backdrop,
+  .docs-sidebar-close {
+    display: none;
   }
 
   /* -- Sidebar -- */
@@ -308,20 +366,129 @@
       overflow: hidden;
     }
 
-    .docs-sidebar {
-      width: 100%;
-      max-height: min(38vh, 260px);
-      border-right: none;
+    .docs-mobile-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 52px;
+      padding: 8px 14px;
       border-bottom: 1px solid #1e1e2e;
+      background: #11111b;
       flex: 0 0 auto;
     }
 
+    .docs-mobile-menu,
+    .docs-sidebar-close {
+      border: 1px solid #313244;
+      background: #181825;
+      color: #bac2de;
+      cursor: pointer;
+      font: inherit;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.1s, border-color 0.1s, color 0.1s;
+    }
+
+    .docs-mobile-menu:hover,
+    .docs-sidebar-close:hover {
+      background: #1e1e2e;
+      border-color: #45475a;
+      color: #cdd6f4;
+    }
+
+    .docs-mobile-menu {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+    }
+
+    .docs-mobile-menu svg,
+    .docs-sidebar-close svg {
+      width: 16px;
+      height: 16px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .docs-mobile-title {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      min-width: 0;
+    }
+
+    .docs-mobile-kicker {
+      color: #585b70;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      line-height: 1.2;
+      text-transform: uppercase;
+    }
+
+    .docs-mobile-current {
+      color: #cdd6f4;
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .docs-nav-backdrop {
+      display: block;
+      position: absolute;
+      inset: 0;
+      z-index: 10;
+      border: none;
+      background: rgba(17, 17, 27, 0.68);
+      backdrop-filter: blur(2px);
+      cursor: default;
+    }
+
+    .docs-sidebar {
+      position: absolute;
+      inset: 0 auto 0 0;
+      z-index: 11;
+      width: min(320px, calc(100% - 24px));
+      max-height: none;
+      border-right: 1px solid #313244;
+      border-bottom: none;
+      box-shadow: 24px 0 48px rgba(0, 0, 0, 0.35);
+      transform: translateX(-100%);
+      transition: transform 0.16s ease, visibility 0.16s ease;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .docs-sidebar.mobile-open {
+      transform: translateX(0);
+      visibility: visible;
+      pointer-events: auto;
+    }
+
     .docs-sidebar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
       position: sticky;
       top: 0;
       z-index: 1;
       background: #181825;
-      padding: 12px 16px 8px;
+      padding: 12px 12px 8px 16px;
+    }
+
+    .docs-sidebar-close {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
     }
 
     .docs-section-toggle {
@@ -366,10 +533,6 @@
   }
 
   @media (max-width: 430px) {
-    .docs-sidebar {
-      max-height: 34vh;
-    }
-
     .docs-article {
       padding: 22px 16px 64px;
     }
