@@ -446,11 +446,11 @@ impl<'a> LoopCompiler<'a> {
     fn call(&mut self, inst: &Instruction) -> bool {
         let func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
         let arg_start = inst.b as usize;
-        let arg_slots = (inst.c >> 8) as usize;
-        let call_ret_slots = (inst.c & 0xFF) as usize;
 
         // Get target function info
         let target_func = &self.vo_module.functions[func_id as usize];
+        let arg_slots = target_func.param_slots as usize;
+        let call_ret_slots = target_func.ret_slots as usize;
         // has_defer callees need VM execution (defer requires real CallFrame in fiber.frames).
         // Everything else can use JIT-to-JIT direct call with VM fallback.
         if !target_func.has_defer {

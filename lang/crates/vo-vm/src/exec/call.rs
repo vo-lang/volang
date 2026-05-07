@@ -142,8 +142,6 @@ pub fn exec_call(
 ) -> ExecResult {
     let func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
     let arg_start = inst.b as usize;
-    let arg_slots = (inst.c >> 8) as usize;
-    let ret_slots = (inst.c & 0xFF) as usize;
     let caller_frame = fiber
         .frames
         .last()
@@ -153,13 +151,15 @@ pub fn exec_call(
     let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(arg_start as u16);
 
     let func = &module.functions[func_id as usize];
+    let arg_slots = func.param_slots as usize;
     let local_slots = func.local_slots as usize;
     let gc_scan_slots = func.gc_scan_slots as usize;
+    let ret_slots = func.ret_slots;
     let new_bp = match fiber.try_push_borrowed_call_frame(
         func_id,
         arg_start as u16,
         inst.b + arg_slots as u16,
-        ret_slots as u16,
+        ret_slots,
         caller_scan_slots,
         local_slots as u16,
         func.gc_scan_slots,
@@ -183,10 +183,10 @@ pub fn exec_call_closure(
     let closure_ref = stack_get(stack, caller_bp + inst.a as usize) as GcRef;
     let func_id = closure::func_id(closure_ref);
     let arg_start = inst.b as usize;
-    let arg_slots = (inst.c >> 8) as usize;
-    let ret_slots = inst.c & 0xFF;
 
     let func = &module.functions[func_id as usize];
+    let arg_slots = func.param_slots as usize;
+    let ret_slots = func.ret_slots;
 
     // New frame's bp is current stack top
     let layout = vo_runtime::objects::closure::call_layout(
@@ -224,7 +224,7 @@ pub fn exec_call_closure(
     let new_bp = match fiber.try_push_borrowed_call_frame(
         func_id,
         borrowed_start,
-        inst.b + arg_slots as u16,
+        borrowed_start + arg_slots as u16,
         ret_slots,
         caller_scan_slots,
         func.local_slots as u16,
@@ -233,11 +233,7 @@ pub fn exec_call_closure(
         Ok(bp) => bp,
         Err(err) => return stack_overflow_panic(gc, fiber, module, err),
     };
-    fiber.zero_slots_tail_at(
-        new_bp,
-        func.gc_scan_slots as usize,
-        layout.arg_offset + arg_slots,
-    );
+    fiber.zero_slots_tail_at(new_bp, func.gc_scan_slots as usize, arg_slots);
     let stack = fiber.stack_ptr();
 
     if let Some(slot0_val) = layout.slot0 {
@@ -254,8 +250,6 @@ pub fn exec_call_iface(
     module: &Module,
     itab_cache: &ItabCache,
 ) -> ExecResult {
-    let arg_slots = (inst.c >> 8) as usize;
-    let ret_slots = (inst.c & 0xFF) as usize;
     let method_idx_u8 = inst.flags;
     let method_idx = method_idx_u8 as usize;
 
@@ -297,12 +291,14 @@ pub fn exec_call_iface(
                 target
             }
         };
+    let arg_slots = module.functions[target.func_id as usize].param_slots as usize;
+    let ret_slots = module.functions[target.func_id as usize].ret_slots;
 
     let new_bp = match fiber.try_push_borrowed_call_frame(
         target.func_id,
         borrowed_start,
-        inst.b + arg_slots as u16,
-        ret_slots as u16,
+        borrowed_start + arg_slots as u16,
+        ret_slots,
         caller_scan_slots,
         target.local_slots,
         target.gc_scan_slots,
@@ -310,7 +306,7 @@ pub fn exec_call_iface(
         Ok(bp) => bp,
         Err(err) => return stack_overflow_panic(gc, fiber, module, err),
     };
-    fiber.zero_slots_tail_at(new_bp, target.gc_scan_slots as usize, 1 + arg_slots);
+    fiber.zero_slots_tail_at(new_bp, target.gc_scan_slots as usize, arg_slots);
     let stack = fiber.stack_ptr();
 
     stack_set(stack, new_bp, slot1);

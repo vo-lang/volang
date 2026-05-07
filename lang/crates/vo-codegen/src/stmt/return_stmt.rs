@@ -46,11 +46,7 @@ fn emit_read_named_return(
 ) {
     if escaped {
         // Escaped: read from heap via GcRef
-        if slots == 1 {
-            func.emit_op(Opcode::PtrGet, dst, src_slot, 0);
-        } else {
-            func.emit_with_flags(Opcode::PtrGetN, slots as u8, dst, src_slot, 0);
-        }
+        func.emit_ptr_get(dst, src_slot, 0, slots);
     } else {
         // Non-escaped: copy from stack
         func.emit_copy(dst, src_slot, slots);

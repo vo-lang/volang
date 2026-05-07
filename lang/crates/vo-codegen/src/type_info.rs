@@ -1507,7 +1507,10 @@ pub fn encode_map_new_slots(key_slots: u16, val_slots: u16) -> u16 {
     (key_slots << 8) | val_slots
 }
 
-/// Encode Call args: (arg_slots << 8) | ret_slots
+/// Encode Call args: (arg_slots << 8) | ret_slots_low8.
+///
+/// Static Call execution must use FunctionDef.param_slots and FunctionDef.ret_slots
+/// as the source of truth; this legacy packed field only preserves 8 bits per side.
 #[inline]
 pub fn encode_call_args(arg_slots: u16, ret_slots: u16) -> u16 {
     (arg_slots << 8) | ret_slots

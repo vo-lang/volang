@@ -671,10 +671,18 @@ impl FuncBuilder {
 
     /// Emit PtrGet or PtrGetN based on slot count
     pub fn emit_ptr_get(&mut self, dst: u16, ptr: u16, offset: u16, slots: u16) {
-        if slots == 1 {
-            self.emit_op(Opcode::PtrGet, dst, ptr, offset);
-        } else {
-            self.emit_with_flags(Opcode::PtrGetN, slots as u8, dst, ptr, offset);
+        let mut copied = 0;
+        while copied < slots {
+            let remaining = slots - copied;
+            let chunk = remaining.min(u8::MAX as u16);
+            let chunk_dst = dst + copied;
+            let chunk_offset = offset + copied;
+            if chunk == 1 {
+                self.emit_op(Opcode::PtrGet, chunk_dst, ptr, chunk_offset);
+            } else {
+                self.emit_with_flags(Opcode::PtrGetN, chunk as u8, chunk_dst, ptr, chunk_offset);
+            }
+            copied += chunk;
         }
     }
 
@@ -687,10 +695,18 @@ impl FuncBuilder {
     /// WARNING: This does NOT emit write barriers. Use emit_ptr_set_with_slot_types for assignment
     /// to existing objects when the value may contain GcRefs.
     pub fn emit_ptr_set(&mut self, ptr: u16, offset: u16, src: u16, slots: u16) {
-        if slots == 1 {
-            self.emit_op(Opcode::PtrSet, ptr, offset, src);
-        } else {
-            self.emit_with_flags(Opcode::PtrSetN, slots as u8, ptr, offset, src);
+        let mut copied = 0;
+        while copied < slots {
+            let remaining = slots - copied;
+            let chunk = remaining.min(u8::MAX as u16);
+            let chunk_offset = offset + copied;
+            let chunk_src = src + copied;
+            if chunk == 1 {
+                self.emit_op(Opcode::PtrSet, ptr, chunk_offset, chunk_src);
+            } else {
+                self.emit_with_flags(Opcode::PtrSetN, chunk as u8, ptr, chunk_offset, chunk_src);
+            }
+            copied += chunk;
         }
     }
 
@@ -710,7 +726,7 @@ impl FuncBuilder {
         } else {
             // Multi-slot: emit PtrSetN (no barrier in instruction itself)
             // If caller passed is_gcref=true, they should use emit_ptr_set_with_slot_types instead
-            self.emit_with_flags(Opcode::PtrSetN, slots as u8, ptr, offset, src);
+            self.emit_ptr_set(ptr, offset, src, slots);
         }
     }
 
@@ -737,11 +753,7 @@ impl FuncBuilder {
 
         if !has_gc_refs {
             // No GcRefs - use simple PtrSetN
-            if slots == 1 {
-                self.emit_op(Opcode::PtrSet, ptr, offset, src);
-            } else {
-                self.emit_with_flags(Opcode::PtrSetN, slots as u8, ptr, offset, src);
-            }
+            self.emit_ptr_set(ptr, offset, src, slots);
         } else {
             // Has GcRefs - emit individual PtrSet for each slot with appropriate barrier flag
             for (i, st) in slot_types.iter().enumerate() {

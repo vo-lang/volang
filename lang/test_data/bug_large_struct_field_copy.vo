@@ -1,0 +1,22 @@
+package main
+
+type HugeField struct {
+	Values [300]int
+	Label string
+}
+
+type Holder struct {
+	Prefix int
+	Huge HugeField
+	Suffix int
+}
+
+func main() {
+	h := &Holder{}
+	h.Huge.Values[299] = 42
+	h.Huge.Label = "large-field"
+	copy := h.Huge
+	assert(copy.Values[299] == 42, "large field tail value")
+	assert(copy.Label == "large-field", "large field string value")
+	println("bug_large_struct_field_copy: ok")
+}

@@ -1,0 +1,20 @@
+package main
+
+type Huge struct {
+	Values [300]int
+	Label string
+}
+
+func makeHuge() Huge {
+	h := Huge{}
+	h.Values[299] = 42
+	h.Label = "large-return"
+	return h
+}
+
+func main() {
+	h := makeHuge()
+	assert(h.Values[299] == 42, "large return tail value")
+	assert(h.Label == "large-return", "large return string value")
+	println("bug_large_return_slots: ok")
+}

@@ -124,8 +124,6 @@ pub fn dispatch_jit_call(
     func_id: u32,
 ) -> ExecResult {
     let arg_start = inst.b as usize;
-    let arg_slots = (inst.c >> 8) as usize;
-    let ret_slots = (inst.c & 0xFF) as usize;
     let caller_frame = fiber
         .frames
         .last()
@@ -135,8 +133,10 @@ pub fn dispatch_jit_call(
     let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(arg_start as u16);
 
     let func_def = &module.functions[func_id as usize];
+    let arg_slots = func_def.param_slots as usize;
     let local_slots = func_def.local_slots as usize;
     let gc_scan_slots = func_def.gc_scan_slots as usize;
+    let ret_slots = func_def.ret_slots as usize;
 
     let jit_bp = match fiber.try_push_borrowed_call_frame(
         func_id,
@@ -290,7 +290,7 @@ fn handle_jit_result(
 
             let callee_func_id = ctx.call_func_id();
             let call_arg_start = ctx.call_arg_start() as usize;
-            let callee_ret_slots = ctx.call_ret_slots() as usize;
+            let callee_ret_slots = module.functions[callee_func_id as usize].ret_slots as usize;
 
             if call_kind == JitContext::CALL_KIND_PREPARED {
                 let callee_bp = ctx.call_resume_pc() as usize;
@@ -803,9 +803,6 @@ pub fn dispatch_loop_osr(
             OsrResult::Panic
         }
         JitResult::Call => {
-            let callee_func_id = ctx.call_func_id();
-            let call_arg_start = ctx.call_arg_start() as usize;
-            let callee_ret_slots = ctx.call_ret_slots();
             let call_kind = ctx.ctx.call_kind;
             let call_ret_reg = ctx.call_ret_reg();
 
@@ -821,6 +818,10 @@ pub fn dispatch_loop_osr(
                 }
                 _ => {}
             }
+
+            let callee_func_id = ctx.call_func_id();
+            let call_arg_start = ctx.call_arg_start() as usize;
+            let callee_ret_slots = module.functions[callee_func_id as usize].ret_slots;
 
             if call_kind == JitContext::CALL_KIND_PREPARED {
                 let callee_bp = ctx.call_resume_pc() as usize;

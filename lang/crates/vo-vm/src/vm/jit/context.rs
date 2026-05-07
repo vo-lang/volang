@@ -48,10 +48,6 @@ impl JitContextWrapper {
         self.ctx.call_resume_pc
     }
 
-    pub fn call_ret_slots(&self) -> u16 {
-        self.ctx.call_ret_slots
-    }
-
     pub fn call_ret_reg(&self) -> u16 {
         self.ctx.call_ret_reg
     }
