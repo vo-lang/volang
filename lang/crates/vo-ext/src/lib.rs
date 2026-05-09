@@ -84,6 +84,7 @@ pub use vo_runtime::ffi::EXTERN_TABLE;
 /// ABI version for extension compatibility checking.
 /// Must match `vo_runtime::ext_loader::ABI_VERSION`.
 pub const ABI_VERSION: u32 = vo_runtime::ffi::EXTENSION_ABI_VERSION;
+pub const ABI_FINGERPRINT: u64 = vo_runtime::ffi::EXTENSION_ABI_FINGERPRINT;
 
 /// Export the extension entry point.
 ///
@@ -111,6 +112,11 @@ macro_rules! export_extensions {
                 entry_count: $crate::EXTERN_TABLE.len() as u32,
                 entries: $crate::EXTERN_TABLE.as_ptr(),
             }
+        }
+
+        #[no_mangle]
+        pub extern "C" fn vo_ext_get_abi_fingerprint() -> u64 {
+            $crate::ABI_FINGERPRINT
         }
 
         /// Receive a host bridge pointer from the extension loader.

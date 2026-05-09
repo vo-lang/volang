@@ -34,6 +34,7 @@ pub fn create_error(call: &mut ExternCallContext, msg: &str) -> (u64, u64) {
         Gc::write_slot(err_obj, field_offsets[1] as usize, 0); // cause slot0
         Gc::write_slot(err_obj, field_offsets[1] as usize + 1, 0); // cause slot1
     }
+    call.gc().mark_allocated_for_scan(err_obj);
 
     let itab_id = call.get_or_create_itab(named_type_id, error_iface_meta_id, true);
     let err_slot0 = interface::pack_slot0(itab_id, error_ptr_rttid, ValueKind::Pointer);
@@ -74,6 +75,7 @@ pub fn create_error_with_cause(
         Gc::write_slot(err_obj, field_offsets[1] as usize, cause_slot0);
         Gc::write_slot(err_obj, field_offsets[1] as usize + 1, cause_slot1);
     }
+    call.gc().mark_allocated_for_scan(err_obj);
 
     let itab_id = call.get_or_create_itab(named_type_id, error_iface_meta_id, true);
     let err_slot0 = interface::pack_slot0(itab_id, error_ptr_rttid, ValueKind::Pointer);

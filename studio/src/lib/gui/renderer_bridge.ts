@@ -4,6 +4,7 @@
 
 import { listen as tauriListen } from '../tauri';
 import type { Backend } from '../backend/backend';
+import { handleVoplayPerfHostLog } from '../perf_report_bridge';
 import { isGuiSessionSupersededError, type RuntimeService } from '../services/runtime_service';
 import { frameworkContractKey, frameworkJsModulePath, type FrameworkContract } from '../types';
 import type { VoWebModule } from '../studio_wasm';
@@ -113,6 +114,7 @@ type ActiveRendererBridge = {
 } | null;
 
 export type VfsFile = { path: string; bytes: Uint8Array };
+export type VfsSnapshot = { rootPath: string; files: VfsFile[] };
 
 type RendererBlobGraph = {
   entryUrl: string;
@@ -335,30 +337,78 @@ function makeRendererHost(
         let handler: ((frame: Uint8Array) => void) | null = null;
         let unlisten: (() => void) | null = null;
         let closed = false;
+        let transportQueue: Promise<void> = Promise.resolve();
+        let draining = false;
+        let drainAgain = false;
+        const WEB_TRANSPORT_POLL_FALLBACK_MS = 16;
+        const WEB_TRANSPORT_DRAIN_FRAME_BUDGET = 16;
+        const WEB_TRANSPORT_DRAIN_TIME_BUDGET_MS = 4;
         const waitForPollTick = (): Promise<void> => new Promise((resolve) => {
-          if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-            window.requestAnimationFrame(() => resolve());
+          setTimeout(resolve, WEB_TRANSPORT_POLL_FALLBACK_MS);
+        });
+        const yieldToBrowserEventLoop = (): Promise<void> => new Promise((resolve) => {
+          setTimeout(resolve, 0);
+        });
+        const runTransport = async <T>(operation: () => Promise<T>): Promise<T> => {
+          const run = transportQueue.then(operation, operation);
+          transportQueue = run.then(() => undefined, () => undefined);
+          return run;
+        };
+        const drainAvailableFrames = async (): Promise<void> => {
+          if (draining) {
+            drainAgain = true;
             return;
           }
-          setTimeout(resolve, 16);
-        });
+          draining = true;
+          try {
+            do {
+              drainAgain = false;
+              let drainedFrames = 0;
+              let drainStartMs = performance.now();
+              while (!closed) {
+                const frame = await runTransport(() => runtime.pollIslandTransport());
+                if (closed || frame.length === 0) {
+                  break;
+                }
+                const ownedFrame = new Uint8Array(frame);
+                emitRendererBridgeFrameDebug(backend, 'recv', ownedFrame);
+                handler?.(ownedFrame);
+                drainedFrames += 1;
+                if (
+                  drainedFrames >= WEB_TRANSPORT_DRAIN_FRAME_BUDGET
+                  || performance.now() - drainStartMs >= WEB_TRANSPORT_DRAIN_TIME_BUDGET_MS
+                ) {
+                  drainedFrames = 0;
+                  drainStartMs = performance.now();
+                  await yieldToBrowserEventLoop();
+                }
+              }
+            } while (!closed && drainAgain);
+          } finally {
+            draining = false;
+          }
+        };
+        const pushFrame = async (frame: Uint8Array): Promise<void> => {
+          await runTransport(() => runtime.pushIslandTransport(frame));
+          await drainAvailableFrames();
+        };
+        const reportTransportError = (label: string, error: unknown): void => {
+          if (isGuiSessionSupersededError(error)) {
+            return;
+          }
+          console.error(`[RendererBridge] island transport ${label} failed:`, error);
+          if (!closed) {
+            closed = true;
+            onError?.(`Island transport ${label} failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        };
         const startWebPolling = (): void => {
           void (async () => {
             while (!closed) {
               try {
-                const frame = await runtime.pollIslandTransport();
-                if (closed) {
-                  return;
-                }
-                if (frame.length > 0) {
-                  emitRendererBridgeFrameDebug(backend, 'recv', frame);
-                  handler?.(frame);
-                  continue;
-                }
+                await drainAvailableFrames();
               } catch (error) {
-                if (!closed && !isGuiSessionSupersededError(error)) {
-                  console.error('[RendererBridge] island transport poll failed:', error);
-                }
+                reportTransportError('poll', error);
                 return;
               }
               await waitForPollTick();
@@ -377,13 +427,9 @@ function makeRendererHost(
             startWebPolling();
           },
           send(frame: Uint8Array): void {
-            emitRendererBridgeFrameDebug(backend, 'send', frame);
-            runtime.pushIslandTransport(frame).catch((error) => {
-              if (isGuiSessionSupersededError(error)) {
-                return;
-              }
-              console.error('[RendererBridge] island transport push failed:', error);
-            });
+            const ownedFrame = new Uint8Array(frame);
+            emitRendererBridgeFrameDebug(backend, 'send', ownedFrame);
+            pushFrame(ownedFrame).catch((error) => reportTransportError('push', error));
           },
           onReceive(nextHandler: (frame: Uint8Array) => void): void {
             handler = nextHandler;
@@ -444,13 +490,13 @@ function makeRendererHost(
   };
 }
 
-// Fetch VFS snapshot files once so multiple loaders can share the result.
+// Fetch VFS snapshot once so multiple loaders can share the same files/root.
 export async function fetchVfsSnapshot(
   backend: Backend,
   entryPath: string,
-): Promise<VfsFile[]> {
+): Promise<VfsSnapshot> {
   const snapshot = await backend.getRendererBridgeVfsSnapshot(entryPath);
-  return snapshot.files;
+  return { rootPath: snapshot.rootPath, files: snapshot.files };
 }
 
 // Returns true if a VFS file path matches a given search path.
@@ -527,7 +573,7 @@ export async function startRendererBridge(
   runtime: RuntimeService,
   sessionId: number,
   context: RendererBridgeContext,
-  vfsFiles?: VfsFile[],
+  vfsSnapshot?: VfsSnapshot,
 ): Promise<void> {
   stopRendererBridge();
   const frameworks = collectRendererFrameworks(context);
@@ -541,13 +587,18 @@ export async function startRendererBridge(
   }
 
   widgetRegistry.clear();
-  const resolvedVfsFiles: VfsFile[] = vfsFiles ?? await fetchVfsSnapshot(backend, context.entryPath);
+  const resolvedVfsSnapshot = vfsSnapshot ?? (await fetchVfsSnapshot(backend, context.entryPath));
+  const resolvedVfsFiles = resolvedVfsSnapshot.files;
+  const resolvedVfsRootPath = resolvedVfsSnapshot.rootPath;
   let sharedVoWebPromise: Promise<VoWebModule> | null = null;
   const getVoWebLazy = (): Promise<VoWebModule> => {
     if (!sharedVoWebPromise) {
       sharedVoWebPromise = (async () => {
         try {
           (globalThis as Record<string, unknown>).__voStudioLogRecord = (record: unknown) => {
+            if (handleVoplayPerfHostLog(record as { code?: unknown; text?: unknown })) {
+              return;
+            }
             const source = typeof (record as { source?: unknown } | null)?.source === 'string'
               ? (record as { source: string }).source
               : 'studio-wasm';
@@ -562,6 +613,7 @@ export async function startRendererBridge(
           if (backend.platform === 'native') {
             emitRendererBridgeDebug(backend, `studio_wasm.host_vfs.install files=${resolvedVfsFiles.length}`);
             setStudioWindowVfsBackendFactory(() => createInMemoryWindowVfsBackend({
+              rootPath: resolvedVfsRootPath,
               files: resolvedVfsFiles.map((file) => ({ path: file.path, bytes: file.bytes })),
             }));
             resetStudioWasmInstance();
@@ -715,7 +767,7 @@ export async function loadProtocolModule(
   const cached = activeProtocols.get(key);
   if (cached) return cached.module;
 
-  const files: VfsFile[] = prefetchedFiles ?? await fetchVfsSnapshot(backend, entryPath);
+  const files: VfsFile[] = prefetchedFiles ?? (await fetchVfsSnapshot(backend, entryPath)).files;
   const { module, blobUrls } = await loadVfsModule<ProtocolModule>(protocolPath, files, (raw) => ({
     findHostWidgetHandlerId: requireFunction<ProtocolModule['findHostWidgetHandlerId']>(
       raw.findHostWidgetHandlerId,
@@ -744,7 +796,7 @@ export async function loadHostBridgeModule(
   const cached = activeHostBridges.get(key);
   if (cached) return cached.module;
 
-  const files: VfsFile[] = prefetchedFiles ?? await fetchVfsSnapshot(backend, entryPath);
+  const files: VfsFile[] = prefetchedFiles ?? (await fetchVfsSnapshot(backend, entryPath)).files;
   const { module, blobUrls } = await loadVfsModule<HostBridgeModule>(hostBridgePath, files, (raw) => ({
     buildImports: requireFunction<HostBridgeModule['buildImports']>(
       raw.buildImports,

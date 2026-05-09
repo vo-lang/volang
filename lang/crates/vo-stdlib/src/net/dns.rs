@@ -215,6 +215,8 @@ fn alloc_string_slice(call: &mut ExternCallContext, strings: &[String]) -> GcRef
         slice::set(slice_ref, i, str_ref as u64, elem_bytes);
     }
 
+    call.gc()
+        .mark_allocated_for_scan(vo_runtime::objects::slice::array_ref(slice_ref));
     slice_ref
 }
 
@@ -230,6 +232,8 @@ fn alloc_ip_slice(call: &mut ExternCallContext, ips: &[Vec<u8>]) -> GcRef {
         slice::set(slice_ref, i, ip_slice as u64, elem_bytes);
     }
 
+    call.gc()
+        .mark_allocated_for_scan(vo_runtime::objects::slice::array_ref(slice_ref));
     slice_ref
 }
 
@@ -262,6 +266,7 @@ fn alloc_socket_addr(call: &mut ExternCallContext, addr: &std::net::SocketAddr) 
         Gc::write_slot(struct_ref, 1, addr.port() as u64);
         Gc::write_slot(struct_ref, 2, zone as u64);
     }
+    call.gc().mark_allocated_for_scan(struct_ref);
 
     struct_ref
 }

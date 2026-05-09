@@ -608,6 +608,17 @@ fn set_struct_field(
     let field_vk = field.value_kind;
     let field_slots = field.slot_count;
     let val_vk = interface::unpack_value_kind(val_slot0);
+    let field_slot_types: Vec<_> = {
+        let parent_meta_id = Gc::header(current_ref).meta_id() as usize;
+        call.struct_meta(parent_meta_id)
+            .and_then(|meta| {
+                meta.slot_types
+                    .get(field.offset..field.offset.saturating_add(field_slots))
+            })
+            .map(|types| types.to_vec())
+            .unwrap_or_default()
+    };
+    let written_vals: Vec<u64>;
 
     if field_vk == ValueKind::Interface {
         // Interface field: validate implementation and compute itab
@@ -616,6 +627,7 @@ fn set_struct_field(
             .unwrap_or(0);
         let (stored_slot0, stored_slot1) =
             prepare_interface_value(call, val_slot0, val_slot1, iface_meta_id)?;
+        written_vals = vec![stored_slot0, stored_slot1];
         unsafe {
             Gc::write_slot(current_ref, field.offset, stored_slot0);
             Gc::write_slot(current_ref, field.offset + 1, stored_slot1);
@@ -637,6 +649,7 @@ fn set_struct_field(
             ));
         }
         // Write zero value for nillable types
+        written_vals = vec![0];
         unsafe {
             Gc::write_slot(current_ref, field.offset, 0);
         }
@@ -646,6 +659,7 @@ fn set_struct_field(
     } else if field_vk == ValueKind::Struct || field_vk == ValueKind::Array {
         // Struct/Array: val_slot1 is a GcRef to boxed data
         let vals = read_ref_slots(val_slot1 as GcRef, field_slots);
+        written_vals = vals.clone();
         for (i, &val) in vals.iter().enumerate() {
             unsafe {
                 Gc::write_slot(current_ref, field.offset + i, val);
@@ -653,9 +667,19 @@ fn set_struct_field(
         }
     } else {
         // Primitive types: val_slot1 is the direct value
+        written_vals = vec![val_slot1];
         unsafe {
             Gc::write_slot(current_ref, field.offset, val_slot1);
         }
+    }
+
+    if !field_slot_types.is_empty() {
+        crate::gc_types::typed_write_barrier(
+            call.gc(),
+            current_ref,
+            &written_vals,
+            &field_slot_types,
+        );
     }
 
     Ok(())
@@ -743,14 +767,16 @@ fn set_map_string_key(
     // For map[any]T, wrap key as interface
     if map_key_vk == ValueKind::Interface {
         let key_slot0 = interface::pack_slot0(0, ValueKind::String as u32, ValueKind::String);
-        map::set(
-            base_ref,
-            &[key_slot0, key_ref as u64],
-            &val_data,
-            Some(call.module()),
-        );
+        let key_data = [key_slot0, key_ref as u64];
+        map::set(base_ref, &key_data, &val_data, Some(call.module()));
+        call.typed_write_barrier_by_meta(base_ref, &key_data, map::key_meta(base_ref));
     } else {
-        map::set(base_ref, &[key_ref as u64], &val_data, Some(call.module()));
+        let key_data = [key_ref as u64];
+        map::set(base_ref, &key_data, &val_data, Some(call.module()));
+        call.typed_write_barrier_by_meta(base_ref, &key_data, map::key_meta(base_ref));
+    }
+    if val_meta.value_kind().may_contain_gc_refs() {
+        call.typed_write_barrier_by_meta(base_ref, &val_data, val_meta);
     }
     Ok(())
 }
@@ -870,6 +896,13 @@ fn set_map_index(
     };
 
     map::set(base_ref, &key_data, &val_data, Some(call.module()));
+    let key_meta = map::key_meta(base_ref);
+    if key_meta.value_kind().may_contain_gc_refs() {
+        call.typed_write_barrier_by_meta(base_ref, &key_data, key_meta);
+    }
+    if val_meta.value_kind().may_contain_gc_refs() {
+        call.typed_write_barrier_by_meta(base_ref, &val_data, val_meta);
+    }
     Ok(())
 }
 
@@ -1008,16 +1041,24 @@ fn set_slice_index(
     }
 
     // Unbox and write
-    if elem_vk == ValueKind::Interface {
+    let written_vals: Vec<u64> = if elem_vk == ValueKind::Interface {
         slice::set(base_ref, idx * elem_slots, val_slot0, 8);
         slice::set(base_ref, idx * elem_slots + 1, val_slot1, 8);
+        vec![val_slot0, val_slot1]
     } else if elem_vk == ValueKind::Struct || elem_vk == ValueKind::Array {
         let vals = read_ref_slots(val_slot1 as GcRef, elem_slots);
         for (i, &slot) in vals.iter().enumerate() {
             slice::set(base_ref, idx * elem_slots + i, slot, 8);
         }
+        vals
     } else {
         slice::set(base_ref, idx * elem_slots, val_slot1, 8);
+        vec![val_slot1]
+    };
+
+    if elem_meta.value_kind().may_contain_gc_refs() {
+        let arr_ref = slice::array_ref(base_ref);
+        call.typed_write_barrier_by_meta(arr_ref, &written_vals, elem_meta);
     }
 
     Ok(())
@@ -1091,6 +1132,7 @@ fn get_method(
 
     let closure_ref = closure::create(call.gc(), func_id, 1);
     closure::set_capture(closure_ref, 0, receiver_slot1);
+    call.gc().mark_allocated_for_scan(closure_ref);
 
     let slot0 = interface::pack_slot0(0, signature_rttid, ValueKind::Closure);
     Ok((slot0, closure_ref as u64))
@@ -1468,6 +1510,10 @@ fn unpack_args(
                 let (arg_slot0, arg_slot1) =
                     read_slice_elem(args_slice_ref, non_variadic_count + i, elem_bytes);
                 set_slice_elem_from_any(new_slice, i, arg_slot0, arg_slot1, elem_vk, elem_slots);
+            }
+            if elem_meta.value_kind().may_contain_gc_refs() {
+                call.gc()
+                    .mark_allocated_for_scan(slice::array_ref(new_slice));
             }
             args.push(new_slice as u64);
         }
@@ -2158,6 +2204,8 @@ fn dyn_pack_any_slice(call: &mut ExternCallContext) -> ExternResult {
         }
     }
 
+    call.gc()
+        .mark_allocated_for_scan(slice::array_ref(new_slice));
     call.ret_ref(0, new_slice);
     call.ret_nil(1);
     call.ret_nil(2);

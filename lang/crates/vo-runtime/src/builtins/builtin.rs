@@ -104,6 +104,16 @@ fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
 
     // Use copy (not copy_nonoverlapping) to support overlapping regions (Go semantics)
     unsafe { core::ptr::copy(src_ptr, dst_ptr, copy_len * elem_bytes) };
+    let elem_meta = array::elem_meta(dst_arr);
+    if elem_meta.value_kind().may_contain_gc_refs() {
+        call.typed_write_barrier_range_by_meta(
+            dst_arr,
+            dst_ptr as *const u8,
+            copy_len,
+            elem_bytes,
+            elem_meta,
+        );
+    }
 
     call.ret_i64(0, copy_len as i64);
     ExternResult::Ok
@@ -145,6 +155,9 @@ fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
         let src_ptr = slice::data_ptr(src);
         let dst_ptr = array::data_ptr_bytes(new_arr);
         unsafe { core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, src_len * elem_bytes) };
+        if elem_meta.value_kind().may_contain_gc_refs() {
+            call.gc().mark_allocated_for_scan(new_arr);
+        }
         let result = slice::from_array_range(call.gc(), new_arr, 0, src_len);
         call.ret_ref(0, result);
         return ExternResult::Ok;
@@ -158,9 +171,19 @@ fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
         // Enough capacity - write to existing backing array, return new slice header
         let dst_ptr = slice::data_ptr(dst);
         let src_ptr = slice::data_ptr(src);
+        let write_ptr = unsafe { dst_ptr.add(dst_len * elem_bytes) };
         unsafe {
-            let write_ptr = dst_ptr.add(dst_len * elem_bytes);
-            core::ptr::copy_nonoverlapping(src_ptr, write_ptr, src_len * elem_bytes);
+            core::ptr::copy(src_ptr, write_ptr, src_len * elem_bytes);
+        }
+        if elem_meta.value_kind().may_contain_gc_refs() {
+            let arr_ref = slice::array_ref(dst);
+            call.typed_write_barrier_range_by_meta(
+                arr_ref,
+                write_ptr as *const u8,
+                src_len,
+                elem_bytes,
+                elem_meta,
+            );
         }
         // Go semantics: append never modifies original slice header
         let new_s = slice::with_new_len(call.gc(), dst, new_len);
@@ -179,6 +202,9 @@ fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
                 new_arr_ptr.add(dst_len * elem_bytes),
                 src_len * elem_bytes,
             );
+        }
+        if elem_meta.value_kind().may_contain_gc_refs() {
+            call.gc().mark_allocated_for_scan(new_arr);
         }
         let result = slice::from_array_range(call.gc(), new_arr, 0, new_len);
         call.ret_ref(0, result);

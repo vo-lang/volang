@@ -261,6 +261,7 @@ where
                 Gc::write_slot(box_ref, j, slot);
             }
         }
+        gc.mark_allocated_for_scan(box_ref);
         captures.push(box_ref);
     }
 

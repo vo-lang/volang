@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::super::{
     compile, compile_source_at, compile_string, compile_with_auto_install_using_registry,
@@ -10,7 +10,8 @@ use super::{
     current_target_triple, installed_module_release_manifest_digest, load_project_deps_for_engine,
     locked_module_cache_dir, make_locked, prepare_native_extension_specs_for_frozen_build,
     read_saved_cache_fingerprint, render_lock_with_modules, temp_dir,
-    validate_locked_modules_installed, write_minimal_native_extension_crate, MockRegistry,
+    validate_locked_modules_installed, write_minimal_native_extension_crate,
+    write_native_extension_test_abi_marker, MockRegistry,
 };
 use vo_common::vfs::MemoryFs;
 use vo_module::digest::Digest;
@@ -36,6 +37,45 @@ fn current_platform_library_name(stem: &str) -> String {
     {
         format!("{}.so", stem)
     }
+}
+
+fn assert_native_extension_load_copy(native_path: &Path, local_module_root: &Path) {
+    assert!(
+        native_path.starts_with(local_module_root.join("rust").join("target")),
+        "native extension should live under the local Rust target dir: {}",
+        native_path.display(),
+    );
+    let file_name = native_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    assert!(
+        file_name.contains(".voabi-"),
+        "native extension should use an ABI/content fingerprinted load copy: {}",
+        native_path.display(),
+    );
+    let marker_path = native_path.with_file_name(format!("{file_name}.vo-abi"));
+    assert!(
+        marker_path.is_file(),
+        "native extension load copy should have an ABI marker: {}",
+        marker_path.display(),
+    );
+}
+
+fn seed_cached_native_extension(local_module_root: &Path, library_stem: &str) {
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let native_path = local_module_root
+        .join("rust")
+        .join("target")
+        .join(profile)
+        .join(current_platform_library_name(library_stem));
+    fs::create_dir_all(native_path.parent().unwrap()).unwrap();
+    fs::write(&native_path, b"test native extension fixture").unwrap();
+    write_native_extension_test_abi_marker(&native_path).unwrap();
 }
 
 fn canonical_native_ext_manifest(name: &str, path: &str, library_stem: &str) -> String {
@@ -735,19 +775,17 @@ fn test_compile_prefers_local_replace_extension_manifest_paths() {
     )
     .unwrap();
     write_minimal_native_extension_crate(&local_vogui.join("rust"), "vo_vogui");
+    seed_cached_native_extension(&local_vogui, "libvo_vogui");
 
     let output = compile(app_root.join("tetris.vo").to_string_lossy().as_ref()).unwrap();
     let local_vogui = local_vogui.canonicalize().unwrap();
-    assert!(
-        output.extensions.iter().any(|manifest| {
-            manifest.name == "vogui"
-                && manifest
-                    .native_path
-                    .starts_with(local_vogui.join("rust").join("target"))
-        }),
-        "extensions = {:?}",
-        output.extensions
-    );
+    let vogui = output
+        .extensions
+        .iter()
+        .find(|manifest| manifest.name == "vogui")
+        .unwrap_or_else(|| panic!("extensions = {:?}", output.extensions));
+    assert_native_extension_load_copy(&vogui.native_path, &local_vogui);
+    assert!(!local_vogui.join("rust").join("Cargo.lock").exists());
 
     fs::remove_dir_all(&root).unwrap();
 }
@@ -800,19 +838,17 @@ fn test_compile_single_file_entry_in_project_uses_ancestor_workfile_extension_ma
     )
     .unwrap();
     write_minimal_native_extension_crate(&local_vogui.join("rust"), "vo_vogui");
+    seed_cached_native_extension(&local_vogui, "libvo_vogui");
 
     let output = compile(app_root.join("tetris.vo").to_string_lossy().as_ref()).unwrap();
     let local_vogui = local_vogui.canonicalize().unwrap();
-    assert!(
-        output.extensions.iter().any(|manifest| {
-            manifest.name == "vogui"
-                && manifest
-                    .native_path
-                    .starts_with(local_vogui.join("rust").join("target"))
-        }),
-        "extensions = {:?}",
-        output.extensions
-    );
+    let vogui = output
+        .extensions
+        .iter()
+        .find(|manifest| manifest.name == "vogui")
+        .unwrap_or_else(|| panic!("extensions = {:?}", output.extensions));
+    assert_native_extension_load_copy(&vogui.native_path, &local_vogui);
+    assert!(!local_vogui.join("rust").join("Cargo.lock").exists());
 
     fs::remove_dir_all(&root).unwrap();
 }
@@ -1374,6 +1410,44 @@ fn test_compile_with_cache_fingerprint_tracks_extension_manifest() {
             "module github.com/acme/app\nvo ^0.1.0\n\n{}",
             canonical_native_ext_manifest("demo2", "rust/target/{profile}/libdemo2", "libdemo2")
         ),
+    )
+    .unwrap();
+
+    compile_with_cache(root.to_string_lossy().as_ref()).unwrap();
+    let second = read_saved_cache_fingerprint(&root, None);
+
+    assert_ne!(first, second);
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn test_compile_with_cache_fingerprint_tracks_local_native_rust_sources() {
+    let root = temp_dir("vo_compile_cache_ext_rust_source");
+
+    fs::create_dir_all(root.join("rust").join("src")).unwrap();
+    fs::write(
+        root.join("vo.mod"),
+        "module github.com/acme/app\nvo 0.1.0\n",
+    )
+    .unwrap();
+    fs::write(root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
+    append_vo_mod_metadata(
+        &root,
+        &canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
+    );
+    fs::write(
+        root.join("rust").join("src").join("lib.rs"),
+        "pub fn v1() {}\n",
+    )
+    .unwrap();
+
+    compile_with_cache(root.to_string_lossy().as_ref()).unwrap();
+    let first = read_saved_cache_fingerprint(&root, None);
+
+    fs::write(
+        root.join("rust").join("src").join("lib.rs"),
+        "pub fn v2() {}\n",
     )
     .unwrap();
 

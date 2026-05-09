@@ -38,6 +38,7 @@ pub extern "C" fn jit_queue_close(ctx: *mut JitContext, chan: u64) -> JitResult 
         } => {
             vm.state
                 .send_endpoint_close_request(home_island, endpoint_id);
+            vm.mark_gc_all_roots_dirty();
             vm.state.endpoint_registry.mark_tombstone(endpoint_id);
             JitResult::Ok
         }
@@ -152,6 +153,7 @@ pub extern "C" fn jit_queue_recv(
             &mut vm.state.endpoint_registry,
             |i, value| unsafe { *dst_ptr.add(i) = value },
         );
+        vm.mark_gc_all_roots_dirty();
         return JitResult::Ok;
     }
     match complete_queue_recv(

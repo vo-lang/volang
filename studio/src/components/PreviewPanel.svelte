@@ -9,7 +9,7 @@
     fetchVfsSnapshot,
     type HostBridgeModule,
     type ProtocolModule,
-    type VfsFile,
+    type VfsSnapshot,
   } from '../lib/gui/renderer_bridge';
   import { setActiveHostBridge, clearActiveHostBridge } from '../lib/studio_wasm';
   import type { ServiceRegistry } from '../lib/services/service_registry';
@@ -277,14 +277,16 @@
       const framework = $runtime.gui.framework;
       const providerFrameworks = $runtime.gui.providerFrameworks;
       const bridgeFrameworks = collectBridgeFrameworks(framework, providerFrameworks);
-      let vfsFiles: VfsFile[] | undefined;
+      let vfsSnapshot: VfsSnapshot | undefined;
+      let vfsFiles: VfsSnapshot['files'] | undefined;
       const needsVfs = bridgeFrameworks.some((provider) =>
         frameworkJsModulePath(provider, 'protocol')
           || frameworkJsModulePath(provider, 'host_bridge')
           || frameworkJsModulePath(provider, 'renderer'),
       );
       if (needsVfs && registry) {
-        vfsFiles = await fetchVfsSnapshot(registry.backend, entryPath);
+        vfsSnapshot = await fetchVfsSnapshot(registry.backend, entryPath);
+        vfsFiles = vfsSnapshot.files;
       }
       const protocolModules: ProtocolModule[] = [];
       for (const provider of bridgeFrameworks) {
@@ -324,7 +326,7 @@
         onError: (message) => {
           rendererBridgeError = message;
         },
-      }, vfsFiles);
+      }, vfsSnapshot);
       if (launchGeneration !== rendererBridgeLaunchGeneration || !($runtime.kind === 'gui' && $runtime.isRunning) || $runtime.gui.sessionId !== sessionId) {
         stopRendererBridge(sessionId);
         if (!isRendererBridgeActive(sessionId)) {

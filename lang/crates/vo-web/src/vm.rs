@@ -50,6 +50,9 @@ pub(crate) fn validate_sync_outcome(
 /// This ensures diagnostic output is visible even if a WASM trap occurs.
 #[cfg(target_arch = "wasm32")]
 fn wasm_write_hook(s: &str) {
+    if s.trim_start().starts_with("__VOPLAY_PERF_REPORT__") {
+        return;
+    }
     web_sys::console::log_1(&format!("[Vo] {}", s).into());
 }
 

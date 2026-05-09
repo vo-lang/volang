@@ -249,6 +249,7 @@ fn metadata_to_file_info(call: &mut ExternCallContext, name: &str, meta: &fs::Me
         Gc::write_slot(file_info, 3, mod_time as u64);
         Gc::write_slot(file_info, 4, is_dir);
     }
+    call.gc().mark_allocated_for_scan(file_info);
     file_info
 }
 
@@ -968,6 +969,8 @@ fn os_read_dir(call: &mut ExternCallContext) -> ExternResult {
                 slice::set(result, base + 1, if *is_dir { 1 } else { 0 }, SLOT_BYTES);
                 slice::set(result, base + 2, *mode as u64, SLOT_BYTES);
             }
+            call.gc()
+                .mark_allocated_for_scan(vo_runtime::objects::slice::array_ref(result));
             call.ret_ref(slots::RET_0, result);
             write_nil_error(call, slots::RET_1);
         }

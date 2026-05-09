@@ -1555,7 +1555,7 @@ fn slice_append<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         .helpers()
         .slice_append
         .expect("slice_append helper not registered");
-    let gc_ptr = e.gc_ptr();
+    let ctx = e.ctx_param();
     let s = e.read_var(inst.b);
 
     // Instruction format:
@@ -1574,11 +1574,11 @@ fn slice_append<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let elem_slot = inst.c + if inst.flags == 0 { 2 } else { 1 };
     let val_ptr = e.var_addr(elem_slot);
 
-    // vo_slice_append(gc, elem_meta: u32, elem_bytes: u32, s: u64, val_ptr: *const u64) -> u64
+    // vo_slice_append(ctx, elem_meta: u32, elem_bytes: u32, s: u64, val_ptr: *const u64) -> u64
     let call = emit_funcref_call(
         e,
         slice_append_func,
-        &[gc_ptr, elem_meta, elem_bytes, s, val_ptr],
+        &[ctx, elem_meta, elem_bytes, s, val_ptr],
     );
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);

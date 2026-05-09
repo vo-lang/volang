@@ -51,6 +51,8 @@ pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) {
     for (i, &cap_ref) in unpacked_captures.iter().enumerate() {
         vo_runtime::objects::closure::set_capture(closure_ref, i, cap_ref as u64);
     }
+    gc.mark_allocated_for_scan(closure_ref);
+    vm.mark_gc_all_roots_dirty();
 
     let new_fiber = unsafe {
         helpers::build_closure_fiber_from_args_ptr(
@@ -195,6 +197,7 @@ fn handle_endpoint_request_inner(
                 ctx.runtime_types,
                 &mut vm_state.endpoint_registry,
             );
+            vm_state.mark_gc_all_roots_dirty();
             if ctx.elem_meta.value_kind().may_contain_gc_refs() {
                 vo_runtime::gc_types::typed_write_barrier_by_meta(
                     &mut vm_state.gc,
@@ -373,6 +376,7 @@ pub(crate) fn finalize_closed_home_endpoint(
             .send_endpoint_response(peer, endpoint_id, EndpointResponseKind::Closed, 0);
     }
 
+    vm.mark_gc_all_roots_dirty();
     vm.state.endpoint_registry.mark_tombstone(endpoint_id);
 }
 
@@ -402,6 +406,7 @@ pub(crate) fn handle_endpoint_response_command(
     match &kind {
         EndpointResponseKind::Closed => {
             mark_remote_endpoint_closed(vm, endpoint_id);
+            vm.mark_gc_all_roots_dirty();
             vm.state.endpoint_registry.mark_tombstone(endpoint_id);
         }
         EndpointResponseKind::SendAck { closed } => {

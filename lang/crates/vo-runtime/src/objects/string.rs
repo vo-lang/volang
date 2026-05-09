@@ -33,6 +33,7 @@ fn alloc_string(gc: &mut Gc, arr: GcRef, data_ptr: *mut u8, len: usize) -> GcRef
     data.data_ptr = ptr_to_slot(data_ptr);
     data.len = len as Slot;
     data.cap = len as Slot;
+    gc.mark_allocated_for_scan(s);
     s
 }
 

@@ -17,6 +17,14 @@ impl RenderIslandRuntime {
         }
     }
 
+    pub fn set_gc_stress_every_step(&mut self, enabled: bool) {
+        self.session.vm_mut().set_gc_stress_every_step(enabled);
+    }
+
+    pub fn gc_step(&mut self) {
+        self.session.gc_step();
+    }
+
     pub fn run(&mut self) -> Result<StepResult, SessionError> {
         self.session.run()
     }
@@ -65,6 +73,14 @@ impl GuestRuntime {
         Self {
             session: GuestSession::new_render_island(vm, stdout_source),
         }
+    }
+
+    pub fn set_gc_stress_every_step(&mut self, enabled: bool) {
+        self.session.set_gc_stress_every_step(enabled);
+    }
+
+    pub fn gc_step(&mut self) {
+        self.session.gc_step();
     }
 
     pub fn start_gui_app(&mut self) -> Result<StepResult, SessionError> {

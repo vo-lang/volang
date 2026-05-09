@@ -23,6 +23,20 @@ impl GuestSession {
         Self::RenderIsland(RenderIslandSession::new(vm, stdout_source))
     }
 
+    pub fn set_gc_stress_every_step(&mut self, enabled: bool) {
+        match self {
+            Self::GuiApp(session) => session.vm_mut().set_gc_stress_every_step(enabled),
+            Self::RenderIsland(session) => session.vm_mut().set_gc_stress_every_step(enabled),
+        }
+    }
+
+    pub fn gc_step(&mut self) {
+        match self {
+            Self::GuiApp(session) => session.gc_step(),
+            Self::RenderIsland(session) => session.gc_step(),
+        }
+    }
+
     pub fn pop_pending_host_event(&mut self) -> Option<PendingHostEvent> {
         match self {
             Self::GuiApp(session) => session.pop_pending_host_event(),

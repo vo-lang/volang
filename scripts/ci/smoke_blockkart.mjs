@@ -57,7 +57,8 @@ function runStaticSmoke() {
 
   const indexPath = join(root, 'studio/src/lib/quickplay.ts');
   const quickplayTs = readFileSync(indexPath, 'utf8');
-  assert(quickplayTs.includes('?${params.toString()}'), 'manifest URLs must carry the build query');
+  assert(quickplayTs.includes('__STUDIO_BUILD_ID__'), 'manifest URLs must use the studio build id');
+  assert(quickplayTs.includes("searchParams.set('build'"), 'manifest URLs must carry the build query');
 
   const artifactRoot = join(root, 'studio/public/quickplay/blockkart/artifacts');
   assert(existsSync(join(artifactRoot, 'github.com@vo-lang@voplay/v0.1.26/voplay_island.js')), 'missing voplay quickplay JS artifact');

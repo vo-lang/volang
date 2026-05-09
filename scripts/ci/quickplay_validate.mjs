@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,6 +57,52 @@ function localPathForArtifact(url) {
   return join(root, 'studio/public/quickplay/blockkart', url.slice(prefix.length));
 }
 
+function sha256Digest(bytes) {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+function moduleFileBytes(file) {
+  if (file.content != null) return Buffer.from(file.content, 'utf8');
+  if (file.contentBase64 != null) return Buffer.from(file.contentBase64, 'base64');
+  fail(`module file is missing content: ${file.path}`);
+}
+
+function validatePackagedWebManifest(mod) {
+  const manifestFile = mod.files.find((file) => file.path === 'vo.web.json');
+  if (!manifestFile || mod.files.some((file) => file.path === 'vo.release.json')) return;
+
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestFile.content);
+  } catch (error) {
+    fail(`${mod.module} vo.web.json is invalid JSON: ${error.message}`);
+  }
+
+  assert(Array.isArray(manifest.source), `${mod.module} vo.web.json source must be an array`);
+  const files = new Map(mod.files.map((file) => [file.path, file]));
+  for (const entry of manifest.source) {
+    const file = files.get(entry.path);
+    assert(file, `${mod.module} vo.web.json declares missing source ${entry.path}`);
+    const bytes = moduleFileBytes(file);
+    assert(bytes.byteLength === entry.size, `${mod.module} source size mismatch for ${entry.path}`);
+    assert(sha256Digest(bytes) === entry.digest, `${mod.module} source digest mismatch for ${entry.path}`);
+  }
+  assert(
+    sha256Digest(Buffer.from(JSON.stringify(manifest.source), 'utf8')) === manifest.source_digest,
+    `${mod.module} vo.web.json source_digest mismatch`,
+  );
+
+  const webArtifacts = new Map((manifest.artifacts ?? []).map((artifact) => [artifact.path, artifact]));
+  for (const artifact of mod.artifacts ?? []) {
+    const webArtifact = webArtifacts.get(artifact.path);
+    assert(webArtifact, `${mod.module} vo.web.json does not declare packaged artifact ${artifact.path}`);
+    const localPath = localPathForArtifact(artifact.url);
+    const bytes = readFileSync(localPath);
+    assert(bytes.byteLength === webArtifact.size, `${mod.module} artifact size mismatch for ${artifact.path}`);
+    assert(sha256Digest(bytes) === webArtifact.digest, `${mod.module} artifact digest mismatch for ${artifact.path}`);
+  }
+}
+
 const project = readJson(projectPath);
 const deps = readJson(depsPath);
 const quickplayTs = readFileSync(quickplayTsPath, 'utf8');
@@ -75,12 +122,16 @@ assert(modules.get('github.com/vo-lang/vogui')?.version === expected.voguiVersio
 for (const mod of deps.modules) {
   assert(typeof mod.cacheDir === 'string' && mod.cacheDir.length > 0, `${mod.module} must have cacheDir`);
   assert(Array.isArray(mod.files) && mod.files.length > 0, `${mod.module} must embed files`);
+  for (const file of mod.files) {
+    assert(!file.path.includes('.codex-release-stage'), `${mod.module} packaged transient file: ${file.path}`);
+  }
   for (const artifact of mod.artifacts ?? []) {
     assert(typeof artifact.url === 'string', `${mod.module} artifact must have url`);
     const localPath = localPathForArtifact(artifact.url);
     assert(existsSync(localPath), `missing packaged artifact: ${artifact.url}`);
     assert(statSync(localPath).size > 0, `empty packaged artifact: ${artifact.url}`);
   }
+  validatePackagedWebManifest(mod);
 }
 
 const allStrings = collectStrings({ project, deps, quickplayTs });

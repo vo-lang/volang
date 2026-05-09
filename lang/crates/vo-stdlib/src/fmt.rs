@@ -652,6 +652,7 @@ fn create_any_slice(gc: &mut vo_runtime::gc::Gc, items: &[interface::InterfaceSl
             }
         }
     }
+    gc.mark_allocated_for_scan(slice::array_ref(new_slice));
     new_slice
 }
 

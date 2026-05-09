@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use vo_common::stable_hash::StableHasher;
 use vo_module::project::ProjectDeps;
 use vo_module::schema::lockfile::LockedModule;
-use vo_runtime::ext_loader::NativeExtensionSpec;
+use vo_runtime::ext_loader::{NativeExtensionSpec, ABI_FINGERPRINT, ABI_VERSION};
 use vo_vm::bytecode::Module;
 
-use super::native::current_target_triple;
+use super::native::{current_target_triple, native_extension_build_marker_matches};
 use super::{
     CompileError, CompileOutput, COMPILE_CACHE_NATIVE_NAMESPACE, COMPILE_CACHE_SCHEMA_VERSION,
     COMPILE_CACHE_SLOT_NAMESPACE,
@@ -92,6 +92,11 @@ pub(super) fn compute_compile_cache_fingerprint(
     hasher.update_str("compiler_version", env!("CARGO_PKG_VERSION"));
     hasher.update_str("compiler_build_id", env!("VO_COMPILER_BUILD_ID"));
     hasher.update_str("target_triple", current_target_triple());
+    hasher.update_str("extension_abi_version", &ABI_VERSION.to_string());
+    hasher.update_str(
+        "extension_abi_fingerprint",
+        &format!("{ABI_FINGERPRINT:#x}"),
+    );
     hasher.update_path("source_root", &canonical_source_root);
     hasher.update_path("project_root", &canonical_project_root);
     hasher.update_path("mod_cache_root", &canonical_mod_cache);
@@ -191,7 +196,7 @@ fn collect_compile_input_files(
             collect_compile_input_files(root, &path, out)?;
             continue;
         }
-        if !is_compile_input_file(&path) {
+        if !is_compile_input_file(root, &path) {
             continue;
         }
         out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
@@ -206,13 +211,34 @@ fn should_skip_compile_input_dir(path: &Path) -> bool {
     )
 }
 
-fn is_compile_input_file(path: &Path) -> bool {
+fn is_compile_input_file(root: &Path, path: &Path) -> bool {
     if path.extension().map(|ext| ext == "vo").unwrap_or(false) {
         return true;
     }
     matches!(
         path.file_name().and_then(|name| name.to_str()),
         Some("vo.mod") | Some("vo.lock") | Some("vo.web.json") | Some("vo.work")
+    ) || is_local_native_extension_input_file(root, path)
+}
+
+fn is_local_native_extension_input_file(root: &Path, path: &Path) -> bool {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let under_rust_dir = rel.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::Normal(name) if name == "rust"
+        )
+    });
+    if !under_rust_dir {
+        return false;
+    }
+
+    if path.extension().map(|ext| ext == "rs").unwrap_or(false) {
+        return true;
+    }
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("Cargo.toml") | Some("Cargo.lock") | Some("build.rs")
     )
 }
 
@@ -229,6 +255,9 @@ pub(super) fn try_load_cache(
     let bytes = fs::read(&slot.module_file).ok()?;
     let module = Module::deserialize(&bytes).ok()?;
     let extensions = load_extensions(&slot.extensions_file)?;
+    if !cached_extensions_have_usable_host_artifacts(&extensions) {
+        return None;
+    }
     let locked_modules = load_locked_modules(&slot.locked_modules_file)?;
 
     Some(CompileOutput {
@@ -237,6 +266,20 @@ pub(super) fn try_load_cache(
         extensions,
         locked_modules,
     })
+}
+
+fn cached_extensions_have_usable_host_artifacts(extensions: &[NativeExtensionSpec]) -> bool {
+    extensions.iter().all(|spec| {
+        !is_local_native_extension_load_copy(&spec.native_path)
+            || native_extension_build_marker_matches(&spec.native_path)
+    })
+}
+
+fn is_local_native_extension_load_copy(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.contains(".voabi-"))
+        .unwrap_or(false)
 }
 
 pub(super) fn save_compile_cache(
@@ -291,5 +334,30 @@ fn load_locked_modules(path: &Path) -> Option<Vec<LockedModule>> {
         Ok(bytes) => serde_json::from_slice(&bytes).ok(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
         Err(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn native_spec(native_path: PathBuf) -> NativeExtensionSpec {
+        NativeExtensionSpec::new("demo".to_string(), native_path, PathBuf::from("vo.mod"))
+    }
+
+    #[test]
+    fn cached_published_native_artifacts_do_not_need_local_build_markers() {
+        let spec = native_spec(PathBuf::from("artifacts/libdemo.dylib"));
+
+        assert!(cached_extensions_have_usable_host_artifacts(&[spec]));
+    }
+
+    #[test]
+    fn cached_local_load_copies_need_current_build_markers() {
+        let spec = native_spec(PathBuf::from(
+            "rust/target/debug/libdemo.voabi-1-deadbeef.dylib",
+        ));
+
+        assert!(!cached_extensions_have_usable_host_artifacts(&[spec]));
     }
 }

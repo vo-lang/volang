@@ -1408,7 +1408,7 @@ pub extern "C" fn vo_slice_slice3(gc: *mut Gc, s: u64, lo: u64, hi: u64, max: u6
 /// val_ptr points to ceil(elem_bytes / SLOT_BYTES) u64 values.
 #[no_mangle]
 pub extern "C" fn vo_slice_append(
-    gc: *mut Gc,
+    ctx: *mut JitContext,
     elem_meta: u32,
     elem_bytes: u32,
     s: u64,
@@ -1417,7 +1417,9 @@ pub extern "C" fn vo_slice_append(
     use crate::objects::slice;
     use crate::ValueMeta;
     unsafe {
-        let gc = &mut *gc;
+        let ctx = &mut *ctx;
+        let gc = &mut *ctx.gc;
+        let module = &*ctx.module;
         let val_slots = slots_for_bytes(elem_bytes as usize);
         let val = core::slice::from_raw_parts(val_ptr, val_slots);
         slice::append(
@@ -1426,7 +1428,7 @@ pub extern "C" fn vo_slice_append(
             elem_bytes as usize,
             s as crate::gc::GcRef,
             val,
-            None,
+            Some(module),
         ) as u64
     }
 }

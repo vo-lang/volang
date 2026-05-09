@@ -126,17 +126,66 @@
     const url = new URL(window.location.href);
     url.search = '';
     url.hash = mode === 'runner' ? '#/runner' : '#/develop';
+    applyRunnerPerfDefaults(url, mode);
     return url.toString();
   }
 
   function syncBrowserUrlToSession(nextSessionInfo: SessionInfo, mode: StudioMode): void {
     const share = shareInfoForMode(nextSessionInfo, mode, window.location.href);
-    const nextUrl = share.shareable && share.canonicalUrl
+    let nextUrl = share.shareable && share.canonicalUrl
       ? share.canonicalUrl
       : bareModeUrl(mode);
+    if (mode === 'runner') {
+      const url = new URL(nextUrl);
+      applyRunnerPerfDefaults(url, mode);
+      preserveRunnerPerfParams(url, new URL(window.location.href));
+      nextUrl = url.toString();
+    }
     if (window.location.href !== nextUrl) {
       window.history.replaceState(null, '', nextUrl);
     }
+  }
+
+  function applyRunnerPerfDefaults(url: URL, mode: StudioMode): void {
+    if (mode !== 'runner' || !isLocalRunnerHost(url)) return;
+    if (url.searchParams.has('voplayPerf') || url.searchParams.has('perf')) return;
+    url.searchParams.set('voplayPerf', 'stats');
+  }
+
+  function preserveRunnerPerfParams(target: URL, source: URL): void {
+    for (const [key, value] of source.searchParams) {
+      if (isRunnerPerfParam(key)) {
+        target.searchParams.set(key, value);
+      }
+    }
+    const hashQueryOffset = source.hash.indexOf('?');
+    if (hashQueryOffset >= 0) {
+      const hashParams = new URLSearchParams(source.hash.slice(hashQueryOffset + 1));
+      for (const [key, value] of hashParams) {
+        if (isRunnerPerfParam(key)) {
+          target.searchParams.set(key, value);
+        }
+      }
+    }
+  }
+
+  function isRunnerPerfParam(name: string): boolean {
+    return name === 'voplayPerf'
+      || name === 'perf'
+      || name === 'voplayPerfOverlay'
+      || name === 'rendererDebug'
+      || name === 'debug'
+      || name === 'voplayRendererPerf'
+      || name === 'voplayPerfExperiment'
+      || name === 'voplayPerfDiag'
+      || name === 'voplayGcStress'
+      || name === 'voGcStressEveryStep'
+      || name.startsWith('voplayPerfDisable')
+      || name.startsWith('voplayDisable');
+  }
+
+  function isLocalRunnerHost(url: URL): boolean {
+    return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1' || url.hostname === '[::1]';
   }
 
   async function bindRunnerSession(nextSessionInfo: SessionInfo): Promise<void> {

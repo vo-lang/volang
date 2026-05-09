@@ -41,6 +41,10 @@ impl AppSession {
         &mut self.vm
     }
 
+    pub fn gc_step(&mut self) {
+        self.vm.gc_step();
+    }
+
     // ── Core run methods ────────────────────────────────────────────────
 
     pub fn run(&mut self, panic_message: &'static str) -> Result<StepResult, SessionError> {

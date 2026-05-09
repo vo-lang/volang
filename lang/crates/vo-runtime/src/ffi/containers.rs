@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use super::ExternCallContext;
 use crate::gc::GcRef;
-use crate::objects::{map, slice, string};
+use crate::objects::{array, map, slice, string};
 use core::marker::PhantomData;
 
 // ==================== VoElem Trait ====================
@@ -31,6 +31,14 @@ pub trait VoElem {
     fn read_from_slice(s: GcRef, idx: usize) -> Self::Owned;
     /// Write to a slice at given index.
     fn write_to_slice(s: GcRef, idx: usize, val: Self::Owned);
+    /// Read from an array at given index.
+    fn read_from_array(arr: GcRef, idx: usize) -> Self::Owned;
+    /// Write to an array at given index.
+    fn write_to_array(arr: GcRef, idx: usize, val: Self::Owned);
+    /// Extract the GC reference stored by `val`, when this element is a ref.
+    fn gc_ref_for_barrier(_val: &Self::Owned) -> Option<GcRef> {
+        None
+    }
 }
 
 // Implement VoElem for primitive types
@@ -46,6 +54,12 @@ impl VoElem for i64 {
     fn write_to_slice(s: GcRef, idx: usize, val: i64) {
         slice::set(s, idx, val as u64, 8);
     }
+    fn read_from_array(arr: GcRef, idx: usize) -> i64 {
+        array::get(arr, idx, 8) as i64
+    }
+    fn write_to_array(arr: GcRef, idx: usize, val: i64) {
+        array::set(arr, idx, val as u64, 8);
+    }
 }
 
 impl VoElem for u64 {
@@ -59,6 +73,12 @@ impl VoElem for u64 {
     }
     fn write_to_slice(s: GcRef, idx: usize, val: u64) {
         slice::set(s, idx, val, 8);
+    }
+    fn read_from_array(arr: GcRef, idx: usize) -> u64 {
+        array::get(arr, idx, 8)
+    }
+    fn write_to_array(arr: GcRef, idx: usize, val: u64) {
+        array::set(arr, idx, val, 8);
     }
 }
 
@@ -74,6 +94,12 @@ impl VoElem for f64 {
     fn write_to_slice(s: GcRef, idx: usize, val: f64) {
         slice::set(s, idx, val.to_bits(), 8);
     }
+    fn read_from_array(arr: GcRef, idx: usize) -> f64 {
+        f64::from_bits(array::get(arr, idx, 8))
+    }
+    fn write_to_array(arr: GcRef, idx: usize, val: f64) {
+        array::set(arr, idx, val.to_bits(), 8);
+    }
 }
 
 impl VoElem for bool {
@@ -88,6 +114,12 @@ impl VoElem for bool {
     fn write_to_slice(s: GcRef, idx: usize, val: bool) {
         slice::set(s, idx, val as u64, 8);
     }
+    fn read_from_array(arr: GcRef, idx: usize) -> bool {
+        array::get(arr, idx, 8) != 0
+    }
+    fn write_to_array(arr: GcRef, idx: usize, val: bool) {
+        array::set(arr, idx, val as u64, 8);
+    }
 }
 
 impl VoElem for GcRef {
@@ -101,6 +133,15 @@ impl VoElem for GcRef {
     }
     fn write_to_slice(s: GcRef, idx: usize, val: GcRef) {
         slice::set(s, idx, val as u64, 8);
+    }
+    fn read_from_array(arr: GcRef, idx: usize) -> GcRef {
+        array::get(arr, idx, 8) as GcRef
+    }
+    fn write_to_array(arr: GcRef, idx: usize, val: GcRef) {
+        array::set(arr, idx, val as u64, 8);
+    }
+    fn gc_ref_for_barrier(val: &GcRef) -> Option<GcRef> {
+        Some(*val)
     }
 }
 
@@ -119,6 +160,27 @@ impl VoElem for VoStringElem {
     }
     fn write_to_slice(_s: GcRef, _idx: usize, _val: String) {
         panic!("Cannot write String directly to slice - use ctx.alloc_str() first");
+    }
+    fn read_from_array(arr: GcRef, idx: usize) -> String {
+        let str_ref = array::get(arr, idx, 8) as GcRef;
+        string::as_str(str_ref).to_string()
+    }
+    fn write_to_array(_arr: GcRef, _idx: usize, _val: String) {
+        panic!("Cannot write String directly to array - use ctx.alloc_str() first");
+    }
+}
+
+#[inline]
+fn apply_element_write_barrier<T: VoElem>(
+    ctx: &mut ExternCallContext,
+    parent: GcRef,
+    child: Option<GcRef>,
+) {
+    if T::NEEDS_GC {
+        debug_assert_eq!(T::ELEM_BYTES, 8);
+        if let Some(child) = child {
+            ctx.gc().write_barrier(parent, child);
+        }
     }
 }
 
@@ -171,10 +233,12 @@ impl<T: VoElem> VoSlice<T> {
         T::read_from_slice(self.ptr, idx)
     }
 
-    /// Set element at index.
+    /// Set element at index and apply a GC barrier when `T` is a reference type.
     #[inline]
-    pub fn set(&self, idx: usize, val: T::Owned) {
+    pub fn set(&self, ctx: &mut ExternCallContext, idx: usize, val: T::Owned) {
+        let child = T::gc_ref_for_barrier(&val);
         T::write_to_slice(self.ptr, idx, val);
+        apply_element_write_barrier::<T>(ctx, slice::array_ref(self.ptr), child);
     }
 
     /// Create a cursor for iteration.
@@ -284,12 +348,20 @@ impl<V> VoMap<String, V> {
         map::get(self.ptr, &key, None).map(|v| v[0])
     }
 
-    /// Set value by string key (raw u64).
+    /// Set value by string key (raw u64) and apply GC barriers.
     #[inline]
-    pub fn set_raw(&self, key_ref: GcRef, val: u64) {
+    pub fn set_raw(&self, ctx: &mut ExternCallContext, key_ref: GcRef, val: u64) {
         let key = [key_ref as u64];
         let val = [val];
         map::set(self.ptr, &key, &val, None);
+        let key_meta = map::key_meta(self.ptr);
+        if key_meta.value_kind().may_contain_gc_refs() {
+            ctx.typed_write_barrier_by_meta(self.ptr, &key, key_meta);
+        }
+        let val_meta = map::val_meta(self.ptr);
+        if val_meta.value_kind().may_contain_gc_refs() {
+            ctx.typed_write_barrier_by_meta(self.ptr, &val, val_meta);
+        }
     }
 
     /// Delete by string key.
@@ -313,7 +385,7 @@ impl VoMap<String, String> {
     pub fn set(&self, ctx: &mut ExternCallContext, key: &str, val: &str) {
         let key_ref = ctx.alloc_str(key);
         let val_ref = ctx.alloc_str(val);
-        self.set_raw(key_ref, val_ref as u64);
+        self.set_raw(ctx, key_ref, val_ref as u64);
     }
 
     /// Delete key.
@@ -334,7 +406,7 @@ impl VoMap<String, i64> {
     /// Set value by key.
     pub fn set(&self, ctx: &mut ExternCallContext, key: &str, val: i64) {
         let key_ref = ctx.alloc_str(key);
-        self.set_raw(key_ref, val as u64);
+        self.set_raw(ctx, key_ref, val as u64);
     }
 
     /// Delete key.
@@ -355,7 +427,7 @@ impl VoMap<String, GcRef> {
     /// Set value by key.
     pub fn set(&self, ctx: &mut ExternCallContext, key: &str, val: GcRef) {
         let key_ref = ctx.alloc_str(key);
-        self.set_raw(key_ref, val as u64);
+        self.set_raw(ctx, key_ref, val as u64);
     }
 
     /// Delete key.
@@ -558,14 +630,16 @@ impl<T: VoElem, const N: usize> VoArray<T, N> {
     #[inline]
     pub fn get(&self, idx: usize) -> T::Owned {
         debug_assert!(idx < N, "array index out of bounds");
-        T::read_from_slice(self.ptr, idx)
+        T::read_from_array(self.ptr, idx)
     }
 
-    /// Set element at index.
+    /// Set element at index and apply a GC barrier when `T` is a reference type.
     #[inline]
-    pub fn set(&self, idx: usize, val: T::Owned) {
+    pub fn set(&self, ctx: &mut ExternCallContext, idx: usize, val: T::Owned) {
         debug_assert!(idx < N, "array index out of bounds");
-        T::write_to_slice(self.ptr, idx, val);
+        let child = T::gc_ref_for_barrier(&val);
+        T::write_to_array(self.ptr, idx, val);
+        apply_element_write_barrier::<T>(ctx, self.ptr, child);
     }
 
     /// Create a cursor for iteration.
@@ -594,7 +668,7 @@ impl<T: VoElem, const N: usize> VoArrayCursor<T, N> {
             return None;
         }
         let idx = self.idx;
-        let val = T::read_from_slice(self.ptr, idx);
+        let val = T::read_from_array(self.ptr, idx);
         self.idx += 1;
         Some((idx, val))
     }

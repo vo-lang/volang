@@ -1,6 +1,9 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 //! GC object scanning by type.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+
 use crate::gc::{scan_slots_by_types, Gc, GcRef};
 use crate::objects::{array, closure, interface, map, queue, queue_state, slice};
 use crate::slot::{byte_offset_for_slots, slot_to_ptr, Slot, SLOT_BYTES};
@@ -61,12 +64,32 @@ pub fn typed_write_barrier_by_meta(
                 gc.write_barrier(parent, vals[0] as GcRef);
             }
         }
-        // Struct/Array with mixed slots: need slot_types from struct_metas
-        ValueKind::Struct | ValueKind::Array => {
+        // Struct with mixed slots: need slot_types from struct_metas.
+        ValueKind::Struct => {
             if let Some(module) = module {
                 let meta_id = meta.meta_id() as usize;
                 if meta_id < module.struct_metas.len() {
                     typed_write_barrier(gc, parent, vals, &module.struct_metas[meta_id].slot_types);
+                }
+            } else {
+                // Missing module metadata is a caller bug for precise barriers,
+                // but the GC invariant is more important than precision. Be
+                // conservative so JIT/native helper drift cannot silently skip
+                // barriers for struct values.
+                for &slot in vals {
+                    if slot != 0 {
+                        gc.write_barrier(parent, slot as GcRef);
+                    }
+                }
+            }
+        }
+        // Fixed arrays are flattened in value storage. ValueMeta does not carry the
+        // array element layout, so use write_barrier's child validation instead of
+        // pretending meta_id is a StructMeta index.
+        ValueKind::Array => {
+            for &slot in vals {
+                if slot != 0 {
+                    gc.write_barrier(parent, slot as GcRef);
                 }
             }
         }
@@ -81,16 +104,45 @@ pub fn typed_write_barrier_by_meta(
     }
 }
 
+/// Apply typed write barriers for a contiguous range of elements just written
+/// into an existing heap container.
+pub fn typed_write_barrier_range_by_meta(
+    gc: &mut Gc,
+    parent: GcRef,
+    base_ptr: *const u8,
+    count: usize,
+    elem_bytes: usize,
+    meta: vo_common_core::types::ValueMeta,
+    module: Option<&vo_common_core::bytecode::Module>,
+) {
+    if count == 0 || !meta.value_kind().may_contain_gc_refs() {
+        return;
+    }
+
+    let elem_slots = elem_bytes.div_ceil(SLOT_BYTES);
+    let mut vals = vec![0u64; elem_slots];
+    for idx in 0..count {
+        let elem_ptr = unsafe { base_ptr.add(idx * elem_bytes) };
+        vals.fill(0);
+        unsafe {
+            core::ptr::copy_nonoverlapping(elem_ptr, vals.as_mut_ptr() as *mut u8, elem_bytes);
+        }
+        typed_write_barrier_by_meta(gc, parent, &vals, meta, module);
+    }
+}
+
 /// Scan a GC object and mark its children.
 ///
-/// `func_capture_slot_types`: indexed by func_id, each entry is the capture_slot_types for that function.
+/// `func_capture_slot_types`: returns capture_slot_types for a function id.
 /// Used to scan closure captures with correct types (Interface0/Interface1 vs GcRef).
-pub fn scan_object(
+pub fn scan_object<'a, F>(
     gc: &mut Gc,
     obj: GcRef,
     struct_metas: &[StructMeta],
-    func_capture_slot_types: &[&[SlotType]],
-) {
+    func_capture_slot_types: &F,
+) where
+    F: Fn(u32) -> &'a [SlotType] + ?Sized,
+{
     let gc_header = Gc::header(obj);
 
     // Large arrays use GcHeader.slots == 0 and store the real size in ArrayHeader.
@@ -173,7 +225,10 @@ pub fn scan_object(
 /// For regular closures, all captures are GcRef (pointers to heap-boxed escaped vars).
 /// For method value closures, captures may include interface data (itab + data).
 /// The function's capture_slot_types describes the capture layout directly.
-fn scan_closure(gc: &mut Gc, obj: GcRef, func_capture_slot_types: &[&[SlotType]]) {
+fn scan_closure<'a, F>(gc: &mut Gc, obj: GcRef, func_capture_slot_types: &F)
+where
+    F: Fn(u32) -> &'a [SlotType] + ?Sized,
+{
     let func_id = closure::func_id(obj);
     let cap_count = closure::capture_count(obj);
     if cap_count == 0 {
@@ -184,10 +239,7 @@ fn scan_closure(gc: &mut Gc, obj: GcRef, func_capture_slot_types: &[&[SlotType]]
         core::slice::from_raw_parts((obj as *const u64).add(closure::HEADER_SLOTS), cap_count)
     };
 
-    let capture_types = func_capture_slot_types
-        .get(func_id as usize)
-        .copied()
-        .unwrap_or(&[]);
+    let capture_types = func_capture_slot_types(func_id);
     debug_assert!(
         !capture_types.is_empty(),
         "scan_closure: func_id={} has {} captures but empty capture_slot_types — codegen must set capture_slot_types for all closures with captures",

@@ -10,6 +10,7 @@
 import type { Backend } from '../backend/backend';
 import { frameworkJsModulePath, type FrameworkContract, type GuiRunOutput } from '../types';
 import { setActiveHostBridge, type StudioWasm } from '../studio_wasm';
+import { shouldEmitVoplayPerfConsoleDiagnostics } from '../perf_report_bridge';
 import { loadHostBridgeModule, type HostBridgeModule } from './renderer_bridge';
 
 export interface WasmExtCompileSpec {
@@ -59,11 +60,15 @@ export async function executeGuiFromCompileOutput(
     }
     try {
       const preloadKey = ext.moduleKey || ext.name;
-      console.info(
-        `[studio-gui] preload wasm extension name=${ext.name} moduleKey=${preloadKey} wasmBytes=${ext.wasmBytes.length} jsGlueBytes=${ext.jsGlueBytes?.length ?? 0}`,
-      );
+      if (shouldEmitVoplayPerfConsoleDiagnostics()) {
+        console.info(
+          `[studio-gui] preload wasm extension name=${ext.name} moduleKey=${preloadKey} wasmBytes=${ext.wasmBytes.length} jsGlueBytes=${ext.jsGlueBytes?.length ?? 0}`,
+        );
+      }
       await wasm.preloadExtModule(preloadKey, ext.wasmBytes, jsGlueUrl);
-      console.info(`[studio-gui] preload wasm extension ready name=${ext.name} moduleKey=${preloadKey}`);
+      if (shouldEmitVoplayPerfConsoleDiagnostics()) {
+        console.info(`[studio-gui] preload wasm extension ready name=${ext.name} moduleKey=${preloadKey}`);
+      }
     } finally {
       if (jsGlueUrl) URL.revokeObjectURL(jsGlueUrl);
     }

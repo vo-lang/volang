@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,6 +10,7 @@ const BLOCKKART_ROOT = path.resolve(process.env.BLOCKKART_ROOT ?? path.join(REPO
 const MOD_CACHE_ROOT = path.resolve(process.env.VO_MOD_CACHE ?? path.join(os.homedir(), '.vo', 'mod'));
 const OUT_ROOT = path.join(STUDIO_ROOT, 'public', 'quickplay', 'blockkart');
 const WASM_TARGET = 'wasm32-unknown-unknown';
+const BLOCKKART_RUNTIME_ASSETS = ['assets/blockkart.vpak'];
 
 function cacheKey(modulePath) {
   return modulePath.replaceAll('/', '@');
@@ -16,6 +18,10 @@ function cacheKey(modulePath) {
 
 function gitOutput(args, cwd) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+}
+
+function sha256Digest(bytes) {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
 async function pathExists(filePath) {
@@ -34,6 +40,9 @@ async function walkFiles(root) {
     for (const entry of entries) {
       const absolute = path.join(current, entry.name);
       if (entry.isDirectory()) {
+        if (shouldSkipDependencyDirectory(entry.name)) {
+          continue;
+        }
         await walk(absolute);
       } else if (entry.isFile()) {
         out.push(absolute);
@@ -42,6 +51,10 @@ async function walkFiles(root) {
   }
   await walk(root);
   return out.sort();
+}
+
+function shouldSkipDependencyDirectory(name) {
+  return name.startsWith('.') || name === 'target' || name === 'tmp_checks';
 }
 
 function parseLockFile(content) {
@@ -98,6 +111,73 @@ function shouldPackageDependencyFile(relativePath) {
   return false;
 }
 
+function shouldDeclarePackagedSourceFile(file) {
+  if (file.content == null) return false;
+  if (
+    file.path === 'vo.web.json'
+    || file.path === 'vo.release.json'
+    || file.path === '.vo-version'
+    || file.path === '.vo-source-digest'
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function packagedSourceEntry(file) {
+  const bytes = Buffer.from(file.content, 'utf8');
+  return {
+    digest: sha256Digest(bytes),
+    path: file.path,
+    size: bytes.byteLength,
+  };
+}
+
+function sourceSetDigest(entries) {
+  return sha256Digest(Buffer.from(JSON.stringify(entries), 'utf8'));
+}
+
+async function rewritePackagedWebManifest(moduleDir, files, artifacts) {
+  const manifestFile = files.find((file) => file.path === 'vo.web.json');
+  if (!manifestFile) return;
+
+  // Fully installed release modules carry vo.release.json/.vo-source-digest and
+  // should stay byte-for-byte published. Web-only local quickplay snapshots do
+  // not have those release markers, so their vo.web.json must describe the
+  // exact packaged VFS payload or browser runtime integrity checks fail later.
+  if (files.some((file) => file.path === 'vo.release.json')) return;
+
+  const manifest = JSON.parse(manifestFile.content);
+  const source = files
+    .filter(shouldDeclarePackagedSourceFile)
+    .map(packagedSourceEntry)
+    .sort((a, b) => a.path.localeCompare(b.path));
+  manifest.source = source;
+  manifest.source_digest = sourceSetDigest(source);
+
+  if (Array.isArray(manifest.artifacts) && artifacts.length > 0) {
+    const packagedArtifactPaths = new Map(artifacts.map((artifact) => [path.posix.basename(artifact.path), artifact.path]));
+    const nextArtifacts = [];
+    for (const artifact of manifest.artifacts) {
+      const packagedPath = packagedArtifactPaths.get(artifact.name);
+      if (!packagedPath) {
+        nextArtifacts.push(artifact);
+        continue;
+      }
+      const bytes = await fs.readFile(path.join(moduleDir, packagedPath));
+      nextArtifacts.push({
+        ...artifact,
+        digest: sha256Digest(bytes),
+        path: packagedPath,
+        size: bytes.byteLength,
+      });
+    }
+    manifest.artifacts = nextArtifacts;
+  }
+
+  manifestFile.content = `${JSON.stringify(manifest, null, 2)}\n`;
+}
+
 async function buildProjectPackage() {
   const files = [];
   const rootEntries = await fs.readdir(BLOCKKART_ROOT, { withFileTypes: true });
@@ -109,6 +189,16 @@ async function buildProjectPackage() {
     files.push({
       path: entry.name,
       content: await fs.readFile(path.join(BLOCKKART_ROOT, entry.name), 'utf8'),
+    });
+  }
+  for (const relative of BLOCKKART_RUNTIME_ASSETS) {
+    const absolute = path.join(BLOCKKART_ROOT, relative);
+    if (!(await pathExists(absolute))) {
+      throw new Error(`Missing BlockKart runtime asset: ${absolute}`);
+    }
+    files.push({
+      path: relative,
+      contentBase64: (await fs.readFile(absolute)).toString('base64'),
     });
   }
   files.sort((a, b) => a.path.localeCompare(b.path));
@@ -157,6 +247,7 @@ async function buildDependencyPackage(lockModules) {
       await fs.copyFile(sourcePath, path.join(OUT_ROOT, outRelative));
     }
 
+    await rewritePackagedWebManifest(moduleDir, files, artifacts);
     files.sort((a, b) => a.path.localeCompare(b.path));
     artifacts.sort((a, b) => a.path.localeCompare(b.path));
     modules.push({

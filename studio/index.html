@@ -7,6 +7,49 @@
 </head>
 <body>
   <div id="app"></div>
+  <script>
+    (() => {
+      const localRunnerHost = location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.hostname === '::1' || location.hostname === '[::1]';
+      const postPerfReport = (payload) => {
+        const body = JSON.stringify(payload);
+        try {
+          fetch('/__voplay_perf_report', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body,
+            keepalive: true,
+          }).catch(() => {});
+          return;
+        } catch {}
+        try {
+          const blob = new Blob([body], { type: 'application/json' });
+          if (navigator.sendBeacon) navigator.sendBeacon('/__voplay_perf_report', blob);
+        } catch {}
+      };
+      const pagePayload = (kind) => ({
+        schemaVersion: 1,
+        source: 'studio-page',
+        kind,
+        mode: new URLSearchParams(location.search).get('voplayPerf') || 'stats',
+        metrics: { href: location.href, hash: location.hash, search: location.search },
+        nowMs: performance.now(),
+        href: location.href,
+        visibility: document.visibilityState,
+        focus: document.hasFocus(),
+      });
+      const params = new URLSearchParams(location.search);
+      if (localRunnerHost && location.hash.startsWith('#/runner') && !params.has('voplayPerf') && !params.has('perf')) {
+        const url = new URL(location.href);
+        url.searchParams.set('voplayPerf', 'stats');
+        history.replaceState(null, '', url);
+      }
+      if (localRunnerHost) {
+        postPerfReport(pagePayload(location.hash.startsWith('#/runner') ? 'runner-bootstrap' : 'page-bootstrap'));
+        setTimeout(() => postPerfReport(pagePayload('page-heartbeat')), 500);
+        setTimeout(() => postPerfReport(pagePayload('page-heartbeat')), 2500);
+      }
+    })();
+  </script>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

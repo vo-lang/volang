@@ -18,7 +18,7 @@ use vo_module::Error;
 use super::cache::compile_cache_slot;
 use super::native::{
     current_target_triple, prepare_native_extension_specs_for_frozen_build,
-    validate_locked_modules_installed,
+    validate_locked_modules_installed, write_native_extension_test_abi_marker,
 };
 use super::CompileError;
 

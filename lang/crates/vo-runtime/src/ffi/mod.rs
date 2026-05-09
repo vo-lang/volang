@@ -143,7 +143,7 @@ pub type ExternFn = fn(&mut ExternCallContext) -> ExternResult;
 
 // ==================== Extension ABI (dylib boundary) ====================
 
-pub const EXTENSION_ABI_VERSION: u32 = 2;
+pub const EXTENSION_ABI_VERSION: u32 = 5;
 
 /// Extension ABI result codes returned across dylib boundary.
 pub mod ext_abi {
@@ -156,6 +156,55 @@ pub mod ext_abi {
     pub const RESULT_HOST_EVENT_WAIT: u32 = 6;
     pub const RESULT_HOST_EVENT_WAIT_REPLAY: u32 = 7;
 }
+
+const fn extension_abi_fingerprint() -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let words = [
+        EXTENSION_ABI_VERSION as u64,
+        core::mem::size_of::<ExternCallContext<'static>>() as u64,
+        core::mem::align_of::<ExternCallContext<'static>>() as u64,
+        core::mem::offset_of!(ExternCallContext<'static>, stack) as u64,
+        core::mem::offset_of!(ExternCallContext<'static>, bp) as u64,
+        core::mem::offset_of!(ExternCallContext<'static>, arg_start) as u64,
+        core::mem::offset_of!(ExternCallContext<'static>, ret_start) as u64,
+        core::mem::offset_of!(ExternCallContext<'static>, extern_id) as u64,
+        core::mem::offset_of!(ExternCallContext<'static>, gc) as u64,
+        core::mem::offset_of!(ExternCallContext<'static>, module) as u64,
+        core::mem::offset_of!(ExternCallContext<'static>, itab_cache) as u64,
+        core::mem::offset_of!(ExternCallContext<'static>, vm) as u64,
+        core::mem::offset_of!(ExternCallContext<'static>, fiber) as u64,
+        core::mem::size_of::<Gc>() as u64,
+        core::mem::align_of::<Gc>() as u64,
+        core::mem::size_of::<crate::gc::GcHeader>() as u64,
+        core::mem::align_of::<crate::gc::GcHeader>() as u64,
+        core::mem::size_of::<crate::objects::array::ArrayHeader>() as u64,
+        core::mem::align_of::<crate::objects::array::ArrayHeader>() as u64,
+        core::mem::size_of::<crate::objects::slice::SliceData>() as u64,
+        core::mem::align_of::<crate::objects::slice::SliceData>() as u64,
+        ext_abi::RESULT_OK as u64,
+        ext_abi::RESULT_YIELD as u64,
+        ext_abi::RESULT_BLOCK as u64,
+        ext_abi::RESULT_WAIT_IO as u64,
+        ext_abi::RESULT_PANIC as u64,
+        ext_abi::RESULT_CALL_CLOSURE as u64,
+        ext_abi::RESULT_HOST_EVENT_WAIT as u64,
+        ext_abi::RESULT_HOST_EVENT_WAIT_REPLAY as u64,
+    ];
+    let mut i = 0;
+    while i < words.len() {
+        hash ^= words[i];
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        i += 1;
+    }
+    hash
+}
+
+/// ABI fingerprint for native extensions.
+///
+/// The table version catches intentional ABI epochs; this fingerprint catches
+/// accidental layout drift inside the epoch before an extension can interpret
+/// the host `ExternCallContext` with stale struct layouts.
+pub const EXTENSION_ABI_FINGERPRINT: u64 = extension_abi_fingerprint();
 
 /// Extension function pointer type (C calling convention).
 /// `ctx` is a pointer to `ExternCallContext` (opaque at the ABI boundary).
@@ -254,6 +303,7 @@ pub fn lookup_extern(name: &str) -> Option<ExternFnPtr> {
 /// Unified external function call context.
 ///
 /// Provides stack access, GC allocation, and type metadata for all extern functions.
+#[repr(C)]
 pub struct ExternCallContext<'a> {
     /// Stack slots.
     stack: &'a mut [u64],
@@ -480,6 +530,13 @@ impl<'a> ExternCallContext<'a> {
     /// Write return value as GcRef.
     #[inline]
     pub fn ret_ref(&mut self, n: u16, val: GcRef) {
+        debug_assert!(
+            self.gc.canonicalize_ref(val).is_some(),
+            "ret_ref: invalid GcRef {:p} for extern_id={} ret_slot={}",
+            val,
+            self.extern_id,
+            n
+        );
         self.set_slot(self.ret_start + n, val as u64);
     }
 
@@ -864,6 +921,39 @@ impl<'a> ExternCallContext<'a> {
         self.gc.alloc(value_meta, slots)
     }
 
+    /// Apply a type-aware write barrier for a value written into a heap object.
+    #[inline]
+    pub fn typed_write_barrier_by_meta(&mut self, parent: GcRef, vals: &[u64], meta: ValueMeta) {
+        crate::gc_types::typed_write_barrier_by_meta(
+            self.gc,
+            parent,
+            vals,
+            meta,
+            Some(self.module),
+        );
+    }
+
+    /// Apply type-aware write barriers for a range written into a heap container.
+    #[inline]
+    pub fn typed_write_barrier_range_by_meta(
+        &mut self,
+        parent: GcRef,
+        base_ptr: *const u8,
+        count: usize,
+        elem_bytes: usize,
+        meta: ValueMeta,
+    ) {
+        crate::gc_types::typed_write_barrier_range_by_meta(
+            self.gc,
+            parent,
+            base_ptr,
+            count,
+            elem_bytes,
+            meta,
+            Some(self.module),
+        );
+    }
+
     /// Box a value into interface format (InterfaceSlot).
     ///
     /// This is the canonical way to convert any value to interface representation.
@@ -937,6 +1027,9 @@ impl<'a> ExternCallContext<'a> {
                 for (i, &val) in raw_slots.iter().enumerate() {
                     unsafe { *data_ptr.add(i) = val };
                 }
+                if elem_vk.may_contain_gc_refs() {
+                    self.gc.mark_allocated_for_scan(new_ref);
+                }
 
                 let slot0 = interface::pack_slot0(0, rttid, vk);
                 InterfaceSlot::new(slot0, new_ref as u64)
@@ -960,6 +1053,7 @@ impl<'a> ExternCallContext<'a> {
         for (i, &val) in raw_slots.iter().enumerate() {
             unsafe { Gc::write_slot(new_ref, i, val) };
         }
+        self.gc.mark_allocated_for_scan(new_ref);
         new_ref
     }
 
@@ -1309,6 +1403,14 @@ impl<'a> ExternCallContext<'a> {
     pub fn map_set_string_key(&mut self, m: GcRef, key: &str, val: &[u64]) {
         let str_ref = crate::objects::string::from_rust_str(self.gc, key);
         crate::objects::map::set(m, &[str_ref as u64], val, None);
+        let key_meta = crate::objects::map::key_meta(m);
+        if key_meta.value_kind().may_contain_gc_refs() {
+            self.typed_write_barrier_by_meta(m, &[str_ref as u64], key_meta);
+        }
+        let val_meta = crate::objects::map::val_meta(m);
+        if val_meta.value_kind().may_contain_gc_refs() {
+            self.typed_write_barrier_by_meta(m, val, val_meta);
+        }
     }
 
     /// Find the rttid for a `RuntimeType::Basic(vk)` entry in this module.
@@ -1352,6 +1454,7 @@ impl<'a> ExternCallContext<'a> {
             // String is a GcRef (8 bytes), store as u64
             slice::set(s, i, str_ref as u64, 8);
         }
+        self.gc.mark_allocated_for_scan(slice::array_ref(s));
         s
     }
 

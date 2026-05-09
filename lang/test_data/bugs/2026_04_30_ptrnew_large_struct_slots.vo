@@ -26,7 +26,14 @@ func main() {
 	defer toolchain.Free(m)
 
 	bytecode := toolchain.FormatBytecode(m)
-	assert(strings.Contains(bytecode, "PtrNew"), "compiled bytecode should allocate Big")
-	assert(strings.Contains(bytecode, "slots=261"), "PtrNew must allocate all 261 heap slots")
-	assert(!strings.Contains(bytecode, "slots=5"), "PtrNew slot count must not be truncated to u8")
+	ptrNewLine := ""
+	for _, line := range strings.Split(bytecode, "\n") {
+		if strings.Contains(line, "PtrNew") {
+			ptrNewLine = line
+			break
+		}
+	}
+	assert(ptrNewLine != "", "compiled bytecode should allocate Big")
+	assert(strings.Contains(ptrNewLine, "slots=261"), "PtrNew must allocate all 261 heap slots")
+	assert(!strings.Contains(ptrNewLine, "slots=5"), "PtrNew slot count must not be truncated to u8")
 }

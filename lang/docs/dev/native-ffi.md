@@ -299,12 +299,12 @@ Type-safe wrappers for Vo container types:
 let s = VoSlice::<i64>::from_ref(ctx.arg_ref(slots::ARG_DATA));
 let len = s.len();
 let val = s.get(0);
-s.set(0, val * 2);
+s.set(ctx, 0, val * 2);
 
 // Cursor iteration (allows modification)
 let mut cur = s.cursor();
 while let Some((idx, val)) = cur.next() {
-    if val > 100 { s.set(idx, val * 2); }
+    if val > 100 { s.set(ctx, idx, val * 2); }
 }
 ```
 

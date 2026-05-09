@@ -9,8 +9,7 @@ use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use vo_runtime::gc::Gc;
-use vo_runtime::gc::GcRef;
+use vo_runtime::gc::{Gc, GcRef, GcRootScanKind, GcStepStats};
 use vo_runtime::output::{default_sink, OutputSink};
 use vo_runtime::SentinelErrorCache;
 
@@ -306,6 +305,45 @@ pub struct VmState {
     pub command_queue: VecDeque<IslandCommand>,
     pub outbound_commands: VecDeque<(u32, IslandCommand)>,
     pub pending_island_responses: u32,
+    /// Conservative root-dirty marker for incremental GC sweep. Set when host
+    /// command/I/O paths may have changed roots outside the currently running
+    /// fiber.
+    pub gc_roots_dirty_all: bool,
+    /// Fibers whose root set may have changed since the last full or dirty root
+    /// scan. Used to avoid rescanning every fiber on each sweep slice.
+    pub gc_dirty_fibers: Vec<u32>,
+    /// Monotonic root mutation epoch. Incremented on every dirty-root event so a
+    /// bounded root snapshot can detect changes that happened while it was being
+    /// scanned across scheduler boundaries.
+    pub gc_dirty_epoch: u64,
+    pub gc_root_scan: Option<VmRootScanSnapshot>,
+    pub last_gc_step_stats: VmGcStepStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmRootScanMode {
+    Full,
+    DirtyFibers,
+}
+
+#[derive(Debug)]
+pub struct VmRootScanSnapshot {
+    pub kind: GcRootScanKind,
+    pub mode: VmRootScanMode,
+    pub dirty_epoch: u64,
+    pub dirty_fibers: Vec<u32>,
+    pub roots: Vec<GcRef>,
+    pub cursor: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VmGcStepStats {
+    pub gc: GcStepStats,
+    pub dirty_all_before: bool,
+    pub dirty_fiber_count: usize,
+    pub full_roots_scanned: bool,
+    pub dirty_roots_scanned: bool,
+    pub stable_roots_skipped: bool,
 }
 
 impl VmState {
@@ -341,6 +379,11 @@ impl VmState {
             command_queue: VecDeque::new(),
             outbound_commands: VecDeque::new(),
             pending_island_responses: 0,
+            gc_roots_dirty_all: true,
+            gc_dirty_fibers: Vec::new(),
+            gc_dirty_epoch: 0,
+            gc_root_scan: None,
+            last_gc_step_stats: VmGcStepStats::default(),
         }
     }
 
@@ -507,6 +550,17 @@ impl VmState {
         }
     }
 
+    /// Conservatively record that the VM root set changed outside the current
+    /// fiber's ordinary stack mutation path.
+    #[inline]
+    pub fn mark_gc_all_roots_dirty(&mut self) {
+        if self.gc_root_scan.is_some() || !self.gc_roots_dirty_all {
+            self.gc_dirty_epoch = self.gc_dirty_epoch.wrapping_add(1);
+        }
+        self.gc_roots_dirty_all = true;
+        self.gc_dirty_fibers.clear();
+    }
+
     /// Allocate a new endpoint ID for this island.
     /// Format: high 32 bits = island_id, low 32 bits = counter.
     pub fn allocate_endpoint_id(&mut self) -> u64 {
@@ -528,6 +582,7 @@ impl VmState {
         scheduler: &mut crate::scheduler::Scheduler,
     ) {
         if waiter.island_id == self.current_island_id {
+            self.mark_gc_all_roots_dirty();
             scheduler.wake_queue_waiter(waiter);
         } else {
             self.send_wake_to_island(waiter.island_id, waiter.fiber_id as u32);

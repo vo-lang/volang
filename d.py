@@ -4,6 +4,7 @@ Vo Development Tool - Wrapper for vo-test and other utilities
 
 Usage:
     ./d.py test [vm|jit|osr|both|gc|nostd|wasm] [-v] [--jobs N] [--repeat N|-n N] [file]
+    ./d.py gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]
     ./d.py bench [all|vo|<name>|score] [--all-langs]
     ./d.py loc [--with-tests]
     ./d.py clean [all|vo|rust]
@@ -158,6 +159,16 @@ def run_vo_cli(args, jit_mode=False):
     return result.returncode
 
 
+def run_gc_perf(args):
+    cmd = ['cargo', 'run', '-p', 'vo-runtime', '--example', 'gc_perf']
+    if USE_RELEASE:
+        cmd.append('--release')
+    cmd.append('--')
+    cmd.extend(args)
+    result = subprocess.run(cmd, cwd=PROJECT_ROOT)
+    return result.returncode
+
+
 def run_other_command(command, args):
     """Run other commands via d_py.py."""
     d_py = PROJECT_ROOT / 'd_py.py'
@@ -200,6 +211,8 @@ def main():
         sys.exit(run_vo_cli(['run'] + rest_args, jit_mode=jit_mode))
     elif command == 'vo':
         sys.exit(run_vo_cli(rest_args))
+    elif command == 'gc-perf':
+        sys.exit(run_gc_perf(rest_args))
     elif command in ('bench', 'loc', 'clean', 'studio', 'studio-native', 'studio-stop', 'ci'):
         sys.exit(run_other_command(command, rest_args))
     elif command in ('-h', '--help', 'help'):

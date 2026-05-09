@@ -35,7 +35,8 @@ pub use types::EndpointRegistry;
 #[cfg(feature = "std")]
 pub use types::IslandThread;
 pub use types::{
-    ErrorLocation, ExecResult, RuntimeTrapKind, SchedulingOutcome, VmError, VmState, TIME_SLICE,
+    ErrorLocation, ExecResult, RuntimeTrapKind, SchedulingOutcome, VmError, VmGcStepStats,
+    VmRootScanMode, VmRootScanSnapshot, VmState, TIME_SLICE,
 };
 
 use helpers::{
@@ -63,6 +64,16 @@ enum WaitResult {
     /// Island VM should return to its command loop.
     #[cfg(feature = "std")]
     Break,
+}
+
+#[inline]
+fn exec_result_allows_gc_step(result: &ExecResult) -> bool {
+    !matches!(result, ExecResult::Block(_))
+}
+
+#[inline]
+fn exec_result_marks_gc_fiber_roots_dirty(result: &ExecResult) -> bool {
+    !matches!(result, ExecResult::Interrupted)
 }
 
 use crate::instruction::{Instruction, Opcode};
@@ -114,6 +125,86 @@ fn validate_externs_registered(
         msg.push_str(&format!("  - [{}] {}\n", id, name));
     }
     panic!("{}", msg);
+}
+
+#[cfg(debug_assertions)]
+#[allow(clippy::too_many_arguments)]
+fn debug_validate_extern_returns(
+    gc: &vo_runtime::gc::Gc,
+    module: &Module,
+    fiber: &Fiber,
+    fiber_id: crate::scheduler::FiberId,
+    func_id: u32,
+    extern_id: u32,
+    bp: usize,
+    inst: &Instruction,
+) {
+    let Some(extern_def) = module.externs.get(extern_id as usize) else {
+        return;
+    };
+    let Some(func) = module.functions.get(func_id as usize) else {
+        return;
+    };
+
+    let ret_start = inst.a as usize;
+    let ret_end = ret_start.saturating_add(extern_def.ret_slots as usize);
+    let scan_end = ret_end.min(func.slot_types.len());
+    let mut slot_idx = ret_start;
+    while slot_idx < scan_end {
+        match func.slot_types[slot_idx] {
+            vo_runtime::SlotType::GcRef => {
+                let raw = fiber.stack[bp + slot_idx];
+                if raw != 0 && gc.canonicalize_ref(raw as GcRef).is_none() {
+                    let (in_all, in_index, index_len) = gc.debug_ref_membership(raw as GcRef);
+                    panic!(
+                        "CallExtern returned invalid GcRef fiber={} caller_func={} caller_name={} extern={} extern_name={} ret_slot={} raw=0x{:016x} in_all_objects={} in_object_index={} object_index_len={}",
+                        fiber_id.to_raw(),
+                        func_id,
+                        func.name,
+                        extern_id,
+                        extern_def.name,
+                        slot_idx,
+                        raw,
+                        in_all,
+                        in_index,
+                        index_len,
+                    );
+                }
+                slot_idx += 1;
+            }
+            vo_runtime::SlotType::Interface0 => {
+                if slot_idx + 1 >= ret_end || slot_idx + 1 >= fiber.stack.len().saturating_sub(bp) {
+                    slot_idx += 1;
+                    continue;
+                }
+                let slot0 = fiber.stack[bp + slot_idx];
+                let slot1 = fiber.stack[bp + slot_idx + 1];
+                if vo_runtime::objects::interface::data_is_gc_ref(slot0)
+                    && slot1 != 0
+                    && gc.canonicalize_ref(slot1 as GcRef).is_none()
+                {
+                    let (in_all, in_index, index_len) = gc.debug_ref_membership(slot1 as GcRef);
+                    panic!(
+                        "CallExtern returned invalid interface GcRef fiber={} caller_func={} caller_name={} extern={} extern_name={} ret_slot={} raw=0x{:016x} in_all_objects={} in_object_index={} object_index_len={}",
+                        fiber_id.to_raw(),
+                        func_id,
+                        func.name,
+                        extern_id,
+                        extern_def.name,
+                        slot_idx + 1,
+                        slot1,
+                        in_all,
+                        in_index,
+                        index_len,
+                    );
+                }
+                slot_idx += 2;
+            }
+            _ => {
+                slot_idx += 1;
+            }
+        }
+    }
 }
 
 impl Vm {
@@ -299,6 +390,9 @@ impl Vm {
     fn finish_load(&mut self, module: Module) {
         let total_global_slots: usize = module.globals.iter().map(|g| g.slots as usize).sum();
         self.state.globals = vec![0u64; total_global_slots];
+        self.state.mark_gc_all_roots_dirty();
+        self.state.gc_root_scan = None;
+        self.state.last_gc_step_stats = VmGcStepStats::default();
         // Initialize itab_cache from module's compile-time itabs
         self.state.itab_cache = ItabCache::from_module_itabs(module.itabs.clone());
         // Reset sentinel error cache for new module (prevents cross-module corruption)
@@ -446,6 +540,7 @@ impl Vm {
     }
 
     pub fn push_island_command(&mut self, cmd: vo_runtime::island::IslandCommand) {
+        self.mark_gc_all_roots_dirty();
         self.state.command_queue.push_back(cmd);
     }
 
@@ -515,11 +610,29 @@ impl Vm {
                 None => break,
             };
 
-            // GC step at scheduling boundary — between fiber runs, all stacks are stable.
-            self.gc_step();
-
             let result = self.run_fiber(fiber_id);
-            match self.handle_exec_result(result, max_iterations.is_some()) {
+            let gc_after_boundary = exec_result_allows_gc_step(&result);
+            let mark_gc_fiber_roots_dirty = exec_result_marks_gc_fiber_roots_dirty(&result);
+
+            let handled = self.handle_exec_result(result, max_iterations.is_some());
+            // GC step at the scheduling boundary after the current fiber has
+            // yielded/blocked/done. Stacks are stable here, and a newly-woken
+            // fiber can handle latency-sensitive work (for example a render
+            // frame request) before incremental GC uses the remaining slice.
+            //
+            // If this boundary parked the fiber on an external queue/event, return
+            // to the host first. Running a GC slice after the app has reached its
+            // next receive point can delay the remote sender that is supposed to
+            // wake it, which shows up as request-send stalls in split render loops.
+            if !matches!(handled, Some(Err(_))) {
+                if mark_gc_fiber_roots_dirty {
+                    self.mark_gc_fiber_roots_dirty(fiber_id);
+                }
+                if gc_after_boundary {
+                    self.gc_step_after_fiber(None);
+                }
+            }
+            match handled {
                 None => {} // continue scheduling
                 Some(Ok(outcome)) => return Ok(outcome),
                 Some(Err(e)) => return Err(e),
@@ -541,6 +654,9 @@ impl Vm {
         }
         while let Some(cmd) = self.state.command_queue.pop_front() {
             cmds.push(cmd);
+        }
+        if !cmds.is_empty() {
+            self.mark_gc_all_roots_dirty();
         }
         for cmd in cmds {
             self.dispatch_island_command(cmd);
@@ -595,6 +711,7 @@ impl Vm {
         #[cfg(feature = "std")]
         {
             if self.scheduler.poll_io(&mut self.state.io) > 0 {
+                self.mark_gc_all_roots_dirty();
                 return WaitResult::Retry;
             }
         }
@@ -609,6 +726,7 @@ impl Vm {
             if let Some(ref transport) = self.state.main_transport {
                 match transport.recv_timeout(std::time::Duration::from_millis(100)) {
                     Ok(cmd) => {
+                        self.mark_gc_all_roots_dirty();
                         self.dispatch_island_command(cmd);
                         self.state.clear_endpoint_tombstones_if_quiescent();
                         return WaitResult::Retry;
@@ -678,12 +796,14 @@ impl Vm {
     /// Wake a fiber blocked on a host-side event and schedule it to run.
     /// Called by the WASM async run loop after a host event fires.
     pub fn wake_host_event(&mut self, token: u64) {
+        self.mark_gc_all_roots_dirty();
         self.scheduler.wake_host_event(token);
     }
 
     /// Wake a fiber blocked on a host-side event, attaching opaque data.
     /// The FFI function reads the data on replay via `ctx.take_resume_host_event_data()`.
     pub fn wake_host_event_with_data(&mut self, token: u64, data: Vec<u8>) {
+        self.mark_gc_all_roots_dirty();
         self.scheduler.wake_host_event_with_data(token, data);
     }
 
@@ -982,6 +1102,7 @@ impl Vm {
                     } => {
                         self.state
                             .send_endpoint_close_request(home_island, endpoint_id);
+                        self.mark_gc_all_roots_dirty();
                         self.state.endpoint_registry.mark_tombstone(endpoint_id);
                         refetch!();
                     }
@@ -1493,13 +1614,14 @@ impl Vm {
 
                     let (closure_replay_results, closure_replay_panic_message) =
                         fiber.closure_replay.take_for_extern();
+                    let ret_slots = module.externs[extern_id as usize].ret_slots;
                     let invoke = ExternInvoke {
                         extern_id,
                         bp: bp as u32,
                         arg_start: inst.c,
                         arg_slots: inst.flags as u16,
                         ret_start: inst.a,
-                        ret_slots: 0, // not used by current dispatch
+                        ret_slots,
                     };
                     let world = ExternWorld {
                         gc: &mut self.state.gc,
@@ -1527,6 +1649,18 @@ impl Vm {
                         invoke,
                         world,
                         fiber_inputs,
+                    );
+                    stack = fiber.stack_ptr();
+                    #[cfg(debug_assertions)]
+                    debug_validate_extern_returns(
+                        &self.state.gc,
+                        module,
+                        fiber,
+                        fiber_id,
+                        func_id,
+                        extern_id,
+                        bp,
+                        &inst,
                     );
                     match extern_result {
                         ExternResult::Ok => {
@@ -2176,6 +2310,7 @@ impl Vm {
                             &mut self.state.endpoint_registry,
                             |i, value| helpers::stack_set(stack, dst_start + i, value),
                         );
+                        self.mark_gc_all_roots_dirty();
                         refetch!();
                         continue;
                     }
@@ -2506,7 +2641,74 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     #[cfg(feature = "std")]
     use std::sync::Arc;
+    use vo_runtime::bytecode::FunctionDef;
     use vo_runtime::island::{EndpointResponseKind, IslandCommand};
+    use vo_runtime::{SlotType, ValueKind, ValueMeta};
+
+    fn gc_test_module() -> Module {
+        gc_test_module_with_root_slots(1)
+    }
+
+    fn gc_test_module_with_root_slots(root_slots: u16) -> Module {
+        let mut module = Module::new("gc-test".to_string());
+        module.functions.push(FunctionDef {
+            name: "root_frame".to_string(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots: root_slots,
+            gc_scan_slots: root_slots,
+            ret_slots: 0,
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer: false,
+            has_calls: false,
+            has_call_extern: false,
+            code: Vec::new(),
+            slot_types: vec![SlotType::GcRef; root_slots as usize],
+            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&vec![
+                SlotType::GcRef;
+                root_slots as usize
+            ]),
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+        });
+        module
+    }
+
+    fn run_gc_until_pause(vm: &mut Vm) {
+        for _ in 0..10_000 {
+            if !vm.state.gc.should_step() && vm.state.gc.state() == vo_runtime::gc::GcState::Pause {
+                return;
+            }
+            vm.gc_step_after_fiber(None);
+        }
+        panic!(
+            "GC did not reach pause state; state={:?} root_scan_pending={}",
+            vm.state.gc.state(),
+            vm.state.gc_root_scan.is_some(),
+        );
+    }
+
+    fn run_until_atomic_root_scan_pending(vm: &mut Vm) {
+        for _ in 0..10_000 {
+            vm.gc_step_after_fiber(None);
+            if vm.state.gc.state() == vo_runtime::gc::GcState::Atomic
+                && vm.state.gc_root_scan.is_some()
+            {
+                return;
+            }
+        }
+        panic!(
+            "GC did not enter pending atomic root scan; state={:?} root_scan_pending={}",
+            vm.state.gc.state(),
+            vm.state.gc_root_scan.is_some(),
+        );
+    }
 
     #[test]
     fn run_scheduled_returns_suspended_when_waiting_for_island_response() {
@@ -2556,6 +2758,236 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dirty_fiber_root_scan_rescues_late_sweep_root() {
+        let mut vm = Vm::new();
+        vm.finish_load(gc_test_module());
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        {
+            let fiber = vm.scheduler.get_fiber_mut(fid);
+            fiber.push_frame(0, 1, 1, 0, 0);
+        }
+
+        let root = vm.state.gc.alloc(ValueMeta::new(1, ValueKind::Struct), 0);
+
+        vm.gc_step();
+        assert_eq!(vm.state.gc.state(), vo_runtime::gc::GcState::Atomic);
+        vm.gc_step();
+        assert_eq!(vm.state.gc.state(), vo_runtime::gc::GcState::Sweep);
+        assert!(!vm.state.gc_roots_dirty_all);
+
+        vm.scheduler.get_fiber_mut(fid).stack[0] = root as u64;
+        vm.gc_step_after_fiber(Some(fid));
+
+        let stats = vm.last_gc_step_stats();
+        assert!(!stats.dirty_all_before);
+        assert_eq!(stats.dirty_fiber_count, 1);
+        assert!(stats.dirty_roots_scanned);
+        assert!(!stats.full_roots_scanned);
+        assert_eq!(stats.gc.root_scan_calls, 1);
+        assert_eq!(vm.state.gc.canonicalize_ref(root), Some(root));
+    }
+
+    #[test]
+    fn full_vm_root_scan_is_budgeted() {
+        const ROOTS: u16 = 2048;
+        let mut vm = Vm::new();
+        vm.finish_load(gc_test_module_with_root_slots(ROOTS));
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        {
+            let fiber = vm.scheduler.get_fiber_mut(fid);
+            fiber.push_frame(0, ROOTS, ROOTS, 0, 0);
+        }
+
+        let meta = ValueMeta::new(1, ValueKind::Struct);
+        for idx in 0..ROOTS as usize {
+            let root = vm.state.gc.alloc(meta, 0);
+            vm.scheduler.get_fiber_mut(fid).stack[idx] = root as u64;
+        }
+
+        vm.gc_step_after_fiber(None);
+        let stats = vm.last_gc_step_stats();
+        assert_eq!(stats.gc.root_scan_calls, 1);
+        assert_eq!(stats.gc.root_scan_work_bytes, 8192);
+        assert_eq!(stats.gc.object_scans, 0);
+        assert!(vm.state.gc_root_scan.is_some());
+        assert!(vm.state.gc_roots_dirty_all);
+
+        vm.gc_step_after_fiber(None);
+        let stats = vm.last_gc_step_stats();
+        assert_eq!(stats.gc.root_scan_calls, 1);
+        assert_eq!(stats.gc.root_scan_work_bytes, 8192);
+        assert!(stats.full_roots_scanned);
+        assert!(vm.state.gc_root_scan.is_none());
+        assert!(!vm.state.gc_roots_dirty_all);
+    }
+
+    #[test]
+    fn pending_start_cycle_root_scan_restarts_when_roots_mutate() {
+        const ROOTS: u16 = 2048;
+        let mut vm = Vm::new();
+        vm.finish_load(gc_test_module_with_root_slots(ROOTS));
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        {
+            let fiber = vm.scheduler.get_fiber_mut(fid);
+            fiber.push_frame(0, ROOTS, ROOTS, 0, 0);
+        }
+
+        let meta = ValueMeta::new(1, ValueKind::Struct);
+        for idx in 0..ROOTS as usize {
+            let root = vm.state.gc.alloc(meta, 0);
+            vm.scheduler.get_fiber_mut(fid).stack[idx] = root as u64;
+        }
+        let late_root = vm.state.gc.alloc(meta, 0);
+
+        vm.gc_step_after_fiber(None);
+        assert_eq!(vm.state.gc.state(), vo_runtime::gc::GcState::Propagate);
+        assert!(vm.state.gc_root_scan.is_some());
+        assert_eq!(vm.last_gc_step_stats().gc.root_scan_work_bytes, 8192);
+
+        vm.scheduler.get_fiber_mut(fid).stack[0] = late_root as u64;
+        vm.gc_step_after_fiber(Some(fid));
+
+        let stats = vm.last_gc_step_stats();
+        assert!(!stats.full_roots_scanned);
+        assert!(vm.state.gc_root_scan.is_some());
+        assert_eq!(stats.gc.root_scan_calls, 1);
+        assert_eq!(stats.gc.root_scan_work_bytes, 8192);
+
+        run_gc_until_pause(&mut vm);
+        assert_eq!(vm.state.gc.canonicalize_ref(late_root), Some(late_root));
+    }
+
+    #[test]
+    fn pending_atomic_root_scan_restarts_when_roots_mutate() {
+        const ROOTS: u16 = 2048;
+        let mut vm = Vm::new();
+        vm.finish_load(gc_test_module_with_root_slots(ROOTS));
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        {
+            let fiber = vm.scheduler.get_fiber_mut(fid);
+            fiber.push_frame(0, ROOTS, ROOTS, 0, 0);
+        }
+
+        let meta = ValueMeta::new(1, ValueKind::Struct);
+        for idx in 0..ROOTS as usize {
+            let root = vm.state.gc.alloc(meta, 0);
+            vm.scheduler.get_fiber_mut(fid).stack[idx] = root as u64;
+        }
+        let late_root = vm.state.gc.alloc(meta, 0);
+
+        run_until_atomic_root_scan_pending(&mut vm);
+        assert!(vm.state.gc_root_scan.is_some());
+
+        vm.scheduler.get_fiber_mut(fid).stack[0] = late_root as u64;
+        vm.gc_step_after_fiber(Some(fid));
+
+        let stats = vm.last_gc_step_stats();
+        assert!(!stats.full_roots_scanned);
+        assert!(vm.state.gc_root_scan.is_some());
+        assert_eq!(stats.gc.root_scan_calls, 1);
+        assert_eq!(stats.gc.root_scan_work_bytes, 8192);
+
+        run_gc_until_pause(&mut vm);
+        assert_eq!(vm.state.gc.canonicalize_ref(late_root), Some(late_root));
+    }
+
+    #[test]
+    fn finish_load_resets_pending_gc_root_scan_state() {
+        const ROOTS: u16 = 2048;
+        let mut vm = Vm::new();
+        vm.finish_load(gc_test_module_with_root_slots(ROOTS));
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        {
+            let fiber = vm.scheduler.get_fiber_mut(fid);
+            fiber.push_frame(0, ROOTS, ROOTS, 0, 0);
+        }
+
+        for idx in 0..ROOTS as usize {
+            let root = vm.state.gc.alloc(ValueMeta::new(1, ValueKind::Struct), 0);
+            vm.scheduler.get_fiber_mut(fid).stack[idx] = root as u64;
+        }
+
+        vm.gc_step_after_fiber(None);
+        assert!(vm.state.gc_root_scan.is_some());
+
+        vm.state.gc_roots_dirty_all = false;
+        vm.state.gc_dirty_fibers.push(fid.to_raw());
+        let epoch_before = vm.state.gc_dirty_epoch;
+
+        vm.finish_load(gc_test_module());
+
+        assert!(vm.state.gc_root_scan.is_none());
+        assert!(vm.state.gc_roots_dirty_all);
+        assert!(vm.state.gc_dirty_fibers.is_empty());
+        assert_eq!(vm.state.gc_dirty_epoch, epoch_before.wrapping_add(1));
+        assert_eq!(vm.state.last_gc_step_stats.gc.root_scan_calls, 0);
+        assert!(!vm.state.last_gc_step_stats.full_roots_scanned);
+        assert!(!vm.state.last_gc_step_stats.dirty_roots_scanned);
+    }
+
+    #[test]
+    fn stable_sweep_step_skips_vm_root_scan_when_roots_unchanged() {
+        let mut vm = Vm::new();
+        vm.finish_load(gc_test_module());
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        {
+            let fiber = vm.scheduler.get_fiber_mut(fid);
+            fiber.push_frame(0, 1, 1, 0, 0);
+        }
+
+        let root = vm.state.gc.alloc(ValueMeta::new(1, ValueKind::Struct), 0);
+        vm.scheduler.get_fiber_mut(fid).stack[0] = root as u64;
+
+        vm.gc_step_after_fiber(None);
+        assert_eq!(vm.state.gc.state(), vo_runtime::gc::GcState::Atomic);
+        assert!(vm.last_gc_step_stats().full_roots_scanned);
+
+        vm.gc_step_after_fiber(None);
+        assert_eq!(vm.state.gc.state(), vo_runtime::gc::GcState::Sweep);
+        assert!(vm.last_gc_step_stats().full_roots_scanned);
+        assert!(!vm.state.gc_roots_dirty_all);
+
+        vm.gc_step_after_fiber(None);
+
+        let stats = vm.last_gc_step_stats();
+        assert!(stats.stable_roots_skipped);
+        assert!(!stats.dirty_all_before);
+        assert_eq!(stats.dirty_fiber_count, 0);
+        assert!(!stats.full_roots_scanned);
+        assert!(!stats.dirty_roots_scanned);
+        assert_eq!(stats.gc.root_scan_calls, 0);
+        assert_eq!(stats.gc.root_scan_skips, 1);
+        assert_eq!(vm.state.gc.canonicalize_ref(root), Some(root));
+    }
+
+    #[test]
+    fn duplicate_dirty_fiber_mark_does_not_advance_epoch_without_active_scan() {
+        let mut vm = Vm::new();
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        vm.state.gc_roots_dirty_all = false;
+        vm.state.gc_dirty_epoch = 7;
+
+        vm.mark_gc_fiber_roots_dirty(fid);
+        assert_eq!(vm.state.gc_dirty_epoch, 8);
+        assert_eq!(vm.state.gc_dirty_fibers, vec![fid.to_raw()]);
+
+        vm.mark_gc_fiber_roots_dirty(fid);
+        assert_eq!(vm.state.gc_dirty_epoch, 8);
+        assert_eq!(vm.state.gc_dirty_fibers, vec![fid.to_raw()]);
+
+        vm.state.gc_root_scan = Some(VmRootScanSnapshot {
+            kind: vo_runtime::gc::GcRootScanKind::Sweep,
+            mode: VmRootScanMode::DirtyFibers,
+            dirty_epoch: vm.state.gc_dirty_epoch,
+            dirty_fibers: vec![fid.to_raw()],
+            roots: Vec::new(),
+            cursor: 0,
+        });
+        vm.mark_gc_fiber_roots_dirty(fid);
+        assert_eq!(vm.state.gc_dirty_epoch, 9);
+    }
+
     #[cfg(feature = "std")]
     #[test]
     fn run_scheduled_returns_interrupted_when_interrupt_flag_is_set() {
@@ -2574,5 +3006,51 @@ mod tests {
         let result = vm.handle_exec_result(ExecResult::Interrupted, false);
 
         assert!(matches!(result, Some(Err(VmError::Interrupted))));
+    }
+
+    #[test]
+    fn blocked_exec_results_return_to_host_before_gc() {
+        assert!(!exec_result_allows_gc_step(&ExecResult::Block(
+            crate::fiber::BlockReason::Queue,
+        )));
+        assert!(exec_result_marks_gc_fiber_roots_dirty(&ExecResult::Block(
+            crate::fiber::BlockReason::Queue
+        )));
+        assert!(!exec_result_allows_gc_step(&ExecResult::Block(
+            crate::fiber::BlockReason::HostEvent {
+                token: 1,
+                delay_ms: 0,
+            },
+        )));
+        assert!(exec_result_marks_gc_fiber_roots_dirty(&ExecResult::Block(
+            crate::fiber::BlockReason::HostEvent {
+                token: 1,
+                delay_ms: 0,
+            }
+        )));
+        assert!(!exec_result_allows_gc_step(&ExecResult::Block(
+            crate::fiber::BlockReason::HostEventReplay(1),
+        )));
+        assert!(exec_result_marks_gc_fiber_roots_dirty(&ExecResult::Block(
+            crate::fiber::BlockReason::HostEventReplay(1)
+        )));
+        #[cfg(feature = "std")]
+        assert!(!exec_result_allows_gc_step(&ExecResult::Block(
+            crate::fiber::BlockReason::Io(1),
+        )));
+        #[cfg(feature = "std")]
+        assert!(exec_result_marks_gc_fiber_roots_dirty(&ExecResult::Block(
+            crate::fiber::BlockReason::Io(1)
+        )));
+
+        assert!(exec_result_allows_gc_step(&ExecResult::TimesliceExpired));
+        assert!(exec_result_marks_gc_fiber_roots_dirty(
+            &ExecResult::TimesliceExpired
+        ));
+        assert!(exec_result_allows_gc_step(&ExecResult::Done));
+        assert!(exec_result_marks_gc_fiber_roots_dirty(&ExecResult::Done));
+        assert!(!exec_result_marks_gc_fiber_roots_dirty(
+            &ExecResult::Interrupted
+        ));
     }
 }

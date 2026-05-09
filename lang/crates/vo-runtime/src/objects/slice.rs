@@ -111,6 +111,7 @@ pub fn from_array_range_with_cap(
     data.data_ptr = ptr_to_slot(unsafe { array::data_ptr_bytes(arr).add(start_off * elem_bytes) });
     data.len = length as Slot;
     data.cap = capacity as Slot;
+    gc.mark_allocated_for_scan(s);
     s
 }
 
@@ -302,6 +303,7 @@ pub fn slice_of(gc: &mut Gc, s: GcRef, lo: usize, hi: usize) -> Option<GcRef> {
     new_data.data_ptr = ptr_to_slot(new_data_ptr);
     new_data.len = (hi - lo) as Slot;
     new_data.cap = (cap - lo) as Slot;
+    gc.mark_allocated_for_scan(new_s);
     Some(new_s)
 }
 
@@ -321,6 +323,7 @@ pub fn slice_of_with_cap(gc: &mut Gc, s: GcRef, lo: usize, hi: usize, max: usize
     new_data.data_ptr = ptr_to_slot(new_data_ptr);
     new_data.len = (hi - lo) as Slot;
     new_data.cap = (max - lo) as Slot;
+    gc.mark_allocated_for_scan(new_s);
     Some(new_s)
 }
 
@@ -334,6 +337,7 @@ pub fn with_new_len(gc: &mut Gc, s: GcRef, new_len: usize) -> GcRef {
     new_data.data_ptr = data.data_ptr;
     new_data.len = new_len as Slot;
     new_data.cap = data.cap;
+    gc.mark_allocated_for_scan(new_s);
     new_s
 }
 
@@ -350,6 +354,9 @@ pub fn append(
     if s.is_null() {
         let new_arr = array::create(gc, em, elem_bytes, 4);
         array::set_n(new_arr, 0, val, elem_bytes);
+        if em.value_kind().may_contain_gc_refs() {
+            gc.mark_allocated_for_scan(new_arr);
+        }
         return from_array_range(gc, new_arr, 0, 1);
     }
     let data = SliceData::as_ref(s);
@@ -387,6 +394,9 @@ pub fn append(
         let dst_ptr = array::data_ptr_bytes(new_arr);
         unsafe { core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, cur_len * elem_bytes) };
         array::set_n(new_arr, cur_len, val, elem_bytes);
+        if aem.value_kind().may_contain_gc_refs() {
+            gc.mark_allocated_for_scan(new_arr);
+        }
         from_array_range(gc, new_arr, 0, cur_len + 1)
     }
 }

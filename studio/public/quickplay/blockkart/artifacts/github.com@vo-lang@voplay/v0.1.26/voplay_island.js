@@ -1,4 +1,4 @@
-/* @ts-self-types="./voplay_island.d.ts" */
+/* @ts-self-types="./vo_voplay.d.ts" */
 
 export function __voDispose() {
     wasm.__voDispose();
@@ -239,6 +239,20 @@ export function createPlaneMesh(input) {
 }
 
 /**
+ * createRawMesh(data []byte) → (uint32, error)
+ * @param {Uint8Array} input
+ * @returns {Uint8Array}
+ */
+export function createRawMesh(input) {
+    const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.createRawMesh(ptr0, len0);
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
  * scene3d_createRoundedBoxMesh(bevelRadius, segments) → uint32
  * @param {Uint8Array} input
  * @returns {Uint8Array}
@@ -365,6 +379,34 @@ export function isRendererReady(_input) {
 }
 
 /**
+ * lastRendererPerfPacket() → []byte
+ * @param {Uint8Array} _input
+ * @returns {Uint8Array}
+ */
+export function lastRendererPerfPacket(_input) {
+    const ptr0 = passArray8ToWasm0(_input, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.lastRendererPerfPacket(ptr0, len0);
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * lastWebGpuPerfPacket() → []byte
+ * @param {Uint8Array} _input
+ * @returns {Uint8Array}
+ */
+export function lastWebGpuPerfPacket(_input) {
+    const ptr0 = passArray8ToWasm0(_input, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.lastWebGpuPerfPacket(ptr0, len0);
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
  * loadCubemap(right, left, top, bottom, front, back string) → (uint32, error)
  * @param {Uint8Array} input
  * @returns {Uint8Array}
@@ -477,6 +519,62 @@ export function loadTextureBytes(input) {
 }
 
 /**
+ * loadTextureBytesLinear(data []byte) -> (uint32, error)
+ * @param {Uint8Array} input
+ * @returns {Uint8Array}
+ */
+export function loadTextureBytesLinear(input) {
+    const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.loadTextureBytesLinear(ptr0, len0);
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * loadTextureLinear(path string) -> (uint32, error)
+ * @param {Uint8Array} input
+ * @returns {Uint8Array}
+ */
+export function loadTextureLinear(input) {
+    const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.loadTextureLinear(ptr0, len0);
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * loadTextureRGBA(width uint32, height uint32, data []byte) -> (uint32, error)
+ * @param {Uint8Array} input
+ * @returns {Uint8Array}
+ */
+export function loadTextureRGBA(input) {
+    const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.loadTextureRGBA(ptr0, len0);
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * loadTextureRGBALinear(width uint32, height uint32, data []byte) -> (uint32, error)
+ * @param {Uint8Array} input
+ * @returns {Uint8Array}
+ */
+export function loadTextureRGBALinear(input) {
+    const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.loadTextureRGBALinear(ptr0, len0);
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
  * measureText(fontId uint32, text string, size float) → (float, float)
  * @param {Uint8Array} input
  * @returns {Uint8Array}
@@ -505,14 +603,14 @@ export function modelBounds(input) {
 }
 
 /**
- * modelMeshDataBytes(id uint32) → []byte
+ * modelGeometryBytes(id uint32) → []byte
  * @param {Uint8Array} input
  * @returns {Uint8Array}
  */
-export function modelMeshDataBytes(input) {
+export function modelGeometryBytes(input) {
     const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.modelMeshDataBytes(ptr0, len0);
+    const ret = wasm.modelGeometryBytes(ptr0, len0);
     var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v2;
@@ -659,6 +757,20 @@ export function scene2d_physicsStep(input) {
 }
 
 /**
+ * scene3d_bakeImpostorAtlasBytes(request []byte) → ([]byte, error)
+ * @param {Uint8Array} input
+ * @returns {Uint8Array}
+ */
+export function scene3d_bakeImpostorAtlasBytes(input) {
+    const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.scene3d_bakeImpostorAtlasBytes(ptr0, len0);
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
  * scene3d_createTerrain(path, sx, sy, sz, uvScale, texId, normalTexId, mrTexId, normalScale, roughness, metallic) → terrain result
  * @param {Uint8Array} input
  * @returns {Uint8Array}
@@ -709,6 +821,20 @@ export function scene3d_createTerrainSplat(input) {
     const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.scene3d_createTerrainSplat(ptr0, len0);
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * scene3d_createTerrainSplatModel(modelId, controlTexId, layerData) → (uint32, error)
+ * @param {Uint8Array} input
+ * @returns {Uint8Array}
+ */
+export function scene3d_createTerrainSplatModel(input) {
+    const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.scene3d_createTerrainSplatModel(ptr0, len0);
     var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v2;
@@ -939,7 +1065,7 @@ export function scene3d_physicsSpawnTrimeshBody(input) {
 }
 
 /**
- * scene3d_physicsSpawnTrimeshBodyData(worldId, bodyId, data []byte, meshData []byte)
+ * scene3d_physicsSpawnTrimeshBodyData(worldId, bodyId, data []byte, geometryData []byte)
  * @param {Uint8Array} input
  * @returns {Uint8Array}
  */
@@ -981,6 +1107,20 @@ export function scene3d_terrainHeightAt(input) {
 }
 
 /**
+ * setRendererPerfStatsEnabled(enabled bool) → error
+ * @param {Uint8Array} input
+ * @returns {Uint8Array}
+ */
+export function setRendererPerfStatsEnabled(input) {
+    const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.setRendererPerfStatsEnabled(ptr0, len0);
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
  * submitFrame(cmds []byte) → error
  * @param {Uint8Array} input
  * @returns {Uint8Array}
@@ -989,6 +1129,20 @@ export function submitFrame(input) {
     const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.submitFrame(ptr0, len0);
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * texturePixelsBytes(id uint32) -> []byte
+ * @param {Uint8Array} input
+ * @returns {Uint8Array}
+ */
+export function texturePixelsBytes(input) {
+    const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.texturePixelsBytes(ptr0, len0);
     var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v2;
@@ -1018,6 +1172,17 @@ function __wbg_get_imports() {
             const ret = arg0.WorkerGlobalScope;
             return ret;
         },
+        __wbg___voplayRendererPerfConfig_80029a48239bd224: function() { return handleError(function (arg0) {
+            const ret = globalThis.__voplayRendererPerfConfig();
+            const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+        }, arguments); },
+        __wbg___voplayTakeWebGpuPerfPacket_7a5a71ec3de798c5: function() { return handleError(function () {
+            const ret = globalThis.__voplayTakeWebGpuPerfPacket();
+            return ret;
+        }, arguments); },
         __wbg___wbindgen_debug_string_ab4b34d23d6778bd: function(arg0, arg1) {
             const ret = debugString(arg1);
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -1041,6 +1206,12 @@ function __wbg_get_imports() {
         __wbg___wbindgen_is_undefined_29a43b4d42920abd: function(arg0) {
             const ret = arg0 === undefined;
             return ret;
+        },
+        __wbg___wbindgen_number_get_c7f42aed0525c451: function(arg0, arg1) {
+            const obj = arg1;
+            const ret = typeof(obj) === 'number' ? obj : undefined;
+            getDataViewMemory0().setFloat64(arg0 + 8 * 1, isLikeNone(ret) ? 0 : ret, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, !isLikeNone(ret), true);
         },
         __wbg___wbindgen_string_get_7ed5322991caaec5: function(arg0, arg1) {
             const obj = arg1;
@@ -1515,6 +1686,10 @@ function __wbg_get_imports() {
             const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
             return ret;
         },
+        __wbg_now_a9b7df1cbee90986: function() {
+            const ret = Date.now();
+            return ret;
+        },
         __wbg_pointerId_b99c11e1f5e3731d: function(arg0) {
             const ret = arg0.pointerId;
             return ret;
@@ -1594,11 +1769,17 @@ function __wbg_get_imports() {
         __wbg_setPipeline_323a115b52180cad: function(arg0, arg1) {
             arg0.setPipeline(arg1);
         },
+        __wbg_setScissorRect_91ab81001aa06f8c: function(arg0, arg1, arg2, arg3, arg4) {
+            arg0.setScissorRect(arg1 >>> 0, arg2 >>> 0, arg3 >>> 0, arg4 >>> 0);
+        },
         __wbg_setVertexBuffer_e32a2441b1f7bfa3: function(arg0, arg1, arg2, arg3, arg4) {
             arg0.setVertexBuffer(arg1 >>> 0, arg2, arg3, arg4);
         },
         __wbg_setVertexBuffer_f90b4b03dde32ab1: function(arg0, arg1, arg2, arg3) {
             arg0.setVertexBuffer(arg1 >>> 0, arg2, arg3);
+        },
+        __wbg_setViewport_b5382516378a0227: function(arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
+            arg0.setViewport(arg1, arg2, arg3, arg4, arg5, arg6);
         },
         __wbg_set_022bee52d0b05b19: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = Reflect.set(arg0, arg1, arg2);
@@ -2201,22 +2382,22 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, arg2, arg3, arg4);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1952, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1955, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hfac776d1ce93c707);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("KeyboardEvent")], shim_idx: 18, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("KeyboardEvent")], shim_idx: 171, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h04b6fa89c17225ff);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("PointerEvent")], shim_idx: 18, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("PointerEvent")], shim_idx: 171, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h04b6fa89c17225ff_2);
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("WheelEvent")], shim_idx: 18, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("WheelEvent")], shim_idx: 171, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h04b6fa89c17225ff_3);
             return ret;
         },
@@ -2242,7 +2423,7 @@ function __wbg_get_imports() {
     };
     return {
         __proto__: null,
-        "./voplay_island_bg.js": import0,
+        "./vo_voplay_bg.js": import0,
     };
 }
 

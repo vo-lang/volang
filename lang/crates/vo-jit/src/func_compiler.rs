@@ -16,6 +16,8 @@ use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::jit_api::JitContext;
 
+const MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS: usize = 512;
+
 pub struct FunctionCompiler<'a> {
     builder: FunctionBuilder<'a>,
     func_id: u32,
@@ -719,17 +721,22 @@ impl<'a> FunctionCompiler<'a> {
         let target_func = &self.vo_module.functions[target_func_id as usize];
         let arg_slots = target_func.param_slots as usize;
         let call_ret_slots = target_func.ret_slots as usize;
+        let callee_local_slots = target_func.local_slots as usize;
 
-        // Self-recursive call: always use direct JIT call
-        // We know the current function is jittable since we're compiling it
-        if target_func_id == self.func_id {
+        // Self-recursive calls can use a direct native call only while the
+        // callee frame is small enough for the host stack. Large frames must go
+        // through the VM path so fiber stack limits fire before wasm stack
+        // exhaustion.
+        if target_func_id == self.func_id && callee_local_slots <= MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS
+        {
             self.call_self_recursive(arg_start, arg_slots, call_ret_slots, target_func);
             return false;
         }
 
         // has_defer callees need VM execution (defer requires real CallFrame in fiber.frames).
-        // Everything else can use JIT-to-JIT direct call with VM fallback.
-        if !target_func.has_defer {
+        // Large-frame callees also need VM execution so stack overflow is
+        // reported as a recoverable Vo panic instead of a host wasm trap.
+        if !target_func.has_defer && callee_local_slots <= MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS {
             let callee_func_ref = self
                 .callee_func_refs
                 .get(target_func_id as usize)

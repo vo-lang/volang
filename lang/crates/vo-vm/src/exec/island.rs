@@ -401,6 +401,7 @@ fn prepare_single_queue_handle(
             }
             let endpoint_id = queue::add_home_peer(chan_ref, target_island);
             state.endpoint_registry.ensure_live(endpoint_id, chan_ref);
+            state.mark_gc_all_roots_dirty();
         }
         QueueBacking::Remote => {
             let proxy = queue::remote_proxy(chan_ref);

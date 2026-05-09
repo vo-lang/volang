@@ -724,6 +724,9 @@ where
         );
         write_element(data_ptr, i, elem_bytes, &elem_buf);
     }
+    if elem_meta.value_kind().may_contain_gc_refs() {
+        gc.mark_allocated_for_scan(slice::array_ref(new_slice));
+    }
 
     new_slice
 }
@@ -784,6 +787,9 @@ where
             resolve_queue_handle,
         );
         write_element(data_ptr, i, elem_bytes, &elem_buf);
+    }
+    if elem_meta.value_kind().may_contain_gc_refs() {
+        gc.mark_allocated_for_scan(new_arr);
     }
 
     new_arr
@@ -871,6 +877,7 @@ where
         unsafe { Gc::write_slot(new_obj, i, val) };
     }
 
+    gc.mark_allocated_for_scan(new_obj);
     new_obj
 }
 
@@ -928,6 +935,9 @@ where
             resolve_queue_handle,
         );
         map::set(new_map, &key_buf, &val_buf, None);
+    }
+    if key_meta.value_kind().may_contain_gc_refs() || val_meta.value_kind().may_contain_gc_refs() {
+        gc.mark_allocated_for_scan(new_map);
     }
 
     new_map

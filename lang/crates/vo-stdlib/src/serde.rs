@@ -730,59 +730,85 @@ fn unmarshal_struct_from_object<'a, R: FormatReader<'a>>(
     call: &mut ExternCallContext,
     ptr: GcRef,
     rttid: u32,
+    obj: ParsedObject<'a>,
+) -> Result<(), &'static str> {
+    unmarshal_struct_from_object_with_parent::<R>(call, Some(ptr), ptr as *mut u8, rttid, obj)
+}
+
+fn unmarshal_struct_from_object_with_parent<'a, R: FormatReader<'a>>(
+    call: &mut ExternCallContext,
+    parent: Option<GcRef>,
+    ptr: *mut u8,
+    rttid: u32,
     mut obj: ParsedObject<'a>,
 ) -> Result<(), &'static str> {
     let struct_meta_id = get_struct_meta_id(call, rttid)?;
 
     while let Some((key, value)) = R::next_field(&mut obj)? {
-        if let Some((field_ptr, fvk, field_rttid)) =
-            find_field_by_key::<R>(call, ptr, struct_meta_id, &key)?
-        {
-            unmarshal_field_value::<R>(call, field_ptr, fvk, field_rttid, value)?;
+        if let Some(field) = find_field_by_key::<R>(call, parent, ptr, struct_meta_id, &key)? {
+            unmarshal_field_value::<R>(
+                call,
+                field.parent,
+                field.ptr,
+                field.value_kind,
+                field.rttid,
+                value,
+            )?;
         }
     }
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct FieldTarget {
+    parent: Option<GcRef>,
+    ptr: *mut u8,
+    value_kind: ValueKind,
+    rttid: u32,
+}
+
 /// Find a field by key, recursively searching embedded structs.
 fn find_field_by_key<'a, R: FormatReader<'a>>(
     call: &ExternCallContext,
-    ptr: GcRef,
+    parent: Option<GcRef>,
+    ptr: *mut u8,
     struct_meta_id: u32,
     key: &str,
-) -> Result<Option<(GcRef, ValueKind, u32)>, &'static str> {
+) -> Result<Option<FieldTarget>, &'static str> {
     let struct_meta = call
         .struct_meta(struct_meta_id as usize)
         .ok_or("meta not found")?;
 
     let mut embedded_fields = Vec::new();
 
-    let mut case_insensitive_match: Option<(GcRef, ValueKind, u32)> = None;
+    let mut case_insensitive_match: Option<FieldTarget> = None;
 
     for field in &struct_meta.fields {
-        let field_ptr = unsafe { (ptr as *const u8).add(field.offset as usize * SLOT_BYTES) };
+        let field_ptr = unsafe { ptr.add(field.offset as usize * SLOT_BYTES) };
 
         if field.embedded {
-            embedded_fields.push((field_ptr as GcRef, field.type_info.rttid()));
+            embedded_fields.push((field_ptr, field.type_info.rttid()));
         } else {
             let field_name = get_field_name(&field.name, field.tag.as_deref(), R::tag_key());
             if field_name == "-" {
                 continue;
             }
             if field_name == key {
-                return Ok(Some((
-                    field_ptr as GcRef,
-                    field.type_info.value_kind(),
-                    field.type_info.rttid(),
-                )));
+                return Ok(Some(FieldTarget {
+                    parent,
+                    ptr: field_ptr,
+                    value_kind: field.type_info.value_kind(),
+                    rttid: field.type_info.rttid(),
+                }));
             }
             // Case-insensitive fallback (Go json.Unmarshal behavior)
             if case_insensitive_match.is_none() && field_name.eq_ignore_ascii_case(key) {
-                case_insensitive_match = Some((
-                    field_ptr as GcRef,
-                    field.type_info.value_kind(),
-                    field.type_info.rttid(),
-                ));
+                case_insensitive_match = Some(FieldTarget {
+                    parent,
+                    ptr: field_ptr,
+                    value_kind: field.type_info.value_kind(),
+                    rttid: field.type_info.rttid(),
+                });
             }
         }
     }
@@ -793,7 +819,7 @@ fn find_field_by_key<'a, R: FormatReader<'a>>(
 
     for (embed_ptr, embed_rttid) in embedded_fields {
         let embed_meta_id = get_struct_meta_id(call, embed_rttid)?;
-        if let Some(result) = find_field_by_key::<R>(call, embed_ptr, embed_meta_id, key)? {
+        if let Some(result) = find_field_by_key::<R>(call, parent, embed_ptr, embed_meta_id, key)? {
             return Ok(Some(result));
         }
     }
@@ -803,12 +829,20 @@ fn find_field_by_key<'a, R: FormatReader<'a>>(
 
 fn unmarshal_field_value<'a, R: FormatReader<'a>>(
     call: &mut ExternCallContext,
-    field_ptr: GcRef,
+    parent: Option<GcRef>,
+    field_ptr: *mut u8,
     vk: ValueKind,
     rttid: u32,
     value: ParsedValue<'a>,
 ) -> Result<(), &'static str> {
-    write_typed_value::<R>(call, field_ptr as *mut u8, vk, rttid, value)
+    write_typed_value::<R>(call, parent, field_ptr, vk, rttid, value)?;
+    if let Some(parent) = parent.filter(|_| vk.may_contain_gc_refs()) {
+        let slots = value_slot_count(call, vk, rttid) as usize;
+        let vals = unsafe { core::slice::from_raw_parts(field_ptr as *const u64, slots) };
+        let meta = call.value_meta_for_value_rttid(ValueRttid::new(rttid, vk));
+        call.typed_write_barrier_by_meta(parent, vals, meta);
+    }
+    Ok(())
 }
 
 /// Write a parsed value to a raw memory pointer according to the Vo runtime type.
@@ -817,6 +851,7 @@ fn unmarshal_field_value<'a, R: FormatReader<'a>>(
 /// pointer must have the correct alignment and backing size for `vk`/`rttid`.
 fn write_typed_value<'a, R: FormatReader<'a>>(
     call: &mut ExternCallContext,
+    parent: Option<GcRef>,
     ptr: *mut u8,
     vk: ValueKind,
     rttid: u32,
@@ -943,7 +978,7 @@ fn write_typed_value<'a, R: FormatReader<'a>>(
         ValueKind::Struct => match value {
             ParsedValue::Null => {}
             ParsedValue::Object(obj) => {
-                unmarshal_struct_from_object::<R>(call, ptr as GcRef, rttid, obj)?;
+                unmarshal_struct_from_object_with_parent::<R>(call, parent, ptr, rttid, obj)?;
             }
             _ => return Err("expected object"),
         },
@@ -960,6 +995,7 @@ fn write_typed_value<'a, R: FormatReader<'a>>(
                 let slot_count = meta.slot_count();
                 let new_struct = call.gc_alloc_raw(slot_count, meta_id);
                 unmarshal_struct_from_object::<R>(call, new_struct, inner_rttid, obj)?;
+                call.gc().mark_allocated_for_scan(new_struct);
                 unsafe {
                     *(ptr as *mut u64) = new_struct as u64;
                 }
@@ -1080,6 +1116,8 @@ fn json_to_iface_slots<'a, R: FormatReader<'a>>(
                     *p.add(1) = s1;
                 }
             }
+            call.gc()
+                .mark_allocated_for_scan(vo_runtime::objects::slice::array_ref(s));
             (ValueKind::Slice as u64, s as u64)
         }
     }
@@ -1117,7 +1155,7 @@ fn unmarshal_map_value<'a, R: FormatReader<'a>>(
         } else {
             let mut buf = vec![0u64; val_slots as usize];
             let ptr = buf.as_mut_ptr() as *mut u8;
-            write_typed_value::<R>(call, ptr, val_vk, val_rttid_u32, v).ok();
+            write_typed_value::<R>(call, None, ptr, val_vk, val_rttid_u32, v).ok();
             call.map_set_string_key(m, &k, &buf);
         }
     }
@@ -1142,9 +1180,14 @@ fn unmarshal_slice_value<'a, R: FormatReader<'a>>(
     }
 
     let base_ptr = slice::data_ptr(s);
+    let parent = slice::array_ref(s);
     for (i, elem_val) in elems.into_iter().enumerate() {
         let elem_ptr = unsafe { base_ptr.add(i * elem_bytes) };
-        write_typed_value::<R>(call, elem_ptr, elem_vk, elem_rttid, elem_val)?;
+        write_typed_value::<R>(call, Some(parent), elem_ptr, elem_vk, elem_rttid, elem_val)?;
+    }
+    if elem_meta.value_kind().may_contain_gc_refs() {
+        call.gc()
+            .mark_allocated_for_scan(vo_runtime::objects::slice::array_ref(s));
     }
 
     Ok(s)

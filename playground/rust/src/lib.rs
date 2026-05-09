@@ -272,17 +272,19 @@ mod tests {
 
     #[test]
     fn test_vogui_files_embedded() {
+        const VOGUI_APP_PATH: &str = "github.com/vo-lang/vogui/app.vo";
+
         assert!(VOGUI_FILES.len() > 0, "No .vo files embedded from vogui!");
-        let has_app = VOGUI_FILES.iter().any(|(p, _)| *p == "vogui/app.vo");
-        assert!(has_app, "vogui/app.vo not embedded");
+        let has_app = VOGUI_FILES.iter().any(|(p, _)| *p == VOGUI_APP_PATH);
+        assert!(has_app, "{VOGUI_APP_PATH} not embedded");
 
         let mut fs = vo_common::vfs::MemoryFs::new();
         add_vogui_to_fs(&mut fs);
 
         use vo_common::vfs::FileSystem;
         assert!(
-            fs.exists(std::path::Path::new("vogui/app.vo")),
-            "vogui/app.vo not in fs"
+            fs.exists(std::path::Path::new(VOGUI_APP_PATH)),
+            "{VOGUI_APP_PATH} not in fs"
         );
     }
 }

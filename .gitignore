@@ -27,6 +27,7 @@ target/
 *.a
 *.so
 *.dylib
+/main.vob
 
 # Test and coverage
 *.profraw

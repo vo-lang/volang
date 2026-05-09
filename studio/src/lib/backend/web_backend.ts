@@ -30,6 +30,7 @@ import type {
 import { buildShareInfo } from '../session_share';
 import { loadStudioWasm, setStandaloneGuiEventDispatcher, type StudioWasm } from '../studio_wasm';
 import { executeGuiFromCompileOutput, type GuiCompileOutput } from '../gui/gui_pipeline';
+import { handleVoplayPerfHostLog, shouldEmitVoplayPerfConsoleDiagnostics } from '../perf_report_bridge';
 import { consolePush } from '../../stores/console';
 import { formatDurationMs, pushUiConsole, renderStudioLogRecord, type StudioLogRecord } from './gui_console';
 import { makeErrorStreamHandle, makeResolvedStreamHandle, makeStreamHandleFromProducer } from './stream_handle';
@@ -39,6 +40,7 @@ import {
   BLOCKKART_GITHUB_URL,
   BLOCKKART_PROJECT_PACKAGE_URL,
   BLOCKKART_QUICKPLAY_SPEC,
+  staticPackageUrl,
 } from '../quickplay';
 
 const WORKSPACE_ROOT = '/workspace';
@@ -60,6 +62,10 @@ const BLOCKKART_PACKAGED_MODULE_MARKERS = [
 ];
 const sessionWorkspaceDiscovery = new Map<string, WorkspaceDiscoveryMode>();
 const DISPLAY_PULSE_DELAY_MS = 0xFFFFFFFF;
+const PERF_SAMPLE_WINDOW = 240;
+const FRAME_BUDGET_120_MS = 1000 / 120;
+const DISPLAY_PULSE_SLOW_120_MS = FRAME_BUDGET_120_MS * 1.25;
+const DISPLAY_PULSE_SLOW_60_MS = (1000 / 60) * 1.1;
 const MISSING_INITIAL_GUI_RENDER = 'guest app did not emit a render';
 const defaultWorkspaceFiles = new Map<string, string>([
   [`${WORKSPACE_ROOT}/README.md`, '# Studio\n\nThe web backend is running in an in-memory workspace.\n'],
@@ -139,9 +145,10 @@ interface LocalProjectSnapshot {
   files: LocalProjectSnapshotFile[];
 }
 
-interface StaticTextFile {
+interface StaticPackageFile {
   path: string;
-  content: string;
+  content?: string;
+  contentBase64?: string;
   mode?: number;
 }
 
@@ -156,14 +163,14 @@ interface BlockKartProjectPackage {
   name: string;
   module: string;
   commit: string;
-  files: StaticTextFile[];
+  files: StaticPackageFile[];
 }
 
 interface BlockKartDependencyModulePackage {
   module: string;
   version: string;
   cacheDir: string;
-  files: StaticTextFile[];
+  files: StaticPackageFile[];
   artifacts: StaticArtifactFile[];
 }
 
@@ -192,6 +199,7 @@ type OpenVfsFile = { path: string; flags: number; position: number };
 
 const openVfsFiles = new Map<number, OpenVfsFile>();
 let nextVfsFd = 100;
+let runtimeVfsRoot = ROOT;
 
 const O_RDONLY = 0;
 const O_WRONLY = 1;
@@ -209,6 +217,24 @@ const ERR_BAD_FD = 'invalid file descriptor';
 
 resetWorkspaceState();
 
+function percentile(sorted: number[], fraction: number): number {
+  if (sorted.length === 0) return 0;
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1));
+  return sorted[index];
+}
+
+function countAbove(samples: number[], threshold: number): number {
+  let count = 0;
+  for (const sample of samples) {
+    if (sample > threshold) count += 1;
+  }
+  return count;
+}
+
+function formatMs(value: number): string {
+  return `${value.toFixed(2)}ms`;
+}
+
 export class WebBackend implements Backend {
   readonly platform = 'wasm' as const;
 
@@ -217,6 +243,7 @@ export class WebBackend implements Backend {
   private guiFatalError: Error | null = null;
   private guiHostTimers = new Map<string, { kind: 'timeout' | 'raf'; id: number }>();
   private guiFirstRenderWaiter: { sessionId: number; resolve: (bytes: Uint8Array) => void; reject: (error: unknown) => void } | null = null;
+  private guiDisplayPulseWaitWindow: number[] = [];
 
   private clearGuiHostTimers(): void {
     for (const handle of this.guiHostTimers.values()) {
@@ -301,9 +328,44 @@ export class WebBackend implements Backend {
       }).catch(() => {});
     };
     const handle = delayMs === DISPLAY_PULSE_DELAY_MS
-      ? { kind: 'raf' as const, id: requestAnimationFrame(() => fire()) }
+      ? this.scheduleGuiDisplayPulse(fire)
       : { kind: 'timeout' as const, id: window.setTimeout(fire, Math.max(0, delayMs)) };
     this.guiHostTimers.set(token, handle);
+  }
+
+  private scheduleGuiDisplayPulse(fire: () => void): { kind: 'raf'; id: number } {
+    const scheduledAtMs = performance.now();
+    const id = requestAnimationFrame(() => {
+      this.recordGuiDisplayPulseWait(performance.now() - scheduledAtMs);
+      fire();
+    });
+    return { kind: 'raf', id };
+  }
+
+  private recordGuiDisplayPulseWait(waitMs: number): void {
+    if (!shouldEmitVoplayPerfConsoleDiagnostics()) {
+      return;
+    }
+    this.guiDisplayPulseWaitWindow.push(waitMs);
+    if (this.guiDisplayPulseWaitWindow.length < PERF_SAMPLE_WINDOW) {
+      return;
+    }
+    const samples = this.guiDisplayPulseWaitWindow;
+    const sorted = [...samples].sort((a, b) => a - b);
+    const p50 = percentile(sorted, 0.5);
+    const p90 = percentile(sorted, 0.9);
+    const p99 = percentile(sorted, 0.99);
+    const max = sorted[sorted.length - 1] ?? 0;
+    console.info(
+      `[studio-perf] gui display pulse window samples=${samples.length}` +
+        ` wait p50/p90/p99/max=${formatMs(p50)}/${formatMs(p90)}/${formatMs(p99)}/${formatMs(max)}` +
+        ` slow120=${countAbove(samples, DISPLAY_PULSE_SLOW_120_MS)}/${samples.length}` +
+        ` slow60=${countAbove(samples, DISPLAY_PULSE_SLOW_60_MS)}/${samples.length}` +
+        ` visibility=${document.visibilityState}` +
+        ` focus=${document.hasFocus()}` +
+        ` timers=${this.guiHostTimers.size}`,
+    );
+    this.guiDisplayPulseWaitWindow = [];
   }
 
   private prepareFirstGuiRender(
@@ -715,6 +777,7 @@ export class WebBackend implements Backend {
     this.clearGuiHostTimers();
     this.rejectGuiFirstRenderWaiter(new Error('GUI session superseded'));
     setStandaloneGuiEventDispatcher(null);
+    setRuntimeVfsRoot(findProjectRootForEntry(normalized) ?? dirname(normalized));
     const totalStart = performance.now();
     const startup = await this.serializeGuiOperation(async () => {
       consolePush('system', `Opening GUI ${targetLabel}`);
@@ -733,10 +796,12 @@ export class WebBackend implements Backend {
       const compileStart = performance.now();
       const compileResult = wasm.compileGui(normalized, workspaceDiscovery);
       const compileDurationMs = performance.now() - compileStart;
-      console.info(`[studio-gui] compileGui ${normalized} ${Math.round(compileDurationMs)}ms`);
       const wasmExtensionLabels = compileResult.wasmExtensions.map((ext) => `${ext.name}=>${ext.moduleKey ?? ext.name}`);
       const wasmExtensionSummary = wasmExtensionLabels.length > 0 ? wasmExtensionLabels.join(', ') : 'none';
-      console.info(`[studio-gui] wasmExtensions ${normalized} count=${wasmExtensionLabels.length} names=${wasmExtensionSummary}`);
+      if (shouldEmitVoplayPerfConsoleDiagnostics()) {
+        console.info(`[studio-gui] compileGui ${normalized} ${Math.round(compileDurationMs)}ms`);
+        console.info(`[studio-gui] wasmExtensions ${normalized} count=${wasmExtensionLabels.length} names=${wasmExtensionSummary}`);
+      }
       consolePush(
         'system',
         wasmExtensionLabels.length > 0
@@ -765,7 +830,9 @@ export class WebBackend implements Backend {
     this.assertGuiSessionCurrent(sessionId);
     const totalDurationMs = performance.now() - totalStart;
     consolePush('success', `Opened GUI ${targetLabel} in ${formatDurationMs(totalDurationMs)}`);
-    console.info(`[studio-gui] total open ${normalized} ${Math.round(totalDurationMs)}ms`);
+    if (shouldEmitVoplayPerfConsoleDiagnostics()) {
+      console.info(`[studio-gui] total open ${normalized} ${Math.round(totalDurationMs)}ms`);
+    }
     return {
       ...startup.output,
       renderBytes,
@@ -810,6 +877,7 @@ export class WebBackend implements Backend {
     this.clearGuiHostTimers();
     this.rejectGuiFirstRenderWaiter(new Error('GUI session superseded'));
     setStandaloneGuiEventDispatcher(null);
+    setRuntimeVfsRoot(ROOT);
     await this.serializeGuiOperation(async () => {
       const wasm = await getStudioWasm();
       wasm.stopGui();
@@ -819,7 +887,9 @@ export class WebBackend implements Backend {
   async getRendererBridgeVfsSnapshot(path: string): Promise<RendererBridgeVfsSnapshot> {
     const wasm = await getStudioWasm();
     const normalized = normalizePath(path);
-    return wasm.getRenderIslandVfsSnapshot(normalized, workspaceDiscoveryForPath(normalized));
+    const snapshot = wasm.getRenderIslandVfsSnapshot(normalized, workspaceDiscoveryForPath(normalized));
+    setRuntimeVfsRoot(snapshot.rootPath);
+    return snapshot;
   }
 
   voGet(_spec: string): StreamHandle<InstallEvent> {
@@ -886,6 +956,22 @@ function normalizePath(path: string): string {
   return absolute.endsWith('/') && absolute.length > 1 ? absolute.slice(0, -1) : absolute;
 }
 
+function setRuntimeVfsRoot(path: string): void {
+  runtimeVfsRoot = normalizePath(path || ROOT);
+}
+
+function normalizeRuntimeVfsPath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed || trimmed === '.') {
+    return runtimeVfsRoot;
+  }
+  if (trimmed.startsWith(ROOT)) {
+    return normalizePath(trimmed);
+  }
+  const base = runtimeVfsRoot === ROOT ? ROOT : `${runtimeVfsRoot}/`;
+  return normalizePath(`${base}${trimmed}`);
+}
+
 function sortEntries(entries: FsEntry[]): FsEntry[] {
   return [...entries].sort((a, b) => {
     if (a.isDir !== b.isDir) {
@@ -899,12 +985,28 @@ function getStudioWasm(): Promise<StudioWasm> {
   ensureVfsBindings();
   if (!studioWasmPromise) {
     (globalThis as Record<string, unknown>).__voStudioLogRecord = (record: StudioLogRecord) => {
+      if (handleVoplayPerfHostLog(record)) {
+        return;
+      }
       pushStudioLogRecord(record);
-      console.debug('[studio-log]', record);
+      if (shouldEmitStudioLogDebug()) {
+        console.debug('[studio-log]', record);
+      }
     };
     studioWasmPromise = loadStudioWasm();
   }
   return studioWasmPromise;
+}
+
+function shouldEmitStudioLogDebug(): boolean {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.has('studioLogDebug')
+      || params.has('debug')
+      || window.localStorage.getItem('studio.logDebug') === '1';
+  } catch {
+    return false;
+  }
 }
 
 async function compileEntryForCommand(
@@ -1089,7 +1191,7 @@ function listVfsEntries(path: string): Array<[string, boolean, number]> {
 }
 
 function vfsOpenFile(path: string, flags: number, mode: number): [number, string | null] {
-  const normalized = normalizePath(path);
+  const normalized = normalizeRuntimeVfsPath(path);
   const access = flags & 0x3;
   const create = (flags & O_CREATE) !== 0;
   const excl = (flags & O_EXCL) !== 0;
@@ -1220,7 +1322,7 @@ function vfsFtruncate(fd: number, size: number): string | null {
 }
 
 function vfsMkdir(path: string, mode: number): string | null {
-  const normalized = normalizePath(path);
+  const normalized = normalizeRuntimeVfsPath(path);
   const parent = dirname(normalized);
   if (!directories.has(parent)) return ERR_NOT_EXIST;
   if (directories.has(normalized) || vfsFiles.has(normalized)) return ERR_EXIST;
@@ -1231,7 +1333,7 @@ function vfsMkdir(path: string, mode: number): string | null {
 }
 
 function vfsMkdirAll(path: string, mode: number): string | null {
-  const normalized = normalizePath(path);
+  const normalized = normalizeRuntimeVfsPath(path);
   const parts = normalized.split('/').filter(Boolean);
   let current = ROOT;
   for (const part of parts) {
@@ -1247,7 +1349,7 @@ function vfsMkdirAll(path: string, mode: number): string | null {
 }
 
 function vfsRemove(path: string): string | null {
-  const normalized = normalizePath(path);
+  const normalized = normalizeRuntimeVfsPath(path);
   if (vfsFiles.has(normalized)) {
     deleteFile(normalized);
     return null;
@@ -1261,7 +1363,7 @@ function vfsRemove(path: string): string | null {
 }
 
 function vfsRemoveAll(path: string): string | null {
-  const normalized = normalizePath(path);
+  const normalized = normalizeRuntimeVfsPath(path);
   if (vfsFiles.has(normalized)) {
     deleteFile(normalized);
     return null;
@@ -1283,8 +1385,8 @@ function vfsRemoveAll(path: string): string | null {
 }
 
 function vfsRename(oldPath: string, newPath: string): string | null {
-  const oldNorm = normalizePath(oldPath);
-  const newNorm = normalizePath(newPath);
+  const oldNorm = normalizeRuntimeVfsPath(oldPath);
+  const newNorm = normalizeRuntimeVfsPath(newPath);
   if (vfsFiles.has(oldNorm)) {
     setVfsFile(newNorm, vfsFiles.get(oldNorm) ?? new Uint8Array(0), vfsFileModes.get(oldNorm) ?? 0o644);
     deleteFile(oldNorm);
@@ -1310,7 +1412,7 @@ function vfsRename(oldPath: string, newPath: string): string | null {
 }
 
 function vfsStat(path: string): [string, number, number, number, boolean, string | null] {
-  const normalized = normalizePath(path);
+  const normalized = normalizeRuntimeVfsPath(path);
   const name = normalized === ROOT ? '' : normalized.slice(normalized.lastIndexOf('/') + 1);
   if (directories.has(normalized)) {
     return [name, 0, vfsDirModes.get(normalized) ?? 0o755, vfsDirModTimes.get(normalized) ?? 0, true, null];
@@ -1321,13 +1423,13 @@ function vfsStat(path: string): [string, number, number, number, boolean, string
 }
 
 function vfsReadDir(path: string): [Array<[string, boolean, number]>, string | null] {
-  const normalized = normalizePath(path);
+  const normalized = normalizeRuntimeVfsPath(path);
   if (!directories.has(normalized)) return [[], ERR_NOT_EXIST];
   return [listVfsEntries(normalized), null];
 }
 
 function vfsChmod(path: string, mode: number): string | null {
-  const normalized = normalizePath(path);
+  const normalized = normalizeRuntimeVfsPath(path);
   if (directories.has(normalized)) {
     vfsDirModes.set(normalized, mode);
     return null;
@@ -1338,7 +1440,7 @@ function vfsChmod(path: string, mode: number): string | null {
 }
 
 function vfsTruncate(path: string, size: number): string | null {
-  const normalized = normalizePath(path);
+  const normalized = normalizeRuntimeVfsPath(path);
   if (directories.has(normalized)) return ERR_IS_DIR;
   const existing = vfsFiles.get(normalized);
   if (!existing) return ERR_NOT_EXIST;
@@ -1356,7 +1458,7 @@ function vfsTruncate(path: string, size: number): string | null {
 }
 
 function vfsReadFile(path: string): [Uint8Array | null, string | null] {
-  const normalized = normalizePath(path);
+  const normalized = normalizeRuntimeVfsPath(path);
   if (directories.has(normalized)) return [null, ERR_IS_DIR];
   const bytes = vfsFiles.get(normalized);
   if (!bytes) return [null, ERR_NOT_EXIST];
@@ -1364,7 +1466,7 @@ function vfsReadFile(path: string): [Uint8Array | null, string | null] {
 }
 
 function vfsWriteFile(path: string, data: Uint8Array, mode: number): string | null {
-  setVfsFile(path, data, mode);
+  setVfsFile(normalizeRuntimeVfsPath(path), data, mode);
   return null;
 }
 
@@ -1558,7 +1660,7 @@ async function openBlockKartQuickPlaySession(): Promise<SessionInfo> {
   const sessionRoot = `${QUICKPLAY_SESSION_ROOT}/BlockKart/${sessionNonce()}`;
   clearImportedRootSync(sessionRoot);
   ensureDir(sessionRoot);
-  writeStaticTextFiles(sessionRoot, pack.files);
+  writeStaticPackageFiles(sessionRoot, pack.files);
   const entryPath = `${sessionRoot}/main.vo`;
   if (!hasVfsFile(entryPath)) {
     throw new Error('BlockKart quickplay package is missing main.vo');
@@ -1624,9 +1726,9 @@ async function installBlockKartPackagedDependencies(): Promise<void> {
   }
   for (const modulePack of pack.modules) {
     const moduleRoot = `/${modulePack.cacheDir}`;
-    writeStaticTextFiles(moduleRoot, modulePack.files);
+    writeStaticPackageFiles(moduleRoot, modulePack.files);
     await runWithConcurrency(modulePack.artifacts, 4, async (artifact) => {
-      const bytes = await fetchBytesFromUrl(artifact.url);
+      const bytes = await fetchBytesFromUrl(staticPackageUrl(artifact.url));
       setVfsFile(`${moduleRoot}/${artifact.path}`, bytes, artifact.mode ?? 0o644);
     });
     await yieldToBrowser();
@@ -1634,12 +1736,20 @@ async function installBlockKartPackagedDependencies(): Promise<void> {
   consolePush('system', `Loaded BlockKart dependencies in ${formatDurationMs(performance.now() - start)}`);
 }
 
-function writeStaticTextFiles(root: string, files: StaticTextFile[]): void {
+function writeStaticPackageFiles(root: string, files: StaticPackageFile[]): void {
   const normalizedRoot = normalizePath(root);
   ensureDir(normalizedRoot);
   for (const file of files) {
     const relative = normalizeStaticPackagePath(file.path);
-    setVfsFile(`${normalizedRoot}/${relative}`, textEncoder.encode(file.content), file.mode ?? 0o644);
+    let bytes: Uint8Array;
+    if (file.contentBase64 != null) {
+      bytes = decodeBase64Bytes(file.contentBase64);
+    } else if (file.content != null) {
+      bytes = textEncoder.encode(file.content);
+    } else {
+      throw new Error(`Static package file is missing content: ${file.path}`);
+    }
+    setVfsFile(`${normalizedRoot}/${relative}`, bytes, file.mode ?? 0o644);
   }
 }
 

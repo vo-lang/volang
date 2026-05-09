@@ -16,6 +16,7 @@ vo-app-runtime = { path = "../../lang/crates/vo-app-runtime", default-features =
 vo-web = { path = "../../lang/crates/vo-web" }
 vo-web-runtime-wasm = { path = "../../lang/crates/vo-web/runtime-wasm" }
 vo-common = { path = "../../lang/crates/vo-common" }
+vo-common-core = { path = "../../lang/crates/vo-common-core", default-features = false }
 vo-runtime = { path = "../../lang/crates/vo-runtime", default-features = false }
 vo-module = { path = "../../lang/crates/vo-module" }
 vo-vm = { path = "../../lang/crates/vo-vm", default-features = false }
@@ -41,4 +42,3 @@ vo-runtime   = { path = "../../lang/crates/vo-runtime" }
 vo-stdlib    = { path = "../../lang/crates/vo-stdlib" }
 vo-syntax    = { path = "../../lang/crates/vo-syntax" }
 vo-vm        = { path = "../../lang/crates/vo-vm" }
-

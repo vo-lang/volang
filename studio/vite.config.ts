@@ -1,11 +1,16 @@
 import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { defineConfig } from 'vite';
 import { svelte, vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 
 interface ProxyRequest {
+  method?: string;
   url?: string;
+  on(event: 'data', handler: (chunk: Uint8Array | string) => void): void;
+  on(event: 'end', handler: () => void): void;
+  on(event: 'error', handler: (error: Error) => void): void;
 }
 
 interface ProxyResponse {
@@ -19,6 +24,9 @@ interface ProxyMiddlewares {
 
 interface ProxyServer {
   middlewares: ProxyMiddlewares;
+  ws?: {
+    send(payload: unknown): void;
+  };
 }
 
 interface LocalProjectSnapshotFile {
@@ -33,6 +41,11 @@ interface LocalProjectSnapshot {
   files: LocalProjectSnapshotFile[];
 }
 
+interface VoplayPerfReport {
+  receivedAt: string;
+  payload: unknown;
+}
+
 interface LocalProjectSnapshotPlan {
   projectRoot: string;
   snapshotBase: string;
@@ -45,6 +58,10 @@ const buildEnv = (globalThis as typeof globalThis & {
 }).process?.env ?? {};
 
 const LOCAL_PROJECT_ROUTE = '/__vo_studio_local_project';
+const VOPLAY_PERF_REPORT_ROUTE = '/__voplay_perf_report';
+const VOPLAY_PERF_RELOAD_ROUTE = '/__voplay_perf_reload';
+const VOPLAY_PERF_REPORT_LIMIT = 256;
+const VOPLAY_PERF_REPORT_MAX_BYTES = 128 * 1024;
 const LOCAL_PROJECT_MAX_FILES = readPositiveIntEnv('VITE_STUDIO_LOCAL_PROJECT_MAX_FILES', 5000);
 const LOCAL_PROJECT_MAX_BYTES = readByteSizeEnv('VITE_STUDIO_LOCAL_PROJECT_MAX_BYTES', 512 * 1024 * 1024);
 const ROOT_PATH = sep;
@@ -57,6 +74,7 @@ const LOCAL_PROJECT_SKIP_DIRS = new Set([
   'node_modules',
   'target',
 ]);
+const voplayPerfReports: VoplayPerfReport[] = [];
 
 function readPositiveIntEnv(name: string, fallback: number): number {
   const raw = buildEnv[name]?.trim();
@@ -104,6 +122,16 @@ function localProjectSnapshot() {
   };
 }
 
+function voplayPerfReportEndpoint() {
+  return {
+    name: 'studio-voplay-perf-report-endpoint',
+    configureServer(server: ProxyServer) {
+      installVoplayPerfReportEndpoint(server.middlewares);
+      installVoplayPerfReloadEndpoint(server);
+    },
+  };
+}
+
 function installLocalProjectSnapshot(middlewares: ProxyMiddlewares) {
   middlewares.use(LOCAL_PROJECT_ROUTE, (req: ProxyRequest, res: ProxyResponse) => {
     try {
@@ -124,12 +152,87 @@ function installLocalProjectSnapshot(middlewares: ProxyMiddlewares) {
   });
 }
 
+function installVoplayPerfReportEndpoint(middlewares: ProxyMiddlewares) {
+  middlewares.use(VOPLAY_PERF_REPORT_ROUTE, (req: ProxyRequest, res: ProxyResponse) => {
+    const method = (req.method ?? 'GET').toUpperCase();
+    if (method === 'GET') {
+      writeJson(res, { count: voplayPerfReports.length, reports: voplayPerfReports });
+      return;
+    }
+    if (method === 'DELETE') {
+      voplayPerfReports.length = 0;
+      writeJson(res, { ok: true, count: 0 });
+      return;
+    }
+    if (method !== 'POST') {
+      writeText(res, 405, 'method not allowed');
+      return;
+    }
+    readRequestBody(req, VOPLAY_PERF_REPORT_MAX_BYTES).then((body) => {
+      let payload: unknown = body;
+      if (body.length > 0) {
+        try {
+          payload = JSON.parse(body);
+        } catch {
+          payload = { raw: body };
+        }
+      }
+      voplayPerfReports.push({ receivedAt: new Date().toISOString(), payload });
+      if (voplayPerfReports.length > VOPLAY_PERF_REPORT_LIMIT) {
+        voplayPerfReports.splice(0, voplayPerfReports.length - VOPLAY_PERF_REPORT_LIMIT);
+      }
+      writeJson(res, { ok: true, count: voplayPerfReports.length });
+    }).catch((error: unknown) => {
+      writeText(res, 400, localProjectErrorMessage(error));
+    });
+  });
+}
+
+function installVoplayPerfReloadEndpoint(server: ProxyServer) {
+  server.middlewares.use(VOPLAY_PERF_RELOAD_ROUTE, (req: ProxyRequest, res: ProxyResponse) => {
+    const method = (req.method ?? 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'POST') {
+      writeText(res, 405, 'method not allowed');
+      return;
+    }
+    server.ws?.send({ type: 'full-reload', path: '*' });
+    voplayPerfReports.push({
+      receivedAt: new Date().toISOString(),
+      payload: { schemaVersion: 1, source: 'studio-dev-server', kind: 'reload-request' },
+    });
+    if (voplayPerfReports.length > VOPLAY_PERF_REPORT_LIMIT) {
+      voplayPerfReports.splice(0, voplayPerfReports.length - VOPLAY_PERF_REPORT_LIMIT);
+    }
+    writeJson(res, { ok: true, count: voplayPerfReports.length });
+  });
+}
+
+function readRequestBody(req: ProxyRequest, maxBytes: number): Promise<string> {
+  return new Promise((resolveBody, rejectBody) => {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    req.on('data', (chunk) => {
+      const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk);
+      total += bytes.byteLength;
+      if (total > maxBytes) {
+        rejectBody(new Error('request body too large'));
+        return;
+      }
+      chunks.push(bytes);
+    });
+    req.on('end', () => {
+      resolveBody(Buffer.concat(chunks).toString('utf8'));
+    });
+    req.on('error', rejectBody);
+  });
+}
+
 function writeText(res: ProxyResponse, status: number, body: string) {
   res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
   res.end(body);
 }
 
-function writeJson(res: ProxyResponse, body: LocalProjectSnapshot) {
+function writeJson(res: ProxyResponse, body: unknown) {
   res.writeHead(200, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
@@ -468,7 +571,7 @@ function shouldIncludeLocalProjectFile(name: string, relFromRoot: string): boole
   if (name.endsWith('.vpak')) {
     return true;
   }
-  if (relFromRoot.startsWith('assets/') && /\.(png|jpe?g|webp)$/i.test(name)) {
+  if (relFromRoot.startsWith('assets/') && /\.(png|jpe?g|webp|glb|gltf|bin)$/i.test(name)) {
     return true;
   }
   if (relFromRoot.startsWith('js/dist/')) {
@@ -532,17 +635,46 @@ function readStudioWasmBuildId(): string | null {
   }
 }
 
-const studioBuildId = readStudioWasmBuildId()
+function readQuickplayPackageBuildId(): string | null {
+  const quickplayFiles = [
+    'public/quickplay/blockkart/project.json',
+    'public/quickplay/blockkart/deps.json',
+    'public/quickplay/blockkart/artifacts/github.com@vo-lang@vogui/v0.1.14/vogui.wasm',
+    'public/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.26/voplay_island.js',
+    'public/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.26/voplay_island_bg.wasm',
+  ];
+  try {
+    const hash = createHash('sha256');
+    for (const file of quickplayFiles) {
+      const absolute = resolve(file);
+      if (!existsSync(absolute)) continue;
+      hash.update(file);
+      hash.update('\0');
+      hash.update(readFileSync(absolute));
+      hash.update('\0');
+    }
+    return `qp-${hash.digest('hex').slice(0, 12)}`;
+  } catch {
+    return null;
+  }
+}
+
+const studioBaseBuildId = readStudioWasmBuildId()
   || [
     buildEnv.GITHUB_SHA,
     buildEnv.GITHUB_RUN_ID,
     buildEnv.GITHUB_RUN_ATTEMPT,
   ].filter((value): value is string => typeof value === 'string' && value.length > 0).join('-')
   || Date.now().toString(36);
+const studioBuildId = [
+  studioBaseBuildId,
+  readQuickplayPackageBuildId(),
+].filter((value): value is string => typeof value === 'string' && value.length > 0).join('-');
 
 export default defineConfig({
-  plugins: [localProjectSnapshot(), svelte({ preprocess: vitePreprocess() })],
+  plugins: [localProjectSnapshot(), voplayPerfReportEndpoint(), svelte({ preprocess: vitePreprocess() })],
   server: {
+    host: '127.0.0.1',
     port: 5174,
     strictPort: true,
   },

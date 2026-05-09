@@ -14,6 +14,7 @@ import { hasWindowVfsBindings, installWindowVfsBackend, type WindowVfsBackend } 
 export interface VoVmInstance {
   run(): string;
   runScheduled(): string;
+  setGcStressEveryStep(enabled: boolean): void;
   pushIslandCommand(frame: Uint8Array): void;
   takeOutboundCommands(): Uint8Array[];
   takePendingHostEvents(): Array<{ token: string; delayMs: number; replay: boolean }>;
@@ -44,6 +45,8 @@ export interface StudioWasm {
   runGuiEntry(entryPath: string): Uint8Array;
   sendGuiEvent(handlerId: number, payload: string): Uint8Array;
   sendGuiEventAsync(handlerId: number, payload: string): void;
+  setGcStressEveryStep(enabled: boolean): void;
+  setGcStressHostStep(enabled: boolean): void;
   startRenderIsland(bytecode: Uint8Array): void;
   pushIslandData(data: Uint8Array): void;
   pollGuiRender(): Uint8Array;
@@ -76,7 +79,7 @@ export interface StudioWasm {
 }
 
 type RawStudioWasmModule = Partial<StudioWasm> & {
-  default: (wasmPath?: string) => Promise<void>;
+  default: (opts?: { module_or_path?: string }) => Promise<void>;
   StudioVoVm?: { withExterns(bytecode: Uint8Array): VoVmInstance };
 };
 
@@ -954,17 +957,33 @@ function installExtBridgeGlobals(): void {
   };
 }
 
- // ── Loader ────────────────────────────────────────────────────────────────────
+// ── Loader ────────────────────────────────────────────────────────────────────
 
- let instance: StudioWasm | null = null;
- let initPromise: Promise<StudioWasm> | null = null;
- let loadGeneration = 0;
+let instance: StudioWasm | null = null;
+let initPromise: Promise<StudioWasm> | null = null;
+let loadGeneration = 0;
 
- function requireStudioExport<T>(value: T | undefined, name: string): T {
-   if (value === undefined) {
-     throw new Error(`studio/wasm missing export: ${name}`);
+function requireStudioExport<T>(value: T | undefined, name: string): T {
+  if (value === undefined) {
+    throw new Error(`studio/wasm missing export: ${name}`);
   }
   return value;
+}
+
+function queryFlagEnabled(name: string): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  const value = new URLSearchParams(window.location.search).get(name);
+  return value !== null && value !== '' && value !== '0' && value !== 'false';
+}
+
+function gcStressEveryStepEnabled(): boolean {
+  return queryFlagEnabled('voGcStressEveryStep');
+}
+
+function gcStressHostStepEnabled(): boolean {
+  return queryFlagEnabled('voplayGcStress') || queryFlagEnabled('voGcStressHostStep');
 }
 
 function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
@@ -972,14 +991,40 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
   if (!vmExport) {
     throw new Error('studio/wasm missing VM export: StudioVoVm');
   }
+  const setGcStressEveryStep = requireStudioExport(
+    mod.setGcStressEveryStep as StudioWasm['setGcStressEveryStep'],
+    'setGcStressEveryStep',
+  );
+  const setGcStressHostStep = requireStudioExport(
+    mod.setGcStressHostStep as StudioWasm['setGcStressHostStep'],
+    'setGcStressHostStep',
+  );
+  const applyGcStressFlag = (): boolean => {
+    const everyStepEnabled = gcStressEveryStepEnabled();
+    const hostStepEnabled = gcStressHostStepEnabled();
+    setGcStressEveryStep(everyStepEnabled);
+    setGcStressHostStep(hostStepEnabled);
+    return everyStepEnabled;
+  };
   return {
-    runGuiFromBytecode: requireStudioExport(mod.runGuiFromBytecode as StudioWasm['runGuiFromBytecode'], 'runGuiFromBytecode'),
-    startGuiFromBytecode: requireStudioExport(mod.startGuiFromBytecode as StudioWasm['startGuiFromBytecode'], 'startGuiFromBytecode'),
+    runGuiFromBytecode: (bytecode) => {
+      applyGcStressFlag();
+      return requireStudioExport(mod.runGuiFromBytecode as StudioWasm['runGuiFromBytecode'], 'runGuiFromBytecode')(bytecode);
+    },
+    startGuiFromBytecode: (bytecode, entryPath) => {
+      applyGcStressFlag();
+      return requireStudioExport(mod.startGuiFromBytecode as StudioWasm['startGuiFromBytecode'], 'startGuiFromBytecode')(bytecode, entryPath);
+    },
     runGui: requireStudioExport(mod.runGui, 'runGui'),
     runGuiEntry: requireStudioExport(mod.runGuiEntry, 'runGuiEntry'),
     sendGuiEvent: requireStudioExport(mod.sendGuiEvent, 'sendGuiEvent'),
     sendGuiEventAsync: requireStudioExport(mod.sendGuiEventAsync, 'sendGuiEventAsync'),
-    startRenderIsland: requireStudioExport(mod.startRenderIsland, 'startRenderIsland'),
+    setGcStressEveryStep,
+    setGcStressHostStep,
+    startRenderIsland: (bytecode) => {
+      applyGcStressFlag();
+      return requireStudioExport(mod.startRenderIsland, 'startRenderIsland')(bytecode);
+    },
     pushIslandData: requireStudioExport(mod.pushIslandData, 'pushIslandData'),
     pollGuiRender: requireStudioExport(mod.pollGuiRender, 'pollGuiRender'),
     getRenderIslandVfsSnapshot: requireStudioExport(mod.getRenderIslandVfsSnapshot, 'getRenderIslandVfsSnapshot'),
@@ -997,7 +1042,12 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
     getBuildId: requireStudioExport(mod.getBuildId as StudioWasm['getBuildId'], 'getBuildId'),
     initVFS: requireStudioExport(mod.initVFS, 'initVFS'),
     VoVm: {
-      withExterns: (bytecode) => vmExport.withExterns(bytecode),
+      withExterns: (bytecode) => {
+        const enabled = applyGcStressFlag();
+        const vm = vmExport.withExterns(bytecode);
+        vm.setGcStressEveryStep(enabled);
+        return vm;
+      },
     },
   };
 }
@@ -1041,7 +1091,7 @@ export async function loadStudioWasm(): Promise<StudioWasm> {
         level: 'system',
         text: `path=${wasmPath}`,
       });
-      await mod.default(wasmPath);
+      await mod.default({ module_or_path: wasmPath });
       emitStudioHostLog({
         source: 'studio-wasm',
         code: 'wasm_init_ready',
@@ -1057,6 +1107,8 @@ export async function loadStudioWasm(): Promise<StudioWasm> {
         level: 'system',
       });
       await normalized.initVFS();
+      normalized.setGcStressEveryStep(gcStressEveryStepEnabled());
+      normalized.setGcStressHostStep(gcStressHostStepEnabled());
       emitStudioHostLog({
         source: 'studio-wasm',
         code: 'init_vfs_ready',

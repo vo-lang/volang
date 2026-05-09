@@ -7,7 +7,7 @@
 //! Source files are read from the JS VirtualFS (via vo_web_runtime_wasm::vfs).
 
 use js_sys::{Object, Reflect};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use vo_app_runtime::{GuestRuntime, RenderBuffer, RenderIslandRuntime, SessionError, StepResult};
@@ -58,6 +58,9 @@ fn emit_host_log(record: vo_web::HostLogRecord) {
     let code = record.core.code.clone();
     let text = record.text.clone();
     vo_web::emit_host_log(record);
+    if code == "stdout" || code == "voplay_perf_report" {
+        return;
+    }
     match text {
         Some(text) => web_sys::console::log_1(&format!("[{}:{}] {}", source, code, text).into()),
         None => web_sys::console::log_1(&format!("[{}:{}]", source, code).into()),
@@ -67,8 +70,32 @@ fn emit_host_log(record: vo_web::HostLogRecord) {
 fn flush_stdout(label: &str, stdout: Option<&str>) {
     if let Some(s) = stdout {
         let trimmed = s.trim();
-        if !trimmed.is_empty() {
+        if trimmed.is_empty() {
+            return;
+        }
+        if !trimmed.contains("__VOPLAY_PERF_REPORT__") {
             emit_host_log(vo_web::HostLogRecord::new(label, "stdout", "stdout").text(trimmed));
+            return;
+        }
+        let mut stdout_lines = Vec::new();
+        for line in s.lines() {
+            let line_trimmed = line.trim();
+            if line_trimmed.is_empty() {
+                continue;
+            }
+            if let Some(payload) = line_trimmed.strip_prefix("__VOPLAY_PERF_REPORT__") {
+                vo_web::emit_host_log(
+                    vo_web::HostLogRecord::new("voplay-perf", "voplay_perf_report", "system")
+                        .text(payload.trim()),
+                );
+                continue;
+            }
+            stdout_lines.push(line);
+        }
+        let stdout_text = stdout_lines.join("\n");
+        let stdout_text = stdout_text.trim();
+        if !stdout_text.is_empty() {
+            emit_host_log(vo_web::HostLogRecord::new(label, "stdout", "stdout").text(stdout_text));
         }
     }
 }
@@ -100,6 +127,30 @@ fn guest_stdout_source() -> Box<dyn Fn() -> String> {
 thread_local! {
     static GUEST: RefCell<Option<GuestRuntime>> = RefCell::new(None);
     static GUI_RENDER: RefCell<RenderBuffer> = RefCell::new(RenderBuffer::new());
+    static GC_STRESS_EVERY_STEP: Cell<bool> = Cell::new(false);
+    static GC_STRESS_HOST_STEP: Cell<bool> = Cell::new(false);
+}
+
+fn apply_gc_stress_config(vm: &mut vo_vm::vm::Vm) {
+    GC_STRESS_EVERY_STEP.with(|enabled| {
+        vm.set_gc_stress_every_step(enabled.get());
+    });
+}
+
+fn gc_stress_host_step_enabled() -> bool {
+    GC_STRESS_HOST_STEP.with(|enabled| enabled.get())
+}
+
+fn run_gc_stress_render_step(runtime: &mut RenderIslandRuntime) {
+    if gc_stress_host_step_enabled() {
+        runtime.gc_step();
+    }
+}
+
+fn run_gc_stress_guest_step(guest: &mut GuestRuntime) {
+    if gc_stress_host_step_enabled() {
+        guest.gc_step();
+    }
 }
 
 fn with_guest_mut<T>(
@@ -114,18 +165,20 @@ fn with_guest_mut<T>(
 }
 
 fn load_gui_app_from_bytecode(bytecode: &[u8]) -> Result<GuestRuntime, JsValue> {
-    let vm = vo_web::create_loaded_vm(bytecode, |reg, exts| {
+    let mut vm = vo_web::create_loaded_vm(bytecode, |reg, exts| {
         vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
     })
     .map_err(|e| JsValue::from_str(&e))?;
+    apply_gc_stress_config(&mut vm);
     Ok(GuestRuntime::new_gui_app(vm, guest_stdout_source()))
 }
 
 fn load_render_island_from_bytecode(bytecode: &[u8]) -> Result<GuestRuntime, JsValue> {
-    let vm = vo_web::create_loaded_vm(bytecode, |reg, exts| {
+    let mut vm = vo_web::create_loaded_vm(bytecode, |reg, exts| {
         vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
     })
     .map_err(|e| JsValue::from_str(&e))?;
+    apply_gc_stress_config(&mut vm);
     Ok(GuestRuntime::new_render_island(vm, guest_stdout_source()))
 }
 
@@ -160,6 +213,7 @@ where
         log_wasm_path("gui_load_vm_done", path_label, "system", Some(load_start));
         let start_start = js_sys::Date::now();
         let step = start_guest(&mut guest).map_err(session_error_to_js)?;
+        run_gc_stress_guest_step(&mut guest);
         log_wasm_path("gui_start_done", path_label, "system", Some(start_start));
         let render_output = take_guest_step_render(step);
         GUEST.with(|g| *g.borrow_mut() = Some(guest));
@@ -191,17 +245,24 @@ impl StudioVoVm {
         ensure_panic_hook();
         let module = vo_vm::bytecode::Module::deserialize(bytecode)
             .map_err(|e| JsValue::from_str(&format!("Failed to load bytecode: {:?}", e)))?;
-        let vm = vo_web::create_loaded_vm_from_module(module, |reg, exts| {
+        let mut vm = vo_web::create_loaded_vm_from_module(module, |reg, exts| {
             vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
         })
         .map_err(|e| JsValue::from_str(&e))?;
+        apply_gc_stress_config(&mut vm);
         Ok(StudioVoVm {
             runtime: RenderIslandRuntime::new(vm, guest_stdout_source()),
         })
     }
 
+    #[wasm_bindgen(js_name = "setGcStressEveryStep")]
+    pub fn set_gc_stress_every_step(&mut self, enabled: bool) {
+        self.runtime.set_gc_stress_every_step(enabled);
+    }
+
     pub fn run(&mut self) -> Result<String, JsValue> {
         let step = self.runtime.run().map_err(session_error_to_js)?;
+        run_gc_stress_render_step(&mut self.runtime);
         flush_stdout("render-island", step.stdout.as_deref());
         Ok(format!("{:?}", step.outcome))
     }
@@ -209,6 +270,7 @@ impl StudioVoVm {
     #[wasm_bindgen(js_name = "runInit")]
     pub fn run_init(&mut self) -> Result<String, JsValue> {
         let step = self.runtime.run_init().map_err(session_error_to_js)?;
+        run_gc_stress_render_step(&mut self.runtime);
         flush_stdout("render-island", step.stdout.as_deref());
         Ok(format!("{:?}", step.outcome))
     }
@@ -216,6 +278,7 @@ impl StudioVoVm {
     #[wasm_bindgen(js_name = "runScheduled")]
     pub fn run_scheduled(&mut self) -> Result<String, JsValue> {
         let step = self.runtime.run_scheduled().map_err(session_error_to_js)?;
+        run_gc_stress_render_step(&mut self.runtime);
         flush_stdout("render-island", step.stdout.as_deref());
         Ok(format!("{:?}", step.outcome))
     }
@@ -1517,9 +1580,7 @@ pub fn start_gui_from_bytecode(
     entry_path: Option<String>,
 ) -> Result<Vec<u8>, JsValue> {
     let path_label = entry_path.as_deref().unwrap_or("native-bytecode");
-    start_gui_from_bytecode_with(bytecode, path_label, |guest| {
-        guest.start_gui_app_step()
-    })
+    start_gui_from_bytecode_with(bytecode, path_label, |guest| guest.start_gui_app_step())
 }
 
 /// Send an event to the running guest app, returning the new render bytes.
@@ -1536,6 +1597,7 @@ pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<Vec<u8>, JsValue
         let step = guest
             .dispatch_gui_event(handler_id, payload)
             .map_err(session_error_to_js)?;
+        run_gc_stress_guest_step(guest);
         flush_stdout("guest", step.stdout.as_deref());
         Ok(step.render_output.unwrap_or_default())
     })
@@ -1548,6 +1610,7 @@ pub fn send_gui_event_async(handler_id: i32, payload: &str) -> Result<(), JsValu
             .try_dispatch_gui_event(handler_id, payload)
             .map_err(session_error_to_js)?;
         if let Some(step) = step {
+            run_gc_stress_guest_step(guest);
             flush_stdout("guest", step.stdout.as_deref());
             if let Some(render_output) = step.render_output {
                 GUI_RENDER.with(|r| r.borrow_mut().push(render_output));
@@ -1555,6 +1618,21 @@ pub fn send_gui_event_async(handler_id: i32, payload: &str) -> Result<(), JsValu
         }
         Ok(())
     })
+}
+
+#[wasm_bindgen(js_name = "setGcStressEveryStep")]
+pub fn set_gc_stress_every_step(enabled: bool) {
+    GC_STRESS_EVERY_STEP.with(|cell| cell.set(enabled));
+    GUEST.with(|g| {
+        if let Some(guest) = g.borrow_mut().as_mut() {
+            guest.set_gc_stress_every_step(enabled);
+        }
+    });
+}
+
+#[wasm_bindgen(js_name = "setGcStressHostStep")]
+pub fn set_gc_stress_host_step(enabled: bool) {
+    GC_STRESS_HOST_STEP.with(|cell| cell.set(enabled));
 }
 
 #[wasm_bindgen(js_name = "startRenderIsland")]
@@ -1570,6 +1648,7 @@ pub fn start_render_island(bytecode: &[u8]) -> Result<(), JsValue> {
 pub fn push_island_data(data: &[u8]) -> Result<(), JsValue> {
     with_guest_mut(|guest| {
         let step = guest.push_island_frame(data).map_err(session_error_to_js)?;
+        run_gc_stress_guest_step(guest);
         flush_stdout("guest", step.stdout.as_deref());
         if let Some(render_output) = step.render_output {
             GUI_RENDER.with(|r| r.borrow_mut().push(render_output));
@@ -1636,6 +1715,7 @@ pub fn wake_host_event(token: &str) -> Result<(), JsValue> {
     with_guest_mut(|guest| {
         guest.wake_host_event(token);
         let step = guest.run_scheduled().map_err(session_error_to_js)?;
+        run_gc_stress_guest_step(guest);
         flush_stdout("guest", step.stdout.as_deref());
         if let Some(render_output) = step.render_output {
             GUI_RENDER.with(|r| r.borrow_mut().push(render_output));

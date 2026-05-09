@@ -115,6 +115,7 @@ fn find_all_string(call: &mut ExternCallContext) -> ExternResult {
         let str_ref = str_obj::from_rust_str(gc, r);
         array::set(arr, i, str_ref as u64, 8);
     }
+    gc.mark_allocated_for_scan(arr);
     let slice_ref = slice::from_array(gc, arr);
     call.ret_ref(slots::RET_0, slice_ref);
     ExternResult::Ok
@@ -182,6 +183,7 @@ fn split_string(call: &mut ExternCallContext) -> ExternResult {
         let str_ref = str_obj::from_rust_str(gc, r);
         array::set(arr, i, str_ref as u64, 8);
     }
+    gc.mark_allocated_for_scan(arr);
     let slice_ref = slice::from_array(gc, arr);
     call.ret_ref(slots::RET_0, slice_ref);
     ExternResult::Ok
@@ -215,6 +217,7 @@ fn find_string_submatch(call: &mut ExternCallContext) -> ExternResult {
         let str_ref = str_obj::from_rust_str(gc, r);
         array::set(arr, i, str_ref as u64, 8);
     }
+    gc.mark_allocated_for_scan(arr);
     let slice_ref = slice::from_array(gc, arr);
     call.ret_ref(slots::RET_0, slice_ref);
     ExternResult::Ok

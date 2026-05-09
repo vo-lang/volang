@@ -1,5 +1,6 @@
 //! Bytecode text format parser and formatter.
 
+use vo_common_core::SlotType;
 use vo_vm::bytecode::{Constant, FunctionDef, Module};
 use vo_vm::instruction::{Instruction, Opcode};
 
@@ -125,15 +126,63 @@ fn format_constant(c: &Constant) -> String {
 fn format_function(func_id: u32, f: &FunctionDef) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "func_{} {}(params={}, param_slots={}, locals={}, ret={}):\n",
-        func_id, f.name, f.param_count, f.param_slots, f.local_slots, f.ret_slots
+        "func_{} {}(params={}, param_slots={}, locals={}, ret={}, gc_scan_slots={}):\n",
+        func_id, f.name, f.param_count, f.param_slots, f.local_slots, f.ret_slots, f.gc_scan_slots
     ));
+    if let Some(slot_summary) = format_slot_type_summary(&f.slot_types) {
+        out.push_str(&format!("  # slot_types: {}\n", slot_summary));
+    }
 
     for (pc, instr) in f.code.iter().enumerate() {
         out.push_str(&format!("  {:04}: {}\n", pc, format_instruction(instr)));
     }
 
     out
+}
+
+fn format_slot_type_summary(slot_types: &[SlotType]) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut i = 0usize;
+    while i < slot_types.len() {
+        let slot_type = slot_types[i];
+        if slot_type == SlotType::Value {
+            i += 1;
+            continue;
+        }
+
+        let start = i;
+        i += 1;
+        while i < slot_types.len() && slot_types[i] == slot_type {
+            i += 1;
+        }
+
+        if start + 1 == i {
+            parts.push(format!("r{}={}", start, format_slot_type(slot_type)));
+        } else {
+            parts.push(format!(
+                "r{}..r{}={}",
+                start,
+                i - 1,
+                format_slot_type(slot_type)
+            ));
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
+fn format_slot_type(slot_type: SlotType) -> &'static str {
+    match slot_type {
+        SlotType::Value => "Value",
+        SlotType::GcRef => "GcRef",
+        SlotType::Interface0 => "Interface0",
+        SlotType::Interface1 => "Interface1",
+        SlotType::Float => "Float",
+    }
 }
 
 fn format_instruction(instr: &Instruction) -> String {

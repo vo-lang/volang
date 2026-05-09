@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 
 use libloading::{Library, Symbol};
 
-use crate::ffi::{ExtensionTable, ExternEntry, ExternFnPtr, EXTENSION_ABI_VERSION};
+use crate::ffi::{
+    ExtensionTable, ExternEntry, ExternFnPtr, EXTENSION_ABI_FINGERPRINT, EXTENSION_ABI_VERSION,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeExtensionSpec {
@@ -29,6 +31,7 @@ impl NativeExtensionSpec {
 
 /// ABI version — must match vo-ext's ABI_VERSION.
 pub const ABI_VERSION: u32 = EXTENSION_ABI_VERSION;
+pub const ABI_FINGERPRINT: u64 = EXTENSION_ABI_FINGERPRINT;
 
 /// Error type for extension loading.
 #[derive(Debug)]
@@ -45,6 +48,10 @@ pub enum ExtError {
     },
     /// ABI version mismatch.
     VersionMismatch { expected: u32, found: u32 },
+    /// Missing ABI fingerprint entry point.
+    MissingAbiFingerprint,
+    /// ABI fingerprint mismatch.
+    FingerprintMismatch { expected: u64, found: u64 },
     /// IO error.
     Io(std::io::Error),
 }
@@ -69,6 +76,16 @@ impl std::fmt::Display for ExtError {
                 write!(
                     f,
                     "ABI version mismatch: expected {}, found {}",
+                    expected, found
+                )
+            }
+            ExtError::MissingAbiFingerprint => {
+                write!(f, "extension missing vo_ext_get_abi_fingerprint")
+            }
+            ExtError::FingerprintMismatch { expected, found } => {
+                write!(
+                    f,
+                    "ABI fingerprint mismatch: expected {:#x}, found {:#x}",
                     expected, found
                 )
             }
@@ -170,6 +187,18 @@ impl ExtensionLoader {
             return Err(ExtError::VersionMismatch {
                 expected: ABI_VERSION,
                 found: table.version,
+            });
+        }
+
+        let get_abi_fingerprint: Symbol<extern "C" fn() -> u64> = unsafe {
+            lib.get(b"vo_ext_get_abi_fingerprint")
+                .map_err(|_| ExtError::MissingAbiFingerprint)?
+        };
+        let found_fingerprint = get_abi_fingerprint();
+        if found_fingerprint != ABI_FINGERPRINT {
+            return Err(ExtError::FingerprintMismatch {
+                expected: ABI_FINGERPRINT,
+                found: found_fingerprint,
             });
         }
 

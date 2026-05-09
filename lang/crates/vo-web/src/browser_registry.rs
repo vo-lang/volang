@@ -312,7 +312,7 @@ async fn fetch_source_entry(
     entry: &WebManifestSource,
 ) -> Result<(PathBuf, String)> {
     validate_web_relative_path(&entry.path)?;
-    let content = fetch_module_file_text(module, commit, &entry.path).await?;
+    let content = fetch_module_file_text(module, version, commit, &entry.path).await?;
     let digest = Digest::from_sha256(content.as_bytes());
     let expected = Digest::parse(&entry.digest).map_err(|error| {
         Error::InvalidReleaseMetadata(format!(
@@ -361,7 +361,7 @@ async fn fetch_web_artifact(
             detail: format!("vo.web.json does not declare {}", artifact.name),
         })?;
     validate_web_relative_path(&web_artifact.path)?;
-    let bytes = fetch_module_file_bytes(module, &web.commit, &web_artifact.path).await?;
+    let bytes = fetch_module_file_bytes(module, version, &web.commit, &web_artifact.path).await?;
     let expected = Digest::parse(&web_artifact.digest).map_err(|error| {
         Error::InvalidReleaseMetadata(format!(
             "vo.web.json artifact digest for {}: {}",
@@ -381,6 +381,19 @@ async fn fetch_web_artifact(
 
 async fn fetch_web_manifest(module: &ModulePath, version: &ExactVersion) -> Result<WebManifest> {
     let cache_key = module_version_cache_key(module, version);
+    if let Some(bytes) = read_packaged_module_file(module, version, VO_WEB_FILE) {
+        let manifest: WebManifest = serde_json::from_slice(&bytes).map_err(|error| {
+            Error::InvalidReleaseMetadata(format!(
+                "invalid vo.web.json from packaged VFS {}: {}",
+                packaged_module_file_path(module, version, VO_WEB_FILE),
+                error
+            ))
+        })?;
+        WEB_MANIFEST_CACHE.with(|cache| {
+            cache.borrow_mut().insert(cache_key, manifest.clone());
+        });
+        return Ok(manifest);
+    }
     if let Some(manifest) = WEB_MANIFEST_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned())
     {
         return Ok(manifest);
@@ -475,18 +488,56 @@ fn module_version_cache_key(module: &ModulePath, version: &ExactVersion) -> Stri
 
 async fn fetch_module_file_text(
     module: &ModulePath,
+    version: &ExactVersion,
     commit: &str,
     rel_path: &str,
 ) -> Result<String> {
+    if let Some(bytes) = read_packaged_module_file(module, version, rel_path) {
+        return String::from_utf8(bytes).map_err(|error| {
+            Error::RegistryError(format!(
+                "invalid UTF-8 from packaged VFS {}: {}",
+                packaged_module_file_path(module, version, rel_path),
+                error
+            ))
+        });
+    }
     fetch_text(&raw_module_file_url(module, commit, rel_path)).await
 }
 
 async fn fetch_module_file_bytes(
     module: &ModulePath,
+    version: &ExactVersion,
     commit: &str,
     rel_path: &str,
 ) -> Result<Vec<u8>> {
+    if let Some(bytes) = read_packaged_module_file(module, version, rel_path) {
+        return Ok(bytes);
+    }
     fetch_bytes_typed(&raw_module_file_url(module, commit, rel_path)).await
+}
+
+fn read_packaged_module_file(
+    module: &ModulePath,
+    version: &ExactVersion,
+    rel_path: &str,
+) -> Option<Vec<u8>> {
+    let path = packaged_module_file_path(module, version, rel_path);
+    let (data, err) = vo_web_runtime_wasm::vfs::read_file(&path);
+    if err.is_none() {
+        Some(data)
+    } else {
+        None
+    }
+}
+
+fn packaged_module_file_path(
+    module: &ModulePath,
+    version: &ExactVersion,
+    rel_path: &str,
+) -> String {
+    let key = module.as_str().replace('/', "@");
+    let rel = rel_path.trim_start_matches('/');
+    format!("/{}/{}/{}", key, version, rel)
 }
 
 fn raw_module_file_url(module: &ModulePath, commit: &str, rel_path: &str) -> String {

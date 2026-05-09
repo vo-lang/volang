@@ -28,6 +28,10 @@ impl GuiAppSession {
         self.session.vm_mut()
     }
 
+    pub fn gc_step(&mut self) {
+        self.session.gc_step();
+    }
+
     // ── Core step methods ───────────────────────────────────────────────
 
     pub fn start_step(&mut self) -> Result<StepResult, SessionError> {

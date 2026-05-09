@@ -27,6 +27,10 @@ impl RenderIslandSession {
         self.session.vm_mut()
     }
 
+    pub fn gc_step(&mut self) {
+        self.session.gc_step();
+    }
+
     // ── Core step methods ───────────────────────────────────────────────
 
     pub fn run(&mut self) -> Result<StepResult, SessionError> {
