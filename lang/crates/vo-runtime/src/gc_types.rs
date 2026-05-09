@@ -10,6 +10,28 @@ use crate::slot::{byte_offset_for_slots, slot_to_ptr, Slot, SLOT_BYTES};
 use vo_common_core::bytecode::StructMeta;
 use vo_common_core::types::{SlotType, ValueKind, ValueMeta};
 
+/// GC layout metadata needed to scan closure captures for a function.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClosureScanLayout<'a> {
+    /// Explicit capture slot layout for codegen-created closures and wrappers.
+    pub capture_slot_types: &'a [SlotType],
+    /// Capture slot layout for runtime-created direct method closures.
+    pub runtime_capture_slot_types: &'a [SlotType],
+}
+
+impl<'a> ClosureScanLayout<'a> {
+    #[inline]
+    pub const fn new(
+        capture_slot_types: &'a [SlotType],
+        runtime_capture_slot_types: &'a [SlotType],
+    ) -> Self {
+        Self {
+            capture_slot_types,
+            runtime_capture_slot_types,
+        }
+    }
+}
+
 /// Type-safe write barrier for mixed-slot values.
 ///
 /// Only barriers slots that are actually GcRefs (SlotType::GcRef) or
@@ -133,15 +155,15 @@ pub fn typed_write_barrier_range_by_meta(
 
 /// Scan a GC object and mark its children.
 ///
-/// `func_capture_slot_types`: returns capture_slot_types for a function id.
+/// `func_closure_scan_layout`: returns closure capture GC metadata for a function id.
 /// Used to scan closure captures with correct types (Interface0/Interface1 vs GcRef).
 pub fn scan_object<'a, F>(
     gc: &mut Gc,
     obj: GcRef,
     struct_metas: &[StructMeta],
-    func_capture_slot_types: &F,
+    func_closure_scan_layout: &F,
 ) where
-    F: Fn(u32) -> &'a [SlotType] + ?Sized,
+    F: Fn(u32) -> ClosureScanLayout<'a> + ?Sized,
 {
     let gc_header = Gc::header(obj);
 
@@ -178,7 +200,7 @@ pub fn scan_object<'a, F>(
         }
 
         ValueKind::Closure => {
-            scan_closure(gc, obj, func_capture_slot_types);
+            scan_closure(gc, obj, func_closure_scan_layout);
         }
 
         ValueKind::Map => {
@@ -219,15 +241,15 @@ pub fn scan_object<'a, F>(
     }
 }
 
-/// Scan closure captures using the function's capture_slot_types.
+/// Scan closure captures using the function's capture GC layout.
 ///
 /// Closure layout: [ClosureHeader (1 slot)] [capture_0] [capture_1] ...
 /// For regular closures, all captures are GcRef (pointers to heap-boxed escaped vars).
 /// For method value closures, captures may include interface data (itab + data).
-/// The function's capture_slot_types describes the capture layout directly.
+/// Runtime-created direct method closures capture receiver slot1 for a method function.
 fn scan_closure<'a, F>(gc: &mut Gc, obj: GcRef, func_capture_slot_types: &F)
 where
-    F: Fn(u32) -> &'a [SlotType] + ?Sized,
+    F: Fn(u32) -> ClosureScanLayout<'a> + ?Sized,
 {
     let func_id = closure::func_id(obj);
     let cap_count = closure::capture_count(obj);
@@ -239,24 +261,42 @@ where
         core::slice::from_raw_parts((obj as *const u64).add(closure::HEADER_SLOTS), cap_count)
     };
 
-    let capture_types = func_capture_slot_types(func_id);
+    let layout = func_capture_slot_types(func_id);
+    let capture_types = layout.capture_slot_types;
+    if !capture_types.is_empty() {
+        scan_slots_by_types(gc, capture_slots, capture_types);
+        return;
+    }
+
+    let runtime_capture_types = layout.runtime_capture_slot_types;
+    if !runtime_capture_types.is_empty() {
+        if runtime_capture_types.len() == cap_count {
+            scan_slots_by_types(gc, capture_slots, runtime_capture_types);
+            return;
+        }
+        debug_assert_eq!(
+            runtime_capture_types.len(),
+            cap_count,
+            "scan_closure: func_id={} has {} captures but runtime capture layout has {} slots",
+            func_id,
+            cap_count,
+            runtime_capture_types.len()
+        );
+        return;
+    }
+
     debug_assert!(
-        !capture_types.is_empty(),
+        false,
         "scan_closure: func_id={} has {} captures but empty capture_slot_types — codegen must set capture_slot_types for all closures with captures",
         func_id, cap_count
     );
-    if capture_types.is_empty() {
-        // Fallback for old bytecode: treat all captures as GcRef.
-        // This is ONLY correct for regular closures (all captures are GcRef escape boxes).
-        // Method value wrappers have Interface0/Interface1 captures that would crash here.
-        // The debug_assert above catches this in debug builds.
-        for &slot in capture_slots {
-            if slot != 0 {
-                gc.mark_gray(slot_to_ptr(slot));
-            }
+
+    // Compatibility fallback for old bytecode: regular closure captures used to be
+    // heap-boxed variables, so a missing layout was equivalent to all-GcRef.
+    for &slot in capture_slots {
+        if slot != 0 {
+            gc.mark_gray(slot_to_ptr(slot));
         }
-    } else {
-        scan_slots_by_types(gc, capture_slots, capture_types);
     }
 }
 

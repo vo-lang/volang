@@ -1493,8 +1493,8 @@ impl Default for Gc {
 mod tests {
     use super::*;
 
-    fn empty_capture_slot_types(_: u32) -> &'static [crate::SlotType] {
-        &[]
+    fn empty_closure_scan_layout(_: u32) -> crate::gc_types::ClosureScanLayout<'static> {
+        crate::gc_types::ClosureScanLayout::default()
     }
 
     #[test]
@@ -1973,7 +1973,7 @@ mod tests {
         assert!(Gc::header(child).is_gray());
 
         gc.atomic_phase(&mut |gc, obj| {
-            crate::gc_types::scan_object(gc, obj, &[], &empty_capture_slot_types);
+            crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout);
         });
 
         let work = gc.sweep_step(&mut |dead| finalized.push(dead), usize::MAX);
@@ -2003,7 +2003,7 @@ mod tests {
 
         let work = gc.step(
             |gc| gc.mark_gray(late_root),
-            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_capture_slot_types),
+            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
             |dead| finalized.push(dead),
         );
 
@@ -2051,7 +2051,7 @@ mod tests {
                         gc.mark_gray(raw_child as GcRef);
                     }
                 }
-                crate::gc_types::scan_object(gc, obj, &[], &empty_capture_slot_types);
+                crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout);
             },
             |dead| finalized.push(dead),
         );
@@ -2098,7 +2098,7 @@ mod tests {
 
         let work = gc.step(
             |gc| gc.mark_gray(arr),
-            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_capture_slot_types),
+            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
             |dead| finalized.push(dead),
         );
 
@@ -2140,7 +2140,7 @@ mod tests {
 
         let work = gc.step(
             |gc| gc.mark_gray(parent),
-            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_capture_slot_types),
+            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
             |dead| finalized.push(dead),
         );
 
@@ -2174,7 +2174,7 @@ mod tests {
 
         let work = gc.step(
             |gc| gc.mark_gray(new_arr_root.get()),
-            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_capture_slot_types),
+            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
             |dead| finalized.push(dead),
         );
 
@@ -2212,7 +2212,7 @@ mod tests {
 
         let work = gc.step(
             |gc| gc.mark_gray(new_map_root.get()),
-            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_capture_slot_types),
+            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
             |dead| finalized.push(dead),
         );
 
@@ -2253,7 +2253,7 @@ mod tests {
 
         let work = gc.step(
             |gc| gc.mark_gray(late_root),
-            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_capture_slot_types),
+            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
             |dead| finalized.push(dead),
         );
 

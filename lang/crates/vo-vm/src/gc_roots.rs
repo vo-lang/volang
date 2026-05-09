@@ -483,13 +483,25 @@ impl Vm {
         let mut full_roots_scanned = false;
         let mut dirty_roots_scanned = false;
         let mut completed_root_scan: Option<VmRootScanCompletion> = None;
-        let func_capture_slot_types = |func_id: u32| -> &[vo_runtime::SlotType] {
-            module_ref
-                .functions
-                .get(func_id as usize)
-                .map(|f| f.capture_slot_types.as_slice())
-                .unwrap_or(&[])
-        };
+        let func_closure_scan_layout =
+            |func_id: u32| -> vo_runtime::gc_types::ClosureScanLayout<'_> {
+                module_ref
+                    .functions
+                    .get(func_id as usize)
+                    .map(|f| {
+                        let runtime_capture_slot_types =
+                            if f.capture_slot_types.is_empty() && f.recv_slots == 1 {
+                                f.slot_types.get(..1).unwrap_or(&[])
+                            } else {
+                                &[]
+                            };
+                        vo_runtime::gc_types::ClosureScanLayout::new(
+                            f.capture_slot_types.as_slice(),
+                            runtime_capture_slot_types,
+                        )
+                    })
+                    .unwrap_or_default()
+            };
 
         unsafe { &mut *gc_ptr }.step_with_root_scanner(
             root_state,
@@ -516,7 +528,7 @@ impl Vm {
                     gc,
                     obj,
                     &module_ref.struct_metas,
-                    &func_capture_slot_types,
+                    &func_closure_scan_layout,
                 );
             },
             |obj| {
