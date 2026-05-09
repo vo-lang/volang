@@ -659,17 +659,18 @@ function readQuickplayPackageBuildId(): string | null {
   }
 }
 
-const studioBaseBuildId = readStudioWasmBuildId()
-  || [
-    buildEnv.GITHUB_SHA,
-    buildEnv.GITHUB_RUN_ID,
-    buildEnv.GITHUB_RUN_ATTEMPT,
-  ].filter((value): value is string => typeof value === 'string' && value.length > 0).join('-')
+const studioWasmBuildId = readStudioWasmBuildId();
+const studioFallbackBaseBuildId = [
+  buildEnv.GITHUB_SHA,
+  buildEnv.GITHUB_RUN_ID,
+  buildEnv.GITHUB_RUN_ATTEMPT,
+].filter((value): value is string => typeof value === 'string' && value.length > 0).join('-')
   || Date.now().toString(36);
-const studioBuildId = [
-  studioBaseBuildId,
-  readQuickplayPackageBuildId(),
-].filter((value): value is string => typeof value === 'string' && value.length > 0).join('-');
+const studioBuildId = studioWasmBuildId
+  || [
+    studioFallbackBaseBuildId,
+    readQuickplayPackageBuildId(),
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0).join('-');
 
 export default defineConfig({
   plugins: [localProjectSnapshot(), voplayPerfReportEndpoint(), svelte({ preprocess: vitePreprocess() })],

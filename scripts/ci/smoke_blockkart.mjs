@@ -83,6 +83,13 @@ async function runHttpSmoke(baseUrl, buildId) {
   }
 
   const query = buildId ? `?build=${encodeURIComponent(buildId)}` : '';
+  const wasmBuildId = (await (await fetchOk(joinUrl(baseUrl, `/wasm/vo_studio_wasm.build_id${query}`))).text()).trim();
+  assert(wasmBuildId.length > 0, 'remote studio WASM build id is empty');
+  assert(!script.includes(`${wasmBuildId}-qp-`), `entry bundle extends the WASM build id ${wasmBuildId}`);
+  if (buildId) {
+    assert(wasmBuildId === buildId, `remote studio WASM build id ${wasmBuildId} does not match expected ${buildId}`);
+  }
+
   const project = await (await fetchOk(joinUrl(baseUrl, `/quickplay/blockkart/project.json${query}`))).json();
   const deps = await (await fetchOk(joinUrl(baseUrl, `/quickplay/blockkart/deps.json${query}`))).json();
   assert(project.name === 'BlockKart', 'remote project manifest is not BlockKart');

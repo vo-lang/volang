@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { resolveStudioBuildId } from './studio_build_id.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const studioDir = resolve(scriptDir, '..');
@@ -10,22 +11,8 @@ const buildIdFile = resolve(publicWasmDir, 'vo_studio_wasm.build_id');
 const wasmFile = resolve(publicWasmDir, 'vo_studio_wasm_bg.wasm');
 const jsFile = resolve(publicWasmDir, 'vo_studio_wasm.js');
 
-function resolveBuildId(env) {
-  const explicit = (env.VIBE_STUDIO_BUILD_ID ?? '').trim();
-  if (explicit.length > 0) {
-    return explicit;
-  }
-  const githubParts = [env.GITHUB_SHA, env.GITHUB_RUN_ID, env.GITHUB_RUN_ATTEMPT]
-    .map((value) => (value ?? '').trim())
-    .filter((value) => value.length > 0);
-  if (githubParts.length > 0) {
-    return githubParts.join('-');
-  }
-  return `local-${Date.now().toString(16)}`;
-}
-
 const env = { ...process.env };
-const buildId = resolveBuildId(env);
+const buildId = resolveStudioBuildId(env, { studioRoot: studioDir });
 env.VIBE_STUDIO_BUILD_ID = buildId;
 
 const result = spawnSync(

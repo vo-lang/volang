@@ -129,4 +129,6 @@ jobs:
         uses: actions/deploy-pages@v5
 
       - name: Smoke BlockKart deployment
-        run: node scripts/ci/smoke_blockkart.mjs --base-url "${{ steps.deployment.outputs.page_url }}" --build-id "${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+        run: |
+          build_id="$(node studio/scripts/studio_build_id.mjs)"
+          node scripts/ci/smoke_blockkart.mjs --base-url "${{ steps.deployment.outputs.page_url }}" --build-id "$build_id"
