@@ -3,7 +3,8 @@
 ## macOS (Homebrew)
 
 ```bash
-brew install vo-lang/tap/vo
+brew tap vo-lang/vo
+brew install vo
 ```
 
 ## From Source

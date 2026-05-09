@@ -179,25 +179,24 @@ jobs:
           text = path.read_text()
 
           version = os.environ["VERSION"]
-          version_token = "#{version}"
           replacements = {
-              "vo-aarch64-apple-darwin.tar.gz": os.environ["SHA_AARCH64_APPLE"],
-              "vo-x86_64-apple-darwin.tar.gz": os.environ["SHA_X86_64_APPLE"],
-              "vo-x86_64-unknown-linux-gnu.tar.gz": os.environ["SHA_X86_64_LINUX"],
-              "vo-aarch64-unknown-linux-gnu.tar.gz": os.environ["SHA_AARCH64_LINUX"],
+              "aarch64-apple-darwin": os.environ["SHA_AARCH64_APPLE"],
+              "x86_64-apple-darwin": os.environ["SHA_X86_64_APPLE"],
+              "x86_64-unknown-linux-gnu": os.environ["SHA_X86_64_LINUX"],
+              "aarch64-unknown-linux-gnu": os.environ["SHA_AARCH64_LINUX"],
           }
 
-          text, count = re.subn(r'(?m)^  version ".*"$', f'  version "{version}"', text, count=1)
+          text, count = re.subn(r'(?m)^  release_version = ".*"$', f'  release_version = "{version}"', text, count=1)
           if count != 1:
-              raise SystemExit("failed to update Formula version")
+              raise SystemExit("failed to update Formula release_version")
 
-          for asset, sha in replacements.items():
+          for target, sha in replacements.items():
               pattern = re.compile(
-                  rf'(url "https://github\.com/vo-lang/volang/releases/download/v{re.escape(version_token)}/{re.escape(asset)}"\n\s+sha256 ")([^"]+)(")'
+                  rf'(?m)^(\s*"{re.escape(target)}"\s*=>\s*")([^"]+)(".*)$'
               )
               text, count = pattern.subn(lambda match, sha=sha: f'{match.group(1)}{sha}{match.group(3)}', text, count=1)
               if count != 1:
-                  raise SystemExit(f"failed to update SHA256 for {asset}")
+                  raise SystemExit(f"failed to update SHA256 for {target}")
 
           path.write_text(text)
           PY
