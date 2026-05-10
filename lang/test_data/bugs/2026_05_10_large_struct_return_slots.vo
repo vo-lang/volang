@@ -1,0 +1,67 @@
+package main
+
+type LargeTrace struct {
+	SchemaVersion int
+	Enabled bool
+	Mode string
+	TargetHz int
+	BudgetMs float64
+	FrameCount int
+	CapturedFrames int
+	Frames []int
+	Current LargeFrame
+	WorstFrame LargeFrame
+	RecentSpikes []LargeFrame
+	Pad [330]int
+}
+
+type LargeFrame struct {
+	FrameId int
+	FrameMs float64
+	Label string
+	Slow bool
+}
+
+type Holder struct {
+	Enabled bool
+}
+
+func makeTrace() LargeTrace {
+	trace := LargeTrace{}
+	trace.SchemaVersion = 1
+	trace.Enabled = false
+	trace.Mode = "off"
+	trace.TargetHz = 0
+	trace.BudgetMs = 8.333333
+	return trace
+}
+
+func (h *Holder) Trace() LargeTrace {
+	trace := LargeTrace{}
+	trace.SchemaVersion = 1
+	trace.Enabled = false
+	trace.Mode = "off"
+	trace.TargetHz = 0
+	trace.BudgetMs = 8.333333
+	return trace
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("FAIL: " + msg)
+	}
+}
+
+func main() {
+	trace := makeTrace()
+	assert(trace.SchemaVersion == 1, "schema survives large struct return")
+	assert(!trace.Enabled, "bool survives large struct return")
+	assert(trace.Mode == "off", "string survives large struct return")
+	assert(trace.BudgetMs > 8.0, "float survives large struct return")
+	holder := &Holder{}
+	methodTrace := holder.Trace()
+	assert(methodTrace.SchemaVersion == 1, "schema survives large struct method return")
+	assert(!methodTrace.Enabled, "bool survives large struct method return")
+	assert(methodTrace.Mode == "off", "string survives large struct method return")
+	println("OK")
+}
