@@ -245,6 +245,31 @@ export class RuntimeService {
     });
   }
 
+  async pushAndPollIslandTransport(data: Uint8Array): Promise<Uint8Array[]> {
+    if (!this.guiSessionActive) {
+      return [];
+    }
+    const sessionId = this.guiSessionId;
+    return this.serializeGuiOperation(async () => {
+      if (!this.isGuiSessionActiveFor(sessionId)) {
+        return [];
+      }
+      try {
+        const frames = await this.backend.pushAndPollIslandTransport(data);
+        if (!this.isGuiSessionActiveFor(sessionId)) {
+          return [];
+        }
+        return frames;
+      } catch (error) {
+        const sessionError = this.coerceGuiSessionError(error, sessionId);
+        if (isGuiSessionSupersededError(sessionError)) {
+          return [];
+        }
+        throw sessionError;
+      }
+    });
+  }
+
   async pollIslandTransport(): Promise<Uint8Array> {
     if (!this.guiSessionActive) {
       return new Uint8Array(0);

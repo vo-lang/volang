@@ -209,6 +209,11 @@ export class NativeBackend implements Backend {
     await this.invoke<void>('cmd_push_island_transport', { data: Array.from(data) });
   }
 
+  async pushAndPollIslandTransport(data: Uint8Array): Promise<Uint8Array[]> {
+    await this.pushIslandTransport(data);
+    return [];
+  }
+
   async pollIslandTransport(): Promise<Uint8Array> {
     return new Uint8Array(0);
   }

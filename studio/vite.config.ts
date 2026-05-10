@@ -177,15 +177,23 @@ function installVoplayPerfReportEndpoint(middlewares: ProxyMiddlewares) {
           payload = { raw: body };
         }
       }
-      voplayPerfReports.push({ receivedAt: new Date().toISOString(), payload });
-      if (voplayPerfReports.length > VOPLAY_PERF_REPORT_LIMIT) {
-        voplayPerfReports.splice(0, voplayPerfReports.length - VOPLAY_PERF_REPORT_LIMIT);
-      }
+      pushVoplayPerfReportPayload(payload);
       writeJson(res, { ok: true, count: voplayPerfReports.length });
     }).catch((error: unknown) => {
       writeText(res, 400, localProjectErrorMessage(error));
     });
   });
+}
+
+function pushVoplayPerfReportPayload(payload: unknown) {
+  const receivedAt = new Date().toISOString();
+  const payloads = Array.isArray(payload) ? payload : [payload];
+  for (const item of payloads) {
+    voplayPerfReports.push({ receivedAt, payload: item });
+  }
+  if (voplayPerfReports.length > VOPLAY_PERF_REPORT_LIMIT) {
+    voplayPerfReports.splice(0, voplayPerfReports.length - VOPLAY_PERF_REPORT_LIMIT);
+  }
 }
 
 function installVoplayPerfReloadEndpoint(server: ProxyServer) {

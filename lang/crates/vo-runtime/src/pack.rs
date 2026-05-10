@@ -51,6 +51,9 @@ impl Default for PackedValue {
 
 type UnpackQueueHandleCache = HashMap<u64, GcRef>;
 
+const SEQUENCE_ENCODING_ELEMENTS: u8 = 0;
+const SEQUENCE_ENCODING_RAW_BYTES: u8 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueHandleInfo {
     pub kind: QueueKind,
@@ -316,6 +319,12 @@ fn pack_slice(
     if elem_bytes == 0 {
         return;
     }
+    if can_pack_sequence_as_raw_bytes(elem_meta, elem_bytes) {
+        packed.data.push(SEQUENCE_ENCODING_RAW_BYTES);
+        pack_raw_sequence_bytes(packed, slice::data_ptr(slice_ref), length, elem_bytes);
+        return;
+    }
+    packed.data.push(SEQUENCE_ENCODING_ELEMENTS);
 
     // For struct elements, use actual slot_count from metadata (may be > elem_bytes/8 for packed structs)
     let elem_slots = if elem_meta.value_kind() == ValueKind::Struct {
@@ -376,6 +385,12 @@ fn pack_array(
     if elem_bytes == 0 {
         return;
     }
+    if can_pack_sequence_as_raw_bytes(elem_meta, elem_bytes) {
+        packed.data.push(SEQUENCE_ENCODING_RAW_BYTES);
+        pack_raw_sequence_bytes(packed, array::data_ptr_bytes(arr_ref), length, elem_bytes);
+        return;
+    }
+    packed.data.push(SEQUENCE_ENCODING_ELEMENTS);
 
     // For struct elements, use actual slot_count from metadata (may be > elem_bytes/8 for packed structs)
     let elem_slots = if elem_meta.value_kind() == ValueKind::Struct {
@@ -698,6 +713,17 @@ where
     }
 
     let data_ptr = slice::data_ptr(new_slice);
+    let encoding = data[*cursor];
+    *cursor += 1;
+    if encoding == SEQUENCE_ENCODING_RAW_BYTES {
+        let byte_len = length
+            .checked_mul(elem_bytes)
+            .expect("unpack raw slice byte length overflow");
+        unpack_raw_sequence_bytes(data, cursor, data_ptr, byte_len);
+        return new_slice;
+    }
+    debug_assert_eq!(encoding, SEQUENCE_ENCODING_ELEMENTS);
+
     // For struct elements, use actual slot_count from metadata (may be > elem_bytes/8 for packed structs)
     let elem_slots = if elem_meta.value_kind() == ValueKind::Struct {
         let meta_id = elem_meta.meta_id() as usize;
@@ -762,6 +788,17 @@ where
     }
 
     let data_ptr = array::data_ptr_bytes(new_arr);
+    let encoding = data[*cursor];
+    *cursor += 1;
+    if encoding == SEQUENCE_ENCODING_RAW_BYTES {
+        let byte_len = length
+            .checked_mul(elem_bytes)
+            .expect("unpack raw array byte length overflow");
+        unpack_raw_sequence_bytes(data, cursor, data_ptr, byte_len);
+        return new_arr;
+    }
+    debug_assert_eq!(encoding, SEQUENCE_ENCODING_ELEMENTS);
+
     // For struct elements, use actual slot_count from metadata (may be > elem_bytes/8 for packed structs)
     let elem_slots = if elem_meta.value_kind() == ValueKind::Struct {
         let meta_id = elem_meta.meta_id() as usize;
@@ -1051,6 +1088,43 @@ where
 // Helper Functions
 // =============================================================================
 
+fn can_pack_sequence_as_raw_bytes(elem_meta: ValueMeta, elem_bytes: usize) -> bool {
+    if elem_bytes != 1 {
+        return false;
+    }
+    matches!(
+        elem_meta.value_kind(),
+        ValueKind::Bool | ValueKind::Int8 | ValueKind::Uint8
+    )
+}
+
+fn pack_raw_sequence_bytes(
+    packed: &mut PackedValue,
+    data_ptr: *mut u8,
+    length: usize,
+    elem_bytes: usize,
+) {
+    let byte_len = length
+        .checked_mul(elem_bytes)
+        .expect("pack raw sequence byte length overflow");
+    if byte_len == 0 {
+        return;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(data_ptr as *const u8, byte_len) };
+    packed.data.extend_from_slice(bytes);
+}
+
+fn unpack_raw_sequence_bytes(data: &[u8], cursor: &mut usize, dst: *mut u8, byte_len: usize) {
+    if byte_len == 0 {
+        return;
+    }
+    let end = *cursor + byte_len;
+    unsafe {
+        core::ptr::copy_nonoverlapping(data[*cursor..end].as_ptr(), dst, byte_len);
+    }
+    *cursor = end;
+}
+
 fn read_u64(data: &[u8], cursor: &mut usize) -> u64 {
     let bytes: [u8; 8] = data[*cursor..*cursor + 8]
         .try_into()
@@ -1250,6 +1324,7 @@ mod tests {
             &struct_metas,
             &runtime_types,
         );
+        assert_eq!(packed.data().len(), 19);
 
         let mut dst = [0u64];
         unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);
@@ -1276,6 +1351,7 @@ mod tests {
             &struct_metas,
             &runtime_types,
         );
+        assert_eq!(packed.data().len(), 24);
 
         let mut dst = [0u64];
         unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);

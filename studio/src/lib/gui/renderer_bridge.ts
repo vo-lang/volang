@@ -354,6 +354,11 @@ function makeRendererHost(
           transportQueue = run.then(() => undefined, () => undefined);
           return run;
         };
+        const deliverFrame = (frame: Uint8Array): void => {
+          const ownedFrame = new Uint8Array(frame);
+          emitRendererBridgeFrameDebug(backend, 'recv', ownedFrame);
+          handler?.(ownedFrame);
+        };
         const drainAvailableFrames = async (): Promise<void> => {
           if (draining) {
             drainAgain = true;
@@ -370,9 +375,7 @@ function makeRendererHost(
                 if (closed || frame.length === 0) {
                   break;
                 }
-                const ownedFrame = new Uint8Array(frame);
-                emitRendererBridgeFrameDebug(backend, 'recv', ownedFrame);
-                handler?.(ownedFrame);
+                deliverFrame(frame);
                 drainedFrames += 1;
                 if (
                   drainedFrames >= WEB_TRANSPORT_DRAIN_FRAME_BUDGET
@@ -389,8 +392,27 @@ function makeRendererHost(
           }
         };
         const pushFrame = async (frame: Uint8Array): Promise<void> => {
-          await runTransport(() => runtime.pushIslandTransport(frame));
-          await drainAvailableFrames();
+          const frames = await runTransport(() => runtime.pushAndPollIslandTransport(frame));
+          let deliveredFrames = 0;
+          let deliverStartMs = performance.now();
+          for (const responseFrame of frames) {
+            if (closed) {
+              return;
+            }
+            deliverFrame(responseFrame);
+            deliveredFrames += 1;
+            if (
+              deliveredFrames >= WEB_TRANSPORT_DRAIN_FRAME_BUDGET
+              || performance.now() - deliverStartMs >= WEB_TRANSPORT_DRAIN_TIME_BUDGET_MS
+            ) {
+              deliveredFrames = 0;
+              deliverStartMs = performance.now();
+              await yieldToBrowserEventLoop();
+            }
+          }
+          if (frames.length >= WEB_TRANSPORT_DRAIN_FRAME_BUDGET) {
+            await drainAvailableFrames();
+          }
         };
         const reportTransportError = (label: string, error: unknown): void => {
           if (isGuiSessionSupersededError(error)) {

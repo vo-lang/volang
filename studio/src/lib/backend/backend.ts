@@ -68,6 +68,7 @@ export interface Backend {
   sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array>;
   sendGuiEventAsync(handlerId: number, payload: string): Promise<void>;
   pushIslandTransport(data: Uint8Array): Promise<void>;
+  pushAndPollIslandTransport(data: Uint8Array): Promise<Uint8Array[]>;
   pollIslandTransport(): Promise<Uint8Array>;
   pollGuiRender(): Promise<Uint8Array>;
   stopGui(): Promise<void>;

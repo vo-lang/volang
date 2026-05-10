@@ -857,6 +857,25 @@ export class WebBackend implements Backend {
     );
   }
 
+  async pushAndPollIslandTransport(data: Uint8Array): Promise<Uint8Array[]> {
+    return this.runGuiEventSerialized(
+      (wasm) => {
+        wasm.pushIslandData(data);
+        this.drainPendingGuiHostEvents(wasm);
+        const frames: Uint8Array[] = [];
+        for (let i = 0; i < 32; i += 1) {
+          const frame = wasm.pollIslandData();
+          if (frame.length === 0) {
+            break;
+          }
+          frames.push(new Uint8Array(frame));
+        }
+        return frames;
+      },
+      [],
+    );
+  }
+
   async pollIslandTransport(): Promise<Uint8Array> {
     return this.runGuiEventSerialized(
       (wasm) => wasm.pollIslandData(),

@@ -4,6 +4,11 @@ use vo_vm::vm::SchedulingOutcome;
 
 use crate::js_types::RunResult;
 
+#[cfg(any(target_arch = "wasm32", test))]
+const VOPLAY_PERF_REPORT_MARKER: &str = "__VOPLAY_PERF_REPORT__";
+#[cfg(target_arch = "wasm32")]
+const VOPLAY_PERF_REPORT_CODE: &str = "voplay_perf_report";
+
 // ── Re-exports for external consumers ────────────────────────────────────────
 
 pub use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
@@ -50,10 +55,21 @@ pub(crate) fn validate_sync_outcome(
 /// This ensures diagnostic output is visible even if a WASM trap occurs.
 #[cfg(target_arch = "wasm32")]
 fn wasm_write_hook(s: &str) {
-    if s.trim_start().starts_with("__VOPLAY_PERF_REPORT__") {
+    if let Some(payload) = voplay_perf_report_payload(s) {
+        crate::host_log::emit_host_log(
+            crate::host_log::HostLogRecord::new("vo-web", VOPLAY_PERF_REPORT_CODE, "info")
+                .text(payload),
+        );
         return;
     }
     web_sys::console::log_1(&format!("[Vo] {}", s).into());
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn voplay_perf_report_payload(s: &str) -> Option<&str> {
+    s.trim_start()
+        .strip_prefix(VOPLAY_PERF_REPORT_MARKER)
+        .map(str::trim)
 }
 
 fn init_output() {
@@ -182,4 +198,18 @@ pub fn run_with_args(bytecode: &[u8], args: js_sys::Array) -> RunResult {
     });
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::voplay_perf_report_payload;
+
+    #[test]
+    fn extracts_voplay_perf_report_payload() {
+        assert_eq!(
+            voplay_perf_report_payload("  __VOPLAY_PERF_REPORT__{\"kind\":\"perf-summary\"}\n"),
+            Some("{\"kind\":\"perf-summary\"}")
+        );
+        assert_eq!(voplay_perf_report_payload("[Vo] normal"), None);
+    }
 }
