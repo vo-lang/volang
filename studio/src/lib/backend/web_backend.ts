@@ -57,8 +57,8 @@ const QUICKPLAY_SESSION_ROOT = `${WORKSPACE_ROOT}/.studio-sessions/quickplay`;
 const BLOCKKART_PACKAGED_MODULE_MARKERS = [
   '/github.com@vo-lang@vogui/v0.1.15/vo.release.json',
   '/github.com@vo-lang@vopack/v0.1.2/vo.release.json',
-  '/github.com@vo-lang@voplay/v0.1.27/vo.web.json',
-  '/github.com@vo-lang@voplay/v0.1.27/artifacts/voplay_island_bg.wasm',
+  '/github.com@vo-lang@voplay/v0.1.28/vo.web.json',
+  '/github.com@vo-lang@voplay/v0.1.28/artifacts/voplay_island_bg.wasm',
 ];
 const sessionWorkspaceDiscovery = new Map<string, WorkspaceDiscoveryMode>();
 const DISPLAY_PULSE_DELAY_MS = 0xFFFFFFFF;

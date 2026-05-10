@@ -10,8 +10,8 @@ export const QUICKPLAY_PACKAGE_FILES = [
   'public/quickplay/blockkart/project.json',
   'public/quickplay/blockkart/deps.json',
   'public/quickplay/blockkart/artifacts/github.com@vo-lang@vogui/v0.1.15/vogui.wasm',
-  'public/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.27/voplay_island.js',
-  'public/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.27/voplay_island_bg.wasm',
+  'public/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.28/voplay_island.js',
+  'public/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.28/voplay_island_bg.wasm',
 ];
 
 export function readQuickplayPackageBuildId({ studioRoot = STUDIO_ROOT } = {}) {

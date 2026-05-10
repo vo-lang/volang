@@ -13,7 +13,7 @@ const quickplayTsPath = join(root, 'studio/src/lib/quickplay.ts');
 const expected = {
   projectName: 'BlockKart',
   projectModule: 'github.com/vo-lang/blockkart',
-  voplayVersion: 'v0.1.27',
+  voplayVersion: 'v0.1.28',
   voguiVersion: 'v0.1.15',
 };
 
