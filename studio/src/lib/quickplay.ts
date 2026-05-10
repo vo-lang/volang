@@ -16,7 +16,7 @@ export const BLOCKKART_DEPS_PACKAGE_URL = staticPackageUrl('/quickplay/blockkart
 export const BLOCKKART_PREFETCH_URLS = [
   BLOCKKART_PROJECT_PACKAGE_URL,
   BLOCKKART_DEPS_PACKAGE_URL,
-  staticPackageUrl('/quickplay/blockkart/artifacts/github.com@vo-lang@vogui/v0.1.14/vogui.wasm'),
-  staticPackageUrl('/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.26/voplay_island.js'),
-  staticPackageUrl('/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.26/voplay_island_bg.wasm'),
+  staticPackageUrl('/quickplay/blockkart/artifacts/github.com@vo-lang@vogui/v0.1.15/vogui.wasm'),
+  staticPackageUrl('/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.27/voplay_island.js'),
+  staticPackageUrl('/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.27/voplay_island_bg.wasm'),
 ];

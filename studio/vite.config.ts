@@ -647,9 +647,9 @@ function readQuickplayPackageBuildId(): string | null {
   const quickplayFiles = [
     'public/quickplay/blockkart/project.json',
     'public/quickplay/blockkart/deps.json',
-    'public/quickplay/blockkart/artifacts/github.com@vo-lang@vogui/v0.1.14/vogui.wasm',
-    'public/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.26/voplay_island.js',
-    'public/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.26/voplay_island_bg.wasm',
+    'public/quickplay/blockkart/artifacts/github.com@vo-lang@vogui/v0.1.15/vogui.wasm',
+    'public/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.27/voplay_island.js',
+    'public/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.27/voplay_island_bg.wasm',
   ];
   try {
     const hash = createHash('sha256');
