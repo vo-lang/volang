@@ -31,7 +31,7 @@ fn ensure_panic_hook() {
 include!(concat!(env!("OUT_DIR"), "/term_embedded.rs"));
 include!(concat!(env!("OUT_DIR"), "/studio_build_info.rs"));
 
-#[path = "../../../lang/crates/vo-engine/src/format.rs"]
+#[path = "../../../../lang/crates/vo-engine/src/format.rs"]
 mod bytecode_text_format;
 
 const STUDIO_IMPORTED_SYNTHETIC_LOCK_CREATED_BY: &str = "studio wasm imported synthetic vo.lock";
