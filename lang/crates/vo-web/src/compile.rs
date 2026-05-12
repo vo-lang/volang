@@ -166,7 +166,7 @@ fn prepare_single_file_input(
         SingleFileContext::AdHoc { .. } => {
             // Spec §10.1: ad hoc programs see only the stdlib. Keep the
             // long-standing "requires a project with vo.mod and vo.lock"
-            // diagnostic so existing callers (studio/playground) can continue
+            // diagnostic so existing callers (apps/studio/playground) can continue
             // to match on it.
             reject_external_imports_in_source(source, "ad hoc program")?;
             Ok(PreparedCompileInput {
@@ -443,7 +443,7 @@ pub fn compile_source_with_vfs(
 /// Compile a multi-file Vo package given a pre-populated local filesystem.
 ///
 /// `entry` is the path to the package entry file inside `local_fs`
-/// (e.g. `"studio/main.vo"`). `local_fs` must contain all package source files.
+/// (e.g. `"apps/studio/main.vo"`). `local_fs` must contain all package source files.
 /// `std_fs` must contain stdlib packages only.
 /// Third-party modules (imports containing `.`) are not resolved by this variant;
 /// use `compile_entry_with_mod_fs` if the package has external module dependencies.

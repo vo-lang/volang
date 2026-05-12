@@ -56,8 +56,7 @@ pub(super) fn compile_cache_slot(root: &Path, single_file: Option<&OsStr>) -> Co
         slot_hasher.update_str("entry_name", ".");
     }
     let slot_id = slot_hasher.finish_suffix();
-    let dir = root
-        .join(".vo-cache")
+    let dir = repo_local_compile_cache_root(root)
         .join("compile")
         .join("native")
         .join(slot_id);
@@ -68,6 +67,22 @@ pub(super) fn compile_cache_slot(root: &Path, single_file: Option<&OsStr>) -> Co
         locked_modules_file: dir.join("locked_modules"),
         dir,
     }
+}
+
+fn repo_local_compile_cache_root(root: &Path) -> PathBuf {
+    let state_root = find_volang_repo_root(root)
+        .unwrap_or_else(|| root.to_path_buf())
+        .join(".volang");
+    state_root.join("cache").join("vo")
+}
+
+fn find_volang_repo_root(start: &Path) -> Option<PathBuf> {
+    for ancestor in start.ancestors() {
+        if ancestor.join("Cargo.toml").is_file() && ancestor.join("eng").is_dir() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
 }
 
 pub(super) fn compute_compile_cache_fingerprint(
@@ -207,7 +222,7 @@ fn collect_compile_input_files(
 fn should_skip_compile_input_dir(path: &Path) -> bool {
     matches!(
         path.file_name().and_then(|name| name.to_str()),
-        Some(".git") | Some(".vo-cache") | Some("node_modules") | Some("target")
+        Some(".git") | Some(".volang") | Some(".vo-cache") | Some("node_modules") | Some("target")
     )
 }
 

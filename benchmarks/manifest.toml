@@ -1,0 +1,73 @@
+version = 1
+
+[[benchmark]]
+id = "binary-trees"
+path = "binary-trees"
+owner = "runtime"
+languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]
+
+[[benchmark]]
+id = "call-dispatch"
+path = "call-dispatch"
+owner = "runtime"
+languages = ["vo", "go", "lua", "js", "java"]
+
+[[benchmark]]
+id = "fannkuch"
+path = "fannkuch"
+owner = "runtime"
+languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]
+
+[[benchmark]]
+id = "fibonacci"
+path = "fibonacci"
+owner = "runtime"
+languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]
+
+[[benchmark]]
+id = "matrix2"
+path = "matrix2"
+owner = "runtime"
+languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]
+
+[[benchmark]]
+id = "nbody"
+path = "nbody"
+owner = "runtime"
+languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]
+
+[[benchmark]]
+id = "quicksort"
+path = "quicksort"
+owner = "runtime"
+languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]
+
+[[benchmark]]
+id = "recursive-tree"
+path = "recursive-tree"
+owner = "runtime"
+languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]
+
+[[benchmark]]
+id = "sieve"
+path = "sieve"
+owner = "runtime"
+languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]
+
+[[benchmark]]
+id = "spectral-norm"
+path = "spectral-norm"
+owner = "runtime"
+languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]
+
+[[benchmark]]
+id = "sum-array"
+path = "sum-array"
+owner = "runtime"
+languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]
+
+[[benchmark]]
+id = "task-queue"
+path = "task-queue"
+owner = "runtime"
+languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]

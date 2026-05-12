@@ -1,0 +1,313 @@
+package main
+
+import (
+	"fmt"
+	"github.com/vo-lang/vogui"
+)
+
+const (
+	msgFontFam       = "system-ui, -apple-system, sans-serif"
+	msgLineH         = 22.0
+	msgMaxW          = 480.0
+	msgBubblePct     = 0.72 // max bubble width as fraction of row content width
+	msgBubbleBorder  = 1.0
+	msgBubblePH      = 14.0
+	msgBubblePV      = 10.0
+	msgRowPH         = 12.0
+	msgRowPV         = 6.0
+
+	tickMs       = 40
+	charsPerTick = 4
+)
+
+// Message is a single chat bubble.
+type Message struct {
+	IsUser bool
+	Text   string
+	Done   bool
+}
+
+// State holds all mutable app state.
+type State struct {
+	messages   []Message
+	scriptIdx  int  // next script index to deliver
+	charIdx    int  // chars revealed in the active streaming message
+	streaming  bool // currently typing out a message
+	waitTicks  int  // countdown before starting next message
+	paused     bool
+	timerID    int
+	followTail bool // true when scroll position is at the bottom
+}
+
+func (s *State) stopTimer() {
+	if s.timerID != 0 {
+		vogui.ClearInterval(s.timerID)
+		s.timerID = 0
+	}
+}
+
+// script is the full conversation, alternating user (even index) / AI (odd index).
+var script = []string{
+	// 0: user
+	"Hey, can you explain how this chat scroll works?",
+	// 1: AI
+	"This chat uses a browser-truth scroll model. Instead of predicting heights in Vo, the browser owns all layout and scroll physics. Vo just reads what the browser reports via ObserveScroll and decides what to do.\n\nThe key insight: let the browser be the single source of truth for scroll state. Vo reads, reacts, and commands — but never predicts.",
+	// 2: user
+	"How does auto-follow work?",
+	// 3: AI
+	"A boolean called followTail tracks whether the user is at the bottom. ObserveScroll gives us a ScrollEvent with AtBottom and BottomGap — real values from the browser's own scrollHeight, scrollTop, and clientHeight.\n\nWhen followTail is true and new content arrives, we call ScrollToBottomSmooth to keep the view pinned. When the user scrolls up, followTail becomes false and we stop chasing.",
+	// 4: user
+	"What about the scroll-to-bottom button?",
+	// 5: AI
+	"The floating button appears when followTail is false — meaning the user has scrolled away from the bottom. Tapping it calls ScrollToBottomSmooth on the scroll container ref, which triggers a smooth CSS scroll.\n\nOnce the smooth scroll completes and reaches the bottom, the next ScrollEvent will report AtBottom=true, and followTail flips back to true automatically.",
+	// 6: user
+	"What's happening in this demo right now?",
+	// 7: AI
+	"This demo is streaming text in real time — each timer tick reveals a few more characters, and the last message grows taller on every frame.\n\nBecause the browser handles all layout, there's no height prediction mismatch. The scroll container just grows naturally, and ScrollToBottomSmooth keeps the view pinned when followTail is true.",
+	// 8: user
+	"What if you need to handle really large lists?",
+	// 9: AI
+	"For very large lists (10K+ items), use VirtualList instead of a plain scroll container. VirtualList delegates scroll physics to JS while Vo provides only the visible window of items.\n\nJS computes which items are visible based on scroll position, emits a RangeEvent with Start/End indices, and Vo re-renders just that window. No dual-truth, no height prediction — JS owns the scroll, Vo owns the rendering.",
+	// 10: user
+	"What about when content changes dynamically?",
+	// 11: AI
+	"That's the beauty of the browser-truth model. When content changes — new messages appended, existing messages updated, text wrapping differently — the browser just handles it. No offset tables to rebuild, no height caches to invalidate.\n\nVo renders the content, the browser lays it out, ObserveScroll reports the new state, and followTail decides whether to chase the bottom. The whole thing is a simple reactive loop with zero prediction.\n\nAnd that's exactly what this demo proves: streaming text, growing bubbles, smooth scroll — all driven by real browser layout truth.",
+}
+
+func (s *State) messageDisplayText(msg Message) string {
+	if !msg.Done {
+		return msg.Text + "▊"
+	}
+	return msg.Text
+}
+
+func (s *State) renderItem(i int) vogui.Node {
+	msg := s.messages[i]
+	displayText := s.messageDisplayText(msg)
+
+	bubbleBg := "#1e293b"
+	bubbleFg := "#e2e8f0"
+	justify := "flex-start"
+	if msg.IsUser {
+		bubbleBg = "#2563eb"
+		bubbleFg = "#ffffff"
+		justify = "flex-end"
+	}
+
+	bubbleBorder := "1px solid rgba(148,163,184,0.15)"
+	if msg.IsUser {
+		bubbleBorder = "1px solid transparent"
+	}
+
+	// CSS min() caps at the pixel maximum or the percentage of the row content
+	// width — whichever is smaller. No Vo-side width prediction needed.
+	bubbleMaxW := fmt.Sprintf("min(%gpx, %g%%)",
+		msgMaxW+(msgBubblePH+msgBubbleBorder)*2,
+		msgBubblePct*100)
+
+	bubble := vogui.Div().
+		Text(displayText).
+		Bg(bubbleBg).Fg(bubbleFg).
+		Rounded(12).
+		Px(int(msgBubblePH)).Py(int(msgBubblePV)).
+		MinW(0).
+		MaxW(bubbleMaxW).
+		Style("border", bubbleBorder).
+		Style("boxSizing", "border-box").
+		Style("wordBreak", "break-word").
+		Style("whiteSpace", "pre-wrap").
+		Style("fontFamily", msgFontFam).
+		FontSize(15).
+		LineHeight(fmt.Sprintf("%gpx", msgLineH))
+
+	return vogui.Div(bubble).
+		Display("flex").
+		Style("justifyContent", justify).
+		W("100%").
+		Style("boxSizing", "border-box").
+		Px(int(msgRowPH)).Py(int(msgRowPV))
+}
+
+func (s *State) startMessage() {
+	if s.scriptIdx >= len(script) {
+		s.stopTimer()
+		return
+	}
+	isUser := s.scriptIdx%2 == 0
+	s.messages = append(s.messages, Message{IsUser: isUser, Done: false})
+	s.charIdx = 0
+	s.streaming = true
+	if s.followTail {
+		vogui.ScrollToBottomRef("chat-scroll")
+	}
+}
+
+func (s *State) tick() {
+	if s.paused {
+		return
+	}
+
+	if s.streaming {
+		target := script[s.scriptIdx]
+		end := s.charIdx + charsPerTick
+		if end > len(target) {
+			end = len(target)
+		}
+		s.charIdx = end
+		last := len(s.messages) - 1
+		s.messages[last].Text = target[:s.charIdx]
+		if s.followTail {
+			vogui.ScrollToBottomRef("chat-scroll")
+		}
+
+		if s.charIdx >= len(target) {
+			s.messages[last].Done = true
+			s.streaming = false
+			s.scriptIdx++
+			if s.scriptIdx >= len(script) {
+				s.stopTimer()
+				return
+			}
+			if s.scriptIdx%2 == 0 {
+				s.waitTicks = 50 // longer pause — "user is thinking"
+			} else {
+				s.waitTicks = 20 // shorter pause — AI responds quickly
+			}
+		}
+		return
+	}
+
+	if s.waitTicks > 0 {
+		s.waitTicks--
+		return
+	}
+
+	if s.scriptIdx >= len(script) {
+		return
+	}
+
+	s.startMessage()
+}
+
+func (s *State) view() vogui.Node {
+	status := fmt.Sprintf("%d messages", len(s.messages))
+	if s.streaming {
+		role := "AI"
+		if s.messages[len(s.messages)-1].IsUser {
+			role = "User"
+		}
+		status = status + " · " + role + " is typing..."
+	} else if s.paused {
+		status = status + " · paused"
+	}
+
+	header := vogui.Div(
+		vogui.H2("Streaming Chat").Fg("#f1f5f9").FontSize(16),
+		vogui.Text(status).Fg("#64748b").FontSize(13),
+	).
+		Display("flex").
+		Style("alignItems", "center").
+		Style("justifyContent", "space-between").
+		Px(20).Py(14).
+		Bg("#0f1929").
+		Style("borderBottom", "1px solid #1e293b").
+		Style("flexShrink", "0")
+
+	pauseLabel := "⏸ Pause"
+	if s.paused {
+		pauseLabel = "▶ Resume"
+	}
+
+	pauseBtn := vogui.Button(pauseLabel, vogui.OnClick(func(st *State) {
+		st.paused = !st.paused
+	})).
+		Bg("#1e293b").Fg("#94a3b8").
+		Rounded(8).Px(14).Py(8).
+		FontSize(13).
+		Style("border", "1px solid #334155").
+		Cursor("pointer")
+
+	topBtn := vogui.Button("⬆ Top", vogui.OnClick(func(st *State) {
+		vogui.ScrollTo("chat-scroll", 0)
+		st.followTail = false
+	})).
+		Bg("#1e293b").Fg("#94a3b8").
+		Rounded(8).Px(14).Py(8).
+		FontSize(13).
+		Style("border", "1px solid #334155").
+		Cursor("pointer")
+
+	bottomBtn := vogui.Button("⬇ Bottom", vogui.OnClick(func(st *State) {
+		vogui.ScrollToBottomRef("chat-scroll")
+		st.followTail = true
+	})).
+		Bg("#1e293b").Fg("#94a3b8").
+		Rounded(8).Px(14).Py(8).
+		FontSize(13).
+		Style("border", "1px solid #334155").
+		Cursor("pointer")
+
+	footer := vogui.Row(pauseBtn, topBtn, bottomBtn).
+		Gap(8).Px(20).Py(12).
+		Bg("#0f1929").
+		Style("borderTop", "1px solid #1e293b").
+		Style("flexShrink", "0")
+
+	// Render all messages as a plain browser-managed scroll container.
+	// The browser owns layout and scroll physics; Vo only reads AtBottom
+	// via ObserveScroll and issues ScrollToBottomRef commands.
+	items := make([]vogui.Node, len(s.messages))
+	for i := range s.messages {
+		items[i] = s.renderItem(i).Key(fmt.Sprint(i))
+	}
+
+	chatList := vogui.Scroll(items...).
+		Ref("chat-scroll").
+		Flex(1).
+		Style("minHeight", "0").
+		OverflowX("hidden").
+		OverflowY("auto").
+		ObserveScroll(vogui.OnScrollState(func(st *State, e vogui.ScrollEvent) {
+			st.followTail = e.AtBottom
+		}))
+
+	return vogui.Div(
+		header,
+		chatList,
+		footer,
+	).
+		Display("flex").
+		Style("flexDirection", "column").
+		H("100%").
+		Bg("#0a1628")
+}
+
+func main() {
+	vogui.Run(vogui.App{
+		Init: func() any {
+			s := &State{}
+			s.followTail = true // start pinned to bottom
+
+			// Pre-seed first 2 entries as completed history.
+			for i := 0; i < 2 && i < len(script); i++ {
+				s.messages = append(s.messages, Message{
+					IsUser: i%2 == 0,
+					Text:   script[i],
+					Done:   true,
+				})
+			}
+			s.scriptIdx = 2
+
+			s.startMessage()
+
+			s.timerID = vogui.SetInterval(func(st *State) {
+				st.tick()
+			}, tickMs)
+
+			return s
+		},
+		View: func(state any) vogui.Node {
+			return state.(*State).view()
+		},
+	})
+}

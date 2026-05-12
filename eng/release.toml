@@ -1,0 +1,44 @@
+version = 1
+
+[package]
+crate = "vo"
+binary = "vo"
+artifact_prefix = "vo"
+build_args = ["--release", "-p", "vo", "--no-default-features"]
+release_opt_level = "3"
+release_lto = "thin"
+
+[cross]
+version = "0.2.5"
+
+[notes]
+product_name = "Vo"
+homebrew = [
+  "brew tap vo-lang/vo",
+  "brew install vo",
+]
+manual_install = "Download the binary for your platform below, extract, and place `vo` on your PATH."
+
+[homebrew]
+repository = "vo-lang/homebrew-vo"
+formula_path = "Formula/vo.rb"
+
+[[target]]
+target = "aarch64-apple-darwin"
+os = "macos-14"
+use_cross = false
+
+[[target]]
+target = "x86_64-apple-darwin"
+os = "macos-15-intel"
+use_cross = false
+
+[[target]]
+target = "x86_64-unknown-linux-gnu"
+os = "ubuntu-22.04"
+use_cross = false
+
+[[target]]
+target = "aarch64-unknown-linux-gnu"
+os = "ubuntu-22.04"
+use_cross = true

@@ -1,110 +1,177 @@
 #!/usr/bin/env node
 // WASM test runner for vo test cases
-// Usage: node test_runner.mjs [test_file.vo]
+// Usage: node test_runner.mjs --plan <plan.json>
 
-import { readFileSync, readdirSync, statSync, existsSync } from "fs";
-import { join, relative, dirname } from "path";
+import { readFileSync, existsSync } from "fs";
+import { join, relative, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
-import { parse as parseToml } from "smol-toml";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Import wasm-pack generated module (ES module for --target web)
-import init, { compileAndRun, version } from "./pkg/vo_web.js";
-const voWeb = { compileAndRun, version };
+import init, { compileAndRun } from "./pkg/vo_web.js";
+const voWeb = { compileAndRun };
 
 const TEST_DIR = join(__dirname, "../../test_data");
-const CONFIG_PATH = join(TEST_DIR, "_config.toml");
-
-// Load test config and build skip/should_fail sets
-function loadConfig() {
-  const skipTests = new Set();
-  const shouldFailTests = new Set();
-  
-  if (!existsSync(CONFIG_PATH)) {
-    return { skipTests, shouldFailTests };
-  }
-  
-  const configText = readFileSync(CONFIG_PATH, "utf-8");
-  const config = parseToml(configText);
-  
-  for (const test of config.tests || []) {
-    const file = test.file;
-    // Skip if wasm is in skip list
-    if (test.skip && test.skip.includes("wasm")) {
-      skipTests.add(file);
-    }
-    // should_fail tests
-    if (test.should_fail) {
-      shouldFailTests.add(file);
-    }
-  }
-  
-  return { skipTests, shouldFailTests };
-}
-
-const { skipTests: SKIP_TESTS, shouldFailTests: SHOULD_FAIL_TESTS } = loadConfig();
 
 // Colors
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
-const YELLOW = "\x1b[33m";
-const DIM = "\x1b[2m";
 const NC = "\x1b[0m";
 
-function findVoFiles(dir) {
-  const files = [];
-  
-  if (!existsSync(dir)) return files;
-  
-  const entries = readdirSync(dir);
-  for (const entry of entries) {
-    const fullPath = join(dir, entry);
-    const stat = statSync(fullPath);
-    
-    if (stat.isDirectory()) {
-      // Skip proj_*, zip, typechecker directories
-      if (!entry.startsWith("proj_") && !entry.startsWith("typechecker") && !entry.endsWith(".zip")) {
-        files.push(...findVoFiles(fullPath));
-      }
-    } else if (entry.endsWith(".vo")) {
-      files.push(fullPath);
-    }
+function patternsForExpect(expect) {
+  if (Array.isArray(expect?.patterns) && expect.patterns.length > 0) {
+    return expect.patterns;
   }
-  
-  return files.sort();
+  if (typeof expect?.pattern === "string" && expect.pattern.length > 0) {
+    return [expect.pattern];
+  }
+  return [];
 }
 
-async function runTest(filePath) {
-  const source = readFileSync(filePath, "utf-8");
-  const relPath = relative(TEST_DIR, filePath);
-  
-  // Skip tests marked with skip=["wasm"] in config
-  if (SKIP_TESTS.has(relPath)) {
-    console.log(`  ${YELLOW}⊘${NC} ${relPath} [wasm skipped]`);
-    return "skip";
+function patternMatches(message, pattern) {
+  const trimmed = pattern.trim();
+  if (trimmed.length === 0) {
+    return true;
   }
-  
-  // Handle should_fail tests
-  if (SHOULD_FAIL_TESTS.has(relPath)) {
-    console.log(`  ${YELLOW}⊘${NC} ${relPath} [should_fail]`);
-    return "skip";
-  }
-  
-  try {
-    const result = await voWeb.compileAndRun(source, relPath);
-    
-    if (result.status === "ok") {
-      console.log(`  ${GREEN}✓${NC} ${relPath} [wasm]`);
-      return true;
-    } else {
-      console.log(`  ${RED}✗${NC} ${relPath} [wasm] ${result.stderr.slice(0, 60)}`);
+  let index = 0;
+  for (const part of trimmed.split("X").filter((segment) => segment.length > 0)) {
+    const pos = message.slice(index).indexOf(part);
+    if (pos === -1) {
       return false;
     }
-  } catch (e) {
-    console.log(`  ${RED}✗${NC} ${relPath} [wasm] ${e.message?.slice(0, 60) || e}`);
+    index += pos + part.length;
+  }
+  return true;
+}
+
+function patternsMatch(message, patterns) {
+  if (patterns.length === 0) {
     return false;
   }
+  return patterns.every((pattern) => patternMatches(message, pattern));
+}
+
+function resolveTestPath(file) {
+  return existsSync(file) ? resolve(file) : join(TEST_DIR, file);
+}
+
+function jobTimeoutSeconds(job) {
+  const parsed = Number(job.timeout_sec);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+  return Math.trunc(parsed);
+}
+
+async function withJobTimeout(job, run) {
+  const seconds = jobTimeoutSeconds(job);
+  let timeout;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(run),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error(`timed out after ${seconds}s`));
+        }, seconds * 1000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function withJobEnv(job, run) {
+  const env =
+    job.env && typeof job.env === "object" && !Array.isArray(job.env) ? job.env : {};
+  const saved = new Map();
+  for (const [key, value] of Object.entries(env)) {
+    saved.set(
+      key,
+      Object.prototype.hasOwnProperty.call(process.env, key) ? process.env[key] : undefined,
+    );
+    process.env[key] = String(value);
+  }
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of saved.entries()) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+async function compileAndRunJob(job, source, relPath) {
+  return withJobEnv(job, () =>
+    withJobTimeout(job, () => voWeb.compileAndRun(source, relPath)),
+  );
+}
+
+async function runPlanJob(job) {
+  if (job.kind !== "file") {
+    const message = `unsupported case kind ${job.kind}`;
+    console.log(`  ${RED}✗${NC} ${job.id} [wasm] ${message}`);
+    return { passed: false, label: job.id, error: message };
+  }
+  const fullPath = resolveTestPath(job.path);
+  if (!existsSync(fullPath)) {
+    const message = `file not found: ${job.path}`;
+    console.log(`  ${RED}✗${NC} ${job.id} [wasm] ${message}`);
+    return { passed: false, label: job.id, error: message };
+  }
+
+  const source = readFileSync(fullPath, "utf-8");
+  const relPath = relative(TEST_DIR, fullPath);
+  const expectKind = job.expect?.kind ?? "pass";
+
+  try {
+    const result = await compileAndRunJob(job, source, relPath);
+    if (expectKind === "fail") {
+      const message = `${result.stderr ?? ""}\n${result.stdout ?? ""}`;
+      const patterns = patternsForExpect(job.expect);
+      if (result.status === "compile_error" && patternsMatch(message, patterns)) {
+        console.log(`  ${GREEN}✓${NC} ${relPath} [wasm compile-fail]`);
+        return { passed: true, label: relPath, error: "" };
+      }
+      const error = message.trim();
+      console.log(`  ${RED}✗${NC} ${relPath} [wasm compile-fail] ${error.slice(0, 80)}`);
+      return { passed: false, label: relPath, error };
+    }
+
+    if (result.status === "ok") {
+      console.log(`  ${GREEN}✓${NC} ${relPath} [wasm]`);
+      return { passed: true, label: relPath, error: "" };
+    }
+    const error = result.stderr ?? "";
+    console.log(`  ${RED}✗${NC} ${relPath} [wasm] ${error.slice(0, 80)}`);
+    return { passed: false, label: relPath, error };
+  } catch (e) {
+    const error = e.message || String(e);
+    console.log(`  ${RED}✗${NC} ${relPath} [wasm] ${error.slice(0, 80)}`);
+    return { passed: false, label: relPath, error };
+  }
+}
+
+function loadPlan(args) {
+  if (args.length !== 2 || args[0] !== "--plan") {
+    console.error("Usage: node test_runner.mjs --plan <plan.json>");
+    process.exit(2);
+  }
+  const planPath = args[1];
+  if (!planPath) {
+    console.error("--plan requires a path");
+    process.exit(2);
+  }
+  const plan = JSON.parse(readFileSync(planPath, "utf-8"));
+  if (plan.schema !== "volang.test-plan.v1") {
+    console.error(`Unsupported test plan schema: ${plan.schema}`);
+    process.exit(2);
+  }
+  return plan;
 }
 
 async function main() {
@@ -112,47 +179,39 @@ async function main() {
   // Node.js fetch doesn't support file:// URLs, so we read the WASM file manually
   const wasmPath = join(__dirname, "pkg", "vo_web_bg.wasm");
   const wasmBytes = readFileSync(wasmPath);
-  await init(wasmBytes);
-  
+  await init({ module_or_path: wasmBytes });
+
   const args = process.argv.slice(2);
-  
-  if (args.length > 0) {
-    // Run single file
-    const file = args[0];
-    const fullPath = existsSync(file) ? file : join(TEST_DIR, file);
-    if (!existsSync(fullPath)) {
-      console.error(`File not found: ${file}`);
-      process.exit(1);
-    }
-    await runTest(fullPath);
-    return;
+  const plan = loadPlan(args);
+  if (!Array.isArray(plan.jobs) || plan.jobs.length === 0) {
+    console.error("WASM test plan contains no jobs");
+    process.exit(2);
   }
-  
-  // Run all tests
-  console.log(`Running WASM tests...\n`);
-  
-  const files = findVoFiles(TEST_DIR);
+  console.log(`Running ${plan.suite ?? "selected"} WASM tests...\n`);
   let passed = 0;
   let failed = 0;
-  let skipped = 0;
-  
-  for (const file of files) {
-    const result = await runTest(file);
-    if (result === "skip") {
-      skipped++;
-    } else if (result) {
+  const failures = [];
+  for (const job of plan.jobs) {
+    const result = await runPlanJob(job);
+    if (result.passed) {
       passed++;
     } else {
       failed++;
+      failures.push(result);
     }
   }
-  
-  console.log(`\n${passed} passed, ${failed} failed, ${skipped} skipped`);
-  
+
+  if (failures.length > 0) {
+    console.log("\nFailures:");
+    for (const failure of failures) {
+      console.log(`  ✗ ${failure.label} ${failure.error}`.trimEnd());
+    }
+  }
+  console.log(`\n${passed} passed, ${failed} failed`);
+
   if (failed > 0) {
     process.exit(1);
   }
 }
 
 main();
-

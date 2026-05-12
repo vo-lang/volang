@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "artifact": "playground.generated-docs",
+  "path": "apps/playground-legacy/src/assets/docs/generated",
+  "generator": {
+    "command": [
+      "vo-dev",
+      "task",
+      "run",
+      "task:docs-sync"
+    ]
+  },
+  "inputs": [
+    "scripts/ci/docs_sync.mjs",
+    "lang/docs/spec/**",
+    "lang/docs/vo-for-gophers.md"
+  ],
+  "docs": [
+    {
+      "id": "vo-for-gophers",
+      "title": "Vo for Go Programmers",
+      "source": "lang/docs/vo-for-gophers.md",
+      "output": "vo-for-gophers.md",
+      "source_digest": "sha256:a42469b955bc382c1f6f98732b32fe317b97f7b8891bb4ac9562ac461571b482",
+      "generated_at": "2026-01-20T20:35:05+08:00",
+      "generator": "node scripts/ci/docs_sync.mjs"
+    },
+    {
+      "id": "language",
+      "title": "Language Spec",
+      "source": "lang/docs/spec/language.md",
+      "output": "spec/language.md",
+      "source_digest": "sha256:ada4529580de0198e1169b69f260be16fef9d3308b2d1d4c8756fd292872271d",
+      "generated_at": "2026-01-20T15:23:25+08:00",
+      "generator": "node scripts/ci/docs_sync.mjs"
+    },
+    {
+      "id": "dynamic",
+      "title": "Dynamic Semantics",
+      "source": "lang/docs/spec/dynamic.md",
+      "output": "spec/dynamic.md",
+      "source_digest": "sha256:7314e09ca51b1677904391b246a5098b50cffc168de29fe5cc2b6a97eca8acae",
+      "generated_at": "2026-01-20T20:35:05+08:00",
+      "generator": "node scripts/ci/docs_sync.mjs"
+    },
+    {
+      "id": "module",
+      "title": "Module System",
+      "source": "lang/docs/spec/module.md",
+      "output": "spec/module.md",
+      "source_digest": "sha256:c63bda4a129ffe8dfab7688dc413a44143e7e1c2c757b8f5b36c4d95f9077700",
+      "generated_at": "2026-05-12T23:32:39+08:00",
+      "generator": "node scripts/ci/docs_sync.mjs"
+    },
+    {
+      "id": "native-ffi",
+      "title": "Native FFI",
+      "source": "lang/docs/spec/native-ffi.md",
+      "output": "spec/native-ffi.md",
+      "source_digest": "sha256:3afa59367b3cec7df80764633253d1c2e8a698578d7eaa307e9b1f5df0404c7b",
+      "generated_at": "2026-05-12T23:32:39+08:00",
+      "generator": "node scripts/ci/docs_sync.mjs"
+    },
+    {
+      "id": "memory-model",
+      "title": "Memory Model",
+      "source": "lang/docs/spec/memory-model-and-instructions.md",
+      "output": "spec/memory-model-and-instructions.md",
+      "source_digest": "sha256:51b28102399dda3e09f0275283070c64e984d9fa5410bf944480103dd9c78650",
+      "generated_at": "2026-01-20T20:35:05+08:00",
+      "generator": "node scripts/ci/docs_sync.mjs"
+    },
+    {
+      "id": "vm-bytecode",
+      "title": "VM Bytecode",
+      "source": "lang/docs/spec/vm-bytecode.md",
+      "output": "spec/vm-bytecode.md",
+      "source_digest": "sha256:97a149bafa23c666f395555258000139c05806b99e206454510868236586a812",
+      "generated_at": "2026-01-29T19:15:13+08:00",
+      "generator": "node scripts/ci/docs_sync.mjs"
+    },
+    {
+      "id": "vm-jit",
+      "title": "JIT Design",
+      "source": "lang/docs/spec/vm-jit-design.md",
+      "output": "spec/vm-jit-design.md",
+      "source_digest": "sha256:774529f94dd58cf937c2a4c891bfcefcf271b456affa7ea7131ae7f95a32c222",
+      "generated_at": "2026-01-21T13:06:28+08:00",
+      "generator": "node scripts/ci/docs_sync.mjs"
+    }
+  ]
+}

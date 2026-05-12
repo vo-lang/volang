@@ -22,12 +22,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install Rust
+        uses: ./.github/actions/setup-rust
+
       - name: Plan smart CI tasks
         id: plan
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-        run: python3 scripts/ci/plan.py --mode smart --base "$BASE_SHA" --head "$HEAD_SHA" --github-output
+        run: cargo run -q -p vo-dev -- ci matrix pr --base "$BASE_SHA" --head "$HEAD_SHA" --github-output
 
   task:
     name: ${{ matrix.title }}
@@ -42,11 +45,11 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Checkout first-party module
-        if: matrix.repo != ''
+        if: matrix.checkout
         uses: actions/checkout@v5
         with:
-          repository: vo-lang/${{ matrix.repo }}
-          path: ci_modules/${{ matrix.repo }}
+          repository: ${{ matrix.checkout_repository }}
+          path: ${{ matrix.checkout_path }}
 
       - name: Install Rust
         if: matrix.rust
@@ -56,24 +59,22 @@ jobs:
         if: matrix.rust
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-            studio/wasm -> target
+          workspaces: ${{ matrix.rust_cache_workspaces }}
 
       - name: Install wasm-pack
         if: matrix.wasm_pack
-        run: cargo install wasm-pack --locked --version 0.13.1
+        run: cargo install wasm-pack --locked --version "${{ matrix.wasm_pack_version }}"
 
       - name: Setup Node
         if: matrix.node
         uses: actions/setup-node@v5
         with:
-          node-version: "24"
+          node-version: ${{ matrix.node_version }}
           cache: "npm"
-          cache-dependency-path: studio/package-lock.json
+          cache-dependency-path: ${{ matrix.node_lockfiles }}
 
       - name: Run CI task
-        run: python3 scripts/ci/run.py task "${{ matrix.task }}"
+        run: cargo run -q -p vo-dev -- task run "task:${{ matrix.task }}"
 
   gate:
     name: CI Gate

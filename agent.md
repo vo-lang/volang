@@ -10,11 +10,12 @@ Volang is both a language implementation and a development environment.
 
 - The language pipeline lives under `lang/`: syntax, analysis, codegen, VM,
   runtime, JIT, stdlib, module tooling, release tooling, and web runtime.
-- The command line tools live under `cmd/`, especially `cmd/vo` and
-  `cmd/vo-test`.
-- Vo Studio lives under `studio/`: Svelte web app, Rust/WASM compiler bridge,
+- The command line tools live under `cmd/`, especially `cmd/vo`, `cmd/vo-test`,
+  and `cmd/vo-dev`.
+- Vo Studio lives under `apps/studio/`: Svelte web app, Rust/WASM compiler bridge,
   and Tauri native wrapper.
-- Local and CI workflows are routed through `d.py` and `scripts/ci/`.
+- Local and CI workflows are routed through `d.py`, `cmd/vo-dev`, and the
+  data manifests in `eng/`.
 - First-party modules such as `vogui`, `voplay`, `vopack`, and `vostore` are
   usually sibling repositories and may be referenced through `vo.work`.
 
@@ -30,7 +31,9 @@ volang/
 |-- cmd/
 |   |-- vo/                 # main CLI
 |   |-- vo-test/            # language/runtime integration test runner
+|   |-- vo-dev/             # engineering control plane
 |   `-- vo-embed/           # no_std/embed-oriented runner
+|-- eng/                    # task graph, toolchains, CI, tests, artifacts
 |-- lang/
 |   |-- crates/             # Rust crates for compiler/runtime/tooling
 |   |-- stdlib/             # Vo standard library source packages
@@ -40,19 +43,19 @@ volang/
 |       |-- spec/           # canonical specs
 |       |-- dev/            # stable developer docs
 |       `-- dev-notes/      # dated investigation/onboarding notes
-|-- studio/
+|-- apps/studio/
 |   |-- src/                # Svelte web app
 |   |-- wasm/               # wasm-bindgen bridge to compiler/runtime
 |   |-- src-tauri/          # native Studio backend
 |   |-- docs/               # user-facing docs rendered in Studio
 |   |-- public/             # served static assets, wasm, quickplay packages
 |   `-- scripts/            # Studio build/package helpers
-|-- scripts/ci/             # CI task graph and local runner
+|-- scripts/ci/             # narrow quickplay helper scripts
+|-- tests/lang/             # canonical language test manifest
 |-- examples/               # sample Vo programs
 |-- benchmarks/             # benchmark suite
-|-- playground/             # older playground app code
+|-- apps/playground-legacy/             # older playground app code
 |-- d.py                    # stable dev command wrapper
-|-- d_py.py                 # heavier command implementation
 |-- Cargo.toml              # Rust workspace
 `-- vo.work                 # local first-party module workspace overrides
 ```
@@ -120,13 +123,16 @@ Common commands:
 
 Notes:
 
-- `./d.py test` runs the large `lang/test_data/` integration suite. It is the
-  main language-core regression harness and can cover thousands of test cases.
-  Run it when changing parser, analysis, codegen, VM, runtime, JIT, stdlib, or
-  closely related CLI behavior.
+- `./d.py` is a compatibility wrapper. Broad test, CI, Studio, benchmark, loc,
+  and clean commands delegate to `vo-dev`.
+- `tests/lang/manifest.toml` is the executable language test manifest. Test
+  source files still live under `tests/lang/cases/`.
+- `./d.py test` runs the manifest-driven language integration suite. Run it
+  when changing parser, analysis, codegen, VM, runtime, JIT, stdlib, or closely
+  related CLI behavior.
 - JIT-mode tests are much slower in debug builds. Prefer
   `./d.py test jit --release` for broad JIT verification.
-- `./d.py test wasm` uses the Node/WASM path through `d_py.py`.
+- `./d.py test wasm` uses the manifest-driven `vo-dev` WASM test target.
 - `./d.py studio` rebuilds Studio WASM when stale, then starts Vite.
 - Studio web uses strict Vite port `5174`.
 - `./d.py studio-native` launches Tauri and can reuse an existing Studio dev
@@ -147,7 +153,7 @@ lang/crates/vo-codegen
 lang/crates/vo-vm
 lang/crates/vo-runtime
 lang/stdlib
-lang/test_data
+tests/lang
 ```
 
 Typical verification:
@@ -160,8 +166,9 @@ cargo check --workspace --all-targets --exclude vo-playground
 cargo check -p vo-web --target wasm32-unknown-unknown
 ```
 
-Add behavior tests under `lang/test_data/`. Put Rust unit tests near the
-compiler/runtime code they protect.
+Add behavior tests under `tests/lang/cases/` and add the matching case metadata
+to `tests/lang/manifest.toml`. Put Rust unit tests near the compiler/runtime
+code they protect.
 
 ### CLI and Tooling
 
@@ -170,8 +177,8 @@ Start in:
 ```text
 cmd/vo
 cmd/vo-test
+cmd/vo-dev
 d.py
-d_py.py
 lang/crates/vo-engine
 lang/crates/vo-module
 lang/crates/vo-release
@@ -195,7 +202,9 @@ lang/crates/vo-release
 lang/docs/spec/module.md
 lang/docs/spec/repository-layout.md
 lang/docs/spec/native-ffi.md
-scripts/ci/tasks.toml
+eng/tasks.toml
+eng/project.toml
+eng/toolchains.toml
 ```
 
 Typical verification:
@@ -213,19 +222,24 @@ Typical verification:
 Start in:
 
 ```text
-studio/src/App.svelte
-studio/src/components
-studio/src/lib/router.ts
-studio/src/lib/services
-studio/src/lib/backend
-studio/src/stores
+apps/studio/src/App.svelte
+apps/studio/src/components
+apps/studio/src/lib/router.ts
+apps/studio/src/lib/services
+apps/studio/src/lib/backend
+apps/studio/src/stores
 ```
 
-Typical verification:
+Task-graph frontend verification:
 
 ```sh
-cd studio
-npm run build
+./d.py ci task studio-build
+```
+
+Use `cd apps/studio && npm run build` only when debugging Vite/Svelte locally and not as the final repo verification. For changes that depend on `vogui` or deploy behavior:
+
+```sh
+./d.py ci site
 ```
 
 For live development, run from repo root:
@@ -239,8 +253,8 @@ For live development, run from repo root:
 Start in:
 
 ```text
-studio/wasm/src/lib.rs
-studio/src/lib/studio_wasm.ts
+apps/studio/wasm/src/lib.rs
+apps/studio/src/lib/studio_wasm.ts
 lang/crates/*
 lang/stdlib
 ```
@@ -253,36 +267,36 @@ cargo check -p vo-web --target wasm32-unknown-unknown
 ```
 
 If Studio reports an asset mismatch, rebuild Studio WASM and reload the page.
-The local/deploy build id is in `studio/public/wasm/vo_studio_wasm.build_id`.
+The local/deploy build id is in `apps/studio/public/wasm/vo_studio_wasm.build_id`.
 
 ### Native Studio
 
 Start in:
 
 ```text
-studio/src-tauri/src/main.rs
-studio/src-tauri/src/lib.rs
-studio/src-tauri/src/commands
-studio/src-tauri/src/gui_runtime.rs
-studio/src/lib/backend/native_backend.ts
+apps/studio/src-tauri/src/main.rs
+apps/studio/src-tauri/src/lib.rs
+apps/studio/src-tauri/src/commands
+apps/studio/src-tauri/src/gui_runtime.rs
+apps/studio/src/lib/backend/native_backend.ts
 ```
 
 Native Studio exposes direct filesystem and process capabilities. Keep shared
-UI code backend-neutral through `studio/src/lib/backend/backend.ts` where
+UI code backend-neutral through `apps/studio/src/lib/backend/backend.ts` where
 possible.
 
 ### Studio Docs
 
-User-facing docs rendered by Studio live in `studio/docs/`.
+User-facing docs rendered by Studio live in `apps/studio/docs/`.
 
 ```text
-studio/docs/getting-started/
-studio/docs/language/
-studio/docs/cli/
-studio/docs/advanced/
+apps/studio/docs/pages/getting-started/
+apps/studio/docs/pages/language/
+apps/studio/docs/pages/cli/
+apps/studio/docs/pages/advanced/
 ```
 
-When adding user-facing language or tool docs, prefer `studio/docs/`. When
+When adding user-facing language or tool docs, prefer `apps/studio/docs/`. When
 writing engineering notes or handoffs, use `lang/docs/dev/` or
 `lang/docs/dev-notes/`.
 
@@ -309,7 +323,8 @@ Important rules for agents:
 - Integrity mismatches should fail hard, not fall back to unchecked behavior.
 
 For module repository layout, commit `vo.mod` and `vo.lock`; do not commit
-`.vodeps/`, `.vo-cache/`, `target/`, or native dynamic library outputs.
+`.vodeps/`, `.vo-cache/`, `.volang/`, `target/`, or native dynamic library
+outputs.
 
 ## Studio Architecture Notes
 
@@ -317,10 +332,10 @@ Studio has three main layers:
 
 - Web app: Svelte UI, routing, stores, editor, docs, runner, and backend-neutral
   services.
-- Studio WASM: wasm-bindgen exports in `studio/wasm/src/lib.rs`, loaded through
-  `studio/src/lib/studio_wasm.ts` from static files in `studio/public/wasm/`.
+- Studio WASM: wasm-bindgen exports in `apps/studio/wasm/src/lib.rs`, loaded through
+  `apps/studio/src/lib/studio_wasm.ts` from static files in `apps/studio/public/wasm/`.
 - Native Studio: Tauri commands and native runtime bridge under
-  `studio/src-tauri/`.
+  `apps/studio/src-tauri/`.
 
 UI modes are:
 
@@ -338,9 +353,9 @@ Quickplay packages are the static, run-fast path for curated Studio projects.
 Relevant files include:
 
 ```text
-studio/src/lib/quickplay.ts
-studio/public/quickplay/
-studio/scripts/
+apps/studio/src/lib/quickplay.ts
+apps/studio/public/quickplay/
+apps/studio/scripts/
 scripts/ci/quickplay_validate.mjs
 ```
 
@@ -349,11 +364,11 @@ The usual pattern is:
 1. Package project source into a static `project.json`.
 2. Package dependency source/artifacts into `deps.json` plus static artifact
    files.
-3. Serve those files from `studio/public/quickplay/...`.
+3. Serve those files from `apps/studio/public/quickplay/...`.
 4. Open the package through a stable `vo:quickplay:<name>` spec.
 
 In local web development, Studio can snapshot readable local projects through
-Vite middleware in `studio/vite.config.ts`. Relevant environment variables are:
+Vite middleware in `apps/studio/vite.config.ts`. Relevant environment variables are:
 
 ```text
 VITE_STUDIO_LOCAL_PROJECTS=1
@@ -369,9 +384,10 @@ or generated directories such as `.git`, `node_modules`, and `target`.
 The local CI task graph is in:
 
 ```text
-scripts/ci/tasks.toml
-scripts/ci/run.py
-scripts/ci/plan.py
+eng/tasks.toml
+eng/ci.toml
+eng/toolchains.toml
+cmd/vo-dev
 ```
 
 Common groups:
@@ -387,6 +403,16 @@ Common groups:
 Prefer the smallest verification that covers the touched surface, then widen if
 the change crosses subsystem boundaries.
 
+Useful control-plane commands:
+
+```sh
+cargo run -q -p vo-dev -- verify plan pr
+cargo run -q -p vo-dev -- verify run quality
+cargo run -q -p vo-dev -- lint all
+cargo run -q -p vo-dev -- test lint --suite lang
+cargo run -q -p vo-dev -- tool check --task vo-test-wasm
+```
+
 ## Documentation Source of Truth
 
 Read these first when the task touches the corresponding area:
@@ -399,17 +425,17 @@ lang/docs/spec/repository-layout.md
 lang/docs/spec/native-ffi.md
 lang/docs/spec/vm-bytecode.md
 lang/docs/spec/vm-jit-design.md
-lang/docs/dev/d-py-usage.md
+lang/docs/dev-notes/2026-05-11-engineering-and-repository-redesign.md
 lang/docs/dev-notes/
-studio/docs/_manifest.json
-studio/docs/cli/commands.md
-studio/docs/advanced/backends.md
-studio/docs/advanced/modules.md
-studio/docs/advanced/embedding.md
+apps/studio/docs/manifest.toml
+apps/studio/docs/pages/cli/commands.md
+apps/studio/docs/pages/advanced/backends.md
+apps/studio/docs/pages/advanced/modules.md
+apps/studio/docs/pages/advanced/embedding.md
 ```
 
 Treat `lang/docs/spec/` as the stronger source for canonical behavior.
-Treat `studio/docs/` as the stronger source for user-facing Studio docs.
+Treat `apps/studio/docs/` as the stronger source for user-facing Studio docs.
 Treat dated notes in `lang/docs/dev-notes/` as useful history and handoff
 context, not automatically-current specs.
 
@@ -427,7 +453,7 @@ context, not automatically-current specs.
   fail-fast behavior with clear errors over broad fallbacks or silent recovery.
 - For frontend changes, match the existing Svelte/Studio design language and
   verify that the app builds.
-- For language/runtime changes, add focused `lang/test_data/` coverage when
+- For language/runtime changes, add focused `tests/lang/cases/` coverage when
   behavior changes.
 - For module/release changes, keep `vo.mod`, `vo.lock`, `vo.work`,
   `vo.release.json`, and `vo.web.json` semantics aligned with the specs.

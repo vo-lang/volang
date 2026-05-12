@@ -1,0 +1,112 @@
+// Number formatting: FIX, SCI, ENG, ALL display modes.
+package main
+
+import (
+	"fmt"
+	"math"
+)
+
+// formatNumber formats a float64 according to the current display mode.
+func formatNumber(s *State, v float64) string {
+	if math.IsNaN(v) {
+		return "NaN"
+	}
+	if math.IsInf(v, 1) {
+		return "Infinity"
+	}
+	if math.IsInf(v, -1) {
+		return "-Infinity"
+	}
+
+	switch s.FmtMode {
+	case FmtFix:
+		return fmt.Sprintf("%.*f", s.FmtDigits, v)
+	case FmtSci:
+		return fmt.Sprintf("%.*E", s.FmtDigits, v)
+	case FmtEng:
+		return formatEng(v, s.FmtDigits)
+	}
+	return formatAll(v)
+}
+
+// formatAll shows full precision, trimming trailing zeros.
+func formatAll(v float64) string {
+	if v == 0 {
+		return "0"
+	}
+	str := fmt.Sprintf("%.15G", v)
+	return str
+}
+
+// formatEng formats in engineering notation (exponent multiple of 3).
+func formatEng(v float64, digits int) string {
+	if v == 0 {
+		return fmt.Sprintf("%.*f", digits, 0.0)
+	}
+	neg := v < 0
+	if neg {
+		v = -v
+	}
+	exp := int(math.Floor(math.Log10(v)))
+	// Round exponent down to nearest multiple of 3
+	engExp := exp - ((exp % 3) + 3) % 3
+	mantissa := v / math.Pow(10, float64(engExp))
+	prefix := ""
+	if neg {
+		prefix = "-"
+	}
+	if engExp == 0 {
+		return fmt.Sprintf("%s%.*f", prefix, digits, mantissa)
+	}
+	return fmt.Sprintf("%s%.*fE%d", prefix, digits, mantissa, engExp)
+}
+
+// displayLine returns the string for the X register display,
+// including entry buffer when in digit entry mode.
+func displayLine(s *State) string {
+	if s.Error != "" {
+		return s.Error
+	}
+	if s.Entering {
+		str := s.Entry
+		if s.Negative && len(str) > 0 && str[0] != '-' {
+			str = "-" + str
+		}
+		if str == "" {
+			str = "0"
+		}
+		return str + "_"
+	}
+	return formatNumber(s, stackX(s))
+}
+
+// displayYLine returns a short formatted string for the Y register line.
+func displayYLine(s *State) string {
+	return formatNumber(s, stackY(s))
+}
+
+// annunciatorLine returns the annunciator string (shift, trig mode, etc).
+func annunciatorLine(s *State) string {
+	parts := ""
+	switch s.Shift {
+	case ShiftUp:
+		parts += "▲ "
+	case ShiftDown:
+		parts += "▼ "
+	}
+	switch s.TrigMode {
+	case TrigDeg:
+		parts += "DEG"
+	case TrigRad:
+		parts += "RAD"
+	case TrigGrd:
+		parts += "GRD"
+	}
+	if s.StoPending {
+		parts += " STO_"
+	}
+	if s.RclPending {
+		parts += " RCL_"
+	}
+	return parts
+}

@@ -1,0 +1,380 @@
+// RPN stack engine: 4-level stack (T/Z/Y/X), LASTX, number entry state machine.
+package main
+
+import "math"
+
+// ============ Stack Operations ============
+
+func stackX(s *State) float64 { return s.Stack[3] }
+func stackY(s *State) float64 { return s.Stack[2] }
+func stackZ(s *State) float64 { return s.Stack[1] }
+func stackT(s *State) float64 { return s.Stack[0] }
+
+func setX(s *State, v float64) { s.Stack[3] = v }
+func setY(s *State, v float64) { s.Stack[2] = v }
+
+func stackLift(s *State) {
+	s.Stack[0] = s.Stack[1] // T = Z
+	s.Stack[1] = s.Stack[2] // Z = Y
+	s.Stack[2] = s.Stack[3] // Y = X
+}
+
+func stackDrop(s *State) {
+	s.Stack[3] = s.Stack[2] // X = Y
+	s.Stack[2] = s.Stack[1] // Y = Z
+	s.Stack[1] = s.Stack[0] // Z = T
+}
+
+// finishEntry commits the current digit entry to X and resets entry state.
+func finishEntry(s *State) float64 {
+	if !s.Entering {
+		return stackX(s)
+	}
+	v := parseEntry(s)
+	setX(s, v)
+	s.Entering = false
+	s.Entry = ""
+	s.HasDot = false
+	s.HasExp = false
+	s.ExpEntry = false
+	s.Negative = false
+	s.LiftEnabled = true
+	return v
+}
+
+func parseEntry(s *State) float64 {
+	if s.Entry == "" || s.Entry == "." || s.Entry == "-" || s.Entry == "-." {
+		return 0
+	}
+	str := s.Entry
+	if s.Negative {
+		str = "-" + str
+	}
+	return parseFloat(str)
+}
+
+func parseFloat(str string) float64 {
+	result := 0.0
+	sign := 1.0
+	i := 0
+	n := len(str)
+	if i < n && str[i] == '-' {
+		sign = -1.0
+		i++
+	} else if i < n && str[i] == '+' {
+		i++
+	}
+	for i < n && str[i] >= '0' && str[i] <= '9' {
+		result = result*10 + float64(str[i]-'0')
+		i++
+	}
+	if i < n && str[i] == '.' {
+		i++
+		frac := 0.1
+		for i < n && str[i] >= '0' && str[i] <= '9' {
+			result += float64(str[i]-'0') * frac
+			frac *= 0.1
+			i++
+		}
+	}
+	result *= sign
+	if i < n && (str[i] == 'E' || str[i] == 'e') {
+		i++
+		expSign := 1.0
+		if i < n && str[i] == '-' {
+			expSign = -1.0
+			i++
+		} else if i < n && str[i] == '+' {
+			i++
+		}
+		exp := 0.0
+		for i < n && str[i] >= '0' && str[i] <= '9' {
+			exp = exp*10 + float64(str[i]-'0')
+			i++
+		}
+		result *= math.Pow(10, expSign*exp)
+	}
+	return result
+}
+
+// ============ Digit Entry ============
+
+func pressDigit(s *State, d string) {
+	s.Error = ""
+	if s.StoPending || s.RclPending {
+		handleRegDigit(s, d)
+		return
+	}
+	if !s.Entering {
+		if s.LiftEnabled {
+			stackLift(s)
+		}
+		s.Entering = true
+		s.Entry = ""
+		s.HasDot = false
+		s.HasExp = false
+		s.ExpEntry = false
+		s.Negative = false
+	}
+	if s.ExpEntry {
+		expPart := expPartOf(s.Entry)
+		if len(expPart) < 3 {
+			s.Entry += d
+		}
+	} else {
+		s.Entry += d
+	}
+	setX(s, parseEntry(s))
+}
+
+func expPartOf(entry string) string {
+	for i := len(entry) - 1; i >= 0; i-- {
+		if entry[i] == 'E' || entry[i] == 'e' {
+			return entry[i+1:]
+		}
+	}
+	return ""
+}
+
+func pressDot(s *State) {
+	s.Error = ""
+	if s.StoPending || s.RclPending {
+		return
+	}
+	if !s.Entering {
+		if s.LiftEnabled {
+			stackLift(s)
+		}
+		s.Entering = true
+		s.Entry = "0"
+		s.HasDot = false
+		s.HasExp = false
+		s.ExpEntry = false
+		s.Negative = false
+	}
+	if !s.HasDot && !s.ExpEntry {
+		s.HasDot = true
+		s.Entry += "."
+	}
+	setX(s, parseEntry(s))
+}
+
+func pressEex(s *State) {
+	s.Error = ""
+	if !s.Entering {
+		if s.LiftEnabled {
+			stackLift(s)
+		}
+		s.Entering = true
+		s.Entry = "1"
+		s.HasDot = false
+		s.HasExp = false
+		s.ExpEntry = false
+		s.Negative = false
+	}
+	if !s.HasExp {
+		s.HasExp = true
+		s.ExpEntry = true
+		s.Entry += "E"
+	}
+	setX(s, parseEntry(s))
+}
+
+func pressChs(s *State) {
+	s.Error = ""
+	if s.Entering {
+		if s.ExpEntry {
+			eIdx := -1
+			for i := len(s.Entry) - 1; i >= 0; i-- {
+				if s.Entry[i] == 'E' || s.Entry[i] == 'e' {
+					eIdx = i
+					break
+				}
+			}
+			if eIdx >= 0 {
+				after := s.Entry[eIdx+1:]
+				if len(after) > 0 && after[0] == '-' {
+					s.Entry = s.Entry[:eIdx+1] + after[1:]
+				} else {
+					s.Entry = s.Entry[:eIdx+1] + "-" + after
+				}
+			}
+		} else {
+			s.Negative = !s.Negative
+		}
+		setX(s, parseEntry(s))
+	} else {
+		setX(s, -stackX(s))
+	}
+}
+
+func pressBackspace(s *State) {
+	s.Error = ""
+	if s.Entering && len(s.Entry) > 0 {
+		last := s.Entry[len(s.Entry)-1]
+		s.Entry = s.Entry[:len(s.Entry)-1]
+		if last == '.' {
+			s.HasDot = false
+		}
+		if last == 'E' || last == 'e' {
+			s.HasExp = false
+			s.ExpEntry = false
+		}
+		setX(s, parseEntry(s))
+		if s.Entry == "" {
+			s.Entering = false
+			setX(s, 0)
+		}
+	} else {
+		setX(s, 0)
+		s.Entering = false
+	}
+}
+
+// ============ Stack Commands ============
+
+func pressEnter(s *State) {
+	s.Error = ""
+	finishEntry(s)
+	stackLift(s)
+	s.LiftEnabled = false
+}
+
+func pressSwapXY(s *State) {
+	s.Error = ""
+	finishEntry(s)
+	x := stackX(s)
+	y := stackY(s)
+	setX(s, y)
+	setY(s, x)
+}
+
+func pressRollDown(s *State) {
+	s.Error = ""
+	finishEntry(s)
+	x := s.Stack[3]
+	s.Stack[3] = s.Stack[2]
+	s.Stack[2] = s.Stack[1]
+	s.Stack[1] = s.Stack[0]
+	s.Stack[0] = x
+}
+
+func pressRollUp(s *State) {
+	s.Error = ""
+	finishEntry(s)
+	t := s.Stack[0]
+	s.Stack[0] = s.Stack[1]
+	s.Stack[1] = s.Stack[2]
+	s.Stack[2] = s.Stack[3]
+	s.Stack[3] = t
+}
+
+func pressLastX(s *State) {
+	s.Error = ""
+	finishEntry(s)
+	if s.LiftEnabled {
+		stackLift(s)
+	}
+	setX(s, s.LastX)
+	s.LiftEnabled = true
+}
+
+func pressClearX(s *State) {
+	s.Error = ""
+	setX(s, 0)
+	s.Entering = false
+	s.Entry = ""
+	s.HasDot = false
+	s.HasExp = false
+	s.ExpEntry = false
+	s.Negative = false
+	s.LiftEnabled = false
+}
+
+// ============ Binary / Unary Ops ============
+
+func binaryOp(s *State, op func(y float64, x float64) (float64, bool)) {
+	s.Error = ""
+	finishEntry(s)
+	x := stackX(s)
+	y := stackY(s)
+	s.LastX = x
+	result, ok := op(y, x)
+	if !ok {
+		s.Error = "Error"
+		return
+	}
+	stackDrop(s)
+	setX(s, result)
+	s.LiftEnabled = true
+}
+
+func unaryOp(s *State, op func(x float64) (float64, bool)) {
+	s.Error = ""
+	finishEntry(s)
+	x := stackX(s)
+	s.LastX = x
+	result, ok := op(x)
+	if !ok {
+		s.Error = "Error"
+		return
+	}
+	setX(s, result)
+	s.LiftEnabled = true
+}
+
+// ============ Arithmetic ============
+
+func pressAdd(s *State) {
+	binaryOp(s, func(y float64, x float64) (float64, bool) { return y + x, true })
+}
+
+func pressSub(s *State) {
+	binaryOp(s, func(y float64, x float64) (float64, bool) { return y - x, true })
+}
+
+func pressMul(s *State) {
+	binaryOp(s, func(y float64, x float64) (float64, bool) { return y * x, true })
+}
+
+func pressDiv(s *State) {
+	binaryOp(s, func(y float64, x float64) (float64, bool) {
+		if x == 0 {
+			return 0, false
+		}
+		return y / x, true
+	})
+}
+
+// ============ STO / RCL ============
+
+func handleRegDigit(s *State, d string) {
+	reg := int(d[0] - '0')
+	if reg < 0 || reg >= MaxRegs {
+		return
+	}
+	if s.StoPending {
+		finishEntry(s)
+		s.Regs[reg] = stackX(s)
+		s.StoPending = false
+	} else if s.RclPending {
+		if s.LiftEnabled {
+			stackLift(s)
+		}
+		setX(s, s.Regs[reg])
+		s.RclPending = false
+		s.LiftEnabled = true
+	}
+}
+
+func pressSto(s *State) {
+	s.Error = ""
+	s.StoPending = true
+	s.RclPending = false
+}
+
+func pressRcl(s *State) {
+	s.Error = ""
+	s.RclPending = true
+	s.StoPending = false
+}

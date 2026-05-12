@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveStudioBuildId } from '../../apps/studio/scripts/studio_build_id.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -23,6 +23,40 @@ function assert(condition, message) {
   if (!condition) {
     fail(message);
   }
+}
+
+function readJson(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    fail(`cannot read JSON ${path}: ${error.message}`);
+  }
+}
+
+function localPathForArtifact(url) {
+  const prefix = '/quickplay/blockkart/';
+  assert(url.startsWith(prefix), `artifact URL must be quickplay-local: ${url}`);
+  return join(root, 'apps/studio/public/quickplay/blockkart', url.slice(prefix.length));
+}
+
+function moduleByName(deps, moduleName) {
+  const modulePack = deps.modules?.find((mod) => mod.module === moduleName);
+  assert(modulePack, `deps manifest is missing ${moduleName}`);
+  return modulePack;
+}
+
+function webArtifacts(modulePack) {
+  return (modulePack.artifacts ?? []).filter((artifact) => typeof artifact.url === 'string');
+}
+
+function requiredVoplayArtifacts(deps) {
+  const voplay = moduleByName(deps, 'github.com/vo-lang/voplay');
+  const artifacts = webArtifacts(voplay);
+  const js = artifacts.find((artifact) => artifact.url.endsWith('/voplay_island.js'));
+  const wasm = artifacts.find((artifact) => artifact.url.endsWith('/voplay_island_bg.wasm'));
+  assert(js, 'deps manifest is missing voplay quickplay JS artifact');
+  assert(wasm, 'deps manifest is missing voplay quickplay WASM artifact');
+  return [js, wasm];
 }
 
 async function fetchOk(url) {
@@ -47,22 +81,17 @@ function joinUrl(base, path) {
 }
 
 function runStaticSmoke() {
-  const validate = spawnSync('node', ['scripts/ci/quickplay_validate.mjs'], {
-    cwd: root,
-    stdio: 'inherit',
-  });
-  if (validate.status !== 0) {
-    process.exit(validate.status ?? 1);
-  }
-
-  const indexPath = join(root, 'studio/src/lib/quickplay.ts');
+  const indexPath = join(root, 'apps/studio/src/lib/quickplay.ts');
   const quickplayTs = readFileSync(indexPath, 'utf8');
   assert(quickplayTs.includes('__STUDIO_BUILD_ID__'), 'manifest URLs must use the studio build id');
   assert(quickplayTs.includes("searchParams.set('build'"), 'manifest URLs must carry the build query');
+  assert(!quickplayTs.includes('/quickplay/blockkart/artifacts/'), 'quickplay.ts must not hard-code artifact URLs');
 
-  const artifactRoot = join(root, 'studio/public/quickplay/blockkart/artifacts');
-  assert(existsSync(join(artifactRoot, 'github.com@vo-lang@voplay/v0.1.28/voplay_island.js')), 'missing voplay quickplay JS artifact');
-  assert(existsSync(join(artifactRoot, 'github.com@vo-lang@voplay/v0.1.28/voplay_island_bg.wasm')), 'missing voplay quickplay WASM artifact');
+  const deps = readJson(join(root, 'apps/studio/public/quickplay/blockkart/deps.json'));
+  for (const artifact of requiredVoplayArtifacts(deps)) {
+    const path = localPathForArtifact(artifact.url);
+    assert(existsSync(path), `missing packaged artifact: ${artifact.url}`);
+  }
   console.log('BlockKart smoke: static ok');
 }
 
@@ -76,8 +105,7 @@ async function runHttpSmoke(baseUrl, buildId) {
   const script = await (await fetchOk(scriptUrl)).text();
   assert(script.includes('/quickplay/blockkart/project.json'), 'entry bundle does not reference BlockKart project manifest');
   assert(script.includes('/quickplay/blockkart/deps.json'), 'entry bundle does not reference BlockKart deps manifest');
-  assert(script.includes('v0.1.28'), 'entry bundle does not reference current voplay quickplay artifacts');
-  assert(!script.includes('v0.1.23'), 'entry bundle still references stale voplay v0.1.23 artifacts');
+  assert(!script.includes('/quickplay/blockkart/artifacts/'), 'entry bundle hard-codes BlockKart artifact URLs');
   if (buildId) {
     assert(script.includes(buildId), `entry bundle does not contain build id ${buildId}`);
   }
@@ -95,16 +123,18 @@ async function runHttpSmoke(baseUrl, buildId) {
   assert(project.name === 'BlockKart', 'remote project manifest is not BlockKart');
   assert(project.module === 'github.com/vo-lang/blockkart', 'remote project manifest module is wrong');
 
-  const voplay = deps.modules?.find((mod) => mod.module === 'github.com/vo-lang/voplay');
-  assert(voplay?.version === 'v0.1.28', 'remote deps manifest does not use voplay v0.1.28');
-  for (const artifact of voplay.artifacts ?? []) {
-    await fetchOk(joinUrl(baseUrl, artifact.url));
+  requiredVoplayArtifacts(deps);
+  for (const modulePack of deps.modules ?? []) {
+    for (const artifact of webArtifacts(modulePack)) {
+      await fetchOk(joinUrl(baseUrl, `${artifact.url}${query}`));
+    }
   }
   console.log('BlockKart smoke: remote ok');
 }
 
-const baseUrl = argValue('--base-url');
-const buildId = argValue('--build-id');
+const baseUrl = argValue('--base-url') || process.env.BLOCKKART_SMOKE_BASE_URL || '';
+const explicitBuildId = argValue('--build-id') || process.env.BLOCKKART_SMOKE_BUILD_ID || '';
+const buildId = explicitBuildId || (baseUrl ? resolveStudioBuildId(process.env) : '');
 
 if (!baseUrl) {
   runStaticSmoke();

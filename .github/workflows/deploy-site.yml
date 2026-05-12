@@ -3,16 +3,6 @@ name: Deploy Studio to GitHub Pages
 on:
   push:
     branches: ["main"]
-    paths:
-      - "studio/**"
-      - "lang/crates/**"
-      - ".github/workflows/deploy-site.yml"
-      - ".github/actions/setup-rust/**"
-      - "studio/scripts/build_wasm.mjs"
-      - "scripts/ci/**"
-      - "rust-toolchain.toml"
-      - "Cargo.toml"
-      - "Cargo.lock"
   workflow_dispatch:
 
 permissions:
@@ -27,87 +17,50 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      node_version: ${{ steps.ci_metadata.outputs.node_version }}
     steps:
       - name: Checkout volang
         uses: actions/checkout@v5
 
-      - name: Checkout vogui
-        uses: actions/checkout@v5
-        with:
-          repository: vo-lang/vogui
-          path: vogui
-
       - name: Install Rust
         uses: ./.github/actions/setup-rust
+
+      - name: Read CI metadata
+        id: ci_metadata
+        run: cargo run -q -p vo-dev -- ci metadata site --github-output
+
+      - name: Checkout first-party module
+        if: steps.ci_metadata.outputs.checkout == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.ci_metadata.outputs.checkout_repository }}
+          path: ${{ steps.ci_metadata.outputs.checkout_path }}
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-            studio/wasm -> target
+          workspaces: ${{ steps.ci_metadata.outputs.rust_cache_workspaces }}
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked --version 0.13.1
+        if: steps.ci_metadata.outputs.wasm_pack == 'true'
+        run: cargo install wasm-pack --locked --version "${{ steps.ci_metadata.outputs.wasm_pack_version }}"
 
       - name: Setup Node
+        if: steps.ci_metadata.outputs.node == 'true'
         uses: actions/setup-node@v5
         with:
-          node-version: "24"
+          node-version: ${{ steps.ci_metadata.outputs.node_version }}
           cache: "npm"
-          cache-dependency-path: |
-            studio/package-lock.json
-            vogui/js/package-lock.json
+          cache-dependency-path: ${{ steps.ci_metadata.outputs.node_lockfiles }}
 
-      - name: Build vo-web WASM
-        working-directory: lang/crates/vo-web
-        run: wasm-pack build --target web --release
+      - name: Build Studio site
+        run: cargo run -q -p vo-dev -- task run site
 
-      - name: Build VoGUI JS
-        working-directory: vogui/js
-        run: npm ci && npm run build
-
-      - name: Build studio WASM
-        working-directory: studio
-        run: npm run build:wasm
-
-      - name: Install Studio dependencies
-        working-directory: studio
-        run: npm ci
-
-      - name: Install @vogui/runtime from local build
-        working-directory: studio
-        run: npm install --no-save ../vogui/js
-
-      - name: Build Studio
-        working-directory: studio
-        run: npm run build
-
-      - name: Validate BlockKart quickplay package
-        run: python3 scripts/ci/run.py task quickplay-validate
-
-      - name: Smoke BlockKart static package
-        run: python3 scripts/ci/run.py task blockkart-smoke-static
-
-      - name: Archive Pages artifact
-        run: |
-          test -d studio/dist
-          find studio/dist -mindepth 1 -print -quit | grep -q .
-          tar \
-            --dereference --hard-dereference \
-            --directory studio/dist \
-            -cvf "$RUNNER_TEMP/artifact.tar" \
-            --exclude=.git \
-            --exclude=.github \
-            --exclude=".[^/]*" \
-            .
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v6
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
         with:
-          name: github-pages
-          path: ${{ runner.temp }}/artifact.tar
-          retention-days: 1
+          path: apps/studio/dist
 
   deploy:
     needs: build
@@ -119,16 +72,19 @@ jobs:
       - name: Checkout volang
         uses: actions/checkout@v5
 
+      - name: Install Rust
+        uses: ./.github/actions/setup-rust
+
       - name: Setup Node
         uses: actions/setup-node@v5
         with:
-          node-version: "24"
+          node-version: ${{ needs.build.outputs.node_version }}
 
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
 
       - name: Smoke BlockKart deployment
-        run: |
-          build_id="$(node studio/scripts/studio_build_id.mjs)"
-          node scripts/ci/smoke_blockkart.mjs --base-url "${{ steps.deployment.outputs.page_url }}" --build-id "$build_id"
+        env:
+          BLOCKKART_SMOKE_BASE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: cargo run -q -p vo-dev -- task run task:blockkart-smoke-remote

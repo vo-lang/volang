@@ -1,0 +1,75 @@
+version = 1
+default_targets = ["vm", "jit"]
+required_file_pass_targets = ["vm", "jit", "osr", "nostd", "wasm"]
+gc_regression_alias = "gc"
+
+[[alias]]
+name = "both"
+targets = ["vm", "jit"]
+
+[[alias]]
+name = "gc"
+targets = ["gc-vm", "gc-jit"]
+
+[[alias]]
+name = "embed"
+targets = ["nostd"]
+
+[[target]]
+name = "vm"
+kind = "native"
+backend = "vm"
+env = { VOWORK = "off" }
+default_timeout_sec = 20
+
+[[target]]
+name = "jit"
+kind = "native"
+backend = "jit"
+env = { VOWORK = "off", VO_JIT_CALL_THRESHOLD = "1" }
+default_timeout_sec = 60
+
+[[target]]
+name = "osr"
+kind = "native"
+backend = "jit"
+env = { VOWORK = "off", VO_JIT_CALL_THRESHOLD = "1000", VO_JIT_LOOP_THRESHOLD = "1" }
+default_timeout_sec = 60
+
+[[target]]
+name = "gc-vm"
+kind = "native"
+backend = "vm"
+env = { VOWORK = "off", VO_GC_DEBUG = "1" }
+default_timeout_sec = 60
+
+[[target]]
+name = "gc-jit"
+kind = "native"
+backend = "jit"
+env = { VOWORK = "off", VO_GC_DEBUG = "1", VO_JIT_CALL_THRESHOLD = "1" }
+default_timeout_sec = 90
+
+[[target]]
+name = "nostd"
+kind = "embed"
+backend = "vo-embed"
+env = { VOWORK = "off" }
+default_timeout_sec = 20
+
+[[target]]
+name = "wasm"
+kind = "wasm"
+backend = "vo-web"
+env = { VOWORK = "off" }
+default_timeout_sec = 60
+build_command = ["wasm-pack", "build", "lang/crates/vo-web", "--target", "web", "--features", "compiler"]
+release_build_args = ["--release"]
+runner_command = ["node", "lang/crates/vo-web/test_runner.mjs"]
+
+[[target]]
+name = "compile"
+kind = "compile"
+backend = "compile"
+env = { VOWORK = "off" }
+default_timeout_sec = 20

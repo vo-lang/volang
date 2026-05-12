@@ -1,0 +1,491 @@
+version = 1
+
+[groups]
+quality = [
+  "ci-self-check",
+  "d-py-smoke",
+  "eng-lint-tasks",
+  "eng-lint-artifacts",
+  "eng-lint-repo-boundaries",
+  "eng-lint-release",
+  "eng-lint-layout",
+  "docs-lint",
+  "eng-lint-examples",
+  "eng-lint-benchmarks",
+  "cargo-fmt",
+  "cargo-clippy",
+  "cargo-check",
+  "wasm-check",
+]
+
+test = [
+  "test-data-lint",
+  "vo-test",
+  "vo-test-compile",
+  "vo-test-gc",
+  "vo-test-osr",
+  "vo-test-nostd",
+  "vo-test-wasm",
+  "examples-smoke",
+  "cargo-test-release",
+  "wasm-check-release",
+]
+
+release-verify = [
+  "release-verify-vogui",
+  "release-verify-voplay",
+  "release-verify-vopack",
+  "release-verify-vostore",
+]
+
+site = [
+  "vo-web-wasm-build",
+  "vogui-build",
+  "studio-wasm-build",
+  "studio-install-local-vogui",
+  "studio-build",
+  "quickplay-validate",
+  "blockkart-smoke-static",
+]
+
+pr = [
+  "ci-self-check",
+  "d-py-smoke",
+  "eng-lint-tasks",
+  "eng-lint-artifacts",
+  "eng-lint-repo-boundaries",
+  "eng-lint-release",
+  "eng-lint-layout",
+  "docs-lint",
+  "eng-lint-examples",
+  "eng-lint-benchmarks",
+  "cargo-fmt",
+  "cargo-clippy",
+  "cargo-check",
+  "wasm-check",
+  "test-data-lint",
+  "vo-test",
+  "vo-test-compile",
+  "vo-test-gc",
+  "vo-test-osr",
+  "vo-test-nostd",
+  "vo-test-wasm",
+  "examples-smoke",
+  "cargo-test-release",
+  "wasm-check-release",
+  "quickplay-validate",
+  "blockkart-smoke-static",
+  "release-verify-vogui",
+  "release-verify-voplay",
+  "release-verify-vopack",
+  "release-verify-vostore",
+]
+
+full = [
+  "quality",
+  "test",
+  "site",
+  "release-verify",
+]
+
+[[task]]
+name = "ci-self-check"
+title = "ci self-check"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "all"]
+tools = ["rust", "vo-dev"]
+inputs = ["scripts/ci/**", "scripts/ci-local.sh", "d.py", ".githooks/pre-push", ".github/workflows/**", "eng/**", "cmd/vo-dev/**"]
+outputs = []
+tier = "fast"
+
+[[task]]
+name = "d-py-smoke"
+title = "d.py compatibility smoke"
+command = ["./d.py", "help"]
+tools = ["python", "rust", "vo-dev"]
+inputs = ["d.py", "cmd/vo-dev/**", "Cargo.toml", "Cargo.lock", ".githooks/pre-push", "scripts/ci-local.sh"]
+outputs = []
+env = { PYTHONDONTWRITEBYTECODE = "1" }
+tier = "fast"
+
+[[task]]
+name = "eng-lint-tasks"
+title = "engineering task manifest lint"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "tasks"]
+tools = ["rust", "vo-dev"]
+inputs = ["eng/tasks.toml", "eng/toolchains.toml", "eng/project.toml", "eng/artifacts.toml", "eng/ci.toml", "cmd/vo-dev/**", "Cargo.toml", "Cargo.lock"]
+outputs = []
+tier = "fast"
+
+[[task]]
+name = "eng-lint-artifacts"
+title = "engineering artifact policy lint"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "artifacts"]
+tools = ["rust", "vo-dev"]
+inputs = ["eng/artifacts.toml", "eng/tasks.toml", "eng/project.toml", "cmd/vo-dev/**", "apps/studio/public/quickplay/blockkart/**"]
+outputs = []
+tier = "fast"
+
+[[task]]
+name = "eng-lint-repo-boundaries"
+title = "engineering repo boundary lint"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "repo-boundaries"]
+tools = ["rust", "vo-dev"]
+inputs = ["eng/project.toml", "eng/tasks.toml", "cmd/vo-dev/**", "scripts/ci/**", ".github/workflows/**", "d.py", "vo.work", "apps/playground-legacy/vite.config.ts", "apps/playground-legacy/rust/build.rs", "apps/playground-legacy/src/**", "apps/studio/src-tauri/**"]
+outputs = []
+tier = "fast"
+
+[[task]]
+name = "eng-lint-release"
+title = "engineering release policy lint"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "release"]
+tools = ["rust", "vo-dev"]
+inputs = ["eng/release.toml", ".github/workflows/release.yml", "cmd/vo-dev/**", "Cargo.toml", "Cargo.lock"]
+outputs = []
+tier = "fast"
+
+[[task]]
+name = "eng-lint-layout"
+title = "repository layout lint"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "layout"]
+tools = ["rust", "vo-dev"]
+inputs = ["cmd/vo-dev/**", "Cargo.toml", "eng/**", "examples/manifest.toml", "tests/lang/manifest.toml", "benchmarks/manifest.toml", ".gitignore"]
+outputs = []
+tier = "fast"
+
+[[task]]
+name = "docs-sync"
+title = "generate app-visible docs"
+command = ["node", "scripts/ci/docs_sync.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/docs_sync.mjs", "lang/docs/spec/**", "lang/docs/vo-for-gophers.md"]
+outputs = ["apps/playground-legacy/src/assets/docs/generated"]
+tier = "manual"
+
+[[task]]
+name = "docs-lint"
+title = "documentation source sync lint"
+command = ["node", "scripts/ci/docs_lint.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/docs_lint.mjs", "scripts/ci/docs_sync.mjs", "lang/docs/spec/**", "lang/docs/vo-for-gophers.md", "apps/playground-legacy/src/assets/docs/generated/**", "apps/studio/docs/manifest.toml", "apps/studio/docs/pages/**"]
+outputs = []
+tier = "fast"
+
+[[task]]
+name = "eng-lint-examples"
+title = "examples manifest lint"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "examples"]
+tools = ["rust", "vo-dev"]
+inputs = ["cmd/vo-dev/**", "examples/manifest.toml", "examples/**"]
+outputs = []
+tier = "fast"
+
+[[task]]
+name = "eng-lint-benchmarks"
+title = "benchmark manifest lint"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "benchmarks"]
+tools = ["rust", "vo-dev"]
+inputs = ["cmd/vo-dev/**", "benchmarks/manifest.toml", "benchmarks/**"]
+outputs = []
+tier = "fast"
+
+[[task]]
+name = "cargo-fmt"
+title = "cargo fmt"
+command = ["cargo", "fmt", "--all", "--", "--check"]
+tools = ["rust"]
+inputs = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**", ".github/workflows/**", "scripts/ci/**", "d.py"]
+outputs = []
+tier = "fast"
+
+[[task]]
+name = "cargo-clippy"
+title = "cargo clippy"
+command = ["cargo", "clippy", "--workspace", "--all-targets", "--exclude", "vo-playground", "--", "-D", "warnings"]
+tools = ["rust"]
+inputs = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**"]
+outputs = []
+tier = "fast"
+
+[[task]]
+name = "cargo-check"
+title = "cargo check"
+command = ["cargo", "check", "--workspace", "--all-targets", "--exclude", "vo-playground"]
+tools = ["rust"]
+inputs = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**"]
+outputs = []
+tier = "fast"
+
+[[task]]
+name = "wasm-check"
+title = "vo-web wasm check"
+command = ["cargo", "check", "-p", "vo-web", "--target", "wasm32-unknown-unknown"]
+tools = ["rust"]
+inputs = ["lang/crates/**", "lang/stdlib/**", "apps/studio/wasm/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "fast"
+
+[[task]]
+name = "test-data-lint"
+title = "language test manifest lint"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "lint", "--suite", "lang"]
+tools = ["rust", "vo-dev"]
+inputs = ["eng/tests.toml", "cmd/vo-dev/**", "tests/lang/cases/**", "tests/lang/**"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "vo-test"
+title = "vo language tests"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "run", "--suite", "lang", "--targets", "vm,jit", "--release"]
+needs = ["test-data-lint"]
+tools = ["rust", "vo-dev"]
+inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/cases/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "d.py", "eng/tests.toml", "cmd/vo-dev/**"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "vo-test-compile"
+title = "vo compile-fail language tests"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "run", "--suite", "lang", "--targets", "compile", "--release"]
+needs = ["test-data-lint"]
+tools = ["rust", "vo-dev"]
+inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/cases/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "d.py", "eng/tests.toml", "cmd/vo-dev/**"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "vo-test-gc"
+title = "vo GC language tests"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "run", "--suite", "lang", "--targets", "gc-vm,gc-jit", "--release"]
+needs = ["test-data-lint"]
+tools = ["rust", "vo-dev"]
+inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/cases/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "d.py", "eng/tests.toml", "cmd/vo-dev/**"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "vo-test-osr"
+title = "vo OSR language tests"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "run", "--suite", "lang", "--targets", "osr", "--release"]
+needs = ["test-data-lint"]
+tools = ["rust", "vo-dev"]
+inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/cases/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "d.py", "eng/tests.toml", "cmd/vo-dev/**"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "vo-test-nostd"
+title = "vo no_std language tests"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "run", "--suite", "lang", "--targets", "nostd", "--release"]
+needs = ["test-data-lint"]
+tools = ["rust", "vo-dev"]
+inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/cases/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "d.py", "eng/tests.toml", "cmd/vo-dev/**"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "vo-test-wasm"
+title = "vo WASM language tests"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "run", "--suite", "lang", "--targets", "wasm"]
+needs = ["test-data-lint"]
+tools = ["rust", "node", "wasm-pack", "vo-dev"]
+node_workspaces = ["vo-web"]
+inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/cases/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "d.py", "eng/tests.toml", "cmd/vo-dev/**", "lang/crates/vo-web/**"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "examples-smoke"
+title = "examples smoke check"
+command = ["cargo", "run", "-q", "-p", "vo", "--", "check", "examples/basics/hello.vo"]
+needs = ["eng-lint-examples"]
+tools = ["rust"]
+inputs = ["cmd/vo/**", "lang/crates/**", "lang/stdlib/**", "examples/manifest.toml", "examples/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "cargo-test-release"
+title = "cargo test release"
+command = ["cargo", "test", "--workspace", "--release", "--exclude", "vo-playground"]
+tools = ["rust"]
+inputs = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "wasm-check-release"
+title = "vo-web wasm release check"
+command = ["cargo", "check", "-p", "vo-web", "--target", "wasm32-unknown-unknown", "--release"]
+tools = ["rust"]
+inputs = ["lang/crates/**", "lang/stdlib/**", "apps/studio/wasm/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "vo-web-wasm-build"
+title = "build vo-web wasm"
+cwd = "lang/crates/vo-web"
+command = ["wasm-pack", "build", "--target", "web", "--release"]
+tools = ["rust", "wasm-pack"]
+inputs = ["lang/crates/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = ["lang/crates/vo-web/pkg"]
+tier = "site"
+
+[[task]]
+name = "vogui-npm-ci"
+title = "install vogui js dependencies"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "first-party", "run-workspace", "vogui", "js", "--", "npm", "ci"]
+tools = ["rust", "node", "npm", "vo-dev"]
+node_workspaces = ["vogui-js"]
+repo = "vogui"
+internal = true
+inputs = ["eng/project.toml", "cmd/vo-dev/**"]
+outputs = []
+tier = "site"
+
+[[task]]
+name = "vogui-build"
+title = "build vogui js"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "first-party", "run-workspace", "vogui", "js", "--", "npm", "run", "build"]
+needs = ["vogui-npm-ci"]
+tools = ["rust", "node", "npm", "vo-dev"]
+node_workspaces = ["vogui-js"]
+repo = "vogui"
+inputs = ["apps/studio/package.json", "apps/studio/package-lock.json", "eng/project.toml", "cmd/vo-dev/**"]
+outputs = []
+tier = "site"
+
+[[task]]
+name = "studio-wasm-build"
+title = "build studio wasm"
+cwd = "apps/studio"
+command = ["npm", "run", "build:wasm"]
+tools = ["rust", "node", "npm", "wasm-pack"]
+node_workspaces = ["studio"]
+inputs = ["apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/wasm/**", "apps/studio/scripts/build_wasm.mjs", "apps/studio/scripts/studio_build_id.mjs", "apps/studio/public/quickplay/blockkart/**", "lang/crates/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = ["apps/studio/public/wasm/vo_studio_wasm_bg.wasm", "apps/studio/public/wasm/vo_studio_wasm.js", "apps/studio/public/wasm/vo_studio_wasm.build_id"]
+tier = "site"
+
+[[task]]
+name = "studio-npm-ci"
+title = "install studio dependencies"
+cwd = "apps/studio"
+command = ["npm", "ci"]
+tools = ["node", "npm"]
+node_workspaces = ["studio"]
+internal = true
+inputs = ["apps/studio/package.json", "apps/studio/package-lock.json"]
+outputs = ["apps/studio/node_modules"]
+tier = "site"
+
+[[task]]
+name = "studio-install-local-vogui"
+title = "install local @vogui/runtime"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "studio-install-local-vogui"]
+needs = ["studio-npm-ci", "vogui-build"]
+tools = ["rust", "node", "npm", "vo-dev"]
+node_workspaces = ["studio", "vogui-js"]
+repo = "vogui"
+inputs = ["cmd/vo-dev/**", "apps/studio/package.json", "apps/studio/package-lock.json", "eng/project.toml"]
+outputs = []
+tier = "site"
+
+[[task]]
+name = "studio-build"
+title = "build studio"
+cwd = "apps/studio"
+command = ["npm", "run", "build"]
+needs = ["studio-install-local-vogui", "studio-wasm-build"]
+tools = ["node", "npm"]
+node_workspaces = ["studio"]
+inputs = ["apps/studio/index.html", "apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/src/**", "apps/studio/public/**", "apps/studio/scripts/**", "apps/studio/vite.config.*", "apps/studio/tsconfig*.json", "apps/studio/wasm/**", "lang/crates/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = ["apps/studio/dist"]
+tier = "site"
+
+[[task]]
+name = "quickplay-blockkart-package"
+title = "package BlockKart quickplay package"
+cwd = "apps/studio"
+command = ["npm", "run", "package:blockkart"]
+tools = ["node", "npm"]
+node_workspaces = ["studio"]
+repo = "BlockKart"
+internal = true
+inputs = ["apps/studio/scripts/package_blockkart_quickplay.mjs", "eng/project.toml", "external:BlockKart", "module-cache:voplay", "module-cache:vogui"]
+outputs = ["apps/studio/public/quickplay/blockkart"]
+tier = "manual"
+
+[[task]]
+name = "quickplay-validate"
+title = "validate BlockKart quickplay package"
+command = ["node", "scripts/ci/quickplay_validate.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/quickplay_validate.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/scripts/package_blockkart_quickplay.mjs", "apps/studio/src/lib/quickplay.ts", "eng/artifacts.toml"]
+outputs = []
+tier = "site"
+
+[[task]]
+name = "blockkart-smoke-static"
+title = "smoke BlockKart static package"
+command = ["node", "scripts/ci/smoke_blockkart.mjs"]
+needs = ["quickplay-validate"]
+tools = ["node"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/smoke_blockkart.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/src/lib/quickplay.ts"]
+outputs = []
+tier = "site"
+
+[[task]]
+name = "blockkart-smoke-remote"
+title = "smoke BlockKart remote deployment"
+command = ["node", "scripts/ci/smoke_blockkart.mjs"]
+needs = ["quickplay-validate"]
+tools = ["node"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/smoke_blockkart.mjs", "apps/studio/scripts/studio_build_id.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/src/lib/quickplay.ts"]
+outputs = []
+tier = "site"
+
+[[task]]
+name = "release-verify-vogui"
+title = "release verify vogui"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "first-party", "release-verify", "vogui"]
+tools = ["rust", "vo-dev"]
+repo = "vogui"
+inputs = ["cmd/vo/**", "cmd/vo-dev/**", "lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**", "eng/project.toml"]
+outputs = []
+tier = "release"
+
+[[task]]
+name = "release-verify-voplay"
+title = "release verify voplay"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "first-party", "release-verify", "voplay"]
+tools = ["rust", "vo-dev"]
+repo = "voplay"
+inputs = ["cmd/vo/**", "cmd/vo-dev/**", "lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**", "eng/project.toml"]
+outputs = []
+tier = "release"
+
+[[task]]
+name = "release-verify-vopack"
+title = "release verify vopack"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "first-party", "release-verify", "vopack"]
+tools = ["rust", "vo-dev"]
+repo = "vopack"
+inputs = ["cmd/vo/**", "cmd/vo-dev/**", "lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**", "eng/project.toml"]
+outputs = []
+tier = "release"
+
+[[task]]
+name = "release-verify-vostore"
+title = "release verify vostore"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "first-party", "release-verify", "vostore"]
+tools = ["rust", "vo-dev"]
+repo = "vostore"
+inputs = ["cmd/vo/**", "cmd/vo-dev/**", "lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**", "eng/project.toml"]
+outputs = []
+tier = "release"

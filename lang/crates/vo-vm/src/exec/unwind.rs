@@ -162,7 +162,18 @@ pub fn handle_jit_ok_return(
         Some(f) => f,
         None => return ExecResult::Done,
     };
-    fiber.clear_parent_borrowed_slots(&frame, frame.ret_reg as usize, frame.ret_count as usize);
+    let preserve_parent_ret_slots = pending_defers.is_empty();
+    let preserved_ret_reg = if preserve_parent_ret_slots {
+        frame.ret_reg as usize
+    } else {
+        0
+    };
+    let preserved_ret_count = if preserve_parent_ret_slots {
+        frame.ret_count as usize
+    } else {
+        0
+    };
+    fiber.clear_parent_borrowed_slots(&frame, preserved_ret_reg, preserved_ret_count);
 
     if !pending_defers.is_empty() {
         let mut pending = pending_defers;
@@ -368,7 +379,18 @@ fn handle_initial_return(
         Some(f) => f,
         None => return ExecResult::Done,
     };
-    fiber.clear_parent_borrowed_slots(&frame, frame.ret_reg as usize, frame.ret_count as usize);
+    let preserve_parent_ret_slots = pending_defers.is_empty();
+    let preserved_ret_reg = if preserve_parent_ret_slots {
+        frame.ret_reg as usize
+    } else {
+        0
+    };
+    let preserved_ret_count = if preserve_parent_ret_slots {
+        frame.ret_count as usize
+    } else {
+        0
+    };
+    fiber.clear_parent_borrowed_slots(&frame, preserved_ret_reg, preserved_ret_count);
 
     // Execute defers or complete return
     if !pending_defers.is_empty() {
@@ -579,7 +601,7 @@ fn start_panic_unwind(fiber: &mut Fiber, module: &Module) -> ExecResult {
                 extract_frame_return_values(fiber, module);
 
             let frame = pop_frame(fiber).unwrap();
-            fiber.clear_parent_borrowed_slots(&frame, caller_ret_reg as usize, caller_ret_count);
+            fiber.clear_parent_borrowed_slots(&frame, 0, 0);
 
             let mut pending = pending;
             let first_defer = pending.remove(0);

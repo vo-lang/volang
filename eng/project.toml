@@ -1,0 +1,39 @@
+version = 1
+
+[repo]
+name = "volang"
+module = "github.com/vo-lang/volang"
+
+[[first_party]]
+name = "vogui"
+repository = "vo-lang/vogui"
+local_hint = "../vogui"
+ci_checkout = true
+
+[[first_party.workspace]]
+name = "js"
+kind = "node"
+path = "js"
+
+[[first_party]]
+name = "voplay"
+repository = "vo-lang/voplay"
+local_hint = "../voplay"
+ci_checkout = true
+
+[[first_party]]
+name = "vopack"
+repository = "vo-lang/vopack"
+local_hint = "../vopack"
+ci_checkout = true
+
+[[first_party]]
+name = "vostore"
+repository = "vo-lang/vostore"
+local_hint = "../vostore"
+ci_checkout = true
+
+[[external_project]]
+name = "BlockKart"
+local_hint = "../BlockKart"
+ci_checkout = false

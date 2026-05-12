@@ -1,0 +1,61 @@
+version = 1
+
+[tools.rust]
+source = "rust-toolchain.toml"
+required = true
+check = ["cargo", "--version"]
+
+[tools.node]
+version = "24"
+required = true
+check = ["node", "--version"]
+
+[tools.npm]
+version_from = "node"
+required = true
+check = ["npm", "--version"]
+
+[tools.wasm-pack]
+version = "0.14.0"
+required = true
+check = ["wasm-pack", "--version"]
+
+[tools.python]
+minimum = "3.9"
+required = true
+usage = "d.py compatibility wrapper and CI smoke while the wrapper exists"
+check = ["python3", "--version"]
+
+[tools.vo-dev]
+source = "cmd/vo-dev"
+required = true
+
+[[rust_cache_workspace]]
+path = "."
+target = "target"
+
+[[rust_cache_workspace]]
+path = "apps/studio/wasm"
+target = "target"
+
+[[node_workspace]]
+name = "studio"
+path = "apps/studio"
+lockfile = "apps/studio/package-lock.json"
+
+[[node_workspace]]
+name = "playground-legacy"
+path = "apps/playground-legacy"
+lockfile = "apps/playground-legacy/package-lock.json"
+status = "legacy"
+
+[[node_workspace]]
+name = "vo-web"
+path = "lang/crates/vo-web"
+lockfile = "lang/crates/vo-web/package-lock.json"
+
+[[node_workspace]]
+name = "vogui-js"
+repo = "vogui"
+path = "js"
+lockfile = "js/package-lock.json"

@@ -159,21 +159,45 @@ fn collect_fiber_roots(gc: &Gc, roots: &mut Vec<GcRef>, fiber: &Fiber, functions
         #[cfg(debug_assertions)]
         {
             for (slot_idx, slot_type) in slot_types.iter().enumerate() {
-                if *slot_type == vo_runtime::SlotType::GcRef {
-                    let raw = stack_slice[slot_idx];
-                    if raw != 0 && gc.canonicalize_ref(raw as GcRef).is_none() {
-                        panic!(
-                            "collect_fiber_roots: invalid GcRef in fiber={} func={} name={} frame_bp={} frame_pc={} frame_scan_slots={} scan_slot={} raw=0x{:016x}",
-                            fiber.id,
-                            frame.func_id,
-                            func.name,
-                            frame.bp,
-                            frame.pc,
-                            frame.scan_slots,
-                            slot_idx,
-                            raw,
-                        );
+                match *slot_type {
+                    vo_runtime::SlotType::GcRef => {
+                        let raw = stack_slice[slot_idx];
+                        if raw != 0 && gc.canonicalize_ref(raw as GcRef).is_none() {
+                            panic!(
+                                "collect_fiber_roots: invalid GcRef in fiber={} func={} name={} frame_bp={} frame_pc={} frame_scan_slots={} scan_slot={} raw=0x{:016x}",
+                                fiber.id,
+                                frame.func_id,
+                                func.name,
+                                frame.bp,
+                                frame.pc,
+                                frame.scan_slots,
+                                slot_idx,
+                                raw,
+                            );
+                        }
                     }
+                    vo_runtime::SlotType::Interface0 => {
+                        if slot_idx + 1 < stack_slice.len()
+                            && vo_runtime::objects::interface::data_is_gc_ref(stack_slice[slot_idx])
+                        {
+                            let raw = stack_slice[slot_idx + 1];
+                            if raw != 0 && gc.canonicalize_ref(raw as GcRef).is_none() {
+                                panic!(
+                                    "collect_fiber_roots: invalid interface GcRef in fiber={} func={} name={} frame_bp={} frame_pc={} frame_scan_slots={} scan_slot={} slot0=0x{:016x} raw=0x{:016x}",
+                                    fiber.id,
+                                    frame.func_id,
+                                    func.name,
+                                    frame.bp,
+                                    frame.pc,
+                                    frame.scan_slots,
+                                    slot_idx,
+                                    stack_slice[slot_idx],
+                                    raw,
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -624,21 +648,45 @@ fn scan_fiber(gc: &mut Gc, fiber: &Fiber, functions: &[FunctionDef]) {
         #[cfg(debug_assertions)]
         {
             for (slot_idx, slot_type) in slot_types.iter().enumerate() {
-                if *slot_type == vo_runtime::SlotType::GcRef {
-                    let raw = stack_slice[slot_idx];
-                    if raw != 0 && gc.canonicalize_ref(raw as GcRef).is_none() {
-                        panic!(
-                            "scan_fibers: invalid GcRef in fiber={} func={} name={} frame_bp={} frame_pc={} frame_scan_slots={} scan_slot={} raw=0x{:016x}",
-                            fiber.id,
-                            frame.func_id,
-                            func.name,
-                            frame.bp,
-                            frame.pc,
-                            frame.scan_slots,
-                            slot_idx,
-                            raw,
-                        );
+                match *slot_type {
+                    vo_runtime::SlotType::GcRef => {
+                        let raw = stack_slice[slot_idx];
+                        if raw != 0 && gc.canonicalize_ref(raw as GcRef).is_none() {
+                            panic!(
+                                "scan_fibers: invalid GcRef in fiber={} func={} name={} frame_bp={} frame_pc={} frame_scan_slots={} scan_slot={} raw=0x{:016x}",
+                                fiber.id,
+                                frame.func_id,
+                                func.name,
+                                frame.bp,
+                                frame.pc,
+                                frame.scan_slots,
+                                slot_idx,
+                                raw,
+                            );
+                        }
                     }
+                    vo_runtime::SlotType::Interface0 => {
+                        if slot_idx + 1 < stack_slice.len()
+                            && vo_runtime::objects::interface::data_is_gc_ref(stack_slice[slot_idx])
+                        {
+                            let raw = stack_slice[slot_idx + 1];
+                            if raw != 0 && gc.canonicalize_ref(raw as GcRef).is_none() {
+                                panic!(
+                                    "scan_fibers: invalid interface GcRef in fiber={} func={} name={} frame_bp={} frame_pc={} frame_scan_slots={} scan_slot={} slot0=0x{:016x} raw=0x{:016x}",
+                                    fiber.id,
+                                    frame.func_id,
+                                    func.name,
+                                    frame.bp,
+                                    frame.pc,
+                                    frame.scan_slots,
+                                    slot_idx,
+                                    stack_slice[slot_idx],
+                                    raw,
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }

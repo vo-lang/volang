@@ -1,6 +1,6 @@
 # Vo Native FFI Specification
 
-Version: 1.0  
+Version: 1.0
 Status: Draft
 
 ## 1. Scope

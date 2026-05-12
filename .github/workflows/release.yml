@@ -9,25 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  plan:
+    name: Plan Release
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: ./.github/actions/setup-rust
+
+      - name: Plan release targets
+        id: plan
+        run: cargo run -q -p vo-dev -- release matrix --github-output
+
   build:
     name: Build ${{ matrix.target }}
+    needs: plan
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-14
-            use_cross: false
-          - target: x86_64-apple-darwin
-            os: macos-15-intel
-            use_cross: false
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
-            use_cross: false
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04
-            use_cross: true
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v5
@@ -35,46 +38,26 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust
 
-      - name: Install requested Rust target
-        run: rustup target add ${{ matrix.target }}
-
       - name: Install cross
         if: matrix.use_cross
-        run: cargo install cross --locked
+        run: cargo install cross --locked --version "$(cargo run -q -p vo-dev -- release cross-version)"
 
       - name: Build vo CLI
         env:
           VO_BUILD_COMMIT: ${{ github.sha }}
           VO_BUILD_DATE: ${{ github.ref_name }}
-          CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
-          CARGO_PROFILE_RELEASE_LTO: "thin"
-        run: |
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p vo --no-default-features
-          else
-            cargo build --release --target ${{ matrix.target }} -p vo --no-default-features
-          fi
+        run: cargo run -q -p vo-dev -- release build "${{ matrix.target }}"
 
       - name: Package tarball
-        shell: bash
-        run: |
-          BINARY=target/${{ matrix.target }}/release/vo
-          TARBALL=vo-${{ matrix.target }}.tar.gz
-          tar -czf "$TARBALL" -C "$(dirname $BINARY)" "$(basename $BINARY)"
-          if command -v sha256sum &>/dev/null; then
-            sha256sum "$TARBALL" > "$TARBALL.sha256"
-          else
-            shasum -a 256 "$TARBALL" > "$TARBALL.sha256"
-          fi
-          echo "TARBALL=$TARBALL" >> $GITHUB_ENV
+        run: cargo run -q -p vo-dev -- release package "${{ matrix.target }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: vo-${{ matrix.target }}
           path: |
-            vo-${{ matrix.target }}.tar.gz
-            vo-${{ matrix.target }}.tar.gz.sha256
+            ${{ matrix.artifact_name }}
+            ${{ matrix.artifact_name }}.sha256
 
   release:
     name: Create GitHub Release
@@ -86,9 +69,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Install Rust toolchain
+        uses: ./.github/actions/setup-rust
+
       - name: Extract version
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+        run: cargo run -q -p vo-dev -- release version --github-output
 
       - name: Download all artifacts
         uses: actions/download-artifact@v7
@@ -97,42 +83,12 @@ jobs:
           merge-multiple: true
 
       - name: Write release notes
-        run: |
-          cat > RELEASE_NOTES.md <<'EOF'
-          ## Vo ${{ github.ref_name }}
-
-          ### Install via Homebrew
-          ```sh
-          brew tap vo-lang/vo
-          brew install vo
-          ```
-
-          ### Manual install
-          Download the binary for your platform below, extract, and place `vo` on your PATH.
-          EOF
+        run: cargo run -q -p vo-dev -- release notes --tag "${{ github.ref_name }}" --out RELEASE_NOTES.md
 
       - name: Create or update release
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          prerelease_args=()
-          if [[ "$TAG" == *-* ]]; then
-            prerelease_args+=(--prerelease)
-          fi
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" \
-              --title "Vo $TAG" \
-              --notes-file RELEASE_NOTES.md \
-              "${prerelease_args[@]}"
-            gh release upload "$TAG" artifacts/*.tar.gz artifacts/*.sha256 --clobber
-          else
-            gh release create "$TAG" artifacts/*.tar.gz artifacts/*.sha256 \
-              --title "Vo $TAG" \
-              --notes-file RELEASE_NOTES.md \
-              "${prerelease_args[@]}"
-          fi
+        run: cargo run -q -p vo-dev -- release publish --tag "${{ github.ref_name }}" --artifacts artifacts --notes RELEASE_NOTES.md
 
   update-homebrew:
     name: Update Homebrew Formula
@@ -140,73 +96,38 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Checkout volang
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: ./.github/actions/setup-rust
+
+      - name: Read Homebrew metadata
+        id: homebrew
+        run: cargo run -q -p vo-dev -- release homebrew-metadata --github-output
+
       - name: Download SHA256 files
         uses: actions/download-artifact@v7
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Read SHA256 values
-        id: sha
-        run: |
-          echo "aarch64_apple=$(awk '{print $1}' artifacts/vo-aarch64-apple-darwin.tar.gz.sha256)" >> $GITHUB_OUTPUT
-          echo "x86_64_apple=$(awk '{print $1}' artifacts/vo-x86_64-apple-darwin.tar.gz.sha256)" >> $GITHUB_OUTPUT
-          echo "x86_64_linux=$(awk '{print $1}' artifacts/vo-x86_64-unknown-linux-gnu.tar.gz.sha256)" >> $GITHUB_OUTPUT
-          echo "aarch64_linux=$(awk '{print $1}' artifacts/vo-aarch64-unknown-linux-gnu.tar.gz.sha256)" >> $GITHUB_OUTPUT
-
-      - name: Checkout homebrew-vo
+      - name: Checkout Homebrew tap
         uses: actions/checkout@v5
         with:
-          repository: vo-lang/homebrew-vo
+          repository: ${{ steps.homebrew.outputs.repository }}
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-vo
+          path: ${{ steps.homebrew.outputs.checkout_path }}
 
       - name: Update Formula
-        env:
-          VERSION: ${{ needs.release.outputs.version }}
-          SHA_AARCH64_APPLE: ${{ steps.sha.outputs.aarch64_apple }}
-          SHA_X86_64_APPLE: ${{ steps.sha.outputs.x86_64_apple }}
-          SHA_X86_64_LINUX: ${{ steps.sha.outputs.x86_64_linux }}
-          SHA_AARCH64_LINUX: ${{ steps.sha.outputs.aarch64_linux }}
-        run: |
-          cd homebrew-vo
-          python3 - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          path = Path("Formula/vo.rb")
-          text = path.read_text()
-
-          version = os.environ["VERSION"]
-          replacements = {
-              "aarch64-apple-darwin": os.environ["SHA_AARCH64_APPLE"],
-              "x86_64-apple-darwin": os.environ["SHA_X86_64_APPLE"],
-              "x86_64-unknown-linux-gnu": os.environ["SHA_X86_64_LINUX"],
-              "aarch64-unknown-linux-gnu": os.environ["SHA_AARCH64_LINUX"],
-          }
-
-          text, count = re.subn(r'(?m)^  release_version = ".*"$', f'  release_version = "{version}"', text, count=1)
-          if count != 1:
-              raise SystemExit("failed to update Formula release_version")
-
-          for target, sha in replacements.items():
-              pattern = re.compile(
-                  rf'(?m)^(\s*"{re.escape(target)}"\s*=>\s*")([^"]+)(".*)$'
-              )
-              text, count = pattern.subn(lambda match, sha=sha: f'{match.group(1)}{sha}{match.group(3)}', text, count=1)
-              if count != 1:
-                  raise SystemExit(f"failed to update SHA256 for {target}")
-
-          path.write_text(text)
-          PY
+        run: cargo run -q -p vo-dev -- release update-homebrew --repo "${{ steps.homebrew.outputs.checkout_path }}" --artifacts artifacts --version "${{ needs.release.outputs.version }}"
 
       - name: Commit and push Formula update
         run: |
-          cd homebrew-vo
+          cd "${{ steps.homebrew.outputs.checkout_path }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/vo.rb
+          git add "${{ steps.homebrew.outputs.formula_path }}"
           if git diff --cached --quiet; then
             echo "Formula already up to date"
             exit 0

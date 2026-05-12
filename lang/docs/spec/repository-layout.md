@@ -40,7 +40,7 @@ repo/
 Rules:
 
 - `vo.mod` and `vo.lock` must be committed.
-- `.vodeps/`, `.vo-cache/`, build artifacts, and Rust `target/` outputs must not be committed.
+- `.vodeps/`, `.vo-cache/`, `.volang/`, build artifacts, and Rust `target/` outputs must not be committed.
 - Public reusable packages should be placed under `pkg/`.
 - Non-public implementation packages should be placed under `internal/`.
 - Executable entry points should be placed under `cmd/<name>/`.
@@ -116,7 +116,7 @@ Additional required checks when extension metadata is present in `vo.mod`:
 Additional recommended checks:
 
 - `vo.lock` integrity consistency (no dependency or artifact drift without corresponding lock update)
-- no forbidden committed directories (`.vodeps`, `.vo-cache`, `target/`)
+- no forbidden committed directories (`.vodeps`, `.vo-cache`, `.volang`, `target/`)
 - If `vo.mod` declares native targets: at least one native test on each covered host platform should invoke an extern function to verify the shared library loads correctly
 
 ## 7. Publishing Checklist

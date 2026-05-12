@@ -176,24 +176,35 @@ pub fn exec_map_iter_next(stack: *mut Slot, bp: usize, inst: &Instruction) {
     let ok_slot = bp + inst.c as usize;
     let key_slots = (inst.flags & 0x0F) as usize;
     let val_slots = ((inst.flags >> 4) & 0x0F) as usize;
+    let key_dst = bp + inst.a as usize;
+    let val_dst = key_dst + key_slots;
 
     // Get mutable reference to iterator on stack
     let iter = unsafe { &mut *(stack.add(iter_slot) as *mut map::MapIterator) };
 
     match map::iter_next(iter) {
         Some((key, val)) => {
-            let key_dst = bp + inst.a as usize;
-            let val_dst = key_dst + key_slots;
-
             for (i, &k) in key.iter().enumerate().take(key_slots) {
                 stack_set(stack, key_dst + i, k);
+            }
+            for i in key.len().min(key_slots)..key_slots {
+                stack_set(stack, key_dst + i, 0);
             }
             for (i, &v) in val.iter().enumerate().take(val_slots) {
                 stack_set(stack, val_dst + i, v);
             }
+            for i in val.len().min(val_slots)..val_slots {
+                stack_set(stack, val_dst + i, 0);
+            }
             stack_set(stack, ok_slot, 1);
         }
         None => {
+            for i in 0..key_slots {
+                stack_set(stack, key_dst + i, 0);
+            }
+            for i in 0..val_slots {
+                stack_set(stack, val_dst + i, 0);
+            }
             stack_set(stack, ok_slot, 0);
         }
     }

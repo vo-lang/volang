@@ -1,0 +1,61 @@
+version = 1
+
+[[section]]
+title = "Getting Started"
+slug = "getting-started"
+
+[[section.page]]
+title = "Introduction"
+file = "getting-started/introduction.md"
+
+[[section.page]]
+title = "Installation"
+file = "getting-started/installation.md"
+
+[[section.page]]
+title = "Hello World"
+file = "getting-started/hello-world.md"
+
+[[section]]
+title = "Language"
+slug = "language"
+
+[[section.page]]
+title = "Vo for Go Programmers"
+file = "language/vo-for-gophers.md"
+
+[[section.page]]
+title = "Syntax Overview"
+file = "language/syntax.md"
+
+[[section.page]]
+title = "Error Handling"
+file = "language/error-handling.md"
+
+[[section.page]]
+title = "Dynamic Access"
+file = "language/dynamic-access.md"
+
+[[section]]
+title = "CLI"
+slug = "cli"
+
+[[section.page]]
+title = "Commands"
+file = "cli/commands.md"
+
+[[section]]
+title = "Advanced"
+slug = "advanced"
+
+[[section.page]]
+title = "Execution Backends"
+file = "advanced/backends.md"
+
+[[section.page]]
+title = "Module System"
+file = "advanced/modules.md"
+
+[[section.page]]
+title = "Embedding Vo in Rust"
+file = "advanced/embedding.md"

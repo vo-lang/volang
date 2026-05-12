@@ -1031,11 +1031,22 @@ pub extern "C" fn vo_map_iter_next(
 ) -> u64 {
     use crate::objects::map;
     let iter = unsafe { &mut *(iter_ptr as *mut map::MapIterator) };
+    let key_slots = key_slots as usize;
+    let val_slots = val_slots as usize;
+
+    unsafe {
+        if key_slots > 0 {
+            core::ptr::write_bytes(key_ptr, 0, key_slots);
+        }
+        if val_slots > 0 {
+            core::ptr::write_bytes(val_ptr, 0, val_slots);
+        }
+    }
 
     match map::iter_next(iter) {
         Some((key, val)) => {
-            let key_copy = (key_slots as usize).min(key.len());
-            let val_copy = (val_slots as usize).min(val.len());
+            let key_copy = key_slots.min(key.len());
+            let val_copy = val_slots.min(val.len());
             unsafe {
                 core::ptr::copy_nonoverlapping(key.as_ptr(), key_ptr, key_copy);
                 core::ptr::copy_nonoverlapping(val.as_ptr(), val_ptr, val_copy);

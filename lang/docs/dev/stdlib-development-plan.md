@@ -540,7 +540,7 @@ These are user-visible failures in playground flows (timezone APIs and entropy q
 |------|------|-------------|
 | W2.1 | `vo-web/runtime-wasm/src/time.rs` | Replace panic implementation with suspend-via-W0 path. Convert nanoseconds to milliseconds carefully (floor/ceil policy documented and tested). |
 | W2.2 | `vo-web/runtime-wasm/src/time.rs` + registration | Register the **correct extern name** used by Vo stdlib (`time_blocking_sleepNano`). |
-| W2.3 | `lang/test_data` + wasm integration tests | Add tests for `time.Sleep`, `time.After`, `NewTimer`, `NewTicker`, reset/stop behavior, and no-busy-loop guarantees. |
+| W2.3 | `tests/lang` + wasm integration tests | Add tests for `time.Sleep`, `time.After`, `NewTimer`, `NewTicker`, reset/stop behavior, and no-busy-loop guarantees. |
 | W2.4 | Scheduler re-entry tests | Verify callback-driven re-entry remains correct with nested goroutines and multiple concurrent sleepers. |
 
 **Exit criteria:** no panic path for `Sleep` on WASM; timer family behaves consistently with native semantics for supported cases.

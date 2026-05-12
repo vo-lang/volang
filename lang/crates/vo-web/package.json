@@ -38,8 +38,5 @@
     "wasm",
     "webassembly"
   ],
-  "license": "MIT",
-  "dependencies": {
-    "smol-toml": "^1.6.0"
-  }
+  "license": "MIT"
 }

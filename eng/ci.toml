@@ -1,0 +1,50 @@
+version = 1
+
+[changed_files]
+fallback = ["cargo-fmt", "ci-self-check", "test-data-lint", "vo-test"]
+unknown_path_policy = "fallback"
+
+[[known_prefix]]
+path = "skills/**"
+tasks = ["cargo-fmt", "ci-self-check", "test-data-lint", "vo-test"]
+
+[[known_prefix]]
+path = "docs/**"
+tasks = ["docs-lint"]
+
+[[known_prefix]]
+path = "lang/docs/**"
+tasks = ["docs-lint", "ci-self-check"]
+
+[[known_prefix]]
+path = "apps/studio/docs/**"
+tasks = ["docs-lint", "studio-build"]
+
+[[known_prefix]]
+path = "apps/playground-legacy/src/assets/docs/generated/**"
+tasks = ["docs-lint"]
+
+[[known_prefix]]
+path = "examples/**"
+tasks = ["eng-lint-examples", "examples-smoke"]
+
+[[known_prefix]]
+path = "benchmarks/**"
+tasks = ["eng-lint-benchmarks"]
+
+[[known_prefix]]
+path = "eng/toolchains.toml"
+tasks = [
+  "ci-self-check",
+  "d-py-smoke",
+  "eng-lint-tasks",
+  "vo-test-wasm",
+  "wasm-check",
+  "wasm-check-release",
+  "vo-web-wasm-build",
+  "vogui-build",
+  "studio-wasm-build",
+  "studio-build",
+  "quickplay-validate",
+  "blockkart-smoke-static",
+]

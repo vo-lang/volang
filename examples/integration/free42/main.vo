@@ -1,0 +1,170 @@
+// Free42 - HP-42S RPN Scientific Calculator
+// A multi-file GUI example demonstrating: complex state management,
+// shift-key modes, soft-menu system, number formatting (FIX/SCI/ENG/ALL).
+package main
+
+import "github.com/vo-lang/vogui"
+
+// ============ Constants ============
+
+const MaxRegs = 100
+
+// Display format modes
+const (
+	FmtAll = 0
+	FmtFix = 1
+	FmtSci = 2
+	FmtEng = 3
+)
+
+// Shift states
+const (
+	ShiftNone = 0
+	ShiftUp   = 1
+	ShiftDown = 2
+)
+
+// Trig modes
+const (
+	TrigDeg = 0
+	TrigRad = 1
+	TrigGrd = 2
+)
+
+// Menu IDs
+const (
+	MenuNone    = 0
+	MenuMath    = 1
+	MenuTrig    = 2
+	MenuHyp     = 3
+	MenuConvert = 4
+	MenuConv2   = 5
+	MenuDisp    = 6
+	MenuMode    = 7
+)
+
+// ============ State ============
+
+type State struct {
+	// RPN stack: index 0=T, 1=Z, 2=Y, 3=X
+	Stack   [4]float64
+	LastX   float64
+	Shift   int
+	TrigMode int
+
+	// Digit entry
+	Entry    string
+	Entering bool
+	HasDot   bool
+	HasExp   bool
+	Negative bool
+	ExpEntry bool
+
+	// Display format
+	FmtMode   int
+	FmtDigits int
+
+	// Soft-menu
+	Menu     int
+	MenuPage int
+
+	// Storage registers
+	Regs [MaxRegs]float64
+
+	// STO/RCL pending input
+	StoPending bool
+	RclPending bool
+
+	// Error message
+	Error string
+
+	// Stack lift control
+	LiftEnabled bool
+}
+
+func initState() any {
+	return &State{
+		FmtMode:     FmtFix,
+		FmtDigits:   4,
+		LiftEnabled: true,
+	}
+}
+
+// ============ Root View ============
+
+func view(state any) vogui.Node {
+	s := state.(*State)
+	return vogui.Center(
+		vogui.Column(
+			vogui.Text("Free42").Font(14).Bold().Fg("#aaa"),
+			viewDisplay(s),
+			viewKeyboard(s),
+		).Gap(6).P(16).W(340).
+			Bg(colorBody).Rounded(12).
+			Border("2px solid #444"),
+	).Bg("#1a1a1e")
+}
+
+// ============ Global Keyboard Handler ============
+
+func handleKey(state any, key string) {
+	s := state.(*State)
+	switch key {
+	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		pressDigit(s, key)
+	case ".":
+		pressDot(s)
+	case "Enter":
+		pressEnter(s)
+	case "Backspace":
+		pressBackspace(s)
+	case "+":
+		pressAdd(s)
+	case "-":
+		pressSub(s)
+	case "*":
+		pressMul(s)
+	case "/":
+		pressDiv(s)
+	case "Escape":
+		if s.Menu != MenuNone {
+			closeMenu(s)
+		} else {
+			pressClearX(s)
+		}
+	case "s":
+		pressSin(s)
+	case "c":
+		pressCos(s)
+	case "t":
+		pressTan(s)
+	case "l":
+		pressLn(s)
+	case "L":
+		pressLog(s)
+	case "q":
+		pressSqrt(s)
+	case "p":
+		pressPi(s)
+	case "!":
+		pressFactorial(s)
+	case "r":
+		pressRecip(s)
+	case "^":
+		pressYtoX(s)
+	case "x":
+		pressSwapXY(s)
+	case "n":
+		pressChs(s)
+	}
+}
+
+// ============ Main ============
+
+func main() {
+	vogui.SetGlobalKeyHandler(handleKey)
+	vogui.Run(vogui.App{
+		Init: initState,
+		View: view,
+	})
+}

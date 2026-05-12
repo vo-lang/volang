@@ -1,0 +1,55 @@
+package main
+
+import "regexp"
+
+func main() {
+	// Compile a regexp
+	re := regexp.MustCompile(`\d+`)
+
+	// Test MatchString
+	matched := re.MatchString("hello123world")
+	println("MatchString '\\d+' in 'hello123world':", matched)
+
+	// Test FindString
+	found := re.FindString("hello123world456")
+	println("FindString '\\d+' in 'hello123world456':", found)
+
+	// Test FindAllString
+	all := re.FindAllString("a1b2c3d4", -1)
+	println("FindAllString '\\d+' in 'a1b2c3d4':")
+	for i := 0; i < len(all); i++ {
+		println("  ", i, ":", all[i])
+	}
+
+	// Test ReplaceAllString
+	replaced := re.ReplaceAllString("a1b2c3", "X")
+	println("ReplaceAllString '\\d+' -> 'X' in 'a1b2c3':", replaced)
+
+	// Test Split
+	reSpace := regexp.MustCompile(`\s+`)
+	parts := reSpace.Split("hello world  foo", -1)
+	println("Split by '\\s+' in 'hello world  foo':")
+	for i := 0; i < len(parts); i++ {
+		println("  ", i, ":", parts[i])
+	}
+
+	// Test FindStringSubmatch (capture groups)
+	reEmail := regexp.MustCompile(`(\w+)@(\w+)\.(\w+)`)
+	submatch := reEmail.FindStringSubmatch("user@example.com")
+	println("FindStringSubmatch email pattern:")
+	for i := 0; i < len(submatch); i++ {
+		println("  ", i, ":", submatch[i])
+	}
+
+	// Test QuoteMeta
+	quoted := regexp.QuoteMeta("hello.world*")
+	println("QuoteMeta 'hello.world*':", quoted)
+
+	// Test package-level MatchString
+	ok, err := regexp.MatchString(`^\d+$`, "12345")
+	if err != nil {
+		println("Error:", err)
+	} else {
+		println("MatchString '^\\d+$' in '12345':", ok)
+	}
+}

@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "artifact": "studio.quickplay.blockkart",
+  "path": "apps/studio/public/quickplay/blockkart",
+  "generator": {
+    "command": [
+      "vo-dev",
+      "task",
+      "run",
+      "task:quickplay-blockkart-package"
+    ],
+    "script": "apps/studio/scripts/package_blockkart_quickplay.mjs",
+    "version": 1
+  },
+  "inputs": [
+    "apps/studio/scripts/package_blockkart_quickplay.mjs",
+    "eng/project.toml",
+    "external:BlockKart",
+    "module-cache:voplay",
+    "module-cache:vogui"
+  ],
+  "project": {
+    "commit": "a6726a17eb47c05a2ce112fca2601028ad616d48",
+    "dirty": false,
+    "filesDigest": "sha256:5e6bca86d215a72b17837fa7b8f61f1cff101940e6a2deff65b01cdcb362d378",
+    "module": "github.com/vo-lang/blockkart"
+  },
+  "dependencies": [
+    {
+      "artifacts": [
+        {
+          "digest": "sha256:83d90c148f58851ffed12ceec24cc641889456c1ffcab3ea40b8f66d4e3aab83",
+          "path": "artifacts/vogui.wasm",
+          "size": 29805,
+          "url": "/quickplay/blockkart/artifacts/github.com@vo-lang@vogui/v0.1.15/vogui.wasm"
+        }
+      ],
+      "cacheDir": "github.com@vo-lang@vogui/v0.1.15",
+      "filesDigest": "sha256:bb3cae3ed9961aa32d993620d681501e82f74f42c4459fec0ef70298c3499fe1",
+      "module": "github.com/vo-lang/vogui",
+      "version": "v0.1.15"
+    },
+    {
+      "artifacts": [],
+      "cacheDir": "github.com@vo-lang@vopack/v0.1.2",
+      "filesDigest": "sha256:98b0f57a53a3c6fb2d09fbf9d3200de8c1e801acea94830221290e978872ffc6",
+      "module": "github.com/vo-lang/vopack",
+      "version": "v0.1.2"
+    },
+    {
+      "artifacts": [
+        {
+          "digest": "sha256:c548aa0fc3d8444eef5df25c36a43de8e28407293f1cd75b64f8271a2e05006f",
+          "path": "artifacts/voplay_island_bg.wasm",
+          "size": 3614081,
+          "url": "/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.28/voplay_island_bg.wasm"
+        },
+        {
+          "digest": "sha256:8e5de169d3d33c06c03c4f115ad9ed6688de8832942244f062bf4dc8ea7ca2b2",
+          "path": "artifacts/voplay_island.js",
+          "size": 108533,
+          "url": "/quickplay/blockkart/artifacts/github.com@vo-lang@voplay/v0.1.28/voplay_island.js"
+        }
+      ],
+      "cacheDir": "github.com@vo-lang@voplay/v0.1.28",
+      "filesDigest": "sha256:5ef2226138c2879ce61de15575c9e1409df9a98fec4a486d25ccddc73a90c8ab",
+      "module": "github.com/vo-lang/voplay",
+      "version": "v0.1.28"
+    }
+  ],
+  "outputs": [
+    {
+      "digest": "sha256:97c5b4d4c50b8d8c6686867bdfaabdcc0e08d5c9193222550c62d0a95f860687",
+      "path": "project.json",
+      "size": 22708844
+    },
+    {
+      "digest": "sha256:8bb27949554ac0c997026754e8c2c700ba8fa00423ba89f28753d1a967342c54",
+      "path": "deps.json",
+      "size": 2410045
+    }
+  ]
+}

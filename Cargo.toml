@@ -3,16 +3,17 @@ resolver = "2"
 members = [
   "lang/crates/*",
   "lang/crates/vo-web/runtime-wasm",
-  "playground/rust",
+  "apps/playground-legacy/rust",
   "cmd/vo",
+  "cmd/vo-dev",
   "cmd/vo-embed",
-  "cmd/vo-test/rust",
+  "cmd/vo-test",
 ]
 exclude = [
   "3rdparty/git2/rust",
   "3rdparty/resvg/rust",
   "3rdparty/wgpu/rust",
-  "studio/src-tauri",
+  "apps/studio/src-tauri",
   "lang/crates/vo-module-old",
 ]
 
@@ -27,10 +28,6 @@ opt-level = "s"
 lto = true
 strip = true
 debug = false
-
-[profile.release.package.vo-studio-wasm]
-debug = true
-strip = false
 
 [profile.release.package.vo-test]
 opt-level = 3

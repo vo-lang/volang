@@ -1,0 +1,125 @@
+version = 1
+
+[[artifact]]
+name = "studio.quickplay.blockkart"
+class = "generated-checked-in"
+path = "apps/studio/public/quickplay/blockkart"
+owner = "studio"
+generator = ["vo-dev", "task", "run", "task:quickplay-blockkart-package"]
+validator = ["vo-dev", "task", "run", "task:quickplay-validate"]
+provenance = "apps/studio/public/quickplay/blockkart/provenance.json"
+max_total_bytes = 35000000
+allowed_extensions = [".json", ".js", ".wasm", ".vpak"]
+inputs = [
+  "apps/studio/scripts/package_blockkart_quickplay.mjs",
+  "eng/project.toml",
+  "external:BlockKart",
+  "module-cache:voplay",
+  "module-cache:vogui",
+]
+tracked = true
+approval = "checked-in-generated"
+
+[[artifact]]
+name = "studio.fixture.blockkart-vpak"
+class = "fixture"
+path = "apps/studio/fixtures/blockkart/blockkart.vpak"
+owner = "studio"
+tracked = true
+allowed_extensions = [".vpak"]
+
+[[artifact]]
+name = "playground.generated-docs"
+class = "generated-checked-in"
+path = "apps/playground-legacy/src/assets/docs/generated"
+owner = "docs"
+generator = ["vo-dev", "task", "run", "task:docs-sync"]
+validator = ["vo-dev", "task", "run", "task:docs-lint"]
+provenance = "apps/playground-legacy/src/assets/docs/generated/_manifest.json"
+max_total_bytes = 1500000
+inputs = [
+  "scripts/ci/docs_sync.mjs",
+  "lang/docs/spec/**",
+  "lang/docs/vo-for-gophers.md",
+]
+allowed_extensions = [".md", ".json"]
+tracked = true
+approval = "checked-in-generated"
+
+[[artifact]]
+name = "root.cargo-target"
+class = "cache"
+path = "target"
+tracked = false
+
+[[artifact]]
+name = "studio.tauri-target"
+class = "cache"
+path = "apps/studio/src-tauri/target"
+tracked = false
+
+[[artifact]]
+name = "studio.wasm-target"
+class = "cache"
+path = "apps/studio/wasm/target"
+tracked = false
+
+[[artifact]]
+name = "studio.node-modules"
+class = "cache"
+path = "apps/studio/node_modules"
+tracked = false
+
+[[artifact]]
+name = "playground.node-modules"
+class = "cache"
+path = "apps/playground-legacy/node_modules"
+tracked = false
+
+[[artifact]]
+name = "vo-web.node-modules"
+class = "cache"
+path = "lang/crates/vo-web/node_modules"
+tracked = false
+
+[[artifact]]
+name = "studio.dist"
+class = "build-output"
+path = "apps/studio/dist"
+tracked = false
+
+[[artifact]]
+name = "playground.dist"
+class = "build-output"
+path = "apps/playground-legacy/dist"
+tracked = false
+
+[[artifact]]
+name = "vo-web.dist"
+class = "build-output"
+path = "lang/crates/vo-web/dist"
+tracked = false
+
+[[artifact]]
+name = "studio.wasm-pkg"
+class = "build-output"
+path = "apps/studio/wasm/pkg"
+tracked = false
+
+[[artifact]]
+name = "playground.rust-pkg"
+class = "build-output"
+path = "apps/playground-legacy/rust/pkg"
+tracked = false
+
+[[artifact]]
+name = "studio.public-wasm"
+class = "build-output"
+path = "apps/studio/public/wasm"
+tracked = false
+
+[[artifact]]
+name = "vo-web.wasm-pkg"
+class = "build-output"
+path = "lang/crates/vo-web/pkg"
+tracked = false

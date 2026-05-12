@@ -1839,6 +1839,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-dev"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "vo-embed"
 version = "0.1.1"
 dependencies = [
@@ -2010,6 +2020,8 @@ dependencies = [
 name = "vo-test"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "vo-engine",
 ]
 
