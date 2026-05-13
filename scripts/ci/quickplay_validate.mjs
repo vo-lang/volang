@@ -209,6 +209,11 @@ assert(project.name === expected.projectName, `project name must be ${expected.p
 assert(project.module === expected.projectModule, `project module must be ${expected.projectModule}`);
 assert(Array.isArray(project.files) && project.files.length > 0, 'project files must be embedded');
 assert(project.files.some((file) => file.path === 'main.vo'), 'project package must include main.vo');
+const projectFiles = new Map(project.files.map((file) => [file.path, file]));
+const runtimeAsset = projectFiles.get('assets/blockkart.vpak');
+assert(runtimeAsset, 'project package must include assets/blockkart.vpak');
+assert(moduleFileBytes(runtimeAsset).byteLength > 1024 * 1024, 'assets/blockkart.vpak must contain the runtime asset pack');
+assert(!projectFiles.has('apps/studio/fixtures/blockkart/blockkart.vpak'), 'project package must not embed the Studio fixture path');
 
 assert(Array.isArray(deps.modules) && deps.modules.length > 0, 'deps modules must be embedded');
 const modules = new Map(deps.modules.map((mod) => [mod.module, mod]));

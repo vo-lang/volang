@@ -49,6 +49,20 @@ function webArtifacts(modulePack) {
   return (modulePack.artifacts ?? []).filter((artifact) => typeof artifact.url === 'string');
 }
 
+function moduleFileBytes(file) {
+  if (file?.content != null) return Buffer.from(file.content, 'utf8');
+  if (file?.contentBase64 != null) return Buffer.from(file.contentBase64, 'base64');
+  return Buffer.alloc(0);
+}
+
+function assertBlockKartRuntimeAsset(project) {
+  const files = new Map((project.files ?? []).map((file) => [file.path, file]));
+  const runtimeAsset = files.get('assets/blockkart.vpak');
+  assert(runtimeAsset, 'project package is missing assets/blockkart.vpak');
+  assert(moduleFileBytes(runtimeAsset).byteLength > 1024 * 1024, 'assets/blockkart.vpak is not a full runtime asset pack');
+  assert(!files.has('apps/studio/fixtures/blockkart/blockkart.vpak'), 'project package still embeds the Studio fixture path');
+}
+
 function requiredVoplayArtifacts(deps) {
   const voplay = moduleByName(deps, 'github.com/vo-lang/voplay');
   const artifacts = webArtifacts(voplay);
@@ -88,6 +102,8 @@ function runStaticSmoke() {
   assert(!quickplayTs.includes('/quickplay/blockkart/artifacts/'), 'quickplay.ts must not hard-code artifact URLs');
 
   const deps = readJson(join(root, 'apps/studio/public/quickplay/blockkart/deps.json'));
+  const project = readJson(join(root, 'apps/studio/public/quickplay/blockkart/project.json'));
+  assertBlockKartRuntimeAsset(project);
   for (const artifact of requiredVoplayArtifacts(deps)) {
     const path = localPathForArtifact(artifact.url);
     assert(existsSync(path), `missing packaged artifact: ${artifact.url}`);
@@ -122,6 +138,7 @@ async function runHttpSmoke(baseUrl, buildId) {
   const deps = await (await fetchOk(joinUrl(baseUrl, `/quickplay/blockkart/deps.json${query}`))).json();
   assert(project.name === 'BlockKart', 'remote project manifest is not BlockKart');
   assert(project.module === 'github.com/vo-lang/blockkart', 'remote project manifest module is wrong');
+  assertBlockKartRuntimeAsset(project);
 
   requiredVoplayArtifacts(deps);
   for (const modulePack of deps.modules ?? []) {

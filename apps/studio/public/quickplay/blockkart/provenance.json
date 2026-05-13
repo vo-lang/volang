@@ -22,7 +22,7 @@
   "project": {
     "commit": "a6726a17eb47c05a2ce112fca2601028ad616d48",
     "dirty": false,
-    "filesDigest": "sha256:5e6bca86d215a72b17837fa7b8f61f1cff101940e6a2deff65b01cdcb362d378",
+    "filesDigest": "sha256:5499854e4d53cc6dea06f7795eab614d88f8354104d9982d1f1fa4adb0cd4a41",
     "module": "github.com/vo-lang/blockkart"
   },
   "dependencies": [
@@ -70,9 +70,9 @@
   ],
   "outputs": [
     {
-      "digest": "sha256:97c5b4d4c50b8d8c6686867bdfaabdcc0e08d5c9193222550c62d0a95f860687",
+      "digest": "sha256:2c8b33f1f377531d0d03528f13d47fe7776779b99153fd94f8fc29364622a052",
       "path": "project.json",
-      "size": 22708844
+      "size": 22708820
     },
     {
       "digest": "sha256:8bb27949554ac0c997026754e8c2c700ba8fa00423ba89f28753d1a967342c54",
