@@ -1,6 +1,6 @@
 interface:
   display_name: "Volang Dev"
-  short_description: "Develop Volang compiler, runtime, and Studio"
-  default_prompt: "Use $volang-dev to modify the Volang compiler or Studio codebase with subsystem-aware validation."
+  short_description: "Maintain Volang with source-backed validation"
+  default_prompt: "Use $volang-dev to maintain, debug, or review Volang with subsystem-aware source checks and focused validation."
 policy:
   allow_implicit_invocation: true
