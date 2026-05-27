@@ -7,26 +7,77 @@
 //!
 //! The JIT supports two compilation modes:
 //! 1. **Full function compilation** - Triggered when a function becomes hot (many calls)
-//! 2. **Loop OSR (On-Stack Replacement)** - TODO: Triggered when a loop becomes hot
-//!
-//! Currently only full function compilation is implemented. Loop OSR is planned.
+//! 2. **Loop OSR (On-Stack Replacement)** - Triggered when a loop backedge becomes hot
 
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 
 use std::collections::HashMap;
 
-use vo_jit::loop_analysis::analyze_loops;
+use vo_jit::loop_analysis::analyze_loops_with_module;
 use vo_jit::{JitCompiler, JitError, JitFunc, LoopFunc, LoopInfo};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum JitFallbackReason {
+    InterpretedCold = 0,
+    UnsupportedFunction = 1,
+    CompileFailed = 2,
+    RegularCall = 3,
+    PreparedDynamicCall = 4,
+    Yield = 5,
+    QueueBlock = 6,
+    WaitIo = 7,
+    WaitQueue = 8,
+    Replay = 9,
+    LoopNotHot = 10,
+    LoopCompileFailed = 11,
+}
+
+impl JitFallbackReason {
+    pub const COUNT: usize = 12;
+
+    #[inline]
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct JitFallbackReasonStats {
+    counts: [u64; JitFallbackReason::COUNT],
+}
+
+impl JitFallbackReasonStats {
+    #[inline]
+    pub fn get(self, reason: JitFallbackReason) -> u64 {
+        self.counts[reason.index()]
+    }
+
+    #[inline]
+    pub fn total(self) -> u64 {
+        self.counts.iter().sum()
+    }
+
+    #[inline]
+    fn increment(&mut self, reason: JitFallbackReason) {
+        self.counts[reason.index()] += 1;
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct JitExecutionStats {
     pub function_entries: u64,
     pub loop_entries: u64,
+    pub fallback_reasons: JitFallbackReasonStats,
 }
 
 impl JitExecutionStats {
     pub fn executed_jit_code(self) -> bool {
         self.function_entries > 0 || self.loop_entries > 0
+    }
+
+    pub fn fallback_count(self, reason: JitFallbackReason) -> u64 {
+        self.fallback_reasons.get(reason)
     }
 }
 
@@ -39,7 +90,7 @@ impl JitExecutionStats {
 pub struct JitConfig {
     /// Call count threshold for full function compilation.
     pub call_threshold: u32,
-    /// Backedge count threshold for loop OSR compilation (TODO).
+    /// Backedge count threshold for loop OSR compilation.
     pub loop_threshold: u32,
     /// Print Cranelift IR for compiled functions.
     pub debug_ir: bool,
@@ -225,6 +276,11 @@ impl JitManager {
         self.execution_stats.loop_entries += 1;
     }
 
+    #[inline]
+    pub fn record_fallback(&mut self, reason: JitFallbackReason) {
+        self.execution_stats.fallback_reasons.increment(reason);
+    }
+
     fn rebuild_available_direct_callees(&self, out: &mut Vec<u32>) {
         out.clear();
         out.reserve(self.func_table.len().saturating_sub(out.capacity()));
@@ -266,12 +322,28 @@ impl JitManager {
             return Some(jit_func);
         }
 
+        if self.is_unsupported(func_id) {
+            self.record_fallback(JitFallbackReason::UnsupportedFunction);
+            return None;
+        }
+
         // 2. Record call, compile if hot
-        if self.record_call(func_id) && self.compile_full(func_id, func_def, module).is_ok() {
-            return self.get_entry(func_id);
+        if self.record_call(func_id) {
+            match self.compile_full(func_id, func_def, module) {
+                Ok(()) => {
+                    if let Some(entry) = self.get_entry(func_id) {
+                        return Some(entry);
+                    }
+                }
+                Err(_) => {
+                    self.record_fallback(JitFallbackReason::CompileFailed);
+                    return None;
+                }
+            }
         }
 
         // 3. Fall back to VM
+        self.record_fallback(JitFallbackReason::InterpretedCold);
         None
     }
 
@@ -301,12 +373,17 @@ impl JitManager {
     }
 
     /// Get or analyze loops for a function.
-    pub fn get_loops(&mut self, func_id: u32, func_def: &FunctionDef) -> &[LoopInfo] {
+    pub fn get_loops(
+        &mut self,
+        func_id: u32,
+        func_def: &FunctionDef,
+        module: &VoModule,
+    ) -> &[LoopInfo] {
         let id = func_id as usize;
         let info = &mut self.funcs[id];
 
         if info.loops.is_none() {
-            info.loops = Some(analyze_loops(func_def));
+            info.loops = Some(analyze_loops_with_module(func_def, module));
         }
 
         info.loops.as_ref().unwrap()
@@ -317,9 +394,10 @@ impl JitManager {
         &mut self,
         func_id: u32,
         func_def: &FunctionDef,
+        module: &VoModule,
         begin_pc: usize,
     ) -> Option<LoopInfo> {
-        let loops = self.get_loops(func_id, func_def);
+        let loops = self.get_loops(func_id, func_def, module);
         loops.iter().find(|l| l.begin_pc == begin_pc).cloned()
     }
 
@@ -457,5 +535,33 @@ impl JitManager {
     /// The returned function pointer must only be called with the correct ABI.
     pub unsafe fn get_loop_func(&self, func_id: u32, begin_pc: usize) -> Option<LoopFunc> {
         self.compiler.get_loop_func_ptr(func_id, begin_pc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_reason_stats_are_machine_readable() {
+        let mut stats = JitFallbackReasonStats::default();
+        stats.increment(JitFallbackReason::InterpretedCold);
+        stats.increment(JitFallbackReason::InterpretedCold);
+        stats.increment(JitFallbackReason::WaitIo);
+
+        assert_eq!(stats.get(JitFallbackReason::InterpretedCold), 2);
+        assert_eq!(stats.get(JitFallbackReason::WaitIo), 1);
+        assert_eq!(stats.total(), 3);
+    }
+
+    #[test]
+    fn manager_records_fallback_reasons() {
+        let mut manager = JitManager::new().expect("jit manager");
+        manager.record_fallback(JitFallbackReason::RegularCall);
+        manager.record_fallback(JitFallbackReason::Replay);
+
+        let stats = manager.execution_stats();
+        assert_eq!(stats.fallback_count(JitFallbackReason::RegularCall), 1);
+        assert_eq!(stats.fallback_count(JitFallbackReason::Replay), 1);
     }
 }

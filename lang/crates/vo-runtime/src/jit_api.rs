@@ -602,6 +602,73 @@ impl JitContext {
     pub const OFFSET_IC_TABLE: i32 = std::mem::offset_of!(JitContext, ic_table) as i32;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitContextAbiField {
+    pub name: &'static str,
+    pub offset: i32,
+}
+
+/// JitContext fields that generated code may address by raw offset.
+///
+/// Keep this table in sync with `JitContext` and the offset constants above; it
+/// gives tests and downstream debug tooling a single machine-readable ABI view.
+pub fn jit_context_abi_fields() -> &'static [JitContextAbiField] {
+    &[
+        JitContextAbiField {
+            name: "jit_func_table",
+            offset: JitContext::OFFSET_JIT_FUNC_TABLE,
+        },
+        JitContextAbiField {
+            name: "direct_call_table",
+            offset: JitContext::OFFSET_DIRECT_CALL_TABLE,
+        },
+        JitContextAbiField {
+            name: "call_func_id",
+            offset: JitContext::OFFSET_CALL_FUNC_ID,
+        },
+        JitContextAbiField {
+            name: "call_resume_pc",
+            offset: JitContext::OFFSET_CALL_RESUME_PC,
+        },
+        JitContextAbiField {
+            name: "stack_ptr",
+            offset: JitContext::OFFSET_STACK_PTR,
+        },
+        JitContextAbiField {
+            name: "stack_cap",
+            offset: JitContext::OFFSET_STACK_CAP,
+        },
+        JitContextAbiField {
+            name: "jit_bp",
+            offset: JitContext::OFFSET_JIT_BP,
+        },
+        JitContextAbiField {
+            name: "fiber_sp",
+            offset: JitContext::OFFSET_FIBER_SP,
+        },
+        JitContextAbiField {
+            name: "push_frame_fn",
+            offset: JitContext::OFFSET_PUSH_FRAME_FN,
+        },
+        JitContextAbiField {
+            name: "push_resume_point_fn",
+            offset: JitContext::OFFSET_PUSH_RESUME_POINT_FN,
+        },
+        JitContextAbiField {
+            name: "prepare_closure_call_fn",
+            offset: JitContext::OFFSET_PREPARE_CLOSURE_CALL_FN,
+        },
+        JitContextAbiField {
+            name: "prepare_iface_call_fn",
+            offset: JitContext::OFFSET_PREPARE_IFACE_CALL_FN,
+        },
+        JitContextAbiField {
+            name: "ic_table",
+            offset: JitContext::OFFSET_IC_TABLE,
+        },
+    ]
+}
+
 // =============================================================================
 // JitResult
 // =============================================================================
@@ -1822,6 +1889,68 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
     ]
 }
 
+pub fn runtime_symbol_names() -> &'static [&'static str] {
+    &[
+        "vo_gc_alloc",
+        "vo_gc_write_barrier",
+        "vo_gc_safepoint",
+        "vo_panic",
+        "vo_call_extern",
+        "vo_str_new",
+        "vo_str_len",
+        "vo_str_index",
+        "vo_str_concat",
+        "vo_str_slice",
+        "vo_str_eq",
+        "vo_str_cmp",
+        "vo_str_decode_rune",
+        "vo_closure_new",
+        "vo_queue_new_checked",
+        "vo_chan_len",
+        "vo_chan_cap",
+        "vo_array_new",
+        "vo_array_get",
+        "vo_array_set",
+        "vo_array_len",
+        "vo_slice_new_checked",
+        "vo_slice_len",
+        "vo_slice_cap",
+        "vo_slice_get",
+        "vo_slice_set",
+        "vo_slice_slice",
+        "vo_slice_slice3",
+        "vo_slice_append",
+        "vo_slice_from_array",
+        "vo_slice_from_array3",
+        "vo_iface_pack_slot0",
+        "vo_iface_to_iface",
+        "vo_iface_eq",
+        "vo_iface_assert",
+        "vo_set_call_request",
+        "vo_ptr_clone",
+        "vo_map_new",
+        "vo_map_len",
+        "vo_map_get",
+        "vo_map_set",
+        "vo_map_delete",
+        "vo_map_iter_init",
+        "vo_map_iter_next",
+        "vo_copy",
+        "vo_island_new",
+        "vo_chan_close",
+        "vo_chan_send",
+        "vo_chan_recv",
+        "vo_go_start",
+        "vo_go_island",
+        "vo_defer_push",
+        "vo_recover",
+        "vo_select_begin",
+        "vo_select_send",
+        "vo_select_recv",
+        "vo_select_exec",
+    ]
+}
+
 // =============================================================================
 // Island/Channel JIT Helpers
 // =============================================================================
@@ -1981,5 +2110,28 @@ mod tests {
             .any(|(name, _)| *name == "vo_set_call_request"));
         assert!(symbols.iter().any(|(name, _)| *name == "vo_defer_push"));
         assert!(symbols.iter().any(|(name, _)| *name == "vo_recover"));
+    }
+
+    #[test]
+    fn runtime_symbol_name_manifest_matches_registered_symbols() {
+        let symbols = get_runtime_symbols();
+        let names = runtime_symbol_names();
+        assert_eq!(symbols.len(), names.len());
+        for ((registered, _), manifest) in symbols.iter().zip(names.iter()) {
+            assert_eq!(registered, manifest);
+        }
+    }
+
+    #[test]
+    fn jit_context_abi_field_manifest_is_sorted_and_unique() {
+        let fields = jit_context_abi_fields();
+        assert!(!fields.is_empty());
+        for pair in fields.windows(2) {
+            assert_ne!(pair[0].name, pair[1].name);
+            assert!(
+                pair[0].offset < pair[1].offset || pair[0].name < pair[1].name,
+                "ABI fields should remain inspectable without duplicate adjacent entries"
+            );
+        }
     }
 }

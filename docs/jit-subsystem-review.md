@@ -6,6 +6,36 @@
 
 本次复核覆盖 `vo-jit` 的 full-function JIT、loop OSR、shared translator、direct JIT-to-JIT call、dynamic call inline cache、JIT/VM frame materialization、CopyN 编码与 loop liveness。结论基于源码阅读和现有 JIT/OSR 测试验证。
 
+## 2026-05-28 后续重构完成项
+
+本轮后续重构没有移除已有 JIT opcode 能力；唯一收紧的是 `has_defer` 的自递归 direct-native call 优化：这类调用现在走 VM fallback，以保证 defer/recover 依赖的真实 `CallFrame` 深度不被 native shadow call chain 隐藏。函数本身仍可 JIT，降级的是不安全的 direct-call 快路径。
+
+完成项：
+
+1. 增加 `verify_jit_metadata`，在 full-function JIT 与 loop OSR 编译入口校验 metadata 长度、opcode kind、metadata kind、elem layout，以及 effects 推导出的 slot 读写是否落在 `local_slots` 内。本轮 review 发现 `ElemLayout { elem_bytes: 0 }` 曾被 helper 当成 0-slot layout 接受；已先补失败单测，再在共享 metadata helper 层拒绝 zero-byte layout。
+2. 增加机器可读 `capability_matrix()` / `opcode_capability()`。每个 `Opcode` 必须显式声明 full JIT、OSR 与 fallback 策略，新增 opcode 漏声明会在编译期 match exhaustiveness 或单测中暴露。
+3. 把复杂 opcode 的 packed 语义集中到 `Instruction` accessor：static call func id、closure func id、defer/go shared call shape、packed arg/ret slots、queue recv/select recv flags、MapNew/MapIterNext slot counts。VM、JIT、effects、formatter 改为复用同一语义入口。
+4. 拆分 `translate.rs`：scalar、memory、conversions、collections、runtime ops 独立成 opcode-family lowering 文件；父模块只保留 dispatcher 与少量 shared checks。
+5. 新增 `FunctionAnalysis`，full-function JIT 与 loop OSR 共享 metadata-aware reg const facts、effects 和 `memory_only_start` 推导。loop analysis 现在从 `Module` 读取 extern return slot metadata。
+6. 建立 fallback reason 可观测性：`JitFallbackReason` 和 `JitFallbackReasonStats` 记录 cold interpreter fallback、unsupported/compile failure、regular/prepared call fallback、yield/block、WaitIo/WaitQueue/Replay、loop not hot/compile failed。
+7. 系统化 frame materialization invariant：`materialized_jit_frame_invariants` 校验 materialization 后 `resume_stack` 清空、frame func_id 有效、GC scan extent 不越过当前 `fiber.sp`、scan slot 不超过函数 metadata、最内层 frame 的 local extent 被 `fiber.sp` 覆盖，并显式允许 borrowed-call parent 的完整 local extent 高于当前 callee `sp`。
+8. 统一 static call route：`CallPlan` 先选择 `SelfRecursiveNative`、`KnownDirectJit`、`DynamicJitTable`、`VmFallback`，full-function 与 OSR call lowering 共享同一 plan。closure/interface dynamic call 也有 `DynamicCallPlan` 统一 packed arg/ret/resume_pc 解码。
+9. 固化 runtime ABI 边界：`runtime_symbol_names()` 与 `jit_context_abi_fields()` 提供 helper symbol 和 `JitContext` offset 的机器可读 manifest，runtime/JIT 单测保证 manifest 与注册表同步。
+10. defer/recover JIT 支持选择为保留支持，不拒绝。已有 `DeferPush`/`ErrDeferPush`/`Recover` lowering 继续使用 runtime callback；新增递归 defer fallback 回归用例保护 direct-call 收紧后的 frame 深度语义。
+11. 增加 JIT 专项 benchmark manifest：`jit-map`、`jit-slice`、`jit-call`、`jit-loop`、`jit-copy`，用于后续 `./d.py bench vo --jit-hot` 做性能回归观察。
+
+测试分层：
+
+- source behavior：新增 `tests/lang/cases/bugs/2026_05_28_jit_recursive_defer_fallback.vo`，并保留既有 WaitIo、direct-call fallback、nested JIT calls、panic/recover、loop defer/OSR cases。
+- bytecode/codegen encoding：`vo-common-core` 的 complex instruction accessor 单测，`vo-codegen` 继续覆盖 JIT metadata 生成。
+- vo-jit unit/effects/liveness：metadata verifier、capability matrix、call plan route、dynamic call plan、shared analysis、metadata-aware effects、loop liveness 单测。
+- VM/JIT frame/runtime boundary：`vo-vm --features jit` 覆盖 fallback stats、nested materialization invariant、borrowed-parent materialization invariant；`vo-runtime` 覆盖 JIT runtime symbol/ABI manifests。
+
+结构性重构说明：
+
+- metadata verifier、capability matrix、translate split、ABI manifest、benchmark manifest 是 invariant/maintainability 改动，不对应单一 pre-fix failing runtime case；因此用结构性单测、manifest lint 和编译期 exhaustiveness 作为保护。
+- packed metadata register 路径仍作为兼容 fallback 保留，但所有新 effects/analysis/verifier 路径优先消费 `jit_metadata`。剩余风险是旧 bytecode 或手写 tests 仍可能只提供 packed register facts；这不会降低 JIT 能力，但后续可以在 codegen 完全稳定后逐步减少 fallback 依赖。
+
 ## 优先级一：必须修复
 
 ### 1. `reg_consts` 是线性状态，不能跨控制流粘滞

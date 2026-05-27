@@ -26,7 +26,7 @@ pub fn exec_go_start(
     functions: &[FunctionDef],
     next_fiber_id: u32,
 ) -> GoResult {
-    let is_closure_call = (inst.flags & 1) != 0;
+    let is_closure_call = inst.call_shape_is_closure();
     let args_start = inst.b;
     let arg_slots = inst.c;
 
@@ -35,7 +35,7 @@ pub fn exec_go_start(
         let func_id = closure::func_id(closure_ref);
         (func_id, Some(closure_ref))
     } else {
-        let func_id = inst.a as u32 | ((inst.flags as u32 >> 1) << 16);
+        let func_id = inst.call_shape_static_func_id();
         (func_id, None)
     };
 

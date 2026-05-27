@@ -108,7 +108,7 @@ Vo compiles to a single bytecode format; backends differ only in how that byteco
 
 ## Performance
 
-The benchmark suite currently has 12 manifest entries under `benchmarks/`.
+The benchmark suite currently has 17 manifest entries under `benchmarks/`.
 `./d.py bench all` runs the suite through the `vo-dev` benchmark runner, which
 uses `hyperfine` with a default of one warmup and three measured runs
 (`--warmup N` / `--runs N` override those values). It writes transient JSON,

@@ -1,0 +1,16 @@
+package main
+
+func main() {
+	n := 10000000
+	a := 1
+	b := 3
+	sum := 0
+
+	for i := 0; i < n; i++ {
+		a = (a*1664525 + 1013904223) & 0x7fffffff
+		b = b + ((a >> 7) & 31)
+		sum += (a ^ b) & 1023
+	}
+
+	println(sum)
+}

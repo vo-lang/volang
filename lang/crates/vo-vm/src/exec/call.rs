@@ -140,7 +140,7 @@ pub fn exec_call(
     inst: &Instruction,
     module: &Module,
 ) -> ExecResult {
-    let func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
+    let func_id = inst.static_call_func_id();
     let arg_start = inst.b as usize;
     let caller_frame = fiber
         .frames

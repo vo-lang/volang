@@ -1,5 +1,6 @@
 //! Shared bytecode instruction effect facts used by JIT analysis and translation.
 
+use vo_runtime::bytecode::ExternDef;
 use vo_runtime::instruction::{Instruction, Opcode};
 
 use crate::metadata;
@@ -22,17 +23,27 @@ pub struct InstructionEffects {
     pub may_call: bool,
 }
 
+#[allow(dead_code)]
 pub fn instruction_effects(inst: &Instruction) -> InstructionEffects {
     instruction_effects_with_facts(inst, EffectFacts::none())
 }
 
+#[allow(dead_code)]
 pub fn instruction_effects_with_facts(
     inst: &Instruction,
     facts: EffectFacts<'_>,
 ) -> InstructionEffects {
+    instruction_effects_with_context(inst, facts, &[])
+}
+
+pub fn instruction_effects_with_context(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+    externs: &[ExternDef],
+) -> InstructionEffects {
     InstructionEffects {
         reads: read_regs_with_facts(inst, facts),
-        writes: write_regs_with_facts(inst, facts),
+        writes: write_regs_with_context(inst, facts, externs),
         memory_sync: memory_sync_effect(inst),
         may_call: may_call(inst),
     }
@@ -98,11 +109,12 @@ pub fn map_delete_key_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Optio
 }
 
 pub fn recv_result_slots(flags: u8, normalize_zero_elem_slots: bool) -> u16 {
-    let mut elem_slots = ((flags >> 1) & 0x7F) as u16;
+    let inst = Instruction::with_flags(Opcode::QueueRecv, flags, 0, 0, 0);
+    let mut elem_slots = inst.recv_elem_slots();
     if normalize_zero_elem_slots && elem_slots == 0 {
         elem_slots = 1;
     }
-    elem_slots + u16::from((flags & 1) != 0)
+    elem_slots + u16::from(inst.recv_has_ok())
 }
 
 fn push_recv_result_slots(regs: &mut Vec<u16>, dst_start: u16, flags: u8, normalize_zero: bool) {
@@ -351,7 +363,7 @@ pub fn read_regs(inst: &Instruction) -> Vec<u16> {
             regs.push(0);
         }
         Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => {
-            if (inst.flags & 1) != 0 {
+            if inst.call_shape_is_closure() {
                 regs.push(inst.a);
             }
             push_slot_range(&mut regs, inst.b, inst.c);
@@ -397,11 +409,11 @@ pub fn read_regs(inst: &Instruction) -> Vec<u16> {
             push_slot_range(&mut regs, inst.a, inst.b);
         }
         Opcode::Call => {
-            push_slot_range(&mut regs, inst.b, inst.c >> 8);
+            push_slot_range(&mut regs, inst.b, inst.packed_arg_slots());
         }
         Opcode::CallClosure => {
             regs.push(inst.a);
-            push_slot_range(&mut regs, inst.b, inst.c >> 8);
+            push_slot_range(&mut regs, inst.b, inst.packed_arg_slots());
         }
         Opcode::CallExtern => {
             push_slot_range(&mut regs, inst.c, inst.flags as u16);
@@ -409,7 +421,7 @@ pub fn read_regs(inst: &Instruction) -> Vec<u16> {
         Opcode::CallIface => {
             regs.push(inst.a);
             regs.push(inst.a + 1);
-            push_slot_range(&mut regs, inst.b, inst.c >> 8);
+            push_slot_range(&mut regs, inst.b, inst.packed_arg_slots());
         }
         _ => {}
     }
@@ -571,8 +583,8 @@ pub fn multi_write_regs(inst: &Instruction) -> Vec<u16> {
 
     match inst.opcode() {
         Opcode::Call | Opcode::CallClosure | Opcode::CallIface => {
-            let ret_start = inst.b + (inst.c >> 8);
-            let ret_slots = inst.c & 0xFF;
+            let ret_start = inst.packed_call_ret_start();
+            let ret_slots = inst.packed_ret_slots();
             push_slot_range(&mut regs, ret_start, ret_slots);
         }
         Opcode::CallExtern => {
@@ -608,8 +620,8 @@ pub fn multi_write_regs(inst: &Instruction) -> Vec<u16> {
             push_slot_range(&mut regs, inst.a, MAP_ITER_SLOTS);
         }
         Opcode::MapIterNext => {
-            let key_slots = (inst.flags & 0x0F) as u16;
-            let val_slots = ((inst.flags >> 4) & 0x0F) as u16;
+            let key_slots = inst.map_iter_key_slots();
+            let val_slots = inst.map_iter_val_slots();
             push_slot_range(&mut regs, inst.b, MAP_ITER_SLOTS);
             push_slot_range(&mut regs, inst.a, key_slots + val_slots);
             regs.push(inst.c);
@@ -629,10 +641,27 @@ pub fn multi_write_regs(inst: &Instruction) -> Vec<u16> {
     regs
 }
 
+#[allow(dead_code)]
 pub fn multi_write_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<u16> {
+    multi_write_regs_with_context(inst, facts, &[])
+}
+
+pub fn multi_write_regs_with_context(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+    externs: &[ExternDef],
+) -> Vec<u16> {
     let mut regs = Vec::new();
 
     match inst.opcode() {
+        Opcode::CallExtern => {
+            let ret_slots = externs
+                .get(inst.b as usize)
+                .map(|extern_def| extern_def.ret_slots)
+                .unwrap_or(1);
+            push_slot_range(&mut regs, inst.a, ret_slots);
+            return regs;
+        }
         Opcode::ArrayGet | Opcode::SliceGet => {
             if let Some(slots) = indexed_get_result_slots(inst, facts) {
                 push_slot_range(&mut regs, inst.a, slots);
@@ -660,8 +689,17 @@ pub fn write_regs(inst: &Instruction) -> Vec<u16> {
     regs
 }
 
+#[allow(dead_code)]
 pub fn write_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<u16> {
-    if !facts.has_facts() {
+    write_regs_with_context(inst, facts, &[])
+}
+
+pub fn write_regs_with_context(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+    externs: &[ExternDef],
+) -> Vec<u16> {
+    if !facts.has_facts() && externs.is_empty() {
         return write_regs(inst);
     }
 
@@ -669,7 +707,7 @@ pub fn write_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<
     if let Some(reg) = single_write_reg(inst) {
         regs.push(reg);
     }
-    regs.extend(multi_write_regs_with_facts(inst, facts));
+    regs.extend(multi_write_regs_with_context(inst, facts, externs));
     regs
 }
 
@@ -845,6 +883,23 @@ mod tests {
         assert_eq!(
             read_regs_with_facts(&inst, EffectFacts::none().with_instruction(Some(&meta))),
             vec![1, 4, 5, 6, 9, 10, 11]
+        );
+    }
+
+    #[test]
+    fn call_extern_effects_use_declared_return_slots_when_available() {
+        let inst = Instruction::with_flags(Opcode::CallExtern, 2, 10, 0, 20);
+        let externs = vec![vo_runtime::bytecode::ExternDef {
+            name: "multi".to_string(),
+            param_slots: 2,
+            ret_slots: 3,
+            is_blocking: false,
+            param_kinds: Vec::new(),
+        }];
+
+        assert_eq!(
+            write_regs_with_context(&inst, EffectFacts::none(), &externs),
+            vec![10, 11, 12]
         );
     }
 }

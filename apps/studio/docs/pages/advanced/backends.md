@@ -155,7 +155,7 @@ interpreter.
 
 ## Performance Comparison
 
-The benchmark suite currently has 12 manifest entries under `benchmarks/`.
+The benchmark suite currently has 17 manifest entries under `benchmarks/`.
 `./d.py bench all` runs each manifest-listed benchmark through `vo-dev` and
 `hyperfine` with a default of one warmup and three measured runs
 (`--warmup N` / `--runs N` can override them). The runner writes transient JSON,

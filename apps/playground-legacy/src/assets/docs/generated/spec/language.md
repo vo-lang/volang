@@ -2,7 +2,7 @@
 Generated from lang/docs/spec/language.md
 Generator: node scripts/ci/docs_sync.mjs
 Source-Digest: sha256:e00b3333775d458082d248678196669999319bd12778ad1b39f23052f5f9575e
-Generated-At: 2026-01-20T15:23:25+08:00
+Generated-At: 2026-05-27T11:17:51+08:00
 -->
 # Vo Language Specification
 

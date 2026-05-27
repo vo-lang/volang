@@ -1,7 +1,9 @@
 #![allow(clippy::result_large_err)]
 //! JIT compiler for Vo bytecode using Cranelift.
 
+mod analysis;
 mod call_helpers;
+mod capability;
 mod effects;
 mod func_compiler;
 mod helpers;
@@ -11,11 +13,14 @@ mod loop_compiler;
 mod metadata;
 mod translate;
 mod translator;
+mod verifier;
 
+pub use capability::{capability_matrix, opcode_capability, BackendStatus, FallbackPolicy};
 pub use func_compiler::FunctionCompiler;
 pub use loop_analysis::LoopInfo;
 pub use loop_compiler::{CompiledLoop, LoopCompiler, LoopFunc};
 pub use translator::{HelperFuncs, IrEmitter, TranslateResult};
+pub use verifier::{verify_jit_metadata, JitMetadataError};
 
 use std::collections::HashMap;
 
@@ -42,6 +47,7 @@ pub enum JitError {
     FunctionNotFound(u32),
     InvalidOsrTarget(usize),
     UnsupportedOpcode(Opcode),
+    InvalidMetadata(JitMetadataError),
     Internal(String),
 }
 
@@ -53,6 +59,7 @@ impl std::fmt::Display for JitError {
             JitError::FunctionNotFound(id) => write!(f, "function not found: {}", id),
             JitError::InvalidOsrTarget(pc) => write!(f, "invalid OSR target PC: {}", pc),
             JitError::UnsupportedOpcode(op) => write!(f, "unsupported opcode: {:?}", op),
+            JitError::InvalidMetadata(e) => write!(f, "invalid JIT metadata: {}", e),
             JitError::Internal(msg) => write!(f, "internal error: {}", msg),
         }
     }
@@ -69,6 +76,12 @@ impl From<cranelift_module::ModuleError> for JitError {
 impl From<cranelift_codegen::CodegenError> for JitError {
     fn from(e: cranelift_codegen::CodegenError) -> Self {
         JitError::Codegen(e)
+    }
+}
+
+impl From<JitMetadataError> for JitError {
+    fn from(e: JitMetadataError) -> Self {
+        JitError::InvalidMetadata(e)
     }
 }
 
@@ -269,6 +282,8 @@ impl JitCompiler {
             return Ok(());
         }
 
+        verifier::verify_jit_metadata(func, vo_module)?;
+
         // Clear any residual state from previous compilation
         self.ctx.clear();
 
@@ -346,6 +361,8 @@ impl JitCompiler {
         if self.cache.contains_loop(func_id, begin_pc) {
             return Ok(());
         }
+        verifier::verify_jit_metadata(func, vo_module)?;
+
         // Clear any residual state from previous compilation
         self.ctx.clear();
 

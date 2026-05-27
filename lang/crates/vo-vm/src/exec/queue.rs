@@ -200,7 +200,7 @@ pub fn exec_queue_new(
     let elem_meta = ValueMeta::from_raw(packed_type as u32);
     let elem_rttid = ValueRttid::from_raw((packed_type >> 32) as u32);
     let cap = stack_get(stack, bp + inst.c as usize) as i64;
-    let elem_slots = (inst.flags & !QUEUE_KIND_PORT_FLAG) as u16;
+    let elem_slots = inst.queue_new_elem_slots();
 
     match queue::create_checked(gc, kind, elem_meta, elem_rttid, elem_slots, cap) {
         Ok(ch) => {
@@ -342,8 +342,8 @@ pub fn exec_queue_recv(
     inst: &Instruction,
 ) -> QueueExecResult {
     let ch = stack_get(stack, bp + inst.b as usize) as GcRef;
-    let elem_slots = ((inst.flags >> 1) & 0x7F) as usize;
-    let has_ok = (inst.flags & 1) != 0;
+    let elem_slots = inst.recv_elem_slots() as usize;
+    let has_ok = inst.recv_has_ok();
     let dst_start = bp + inst.a as usize;
 
     match complete_queue_recv(

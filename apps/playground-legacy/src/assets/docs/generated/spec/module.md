@@ -2,7 +2,7 @@
 Generated from lang/docs/spec/module.md
 Generator: node scripts/ci/docs_sync.mjs
 Source-Digest: sha256:9e985fe185ef71f7b1a35e2ebe786c66f125fbd2f573bd04ae193cfe983d8661
-Generated-At: 2026-05-12T23:32:39+08:00
+Generated-At: 2026-05-27T11:17:51+08:00
 -->
 # Vo Module Specification
 

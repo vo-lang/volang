@@ -318,6 +318,7 @@ pub trait IrEmitter<'a> {
 /// Scan instructions to find the minimum base register accessed via memory pointers.
 /// Slots below this value are pure SSA — never accessed through memory by callbacks
 /// or dynamic indexing, so store_local can skip memory writes for them.
+#[allow(dead_code)]
 pub fn compute_memory_only_start(code: &[Instruction]) -> u16 {
     let mut min_base = u16::MAX;
     for inst in code {
@@ -576,8 +577,8 @@ fn reg_const_effect(
             }
         }
         Opcode::Call | Opcode::CallClosure | Opcode::CallIface => {
-            let ret_start = inst.b + (inst.c >> 8);
-            let ret_slots = inst.c & 0xFF;
+            let ret_start = inst.packed_call_ret_start();
+            let ret_slots = inst.packed_ret_slots();
             RegConstEffect::KillSlots {
                 start: ret_start,
                 count: ret_slots,

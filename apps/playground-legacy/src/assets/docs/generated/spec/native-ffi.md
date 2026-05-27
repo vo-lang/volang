@@ -2,7 +2,7 @@
 Generated from lang/docs/spec/native-ffi.md
 Generator: node scripts/ci/docs_sync.mjs
 Source-Digest: sha256:b110a6887404ef2d623b1f980beb48afbc50cc9e4ac022ed6e7147785e2ce66e
-Generated-At: 2026-05-12T23:32:39+08:00
+Generated-At: 2026-05-27T11:17:51+08:00
 -->
 # Vo Native FFI Specification
 

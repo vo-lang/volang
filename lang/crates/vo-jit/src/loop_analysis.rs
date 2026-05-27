@@ -8,7 +8,7 @@ use vo_common_core::instruction::HINT_LOOP;
 use vo_common_core::instruction::{
     LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
 };
-use vo_runtime::bytecode::FunctionDef;
+use vo_runtime::bytecode::{Constant, ExternDef, FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
 
 use crate::effects;
@@ -47,7 +47,13 @@ impl LoopInfo {
 
 /// Analyze a function's bytecode to find all loops using Hint instructions.
 pub fn analyze_loops(func_def: &FunctionDef) -> Vec<LoopInfo> {
-    analyze_loops_from_code(&func_def.code)
+    analyze_loops_with_context(func_def, &[], &[])
+}
+
+/// Analyze loops with module-level facts that are needed for precise liveness
+/// of dynamic element layouts and extern return slots.
+pub fn analyze_loops_with_module(func_def: &FunctionDef, vo_module: &VoModule) -> Vec<LoopInfo> {
+    analyze_loops_with_context(func_def, &vo_module.constants, &vo_module.externs)
 }
 
 /// Analyze bytecode to find all loops using Hint instructions.
@@ -59,6 +65,36 @@ pub fn analyze_loops(func_def: &FunctionDef) -> Vec<LoopInfo> {
 /// begin_pc (loop_start) is hint_pc + 1 (the instruction after HINT_LOOP).
 /// end_pc is hint_pc + end_offset (the back-edge Jump).
 pub fn analyze_loops_from_code(code: &[Instruction]) -> Vec<LoopInfo> {
+    analyze_loops_from_code_with_context(code, &[], &[], &[])
+}
+
+fn analyze_loops_with_context(
+    func_def: &FunctionDef,
+    constants: &[Constant],
+    externs: &[ExternDef],
+) -> Vec<LoopInfo> {
+    let reg_const_facts = crate::translator::compute_reg_const_facts_with_metadata(
+        &func_def.code,
+        &func_def.jit_metadata,
+        constants,
+        externs,
+        0,
+        func_def.code.len(),
+    );
+    analyze_loops_from_code_with_context(
+        &func_def.code,
+        &func_def.jit_metadata,
+        &reg_const_facts,
+        externs,
+    )
+}
+
+fn analyze_loops_from_code_with_context(
+    code: &[Instruction],
+    jit_metadata: &[vo_runtime::bytecode::JitInstructionMetadata],
+    reg_const_facts: &[std::collections::HashMap<u16, i64>],
+    externs: &[ExternDef],
+) -> Vec<LoopInfo> {
     let mut loops = Vec::new();
 
     for (pc, inst) in code.iter().enumerate() {
@@ -85,7 +121,14 @@ pub fn analyze_loops_from_code(code: &[Instruction]) -> Vec<LoopInfo> {
                     find_back_edge_jump(code, begin_pc)
                 };
 
-                let (live_in, live_out) = analyze_loop_liveness(code, begin_pc, end_pc);
+                let (live_in, live_out) = analyze_loop_liveness(
+                    code,
+                    jit_metadata,
+                    reg_const_facts,
+                    externs,
+                    begin_pc,
+                    end_pc,
+                );
                 let has_calls = has_function_calls(code, begin_pc, end_pc);
 
                 loops.push(LoopInfo {
@@ -165,14 +208,27 @@ fn has_function_calls(code: &[Instruction], header_pc: usize, back_edge_pc: usiz
 /// - live_out: registers written in the loop (conservative: all written regs)
 fn analyze_loop_liveness(
     code: &[Instruction],
+    jit_metadata: &[vo_runtime::bytecode::JitInstructionMetadata],
+    reg_const_facts: &[std::collections::HashMap<u16, i64>],
+    externs: &[ExternDef],
     header_pc: usize,
     back_edge_pc: usize,
 ) -> (Vec<u16>, Vec<u16>) {
     let mut read_before_write: HashSet<u16> = HashSet::new();
     let mut written: HashSet<u16> = HashSet::new();
 
-    for inst in &code[header_pc..=back_edge_pc] {
-        let effects = effects::instruction_effects(inst);
+    for (pc, inst) in code
+        .iter()
+        .enumerate()
+        .take(back_edge_pc + 1)
+        .skip(header_pc)
+    {
+        let facts = reg_const_facts
+            .get(pc)
+            .map(effects::EffectFacts::from_reg_consts)
+            .unwrap_or_else(effects::EffectFacts::none)
+            .with_instruction(jit_metadata.get(pc));
+        let effects = effects::instruction_effects_with_context(inst, facts, externs);
 
         for reg in effects.reads {
             if !written.contains(&reg) {

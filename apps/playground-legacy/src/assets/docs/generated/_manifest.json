@@ -31,7 +31,7 @@
       "source": "lang/docs/spec/language.md",
       "output": "spec/language.md",
       "source_digest": "sha256:e00b3333775d458082d248678196669999319bd12778ad1b39f23052f5f9575e",
-      "generated_at": "2026-01-20T15:23:25+08:00",
+      "generated_at": "2026-05-27T11:17:51+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
@@ -49,7 +49,7 @@
       "source": "lang/docs/spec/module.md",
       "output": "spec/module.md",
       "source_digest": "sha256:9e985fe185ef71f7b1a35e2ebe786c66f125fbd2f573bd04ae193cfe983d8661",
-      "generated_at": "2026-05-12T23:32:39+08:00",
+      "generated_at": "2026-05-27T11:17:51+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
@@ -58,7 +58,7 @@
       "source": "lang/docs/spec/native-ffi.md",
       "output": "spec/native-ffi.md",
       "source_digest": "sha256:b110a6887404ef2d623b1f980beb48afbc50cc9e4ac022ed6e7147785e2ce66e",
-      "generated_at": "2026-05-12T23:32:39+08:00",
+      "generated_at": "2026-05-27T11:17:51+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {

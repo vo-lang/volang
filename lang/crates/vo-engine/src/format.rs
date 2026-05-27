@@ -287,9 +287,9 @@ fn format_instruction(instr: &Instruction) -> String {
         // CALL
         // a=func_id_low, b=args_start, c=(arg_slots<<8|ret_slots), flags=func_id_high
         Opcode::Call => {
-            let func_id = a as u32 | ((flags as u32) << 16);
-            let arg_slots = c >> 8;
-            let ret_slots = c & 0xFF;
+            let func_id = instr.static_call_func_id();
+            let arg_slots = instr.packed_arg_slots();
+            let ret_slots = instr.packed_ret_slots();
             format!(
                 "Call          func_{}, args=r{}, arg_slots={}, ret_slots={}",
                 func_id, b, arg_slots, ret_slots
@@ -302,8 +302,8 @@ fn format_instruction(instr: &Instruction) -> String {
         ),
         // CallClosure: a=closure_reg, b=args_start, c=(arg_slots<<8|ret_slots)
         Opcode::CallClosure => {
-            let arg_slots = c >> 8;
-            let ret_slots = c & 0xFF;
+            let arg_slots = instr.packed_arg_slots();
+            let ret_slots = instr.packed_ret_slots();
             format!(
                 "CallClosure   r{}, r{}, arg_slots={}, ret_slots={}",
                 a, b, arg_slots, ret_slots
@@ -311,8 +311,8 @@ fn format_instruction(instr: &Instruction) -> String {
         }
         // CallIface: a=iface_slot, b=args_start, c=(arg_slots<<8|ret_slots), flags=method_idx
         Opcode::CallIface => {
-            let arg_slots = c >> 8;
-            let ret_slots = c & 0xFF;
+            let arg_slots = instr.packed_arg_slots();
+            let ret_slots = instr.packed_ret_slots();
             format!(
                 "CallIface     r{}, r{}, method={}, arg_slots={}, ret_slots={}",
                 a, b, flags, arg_slots, ret_slots
@@ -389,8 +389,8 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::MapLen => format!("MapLen        r{}, r{}", a, b),
         Opcode::MapIterInit => format!("MapIterInit   r{}, r{}", a, b),
         Opcode::MapIterNext => {
-            let key_slots = flags & 0x0F;
-            let val_slots = (flags >> 4) & 0x0F;
+            let key_slots = instr.map_iter_key_slots();
+            let val_slots = instr.map_iter_val_slots();
             format!(
                 "MapIterNext   r{}, iter=r{}, ok=r{}, key_slots={}, val_slots={}",
                 a, b, c, key_slots, val_slots
@@ -403,19 +403,19 @@ fn format_instruction(instr: &Instruction) -> String {
             a,
             b,
             c,
-            if (flags & vo_runtime::instruction::QUEUE_KIND_PORT_FLAG) != 0 {
+            if instr.queue_new_is_port() {
                 "port"
             } else {
                 "chan"
             },
-            flags & !vo_runtime::instruction::QUEUE_KIND_PORT_FLAG,
+            instr.queue_new_elem_slots(),
         ),
         Opcode::QueueSend => format!("QueueSend     r{}, r{}, slots={}", a, b, flags),
         Opcode::QueueRecv => format!(
             "QueueRecv     r{}, r{}, slots={}",
             a,
             b,
-            (flags >> 1) & 0x7F
+            instr.recv_elem_slots()
         ),
         Opcode::QueueClose => format!("QueueClose    r{}", a),
         Opcode::QueueLen => format!("QueueLen      r{}, r{}", a, b),
@@ -430,7 +430,7 @@ fn format_instruction(instr: &Instruction) -> String {
         // CLOSURE
         // ClosureNew: a=dst, b=func_id_low, c=capture_count, flags=func_id_high
         Opcode::ClosureNew => {
-            let func_id = b as u32 | ((flags as u32) << 16);
+            let func_id = instr.closure_new_func_id();
             format!("ClosureNew    r{}, func_{}, captures={}", a, func_id, c)
         }
         // ClosureGet: a=dst, b=capture_index (closure ref is always at r0)
@@ -439,11 +439,10 @@ fn format_instruction(instr: &Instruction) -> String {
         // GO
         // a=func_id_low/closure_reg, b=args_start, c=arg_slots, flags bit0=is_closure
         Opcode::GoStart => {
-            let is_closure = (flags & 1) != 0;
-            if is_closure {
+            if instr.call_shape_is_closure() {
                 format!("GoStart       closure=r{}, args=r{}, slots={}", a, b, c)
             } else {
-                let func_id = a as u32 | (((flags >> 1) as u32) << 16);
+                let func_id = instr.call_shape_static_func_id();
                 format!("GoStart       func_{}, args=r{}, slots={}", func_id, b, c)
             }
         }
@@ -451,20 +450,18 @@ fn format_instruction(instr: &Instruction) -> String {
         // DEFER
         // a=func_id_low/closure_reg, b=arg_start, c=arg_slots, flags bit0=is_closure
         Opcode::DeferPush => {
-            let is_closure = (flags & 1) != 0;
-            if is_closure {
+            if instr.call_shape_is_closure() {
                 format!("DeferPush     closure=r{}, args=r{}, slots={}", a, b, c)
             } else {
-                let func_id = a as u32 | (((flags >> 1) as u32) << 16);
+                let func_id = instr.call_shape_static_func_id();
                 format!("DeferPush     func_{}, args=r{}, slots={}", func_id, b, c)
             }
         }
         Opcode::ErrDeferPush => {
-            let is_closure = (flags & 1) != 0;
-            if is_closure {
+            if instr.call_shape_is_closure() {
                 format!("ErrDeferPush  closure=r{}, args=r{}, slots={}", a, b, c)
             } else {
-                let func_id = a as u32 | (((flags >> 1) as u32) << 16);
+                let func_id = instr.call_shape_static_func_id();
                 format!("ErrDeferPush  func_{}, args=r{}, slots={}", func_id, b, c)
             }
         }

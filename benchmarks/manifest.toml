@@ -25,6 +25,36 @@ owner = "runtime"
 languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]
 
 [[benchmark]]
+id = "jit-call"
+path = "jit-call"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "jit-copy"
+path = "jit-copy"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "jit-loop"
+path = "jit-loop"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "jit-map"
+path = "jit-map"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "jit-slice"
+path = "jit-slice"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
 id = "matrix2"
 path = "matrix2"
 owner = "runtime"

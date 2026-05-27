@@ -1,0 +1,24 @@
+package main
+
+func assert(ok bool, msg string) {
+	if !ok {
+		panic(msg)
+	}
+}
+
+var order int
+
+func recur(n int) {
+	defer func() {
+		order = order + 1
+	}()
+	if n > 0 {
+		recur(n - 1)
+	}
+}
+
+func main() {
+	order = 0
+	recur(5)
+	assert(order == 6, "recursive defer calls must materialize real defer frames")
+}

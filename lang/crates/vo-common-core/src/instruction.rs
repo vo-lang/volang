@@ -105,6 +105,105 @@ impl Instruction {
             self.flags as u16
         }
     }
+
+    /// Static Call target function id.
+    ///
+    /// `Call` stores the low 16 bits in `a` and the high 8 bits in `flags`.
+    #[inline]
+    pub const fn static_call_func_id(&self) -> u32 {
+        (self.a as u32) | ((self.flags as u32) << 16)
+    }
+
+    /// ClosureNew target function id.
+    ///
+    /// `ClosureNew` stores the low 16 bits in `b` and the high 8 bits in `flags`.
+    #[inline]
+    pub const fn closure_new_func_id(&self) -> u32 {
+        (self.b as u32) | ((self.flags as u32) << 16)
+    }
+
+    /// Whether the opcode's shared call/defer/go shape targets a closure value.
+    ///
+    /// Used by `GoStart`, `DeferPush`, and `ErrDeferPush`.
+    #[inline]
+    pub const fn call_shape_is_closure(&self) -> bool {
+        (self.flags & 1) != 0
+    }
+
+    /// Static function id for the shared GoStart/DeferPush shape.
+    ///
+    /// The low 16 bits live in `a`; the high 7 bits live in `flags >> 1`
+    /// because bit 0 is the closure marker.
+    #[inline]
+    pub const fn call_shape_static_func_id(&self) -> u32 {
+        (self.a as u32) | (((self.flags as u32) >> 1) << 16)
+    }
+
+    /// Argument slot count for `Call`, `CallClosure`, and `CallIface`.
+    #[inline]
+    pub const fn packed_arg_slots(&self) -> u16 {
+        self.c >> 8
+    }
+
+    /// Return slot count for `Call`, `CallClosure`, and `CallIface`.
+    #[inline]
+    pub const fn packed_ret_slots(&self) -> u16 {
+        self.c & 0x00FF
+    }
+
+    /// Return destination for `Call`, `CallClosure`, and `CallIface`.
+    #[inline]
+    pub const fn packed_call_ret_start(&self) -> u16 {
+        self.b + self.packed_arg_slots()
+    }
+
+    /// Key slot count for MapNew's packed `c` operand.
+    #[inline]
+    pub const fn map_new_key_slots(&self) -> u16 {
+        self.c >> 8
+    }
+
+    /// Value slot count for MapNew's packed `c` operand.
+    #[inline]
+    pub const fn map_new_val_slots(&self) -> u16 {
+        self.c & 0x00FF
+    }
+
+    /// Element slots for QueueNew flags.
+    #[inline]
+    pub const fn queue_new_elem_slots(&self) -> u16 {
+        (self.flags & !QUEUE_KIND_PORT_FLAG) as u16
+    }
+
+    /// Whether QueueNew creates an island port instead of a local channel.
+    #[inline]
+    pub const fn queue_new_is_port(&self) -> bool {
+        (self.flags & QUEUE_KIND_PORT_FLAG) != 0
+    }
+
+    /// Element slot count for QueueRecv/SelectRecv flags.
+    #[inline]
+    pub const fn recv_elem_slots(&self) -> u16 {
+        ((self.flags >> 1) & 0x7F) as u16
+    }
+
+    /// Whether QueueRecv/SelectRecv writes an ok result slot.
+    #[inline]
+    pub const fn recv_has_ok(&self) -> bool {
+        (self.flags & 1) != 0
+    }
+
+    /// MapIterNext key slot count.
+    #[inline]
+    pub const fn map_iter_key_slots(&self) -> u16 {
+        (self.flags & 0x0F) as u16
+    }
+
+    /// MapIterNext value slot count.
+    #[inline]
+    pub const fn map_iter_val_slots(&self) -> u16 {
+        ((self.flags >> 4) & 0x0F) as u16
+    }
 }
 
 #[repr(u8)]
@@ -321,6 +420,8 @@ pub enum Opcode {
 
 impl Opcode {
     const MAX_VALID: u8 = Self::ForLoop as u8;
+    /// Number of valid opcodes, excluding the `Invalid` sentinel.
+    pub const COUNT: usize = Self::MAX_VALID as usize + 1;
 
     #[inline]
     pub fn from_u8(v: u8) -> Self {
@@ -361,5 +462,37 @@ mod tests {
             assert_ne!(op, Opcode::Invalid, "opcode {} should be valid", i);
             assert_eq!(op as u8, i);
         }
+    }
+
+    #[test]
+    fn test_complex_instruction_accessors() {
+        let call = Instruction::with_flags(Opcode::Call, 0x12, 0x3456, 10, (3 << 8) | 2);
+        assert_eq!(call.static_call_func_id(), 0x12_3456);
+        assert_eq!(call.packed_arg_slots(), 3);
+        assert_eq!(call.packed_ret_slots(), 2);
+        assert_eq!(call.packed_call_ret_start(), 13);
+
+        let map_new = Instruction::new(Opcode::MapNew, 1, 2, (4 << 8) | 7);
+        assert_eq!(map_new.map_new_key_slots(), 4);
+        assert_eq!(map_new.map_new_val_slots(), 7);
+
+        let closure_new = Instruction::with_flags(Opcode::ClosureNew, 0xAB, 1, 0xCDEF, 4);
+        assert_eq!(closure_new.closure_new_func_id(), 0xAB_CDEF);
+
+        let go = Instruction::with_flags(Opcode::GoStart, 0x24, 0x1000, 4, 2);
+        assert!(!go.call_shape_is_closure());
+        assert_eq!(go.call_shape_static_func_id(), 0x12_1000);
+
+        let queue = Instruction::with_flags(Opcode::QueueNew, QUEUE_KIND_PORT_FLAG | 3, 1, 2, 3);
+        assert!(queue.queue_new_is_port());
+        assert_eq!(queue.queue_new_elem_slots(), 3);
+
+        let recv = Instruction::with_flags(Opcode::SelectRecv, (4 << 1) | 1, 1, 2, 3);
+        assert_eq!(recv.recv_elem_slots(), 4);
+        assert!(recv.recv_has_ok());
+
+        let iter = Instruction::with_flags(Opcode::MapIterNext, (5 << 4) | 2, 1, 2, 3);
+        assert_eq!(iter.map_iter_key_slots(), 2);
+        assert_eq!(iter.map_iter_val_slots(), 5);
     }
 }

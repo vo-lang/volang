@@ -95,15 +95,10 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     pub fn compile(mut self) -> Result<(), JitError> {
-        self.memory_only_start = crate::translator::compute_memory_only_start(&self.func_def.code);
-        self.reg_const_facts = crate::translator::compute_reg_const_facts_with_metadata(
-            &self.func_def.code,
-            &self.func_def.jit_metadata,
-            &self.vo_module.constants,
-            &self.vo_module.externs,
-            0,
-            self.func_def.code.len(),
-        );
+        let analysis =
+            crate::analysis::FunctionAnalysis::for_function(self.func_def, self.vo_module);
+        self.memory_only_start = analysis.memory_only_start;
+        self.reg_const_facts = analysis.reg_const_facts;
         self.declare_variables();
         self.scan_jump_targets();
 
@@ -735,7 +730,7 @@ impl<'a> FunctionCompiler<'a> {
 
     /// Returns true if the block was terminated
     fn call(&mut self, inst: &Instruction) -> bool {
-        let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
+        let target_func_id = inst.static_call_func_id();
         let arg_start = inst.b as usize;
 
         let target_func = &self.vo_module.functions[target_func_id as usize];
@@ -751,34 +746,29 @@ impl<'a> FunctionCompiler<'a> {
             callee_func_ref,
         );
 
-        // Self-recursive calls can use a direct native call only while the
-        // callee frame is small enough for the host stack. Large frames must go
-        // through the VM path so fiber stack limits fire before wasm stack
-        // exhaustion.
-        if call_plan.is_self_recursive(self.func_id) && call_plan.fits_direct_native_frame() {
-            self.call_self_recursive(
-                call_plan.arg_start,
-                call_plan.arg_slots,
-                call_plan.call_ret_slots,
-                target_func,
-            );
-            return false;
-        }
-
-        // has_defer callees need VM execution (defer requires real CallFrame in fiber.frames).
-        // Large-frame callees also need VM execution so stack overflow is
-        // reported as a recoverable Vo panic instead of a host wasm trap.
-        if call_plan.can_use_direct_jit(true) {
-            // JIT-to-JIT direct call with runtime check for compiled callee
-            // If callee returns Call/WaitIo, we propagate it to VM
-            crate::call_helpers::emit_jit_call_with_fallback(self, call_plan.jit_config());
-            false // Block not terminated - we have a merge block for continuation
-        } else {
-            // Callee has defer: requires real CallFrame in fiber.frames.
-            // Use Call request mechanism: return JitResult::Call, VM executes callee,
-            // then continues execution in interpreter
-            crate::call_helpers::emit_call_via_vm(self, call_plan.vm_config(self.current_pc + 1));
-            true // Block IS terminated - call_via_vm generates return instruction
+        match call_plan.route_for_full_function(self.func_id) {
+            crate::call_helpers::CallRoute::SelfRecursiveNative => {
+                self.call_self_recursive(
+                    call_plan.arg_start,
+                    call_plan.arg_slots,
+                    call_plan.call_ret_slots,
+                    target_func,
+                );
+                false
+            }
+            crate::call_helpers::CallRoute::KnownDirectJit
+            | crate::call_helpers::CallRoute::DynamicJitTable => {
+                crate::call_helpers::emit_jit_call_with_fallback(self, call_plan.jit_config());
+                false
+            }
+            crate::call_helpers::CallRoute::VmFallback => {
+                crate::call_helpers::emit_call_via_vm(
+                    self,
+                    call_plan.vm_config(self.current_pc + 1),
+                );
+                true
+            }
+            crate::call_helpers::CallRoute::DynamicInlineCache => unreachable!(),
         }
     }
 

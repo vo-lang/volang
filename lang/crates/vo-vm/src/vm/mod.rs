@@ -1569,7 +1569,7 @@ impl Vm {
                 Opcode::Call => {
                     #[cfg(feature = "jit")]
                     {
-                        let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
+                        let target_func_id = inst.static_call_func_id();
                         if let Some(jit_mgr) = self.jit_mgr.as_mut() {
                             let target_func = &module.functions[target_func_id as usize];
                             if let Some(jit_func) =
@@ -2297,8 +2297,8 @@ impl Vm {
                 }
                 Opcode::QueueRecv => {
                     if let Some(recv_response) = fiber.take_remote_recv_response() {
-                        let elem_slots = ((inst.flags >> 1) & 0x7F) as usize;
-                        let has_ok = (inst.flags & 1) != 0;
+                        let elem_slots = inst.recv_elem_slots() as usize;
+                        let has_ok = inst.recv_has_ok();
                         let dst_start = bp + inst.a as usize;
                         exec::replay_remote_queue_recv_response(
                             &mut self.state.gc,
@@ -2349,8 +2349,8 @@ impl Vm {
                         &mut fiber.select_state,
                         inst.a,
                         inst.b,
-                        (inst.flags >> 1) & 0x7F,
-                        (inst.flags & 1) != 0,
+                        inst.recv_elem_slots() as u8,
+                        inst.recv_has_ok(),
                     );
                 }
                 Opcode::SelectExec => {

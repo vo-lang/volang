@@ -127,6 +127,9 @@ pub fn elem_layout_from_instruction(metadata: &JitInstructionMetadata) -> Option
 }
 
 fn elem_layout_from_bytes(bytes: usize, needs_sign_extend: bool) -> Option<ElemLayout> {
+    if bytes == 0 {
+        return None;
+    }
     let slots = u16::try_from(bytes.div_ceil(8)).ok()?;
     Some(ElemLayout {
         bytes,
@@ -258,14 +261,7 @@ mod tests {
                 needs_sign_extend: false
             })
         );
-        assert_eq!(
-            elem_layout_from_flags_or_dynamic_bytes(0, Some(0)),
-            Some(ElemLayout {
-                bytes: 0,
-                slots: 0,
-                needs_sign_extend: false
-            })
-        );
+        assert_eq!(elem_layout_from_flags_or_dynamic_bytes(0, Some(0)), None);
     }
 
     #[test]

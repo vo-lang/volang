@@ -641,15 +641,16 @@ fn emit_ic_miss_update_and_dispatch<'a, E: IrEmitter<'a>>(emitter: &mut E, p: Ic
 ///   - Dispatch via emit_prepared_call (direct JIT or trampoline)
 pub fn emit_call_closure<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction) {
     let closure_slot = inst.a as usize;
-    let arg_start = inst.b as usize;
-    let arg_slots = (inst.c >> 8) as usize;
-    let ret_slots = (inst.c & 0xFF) as usize;
+    let callsite_pc = emitter.current_pc();
+    let plan = DynamicCallPlan::new(inst, callsite_pc);
+    let arg_start = plan.arg_start;
+    let arg_slots = plan.arg_slots;
+    let ret_slots = plan.ret_slots;
 
     let ctx = emitter.ctx_param();
     let panic_ret_val = emitter.panic_return_value();
     let caller_func_id = emitter.func_id();
-    let callsite_pc = emitter.current_pc();
-    let resume_pc = callsite_pc + 1;
+    let resume_pc = plan.resume_pc;
 
     // Read closure_ref
     let closure_ref = emitter.read_var(closure_slot as u16);
@@ -1028,15 +1029,16 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instructi
 /// IC slow path: call prepare_iface_call, update IC, dispatch via emit_prepared_call.
 pub fn emit_call_iface<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction) {
     let iface_slot = inst.a as usize;
-    let arg_start = inst.b as usize;
-    let arg_slots = (inst.c >> 8) as usize;
-    let ret_slots = (inst.c & 0xFF) as usize;
+    let callsite_pc = emitter.current_pc();
+    let plan = DynamicCallPlan::new(inst, callsite_pc);
+    let arg_start = plan.arg_start;
+    let arg_slots = plan.arg_slots;
+    let ret_slots = plan.ret_slots;
     let method_idx = inst.flags as u32;
 
     let ctx = emitter.ctx_param();
     let caller_func_id = emitter.func_id();
-    let callsite_pc = emitter.current_pc();
-    let resume_pc = callsite_pc + 1;
+    let resume_pc = plan.resume_pc;
 
     // Read interface slots
     let slot0 = emitter.read_var(iface_slot as u16);
@@ -1751,6 +1753,21 @@ pub struct CallViaVmConfig {
     pub ret_slots: usize,
 }
 
+/// Lowering route selected for a bytecode call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallRoute {
+    /// Same function, direct native-stack recursive call.
+    SelfRecursiveNative,
+    /// Callee has a known Cranelift FuncRef at compile time.
+    KnownDirectJit,
+    /// Callee may be compiled at runtime; generated code checks jit_func_table.
+    DynamicJitTable,
+    /// Closure/interface call with a monomorphic inline cache and prepare fallback.
+    DynamicInlineCache,
+    /// Return JitResult::Call so the VM owns frame setup and dispatch.
+    VmFallback,
+}
+
 /// Static bytecode call shape after decoding the target FunctionDef.
 #[derive(Clone, Copy)]
 pub struct CallPlan {
@@ -1799,6 +1816,31 @@ impl CallPlan {
         !self.callee_has_defer && (!enforce_native_frame_limit || self.fits_direct_native_frame())
     }
 
+    pub fn route_for_full_function(self, current_func_id: u32) -> CallRoute {
+        if self.is_self_recursive(current_func_id)
+            && !self.callee_has_defer
+            && self.fits_direct_native_frame()
+        {
+            return CallRoute::SelfRecursiveNative;
+        }
+        self.route_non_recursive(true)
+    }
+
+    pub fn route_for_loop(self) -> CallRoute {
+        self.route_non_recursive(false)
+    }
+
+    fn route_non_recursive(self, enforce_native_frame_limit: bool) -> CallRoute {
+        if !self.can_use_direct_jit(enforce_native_frame_limit) {
+            return CallRoute::VmFallback;
+        }
+        if self.callee_func_ref.is_some() {
+            CallRoute::KnownDirectJit
+        } else {
+            CallRoute::DynamicJitTable
+        }
+    }
+
     pub fn jit_config(self) -> JitCallWithFallbackConfig {
         JitCallWithFallbackConfig {
             func_id: self.func_id,
@@ -1819,6 +1861,32 @@ impl CallPlan {
             ret_reg: self.ret_reg,
             resume_pc,
             ret_slots: self.call_ret_slots,
+        }
+    }
+}
+
+/// Dynamic closure/interface call shape after decoding the packed call operand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DynamicCallPlan {
+    pub arg_start: usize,
+    pub arg_slots: usize,
+    pub ret_slots: usize,
+    pub ret_reg: usize,
+    pub resume_pc: usize,
+    pub route: CallRoute,
+}
+
+impl DynamicCallPlan {
+    pub fn new(inst: &Instruction, callsite_pc: usize) -> Self {
+        let arg_start = inst.b as usize;
+        let arg_slots = inst.packed_arg_slots() as usize;
+        Self {
+            arg_start,
+            arg_slots,
+            ret_slots: inst.packed_ret_slots() as usize,
+            ret_reg: arg_start + arg_slots,
+            resume_pc: callsite_pc + 1,
+            route: CallRoute::DynamicInlineCache,
         }
     }
 }
@@ -2378,4 +2446,83 @@ fn check_call_result<'a, E: IrEmitter<'a>>(emitter: &mut E, result: Value, spill
     // Ok path - continue execution
     emitter.builder().switch_to_block(ok_block);
     emitter.builder().seal_block(ok_block);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn func(local_slots: u16, has_defer: bool) -> FunctionDef {
+        FunctionDef {
+            name: "callee".to_string(),
+            param_count: 1,
+            param_slots: 1,
+            local_slots,
+            gc_scan_slots: local_slots,
+            ret_slots: 1,
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer,
+            has_calls: false,
+            has_call_extern: false,
+            code: Vec::new(),
+            jit_metadata: Vec::new(),
+            slot_types: Vec::new(),
+            borrowed_scan_slots_prefix: Vec::new(),
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn call_plan_routes_full_function_call_shapes() {
+        let self_plan = CallPlan::new(7, 2, &func(8, false), None);
+        assert_eq!(
+            self_plan.route_for_full_function(7),
+            CallRoute::SelfRecursiveNative
+        );
+
+        let defer_self = CallPlan::new(7, 2, &func(8, true), None);
+        assert_eq!(defer_self.route_for_full_function(7), CallRoute::VmFallback);
+
+        let large = CallPlan::new(
+            7,
+            2,
+            &func((MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS + 1) as u16, false),
+            None,
+        );
+        assert_eq!(large.route_for_full_function(7), CallRoute::VmFallback);
+
+        let direct = CallPlan::new(8, 2, &func(8, false), Some(FuncRef::from_u32(3)));
+        assert_eq!(direct.route_for_full_function(7), CallRoute::KnownDirectJit);
+
+        let dynamic = CallPlan::new(8, 2, &func(8, false), None);
+        assert_eq!(
+            dynamic.route_for_full_function(7),
+            CallRoute::DynamicJitTable
+        );
+    }
+
+    #[test]
+    fn dynamic_call_plan_uses_packed_call_operands() {
+        let inst = Instruction::with_flags(
+            vo_runtime::instruction::Opcode::CallClosure,
+            0,
+            4,
+            10,
+            (3 << 8) | 2,
+        );
+        let plan = DynamicCallPlan::new(&inst, 41);
+        assert_eq!(plan.arg_start, 10);
+        assert_eq!(plan.arg_slots, 3);
+        assert_eq!(plan.ret_slots, 2);
+        assert_eq!(plan.ret_reg, 13);
+        assert_eq!(plan.resume_pc, 42);
+        assert_eq!(plan.route, CallRoute::DynamicInlineCache);
+    }
 }

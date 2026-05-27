@@ -20,8 +20,8 @@ pub fn exec_map_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc
     let key_rttid = stack_get(stack, bp + inst.b as usize + 1) as u32;
     let key_meta = ValueMeta::from_raw((packed >> 32) as u32);
     let val_meta = ValueMeta::from_raw(packed as u32);
-    let key_slots = inst.c >> 8;
-    let val_slots = inst.c & 0xFF;
+    let key_slots = inst.map_new_key_slots();
+    let val_slots = inst.map_new_val_slots();
     let m = map::create(gc, key_meta, val_meta, key_slots, val_slots, key_rttid);
     stack_set(stack, bp + inst.a as usize, m as u64);
 }
@@ -174,8 +174,8 @@ pub fn exec_map_iter_init(stack: *mut Slot, bp: usize, inst: &Instruction) {
 pub fn exec_map_iter_next(stack: *mut Slot, bp: usize, inst: &Instruction) {
     let iter_slot = bp + inst.b as usize;
     let ok_slot = bp + inst.c as usize;
-    let key_slots = (inst.flags & 0x0F) as usize;
-    let val_slots = ((inst.flags >> 4) & 0x0F) as usize;
+    let key_slots = inst.map_iter_key_slots() as usize;
+    let val_slots = inst.map_iter_val_slots() as usize;
     let key_dst = bp + inst.a as usize;
     let val_dst = key_dst + key_slots;
 
