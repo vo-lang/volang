@@ -179,6 +179,36 @@ pub trait IrEmitter<'a> {
     /// Get register constant
     fn get_reg_const(&self, reg: u16) -> Option<i64>;
 
+    /// Resolve typed array/slice element metadata for JIT lowering.
+    fn elem_layout(
+        &self,
+        flags: u8,
+        dynamic_bytes_slot: u16,
+    ) -> Option<crate::metadata::ElemLayout> {
+        crate::metadata::elem_layout_from_flags_or_dynamic_bytes(
+            flags,
+            self.get_reg_const(dynamic_bytes_slot),
+        )
+    }
+
+    /// Resolve typed map-get metadata for JIT lowering.
+    fn map_get_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapGetLayout> {
+        self.get_reg_const(inst.c)
+            .map(crate::metadata::map_get_layout_from_meta)
+    }
+
+    /// Resolve typed map-set metadata for JIT lowering.
+    fn map_set_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapSetLayout> {
+        self.get_reg_const(inst.b)
+            .map(crate::metadata::map_set_layout_from_meta)
+    }
+
+    /// Resolve typed map-delete metadata for JIT lowering.
+    fn map_delete_key_slots(&self, inst: &Instruction) -> Option<u16> {
+        self.get_reg_const(inst.b)
+            .and_then(crate::metadata::map_delete_key_slots_from_meta)
+    }
+
     /// Clear compile-time constant state for a slot after non-constant writes.
     fn clear_reg_const(&mut self, reg: u16);
 
@@ -501,7 +531,7 @@ fn reg_const_effect(
         };
     }
 
-    let effect_facts = effects::EffectFacts::from_reg_consts(facts);
+    let metadata_facts = crate::metadata::MetadataFacts::from_reg_consts(facts);
 
     match inst.opcode() {
         Opcode::CopyN => {
@@ -537,7 +567,7 @@ fn reg_const_effect(
             count: inst.flags as u16,
         },
         Opcode::SliceGet | Opcode::ArrayGet => {
-            if let Some(slots) = effects::indexed_get_result_slots(inst, effect_facts) {
+            if let Some(slots) = crate::metadata::indexed_get_result_slots(inst, metadata_facts) {
                 RegConstEffect::KillSlots {
                     start: inst.a,
                     count: slots,
@@ -573,8 +603,8 @@ fn reg_const_effect(
             }
         }
         Opcode::MapGet => {
-            if let Some(out_slots) =
-                effects::map_get_layout(inst, effect_facts).map(|layout| layout.output_slots())
+            if let Some(out_slots) = crate::metadata::map_get_layout(inst, metadata_facts)
+                .map(|layout| layout.output_slots())
             {
                 RegConstEffect::KillSlots {
                     start: inst.a,

@@ -1,55 +1,11 @@
 //! Shared bytecode instruction effect facts used by JIT analysis and translation.
 
-use std::collections::HashMap;
-
 use vo_runtime::instruction::{Instruction, Opcode};
 
+use crate::metadata;
+pub use crate::metadata::{MapGetLayout, MapSetLayout, MetadataFacts as EffectFacts};
+
 pub const MAP_ITER_SLOTS: u16 = vo_runtime::objects::map::MAP_ITER_SLOTS as u16;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct EffectFacts<'a> {
-    reg_consts: Option<&'a HashMap<u16, i64>>,
-}
-
-impl<'a> EffectFacts<'a> {
-    pub fn none() -> Self {
-        Self { reg_consts: None }
-    }
-
-    pub fn from_reg_consts(reg_consts: &'a HashMap<u16, i64>) -> Self {
-        Self {
-            reg_consts: Some(reg_consts),
-        }
-    }
-
-    fn const_i64(self, slot: u16) -> Option<i64> {
-        self.reg_consts
-            .and_then(|reg_consts| reg_consts.get(&slot).copied())
-    }
-
-    fn has_reg_consts(self) -> bool {
-        self.reg_consts.is_some()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MapGetLayout {
-    pub key_slots: u16,
-    pub val_slots: u16,
-    pub has_ok: bool,
-}
-
-impl MapGetLayout {
-    pub fn output_slots(self) -> u16 {
-        self.val_slots + u16::from(self.has_ok)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MapSetLayout {
-    pub key_slots: u16,
-    pub val_slots: u16,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemorySyncEffect {
@@ -114,65 +70,31 @@ pub fn push_slot_range(regs: &mut Vec<u16>, start: u16, slots: u16) {
 }
 
 pub fn slice_elem_slots_from_flags(flags: u8) -> u16 {
-    let elem_bytes = match flags {
-        0 => 64,
-        0x81 | 0x82 | 0x84 | 0x44 => 8,
-        f => f as usize,
-    };
-    elem_bytes.div_ceil(8) as u16
-}
-
-pub fn elem_slots_from_dynamic_bytes(elem_bytes: i64) -> Option<u16> {
-    let elem_bytes = usize::try_from(elem_bytes).ok()?;
-    if elem_bytes == 0 {
-        return None;
-    }
-    u16::try_from(elem_bytes.div_ceil(8)).ok()
-}
-
-fn elem_slots_from_flags_or_fact(
-    flags: u8,
-    dynamic_bytes_slot: u16,
-    facts: EffectFacts<'_>,
-) -> Option<u16> {
-    if flags == 0 {
-        elem_slots_from_dynamic_bytes(facts.const_i64(dynamic_bytes_slot)?)
-    } else {
-        Some(slice_elem_slots_from_flags(flags))
-    }
+    metadata::elem_layout_from_flags(flags).slots
 }
 
 pub fn indexed_get_result_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
-    elem_slots_from_flags_or_fact(inst.flags, inst.c + 1, facts)
+    metadata::indexed_get_result_slots(inst, facts)
 }
 
 pub fn indexed_set_value_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
-    elem_slots_from_flags_or_fact(inst.flags, inst.b + 1, facts)
+    metadata::indexed_set_value_slots(inst, facts)
 }
 
 pub fn slice_append_value_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
-    elem_slots_from_flags_or_fact(inst.flags, inst.c + 1, facts)
+    metadata::slice_append_value_slots(inst, facts)
 }
 
 pub fn map_get_layout(inst: &Instruction, facts: EffectFacts<'_>) -> Option<MapGetLayout> {
-    let meta = facts.const_i64(inst.c)? as u64;
-    Some(MapGetLayout {
-        key_slots: ((meta >> 16) & 0xFFFF) as u16,
-        val_slots: ((meta >> 1) & 0x7FFF) as u16,
-        has_ok: (meta & 1) != 0,
-    })
+    metadata::map_get_layout(inst, facts)
 }
 
 pub fn map_set_layout(inst: &Instruction, facts: EffectFacts<'_>) -> Option<MapSetLayout> {
-    let meta = facts.const_i64(inst.b)? as u64;
-    Some(MapSetLayout {
-        key_slots: ((meta >> 8) & 0xFF) as u16,
-        val_slots: (meta & 0xFF) as u16,
-    })
+    metadata::map_set_layout(inst, facts)
 }
 
 pub fn map_delete_key_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
-    u16::try_from(facts.const_i64(inst.b)?).ok()
+    metadata::map_delete_key_slots(inst, facts)
 }
 
 pub fn recv_result_slots(flags: u8, normalize_zero_elem_slots: bool) -> u16 {
@@ -839,6 +761,7 @@ pub fn preserves_reg_const_facts(op: Opcode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn fact_map(entries: &[(u16, i64)]) -> HashMap<u16, i64> {
         entries.iter().copied().collect()

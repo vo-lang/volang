@@ -8,6 +8,7 @@ mod helpers;
 mod intrinsics;
 pub mod loop_analysis;
 mod loop_compiler;
+mod metadata;
 mod translate;
 mod translator;
 

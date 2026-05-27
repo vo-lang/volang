@@ -1220,21 +1220,10 @@ fn index_check<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 /// When flags==0, elem_bytes is stored in the specified register (set by preceding LoadConst).
 /// Returns (elem_bytes, needs_sign_extend).
 fn resolve_elem_bytes<'a>(e: &impl IrEmitter<'a>, flags: u8, eb_reg: u16) -> (usize, bool) {
-    match flags {
-        0 => {
-            // Dynamic: elem_bytes > 63, stored in register by LoadConst
-            let eb = e
-                .get_reg_const(eb_reg)
-                .expect("SliceGet/Set: dynamic elem_bytes not in reg_consts")
-                as usize;
-            (eb, false)
-        }
-        0x81 => (1, true),  // int8
-        0x82 => (2, true),  // int16
-        0x84 => (4, true),  // int32
-        0x44 => (4, false), // float32
-        f => (f as usize, false),
-    }
+    let layout = e
+        .elem_layout(flags, eb_reg)
+        .expect("SliceGet/Set: elem metadata not available");
+    (layout.bytes, layout.needs_sign_extend)
 }
 
 /// Load a single element (1/2/4/8 bytes) from memory address, with optional sign extension.
@@ -1990,12 +1979,12 @@ fn map_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().map_get.expect("map_get helper not registered");
     // MapGet: a=dst, b=map, c=meta_slot, key at c+1
     // meta: key_slots<<16 | val_slots<<1 | has_ok
-    let meta = e
-        .get_reg_const(inst.c)
-        .expect("MapGet: meta not found in reg_consts") as u64;
-    let key_slots = ((meta >> 16) & 0xFFFF) as usize;
-    let val_slots = ((meta >> 1) & 0x7FFF) as usize;
-    let has_ok = (meta & 1) != 0;
+    let layout = e
+        .map_get_layout(inst)
+        .expect("MapGet: metadata not available");
+    let key_slots = layout.key_slots as usize;
+    let val_slots = layout.val_slots as usize;
+    let has_ok = layout.has_ok;
 
     let m = e.read_var(inst.b);
     let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.c + 1, key_slots);
@@ -2037,11 +2026,11 @@ fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().map_set.expect("map_set helper not registered");
     // MapSet: a=map, b=meta_slot, c=val_start, key at b+1
     // meta: key_slots<<8 | val_slots
-    let meta = e
-        .get_reg_const(inst.b)
-        .expect("MapSet: meta not found in reg_consts") as u64;
-    let key_slots = ((meta >> 8) & 0xFF) as usize;
-    let val_slots = (meta & 0xFF) as usize;
+    let layout = e
+        .map_set_layout(inst)
+        .expect("MapSet: metadata not available");
+    let key_slots = layout.key_slots as usize;
+    let val_slots = layout.val_slots as usize;
 
     let m = e.read_var(inst.a);
 
@@ -2073,8 +2062,8 @@ fn map_delete<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         .expect("map_delete helper not registered");
     // MapDelete: a=map, b=meta_slot (=key_slots), key at b+1
     let key_slots = e
-        .get_reg_const(inst.b)
-        .expect("MapDelete: meta not found in reg_consts") as usize;
+        .map_delete_key_slots(inst)
+        .expect("MapDelete: metadata not available") as usize;
 
     let m = e.read_var(inst.a);
     let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b + 1, key_slots);
