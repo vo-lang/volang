@@ -468,46 +468,24 @@ impl<'a> LoopCompiler<'a> {
         let func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
         let arg_start = inst.b as usize;
 
-        // Get target function info
         let target_func = &self.vo_module.functions[func_id as usize];
-        let arg_slots = target_func.param_slots as usize;
-        let call_ret_slots = target_func.ret_slots as usize;
+        let callee_func_ref = self
+            .callee_func_refs
+            .get(func_id as usize)
+            .copied()
+            .flatten();
+        let call_plan =
+            crate::call_helpers::CallPlan::new(func_id, arg_start, target_func, callee_func_ref);
+
         // has_defer callees need VM execution (defer requires real CallFrame in fiber.frames).
         // Everything else can use JIT-to-JIT direct call with VM fallback.
-        if !target_func.has_defer {
-            let callee_func_ref = self
-                .callee_func_refs
-                .get(func_id as usize)
-                .copied()
-                .flatten();
-
+        if call_plan.can_use_direct_jit(false) {
             // JIT-to-JIT direct call with fallback to VM
-            crate::call_helpers::emit_jit_call_with_fallback(
-                self,
-                crate::call_helpers::JitCallWithFallbackConfig {
-                    func_id,
-                    arg_start,
-                    ret_reg: arg_start + arg_slots,
-                    arg_slots,
-                    call_ret_slots,
-                    func_ret_slots: target_func.ret_slots as usize,
-                    callee_local_slots: target_func.local_slots as usize,
-                    callee_func_ref,
-                },
-            );
+            crate::call_helpers::emit_jit_call_with_fallback(self, call_plan.jit_config());
             false // Block not terminated - we have a merge block
         } else {
             // Callee has defer or no call_vm helper - use Call request mechanism
-            crate::call_helpers::emit_call_via_vm(
-                self,
-                crate::call_helpers::CallViaVmConfig {
-                    func_id,
-                    arg_start,
-                    ret_reg: arg_start + arg_slots,
-                    resume_pc: self.current_pc + 1,
-                    ret_slots: call_ret_slots,
-                },
-            );
+            crate::call_helpers::emit_call_via_vm(self, call_plan.vm_config(self.current_pc + 1));
             true // Block terminated with return
         }
     }

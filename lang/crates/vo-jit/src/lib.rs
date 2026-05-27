@@ -2,6 +2,7 @@
 //! JIT compiler for Vo bytecode using Cranelift.
 
 mod call_helpers;
+mod effects;
 mod func_compiler;
 mod helpers;
 mod intrinsics;

@@ -16,8 +16,6 @@ use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::jit_api::JitContext;
 
-const MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS: usize = 512;
-
 pub struct FunctionCompiler<'a> {
     builder: FunctionBuilder<'a>,
     func_id: u32,
@@ -739,62 +737,46 @@ impl<'a> FunctionCompiler<'a> {
         let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
         let arg_start = inst.b as usize;
 
-        // Get target function info
         let target_func = &self.vo_module.functions[target_func_id as usize];
-        let arg_slots = target_func.param_slots as usize;
-        let call_ret_slots = target_func.ret_slots as usize;
-        let callee_local_slots = target_func.local_slots as usize;
+        let callee_func_ref = self
+            .callee_func_refs
+            .get(target_func_id as usize)
+            .copied()
+            .flatten();
+        let call_plan = crate::call_helpers::CallPlan::new(
+            target_func_id,
+            arg_start,
+            target_func,
+            callee_func_ref,
+        );
 
         // Self-recursive calls can use a direct native call only while the
         // callee frame is small enough for the host stack. Large frames must go
         // through the VM path so fiber stack limits fire before wasm stack
         // exhaustion.
-        if target_func_id == self.func_id && callee_local_slots <= MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS
-        {
-            self.call_self_recursive(arg_start, arg_slots, call_ret_slots, target_func);
+        if call_plan.is_self_recursive(self.func_id) && call_plan.fits_direct_native_frame() {
+            self.call_self_recursive(
+                call_plan.arg_start,
+                call_plan.arg_slots,
+                call_plan.call_ret_slots,
+                target_func,
+            );
             return false;
         }
 
         // has_defer callees need VM execution (defer requires real CallFrame in fiber.frames).
         // Large-frame callees also need VM execution so stack overflow is
         // reported as a recoverable Vo panic instead of a host wasm trap.
-        if !target_func.has_defer && callee_local_slots <= MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS {
-            let callee_func_ref = self
-                .callee_func_refs
-                .get(target_func_id as usize)
-                .copied()
-                .flatten();
-
+        if call_plan.can_use_direct_jit(true) {
             // JIT-to-JIT direct call with runtime check for compiled callee
             // If callee returns Call/WaitIo, we propagate it to VM
-            crate::call_helpers::emit_jit_call_with_fallback(
-                self,
-                crate::call_helpers::JitCallWithFallbackConfig {
-                    func_id: target_func_id,
-                    arg_start,
-                    ret_reg: arg_start + arg_slots,
-                    arg_slots,
-                    call_ret_slots,
-                    func_ret_slots: target_func.ret_slots as usize,
-                    callee_local_slots: target_func.local_slots as usize,
-                    callee_func_ref,
-                },
-            );
+            crate::call_helpers::emit_jit_call_with_fallback(self, call_plan.jit_config());
             false // Block not terminated - we have a merge block for continuation
         } else {
             // Callee has defer: requires real CallFrame in fiber.frames.
             // Use Call request mechanism: return JitResult::Call, VM executes callee,
             // then continues execution in interpreter
-            crate::call_helpers::emit_call_via_vm(
-                self,
-                crate::call_helpers::CallViaVmConfig {
-                    func_id: target_func_id,
-                    arg_start,
-                    ret_reg: arg_start + arg_slots,
-                    resume_pc: self.current_pc + 1,
-                    ret_slots: call_ret_slots,
-                },
-            );
+            crate::call_helpers::emit_call_via_vm(self, call_plan.vm_config(self.current_pc + 1));
             true // Block IS terminated - call_via_vm generates return instruction
         }
     }

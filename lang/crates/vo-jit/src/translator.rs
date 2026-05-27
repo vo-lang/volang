@@ -8,6 +8,8 @@ use vo_runtime::bytecode::{Constant, ExternDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
 
+use crate::effects::{self, MemorySyncEffect};
+
 /// Translation result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranslateResult {
@@ -76,6 +78,24 @@ pub struct HelperFuncs {
     pub select_exec: Option<FuncRef>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperCallEffect {
+    /// Helper neither observes nor mutates the caller frame and cannot reallocate fiber.stack.
+    FrameIndependent,
+    /// Helper may trigger GC/scheduler/VM paths or observe locals through fiber.stack.
+    MayObserveFrame,
+}
+
+impl HelperCallEffect {
+    fn needs_frame_sync(self) -> bool {
+        matches!(self, HelperCallEffect::MayObserveFrame)
+    }
+
+    fn invalidates_reg_consts(self) -> bool {
+        matches!(self, HelperCallEffect::MayObserveFrame)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum SelectSyncCase {
     Send,
@@ -91,19 +111,22 @@ pub fn emit_funcref_call<'a>(
     func_ref: FuncRef,
     args: &[Value],
 ) -> Inst {
-    // TODO(jit): This unconditional spill is a conservative correctness barrier for helper calls.
-    // Today some imported/runtime helpers may trigger GC, suspend into the VM, return non-OK,
-    // reallocate fiber.stack, or otherwise observe the caller frame through fiber.stack materialization.
-    // In those cases the caller's SSA-only locals must already be synchronized before the call.
-    // The downside is that pure helpers also pay a full-frame spill cost, which shows up in
-    // helper-heavy benchmarks such as dynamic calls, task queues, select, and runtime-intensive code.
-    // The intended refactor is to make helper-call lowering effect-aware: classify each helper as
-    // may_gc / may_suspend / may_return_non_ok / may_realloc_stack / may_observe_frame, spill only
-    // when one of those effects is present, and eventually narrow the spill set to live GC-visible
-    // slots instead of materializing the entire frame on every helper call.
-    emitter.spill_all_vars();
+    emit_funcref_call_with_effect(emitter, func_ref, args, HelperCallEffect::MayObserveFrame)
+}
+
+pub fn emit_funcref_call_with_effect<'a>(
+    emitter: &mut impl IrEmitter<'a>,
+    func_ref: FuncRef,
+    args: &[Value],
+    effect: HelperCallEffect,
+) -> Inst {
+    if effect.needs_frame_sync() {
+        emitter.spill_all_vars();
+    }
     let call = emit_funcref_call_raw(emitter, func_ref, args);
-    emitter.clear_reg_consts();
+    if effect.invalidates_reg_consts() {
+        emitter.clear_reg_consts();
+    }
     call
 }
 
@@ -247,34 +270,12 @@ pub trait IrEmitter<'a> {
 pub fn compute_memory_only_start(code: &[Instruction]) -> u16 {
     let mut min_base = u16::MAX;
     for inst in code {
-        match inst.opcode() {
-            // Dynamic indexed memory access (SlotGet reads, SlotSet writes)
-            Opcode::SlotSet | Opcode::SlotSetN => {
-                min_base = min_base.min(inst.a);
+        match effects::memory_sync_effect(inst) {
+            MemorySyncEffect::None => {}
+            MemorySyncEffect::From(base) => {
+                min_base = min_base.min(base);
             }
-            Opcode::SlotGet | Opcode::SlotGetN => {
-                min_base = min_base.min(inst.b);
-            }
-            // Callbacks that read from var_addr pointers
-            Opcode::QueueSend => {
-                min_base = min_base.min(inst.b);
-            }
-            Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => {
-                min_base = min_base.min(inst.b);
-            }
-            Opcode::GoIsland => {
-                min_base = min_base.min(inst.c);
-            }
-            Opcode::SliceAppend => {
-                let elem_slot = inst.c + if inst.flags == 0 { 2 } else { 1 };
-                min_base = min_base.min(elem_slot);
-            }
-            // Select callbacks read/write fiber.stack directly via register numbers —
-            // all slots must be memory-synced
-            Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => {
-                return 0;
-            }
-            _ => {}
+            MemorySyncEffect::All => return 0,
         }
     }
     min_base
@@ -485,31 +486,14 @@ fn slots_for_elem_bytes(elem_bytes: i64) -> Option<u16> {
     u16::try_from((elem_bytes as usize).div_ceil(8)).ok()
 }
 
-fn slice_elem_slots_from_flags(flags: u8) -> u16 {
-    let elem_bytes = match flags {
-        0 => 64,
-        0x81 | 0x82 | 0x84 | 0x44 => 8,
-        f => f as usize,
-    };
-    elem_bytes.div_ceil(8) as u16
-}
-
 fn slice_elem_slots(inst: &Instruction, facts: &HashMap<u16, i64>) -> Option<u16> {
     if inst.flags == 0 {
         facts
             .get(&(inst.c + 1))
             .and_then(|elem_bytes| slots_for_elem_bytes(*elem_bytes))
     } else {
-        Some(slice_elem_slots_from_flags(inst.flags))
+        Some(effects::slice_elem_slots_from_flags(inst.flags))
     }
-}
-
-fn recv_result_slots(flags: u8, normalize_zero_elem_slots: bool) -> u16 {
-    let mut elem_slots = ((flags >> 1) & 0x7F) as u16;
-    if normalize_zero_elem_slots && elem_slots == 0 {
-        elem_slots = 1;
-    }
-    elem_slots + u16::from((flags & 1) != 0)
 }
 
 fn transfer_reg_const_facts(
@@ -579,11 +563,11 @@ fn reg_const_effect(
         }
         Opcode::QueueRecv => RegConstEffect::KillSlots {
             start: inst.a,
-            count: recv_result_slots(inst.flags, false),
+            count: effects::recv_result_slots(inst.flags, false),
         },
         Opcode::SelectRecv => RegConstEffect::KillSlots {
             start: inst.a,
-            count: recv_result_slots(inst.flags, true),
+            count: effects::recv_result_slots(inst.flags, true),
         },
         Opcode::IfaceAssign => RegConstEffect::KillSlots {
             start: inst.a,
@@ -619,18 +603,18 @@ fn reg_const_effect(
         }
         Opcode::MapIterInit => RegConstEffect::KillSlots {
             start: inst.a,
-            count: 3,
+            count: effects::MAP_ITER_SLOTS,
         },
         Opcode::StrDecodeRune | Opcode::Recover => RegConstEffect::KillSlots {
             start: inst.a,
             count: 2,
         },
         Opcode::SlotSet | Opcode::SlotSetN => RegConstEffect::KillSlotsAtOrAfter { start: inst.a },
-        op if single_slot_unknown_result_opcode(op) => RegConstEffect::KillSlots {
+        op if effects::single_slot_unknown_result_opcode(op) => RegConstEffect::KillSlots {
             start: inst.a,
             count: 1,
         },
-        op if preserves_reg_const_facts(op) => RegConstEffect::Preserve,
+        op if effects::preserves_reg_const_facts(op) => RegConstEffect::Preserve,
         Opcode::MapIterNext | Opcode::SelectExec => RegConstEffect::Clear,
         _ => RegConstEffect::Clear,
     }
@@ -734,91 +718,6 @@ fn single_slot_const_result(
         })),
         _ => None,
     }
-}
-
-fn single_slot_unknown_result_opcode(op: Opcode) -> bool {
-    matches!(
-        op,
-        Opcode::AddF
-            | Opcode::SubF
-            | Opcode::MulF
-            | Opcode::DivF
-            | Opcode::NegF
-            | Opcode::EqF
-            | Opcode::NeF
-            | Opcode::LtF
-            | Opcode::LeF
-            | Opcode::GtF
-            | Opcode::GeF
-            | Opcode::GlobalGet
-            | Opcode::PtrGet
-            | Opcode::PtrAdd
-            | Opcode::SlotGet
-            | Opcode::ConvI2F
-            | Opcode::ConvF2I
-            | Opcode::ConvF64F32
-            | Opcode::ConvF32F64
-            | Opcode::Trunc
-            | Opcode::SliceNew
-            | Opcode::SliceLen
-            | Opcode::SliceCap
-            | Opcode::SliceSlice
-            | Opcode::SliceAppend
-            | Opcode::SliceAddr
-            | Opcode::ArrayNew
-            | Opcode::ArrayAddr
-            | Opcode::StrNew
-            | Opcode::StrLen
-            | Opcode::StrIndex
-            | Opcode::StrConcat
-            | Opcode::StrSlice
-            | Opcode::StrEq
-            | Opcode::StrNe
-            | Opcode::StrLt
-            | Opcode::StrLe
-            | Opcode::StrGt
-            | Opcode::StrGe
-            | Opcode::MapNew
-            | Opcode::MapLen
-            | Opcode::ClosureNew
-            | Opcode::ClosureGet
-            | Opcode::PtrNew
-            | Opcode::QueueNew
-            | Opcode::QueueLen
-            | Opcode::QueueCap
-            | Opcode::IslandNew
-            | Opcode::IfaceEq
-            | Opcode::ForLoop
-    )
-}
-
-fn preserves_reg_const_facts(op: Opcode) -> bool {
-    matches!(
-        op,
-        Opcode::Hint
-            | Opcode::Jump
-            | Opcode::JumpIf
-            | Opcode::JumpIfNot
-            | Opcode::Return
-            | Opcode::Panic
-            | Opcode::IndexCheck
-            | Opcode::GlobalSet
-            | Opcode::GlobalSetN
-            | Opcode::PtrSet
-            | Opcode::PtrSetN
-            | Opcode::ArraySet
-            | Opcode::SliceSet
-            | Opcode::MapSet
-            | Opcode::MapDelete
-            | Opcode::QueueSend
-            | Opcode::QueueClose
-            | Opcode::SelectBegin
-            | Opcode::SelectSend
-            | Opcode::GoStart
-            | Opcode::GoIsland
-            | Opcode::DeferPush
-            | Opcode::ErrDeferPush
-    )
 }
 
 #[inline]
@@ -969,6 +868,24 @@ mod tests {
             facts[5].get(&5),
             Some(&((17i64 << 32) | 4111)),
             "packed metadata built from pure integer ops should stay available"
+        );
+    }
+
+    #[test]
+    fn reg_const_facts_map_iter_init_kills_whole_iterator() {
+        let constants = vec![Constant::Int(99)];
+        let iter_start = 10;
+        let iter_last = iter_start + effects::MAP_ITER_SLOTS - 1;
+        let code = vec![
+            Instruction::new(Opcode::LoadConst, iter_last, 0, 0),
+            Instruction::new(Opcode::MapIterInit, iter_start, 1, 0),
+            Instruction::new(Opcode::MapLen, 20, 1, 0),
+        ];
+        let facts = compute_reg_const_facts(&code, &constants, &[], 0, code.len());
+
+        assert!(
+            !facts[2].contains_key(&iter_last),
+            "MapIterInit writes all iterator slots, so constants in the tail must be killed"
         );
     }
 }

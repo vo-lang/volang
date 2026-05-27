@@ -9,7 +9,9 @@ use cranelift_codegen::ir::{
 use vo_runtime::bytecode::Constant;
 use vo_runtime::instruction::{Instruction, Opcode, QUEUE_KIND_PORT_FLAG};
 
-use crate::translator::{emit_funcref_call, IrEmitter, TranslateResult};
+use crate::translator::{
+    emit_funcref_call, emit_funcref_call_with_effect, HelperCallEffect, IrEmitter, TranslateResult,
+};
 use crate::JitError;
 
 /// Translate a single instruction.
@@ -1834,7 +1836,12 @@ fn str_index<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
     emit_panic_if(e, out_of_bounds);
-    let call = emit_funcref_call(e, str_index_func, &[s, idx]);
+    let call = emit_funcref_call_with_effect(
+        e,
+        str_index_func,
+        &[s, idx],
+        HelperCallEffect::FrameIndependent,
+    );
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1870,7 +1877,7 @@ fn str_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().str_eq.expect("str_eq helper not registered");
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
-    let call = emit_funcref_call(e, func, &[a, b]);
+    let call = emit_funcref_call_with_effect(e, func, &[a, b], HelperCallEffect::FrameIndependent);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -1879,7 +1886,7 @@ fn str_ne<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().str_eq.expect("str_eq helper not registered");
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
-    let call = emit_funcref_call(e, func, &[a, b]);
+    let call = emit_funcref_call_with_effect(e, func, &[a, b], HelperCallEffect::FrameIndependent);
     let eq_result = e.builder().inst_results(call)[0];
     let zero = e.builder().ins().iconst(types::I64, 0);
     let cmp = e.builder().ins().icmp(IntCC::Equal, eq_result, zero);
@@ -1891,7 +1898,7 @@ fn str_cmp<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: IntCC) {
     let func = e.helpers().str_cmp.expect("str_cmp helper not registered");
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
-    let call = emit_funcref_call(e, func, &[a, b]);
+    let call = emit_funcref_call_with_effect(e, func, &[a, b], HelperCallEffect::FrameIndependent);
     let cmp_result = e.builder().inst_results(call)[0]; // i32
     let zero = e.builder().ins().iconst(types::I32, 0);
     let cmp = e.builder().ins().icmp(cc, cmp_result, zero);
@@ -1906,7 +1913,8 @@ fn str_decode_rune<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         .expect("str_decode_rune helper not registered");
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    let call = emit_funcref_call(e, func, &[s, idx]);
+    let call =
+        emit_funcref_call_with_effect(e, func, &[s, idx], HelperCallEffect::FrameIndependent);
     let packed = e.builder().inst_results(call)[0];
     // Unpack: packed = (rune << 32) | width
     let rune = e.builder().ins().ushr_imm(packed, 32);
@@ -1950,7 +1958,7 @@ fn map_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 fn map_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().map_len.expect("map_len helper not registered");
     let m = e.read_var(inst.b);
-    let call = emit_funcref_call(e, func, &[m]);
+    let call = emit_funcref_call_with_effect(e, func, &[m], HelperCallEffect::FrameIndependent);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -2279,7 +2287,7 @@ fn queue_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         .queue_len
         .expect("queue_len helper not registered");
     let ch = e.read_var(inst.b);
-    let call = emit_funcref_call(e, func, &[ch]);
+    let call = emit_funcref_call_with_effect(e, func, &[ch], HelperCallEffect::FrameIndependent);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -2290,7 +2298,7 @@ fn queue_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         .queue_cap
         .expect("queue_cap helper not registered");
     let ch = e.read_var(inst.b);
-    let call = emit_funcref_call(e, func, &[ch]);
+    let call = emit_funcref_call_with_effect(e, func, &[ch], HelperCallEffect::FrameIndependent);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }

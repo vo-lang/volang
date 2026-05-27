@@ -11,6 +11,8 @@ use vo_common_core::instruction::{
 use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::instruction::{Instruction, Opcode};
 
+use crate::effects;
+
 /// Information about a detected loop (from Hint instructions).
 #[derive(Debug, Clone)]
 pub struct LoopInfo {
@@ -170,20 +172,15 @@ fn analyze_loop_liveness(
     let mut written: HashSet<u16> = HashSet::new();
 
     for inst in &code[header_pc..=back_edge_pc] {
-        // Get registers read by this instruction
-        for reg in get_read_regs(inst) {
+        let effects = effects::instruction_effects(inst);
+
+        for reg in effects.reads {
             if !written.contains(&reg) {
                 read_before_write.insert(reg);
             }
         }
 
-        // Get registers written by this instruction
-        if let Some(dst) = get_write_reg(inst) {
-            written.insert(dst);
-        }
-
-        // Handle multi-slot writes (e.g., Call with multiple return values)
-        for dst in get_write_regs_multi(inst) {
+        for dst in effects.writes {
             written.insert(dst);
         }
     }
@@ -197,355 +194,22 @@ fn analyze_loop_liveness(
     (live_in, live_out)
 }
 
-fn push_slot_range(regs: &mut Vec<u16>, start: u16, slots: u16) {
-    for i in 0..slots {
-        regs.push(start + i);
-    }
-}
-
-fn recv_layout(flags: u8, normalize_zero_elem_slots: bool) -> (u16, bool) {
-    let mut elem_slots = ((flags >> 1) & 0x7F) as u16;
-    if normalize_zero_elem_slots && elem_slots == 0 {
-        elem_slots = 1;
-    }
-    (elem_slots, (flags & 1) != 0)
-}
-
-fn push_recv_result_slots(regs: &mut Vec<u16>, dst_start: u16, elem_slots: u16, has_ok: bool) {
-    push_slot_range(regs, dst_start, elem_slots);
-    if has_ok {
-        regs.push(dst_start + elem_slots);
-    }
-}
-
 /// Get registers read by an instruction.
+#[cfg(test)]
 fn get_read_regs(inst: &Instruction) -> Vec<u16> {
-    let mut regs = Vec::new();
-
-    match inst.opcode() {
-        // Instructions that read from b and/or c
-        Opcode::Copy | Opcode::Not | Opcode::NegI | Opcode::NegF => {
-            regs.push(inst.b);
-        }
-        Opcode::AddI
-        | Opcode::SubI
-        | Opcode::MulI
-        | Opcode::DivI
-        | Opcode::DivU
-        | Opcode::ModI
-        | Opcode::ModU
-        | Opcode::AddF
-        | Opcode::SubF
-        | Opcode::MulF
-        | Opcode::DivF
-        | Opcode::And
-        | Opcode::Or
-        | Opcode::Xor
-        | Opcode::Shl
-        | Opcode::ShrS
-        | Opcode::ShrU
-        | Opcode::EqI
-        | Opcode::NeI
-        | Opcode::LtI
-        | Opcode::LeI
-        | Opcode::GtI
-        | Opcode::GeI
-        | Opcode::LtU
-        | Opcode::LeU
-        | Opcode::GtU
-        | Opcode::GeU
-        | Opcode::EqF
-        | Opcode::NeF
-        | Opcode::LtF
-        | Opcode::LeF
-        | Opcode::GtF
-        | Opcode::GeF => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-        }
-        // Conditional jumps read the condition register
-        Opcode::JumpIf | Opcode::JumpIfNot => {
-            regs.push(inst.a);
-        }
-        Opcode::QueueNew => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-        }
-        Opcode::QueueLen | Opcode::QueueCap => {
-            regs.push(inst.b);
-        }
-        Opcode::QueueClose => {
-            regs.push(inst.a);
-        }
-        Opcode::QueueSend => {
-            regs.push(inst.a);
-            push_slot_range(&mut regs, inst.b, inst.flags as u16);
-        }
-        Opcode::QueueRecv => {
-            regs.push(inst.b);
-        }
-        // ForLoop reads idx and limit
-        Opcode::ForLoop => {
-            regs.push(inst.a); // idx
-            regs.push(inst.b); // limit
-        }
-        // Return reads return value registers
-        Opcode::Return => {
-            let count = inst.b;
-            for i in 0..count {
-                regs.push(inst.a + i);
-            }
-        }
-        // PtrGet reads pointer and offset
-        Opcode::PtrGet => {
-            regs.push(inst.b);
-        }
-        // PtrSet reads pointer, offset, and value
-        Opcode::PtrSet => {
-            regs.push(inst.a);
-            regs.push(inst.c);
-        }
-        // SliceGet reads slice and index
-        Opcode::SliceGet => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-        }
-        // SliceSet reads slice, index, and value (possibly multi-slot)
-        Opcode::SliceSet => {
-            regs.push(inst.a); // slice
-            regs.push(inst.b); // index
-                               // Value may be multi-slot
-            let elem_bytes = match inst.flags {
-                0 => 64, // Dynamic - assume max for safety
-                0x81 | 0x82 | 0x84 | 0x44 => 8,
-                f => f as usize,
-            };
-            let elem_slots = elem_bytes.div_ceil(8);
-            for i in 0..elem_slots {
-                regs.push(inst.c + i as u16);
-            }
-        }
-        // CopyN reads n slots starting from b
-        Opcode::CopyN => {
-            let n = inst.copy_n_count();
-            for i in 0..n {
-                regs.push(inst.b + i);
-            }
-        }
-        // IfaceAssign reads source (1 or 2 slots depending on vk)
-        Opcode::IfaceAssign => {
-            let vk = inst.flags;
-            if vk == 16 {
-                // Interface source: 2 slots
-                regs.push(inst.b);
-                regs.push(inst.b + 1);
-            } else {
-                // Concrete source: 1 slot
-                regs.push(inst.b);
-            }
-        }
-        // PtrGetN reads pointer
-        Opcode::PtrGetN => {
-            regs.push(inst.b);
-        }
-        // PtrSetN reads pointer and n value slots
-        Opcode::PtrSetN => {
-            regs.push(inst.a); // pointer
-            let n = inst.flags as u16;
-            for i in 0..n {
-                regs.push(inst.c + i);
-            }
-        }
-        // Call reads arguments
-        Opcode::Call => {
-            let arg_start = inst.b;
-            let arg_slots = inst.c >> 8;
-            for i in 0..arg_slots {
-                regs.push(arg_start + i);
-            }
-        }
-        // CallClosure reads closure ref and arguments
-        Opcode::CallClosure => {
-            regs.push(inst.a); // closure ref
-            let arg_start = inst.b;
-            let arg_slots = inst.c >> 8;
-            for i in 0..arg_slots {
-                regs.push(arg_start + i);
-            }
-        }
-        // CallExtern reads arguments (a=dst, b=extern_id, c=arg_start, flags=arg_count)
-        Opcode::CallExtern => {
-            let arg_start = inst.c;
-            let arg_count = inst.flags as u16;
-            for i in 0..arg_count {
-                regs.push(arg_start + i);
-            }
-        }
-        Opcode::CallIface => {
-            // CallIface: a=iface_slot (2 slots), b=args_start
-            regs.push(inst.a);
-            regs.push(inst.a + 1);
-            let arg_start = inst.b;
-            let arg_slots = inst.c >> 8;
-            for i in 0..arg_slots {
-                regs.push(arg_start + i);
-            }
-        }
-        Opcode::SelectSend => {
-            regs.push(inst.a);
-            let elem_slots = if inst.flags == 0 {
-                1
-            } else {
-                inst.flags as u16
-            };
-            push_slot_range(&mut regs, inst.b, elem_slots);
-        }
-        Opcode::SelectRecv => {
-            regs.push(inst.b);
-        }
-        // Many other instructions - add as needed
-        _ => {}
-    }
-
-    regs
+    effects::read_regs(inst)
 }
 
 /// Get the register written by an instruction (single destination).
+#[cfg(test)]
 fn get_write_reg(inst: &Instruction) -> Option<u16> {
-    match inst.opcode() {
-        // Most arithmetic/logic instructions write to a
-        Opcode::Copy
-        | Opcode::Not
-        | Opcode::NegI
-        | Opcode::NegF
-        | Opcode::AddI
-        | Opcode::SubI
-        | Opcode::MulI
-        | Opcode::DivI
-        | Opcode::DivU
-        | Opcode::ModI
-        | Opcode::ModU
-        | Opcode::AddF
-        | Opcode::SubF
-        | Opcode::MulF
-        | Opcode::DivF
-        | Opcode::And
-        | Opcode::Or
-        | Opcode::Xor
-        | Opcode::Shl
-        | Opcode::ShrS
-        | Opcode::ShrU
-        | Opcode::EqI
-        | Opcode::NeI
-        | Opcode::LtI
-        | Opcode::LeI
-        | Opcode::GtI
-        | Opcode::GeI
-        | Opcode::LtU
-        | Opcode::LeU
-        | Opcode::GtU
-        | Opcode::GeU
-        | Opcode::EqF
-        | Opcode::NeF
-        | Opcode::LtF
-        | Opcode::LeF
-        | Opcode::GtF
-        | Opcode::GeF
-        | Opcode::LoadInt
-        | Opcode::LoadConst
-        | Opcode::PtrGet
-        | Opcode::PtrNew
-        | Opcode::SliceGet
-        | Opcode::SliceNew
-        | Opcode::QueueNew
-        | Opcode::QueueLen
-        | Opcode::QueueCap
-        | Opcode::IslandNew
-        | Opcode::SelectExec
-        | Opcode::ForLoop => {
-            // ForLoop writes idx (a)
-            Some(inst.a)
-        }
-        _ => None,
-    }
+    effects::single_write_reg(inst)
 }
 
 /// Get registers written by multi-slot instructions (e.g., Call return values).
+#[cfg(test)]
 fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
-    let mut regs = Vec::new();
-
-    match inst.opcode() {
-        Opcode::Call => {
-            let ret_start = inst.b + (inst.c >> 8);
-            let ret_slots = inst.c & 0xFF;
-            for i in 0..ret_slots {
-                regs.push(ret_start + i);
-            }
-        }
-        Opcode::CallClosure => {
-            let ret_start = inst.b + (inst.c >> 8);
-            let ret_slots = inst.c & 0xFF;
-            for i in 0..ret_slots {
-                regs.push(ret_start + i);
-            }
-        }
-        // CallExtern: a=dst, returns written to dst
-        Opcode::CallExtern => {
-            // Need vo_module to get ret_slots, but we don't have it here
-            // For safety, assume it writes to inst.a (single slot minimum)
-            regs.push(inst.a);
-        }
-        Opcode::CallIface => {
-            let ret_start = inst.b + (inst.c >> 8);
-            let ret_slots = inst.c & 0xFF;
-            for i in 0..ret_slots {
-                regs.push(ret_start + i);
-            }
-        }
-        Opcode::CopyN => {
-            // CopyN: a=dst, c=n (flags mirrors small canonical encodings)
-            let n = inst.copy_n_count();
-            for i in 0..n {
-                regs.push(inst.a + i);
-            }
-        }
-        Opcode::IfaceAssign => {
-            // IfaceAssign always writes 2 slots (slot0 and slot1)
-            regs.push(inst.a);
-            regs.push(inst.a + 1);
-        }
-        Opcode::PtrGetN => {
-            // PtrGetN: a=dst, flags=n
-            let n = inst.flags as u16;
-            for i in 0..n {
-                regs.push(inst.a + i);
-            }
-        }
-        Opcode::SliceGet => {
-            // SliceGet: when elem_bytes > 8, writes multiple slots
-            // flags encodes elem info: 0=dynamic, 1-8=direct, >8=multi-slot
-            let elem_bytes = match inst.flags {
-                0 => 64,                        // Dynamic - assume max for safety
-                0x81 | 0x82 | 0x84 | 0x44 => 8, // Small types fit in 1 slot
-                f => f as usize,
-            };
-            let elem_slots = elem_bytes.div_ceil(8);
-            for i in 0..elem_slots {
-                regs.push(inst.a + i as u16);
-            }
-        }
-        Opcode::QueueRecv => {
-            let (elem_slots, has_ok) = recv_layout(inst.flags, false);
-            push_recv_result_slots(&mut regs, inst.a, elem_slots, has_ok);
-        }
-        Opcode::SelectRecv => {
-            let (elem_slots, has_ok) = recv_layout(inst.flags, true);
-            push_recv_result_slots(&mut regs, inst.a, elem_slots, has_ok);
-        }
-        _ => {}
-    }
-
-    regs
+    effects::multi_write_regs(inst)
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ use cranelift_codegen::ir::{
     types, Block, FuncRef, InstBuilder, MemFlags, SigRef, StackSlotData, StackSlotKind, Value,
 };
 
+use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::{DynCallIC, JitContext, PreparedCall};
 use vo_runtime::objects::closure as closure_obj;
@@ -23,6 +24,10 @@ pub const JIT_RESULT_CALL: i32 = 2;
 /// Callees with more locals fall through to prepare callback.
 /// 64 slots = 512 bytes on native stack per dynamic call site.
 const MAX_IC_NATIVE_SLOTS: usize = 64;
+
+/// Maximum callee local_slots for direct static JIT calls from a function body.
+/// Larger frames use the VM path so fiber stack limits fire before host stack exhaustion.
+pub const MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS: usize = 512;
 
 fn current_call_conv<'a, E: IrEmitter<'a>>(emitter: &mut E) -> cranelift_codegen::isa::CallConv {
     emitter.builder().func.signature.call_conv
@@ -1744,6 +1749,78 @@ pub struct CallViaVmConfig {
     pub ret_reg: usize,
     pub resume_pc: usize,
     pub ret_slots: usize,
+}
+
+/// Static bytecode call shape after decoding the target FunctionDef.
+#[derive(Clone, Copy)]
+pub struct CallPlan {
+    pub func_id: u32,
+    pub arg_start: usize,
+    pub arg_slots: usize,
+    pub ret_reg: usize,
+    pub call_ret_slots: usize,
+    pub func_ret_slots: usize,
+    pub callee_local_slots: usize,
+    pub callee_has_defer: bool,
+    pub callee_func_ref: Option<FuncRef>,
+}
+
+impl CallPlan {
+    pub fn new(
+        func_id: u32,
+        arg_start: usize,
+        target_func: &FunctionDef,
+        callee_func_ref: Option<FuncRef>,
+    ) -> Self {
+        let arg_slots = target_func.param_slots as usize;
+        let call_ret_slots = target_func.ret_slots as usize;
+        Self {
+            func_id,
+            arg_start,
+            arg_slots,
+            ret_reg: arg_start + arg_slots,
+            call_ret_slots,
+            func_ret_slots: target_func.ret_slots as usize,
+            callee_local_slots: target_func.local_slots as usize,
+            callee_has_defer: target_func.has_defer,
+            callee_func_ref,
+        }
+    }
+
+    pub fn is_self_recursive(self, current_func_id: u32) -> bool {
+        self.func_id == current_func_id
+    }
+
+    pub fn fits_direct_native_frame(self) -> bool {
+        self.callee_local_slots <= MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS
+    }
+
+    pub fn can_use_direct_jit(self, enforce_native_frame_limit: bool) -> bool {
+        !self.callee_has_defer && (!enforce_native_frame_limit || self.fits_direct_native_frame())
+    }
+
+    pub fn jit_config(self) -> JitCallWithFallbackConfig {
+        JitCallWithFallbackConfig {
+            func_id: self.func_id,
+            arg_start: self.arg_start,
+            ret_reg: self.ret_reg,
+            arg_slots: self.arg_slots,
+            call_ret_slots: self.call_ret_slots,
+            func_ret_slots: self.func_ret_slots,
+            callee_local_slots: self.callee_local_slots,
+            callee_func_ref: self.callee_func_ref,
+        }
+    }
+
+    pub fn vm_config(self, resume_pc: usize) -> CallViaVmConfig {
+        CallViaVmConfig {
+            func_id: self.func_id,
+            arg_start: self.arg_start,
+            ret_reg: self.ret_reg,
+            resume_pc,
+            ret_slots: self.call_ret_slots,
+        }
+    }
 }
 
 /// Configuration for JIT-to-JIT call with fallback.
