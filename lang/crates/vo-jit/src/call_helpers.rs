@@ -5,7 +5,7 @@
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
-    types, FuncRef, InstBuilder, MemFlags, SigRef, StackSlotData, StackSlotKind, Value,
+    types, Block, FuncRef, InstBuilder, MemFlags, SigRef, StackSlotData, StackSlotKind, Value,
 };
 
 use vo_runtime::instruction::Instruction;
@@ -115,6 +115,35 @@ pub fn emit_stack_limit_guard<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value,
 
     emitter.builder().switch_to_block(ok_block);
     emitter.builder().seal_block(ok_block);
+}
+
+pub fn emit_stack_capacity_check<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    ctx: Value,
+    new_sp: Value,
+) -> (Block, Block) {
+    emit_stack_limit_guard(emitter, ctx, new_sp);
+
+    let capacity = emitter.builder().ins().load(
+        types::I32,
+        MemFlags::trusted(),
+        ctx,
+        JitContext::OFFSET_STACK_CAP,
+    );
+    let exceeds_capacity =
+        emitter
+            .builder()
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThan, new_sp, capacity);
+
+    let fallback_block = emitter.builder().create_block();
+    let ok_block = emitter.builder().create_block();
+    emitter
+        .builder()
+        .ins()
+        .brif(exceeds_capacity, fallback_block, &[], ok_block, &[]);
+
+    (fallback_block, ok_block)
 }
 
 pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value) -> Value {
@@ -292,7 +321,8 @@ struct IcHitParams {
     ret_ptr: Value,
     caller_bp: Value,
     old_fiber_sp: Value,
-    merge_block: cranelift_codegen::ir::Block,
+    merge_block: Block,
+    capacity_fallback_block: Block,
     arg_start: usize,
     arg_slots: usize,
     ret_slots: usize,
@@ -326,7 +356,14 @@ fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
     // Update ctx
     let new_bp = p.old_fiber_sp;
     let new_sp = emitter.builder().ins().iadd(new_bp, p.ic_local_slots);
-    emit_stack_limit_guard(emitter, p.ctx, new_sp);
+    let (capacity_fallback_block, capacity_ok_block) =
+        emit_stack_capacity_check(emitter, p.ctx, new_sp);
+    emitter.builder().switch_to_block(capacity_fallback_block);
+    emitter.builder().seal_block(capacity_fallback_block);
+    emitter.builder().ins().jump(p.capacity_fallback_block, &[]);
+
+    emitter.builder().switch_to_block(capacity_ok_block);
+    emitter.builder().seal_block(capacity_ok_block);
     let old_call_depth = emit_call_depth_enter(emitter, p.ctx);
     emitter.builder().ins().store(
         MemFlags::trusted(),
@@ -855,6 +892,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instructi
             caller_bp,
             old_fiber_sp,
             merge_block,
+            capacity_fallback_block: ic_miss_block,
             arg_start,
             arg_slots,
             ret_slots,
@@ -1156,6 +1194,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction
             caller_bp,
             old_fiber_sp,
             merge_block,
+            capacity_fallback_block: ic_miss_block,
             arg_start,
             arg_slots,
             ret_slots,
@@ -1819,7 +1858,23 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         .builder()
         .ins()
         .iadd_imm(new_bp, config.callee_local_slots as i64);
-    emit_stack_limit_guard(emitter, ctx, new_sp);
+    let (capacity_fallback_block, capacity_ok_block) =
+        emit_stack_capacity_check(emitter, ctx, new_sp);
+    emitter.builder().switch_to_block(capacity_fallback_block);
+    emitter.builder().seal_block(capacity_fallback_block);
+    emit_call_via_vm(
+        emitter,
+        CallViaVmConfig {
+            func_id: config.func_id,
+            arg_start: config.arg_start,
+            ret_reg: config.ret_reg,
+            resume_pc: current_pc + 1,
+            ret_slots: config.call_ret_slots,
+        },
+    );
+
+    emitter.builder().switch_to_block(capacity_ok_block);
+    emitter.builder().seal_block(capacity_ok_block);
     let old_call_depth = emit_call_depth_enter(emitter, ctx);
     emitter
         .builder()

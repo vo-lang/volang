@@ -29,6 +29,7 @@ pub struct FunctionCompiler<'a> {
     current_pc: usize,
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
+    reg_const_facts: Vec<HashMap<u16, i64>>,
     /// FuncRef for self-recursive calls (direct call optimization)
     self_func_ref: Option<FuncRef>,
     /// FuncRef table for other already-compiled callees.
@@ -81,6 +82,7 @@ impl<'a> FunctionCompiler<'a> {
             current_pc: 0,
             helpers,
             reg_consts: HashMap::new(),
+            reg_const_facts: Vec::new(),
             self_func_ref,
             callee_func_refs,
             saved_jit_bp: None,
@@ -96,6 +98,13 @@ impl<'a> FunctionCompiler<'a> {
 
     pub fn compile(mut self) -> Result<(), JitError> {
         self.memory_only_start = crate::translator::compute_memory_only_start(&self.func_def.code);
+        self.reg_const_facts = crate::translator::compute_reg_const_facts(
+            &self.func_def.code,
+            &self.vo_module.constants,
+            &self.vo_module.externs,
+            0,
+            self.func_def.code.len(),
+        );
         self.declare_variables();
         self.scan_jump_targets();
 
@@ -112,13 +121,14 @@ impl<'a> FunctionCompiler<'a> {
                     self.builder.ins().jump(block, &[]);
                 }
                 self.builder.switch_to_block(block);
-                // Clear non-nil tracking at block boundaries (jump targets)
-                self.checked_non_nil.clear();
+                self.clear_flow_facts();
             } else if block_terminated {
                 let dummy = self.builder.create_block();
                 self.builder.switch_to_block(dummy);
+                self.clear_flow_facts();
             }
 
+            self.apply_reg_const_facts(pc);
             let inst = &self.func_def.code[pc];
             block_terminated = self.translate_instruction(inst)?;
         }
@@ -163,6 +173,15 @@ impl<'a> FunctionCompiler<'a> {
             let block = self.builder.create_block();
             self.blocks.insert(pc, block);
         }
+    }
+
+    fn clear_flow_facts(&mut self) {
+        self.checked_non_nil.clear();
+        self.reg_consts.clear();
+    }
+
+    fn apply_reg_const_facts(&mut self, pc: usize) {
+        self.reg_consts = self.reg_const_facts.get(pc).cloned().unwrap_or_default();
     }
 
     /// Spill all SSA variables to fiber.stack (recomputed base, handles reallocation).
@@ -518,8 +537,9 @@ impl<'a> FunctionCompiler<'a> {
                 .ins()
                 .store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
         }
-        // Clear non-nil status when slot is written
+        // Writes invalidate local compile-time facts for the slot.
         self.checked_non_nil.remove(&slot);
+        self.reg_consts.remove(&slot);
     }
 
     fn conditional_jump(&mut self, inst: &Instruction, cmp_cond: IntCC) {
@@ -537,6 +557,7 @@ impl<'a> FunctionCompiler<'a> {
 
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
+        self.clear_flow_facts();
     }
 
     fn forloop(&mut self, inst: &Instruction) {
@@ -562,6 +583,7 @@ impl<'a> FunctionCompiler<'a> {
             .brif(continue_loop, target_block, &[], fall_through, &[]);
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
+        self.clear_flow_facts();
     }
 
     fn ret(&mut self, inst: &Instruction) {
@@ -848,7 +870,23 @@ impl<'a> FunctionCompiler<'a> {
             .builder
             .ins()
             .iadd_imm(new_bp, callee_local_slots as i64);
-        crate::call_helpers::emit_stack_limit_guard(self, ctx, new_sp);
+        let (capacity_fallback_block, capacity_ok_block) =
+            crate::call_helpers::emit_stack_capacity_check(self, ctx, new_sp);
+        self.builder.switch_to_block(capacity_fallback_block);
+        self.builder.seal_block(capacity_fallback_block);
+        crate::call_helpers::emit_call_via_vm(
+            self,
+            crate::call_helpers::CallViaVmConfig {
+                func_id: self.func_id,
+                arg_start,
+                ret_reg: arg_start + arg_slots,
+                resume_pc: self.current_pc + 1,
+                ret_slots: call_ret_slots,
+            },
+        );
+
+        self.builder.switch_to_block(capacity_ok_block);
+        self.builder.seal_block(capacity_ok_block);
         let old_call_depth = crate::call_helpers::emit_call_depth_enter(self, ctx);
         self.builder
             .ins()
@@ -994,6 +1032,12 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     fn get_reg_const(&self, reg: u16) -> Option<i64> {
         self.reg_consts.get(&reg).copied()
     }
+    fn clear_reg_const(&mut self, reg: u16) {
+        self.reg_consts.remove(&reg);
+    }
+    fn clear_reg_consts(&mut self) {
+        self.reg_consts.clear();
+    }
     fn panic_return_value(&self) -> i32 {
         1
     }
@@ -1065,6 +1109,7 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
                 .store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
         }
         self.checked_non_nil.remove(&slot);
+        self.reg_consts.remove(&slot);
     }
     fn reload_all_vars_from_memory(&mut self) {
         let args_ptr = self.current_memory_base_ptr();
@@ -1077,6 +1122,7 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
                 .load(ty, MemFlags::trusted(), args_ptr, offset);
             self.builder.def_var(self.vars[i], val);
         }
+        self.clear_flow_facts();
     }
     fn begin_select_tracking(&mut self) {
         self.pending_select_cases.clear();

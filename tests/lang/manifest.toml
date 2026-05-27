@@ -672,6 +672,30 @@ targets = ["vm", "jit", "osr", "nostd", "wasm"]
 expect = "pass"
 
 [[case]]
+id = "bugs.2026-05-27-jit-const-fact-control-flow"
+kind = "file"
+path = "cases/bugs/2026_05_27_jit_const_fact_control_flow.vo"
+targets = ["vm", "jit", "nostd", "wasm"]
+reason = "case has no loop-shaped OSR entry; full-function JIT coverage is sufficient"
+expect = "pass"
+
+[[case]]
+id = "bugs.2026-05-27-jit-copy-n-canonical-osr"
+kind = "file"
+path = "cases/bugs/2026_05_27_jit_copy_n_canonical_osr.vo"
+targets = ["vm", "jit", "osr", "nostd", "wasm"]
+expect = "pass"
+
+[[case]]
+id = "bugs.2026-05-27-jit-direct-stack-capacity-waitio"
+kind = "file"
+path = "cases/bugs/2026_05_27_jit_direct_stack_capacity_waitio.vo"
+targets = ["vm", "jit", "nostd", "wasm"]
+skip = ["nostd"]
+reason = "case has no loop-shaped OSR entry; time externs are not registered in vo-embed for nostd"
+expect = "pass"
+
+[[case]]
 id = "bugs.any-return-type-loss"
 kind = "file"
 path = "cases/bugs/any_return_type_loss.vo"

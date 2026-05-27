@@ -327,7 +327,7 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
         }
         // CopyN reads n slots starting from b
         Opcode::CopyN => {
-            let n = inst.flags as u16;
+            let n = inst.copy_n_count();
             for i in 0..n {
                 regs.push(inst.b + i);
             }
@@ -503,8 +503,8 @@ fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
             }
         }
         Opcode::CopyN => {
-            // CopyN: a=dst, flags=n
-            let n = inst.flags as u16;
+            // CopyN: a=dst, c=n (flags mirrors small canonical encodings)
+            let n = inst.copy_n_count();
             for i in 0..n {
                 regs.push(inst.a + i);
             }
@@ -770,13 +770,13 @@ mod tests {
         }
     }
 
-    fn copy_n(dst: u16, src: u16, n: u8) -> Instruction {
+    fn copy_n(dst: u16, src: u16, n: u16) -> Instruction {
         Instruction {
             op: Opcode::CopyN as u8,
-            flags: n,
+            flags: n.min(u8::MAX as u16) as u8,
             a: dst,
             b: src,
-            c: 0,
+            c: n,
         }
     }
 
@@ -954,6 +954,23 @@ mod tests {
     }
 
     #[test]
+    fn test_get_read_regs_copy_n_canonical_count() {
+        let inst = Instruction {
+            op: Opcode::CopyN as u8,
+            flags: 0,
+            a: 5,
+            b: 10,
+            c: 3,
+        };
+        let regs = get_read_regs(&inst);
+        assert_eq!(
+            regs,
+            vec![10, 11, 12],
+            "CopyN should use canonical c count even when flags is zero"
+        );
+    }
+
+    #[test]
     fn test_get_read_regs_iface_assign() {
         // Concrete source (vk != 16)
         let inst = iface_assign(5, 10, 1);
@@ -1016,6 +1033,15 @@ mod tests {
         let inst = copy_n(10, 5, 3);
         let regs = get_write_regs_multi(&inst);
         assert_eq!(regs, vec![10, 11, 12], "CopyN should write n slots to dst");
+    }
+
+    #[test]
+    fn test_get_write_regs_multi_copy_n_large_canonical_count() {
+        let inst = copy_n(10, 5, 300);
+        let regs = get_write_regs_multi(&inst);
+        assert_eq!(regs.len(), 300, "CopyN should not truncate counts to flags");
+        assert_eq!(regs[0], 10);
+        assert_eq!(regs[299], 309);
     }
 
     #[test]

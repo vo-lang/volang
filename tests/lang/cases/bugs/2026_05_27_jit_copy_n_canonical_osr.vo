@@ -1,0 +1,24 @@
+package main
+
+type TripleA struct {
+	A int
+	B int
+	C int
+}
+
+type TripleB TripleA
+
+func sumConverted(n int) int {
+	total := 0
+	cur := TripleA{}
+	for i := 0; i < n; i++ {
+		cur = TripleA{A: i, B: i + 1, C: i + 2}
+		converted := TripleB(cur)
+		total += converted.A + converted.B + converted.C
+	}
+	return total
+}
+
+func main() {
+	assert(sumConverted(200) == 60300, "CopyN canonical count must be visible to JIT and OSR")
+}

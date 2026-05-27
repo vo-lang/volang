@@ -42,6 +42,7 @@ pub struct LoopCompiler<'a> {
     ctx_ptr: Value,
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
+    reg_const_facts: Vec<HashMap<u16, i64>>,
     /// FuncRef table for already-compiled callees. Indexed by func_id.
     callee_func_refs: &'a [Option<FuncRef>],
     checked_non_nil: HashSet<u16>,
@@ -80,6 +81,7 @@ impl<'a> LoopCompiler<'a> {
             ctx_ptr: Value::from_u32(0),
             helpers,
             reg_consts: HashMap::new(),
+            reg_const_facts: Vec::new(),
             callee_func_refs,
             checked_non_nil: HashSet::new(),
             memory_only_start: u16::MAX,
@@ -89,6 +91,13 @@ impl<'a> LoopCompiler<'a> {
     pub fn compile(mut self) -> Result<(), JitError> {
         self.memory_only_start = crate::translator::compute_memory_only_start(
             &self.func_def.code[self.loop_info.begin_pc..=self.loop_info.end_pc],
+        );
+        self.reg_const_facts = crate::translator::compute_reg_const_facts(
+            &self.func_def.code,
+            &self.vo_module.constants,
+            &self.vo_module.externs,
+            self.loop_info.begin_pc,
+            self.loop_info.end_pc + 1,
         );
         self.declare_variables();
         self.scan_jump_targets();
@@ -109,15 +118,16 @@ impl<'a> LoopCompiler<'a> {
                     self.builder.ins().jump(block, &[]);
                 }
                 self.builder.switch_to_block(block);
-                // Clear non-nil tracking at block boundaries (jump targets)
-                self.checked_non_nil.clear();
+                self.clear_flow_facts();
                 block_terminated = false;
             } else if block_terminated {
                 let dummy = self.builder.create_block();
                 self.builder.switch_to_block(dummy);
+                self.clear_flow_facts();
                 block_terminated = false;
             }
 
+            self.apply_reg_const_facts(pc);
             let inst = &self.func_def.code[pc];
             if inst.opcode() == Opcode::Hint {
                 continue;
@@ -195,6 +205,15 @@ impl<'a> LoopCompiler<'a> {
             self.blocks.insert(pc, block);
             block
         }
+    }
+
+    fn clear_flow_facts(&mut self) {
+        self.checked_non_nil.clear();
+        self.reg_consts.clear();
+    }
+
+    fn apply_reg_const_facts(&mut self, pc: usize) {
+        self.reg_consts = self.reg_const_facts.get(pc).cloned().unwrap_or_default();
     }
 
     fn emit_prologue(&mut self) {
@@ -359,6 +378,7 @@ impl<'a> LoopCompiler<'a> {
 
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
+        self.clear_flow_facts();
     }
 
     /// Returns true if block is terminated (exit to VM), false if fall-through continues in JIT
@@ -389,6 +409,7 @@ impl<'a> LoopCompiler<'a> {
                 .brif(continue_loop, target_block, &[], fall_through, &[]);
             self.builder.switch_to_block(fall_through);
             self.builder.seal_block(fall_through);
+            self.clear_flow_facts();
             false
         } else {
             // Exit outside loop - return to VM
@@ -529,6 +550,7 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
                 .store(MemFlags::trusted(), val, locals_ptr, offset);
         }
         self.checked_non_nil.remove(&slot);
+        self.reg_consts.remove(&slot);
     }
     fn ctx_param(&mut self) -> Value {
         self.ctx_ptr
@@ -557,6 +579,12 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     }
     fn get_reg_const(&self, reg: u16) -> Option<i64> {
         self.reg_consts.get(&reg).copied()
+    }
+    fn clear_reg_const(&mut self, reg: u16) {
+        self.reg_consts.remove(&reg);
+    }
+    fn clear_reg_consts(&mut self) {
+        self.reg_consts.clear();
     }
     fn panic_return_value(&self) -> i32 {
         JitResult::Panic as i32
@@ -632,6 +660,7 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
                 .store(MemFlags::trusted(), val, locals_ptr, offset);
         }
         self.checked_non_nil.remove(&slot);
+        self.reg_consts.remove(&slot);
     }
     fn reload_all_vars_from_memory(&mut self) {
         let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
@@ -644,6 +673,7 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
                 .load(ty, MemFlags::trusted(), locals_ptr, offset);
             self.builder.def_var(self.vars[i], val);
         }
+        self.clear_flow_facts();
     }
     fn sync_written_slots(&mut self, start_slot: u16, slot_count: u16) {
         if slot_count == 0 {

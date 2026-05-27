@@ -443,11 +443,26 @@ pub fn can_direct_jit_call(func: &vo_runtime::bytecode::FunctionDef) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
+    use std::ptr;
+    use std::sync::Arc;
+    use vo_runtime::bytecode::{Constant, FunctionDef, Module as VoModule};
     use vo_runtime::instruction::{Instruction, Opcode};
+    use vo_runtime::jit_api::{alloc_ic_table, DynCallIC};
+    use vo_runtime::objects::interface::InterfaceSlot;
+    use vo_runtime::output::{CaptureSink, OutputSink};
     use vo_runtime::SlotType;
 
     fn make_func(code: Vec<Instruction>, local_slots: u16) -> FunctionDef {
+        make_func_with_sig(code, 0, 0, local_slots, 0)
+    }
+
+    fn make_func_with_sig(
+        code: Vec<Instruction>,
+        param_count: u16,
+        param_slots: u16,
+        local_slots: u16,
+        ret_slots: u16,
+    ) -> FunctionDef {
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
         let slot_types = vec![SlotType::Value; local_slots as usize];
         let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&slot_types);
@@ -455,11 +470,11 @@ mod tests {
             FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
         FunctionDef {
             name: "test".into(),
-            param_count: 0,
-            param_slots: 0,
+            param_count,
+            param_slots,
             local_slots,
             gc_scan_slots,
-            ret_slots: 0,
+            ret_slots,
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
@@ -475,6 +490,110 @@ mod tests {
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
+        }
+    }
+
+    fn jump_if_not(cond: u16, offset: i32) -> Instruction {
+        Instruction {
+            op: Opcode::JumpIfNot as u8,
+            flags: 0,
+            a: cond,
+            b: (offset as u32 & 0xFFFF) as u16,
+            c: ((offset as u32 >> 16) & 0xFFFF) as u16,
+        }
+    }
+
+    struct JitContextParts {
+        safepoint_flag: bool,
+        panic_flag: bool,
+        is_user_panic: bool,
+        panic_msg: InterfaceSlot,
+        output: Arc<CaptureSink>,
+        host_output: Option<Vec<u8>>,
+        program_args: Vec<String>,
+        sentinel_errors: vo_runtime::ffi::SentinelErrorCache,
+        empty_func_table: [*const u8; 1],
+        ic_table: Vec<DynCallIC>,
+    }
+
+    impl JitContextParts {
+        fn new() -> Self {
+            Self {
+                safepoint_flag: false,
+                panic_flag: false,
+                is_user_panic: false,
+                panic_msg: InterfaceSlot::default(),
+                output: CaptureSink::new(),
+                host_output: None,
+                program_args: Vec::new(),
+                sentinel_errors: vo_runtime::ffi::SentinelErrorCache::new(),
+                empty_func_table: [ptr::null::<u8>()],
+                ic_table: alloc_ic_table(),
+            }
+        }
+
+        fn context(&mut self, module: &VoModule, args: &mut [u64]) -> JitContext {
+            JitContext {
+                gc: ptr::null_mut(),
+                globals: ptr::null_mut(),
+                safepoint_flag: &self.safepoint_flag,
+                panic_flag: &mut self.panic_flag,
+                is_user_panic: &mut self.is_user_panic,
+                panic_msg: &mut self.panic_msg,
+                vm: ptr::null_mut(),
+                fiber: ptr::null_mut(),
+                itab_cache: ptr::null_mut(),
+                extern_registry: ptr::null(),
+                call_extern_fn: None,
+                module,
+                jit_func_table: self.empty_func_table.as_ptr(),
+                jit_func_count: 0,
+                direct_call_table: self.empty_func_table.as_ptr(),
+                direct_call_count: 0,
+                program_args: &self.program_args,
+                sentinel_errors: &mut self.sentinel_errors,
+                output: &*self.output as *const dyn OutputSink,
+                host_output: &mut self.host_output,
+                io: ptr::null_mut(),
+                call_func_id: 0,
+                call_arg_start: 0,
+                call_resume_pc: 0,
+                call_ret_slots: 0,
+                call_ret_reg: 0,
+                call_kind: 0,
+                wait_io_token: 0,
+                loop_exit_pc: 0,
+                stack_ptr: args.as_mut_ptr(),
+                stack_cap: args.len() as u32,
+                stack_limit: 1024,
+                call_depth: 0,
+                call_depth_limit: 1024,
+                jit_bp: 0,
+                fiber_sp: args.len() as u32,
+                push_frame_fn: None,
+                pop_frame_fn: None,
+                stack_overflow_fn: None,
+                push_resume_point_fn: None,
+                create_island_fn: None,
+                queue_close_fn: None,
+                queue_send_fn: None,
+                queue_recv_fn: None,
+                go_start_fn: None,
+                go_island_fn: None,
+                defer_push_fn: None,
+                recover_fn: None,
+                select_begin_fn: None,
+                select_send_fn: None,
+                select_recv_fn: None,
+                select_exec_fn: None,
+                is_error_return: 0,
+                ret_gcref_start: 0,
+                ret_is_heap: 0,
+                ret_start: 0,
+                prepare_closure_call_fn: None,
+                prepare_iface_call_fn: None,
+                ic_table: self.ic_table.as_mut_ptr(),
+            }
         }
     }
 
@@ -532,6 +651,83 @@ mod tests {
             result.is_ok(),
             "Queue opcodes should compile in JIT: {:?}",
             result
+        );
+    }
+
+    #[test]
+    fn jit_shift_precheck_ignores_stale_branch_constant_fact() {
+        let func = make_func_with_sig(
+            vec![
+                jump_if_not(0, 2),
+                Instruction::new(Opcode::LoadConst, 1, 0, 0),
+                Instruction::new(Opcode::LoadInt, 2, 1, 0),
+                Instruction::new(Opcode::Shl, 3, 2, 1),
+                Instruction::new(Opcode::Return, 3, 1, 0),
+            ],
+            2,
+            2,
+            4,
+            1,
+        );
+        let mut module = VoModule::new("test".into());
+        module.constants.push(Constant::Int(64));
+        module.functions.push(func);
+
+        let mut jit = JitCompiler::new().expect("create jit compiler");
+        jit.compile(0, &module.functions[0], &module, &[])
+            .expect("compile repro function");
+        let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
+
+        let mut args = [0_u64, (-1_i64) as u64, 0, 0];
+        let mut ret = [0_u64; 1];
+        let mut parts = JitContextParts::new();
+        let mut ctx = parts.context(&module, &mut args);
+
+        let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+
+        assert_eq!(
+            result,
+            JitResult::Panic,
+            "false branch keeps dynamic shift amount; -1 must not be optimized as const 64"
+        );
+        assert!(
+            parts.panic_flag,
+            "negative shift should set the runtime panic flag"
+        );
+    }
+
+    #[test]
+    fn jit_copy_n_overlap_matches_memmove_semantics() {
+        let func = make_func_with_sig(
+            vec![
+                Instruction::new(Opcode::CopyN, 1, 0, 3),
+                Instruction::new(Opcode::Return, 1, 3, 0),
+            ],
+            3,
+            3,
+            4,
+            3,
+        );
+        let mut module = VoModule::new("test".into());
+        module.functions.push(func);
+
+        let mut jit = JitCompiler::new().expect("create jit compiler");
+        jit.compile(0, &module.functions[0], &module, &[])
+            .expect("compile CopyN overlap repro");
+        let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
+
+        let mut args = [1_u64, 2, 3, 0];
+        let mut ret = [0_u64; 3];
+        let mut parts = JitContextParts::new();
+        let mut ctx = parts.context(&module, &mut args);
+
+        let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+
+        assert_eq!(result, JitResult::Ok);
+        assert_eq!(
+            ret,
+            [1, 2, 3],
+            "overlapping CopyN must read the whole source range before writing"
         );
     }
 }

@@ -1,0 +1,33 @@
+package main
+
+func shiftAfterBranch(cond bool, amount int) int {
+	shift := amount
+	if cond {
+		shift = 1
+	}
+	return 1 << shift
+}
+
+func divAfterBranch(cond bool, divisor int) int {
+	d := divisor
+	if cond {
+		d = 1
+	}
+	return 10 / d
+}
+
+func main() {
+	assert(shiftAfterBranch(false, 64) == 0, "shift fact must not leak out of branch")
+	assert(divAfterBranch(false, 2) == 5, "divisor fact must not leak out of branch")
+
+	caught := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				caught = true
+			}
+		}()
+		_ = shiftAfterBranch(false, -1)
+	}()
+	assert(caught, "negative shift from branch fallthrough must still panic")
+}

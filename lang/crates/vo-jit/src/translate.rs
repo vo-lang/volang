@@ -503,6 +503,7 @@ pub fn translate_inst<'a>(
 fn load_int<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let val = e.builder().ins().iconst(types::I64, inst.imm32() as i64);
     e.write_var(inst.a, val);
+    e.set_reg_const(inst.a, inst.imm32() as i64);
 }
 
 fn load_const<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
@@ -512,9 +513,9 @@ fn load_const<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     match &constant {
         Constant::Float(f) => {
             // Float constant: load as F64 directly, no bitcast needed
-            e.set_reg_const(inst.a, f.to_bits() as i64);
             let v = e.builder().ins().f64const(*f);
             e.write_var_f64(inst.a, v);
+            e.set_reg_const(inst.a, f.to_bits() as i64);
         }
         constant => {
             let (val, reg_const) = match constant {
@@ -524,25 +525,35 @@ fn load_const<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
                 Constant::String(_) => (0, None),
                 Constant::Float(_) => unreachable!(),
             };
+            let v = e.builder().ins().iconst(types::I64, val);
+            e.write_var(inst.a, v);
             if let Some(c) = reg_const {
                 e.set_reg_const(inst.a, c);
             }
-            let v = e.builder().ins().iconst(types::I64, val);
-            e.write_var(inst.a, v);
         }
     }
 }
 
 fn copy<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let const_val = e.get_reg_const(inst.b);
     let v = e.read_var(inst.b);
     e.write_var(inst.a, v);
+    if let Some(c) = const_val {
+        e.set_reg_const(inst.a, c);
+    }
 }
 
 fn copy_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let count = inst.c as usize;
+    let count = inst.copy_n_count();
+    let mut values = Vec::with_capacity(count as usize);
     for i in 0..count {
-        let v = e.read_var(inst.b + i as u16);
+        values.push((e.read_var(inst.b + i), e.get_reg_const(inst.b + i)));
+    }
+    for (i, (v, const_val)) in values.into_iter().enumerate() {
         e.write_var(inst.a + i as u16, v);
+        if let Some(c) = const_val {
+            e.set_reg_const(inst.a + i as u16, c);
+        }
     }
 }
 

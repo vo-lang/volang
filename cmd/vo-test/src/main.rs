@@ -504,7 +504,7 @@ fn run_job_inner(job: &TestJob) -> Result<(), String> {
         print!("{output}");
     }
     let observation = result.map_err(|err| err.to_string())?;
-    if job.backend == "jit" && !observation.executed_jit_code() {
+    if matches!(job.target.as_str(), "jit" | "gc-jit") && !observation.executed_jit_code() {
         return Err(
             "JIT backend completed without entering JIT-compiled function or loop code".to_string(),
         );

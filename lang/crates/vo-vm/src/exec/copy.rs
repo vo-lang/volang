@@ -7,7 +7,7 @@ use vo_runtime::slot::Slot;
 
 #[inline]
 pub fn exec_copy_n(stack: *mut Slot, bp: usize, inst: &Instruction) {
-    let count = inst.c as usize;
+    let count = inst.copy_n_count() as usize;
     if count == 0 {
         return;
     }

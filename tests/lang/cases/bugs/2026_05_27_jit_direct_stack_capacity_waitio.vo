@@ -1,0 +1,24 @@
+package main
+
+import "time"
+
+func deep(n int) int {
+	var pad [300]int
+	pad[0] = n
+	pad[299] = n + 1
+	if n == 0 {
+		time.Sleep(time.Millisecond)
+		return pad[0] + pad[299] - 1
+	}
+	return deep(n-1) + 1 + pad[0] - n
+}
+
+func warmup() {
+	_ = deep(2)
+	_ = deep(2)
+}
+
+func main() {
+	warmup()
+	assert(deep(40) == 40, "direct JIT calls must grow fiber stack before WaitIo materialization")
+}
