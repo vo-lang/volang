@@ -1,8 +1,55 @@
 //! Shared bytecode instruction effect facts used by JIT analysis and translation.
 
+use std::collections::HashMap;
+
 use vo_runtime::instruction::{Instruction, Opcode};
 
 pub const MAP_ITER_SLOTS: u16 = vo_runtime::objects::map::MAP_ITER_SLOTS as u16;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EffectFacts<'a> {
+    reg_consts: Option<&'a HashMap<u16, i64>>,
+}
+
+impl<'a> EffectFacts<'a> {
+    pub fn none() -> Self {
+        Self { reg_consts: None }
+    }
+
+    pub fn from_reg_consts(reg_consts: &'a HashMap<u16, i64>) -> Self {
+        Self {
+            reg_consts: Some(reg_consts),
+        }
+    }
+
+    fn const_i64(self, slot: u16) -> Option<i64> {
+        self.reg_consts
+            .and_then(|reg_consts| reg_consts.get(&slot).copied())
+    }
+
+    fn has_reg_consts(self) -> bool {
+        self.reg_consts.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapGetLayout {
+    pub key_slots: u16,
+    pub val_slots: u16,
+    pub has_ok: bool,
+}
+
+impl MapGetLayout {
+    pub fn output_slots(self) -> u16 {
+        self.val_slots + u16::from(self.has_ok)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapSetLayout {
+    pub key_slots: u16,
+    pub val_slots: u16,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemorySyncEffect {
@@ -20,9 +67,16 @@ pub struct InstructionEffects {
 }
 
 pub fn instruction_effects(inst: &Instruction) -> InstructionEffects {
+    instruction_effects_with_facts(inst, EffectFacts::none())
+}
+
+pub fn instruction_effects_with_facts(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+) -> InstructionEffects {
     InstructionEffects {
-        reads: read_regs(inst),
-        writes: write_regs(inst),
+        reads: read_regs_with_facts(inst, facts),
+        writes: write_regs_with_facts(inst, facts),
         memory_sync: memory_sync_effect(inst),
         may_call: may_call(inst),
     }
@@ -66,6 +120,59 @@ pub fn slice_elem_slots_from_flags(flags: u8) -> u16 {
         f => f as usize,
     };
     elem_bytes.div_ceil(8) as u16
+}
+
+pub fn elem_slots_from_dynamic_bytes(elem_bytes: i64) -> Option<u16> {
+    let elem_bytes = usize::try_from(elem_bytes).ok()?;
+    if elem_bytes == 0 {
+        return None;
+    }
+    u16::try_from(elem_bytes.div_ceil(8)).ok()
+}
+
+fn elem_slots_from_flags_or_fact(
+    flags: u8,
+    dynamic_bytes_slot: u16,
+    facts: EffectFacts<'_>,
+) -> Option<u16> {
+    if flags == 0 {
+        elem_slots_from_dynamic_bytes(facts.const_i64(dynamic_bytes_slot)?)
+    } else {
+        Some(slice_elem_slots_from_flags(flags))
+    }
+}
+
+pub fn indexed_get_result_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
+    elem_slots_from_flags_or_fact(inst.flags, inst.c + 1, facts)
+}
+
+pub fn indexed_set_value_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
+    elem_slots_from_flags_or_fact(inst.flags, inst.b + 1, facts)
+}
+
+pub fn slice_append_value_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
+    elem_slots_from_flags_or_fact(inst.flags, inst.c + 1, facts)
+}
+
+pub fn map_get_layout(inst: &Instruction, facts: EffectFacts<'_>) -> Option<MapGetLayout> {
+    let meta = facts.const_i64(inst.c)? as u64;
+    Some(MapGetLayout {
+        key_slots: ((meta >> 16) & 0xFFFF) as u16,
+        val_slots: ((meta >> 1) & 0x7FFF) as u16,
+        has_ok: (meta & 1) != 0,
+    })
+}
+
+pub fn map_set_layout(inst: &Instruction, facts: EffectFacts<'_>) -> Option<MapSetLayout> {
+    let meta = facts.const_i64(inst.b)? as u64;
+    Some(MapSetLayout {
+        key_slots: ((meta >> 8) & 0xFF) as u16,
+        val_slots: (meta & 0xFF) as u16,
+    })
+}
+
+pub fn map_delete_key_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
+    u16::try_from(facts.const_i64(inst.b)?).ok()
 }
 
 pub fn recv_result_slots(flags: u8, normalize_zero_elem_slots: bool) -> u16 {
@@ -388,6 +495,66 @@ pub fn read_regs(inst: &Instruction) -> Vec<u16> {
     regs
 }
 
+pub fn read_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<u16> {
+    if !facts.has_reg_consts() {
+        return read_regs(inst);
+    }
+
+    let mut regs = Vec::new();
+
+    match inst.opcode() {
+        Opcode::ArraySet | Opcode::SliceSet => {
+            if let Some(value_slots) = indexed_set_value_slots(inst, facts) {
+                regs.push(inst.a);
+                regs.push(inst.b);
+                push_slot_range(&mut regs, inst.c, value_slots);
+                return regs;
+            }
+        }
+        Opcode::SliceAppend => {
+            if let Some(value_slots) = slice_append_value_slots(inst, facts) {
+                regs.push(inst.b);
+                regs.push(inst.c);
+                if inst.flags == 0 {
+                    regs.push(inst.c + 1);
+                    push_slot_range(&mut regs, inst.c + 2, value_slots);
+                } else {
+                    push_slot_range(&mut regs, inst.c + 1, value_slots);
+                }
+                return regs;
+            }
+        }
+        Opcode::MapGet => {
+            if let Some(layout) = map_get_layout(inst, facts) {
+                regs.push(inst.b);
+                regs.push(inst.c);
+                push_slot_range(&mut regs, inst.c + 1, layout.key_slots);
+                return regs;
+            }
+        }
+        Opcode::MapSet => {
+            if let Some(layout) = map_set_layout(inst, facts) {
+                regs.push(inst.a);
+                regs.push(inst.b);
+                push_slot_range(&mut regs, inst.b + 1, layout.key_slots);
+                push_slot_range(&mut regs, inst.c, layout.val_slots);
+                return regs;
+            }
+        }
+        Opcode::MapDelete => {
+            if let Some(key_slots) = map_delete_key_slots(inst, facts) {
+                regs.push(inst.a);
+                regs.push(inst.b);
+                push_slot_range(&mut regs, inst.b + 1, key_slots);
+                return regs;
+            }
+        }
+        _ => {}
+    }
+
+    read_regs(inst)
+}
+
 pub fn single_write_reg(inst: &Instruction) -> Option<u16> {
     match inst.opcode() {
         Opcode::Copy
@@ -540,12 +707,47 @@ pub fn multi_write_regs(inst: &Instruction) -> Vec<u16> {
     regs
 }
 
+pub fn multi_write_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<u16> {
+    let mut regs = Vec::new();
+
+    match inst.opcode() {
+        Opcode::ArrayGet | Opcode::SliceGet => {
+            if let Some(slots) = indexed_get_result_slots(inst, facts) {
+                push_slot_range(&mut regs, inst.a, slots);
+                return regs;
+            }
+        }
+        Opcode::MapGet => {
+            if let Some(layout) = map_get_layout(inst, facts) {
+                push_slot_range(&mut regs, inst.a, layout.output_slots());
+                return regs;
+            }
+        }
+        _ => {}
+    }
+
+    multi_write_regs(inst)
+}
+
 pub fn write_regs(inst: &Instruction) -> Vec<u16> {
     let mut regs = Vec::new();
     if let Some(reg) = single_write_reg(inst) {
         regs.push(reg);
     }
     regs.extend(multi_write_regs(inst));
+    regs
+}
+
+pub fn write_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<u16> {
+    if !facts.has_reg_consts() {
+        return write_regs(inst);
+    }
+
+    let mut regs = Vec::new();
+    if let Some(reg) = single_write_reg(inst) {
+        regs.push(reg);
+    }
+    regs.extend(multi_write_regs_with_facts(inst, facts));
     regs
 }
 
@@ -632,4 +834,80 @@ pub fn preserves_reg_const_facts(op: Opcode) -> bool {
             | Opcode::DeferPush
             | Opcode::ErrDeferPush
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fact_map(entries: &[(u16, i64)]) -> HashMap<u16, i64> {
+        entries.iter().copied().collect()
+    }
+
+    #[test]
+    fn map_get_effects_use_metadata_layout_when_available() {
+        let inst = Instruction::new(Opcode::MapGet, 10, 2, 5);
+        let meta = (3i64 << 16) | (2i64 << 1) | 1;
+        let facts = fact_map(&[(5, meta)]);
+        let effects = instruction_effects_with_facts(&inst, EffectFacts::from_reg_consts(&facts));
+
+        assert_eq!(effects.reads, vec![2, 5, 6, 7, 8]);
+        assert_eq!(effects.writes, vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn map_set_effects_use_metadata_layout_when_available() {
+        let inst = Instruction::new(Opcode::MapSet, 1, 4, 9);
+        let meta = (2i64 << 8) | 3;
+        let facts = fact_map(&[(4, meta)]);
+
+        assert_eq!(
+            read_regs_with_facts(&inst, EffectFacts::from_reg_consts(&facts)),
+            vec![1, 4, 5, 6, 9, 10, 11]
+        );
+    }
+
+    #[test]
+    fn map_delete_effects_use_metadata_layout_when_available() {
+        let inst = Instruction::new(Opcode::MapDelete, 1, 4, 0);
+        let facts = fact_map(&[(4, 3)]);
+
+        assert_eq!(
+            read_regs_with_facts(&inst, EffectFacts::from_reg_consts(&facts)),
+            vec![1, 4, 5, 6, 7]
+        );
+    }
+
+    #[test]
+    fn indexed_get_effects_use_dynamic_elem_bytes_when_available() {
+        let inst = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
+        let facts = fact_map(&[(8, 24)]);
+
+        assert_eq!(
+            multi_write_regs_with_facts(&inst, EffectFacts::from_reg_consts(&facts)),
+            vec![20, 21, 22]
+        );
+    }
+
+    #[test]
+    fn indexed_set_effects_use_dynamic_elem_bytes_when_available() {
+        let inst = Instruction::with_flags(Opcode::ArraySet, 0, 1, 4, 20);
+        let facts = fact_map(&[(5, 24)]);
+
+        assert_eq!(
+            read_regs_with_facts(&inst, EffectFacts::from_reg_consts(&facts)),
+            vec![1, 4, 20, 21, 22]
+        );
+    }
+
+    #[test]
+    fn slice_append_effects_use_dynamic_elem_bytes_when_available() {
+        let inst = Instruction::with_flags(Opcode::SliceAppend, 0, 1, 2, 10);
+        let facts = fact_map(&[(11, 24)]);
+
+        assert_eq!(
+            read_regs_with_facts(&inst, EffectFacts::from_reg_consts(&facts)),
+            vec![2, 10, 11, 12, 13, 14]
+        );
+    }
 }

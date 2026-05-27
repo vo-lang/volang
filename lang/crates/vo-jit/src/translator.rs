@@ -479,23 +479,6 @@ fn unary_const(
     op(value)
 }
 
-fn slots_for_elem_bytes(elem_bytes: i64) -> Option<u16> {
-    if elem_bytes <= 0 {
-        return None;
-    }
-    u16::try_from((elem_bytes as usize).div_ceil(8)).ok()
-}
-
-fn slice_elem_slots(inst: &Instruction, facts: &HashMap<u16, i64>) -> Option<u16> {
-    if inst.flags == 0 {
-        facts
-            .get(&(inst.c + 1))
-            .and_then(|elem_bytes| slots_for_elem_bytes(*elem_bytes))
-    } else {
-        Some(effects::slice_elem_slots_from_flags(inst.flags))
-    }
-}
-
 fn transfer_reg_const_facts(
     inst: &Instruction,
     constants: &[Constant],
@@ -517,6 +500,8 @@ fn reg_const_effect(
             value,
         };
     }
+
+    let effect_facts = effects::EffectFacts::from_reg_consts(facts);
 
     match inst.opcode() {
         Opcode::CopyN => {
@@ -552,7 +537,7 @@ fn reg_const_effect(
             count: inst.flags as u16,
         },
         Opcode::SliceGet | Opcode::ArrayGet => {
-            if let Some(slots) = slice_elem_slots(inst, facts) {
+            if let Some(slots) = effects::indexed_get_result_slots(inst, effect_facts) {
                 RegConstEffect::KillSlots {
                     start: inst.a,
                     count: slots,
@@ -588,11 +573,9 @@ fn reg_const_effect(
             }
         }
         Opcode::MapGet => {
-            if let Some(out_slots) = facts.get(&inst.c).map(|meta| {
-                let val_slots = ((meta >> 1) & 0x7FFF) as u16;
-                let has_ok = (meta & 1) != 0;
-                val_slots + u16::from(has_ok)
-            }) {
+            if let Some(out_slots) =
+                effects::map_get_layout(inst, effect_facts).map(|layout| layout.output_slots())
+            {
                 RegConstEffect::KillSlots {
                     start: inst.a,
                     count: out_slots,
