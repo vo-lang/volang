@@ -18,6 +18,18 @@ use std::collections::HashMap;
 use vo_jit::loop_analysis::analyze_loops;
 use vo_jit::{JitCompiler, JitError, JitFunc, LoopFunc, LoopInfo};
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct JitExecutionStats {
+    pub function_entries: u64,
+    pub loop_entries: u64,
+}
+
+impl JitExecutionStats {
+    pub fn executed_jit_code(self) -> bool {
+        self.function_entries > 0 || self.loop_entries > 0
+    }
+}
+
 // =============================================================================
 // Configuration
 // =============================================================================
@@ -120,6 +132,9 @@ pub struct JitManager {
     /// Configuration.
     config: JitConfig,
 
+    /// Counts of JIT-compiled code that was actually entered during this VM run.
+    execution_stats: JitExecutionStats,
+
     /// Reusable scratch buffer for direct callee snapshots.
     available_direct_callees_buf: Vec<u32>,
 }
@@ -137,6 +152,7 @@ impl JitManager {
             direct_call_table: Vec::new(),
             compiler: JitCompiler::new()?,
             config: JitConfig::default(),
+            execution_stats: JitExecutionStats::default(),
             available_direct_callees_buf: Vec::new(),
         })
     }
@@ -150,6 +166,7 @@ impl JitManager {
             direct_call_table: Vec::new(),
             compiler,
             config,
+            execution_stats: JitExecutionStats::default(),
             available_direct_callees_buf: Vec::new(),
         })
     }
@@ -159,6 +176,7 @@ impl JitManager {
         self.funcs = (0..func_count).map(|_| FunctionJitInfo::new()).collect();
         self.func_table = vec![std::ptr::null(); func_count];
         self.direct_call_table = vec![std::ptr::null(); func_count];
+        self.execution_stats = JitExecutionStats::default();
     }
 
     /// Get function table pointer for JIT code.
@@ -190,6 +208,21 @@ impl JitManager {
     #[inline]
     pub fn config(&self) -> &JitConfig {
         &self.config
+    }
+
+    #[inline]
+    pub fn execution_stats(&self) -> JitExecutionStats {
+        self.execution_stats
+    }
+
+    #[inline]
+    pub fn record_function_entry(&mut self) {
+        self.execution_stats.function_entries += 1;
+    }
+
+    #[inline]
+    pub fn record_loop_entry(&mut self) {
+        self.execution_stats.loop_entries += 1;
     }
 
     fn rebuild_available_direct_callees(&self, out: &mut Vec<u32>) {

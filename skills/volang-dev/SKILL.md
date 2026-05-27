@@ -12,26 +12,24 @@ validation, and treat stale docs as an expected maintenance hazard.
 ## Core Protocol
 
 1. Check the worktree and identify the affected paths.
-2. Read `agent.md` unless the task is already tightly scoped or it was already
-   loaded in this turn.
-3. Load [references/repo-map.md](references/repo-map.md) for routing when the
+2. Load [references/repo-map.md](references/repo-map.md) for routing when the
    owner is unclear.
-4. Load [references/subsystem-playbooks.md](references/subsystem-playbooks.md)
+3. Load [references/subsystem-playbooks.md](references/subsystem-playbooks.md)
    for common change recipes, and [references/risk-ledger.md](references/risk-ledger.md)
    when the task touches docs, implementation status, generated artifacts,
    modules, FFI, JIT, GC, Studio, or CI policy.
-5. Inspect the current source around the relevant entry points.
-6. Make the smallest change that matches local patterns.
-7. Add or update tests when behavior changes.
-8. Run the narrowest validation from [references/verification.md](references/verification.md),
+4. Inspect the current source around the relevant entry points.
+5. Make the smallest change that matches local patterns.
+6. Add or update tests when behavior changes.
+7. Run the narrowest validation from [references/verification.md](references/verification.md),
    then widen only when the change crosses subsystem boundaries.
-9. Re-read changed source and relevant caveats before finalizing.
+8. Re-read changed source and relevant caveats before finalizing.
 
 ## Source Truth Rules
 
 - Prefer current Rust, Vo, Svelte, and TypeScript source over specs, README
   claims, generated mirrors, and dated design notes.
-- Treat `agent.md` as the current human-maintained repo guide.
+- Treat this skill and its references as the compact maintainer guide.
 - Treat `eng/*.toml`, `cmd/vo-dev`, and `tests/lang/manifest.toml` as the
   authority for local and CI workflow behavior.
 - Treat `lang/docs/spec/*.md` as canonical intended behavior for user-facing
@@ -57,7 +55,7 @@ validation, and treat stale docs as an expected maintenance hazard.
 - Volatile caveats and stale-doc checks: [references/risk-ledger.md](references/risk-ledger.md)
 
 Read only the references needed for the task. The repo already has broad
-background in `agent.md`; use references for decisions, caveats, and commands.
+background in this skill; use references for decisions, caveats, and commands.
 
 ## Routing Heuristics
 

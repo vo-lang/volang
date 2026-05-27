@@ -1,7 +1,8 @@
 use crate::test_config::load_test_config;
-use crate::test_plan::{build_plan, TestArgs};
+use crate::test_plan::{build_plan, TestArgs, TestPlan};
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
 
@@ -61,6 +62,13 @@ pub(crate) fn run_tests(root: &Path, opts: &TestArgs) -> Result<()> {
         release: opts.release,
     };
     let plan = build_plan(root, &native_opts)?;
+    if plan_needs_loopback_preflight(&plan) {
+        check_localhost_loopback().context(
+            "localhost loopback preflight failed before running selected net/http tests; \
+             local sandboxing can block 127.0.0.1 sockets, so rerun outside the sandbox or allow \
+             local networking for this test command",
+        )?;
+    }
     let plan_path =
         std::env::temp_dir().join(format!("volang-test-plan-{}.json", std::process::id()));
     fs::write(&plan_path, serde_json::to_string_pretty(&plan)?)?;
@@ -146,6 +154,33 @@ fn run_wasm_tests(root: &Path, opts: &TestArgs, wasm_target_name: &str) -> Resul
             command_description(&wasm_target.runner_command)
         );
     }
+    Ok(())
+}
+
+fn plan_needs_loopback_preflight(plan: &TestPlan) -> bool {
+    plan.jobs.iter().any(|job| {
+        let path = job.path.replace('\\', "/").to_ascii_lowercase();
+        let id = job.id.to_ascii_lowercase();
+        path.contains("/net/")
+            || path.contains("http")
+            || path.contains("socket")
+            || id.contains("http")
+            || id.contains("socket")
+            || id.contains("net_")
+    })
+}
+
+fn check_localhost_loopback() -> Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).context("could not bind 127.0.0.1:0")?;
+    let addr = listener
+        .local_addr()
+        .context("could not inspect loopback listener address")?;
+    let client = TcpStream::connect(addr)
+        .with_context(|| format!("could not connect to loopback listener at {addr}"))?;
+    let (_server, _) = listener
+        .accept()
+        .with_context(|| format!("could not accept loopback connection at {addr}"))?;
+    drop(client);
     Ok(())
 }
 

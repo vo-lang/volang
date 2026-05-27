@@ -179,6 +179,9 @@ fn invoke_jit_and_handle(
     jit_bp: usize,
     ret_slots: usize,
 ) -> ExecResult {
+    if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
+        jit_mgr.record_function_entry();
+    }
     let mut ctx = build_jit_context(vm, fiber, module);
     ctx.ctx.stack_ptr = fiber.stack_ptr();
     ctx.ctx.stack_cap = fiber.stack.len() as u32;
@@ -762,6 +765,10 @@ pub fn dispatch_loop_osr(
     let (result, ctx) = unsafe {
         let module = &*module_ptr;
         let fiber = &mut *fiber_ptr;
+
+        if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
+            jit_mgr.record_loop_entry();
+        }
 
         // Sync fiber.sp to the correct value for this frame.
         // After a WaitIo cycle, fiber.sp may be stale (left at a higher value

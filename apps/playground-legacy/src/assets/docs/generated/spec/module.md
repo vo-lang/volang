@@ -1,7 +1,7 @@
 <!--
 Generated from lang/docs/spec/module.md
 Generator: node scripts/ci/docs_sync.mjs
-Source-Digest: sha256:c63bda4a129ffe8dfab7688dc413a44143e7e1c2c757b8f5b36c4d95f9077700
+Source-Digest: sha256:9e985fe185ef71f7b1a35e2ebe786c66f125fbd2f573bd04ae193cfe983d8661
 Generated-At: 2026-05-12T23:32:39+08:00
 -->
 # Vo Module Specification
@@ -48,7 +48,11 @@ The Vo module system is defined by the following principles:
 - **Single authored module manifest**. `vo.mod` records human-authored dependency intent, extension metadata, web runtime metadata, and declared publication targets. Other module metadata files are generated from it.
 - **Separation of intent and resolution**. `vo.mod` records human-authored intent. `vo.lock` records the exact published graph selected from that intent.
 - **Root-lock authority**. Only the root project's `vo.lock` is authoritative for a build. Dependency-local lockfiles are not consulted when a module is consumed as a dependency.
-- **Frozen builds**. `vo build`, `vo check`, `vo test`, and `vo run` MUST NOT access the network, mutate `vo.mod`, mutate `vo.lock`, or re-solve dependencies.
+- **Frozen builds**. `vo build`, `vo check`, `vo test`, and `vo run` use an
+  already-pinned graph. Current public CLI entry points may materialize
+  already-locked dependencies into the cache, but they must not mutate
+  `vo.mod`, mutate `vo.lock`, re-solve dependencies, or silently upgrade the
+  graph.
 - **Target-neutral dependency graph**. Source dependency selection is independent of native or WASM target. Target-specific artifacts supplement a resolved module version; they do not change graph identity.
 - **Workspace isolation**. `vo.work` MAY replace a module's source tree locally, but it MUST NOT rewrite canonical module identity or published lockfile semantics.
 - **Hard failure on integrity mismatch**. The toolchain MUST fail on lock, manifest, source, or artifact mismatches. It MUST NOT fall back to unchecked behavior.
@@ -703,7 +707,8 @@ Each published module version must map to:
 - a GitHub Release for that tag
 - a release manifest asset
 - a source-package asset
-- a generated browser manifest named `vo.web.json` committed at the module root for that tag
+- a generated browser manifest named `vo.web.json` staged for the release and
+  included at the module root inside the published source package
 
 A version is published only if all required publication artifacts exist and pass validation. A tag by itself is not a valid module release.
 
@@ -739,7 +744,11 @@ Rules:
 ### 6.3 Browser Manifest
 
 Each published module version must provide a generated browser manifest named `vo.web.json`.
-The browser manifest is committed at the module root for the published revision and is fetched by browser runtimes through raw Git content.
+Current release staging writes the browser manifest as a staged release output
+and includes a virtual `vo.web.json` at the module root inside the source
+package. Current `vo-web` browser loading first checks the packaged module VFS
+for that file, then falls back to fetching `vo.web.json` from raw Git content
+for the release tag.
 
 `vo.web.json` is the authoritative browser consumption index for a module version.
 It is generated from `vo.mod`, `vo.lock`, the committed source tree, and the staged release artifact contract.
@@ -763,8 +772,11 @@ The browser manifest must contain, at minimum:
 Rules:
 
 - Browser runtimes MUST prefer `vo.web.json` over GitHub API tree enumeration.
-- Browser runtimes MUST NOT require GitHub Release API calls to load a module version that provides `vo.web.json`.
-- Browser runtimes MUST load files listed in `vo.web.json` from immutable raw Git content for the recorded commit or tag.
+- Browser runtimes SHOULD use a packaged module VFS copy when available. When
+  no packaged copy is available, current `vo-web` fetches `vo.web.json` from
+  raw Git content for the release tag.
+- Browser runtimes MUST load files listed in `vo.web.json` from either the
+  packaged module VFS or immutable raw Git content for the recorded commit.
 - `source_digest` is the digest of the browser source payload described by `source`; it is distinct from the source-package digest recorded in `vo.release.json`.
 - `vo.web.json` MUST NOT list itself in `source`; including the manifest in its own source set would make the digest circular.
 - `vo.web.json` MUST NOT list native dynamic-library artifacts.
@@ -928,17 +940,26 @@ The following commands are frozen with respect to dependency resolution:
 
 Frozen means:
 
-- no registry access
 - no implicit version solving
 - no lockfile mutation
 - no silent dependency upgrades
 - no fallback from failed integrity checks to unchecked source trees or raw repository fetches
 
+Current public CLI compile/run/check/test entry points perform an
+auto-materialization preflight before the frozen compile. That preflight may
+download modules and artifacts that are already pinned by `vo.lock`, and
+single-file inline modules with `require` entries may be resolved into an
+ephemeral cache before compilation. The compile itself still uses the resolved
+graph and must not rewrite the authored project graph.
+
 ### 8.2 Missing Lock or Missing Artifacts
 
 If a build requires external modules and `vo.lock` is missing, the build fails and instructs the user to run a module-management command.
 
-If `vo.lock` exists but required artifacts are missing from cache, the build fails and instructs the user to fetch them explicitly.
+If `vo.lock` exists but required artifacts are missing from cache, low-level
+frozen compile paths fail. Public CLI entry points that use auto-install may
+first try to materialize the locked artifacts; if that preflight fails, the
+build fails.
 
 If a build uses workspace overrides for external modules, the root `vo.lock` is still required because workspace overrides do not replace published graph authority.
 
@@ -1209,8 +1230,11 @@ Rules:
 ### 13.9 `vo build`, `vo check`, `vo test`, `vo run`
 
 Use the exact graph pinned in `vo.lock`.
-Do not access the network.
-Do not mutate `vo.mod` or `vo.lock`.
+Current public CLI entry points may materialize already-locked modules and
+artifacts before compiling, and inline single-file modules with `require`
+entries may resolve into an ephemeral cache. They must not mutate `vo.mod` or
+`vo.lock`, re-solve an existing project graph, or silently upgrade locked
+dependencies.
 
 ## 14. Not Supported by Design
 

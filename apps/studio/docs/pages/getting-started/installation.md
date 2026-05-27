@@ -9,7 +9,7 @@ brew install vo
 
 ## From Source
 
-Requires Rust toolchain (1.75+):
+Requires the repository Rust toolchain (`rust-toolchain.toml`, currently Rust 1.94.0):
 
 ```bash
 git clone https://github.com/vo-lang/volang.git

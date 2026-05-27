@@ -21,7 +21,6 @@ system.
 
 | Path | Owns |
 | --- | --- |
-| `agent.md` | Repo-specific guide for AI agents and automation. |
 | `d.py` | Thin compatibility wrapper over `cmd/vo-dev`; must run from repo root. |
 | `cmd/vo` | Public `vo` CLI: run, build, check, test, fmt, mod, release, dump. |
 | `cmd/vo-dev` | Engineering control plane: task graph, CI, tests, tools, lint, release, Studio helpers. |

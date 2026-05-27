@@ -60,6 +60,9 @@ fn clean_vo_generated(root: &Path, cleaned: &mut Vec<String>) -> Result<()> {
 
 fn clean_bench_generated(root: &Path, cleaned: &mut Vec<String>) -> Result<()> {
     let benchmarks = root.join("benchmarks");
+    remove_dir_if_exists(root, &root.join("target/bench"), cleaned)?;
+    // Keep legacy cleanup so older benchmark artifacts do not linger after the
+    // runner's output moved under target/bench.
     remove_dir_if_exists(root, &benchmarks.join("results"), cleaned)?;
     if !benchmarks.exists() {
         return Ok(());

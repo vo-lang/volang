@@ -1,5 +1,9 @@
 # Vo Error System Redesign
 
+Status: historical design proposal. This document is not a current
+implementation reference; verify `lang/stdlib/errors`, `vo-runtime` builtins,
+and `vo-stdlib` before treating any API or Rust shim below as shipped.
+
 ## Overview
 
 This document describes the redesign of Vo's error system to match Go's standard library semantics and remove the non-standard Code mechanism.
@@ -140,7 +144,7 @@ func Wrap(cause error, msg string) error {
 
 ### asError() - For errors.As()
 
-**Location**: `vo-runtime/src/stdlib/errors.rs` (new file)
+**Location**: proposed; no current `vo-runtime/src/stdlib/errors.rs` file exists.
 
 ```rust
 use vo_ext::prelude::*;
@@ -149,7 +153,8 @@ use vo_ext::prelude::*;
 /// target is a pointer to interface or pointer type.
 /// 
 /// Vo signature: extern func asError(err error, targetRttid int, targetPtr any) bool
-#[vo_extern_ctx("errors", "asError")]
+// Historical pseudocode. A current implementation would use #[vostd_fn] for
+// stdlib registration or #[vo_fn] for an extension crate.
 fn as_error(ctx: &mut ExternCallContext) -> ExternResult {
     let err = ctx.arg_any(slots::ARG_ERR);
     let target_rttid = ctx.arg_i64(slots::ARG_TARGET_RTTID) as u32;

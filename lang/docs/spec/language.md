@@ -1389,23 +1389,29 @@ Sends a value to a channel. The first expression must be a channel type, the sec
 ch <- 42
 ```
 
-### 8.12 Goto and Labels
+### 8.12 Labels and Current Goto Status
 
 ```ebnf
 GotoStmt    ::= "goto" Ident ";" ;
 LabeledStmt ::= Ident ":" Stmt ;
 ```
 
-`goto` transfers control to the labeled statement. Labels are scoped to the function body.
+Labels are scoped to the function body and may be used by labeled `break` and
+`continue` forms.
+
+Current implementation status: the parser recognizes `goto`, but the checker
+rejects it with `goto is not supported, use labeled break instead`. The
+language regression manifest currently records `cases/goto_stmt.vo` as an
+expected failure for that diagnostic.
 
 ```vo
 func example() {
-    if condition {
-        goto cleanup
+outer:
+    for item := range items {
+        if item.Done {
+            break outer
+        }
     }
-    // ... normal code ...
-cleanup:
-    // cleanup code
 }
 ```
 

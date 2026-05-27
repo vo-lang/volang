@@ -498,12 +498,17 @@ fn run_job_inner(job: &TestJob) -> Result<(), String> {
         other => return Err(format!("unsupported backend in run-plan: {other}")),
     };
     let sink = vo_engine::CaptureSink::new();
-    let result = vo_engine::run_with_output(compiled, mode, Vec::new(), sink.clone());
+    let result = vo_engine::run_with_output_observed(compiled, mode, Vec::new(), sink.clone());
     let output = sink.take();
     if !output.is_empty() {
         print!("{output}");
     }
-    result.map_err(|err| err.to_string())?;
+    let observation = result.map_err(|err| err.to_string())?;
+    if job.backend == "jit" && !observation.executed_jit_code() {
+        return Err(
+            "JIT backend completed without entering JIT-compiled function or loop code".to_string(),
+        );
+    }
     Ok(())
 }
 

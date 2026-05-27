@@ -7,7 +7,9 @@ Vo is the Python of the Rust world — a statically typed, low-ceremony language
 ## What Vo Is For
 
 - **Embed in Rust apps** — Vo's VM is a Rust library. Add a scripting layer to your Rust project without shipping a separate runtime.
-- **Run in the browser** — First-class WASM target. Vo programs run in the browser with the same semantics as on native. This page is proof: the Studio editor and all examples execute Vo via WASM.
+- **Run in the browser** — First-class WASM target. Studio web mode compiles
+  and runs Vo through the Studio WASM bridge. Native Studio sessions use the
+  Tauri backend and native VM/JIT paths.
 - **Almost Go** — Vo stays very close to Go. Most Go programs run with minimal changes.
 - **AI-friendly** — AI already knows Go well, and because Vo stays close to Go and can be run directly in normal use, it is easy for AI to read, write, and use.
 

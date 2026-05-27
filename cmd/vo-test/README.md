@@ -35,6 +35,10 @@ machines. This keeps JIT/runtime scheduler regressions from being hidden behind
 host-specific oversubscription. Text output emits a progress line every 30
 seconds and a complete failure summary at the end.
 
+Jobs whose backend is `jit` must enter JIT-compiled function or loop code at
+least once. A run that completes entirely through the interpreter is reported as
+a failed JIT job, even if the program output is otherwise correct.
+
 The plan schema is `volang.test-plan.v1`. A job contains:
 
 - `id`: stable job id.

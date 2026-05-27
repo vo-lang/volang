@@ -31,11 +31,9 @@ vo run main.vo --mode=vm    # explicit
 - **Island concurrency** — independent island VMs can run on separate threads
   (native) or as separate WASM instances (browser). Cross-island communication
   uses ports; channels are island-local.
-- **Incremental GC** — tri-color mark-sweep collector with Lua-style
-  generational aging (young → survival → old → touched). Collection is
-  incremental: marking is interruptible across scheduling steps; only the
-  final atomic-mark and sweep-start phases are stop-the-world. Default
-  parameters: pause=200 (trigger at 2× estimated live), step=8 KB.
+- **Incremental GC** — non-moving tri-color mark-sweep collector with precise
+  slot scanning. Collection is incremental across scheduler boundaries with
+  pause=200, step multiplier=100, and an 8 KB base step size by default.
 
 ### When to Use
 
@@ -76,8 +74,8 @@ vo run main.vo --mode=jit
 
 - **Long-running or compute-heavy programs** — the warm-up cost is amortized
   across many iterations.
-- **Benchmarks and numerical workloads** — JIT-compiled tight loops approach
-  native C/Go speed on many benchmarks.
+- **Benchmarks and numerical workloads** — useful for exercising hot
+  full-function compilation, loop OSR, and VM fallback behavior.
 
 ### Tuning
 
@@ -87,8 +85,10 @@ vo run main.vo --mode=jit
 | `VO_JIT_LOOP_THRESHOLD` | 50 | Back-edge count before loop OSR |
 | `VO_JIT_DEBUG` | *(unset)* | If set, print Cranelift IR for every compiled unit |
 
-The test harness `./d.py test jit <file>` sets thresholds to 0 so JIT
-triggers immediately for deterministic testing.
+The language-test targets are configured in `eng/tests.toml`: `jit` sets
+`VO_JIT_CALL_THRESHOLD=1`, `osr` sets `VO_JIT_CALL_THRESHOLD=1000` and
+`VO_JIT_LOOP_THRESHOLD=1`, and `gc-jit` sets `VO_GC_DEBUG=1` plus
+`VO_JIT_CALL_THRESHOLD=1`.
 
 ---
 
@@ -155,51 +155,14 @@ interpreter.
 
 ## Performance Comparison
 
-Geometric-mean relative time across 12 benchmarks (lower is faster, `1.0×` =
-fastest in each benchmark). Measured on Apple M1, single-core, `--release`.
+The benchmark suite currently has 12 manifest entries under `benchmarks/`.
+`./d.py bench all` runs each manifest-listed benchmark through `vo-dev` and
+`hyperfine` with a default of one warmup and three measured runs
+(`--warmup N` / `--runs N` can override them). The runner writes transient JSON,
+Markdown, and `summary.json` files under `target/bench/results/`, places native
+build artifacts under `target/bench/artifacts/`, and uses `target/bench/go-cache/`
+as the repo-local Go cache. Those generated files are cleaned by
+`vo-dev clean bench` and are not repository facts.
 
-| Rank | Language | Geometric Mean |
-|------|----------|---------------|
-| 1 | C | 1.11× |
-| 2 | Go | 1.80× |
-| 3 | LuaJIT | 2.37× |
-| 4 | Java | 3.59× |
-| 5 | **Vo-JIT** | **4.25×** |
-| 6 | Node | 5.46× |
-| 7 | Lua | 24.48× |
-| 8 | **Vo-VM** | **34.96×** |
-
-### Per-Benchmark Breakdown
-
-Each cell is the relative time vs. the fastest language in that benchmark
-(`1.00` = winner). `–` means not applicable.
-
-| Benchmark | C | Go | LuaJIT | Java | Vo-JIT | Node | Lua | Vo-VM |
-|---|---|---|---|---|---|---|---|---|
-| binary-trees | 1.27 | 1.29 | 3.04 | **1.00** | 6.45 | 1.29 | 8.14 | 14.69 |
-| call-dispatch | – | **1.00** | 1.90 | 2.55 | 5.07 | 3.51 | 25.72 | 59.61 |
-| fannkuch | **1.00** | 1.01 | 1.39 | 3.22 | 2.41 | 3.55 | 11.43 | 20.88 |
-| fibonacci | **1.00** | 1.14 | 1.74 | 2.48 | 4.86 | 4.82 | 18.03 | 51.23 |
-| matrix2 | 1.30 | 1.69 | **1.00** | 4.60 | 3.32 | 6.13 | 59.97 | 44.80 |
-| nbody | **1.00** | 1.05 | 1.39 | 4.72 | 5.79 | 4.71 | 37.55 | 40.33 |
-| quicksort | 1.02 | **1.00** | 1.99 | 2.92 | 3.39 | 6.24 | 14.58 | 27.89 |
-| recursive-tree | **1.00** | 5.51 | 4.89 | 2.70 | 6.26 | 5.77 | 26.54 | 28.93 |
-| sieve | **1.00** | 1.53 | 4.17 | 6.00 | 2.46 | 8.58 | 14.02 | 30.51 |
-| spectral-norm | 1.59 | 3.07 | **1.00** | 5.53 | 6.78 | 8.26 | 48.01 | 63.28 |
-| sum-array | **1.00** | 2.07 | 4.31 | 4.21 | 2.56 | 7.74 | 15.26 | 20.73 |
-| task-queue | **1.00** | 1.18 | 1.62 | 3.21 | 1.67 | 4.87 | 14.57 | 16.66 |
-
-### Observations
-
-- **Vo-JIT** is competitive with Go and Java on tight integer/array loops
-  (fannkuch 2.41×, sieve 2.46×, task-queue 1.67×, sum-array 2.56×).
-- **GC-heavy** benchmarks (binary-trees, recursive-tree) show a wider gap due
-  to allocation pressure on the incremental collector.
-- **call-dispatch** stresses virtual/interface dispatch; the 5× JIT overhead
-  reflects the current inline-cache cost vs. Go's devirtualized static dispatch.
-- **Vo-VM** is roughly **8×** slower than Vo-JIT on average, consistent with
-  the interpreted-vs-compiled gap seen in other language pairs (e.g. Lua vs
-  LuaJIT ≈ 10×).
-
-*Benchmarks use `./d.py bench all`. Results are informal and
-hardware-dependent; not authoritative.*
+Use `./d.py bench score` after a local run to print the relative-time summary
+for the current machine, compiler, and toolchain state.

@@ -30,7 +30,7 @@
       "title": "Language Spec",
       "source": "lang/docs/spec/language.md",
       "output": "spec/language.md",
-      "source_digest": "sha256:ada4529580de0198e1169b69f260be16fef9d3308b2d1d4c8756fd292872271d",
+      "source_digest": "sha256:e00b3333775d458082d248678196669999319bd12778ad1b39f23052f5f9575e",
       "generated_at": "2026-01-20T15:23:25+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
@@ -48,7 +48,7 @@
       "title": "Module System",
       "source": "lang/docs/spec/module.md",
       "output": "spec/module.md",
-      "source_digest": "sha256:c63bda4a129ffe8dfab7688dc413a44143e7e1c2c757b8f5b36c4d95f9077700",
+      "source_digest": "sha256:9e985fe185ef71f7b1a35e2ebe786c66f125fbd2f573bd04ae193cfe983d8661",
       "generated_at": "2026-05-12T23:32:39+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
@@ -57,7 +57,7 @@
       "title": "Native FFI",
       "source": "lang/docs/spec/native-ffi.md",
       "output": "spec/native-ffi.md",
-      "source_digest": "sha256:3afa59367b3cec7df80764633253d1c2e8a698578d7eaa307e9b1f5df0404c7b",
+      "source_digest": "sha256:b110a6887404ef2d623b1f980beb48afbc50cc9e4ac022ed6e7147785e2ce66e",
       "generated_at": "2026-05-12T23:32:39+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },

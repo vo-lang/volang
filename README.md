@@ -9,7 +9,9 @@ Vo is the Python of the Rust world — a statically typed, low-ceremony language
 ## What Vo Is For
 
 - **Embed in Rust apps** — Vo's VM is a Rust library. Add a scripting layer to your Rust project without shipping a separate runtime.
-- **Run in the browser** — First-class WASM target. Vo programs run in the browser with the same semantics as on native.
+- **Run in the browser** — First-class WASM target. Browser execution uses the
+  `vo-web` WASM VM path; native CLI and Studio native sessions use native
+  VM/JIT paths.
 - **Almost Go** — Vo stays very close to Go. Most Go programs run with minimal changes.
 - **AI-friendly** — AI already knows Go well, and because Vo stays close to Go and can be run directly in normal use, it is easy for AI to read, write, and use.
 
@@ -106,22 +108,18 @@ Vo compiles to a single bytecode format; backends differ only in how that byteco
 
 ## Performance
 
-Geometric-mean relative time across 12 benchmarks (lower is faster). Measured on Apple M1, single-core, `--release`:
+The benchmark suite currently has 12 manifest entries under `benchmarks/`.
+`./d.py bench all` runs the suite through the `vo-dev` benchmark runner, which
+uses `hyperfine` with a default of one warmup and three measured runs
+(`--warmup N` / `--runs N` override those values). It writes transient JSON,
+Markdown, and `summary.json` output under `target/bench/results/`, keeps native
+build artifacts under `target/bench/artifacts/`, and uses `target/bench/go-cache/`
+as the repo-local Go cache. Use `./d.py bench score` to compute the local
+relative-time summary from those transient results; `vo-dev clean bench` removes
+the generated benchmark tree.
 
-| Rank | Language | Geometric Mean |
-|------|----------|---------------|
-| 1 | C | 1.11× |
-| 2 | Go | 1.80× |
-| 3 | LuaJIT | 2.37× |
-| 4 | Java | 3.59× |
-| 5 | **Vo-JIT** | **4.25×** |
-| 6 | Node | 5.46× |
-| 7 | Lua | 24.48× |
-| 8 | **Vo-VM** | **34.96×** |
-
-Vo-JIT is competitive with Go and Java on tight integer/array loops (e.g. sieve 2.46×, task-queue 1.67×, sum-array 2.56×). GC-heavy benchmarks show a wider gap due to allocation pressure on the incremental collector.
-
-*Results are informal and hardware-dependent; not authoritative. Run `./d.py bench all` to reproduce.*
+Benchmark results are hardware-dependent local measurements, not checked-in
+release claims.
 
 ## License
 

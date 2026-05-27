@@ -19,8 +19,9 @@ pub use compile::{
 };
 pub use format::format_text;
 pub use run::{
-    build_gui_vm, run, run_with_output, run_with_output_interruptible, RunError, RunMode,
-    RuntimeError, RuntimeErrorKind,
+    build_gui_vm, run, run_with_output, run_with_output_interruptible,
+    run_with_output_interruptible_observed, run_with_output_observed, RunError, RunMode,
+    RunObservation, RuntimeError, RuntimeErrorKind,
 };
 pub use scan::scan_external_imports;
 pub use toolchain::{ensure_toolchain_host_installed, install_module};

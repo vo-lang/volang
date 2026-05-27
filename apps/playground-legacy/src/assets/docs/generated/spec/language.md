@@ -1,7 +1,7 @@
 <!--
 Generated from lang/docs/spec/language.md
 Generator: node scripts/ci/docs_sync.mjs
-Source-Digest: sha256:ada4529580de0198e1169b69f260be16fef9d3308b2d1d4c8756fd292872271d
+Source-Digest: sha256:e00b3333775d458082d248678196669999319bd12778ad1b39f23052f5f9575e
 Generated-At: 2026-01-20T15:23:25+08:00
 -->
 # Vo Language Specification
@@ -1395,23 +1395,29 @@ Sends a value to a channel. The first expression must be a channel type, the sec
 ch <- 42
 ```
 
-### 8.12 Goto and Labels
+### 8.12 Labels and Current Goto Status
 
 ```ebnf
 GotoStmt    ::= "goto" Ident ";" ;
 LabeledStmt ::= Ident ":" Stmt ;
 ```
 
-`goto` transfers control to the labeled statement. Labels are scoped to the function body.
+Labels are scoped to the function body and may be used by labeled `break` and
+`continue` forms.
+
+Current implementation status: the parser recognizes `goto`, but the checker
+rejects it with `goto is not supported, use labeled break instead`. The
+language regression manifest currently records `cases/goto_stmt.vo` as an
+expected failure for that diagnostic.
 
 ```vo
 func example() {
-    if condition {
-        goto cleanup
+outer:
+    for item := range items {
+        if item.Done {
+            break outer
+        }
     }
-    // ... normal code ...
-cleanup:
-    // cleanup code
 }
 ```
 

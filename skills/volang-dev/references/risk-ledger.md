@@ -15,8 +15,8 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
 ## Source Versus Docs
 
 - Source wins over docs when exact current behavior matters.
-- `agent.md` is the best high-level current guide, but it can still lag after
-  repo moves. Verify named paths.
+- The checked-in `volang-dev` skill is the compact current maintainer guide,
+  but repo maps can still lag after moves. Verify named paths.
 - `lang/docs/spec/*` describes intended behavior and user-facing contracts; use
   it as background, then inspect source.
 - Some specs are intentionally canonical for contracts but stale for
@@ -36,8 +36,8 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
   `object` as a keyword. Check `token.rs` before documenting keywords.
 - `lang/docs/spec/language.md` describes `goto` syntax and semantics, but the
   current checker rejects `goto` and manifest cases expect that diagnostic.
-- `agent.md` or other repo maps can lag path moves such as the migration from
-  old language-test locations to `tests/lang`. Verify named paths.
+- Repo maps can lag path moves such as the migration from old language-test
+  locations to `tests/lang`. Verify named paths.
 - Studio installation docs can lag `rust-toolchain.toml`. Verify the pinned Rust
   toolchain before repeating version claims.
 - Studio backend docs can lag JIT target env in `eng/tests.toml`. Verify the

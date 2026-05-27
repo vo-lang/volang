@@ -229,6 +229,6 @@ fn prepend(first: &str, args: Vec<String>) -> Vec<String> {
 
 fn print_dpy_usage() {
     println!(
-        "usage:\n  ./d.py test [target|alias] [--release] [-v] [-j N|--jobs N] [--repeat N|-n N] [file-or-dir]\n  ./d.py gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]\n  ./d.py bench [all|vo|<name>|score] [--all-langs]\n  ./d.py loc [--with-tests]\n  ./d.py clean [all|vo|rust|bench|junk]\n  ./d.py studio [--build-wasm] [--build-only] [--runner] [project]\n  ./d.py studio-native [--build-wasm] [--runner] [project]\n  ./d.py studio-stop\n  ./d.py ci [smart|quality|test|site|pr|full|release-verify|task <task-name>|task:<task-name>]\n  ./d.py run <file.vo> [--mode=vm|jit] [--codegen]\n  ./d.py vo <args...>"
+        "usage:\n  ./d.py test [target|alias] [--release] [-v] [-j N|--jobs N] [--repeat N|-n N] [file-or-dir]\n  ./d.py gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]\n  ./d.py bench [all|vo|<name>|score] [--all-langs] [--runs N] [--warmup N]\n  ./d.py loc [--with-tests]\n  ./d.py clean [all|vo|rust|bench|junk]\n  ./d.py studio [--build-wasm] [--build-only] [--runner] [project]\n  ./d.py studio-native [--build-wasm] [--runner] [project]\n  ./d.py studio-stop\n  ./d.py ci [smart|quality|test|site|pr|full|release-verify|task <task-name>|task:<task-name>]\n  ./d.py run <file.vo> [--mode=vm|jit] [--codegen]\n  ./d.py vo <args...>"
     );
 }

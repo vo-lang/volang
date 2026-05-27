@@ -16,9 +16,10 @@ It covers:
 
 This specification does not define:
 
-- source-language syntax for `extern func`
+- source-language syntax for function declarations without bodies
 - non-Rust extension backends
-- host-application tables such as `[extension.web]`
+- host-application metadata beyond the module-owned `[web]`,
+  `[extension.web]`, and `[extension.web.js]` tables
 - low-level ABI details beyond the extension entry table contract
 
 ## 2. Design Principles
@@ -28,7 +29,9 @@ This specification does not define:
 - **Partial target support is normal**. A module version may support some targets and omit others.
 - **No implicit fallback for published dependencies**. If a published dependency needs a native artifact for the active target, the build uses the locked published artifact or fails.
 - **Separation of local hints and published identity**. Local build paths help workspace development; published artifact names are declared explicitly and recorded in `vo.release.json`.
-- **Tool-specific metadata isolation**. Module-system parsers own only the extension tables defined here. Other top-level tables may exist for app-specific tooling.
+- **Tool-specific metadata isolation**. Module-system parsers reject unknown
+  root metadata tables. Browser/app metadata that the module system parses must
+  live in `[web]`, `[extension.web]`, or `[extension.web.js]`.
 
 ## 3. Runtime Contract
 
@@ -40,7 +43,7 @@ Users should depend on the `vo_ext` crate.
 ```rust
 use vo_ext::prelude::*;
 
-#[vo_extern("math", "Add")]
+#[vo_fn("math", "Add")]
 fn add(a: i64, b: i64) -> i64 {
     a + b
 }
@@ -57,18 +60,31 @@ The runtime loads the shared library, calls that entry point, and receives a tab
 #[repr(C)]
 pub struct ExtensionTable {
     pub version: u32,
-    pub entry_count: usize,
+    pub entry_count: u32,
     pub entries: *const ExternEntry,
 }
 ```
 
 ### 3.3 Call Results
 
+Rust implementations return `vo_runtime::ffi::ExternResult`. The current
+runtime variants include normal completion, scheduler blocking/yielding,
+host-event replay, closure callbacks, panic payloads, and registration failure.
+Across the native dylib boundary, `#[vo_fn]` generates an `extern "C"`
+trampoline that maps those variants to `vo_runtime::ffi::ext_abi::RESULT_*`
+`u32` result codes and stores complex payloads on `ExternCallContext`.
+
 ```rust
 pub enum ExternResult {
     Ok,
     Yield,
+    Block,
+    WaitIo { token: IoToken },
+    HostEventWait { token: u64, delay_ms: u32 },
+    HostEventWaitAndReplay { token: u64 },
     Panic(String),
+    NotRegistered(u32),
+    CallClosure { closure_ref: GcRef, args: Vec<u64> },
 }
 ```
 
@@ -312,7 +328,7 @@ vo-ext = { path = "../lang/crates/vo-ext" }
 ```rust
 use vo_ext::prelude::*;
 
-#[vo_extern("math", "Add")]
+#[vo_fn("math", "Add")]
 fn add(a: i64, b: i64) -> i64 {
     a + b
 }

@@ -19,6 +19,18 @@ pub enum RunMode {
     Jit,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RunObservation {
+    pub jit_function_entries: u64,
+    pub jit_loop_entries: u64,
+}
+
+impl RunObservation {
+    pub fn executed_jit_code(self) -> bool {
+        self.jit_function_entries > 0 || self.jit_loop_entries > 0
+    }
+}
+
 #[derive(Debug)]
 pub struct RuntimeError {
     pub message: String,
@@ -128,6 +140,15 @@ pub fn run_with_output(
     run_with_output_interruptible(compiled, mode, args, sink, None)
 }
 
+pub fn run_with_output_observed(
+    compiled: CompileOutput,
+    mode: RunMode,
+    args: Vec<String>,
+    sink: Arc<dyn OutputSink>,
+) -> Result<RunObservation, RunError> {
+    run_with_output_interruptible_observed(compiled, mode, args, sink, None)
+}
+
 pub fn run_with_output_interruptible(
     compiled: CompileOutput,
     mode: RunMode,
@@ -135,6 +156,16 @@ pub fn run_with_output_interruptible(
     sink: Arc<dyn OutputSink>,
     interrupt_flag: Option<Arc<AtomicBool>>,
 ) -> Result<(), RunError> {
+    run_with_output_interruptible_observed(compiled, mode, args, sink, interrupt_flag).map(|_| ())
+}
+
+pub fn run_with_output_interruptible_observed(
+    compiled: CompileOutput,
+    mode: RunMode,
+    args: Vec<String>,
+    sink: Arc<dyn OutputSink>,
+    interrupt_flag: Option<Arc<AtomicBool>>,
+) -> Result<RunObservation, RunError> {
     ensure_toolchain_host_installed();
     let CompileOutput {
         module,
@@ -191,7 +222,25 @@ pub fn run_with_output_interruptible(
         let e = vm.deadlock_err();
         return Err(vm_err_to_run_err(&vm, &e));
     }
-    Ok(())
+    Ok(run_observation(&vm))
+}
+
+#[cfg(feature = "jit")]
+fn run_observation(vm: &Vm) -> RunObservation {
+    let stats = vm
+        .jit_mgr
+        .as_ref()
+        .map(|mgr| mgr.execution_stats())
+        .unwrap_or_default();
+    RunObservation {
+        jit_function_entries: stats.function_entries,
+        jit_loop_entries: stats.loop_entries,
+    }
+}
+
+#[cfg(not(feature = "jit"))]
+fn run_observation(_vm: &Vm) -> RunObservation {
+    RunObservation::default()
 }
 
 fn vm_err_to_run_err(vm: &Vm, e: &VmError) -> RunError {

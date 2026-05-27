@@ -301,7 +301,7 @@ fn check_tools_with_policy(
 
 fn validate_tool_status(name: &str, tool: &Tool, mut status: ToolStatus) -> ToolStatus {
     if !status.ok {
-        return status;
+        return with_tool_repair_hint(name, tool, status);
     }
     if let Some(version) = &tool.version {
         let ok = if name == "node" {
@@ -330,7 +330,46 @@ fn validate_tool_status(name: &str, tool: &Tool, mut status: ToolStatus) -> Tool
             }
         }
     }
+    with_tool_repair_hint(name, tool, status)
+}
+
+fn with_tool_repair_hint(name: &str, tool: &Tool, mut status: ToolStatus) -> ToolStatus {
+    if status.ok || status.message.contains("Repair:") {
+        return status;
+    }
+    let Some(hint) = tool_repair_hint(name, tool) else {
+        return status;
+    };
+    status.message = format!("{}. Repair: {hint}", status.message.trim_end_matches('.'));
     status
+}
+
+fn tool_repair_hint(name: &str, tool: &Tool) -> Option<String> {
+    match name {
+        "node" => Some(format!(
+            "install or activate Node {}; examples: fnm install {}, volta install node@{}, mise use node@{}",
+            node_tool_requirement(tool),
+            node_tool_bootstrap_version(tool),
+            node_tool_bootstrap_version(tool),
+            node_tool_bootstrap_version(tool)
+        )),
+        "npm" => Some(
+            "activate the Node toolchain declared in eng/toolchains.toml; npm is provided by Node"
+                .to_string(),
+        ),
+        "rust" => Some("install the toolchain declared in rust-toolchain.toml".to_string()),
+        "wasm-pack" => Some(format!(
+            "install wasm-pack {}",
+            tool.version
+                .as_deref()
+                .unwrap_or("from eng/toolchains.toml")
+        )),
+        _ => tool
+            .usage
+            .clone()
+            .or_else(|| tool.source.clone())
+            .map(|text| format!("install according to eng/toolchains.toml ({text})")),
+    }
 }
 
 fn node_tool_requirement(tool: &Tool) -> String {

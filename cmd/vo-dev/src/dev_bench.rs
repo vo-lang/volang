@@ -1,11 +1,15 @@
 use crate::dev_common::TARGET_32;
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const DEFAULT_BENCH_WARMUP: u64 = 1;
+const DEFAULT_BENCH_RUNS: u64 = 3;
 
 pub(crate) fn cmd_bench(root: &Path, args: Vec<String>) -> Result<()> {
     let mut target = "all".to_string();
@@ -14,6 +18,8 @@ pub(crate) fn cmd_bench(root: &Path, args: Vec<String>) -> Result<()> {
     let mut jit_hot = false;
     let mut jit_call_threshold = None;
     let mut jit_loop_threshold = None;
+    let mut warmup = DEFAULT_BENCH_WARMUP;
+    let mut runs = DEFAULT_BENCH_RUNS;
     let mut target_set = false;
 
     let mut i = 0;
@@ -36,6 +42,14 @@ pub(crate) fn cmd_bench(root: &Path, args: Vec<String>) -> Result<()> {
                 i += 1;
                 jit_loop_threshold = Some(parse_u64_arg("--jit-loop-threshold", args.get(i))?);
             }
+            "--warmup" => {
+                i += 1;
+                warmup = parse_u64_arg("--warmup", args.get(i))?;
+            }
+            "--runs" => {
+                i += 1;
+                runs = parse_positive_u64_arg("--runs", args.get(i))?;
+            }
             other if other.starts_with("--jit-call-threshold=") => {
                 jit_call_threshold = Some(parse_u64_value(
                     "--jit-call-threshold",
@@ -47,6 +61,12 @@ pub(crate) fn cmd_bench(root: &Path, args: Vec<String>) -> Result<()> {
                     "--jit-loop-threshold",
                     other.split_once('=').unwrap().1,
                 )?);
+            }
+            other if other.starts_with("--warmup=") => {
+                warmup = parse_u64_value("--warmup", other.split_once('=').unwrap().1)?;
+            }
+            other if other.starts_with("--runs=") => {
+                runs = parse_positive_u64_value("--runs", other.split_once('=').unwrap().1)?;
             }
             other if other.starts_with("--arch=") => {
                 arch = other.split_once('=').unwrap().1.to_string();
@@ -75,6 +95,8 @@ pub(crate) fn cmd_bench(root: &Path, args: Vec<String>) -> Result<()> {
         jit_hot,
         jit_call_threshold,
         jit_loop_threshold,
+        warmup,
+        runs,
     };
     runner.run()
 }
@@ -88,6 +110,8 @@ struct BenchRunner<'a> {
     jit_hot: bool,
     jit_call_threshold: Option<u64>,
     jit_loop_threshold: Option<u64>,
+    warmup: u64,
+    runs: u64,
 }
 
 impl BenchRunner<'_> {
@@ -97,22 +121,22 @@ impl BenchRunner<'_> {
             self.target = "all".to_string();
         }
         if self.target == "score" {
-            return self.calculate_scores(None);
+            return self.calculate_scores(None, &[]);
         }
         self.check_deps()?;
         self.build_vo()?;
-        let scope = if self.target == "all" {
+        let run_info = if self.target == "all" {
             self.run_all_benchmarks()?
         } else if self.benchmark_exists(&self.target)? {
             let target = self.target.clone();
-            self.run_benchmark(&target)?;
-            vec![target]
+            vec![self.run_benchmark(&target)?]
         } else {
             println!("Unknown benchmark: {}", self.target);
             self.list_benchmarks()?;
             bail!("unknown benchmark");
         };
-        self.calculate_scores(Some(&scope))
+        let scope: Vec<_> = run_info.iter().map(|info| info.name.clone()).collect();
+        self.calculate_scores(Some(&scope), &run_info)
     }
 
     fn check_deps(&self) -> Result<()> {
@@ -163,18 +187,19 @@ impl BenchRunner<'_> {
             .any(|entry| entry.id == name))
     }
 
-    fn run_all_benchmarks(&self) -> Result<Vec<String>> {
+    fn run_all_benchmarks(&self) -> Result<Vec<BenchmarkRunInfo>> {
         let mut ran = Vec::new();
         for path in benchmark_dirs(self.root)? {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
-            self.run_benchmark(&name)?;
-            ran.push(name);
+            ran.push(self.run_benchmark(&name)?);
         }
         Ok(ran)
     }
 
-    fn run_benchmark(&self, name: &str) -> Result<()> {
+    fn run_benchmark(&self, name: &str) -> Result<BenchmarkRunInfo> {
         let bench_dir = self.root.join("benchmarks").join(name);
+        let artifact_dir = self.bench_artifact_dir(name);
+        fs::create_dir_all(&artifact_dir)?;
         println!("\n=== {name} ===\n");
 
         let vo_file = first_ext(&bench_dir, "vo")?;
@@ -211,10 +236,13 @@ impl BenchRunner<'_> {
 
         if !self.vo_only {
             if let Some(go_file) = go_file {
-                let go_bin = bench_dir.join("go_bench");
+                let go_bin = artifact_dir.join("go_bench");
+                let go_cache_dir = self.bench_go_cache_dir();
+                fs::create_dir_all(&go_cache_dir)?;
                 if run_status(
                     self.root,
                     Command::new("go")
+                        .env("GOCACHE", &go_cache_dir)
                         .args(["build", "-o"])
                         .arg(&go_bin)
                         .arg(&go_file),
@@ -258,10 +286,13 @@ impl BenchRunner<'_> {
                         self.root,
                         Command::new("javac")
                             .args(["-d"])
-                            .arg(&bench_dir)
+                            .arg(&artifact_dir)
                             .arg(java_file),
                     )? {
-                        commands.push(format!("java -cp {} {class_name}", shell_quote(&bench_dir)));
+                        commands.push(format!(
+                            "java -cp {} {class_name}",
+                            shell_quote(&artifact_dir)
+                        ));
                         names.push("Java".to_string());
                     }
                 }
@@ -269,7 +300,7 @@ impl BenchRunner<'_> {
         }
 
         if let Some(c_file) = c_file {
-            let c_bin = bench_dir.join("c_bench");
+            let c_bin = artifact_dir.join("c_bench");
             for compiler in ["cc", "gcc", "clang"] {
                 if command_exists(compiler) {
                     if run_status(
@@ -289,16 +320,24 @@ impl BenchRunner<'_> {
 
         if commands.is_empty() {
             println!("No runnable benchmarks found");
-            return Ok(());
+            return Ok(BenchmarkRunInfo {
+                name: name.to_string(),
+                warning_count: 0,
+            });
         }
 
-        let results_dir = self.root.join("benchmarks/results");
+        let results_dir = self.bench_results_dir();
         fs::create_dir_all(&results_dir)?;
         let export_json = results_dir.join(format!("{name}.json"));
         let export_md = results_dir.join(format!("{name}.md"));
 
         let mut hf = Command::new("hyperfine");
-        hf.args(["--warmup", "1", "--runs", "3"]);
+        hf.args([
+            "--warmup",
+            &self.warmup.to_string(),
+            "--runs",
+            &self.runs.to_string(),
+        ]);
         for (name, command) in names.iter().zip(commands.iter()) {
             hf.args(["-n", name, command]);
         }
@@ -307,16 +346,29 @@ impl BenchRunner<'_> {
             .arg("--export-markdown")
             .arg(export_md)
             .current_dir(self.root);
-        let status = hf.status().context("could not run hyperfine")?;
-        if !status.success() {
+        let output = hf.output().context("could not run hyperfine")?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        print!("{stdout}");
+        eprint!("{stderr}");
+        let warning_count =
+            count_hyperfine_warnings(&output.stdout) + count_hyperfine_warnings(&output.stderr);
+        if !output.status.success() {
             bail!("hyperfine failed for {name}");
         }
-        Ok(())
+        Ok(BenchmarkRunInfo {
+            name: name.to_string(),
+            warning_count,
+        })
     }
 
-    fn calculate_scores(&self, only: Option<&[String]>) -> Result<()> {
+    fn calculate_scores(
+        &self,
+        only: Option<&[String]>,
+        run_info: &[BenchmarkRunInfo],
+    ) -> Result<()> {
         println!("\n=== Calculating Scores ===\n");
-        let results_dir = self.root.join("benchmarks/results");
+        let results_dir = self.bench_results_dir();
         let selected: Option<BTreeSet<_>> =
             only.map(|items| items.iter().map(String::as_str).collect());
         let mut files = Vec::new();
@@ -327,6 +379,9 @@ impl BenchRunner<'_> {
                     continue;
                 }
                 let stem = path.file_stem().unwrap().to_string_lossy();
+                if stem == "summary" {
+                    continue;
+                }
                 if selected
                     .as_ref()
                     .is_none_or(|items| items.contains(stem.as_ref()))
@@ -438,6 +493,64 @@ impl BenchRunner<'_> {
                 println!("{:>2}. {:<10}: {:.2}x", idx + 1, name, score);
             }
         }
+        if !run_info.is_empty() {
+            self.write_summary(only, run_info, &averages)?;
+        }
+        Ok(())
+    }
+
+    fn write_summary(
+        &self,
+        only: Option<&[String]>,
+        run_info: &[BenchmarkRunInfo],
+        ranking: &[(String, f64)],
+    ) -> Result<()> {
+        let results_dir = self.bench_results_dir();
+        fs::create_dir_all(&results_dir)?;
+        let summary = BenchmarkSummary {
+            schema: "volang.benchmark.summary.v1",
+            generated_at_unix_sec: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            scope: only.map(|items| items.to_vec()).unwrap_or_default(),
+            config: BenchmarkSummaryConfig {
+                runs: self.runs,
+                warmup: self.warmup,
+                all_langs: self.all_langs,
+                vo_only: self.vo_only,
+                arch: self.arch.clone(),
+                jit_hot: self.jit_hot,
+                jit_call_threshold: self.jit_call_threshold,
+                jit_loop_threshold: self.jit_loop_threshold,
+                results_dir: path_display(self.root, &results_dir),
+                artifacts_dir: path_display(self.root, &self.bench_artifacts_dir()),
+                go_cache_dir: path_display(self.root, &self.bench_go_cache_dir()),
+                vo_binary: path_display(self.root, &self.vo_bench_bin()),
+                score_mode: if self.vo_only {
+                    "vo_vm_100".to_string()
+                } else {
+                    "relative_time".to_string()
+                },
+            },
+            tools: collect_tool_versions(),
+            runs: run_info.to_vec(),
+            ranking: ranking
+                .iter()
+                .enumerate()
+                .map(|(idx, (name, score))| BenchmarkRankingEntry {
+                    rank: idx + 1,
+                    name: name.clone(),
+                    score: *score,
+                })
+                .collect(),
+        };
+        let path = results_dir.join("summary.json");
+        fs::write(&path, serde_json::to_string_pretty(&summary)?)?;
+        println!(
+            "\nWrote benchmark summary: {}",
+            path_display(self.root, &path)
+        );
         Ok(())
     }
 
@@ -462,6 +575,69 @@ impl BenchRunner<'_> {
         }
         self.root.join("target/release/vo")
     }
+
+    fn bench_results_dir(&self) -> PathBuf {
+        self.root.join("target/bench/results")
+    }
+
+    fn bench_artifacts_dir(&self) -> PathBuf {
+        self.root.join("target/bench/artifacts")
+    }
+
+    fn bench_artifact_dir(&self, name: &str) -> PathBuf {
+        self.bench_artifacts_dir().join(name)
+    }
+
+    fn bench_go_cache_dir(&self) -> PathBuf {
+        self.root.join("target/bench/go-cache")
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BenchmarkRunInfo {
+    name: String,
+    warning_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkSummary {
+    schema: &'static str,
+    generated_at_unix_sec: u64,
+    scope: Vec<String>,
+    config: BenchmarkSummaryConfig,
+    tools: Vec<ToolVersion>,
+    runs: Vec<BenchmarkRunInfo>,
+    ranking: Vec<BenchmarkRankingEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkSummaryConfig {
+    runs: u64,
+    warmup: u64,
+    all_langs: bool,
+    vo_only: bool,
+    arch: String,
+    jit_hot: bool,
+    jit_call_threshold: Option<u64>,
+    jit_loop_threshold: Option<u64>,
+    results_dir: String,
+    artifacts_dir: String,
+    go_cache_dir: String,
+    vo_binary: String,
+    score_mode: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolVersion {
+    name: String,
+    version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkRankingEntry {
+    rank: usize,
+    name: String,
+    score: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -534,6 +710,21 @@ fn run_status(root: &Path, command: &mut Command) -> Result<bool> {
     Ok(command.current_dir(root).status()?.success())
 }
 
+fn parse_positive_u64_arg(name: &str, value: Option<&String>) -> Result<u64> {
+    parse_positive_u64_value(
+        name,
+        value.ok_or_else(|| anyhow!("{name} requires a value"))?,
+    )
+}
+
+fn parse_positive_u64_value(name: &str, value: &str) -> Result<u64> {
+    let parsed = parse_u64_value(name, value)?;
+    if parsed == 0 {
+        bail!("{name} must be > 0");
+    }
+    Ok(parsed)
+}
+
 fn parse_u64_arg(name: &str, value: Option<&String>) -> Result<u64> {
     parse_u64_value(
         name,
@@ -560,4 +751,60 @@ fn shell_quote_str(value: &str) -> String {
     } else {
         format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
+}
+
+fn count_hyperfine_warnings(output: &[u8]) -> usize {
+    String::from_utf8_lossy(output).matches("Warning:").count()
+}
+
+fn collect_tool_versions() -> Vec<ToolVersion> {
+    [
+        "hyperfine",
+        "rustc",
+        "cargo",
+        "go",
+        "lua",
+        "luajit",
+        "node",
+        "python3",
+        "ruby",
+        "java",
+        "javac",
+        "cc",
+    ]
+    .into_iter()
+    .map(|name| ToolVersion {
+        name: name.to_string(),
+        version: command_version(name),
+    })
+    .collect()
+}
+
+fn command_version(name: &str) -> Option<String> {
+    let args: &[&str] = match name {
+        "go" => &["version"],
+        "lua" | "luajit" => &["-v"],
+        "java" | "javac" => &["-version"],
+        _ => &["--version"],
+    };
+    let output = Command::new(name).args(args).output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let text = if stdout.trim().is_empty() {
+        stderr.trim()
+    } else {
+        stdout.trim()
+    };
+    if text.is_empty() {
+        None
+    } else {
+        text.lines().next().map(str::to_string)
+    }
+}
+
+fn path_display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
 }

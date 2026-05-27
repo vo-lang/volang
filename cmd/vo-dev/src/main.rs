@@ -110,7 +110,7 @@ fn print_usage() {
   vo-dev first-party release-verify <repo>
   vo-dev studio-install-local-vogui
   vo-dev test lint --suite lang
-  vo-dev bench [all|vo|score|<name>] [--all-langs] [--arch 32|64] [--jit-hot]
+  vo-dev bench [all|vo|score|<name>] [--all-langs] [--runs N] [--warmup N] [--arch 32|64] [--jit-hot]
   vo-dev gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]
   vo-dev loc [--with-tests]
   vo-dev clean [all|vo|rust|bench|junk]

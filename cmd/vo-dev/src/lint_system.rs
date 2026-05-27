@@ -545,7 +545,6 @@ fn lint_layout(root: &Path) -> Result<()> {
         "Cargo.toml",
         "LICENSE",
         "README.md",
-        "agent.md",
         "d.py",
         "rust-toolchain.toml",
         "vo.work",
