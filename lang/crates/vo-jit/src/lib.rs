@@ -486,6 +486,7 @@ mod tests {
             has_defer: false,
             has_calls,
             has_call_extern,
+            jit_metadata: vec![Default::default(); code.len()],
             code,
             slot_types,
             borrowed_scan_slots_prefix,

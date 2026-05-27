@@ -5,7 +5,7 @@ use vo_common::symbol::Symbol;
 use vo_common_core::instruction::{
     HINT_LOOP, LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
 };
-use vo_common_core::TransferType;
+use vo_common_core::{JitInstructionMetadata, TransferType};
 use vo_runtime::SlotType;
 use vo_vm::bytecode::FunctionDef;
 use vo_vm::instruction::{Instruction, Opcode};
@@ -153,6 +153,7 @@ pub struct FuncBuilder {
     named_return_slots: Vec<(u16, u16, bool)>, // (slot, slots, escaped) for named return variables
     slot_types: Vec<SlotType>,
     code: Vec<Instruction>,
+    jit_metadata: Vec<JitInstructionMetadata>,
     loop_stack: Vec<LoopContext>,
     return_types: Vec<vo_analysis::objects::TypeKey>,
     // Label support for goto
@@ -192,6 +193,7 @@ impl FuncBuilder {
             named_return_slots: Vec::new(),
             slot_types: Vec::new(),
             code: Vec::new(),
+            jit_metadata: Vec::new(),
             loop_stack: Vec::new(),
             return_types: Vec::new(),
             labels: HashMap::new(),
@@ -628,15 +630,53 @@ impl FuncBuilder {
     // === Instruction emission ===
 
     pub fn emit(&mut self, inst: Instruction) {
-        self.code.push(inst);
+        self.emit_with_metadata(inst, JitInstructionMetadata::None);
     }
 
     pub fn emit_op(&mut self, op: Opcode, a: u16, b: u16, c: u16) {
-        self.code.push(Instruction::new(op, a, b, c));
+        self.emit_with_metadata(Instruction::new(op, a, b, c), JitInstructionMetadata::None);
     }
 
     pub fn emit_with_flags(&mut self, op: Opcode, flags: u8, a: u16, b: u16, c: u16) {
-        self.code.push(Instruction::with_flags(op, flags, a, b, c));
+        self.emit_with_metadata(
+            Instruction::with_flags(op, flags, a, b, c),
+            JitInstructionMetadata::None,
+        );
+    }
+
+    fn emit_with_metadata(&mut self, inst: Instruction, metadata: JitInstructionMetadata) {
+        self.code.push(inst);
+        self.jit_metadata.push(metadata);
+    }
+
+    fn emit_with_flags_and_metadata(
+        &mut self,
+        op: Opcode,
+        flags: u8,
+        a: u16,
+        b: u16,
+        c: u16,
+        metadata: JitInstructionMetadata,
+    ) {
+        self.emit_with_metadata(Instruction::with_flags(op, flags, a, b, c), metadata);
+    }
+
+    fn elem_metadata(
+        elem_bytes: usize,
+        elem_vk: vo_common_core::ValueKind,
+    ) -> JitInstructionMetadata {
+        match u32::try_from(elem_bytes) {
+            Ok(elem_bytes) => JitInstructionMetadata::ElemLayout {
+                elem_bytes,
+                needs_sign_extend: matches!(
+                    elem_vk,
+                    vo_common_core::ValueKind::Int8
+                        | vo_common_core::ValueKind::Int16
+                        | vo_common_core::ValueKind::Int32
+                ),
+            },
+            Err(_) => JitInstructionMetadata::None,
+        }
     }
 
     /// Emit PtrNew: a=dst, b=meta register, c=heap slot count.
@@ -901,9 +941,23 @@ impl FuncBuilder {
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem_bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags(Opcode::ArrayGet, flags, dst, arr, index_and_eb);
+            self.emit_with_flags_and_metadata(
+                Opcode::ArrayGet,
+                flags,
+                dst,
+                arr,
+                index_and_eb,
+                Self::elem_metadata(elem_bytes, elem_vk),
+            );
         } else {
-            self.emit_with_flags(Opcode::ArrayGet, flags, dst, arr, idx);
+            self.emit_with_flags_and_metadata(
+                Opcode::ArrayGet,
+                flags,
+                dst,
+                arr,
+                idx,
+                Self::elem_metadata(elem_bytes, elem_vk),
+            );
         }
     }
 
@@ -923,9 +977,23 @@ impl FuncBuilder {
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem_bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags(Opcode::ArraySet, flags, arr, index_and_eb, val);
+            self.emit_with_flags_and_metadata(
+                Opcode::ArraySet,
+                flags,
+                arr,
+                index_and_eb,
+                val,
+                Self::elem_metadata(elem_bytes, elem_vk),
+            );
         } else {
-            self.emit_with_flags(Opcode::ArraySet, flags, arr, idx, val);
+            self.emit_with_flags_and_metadata(
+                Opcode::ArraySet,
+                flags,
+                arr,
+                idx,
+                val,
+                Self::elem_metadata(elem_bytes, elem_vk),
+            );
         }
     }
 
@@ -945,9 +1013,23 @@ impl FuncBuilder {
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem_bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags(Opcode::SliceGet, flags, dst, slice, index_and_eb);
+            self.emit_with_flags_and_metadata(
+                Opcode::SliceGet,
+                flags,
+                dst,
+                slice,
+                index_and_eb,
+                Self::elem_metadata(elem_bytes, elem_vk),
+            );
         } else {
-            self.emit_with_flags(Opcode::SliceGet, flags, dst, slice, idx);
+            self.emit_with_flags_and_metadata(
+                Opcode::SliceGet,
+                flags,
+                dst,
+                slice,
+                idx,
+                Self::elem_metadata(elem_bytes, elem_vk),
+            );
         }
     }
 
@@ -967,10 +1049,91 @@ impl FuncBuilder {
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem_bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags(Opcode::SliceSet, flags, slice, index_and_eb, val);
+            self.emit_with_flags_and_metadata(
+                Opcode::SliceSet,
+                flags,
+                slice,
+                index_and_eb,
+                val,
+                Self::elem_metadata(elem_bytes, elem_vk),
+            );
         } else {
-            self.emit_with_flags(Opcode::SliceSet, flags, slice, idx, val);
+            self.emit_with_flags_and_metadata(
+                Opcode::SliceSet,
+                flags,
+                slice,
+                idx,
+                val,
+                Self::elem_metadata(elem_bytes, elem_vk),
+            );
         }
+    }
+
+    pub fn emit_slice_append(
+        &mut self,
+        dst: u16,
+        slice: u16,
+        meta_and_elem: u16,
+        flags: u8,
+        elem_bytes: usize,
+        elem_vk: vo_common_core::ValueKind,
+    ) {
+        self.emit_with_flags_and_metadata(
+            Opcode::SliceAppend,
+            flags,
+            dst,
+            slice,
+            meta_and_elem,
+            Self::elem_metadata(elem_bytes, elem_vk),
+        );
+    }
+
+    pub fn emit_map_get(
+        &mut self,
+        dst: u16,
+        map: u16,
+        meta_and_key: u16,
+        key_slots: u16,
+        val_slots: u16,
+        has_ok: bool,
+    ) {
+        self.emit_with_metadata(
+            Instruction::new(Opcode::MapGet, dst, map, meta_and_key),
+            JitInstructionMetadata::MapGet {
+                key_slots,
+                val_slots,
+                has_ok,
+            },
+        );
+    }
+
+    pub fn emit_map_set(
+        &mut self,
+        flags: u8,
+        map: u16,
+        meta_and_key: u16,
+        val: u16,
+        key_slots: u16,
+        val_slots: u16,
+    ) {
+        self.emit_with_flags_and_metadata(
+            Opcode::MapSet,
+            flags,
+            map,
+            meta_and_key,
+            val,
+            JitInstructionMetadata::MapSet {
+                key_slots,
+                val_slots,
+            },
+        );
+    }
+
+    pub fn emit_map_delete(&mut self, map: u16, meta_and_key: u16, key_slots: u16) {
+        self.emit_with_metadata(
+            Instruction::new(Opcode::MapDelete, map, meta_and_key, 0),
+            JitInstructionMetadata::MapDelete { key_slots },
+        );
     }
 
     // === Jump ===
@@ -982,7 +1145,10 @@ impl FuncBuilder {
     /// Emit jump, return position to patch later.
     pub fn emit_jump(&mut self, op: Opcode, cond_reg: u16) -> usize {
         let pc = self.code.len();
-        self.code.push(Instruction::new(op, cond_reg, 0, 0));
+        self.emit_with_metadata(
+            Instruction::new(op, cond_reg, 0, 0),
+            JitInstructionMetadata::None,
+        );
         pc
     }
 
@@ -991,7 +1157,10 @@ impl FuncBuilder {
         let current = self.code.len() as i32;
         let offset = target as i32 - current;
         let (b, c) = Self::encode_jump_offset(offset);
-        self.code.push(Instruction::new(op, cond_reg, b, c));
+        self.emit_with_metadata(
+            Instruction::new(op, cond_reg, b, c),
+            JitInstructionMetadata::None,
+        );
     }
 
     /// Patch jump at pc to target.
@@ -1016,13 +1185,10 @@ impl FuncBuilder {
         let current_pc = self.code.len();
         // offset is relative to pc+1
         let offset = body_start as i32 - (current_pc as i32 + 1);
-        self.code.push(Instruction::with_flags(
-            Opcode::ForLoop,
-            flags,
-            idx_slot,
-            limit_slot,
-            offset as u16,
-        ));
+        self.emit_with_metadata(
+            Instruction::with_flags(Opcode::ForLoop, flags, idx_slot, limit_slot, offset as u16),
+            JitInstructionMetadata::None,
+        );
     }
 
     // === Loop ===
@@ -1070,13 +1236,10 @@ impl FuncBuilder {
     fn emit_hint_loop_placeholder(&mut self, depth: u8) {
         // loop_info: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset (all zero initially)
         let loop_info = (depth as u16) << 4;
-        self.code.push(Instruction::with_flags(
-            Opcode::Hint,
-            HINT_LOOP,
-            loop_info,
-            0,
-            0,
-        ));
+        self.emit_with_metadata(
+            Instruction::with_flags(Opcode::Hint, HINT_LOOP, loop_info, 0, 0),
+            JitInstructionMetadata::None,
+        );
     }
 
     /// Mark current loop as containing defer.
@@ -1397,6 +1560,7 @@ impl FuncBuilder {
         let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&self.slot_types);
         let borrowed_scan_slots_prefix =
             FunctionDef::compute_borrowed_scan_slots_prefix(&self.slot_types);
+        debug_assert_eq!(self.code.len(), self.jit_metadata.len());
 
         FunctionDef {
             name: self.name,
@@ -1415,6 +1579,7 @@ impl FuncBuilder {
             has_calls,
             has_call_extern,
             code: self.code,
+            jit_metadata: self.jit_metadata,
             slot_types: self.slot_types,
             borrowed_scan_slots_prefix,
             capture_types: self.capture_types,

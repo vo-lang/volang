@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 
 use cranelift_codegen::ir::{types, FuncRef, Inst, InstBuilder, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
-use vo_runtime::bytecode::{Constant, ExternDef, Module as VoModule};
+use vo_runtime::bytecode::{Constant, ExternDef, JitInstructionMetadata, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
 
@@ -179,34 +179,55 @@ pub trait IrEmitter<'a> {
     /// Get register constant
     fn get_reg_const(&self, reg: u16) -> Option<i64>;
 
+    /// Get JIT metadata attached to the instruction at current_pc, if present.
+    fn current_jit_metadata(&self) -> Option<&JitInstructionMetadata> {
+        None
+    }
+
     /// Resolve typed array/slice element metadata for JIT lowering.
     fn elem_layout(
         &self,
         flags: u8,
         dynamic_bytes_slot: u16,
     ) -> Option<crate::metadata::ElemLayout> {
-        crate::metadata::elem_layout_from_flags_or_dynamic_bytes(
-            flags,
-            self.get_reg_const(dynamic_bytes_slot),
-        )
+        self.current_jit_metadata()
+            .and_then(crate::metadata::elem_layout_from_instruction)
+            .or_else(|| {
+                crate::metadata::elem_layout_from_flags_or_dynamic_bytes(
+                    flags,
+                    self.get_reg_const(dynamic_bytes_slot),
+                )
+            })
     }
 
     /// Resolve typed map-get metadata for JIT lowering.
     fn map_get_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapGetLayout> {
-        self.get_reg_const(inst.c)
-            .map(crate::metadata::map_get_layout_from_meta)
+        self.current_jit_metadata()
+            .and_then(crate::metadata::map_get_layout_from_instruction)
+            .or_else(|| {
+                self.get_reg_const(inst.c)
+                    .map(crate::metadata::map_get_layout_from_meta)
+            })
     }
 
     /// Resolve typed map-set metadata for JIT lowering.
     fn map_set_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapSetLayout> {
-        self.get_reg_const(inst.b)
-            .map(crate::metadata::map_set_layout_from_meta)
+        self.current_jit_metadata()
+            .and_then(crate::metadata::map_set_layout_from_instruction)
+            .or_else(|| {
+                self.get_reg_const(inst.b)
+                    .map(crate::metadata::map_set_layout_from_meta)
+            })
     }
 
     /// Resolve typed map-delete metadata for JIT lowering.
     fn map_delete_key_slots(&self, inst: &Instruction) -> Option<u16> {
-        self.get_reg_const(inst.b)
-            .and_then(crate::metadata::map_delete_key_slots_from_meta)
+        self.current_jit_metadata()
+            .and_then(crate::metadata::map_delete_key_slots_from_instruction)
+            .or_else(|| {
+                self.get_reg_const(inst.b)
+                    .and_then(crate::metadata::map_delete_key_slots_from_meta)
+            })
     }
 
     /// Clear compile-time constant state for a slot after non-constant writes.
@@ -313,8 +334,9 @@ pub fn compute_memory_only_start(code: &[Instruction]) -> u16 {
 
 pub type RegConstFacts = Vec<HashMap<u16, i64>>;
 
-pub fn compute_reg_const_facts(
+pub fn compute_reg_const_facts_with_metadata(
     code: &[Instruction],
+    jit_metadata: &[JitInstructionMetadata],
     constants: &[Constant],
     externs: &[ExternDef],
     begin_pc: usize,
@@ -340,7 +362,13 @@ pub fn compute_reg_const_facts(
         }
 
         let mut out = in_facts[pc].clone();
-        transfer_reg_const_facts(&code[pc], constants, externs, &mut out);
+        transfer_reg_const_facts(
+            &code[pc],
+            jit_metadata.get(pc),
+            constants,
+            externs,
+            &mut out,
+        );
         if processed[pc] && out == out_facts[pc] {
             continue;
         }
@@ -511,15 +539,17 @@ fn unary_const(
 
 fn transfer_reg_const_facts(
     inst: &Instruction,
+    jit_metadata: Option<&JitInstructionMetadata>,
     constants: &[Constant],
     externs: &[ExternDef],
     facts: &mut HashMap<u16, i64>,
 ) {
-    reg_const_effect(inst, constants, externs, facts).apply(facts);
+    reg_const_effect(inst, jit_metadata, constants, externs, facts).apply(facts);
 }
 
 fn reg_const_effect(
     inst: &Instruction,
+    jit_metadata: Option<&JitInstructionMetadata>,
     constants: &[Constant],
     externs: &[ExternDef],
     facts: &HashMap<u16, i64>,
@@ -531,7 +561,8 @@ fn reg_const_effect(
         };
     }
 
-    let metadata_facts = crate::metadata::MetadataFacts::from_reg_consts(facts);
+    let metadata_facts =
+        crate::metadata::MetadataFacts::from_reg_consts(facts).with_instruction(jit_metadata);
 
     match inst.opcode() {
         Opcode::CopyN => {
@@ -786,7 +817,7 @@ mod tests {
             Instruction::new(Opcode::LoadInt, 2, 2, 0),
             Instruction::new(Opcode::Shl, 3, 4, 2),
         ];
-        let facts = compute_reg_const_facts(&code, &[], &[], 0, code.len());
+        let facts = compute_reg_const_facts_with_metadata(&code, &[], &[], &[], 0, code.len());
 
         assert!(
             !facts[3].contains_key(&2),
@@ -803,7 +834,8 @@ mod tests {
             Instruction::new(Opcode::Copy, 6, 5, 0),
             Instruction::new(Opcode::MapGet, 7, 8, 5),
         ];
-        let facts = compute_reg_const_facts(&code, &constants, &[], 0, code.len());
+        let facts =
+            compute_reg_const_facts_with_metadata(&code, &[], &constants, &[], 0, code.len());
 
         assert_eq!(
             facts[3].get(&5),
@@ -821,7 +853,8 @@ mod tests {
             Instruction::new(Opcode::MapSet, 0, 1, 3),
             Instruction::new(Opcode::MapDelete, 0, 1, 2),
         ];
-        let facts = compute_reg_const_facts(&code, &constants, &[], 0, code.len());
+        let facts =
+            compute_reg_const_facts_with_metadata(&code, &[], &constants, &[], 0, code.len());
 
         assert_eq!(
             facts[2].get(&1),
@@ -832,6 +865,35 @@ mod tests {
             facts[3].get(&1),
             Some(&258),
             "map writes must not discard metadata registers they only read"
+        );
+    }
+
+    #[test]
+    fn reg_const_facts_use_instruction_metadata_when_meta_register_is_not_constant() {
+        let constants = vec![Constant::Int(42), Constant::Int(99)];
+        let code = vec![
+            Instruction::new(Opcode::LoadConst, 5, 0, 0),
+            Instruction::new(Opcode::LoadConst, 7, 1, 0),
+            Instruction::new(Opcode::MapGet, 7, 1, 20),
+            Instruction::new(Opcode::MapLen, 30, 1, 0),
+        ];
+        let mut metadata = vec![JitInstructionMetadata::None; code.len()];
+        metadata[2] = JitInstructionMetadata::MapGet {
+            key_slots: 2,
+            val_slots: 2,
+            has_ok: true,
+        };
+        let facts =
+            compute_reg_const_facts_with_metadata(&code, &metadata, &constants, &[], 0, code.len());
+
+        assert_eq!(
+            facts[3].get(&5),
+            Some(&42),
+            "unrelated constants should survive a MapGet described by instruction metadata"
+        );
+        assert!(
+            !facts[3].contains_key(&7) && !facts[3].contains_key(&8) && !facts[3].contains_key(&9),
+            "MapGet output slots should be killed from instruction metadata"
         );
     }
 
@@ -851,7 +913,8 @@ mod tests {
             Instruction::with_flags(Opcode::CallExtern, 1, 13, 0, 20),
             Instruction::new(Opcode::MapSet, 0, 5, 8),
         ];
-        let facts = compute_reg_const_facts(&code, &constants, &externs, 0, code.len());
+        let facts =
+            compute_reg_const_facts_with_metadata(&code, &[], &constants, &externs, 0, code.len());
 
         assert_eq!(
             facts[3].get(&5),
@@ -875,7 +938,8 @@ mod tests {
             Instruction::new(Opcode::Or, 5, 5, 7),
             Instruction::new(Opcode::MapNew, 8, 5, 0),
         ];
-        let facts = compute_reg_const_facts(&code, &constants, &[], 0, code.len());
+        let facts =
+            compute_reg_const_facts_with_metadata(&code, &[], &constants, &[], 0, code.len());
 
         assert_eq!(
             facts[5].get(&5),
@@ -894,7 +958,8 @@ mod tests {
             Instruction::new(Opcode::MapIterInit, iter_start, 1, 0),
             Instruction::new(Opcode::MapLen, 20, 1, 0),
         ];
-        let facts = compute_reg_const_facts(&code, &constants, &[], 0, code.len());
+        let facts =
+            compute_reg_const_facts_with_metadata(&code, &[], &constants, &[], 0, code.len());
 
         assert!(
             !facts[2].contains_key(&iter_last),

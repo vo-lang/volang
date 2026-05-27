@@ -531,7 +531,7 @@ fn resolve_index_field_lvalue(
         let meta_idx = ctx.const_int(meta as i64);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         func.emit_copy(meta_reg + 1, index_reg, key_slots);
-        func.emit_op(Opcode::MapGet, tmp, container_reg, meta_reg);
+        func.emit_map_get(tmp, container_reg, meta_reg, key_slots, val_slots, false);
 
         return Ok(Some(LValue::Variable(StorageKind::StackValue {
             slot: tmp + field_offset,
@@ -830,7 +830,7 @@ pub fn emit_lvalue_load(
                     let meta_idx = ctx.const_int(meta as i64);
                     func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
                     func.emit_copy(meta_reg + 1, *index_reg, *key_slots);
-                    func.emit_op(Opcode::MapGet, dst, *container_reg, meta_reg);
+                    func.emit_map_get(dst, *container_reg, meta_reg, *key_slots, *val_slots, false);
                 }
                 ContainerKind::String => {
                     func.emit_op(Opcode::StrIndex, dst, *container_reg, *index_reg);
@@ -956,12 +956,13 @@ pub fn emit_lvalue_store(
                         .iter()
                         .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface0));
                     let flags = (key_may_gc as u8) | ((*val_may_gc as u8) << 1);
-                    func.emit_with_flags(
-                        Opcode::MapSet,
+                    func.emit_map_set(
                         flags,
                         *container_reg,
                         meta_and_key_reg,
                         src,
+                        *key_slots,
+                        *val_slots,
                     );
                 }
                 ContainerKind::String => {

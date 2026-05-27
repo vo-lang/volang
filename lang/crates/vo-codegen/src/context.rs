@@ -95,8 +95,8 @@ use vo_common::span::Span;
 use vo_common::symbol::Symbol;
 use vo_common::SourceMap;
 use vo_vm::bytecode::{
-    Constant, FunctionDef, GlobalDef, InterfaceMeta, Itab, MethodInfo, Module, NamedTypeMeta,
-    StructMeta,
+    Constant, FunctionDef, GlobalDef, InterfaceMeta, Itab, JitInstructionMetadata, MethodInfo,
+    Module, NamedTypeMeta, StructMeta,
 };
 
 /// Package-level codegen context.
@@ -818,6 +818,7 @@ impl CodegenContext {
             has_calls: false,
             has_call_extern: false,
             code: Vec::new(),
+            jit_metadata: Vec::new(),
             slot_types: Vec::new(),
             borrowed_scan_slots_prefix: vec![0],
             capture_types: Vec::new(),
@@ -1220,6 +1221,7 @@ impl CodegenContext {
             has_defer: false, // wrappers never have defer
             has_calls,
             has_call_extern,
+            jit_metadata: vec![JitInstructionMetadata::None; code.len()],
             code,
             slot_types,
             borrowed_scan_slots_prefix,

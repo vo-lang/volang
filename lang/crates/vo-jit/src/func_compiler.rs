@@ -96,8 +96,9 @@ impl<'a> FunctionCompiler<'a> {
 
     pub fn compile(mut self) -> Result<(), JitError> {
         self.memory_only_start = crate::translator::compute_memory_only_start(&self.func_def.code);
-        self.reg_const_facts = crate::translator::compute_reg_const_facts(
+        self.reg_const_facts = crate::translator::compute_reg_const_facts_with_metadata(
             &self.func_def.code,
+            &self.func_def.jit_metadata,
             &self.vo_module.constants,
             &self.vo_module.externs,
             0,
@@ -1004,6 +1005,9 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     }
     fn current_pc(&self) -> usize {
         self.current_pc
+    }
+    fn current_jit_metadata(&self) -> Option<&vo_runtime::bytecode::JitInstructionMetadata> {
+        self.func_def.jit_metadata.get(self.current_pc)
     }
     fn helpers(&self) -> &HelperFuncs {
         &self.helpers

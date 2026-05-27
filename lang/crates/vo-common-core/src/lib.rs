@@ -25,8 +25,8 @@ pub mod symbol;
 pub mod types;
 
 pub use bytecode::{
-    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, Itab, Module, StructMeta,
-    TransferType,
+    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, Itab, JitInstructionMetadata,
+    Module, StructMeta, TransferType,
 };
 pub use debug_info::{DebugInfo, DebugLoc, FuncDebugInfo, SourceLoc};
 pub use instruction::{Instruction, Opcode};

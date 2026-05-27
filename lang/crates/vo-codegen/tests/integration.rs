@@ -7,6 +7,8 @@ use vo_analysis::{AnalysisError, Checker, Project};
 use vo_codegen::compile_project;
 use vo_common::SourceMap;
 use vo_syntax::parser;
+use vo_vm::bytecode::JitInstructionMetadata;
+use vo_vm::instruction::Opcode;
 use vo_vm::vm::Vm;
 
 /// Helper: analyze a single source string (no imports) for tests
@@ -68,6 +70,160 @@ fn compile_and_run(source: &str) {
     vm.run().expect("VM execution failed");
 
     println!("✓ VM execution completed");
+}
+
+#[test]
+fn test_jit_instruction_metadata_for_dynamic_slice_and_map_ops() {
+    let source = r#"
+package main
+
+type Big struct {
+    a int
+    b int
+    c int
+    d int
+    e int
+    f int
+    g int
+    h int
+    i int
+}
+
+func main() int {
+    xs := make([]Big, 1)
+    xs[0] = Big{}
+    xs = append(xs, Big{})
+
+    m := make(map[Big]Big)
+    _, ok := m[Big{}]
+    m[Big{}] = Big{}
+    delete(m, Big{})
+
+    if ok {
+        return len(xs)
+    }
+    return len(xs)
+}
+"#;
+
+    let module = compile_source(source);
+    let main = module
+        .functions
+        .iter()
+        .find(|func| {
+            func.code.iter().any(|inst| {
+                matches!(
+                    inst.opcode(),
+                    Opcode::SliceSet
+                        | Opcode::SliceAppend
+                        | Opcode::MapGet
+                        | Opcode::MapSet
+                        | Opcode::MapDelete
+                )
+            })
+        })
+        .expect("expected compiled main body with slice/map operations");
+    let metadata_dump = || {
+        let ops = main
+            .code
+            .iter()
+            .enumerate()
+            .map(|(pc, inst)| format!("{pc}: {:?} flags={}", inst.opcode(), inst.flags))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let metadata = main
+            .code
+            .iter()
+            .zip(&main.jit_metadata)
+            .enumerate()
+            .filter(|(_, (_, meta))| !matches!(meta, JitInstructionMetadata::None))
+            .map(|(pc, (inst, meta))| {
+                format!("{pc}: {:?} flags={} {:?}", inst.opcode(), inst.flags, meta)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("ops:\n{ops}\nmetadata:\n{metadata}")
+    };
+
+    assert_eq!(main.code.len(), main.jit_metadata.len());
+    assert!(
+        main.code
+            .iter()
+            .zip(&main.jit_metadata)
+            .any(|(inst, meta)| {
+                inst.opcode() == Opcode::SliceSet
+                    && inst.flags == 0
+                    && matches!(
+                        meta,
+                        JitInstructionMetadata::ElemLayout {
+                            elem_bytes: 72,
+                            needs_sign_extend: false
+                        }
+                    )
+            }),
+        "dynamic-width SliceSet should carry explicit JIT element metadata; got:\n{}",
+        metadata_dump()
+    );
+    assert!(
+        main.code
+            .iter()
+            .zip(&main.jit_metadata)
+            .any(|(inst, meta)| {
+                inst.opcode() == Opcode::SliceAppend
+                    && inst.flags == 0
+                    && matches!(
+                        meta,
+                        JitInstructionMetadata::ElemLayout {
+                            elem_bytes: 72,
+                            needs_sign_extend: false
+                        }
+                    )
+            }),
+        "dynamic-width SliceAppend should carry explicit JIT element metadata"
+    );
+    assert!(
+        main.code
+            .iter()
+            .zip(&main.jit_metadata)
+            .any(|(inst, meta)| {
+                inst.opcode() == Opcode::MapGet
+                    && matches!(
+                        meta,
+                        JitInstructionMetadata::MapGet {
+                            key_slots: 9,
+                            val_slots: 9,
+                            has_ok: true
+                        }
+                    )
+            }),
+        "comma-ok MapGet should carry explicit key/value/ok metadata"
+    );
+    assert!(
+        main.code
+            .iter()
+            .zip(&main.jit_metadata)
+            .any(|(inst, meta)| {
+                inst.opcode() == Opcode::MapSet
+                    && matches!(
+                        meta,
+                        JitInstructionMetadata::MapSet {
+                            key_slots: 9,
+                            val_slots: 9
+                        }
+                    )
+            }),
+        "MapSet should carry explicit key/value metadata"
+    );
+    assert!(
+        main.code
+            .iter()
+            .zip(&main.jit_metadata)
+            .any(|(inst, meta)| {
+                inst.opcode() == Opcode::MapDelete
+                    && matches!(meta, JitInstructionMetadata::MapDelete { key_slots: 9 })
+            }),
+        "MapDelete should carry explicit key metadata"
+    );
 }
 
 #[test]

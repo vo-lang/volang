@@ -364,12 +364,13 @@ fn compile_builtin_call_impl(
                         )?;
                     }
 
-                    func.emit_with_flags(
-                        Opcode::SliceAppend,
-                        flags,
+                    func.emit_slice_append(
                         append_dst,
                         current_slice,
                         meta_and_elem_reg,
+                        flags,
+                        elem_bytes,
+                        elem_vk,
                     );
                     current_slice = append_dst;
                 }
@@ -406,7 +407,7 @@ fn compile_builtin_call_impl(
             let key_reg = compile_map_key_expr(&call.args[1], key_type, ctx, func, info)?;
             func.emit_copy(meta_and_key_reg + 1, key_reg, key_slots);
 
-            func.emit_op(Opcode::MapDelete, map_reg, meta_and_key_reg, 0);
+            func.emit_map_delete(map_reg, meta_and_key_reg, key_slots);
         }
         "close" => {
             if call.args.len() != 1 {

@@ -437,7 +437,7 @@ fn compile_map_lit(
             super::compile_elem_to(&elem.value, val_reg, val_type, ctx, func, info)?;
 
             // MapSet: a=map, b=meta_and_key, c=val
-            func.emit_op(Opcode::MapSet, dst, meta_and_key_reg, val_reg);
+            func.emit_map_set(0, dst, meta_and_key_reg, val_reg, key_slots, val_slots);
         }
     }
     Ok(())

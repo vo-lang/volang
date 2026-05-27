@@ -1296,6 +1296,9 @@ fn store_element<'a>(e: &mut impl IrEmitter<'a>, addr: Value, val: Value, elem_b
 }
 
 fn emit_elem_slots_i32<'a>(e: &mut impl IrEmitter<'a>, flags: u8, eb_reg: u16) -> Value {
+    if let Some(layout) = e.elem_layout(flags, eb_reg) {
+        return e.builder().ins().iconst(types::I32, layout.bytes as i64);
+    }
     if flags == 0 {
         let eb_raw = e.read_var(eb_reg);
         e.builder().ins().ireduce(types::I32, eb_raw)
@@ -1310,6 +1313,9 @@ fn emit_elem_slots_i32<'a>(e: &mut impl IrEmitter<'a>, flags: u8, eb_reg: u16) -
 }
 
 fn emit_elem_bytes_i32<'a>(e: &mut impl IrEmitter<'a>, flags: u8, eb_reg: u16) -> Value {
+    if let Some(layout) = e.elem_layout(flags, eb_reg) {
+        return e.builder().ins().iconst(types::I32, layout.bytes as i64);
+    }
     if flags == 0 {
         let eb_raw = e.read_var(eb_reg);
         e.builder().ins().ireduce(types::I32, eb_raw)

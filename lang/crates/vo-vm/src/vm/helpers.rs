@@ -284,6 +284,7 @@ mod tests {
             has_defer: false,
             has_calls: false,
             has_call_extern: false,
+            jit_metadata: Vec::new(),
             code: Vec::new(),
             slot_types: Vec::new(),
             borrowed_scan_slots_prefix: vec![0],

@@ -6,31 +6,59 @@
 
 use std::collections::HashMap;
 
+use vo_runtime::bytecode::JitInstructionMetadata;
 use vo_runtime::instruction::Instruction;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MetadataFacts<'a> {
     reg_consts: Option<&'a HashMap<u16, i64>>,
+    instruction: Option<&'a JitInstructionMetadata>,
 }
 
 impl<'a> MetadataFacts<'a> {
     pub fn none() -> Self {
-        Self { reg_consts: None }
+        Self {
+            reg_consts: None,
+            instruction: None,
+        }
     }
 
     pub fn from_reg_consts(reg_consts: &'a HashMap<u16, i64>) -> Self {
         Self {
             reg_consts: Some(reg_consts),
+            instruction: None,
         }
     }
 
-    pub fn has_reg_consts(self) -> bool {
-        self.reg_consts.is_some()
+    pub fn with_instruction(mut self, metadata: Option<&'a JitInstructionMetadata>) -> Self {
+        self.instruction = metadata;
+        self
+    }
+
+    pub fn has_facts(self) -> bool {
+        self.reg_consts.is_some() || self.instruction.is_some()
     }
 
     fn const_i64(self, slot: u16) -> Option<i64> {
         self.reg_consts
             .and_then(|reg_consts| reg_consts.get(&slot).copied())
+    }
+
+    fn elem_layout(self) -> Option<ElemLayout> {
+        self.instruction.and_then(elem_layout_from_instruction)
+    }
+
+    fn map_get_layout(self) -> Option<MapGetLayout> {
+        self.instruction.and_then(map_get_layout_from_instruction)
+    }
+
+    fn map_set_layout(self) -> Option<MapSetLayout> {
+        self.instruction.and_then(map_set_layout_from_instruction)
+    }
+
+    fn map_delete_key_slots(self) -> Option<u16> {
+        self.instruction
+            .and_then(map_delete_key_slots_from_instruction)
     }
 }
 
@@ -88,6 +116,16 @@ pub fn elem_layout_from_flags_or_dynamic_bytes(
     }
 }
 
+pub fn elem_layout_from_instruction(metadata: &JitInstructionMetadata) -> Option<ElemLayout> {
+    match *metadata {
+        JitInstructionMetadata::ElemLayout {
+            elem_bytes,
+            needs_sign_extend,
+        } => elem_layout_from_bytes(elem_bytes as usize, needs_sign_extend),
+        _ => None,
+    }
+}
+
 fn elem_layout_from_bytes(bytes: usize, needs_sign_extend: bool) -> Option<ElemLayout> {
     let slots = u16::try_from(bytes.div_ceil(8)).ok()?;
     Some(ElemLayout {
@@ -102,7 +140,9 @@ fn elem_layout_from_flags_or_fact(
     dynamic_bytes_slot: u16,
     facts: MetadataFacts<'_>,
 ) -> Option<ElemLayout> {
-    elem_layout_from_flags_or_dynamic_bytes(flags, facts.const_i64(dynamic_bytes_slot))
+    facts.elem_layout().or_else(|| {
+        elem_layout_from_flags_or_dynamic_bytes(flags, facts.const_i64(dynamic_bytes_slot))
+    })
 }
 
 pub fn indexed_get_result_slots(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
@@ -126,8 +166,25 @@ pub fn map_get_layout_from_meta(meta: i64) -> MapGetLayout {
     }
 }
 
+pub fn map_get_layout_from_instruction(metadata: &JitInstructionMetadata) -> Option<MapGetLayout> {
+    match *metadata {
+        JitInstructionMetadata::MapGet {
+            key_slots,
+            val_slots,
+            has_ok,
+        } => Some(MapGetLayout {
+            key_slots,
+            val_slots,
+            has_ok,
+        }),
+        _ => None,
+    }
+}
+
 pub fn map_get_layout(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<MapGetLayout> {
-    facts.const_i64(inst.c).map(map_get_layout_from_meta)
+    facts
+        .map_get_layout()
+        .or_else(|| facts.const_i64(inst.c).map(map_get_layout_from_meta))
 }
 
 pub fn map_set_layout_from_meta(meta: i64) -> MapSetLayout {
@@ -138,16 +195,40 @@ pub fn map_set_layout_from_meta(meta: i64) -> MapSetLayout {
     }
 }
 
+pub fn map_set_layout_from_instruction(metadata: &JitInstructionMetadata) -> Option<MapSetLayout> {
+    match *metadata {
+        JitInstructionMetadata::MapSet {
+            key_slots,
+            val_slots,
+        } => Some(MapSetLayout {
+            key_slots,
+            val_slots,
+        }),
+        _ => None,
+    }
+}
+
 pub fn map_set_layout(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<MapSetLayout> {
-    facts.const_i64(inst.b).map(map_set_layout_from_meta)
+    facts
+        .map_set_layout()
+        .or_else(|| facts.const_i64(inst.b).map(map_set_layout_from_meta))
 }
 
 pub fn map_delete_key_slots_from_meta(meta: i64) -> Option<u16> {
     u16::try_from(meta).ok()
 }
 
+pub fn map_delete_key_slots_from_instruction(metadata: &JitInstructionMetadata) -> Option<u16> {
+    match *metadata {
+        JitInstructionMetadata::MapDelete { key_slots } => Some(key_slots),
+        _ => None,
+    }
+}
+
 pub fn map_delete_key_slots(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
-    map_delete_key_slots_from_meta(facts.const_i64(inst.b)?)
+    facts
+        .map_delete_key_slots()
+        .or_else(|| map_delete_key_slots_from_meta(facts.const_i64(inst.b)?))
 }
 
 #[cfg(test)]
@@ -218,5 +299,39 @@ mod tests {
 
         assert_eq!(map_get_layout(&map_get, facts).unwrap().output_slots(), 3);
         assert_eq!(indexed_get_result_slots(&slice_get, facts), Some(3));
+    }
+
+    #[test]
+    fn instruction_metadata_takes_precedence_over_register_facts() {
+        let facts = fact_map(&[(5, 1), (8, 1)]);
+        let map_get = Instruction::new(Opcode::MapGet, 10, 2, 5);
+        let slice_get = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
+
+        let map_meta = JitInstructionMetadata::MapGet {
+            key_slots: 4,
+            val_slots: 3,
+            has_ok: true,
+        };
+        let elem_meta = JitInstructionMetadata::ElemLayout {
+            elem_bytes: 24,
+            needs_sign_extend: false,
+        };
+
+        assert_eq!(
+            map_get_layout(
+                &map_get,
+                MetadataFacts::from_reg_consts(&facts).with_instruction(Some(&map_meta))
+            )
+            .unwrap()
+            .output_slots(),
+            4
+        );
+        assert_eq!(
+            indexed_get_result_slots(
+                &slice_get,
+                MetadataFacts::from_reg_consts(&facts).with_instruction(Some(&elem_meta))
+            ),
+            Some(3)
+        );
     }
 }

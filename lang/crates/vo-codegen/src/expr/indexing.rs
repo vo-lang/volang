@@ -36,7 +36,7 @@ pub fn compile_index(
         let meta_idx = ctx.const_int(meta as i64);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         func.emit_copy(meta_reg + 1, key_reg, key_slots);
-        func.emit_op(Opcode::MapGet, dst, map_reg, meta_reg);
+        func.emit_map_get(dst, map_reg, meta_reg, key_slots, val_slots, is_comma_ok);
     } else {
         let lv = crate::lvalue::resolve_lvalue(expr, ctx, func, info)?;
         crate::lvalue::emit_lvalue_load(&lv, dst, ctx, func);

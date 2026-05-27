@@ -418,7 +418,7 @@ pub fn read_regs(inst: &Instruction) -> Vec<u16> {
 }
 
 pub fn read_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<u16> {
-    if !facts.has_reg_consts() {
+    if !facts.has_facts() {
         return read_regs(inst);
     }
 
@@ -661,7 +661,7 @@ pub fn write_regs(inst: &Instruction) -> Vec<u16> {
 }
 
 pub fn write_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<u16> {
-    if !facts.has_reg_consts() {
+    if !facts.has_facts() {
         return write_regs(inst);
     }
 
@@ -831,6 +831,20 @@ mod tests {
         assert_eq!(
             read_regs_with_facts(&inst, EffectFacts::from_reg_consts(&facts)),
             vec![2, 10, 11, 12, 13, 14]
+        );
+    }
+
+    #[test]
+    fn effects_use_instruction_metadata_without_reg_consts() {
+        let inst = Instruction::new(Opcode::MapSet, 1, 4, 9);
+        let meta = vo_runtime::bytecode::JitInstructionMetadata::MapSet {
+            key_slots: 2,
+            val_slots: 3,
+        };
+
+        assert_eq!(
+            read_regs_with_facts(&inst, EffectFacts::none().with_instruction(Some(&meta))),
+            vec![1, 4, 5, 6, 9, 10, 11]
         );
     }
 }

@@ -22,15 +22,16 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::bytecode::{
     Constant, ExtSlotKind, ExternDef, FieldMeta, FunctionDef, GlobalDef, InterfaceMeta,
-    InterfaceMethodMeta, Itab, MethodInfo, Module, NamedTypeMeta, StructMeta, TransferType,
-    WellKnownTypes,
+    InterfaceMethodMeta, Itab, JitInstructionMetadata, MethodInfo, Module, NamedTypeMeta,
+    StructMeta, TransferType, WellKnownTypes,
 };
 use crate::instruction::Instruction;
 use crate::types::{SlotType, ValueMeta, ValueRttid};
 use crate::RuntimeType;
 
 const MAGIC: &[u8; 3] = b"VOB";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
+const MIN_SUPPORTED_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum SerializeError {
@@ -39,6 +40,7 @@ pub enum SerializeError {
     UnexpectedEof,
     InvalidUtf8,
     InvalidConstant,
+    InvalidJitMetadata,
 }
 
 pub struct ByteWriter {
@@ -113,6 +115,67 @@ fn write_option_u32(w: &mut ByteWriter, opt: Option<u32>) {
 fn read_option_u32(r: &mut ByteReader) -> Result<Option<u32>, SerializeError> {
     let raw = r.read_u32()?;
     Ok(if raw == 0 { None } else { Some(raw - 1) })
+}
+
+fn write_jit_instruction_metadata(w: &mut ByteWriter, meta: JitInstructionMetadata) {
+    match meta {
+        JitInstructionMetadata::None => w.write_u8(0),
+        JitInstructionMetadata::ElemLayout {
+            elem_bytes,
+            needs_sign_extend,
+        } => {
+            w.write_u8(1);
+            w.write_u32(elem_bytes);
+            w.write_u8(needs_sign_extend as u8);
+        }
+        JitInstructionMetadata::MapGet {
+            key_slots,
+            val_slots,
+            has_ok,
+        } => {
+            w.write_u8(2);
+            w.write_u16(key_slots);
+            w.write_u16(val_slots);
+            w.write_u8(has_ok as u8);
+        }
+        JitInstructionMetadata::MapSet {
+            key_slots,
+            val_slots,
+        } => {
+            w.write_u8(3);
+            w.write_u16(key_slots);
+            w.write_u16(val_slots);
+        }
+        JitInstructionMetadata::MapDelete { key_slots } => {
+            w.write_u8(4);
+            w.write_u16(key_slots);
+        }
+    }
+}
+
+fn read_jit_instruction_metadata(
+    r: &mut ByteReader,
+) -> Result<JitInstructionMetadata, SerializeError> {
+    match r.read_u8()? {
+        0 => Ok(JitInstructionMetadata::None),
+        1 => Ok(JitInstructionMetadata::ElemLayout {
+            elem_bytes: r.read_u32()?,
+            needs_sign_extend: r.read_u8()? != 0,
+        }),
+        2 => Ok(JitInstructionMetadata::MapGet {
+            key_slots: r.read_u16()?,
+            val_slots: r.read_u16()?,
+            has_ok: r.read_u8()? != 0,
+        }),
+        3 => Ok(JitInstructionMetadata::MapSet {
+            key_slots: r.read_u16()?,
+            val_slots: r.read_u16()?,
+        }),
+        4 => Ok(JitInstructionMetadata::MapDelete {
+            key_slots: r.read_u16()?,
+        }),
+        _ => Err(SerializeError::InvalidJitMetadata),
+    }
 }
 
 // RuntimeType serialization tags
@@ -571,6 +634,9 @@ impl Module {
                 w.write_u16(inst.b);
                 w.write_u16(inst.c);
             }
+            w.write_vec(&f.jit_metadata, |w, meta| {
+                write_jit_instruction_metadata(w, *meta);
+            });
             // Cross-island transfer types
             w.write_vec(&f.capture_types, |w, typ| {
                 w.write_u32(typ.meta_raw);
@@ -626,7 +692,7 @@ impl Module {
         r.pos = 3;
 
         let version = r.read_u32()?;
-        if version != VERSION {
+        if !(MIN_SUPPORTED_VERSION..=VERSION).contains(&version) {
             return Err(SerializeError::UnsupportedVersion(version));
         }
 
@@ -790,6 +856,13 @@ impl Module {
                 let c = r.read_u16()?;
                 code.push(Instruction { op, flags, a, b, c });
             }
+            let jit_metadata = if version >= 3 {
+                r.read_vec(read_jit_instruction_metadata)?
+            } else {
+                let mut metadata = Vec::with_capacity(code.len());
+                metadata.resize(code.len(), JitInstructionMetadata::None);
+                metadata
+            };
             // Compute has_calls/has_call_extern from bytecode (not serialized — derived fields)
             let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
             // Cross-island transfer types
@@ -830,6 +903,7 @@ impl Module {
                 slot_types,
                 borrowed_scan_slots_prefix,
                 code,
+                jit_metadata,
                 capture_types,
                 capture_slot_types,
                 param_types,
@@ -961,6 +1035,16 @@ mod tests {
                 Instruction::new(Opcode::AddI, 0, 0, 1),
                 Instruction::new(Opcode::Return, 0, 0, 0),
             ],
+            jit_metadata: vec![
+                JitInstructionMetadata::None,
+                JitInstructionMetadata::None,
+                JitInstructionMetadata::MapGet {
+                    key_slots: 2,
+                    val_slots: 3,
+                    has_ok: true,
+                },
+                JitInstructionMetadata::None,
+            ],
             capture_types: vec![],
             capture_slot_types: vec![],
             param_types: vec![],
@@ -975,5 +1059,20 @@ mod tests {
             module.functions[0].code.len(),
             module2.functions[0].code.len()
         );
+        assert_eq!(
+            module.functions[0].jit_metadata,
+            module2.functions[0].jit_metadata
+        );
+    }
+
+    #[test]
+    fn test_deserialize_v2_empty_module() {
+        let module = Module::new("test".into());
+        let mut bytes = module.serialize();
+        bytes[3..7].copy_from_slice(&2u32.to_le_bytes());
+
+        let module2 = Module::deserialize(&bytes).unwrap();
+        assert_eq!(module.name, module2.name);
+        assert!(module2.functions.is_empty());
     }
 }
