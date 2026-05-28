@@ -48,6 +48,11 @@ pub enum JitError {
     InvalidOsrTarget(usize),
     UnsupportedOpcode(Opcode),
     InvalidMetadata(JitMetadataError),
+    MissingJitLayout {
+        pc: usize,
+        opcode: Opcode,
+        layout: &'static str,
+    },
     Internal(String),
 }
 
@@ -60,6 +65,9 @@ impl std::fmt::Display for JitError {
             JitError::InvalidOsrTarget(pc) => write!(f, "invalid OSR target PC: {}", pc),
             JitError::UnsupportedOpcode(op) => write!(f, "unsupported opcode: {:?}", op),
             JitError::InvalidMetadata(e) => write!(f, "invalid JIT metadata: {}", e),
+            JitError::MissingJitLayout { pc, opcode, layout } => {
+                write!(f, "missing JIT {layout} layout for {opcode:?} at pc {pc}")
+            }
             JitError::Internal(msg) => write!(f, "internal error: {}", msg),
         }
     }
@@ -446,17 +454,18 @@ impl Default for JitCompiler {
 /// Check if a function can be safely called via JIT-to-JIT direct call from
 /// prepare_closure_call / prepare_iface_call fast path.
 ///
-/// Returns false if the function contains any call instructions (Call/CallClosure/CallIface),
-/// because those can return JitResult::Call. The emit_prepared_call non-OK path only
-/// propagates the result with push_resume_point — it doesn't properly handle the
-/// ctx.jit_bp/fiber_sp state that nested calls leave behind.
+/// Returns false if the function has defer state or contains any call
+/// instructions (Call/CallClosure/CallIface/CallExtern). Deferred functions
+/// need real VM frames for unwinding, and nested calls can return
+/// JitResult::Call through paths that the prepared-call fast path cannot
+/// safely replay.
 ///
-/// Only leaf functions (no calls) are safe for JIT-to-JIT direct dispatch from
+/// Only no-defer leaf functions are safe for JIT-to-JIT direct dispatch from
 /// prepare callbacks. They always return Ok or Panic, never Call.
 /// This is used to populate the direct_call_table, which prepare callbacks consult
 /// to decide if a JIT-to-JIT direct call is safe.
 pub fn can_direct_jit_call(func: &vo_runtime::bytecode::FunctionDef) -> bool {
-    !func.has_calls && !func.has_call_extern
+    !func.has_defer && !func.has_calls && !func.has_call_extern
 }
 
 #[cfg(test)]
@@ -521,6 +530,22 @@ mod tests {
             b: (offset as u32 & 0xFFFF) as u16,
             c: ((offset as u32 >> 16) & 0xFFFF) as u16,
         }
+    }
+
+    #[test]
+    fn direct_call_table_excludes_defer_and_nested_call_functions() {
+        let leaf = make_func(vec![Instruction::new(Opcode::Return, 0, 0, 0)], 1);
+        assert!(can_direct_jit_call(&leaf));
+
+        let mut defer_leaf = make_func(vec![Instruction::new(Opcode::Return, 0, 0, 0)], 1);
+        defer_leaf.has_defer = true;
+        assert!(
+            !can_direct_jit_call(&defer_leaf),
+            "defer functions need VM frames and must not enter direct_call_table"
+        );
+
+        let nested_call = make_func(vec![Instruction::new(Opcode::Call, 0, 0, 0)], 1);
+        assert!(!can_direct_jit_call(&nested_call));
     }
 
     struct JitContextParts {
@@ -672,6 +697,30 @@ mod tests {
             "Queue opcodes should compile in JIT: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn compile_rejects_missing_dynamic_elem_layout_instead_of_panicking() {
+        let func = make_func(
+            vec![
+                Instruction::with_flags(Opcode::SliceGet, 0, 0, 1, 2),
+                Instruction::new(Opcode::Return, 0, 1, 0),
+            ],
+            4,
+        );
+        let mut module = VoModule::new("test".into());
+        module.functions.push(func);
+
+        let mut jit = JitCompiler::new().expect("create jit compiler");
+        let result = jit.compile(0, &module.functions[0], &module, &[]);
+
+        assert!(matches!(
+            result,
+            Err(JitError::InvalidMetadata(JitMetadataError::MissingLayout {
+                layout: "ElemLayout",
+                ..
+            }))
+        ));
     }
 
     #[test]

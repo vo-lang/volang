@@ -45,15 +45,42 @@ impl LoopInfo {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopAnalysisError {
+    MissingBackEdge {
+        loop_start: usize,
+    },
+    InvalidLoopRange {
+        begin_pc: usize,
+        end_pc: usize,
+        code_len: usize,
+    },
+    SlotRangeOverflow {
+        pc: usize,
+        source: effects::SlotRangeError,
+    },
+}
+
 /// Analyze a function's bytecode to find all loops using Hint instructions.
 pub fn analyze_loops(func_def: &FunctionDef) -> Vec<LoopInfo> {
-    analyze_loops_with_context(func_def, &[], &[])
+    try_analyze_loops(func_def).unwrap_or_default()
+}
+
+pub fn try_analyze_loops(func_def: &FunctionDef) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
+    try_analyze_loops_with_context(func_def, &[], &[])
 }
 
 /// Analyze loops with module-level facts that are needed for precise liveness
 /// of dynamic element layouts and extern return slots.
 pub fn analyze_loops_with_module(func_def: &FunctionDef, vo_module: &VoModule) -> Vec<LoopInfo> {
-    analyze_loops_with_context(func_def, &vo_module.constants, &vo_module.externs)
+    try_analyze_loops_with_module(func_def, vo_module).unwrap_or_default()
+}
+
+pub fn try_analyze_loops_with_module(
+    func_def: &FunctionDef,
+    vo_module: &VoModule,
+) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
+    try_analyze_loops_with_context(func_def, &vo_module.constants, &vo_module.externs)
 }
 
 /// Analyze bytecode to find all loops using Hint instructions.
@@ -65,14 +92,20 @@ pub fn analyze_loops_with_module(func_def: &FunctionDef, vo_module: &VoModule) -
 /// begin_pc (loop_start) is hint_pc + 1 (the instruction after HINT_LOOP).
 /// end_pc is hint_pc + end_offset (the back-edge Jump).
 pub fn analyze_loops_from_code(code: &[Instruction]) -> Vec<LoopInfo> {
-    analyze_loops_from_code_with_context(code, &[], &[], &[])
+    try_analyze_loops_from_code(code).unwrap_or_default()
 }
 
-fn analyze_loops_with_context(
+pub fn try_analyze_loops_from_code(
+    code: &[Instruction],
+) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
+    try_analyze_loops_from_code_with_context(code, &[], &[], &[])
+}
+
+fn try_analyze_loops_with_context(
     func_def: &FunctionDef,
     constants: &[Constant],
     externs: &[ExternDef],
-) -> Vec<LoopInfo> {
+) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
     let reg_const_facts = crate::translator::compute_reg_const_facts_with_metadata(
         &func_def.code,
         &func_def.jit_metadata,
@@ -81,7 +114,7 @@ fn analyze_loops_with_context(
         0,
         func_def.code.len(),
     );
-    analyze_loops_from_code_with_context(
+    try_analyze_loops_from_code_with_context(
         &func_def.code,
         &func_def.jit_metadata,
         &reg_const_facts,
@@ -89,12 +122,12 @@ fn analyze_loops_with_context(
     )
 }
 
-fn analyze_loops_from_code_with_context(
+fn try_analyze_loops_from_code_with_context(
     code: &[Instruction],
     jit_metadata: &[vo_runtime::bytecode::JitInstructionMetadata],
     reg_const_facts: &[std::collections::HashMap<u16, i64>],
     externs: &[ExternDef],
-) -> Vec<LoopInfo> {
+) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
     let mut loops = Vec::new();
 
     for (pc, inst) in code.iter().enumerate() {
@@ -118,8 +151,15 @@ fn analyze_loops_from_code_with_context(
                     pc + end_offset
                 } else {
                     // Fallback: scan forward to find back-edge Jump targeting begin_pc
-                    find_back_edge_jump(code, begin_pc)
+                    find_back_edge_jump(code, begin_pc)?
                 };
+                if begin_pc >= code.len() || end_pc >= code.len() || begin_pc > end_pc {
+                    return Err(LoopAnalysisError::InvalidLoopRange {
+                        begin_pc,
+                        end_pc,
+                        code_len: code.len(),
+                    });
+                }
 
                 let (live_in, live_out) = analyze_loop_liveness(
                     code,
@@ -128,7 +168,7 @@ fn analyze_loops_from_code_with_context(
                     externs,
                     begin_pc,
                     end_pc,
-                );
+                )?;
                 let has_calls = has_function_calls(code, begin_pc, end_pc);
 
                 loops.push(LoopInfo {
@@ -148,12 +188,15 @@ fn analyze_loops_from_code_with_context(
         }
     }
 
-    loops
+    Ok(loops)
 }
 
 /// Find the back-edge Jump that targets the given loop_start.
 /// This is a fallback when end_offset is not encoded in HINT_LOOP.
-fn find_back_edge_jump(code: &[Instruction], loop_start: usize) -> usize {
+fn find_back_edge_jump(
+    code: &[Instruction],
+    loop_start: usize,
+) -> Result<usize, LoopAnalysisError> {
     for (pc, inst) in code.iter().enumerate().skip(loop_start) {
         match inst.opcode() {
             Opcode::Jump => {
@@ -163,25 +206,20 @@ fn find_back_edge_jump(code: &[Instruction], loop_start: usize) -> usize {
                     // So actual target = pc + offset (the +1 and -1 cancel out)
                     let target = (pc as i64 + offset as i64) as usize;
                     if target == loop_start {
-                        return pc;
+                        return Ok(pc);
                     }
                 }
             }
             Opcode::ForLoop => {
                 let target = inst.forloop_target(pc);
                 if target == loop_start {
-                    return pc;
+                    return Ok(pc);
                 }
             }
             _ => {}
         }
     }
-    // No back-edge found - this is a codegen bug
-    // If HINT_LOOP was emitted, there must be a back-edge Jump
-    panic!(
-        "find_back_edge_jump: no back-edge Jump found targeting loop_start={}",
-        loop_start
-    )
+    Err(LoopAnalysisError::MissingBackEdge { loop_start })
 }
 
 /// Find loop info by header PC (begin_pc).
@@ -213,7 +251,7 @@ fn analyze_loop_liveness(
     externs: &[ExternDef],
     header_pc: usize,
     back_edge_pc: usize,
-) -> (Vec<u16>, Vec<u16>) {
+) -> Result<(Vec<u16>, Vec<u16>), LoopAnalysisError> {
     let mut read_before_write: HashSet<u16> = HashSet::new();
     let mut written: HashSet<u16> = HashSet::new();
 
@@ -228,7 +266,8 @@ fn analyze_loop_liveness(
             .map(effects::EffectFacts::from_reg_consts)
             .unwrap_or_else(effects::EffectFacts::none)
             .with_instruction(jit_metadata.get(pc));
-        let effects = effects::instruction_effects_with_context(inst, facts, externs);
+        let effects = effects::try_instruction_effects_with_context(inst, facts, externs)
+            .map_err(|source| LoopAnalysisError::SlotRangeOverflow { pc, source })?;
 
         for reg in effects.reads {
             if !written.contains(&reg) {
@@ -247,7 +286,7 @@ fn analyze_loop_liveness(
     live_in.sort();
     live_out.sort();
 
-    (live_in, live_out)
+    Ok((live_in, live_out))
 }
 
 /// Get registers read by an instruction.
@@ -465,6 +504,39 @@ mod tests {
         assert_eq!(loop_info.begin_pc, 1, "begin_pc = hint_pc + 1");
         assert_eq!(loop_info.end_pc, 2, "end_pc = hint_pc + end_offset");
         assert!(loop_info.is_infinite(), "Should be infinite loop");
+    }
+
+    #[test]
+    fn try_analyze_reports_effect_slot_range_overflow() {
+        let func = make_func(vec![
+            hint_loop(0, 2, 3),
+            copy_n(0, u16::MAX, 2),
+            jump(-2),
+            ret(),
+        ]);
+
+        assert!(matches!(
+            try_analyze_loops(&func),
+            Err(LoopAnalysisError::SlotRangeOverflow { pc: 1, .. })
+        ));
+        assert!(
+            analyze_loops(&func).is_empty(),
+            "legacy loop discovery must conservatively disable OSR on malformed effects"
+        );
+    }
+
+    #[test]
+    fn try_analyze_reports_missing_back_edge() {
+        let func = make_func(vec![hint_loop(0, 0, 2), load_int(0, 1), ret()]);
+
+        assert!(matches!(
+            try_analyze_loops(&func),
+            Err(LoopAnalysisError::MissingBackEdge { loop_start: 1 })
+        ));
+        assert!(
+            analyze_loops(&func).is_empty(),
+            "legacy loop discovery must conservatively disable OSR on malformed loop hints"
+        );
     }
 
     // =========================================================================

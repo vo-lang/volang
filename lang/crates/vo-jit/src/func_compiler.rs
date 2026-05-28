@@ -96,7 +96,7 @@ impl<'a> FunctionCompiler<'a> {
 
     pub fn compile(mut self) -> Result<(), JitError> {
         let analysis =
-            crate::analysis::FunctionAnalysis::for_function(self.func_def, self.vo_module);
+            crate::analysis::FunctionAnalysis::for_function(self.func_def, self.vo_module)?;
         self.memory_only_start = analysis.memory_only_start;
         self.reg_const_facts = analysis.reg_const_facts;
         self.declare_variables();
@@ -322,8 +322,15 @@ impl<'a> FunctionCompiler<'a> {
         if slot_count == 0 {
             return;
         }
+        let Some(end_slot) = start_slot.checked_add(slot_count) else {
+            return;
+        };
+        let end_slot = end_slot.min(self.vars.len() as u16);
+        if start_slot >= end_slot {
+            return;
+        }
         let args_ptr = self.current_memory_base_ptr();
-        for slot in start_slot..start_slot + slot_count {
+        for slot in start_slot..end_slot {
             let offset = (slot as i32) * 8;
             if self.is_float_slot(slot) {
                 let val =
@@ -1029,7 +1036,10 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
             return;
         }
         let local_count = self.vars.len() as u16;
-        let end_slot = start_slot.saturating_add(slot_count).min(local_count);
+        let Some(end_slot) = start_slot.checked_add(slot_count) else {
+            return;
+        };
+        let end_slot = end_slot.min(local_count);
         let spill_end = end_slot.min(self.memory_only_start);
         if start_slot >= spill_end {
             return;

@@ -1208,8 +1208,7 @@ fn pack_variadic_args(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let elem_slots = info.type_slot_count(elem_type);
-    let elem_bytes = (elem_slots as usize) * 8;
+    let elem_bytes = vo_analysis::check::type_info::elem_bytes_for_heap(elem_type, info.tc_objs());
     let elem_slot_types = info.type_slot_types(elem_type);
     let elem_vk = info.type_value_kind(elem_type);
 
@@ -1243,7 +1242,7 @@ fn pack_variadic_args(
         let eb_idx = ctx.const_int(elem_bytes as i64);
         func.emit_op(Opcode::LoadConst, len_cap_reg + 2, eb_idx, 0);
     }
-    func.emit_with_flags(Opcode::SliceNew, flags, dst, meta_reg, len_cap_reg);
+    func.emit_slice_new(dst, meta_reg, len_cap_reg, flags, elem_bytes, elem_vk);
 
     // Helper to set one slice element
     let mut slice_idx = 0usize;

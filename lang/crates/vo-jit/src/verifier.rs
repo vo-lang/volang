@@ -5,6 +5,8 @@ use std::fmt;
 use vo_runtime::bytecode::{FunctionDef, JitInstructionMetadata, Module as VoModule};
 use vo_runtime::instruction::Opcode;
 
+use crate::effects::SlotRangeError;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JitMetadataError {
     LengthMismatch {
@@ -32,6 +34,19 @@ pub enum JitMetadataError {
         func: String,
         pc: usize,
         flags: u8,
+    },
+    MissingLayout {
+        func: String,
+        pc: usize,
+        opcode: Opcode,
+        layout: &'static str,
+    },
+    SlotRangeOverflow {
+        func: String,
+        pc: usize,
+        start: u16,
+        count: u16,
+        access: &'static str,
     },
     SlotOutOfRange {
         func: String,
@@ -77,6 +92,25 @@ impl fmt::Display for JitMetadataError {
                 f,
                 "JIT elem layout does not match bytecode flags 0x{flags:02x} in {func} at pc {pc}"
             ),
+            Self::MissingLayout {
+                func,
+                pc,
+                opcode,
+                layout,
+            } => write!(
+                f,
+                "missing JIT {layout} layout for {opcode:?} in {func} at pc {pc}"
+            ),
+            Self::SlotRangeOverflow {
+                func,
+                pc,
+                start,
+                count,
+                access,
+            } => write!(
+                f,
+                "JIT {access} slot range starting at {start} with {count} slots overflows u16 in {func} at pc {pc}"
+            ),
             Self::SlotOutOfRange {
                 func,
                 pc,
@@ -92,6 +126,18 @@ impl fmt::Display for JitMetadataError {
 }
 
 impl std::error::Error for JitMetadataError {}
+
+impl JitMetadataError {
+    pub(crate) fn slot_range(func: &FunctionDef, pc: usize, err: SlotRangeError) -> Self {
+        Self::SlotRangeOverflow {
+            func: func.name.clone(),
+            pc,
+            start: err.start,
+            count: err.count,
+            access: err.access,
+        }
+    }
+}
 
 pub fn verify_jit_metadata(
     func: &FunctionDef,
@@ -114,10 +160,16 @@ pub fn verify_jit_metadata(
                 raw: inst.op,
             });
         }
-        verify_metadata_kind(func, pc, opcode, &func.jit_metadata[pc])?;
+        verify_metadata_kind(
+            func,
+            pc,
+            opcode,
+            func.code[pc].flags,
+            &func.jit_metadata[pc],
+        )?;
     }
 
-    let analysis = crate::analysis::FunctionAnalysis::for_function(func, vo_module);
+    let analysis = crate::analysis::FunctionAnalysis::for_function(func, vo_module)?;
     for (pc, effects) in analysis.effects.iter().enumerate() {
         for &slot in &effects.reads {
             verify_slot(func, pc, slot, "read")?;
@@ -134,10 +186,21 @@ fn verify_metadata_kind(
     func: &FunctionDef,
     pc: usize,
     opcode: Opcode,
+    flags: u8,
     metadata: &JitInstructionMetadata,
 ) -> Result<(), JitMetadataError> {
     match *metadata {
-        JitInstructionMetadata::None => Ok(()),
+        JitInstructionMetadata::None => {
+            if let Some(layout) = required_layout(opcode, flags) {
+                return Err(JitMetadataError::MissingLayout {
+                    func: func.name.clone(),
+                    pc,
+                    opcode,
+                    layout,
+                });
+            }
+            Ok(())
+        }
         JitInstructionMetadata::ElemLayout { elem_bytes, .. } => {
             if !matches!(
                 opcode,
@@ -179,6 +242,26 @@ fn verify_metadata_kind(
         JitInstructionMetadata::MapDelete { .. } => (opcode == Opcode::MapDelete)
             .then_some(())
             .ok_or_else(|| wrong_kind(func, pc, opcode, "MapDelete")),
+    }
+}
+
+fn required_layout(opcode: Opcode, flags: u8) -> Option<&'static str> {
+    match opcode {
+        Opcode::ArrayNew
+        | Opcode::ArrayGet
+        | Opcode::ArraySet
+        | Opcode::SliceNew
+        | Opcode::SliceGet
+        | Opcode::SliceSet
+        | Opcode::SliceAppend
+            if flags == 0 =>
+        {
+            Some("ElemLayout")
+        }
+        Opcode::MapGet => Some("MapGet"),
+        Opcode::MapSet => Some("MapSet"),
+        Opcode::MapDelete => Some("MapDelete"),
+        _ => None,
     }
 }
 
@@ -355,6 +438,79 @@ mod tests {
         assert!(matches!(
             verify_jit_metadata(&module.functions[0], &module),
             Err(JitMetadataError::SlotOutOfRange { access: "read", .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_slot_range_overflow_without_wrapping() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![Instruction::new(Opcode::CopyN, 0, u16::MAX, 2)],
+            vec![JitInstructionMetadata::None],
+            4,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::SlotRangeOverflow { access: "read", .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_operand_offset_overflow_without_wrapping() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![Instruction::new(Opcode::ArrayNew, 0, 1, u16::MAX)],
+            vec![JitInstructionMetadata::ElemLayout {
+                elem_bytes: 24,
+                needs_sign_extend: false,
+            }],
+            4,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::SlotRangeOverflow { access: "read", .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_required_dynamic_layout() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![Instruction::with_flags(Opcode::SliceGet, 0, 0, 1, 2)],
+            vec![JitInstructionMetadata::None],
+            4,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::MissingLayout {
+                layout: "ElemLayout",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_map_get_output_range_overflow() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![Instruction::new(Opcode::MapGet, 0, 1, 2)],
+            vec![JitInstructionMetadata::MapGet {
+                key_slots: 1,
+                val_slots: u16::MAX,
+                has_ok: true,
+            }],
+            4,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::SlotRangeOverflow {
+                access: "write",
+                ..
+            })
         ));
     }
 

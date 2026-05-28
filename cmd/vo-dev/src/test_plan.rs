@@ -241,7 +241,10 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                 backend: target.backend.clone(),
                 env: target.env.clone(),
                 timeout_sec: case_timeout(case, target_name, target.default_timeout_sec),
-                expect: json!({ "kind": "pass" }),
+                expect: json!({
+                    "kind": "pass",
+                    "jit_regular_call_fallbacks_min": expect.jit_regular_call_fallbacks_min,
+                }),
             });
         }
     }

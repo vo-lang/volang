@@ -173,7 +173,7 @@ pub struct JitManager {
     func_table: Vec<*const u8>,
 
     /// Direct call table: only populated for functions that pass can_direct_jit_call
-    /// (no CallClosure/CallIface). Used by prepare_closure_call / prepare_iface_call
+    /// (no defer and no nested calls). Used by prepare_closure_call / prepare_iface_call
     /// to decide if JIT-to-JIT direct call is safe from the fast path.
     direct_call_table: Vec<*const u8>,
 
@@ -243,7 +243,8 @@ impl JitManager {
     }
 
     /// Get direct call table pointer for JIT code.
-    /// Only contains entries for functions safe for JIT-to-JIT direct calls (no CallClosure/CallIface).
+    /// Only contains entries for functions safe for JIT-to-JIT direct calls
+    /// (no defer and no nested calls).
     #[inline]
     pub fn direct_call_table_ptr(&self) -> *const *const u8 {
         self.direct_call_table.as_ptr()
@@ -452,8 +453,9 @@ impl JitManager {
         self.func_table[idx] = ptr as *const u8;
 
         // Only populate direct_call_table if function is safe for JIT-to-JIT direct calls
-        // from prepare callbacks. Functions with CallClosure/CallIface can return JitResult::Call
-        // which the fast path non-OK handler cannot handle.
+        // from prepare callbacks. Defer functions need real frames for unwinding, and
+        // functions with nested calls can return JitResult::Call through paths the
+        // prepared-call fast path cannot safely replay.
         if vo_jit::can_direct_jit_call(func_def) {
             self.direct_call_table[idx] = ptr as *const u8;
         }

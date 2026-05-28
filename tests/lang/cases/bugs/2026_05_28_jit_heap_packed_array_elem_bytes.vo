@@ -1,0 +1,68 @@
+package main
+
+import "fmt"
+
+var globalInt16 = [4]int16{-32768, -1, 1234, 32767}
+var globalInt32 = [4]int32{-2147483648, -1, 123456789, 2147483647}
+var globalUint32 = [4]uint32{0, 1, 2147483648, 4294967295}
+var globalFloat32 = [4]float32{0.0, 1.5, -2.25, 1024.5}
+
+func assert(ok bool, msg string) {
+	if !ok {
+		panic(msg)
+	}
+}
+
+func testInt16() {
+	s := globalInt16[:]
+	assert(s[0] == -32768, "int16 min")
+	assert(s[1] == -1, "int16 sign")
+	assert(s[2] == 1234, "int16 middle")
+	assert(s[3] == 32767, "int16 max")
+}
+
+func testInt32() {
+	s := globalInt32[:]
+	assert(s[0] == -2147483648, "int32 min")
+	assert(s[1] == -1, "int32 sign")
+	assert(s[2] == 123456789, "int32 middle")
+	assert(s[3] == 2147483647, "int32 max")
+}
+
+func testUint32() {
+	s := globalUint32[:]
+	assert(s[0] == 0, "uint32 zero")
+	assert(s[1] == 1, "uint32 one")
+	assert(s[2] == 2147483648, "uint32 high bit")
+	assert(s[3] == 4294967295, "uint32 max")
+}
+
+func testFloat32() {
+	s := globalFloat32[:]
+	assert(s[0] == 0.0, "float32 zero")
+	assert(s[1] == 1.5, "float32 positive")
+	assert(s[2] == -2.25, "float32 negative")
+	assert(s[3] == 1024.5, "float32 large")
+}
+
+func sumVariadicInt32(xs ...int32) int32 {
+	return xs[0] + xs[1] + xs[2]
+}
+
+func sumVariadicFloat32(xs ...float32) float32 {
+	return xs[0] + xs[1] + xs[2]
+}
+
+func testVariadicPacked() {
+	assert(sumVariadicInt32(-7, 123456, 8) == 123457, "variadic int32 packed slice")
+	assert(sumVariadicFloat32(1.5, -2.25, 3.0) == 2.25, "variadic float32 packed slice")
+}
+
+func main() {
+	testInt16()
+	testInt32()
+	testUint32()
+	testFloat32()
+	testVariadicPacked()
+	fmt.Println("jit heap packed array elem bytes: ok")
+}

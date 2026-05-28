@@ -1,8 +1,7 @@
 //! Typed JIT metadata facts decoded from the current bytecode representation.
 //!
-//! Today these facts are recovered from compile-time constant registers. Keeping
-//! the decoding here gives callers a typed contract and leaves room to move the
-//! source to bytecode operands or metadata tables later.
+//! These facts come from per-instruction metadata first, with compile-time
+//! constant registers kept as a compatibility fallback for older call sites.
 
 use std::collections::HashMap;
 
@@ -77,8 +76,8 @@ pub struct MapGetLayout {
 }
 
 impl MapGetLayout {
-    pub fn output_slots(self) -> u16 {
-        self.val_slots + u16::from(self.has_ok)
+    pub fn output_slots(self) -> Option<u16> {
+        self.val_slots.checked_add(u16::from(self.has_ok))
     }
 }
 
@@ -149,15 +148,18 @@ fn elem_layout_from_flags_or_fact(
 }
 
 pub fn indexed_get_result_slots(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
-    elem_layout_from_flags_or_fact(inst.flags, inst.c + 1, facts).map(|layout| layout.slots)
+    let dynamic_slot = inst.c.checked_add(1)?;
+    elem_layout_from_flags_or_fact(inst.flags, dynamic_slot, facts).map(|layout| layout.slots)
 }
 
 pub fn indexed_set_value_slots(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
-    elem_layout_from_flags_or_fact(inst.flags, inst.b + 1, facts).map(|layout| layout.slots)
+    let dynamic_slot = inst.b.checked_add(1)?;
+    elem_layout_from_flags_or_fact(inst.flags, dynamic_slot, facts).map(|layout| layout.slots)
 }
 
 pub fn slice_append_value_slots(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
-    elem_layout_from_flags_or_fact(inst.flags, inst.c + 1, facts).map(|layout| layout.slots)
+    let dynamic_slot = inst.c.checked_add(1)?;
+    elem_layout_from_flags_or_fact(inst.flags, dynamic_slot, facts).map(|layout| layout.slots)
 }
 
 pub fn map_get_layout_from_meta(meta: i64) -> MapGetLayout {
@@ -293,7 +295,10 @@ mod tests {
         let slice_get = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
         let facts = MetadataFacts::from_reg_consts(&facts);
 
-        assert_eq!(map_get_layout(&map_get, facts).unwrap().output_slots(), 3);
+        assert_eq!(
+            map_get_layout(&map_get, facts).unwrap().output_slots(),
+            Some(3)
+        );
         assert_eq!(indexed_get_result_slots(&slice_get, facts), Some(3));
     }
 
@@ -320,7 +325,7 @@ mod tests {
             )
             .unwrap()
             .output_slots(),
-            4
+            Some(4)
         );
         assert_eq!(
             indexed_get_result_slots(

@@ -607,29 +607,6 @@ pub fn declare_helpers(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn runtime_symbol_manifest_contains_declared_helper_imports() {
-        let names = vo_runtime::jit_api::runtime_symbol_names();
-        for required in [
-            "vo_gc_alloc",
-            "vo_gc_write_barrier",
-            "vo_panic",
-            "vo_call_extern",
-            "vo_set_call_request",
-            "vo_defer_push",
-            "vo_recover",
-            "vo_select_exec",
-        ] {
-            assert!(
-                names.contains(&required),
-                "missing JIT helper symbol {required}"
-            );
-        }
-    }
-}
-
 // =============================================================================
 // Get Helper FuncRefs for a specific function context
 // =============================================================================
@@ -692,5 +669,28 @@ pub fn get_helper_refs(
         select_send: declare_ref(ids.select_send),
         select_recv: declare_ref(ids.select_recv),
         select_exec: declare_ref(ids.select_exec),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn runtime_symbol_manifest_contains_declared_helper_imports() {
+        let names = vo_runtime::jit_api::runtime_symbol_names();
+        for required in [
+            "vo_gc_alloc",
+            "vo_gc_write_barrier",
+            "vo_panic",
+            "vo_call_extern",
+            "vo_set_call_request",
+            "vo_defer_push",
+            "vo_recover",
+            "vo_select_exec",
+        ] {
+            assert!(
+                names.contains(&required),
+                "missing JIT helper symbol {required}"
+            );
+        }
     }
 }

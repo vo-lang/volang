@@ -99,8 +99,10 @@ func testAppendRune() {
 func testFullRune() {
 	assert(utf8.FullRune([]byte("A")))
 	assert(utf8.FullRune([]byte{0xC3, 0xA9}))
-	// {0xC3} alone = invalid sequence → treated as RuneError (sz=1) → FullRune = true
-	assert(utf8.FullRune([]byte{0xC3}))
+	// {0xC3} alone is a possible 2-byte prefix, so it is incomplete.
+	assert(!utf8.FullRune([]byte{0xC3}))
+	// A bad continuation byte makes the prefix invalid, which counts as full.
+	assert(utf8.FullRune([]byte{0xC3, 0x20}))
 
 	assert(utf8.FullRuneInString("hello"))
 	assert(!utf8.FullRuneInString(""))

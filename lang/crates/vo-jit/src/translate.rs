@@ -286,11 +286,11 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         SliceGet => {
-            slice_get(e, inst);
+            slice_get(e, inst)?;
             Ok(Completed)
         }
         SliceSet => {
-            slice_set(e, inst);
+            slice_set(e, inst)?;
             Ok(Completed)
         }
         SliceLen => {
@@ -319,11 +319,11 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         ArrayGet => {
-            array_get(e, inst);
+            array_get(e, inst)?;
             Ok(Completed)
         }
         ArraySet => {
-            array_set(e, inst);
+            array_set(e, inst)?;
             Ok(Completed)
         }
         ArrayAddr => {
@@ -385,15 +385,15 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         MapGet => {
-            map_get(e, inst);
+            map_get(e, inst)?;
             Ok(Completed)
         }
         MapSet => {
-            map_set(e, inst);
+            map_set(e, inst)?;
             Ok(Completed)
         }
         MapDelete => {
-            map_delete(e, inst);
+            map_delete(e, inst)?;
             Ok(Completed)
         }
         MapIterInit => {

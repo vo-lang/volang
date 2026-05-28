@@ -320,17 +320,22 @@ pub trait IrEmitter<'a> {
 /// or dynamic indexing, so store_local can skip memory writes for them.
 #[allow(dead_code)]
 pub fn compute_memory_only_start(code: &[Instruction]) -> u16 {
+    try_compute_memory_only_start(code).unwrap_or(0)
+}
+
+#[allow(dead_code)]
+pub fn try_compute_memory_only_start(code: &[Instruction]) -> Result<u16, effects::SlotRangeError> {
     let mut min_base = u16::MAX;
     for inst in code {
-        match effects::memory_sync_effect(inst) {
+        match effects::try_memory_sync_effect(inst)? {
             MemorySyncEffect::None => {}
             MemorySyncEffect::From(base) => {
                 min_base = min_base.min(base);
             }
-            MemorySyncEffect::All => return 0,
+            MemorySyncEffect::All => return Ok(0),
         }
     }
-    min_base
+    Ok(min_base)
 }
 
 pub type RegConstFacts = Vec<HashMap<u16, i64>>;
@@ -461,7 +466,10 @@ fn kill_slot(facts: &mut HashMap<u16, i64>, slot: u16) {
 
 fn kill_slots(facts: &mut HashMap<u16, i64>, start: u16, count: u16) {
     for i in 0..count {
-        facts.remove(&(start + i));
+        let Some(slot) = start.checked_add(i) else {
+            break;
+        };
+        facts.remove(&slot);
     }
 }
 
@@ -504,7 +512,10 @@ impl RegConstEffect {
                 kill_slots(facts, start, values.len() as u16);
                 for (i, value) in values.into_iter().enumerate() {
                     if let Some(value) = value {
-                        facts.insert(start + i as u16, value);
+                        let Some(slot) = start.checked_add(i as u16) else {
+                            break;
+                        };
+                        facts.insert(slot, value);
                     }
                 }
             }
@@ -569,7 +580,11 @@ fn reg_const_effect(
         Opcode::CopyN => {
             let count = inst.copy_n_count();
             let values = (0..count)
-                .map(|i| facts.get(&(inst.b + i)).copied())
+                .map(|i| {
+                    inst.b
+                        .checked_add(i)
+                        .and_then(|slot| facts.get(&slot).copied())
+                })
                 .collect();
             RegConstEffect::SetSlots {
                 start: inst.a,
@@ -577,7 +592,9 @@ fn reg_const_effect(
             }
         }
         Opcode::Call | Opcode::CallClosure | Opcode::CallIface => {
-            let ret_start = inst.packed_call_ret_start();
+            let Some(ret_start) = inst.b.checked_add(inst.packed_arg_slots()) else {
+                return RegConstEffect::Clear;
+            };
             let ret_slots = inst.packed_ret_slots();
             RegConstEffect::KillSlots {
                 start: ret_start,
@@ -629,14 +646,17 @@ fn reg_const_effect(
             } else {
                 target_slots.max(1)
             };
+            let Some(count) = dst_slots.checked_add(u16::from(has_ok)) else {
+                return RegConstEffect::Clear;
+            };
             RegConstEffect::KillSlots {
                 start: inst.a,
-                count: dst_slots + u16::from(has_ok),
+                count,
             }
         }
         Opcode::MapGet => {
             if let Some(out_slots) = crate::metadata::map_get_layout(inst, metadata_facts)
-                .map(|layout| layout.output_slots())
+                .and_then(|layout| layout.output_slots())
             {
                 RegConstEffect::KillSlots {
                     start: inst.a,

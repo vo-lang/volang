@@ -211,7 +211,7 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
             self.func.emit_op(Opcode::LoadConst, len_reg + 1, eb_idx, 0);
         }
         self.func
-            .emit_with_flags(Opcode::ArrayNew, flags, gcref_slot, meta_reg, len_reg);
+            .emit_array_new(gcref_slot, meta_reg, len_reg, flags, elem_bytes, elem_vk);
 
         Ok(StorageKind::HeapArray {
             gcref_slot,

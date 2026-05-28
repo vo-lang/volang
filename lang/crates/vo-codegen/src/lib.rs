@@ -1320,14 +1320,15 @@ fn compile_global_array_init(
 
     let array_len = info.array_len(array_type);
     let elem_type = info.array_elem_type(array_type);
-    let elem_slots = info.type_slot_count(elem_type);
-    let elem_bytes = (elem_slots as u32 * 8) as u16;
+    let elem_bytes = info.array_elem_bytes(array_type);
     let elem_vk = info.type_value_kind(elem_type);
+    let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
 
     // Allocate registers for: gcref, meta_reg, len_reg, temp for elements
     let gcref_slot = func.alloc_slots(&[vo_runtime::SlotType::GcRef]);
     let meta_reg = func.alloc_slots(&[vo_runtime::SlotType::Value]);
-    let len_reg = func.alloc_slots(&[vo_runtime::SlotType::Value]);
+    let len_reg_count = if flags == 0 { 2 } else { 1 };
+    let len_reg = func.alloc_slots(&vec![vo_runtime::SlotType::Value; len_reg_count]);
 
     // Get elem_meta: (rttid << 8) | elem_vk
     let elem_rttid = ctx.intern_type_key(elem_type, info);
@@ -1340,13 +1341,12 @@ fn compile_global_array_init(
     func.emit_op(Opcode::LoadConst, len_reg, len_idx, 0);
 
     // Emit ArrayNew: gcref_slot = ArrayNew(meta_reg, len_reg)
-    let flags = if elem_bytes <= 8 { elem_bytes as u8 } else { 0 };
     if flags == 0 {
         // Dynamic elem_bytes: need extra register
         let eb_idx = ctx.const_int(elem_bytes as i64);
         func.emit_op(Opcode::LoadConst, len_reg + 1, eb_idx, 0);
     }
-    func.emit_with_flags(Opcode::ArrayNew, flags, gcref_slot, meta_reg, len_reg);
+    func.emit_array_new(gcref_slot, meta_reg, len_reg, flags, elem_bytes, elem_vk);
 
     // Compile array elements and set them
     if let vo_syntax::ast::ExprKind::CompositeLit(lit) = &rhs.kind {
@@ -1357,14 +1357,7 @@ fn compile_global_array_init(
         for (i, elem) in lit.elems.iter().enumerate() {
             crate::expr::compile_elem_to(&elem.value, tmp_elem, elem_type, ctx, func, info)?;
             func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
-            func.emit_array_set(
-                gcref_slot,
-                idx_reg,
-                tmp_elem,
-                elem_bytes as usize,
-                elem_vk,
-                ctx,
-            );
+            func.emit_array_set(gcref_slot, idx_reg, tmp_elem, elem_bytes, elem_vk, ctx);
         }
     }
 

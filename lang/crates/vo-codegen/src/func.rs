@@ -924,6 +924,44 @@ impl FuncBuilder {
     // === Array/Slice element access helpers ===
     // These handle the dynamic elem_flags == 0 case where elem_bytes must be passed in a register.
 
+    pub fn emit_array_new(
+        &mut self,
+        dst: u16,
+        elem_meta: u16,
+        len_reg: u16,
+        flags: u8,
+        elem_bytes: usize,
+        elem_vk: vo_common_core::ValueKind,
+    ) {
+        self.emit_with_flags_and_metadata(
+            Opcode::ArrayNew,
+            flags,
+            dst,
+            elem_meta,
+            len_reg,
+            Self::elem_metadata(elem_bytes, elem_vk),
+        );
+    }
+
+    pub fn emit_slice_new(
+        &mut self,
+        dst: u16,
+        elem_meta: u16,
+        len_cap_reg: u16,
+        flags: u8,
+        elem_bytes: usize,
+        elem_vk: vo_common_core::ValueKind,
+    ) {
+        self.emit_with_flags_and_metadata(
+            Opcode::SliceNew,
+            flags,
+            dst,
+            elem_meta,
+            len_cap_reg,
+            Self::elem_metadata(elem_bytes, elem_vk),
+        );
+    }
+
     /// Emit ArrayGet with proper handling of dynamic elem_bytes.
     /// When flags == 0, allocates extra register for elem_bytes.
     pub fn emit_array_get(
@@ -1636,5 +1674,41 @@ impl FuncBuilder {
     /// Set error return slot offset. Called after set_return_types with type info.
     pub fn set_error_ret_slot(&mut self, slot: i16) {
         self.error_ret_slot = slot;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vo_common_core::ValueKind;
+
+    #[test]
+    fn array_new_emits_elem_layout_metadata() {
+        let mut func = FuncBuilder::new("array_new_metadata");
+
+        func.emit_array_new(0, 1, 2, 0, 72, ValueKind::Struct);
+
+        assert!(matches!(
+            func.jit_metadata.as_slice(),
+            [JitInstructionMetadata::ElemLayout {
+                elem_bytes: 72,
+                needs_sign_extend: false,
+            }]
+        ));
+    }
+
+    #[test]
+    fn slice_new_emits_elem_layout_metadata() {
+        let mut func = FuncBuilder::new("slice_new_metadata");
+
+        func.emit_slice_new(0, 1, 2, 0, 72, ValueKind::Struct);
+
+        assert!(matches!(
+            func.jit_metadata.as_slice(),
+            [JitInstructionMetadata::ElemLayout {
+                elem_bytes: 72,
+                needs_sign_extend: false,
+            }]
+        ));
     }
 }

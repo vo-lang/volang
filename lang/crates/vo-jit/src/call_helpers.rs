@@ -1812,8 +1812,8 @@ impl CallPlan {
         self.callee_local_slots <= MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS
     }
 
-    pub fn can_use_direct_jit(self, enforce_native_frame_limit: bool) -> bool {
-        !self.callee_has_defer && (!enforce_native_frame_limit || self.fits_direct_native_frame())
+    pub fn can_use_direct_jit(self) -> bool {
+        !self.callee_has_defer && self.fits_direct_native_frame()
     }
 
     pub fn route_for_full_function(self, current_func_id: u32) -> CallRoute {
@@ -1823,15 +1823,15 @@ impl CallPlan {
         {
             return CallRoute::SelfRecursiveNative;
         }
-        self.route_non_recursive(true)
+        self.route_non_recursive()
     }
 
     pub fn route_for_loop(self) -> CallRoute {
-        self.route_non_recursive(false)
+        self.route_non_recursive()
     }
 
-    fn route_non_recursive(self, enforce_native_frame_limit: bool) -> CallRoute {
-        if !self.can_use_direct_jit(enforce_native_frame_limit) {
+    fn route_non_recursive(self) -> CallRoute {
+        if !self.can_use_direct_jit() {
             return CallRoute::VmFallback;
         }
         if self.callee_func_ref.is_some() {
@@ -2497,15 +2497,18 @@ mod tests {
             None,
         );
         assert_eq!(large.route_for_full_function(7), CallRoute::VmFallback);
+        assert_eq!(large.route_for_loop(), CallRoute::VmFallback);
 
         let direct = CallPlan::new(8, 2, &func(8, false), Some(FuncRef::from_u32(3)));
         assert_eq!(direct.route_for_full_function(7), CallRoute::KnownDirectJit);
+        assert_eq!(direct.route_for_loop(), CallRoute::KnownDirectJit);
 
         let dynamic = CallPlan::new(8, 2, &func(8, false), None);
         assert_eq!(
             dynamic.route_for_full_function(7),
             CallRoute::DynamicJitTable
         );
+        assert_eq!(dynamic.route_for_loop(), CallRoute::DynamicJitTable);
     }
 
     #[test]

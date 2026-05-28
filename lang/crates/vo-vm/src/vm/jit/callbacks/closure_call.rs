@@ -8,11 +8,18 @@ use vo_runtime::gc::GcRef;
 use vo_runtime::jit_api::{DynCallIC, JitContext, PreparedCall};
 use vo_runtime::objects::closure;
 
+#[inline]
+fn can_use_direct_call_table_entry(func_def: &FunctionDef) -> bool {
+    !func_def.has_defer && !func_def.has_calls && !func_def.has_call_extern
+}
+
 /// Look up a function in the direct_call_table for JIT-to-JIT fast path.
-/// Returns non-null only when callee is a leaf (no defer, no call instructions).
+/// Returns non-null only when callee is a no-defer leaf accepted by
+/// vo_jit::can_direct_jit_call. The local predicate keeps the callback safe
+/// even if an older or test-built table is over-populated.
 #[inline]
 fn lookup_direct_call_ptr(ctx: &JitContext, func_id: u32, func_def: &FunctionDef) -> *const u8 {
-    if !func_def.has_defer && func_id < ctx.direct_call_count {
+    if can_use_direct_call_table_entry(func_def) && func_id < ctx.direct_call_count {
         unsafe { *ctx.direct_call_table.add(func_id as usize) }
     } else {
         core::ptr::null()
@@ -164,5 +171,45 @@ pub extern "C" fn jit_prepare_iface_call(
             slot0_kind: DynCallIC::SLOT0_IFACE_RECEIVER,
             is_leaf: (!func_def.has_calls && !func_def.has_call_extern) as u32,
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn func(has_defer: bool, has_calls: bool, has_call_extern: bool) -> FunctionDef {
+        FunctionDef {
+            name: "callee".to_string(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots: 1,
+            gc_scan_slots: 0,
+            ret_slots: 0,
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer,
+            has_calls,
+            has_call_extern,
+            code: Vec::new(),
+            jit_metadata: Vec::new(),
+            slot_types: Vec::new(),
+            borrowed_scan_slots_prefix: Vec::new(),
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn direct_call_lookup_predicate_rejects_defer_and_nested_calls() {
+        assert!(can_use_direct_call_table_entry(&func(false, false, false)));
+        assert!(!can_use_direct_call_table_entry(&func(true, false, false)));
+        assert!(!can_use_direct_call_table_entry(&func(false, true, false)));
+        assert!(!can_use_direct_call_table_entry(&func(false, false, true)));
     }
 }

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 
 use crate::effects::{self, EffectFacts, InstructionEffects, MemorySyncEffect};
+use crate::verifier::JitMetadataError;
 
 pub struct FunctionAnalysis {
     pub memory_only_start: u16,
@@ -16,7 +17,10 @@ pub struct FunctionAnalysis {
 }
 
 impl FunctionAnalysis {
-    pub fn for_function(func_def: &FunctionDef, vo_module: &VoModule) -> Self {
+    pub fn for_function(
+        func_def: &FunctionDef,
+        vo_module: &VoModule,
+    ) -> Result<Self, JitMetadataError> {
         Self::for_range(func_def, vo_module, 0, func_def.code.len())
     }
 
@@ -25,7 +29,7 @@ impl FunctionAnalysis {
         vo_module: &VoModule,
         begin_pc: usize,
         end_pc_exclusive: usize,
-    ) -> Self {
+    ) -> Result<Self, JitMetadataError> {
         let reg_const_facts = crate::translator::compute_reg_const_facts_with_metadata(
             &func_def.code,
             &func_def.jit_metadata,
@@ -45,19 +49,20 @@ impl FunctionAnalysis {
                     .map(EffectFacts::from_reg_consts)
                     .unwrap_or_else(EffectFacts::none)
                     .with_instruction(func_def.jit_metadata.get(pc));
-                effects::instruction_effects_with_context(inst, facts, &vo_module.externs)
+                effects::try_instruction_effects_with_context(inst, facts, &vo_module.externs)
+                    .map_err(|err| JitMetadataError::slot_range(func_def, pc, err))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let begin = begin_pc.min(effects.len());
         let end = end_pc_exclusive.min(effects.len()).max(begin);
         let memory_only_start = compute_memory_only_start_from_effects(&effects[begin..end]);
 
-        Self {
+        Ok(Self {
             memory_only_start,
             reg_const_facts,
             effects,
-        }
+        })
     }
 }
 
@@ -139,7 +144,8 @@ mod tests {
         });
         module.functions.push(make_func(code, metadata));
 
-        let analysis = FunctionAnalysis::for_function(&module.functions[0], &module);
+        let analysis =
+            FunctionAnalysis::for_function(&module.functions[0], &module).expect("valid analysis");
 
         assert_eq!(analysis.effects[0].writes, vec![10, 11, 12, 13]);
         assert_eq!(analysis.effects[1].writes, vec![20, 21]);

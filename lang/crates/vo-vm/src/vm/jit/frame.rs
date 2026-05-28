@@ -4,17 +4,16 @@ use vo_runtime::jit_api::JitContext;
 
 use crate::fiber::Fiber;
 
-/// Push a new frame for JIT-to-JIT call (fast path).
+/// Reserve a callee stack window for a prepared JIT-to-JIT call.
 ///
-/// This is the optimized version that does NOT push to resume_stack.
-/// Resume points are only pushed lazily via jit_push_resume_point when
-/// callee returns Call/WaitIo (slow path).
+/// This does not push `fiber.frames` or `resume_stack`. Resume points are
+/// recorded lazily via `jit_push_resume_point` only when the callee side-exits.
 ///
 /// Called by JIT code for JIT-to-JIT calls:
 /// 1. Ensures fiber.stack has capacity for local_slots
-/// 2. Zeros the new frame region
+/// 2. Reserves the new frame region without initializing locals
 /// 3. Updates fiber.sp
-/// 4. Updates ctx.jit_bp and ctx.stack_ptr (in case of reallocation)
+/// 4. Updates ctx.jit_bp, ctx.fiber_sp, and stack_ptr/cap if reallocated
 ///
 /// # Returns
 /// args_ptr for the new frame (fiber.stack_ptr + new_bp)
@@ -68,8 +67,8 @@ pub extern "C" fn jit_push_frame(
 
 /// Pop the current JIT frame after callee returns (fast path).
 ///
-/// Restores fiber.sp and ctx.jit_bp to caller's state.
-/// The caller passes its saved bp directly since we don't use resume_stack anymore.
+/// Restores fiber.sp and ctx.jit_bp to caller's state. The caller passes its
+/// saved bp directly; `resume_stack` is only involved after side-exits.
 ///
 /// # Safety
 /// All pointers must be valid. Called from JIT-generated code.
@@ -84,9 +83,8 @@ pub extern "C" fn jit_pop_frame(ctx: *mut JitContext, caller_bp: u32) {
     // Restore jit_bp to caller's bp (passed as parameter)
     ctx_ref.jit_bp = caller_bp;
 
-    // NOTE: No resume_stack.pop here! This is the fast path.
-    // Resume points are pushed lazily via jit_push_resume_point only when
-    // callee returns Call/WaitIo.
+    // NOTE: No resume_stack.pop here. Prepared-call resume points are only
+    // pushed lazily after a side-exit, so the OK path has nothing to pop.
 }
 
 /// Push a resume point on side-exit (Call/WaitIo) - slow path.

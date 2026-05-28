@@ -44,8 +44,8 @@ pub type JitPushFrameFn = extern "C" fn(
     caller_resume_pc: u32,
 ) -> *mut u64;
 
-/// Function pointer type for popping a JIT frame.
-/// Takes caller_bp as parameter since we don't store it in resume_stack anymore.
+/// Function pointer type for popping a prepared JIT frame on the OK path.
+/// Takes caller_bp directly because no resume point is pushed unless a side-exit happens.
 pub type JitPopFrameFn = extern "C" fn(ctx: *mut JitContext, caller_bp: u32);
 
 /// Function pointer type for converting a JIT stack guard failure into a
@@ -92,7 +92,7 @@ pub struct DynCallIC {
     pub slot0_kind: u32,
     /// Resolved func_id (same as key for closure; for iface, resolved via itab).
     pub func_id: u32,
-    /// Whether callee is a leaf function (no Call/CallClosure/CallIface).
+    /// Whether callee is a leaf function (no Call/CallClosure/CallIface/CallExtern).
     /// Leaf callees never read ctx.jit_bp/fiber_sp, so IC hit can skip ctx stores.
     pub is_leaf: u32,
 }
@@ -157,7 +157,7 @@ pub struct PreparedCall {
     pub arg_offset: u32,
     /// slot0_kind (see DynCallIC::SLOT0_*).
     pub slot0_kind: u32,
-    /// Whether callee is a leaf function (no Call/CallClosure/CallIface).
+    /// Whether callee is a leaf function (no Call/CallClosure/CallIface/CallExtern).
     pub is_leaf: u32,
 }
 
@@ -283,9 +283,8 @@ pub struct JitContext {
     pub jit_func_count: u32,
 
     /// Direct call table: only contains entries for functions that pass can_direct_jit_call
-    /// (no CallClosure/CallIface). Used by prepare_closure_call / prepare_iface_call to
-    /// decide if JIT-to-JIT direct call is safe. Functions with CallClosure/CallIface can
-    /// return JitResult::Call, which the fast path non-OK handler cannot handle.
+    /// (no defer and no nested calls). Used by prepare_closure_call / prepare_iface_call
+    /// to decide if JIT-to-JIT direct call is safe.
     pub direct_call_table: *const *const u8,
 
     /// Number of entries in direct_call_table.

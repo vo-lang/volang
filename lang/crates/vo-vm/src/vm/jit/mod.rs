@@ -9,14 +9,17 @@
 //!
 //! ## fiber.stack ABI
 //!
-//! JIT functions store all locals in `fiber.stack[jit_bp..]`, not in separate buffers.
-//! This enables seamless continuation when JIT returns `Call` (VM fallback needed).
+//! Top-level JIT entries use `fiber.stack[jit_bp..]` as their ABI buffer. Nested
+//! direct JIT calls may pass arguments through native stack slots on the OK path,
+//! then spill/materialize into `fiber.stack` before any side-exit.
 //!
 //! ## Shadow Frame Design
 //!
-//! JIT-to-JIT calls use lightweight `resume_stack` (shadow frames) instead of `fiber.frames`:
-//! - `jit_push_frame`: Push ResumePoint to resume_stack (not fiber.frames)
-//! - `jit_pop_frame`: Pop ResumePoint and restore caller's bp
+//! JIT-to-JIT calls keep `fiber.frames` shallow on the OK path. A side-exit lazily
+//! records shadow frames in `resume_stack` just before returning to the VM:
+//! - `jit_push_frame`: reserve a callee window in `fiber.stack` without a real frame
+//! - `jit_pop_frame`: restore caller bp/sp after an OK prepared call
+//! - `jit_push_resume_point`: record a side-exiting callee frame
 //! - On Call/WaitIo/WaitQueue: `materialize_jit_frames` converts shadow frames to real CallFrames
 //!
 //! This avoids redundant frame management during pure JIT execution.

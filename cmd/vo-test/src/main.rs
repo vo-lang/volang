@@ -151,6 +151,7 @@ struct Expect {
     #[serde(default)]
     patterns: Vec<String>,
     pattern: Option<String>,
+    jit_regular_call_fallbacks_min: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -508,6 +509,16 @@ fn run_job_inner(job: &TestJob) -> Result<(), String> {
         return Err(
             "JIT backend completed without entering JIT-compiled function or loop code".to_string(),
         );
+    }
+    if mode == vo_engine::RunMode::Jit {
+        if let Some(min) = job.expect.jit_regular_call_fallbacks_min {
+            if observation.jit_regular_call_fallbacks < min {
+                return Err(format!(
+                    "expected at least {min} JIT regular-call fallbacks, got {}",
+                    observation.jit_regular_call_fallbacks
+                ));
+            }
+        }
     }
     Ok(())
 }

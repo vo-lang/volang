@@ -18,18 +18,24 @@ use super::emit_panic_if;
 // Slice/Array element size helpers
 // =============================================================================
 
-/// Resolve elem_bytes from instruction flags.
-/// When flags==0, elem_bytes is stored in the specified register (set by preceding LoadConst).
+/// Resolve elem_bytes from instruction flags or per-PC JIT metadata.
+/// When flags==0, verifier requires metadata; `eb_reg` remains a fallback for
+/// legacy constant-fact callers.
 /// Returns (elem_bytes, needs_sign_extend).
 pub(super) fn resolve_elem_bytes<'a>(
     e: &impl IrEmitter<'a>,
+    opcode: Opcode,
     flags: u8,
     eb_reg: u16,
-) -> (usize, bool) {
+) -> Result<(usize, bool), JitError> {
     let layout = e
         .elem_layout(flags, eb_reg)
-        .expect("SliceGet/Set: elem metadata not available");
-    (layout.bytes, layout.needs_sign_extend)
+        .ok_or(JitError::MissingJitLayout {
+            pc: e.current_pc(),
+            opcode,
+            layout: "ElemLayout",
+        })?;
+    Ok((layout.bytes, layout.needs_sign_extend))
 }
 
 /// Load a single element (1/2/4/8 bytes) from memory address, with optional sign extension.
@@ -103,23 +109,6 @@ pub(super) fn store_element<'a>(
         _ => {
             e.builder().ins().store(MemFlags::trusted(), val, addr, 0);
         }
-    }
-}
-
-pub(super) fn emit_elem_slots_i32<'a>(e: &mut impl IrEmitter<'a>, flags: u8, eb_reg: u16) -> Value {
-    if let Some(layout) = e.elem_layout(flags, eb_reg) {
-        return e.builder().ins().iconst(types::I32, layout.bytes as i64);
-    }
-    if flags == 0 {
-        let eb_raw = e.read_var(eb_reg);
-        e.builder().ins().ireduce(types::I32, eb_raw)
-    } else {
-        let slots = match flags {
-            0x81 | 0x82 => 1,
-            0x84 | 0x44 => 1,
-            f => f as i64,
-        };
-        e.builder().ins().iconst(types::I32, slots)
     }
 }
 
@@ -209,10 +198,13 @@ pub(super) fn slice_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, result);
 }
 
-pub(super) fn slice_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn slice_get<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.flags, inst.c + 1);
+    let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.c + 1)?;
 
     let data_ptr = emit_slice_bounds_check(e, s, idx);
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
@@ -234,12 +226,16 @@ pub(super) fn slice_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             e.write_var(inst.a + i as u16, val);
         }
     }
+    Ok(())
 }
 
-pub(super) fn slice_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn slice_set<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
     let s = e.read_var(inst.a);
     let idx = e.read_var(inst.b);
-    let (elem_bytes, _) = resolve_elem_bytes(e, inst.flags, inst.b + 1);
+    let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.b + 1)?;
 
     let data_ptr = emit_slice_bounds_check(e, s, idx);
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
@@ -273,6 +269,7 @@ pub(super) fn slice_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             .load(types::I64, MemFlags::trusted(), s, 0);
         emit_array_write_barrier_multi(e, arr, inst.c, elem_slots);
     }
+    Ok(())
 }
 
 /// Load a field from a pointer, returning 0 if pointer is nil.
@@ -439,14 +436,17 @@ pub(super) fn array_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let gc_ptr = e.gc_ptr();
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
-    let elem_slots_i32 = emit_elem_slots_i32(e, inst.flags, inst.c + 1);
+    let elem_bytes_i32 = emit_elem_bytes_i32(e, inst.flags, inst.c + 1);
     let len = e.read_var(inst.c);
-    let call = emit_funcref_call(e, array_new_func, &[gc_ptr, meta_i32, elem_slots_i32, len]);
+    let call = emit_funcref_call(e, array_new_func, &[gc_ptr, meta_i32, elem_bytes_i32, len]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
 
-pub(super) fn array_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn array_get<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
     let arr = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
     // Bounds check: load len from ArrayHeader (offset 0)
@@ -460,7 +460,7 @@ pub(super) fn array_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
     emit_panic_if(e, out_of_bounds);
 
-    let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.flags, inst.c + 1);
+    let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.c + 1)?;
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
     let off = e.builder().ins().imul(idx, eb);
     let off = e.builder().ins().iadd_imm(off, ARRAY_HEADER_BYTES);
@@ -481,9 +481,13 @@ pub(super) fn array_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             e.write_var(inst.a + i as u16, val);
         }
     }
+    Ok(())
 }
 
-pub(super) fn array_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn array_set<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
     let arr = e.read_var(inst.a);
     let idx = e.read_var(inst.b);
     // Bounds check: load len from ArrayHeader (offset 0)
@@ -497,7 +501,7 @@ pub(super) fn array_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
     emit_panic_if(e, out_of_bounds);
 
-    let (elem_bytes, _) = resolve_elem_bytes(e, inst.flags, inst.b + 1);
+    let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.b + 1)?;
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
     let off = e.builder().ins().imul(idx, eb);
     let off = e.builder().ins().iadd_imm(off, ARRAY_HEADER_BYTES);
@@ -526,6 +530,7 @@ pub(super) fn array_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         // For correctness, only barrier when elem may contain GcRefs.
         emit_array_write_barrier_multi(e, arr, inst.c, elem_slots);
     }
+    Ok(())
 }
 
 /// Emit write barrier for a single-slot array/slice element write.
@@ -806,13 +811,15 @@ pub(super) fn store_to_stack<'a>(
     (stack_slot, ptr, slots_i32)
 }
 
-pub(super) fn map_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn map_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
     let func = e.helpers().map_get.expect("map_get helper not registered");
     // MapGet: a=dst, b=map, c=meta_slot, key at c+1
     // meta: key_slots<<16 | val_slots<<1 | has_ok
-    let layout = e
-        .map_get_layout(inst)
-        .expect("MapGet: metadata not available");
+    let layout = e.map_get_layout(inst).ok_or(JitError::MissingJitLayout {
+        pc: e.current_pc(),
+        opcode: inst.opcode(),
+        layout: "MapGet",
+    })?;
     let key_slots = layout.key_slots as usize;
     let val_slots = layout.val_slots as usize;
     let has_ok = layout.has_ok;
@@ -851,15 +858,18 @@ pub(super) fn map_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     if has_ok {
         e.write_var(inst.a + val_slots as u16, found);
     }
+    Ok(())
 }
 
-pub(super) fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
     let func = e.helpers().map_set.expect("map_set helper not registered");
     // MapSet: a=map, b=meta_slot, c=val_start, key at b+1
     // meta: key_slots<<8 | val_slots
-    let layout = e
-        .map_set_layout(inst)
-        .expect("MapSet: metadata not available");
+    let layout = e.map_set_layout(inst).ok_or(JitError::MissingJitLayout {
+        pc: e.current_pc(),
+        opcode: inst.opcode(),
+        layout: "MapSet",
+    })?;
     let key_slots = layout.key_slots as usize;
     let val_slots = layout.val_slots as usize;
 
@@ -884,9 +894,13 @@ pub(super) fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check if vo_map_set returned panic (unhashable interface key)
     let is_panic = e.builder().ins().icmp(IntCC::NotEqual, result, zero);
     emit_panic_if(e, is_panic);
+    Ok(())
 }
 
-pub(super) fn map_delete<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn map_delete<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
     let func = e
         .helpers()
         .map_delete
@@ -894,13 +908,18 @@ pub(super) fn map_delete<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // MapDelete: a=map, b=meta_slot (=key_slots), key at b+1
     let key_slots = e
         .map_delete_key_slots(inst)
-        .expect("MapDelete: metadata not available") as usize;
+        .ok_or(JitError::MissingJitLayout {
+            pc: e.current_pc(),
+            opcode: inst.opcode(),
+            layout: "MapDelete",
+        })? as usize;
 
     let m = e.read_var(inst.a);
     let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b + 1, key_slots);
 
     let ctx = e.ctx_param();
     emit_funcref_call(e, func, &[ctx, m, key_ptr, key_slots_i32]);
+    Ok(())
 }
 
 pub(super) const MAP_ITER_SLOTS: usize = vo_runtime::objects::map::MAP_ITER_SLOTS;

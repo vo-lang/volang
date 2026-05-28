@@ -366,7 +366,7 @@ fn compile_slice_lit(
         let eb_idx = ctx.const_int(elem_bytes as i64);
         func.emit_op(Opcode::LoadConst, len_cap_reg + 2, eb_idx, 0);
     }
-    func.emit_with_flags(Opcode::SliceNew, flags, dst, meta_reg, len_cap_reg);
+    func.emit_slice_new(dst, meta_reg, len_cap_reg, flags, elem_bytes, elem_vk);
 
     // Set each element with keyed index support
     let mut current_index: u64 = 0;

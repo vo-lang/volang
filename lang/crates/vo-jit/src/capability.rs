@@ -192,10 +192,10 @@ pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
         Call => cap(
             opcode,
             OpcodeFamily::Call,
-            BackendStatus::VmFallback,
-            BackendStatus::VmFallback,
+            BackendStatus::CompilerSpecific,
+            BackendStatus::CompilerSpecific,
             FallbackPolicy::VmFallback,
-            "planned direct/self/VM call lowering",
+            "compiler route chooses self/direct/dynamic JIT or VM fallback",
         ),
         CallExtern => cap(
             opcode,
@@ -208,8 +208,8 @@ pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
         CallClosure | CallIface => cap(
             opcode,
             OpcodeFamily::Call,
-            BackendStatus::VmFallback,
-            BackendStatus::VmFallback,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
             FallbackPolicy::VmFallback,
             "dynamic IC with prepare callback fallback",
         ),
@@ -358,5 +358,69 @@ mod tests {
         assert_eq!(capability.full_jit, BackendStatus::Unsupported);
         assert_eq!(capability.osr, BackendStatus::Unsupported);
         assert_eq!(capability.fallback, FallbackPolicy::InvalidOpcode);
+    }
+
+    #[test]
+    fn call_capability_matches_call_plan_routes() {
+        use crate::call_helpers::{CallPlan, CallRoute, MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS};
+        use cranelift_codegen::ir::FuncRef;
+        use vo_runtime::bytecode::FunctionDef;
+
+        fn func(local_slots: u16, has_defer: bool) -> FunctionDef {
+            FunctionDef {
+                name: "callee".to_string(),
+                param_count: 1,
+                param_slots: 1,
+                local_slots,
+                gc_scan_slots: local_slots,
+                ret_slots: 1,
+                recv_slots: 0,
+                heap_ret_gcref_count: 0,
+                heap_ret_gcref_start: 0,
+                heap_ret_slots: Vec::new(),
+                is_closure: false,
+                error_ret_slot: -1,
+                has_defer,
+                has_calls: false,
+                has_call_extern: false,
+                code: Vec::new(),
+                jit_metadata: Vec::new(),
+                slot_types: Vec::new(),
+                borrowed_scan_slots_prefix: Vec::new(),
+                capture_types: Vec::new(),
+                capture_slot_types: Vec::new(),
+                param_types: Vec::new(),
+            }
+        }
+
+        let capability = opcode_capability(Opcode::Call);
+        assert_eq!(capability.full_jit, BackendStatus::CompilerSpecific);
+        assert_eq!(capability.osr, BackendStatus::CompilerSpecific);
+        assert_eq!(capability.fallback, FallbackPolicy::VmFallback);
+
+        let direct = CallPlan::new(8, 2, &func(8, false), Some(FuncRef::from_u32(3)));
+        assert_eq!(direct.route_for_full_function(7), CallRoute::KnownDirectJit);
+        assert_eq!(direct.route_for_loop(), CallRoute::KnownDirectJit);
+
+        let large = CallPlan::new(
+            8,
+            2,
+            &func((MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS + 1) as u16, false),
+            Some(FuncRef::from_u32(3)),
+        );
+        assert_eq!(large.route_for_full_function(7), CallRoute::VmFallback);
+        assert_eq!(large.route_for_loop(), CallRoute::VmFallback);
+    }
+
+    #[test]
+    fn dynamic_call_capability_matches_inline_cache_route() {
+        let closure = opcode_capability(Opcode::CallClosure);
+        let iface = opcode_capability(Opcode::CallIface);
+
+        for capability in [closure, iface] {
+            assert_eq!(capability.full_jit, BackendStatus::RuntimeHelper);
+            assert_eq!(capability.osr, BackendStatus::RuntimeHelper);
+            assert_eq!(capability.fallback, FallbackPolicy::VmFallback);
+        }
     }
 }

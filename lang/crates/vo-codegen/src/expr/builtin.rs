@@ -218,7 +218,7 @@ fn compile_builtin_call_impl(
                 }
 
                 // SliceNew: a=dst, b=elem_meta, c=len_cap_start, flags=elem_flags
-                func.emit_with_flags(Opcode::SliceNew, flags, dst, meta_reg, len_cap_reg);
+                func.emit_slice_new(dst, meta_reg, len_cap_reg, flags, elem_bytes, elem_vk);
             } else if info.is_map(type_key) {
                 // make(map[K]V)
                 let (key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid) =
