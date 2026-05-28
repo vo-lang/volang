@@ -80,7 +80,7 @@ pub fn elem_layout_from_flags(flags: u8) -> ElemLayout {
         0x44 => (4, false),
         f => (f as usize, false),
     };
-    elem_layout_from_bytes(bytes, needs_sign_extend).expect("non-zero elem layout")
+    elem_layout_from_bytes(bytes, needs_sign_extend).expect("valid elem layout")
 }
 
 pub fn elem_layout_from_instruction(metadata: &JitInstructionMetadata) -> Option<ElemLayout> {
@@ -95,7 +95,11 @@ pub fn elem_layout_from_instruction(metadata: &JitInstructionMetadata) -> Option
 
 fn elem_layout_from_bytes(bytes: usize, needs_sign_extend: bool) -> Option<ElemLayout> {
     if bytes == 0 {
-        return None;
+        return (!needs_sign_extend).then_some(ElemLayout {
+            bytes: 0,
+            slots: 0,
+            needs_sign_extend: false,
+        });
     }
     let slots = u16::try_from(bytes.div_ceil(8)).ok()?;
     Some(ElemLayout {
@@ -218,6 +222,23 @@ mod tests {
                 MetadataFacts::from_instruction(Some(&elem_meta))
             ),
             Some(3)
+        );
+    }
+
+    #[test]
+    fn metadata_facts_allow_zero_size_elem_layouts() {
+        let slice_get = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
+        let elem_meta = JitInstructionMetadata::ElemLayout {
+            elem_bytes: 0,
+            needs_sign_extend: false,
+        };
+
+        assert_eq!(
+            indexed_get_result_slots(
+                &slice_get,
+                MetadataFacts::from_instruction(Some(&elem_meta))
+            ),
+            Some(0)
         );
     }
 

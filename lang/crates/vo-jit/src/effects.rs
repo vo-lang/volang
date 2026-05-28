@@ -943,8 +943,14 @@ pub fn try_write_regs_with_context(
     }
 
     let mut regs = Vec::new();
-    if let Some(reg) = single_write_reg(inst) {
-        regs.push(reg);
+    let has_single_write = match inst.opcode() {
+        Opcode::ArrayGet | Opcode::SliceGet => required_indexed_get_result_slots(inst, facts)? > 0,
+        _ => true,
+    };
+    if has_single_write {
+        if let Some(reg) = single_write_reg(inst) {
+            regs.push(reg);
+        }
     }
     regs.extend(try_multi_write_regs_with_context(inst, facts, externs)?);
     Ok(regs)
@@ -1095,6 +1101,20 @@ mod tests {
     }
 
     #[test]
+    fn zero_size_indexed_get_has_no_write_effect() {
+        let inst = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
+        let meta = JitInstructionMetadata::ElemLayout {
+            elem_bytes: 0,
+            needs_sign_extend: false,
+        };
+
+        assert_eq!(
+            write_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
+            Vec::<u16>::new()
+        );
+    }
+
+    #[test]
     fn array_addr_reads_dynamic_elem_bytes_register() {
         let inst = Instruction::with_flags(Opcode::ArrayAddr, 0, 9, 2, 7);
 
@@ -1152,6 +1172,20 @@ mod tests {
         assert_eq!(
             read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
             vec![1, 4, 20, 21, 22]
+        );
+    }
+
+    #[test]
+    fn zero_size_indexed_set_reads_no_value_slots() {
+        let inst = Instruction::with_flags(Opcode::ArraySet, 0, 1, 4, 20);
+        let meta = JitInstructionMetadata::ElemLayout {
+            elem_bytes: 0,
+            needs_sign_extend: false,
+        };
+
+        assert_eq!(
+            read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
+            vec![1, 4]
         );
     }
 

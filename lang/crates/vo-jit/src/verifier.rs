@@ -570,13 +570,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_elem_layout_metadata() {
+    fn accepts_zero_elem_layout_metadata() {
         let mut module = VoModule::new("verify".to_string());
         module.functions.push(make_func(
             vec![Instruction::with_flags(Opcode::SliceGet, 0, 0, 1, 2)],
             vec![JitInstructionMetadata::ElemLayout {
                 elem_bytes: 0,
                 needs_sign_extend: false,
+            }],
+            4,
+        ));
+
+        verify_jit_metadata(&module.functions[0], &module).expect("zero-size elements are valid");
+    }
+
+    #[test]
+    fn rejects_zero_elem_layout_with_sign_extension() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![Instruction::with_flags(Opcode::SliceGet, 0, 0, 1, 2)],
+            vec![JitInstructionMetadata::ElemLayout {
+                elem_bytes: 0,
+                needs_sign_extend: true,
             }],
             4,
         ));

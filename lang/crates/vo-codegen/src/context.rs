@@ -876,7 +876,32 @@ impl CodegenContext {
 
     /// Get or register an extern function with explicit ret_slots (no param_kinds).
     pub fn get_or_register_extern_with_ret_slots(&mut self, name: &str, ret_slots: u16) -> u32 {
+        if matches!(name, "dyn_call" | "dyn_method") {
+            return self.get_or_register_variable_ret_extern(name, ret_slots);
+        }
         self.get_or_register_extern_with_slots(name, ret_slots, Vec::new())
+    }
+
+    fn get_or_register_variable_ret_extern(&mut self, name: &str, ret_slots: u16) -> u32 {
+        if let Some((id, _)) = self
+            .module
+            .externs
+            .iter()
+            .enumerate()
+            .find(|(_, def)| def.name == name && def.ret_slots == ret_slots)
+        {
+            return id as u32;
+        }
+
+        let id = self.module.externs.len() as u32;
+        self.module.externs.push(vo_vm::bytecode::ExternDef {
+            name: name.to_string(),
+            param_slots: 0,
+            ret_slots,
+            is_blocking: name.contains("_blocking_"),
+            param_kinds: Vec::new(),
+        });
+        id
     }
 
     /// Get or register an extern function with ret_slots and param_kinds.
@@ -1612,5 +1637,26 @@ impl CodegenContext {
 
     pub fn finish(self) -> Module {
         self.module
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CodegenContext;
+
+    #[test]
+    fn variable_ret_externs_are_keyed_by_ret_slots() {
+        let mut ctx = CodegenContext::new("extern-ret-slots");
+
+        let typed_call = ctx.get_or_register_extern_with_ret_slots("dyn_call", 4);
+        let any_call = ctx.get_or_register_extern_with_ret_slots("dyn_call", 6);
+        let typed_call_again = ctx.get_or_register_extern_with_ret_slots("dyn_call", 4);
+
+        assert_ne!(typed_call, any_call);
+        assert_eq!(typed_call, typed_call_again);
+        assert_eq!(ctx.module().externs[typed_call as usize].ret_slots, 4);
+        assert_eq!(ctx.module().externs[any_call as usize].ret_slots, 6);
+        assert_eq!(ctx.module().externs[typed_call as usize].name, "dyn_call");
+        assert_eq!(ctx.module().externs[any_call as usize].name, "dyn_call");
     }
 }

@@ -32,6 +32,8 @@
 - `vo-engine::run::tests::{jit_make_slice_negative_len,jit_make_slice_len_larger_than_cap,jit_make_chan_negative_size,jit_make_port_negative_size}_preserves_runtime_trap_kind_message_and_location`：修复前 JIT 只返回 `runtime error: makeslice` / `makechan` / `makeport`；修复后精确匹配 VM 的 `len out of range`、`len larger than cap`、`size out of range`。
 - `vo-engine::run::tests::jit_extern_assert_panic_preserves_message_and_location`：修复前 JIT builtin assert 的 extern panic location 为上一条指令 pc；修复后 message 与 location 均和 VM 一致。
 - `vo-engine::run::tests::jit_explicit_panic_preserves_message_and_location`：保护显式 user panic 的 message/location parity，避免 `user_panic_pc` 机制只覆盖 extern panic。
+- 既有语言回归 `dyn-call-return-multi::jit` 保护 variable-size `dyn_call` extern 的每个 call site 使用独立 ret-slot metadata，避免同名 extern 的较大返回槽数污染较小返回槽数的 JIT 写集校验。
+- 既有语言回归 `skill-debug-vo.2026-01-23-zero-size-type::jit`、`skill-debug-vo.2026-01-28-1420-empty-struct-slice::jit`、`empty-struct-chan-signal::jit` 和 `dyn.dyn-empty-struct::jit` 保护 JIT 接受 zero-size slice/array element layout，并在 bounds check 后按 0-slot get/set/append 语义执行。
 - `vo-engine::run::tests::{strict_jit_full_compile_invalid_metadata_fails_fast,strict_jit_osr_loop_analysis_error_fails_fast,strict_jit_dynamic_callee_precompile_error_fails_fast,strict_jit_extern_not_registered_fails_fast}`：覆盖 full JIT、OSR、dynamic callee precompile、extern registry invariant 的 strict fail-fast。
 - `vo-engine::run::no_jit_tests::jit_mode_without_jit_feature_fails_fast`：`cargo test -p vo-engine --no-default-features` 下确认 `RunMode::Jit` 不再 warning 后回退 VM。
 - `vo-vm::vm::island_thread::tests::island_jit_config_init_error_is_propagated`：覆盖 island JIT config 初始化失败传播 helper，生产入口使用同一 helper 并以明确 fatal message 终止。
@@ -46,6 +48,7 @@
 - `cargo test -p vo-engine`
 - `cargo test -p vo-engine --no-default-features`
 - `./d.py test tests/lang/cases/jit`
+- `./d.py test`（全量 lang manifest；覆盖 VM/JIT/OSR/nostd/WASM 中未被 `tests/lang/cases/jit` 子集覆盖的回归）
 - `./d.py test tests/lang/cases/bugs`（需要 loopback preflight，已在允许本地网络后通过）
 - `git diff --check`
 
@@ -53,7 +56,7 @@
 
 合法 fallback 清单：cold/not-hot interpreter execution、WaitIo/WaitQueue/Yield/Replay、regular/prepared call VM materialization、OSR normal exit、direct-call stack-capacity trampoline、以及显式命名的 best-effort embedding API。这些 fallback 是调度、host I/O、stack capacity 或 embedding 语义边界，不是 JIT 编译失败的静默吞错。
 
-当前验证覆盖：本轮要求的 `cargo test -p vo-jit`、`cargo test -p vo-vm --features jit`、`cargo test -p vo-engine`、`cargo test -p vo-engine --no-default-features`、`cargo test -p vo-common-core`、`cargo test -p vo-codegen`、`./d.py test tests/lang/cases/jit`、`./d.py test tests/lang/cases/bugs` 和 `git diff --check` 构成本轮回归门槛。单点反证已经覆盖 extern assert panic location：旧实现 JIT 为 `Some((0, 4))`，VM 为 `Some((0, 5))`；修复后两者一致。
+当前验证覆盖：本轮要求的 `cargo test -p vo-jit`、`cargo test -p vo-vm --features jit`、`cargo test -p vo-engine`、`cargo test -p vo-engine --no-default-features`、`cargo test -p vo-common-core`、`cargo test -p vo-codegen`、`./d.py test tests/lang/cases/jit`、`./d.py test tests/lang/cases/bugs`、`./d.py test` 全量 lang manifest 和 `git diff --check` 构成本轮回归门槛。单点反证已经覆盖 extern assert panic location：旧实现 JIT 为 `Some((0, 4))`，VM 为 `Some((0, 5))`；修复后两者一致。全量 lang manifest 的反证覆盖额外发现的 `dyn_call` ret-slot metadata 污染和 zero-size element layout 支持缺口。
 
 剩余风险：JIT helper effect 分类仍偏保守，部分 helper 仍采用全量 spill；未来新增 callback 或 typed trap 时必须继续显式设置 panic pc 与 payload。当前未发现需要移除 JIT opcode 能力的残留风险。
 
@@ -63,7 +66,7 @@
 
 完成项：
 
-1. 增加 `verify_jit_metadata`，在 full-function JIT 与 loop OSR 编译入口校验 metadata 长度、opcode kind、metadata kind、elem layout，以及 effects 推导出的 slot 读写是否落在 `local_slots` 内。本轮 review 发现 `ElemLayout { elem_bytes: 0 }` 曾被 helper 当成 0-slot layout 接受；已先补失败单测，再在共享 metadata helper 层拒绝 zero-byte layout。
+1. 增加 `verify_jit_metadata`，在 full-function JIT 与 loop OSR 编译入口校验 metadata 长度、opcode kind、metadata kind、elem layout，以及 effects 推导出的 slot 读写是否落在 `local_slots` 内。zero-size element layout 是合法语言语义：`ElemLayout { elem_bytes: 0 }` 现在被建模为 0-slot layout，JIT lowering 对 get/set 在 bounds check 后不读写 value slot；不合法的是 zero-size layout 搭配 sign-extension。
 2. 增加机器可读 `capability_matrix()` / `opcode_capability()`。每个 `Opcode` 必须显式声明 full JIT、OSR 与 fallback 策略，新增 opcode 漏声明会在编译期 match exhaustiveness 或单测中暴露。
 3. 把复杂 opcode 的 packed 语义集中到 `Instruction` accessor：static call func id、closure func id、defer/go shared call shape、packed arg/ret slots、queue recv/select recv flags、MapNew/MapIterNext slot counts。VM、JIT、effects、formatter 改为复用同一语义入口。
 4. 拆分 `translate.rs`：scalar、memory、conversions、collections、runtime ops 独立成 opcode-family lowering 文件；父模块只保留 dispatcher 与少量 shared checks。

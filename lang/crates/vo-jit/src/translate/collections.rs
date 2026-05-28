@@ -221,6 +221,9 @@ pub(super) fn slice_get<'a>(
     let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.c + 1)?;
 
     let data_ptr = emit_slice_bounds_check(e, s, idx);
+    if elem_bytes == 0 {
+        return Ok(());
+    }
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
     let off = e.builder().ins().imul(idx, eb);
 
@@ -252,6 +255,9 @@ pub(super) fn slice_set<'a>(
     let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.b + 1)?;
 
     let data_ptr = emit_slice_bounds_check(e, s, idx);
+    if elem_bytes == 0 {
+        return Ok(());
+    }
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
     let off = e.builder().ins().imul(idx, eb);
 
@@ -488,6 +494,9 @@ pub(super) fn array_get<'a>(
     );
 
     let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.c + 1)?;
+    if elem_bytes == 0 {
+        return Ok(());
+    }
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
     let off = e.builder().ins().imul(idx, eb);
     let off = e.builder().ins().iadd_imm(off, ARRAY_HEADER_BYTES);
@@ -535,6 +544,9 @@ pub(super) fn array_set<'a>(
     );
 
     let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.b + 1)?;
+    if elem_bytes == 0 {
+        return Ok(());
+    }
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
     let off = e.builder().ins().imul(idx, eb);
     let off = e.builder().ins().iadd_imm(off, ARRAY_HEADER_BYTES);
