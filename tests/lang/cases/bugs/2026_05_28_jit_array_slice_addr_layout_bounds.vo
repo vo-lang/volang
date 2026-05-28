@@ -1,0 +1,89 @@
+package main
+
+type Huge struct {
+	f00 int
+	f01 int
+	f02 int
+	f03 int
+	f04 int
+	f05 int
+	f06 int
+	f07 int
+	f08 int
+	f09 int
+	f10 int
+	f11 int
+	f12 int
+	f13 int
+	f14 int
+	f15 int
+	f16 int
+	f17 int
+	f18 int
+	f19 int
+	f20 int
+	f21 int
+	f22 int
+	f23 int
+	f24 int
+	f25 int
+	f26 int
+	f27 int
+	f28 int
+	f29 int
+	f30 int
+	f31 int
+	f32 int
+}
+
+func testSliceAddrHugeLayout() {
+	s := make([]Huge, 2)
+	if len(s) != 2 {
+		panic("slice huge len before addr")
+	}
+	p0 := &s[0]
+	p0.f00 = 10
+	p0.f01 = 0
+	p0.f32 = 1020
+	p1 := &s[1]
+	p1.f00 = 11
+	p1.f32 = 2020
+	sum := p0.f00 + p0.f32 + p1.f00 + p1.f32
+	if p0.f01 != 0 {
+		sum = -1
+	}
+	p0 = nil
+	p1 = nil
+	if len(s) != 2 {
+		panic("slice huge len after addr")
+	}
+	if sum != 3061 {
+		panic("slice addr huge checksum")
+	}
+}
+
+func testArrayAddrHugeLayout() {
+	var arr [2]Huge
+	p0 := &arr[0]
+	p0.f00 = 100
+	p0.f01 = 0
+	p0.f31 = 3040
+	p1 := &arr[1]
+	p1.f00 = 200
+	p1.f31 = 4040
+	sum := p0.f00 + p0.f31 + p1.f00 + p1.f31
+	if p0.f01 != 0 {
+		sum = -1
+	}
+	p0 = nil
+	p1 = nil
+	if sum != 7380 {
+		panic("array addr huge checksum")
+	}
+}
+
+func main() {
+	testSliceAddrHugeLayout()
+	testArrayAddrHugeLayout()
+	println("jit_array_slice_addr_layout_bounds: ok")
+}

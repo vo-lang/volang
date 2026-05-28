@@ -1107,6 +1107,78 @@ impl FuncBuilder {
         }
     }
 
+    /// Emit ArrayAddr with the same element layout metadata used by ArrayGet/ArraySet.
+    pub fn emit_array_addr(
+        &mut self,
+        dst: u16,
+        arr: u16,
+        idx: u16,
+        elem_bytes: usize,
+        elem_vk: vo_common_core::ValueKind,
+        ctx: &mut crate::context::CodegenContext,
+    ) {
+        let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+        if flags == 0 {
+            let index_and_eb = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
+            self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
+            let eb_idx = ctx.const_int(elem_bytes as i64);
+            self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
+            self.emit_with_flags_and_metadata(
+                Opcode::ArrayAddr,
+                flags,
+                dst,
+                arr,
+                index_and_eb,
+                Self::elem_metadata(elem_bytes, elem_vk),
+            );
+        } else {
+            self.emit_with_flags_and_metadata(
+                Opcode::ArrayAddr,
+                flags,
+                dst,
+                arr,
+                idx,
+                Self::elem_metadata(elem_bytes, elem_vk),
+            );
+        }
+    }
+
+    /// Emit SliceAddr with the same element layout metadata used by SliceGet/SliceSet.
+    pub fn emit_slice_addr(
+        &mut self,
+        dst: u16,
+        slice: u16,
+        idx: u16,
+        elem_bytes: usize,
+        elem_vk: vo_common_core::ValueKind,
+        ctx: &mut crate::context::CodegenContext,
+    ) {
+        let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+        if flags == 0 {
+            let index_and_eb = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
+            self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
+            let eb_idx = ctx.const_int(elem_bytes as i64);
+            self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
+            self.emit_with_flags_and_metadata(
+                Opcode::SliceAddr,
+                flags,
+                dst,
+                slice,
+                index_and_eb,
+                Self::elem_metadata(elem_bytes, elem_vk),
+            );
+        } else {
+            self.emit_with_flags_and_metadata(
+                Opcode::SliceAddr,
+                flags,
+                dst,
+                slice,
+                idx,
+                Self::elem_metadata(elem_bytes, elem_vk),
+            );
+        }
+    }
+
     pub fn emit_slice_append(
         &mut self,
         dst: u16,

@@ -86,6 +86,7 @@ pub enum LValue {
     StackArrayField {
         base_slot: u16,
         elem_slots: u16,
+        len: u16,
         index_reg: u16,
         field_offset: u16,
         field_slots: u16,
@@ -490,12 +491,14 @@ fn resolve_index_field_lvalue(
             crate::func::ExprSource::Location(StorageKind::StackArray {
                 base_slot,
                 elem_slots,
+                len,
                 ..
             }) => {
                 let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
                 return Ok(Some(LValue::StackArrayField {
                     base_slot,
                     elem_slots,
+                    len,
                     index_reg,
                     field_offset,
                     field_slots,
@@ -851,11 +854,15 @@ pub fn emit_lvalue_load(
         LValue::StackArrayField {
             base_slot,
             elem_slots,
+            len,
             index_reg,
             field_offset,
             field_slots,
         } => {
             // Read element to temp, then copy field to dst
+            let len_reg = func.alloc_slots(&[SlotType::Value]);
+            func.emit_op(Opcode::LoadInt, len_reg, *len, 0);
+            func.emit_op(Opcode::IndexCheck, *index_reg, len_reg, 0);
             let tmp = func.alloc_slots(&vec![SlotType::Value; *elem_slots as usize]);
             func.emit_slot_get(tmp, *base_slot, *index_reg, *elem_slots);
             func.emit_copy(dst, tmp + *field_offset, *field_slots);
@@ -985,11 +992,15 @@ pub fn emit_lvalue_store(
         LValue::StackArrayField {
             base_slot,
             elem_slots,
+            len,
             index_reg,
             field_offset,
             field_slots,
         } => {
             // Read element to temp, modify field, write back
+            let len_reg = func.alloc_slots(&[SlotType::Value]);
+            func.emit_op(Opcode::LoadInt, len_reg, *len, 0);
+            func.emit_op(Opcode::IndexCheck, *index_reg, len_reg, 0);
             let tmp = func.alloc_slots(&vec![SlotType::Value; *elem_slots as usize]);
             func.emit_slot_get(tmp, *base_slot, *index_reg, *elem_slots);
             func.emit_copy(tmp + *field_offset, src, *field_slots);
@@ -1187,11 +1198,15 @@ pub fn compile_index_addr(
     let index_reg = crate::expr::compile_expr(index_expr, ctx, func, info)?;
 
     if info.is_slice(container_type) {
-        let elem_bytes = info.slice_elem_bytes(container_type) as u8;
-        func.emit_with_flags(Opcode::SliceAddr, elem_bytes, dst, container_reg, index_reg);
+        let elem_type = info.slice_elem_type(container_type);
+        let elem_bytes = info.slice_elem_bytes(container_type);
+        let elem_vk = info.type_value_kind(elem_type);
+        func.emit_slice_addr(dst, container_reg, index_reg, elem_bytes, elem_vk, ctx);
     } else {
-        let elem_bytes = info.array_elem_bytes(container_type) as u8;
-        func.emit_with_flags(Opcode::ArrayAddr, elem_bytes, dst, container_reg, index_reg);
+        let elem_type = info.array_elem_type(container_type);
+        let elem_bytes = info.array_elem_bytes(container_type);
+        let elem_vk = info.type_value_kind(elem_type);
+        func.emit_array_addr(dst, container_reg, index_reg, elem_bytes, elem_vk, ctx);
     }
 
     Ok(())

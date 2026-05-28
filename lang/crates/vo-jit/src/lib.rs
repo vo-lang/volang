@@ -48,6 +48,7 @@ pub enum JitError {
     InvalidOsrTarget(usize),
     UnsupportedOpcode(Opcode),
     InvalidMetadata(JitMetadataError),
+    LoopAnalysis(loop_analysis::LoopAnalysisError),
     MissingJitLayout {
         pc: usize,
         opcode: Opcode,
@@ -65,6 +66,7 @@ impl std::fmt::Display for JitError {
             JitError::InvalidOsrTarget(pc) => write!(f, "invalid OSR target PC: {}", pc),
             JitError::UnsupportedOpcode(op) => write!(f, "unsupported opcode: {:?}", op),
             JitError::InvalidMetadata(e) => write!(f, "invalid JIT metadata: {}", e),
+            JitError::LoopAnalysis(e) => write!(f, "loop analysis failed: {}", e),
             JitError::MissingJitLayout { pc, opcode, layout } => {
                 write!(f, "missing JIT {layout} layout for {opcode:?} at pc {pc}")
             }
@@ -90,6 +92,12 @@ impl From<cranelift_codegen::CodegenError> for JitError {
 impl From<JitMetadataError> for JitError {
     fn from(e: JitMetadataError) -> Self {
         JitError::InvalidMetadata(e)
+    }
+}
+
+impl From<loop_analysis::LoopAnalysisError> for JitError {
+    fn from(e: loop_analysis::LoopAnalysisError) -> Self {
+        JitError::LoopAnalysis(e)
     }
 }
 

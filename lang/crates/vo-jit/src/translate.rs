@@ -310,7 +310,7 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         SliceAddr => {
-            slice_addr(e, inst);
+            slice_addr(e, inst)?;
             Ok(Completed)
         }
         // Array operations
@@ -327,7 +327,7 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         ArrayAddr => {
-            array_addr(e, inst);
+            array_addr(e, inst)?;
             Ok(Completed)
         }
         // String operations

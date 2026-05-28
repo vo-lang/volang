@@ -1,0 +1,59 @@
+package main
+
+type Cell struct {
+	a int
+	b int
+}
+
+var intSink int
+
+func mustPanic(fn func(), msg string) {
+	panicked := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				panicked = true
+			}
+		}()
+		fn()
+	}()
+	assert(panicked, msg)
+}
+
+func testStackArrayFieldReadWrite() {
+	var arr [2]Cell
+	arr[0] = Cell{a: 1, b: 10}
+	arr[1] = Cell{a: 2, b: 20}
+	for i := 0; i < 40; i++ {
+		idx := i % 2
+		arr[idx].b = arr[idx].b + 1
+		intSink += arr[idx].a
+	}
+	assert(arr[0].a == 1, "stack array field read/write element 0 a")
+	assert(arr[1].a == 2, "stack array field read/write element 1 a")
+	assert(arr[0].b == 30, "stack array field write element 0 b")
+	assert(arr[1].b == 40, "stack array field write element 1 b")
+}
+
+func testStackArrayFieldReadBounds() {
+	mustPanic(func() {
+		var arr [2]Cell
+		i := 2
+		intSink = arr[i].b
+	}, "stack array field read out of bounds must panic")
+}
+
+func testStackArrayFieldWriteBounds() {
+	mustPanic(func() {
+		var arr [2]Cell
+		i := 2
+		arr[i].b = 99
+	}, "stack array field write out of bounds must panic")
+}
+
+func main() {
+	testStackArrayFieldReadWrite()
+	testStackArrayFieldReadBounds()
+	testStackArrayFieldWriteBounds()
+	println("jit_stack_array_field_bounds: ok")
+}

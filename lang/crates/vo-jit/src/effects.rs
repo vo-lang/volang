@@ -331,6 +331,9 @@ pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeError> {
         Opcode::ArrayGet | Opcode::ArrayAddr => {
             regs.push(inst.b);
             regs.push(inst.c);
+            if inst.flags == 0 {
+                regs.push(checked_slot_offset(inst.c, 1, "read")?);
+            }
         }
         Opcode::ArraySet => {
             regs.push(inst.a);
@@ -353,6 +356,9 @@ pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeError> {
         Opcode::SliceGet | Opcode::SliceAddr => {
             regs.push(inst.b);
             regs.push(inst.c);
+            if inst.flags == 0 {
+                regs.push(checked_slot_offset(inst.c, 1, "read")?);
+            }
         }
         Opcode::SliceSet => {
             regs.push(inst.a);
@@ -1037,6 +1043,53 @@ mod tests {
             multi_write_regs_with_facts(&inst, EffectFacts::from_reg_consts(&facts)),
             vec![20, 21, 22]
         );
+    }
+
+    #[test]
+    fn array_addr_reads_dynamic_elem_bytes_register() {
+        let inst = Instruction::with_flags(Opcode::ArrayAddr, 0, 9, 2, 7);
+
+        assert_eq!(try_read_regs(&inst).unwrap(), vec![2, 7, 8]);
+        assert_eq!(try_write_regs(&inst).unwrap(), vec![9]);
+    }
+
+    #[test]
+    fn packed_addr_does_not_read_dynamic_elem_bytes_register() {
+        let array = Instruction::with_flags(Opcode::ArrayAddr, 0x82, 9, 2, 7);
+        let slice = Instruction::with_flags(Opcode::SliceAddr, 0x44, 10, 3, 8);
+
+        assert_eq!(try_read_regs(&array).unwrap(), vec![2, 7]);
+        assert_eq!(try_write_regs(&array).unwrap(), vec![9]);
+        assert_eq!(try_read_regs(&slice).unwrap(), vec![3, 8]);
+        assert_eq!(try_write_regs(&slice).unwrap(), vec![10]);
+    }
+
+    #[test]
+    fn array_addr_dynamic_elem_bytes_reports_operand_overflow() {
+        let inst = Instruction::with_flags(Opcode::ArrayAddr, 0, 1, 2, u16::MAX);
+
+        assert!(matches!(
+            try_read_regs(&inst),
+            Err(SlotRangeError {
+                access: "read",
+                start: u16::MAX,
+                count: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn slice_addr_dynamic_elem_bytes_reports_operand_overflow() {
+        let inst = Instruction::with_flags(Opcode::SliceAddr, 0, 1, 2, u16::MAX);
+
+        assert!(matches!(
+            try_read_regs(&inst),
+            Err(SlotRangeError {
+                access: "read",
+                start: u16::MAX,
+                count: 2
+            })
+        ));
     }
 
     #[test]

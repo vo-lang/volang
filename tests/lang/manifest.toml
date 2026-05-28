@@ -710,11 +710,51 @@ targets = ["vm", "jit", "osr", "nostd", "wasm"]
 expect = "pass"
 
 [[case]]
+id = "bugs.2026-05-28-jit-array-slice-addr-layout-bounds"
+kind = "file"
+path = "cases/bugs/2026_05_28_jit_array_slice_addr_layout_bounds.vo"
+targets = ["vm", "jit", "osr"]
+reason = "native JIT/OSR regression for ArrayAddr/SliceAddr layout metadata; nostd/wasm do not run native JIT"
+expect = "pass"
+
+[[case]]
+id = "bugs.2026-05-28-jit-slice-addr-nil-panic"
+kind = "file"
+path = "cases/bugs/2026_05_28_jit_slice_addr_nil_panic.vo"
+targets = ["vm", "jit", "osr"]
+reason = "native JIT/OSR regression for SliceAddr bounds panic; nostd/wasm do not run native JIT"
+expect = "pass"
+
+[[case]]
+id = "bugs.2026-05-28-jit-slice-addr-oob-panic"
+kind = "file"
+path = "cases/bugs/2026_05_28_jit_slice_addr_oob_panic.vo"
+targets = ["vm", "jit", "osr"]
+reason = "native JIT/OSR regression for SliceAddr bounds panic; nostd/wasm do not run native JIT"
+expect = "pass"
+
+[[case]]
+id = "bugs.2026-05-28-jit-array-addr-oob-panic"
+kind = "file"
+path = "cases/bugs/2026_05_28_jit_array_addr_oob_panic.vo"
+targets = ["vm", "jit", "osr"]
+reason = "native JIT/OSR regression for ArrayAddr bounds panic; nostd/wasm do not run native JIT"
+expect = "pass"
+
+[[case]]
 id = "bugs.2026-05-28-jit-osr-large-frame-direct-call-fallback"
 kind = "file"
 path = "cases/bugs/2026_05_28_jit_osr_large_frame_direct_call_fallback.vo"
 targets = ["vm", "jit", "osr", "nostd", "wasm"]
 expect = { kind = "pass", jit_regular_call_fallbacks_min = 3 }
+
+[[case]]
+id = "bugs.2026-05-28-jit-stack-array-field-bounds"
+kind = "file"
+path = "cases/bugs/2026_05_28_jit_stack_array_field_bounds.vo"
+targets = ["vm", "jit", "osr"]
+reason = "native JIT/OSR regression for stack array field bounds; nostd/wasm do not run native JIT"
+expect = "pass"
 
 [[case]]
 id = "bugs.any-return-type-loss"

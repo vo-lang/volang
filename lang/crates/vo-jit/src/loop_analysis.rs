@@ -61,7 +61,34 @@ pub enum LoopAnalysisError {
     },
 }
 
-/// Analyze a function's bytecode to find all loops using Hint instructions.
+impl std::fmt::Display for LoopAnalysisError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingBackEdge { loop_start } => {
+                write!(f, "missing loop back-edge for loop starting at pc {loop_start}")
+            }
+            Self::InvalidLoopRange {
+                begin_pc,
+                end_pc,
+                code_len,
+            } => write!(
+                f,
+                "invalid loop range begin={begin_pc} end={end_pc} for code length {code_len}"
+            ),
+            Self::SlotRangeOverflow { pc, source } => write!(
+                f,
+                "slot range overflow while analyzing loop effects at pc {pc}: {} range starting at {} with {} slots",
+                source.access, source.start, source.count
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LoopAnalysisError {}
+
+/// Legacy conservative adapter for diagnostics that prefer "no loops" over an
+/// analysis error. VM/JIT manager OSR entry points must use `try_analyze_loops`
+/// or `try_analyze_loops_with_module` so malformed ranges are visible.
 pub fn analyze_loops(func_def: &FunctionDef) -> Vec<LoopInfo> {
     try_analyze_loops(func_def).unwrap_or_default()
 }
@@ -70,8 +97,8 @@ pub fn try_analyze_loops(func_def: &FunctionDef) -> Result<Vec<LoopInfo>, LoopAn
     try_analyze_loops_with_context(func_def, &[], &[])
 }
 
-/// Analyze loops with module-level facts that are needed for precise liveness
-/// of dynamic element layouts and extern return slots.
+/// Legacy conservative adapter with module-level facts. OSR dispatch should use
+/// `try_analyze_loops_with_module` to surface malformed metadata/effects.
 pub fn analyze_loops_with_module(func_def: &FunctionDef, vo_module: &VoModule) -> Vec<LoopInfo> {
     try_analyze_loops_with_module(func_def, vo_module).unwrap_or_default()
 }
@@ -83,7 +110,7 @@ pub fn try_analyze_loops_with_module(
     try_analyze_loops_with_context(func_def, &vo_module.constants, &vo_module.externs)
 }
 
-/// Analyze bytecode to find all loops using Hint instructions.
+/// Legacy conservative adapter for raw bytecode loop discovery.
 ///
 /// New HINT_LOOP format (no HINT_LOOP_END needed):
 /// - a: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset

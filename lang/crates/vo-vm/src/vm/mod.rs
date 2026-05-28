@@ -2017,7 +2017,27 @@ impl Vm {
                 Opcode::ArrayAddr => {
                     let arr = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let idx = stack_get(stack, bp + inst.c as usize) as usize;
-                    let elem_bytes = inst.flags as usize;
+                    let len = array::len(arr);
+                    if idx >= len {
+                        handle_panic_result!(runtime_panic(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::IndexOutOfBounds,
+                            format!(
+                                "runtime error: index out of range [{}] with length {}",
+                                idx, len
+                            )
+                        ));
+                    }
+                    let elem_bytes = match inst.flags {
+                        0 => stack_get(stack, bp + inst.c as usize + 1) as usize,
+                        0x81 => 1,
+                        0x82 => 2,
+                        0x84 | 0x44 => 4,
+                        f => f as usize,
+                    };
                     let base = array::data_ptr_bytes(arr);
                     let addr = unsafe { base.add(idx * elem_bytes) } as u64;
                     stack_set(stack, bp + inst.a as usize, addr);
@@ -2205,7 +2225,27 @@ impl Vm {
                 Opcode::SliceAddr => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let idx = stack_get(stack, bp + inst.c as usize) as usize;
-                    let elem_bytes = inst.flags as usize;
+                    let len = if s.is_null() { 0 } else { slice_len(s) };
+                    if idx >= len {
+                        handle_panic_result!(runtime_panic(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::IndexOutOfBounds,
+                            format!(
+                                "runtime error: index out of range [{}] with length {}",
+                                idx, len
+                            )
+                        ));
+                    }
+                    let elem_bytes = match inst.flags {
+                        0 => stack_get(stack, bp + inst.c as usize + 1) as usize,
+                        0x81 => 1,
+                        0x82 => 2,
+                        0x84 | 0x44 => 4,
+                        f => f as usize,
+                    };
                     let base = slice_data_ptr(s);
                     let addr = unsafe { base.add(idx * elem_bytes) } as u64;
                     stack_set(stack, bp + inst.a as usize, addr);

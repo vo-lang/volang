@@ -222,22 +222,37 @@ pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
             FallbackPolicy::RuntimePanic,
             "string helper",
         ),
-        ArrayNew | ArrayGet | ArraySet | ArrayAddr => cap(
-            opcode,
+        ArrayNew => cap(
+            ArrayNew,
             OpcodeFamily::Array,
             BackendStatus::RuntimeHelper,
             BackendStatus::RuntimeHelper,
             FallbackPolicy::RuntimePanic,
-            "array operation",
+            "array allocation helper",
         ),
-        SliceNew | SliceGet | SliceSet | SliceLen | SliceCap | SliceSlice | SliceAppend
-        | SliceAddr => cap(
+        ArrayGet | ArraySet | ArrayAddr => cap(
+            opcode,
+            OpcodeFamily::Array,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::RuntimePanic,
+            "inline array access with bounds checks and typed element layout",
+        ),
+        SliceNew | SliceSlice | SliceAppend => cap(
             opcode,
             OpcodeFamily::Slice,
             BackendStatus::RuntimeHelper,
             BackendStatus::RuntimeHelper,
             FallbackPolicy::RuntimePanic,
-            "slice operation",
+            "slice allocation or reslicing helper",
+        ),
+        SliceGet | SliceSet | SliceLen | SliceCap | SliceAddr => cap(
+            opcode,
+            OpcodeFamily::Slice,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::RuntimePanic,
+            "inline slice access with nil-aware bounds checks and typed element layout",
         ),
         MapNew | MapGet | MapSet | MapDelete | MapLen | MapIterInit | MapIterNext => cap(
             opcode,
@@ -421,6 +436,30 @@ mod tests {
             assert_eq!(capability.full_jit, BackendStatus::RuntimeHelper);
             assert_eq!(capability.osr, BackendStatus::RuntimeHelper);
             assert_eq!(capability.fallback, FallbackPolicy::VmFallback);
+        }
+    }
+
+    #[test]
+    fn array_and_slice_addr_capability_matches_inline_lowering() {
+        let array = opcode_capability(Opcode::ArrayAddr);
+        assert_eq!(array.family, OpcodeFamily::Array);
+        assert_eq!(array.full_jit, BackendStatus::Native);
+        assert_eq!(array.osr, BackendStatus::Native);
+        assert_eq!(array.fallback, FallbackPolicy::RuntimePanic);
+
+        let slice = opcode_capability(Opcode::SliceAddr);
+        assert_eq!(slice.family, OpcodeFamily::Slice);
+        assert_eq!(slice.full_jit, BackendStatus::Native);
+        assert_eq!(slice.osr, BackendStatus::Native);
+        assert_eq!(slice.fallback, FallbackPolicy::RuntimePanic);
+    }
+
+    #[test]
+    fn array_slice_allocations_remain_helper_lowered() {
+        for opcode in [Opcode::ArrayNew, Opcode::SliceNew, Opcode::SliceAppend] {
+            let capability = opcode_capability(opcode);
+            assert_eq!(capability.full_jit, BackendStatus::RuntimeHelper);
+            assert_eq!(capability.osr, BackendStatus::RuntimeHelper);
         }
     }
 }

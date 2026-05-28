@@ -320,7 +320,7 @@ pub enum Opcode {
     ArrayNew,
     ArrayGet,
     ArraySet,
-    /// Get element address: a=dst, b=array_gcref, c=index, flags=elem_bytes
+    /// Get element address: a=dst, b=array_gcref, c=index or index+elem_bytes, flags=elem layout
     ArrayAddr,
 
     // === SLICE: Slice operations ===
@@ -331,7 +331,7 @@ pub enum Opcode {
     SliceCap,
     SliceSlice,
     SliceAppend,
-    /// Get element address: a=dst, b=slice_reg, c=index, flags=elem_bytes
+    /// Get element address: a=dst, b=slice_reg, c=index or index+elem_bytes, flags=elem layout
     SliceAddr,
 
     // === MAP: Map operations ===

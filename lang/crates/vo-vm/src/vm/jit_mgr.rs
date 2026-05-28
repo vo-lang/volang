@@ -13,7 +13,7 @@ use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 
 use std::collections::HashMap;
 
-use vo_jit::loop_analysis::analyze_loops_with_module;
+use vo_jit::loop_analysis::try_analyze_loops_with_module;
 use vo_jit::{JitCompiler, JitError, JitFunc, LoopFunc, LoopInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +142,9 @@ pub struct FunctionJitInfo {
     /// Analyzed loops (lazily populated).
     pub loops: Option<Vec<LoopInfo>>,
 
+    /// Last loop analysis error, if OSR discovery failed for this function.
+    pub loop_analysis_error: Option<String>,
+
     /// Loops that failed compilation (never retry).
     pub failed_loops: std::collections::HashSet<usize>,
 }
@@ -154,6 +157,7 @@ impl FunctionJitInfo {
             call_count: 0,
             loop_counts: HashMap::new(),
             loops: None,
+            loop_analysis_error: None,
             failed_loops: std::collections::HashSet::new(),
         }
     }
@@ -379,15 +383,24 @@ impl JitManager {
         func_id: u32,
         func_def: &FunctionDef,
         module: &VoModule,
-    ) -> &[LoopInfo] {
+    ) -> Result<&[LoopInfo], JitError> {
         let id = func_id as usize;
         let info = &mut self.funcs[id];
 
         if info.loops.is_none() {
-            info.loops = Some(analyze_loops_with_module(func_def, module));
+            match try_analyze_loops_with_module(func_def, module) {
+                Ok(loops) => {
+                    info.loop_analysis_error = None;
+                    info.loops = Some(loops);
+                }
+                Err(err) => {
+                    info.loop_analysis_error = Some(err.to_string());
+                    return Err(err.into());
+                }
+            }
         }
 
-        info.loops.as_ref().unwrap()
+        Ok(info.loops.as_ref().unwrap())
     }
 
     /// Find loop info by begin_pc.
@@ -397,9 +410,16 @@ impl JitManager {
         func_def: &FunctionDef,
         module: &VoModule,
         begin_pc: usize,
-    ) -> Option<LoopInfo> {
-        let loops = self.get_loops(func_id, func_def, module);
-        loops.iter().find(|l| l.begin_pc == begin_pc).cloned()
+    ) -> Result<Option<LoopInfo>, JitError> {
+        let loops = self.get_loops(func_id, func_def, module)?;
+        Ok(loops.iter().find(|l| l.begin_pc == begin_pc).cloned())
+    }
+
+    /// Return the last explicit loop-analysis failure recorded for a function.
+    pub fn last_loop_analysis_error(&self, func_id: u32) -> Option<&str> {
+        self.funcs
+            .get(func_id as usize)
+            .and_then(|info| info.loop_analysis_error.as_deref())
     }
 
     // =========================================================================

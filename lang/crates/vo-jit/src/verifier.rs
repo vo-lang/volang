@@ -207,9 +207,11 @@ fn verify_metadata_kind(
                 Opcode::ArrayNew
                     | Opcode::ArrayGet
                     | Opcode::ArraySet
+                    | Opcode::ArrayAddr
                     | Opcode::SliceNew
                     | Opcode::SliceGet
                     | Opcode::SliceSet
+                    | Opcode::SliceAddr
                     | Opcode::SliceAppend
             ) {
                 return Err(wrong_kind(func, pc, opcode, "ElemLayout"));
@@ -250,9 +252,11 @@ fn required_layout(opcode: Opcode, flags: u8) -> Option<&'static str> {
         Opcode::ArrayNew
         | Opcode::ArrayGet
         | Opcode::ArraySet
+        | Opcode::ArrayAddr
         | Opcode::SliceNew
         | Opcode::SliceGet
         | Opcode::SliceSet
+        | Opcode::SliceAddr
         | Opcode::SliceAppend
             if flags == 0 =>
         {
@@ -490,6 +494,104 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn rejects_missing_array_addr_dynamic_layout() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![Instruction::with_flags(Opcode::ArrayAddr, 0, 0, 1, 2)],
+            vec![JitInstructionMetadata::None],
+            4,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::MissingLayout {
+                opcode: Opcode::ArrayAddr,
+                layout: "ElemLayout",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_slice_addr_dynamic_layout() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![Instruction::with_flags(Opcode::SliceAddr, 0, 0, 1, 2)],
+            vec![JitInstructionMetadata::None],
+            4,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::MissingLayout {
+                opcode: Opcode::SliceAddr,
+                layout: "ElemLayout",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_slice_addr_layout_metadata_kind() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![Instruction::with_flags(Opcode::SliceAddr, 0, 0, 1, 2)],
+            vec![JitInstructionMetadata::MapDelete { key_slots: 1 }],
+            4,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::WrongMetadataKind {
+                opcode: Opcode::SliceAddr,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_inconsistent_array_addr_layout_metadata() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![Instruction::with_flags(Opcode::ArrayAddr, 0x82, 0, 1, 2)],
+            vec![JitInstructionMetadata::ElemLayout {
+                elem_bytes: 4,
+                needs_sign_extend: false,
+            }],
+            4,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::InconsistentElemLayout { flags: 0x82, .. })
+        ));
+    }
+
+    #[test]
+    fn accepts_packed_addr_layout_metadata() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![
+                Instruction::with_flags(Opcode::ArrayAddr, 0x82, 0, 1, 2),
+                Instruction::with_flags(Opcode::SliceAddr, 0x44, 3, 4, 5),
+            ],
+            vec![
+                JitInstructionMetadata::ElemLayout {
+                    elem_bytes: 2,
+                    needs_sign_extend: true,
+                },
+                JitInstructionMetadata::ElemLayout {
+                    elem_bytes: 4,
+                    needs_sign_extend: false,
+                },
+            ],
+            6,
+        ));
+
+        verify_jit_metadata(&module.functions[0], &module).unwrap();
     }
 
     #[test]

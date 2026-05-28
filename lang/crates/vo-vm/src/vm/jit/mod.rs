@@ -1083,10 +1083,17 @@ fn get_or_compile_loop(vm: &mut Vm, func_id: u32, loop_pc: usize) -> Option<vo_j
 
     // Hot - try to compile
     let loop_info = match jit_mgr.find_loop(func_id, func_def, module, loop_pc) {
-        Some(info) => info,
-        None => {
+        Ok(Some(info)) => info,
+        Ok(None) => {
             // Back-edge detected but no LoopInfo found - codegen bug or analysis bug
             // Mark as failed to avoid retrying
+            jit_mgr.mark_loop_failed(func_id, loop_pc);
+            jit_mgr.record_fallback(JitFallbackReason::LoopCompileFailed);
+            return None;
+        }
+        Err(_) => {
+            // Loop discovery failed with an explicit analysis error recorded by
+            // JitManager; do not silently downgrade malformed effect/range facts.
             jit_mgr.mark_loop_failed(func_id, loop_pc);
             jit_mgr.record_fallback(JitFallbackReason::LoopCompileFailed);
             return None;

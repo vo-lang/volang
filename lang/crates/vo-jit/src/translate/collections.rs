@@ -408,18 +408,19 @@ pub(super) fn slice_append<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, result);
 }
 
-pub(super) fn slice_addr<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn slice_addr<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    let elem_bytes = inst.flags as i64;
-    let data_ptr = e
-        .builder()
-        .ins()
-        .load(types::I64, MemFlags::trusted(), s, SLICE_FIELD_DATA_PTR);
-    let eb = e.builder().ins().iconst(types::I64, elem_bytes);
+    let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.c + 1)?;
+    let data_ptr = emit_slice_bounds_check(e, s, idx);
+    let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
     let off = e.builder().ins().imul(idx, eb);
     let addr = e.builder().ins().iadd(data_ptr, off);
     e.write_var(inst.a, addr);
+    Ok(())
 }
 
 // =============================================================================
@@ -618,15 +619,30 @@ pub(super) fn emit_array_write_barrier_multi<'a>(
     e.builder().seal_block(continue_block);
 }
 
-pub(super) fn array_addr<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn array_addr<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
     let arr = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    let elem_bytes = inst.flags as i64;
-    let eb = e.builder().ins().iconst(types::I64, elem_bytes);
+    // Bounds check: load len from ArrayHeader (offset 0)
+    let len = e
+        .builder()
+        .ins()
+        .load(types::I64, MemFlags::trusted(), arr, 0);
+    let out_of_bounds = e
+        .builder()
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
+    emit_panic_if(e, out_of_bounds);
+
+    let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.c + 1)?;
+    let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
     let off = e.builder().ins().imul(idx, eb);
     let off = e.builder().ins().iadd_imm(off, ARRAY_HEADER_BYTES);
     let addr = e.builder().ins().iadd(arr, off);
     e.write_var(inst.a, addr);
+    Ok(())
 }
 
 // =============================================================================
