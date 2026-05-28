@@ -1639,6 +1639,14 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
         ctx,
         JitContext::OFFSET_CALL_RESUME_PC,
     );
+    // Extern panics are user panics at the CallExtern bytecode pc. Publish the
+    // panic location through user_panic_pc; call_resume_pc is only a resume ABI.
+    emitter.builder().ins().store(
+        MemFlags::trusted(),
+        resume_pc_val,
+        ctx,
+        JitContext::OFFSET_USER_PANIC_PC,
+    );
 
     let call = crate::translator::emit_funcref_call(
         emitter,
@@ -1657,6 +1665,14 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
     // Non-OK results (Panic, WaitIo, Replay, Call) exit JIT.
     // Always spill on non-OK so VM can read fiber stack correctly.
     check_call_result(emitter, result, true);
+
+    let no_user_panic_pc = emitter.builder().ins().iconst(types::I32, -1);
+    emitter.builder().ins().store(
+        MemFlags::trusted(),
+        no_user_panic_pc,
+        ctx,
+        JitContext::OFFSET_USER_PANIC_PC,
+    );
 
     // Copy return values back
     for i in 0..copy_back_slots {

@@ -1,6 +1,6 @@
 //! Shared bytecode instruction effect facts used by JIT analysis and translation.
 
-use vo_runtime::bytecode::ExternDef;
+use vo_runtime::bytecode::{ExternDef, FunctionDef};
 use vo_runtime::instruction::{Instruction, Opcode};
 
 use crate::metadata;
@@ -104,9 +104,18 @@ pub fn try_instruction_effects_with_context(
     facts: EffectFacts<'_>,
     externs: &[ExternDef],
 ) -> Result<InstructionEffects, EffectError> {
+    try_instruction_effects_with_module_context(inst, facts, externs, &[])
+}
+
+pub fn try_instruction_effects_with_module_context(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+    externs: &[ExternDef],
+    functions: &[FunctionDef],
+) -> Result<InstructionEffects, EffectError> {
     Ok(InstructionEffects {
-        reads: try_read_regs_with_facts(inst, facts)?,
-        writes: try_write_regs_with_context(inst, facts, externs)?,
+        reads: try_read_regs_with_module_context(inst, facts, functions)?,
+        writes: try_write_regs_with_module_context(inst, facts, externs, functions)?,
         memory_sync: try_memory_sync_effect(inst)?,
         may_call: may_call(inst),
     })
@@ -606,6 +615,22 @@ pub fn try_read_regs_with_facts(
     inst: &Instruction,
     facts: EffectFacts<'_>,
 ) -> Result<Vec<u16>, EffectError> {
+    try_read_regs_with_module_context(inst, facts, &[])
+}
+
+pub fn try_read_regs_with_module_context(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+    functions: &[FunctionDef],
+) -> Result<Vec<u16>, EffectError> {
+    if inst.opcode() == Opcode::Call {
+        if let Some(callee) = functions.get(inst.static_call_func_id() as usize) {
+            let mut regs = Vec::new();
+            try_push_slot_range(&mut regs, inst.b, callee.param_slots, "read")?;
+            return Ok(regs);
+        }
+    }
+
     if !facts.has_facts() {
         return try_read_regs(inst);
     }
@@ -875,9 +900,25 @@ pub fn try_multi_write_regs_with_context(
     facts: EffectFacts<'_>,
     externs: &[ExternDef],
 ) -> Result<Vec<u16>, EffectError> {
+    try_multi_write_regs_with_module_context(inst, facts, externs, &[])
+}
+
+pub fn try_multi_write_regs_with_module_context(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+    externs: &[ExternDef],
+    functions: &[FunctionDef],
+) -> Result<Vec<u16>, EffectError> {
     let mut regs = Vec::new();
 
     match inst.opcode() {
+        Opcode::Call => {
+            if let Some(callee) = functions.get(inst.static_call_func_id() as usize) {
+                let ret_start = checked_slot_offset(inst.b, callee.param_slots, "write")?;
+                try_push_slot_range(&mut regs, ret_start, callee.ret_slots, "write")?;
+                return Ok(regs);
+            }
+        }
         Opcode::CallExtern => {
             let ret_slots = externs
                 .get(inst.b as usize)
@@ -938,7 +979,16 @@ pub fn try_write_regs_with_context(
     facts: EffectFacts<'_>,
     externs: &[ExternDef],
 ) -> Result<Vec<u16>, EffectError> {
-    if !facts.has_facts() && externs.is_empty() {
+    try_write_regs_with_module_context(inst, facts, externs, &[])
+}
+
+pub fn try_write_regs_with_module_context(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+    externs: &[ExternDef],
+    functions: &[FunctionDef],
+) -> Result<Vec<u16>, EffectError> {
+    if !facts.has_facts() && externs.is_empty() && functions.is_empty() {
         return try_write_regs(inst);
     }
 
@@ -952,7 +1002,9 @@ pub fn try_write_regs_with_context(
             regs.push(reg);
         }
     }
-    regs.extend(try_multi_write_regs_with_context(inst, facts, externs)?);
+    regs.extend(try_multi_write_regs_with_module_context(
+        inst, facts, externs, functions,
+    )?);
     Ok(regs)
 }
 

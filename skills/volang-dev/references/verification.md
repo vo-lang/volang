@@ -77,6 +77,9 @@ cargo run -q -p vo-dev -- test lint --suite lang
 
 The language suite is manifest-driven through `tests/lang/manifest.toml`; add or
 update case metadata when adding files under `tests/lang/cases`.
+`./d.py test` uses `eng/tests.toml` default targets and currently covers only
+`vm,jit`; run `./d.py test osr` and `./d.py test gc` explicitly for OSR and GC
+coverage.
 
 Use JIT-focused checks for call, loop, opcode, stack, defer/panic, or interface
 dispatch changes. Add OSR when loops/backedges, HINT metadata, or `ForLoop`

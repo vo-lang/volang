@@ -73,6 +73,95 @@ fn compile_and_run(source: &str) {
 }
 
 #[test]
+fn fail_error_return_temp_uses_interface_slot_layout() {
+    let source = r#"
+package main
+
+type MyError struct {
+    msg string
+}
+
+func (e MyError) Error() string {
+    return e.msg
+}
+
+func makeErr() error {
+    return MyError{msg: "boom"}
+}
+
+func f(ok bool) (int, error) {
+    if !ok {
+        fail makeErr()
+    }
+    return 1, nil
+}
+
+func main() int {
+    _, err := f(false)
+    if err == nil {
+        return 1
+    }
+    return 0
+}
+"#;
+
+    let module = compile_source(source);
+    let make_err_id = module
+        .functions
+        .iter()
+        .position(|func| func.name == "makeErr")
+        .expect("makeErr function should be compiled") as u32;
+    let func = module
+        .functions
+        .iter()
+        .find(|func| func.name == "f")
+        .expect("f function should be compiled");
+    let call = func
+        .code
+        .iter()
+        .find(|inst| {
+            inst.opcode() == Opcode::Call
+                && inst.static_call_func_id() == make_err_id
+                && inst.packed_ret_slots() == 2
+        })
+        .expect("fail makeErr() should call makeErr into a two-slot error temp");
+    let ret_start = call.packed_call_ret_start() as usize;
+
+    assert_eq!(
+        &func.slot_types[ret_start..ret_start + 2],
+        &[
+            vo_runtime::SlotType::Interface0,
+            vo_runtime::SlotType::Interface1
+        ],
+        "error/interface temporaries must use the Interface0/Interface1 GC layout"
+    );
+
+    let error_return = func
+        .code
+        .iter()
+        .find(|inst| inst.opcode() == Opcode::Return && (inst.flags & 1) != 0 && inst.b >= 2)
+        .expect("fail should lower to an error Return");
+    let ret_error_start = error_return.a + error_return.b - 2;
+    let error_copy = func
+        .code
+        .iter()
+        .find(|inst| {
+            inst.opcode() == Opcode::CopyN && inst.a == ret_error_start && inst.copy_n_count() == 2
+        })
+        .expect("fail should copy the propagated error into the declared return buffer");
+    let error_temp = error_copy.b as usize;
+
+    assert_eq!(
+        &func.slot_types[error_temp..error_temp + 2],
+        &[
+            vo_runtime::SlotType::Interface0,
+            vo_runtime::SlotType::Interface1
+        ],
+        "the propagated fail error temp must use the Interface0/Interface1 GC layout"
+    );
+}
+
+#[test]
 fn test_jit_instruction_metadata_for_dynamic_slice_and_map_ops() {
     let source = r#"
 package main

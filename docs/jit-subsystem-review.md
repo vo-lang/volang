@@ -6,6 +6,18 @@
 
 本次复核覆盖 `vo-jit` 的 full-function JIT、loop OSR、shared translator、direct JIT-to-JIT call、dynamic call inline cache、JIT/VM frame materialization、CopyN 编码与 loop liveness。结论基于源码阅读和现有 JIT/OSR 测试验证。
 
+## 2026-05-29 JIT/OSR/GC 架构级修复
+
+本轮修复两个当前 P1，并把对应不变量前移到 verifier/ABI 边界：
+
+1. `fail` / error return 的临时槽和返回槽现在统一使用 `Interface0`/`Interface1` layout，不再把 error interface 当成 `[GcRef, Value]`。新增 `vo-codegen::fail_error_return_temp_uses_interface_slot_layout` 保护 codegen slot metadata，`./d.py test osr tests/lang/cases/fail_stmt.vo` 覆盖修复前会触发 GC root scan 崩溃的语言回归。
+2. loop OSR 正常 exit 现在总是写 `ctx.loop_exit_pc` 并返回 `JitResult::Ok`。新增 `vo-jit::loop_fallthrough_exit_uses_jit_result_ok_abi` 用人工 fallthrough loop 反证旧 ABI：修复前会把 raw `exit_pc` 当成 `JitResult` 返回。
+3. `vo-jit` verifier 扩展为 bytecode slot-type contract verifier，覆盖 `IfaceAssign`、`Return`、`Call` / `CallClosure` / `CallIface` / `CallExtern`、`CopyN`、`PtrSet` / `GlobalSet` / `SlotSet`、`Panic` 等关键 opcode。`CopyN` 校验源/目标 range 不切开 interface pair；extern/dynamic/aggregate raw buffer 可继续使用 raw `[Value, Value]`，但 typed `Return`、`Panic`、`Call` 边界仍要求 canonical `Interface0`/`Interface1`。static `Call` 的 arg/ret shape 以 callee `FunctionDef` metadata 为 ABI 来源，避免大返回槽数被 packed encoding 截断。interface pair、return/error slot、call arg/ret shape、store/write-barrier source layout、panic payload layout 现在在编译入口 fail fast 为 `JitError`，不能退回 VM 静默执行。
+4. `setup_jit_panic` 已移除 `call_resume_pc - 1` location fallback。typed runtime trap 必须提供 `runtime_trap_pc`，显式/user/extern panic 必须提供 `user_panic_pc`；缺失时返回 `JitError`。`call_resume_pc` 只服务 WaitIo/Replay/call materialization。
+5. `JitFallbackReason` 只记录语义 fallback：cold/not-hot、regular/prepared VM call materialization、Yield/QueueBlock、WaitIo/WaitQueue/Replay。unsupported function、full compile failure、OSR compile/metadata/internal ABI failure 都是错误边界，不再记作 fallback reason。
+
+验证注意：`./d.py test` 的默认 target 来自 `eng/tests.toml`，只覆盖 `vm,jit`；OSR 与 GC 回归必须显式运行 `./d.py test osr` 和 `./d.py test gc`。本轮 JIT/OSR/GC 改动的最小验证集还包括 `cargo test -p vo-codegen`、`cargo test -p vo-jit`、`cargo test -p vo-vm --features jit`、`cargo test -p vo-engine`、`cargo test -p vo-engine --no-default-features`、`cargo run -q -p vo-dev -- test lint --suite lang` 和 `cargo check --workspace --all-targets --exclude vo-playground`。
+
 ## 2026-05-28 strict JIT 当前状态
 
 当前状态：本轮重新分析中已知 P1/P2 问题已完成修复，没有再发现必须关闭 JIT 能力才能规避的严重问题。JIT runtime panic 通过 typed trap ABI 回传 `RuntimeTrapKind`、动态 panic 参数和 bytecode pc；显式 `panic()` 与 extern `ExternResult::Panic` 使用独立的 `user_panic_pc` 记录用户 panic pc，避免复用 WaitIo/Replay/call materialization 的 `call_resume_pc`，也避免把 user panic 混入 typed trap 的 `runtime_trap_pc`。VM 侧在 unwind 前恢复 trap kind、panic message 和 source location，避免除零、负 shift、bounds、nil map write、unhashable/uncomparable、type assertion、make slice/chan/port、queue callback panic、builtin assert panic 等路径落回默认 nil pointer 或泛化 `runtime error: JIT panic` 文案。`RunMode::Jit` 下 JIT 初始化失败会直接返回 runtime error；feature 关闭时 `RunMode::Jit` 也 fail fast，不再 warning 后回退 VM。hot full-function 编译失败、InvalidMetadata、LoopAnalysis、Codegen/Internal、OSR bad metadata/bad LoopEnd/missing layout、JIT extern `NotRegistered` 等错误会 fail fast 到 `VmError::Jit`，只保留 cold/not-hot、WaitIo/WaitQueue/Yield/Replay、explicit VM call fallback、OSR normal exit、stack-capacity trampoline 等语义 fallback。
@@ -13,7 +25,7 @@
 完成项：
 
 1. 新增 `JitRuntimeTrapKind` 与 `vo_runtime_trap` helper，JIT lowering 对除零、bounds、负 shift、nil map write、unhashable/uncomparable、type assertion、make slice/chan/port 和 queue callback trap 记录 typed kind、消息参数和 pc。make slice/chan/port 使用 runtime helper 返回的 `alloc_error` code 生成消息，和 VM 的 `makeslice_error_message` / `make_queue_error_message` 分类一致。
-2. `setup_jit_panic` 保留 VM/JIT trap kind。typed runtime trap 使用 `runtime_trap_pc` 设置 panic source location；显式 `panic()`、builtin/extern panic 使用 `user_panic_pc`；`call_resume_pc` 只保留为旧路径兜底，不再作为 extern panic 的主位置来源。callback trap 改为 `set_recoverable_trap`，不再退化成普通 user panic。
+2. `setup_jit_panic` 保留 VM/JIT trap kind。typed runtime trap 使用 `runtime_trap_pc` 设置 panic source location；显式 `panic()`、builtin/extern panic 使用 `user_panic_pc`；`call_resume_pc` 不是 panic location fallback，只保留 WaitIo/Replay/call materialization 语义。callback trap 改为 `set_recoverable_trap`，不再退化成普通 user panic。
 3. `JitManager::resolve_call` 改为 `Result<Option<JitFunc>, JitError>`：`Ok(None)` 只表示 cold interpreter fallback，compile/metadata/internal/codegen 失败会向 VM 传播。dynamic closure/interface callee 预编译错误也会返回 visible JIT error。
 4. loop OSR 的 `get_or_compile_loop` 改为 fail-fast：坏 `LoopEnd`、缺 metadata/layout/extern、slot overflow、compile failure 和 previously failed loop 不再 mark failed 后静默解释执行。
 5. `LoopEnd` invariant 集中到 verifier：metadata 长度/kind/range/offset 一致性之外，`end_pc` 必须是跳回 `begin_pc` 的 `Jump` 或 `ForLoop` back-edge；compact offset 和 explicit metadata 都受同一校验保护。
@@ -48,7 +60,9 @@
 - `cargo test -p vo-engine`
 - `cargo test -p vo-engine --no-default-features`
 - `./d.py test tests/lang/cases/jit`
-- `./d.py test`（全量 lang manifest；覆盖 VM/JIT/OSR/nostd/WASM 中未被 `tests/lang/cases/jit` 子集覆盖的回归）
+- `./d.py test`（默认只覆盖 `vm,jit` target；OSR/GC 需要单独命令）
+- `./d.py test osr`
+- `./d.py test gc`
 - `./d.py test tests/lang/cases/bugs`（需要 loopback preflight，已在允许本地网络后通过）
 - `git diff --check`
 
@@ -56,7 +70,7 @@
 
 合法 fallback 清单：cold/not-hot interpreter execution、WaitIo/WaitQueue/Yield/Replay、regular/prepared call VM materialization、OSR normal exit、direct-call stack-capacity trampoline、以及显式命名的 best-effort embedding API。这些 fallback 是调度、host I/O、stack capacity 或 embedding 语义边界，不是 JIT 编译失败的静默吞错。
 
-当前验证覆盖：本轮要求的 `cargo test -p vo-jit`、`cargo test -p vo-vm --features jit`、`cargo test -p vo-engine`、`cargo test -p vo-engine --no-default-features`、`cargo test -p vo-common-core`、`cargo test -p vo-codegen`、`./d.py test tests/lang/cases/jit`、`./d.py test tests/lang/cases/bugs`、`./d.py test` 全量 lang manifest 和 `git diff --check` 构成本轮回归门槛。单点反证已经覆盖 extern assert panic location：旧实现 JIT 为 `Some((0, 4))`，VM 为 `Some((0, 5))`；修复后两者一致。全量 lang manifest 的反证覆盖额外发现的 `dyn_call` ret-slot metadata 污染和 zero-size element layout 支持缺口。
+当前验证覆盖：本轮要求的 `cargo test -p vo-jit`、`cargo test -p vo-vm --features jit`、`cargo test -p vo-engine`、`cargo test -p vo-engine --no-default-features`、`cargo test -p vo-common-core`、`cargo test -p vo-codegen`、`./d.py test tests/lang/cases/jit`、`./d.py test tests/lang/cases/bugs`、`./d.py test` 默认 `vm,jit` target、单独 `./d.py test osr` / `./d.py test gc` 和 `git diff --check` 构成本轮回归门槛。单点反证已经覆盖 extern assert panic location：旧实现 JIT 为 `Some((0, 4))`，VM 为 `Some((0, 5))`；修复后两者一致。默认 lang manifest 的反证覆盖额外发现的 `dyn_call` ret-slot metadata 污染和 zero-size element layout 支持缺口。
 
 剩余风险：JIT helper effect 分类仍偏保守，部分 helper 仍采用全量 spill；未来新增 callback 或 typed trap 时必须继续显式设置 panic pc 与 payload。当前未发现需要移除 JIT opcode 能力的残留风险。
 
@@ -71,7 +85,7 @@
 3. 把复杂 opcode 的 packed 语义集中到 `Instruction` accessor：static call func id、closure func id、defer/go shared call shape、packed arg/ret slots、queue recv/select recv flags、MapNew/MapIterNext slot counts。VM、JIT、effects、formatter 改为复用同一语义入口。
 4. 拆分 `translate.rs`：scalar、memory、conversions、collections、runtime ops 独立成 opcode-family lowering 文件；父模块只保留 dispatcher 与少量 shared checks。
 5. 新增 `FunctionAnalysis`，full-function JIT 与 loop OSR 共享 metadata-aware reg const facts、effects 和 `memory_only_start` 推导。loop analysis 现在从 `Module` 读取 extern return slot metadata。
-6. 建立 fallback reason 可观测性：`JitFallbackReason` 和 `JitFallbackReasonStats` 记录 cold interpreter fallback、unsupported/compile failure、regular/prepared call fallback、yield/block、WaitIo/WaitQueue/Replay、loop not hot/compile failed。
+6. 建立 fallback reason 可观测性：`JitFallbackReason` 和 `JitFallbackReasonStats` 只记录 cold interpreter fallback、regular/prepared call fallback、yield/block、WaitIo/WaitQueue/Replay、loop not hot。unsupported/compile failure、metadata error 和内部 ABI 错误必须走 `JitError`，不属于 fallback reason。
 7. 系统化 frame materialization invariant：`materialized_jit_frame_invariants` 校验 materialization 后 `resume_stack` 清空、frame func_id 有效、GC scan extent 不越过当前 `fiber.sp`、scan slot 不超过函数 metadata、最内层 frame 的 local extent 被 `fiber.sp` 覆盖，并显式允许 borrowed-call parent 的完整 local extent 高于当前 callee `sp`。
 8. 统一 static call route：`CallPlan` 先选择 `SelfRecursiveNative`、`KnownDirectJit`、`DynamicJitTable`、`VmFallback`，full-function 与 OSR call lowering 共享同一 plan。closure/interface dynamic call 也有 `DynamicCallPlan` 统一 packed arg/ret/resume_pc 解码。
 9. 固化 runtime ABI 边界：`runtime_symbol_names()` 与 `jit_context_abi_fields()` 提供 helper symbol 和 `JitContext` offset 的机器可读 manifest，runtime/JIT 单测保证 manifest 与注册表同步。

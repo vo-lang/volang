@@ -128,14 +128,14 @@ impl std::error::Error for LoopAnalysisError {}
 
 #[cfg(test)]
 fn try_analyze_loops(func_def: &FunctionDef) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
-    try_analyze_loops_with_context(func_def, &[])
+    try_analyze_loops_with_context(func_def, &[], &[])
 }
 
 pub fn try_analyze_loops_with_module(
     func_def: &FunctionDef,
     vo_module: &VoModule,
 ) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
-    try_analyze_loops_with_context(func_def, &vo_module.externs)
+    try_analyze_loops_with_context(func_def, &vo_module.externs, &vo_module.functions)
 }
 
 /// New HINT_LOOP format (no HINT_LOOP_END needed):
@@ -145,14 +145,21 @@ pub fn try_analyze_loops_with_module(
 fn try_analyze_loops_with_context(
     func_def: &FunctionDef,
     externs: &[ExternDef],
+    functions: &[FunctionDef],
 ) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
-    try_analyze_loops_from_code_with_context(&func_def.code, &func_def.jit_metadata, externs)
+    try_analyze_loops_from_code_with_context(
+        &func_def.code,
+        &func_def.jit_metadata,
+        externs,
+        functions,
+    )
 }
 
 fn try_analyze_loops_from_code_with_context(
     code: &[Instruction],
     jit_metadata: &[JitInstructionMetadata],
     externs: &[ExternDef],
+    functions: &[FunctionDef],
 ) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
     let mut loops = Vec::new();
 
@@ -182,8 +189,14 @@ fn try_analyze_loops_from_code_with_context(
                 }
                 validate_loop_back_edge(code, begin_pc, end_pc)?;
 
-                let (live_in, live_out) =
-                    analyze_loop_liveness(code, jit_metadata, externs, begin_pc, end_pc)?;
+                let (live_in, live_out) = analyze_loop_liveness(
+                    code,
+                    jit_metadata,
+                    externs,
+                    functions,
+                    begin_pc,
+                    end_pc,
+                )?;
                 let has_calls = has_function_calls(code, begin_pc, end_pc);
 
                 loops.push(LoopInfo {
@@ -288,6 +301,7 @@ fn analyze_loop_liveness(
     code: &[Instruction],
     jit_metadata: &[JitInstructionMetadata],
     externs: &[ExternDef],
+    functions: &[FunctionDef],
     header_pc: usize,
     back_edge_pc: usize,
 ) -> Result<(Vec<u16>, Vec<u16>), LoopAnalysisError> {
@@ -301,8 +315,9 @@ fn analyze_loop_liveness(
         .skip(header_pc)
     {
         let facts = effects::EffectFacts::from_instruction(jit_metadata.get(pc));
-        let effects = effects::try_instruction_effects_with_context(inst, facts, externs).map_err(
-            |source| match source {
+        let effects =
+            effects::try_instruction_effects_with_module_context(inst, facts, externs, functions)
+                .map_err(|source| match source {
                 effects::EffectError::SlotRange(source) => {
                     LoopAnalysisError::SlotRangeOverflow { pc, source }
                 }
@@ -312,8 +327,7 @@ fn analyze_loop_liveness(
                 effects::EffectError::MissingExtern { extern_id } => {
                     LoopAnalysisError::MissingExtern { pc, extern_id }
                 }
-            },
-        )?;
+            })?;
 
         for reg in effects.reads {
             if !written.contains(&reg) {

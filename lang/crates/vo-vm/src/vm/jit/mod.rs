@@ -52,6 +52,7 @@ struct JitPanicInfo {
 enum SetupJitPanicError {
     Capacity(FiberCapacityError),
     MissingPayload,
+    MissingLocation(&'static str),
 }
 
 fn jit_error_message(action: &str, func_name: &str, err: &vo_jit::JitError) -> String {
@@ -162,8 +163,8 @@ fn set_stack_overflow_panic(vm: &mut Vm, fiber: &mut Fiber, err: FiberCapacityEr
 /// default message as fallback.
 ///
 /// Source location uses `runtime_trap_pc` for typed traps and `user_panic_pc`
-/// for explicit or extern panics. `call_resume_pc` is only a legacy fallback
-/// because WaitIo/Replay/call materialization own its primary semantics.
+/// for explicit or extern panics. `call_resume_pc` is reserved for
+/// WaitIo/Replay/call materialization and is not a panic location fallback.
 ///
 /// Returns the resolved panic message and optional runtime-trap kind; caller
 /// must restore it on the fiber before invoking panic unwinding.
@@ -195,12 +196,12 @@ fn setup_jit_panic(
     materialize_jit_frames(fiber, module, 0).map_err(SetupJitPanicError::Capacity)?;
 
     if fiber.panic_source_loc.is_none() {
-        let pc = if trap_kind.is_some() {
-            trap_pc
+        let (pc, missing) = if trap_kind.is_some() {
+            (trap_pc, "runtime_trap_pc")
         } else {
-            user_panic_pc
-        }
-        .unwrap_or_else(|| ctx.call_resume_pc().saturating_sub(1));
+            (user_panic_pc, "user_panic_pc")
+        };
+        let pc = pc.ok_or(SetupJitPanicError::MissingLocation(missing))?;
         fiber.panic_source_loc = fiber.current_frame().map(|f| (f.func_id, pc));
     }
 
@@ -386,6 +387,11 @@ fn handle_jit_result(
                         "JIT returned Panic without user panic or typed runtime trap payload"
                             .to_string(),
                     );
+                }
+                Err(SetupJitPanicError::MissingLocation(field)) => {
+                    return ExecResult::JitError(format!(
+                        "JIT returned Panic without required {field} location"
+                    ));
                 }
             };
             if let Some(kind) = panic_info.trap_kind {
@@ -929,7 +935,6 @@ pub extern "C" fn jit_call_extern(
             unsafe {
                 *ctx_ref.panic_flag = true;
                 *ctx_ref.is_user_panic = true;
-                ctx_ref.user_panic_pc = ctx_ref.call_resume_pc;
                 ctx_ref.runtime_trap_kind = JitRuntimeTrapKind::None as u8;
                 ctx_ref.runtime_trap_pc = u32::MAX;
                 (*ctx_ref.panic_msg).slot0 = slot0;
@@ -1043,6 +1048,11 @@ pub fn dispatch_loop_osr(
                         "JIT returned Panic without user panic or typed runtime trap payload"
                             .to_string(),
                     );
+                }
+                Err(SetupJitPanicError::MissingLocation(field)) => {
+                    return OsrResult::JitError(format!(
+                        "JIT returned Panic without required {field} location"
+                    ));
                 }
             };
             if let Some(kind) = panic_info.trap_kind {
@@ -1235,7 +1245,6 @@ fn get_or_compile_loop(
 
     // Already failed?
     if jit_mgr.is_loop_failed(func_id, loop_pc) {
-        jit_mgr.record_fallback(JitFallbackReason::LoopCompileFailed);
         return Err(vo_jit::JitError::Internal(format!(
             "loop at pc {loop_pc} previously failed JIT compilation"
         )));
@@ -1252,14 +1261,12 @@ fn get_or_compile_loop(
         Ok(Some(info)) => info,
         Ok(None) => {
             jit_mgr.mark_loop_failed(func_id, loop_pc);
-            jit_mgr.record_fallback(JitFallbackReason::LoopCompileFailed);
             return Err(vo_jit::JitError::Internal(format!(
                 "hot back-edge at pc {loop_pc} has no LoopInfo"
             )));
         }
         Err(err) => {
             jit_mgr.mark_loop_failed(func_id, loop_pc);
-            jit_mgr.record_fallback(JitFallbackReason::LoopCompileFailed);
             return Err(err);
         }
     };
@@ -1289,7 +1296,6 @@ fn get_or_compile_loop(
         }
         Err(err) => {
             jit_mgr.mark_loop_failed(func_id, loop_pc);
-            jit_mgr.record_fallback(JitFallbackReason::LoopCompileFailed);
             Err(err)
         }
     }
@@ -1299,6 +1305,8 @@ fn get_or_compile_loop(
 mod tests {
     use super::*;
     use crate::fiber::ResumePoint;
+    use crate::scheduler::FiberId;
+    use crate::vm::JitConfig;
     use vo_runtime::bytecode::{FunctionDef, Module};
 
     fn function(local_slots: u16, gc_scan_slots: u16) -> FunctionDef {
@@ -1325,6 +1333,59 @@ mod tests {
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
+        }
+    }
+
+    extern "C" fn user_panic_without_location(
+        ctx: *mut JitContext,
+        _locals: *mut u64,
+    ) -> JitResult {
+        unsafe {
+            *(*ctx).panic_flag = true;
+            *(*ctx).is_user_panic = true;
+            *(*ctx).panic_msg = InterfaceSlot::default();
+        }
+        JitResult::Panic
+    }
+
+    extern "C" fn runtime_trap_without_location(
+        ctx: *mut JitContext,
+        _locals: *mut u64,
+    ) -> JitResult {
+        unsafe {
+            (*ctx).runtime_trap_kind = JitRuntimeTrapKind::DivisionByZero as u8;
+        }
+        JitResult::Panic
+    }
+
+    fn vm_with_jit_frame() -> (Vm, FiberId) {
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut module = Module::new("jit-panic-location-test".to_string());
+        module.functions.push(function(1, 0));
+        vm.load(module);
+
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        vm.scheduler.get_fiber_mut(fid).push_frame(0, 1, 0, 0, 0);
+        (vm, fid)
+    }
+
+    #[test]
+    fn osr_user_panic_without_user_panic_pc_is_jit_error() {
+        let (mut vm, fid) = vm_with_jit_frame();
+
+        match dispatch_loop_osr(&mut vm, fid, user_panic_without_location, 0, 1) {
+            OsrResult::JitError(msg) => assert!(msg.contains("user_panic_pc")),
+            _ => panic!("missing user_panic_pc must be a JitError"),
+        }
+    }
+
+    #[test]
+    fn osr_runtime_trap_without_runtime_trap_pc_is_jit_error() {
+        let (mut vm, fid) = vm_with_jit_frame();
+
+        match dispatch_loop_osr(&mut vm, fid, runtime_trap_without_location, 0, 1) {
+            OsrResult::JitError(msg) => assert!(msg.contains("runtime_trap_pc")),
+            _ => panic!("missing runtime_trap_pc must be a JitError"),
         }
     }
 

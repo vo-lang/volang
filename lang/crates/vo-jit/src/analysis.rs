@@ -30,10 +30,11 @@ impl FunctionAnalysis {
         begin_pc: usize,
         end_pc_exclusive: usize,
     ) -> Result<Self, JitMetadataError> {
-        let reg_const_facts = crate::translator::compute_reg_const_facts_with_metadata(
+        let reg_const_facts = crate::translator::compute_reg_const_facts_with_context(
             &func_def.code,
             &func_def.jit_metadata,
             &vo_module.constants,
+            &vo_module.functions,
             &vo_module.externs,
             begin_pc,
             end_pc_exclusive,
@@ -45,8 +46,13 @@ impl FunctionAnalysis {
             .enumerate()
             .map(|(pc, inst)| {
                 let facts = EffectFacts::from_instruction(func_def.jit_metadata.get(pc));
-                effects::try_instruction_effects_with_context(inst, facts, &vo_module.externs)
-                    .map_err(|err| JitMetadataError::effect(func_def, pc, err))
+                effects::try_instruction_effects_with_module_context(
+                    inst,
+                    facts,
+                    &vo_module.externs,
+                    &vo_module.functions,
+                )
+                .map_err(|err| JitMetadataError::effect(func_def, pc, err))
             })
             .collect::<Result<Vec<_>, _>>()?;
 

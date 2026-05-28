@@ -368,7 +368,7 @@ pub(super) fn compile_fail(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     // Compile error expression to temp slot (error is always 2 slots: interface)
-    let error_slot = func.alloc_slots(&[SlotType::GcRef, SlotType::Value]);
+    let error_slot = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
     let error_expr_type = info.expr_type(fail_stmt.error.id);
     crate::assign::emit_assign(
         error_slot,

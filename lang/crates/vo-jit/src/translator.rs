@@ -4,7 +4,9 @@ use std::collections::{HashMap, VecDeque};
 
 use cranelift_codegen::ir::{types, FuncRef, Inst, InstBuilder, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
-use vo_runtime::bytecode::{Constant, ExternDef, JitInstructionMetadata, Module as VoModule};
+use vo_runtime::bytecode::{
+    Constant, ExternDef, FunctionDef, JitInstructionMetadata, Module as VoModule,
+};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
 
@@ -326,10 +328,31 @@ pub fn try_compute_memory_only_start(code: &[Instruction]) -> Result<u16, effect
 
 pub type RegConstFacts = Vec<HashMap<u16, i64>>;
 
-pub fn compute_reg_const_facts_with_metadata(
+#[cfg(test)]
+fn compute_reg_const_facts_with_metadata(
     code: &[Instruction],
     jit_metadata: &[JitInstructionMetadata],
     constants: &[Constant],
+    externs: &[ExternDef],
+    begin_pc: usize,
+    end_pc_exclusive: usize,
+) -> RegConstFacts {
+    compute_reg_const_facts_with_context(
+        code,
+        jit_metadata,
+        constants,
+        &[],
+        externs,
+        begin_pc,
+        end_pc_exclusive,
+    )
+}
+
+pub fn compute_reg_const_facts_with_context(
+    code: &[Instruction],
+    jit_metadata: &[JitInstructionMetadata],
+    constants: &[Constant],
+    functions: &[FunctionDef],
     externs: &[ExternDef],
     begin_pc: usize,
     end_pc_exclusive: usize,
@@ -358,6 +381,7 @@ pub fn compute_reg_const_facts_with_metadata(
             &code[pc],
             jit_metadata.get(pc),
             constants,
+            functions,
             externs,
             &mut out,
         );
@@ -539,16 +563,18 @@ fn transfer_reg_const_facts(
     inst: &Instruction,
     jit_metadata: Option<&JitInstructionMetadata>,
     constants: &[Constant],
+    functions: &[FunctionDef],
     externs: &[ExternDef],
     facts: &mut HashMap<u16, i64>,
 ) {
-    reg_const_effect(inst, jit_metadata, constants, externs, facts).apply(facts);
+    reg_const_effect(inst, jit_metadata, constants, functions, externs, facts).apply(facts);
 }
 
 fn reg_const_effect(
     inst: &Instruction,
     jit_metadata: Option<&JitInstructionMetadata>,
     constants: &[Constant],
+    functions: &[FunctionDef],
     externs: &[ExternDef],
     facts: &HashMap<u16, i64>,
 ) -> RegConstEffect {
@@ -576,7 +602,20 @@ fn reg_const_effect(
                 values,
             }
         }
-        Opcode::Call | Opcode::CallClosure | Opcode::CallIface => {
+        Opcode::Call => {
+            let (arg_slots, ret_slots) = functions
+                .get(inst.static_call_func_id() as usize)
+                .map(|callee| (callee.param_slots, callee.ret_slots))
+                .unwrap_or((inst.packed_arg_slots(), inst.packed_ret_slots()));
+            let Some(ret_start) = inst.b.checked_add(arg_slots) else {
+                return RegConstEffect::Clear;
+            };
+            RegConstEffect::KillSlots {
+                start: ret_start,
+                count: ret_slots,
+            }
+        }
+        Opcode::CallClosure | Opcode::CallIface => {
             let Some(ret_start) = inst.b.checked_add(inst.packed_arg_slots()) else {
                 return RegConstEffect::Clear;
             };

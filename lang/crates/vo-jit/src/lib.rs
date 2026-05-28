@@ -812,4 +812,46 @@ mod tests {
             "overlapping CopyN must read the whole source range before writing"
         );
     }
+
+    #[test]
+    fn loop_fallthrough_exit_uses_jit_result_ok_abi() {
+        let func = make_func(vec![Instruction::new(Opcode::LoadInt, 0, 123, 0)], 1);
+        let mut module = VoModule::new("test".into());
+        module.functions.push(func);
+        let loop_info = LoopInfo {
+            depth: 0,
+            begin_pc: 0,
+            end_pc: 0,
+            exit_pc: JitResult::JitError as usize,
+            has_defer: false,
+            has_labeled_break: false,
+            has_labeled_continue: false,
+            live_in: Vec::new(),
+            live_out: vec![0],
+            has_calls: false,
+        };
+
+        let mut jit = JitCompiler::new().expect("create jit compiler");
+        jit.compile_loop(0, &module.functions[0], &module, &loop_info, &[])
+            .expect("compile minimal fallthrough loop");
+        let loop_func = unsafe { jit.cache.get_loop_func_ptr(0, 0).expect("compiled loop") };
+
+        let mut locals = [0_u64; 1];
+        let mut parts = JitContextParts::new();
+        let mut ctx = parts.context(&module, &mut locals);
+
+        let result = loop_func(&mut ctx, locals.as_mut_ptr());
+
+        assert_eq!(
+            result,
+            JitResult::Ok,
+            "normal OSR exits must return JitResult::Ok, not a raw exit pc"
+        );
+        assert_eq!(
+            ctx.loop_exit_pc,
+            JitResult::JitError as u32,
+            "normal OSR exits must publish the resume pc through ctx.loop_exit_pc"
+        );
+        assert_eq!(locals[0], 123);
+    }
 }

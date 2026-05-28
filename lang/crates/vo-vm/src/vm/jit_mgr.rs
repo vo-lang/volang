@@ -19,22 +19,21 @@ use vo_jit::{JitCompiler, JitError, JitFunc, LoopFunc, LoopInfo};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum JitFallbackReason {
+    // Only semantic exits from native execution belong here. Compile, metadata,
+    // and internal ABI failures return JitError and are not fallback reasons.
     InterpretedCold = 0,
-    UnsupportedFunction = 1,
-    CompileFailed = 2,
-    RegularCall = 3,
-    PreparedDynamicCall = 4,
-    Yield = 5,
-    QueueBlock = 6,
-    WaitIo = 7,
-    WaitQueue = 8,
-    Replay = 9,
-    LoopNotHot = 10,
-    LoopCompileFailed = 11,
+    RegularCall = 1,
+    PreparedDynamicCall = 2,
+    Yield = 3,
+    QueueBlock = 4,
+    WaitIo = 5,
+    WaitQueue = 6,
+    Replay = 7,
+    LoopNotHot = 8,
 }
 
 impl JitFallbackReason {
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 9;
 
     #[inline]
     const fn index(self) -> usize {
@@ -334,7 +333,6 @@ impl JitManager {
         }
 
         if self.is_unsupported(func_id) {
-            self.record_fallback(JitFallbackReason::UnsupportedFunction);
             let msg = self
                 .funcs
                 .get(func_id as usize)
@@ -354,10 +352,7 @@ impl JitManager {
                         return Ok(Some(entry));
                     }
                 }
-                Err(err) => {
-                    self.record_fallback(JitFallbackReason::CompileFailed);
-                    return Err(err);
-                }
+                Err(err) => return Err(err),
             }
         }
 
@@ -585,6 +580,33 @@ impl JitManager {
 mod tests {
     use super::*;
 
+    fn empty_func() -> FunctionDef {
+        FunctionDef {
+            name: "f".to_string(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots: 0,
+            gc_scan_slots: 0,
+            ret_slots: 0,
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer: false,
+            has_calls: false,
+            has_call_extern: false,
+            code: Vec::new(),
+            jit_metadata: Vec::new(),
+            slot_types: Vec::new(),
+            borrowed_scan_slots_prefix: Vec::new(),
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+        }
+    }
+
     #[test]
     fn fallback_reason_stats_are_machine_readable() {
         let mut stats = JitFallbackReasonStats::default();
@@ -606,5 +628,25 @@ mod tests {
         let stats = manager.execution_stats();
         assert_eq!(stats.fallback_count(JitFallbackReason::RegularCall), 1);
         assert_eq!(stats.fallback_count(JitFallbackReason::Replay), 1);
+    }
+
+    #[test]
+    fn unsupported_function_error_is_not_counted_as_fallback() {
+        let func = empty_func();
+        let mut module = VoModule::new("m".to_string());
+        module.functions.push(func.clone());
+        let mut manager = JitManager::new().expect("jit manager");
+        manager.init(1);
+        manager.mark_unsupported(0);
+
+        let err = manager
+            .resolve_call(0, &func, &module)
+            .expect_err("unsupported function must fail fast");
+
+        assert!(
+            err.to_string().contains("cannot be JIT-compiled"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(manager.execution_stats().fallback_reasons.total(), 0);
     }
 }

@@ -139,14 +139,11 @@ impl<'a> LoopCompiler<'a> {
             self.builder.ins().jump(self.exit_block, &[]);
         }
 
-        // Exit block: store vars back to memory, then return exit_pc
+        // Exit block: store vars back to memory, then publish exit_pc via the
+        // LoopFunc ABI and return JitResult::Ok.
         self.builder.switch_to_block(self.exit_block);
         self.store_vars_to_memory();
-        let exit_pc = self
-            .builder
-            .ins()
-            .iconst(types::I32, self.loop_info.exit_pc as i64);
-        self.builder.ins().return_(&[exit_pc]);
+        self.emit_loop_exit(self.loop_info.exit_pc as u32);
 
         self.builder.seal_all_blocks();
         self.builder.finalize();
