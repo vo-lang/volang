@@ -374,6 +374,73 @@ mod tests {
         );
     }
 
+    fn assert_jit_user_panic_matches_vm(source: &str, expected_message: &str) {
+        let vm = vm_error_for(source, RunMode::Vm);
+        let jit = vm_error_for(source, RunMode::Jit);
+
+        let VmError::PanicUnwound {
+            msg: vm_msg,
+            loc: vm_loc,
+        } = vm
+        else {
+            panic!("expected VM user panic, got {vm:?}");
+        };
+        let VmError::PanicUnwound {
+            msg: jit_msg,
+            loc: jit_loc,
+        } = jit
+        else {
+            panic!("expected JIT user panic, got {jit:?}");
+        };
+
+        assert_eq!(vm_msg.as_deref(), Some(expected_message));
+        assert_eq!(jit_msg, vm_msg);
+        assert_eq!(
+            jit_loc.map(|loc| (loc.func_id, loc.pc)),
+            vm_loc.map(|loc| (loc.func_id, loc.pc))
+        );
+        assert!(
+            jit_loc.is_some(),
+            "JIT user panic should preserve VM error location"
+        );
+    }
+
+    #[test]
+    fn jit_extern_assert_panic_preserves_message_and_location() {
+        assert_jit_user_panic_matches_vm(
+            r#"
+package main
+
+func failIfZero(n int) {
+	assert(n != 0, "boom")
+}
+
+func main() {
+	failIfZero(0)
+}
+"#,
+            "assertion failed: boom",
+        );
+    }
+
+    #[test]
+    fn jit_explicit_panic_preserves_message_and_location() {
+        assert_jit_user_panic_matches_vm(
+            r#"
+package main
+
+func explode() {
+	panic("boom")
+}
+
+func main() {
+	explode()
+}
+"#,
+            "boom",
+        );
+    }
+
     #[test]
     fn jit_division_by_zero_preserves_runtime_trap_kind_message_and_location() {
         assert_jit_runtime_trap_matches_vm(

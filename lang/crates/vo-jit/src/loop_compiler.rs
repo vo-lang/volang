@@ -451,6 +451,16 @@ impl<'a> LoopCompiler<'a> {
     fn panic(&mut self, inst: &Instruction) {
         let panic_func = self.helpers.panic.expect("panic helper must be registered");
         let ctx = self.ctx_ptr;
+        let pc_val = self
+            .builder
+            .ins()
+            .iconst(types::I32, self.current_pc as i64);
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            pc_val,
+            ctx,
+            JitContext::OFFSET_USER_PANIC_PC,
+        );
         // Panic message is an interface (2 slots): slot0=metadata, slot1=data.
         // Note: Panic instruction uses inst.a for the register (not inst.b).
         let msg_slot0 = self.read_var(inst.a);

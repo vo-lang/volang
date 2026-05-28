@@ -6,14 +6,14 @@
 
 本次复核覆盖 `vo-jit` 的 full-function JIT、loop OSR、shared translator、direct JIT-to-JIT call、dynamic call inline cache、JIT/VM frame materialization、CopyN 编码与 loop liveness。结论基于源码阅读和现有 JIT/OSR 测试验证。
 
-## 2026-05-28 strict JIT 最终收敛
+## 2026-05-28 strict JIT 当前状态
 
-最终状态：本轮重新分析中剩余的 P1/P2 问题已收敛，未发现新的严重阻塞问题。JIT runtime panic 现在通过 typed trap ABI 回传 `RuntimeTrapKind`、动态 panic 参数和 bytecode pc；VM 侧在 unwind 前恢复 trap kind、panic message 和 source location，避免除零、负 shift、bounds、nil map write、unhashable/uncomparable、type assertion、make slice/chan/port、queue callback panic 等路径落回默认 nil pointer 或泛化 `runtime error: JIT panic` 文案。`RunMode::Jit` 下 JIT 初始化失败会直接返回 runtime error；feature 关闭时 `RunMode::Jit` 也 fail fast，不再 warning 后回退 VM。hot full-function 编译失败、InvalidMetadata、LoopAnalysis、Codegen/Internal、OSR bad metadata/bad LoopEnd/missing layout、JIT extern `NotRegistered` 等错误会 fail fast 到 `VmError::Jit`，只保留 cold/not-hot、WaitIo/WaitQueue/Yield/Replay、explicit VM call fallback、OSR normal exit、stack-capacity trampoline 等语义 fallback。
+当前状态：本轮重新分析中已知 P1/P2 问题已完成修复，没有再发现必须关闭 JIT 能力才能规避的严重问题。JIT runtime panic 通过 typed trap ABI 回传 `RuntimeTrapKind`、动态 panic 参数和 bytecode pc；显式 `panic()` 与 extern `ExternResult::Panic` 使用独立的 `user_panic_pc` 记录用户 panic pc，避免复用 WaitIo/Replay/call materialization 的 `call_resume_pc`，也避免把 user panic 混入 typed trap 的 `runtime_trap_pc`。VM 侧在 unwind 前恢复 trap kind、panic message 和 source location，避免除零、负 shift、bounds、nil map write、unhashable/uncomparable、type assertion、make slice/chan/port、queue callback panic、builtin assert panic 等路径落回默认 nil pointer 或泛化 `runtime error: JIT panic` 文案。`RunMode::Jit` 下 JIT 初始化失败会直接返回 runtime error；feature 关闭时 `RunMode::Jit` 也 fail fast，不再 warning 后回退 VM。hot full-function 编译失败、InvalidMetadata、LoopAnalysis、Codegen/Internal、OSR bad metadata/bad LoopEnd/missing layout、JIT extern `NotRegistered` 等错误会 fail fast 到 `VmError::Jit`，只保留 cold/not-hot、WaitIo/WaitQueue/Yield/Replay、explicit VM call fallback、OSR normal exit、stack-capacity trampoline 等语义 fallback。
 
 完成项：
 
 1. 新增 `JitRuntimeTrapKind` 与 `vo_runtime_trap` helper，JIT lowering 对除零、bounds、负 shift、nil map write、unhashable/uncomparable、type assertion、make slice/chan/port 和 queue callback trap 记录 typed kind、消息参数和 pc。make slice/chan/port 使用 runtime helper 返回的 `alloc_error` code 生成消息，和 VM 的 `makeslice_error_message` / `make_queue_error_message` 分类一致。
-2. `setup_jit_panic` 保留 VM/JIT trap kind，使用 `runtime_trap_pc` 设置 panic source location；callback trap 改为 `set_recoverable_trap`，不再退化成普通 user panic。
+2. `setup_jit_panic` 保留 VM/JIT trap kind。typed runtime trap 使用 `runtime_trap_pc` 设置 panic source location；显式 `panic()`、builtin/extern panic 使用 `user_panic_pc`；`call_resume_pc` 只保留为旧路径兜底，不再作为 extern panic 的主位置来源。callback trap 改为 `set_recoverable_trap`，不再退化成普通 user panic。
 3. `JitManager::resolve_call` 改为 `Result<Option<JitFunc>, JitError>`：`Ok(None)` 只表示 cold interpreter fallback，compile/metadata/internal/codegen 失败会向 VM 传播。dynamic closure/interface callee 预编译错误也会返回 visible JIT error。
 4. loop OSR 的 `get_or_compile_loop` 改为 fail-fast：坏 `LoopEnd`、缺 metadata/layout/extern、slot overflow、compile failure 和 previously failed loop 不再 mark failed 后静默解释执行。
 5. `LoopEnd` invariant 集中到 verifier：metadata 长度/kind/range/offset 一致性之外，`end_pc` 必须是跳回 `begin_pc` 的 `Jump` 或 `ForLoop` back-edge；compact offset 和 explicit metadata 都受同一校验保护。
@@ -22,16 +22,20 @@
 8. `Vm::with_best_effort_jit_config` / `init_jit` 明确保留非严格、机会性 JIT 语义；严格路径使用 `try_with_jit_config` / `try_init_jit`。island thread 继承 JIT config 时使用严格初始化，失败以明确 fatal message 终止该 island thread。
 9. JIT extern `NotRegistered` 视为 JIT/registry 内部不变量破坏，返回 `JitResult::JitError`，调度层转成 `VmError::Jit`；不允许再落到泛化 `runtime error: JIT panic`，用户代码不能 recover 掉该基础设施错误。
 10. capability matrix 继续和 call route/dynamic call/addr lowering/helper allocation tests 同步；`tests/lang/cases/jit/runtime_traps.vo` 现在断言 VM/JIT recover message 精确一致，覆盖 make slice/chan/port 和 send-on-closed queue callback。
+11. JIT extern `ExternResult::Panic` 会记录当前 `CallExtern` pc 到 `user_panic_pc`，不再通过 `call_resume_pc - 1` 推断 source location；显式 `panic()` lowering 同样写入当前 bytecode pc。
+12. Queue callback 的 `QueueAction::Trap(kind)` / `QueueRecvCoreResult::Trap(kind)` 统一补齐 typed trap payload，不再存在理论不可达分支静默返回缺少 payload 的 `JitResult::Panic`。JIT stack overflow callback 也记录 trap pc 并以 `RuntimeTrapKind::StackOverflow` 暴露。
 
 新增关键回归：
 
 - `vo-engine::run::tests::jit_division_by_zero_preserves_runtime_trap_kind_message_and_location`：修复前 JIT 除零会报告 nil pointer；修复后和 VM 一致为 `DivisionByZero`、`runtime error: integer divide by zero`，且 error location 一致。
 - `vo-engine::run::tests::{jit_negative_shift,jit_bounds_check,jit_nil_map_write,jit_type_assertion,jit_interface_eq,jit_map_hash,jit_queue_callback}_preserves_runtime_trap_kind_message_and_location`：覆盖 runtime trap kind/message/location parity。
 - `vo-engine::run::tests::{jit_make_slice_negative_len,jit_make_slice_len_larger_than_cap,jit_make_chan_negative_size,jit_make_port_negative_size}_preserves_runtime_trap_kind_message_and_location`：修复前 JIT 只返回 `runtime error: makeslice` / `makechan` / `makeport`；修复后精确匹配 VM 的 `len out of range`、`len larger than cap`、`size out of range`。
+- `vo-engine::run::tests::jit_extern_assert_panic_preserves_message_and_location`：修复前 JIT builtin assert 的 extern panic location 为上一条指令 pc；修复后 message 与 location 均和 VM 一致。
+- `vo-engine::run::tests::jit_explicit_panic_preserves_message_and_location`：保护显式 user panic 的 message/location parity，避免 `user_panic_pc` 机制只覆盖 extern panic。
 - `vo-engine::run::tests::{strict_jit_full_compile_invalid_metadata_fails_fast,strict_jit_osr_loop_analysis_error_fails_fast,strict_jit_dynamic_callee_precompile_error_fails_fast,strict_jit_extern_not_registered_fails_fast}`：覆盖 full JIT、OSR、dynamic callee precompile、extern registry invariant 的 strict fail-fast。
 - `vo-engine::run::no_jit_tests::jit_mode_without_jit_feature_fails_fast`：`cargo test -p vo-engine --no-default-features` 下确认 `RunMode::Jit` 不再 warning 后回退 VM。
 - `vo-vm::vm::island_thread::tests::island_jit_config_init_error_is_propagated`：覆盖 island JIT config 初始化失败传播 helper，生产入口使用同一 helper 并以明确 fatal message 终止。
-- `vo-jit::verifier` LoopEnd back-edge tests、`vo-codegen::func::tests::elem_layout_metadata_overflow_is_not_silently_dropped`、`tests/lang/cases/jit/runtime_traps.vo`。
+- `vo-jit::verifier` LoopEnd back-edge tests、`vo-codegen::func::tests::elem_layout_metadata_overflow_is_not_silently_dropped`、`tests/lang/cases/jit/runtime_traps.vo`。语言回归用例现在包含 recover 到 builtin assert extern panic 的用户可见文案 `"assertion failed: boom"`。
 
 本轮验证命令：
 
@@ -45,7 +49,13 @@
 - `./d.py test tests/lang/cases/bugs`（需要 loopback preflight，已在允许本地网络后通过）
 - `git diff --check`
 
-最终 review 结论：扫描 `vo-jit`、VM JIT runtime、`jit_mgr`、codegen metadata、bytecode serialization 后，未发现新的 silent fallback、metadata 猜测、panic 语义偏差或 JIT 能力退化。source-level `recover()` 对 runtime trap payload 的具体字符串现在由 `tests/lang/cases/jit/runtime_traps.vo` 精确断言；剩余风险为零。保留的合法 fallback 仅限语义协作路径：cold/not-hot interpreter execution、WaitIo/WaitQueue/Yield/Replay、regular/prepared call VM materialization、OSR normal exit、direct-call stack-capacity trampoline、以及显式命名的 best-effort embedding API。
+当前 review 结论：扫描 `vo-jit`、VM JIT runtime、`jit_mgr`、codegen metadata、bytecode serialization 后，未发现新的 silent fallback、metadata 猜测、panic payload 缺失或必须牺牲 JIT 覆盖面的语义偏差。source-level `recover()` 对 runtime trap payload 的具体字符串由 `tests/lang/cases/jit/runtime_traps.vo` 精确断言；Rust 层 VM/JIT parity 测试覆盖 runtime trap、显式 user panic 和 extern panic 的 message/location。
+
+合法 fallback 清单：cold/not-hot interpreter execution、WaitIo/WaitQueue/Yield/Replay、regular/prepared call VM materialization、OSR normal exit、direct-call stack-capacity trampoline、以及显式命名的 best-effort embedding API。这些 fallback 是调度、host I/O、stack capacity 或 embedding 语义边界，不是 JIT 编译失败的静默吞错。
+
+当前验证覆盖：本轮要求的 `cargo test -p vo-jit`、`cargo test -p vo-vm --features jit`、`cargo test -p vo-engine`、`cargo test -p vo-engine --no-default-features`、`cargo test -p vo-common-core`、`cargo test -p vo-codegen`、`./d.py test tests/lang/cases/jit`、`./d.py test tests/lang/cases/bugs` 和 `git diff --check` 构成本轮回归门槛。单点反证已经覆盖 extern assert panic location：旧实现 JIT 为 `Some((0, 4))`，VM 为 `Some((0, 5))`；修复后两者一致。
+
+剩余风险：JIT helper effect 分类仍偏保守，部分 helper 仍采用全量 spill；未来新增 callback 或 typed trap 时必须继续显式设置 panic pc 与 payload。当前未发现需要移除 JIT opcode 能力的残留风险。
 
 ## 2026-05-28 后续重构完成项
 

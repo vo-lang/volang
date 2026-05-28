@@ -103,6 +103,7 @@ pub fn emit_stack_limit_guard<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value,
 
     emitter.builder().switch_to_block(overflow_block);
     emitter.builder().seal_block(overflow_block);
+    mark_stack_overflow_pc(emitter, ctx);
     let stack_overflow_fn_ptr = emitter.builder().ins().load(
         types::I64,
         MemFlags::trusted(),
@@ -120,6 +121,17 @@ pub fn emit_stack_limit_guard<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value,
 
     emitter.builder().switch_to_block(ok_block);
     emitter.builder().seal_block(ok_block);
+}
+
+fn mark_stack_overflow_pc<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value) {
+    let current_pc = emitter.current_pc() as i64;
+    let pc_val = emitter.builder().ins().iconst(types::I32, current_pc);
+    emitter.builder().ins().store(
+        MemFlags::trusted(),
+        pc_val,
+        ctx,
+        JitContext::OFFSET_RUNTIME_TRAP_PC,
+    );
 }
 
 pub fn emit_stack_capacity_check<'a, E: IrEmitter<'a>>(
@@ -178,6 +190,7 @@ pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value) 
 
     emitter.builder().switch_to_block(overflow_block);
     emitter.builder().seal_block(overflow_block);
+    mark_stack_overflow_pc(emitter, ctx);
     let stack_overflow_fn_ptr = emitter.builder().ins().load(
         types::I64,
         MemFlags::trusted(),

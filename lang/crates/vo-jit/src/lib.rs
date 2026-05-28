@@ -593,6 +593,7 @@ mod tests {
                 panic_flag: &mut self.panic_flag,
                 is_user_panic: &mut self.is_user_panic,
                 panic_msg: &mut self.panic_msg,
+                user_panic_pc: u32::MAX,
                 runtime_trap_kind: vo_runtime::jit_api::JitRuntimeTrapKind::None as u8,
                 runtime_trap_arg0: 0,
                 runtime_trap_arg1: 0,

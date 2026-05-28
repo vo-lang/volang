@@ -60,6 +60,10 @@ func hashPut(m map[any]int, k any) {
 	m[k] = 1
 }
 
+func assertBoom(n int) {
+	assert(n != 0, "boom")
+}
+
 func makeSliceLen(n int) []int {
 	return make([]int, n)
 }
@@ -113,6 +117,8 @@ func main() {
 	h := make(map[any]int)
 	assert(didRecover(func() { hashPut(h, s) }), "map hash trap")
 	assertTrap("map hash message", trapMessage(func() { hashPut(h, s) }), "runtime error: hash of unhashable type")
+
+	assertTrap("extern assert message", trapMessage(func() { assertBoom(0) }), "assertion failed: boom")
 
 	assertTrap("makeslice len message", trapMessage(func() { _ = makeSliceLen(-1) }), "runtime error: makeslice: len out of range")
 	assertTrap("makeslice len cap message", trapMessage(func() { _ = makeSliceLenCap(2, 1) }), "runtime error: makeslice: len larger than cap")

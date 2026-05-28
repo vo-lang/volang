@@ -89,6 +89,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         panic_flag: &mut fiber.jit_panic_flag as *mut bool,
         is_user_panic: &mut fiber.jit_is_user_panic as *mut bool,
         panic_msg: &mut fiber.jit_panic_msg as *mut InterfaceSlot,
+        user_panic_pc: u32::MAX,
         runtime_trap_kind: vo_runtime::jit_api::JitRuntimeTrapKind::None as u8,
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,

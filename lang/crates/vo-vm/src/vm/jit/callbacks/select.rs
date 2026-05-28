@@ -115,11 +115,16 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
             RuntimeTrapKind::SendOnClosedChannel,
             helpers::ERR_SEND_ON_CLOSED,
         ),
-        SelectResult::UnsupportedRemotePort => set_jit_panic(
-            &mut vm.state.gc,
-            fiber,
-            helpers::ERR_SELECT_REMOTE_UNSUPPORTED,
-        ),
+        SelectResult::UnsupportedRemotePort => {
+            unsafe {
+                (*ctx).user_panic_pc = (*ctx).runtime_trap_pc;
+            }
+            set_jit_panic(
+                &mut vm.state.gc,
+                fiber,
+                helpers::ERR_SELECT_REMOTE_UNSUPPORTED,
+            )
+        }
         SelectResult::Wake(waiter) => {
             vm.state.wake_waiter(&waiter, &mut vm.scheduler);
             JitResult::Ok

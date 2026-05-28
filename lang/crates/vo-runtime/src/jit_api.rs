@@ -296,6 +296,13 @@ pub struct JitContext {
     /// Panic message (interface as InterfaceSlot, set by vo_panic for user panics).
     pub panic_msg: *mut InterfaceSlot,
 
+    /// Bytecode pc for user panics raised by JIT code or extern callbacks.
+    ///
+    /// This is deliberately separate from `call_resume_pc`, which is owned by
+    /// WaitIo/Replay/call materialization, and from `runtime_trap_pc`, which is
+    /// owned by typed runtime traps.
+    pub user_panic_pc: u32,
+
     /// Runtime trap kind for JIT-generated runtime panics.
     ///
     /// `JitRuntimeTrapKind::None` means no typed runtime trap was recorded. The
@@ -612,6 +619,7 @@ impl JitContext {
         std::mem::offset_of!(JitContext, runtime_trap_arg1) as i32;
     pub const OFFSET_RUNTIME_TRAP_PC: i32 =
         std::mem::offset_of!(JitContext, runtime_trap_pc) as i32;
+    pub const OFFSET_USER_PANIC_PC: i32 = std::mem::offset_of!(JitContext, user_panic_pc) as i32;
     #[cfg(feature = "std")]
     pub const OFFSET_WAIT_IO_TOKEN: i32 = std::mem::offset_of!(JitContext, wait_io_token) as i32;
     pub const OFFSET_LOOP_EXIT_PC: i32 = std::mem::offset_of!(JitContext, loop_exit_pc) as i32;
@@ -711,6 +719,10 @@ pub fn jit_context_abi_fields() -> &'static [JitContextAbiField] {
         JitContextAbiField {
             name: "runtime_trap_pc",
             offset: JitContext::OFFSET_RUNTIME_TRAP_PC,
+        },
+        JitContextAbiField {
+            name: "user_panic_pc",
+            offset: JitContext::OFFSET_USER_PANIC_PC,
         },
         JitContextAbiField {
             name: "stack_ptr",

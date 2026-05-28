@@ -146,7 +146,13 @@ fn stack_overflow_exec_result(
 
 fn set_stack_overflow_panic(vm: &mut Vm, fiber: &mut Fiber, err: FiberCapacityError) {
     let msg = err.message();
-    callbacks::helpers::set_jit_panic(&mut vm.state.gc, fiber, &msg);
+    fiber.capture_panic_source_loc();
+    callbacks::helpers::set_jit_trap(
+        &mut vm.state.gc,
+        fiber,
+        RuntimeTrapKind::StackOverflow,
+        &msg,
+    );
 }
 
 /// Shared JIT panic setup: materialize frames, capture source location, resolve panic message.
@@ -155,8 +161,9 @@ fn set_stack_overflow_panic(vm: &mut Vm, fiber: &mut Fiber, err: FiberCapacityEr
 /// or VM-fallback panics it may already be in fiber.panic_state — take() handles both, with a
 /// default message as fallback.
 ///
-/// Source location prefers `runtime_trap_pc` recorded by typed JIT traps and
-/// falls back to `call_resume_pc - 1` for older callback/user-panic paths.
+/// Source location uses `runtime_trap_pc` for typed traps and `user_panic_pc`
+/// for explicit or extern panics. `call_resume_pc` is only a legacy fallback
+/// because WaitIo/Replay/call materialization own its primary semantics.
 ///
 /// Returns the resolved panic message and optional runtime-trap kind; caller
 /// must restore it on the fiber before invoking panic unwinding.
@@ -182,11 +189,18 @@ fn setup_jit_panic(
         .take_recoverable_panic_with_kind()
         .ok_or(SetupJitPanicError::MissingPayload)?;
 
+    let trap_pc = (ctx.ctx.runtime_trap_pc != u32::MAX).then_some(ctx.ctx.runtime_trap_pc);
+    let user_panic_pc = (ctx.ctx.user_panic_pc != u32::MAX).then_some(ctx.ctx.user_panic_pc);
+
     materialize_jit_frames(fiber, module, 0).map_err(SetupJitPanicError::Capacity)?;
 
     if fiber.panic_source_loc.is_none() {
-        let trap_pc = (ctx.ctx.runtime_trap_pc != u32::MAX).then_some(ctx.ctx.runtime_trap_pc);
-        let pc = trap_pc.unwrap_or_else(|| ctx.call_resume_pc().saturating_sub(1));
+        let pc = if trap_kind.is_some() {
+            trap_pc
+        } else {
+            user_panic_pc
+        }
+        .unwrap_or_else(|| ctx.call_resume_pc().saturating_sub(1));
         fiber.panic_source_loc = fiber.current_frame().map(|f| (f.func_id, pc));
     }
 
@@ -915,6 +929,9 @@ pub extern "C" fn jit_call_extern(
             unsafe {
                 *ctx_ref.panic_flag = true;
                 *ctx_ref.is_user_panic = true;
+                ctx_ref.user_panic_pc = ctx_ref.call_resume_pc;
+                ctx_ref.runtime_trap_kind = JitRuntimeTrapKind::None as u8;
+                ctx_ref.runtime_trap_pc = u32::MAX;
                 (*ctx_ref.panic_msg).slot0 = slot0;
                 (*ctx_ref.panic_msg).slot1 = msg_str as u64;
             }
