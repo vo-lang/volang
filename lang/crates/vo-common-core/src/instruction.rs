@@ -94,16 +94,15 @@ impl Instruction {
 
     /// Number of slots copied by CopyN.
     ///
-    /// The canonical encoding stores the count in `c`. Older/generated helper
-    /// paths also mirror small counts in `flags`, so keep a compatibility
-    /// fallback for hand-built tests and legacy bytecode.
+    /// The canonical encoding stores the count in `c`; `flags` is only a
+    /// non-authoritative mirror for small counts.
     #[inline]
     pub fn copy_n_count(&self) -> u16 {
-        if self.c != 0 {
-            self.c
-        } else {
-            self.flags as u16
-        }
+        assert!(
+            self.c != 0 || self.flags == 0,
+            "CopyN count must be encoded in c"
+        );
+        self.c
     }
 
     /// Static Call target function id.

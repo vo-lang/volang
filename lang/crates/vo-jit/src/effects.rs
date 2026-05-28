@@ -26,6 +26,34 @@ impl SlotRangeError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectError {
+    SlotRange(SlotRangeError),
+    MissingLayout {
+        opcode: Opcode,
+        layout: &'static str,
+    },
+    MissingExtern {
+        extern_id: u16,
+    },
+}
+
+impl EffectError {
+    fn missing_layout(opcode: Opcode, layout: &'static str) -> Self {
+        Self::MissingLayout { opcode, layout }
+    }
+
+    fn missing_extern(extern_id: u16) -> Self {
+        Self::MissingExtern { extern_id }
+    }
+}
+
+impl From<SlotRangeError> for EffectError {
+    fn from(err: SlotRangeError) -> Self {
+        Self::SlotRange(err)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemorySyncEffect {
     None,
     From(u16),
@@ -40,19 +68,10 @@ pub struct InstructionEffects {
     pub may_call: bool,
 }
 
-/// Conservative adapter for tests and legacy diagnostics. Verifier, metadata
-/// analysis, and compiler paths must use the try_* variants so malformed slot
-/// ranges cannot be hidden.
 #[allow(dead_code)]
 pub(crate) fn instruction_effects(inst: &Instruction) -> InstructionEffects {
-    try_instruction_effects_with_facts(inst, EffectFacts::none()).unwrap_or_else(|_| {
-        InstructionEffects {
-            reads: Vec::new(),
-            writes: Vec::new(),
-            memory_sync: MemorySyncEffect::All,
-            may_call: may_call(inst),
-        }
-    })
+    try_instruction_effects_with_facts(inst, EffectFacts::none())
+        .expect("invalid instruction effects")
 }
 
 #[allow(dead_code)]
@@ -60,12 +79,7 @@ pub(crate) fn instruction_effects_with_facts(
     inst: &Instruction,
     facts: EffectFacts<'_>,
 ) -> InstructionEffects {
-    try_instruction_effects_with_facts(inst, facts).unwrap_or_else(|_| InstructionEffects {
-        reads: Vec::new(),
-        writes: Vec::new(),
-        memory_sync: MemorySyncEffect::All,
-        may_call: may_call(inst),
-    })
+    try_instruction_effects_with_facts(inst, facts).expect("invalid instruction effects")
 }
 
 #[allow(dead_code)]
@@ -74,21 +88,14 @@ pub(crate) fn instruction_effects_with_context(
     facts: EffectFacts<'_>,
     externs: &[ExternDef],
 ) -> InstructionEffects {
-    try_instruction_effects_with_context(inst, facts, externs).unwrap_or_else(|_| {
-        InstructionEffects {
-            reads: Vec::new(),
-            writes: Vec::new(),
-            memory_sync: MemorySyncEffect::All,
-            may_call: may_call(inst),
-        }
-    })
+    try_instruction_effects_with_context(inst, facts, externs).expect("invalid instruction effects")
 }
 
 #[allow(dead_code)]
 pub fn try_instruction_effects_with_facts(
     inst: &Instruction,
     facts: EffectFacts<'_>,
-) -> Result<InstructionEffects, SlotRangeError> {
+) -> Result<InstructionEffects, EffectError> {
     try_instruction_effects_with_context(inst, facts, &[])
 }
 
@@ -96,7 +103,7 @@ pub fn try_instruction_effects_with_context(
     inst: &Instruction,
     facts: EffectFacts<'_>,
     externs: &[ExternDef],
-) -> Result<InstructionEffects, SlotRangeError> {
+) -> Result<InstructionEffects, EffectError> {
     Ok(InstructionEffects {
         reads: try_read_regs_with_facts(inst, facts)?,
         writes: try_write_regs_with_context(inst, facts, externs)?,
@@ -112,11 +119,9 @@ pub fn may_call(inst: &Instruction) -> bool {
     )
 }
 
-/// Conservative adapter for callers that explicitly prefer "sync all memory"
-/// over surfacing malformed slot ranges.
 #[allow(dead_code)]
 pub(crate) fn memory_sync_effect(inst: &Instruction) -> MemorySyncEffect {
-    try_memory_sync_effect(inst).unwrap_or(MemorySyncEffect::All)
+    try_memory_sync_effect(inst).expect("invalid memory sync effect")
 }
 
 pub fn try_memory_sync_effect(inst: &Instruction) -> Result<MemorySyncEffect, SlotRangeError> {
@@ -140,7 +145,7 @@ pub fn try_memory_sync_effect(inst: &Instruction) -> Result<MemorySyncEffect, Sl
 
 #[allow(dead_code)]
 pub(crate) fn push_slot_range(regs: &mut Vec<u16>, start: u16, slots: u16) {
-    let _ = try_push_slot_range(regs, start, slots, "unknown");
+    try_push_slot_range(regs, start, slots, "unknown").expect("slot range overflow");
 }
 
 fn checked_slot_offset(
@@ -173,7 +178,57 @@ pub fn try_push_slot_range(
 }
 
 pub fn slice_elem_slots_from_flags(flags: u8) -> u16 {
+    debug_assert_ne!(
+        flags, 0,
+        "dynamic element layouts must use per-instruction metadata"
+    );
     metadata::elem_layout_from_flags(flags).slots
+}
+
+fn required_indexed_get_result_slots(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+) -> Result<u16, EffectError> {
+    indexed_get_result_slots(inst, facts)
+        .ok_or_else(|| EffectError::missing_layout(inst.opcode(), "ElemLayout"))
+}
+
+fn required_indexed_set_value_slots(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+) -> Result<u16, EffectError> {
+    indexed_set_value_slots(inst, facts)
+        .ok_or_else(|| EffectError::missing_layout(inst.opcode(), "ElemLayout"))
+}
+
+fn required_slice_append_value_slots(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+) -> Result<u16, EffectError> {
+    slice_append_value_slots(inst, facts)
+        .ok_or_else(|| EffectError::missing_layout(inst.opcode(), "ElemLayout"))
+}
+
+fn required_map_get_layout(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+) -> Result<MapGetLayout, EffectError> {
+    map_get_layout(inst, facts).ok_or_else(|| EffectError::missing_layout(inst.opcode(), "MapGet"))
+}
+
+fn required_map_set_layout(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+) -> Result<MapSetLayout, EffectError> {
+    map_set_layout(inst, facts).ok_or_else(|| EffectError::missing_layout(inst.opcode(), "MapSet"))
+}
+
+fn required_map_delete_key_slots(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+) -> Result<u16, EffectError> {
+    map_delete_key_slots(inst, facts)
+        .ok_or_else(|| EffectError::missing_layout(inst.opcode(), "MapDelete"))
 }
 
 pub fn indexed_get_result_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
@@ -221,10 +276,10 @@ fn try_push_recv_result_slots(
 
 #[allow(dead_code)]
 pub(crate) fn read_regs(inst: &Instruction) -> Vec<u16> {
-    try_read_regs(inst).unwrap_or_default()
+    try_read_regs(inst).expect("invalid read effects")
 }
 
-pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeError> {
+pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
     let mut regs = Vec::new();
 
     match inst.opcode() {
@@ -338,6 +393,9 @@ pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeError> {
         Opcode::ArraySet => {
             regs.push(inst.a);
             regs.push(inst.b);
+            if inst.flags == 0 {
+                return Err(EffectError::missing_layout(inst.opcode(), "ElemLayout"));
+            }
             try_push_slot_range(
                 &mut regs,
                 inst.c,
@@ -363,6 +421,9 @@ pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeError> {
         Opcode::SliceSet => {
             regs.push(inst.a);
             regs.push(inst.b);
+            if inst.flags == 0 {
+                return Err(EffectError::missing_layout(inst.opcode(), "ElemLayout"));
+            }
             try_push_slot_range(
                 &mut regs,
                 inst.c,
@@ -385,13 +446,7 @@ pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeError> {
             regs.push(inst.b);
             regs.push(inst.c);
             if inst.flags == 0 {
-                regs.push(checked_slot_offset(inst.c, 1, "read")?);
-                try_push_slot_range(
-                    &mut regs,
-                    checked_slot_offset(inst.c, 2, "read")?,
-                    slice_elem_slots_from_flags(inst.flags),
-                    "read",
-                )?;
+                return Err(EffectError::missing_layout(inst.opcode(), "ElemLayout"));
             } else {
                 try_push_slot_range(
                     &mut regs,
@@ -426,20 +481,13 @@ pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeError> {
             regs.push(checked_slot_offset(inst.b, 1, "read")?);
         }
         Opcode::MapGet => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-            regs.push(checked_slot_offset(inst.c, 1, "read")?);
+            return Err(EffectError::missing_layout(inst.opcode(), "MapGet"));
         }
         Opcode::MapSet => {
-            regs.push(inst.a);
-            regs.push(inst.b);
-            regs.push(checked_slot_offset(inst.b, 1, "read")?);
-            regs.push(inst.c);
+            return Err(EffectError::missing_layout(inst.opcode(), "MapSet"));
         }
         Opcode::MapDelete => {
-            regs.push(inst.a);
-            regs.push(inst.b);
-            regs.push(checked_slot_offset(inst.b, 1, "read")?);
+            return Err(EffectError::missing_layout(inst.opcode(), "MapDelete"));
         }
         Opcode::MapLen => {
             regs.push(inst.b);
@@ -551,13 +599,13 @@ pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeError> {
 
 #[allow(dead_code)]
 pub(crate) fn read_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<u16> {
-    try_read_regs_with_facts(inst, facts).unwrap_or_default()
+    try_read_regs_with_facts(inst, facts).expect("invalid read effects")
 }
 
 pub fn try_read_regs_with_facts(
     inst: &Instruction,
     facts: EffectFacts<'_>,
-) -> Result<Vec<u16>, SlotRangeError> {
+) -> Result<Vec<u16>, EffectError> {
     if !facts.has_facts() {
         return try_read_regs(inst);
     }
@@ -566,75 +614,70 @@ pub fn try_read_regs_with_facts(
 
     match inst.opcode() {
         Opcode::ArraySet | Opcode::SliceSet => {
-            if let Some(value_slots) = indexed_set_value_slots(inst, facts) {
-                regs.push(inst.a);
-                regs.push(inst.b);
-                try_push_slot_range(&mut regs, inst.c, value_slots, "read")?;
-                return Ok(regs);
-            }
+            let value_slots = required_indexed_set_value_slots(inst, facts)?;
+            regs.push(inst.a);
+            regs.push(inst.b);
+            try_push_slot_range(&mut regs, inst.c, value_slots, "read")?;
+            return Ok(regs);
         }
         Opcode::SliceAppend => {
-            if let Some(value_slots) = slice_append_value_slots(inst, facts) {
-                regs.push(inst.b);
-                regs.push(inst.c);
-                if inst.flags == 0 {
-                    regs.push(checked_slot_offset(inst.c, 1, "read")?);
-                    try_push_slot_range(
-                        &mut regs,
-                        checked_slot_offset(inst.c, 2, "read")?,
-                        value_slots,
-                        "read",
-                    )?;
-                } else {
-                    try_push_slot_range(
-                        &mut regs,
-                        checked_slot_offset(inst.c, 1, "read")?,
-                        value_slots,
-                        "read",
-                    )?;
-                }
-                return Ok(regs);
-            }
-        }
-        Opcode::MapGet => {
-            if let Some(layout) = map_get_layout(inst, facts) {
-                regs.push(inst.b);
-                regs.push(inst.c);
+            let value_slots = required_slice_append_value_slots(inst, facts)?;
+            regs.push(inst.b);
+            regs.push(inst.c);
+            if inst.flags == 0 {
+                regs.push(checked_slot_offset(inst.c, 1, "read")?);
+                try_push_slot_range(
+                    &mut regs,
+                    checked_slot_offset(inst.c, 2, "read")?,
+                    value_slots,
+                    "read",
+                )?;
+            } else {
                 try_push_slot_range(
                     &mut regs,
                     checked_slot_offset(inst.c, 1, "read")?,
-                    layout.key_slots,
+                    value_slots,
                     "read",
                 )?;
-                return Ok(regs);
             }
+            return Ok(regs);
+        }
+        Opcode::MapGet => {
+            let layout = required_map_get_layout(inst, facts)?;
+            regs.push(inst.b);
+            regs.push(inst.c);
+            try_push_slot_range(
+                &mut regs,
+                checked_slot_offset(inst.c, 1, "read")?,
+                layout.key_slots,
+                "read",
+            )?;
+            return Ok(regs);
         }
         Opcode::MapSet => {
-            if let Some(layout) = map_set_layout(inst, facts) {
-                regs.push(inst.a);
-                regs.push(inst.b);
-                try_push_slot_range(
-                    &mut regs,
-                    checked_slot_offset(inst.b, 1, "read")?,
-                    layout.key_slots,
-                    "read",
-                )?;
-                try_push_slot_range(&mut regs, inst.c, layout.val_slots, "read")?;
-                return Ok(regs);
-            }
+            let layout = required_map_set_layout(inst, facts)?;
+            regs.push(inst.a);
+            regs.push(inst.b);
+            try_push_slot_range(
+                &mut regs,
+                checked_slot_offset(inst.b, 1, "read")?,
+                layout.key_slots,
+                "read",
+            )?;
+            try_push_slot_range(&mut regs, inst.c, layout.val_slots, "read")?;
+            return Ok(regs);
         }
         Opcode::MapDelete => {
-            if let Some(key_slots) = map_delete_key_slots(inst, facts) {
-                regs.push(inst.a);
-                regs.push(inst.b);
-                try_push_slot_range(
-                    &mut regs,
-                    checked_slot_offset(inst.b, 1, "read")?,
-                    key_slots,
-                    "read",
-                )?;
-                return Ok(regs);
-            }
+            let key_slots = required_map_delete_key_slots(inst, facts)?;
+            regs.push(inst.a);
+            regs.push(inst.b);
+            try_push_slot_range(
+                &mut regs,
+                checked_slot_offset(inst.b, 1, "read")?,
+                key_slots,
+                "read",
+            )?;
+            return Ok(regs);
         }
         _ => {}
     }
@@ -733,10 +776,10 @@ pub fn single_write_reg(inst: &Instruction) -> Option<u16> {
 
 #[allow(dead_code)]
 pub(crate) fn multi_write_regs(inst: &Instruction) -> Vec<u16> {
-    try_multi_write_regs(inst).unwrap_or_default()
+    try_multi_write_regs(inst).expect("invalid multi-write effects")
 }
 
-pub fn try_multi_write_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeError> {
+pub fn try_multi_write_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
     let mut regs = Vec::new();
 
     match inst.opcode() {
@@ -772,6 +815,9 @@ pub fn try_multi_write_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeErr
             try_push_slot_range(&mut regs, inst.a, inst.flags as u16, "write")?;
         }
         Opcode::ArrayGet | Opcode::SliceGet => {
+            if inst.flags == 0 {
+                return Err(EffectError::missing_layout(inst.opcode(), "ElemLayout"));
+            }
             try_push_slot_range(
                 &mut regs,
                 inst.a,
@@ -780,7 +826,7 @@ pub fn try_multi_write_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeErr
             )?;
         }
         Opcode::MapGet => {
-            regs.push(inst.a);
+            return Err(EffectError::missing_layout(inst.opcode(), "MapGet"));
         }
         Opcode::MapIterInit => {
             try_push_slot_range(&mut regs, inst.a, MAP_ITER_SLOTS, "write")?;
@@ -812,7 +858,7 @@ pub fn try_multi_write_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeErr
 
 #[allow(dead_code)]
 pub(crate) fn multi_write_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<u16> {
-    try_multi_write_regs_with_context(inst, facts, &[]).unwrap_or_default()
+    try_multi_write_regs_with_context(inst, facts, &[]).expect("invalid multi-write effects")
 }
 
 #[allow(dead_code)]
@@ -821,14 +867,14 @@ pub(crate) fn multi_write_regs_with_context(
     facts: EffectFacts<'_>,
     externs: &[ExternDef],
 ) -> Vec<u16> {
-    try_multi_write_regs_with_context(inst, facts, externs).unwrap_or_default()
+    try_multi_write_regs_with_context(inst, facts, externs).expect("invalid multi-write effects")
 }
 
 pub fn try_multi_write_regs_with_context(
     inst: &Instruction,
     facts: EffectFacts<'_>,
     externs: &[ExternDef],
-) -> Result<Vec<u16>, SlotRangeError> {
+) -> Result<Vec<u16>, EffectError> {
     let mut regs = Vec::new();
 
     match inst.opcode() {
@@ -836,24 +882,22 @@ pub fn try_multi_write_regs_with_context(
             let ret_slots = externs
                 .get(inst.b as usize)
                 .map(|extern_def| extern_def.ret_slots)
-                .unwrap_or(1);
+                .ok_or_else(|| EffectError::missing_extern(inst.b))?;
             try_push_slot_range(&mut regs, inst.a, ret_slots, "write")?;
             return Ok(regs);
         }
         Opcode::ArrayGet | Opcode::SliceGet => {
-            if let Some(slots) = indexed_get_result_slots(inst, facts) {
-                try_push_slot_range(&mut regs, inst.a, slots, "write")?;
-                return Ok(regs);
-            }
+            let slots = required_indexed_get_result_slots(inst, facts)?;
+            try_push_slot_range(&mut regs, inst.a, slots, "write")?;
+            return Ok(regs);
         }
         Opcode::MapGet => {
-            if let Some(layout) = map_get_layout(inst, facts) {
-                let slots = layout
-                    .output_slots()
-                    .ok_or_else(|| SlotRangeError::new("write", inst.a, layout.val_slots))?;
-                try_push_slot_range(&mut regs, inst.a, slots, "write")?;
-                return Ok(regs);
-            }
+            let layout = required_map_get_layout(inst, facts)?;
+            let slots = layout
+                .output_slots()
+                .ok_or_else(|| SlotRangeError::new("write", inst.a, layout.val_slots))?;
+            try_push_slot_range(&mut regs, inst.a, slots, "write")?;
+            return Ok(regs);
         }
         _ => {}
     }
@@ -863,10 +907,10 @@ pub fn try_multi_write_regs_with_context(
 
 #[allow(dead_code)]
 pub(crate) fn write_regs(inst: &Instruction) -> Vec<u16> {
-    try_write_regs(inst).unwrap_or_default()
+    try_write_regs(inst).expect("invalid write effects")
 }
 
-pub fn try_write_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeError> {
+pub fn try_write_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
     let mut regs = Vec::new();
     if let Some(reg) = single_write_reg(inst) {
         regs.push(reg);
@@ -877,7 +921,7 @@ pub fn try_write_regs(inst: &Instruction) -> Result<Vec<u16>, SlotRangeError> {
 
 #[allow(dead_code)]
 pub(crate) fn write_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<u16> {
-    try_write_regs_with_context(inst, facts, &[]).unwrap_or_default()
+    try_write_regs_with_context(inst, facts, &[]).expect("invalid write effects")
 }
 
 #[allow(dead_code)]
@@ -886,14 +930,14 @@ pub(crate) fn write_regs_with_context(
     facts: EffectFacts<'_>,
     externs: &[ExternDef],
 ) -> Vec<u16> {
-    try_write_regs_with_context(inst, facts, externs).unwrap_or_default()
+    try_write_regs_with_context(inst, facts, externs).expect("invalid write effects")
 }
 
 pub fn try_write_regs_with_context(
     inst: &Instruction,
     facts: EffectFacts<'_>,
     externs: &[ExternDef],
-) -> Result<Vec<u16>, SlotRangeError> {
+) -> Result<Vec<u16>, EffectError> {
     if !facts.has_facts() && externs.is_empty() {
         return try_write_regs(inst);
     }
@@ -994,18 +1038,18 @@ pub fn preserves_reg_const_facts(op: Opcode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    fn fact_map(entries: &[(u16, i64)]) -> HashMap<u16, i64> {
-        entries.iter().copied().collect()
-    }
+    use vo_runtime::bytecode::JitInstructionMetadata;
 
     #[test]
     fn map_get_effects_use_metadata_layout_when_available() {
         let inst = Instruction::new(Opcode::MapGet, 10, 2, 5);
-        let meta = (3i64 << 16) | (2i64 << 1) | 1;
-        let facts = fact_map(&[(5, meta)]);
-        let effects = instruction_effects_with_facts(&inst, EffectFacts::from_reg_consts(&facts));
+        let meta = JitInstructionMetadata::MapGet {
+            key_slots: 3,
+            val_slots: 2,
+            has_ok: true,
+        };
+        let effects =
+            instruction_effects_with_facts(&inst, EffectFacts::from_instruction(Some(&meta)));
 
         assert_eq!(effects.reads, vec![2, 5, 6, 7, 8]);
         assert_eq!(effects.writes, vec![10, 11, 12]);
@@ -1014,11 +1058,13 @@ mod tests {
     #[test]
     fn map_set_effects_use_metadata_layout_when_available() {
         let inst = Instruction::new(Opcode::MapSet, 1, 4, 9);
-        let meta = (2i64 << 8) | 3;
-        let facts = fact_map(&[(4, meta)]);
+        let meta = JitInstructionMetadata::MapSet {
+            key_slots: 2,
+            val_slots: 3,
+        };
 
         assert_eq!(
-            read_regs_with_facts(&inst, EffectFacts::from_reg_consts(&facts)),
+            read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
             vec![1, 4, 5, 6, 9, 10, 11]
         );
     }
@@ -1026,21 +1072,24 @@ mod tests {
     #[test]
     fn map_delete_effects_use_metadata_layout_when_available() {
         let inst = Instruction::new(Opcode::MapDelete, 1, 4, 0);
-        let facts = fact_map(&[(4, 3)]);
+        let meta = JitInstructionMetadata::MapDelete { key_slots: 3 };
 
         assert_eq!(
-            read_regs_with_facts(&inst, EffectFacts::from_reg_consts(&facts)),
+            read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
             vec![1, 4, 5, 6, 7]
         );
     }
 
     #[test]
-    fn indexed_get_effects_use_dynamic_elem_bytes_when_available() {
+    fn indexed_get_effects_use_instruction_elem_layout() {
         let inst = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
-        let facts = fact_map(&[(8, 24)]);
+        let meta = JitInstructionMetadata::ElemLayout {
+            elem_bytes: 24,
+            needs_sign_extend: false,
+        };
 
         assert_eq!(
-            multi_write_regs_with_facts(&inst, EffectFacts::from_reg_consts(&facts)),
+            multi_write_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
             vec![20, 21, 22]
         );
     }
@@ -1070,11 +1119,11 @@ mod tests {
 
         assert!(matches!(
             try_read_regs(&inst),
-            Err(SlotRangeError {
+            Err(EffectError::SlotRange(SlotRangeError {
                 access: "read",
                 start: u16::MAX,
                 count: 2
-            })
+            }))
         ));
     }
 
@@ -1084,32 +1133,38 @@ mod tests {
 
         assert!(matches!(
             try_read_regs(&inst),
-            Err(SlotRangeError {
+            Err(EffectError::SlotRange(SlotRangeError {
                 access: "read",
                 start: u16::MAX,
                 count: 2
-            })
+            }))
         ));
     }
 
     #[test]
-    fn indexed_set_effects_use_dynamic_elem_bytes_when_available() {
+    fn indexed_set_effects_use_instruction_elem_layout() {
         let inst = Instruction::with_flags(Opcode::ArraySet, 0, 1, 4, 20);
-        let facts = fact_map(&[(5, 24)]);
+        let meta = JitInstructionMetadata::ElemLayout {
+            elem_bytes: 24,
+            needs_sign_extend: false,
+        };
 
         assert_eq!(
-            read_regs_with_facts(&inst, EffectFacts::from_reg_consts(&facts)),
+            read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
             vec![1, 4, 20, 21, 22]
         );
     }
 
     #[test]
-    fn slice_append_effects_use_dynamic_elem_bytes_when_available() {
+    fn slice_append_effects_use_instruction_elem_layout() {
         let inst = Instruction::with_flags(Opcode::SliceAppend, 0, 1, 2, 10);
-        let facts = fact_map(&[(11, 24)]);
+        let meta = JitInstructionMetadata::ElemLayout {
+            elem_bytes: 24,
+            needs_sign_extend: false,
+        };
 
         assert_eq!(
-            read_regs_with_facts(&inst, EffectFacts::from_reg_consts(&facts)),
+            read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
             vec![2, 10, 11, 12, 13, 14]
         );
     }
@@ -1123,7 +1178,7 @@ mod tests {
         };
 
         assert_eq!(
-            read_regs_with_facts(&inst, EffectFacts::none().with_instruction(Some(&meta))),
+            read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
             vec![1, 4, 5, 6, 9, 10, 11]
         );
     }
@@ -1134,11 +1189,11 @@ mod tests {
 
         assert!(matches!(
             try_read_regs(&inst),
-            Err(SlotRangeError {
+            Err(EffectError::SlotRange(SlotRangeError {
                 access: "read",
                 start: u16::MAX,
                 ..
-            })
+            }))
         ));
     }
 
@@ -1148,10 +1203,39 @@ mod tests {
 
         assert!(matches!(
             try_write_regs(&inst),
-            Err(SlotRangeError {
+            Err(EffectError::SlotRange(SlotRangeError {
                 access: "write",
                 start: u16::MAX,
                 count: 2,
+            }))
+        ));
+    }
+
+    #[test]
+    fn dynamic_layout_effects_fail_without_instruction_metadata() {
+        let get = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
+        let set = Instruction::with_flags(Opcode::ArraySet, 0, 1, 4, 20);
+        let map = Instruction::new(Opcode::MapGet, 10, 2, 5);
+
+        assert!(matches!(
+            try_multi_write_regs_with_context(&get, EffectFacts::none(), &[]),
+            Err(EffectError::MissingLayout {
+                opcode: Opcode::SliceGet,
+                layout: "ElemLayout"
+            })
+        ));
+        assert!(matches!(
+            try_read_regs_with_facts(&set, EffectFacts::none()),
+            Err(EffectError::MissingLayout {
+                opcode: Opcode::ArraySet,
+                layout: "ElemLayout"
+            })
+        ));
+        assert!(matches!(
+            try_instruction_effects_with_facts(&map, EffectFacts::none()),
+            Err(EffectError::MissingLayout {
+                opcode: Opcode::MapGet,
+                layout: "MapGet"
             })
         ));
     }

@@ -145,6 +145,9 @@ pub struct FunctionJitInfo {
     /// Last loop analysis error, if OSR discovery failed for this function.
     pub loop_analysis_error: Option<String>,
 
+    /// Last full-function compilation error, if the function was disabled.
+    pub compile_error: Option<String>,
+
     /// Loops that failed compilation (never retry).
     pub failed_loops: std::collections::HashSet<usize>,
 }
@@ -158,6 +161,7 @@ impl FunctionJitInfo {
             loop_counts: HashMap::new(),
             loops: None,
             loop_analysis_error: None,
+            compile_error: None,
             failed_loops: std::collections::HashSet::new(),
         }
     }
@@ -288,7 +292,9 @@ impl JitManager {
 
     fn rebuild_available_direct_callees(&self, out: &mut Vec<u32>) {
         out.clear();
-        out.reserve(self.func_table.len().saturating_sub(out.capacity()));
+        if out.capacity() < self.func_table.len() {
+            out.reserve(self.func_table.len() - out.capacity());
+        }
 
         for (id, ptr) in self.func_table.iter().enumerate() {
             if !ptr.is_null() {
@@ -314,22 +320,30 @@ impl JitManager {
     }
 
     /// Resolve which version to use for a function call.
-    /// Returns Some(jit_func) if JIT version available, None for VM fallback.
+    /// Returns Some(jit_func) if JIT version available, None for explicit cold fallback.
     /// Also handles hot tracking and triggers compilation when threshold reached.
     pub fn resolve_call(
         &mut self,
         func_id: u32,
         func_def: &FunctionDef,
         module: &VoModule,
-    ) -> Option<JitFunc> {
+    ) -> Result<Option<JitFunc>, JitError> {
         // 1. Already have JIT version?
         if let Some(jit_func) = self.get_entry(func_id) {
-            return Some(jit_func);
+            return Ok(Some(jit_func));
         }
 
         if self.is_unsupported(func_id) {
             self.record_fallback(JitFallbackReason::UnsupportedFunction);
-            return None;
+            let msg = self
+                .funcs
+                .get(func_id as usize)
+                .and_then(|info| info.compile_error.as_deref())
+                .unwrap_or("function is marked unsupported for JIT");
+            return Err(JitError::Internal(format!(
+                "function {} cannot be JIT-compiled: {msg}",
+                func_def.name
+            )));
         }
 
         // 2. Record call, compile if hot
@@ -337,19 +351,19 @@ impl JitManager {
             match self.compile_full(func_id, func_def, module) {
                 Ok(()) => {
                     if let Some(entry) = self.get_entry(func_id) {
-                        return Some(entry);
+                        return Ok(Some(entry));
                     }
                 }
-                Err(_) => {
+                Err(err) => {
                     self.record_fallback(JitFallbackReason::CompileFailed);
-                    return None;
+                    return Err(err);
                 }
             }
         }
 
-        // 3. Fall back to VM
+        // 3. Fall back to VM only because the function is not hot yet.
         self.record_fallback(JitFallbackReason::InterpretedCold);
-        None
+        Ok(None)
     }
 
     // =========================================================================
@@ -457,6 +471,7 @@ impl JitManager {
         if let Err(e) = compile_result {
             if let Some(info) = self.funcs.get_mut(idx) {
                 info.state = CompileState::Unsupported;
+                info.compile_error = Some(e.to_string());
             }
             return Err(e);
         }
@@ -469,6 +484,7 @@ impl JitManager {
         if let Some(info) = self.funcs.get_mut(idx) {
             info.full_entry = Some(ptr);
             info.state = CompileState::FullyCompiled;
+            info.compile_error = None;
         }
         self.func_table[idx] = ptr as *const u8;
 
@@ -488,7 +504,7 @@ impl JitManager {
         self.funcs
             .get(func_id as usize)
             .map(|info| info.state == CompileState::FullyCompiled)
-            .unwrap_or(false)
+            .expect("JIT: func_id out of range in is_compiled")
     }
 
     /// Check if function is marked as unsupported.
@@ -496,14 +512,17 @@ impl JitManager {
         self.funcs
             .get(func_id as usize)
             .map(|info| info.state == CompileState::Unsupported)
-            .unwrap_or(false)
+            .expect("JIT: func_id out of range in is_unsupported")
     }
 
     /// Mark function as unsupported.
     pub fn mark_unsupported(&mut self, func_id: u32) {
-        if let Some(info) = self.funcs.get_mut(func_id as usize) {
-            info.state = CompileState::Unsupported;
-        }
+        let info = self
+            .funcs
+            .get_mut(func_id as usize)
+            .expect("JIT: func_id out of range in mark_unsupported");
+        info.state = CompileState::Unsupported;
+        info.compile_error = Some("function marked unsupported".to_string());
     }
 
     /// Compile function (alias for compile_full).
@@ -521,14 +540,16 @@ impl JitManager {
         self.funcs
             .get(func_id as usize)
             .map(|info| info.failed_loops.contains(&begin_pc))
-            .unwrap_or(false)
+            .expect("JIT: func_id out of range in is_loop_failed")
     }
 
     /// Mark a loop as failed (never retry).
     pub fn mark_loop_failed(&mut self, func_id: u32, begin_pc: usize) {
-        if let Some(info) = self.funcs.get_mut(func_id as usize) {
-            info.failed_loops.insert(begin_pc);
-        }
+        let info = self
+            .funcs
+            .get_mut(func_id as usize)
+            .expect("JIT: func_id out of range in mark_loop_failed");
+        info.failed_loops.insert(begin_pc);
     }
 
     /// Compile a loop for OSR.

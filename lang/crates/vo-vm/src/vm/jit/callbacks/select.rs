@@ -7,9 +7,9 @@ use vo_runtime::jit_api::{JitContext, JitResult};
 use vo_runtime::slot::Slot;
 
 use crate::exec::{self, SelectResult};
-use crate::vm::helpers;
+use crate::vm::{helpers, RuntimeTrapKind};
 
-use super::helpers::{extract_context, set_jit_panic};
+use super::helpers::{extract_context, set_jit_panic, set_jit_trap};
 
 // =============================================================================
 // Public JIT Callbacks
@@ -109,9 +109,12 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
     ) {
         SelectResult::Continue => JitResult::Ok,
         SelectResult::Block => JitResult::WaitQueue,
-        SelectResult::SendOnClosed => {
-            set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED)
-        }
+        SelectResult::SendOnClosed => set_jit_trap(
+            &mut vm.state.gc,
+            fiber,
+            RuntimeTrapKind::SendOnClosedChannel,
+            helpers::ERR_SEND_ON_CLOSED,
+        ),
         SelectResult::UnsupportedRemotePort => set_jit_panic(
             &mut vm.state.gc,
             fiber,

@@ -547,10 +547,7 @@ impl FuncBuilder {
     }
 
     pub fn is_heap_local(&self, sym: Symbol) -> bool {
-        self.locals
-            .get(&sym)
-            .map(|l| l.storage.is_heap())
-            .unwrap_or(false)
+        self.locals.get(&sym).is_some_and(|l| l.storage.is_heap())
     }
 
     /// Allocate temp slots for function arguments. Returns 0 if slots == 0.
@@ -665,17 +662,16 @@ impl FuncBuilder {
         elem_bytes: usize,
         elem_vk: vo_common_core::ValueKind,
     ) -> JitInstructionMetadata {
-        match u32::try_from(elem_bytes) {
-            Ok(elem_bytes) => JitInstructionMetadata::ElemLayout {
-                elem_bytes,
-                needs_sign_extend: matches!(
-                    elem_vk,
-                    vo_common_core::ValueKind::Int8
-                        | vo_common_core::ValueKind::Int16
-                        | vo_common_core::ValueKind::Int32
-                ),
-            },
-            Err(_) => JitInstructionMetadata::None,
+        let elem_bytes =
+            u32::try_from(elem_bytes).expect("element byte width exceeds JIT metadata encoding");
+        JitInstructionMetadata::ElemLayout {
+            elem_bytes,
+            needs_sign_extend: matches!(
+                elem_vk,
+                vo_common_core::ValueKind::Int8
+                    | vo_common_core::ValueKind::Int16
+                    | vo_common_core::ValueKind::Int32
+            ),
         }
     }
 
@@ -1429,9 +1425,10 @@ impl FuncBuilder {
             hint_pc
         );
 
-        // Calculate end_offset (distance from hint_pc to end_pc, capped at 255)
+        // Calculate end_offset (distance from hint_pc to end_pc, capped at 255).
+        // A zero compact offset means the JIT must read the explicit LoopEnd metadata.
         let offset = end_pc - hint_pc;
-        let end_offset = if offset > 255 { 0 } else { offset as u8 }; // 0 signals JIT to scan for back-edge
+        let end_offset = if offset > 255 { 0 } else { offset as u8 };
 
         // Build flags
         let mut flags = 0u8;
@@ -1457,6 +1454,9 @@ impl FuncBuilder {
         let (b, c) = Self::encode_jump_offset(exit_pc as i32);
         self.code[hint_pc].b = b;
         self.code[hint_pc].c = c;
+        self.jit_metadata[hint_pc] = JitInstructionMetadata::LoopEnd {
+            end_pc: u32::try_from(end_pc).expect("loop end pc exceeds u32"),
+        };
     }
 
     /// Get the depth of the current innermost loop.
@@ -1654,7 +1654,7 @@ impl FuncBuilder {
                     .named_return_slots
                     .first()
                     .map(|(slot, _, _)| *slot)
-                    .unwrap_or(0);
+                    .expect("escaped named returns must have a first slot");
                 let slots: Vec<u16> = self.named_return_slots.iter().map(|(_, s, _)| *s).collect();
                 (self.named_return_slots.len() as u16, start, slots)
             } else {
@@ -1782,5 +1782,11 @@ mod tests {
                 needs_sign_extend: false,
             }]
         ));
+    }
+
+    #[test]
+    #[should_panic(expected = "element byte width exceeds JIT metadata encoding")]
+    fn elem_layout_metadata_overflow_is_not_silently_dropped() {
+        let _ = FuncBuilder::elem_metadata(u32::MAX as usize + 1, ValueKind::Struct);
     }
 }

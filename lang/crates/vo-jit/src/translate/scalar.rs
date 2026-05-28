@@ -6,13 +6,14 @@ use cranelift_codegen::ir::{
 };
 use vo_runtime::bytecode::Constant;
 use vo_runtime::instruction::{Instruction, Opcode, QUEUE_KIND_PORT_FLAG};
+use vo_runtime::jit_api::JitRuntimeTrapKind;
 
 use crate::translator::{
     emit_funcref_call, emit_funcref_call_with_effect, HelperCallEffect, IrEmitter,
 };
 use crate::JitError;
 
-use super::emit_panic_if;
+use super::emit_runtime_trap_if;
 
 pub(super) fn load_int<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let val = e.builder().ins().iconst(types::I64, inst.imm32() as i64);
@@ -102,7 +103,7 @@ pub(super) fn div_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             let one_val = e.builder().ins().iconst(types::I8, 1);
             let zero_val = e.builder().ins().iconst(types::I8, 0);
             let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
-            emit_panic_if(e, is_true);
+            emit_runtime_trap_if(e, is_true, JitRuntimeTrapKind::DivisionByZero, None, None);
             // Unreachable, but satisfy SSA
             let undef = e.builder().ins().iconst(types::I64, 0);
             e.write_var(inst.a, undef);
@@ -129,7 +130,7 @@ pub(super) fn div_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check for division by zero
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_zero = e.builder().ins().icmp(IntCC::Equal, b, zero);
-    emit_panic_if(e, is_zero);
+    emit_runtime_trap_if(e, is_zero, JitRuntimeTrapKind::DivisionByZero, None, None);
     // Handle MIN_INT64 / -1 overflow: result would be MAX_INT64+1, which overflows.
     // x86 idiv traps on this. Go semantics: result wraps to MIN_INT64.
     // Replace b with 1 when overflow would occur to avoid the trap.
@@ -154,7 +155,7 @@ pub(super) fn mod_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             let one_val = e.builder().ins().iconst(types::I8, 1);
             let zero_val = e.builder().ins().iconst(types::I8, 0);
             let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
-            emit_panic_if(e, is_true);
+            emit_runtime_trap_if(e, is_true, JitRuntimeTrapKind::DivisionByZero, None, None);
             let undef = e.builder().ins().iconst(types::I64, 0);
             e.write_var(inst.a, undef);
             return;
@@ -179,7 +180,7 @@ pub(super) fn mod_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check for division by zero
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_zero = e.builder().ins().icmp(IntCC::Equal, b, zero);
-    emit_panic_if(e, is_zero);
+    emit_runtime_trap_if(e, is_zero, JitRuntimeTrapKind::DivisionByZero, None, None);
     // Handle MIN_INT64 % -1: x86 idiv traps on this. Result should be 0.
     // Replace b with 1 when overflow would occur (MIN % 1 = 0).
     let min_i64 = e.builder().ins().iconst(types::I64, i64::MIN);
@@ -202,7 +203,7 @@ pub(super) fn div_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             let one_val = e.builder().ins().iconst(types::I8, 1);
             let zero_val = e.builder().ins().iconst(types::I8, 0);
             let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
-            emit_panic_if(e, is_true);
+            emit_runtime_trap_if(e, is_true, JitRuntimeTrapKind::DivisionByZero, None, None);
             let undef = e.builder().ins().iconst(types::I64, 0);
             e.write_var(inst.a, undef);
             return;
@@ -217,7 +218,7 @@ pub(super) fn div_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check for division by zero
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_zero = e.builder().ins().icmp(IntCC::Equal, b, zero);
-    emit_panic_if(e, is_zero);
+    emit_runtime_trap_if(e, is_zero, JitRuntimeTrapKind::DivisionByZero, None, None);
     let r = e.builder().ins().udiv(a, b);
     e.write_var(inst.a, r);
 }
@@ -231,7 +232,7 @@ pub(super) fn mod_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             let one_val = e.builder().ins().iconst(types::I8, 1);
             let zero_val = e.builder().ins().iconst(types::I8, 0);
             let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
-            emit_panic_if(e, is_true);
+            emit_runtime_trap_if(e, is_true, JitRuntimeTrapKind::DivisionByZero, None, None);
             let undef = e.builder().ins().iconst(types::I64, 0);
             e.write_var(inst.a, undef);
             return;
@@ -246,7 +247,7 @@ pub(super) fn mod_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check for division by zero
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_zero = e.builder().ins().icmp(IntCC::Equal, b, zero);
-    emit_panic_if(e, is_zero);
+    emit_runtime_trap_if(e, is_zero, JitRuntimeTrapKind::DivisionByZero, None, None);
     let r = e.builder().ins().urem(a, b);
     e.write_var(inst.a, r);
 }
@@ -356,7 +357,13 @@ pub(super) fn shift_precheck<'a>(e: &mut impl IrEmitter<'a>, shift_amt: Value) -
         .builder()
         .ins()
         .icmp(IntCC::SignedLessThan, shift_amt, zero);
-    emit_panic_if(e, is_negative);
+    emit_runtime_trap_if(
+        e,
+        is_negative,
+        JitRuntimeTrapKind::NegativeShift,
+        None,
+        None,
+    );
     let sixty_four = e.builder().ins().iconst(types::I64, 64);
     let is_large = e
         .builder()
@@ -375,7 +382,7 @@ pub(super) fn shl<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             let one_val = e.builder().ins().iconst(types::I8, 1);
             let zero_val = e.builder().ins().iconst(types::I8, 0);
             let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
-            emit_panic_if(e, is_true);
+            emit_runtime_trap_if(e, is_true, JitRuntimeTrapKind::NegativeShift, None, None);
             let undef = e.builder().ins().iconst(types::I64, 0);
             e.write_var(inst.a, undef);
         } else if const_b >= 64 {
@@ -402,7 +409,7 @@ pub(super) fn shr_s<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             let one_val = e.builder().ins().iconst(types::I8, 1);
             let zero_val = e.builder().ins().iconst(types::I8, 0);
             let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
-            emit_panic_if(e, is_true);
+            emit_runtime_trap_if(e, is_true, JitRuntimeTrapKind::NegativeShift, None, None);
             let undef = e.builder().ins().iconst(types::I64, 0);
             e.write_var(inst.a, undef);
         } else if const_b >= 64 {
@@ -436,7 +443,7 @@ pub(super) fn shr_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             let one_val = e.builder().ins().iconst(types::I8, 1);
             let zero_val = e.builder().ins().iconst(types::I8, 0);
             let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
-            emit_panic_if(e, is_true);
+            emit_runtime_trap_if(e, is_true, JitRuntimeTrapKind::NegativeShift, None, None);
             let undef = e.builder().ins().iconst(types::I64, 0);
             e.write_var(inst.a, undef);
         } else if const_b >= 64 {

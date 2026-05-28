@@ -4,7 +4,7 @@ use vo_runtime::jit_api::{JitContext, JitResult};
 use vo_runtime::objects::interface::InterfaceSlot;
 
 use crate::fiber::Fiber;
-use crate::vm::Vm;
+use crate::vm::{RuntimeTrapKind, Vm};
 
 /// Extract VM and Fiber references from JitContext.
 #[inline]
@@ -23,7 +23,24 @@ pub fn set_jit_panic(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber, msg: &str) 
     JitResult::Panic
 }
 
+pub fn set_jit_trap(
+    gc: &mut vo_runtime::gc::Gc,
+    fiber: &mut Fiber,
+    kind: RuntimeTrapKind,
+    msg: &str,
+) -> JitResult {
+    let panic_str = vo_runtime::objects::string::new_from_string(gc, msg.to_string());
+    let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
+    fiber.set_recoverable_trap(kind, InterfaceSlot::new(slot0, panic_str as u64));
+    JitResult::Panic
+}
+
 pub extern "C" fn jit_stack_overflow(ctx: *mut JitContext) -> JitResult {
     let (vm, fiber) = unsafe { extract_context(ctx) };
-    set_jit_panic(&mut vm.state.gc, fiber, "runtime error: stack overflow")
+    set_jit_trap(
+        &mut vm.state.gc,
+        fiber,
+        RuntimeTrapKind::StackOverflow,
+        "runtime error: stack overflow",
+    )
 }

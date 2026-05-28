@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 
 use vo_runtime::bytecode::Module;
 use vo_runtime::instruction::Instruction;
-use vo_runtime::jit_api::{JitContext, JitResult};
+use vo_runtime::jit_api::{JitContext, JitResult, JitRuntimeTrapKind};
 use vo_runtime::objects::interface::InterfaceSlot;
 
 use crate::fiber::{CallFrame, Fiber, FiberCapacityError};
@@ -44,10 +44,85 @@ mod frame;
 
 pub use context::{build_jit_context, JitContextWrapper};
 
-/// Create default panic message for runtime errors (nil deref, bounds check, etc).
-fn create_default_panic_msg(gc: &mut vo_runtime::gc::Gc) -> InterfaceSlot {
-    let msg_str =
-        vo_runtime::objects::string::new_from_string(gc, helpers::ERR_NIL_POINTER.to_string());
+struct JitPanicInfo {
+    trap_kind: Option<RuntimeTrapKind>,
+    msg: InterfaceSlot,
+}
+
+enum SetupJitPanicError {
+    Capacity(FiberCapacityError),
+    MissingPayload,
+}
+
+fn jit_error_message(action: &str, func_name: &str, err: &vo_jit::JitError) -> String {
+    format!("JIT {action} failed for {func_name}: {err}")
+}
+
+fn jit_context_error_message(ctx: &JitContextWrapper, module: &Module) -> String {
+    let extern_id = ctx.ctx.runtime_trap_arg0 as u32;
+    let not_registered_id = ctx.ctx.runtime_trap_arg1 as u32;
+    if let Some(extern_def) = module.externs.get(extern_id as usize) {
+        format!(
+            "JIT extern call failed: extern function '{}' (id={}) not registered",
+            extern_def.name, not_registered_id
+        )
+    } else {
+        format!(
+            "JIT execution failed: extern id {} not registered",
+            not_registered_id
+        )
+    }
+}
+
+fn runtime_trap_from_jit(kind: JitRuntimeTrapKind) -> Option<RuntimeTrapKind> {
+    match kind {
+        JitRuntimeTrapKind::None => None,
+        JitRuntimeTrapKind::NilPointerDereference => Some(RuntimeTrapKind::NilPointerDereference),
+        JitRuntimeTrapKind::NilMapWrite => Some(RuntimeTrapKind::NilMapWrite),
+        JitRuntimeTrapKind::UnhashableType => Some(RuntimeTrapKind::UnhashableType),
+        JitRuntimeTrapKind::UncomparableType => Some(RuntimeTrapKind::UncomparableType),
+        JitRuntimeTrapKind::NegativeShift => Some(RuntimeTrapKind::NegativeShift),
+        JitRuntimeTrapKind::NilFuncCall => Some(RuntimeTrapKind::NilFuncCall),
+        JitRuntimeTrapKind::TypeAssertionFailed => Some(RuntimeTrapKind::TypeAssertionFailed),
+        JitRuntimeTrapKind::DivisionByZero => Some(RuntimeTrapKind::DivisionByZero),
+        JitRuntimeTrapKind::IndexOutOfBounds => Some(RuntimeTrapKind::IndexOutOfBounds),
+        JitRuntimeTrapKind::SliceBoundsOutOfRange => Some(RuntimeTrapKind::SliceBoundsOutOfRange),
+        JitRuntimeTrapKind::MakeSlice => Some(RuntimeTrapKind::MakeSlice),
+        JitRuntimeTrapKind::MakeChan => Some(RuntimeTrapKind::MakeChan),
+        JitRuntimeTrapKind::MakePort => Some(RuntimeTrapKind::MakePort),
+        JitRuntimeTrapKind::SendOnClosedChannel => Some(RuntimeTrapKind::SendOnClosedChannel),
+        JitRuntimeTrapKind::SendOnNilChannel => Some(RuntimeTrapKind::SendOnNilChannel),
+        JitRuntimeTrapKind::RecvOnNilChannel => Some(RuntimeTrapKind::RecvOnNilChannel),
+        JitRuntimeTrapKind::CloseNilChannel => Some(RuntimeTrapKind::CloseNilChannel),
+        JitRuntimeTrapKind::CloseClosedChannel => Some(RuntimeTrapKind::CloseClosedChannel),
+        JitRuntimeTrapKind::StackOverflow => Some(RuntimeTrapKind::StackOverflow),
+    }
+}
+
+fn jit_runtime_trap_message(kind: RuntimeTrapKind, arg0: u64, arg1: u64) -> String {
+    match kind {
+        RuntimeTrapKind::IndexOutOfBounds => {
+            format!(
+                "runtime error: index out of range [{}] with length {}",
+                arg0 as i64, arg1 as i64
+            )
+        }
+        RuntimeTrapKind::SliceBoundsOutOfRange => {
+            format!(
+                "runtime error: slice bounds out of range [{}:{}]",
+                arg0 as i64, arg1 as i64
+            )
+        }
+        RuntimeTrapKind::MakeSlice => helpers::makeslice_error_message(arg0 as i32).to_string(),
+        RuntimeTrapKind::MakeChan | RuntimeTrapKind::MakePort => {
+            helpers::make_queue_error_message(kind).to_string()
+        }
+        _ => helpers::runtime_trap_message(kind).to_string(),
+    }
+}
+
+fn interface_string(gc: &mut vo_runtime::gc::Gc, msg: String) -> InterfaceSlot {
+    let msg_str = vo_runtime::objects::string::new_from_string(gc, msg);
     let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
     InterfaceSlot::new(slot0, msg_str as u64)
 }
@@ -80,34 +155,45 @@ fn set_stack_overflow_panic(vm: &mut Vm, fiber: &mut Fiber, err: FiberCapacityEr
 /// or VM-fallback panics it may already be in fiber.panic_state — take() handles both, with a
 /// default message as fallback.
 ///
-/// Source location uses `call_resume_pc-1` (the CallExtern site that triggered the panic).
-/// Falls back to 0 when the panic was not triggered from an extern call site (e.g. nil deref
-/// inside pure JIT opcodes where call_resume_pc is stale).
+/// Source location prefers `runtime_trap_pc` recorded by typed JIT traps and
+/// falls back to `call_resume_pc - 1` for older callback/user-panic paths.
 ///
-/// Returns the resolved panic message; caller must call `fiber.set_recoverable_panic(msg)`.
+/// Returns the resolved panic message and optional runtime-trap kind; caller
+/// must restore it on the fiber before invoking panic unwinding.
 fn setup_jit_panic(
     ctx: &JitContextWrapper,
     fiber: &mut Fiber,
     gc: &mut vo_runtime::gc::Gc,
     module: &Module,
-) -> Result<InterfaceSlot, FiberCapacityError> {
+) -> Result<JitPanicInfo, SetupJitPanicError> {
     if ctx.is_user_panic() {
         fiber.set_recoverable_panic(ctx.panic_msg());
+    } else if let Some(jit_kind) = JitRuntimeTrapKind::from_u8(ctx.ctx.runtime_trap_kind) {
+        if let Some(kind) = runtime_trap_from_jit(jit_kind) {
+            let msg = jit_runtime_trap_message(
+                kind,
+                ctx.ctx.runtime_trap_arg0,
+                ctx.ctx.runtime_trap_arg1,
+            );
+            fiber.set_recoverable_trap(kind, interface_string(gc, msg));
+        }
     }
-    let panic_msg = fiber
-        .take_recoverable_panic()
-        .unwrap_or_else(|| create_default_panic_msg(gc));
+    let (trap_kind, panic_msg) = fiber
+        .take_recoverable_panic_with_kind()
+        .ok_or(SetupJitPanicError::MissingPayload)?;
 
-    materialize_jit_frames(fiber, module, 0)?;
+    materialize_jit_frames(fiber, module, 0).map_err(SetupJitPanicError::Capacity)?;
 
     if fiber.panic_source_loc.is_none() {
-        let resume_pc = ctx.call_resume_pc();
-        fiber.panic_source_loc = fiber
-            .current_frame()
-            .map(|f| (f.func_id, resume_pc.saturating_sub(1)));
+        let trap_pc = (ctx.ctx.runtime_trap_pc != u32::MAX).then_some(ctx.ctx.runtime_trap_pc);
+        let pc = trap_pc.unwrap_or_else(|| ctx.call_resume_pc().saturating_sub(1));
+        fiber.panic_source_loc = fiber.current_frame().map(|f| (f.func_id, pc));
     }
 
-    Ok(panic_msg)
+    Ok(JitPanicInfo {
+        trap_kind,
+        msg: panic_msg,
+    })
 }
 
 /// Execute a JIT-compiled function call.
@@ -276,11 +362,23 @@ fn handle_jit_result(
             )
         }
         JitResult::Panic => {
-            let panic_msg = match setup_jit_panic(&ctx, fiber, &mut vm.state.gc, module) {
-                Ok(msg) => msg,
-                Err(err) => return stack_overflow_exec_result(vm, fiber, module, err),
+            let panic_info = match setup_jit_panic(&ctx, fiber, &mut vm.state.gc, module) {
+                Ok(info) => info,
+                Err(SetupJitPanicError::Capacity(err)) => {
+                    return stack_overflow_exec_result(vm, fiber, module, err);
+                }
+                Err(SetupJitPanicError::MissingPayload) => {
+                    return ExecResult::JitError(
+                        "JIT returned Panic without user panic or typed runtime trap payload"
+                            .to_string(),
+                    );
+                }
             };
-            fiber.set_recoverable_panic(panic_msg);
+            if let Some(kind) = panic_info.trap_kind {
+                fiber.set_recoverable_trap(kind, panic_info.msg);
+            } else {
+                fiber.set_recoverable_panic(panic_info.msg);
+            }
             let stack_ptr = fiber.stack_ptr();
             helpers::panic_unwind(fiber, stack_ptr, module)
         }
@@ -310,6 +408,15 @@ fn handle_jit_result(
             if call_kind == JitContext::CALL_KIND_PREPARED {
                 if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
                     jit_mgr.record_fallback(JitFallbackReason::PreparedDynamicCall);
+                    let callee_func_def = &module.functions[callee_func_id as usize];
+                    if let Err(err) = jit_mgr.resolve_call(callee_func_id, callee_func_def, module)
+                    {
+                        return ExecResult::JitError(jit_error_message(
+                            "prepared dynamic callee compilation",
+                            &callee_func_def.name,
+                            &err,
+                        ));
+                    }
                 }
                 let callee_bp = ctx.call_resume_pc() as usize;
                 let caller_resume_pc = ctx.call_arg_start() as u32;
@@ -324,12 +431,6 @@ fn handle_jit_result(
                     caller_resume_pc,
                 ) {
                     return stack_overflow_exec_result(vm, fiber, module, err);
-                }
-                // Trigger JIT compilation for callee so future dynamic calls
-                // can use the JIT-to-JIT fast path.
-                if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                    let callee_func_def = &module.functions[callee_func_id as usize];
-                    let _ = jit_mgr.resolve_call(callee_func_id, callee_func_def, module);
                 }
                 return ExecResult::FrameChanged;
             }
@@ -356,17 +457,25 @@ fn handle_jit_result(
             // Check if callee can be JIT-executed instead of interpreter fallback
             if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
                 let callee_func_def = &module.functions[callee_func_id as usize];
-                if let Some(jit_func) =
-                    jit_mgr.resolve_call(callee_func_id, callee_func_def, module)
-                {
-                    return execute_jit_callee(
-                        vm,
-                        fiber,
-                        module,
-                        jit_func,
-                        callee_bp,
-                        callee_ret_slots,
-                    );
+                match jit_mgr.resolve_call(callee_func_id, callee_func_def, module) {
+                    Ok(Some(jit_func)) => {
+                        return execute_jit_callee(
+                            vm,
+                            fiber,
+                            module,
+                            jit_func,
+                            callee_bp,
+                            callee_ret_slots,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        return ExecResult::JitError(jit_error_message(
+                            "callee compilation",
+                            &callee_func_def.name,
+                            &err,
+                        ));
+                    }
                 }
             }
 
@@ -415,6 +524,7 @@ fn handle_jit_result(
             }
             ExecResult::FrameChanged
         }
+        JitResult::JitError => ExecResult::JitError(jit_context_error_message(&ctx, module)),
     }
 }
 
@@ -827,11 +937,10 @@ pub extern "C" fn jit_call_extern(
             // Exit JIT — VM will handle host event suspension
             JitResult::Replay
         }
-        ExternResult::NotRegistered(_) => {
-            unsafe {
-                *ctx_ref.panic_flag = true;
-            }
-            JitResult::Panic
+        ExternResult::NotRegistered(id) => {
+            ctx_ref.runtime_trap_arg0 = extern_id as u64;
+            ctx_ref.runtime_trap_arg1 = id as u64;
+            JitResult::JitError
         }
     }
 }
@@ -853,6 +962,8 @@ pub enum OsrResult {
     WaitQueue,
     /// Panic occurred during loop execution.
     Panic,
+    /// Fatal JIT infrastructure error. This is not recoverable by user code.
+    JitError(String),
 }
 
 /// Execute a compiled loop via OSR.
@@ -904,14 +1015,24 @@ pub fn dispatch_loop_osr(
             OsrResult::ExitPc(ctx.ctx.loop_exit_pc as usize)
         }
         JitResult::Panic => {
-            let panic_msg = match setup_jit_panic(&ctx, fiber, &mut vm.state.gc, module) {
-                Ok(msg) => msg,
-                Err(err) => {
+            let panic_info = match setup_jit_panic(&ctx, fiber, &mut vm.state.gc, module) {
+                Ok(info) => info,
+                Err(SetupJitPanicError::Capacity(err)) => {
                     set_stack_overflow_panic(vm, fiber, err);
                     return OsrResult::Panic;
                 }
+                Err(SetupJitPanicError::MissingPayload) => {
+                    return OsrResult::JitError(
+                        "JIT returned Panic without user panic or typed runtime trap payload"
+                            .to_string(),
+                    );
+                }
             };
-            fiber.set_recoverable_panic(panic_msg);
+            if let Some(kind) = panic_info.trap_kind {
+                fiber.set_recoverable_trap(kind, panic_info.msg);
+            } else {
+                fiber.set_recoverable_panic(panic_info.msg);
+            }
             OsrResult::Panic
         }
         JitResult::Call => {
@@ -945,6 +1066,15 @@ pub fn dispatch_loop_osr(
             if call_kind == JitContext::CALL_KIND_PREPARED {
                 if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
                     jit_mgr.record_fallback(JitFallbackReason::PreparedDynamicCall);
+                    let callee_func_def = &module.functions[callee_func_id as usize];
+                    if let Err(err) = jit_mgr.resolve_call(callee_func_id, callee_func_def, module)
+                    {
+                        return OsrResult::JitError(jit_error_message(
+                            "prepared dynamic callee compilation",
+                            &callee_func_def.name,
+                            &err,
+                        ));
+                    }
                 }
                 let callee_bp = ctx.call_resume_pc() as usize;
                 let caller_resume_pc = ctx.call_arg_start() as u32;
@@ -959,13 +1089,6 @@ pub fn dispatch_loop_osr(
                 ) {
                     set_stack_overflow_panic(vm, fiber, err);
                     return OsrResult::Panic;
-                }
-                // Hint: trigger JIT compilation for callee so future loop OSR
-                // iterations can use JIT-to-JIT fast path. Error ignored because
-                // this is best-effort — the VM fallback path works regardless.
-                if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                    let callee_func_def = &module.functions[callee_func_id as usize];
-                    let _ = jit_mgr.resolve_call(callee_func_id, callee_func_def, module);
                 }
                 OsrResult::FrameChanged
             } else {
@@ -1035,6 +1158,7 @@ pub fn dispatch_loop_osr(
             }
             OsrResult::FrameChanged
         }
+        JitResult::JitError => OsrResult::JitError(jit_context_error_message(&ctx, module)),
     }
 }
 
@@ -1050,53 +1174,76 @@ pub(crate) fn try_loop_osr(
     loop_pc: usize,
     bp: usize,
 ) -> Option<OsrResult> {
-    let loop_func = get_or_compile_loop(vm, func_id, loop_pc)?;
+    let loop_func = match get_or_compile_loop(vm, func_id, loop_pc) {
+        Ok(Some(loop_func)) => loop_func,
+        Ok(None) => return None,
+        Err(err) => {
+            let func_name = vm
+                .module
+                .as_ref()
+                .and_then(|module| module.functions.get(func_id as usize))
+                .map(|func| func.name.as_str())
+                .unwrap_or("<unknown>");
+            return Some(OsrResult::JitError(format!(
+                "JIT OSR compilation failed for {func_name} at loop pc {loop_pc}: {err}"
+            )));
+        }
+    };
     let module = vm.module.as_ref().unwrap();
     let local_slots = module.functions[func_id as usize].local_slots as usize;
     Some(dispatch_loop_osr(vm, fiber_id, loop_func, bp, local_slots))
 }
 
 /// Get compiled loop or compile if hot. Returns None if not ready.
-fn get_or_compile_loop(vm: &mut Vm, func_id: u32, loop_pc: usize) -> Option<vo_jit::LoopFunc> {
+fn get_or_compile_loop(
+    vm: &mut Vm,
+    func_id: u32,
+    loop_pc: usize,
+) -> Result<Option<vo_jit::LoopFunc>, vo_jit::JitError> {
     use vo_runtime::instruction::Opcode;
 
-    let module = vm.module.as_ref()?;
+    let module = vm
+        .module
+        .as_ref()
+        .ok_or_else(|| vo_jit::JitError::Internal("OSR requested without loaded module".into()))?;
     let func_def = &module.functions[func_id as usize];
-    let jit_mgr = vm.jit_mgr.as_mut()?;
+    let Some(jit_mgr) = vm.jit_mgr.as_mut() else {
+        return Ok(None);
+    };
 
     // Already compiled?
     if let Some(lf) = unsafe { jit_mgr.get_loop_func(func_id, loop_pc) } {
-        return Some(lf);
+        return Ok(Some(lf));
     }
 
     // Already failed?
     if jit_mgr.is_loop_failed(func_id, loop_pc) {
         jit_mgr.record_fallback(JitFallbackReason::LoopCompileFailed);
-        return None;
+        return Err(vo_jit::JitError::Internal(format!(
+            "loop at pc {loop_pc} previously failed JIT compilation"
+        )));
     }
 
     // Not hot yet?
     if !jit_mgr.record_backedge(func_id, loop_pc) {
         jit_mgr.record_fallback(JitFallbackReason::LoopNotHot);
-        return None;
+        return Ok(None);
     }
 
     // Hot - try to compile
     let loop_info = match jit_mgr.find_loop(func_id, func_def, module, loop_pc) {
         Ok(Some(info)) => info,
         Ok(None) => {
-            // Back-edge detected but no LoopInfo found - codegen bug or analysis bug
-            // Mark as failed to avoid retrying
             jit_mgr.mark_loop_failed(func_id, loop_pc);
             jit_mgr.record_fallback(JitFallbackReason::LoopCompileFailed);
-            return None;
+            return Err(vo_jit::JitError::Internal(format!(
+                "hot back-edge at pc {loop_pc} has no LoopInfo"
+            )));
         }
-        Err(_) => {
-            // Loop discovery failed with an explicit analysis error recorded by
-            // JitManager; do not silently downgrade malformed effect/range facts.
+        Err(err) => {
             jit_mgr.mark_loop_failed(func_id, loop_pc);
             jit_mgr.record_fallback(JitFallbackReason::LoopCompileFailed);
-            return None;
+            return Err(err);
         }
     };
 
@@ -1108,17 +1255,25 @@ fn get_or_compile_loop(vm: &mut Vm, func_id: u32, loop_pc: usize) -> Option<vo_j
             let target_func_id = inst.static_call_func_id();
             if !jit_mgr.is_compiled(target_func_id) && !jit_mgr.is_unsupported(target_func_id) {
                 let target_func = &module.functions[target_func_id as usize];
-                let _ = jit_mgr.compile_function(target_func_id, target_func, module);
+                jit_mgr.resolve_call(target_func_id, target_func, module)?;
             }
         }
     }
 
     match jit_mgr.compile_loop(func_id, func_def, module, &loop_info) {
-        Ok(_) => unsafe { jit_mgr.get_loop_func(func_id, loop_pc) },
-        Err(_) => {
+        Ok(_) => {
+            let loop_func =
+                unsafe { jit_mgr.get_loop_func(func_id, loop_pc) }.ok_or_else(|| {
+                    vo_jit::JitError::Internal(format!(
+                        "compiled loop at pc {loop_pc} but no function pointer was registered"
+                    ))
+                })?;
+            Ok(Some(loop_func))
+        }
+        Err(err) => {
             jit_mgr.mark_loop_failed(func_id, loop_pc);
             jit_mgr.record_fallback(JitFallbackReason::LoopCompileFailed);
-            None
+            Err(err)
         }
     }
 }

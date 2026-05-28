@@ -5,9 +5,9 @@
 //!
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, format, string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 #[cfg(feature = "std")]
-use std::{boxed::Box, vec::Vec};
+use std::{boxed::Box, string::String, vec::Vec};
 
 use vo_common_core::bytecode::StructMeta;
 use vo_common_core::instruction::QUEUE_KIND_PORT_FLAG;
@@ -192,10 +192,6 @@ pub fn exec_queue_new(
     gc: &mut Gc,
 ) -> QueueNewResult {
     let kind = queue_new_kind_from_flags(inst.flags);
-    let err_name = match kind {
-        QueueKind::Chan => "makechan",
-        QueueKind::Port => "makeport",
-    };
     let packed_type = stack_get(stack, bp + inst.b as usize);
     let elem_meta = ValueMeta::from_raw(packed_type as u32);
     let elem_rttid = ValueRttid::from_raw((packed_type >> 32) as u32);
@@ -207,7 +203,9 @@ pub fn exec_queue_new(
             stack_set(stack, bp + inst.a as usize, ch as u64);
             Ok(())
         }
-        Err(_) => Err(format!("runtime error: {}: size out of range", err_name)),
+        Err(_) => Err(String::from(crate::vm::helpers::make_queue_error_message(
+            queue_new_trap_kind(inst.flags),
+        ))),
     }
 }
 

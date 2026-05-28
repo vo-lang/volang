@@ -32,6 +32,59 @@ use vo_common_core::bytecode::Module;
 // JitContext
 // =============================================================================
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitRuntimeTrapKind {
+    None = 0,
+    NilPointerDereference = 1,
+    NilMapWrite = 2,
+    UnhashableType = 3,
+    UncomparableType = 4,
+    NegativeShift = 5,
+    NilFuncCall = 6,
+    TypeAssertionFailed = 7,
+    DivisionByZero = 8,
+    IndexOutOfBounds = 9,
+    SliceBoundsOutOfRange = 10,
+    MakeSlice = 11,
+    MakeChan = 12,
+    MakePort = 13,
+    SendOnClosedChannel = 14,
+    SendOnNilChannel = 15,
+    RecvOnNilChannel = 16,
+    CloseNilChannel = 17,
+    CloseClosedChannel = 18,
+    StackOverflow = 19,
+}
+
+impl JitRuntimeTrapKind {
+    pub fn from_u8(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::None),
+            1 => Some(Self::NilPointerDereference),
+            2 => Some(Self::NilMapWrite),
+            3 => Some(Self::UnhashableType),
+            4 => Some(Self::UncomparableType),
+            5 => Some(Self::NegativeShift),
+            6 => Some(Self::NilFuncCall),
+            7 => Some(Self::TypeAssertionFailed),
+            8 => Some(Self::DivisionByZero),
+            9 => Some(Self::IndexOutOfBounds),
+            10 => Some(Self::SliceBoundsOutOfRange),
+            11 => Some(Self::MakeSlice),
+            12 => Some(Self::MakeChan),
+            13 => Some(Self::MakePort),
+            14 => Some(Self::SendOnClosedChannel),
+            15 => Some(Self::SendOnNilChannel),
+            16 => Some(Self::RecvOnNilChannel),
+            17 => Some(Self::CloseNilChannel),
+            18 => Some(Self::CloseClosedChannel),
+            19 => Some(Self::StackOverflow),
+            _ => None,
+        }
+    }
+}
+
 /// Function pointer type for pushing a JIT frame.
 /// Also updates caller's frame.pc to caller_resume_pc for nested Call handling.
 /// Returns: args_ptr for the new frame (fiber.stack_ptr + new_bp)
@@ -242,6 +295,17 @@ pub struct JitContext {
 
     /// Panic message (interface as InterfaceSlot, set by vo_panic for user panics).
     pub panic_msg: *mut InterfaceSlot,
+
+    /// Runtime trap kind for JIT-generated runtime panics.
+    ///
+    /// `JitRuntimeTrapKind::None` means no typed runtime trap was recorded. The
+    /// arg fields carry trap-specific dynamic details, such as index and length
+    /// for bounds panics. `runtime_trap_pc` is the bytecode pc that caused the
+    /// trap, or `u32::MAX` when unknown.
+    pub runtime_trap_kind: u8,
+    pub runtime_trap_arg0: u64,
+    pub runtime_trap_arg1: u64,
+    pub runtime_trap_pc: u32,
 
     /// Opaque pointer to VM instance.
     /// Cast to `*mut Vm` in trampoline code.
@@ -540,6 +604,14 @@ impl JitContext {
     pub const OFFSET_CALL_RET_SLOTS: i32 = std::mem::offset_of!(JitContext, call_ret_slots) as i32;
     pub const OFFSET_CALL_RET_REG: i32 = std::mem::offset_of!(JitContext, call_ret_reg) as i32;
     pub const OFFSET_CALL_KIND: i32 = std::mem::offset_of!(JitContext, call_kind) as i32;
+    pub const OFFSET_RUNTIME_TRAP_KIND: i32 =
+        std::mem::offset_of!(JitContext, runtime_trap_kind) as i32;
+    pub const OFFSET_RUNTIME_TRAP_ARG0: i32 =
+        std::mem::offset_of!(JitContext, runtime_trap_arg0) as i32;
+    pub const OFFSET_RUNTIME_TRAP_ARG1: i32 =
+        std::mem::offset_of!(JitContext, runtime_trap_arg1) as i32;
+    pub const OFFSET_RUNTIME_TRAP_PC: i32 =
+        std::mem::offset_of!(JitContext, runtime_trap_pc) as i32;
     #[cfg(feature = "std")]
     pub const OFFSET_WAIT_IO_TOKEN: i32 = std::mem::offset_of!(JitContext, wait_io_token) as i32;
     pub const OFFSET_LOOP_EXIT_PC: i32 = std::mem::offset_of!(JitContext, loop_exit_pc) as i32;
@@ -549,6 +621,9 @@ impl JitContext {
     pub const JIT_RESULT_PANIC: u32 = 1;
     pub const JIT_RESULT_CALL: u32 = 2;
     pub const JIT_RESULT_WAIT_IO: u32 = 3;
+    pub const JIT_RESULT_WAIT_QUEUE: u32 = 4;
+    pub const JIT_RESULT_REPLAY: u32 = 5;
+    pub const JIT_RESULT_JIT_ERROR: u32 = 6;
 
     // call_kind constants
     pub const CALL_KIND_REGULAR: u8 = 0;
@@ -630,6 +705,14 @@ pub fn jit_context_abi_fields() -> &'static [JitContextAbiField] {
             offset: JitContext::OFFSET_CALL_RESUME_PC,
         },
         JitContextAbiField {
+            name: "runtime_trap_kind",
+            offset: JitContext::OFFSET_RUNTIME_TRAP_KIND,
+        },
+        JitContextAbiField {
+            name: "runtime_trap_pc",
+            offset: JitContext::OFFSET_RUNTIME_TRAP_PC,
+        },
+        JitContextAbiField {
             name: "stack_ptr",
             offset: JitContext::OFFSET_STACK_PTR,
         },
@@ -697,6 +780,8 @@ pub enum JitResult {
     /// Used when an extern returns CallClosure — JIT exits, frames are materialized,
     /// and VM re-executes the CallExtern which handles suspend/replay natively.
     Replay = 5,
+    /// Fatal JIT infrastructure error. User code cannot recover this.
+    JitError = 6,
 }
 
 // =============================================================================
@@ -880,9 +965,35 @@ pub extern "C" fn vo_panic(ctx: *mut JitContext, msg_slot0: u64, msg_slot1: u64)
         let ctx = &mut *ctx;
         *ctx.panic_flag = true;
         *ctx.is_user_panic = true;
+        ctx.runtime_trap_kind = JitRuntimeTrapKind::None as u8;
+        ctx.runtime_trap_pc = u32::MAX;
         (*ctx.panic_msg).slot0 = msg_slot0;
         (*ctx.panic_msg).slot1 = msg_slot1;
     }
+}
+
+/// Trigger a typed runtime trap from JIT code.
+///
+/// The VM side converts the compact kind and arguments back into
+/// `RuntimeTrapKind`, message text, and source location before unwinding.
+#[no_mangle]
+pub extern "C" fn vo_runtime_trap(
+    ctx: *mut JitContext,
+    kind: u32,
+    arg0: u64,
+    arg1: u64,
+    pc: u32,
+) -> JitResult {
+    unsafe {
+        let ctx = &mut *ctx;
+        *ctx.panic_flag = true;
+        *ctx.is_user_panic = false;
+        ctx.runtime_trap_kind = kind as u8;
+        ctx.runtime_trap_arg0 = arg0;
+        ctx.runtime_trap_arg1 = arg1;
+        ctx.runtime_trap_pc = pc;
+    }
+    JitResult::Panic
 }
 
 /// Call an extern function from JIT code.
@@ -910,7 +1021,12 @@ pub extern "C" fn vo_call_extern(
 
     let call_fn = match ctx_ref.call_extern_fn {
         Some(f) => f,
-        None => return JitResult::Panic,
+        None => unsafe {
+            let ctx = &mut *ctx;
+            ctx.runtime_trap_arg0 = extern_id as u64;
+            ctx.runtime_trap_arg1 = extern_id as u64;
+            return JitResult::JitError;
+        },
     };
 
     call_fn(
@@ -1832,6 +1948,7 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_gc_write_barrier", vo_gc_write_barrier as *const u8),
         ("vo_gc_safepoint", vo_gc_safepoint as *const u8),
         ("vo_panic", vo_panic as *const u8),
+        ("vo_runtime_trap", vo_runtime_trap as *const u8),
         ("vo_call_extern", vo_call_extern as *const u8),
         ("vo_str_new", vo_str_new as *const u8),
         ("vo_str_len", vo_str_len as *const u8),
@@ -1894,6 +2011,7 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
         "vo_gc_write_barrier",
         "vo_gc_safepoint",
         "vo_panic",
+        "vo_runtime_trap",
         "vo_call_extern",
         "vo_str_new",
         "vo_str_len",

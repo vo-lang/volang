@@ -44,13 +44,9 @@ impl FunctionAnalysis {
             .iter()
             .enumerate()
             .map(|(pc, inst)| {
-                let facts = reg_const_facts
-                    .get(pc)
-                    .map(EffectFacts::from_reg_consts)
-                    .unwrap_or_else(EffectFacts::none)
-                    .with_instruction(func_def.jit_metadata.get(pc));
+                let facts = EffectFacts::from_instruction(func_def.jit_metadata.get(pc));
                 effects::try_instruction_effects_with_context(inst, facts, &vo_module.externs)
-                    .map_err(|err| JitMetadataError::slot_range(func_def, pc, err))
+                    .map_err(|err| JitMetadataError::effect(func_def, pc, err))
             })
             .collect::<Result<Vec<_>, _>>()?;
 

@@ -175,7 +175,11 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn apply_reg_const_facts(&mut self, pc: usize) {
-        self.reg_consts = self.reg_const_facts.get(pc).cloned().unwrap_or_default();
+        self.reg_consts = self
+            .reg_const_facts
+            .get(pc)
+            .cloned()
+            .expect("missing per-PC register-constant facts");
     }
 
     /// Spill all SSA variables to fiber.stack (recomputed base, handles reallocation).
@@ -322,9 +326,9 @@ impl<'a> FunctionCompiler<'a> {
         if slot_count == 0 {
             return;
         }
-        let Some(end_slot) = start_slot.checked_add(slot_count) else {
-            return;
-        };
+        let end_slot = start_slot
+            .checked_add(slot_count)
+            .expect("select sync slot range overflow");
         let end_slot = end_slot.min(self.vars.len() as u16);
         if start_slot >= end_slot {
             return;
@@ -670,8 +674,13 @@ impl<'a> FunctionCompiler<'a> {
                 let mut ret_offset = 0i32;
                 for i in 0..gcref_count {
                     let gcref = self.load_local((gcref_start + i) as u16);
-                    let slots_for_this_ref =
-                        self.func_def.heap_ret_slots.get(i).copied().unwrap_or(1) as usize;
+                    let slots_for_this_ref = self
+                        .func_def
+                        .heap_ret_slots
+                        .get(i)
+                        .copied()
+                        .expect("heap return slot metadata missing for JIT return")
+                        as usize;
                     for j in 0..slots_for_this_ref {
                         let val = self.builder.ins().load(
                             types::I64,
@@ -1036,9 +1045,9 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
             return;
         }
         let local_count = self.vars.len() as u16;
-        let Some(end_slot) = start_slot.checked_add(slot_count) else {
-            return;
-        };
+        let end_slot = start_slot
+            .checked_add(slot_count)
+            .expect("memory sync slot range overflow");
         let end_slot = end_slot.min(local_count);
         let spill_end = end_slot.min(self.memory_only_start);
         if start_slot >= spill_end {
@@ -1064,7 +1073,7 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
             .slot_types
             .get(slot as usize)
             .copied()
-            .unwrap_or_default()
+            .expect("slot type missing for JIT slot")
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
         if slot < self.memory_only_start {
@@ -1135,11 +1144,13 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     fn mark_checked_non_nil(&mut self, slot: u16) {
         self.checked_non_nil.insert(slot);
     }
-    fn prologue_caller_bp(&self) -> Option<Value> {
+    fn call_caller_bp(&mut self) -> Value {
         self.saved_caller_bp
+            .expect("function JIT call requires prologue-saved caller bp")
     }
-    fn prologue_fiber_sp(&self) -> Option<Value> {
+    fn call_old_fiber_sp(&mut self) -> Value {
         self.saved_fiber_sp
+            .expect("function JIT call requires prologue-saved fiber sp")
     }
     fn refresh_stack_base_after_reallocation(&mut self) {}
 }

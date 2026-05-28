@@ -30,7 +30,7 @@ use crate::types::{SlotType, ValueMeta, ValueRttid};
 use crate::RuntimeType;
 
 const MAGIC: &[u8; 3] = b"VOB";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const MIN_SUPPORTED_VERSION: u32 = 2;
 
 #[derive(Debug)]
@@ -150,6 +150,10 @@ fn write_jit_instruction_metadata(w: &mut ByteWriter, meta: JitInstructionMetada
             w.write_u8(4);
             w.write_u16(key_slots);
         }
+        JitInstructionMetadata::LoopEnd { end_pc } => {
+            w.write_u8(5);
+            w.write_u32(end_pc);
+        }
     }
 }
 
@@ -173,6 +177,9 @@ fn read_jit_instruction_metadata(
         }),
         4 => Ok(JitInstructionMetadata::MapDelete {
             key_slots: r.read_u16()?,
+        }),
+        5 => Ok(JitInstructionMetadata::LoopEnd {
+            end_pc: r.read_u32()?,
         }),
         _ => Err(SerializeError::InvalidJitMetadata),
     }
@@ -1062,6 +1069,20 @@ mod tests {
         assert_eq!(
             module.functions[0].jit_metadata,
             module2.functions[0].jit_metadata
+        );
+    }
+
+    #[test]
+    fn test_serialize_deserialize_loop_end_metadata() {
+        let mut writer = ByteWriter::new();
+        let metadata = JitInstructionMetadata::LoopEnd { end_pc: 300 };
+        write_jit_instruction_metadata(&mut writer, metadata);
+        let bytes = writer.into_bytes();
+        let mut reader = ByteReader::new(&bytes);
+
+        assert_eq!(
+            read_jit_instruction_metadata(&mut reader).unwrap(),
+            metadata
         );
     }
 

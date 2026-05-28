@@ -2,10 +2,11 @@
 
 use std::fmt;
 
+use vo_common_core::instruction::HINT_LOOP;
 use vo_runtime::bytecode::{FunctionDef, JitInstructionMetadata, Module as VoModule};
 use vo_runtime::instruction::Opcode;
 
-use crate::effects::SlotRangeError;
+use crate::effects::{EffectError, SlotRangeError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JitMetadataError {
@@ -40,6 +41,34 @@ pub enum JitMetadataError {
         pc: usize,
         opcode: Opcode,
         layout: &'static str,
+    },
+    MissingExtern {
+        func: String,
+        pc: usize,
+        extern_id: u16,
+    },
+    MissingLoopEnd {
+        func: String,
+        pc: usize,
+    },
+    InvalidLoopEnd {
+        func: String,
+        pc: usize,
+        begin_pc: usize,
+        end_pc: usize,
+        code_len: usize,
+    },
+    InconsistentLoopEnd {
+        func: String,
+        pc: usize,
+        encoded_end_pc: usize,
+        metadata_end_pc: usize,
+    },
+    InvalidLoopEndBackEdge {
+        func: String,
+        pc: usize,
+        begin_pc: usize,
+        end_pc: usize,
     },
     SlotRangeOverflow {
         func: String,
@@ -101,6 +130,45 @@ impl fmt::Display for JitMetadataError {
                 f,
                 "missing JIT {layout} layout for {opcode:?} in {func} at pc {pc}"
             ),
+            Self::MissingExtern {
+                func,
+                pc,
+                extern_id,
+            } => write!(
+                f,
+                "JIT CallExtern references missing extern {extern_id} in {func} at pc {pc}"
+            ),
+            Self::MissingLoopEnd { func, pc } => {
+                write!(f, "missing JIT LoopEnd metadata for HINT_LOOP in {func} at pc {pc}")
+            }
+            Self::InvalidLoopEnd {
+                func,
+                pc,
+                begin_pc,
+                end_pc,
+                code_len,
+            } => write!(
+                f,
+                "invalid JIT LoopEnd in {func} at pc {pc}: begin_pc={begin_pc}, end_pc={end_pc}, code_len={code_len}"
+            ),
+            Self::InconsistentLoopEnd {
+                func,
+                pc,
+                encoded_end_pc,
+                metadata_end_pc,
+            } => write!(
+                f,
+                "JIT LoopEnd metadata does not match HINT_LOOP offset in {func} at pc {pc}: encoded end_pc={encoded_end_pc}, metadata end_pc={metadata_end_pc}"
+            ),
+            Self::InvalidLoopEndBackEdge {
+                func,
+                pc,
+                begin_pc,
+                end_pc,
+            } => write!(
+                f,
+                "JIT LoopEnd in {func} at pc {pc} points at end_pc={end_pc}, which is not a back-edge to begin_pc={begin_pc}"
+            ),
             Self::SlotRangeOverflow {
                 func,
                 pc,
@@ -135,6 +203,23 @@ impl JitMetadataError {
             start: err.start,
             count: err.count,
             access: err.access,
+        }
+    }
+
+    pub(crate) fn effect(func: &FunctionDef, pc: usize, err: EffectError) -> Self {
+        match err {
+            EffectError::SlotRange(err) => Self::slot_range(func, pc, err),
+            EffectError::MissingLayout { opcode, layout } => Self::MissingLayout {
+                func: func.name.clone(),
+                pc,
+                opcode,
+                layout,
+            },
+            EffectError::MissingExtern { extern_id } => Self::MissingExtern {
+                func: func.name.clone(),
+                pc,
+                extern_id,
+            },
         }
     }
 }
@@ -199,6 +284,16 @@ fn verify_metadata_kind(
                     layout,
                 });
             }
+            if opcode == Opcode::Hint && flags == HINT_LOOP {
+                let end_offset = loop_end_offset(func.code[pc]);
+                if end_offset == 0 {
+                    return Err(JitMetadataError::MissingLoopEnd {
+                        func: func.name.clone(),
+                        pc,
+                    });
+                }
+                validate_loop_end_backedge(func, pc, pc + end_offset)?;
+            }
             Ok(())
         }
         JitInstructionMetadata::ElemLayout { elem_bytes, .. } => {
@@ -244,7 +339,78 @@ fn verify_metadata_kind(
         JitInstructionMetadata::MapDelete { .. } => (opcode == Opcode::MapDelete)
             .then_some(())
             .ok_or_else(|| wrong_kind(func, pc, opcode, "MapDelete")),
+        JitInstructionMetadata::LoopEnd { end_pc } => {
+            if opcode != Opcode::Hint || flags != HINT_LOOP {
+                return Err(wrong_kind(func, pc, opcode, "LoopEnd"));
+            }
+            let end_pc = end_pc as usize;
+            let begin_pc = pc + 1;
+            if begin_pc >= func.code.len() || end_pc >= func.code.len() || begin_pc > end_pc {
+                return Err(JitMetadataError::InvalidLoopEnd {
+                    func: func.name.clone(),
+                    pc,
+                    begin_pc,
+                    end_pc,
+                    code_len: func.code.len(),
+                });
+            }
+            let encoded_end_offset = loop_end_offset(func.code[pc]);
+            if encoded_end_offset > 0 {
+                let encoded_end_pc = pc + encoded_end_offset;
+                if encoded_end_pc != end_pc {
+                    return Err(JitMetadataError::InconsistentLoopEnd {
+                        func: func.name.clone(),
+                        pc,
+                        encoded_end_pc,
+                        metadata_end_pc: end_pc,
+                    });
+                }
+            }
+            validate_loop_end_backedge(func, pc, end_pc)?;
+            Ok(())
+        }
     }
+}
+
+fn validate_loop_end_backedge(
+    func: &FunctionDef,
+    pc: usize,
+    end_pc: usize,
+) -> Result<(), JitMetadataError> {
+    let begin_pc = pc + 1;
+    let Some(inst) = func.code.get(end_pc) else {
+        return Err(JitMetadataError::InvalidLoopEnd {
+            func: func.name.clone(),
+            pc,
+            begin_pc,
+            end_pc,
+            code_len: func.code.len(),
+        });
+    };
+    let targets_begin = match inst.opcode() {
+        Opcode::Jump => jump_target(end_pc, inst.imm32()) == Some(begin_pc),
+        Opcode::ForLoop => inst.forloop_target(end_pc) == begin_pc,
+        _ => false,
+    };
+    if targets_begin {
+        Ok(())
+    } else {
+        Err(JitMetadataError::InvalidLoopEndBackEdge {
+            func: func.name.clone(),
+            pc,
+            begin_pc,
+            end_pc,
+        })
+    }
+}
+
+fn jump_target(pc: usize, offset: i32) -> Option<usize> {
+    let target = pc as i64 + offset as i64;
+    (target >= 0).then_some(target as usize)
+}
+
+fn loop_end_offset(inst: vo_runtime::instruction::Instruction) -> usize {
+    ((inst.a >> 8) & 0xFF) as usize
 }
 
 fn required_layout(opcode: Opcode, flags: u8) -> Option<&'static str> {
@@ -341,6 +507,15 @@ mod tests {
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
         }
+    }
+
+    fn hint_loop(end_offset: u8) -> Instruction {
+        Instruction::with_flags(Opcode::Hint, HINT_LOOP, (end_offset as u16) << 8, 0, 0)
+    }
+
+    fn jump(offset: i32) -> Instruction {
+        let encoded = offset as u32;
+        Instruction::new(Opcode::Jump, 0, encoded as u16, (encoded >> 16) as u16)
     }
 
     #[test]
@@ -630,5 +805,79 @@ mod tests {
         ));
 
         verify_jit_metadata(&module.functions[0], &module).expect("valid metadata");
+    }
+
+    #[test]
+    fn accepts_loop_end_metadata_with_real_backedge() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![
+                hint_loop(0),
+                Instruction::new(Opcode::LoadInt, 0, 1, 0),
+                jump(-1),
+            ],
+            vec![
+                JitInstructionMetadata::LoopEnd { end_pc: 2 },
+                JitInstructionMetadata::None,
+                JitInstructionMetadata::None,
+            ],
+            1,
+        ));
+
+        verify_jit_metadata(&module.functions[0], &module).expect("valid loop end");
+    }
+
+    #[test]
+    fn rejects_loop_end_metadata_without_real_backedge() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![
+                hint_loop(0),
+                Instruction::new(Opcode::LoadInt, 0, 1, 0),
+                Instruction::new(Opcode::LoadInt, 0, 2, 0),
+            ],
+            vec![
+                JitInstructionMetadata::LoopEnd { end_pc: 2 },
+                JitInstructionMetadata::None,
+                JitInstructionMetadata::None,
+            ],
+            1,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::InvalidLoopEndBackEdge {
+                begin_pc: 1,
+                end_pc: 2,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_compact_loop_end_without_real_backedge() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![
+                hint_loop(2),
+                Instruction::new(Opcode::LoadInt, 0, 1, 0),
+                Instruction::new(Opcode::LoadInt, 0, 2, 0),
+            ],
+            vec![
+                JitInstructionMetadata::None,
+                JitInstructionMetadata::None,
+                JitInstructionMetadata::None,
+            ],
+            1,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::InvalidLoopEndBackEdge {
+                begin_pc: 1,
+                end_pc: 2,
+                ..
+            })
+        ));
     }
 }

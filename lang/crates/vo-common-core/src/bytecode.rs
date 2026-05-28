@@ -57,6 +57,9 @@ pub enum JitInstructionMetadata {
     MapDelete {
         key_slots: u16,
     },
+    LoopEnd {
+        end_pc: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

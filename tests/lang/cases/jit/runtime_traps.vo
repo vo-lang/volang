@@ -1,0 +1,124 @@
+package main
+
+import "fmt"
+
+func didRecover(fn func()) bool {
+	caught := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				caught = true
+			}
+		}()
+		fn()
+	}()
+	return caught
+}
+
+func trapMessage(fn func()) string {
+	msg := "<no panic>"
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				msg = fmt.Sprint(r)
+			}
+		}()
+		fn()
+	}()
+	return msg
+}
+
+func assertTrap(label string, got string, want string) {
+	assert(got == want, label, ": got ", got, " want ", want)
+}
+
+func divZero(x int) int {
+	return 10 / x
+}
+
+func negShift(x int) int {
+	return 1 << x
+}
+
+func sliceGet(s []int) int {
+	return s[3]
+}
+
+func nilMapPut(m map[string]int) {
+	m["x"] = 1
+}
+
+func assertInt(v any) int {
+	return v.(int)
+}
+
+func ifaceEq(a any, b any) bool {
+	return a == b
+}
+
+func hashPut(m map[any]int, k any) {
+	m[k] = 1
+}
+
+func makeSliceLen(n int) []int {
+	return make([]int, n)
+}
+
+func makeSliceLenCap(n int, c int) []int {
+	return make([]int, n, c)
+}
+
+func makeChan(n int) chan int {
+	return make(chan int, n)
+}
+
+func makePort(n int) port int {
+	return make(port int, n)
+}
+
+func sendClosed(ch chan int) {
+	close(ch)
+	ch <- 1
+}
+
+func osrWarm() int {
+	sum := 0
+	for i := 0; i < 10; i++ {
+		sum += i
+	}
+	return sum
+}
+
+func main() {
+	assert(osrWarm() == 45, "osr warmup")
+
+	assert(didRecover(func() { _ = divZero(0) }), "div zero trap")
+	assert(didRecover(func() { _ = negShift(-1) }), "negative shift trap")
+	assert(didRecover(func() { _ = sliceGet([]int{1, 2}) }), "bounds trap")
+	assertTrap("div zero message", trapMessage(func() { _ = divZero(0) }), "runtime error: integer divide by zero")
+	assertTrap("negative shift message", trapMessage(func() { _ = negShift(-1) }), "runtime error: negative shift amount")
+	assertTrap("bounds message", trapMessage(func() { _ = sliceGet([]int{1, 2}) }), "runtime error: index out of range [3] with length 2")
+
+	var m map[string]int
+	assert(didRecover(func() { nilMapPut(m) }), "nil map write trap")
+	assertTrap("nil map write message", trapMessage(func() { nilMapPut(m) }), "runtime error: assignment to entry in nil map")
+
+	assert(didRecover(func() { _ = assertInt("not int") }), "type assertion trap")
+	assertTrap("type assertion message", trapMessage(func() { _ = assertInt("not int") }), "runtime error: interface conversion: interface is nil, not")
+
+	s := []int{1}
+	assert(didRecover(func() { _ = ifaceEq(s, s) }), "interface eq trap")
+	assertTrap("interface eq message", trapMessage(func() { _ = ifaceEq(s, s) }), "runtime error: comparing uncomparable type in interface value")
+
+	h := make(map[any]int)
+	assert(didRecover(func() { hashPut(h, s) }), "map hash trap")
+	assertTrap("map hash message", trapMessage(func() { hashPut(h, s) }), "runtime error: hash of unhashable type")
+
+	assertTrap("makeslice len message", trapMessage(func() { _ = makeSliceLen(-1) }), "runtime error: makeslice: len out of range")
+	assertTrap("makeslice len cap message", trapMessage(func() { _ = makeSliceLenCap(2, 1) }), "runtime error: makeslice: len larger than cap")
+	assertTrap("makechan message", trapMessage(func() { _ = makeChan(-1) }), "runtime error: makechan: size out of range")
+	assertTrap("makeport message", trapMessage(func() { _ = makePort(-1) }), "runtime error: makeport: size out of range")
+
+	ch := make(chan int, 1)
+	assertTrap("send closed message", trapMessage(func() { sendClosed(ch) }), "runtime error: send on closed channel")
+}

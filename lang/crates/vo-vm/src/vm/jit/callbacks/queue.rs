@@ -10,7 +10,7 @@ use vo_runtime::jit_api::{JitContext, JitResult};
 use crate::vm::helpers;
 use crate::vm::RuntimeTrapKind;
 
-use super::helpers::{extract_context, set_jit_panic};
+use super::helpers::{extract_context, set_jit_trap};
 
 /// Close a channel.
 pub extern "C" fn jit_queue_close(ctx: *mut JitContext, chan: u64) -> JitResult {
@@ -42,12 +42,18 @@ pub extern "C" fn jit_queue_close(ctx: *mut JitContext, chan: u64) -> JitResult 
             vm.state.endpoint_registry.mark_tombstone(endpoint_id);
             JitResult::Ok
         }
-        QueueAction::Trap(RuntimeTrapKind::CloseNilChannel) => {
-            set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_CLOSE_NIL_CHANNEL)
-        }
-        QueueAction::Trap(RuntimeTrapKind::CloseClosedChannel) => {
-            set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_CLOSE_CLOSED_CHANNEL)
-        }
+        QueueAction::Trap(RuntimeTrapKind::CloseNilChannel) => set_jit_trap(
+            &mut vm.state.gc,
+            fiber,
+            RuntimeTrapKind::CloseNilChannel,
+            helpers::ERR_CLOSE_NIL_CHANNEL,
+        ),
+        QueueAction::Trap(RuntimeTrapKind::CloseClosedChannel) => set_jit_trap(
+            &mut vm.state.gc,
+            fiber,
+            RuntimeTrapKind::CloseClosedChannel,
+            helpers::ERR_CLOSE_CLOSED_CHANNEL,
+        ),
         QueueAction::Trap(_) => JitResult::Panic,
         // channel_close_core never produces these variants
         QueueAction::Block | QueueAction::ReplayThenBlock | QueueAction::Wake(_) => {
@@ -71,7 +77,12 @@ pub extern "C" fn jit_queue_send(
     let module = unsafe { &*((*ctx).module) };
     let (vm, fiber) = unsafe { extract_context(ctx) };
     if fiber.consume_remote_send_closed() {
-        return set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED);
+        return set_jit_trap(
+            &mut vm.state.gc,
+            fiber,
+            RuntimeTrapKind::SendOnClosedChannel,
+            helpers::ERR_SEND_ON_CLOSED,
+        );
     }
     let ch = chan as GcRef;
     let src: Vec<u64> = (0..val_slots as usize)
@@ -103,12 +114,18 @@ pub extern "C" fn jit_queue_send(
                 .send_endpoint_send_request(home_island, endpoint_id, data, fiber.id as u64);
             JitResult::WaitQueue
         }
-        QueueAction::Trap(RuntimeTrapKind::SendOnNilChannel) => {
-            set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_NIL)
-        }
-        QueueAction::Trap(RuntimeTrapKind::SendOnClosedChannel) => {
-            set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED)
-        }
+        QueueAction::Trap(RuntimeTrapKind::SendOnNilChannel) => set_jit_trap(
+            &mut vm.state.gc,
+            fiber,
+            RuntimeTrapKind::SendOnNilChannel,
+            helpers::ERR_SEND_ON_NIL,
+        ),
+        QueueAction::Trap(RuntimeTrapKind::SendOnClosedChannel) => set_jit_trap(
+            &mut vm.state.gc,
+            fiber,
+            RuntimeTrapKind::SendOnClosedChannel,
+            helpers::ERR_SEND_ON_CLOSED,
+        ),
         QueueAction::Trap(_) => JitResult::Panic,
         QueueAction::RemoteRecvData {
             endpoint_id,
@@ -176,9 +193,12 @@ pub extern "C" fn jit_queue_recv(
                 .send_endpoint_recv_request(home_island, endpoint_id, fiber.id as u64);
             JitResult::WaitQueue
         }
-        Err(QueueRecvCoreResult::Trap(RuntimeTrapKind::RecvOnNilChannel)) => {
-            set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_RECV_ON_NIL)
-        }
+        Err(QueueRecvCoreResult::Trap(RuntimeTrapKind::RecvOnNilChannel)) => set_jit_trap(
+            &mut vm.state.gc,
+            fiber,
+            RuntimeTrapKind::RecvOnNilChannel,
+            helpers::ERR_RECV_ON_NIL,
+        ),
         Err(QueueRecvCoreResult::Trap(_)) => JitResult::Panic,
         Err(QueueRecvCoreResult::Success { .. } | QueueRecvCoreResult::Closed) => {
             unreachable!("complete_queue_recv returned terminal recv result as Err")

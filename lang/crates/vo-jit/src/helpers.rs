@@ -42,6 +42,7 @@ pub struct HelperFuncIds {
     pub gc_alloc: cranelift_module::FuncId,
     pub write_barrier: cranelift_module::FuncId,
     pub panic: cranelift_module::FuncId,
+    pub runtime_trap: cranelift_module::FuncId,
     pub call_extern: cranelift_module::FuncId,
     pub str_new: cranelift_module::FuncId,
     pub str_len: cranelift_module::FuncId,
@@ -136,6 +137,17 @@ pub fn declare_helpers(
         sig.params.push(AbiParam::new(ptr));
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I64));
+        sig
+    })?;
+
+    let runtime_trap = declare_import(module, "vo_runtime_trap", {
+        let mut sig = Signature::new(module.target_config().default_call_conv);
+        sig.params.push(AbiParam::new(ptr));
+        sig.params.push(AbiParam::new(types::I32));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I32));
+        sig.returns.push(AbiParam::new(types::I32));
         sig
     })?;
 
@@ -557,6 +569,7 @@ pub fn declare_helpers(
         gc_alloc,
         write_barrier,
         panic,
+        runtime_trap,
         call_extern,
         str_new,
         str_len,
@@ -622,6 +635,7 @@ pub fn get_helper_refs(
         gc_alloc: declare_ref(ids.gc_alloc),
         write_barrier: declare_ref(ids.write_barrier),
         panic: declare_ref(ids.panic),
+        runtime_trap: declare_ref(ids.runtime_trap),
         call_extern: declare_ref(ids.call_extern),
         str_new: declare_ref(ids.str_new),
         str_len: declare_ref(ids.str_len),
@@ -681,6 +695,7 @@ mod tests {
             "vo_gc_alloc",
             "vo_gc_write_barrier",
             "vo_panic",
+            "vo_runtime_trap",
             "vo_call_extern",
             "vo_set_call_request",
             "vo_defer_push",

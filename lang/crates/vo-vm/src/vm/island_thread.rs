@@ -10,6 +10,25 @@ pub use super::types::IslandRegistry;
 use super::{island_shared, Vm};
 use crate::bytecode::Module;
 
+#[cfg(feature = "jit")]
+fn create_island_vm_with_initializer<F>(
+    jit_config: Option<super::JitConfig>,
+    init_jit_vm: F,
+) -> Result<Vm, vo_jit::JitError>
+where
+    F: FnOnce(super::JitConfig) -> Result<Vm, vo_jit::JitError>,
+{
+    match jit_config {
+        Some(config) => init_jit_vm(config),
+        None => Ok(Vm::new()),
+    }
+}
+
+#[cfg(feature = "jit")]
+fn create_island_vm(jit_config: Option<super::JitConfig>) -> Result<Vm, vo_jit::JitError> {
+    create_island_vm_with_initializer(jit_config, Vm::try_with_jit_config)
+}
+
 /// Run an island thread - processes commands and executes fibers.
 #[cfg(feature = "jit")]
 pub fn run_island_thread(
@@ -20,10 +39,8 @@ pub fn run_island_thread(
     extension_specs: Vec<NativeExtensionSpec>,
     jit_config: Option<super::JitConfig>,
 ) {
-    let mut vm = match jit_config {
-        Some(config) => Vm::with_jit_config(config),
-        None => Vm::new(),
-    };
+    let mut vm = create_island_vm(jit_config)
+        .unwrap_or_else(|err| panic!("island {island_id}: JIT initialization failed: {err}"));
     run_island_vm(
         island_id,
         module,
@@ -133,6 +150,27 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) {
                 Err(_) => return,
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "jit"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn island_jit_config_init_error_is_propagated() {
+        let result =
+            create_island_vm_with_initializer(Some(super::super::JitConfig::default()), |_| {
+                Err(vo_jit::JitError::Internal(
+                    "forced island init failure".into(),
+                ))
+            });
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => panic!("island JIT init error should propagate to caller"),
+        };
+
+        assert!(err.to_string().contains("forced island init failure"));
     }
 }
 

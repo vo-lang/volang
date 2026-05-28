@@ -211,7 +211,11 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn apply_reg_const_facts(&mut self, pc: usize) {
-        self.reg_consts = self.reg_const_facts.get(pc).cloned().unwrap_or_default();
+        self.reg_consts = self
+            .reg_const_facts
+            .get(pc)
+            .cloned()
+            .expect("missing per-PC register-constant facts");
     }
 
     fn emit_prologue(&mut self) {
@@ -445,14 +449,13 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn panic(&mut self, inst: &Instruction) {
-        if let Some(panic_func) = self.helpers.panic {
-            let ctx = self.ctx_ptr;
-            // Panic message is an interface (2 slots): slot0=metadata, slot1=data
-            // Note: Panic instruction uses inst.a for the register (not inst.b)
-            let msg_slot0 = self.read_var(inst.a);
-            let msg_slot1 = self.read_var(inst.a + 1);
-            crate::translator::emit_funcref_call(self, panic_func, &[ctx, msg_slot0, msg_slot1]);
-        }
+        let panic_func = self.helpers.panic.expect("panic helper must be registered");
+        let ctx = self.ctx_ptr;
+        // Panic message is an interface (2 slots): slot0=metadata, slot1=data.
+        // Note: Panic instruction uses inst.a for the register (not inst.b).
+        let msg_slot0 = self.read_var(inst.a);
+        let msg_slot1 = self.read_var(inst.a + 1);
+        crate::translator::emit_funcref_call(self, panic_func, &[ctx, msg_slot0, msg_slot1]);
         let panic_val = self
             .builder
             .ins()
@@ -586,9 +589,9 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
             return;
         }
         let local_count = self.vars.len() as u16;
-        let Some(end_slot) = start_slot.checked_add(slot_count) else {
-            return;
-        };
+        let end_slot = start_slot
+            .checked_add(slot_count)
+            .expect("memory sync slot range overflow");
         let end_slot = end_slot.min(local_count);
         let spill_end = end_slot.min(self.memory_only_start);
         if start_slot >= spill_end {
@@ -614,7 +617,7 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
             .slot_types
             .get(slot as usize)
             .copied()
-            .unwrap_or_default()
+            .expect("slot type missing for JIT slot")
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
         if slot < self.memory_only_start {
@@ -666,9 +669,9 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         if slot_count == 0 {
             return;
         }
-        let Some(end_slot) = start_slot.checked_add(slot_count) else {
-            return;
-        };
+        let end_slot = start_slot
+            .checked_add(slot_count)
+            .expect("select sync slot range overflow");
         let end_slot = end_slot.min(self.vars.len() as u16);
         if start_slot >= end_slot {
             return;
@@ -696,6 +699,22 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     }
     fn mark_checked_non_nil(&mut self, slot: u16) {
         self.checked_non_nil.insert(slot);
+    }
+    fn call_caller_bp(&mut self) -> Value {
+        self.builder.ins().load(
+            types::I32,
+            MemFlags::trusted(),
+            self.ctx_ptr,
+            JitContext::OFFSET_JIT_BP,
+        )
+    }
+    fn call_old_fiber_sp(&mut self) -> Value {
+        self.builder.ins().load(
+            types::I32,
+            MemFlags::trusted(),
+            self.ctx_ptr,
+            JitContext::OFFSET_FIBER_SP,
+        )
     }
     fn refresh_stack_base_after_reallocation(&mut self) {
         let stack_ptr = self.builder.ins().load(

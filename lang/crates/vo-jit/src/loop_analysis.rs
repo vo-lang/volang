@@ -8,7 +8,7 @@ use vo_common_core::instruction::HINT_LOOP;
 use vo_common_core::instruction::{
     LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
 };
-use vo_runtime::bytecode::{Constant, ExternDef, FunctionDef, Module as VoModule};
+use vo_runtime::bytecode::{ExternDef, FunctionDef, JitInstructionMetadata, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
 
 use crate::effects;
@@ -49,23 +49,44 @@ impl LoopInfo {
 pub enum LoopAnalysisError {
     MissingBackEdge {
         loop_start: usize,
+        end_pc: usize,
     },
     InvalidLoopRange {
         begin_pc: usize,
         end_pc: usize,
         code_len: usize,
     },
+    MissingLoopEndMetadata {
+        hint_pc: usize,
+    },
+    InconsistentLoopEndMetadata {
+        hint_pc: usize,
+        encoded_end_pc: usize,
+        metadata_end_pc: usize,
+    },
     SlotRangeOverflow {
         pc: usize,
         source: effects::SlotRangeError,
+    },
+    MissingLayout {
+        pc: usize,
+        opcode: Opcode,
+        layout: &'static str,
+    },
+    MissingExtern {
+        pc: usize,
+        extern_id: u16,
     },
 }
 
 impl std::fmt::Display for LoopAnalysisError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingBackEdge { loop_start } => {
-                write!(f, "missing loop back-edge for loop starting at pc {loop_start}")
+            Self::MissingBackEdge { loop_start, end_pc } => {
+                write!(
+                    f,
+                    "loop end pc {end_pc} is not a back-edge for loop starting at pc {loop_start}"
+                )
             }
             Self::InvalidLoopRange {
                 begin_pc,
@@ -75,10 +96,29 @@ impl std::fmt::Display for LoopAnalysisError {
                 f,
                 "invalid loop range begin={begin_pc} end={end_pc} for code length {code_len}"
             ),
+            Self::MissingLoopEndMetadata { hint_pc } => {
+                write!(f, "missing JIT LoopEnd metadata for HINT_LOOP at pc {hint_pc}")
+            }
+            Self::InconsistentLoopEndMetadata {
+                hint_pc,
+                encoded_end_pc,
+                metadata_end_pc,
+            } => write!(
+                f,
+                "inconsistent JIT LoopEnd metadata for HINT_LOOP at pc {hint_pc}: encoded end={encoded_end_pc}, metadata end={metadata_end_pc}"
+            ),
             Self::SlotRangeOverflow { pc, source } => write!(
                 f,
                 "slot range overflow while analyzing loop effects at pc {pc}: {} range starting at {} with {} slots",
                 source.access, source.start, source.count
+            ),
+            Self::MissingLayout { pc, opcode, layout } => write!(
+                f,
+                "missing JIT {layout} layout for {opcode:?} while analyzing loop effects at pc {pc}"
+            ),
+            Self::MissingExtern { pc, extern_id } => write!(
+                f,
+                "missing extern {extern_id} while analyzing loop effects at pc {pc}"
             ),
         }
     }
@@ -86,73 +126,32 @@ impl std::fmt::Display for LoopAnalysisError {
 
 impl std::error::Error for LoopAnalysisError {}
 
-/// Legacy conservative adapter for diagnostics that prefer "no loops" over an
-/// analysis error. VM/JIT manager OSR entry points must use `try_analyze_loops`
-/// or `try_analyze_loops_with_module` so malformed ranges are visible.
-pub fn analyze_loops(func_def: &FunctionDef) -> Vec<LoopInfo> {
-    try_analyze_loops(func_def).unwrap_or_default()
-}
-
-pub fn try_analyze_loops(func_def: &FunctionDef) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
-    try_analyze_loops_with_context(func_def, &[], &[])
-}
-
-/// Legacy conservative adapter with module-level facts. OSR dispatch should use
-/// `try_analyze_loops_with_module` to surface malformed metadata/effects.
-pub fn analyze_loops_with_module(func_def: &FunctionDef, vo_module: &VoModule) -> Vec<LoopInfo> {
-    try_analyze_loops_with_module(func_def, vo_module).unwrap_or_default()
+#[cfg(test)]
+fn try_analyze_loops(func_def: &FunctionDef) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
+    try_analyze_loops_with_context(func_def, &[])
 }
 
 pub fn try_analyze_loops_with_module(
     func_def: &FunctionDef,
     vo_module: &VoModule,
 ) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
-    try_analyze_loops_with_context(func_def, &vo_module.constants, &vo_module.externs)
+    try_analyze_loops_with_context(func_def, &vo_module.externs)
 }
 
-/// Legacy conservative adapter for raw bytecode loop discovery.
-///
 /// New HINT_LOOP format (no HINT_LOOP_END needed):
 /// - a: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset
 /// - bc: exit_pc (32-bit)
 ///
-/// begin_pc (loop_start) is hint_pc + 1 (the instruction after HINT_LOOP).
-/// end_pc is hint_pc + end_offset (the back-edge Jump).
-pub fn analyze_loops_from_code(code: &[Instruction]) -> Vec<LoopInfo> {
-    try_analyze_loops_from_code(code).unwrap_or_default()
-}
-
-pub fn try_analyze_loops_from_code(
-    code: &[Instruction],
-) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
-    try_analyze_loops_from_code_with_context(code, &[], &[], &[])
-}
-
 fn try_analyze_loops_with_context(
     func_def: &FunctionDef,
-    constants: &[Constant],
     externs: &[ExternDef],
 ) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
-    let reg_const_facts = crate::translator::compute_reg_const_facts_with_metadata(
-        &func_def.code,
-        &func_def.jit_metadata,
-        constants,
-        externs,
-        0,
-        func_def.code.len(),
-    );
-    try_analyze_loops_from_code_with_context(
-        &func_def.code,
-        &func_def.jit_metadata,
-        &reg_const_facts,
-        externs,
-    )
+    try_analyze_loops_from_code_with_context(&func_def.code, &func_def.jit_metadata, externs)
 }
 
 fn try_analyze_loops_from_code_with_context(
     code: &[Instruction],
-    jit_metadata: &[vo_runtime::bytecode::JitInstructionMetadata],
-    reg_const_facts: &[std::collections::HashMap<u16, i64>],
+    jit_metadata: &[JitInstructionMetadata],
     externs: &[ExternDef],
 ) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
     let mut loops = Vec::new();
@@ -173,13 +172,7 @@ fn try_analyze_loops_from_code_with_context(
                 // begin_pc is the instruction after HINT_LOOP (the loop_start)
                 let begin_pc = pc + 1;
 
-                // end_pc: if end_offset > 0, use it; otherwise scan for back-edge Jump
-                let end_pc = if end_offset > 0 {
-                    pc + end_offset
-                } else {
-                    // Fallback: scan forward to find back-edge Jump targeting begin_pc
-                    find_back_edge_jump(code, begin_pc)?
-                };
+                let end_pc = loop_end_pc_from_hint(pc, end_offset, jit_metadata)?;
                 if begin_pc >= code.len() || end_pc >= code.len() || begin_pc > end_pc {
                     return Err(LoopAnalysisError::InvalidLoopRange {
                         begin_pc,
@@ -187,15 +180,10 @@ fn try_analyze_loops_from_code_with_context(
                         code_len: code.len(),
                     });
                 }
+                validate_loop_back_edge(code, begin_pc, end_pc)?;
 
-                let (live_in, live_out) = analyze_loop_liveness(
-                    code,
-                    jit_metadata,
-                    reg_const_facts,
-                    externs,
-                    begin_pc,
-                    end_pc,
-                )?;
+                let (live_in, live_out) =
+                    analyze_loop_liveness(code, jit_metadata, externs, begin_pc, end_pc)?;
                 let has_calls = has_function_calls(code, begin_pc, end_pc);
 
                 loops.push(LoopInfo {
@@ -218,35 +206,60 @@ fn try_analyze_loops_from_code_with_context(
     Ok(loops)
 }
 
-/// Find the back-edge Jump that targets the given loop_start.
-/// This is a fallback when end_offset is not encoded in HINT_LOOP.
-fn find_back_edge_jump(
+fn loop_end_pc_from_hint(
+    hint_pc: usize,
+    end_offset: usize,
+    jit_metadata: &[JitInstructionMetadata],
+) -> Result<usize, LoopAnalysisError> {
+    let metadata_end_pc = match jit_metadata.get(hint_pc) {
+        Some(JitInstructionMetadata::LoopEnd { end_pc }) => Some(*end_pc as usize),
+        _ => None,
+    };
+
+    if end_offset > 0 {
+        let encoded_end_pc = hint_pc + end_offset;
+        if let Some(metadata_end_pc) = metadata_end_pc {
+            if metadata_end_pc != encoded_end_pc {
+                return Err(LoopAnalysisError::InconsistentLoopEndMetadata {
+                    hint_pc,
+                    encoded_end_pc,
+                    metadata_end_pc,
+                });
+            }
+        }
+        return Ok(encoded_end_pc);
+    }
+
+    metadata_end_pc.ok_or(LoopAnalysisError::MissingLoopEndMetadata { hint_pc })
+}
+
+fn validate_loop_back_edge(
     code: &[Instruction],
     loop_start: usize,
-) -> Result<usize, LoopAnalysisError> {
-    for (pc, inst) in code.iter().enumerate().skip(loop_start) {
-        match inst.opcode() {
-            Opcode::Jump => {
-                let offset = inst.imm32();
-                if offset < 0 {
-                    // VM executes: frame.pc += 1; target_pc = frame.pc + offset - 1
-                    // So actual target = pc + offset (the +1 and -1 cancel out)
-                    let target = (pc as i64 + offset as i64) as usize;
-                    if target == loop_start {
-                        return Ok(pc);
-                    }
-                }
-            }
-            Opcode::ForLoop => {
-                let target = inst.forloop_target(pc);
-                if target == loop_start {
-                    return Ok(pc);
-                }
-            }
-            _ => {}
-        }
+    end_pc: usize,
+) -> Result<(), LoopAnalysisError> {
+    let Some(inst) = code.get(end_pc) else {
+        return Err(LoopAnalysisError::InvalidLoopRange {
+            begin_pc: loop_start,
+            end_pc,
+            code_len: code.len(),
+        });
+    };
+    let targets_loop_start = match inst.opcode() {
+        Opcode::Jump => jump_target(end_pc, inst.imm32()) == Some(loop_start),
+        Opcode::ForLoop => inst.forloop_target(end_pc) == loop_start,
+        _ => false,
+    };
+    if targets_loop_start {
+        Ok(())
+    } else {
+        Err(LoopAnalysisError::MissingBackEdge { loop_start, end_pc })
     }
-    Err(LoopAnalysisError::MissingBackEdge { loop_start })
+}
+
+fn jump_target(pc: usize, offset: i32) -> Option<usize> {
+    let target = pc as i64 + offset as i64;
+    (target >= 0).then_some(target as usize)
 }
 
 /// Find loop info by header PC (begin_pc).
@@ -273,8 +286,7 @@ fn has_function_calls(code: &[Instruction], header_pc: usize, back_edge_pc: usiz
 /// - live_out: registers written in the loop (conservative: all written regs)
 fn analyze_loop_liveness(
     code: &[Instruction],
-    jit_metadata: &[vo_runtime::bytecode::JitInstructionMetadata],
-    reg_const_facts: &[std::collections::HashMap<u16, i64>],
+    jit_metadata: &[JitInstructionMetadata],
     externs: &[ExternDef],
     header_pc: usize,
     back_edge_pc: usize,
@@ -288,13 +300,20 @@ fn analyze_loop_liveness(
         .take(back_edge_pc + 1)
         .skip(header_pc)
     {
-        let facts = reg_const_facts
-            .get(pc)
-            .map(effects::EffectFacts::from_reg_consts)
-            .unwrap_or_else(effects::EffectFacts::none)
-            .with_instruction(jit_metadata.get(pc));
-        let effects = effects::try_instruction_effects_with_context(inst, facts, externs)
-            .map_err(|source| LoopAnalysisError::SlotRangeOverflow { pc, source })?;
+        let facts = effects::EffectFacts::from_instruction(jit_metadata.get(pc));
+        let effects = effects::try_instruction_effects_with_context(inst, facts, externs).map_err(
+            |source| match source {
+                effects::EffectError::SlotRange(source) => {
+                    LoopAnalysisError::SlotRangeOverflow { pc, source }
+                }
+                effects::EffectError::MissingLayout { opcode, layout } => {
+                    LoopAnalysisError::MissingLayout { pc, opcode, layout }
+                }
+                effects::EffectError::MissingExtern { extern_id } => {
+                    LoopAnalysisError::MissingExtern { pc, extern_id }
+                }
+            },
+        )?;
 
         for reg in effects.reads {
             if !written.contains(&reg) {
@@ -370,6 +389,15 @@ mod tests {
         }
     }
 
+    fn with_metadata(
+        mut func: FunctionDef,
+        pc: usize,
+        metadata: JitInstructionMetadata,
+    ) -> FunctionDef {
+        func.jit_metadata[pc] = metadata;
+        func
+    }
+
     fn hint_loop(depth: u8, end_offset: u8, exit_pc: u32) -> Instruction {
         // New format: a = flags(4) | depth(4) | end_offset(8), bc = exit_pc
         let loop_info = ((end_offset as u16) << 8) | ((depth as u16) << 4);
@@ -418,6 +446,16 @@ mod tests {
         }
     }
 
+    fn for_loop(idx: u16, limit: u16, offset: i16) -> Instruction {
+        Instruction {
+            op: Opcode::ForLoop as u8,
+            flags: 0,
+            a: idx,
+            b: limit,
+            c: offset as u16,
+        }
+    }
+
     fn ret() -> Instruction {
         Instruction {
             op: Opcode::Return as u8,
@@ -431,7 +469,7 @@ mod tests {
     #[test]
     fn test_no_loops() {
         let func = make_func(vec![load_int(0, 42), ret()]);
-        let loops = analyze_loops(&func);
+        let loops = try_analyze_loops(&func).unwrap();
         assert!(
             loops.is_empty(),
             "Should detect no loops without Hint instructions"
@@ -445,18 +483,18 @@ mod tests {
         // 1: Hint LOOP_BEGIN depth=0, end_offset=3, exit=5
         // 2: LoadInt r1, 10       <- begin_pc (loop_start)
         // 3: AddI r0, r0, r1
-        // 4: Jump -3              <- end_pc (back-edge)
+        // 4: Jump -2              <- end_pc (back-edge)
         // 5: Return               <- exit_pc
         let func = make_func(vec![
             load_int(0, 0),     // 0
             hint_loop(0, 3, 5), // 1: HINT_LOOP, end_offset=3 -> end_pc=4
             load_int(1, 10),    // 2: begin_pc (loop_start)
             add_i(0, 0, 1),     // 3
-            jump(-3),           // 4: back edge (end_pc)
+            jump(-2),           // 4: back edge (end_pc)
             ret(),              // 5: exit_pc
         ]);
 
-        let loops = analyze_loops(&func);
+        let loops = try_analyze_loops(&func).unwrap();
         assert_eq!(loops.len(), 1, "Should detect 1 loop");
 
         let loop_info = &loops[0];
@@ -476,10 +514,10 @@ mod tests {
         // 1: LoadInt r0, 0          <- outer begin_pc
         // 2: Hint LOOP_BEGIN depth=1, end_offset=2, exit=5
         // 3: AddI r0, r0, r1        <- inner begin_pc
-        // 4: Jump -2                <- inner end_pc (back edge)
+        // 4: Jump -1                <- inner end_pc (back edge)
         // 5: LoadInt r0, 0          <- inner exit_pc
         // 6: LoadInt r0, 0
-        // 7: Jump -7                <- outer end_pc (back edge)
+        // 7: Jump -6                <- outer end_pc (back edge)
         // 8: LoadInt r0, 0
         // 9: Return                 <- outer exit_pc
         let func = make_func(vec![
@@ -487,15 +525,15 @@ mod tests {
             load_int(0, 0),     // 1: outer begin_pc
             hint_loop(1, 2, 5), // 2: inner HINT_LOOP
             add_i(0, 0, 1),     // 3: inner begin_pc
-            jump(-2),           // 4: inner back edge
+            jump(-1),           // 4: inner back edge
             load_int(0, 0),     // 5: inner exit_pc
             load_int(0, 0),     // 6
-            jump(-7),           // 7: outer back edge
+            jump(-6),           // 7: outer back edge
             load_int(0, 0),     // 8
             ret(),              // 9: outer exit_pc
         ]);
 
-        let loops = analyze_loops(&func);
+        let loops = try_analyze_loops(&func).unwrap();
         assert_eq!(loops.len(), 2, "Should detect 2 nested loops");
 
         // Loops are in bytecode order (outer first, then inner)
@@ -517,14 +555,14 @@ mod tests {
         // Infinite loop: exit_pc = 0
         // 0: Hint LOOP_BEGIN depth=0, end_offset=2, exit=0 (infinite)
         // 1: AddI r0, r0, r1        <- begin_pc
-        // 2: Jump -2                <- end_pc (back edge)
+        // 2: Jump -1                <- end_pc (back edge)
         let func = make_func(vec![
             hint_loop(0, 2, 0), // 0: HINT_LOOP with exit=0 (infinite)
             add_i(0, 0, 1),     // 1: begin_pc
-            jump(-2),           // 2: back edge (end_pc)
+            jump(-1),           // 2: back edge (end_pc)
         ]);
 
-        let loops = analyze_loops(&func);
+        let loops = try_analyze_loops(&func).unwrap();
         assert_eq!(loops.len(), 1);
 
         let loop_info = &loops[0];
@@ -538,7 +576,7 @@ mod tests {
         let func = make_func(vec![
             hint_loop(0, 2, 3),
             copy_n(0, u16::MAX, 2),
-            jump(-2),
+            jump(-1),
             ret(),
         ]);
 
@@ -546,24 +584,84 @@ mod tests {
             try_analyze_loops(&func),
             Err(LoopAnalysisError::SlotRangeOverflow { pc: 1, .. })
         ));
-        assert!(
-            analyze_loops(&func).is_empty(),
-            "legacy loop discovery must conservatively disable OSR on malformed effects"
-        );
     }
 
     #[test]
-    fn try_analyze_reports_missing_back_edge() {
+    fn try_analyze_requires_loop_end_metadata_when_offset_is_not_encoded() {
         let func = make_func(vec![hint_loop(0, 0, 2), load_int(0, 1), ret()]);
 
         assert!(matches!(
             try_analyze_loops(&func),
-            Err(LoopAnalysisError::MissingBackEdge { loop_start: 1 })
+            Err(LoopAnalysisError::MissingLoopEndMetadata { hint_pc: 0 })
         ));
-        assert!(
-            analyze_loops(&func).is_empty(),
-            "legacy loop discovery must conservatively disable OSR on malformed loop hints"
+    }
+
+    #[test]
+    fn try_analyze_reports_metadata_end_without_back_edge() {
+        let func = with_metadata(
+            make_func(vec![hint_loop(0, 0, 2), load_int(0, 1), ret()]),
+            0,
+            JitInstructionMetadata::LoopEnd { end_pc: 2 },
         );
+
+        assert!(matches!(
+            try_analyze_loops(&func),
+            Err(LoopAnalysisError::MissingBackEdge {
+                loop_start: 1,
+                end_pc: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn try_analyze_uses_loop_end_metadata_for_unencoded_jump_loop() {
+        let func = with_metadata(
+            make_func(vec![hint_loop(0, 0, 0), add_i(0, 0, 1), jump(-1)]),
+            0,
+            JitInstructionMetadata::LoopEnd { end_pc: 2 },
+        );
+
+        let loops = try_analyze_loops(&func).unwrap();
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].begin_pc, 1);
+        assert_eq!(loops[0].end_pc, 2);
+    }
+
+    #[test]
+    fn try_analyze_uses_loop_end_metadata_for_unencoded_for_loop() {
+        let func = with_metadata(
+            make_func(vec![
+                hint_loop(0, 0, 3),
+                add_i(0, 0, 1),
+                for_loop(0, 1, -2),
+                ret(),
+            ]),
+            0,
+            JitInstructionMetadata::LoopEnd { end_pc: 2 },
+        );
+
+        let loops = try_analyze_loops(&func).unwrap();
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].begin_pc, 1);
+        assert_eq!(loops[0].end_pc, 2);
+    }
+
+    #[test]
+    fn try_analyze_rejects_inconsistent_loop_end_metadata() {
+        let func = with_metadata(
+            make_func(vec![hint_loop(0, 2, 0), add_i(0, 0, 1), jump(-1)]),
+            0,
+            JitInstructionMetadata::LoopEnd { end_pc: 1 },
+        );
+
+        assert!(matches!(
+            try_analyze_loops(&func),
+            Err(LoopAnalysisError::InconsistentLoopEndMetadata {
+                hint_pc: 0,
+                encoded_end_pc: 2,
+                metadata_end_pc: 1
+            })
+        ));
     }
 
     // =========================================================================
@@ -936,7 +1034,7 @@ mod tests {
             ret(),
         ]);
 
-        let loops = analyze_loops(&func);
+        let loops = try_analyze_loops(&func).unwrap();
         assert_eq!(loops.len(), 1);
         assert_eq!(loops[0].live_in, vec![0, 1, 2]);
         assert_eq!(loops[0].live_out, vec![3, 4, 5]);
@@ -954,7 +1052,7 @@ mod tests {
             ret(),
         ]);
 
-        let loops = analyze_loops(&func);
+        let loops = try_analyze_loops(&func).unwrap();
         assert_eq!(loops.len(), 1);
         assert_eq!(loops[0].live_in, vec![0, 1, 2, 4]);
         assert_eq!(loops[0].live_out, vec![10, 11, 12, 13]);

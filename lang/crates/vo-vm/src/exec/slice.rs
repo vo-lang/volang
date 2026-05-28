@@ -13,7 +13,7 @@ use vo_runtime::slot::Slot;
 use vo_runtime::ValueMeta;
 
 use crate::instruction::Instruction;
-use crate::vm::helpers::{stack_get, stack_set};
+use crate::vm::helpers::{makeslice_error_message, stack_get, stack_set};
 
 /// Result of exec_slice_new: Ok(()) on success, Err(msg) on invalid parameters
 pub type SliceNewResult = Result<(), String>;
@@ -25,8 +25,6 @@ pub fn exec_slice_new(
     inst: &Instruction,
     gc: &mut Gc,
 ) -> SliceNewResult {
-    use vo_runtime::objects::alloc_error;
-
     let meta_raw = stack_get(stack, bp + inst.b as usize) as u32;
     let len = stack_get(stack, bp + inst.c as usize) as i64;
     let cap = stack_get(stack, bp + inst.c as usize + 1) as i64;
@@ -46,12 +44,7 @@ pub fn exec_slice_new(
             stack_set(stack, bp + inst.a as usize, s as u64);
             Ok(())
         }
-        Err(code) => Err(match code {
-            alloc_error::NEGATIVE_LEN => "runtime error: makeslice: len out of range".to_string(),
-            alloc_error::NEGATIVE_CAP => "runtime error: makeslice: cap out of range".to_string(),
-            alloc_error::LEN_GT_CAP => "runtime error: makeslice: len larger than cap".to_string(),
-            _ => "runtime error: makeslice: cap out of range".to_string(),
-        }),
+        Err(code) => Err(makeslice_error_message(code).to_string()),
     }
 }
 

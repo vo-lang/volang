@@ -229,10 +229,12 @@ impl Vm {
 
     /// Create a VM with custom JIT thresholds.
     ///
-    /// Note: thresholds currently affect compilation bookkeeping only.
+    /// This is a best-effort convenience constructor: if JIT initialization
+    /// fails, the VM is still created without a JIT manager. Use
+    /// [`Vm::try_with_jit_config`] for strict `RunMode::Jit` paths.
     #[cfg(feature = "jit")]
     pub fn with_jit_thresholds(call_threshold: u32, loop_threshold: u32) -> Self {
-        Self::with_jit_config(JitConfig {
+        Self::with_best_effort_jit_config(JitConfig {
             call_threshold,
             loop_threshold,
             ..Default::default()
@@ -244,9 +246,13 @@ impl Vm {
         Self::new()
     }
 
-    /// Create a VM with custom JIT configuration.
+    /// Create a VM with custom JIT configuration, best effort.
+    ///
+    /// This deliberately preserves the legacy non-strict API: JIT
+    /// initialization errors are swallowed and the VM runs interpreter-only.
+    /// Strict execution paths must call [`Vm::try_with_jit_config`] instead.
     #[cfg(feature = "jit")]
-    pub fn with_jit_config(config: JitConfig) -> Self {
+    pub fn with_best_effort_jit_config(config: JitConfig) -> Self {
         let mut vm = Self::new();
         if let Ok(mgr) = JitManager::with_config(config) {
             vm.jit_mgr = Some(mgr);
@@ -254,24 +260,48 @@ impl Vm {
         vm
     }
 
-    /// Initialize JIT compiler (if jit feature is enabled).
+    /// Deprecated alias for [`Vm::with_best_effort_jit_config`].
     ///
-    /// Call this after creating the VM to enable JIT compilation.
-    /// Note: VM runtime execution remains interpreter-only.
-    /// Note: Does nothing if JIT manager already exists (e.g., from with_jit_thresholds).
+    /// This method is non-strict and may return a VM without JIT enabled.
+    /// New strict callers should use [`Vm::try_with_jit_config`].
+    #[cfg(feature = "jit")]
+    #[deprecated(
+        note = "non-strict best-effort API; use try_with_jit_config for strict JIT or with_best_effort_jit_config for explicit fallback"
+    )]
+    pub fn with_jit_config(config: JitConfig) -> Self {
+        Self::with_best_effort_jit_config(config)
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn try_with_jit_config(config: JitConfig) -> Result<Self, vo_jit::JitError> {
+        let mut vm = Self::new();
+        vm.jit_mgr = Some(JitManager::with_config(config)?);
+        Ok(vm)
+    }
+
+    /// Strictly initialize the JIT compiler.
+    ///
+    /// Does nothing if a JIT manager already exists.
+    #[cfg(feature = "jit")]
+    pub fn try_init_jit(&mut self) -> Result<(), vo_jit::JitError> {
+        if self.jit_mgr.is_some() {
+            return Ok(());
+        }
+        self.jit_mgr = Some(JitManager::new()?);
+        Ok(())
+    }
+
+    /// Best-effort legacy JIT initialization.
+    ///
+    /// This preserves the old non-strict behavior for embedding callers that
+    /// opportunistically enable JIT. It prints a warning on failure and leaves
+    /// the VM interpreter-only. Strict run paths must use [`Vm::try_init_jit`]
+    /// or [`Vm::try_with_jit_config`].
     #[cfg(feature = "jit")]
     pub fn init_jit(&mut self) {
-        if self.jit_mgr.is_some() {
-            return; // Already initialized (e.g., by with_jit_thresholds)
-        }
-        match JitManager::new() {
-            Ok(mgr) => {
-                self.jit_mgr = Some(mgr);
-            }
-            Err(e) => {
-                #[cfg(feature = "std")]
-                eprintln!("Warning: JIT initialization failed: {}", e);
-            }
+        if let Err(e) = self.try_init_jit() {
+            #[cfg(feature = "std")]
+            eprintln!("Warning: best-effort JIT initialization failed: {}", e);
         }
     }
 
@@ -869,6 +899,10 @@ impl Vm {
                     return Some(Ok(SchedulingOutcome::Panicked));
                 }
             }
+            ExecResult::JitError(msg) => {
+                let _ = self.scheduler.kill_current();
+                return Some(Err(VmError::Jit(msg)));
+            }
             ExecResult::FrameChanged | ExecResult::CallClosure { .. } => {
                 debug_assert!(
                     false,
@@ -1013,6 +1047,9 @@ impl Vm {
                             let fiber = self.scheduler.get_fiber_mut(fiber_id);
                             stack = fiber.stack_ptr();
                             handle_panic_result!(helpers::panic_unwind(fiber, stack, module));
+                        }
+                        jit::OsrResult::JitError(msg) => {
+                            return ExecResult::JitError(msg);
                         }
                     }
                 }
@@ -1572,27 +1609,34 @@ impl Vm {
                         let target_func_id = inst.static_call_func_id();
                         if let Some(jit_mgr) = self.jit_mgr.as_mut() {
                             let target_func = &module.functions[target_func_id as usize];
-                            if let Some(jit_func) =
-                                jit_mgr.resolve_call(target_func_id, target_func, module)
-                            {
-                                // Execute via JIT
-                                let result = jit::dispatch_jit_call(
-                                    self,
-                                    fiber,
-                                    &inst,
-                                    module,
-                                    jit_func,
-                                    target_func_id,
-                                );
-                                stack = fiber.stack_ptr();
-                                match result {
-                                    ExecResult::FrameChanged => {
-                                        // JIT returned Ok or panic_unwind needs to execute defer
-                                        refetch!();
+                            match jit_mgr.resolve_call(target_func_id, target_func, module) {
+                                Ok(Some(jit_func)) => {
+                                    // Execute via JIT
+                                    let result = jit::dispatch_jit_call(
+                                        self,
+                                        fiber,
+                                        &inst,
+                                        module,
+                                        jit_func,
+                                        target_func_id,
+                                    );
+                                    stack = fiber.stack_ptr();
+                                    match result {
+                                        ExecResult::FrameChanged => {
+                                            // JIT returned Ok or panic_unwind needs to execute defer
+                                            refetch!();
+                                        }
+                                        other => return other,
                                     }
-                                    other => return other,
+                                    continue;
                                 }
-                                continue;
+                                Ok(None) => {}
+                                Err(err) => {
+                                    return ExecResult::JitError(format!(
+                                        "JIT call compilation failed for {}: {err}",
+                                        target_func.name
+                                    ));
+                                }
                             }
                         }
                     }

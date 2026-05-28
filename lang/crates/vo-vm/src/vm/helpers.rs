@@ -5,7 +5,7 @@
 use alloc::string::String;
 
 use vo_runtime::gc::{Gc, GcRef};
-use vo_runtime::objects::{closure, slice, string};
+use vo_runtime::objects::{alloc_error, closure, slice, string};
 use vo_runtime::slot::{slot_to_ptr, slot_to_usize, Slot};
 use vo_runtime::InterfaceSlot;
 
@@ -92,6 +92,25 @@ pub const ERR_CLOSE_NIL_CHANNEL: &str = "runtime error: close of nil channel";
 pub const ERR_CLOSE_CLOSED_CHANNEL: &str = "runtime error: close of closed channel";
 pub const ERR_SELECT_REMOTE_UNSUPPORTED: &str =
     "runtime error: select on cross-island port is not supported";
+
+#[inline]
+pub fn makeslice_error_message(error_code: i32) -> &'static str {
+    match error_code {
+        alloc_error::NEGATIVE_LEN => "runtime error: makeslice: len out of range",
+        alloc_error::NEGATIVE_CAP => "runtime error: makeslice: cap out of range",
+        alloc_error::LEN_GT_CAP => "runtime error: makeslice: len larger than cap",
+        _ => "runtime error: makeslice: cap out of range",
+    }
+}
+
+#[inline]
+pub fn make_queue_error_message(kind: RuntimeTrapKind) -> &'static str {
+    match kind {
+        RuntimeTrapKind::MakeChan => "runtime error: makechan: size out of range",
+        RuntimeTrapKind::MakePort => "runtime error: makeport: size out of range",
+        _ => runtime_trap_message(kind),
+    }
+}
 
 #[inline]
 pub fn runtime_trap_message(kind: RuntimeTrapKind) -> &'static str {

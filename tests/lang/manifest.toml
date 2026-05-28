@@ -2998,6 +2998,13 @@ targets = ["vm", "jit", "osr", "nostd", "wasm"]
 expect = "pass"
 
 [[case]]
+id = "jit.runtime-traps"
+kind = "file"
+path = "cases/jit/runtime_traps.vo"
+targets = ["vm", "jit", "osr", "nostd", "wasm"]
+expect = "pass"
+
+[[case]]
 id = "jit.simple-arithmetic"
 kind = "file"
 path = "cases/jit/simple_arithmetic.vo"

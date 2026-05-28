@@ -710,24 +710,9 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instructi
         ));
     let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
 
-    // Save caller_bp and fiber_sp BEFORE branching — both IC hit and miss paths need these,
-    // and the prepare callback (miss path) changes ctx.jit_bp via push_frame.
-    let caller_bp = emitter.prologue_caller_bp().unwrap_or_else(|| {
-        emitter.builder().ins().load(
-            types::I32,
-            MemFlags::trusted(),
-            ctx,
-            JitContext::OFFSET_JIT_BP,
-        )
-    });
-    let old_fiber_sp = emitter.prologue_fiber_sp().unwrap_or_else(|| {
-        emitter.builder().ins().load(
-            types::I32,
-            MemFlags::trusted(),
-            ctx,
-            JitContext::OFFSET_FIBER_SP,
-        )
-    });
+    // Save call-boundary state before branching; the miss path may push a VM frame.
+    let caller_bp = emitter.call_caller_bp();
+    let old_fiber_sp = emitter.call_old_fiber_sp();
 
     // =====================================================================
     // IC lookup: extract func_id from closure, check IC entry
@@ -1073,24 +1058,9 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction
         ));
     let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
 
-    // Save caller_bp and fiber_sp BEFORE branching — both IC hit and miss paths need these,
-    // and the prepare callback (miss path) changes ctx.jit_bp via push_frame.
-    let caller_bp = emitter.prologue_caller_bp().unwrap_or_else(|| {
-        emitter.builder().ins().load(
-            types::I32,
-            MemFlags::trusted(),
-            ctx,
-            JitContext::OFFSET_JIT_BP,
-        )
-    });
-    let old_fiber_sp = emitter.prologue_fiber_sp().unwrap_or_else(|| {
-        emitter.builder().ins().load(
-            types::I32,
-            MemFlags::trusted(),
-            ctx,
-            JitContext::OFFSET_FIBER_SP,
-        )
-    });
+    // Save call-boundary state before branching; the miss path may push a VM frame.
+    let caller_bp = emitter.call_caller_bp();
+    let old_fiber_sp = emitter.call_old_fiber_sp();
 
     // =====================================================================
     // IC lookup: extract itab_id from slot0, check IC entry
@@ -1390,9 +1360,10 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(emitter: &mut E, p: PreparedCallPara
 
     let trampoline_block = emitter.builder().create_block();
     let jit_call_block = emitter.builder().create_block();
-    let merge_block = p
-        .merge_block
-        .unwrap_or_else(|| emitter.builder().create_block());
+    let merge_block = match p.merge_block {
+        Some(block) => block,
+        None => emitter.builder().create_block(),
+    };
 
     emitter
         .builder()
@@ -1604,9 +1575,19 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
     let extern_ret_slots = extern_def.ret_slots as usize;
     let buffer_size = arg_count.max(extern_ret_slots).max(1);
 
-    // Limit copy-back to available variables
-    let available_vars = emitter.local_slot_count().saturating_sub(dst);
-    let copy_back_slots = extern_ret_slots.min(available_vars);
+    let copy_back_slots = if extern_ret_slots == 0 {
+        0
+    } else {
+        let available_vars = emitter
+            .local_slot_count()
+            .checked_sub(dst)
+            .expect("CallExtern destination is outside local slots");
+        assert!(
+            extern_ret_slots <= available_vars,
+            "CallExtern return slots exceed local slots"
+        );
+        extern_ret_slots
+    };
 
     let builder = emitter.builder();
     let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -1922,23 +1903,8 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
 ) {
     let ctx = emitter.ctx_param();
 
-    // Reuse prologue-saved caller_bp and fiber_sp if available (avoids redundant ctx loads)
-    let caller_bp = emitter.prologue_caller_bp().unwrap_or_else(|| {
-        emitter.builder().ins().load(
-            types::I32,
-            MemFlags::trusted(),
-            ctx,
-            JitContext::OFFSET_JIT_BP,
-        )
-    });
-    let old_fiber_sp = emitter.prologue_fiber_sp().unwrap_or_else(|| {
-        emitter.builder().ins().load(
-            types::I32,
-            MemFlags::trusted(),
-            ctx,
-            JitContext::OFFSET_FIBER_SP,
-        )
-    });
+    let caller_bp = emitter.call_caller_bp();
+    let old_fiber_sp = emitter.call_old_fiber_sp();
 
     // Read args from caller's locals_slot
     let mut arg_values = Vec::with_capacity(config.arg_slots);

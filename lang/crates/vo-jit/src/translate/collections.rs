@@ -6,21 +6,22 @@ use cranelift_codegen::ir::{
 };
 use vo_runtime::bytecode::Constant;
 use vo_runtime::instruction::{Instruction, Opcode, QUEUE_KIND_PORT_FLAG};
+use vo_runtime::jit_api::JitRuntimeTrapKind;
 
 use crate::translator::{
     emit_funcref_call, emit_funcref_call_with_effect, HelperCallEffect, IrEmitter,
 };
 use crate::JitError;
 
-use super::emit_panic_if;
+use super::emit_runtime_trap_if;
 
 // =============================================================================
 // Slice/Array element size helpers
 // =============================================================================
 
 /// Resolve elem_bytes from instruction flags or per-PC JIT metadata.
-/// When flags==0, verifier requires metadata; `eb_reg` remains a fallback for
-/// legacy constant-fact callers.
+/// When flags==0, verifier requires metadata; register constants are not a
+/// layout authority.
 /// Returns (elem_bytes, needs_sign_extend).
 pub(super) fn resolve_elem_bytes<'a>(
     e: &impl IrEmitter<'a>,
@@ -155,7 +156,13 @@ pub(super) fn emit_slice_bounds_check<'a>(
         .builder()
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_panic_if(e, out_of_bounds);
+    emit_runtime_trap_if(
+        e,
+        out_of_bounds,
+        JitRuntimeTrapKind::IndexOutOfBounds,
+        Some(idx),
+        Some(len),
+    );
 
     e.builder()
         .ins()
@@ -191,7 +198,14 @@ pub(super) fn slice_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Panic if error_code != 0
     let zero = e.builder().ins().iconst(types::I32, 0);
     let has_error = e.builder().ins().icmp(IntCC::NotEqual, error_code, zero);
-    emit_panic_if(e, has_error);
+    let error_arg = e.builder().ins().sextend(types::I64, error_code);
+    emit_runtime_trap_if(
+        e,
+        has_error,
+        JitRuntimeTrapKind::MakeSlice,
+        Some(error_arg),
+        None,
+    );
 
     // Load result from output slot
     let result = e.builder().ins().stack_load(types::I64, out_slot, 0);
@@ -369,7 +383,13 @@ pub(super) fn slice_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check for bounds error (helper returns u64::MAX on error)
     let error_val = e.builder().ins().iconst(types::I64, -1i64);
     let is_error = e.builder().ins().icmp(IntCC::Equal, result, error_val);
-    emit_panic_if(e, is_error);
+    emit_runtime_trap_if(
+        e,
+        is_error,
+        JitRuntimeTrapKind::SliceBoundsOutOfRange,
+        Some(lo),
+        Some(hi),
+    );
 
     e.write_var(inst.a, result);
 }
@@ -459,7 +479,13 @@ pub(super) fn array_get<'a>(
         .builder()
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_panic_if(e, out_of_bounds);
+    emit_runtime_trap_if(
+        e,
+        out_of_bounds,
+        JitRuntimeTrapKind::IndexOutOfBounds,
+        Some(idx),
+        Some(len),
+    );
 
     let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.c + 1)?;
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
@@ -500,7 +526,13 @@ pub(super) fn array_set<'a>(
         .builder()
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_panic_if(e, out_of_bounds);
+    emit_runtime_trap_if(
+        e,
+        out_of_bounds,
+        JitRuntimeTrapKind::IndexOutOfBounds,
+        Some(idx),
+        Some(len),
+    );
 
     let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.b + 1)?;
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
@@ -634,7 +666,13 @@ pub(super) fn array_addr<'a>(
         .builder()
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_panic_if(e, out_of_bounds);
+    emit_runtime_trap_if(
+        e,
+        out_of_bounds,
+        JitRuntimeTrapKind::IndexOutOfBounds,
+        Some(idx),
+        Some(len),
+    );
 
     let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.c + 1)?;
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
@@ -670,7 +708,13 @@ pub(super) fn str_index<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         .builder()
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_panic_if(e, out_of_bounds);
+    emit_runtime_trap_if(
+        e,
+        out_of_bounds,
+        JitRuntimeTrapKind::IndexOutOfBounds,
+        Some(idx),
+        Some(len),
+    );
     let call = emit_funcref_call_with_effect(
         e,
         str_index_func,
@@ -894,7 +938,7 @@ pub(super) fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
     // nil map write panics (Go semantics)
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_nil = e.builder().ins().icmp(IntCC::Equal, m, zero);
-    emit_panic_if(e, is_nil);
+    emit_runtime_trap_if(e, is_nil, JitRuntimeTrapKind::NilMapWrite, None, None);
 
     let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b + 1, key_slots);
     let (_, val_ptr, val_slots_i32) = store_to_stack(e, inst.c, val_slots);
@@ -909,7 +953,7 @@ pub(super) fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
 
     // Check if vo_map_set returned panic (unhashable interface key)
     let is_panic = e.builder().ins().icmp(IntCC::NotEqual, result, zero);
-    emit_panic_if(e, is_panic);
+    emit_runtime_trap_if(e, is_panic, JitRuntimeTrapKind::UnhashableType, None, None);
     Ok(())
 }
 

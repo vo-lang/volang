@@ -27,6 +27,7 @@ pub struct HelperFuncs {
     pub gc_alloc: Option<FuncRef>,
     pub write_barrier: Option<FuncRef>,
     pub panic: Option<FuncRef>,
+    pub runtime_trap: Option<FuncRef>,
     pub call_extern: Option<FuncRef>,
     pub str_new: Option<FuncRef>,
     pub str_len: Option<FuncRef>,
@@ -188,46 +189,35 @@ pub trait IrEmitter<'a> {
     fn elem_layout(
         &self,
         flags: u8,
-        dynamic_bytes_slot: u16,
+        _dynamic_bytes_slot: u16,
     ) -> Option<crate::metadata::ElemLayout> {
-        self.current_jit_metadata()
-            .and_then(crate::metadata::elem_layout_from_instruction)
-            .or_else(|| {
-                crate::metadata::elem_layout_from_flags_or_dynamic_bytes(
-                    flags,
-                    self.get_reg_const(dynamic_bytes_slot),
-                )
-            })
+        if flags == 0 {
+            self.current_jit_metadata()
+                .and_then(crate::metadata::elem_layout_from_instruction)
+        } else {
+            Some(crate::metadata::elem_layout_from_flags(flags))
+        }
     }
 
     /// Resolve typed map-get metadata for JIT lowering.
     fn map_get_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapGetLayout> {
+        let _ = inst;
         self.current_jit_metadata()
             .and_then(crate::metadata::map_get_layout_from_instruction)
-            .or_else(|| {
-                self.get_reg_const(inst.c)
-                    .map(crate::metadata::map_get_layout_from_meta)
-            })
     }
 
     /// Resolve typed map-set metadata for JIT lowering.
     fn map_set_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapSetLayout> {
+        let _ = inst;
         self.current_jit_metadata()
             .and_then(crate::metadata::map_set_layout_from_instruction)
-            .or_else(|| {
-                self.get_reg_const(inst.b)
-                    .map(crate::metadata::map_set_layout_from_meta)
-            })
     }
 
     /// Resolve typed map-delete metadata for JIT lowering.
     fn map_delete_key_slots(&self, inst: &Instruction) -> Option<u16> {
+        let _ = inst;
         self.current_jit_metadata()
             .and_then(crate::metadata::map_delete_key_slots_from_instruction)
-            .or_else(|| {
-                self.get_reg_const(inst.b)
-                    .and_then(crate::metadata::map_delete_key_slots_from_meta)
-            })
     }
 
     /// Clear compile-time constant state for a slot after non-constant writes.
@@ -298,15 +288,11 @@ pub trait IrEmitter<'a> {
     /// Mark a slot as verified non-nil (after nil check passed).
     fn mark_checked_non_nil(&mut self, slot: u16);
 
-    /// Prologue-saved ctx.jit_bp (i32). Reused by call sites to avoid redundant loads.
-    fn prologue_caller_bp(&self) -> Option<Value> {
-        None
-    }
+    /// Caller bp value to record for a call boundary.
+    fn call_caller_bp(&mut self) -> Value;
 
-    /// Prologue-saved ctx.fiber_sp (i32). Reused by call sites to avoid redundant loads.
-    fn prologue_fiber_sp(&self) -> Option<Value> {
-        None
-    }
+    /// Fiber sp value to restore if a call returns through the native fast path.
+    fn call_old_fiber_sp(&mut self) -> Value;
 
     /// Refresh the cached fiber.stack base pointer after a call that may have triggered
     /// fiber.stack reallocation (via jit_push_frame inside prepare_closure_call, etc.).
@@ -320,7 +306,7 @@ pub trait IrEmitter<'a> {
 /// or dynamic indexing, so store_local can skip memory writes for them.
 #[allow(dead_code)]
 pub fn compute_memory_only_start(code: &[Instruction]) -> u16 {
-    try_compute_memory_only_start(code).unwrap_or(0)
+    try_compute_memory_only_start(code).expect("invalid memory-sync effects")
 }
 
 #[allow(dead_code)]
@@ -573,8 +559,7 @@ fn reg_const_effect(
         };
     }
 
-    let metadata_facts =
-        crate::metadata::MetadataFacts::from_reg_consts(facts).with_instruction(jit_metadata);
+    let metadata_facts = crate::metadata::MetadataFacts::from_instruction(jit_metadata);
 
     match inst.opcode() {
         Opcode::CopyN => {
@@ -861,7 +846,7 @@ mod tests {
         assert_eq!(
             facts[3].get(&5),
             Some(&42),
-            "metadata constants that agree on all predecessors should survive merge"
+            "constants that agree on all predecessors should survive merge"
         );
     }
 
@@ -885,7 +870,7 @@ mod tests {
         assert_eq!(
             facts[3].get(&1),
             Some(&258),
-            "map writes must not discard metadata registers they only read"
+            "map writes must not discard unrelated constants they only read"
         );
     }
 
@@ -949,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn reg_const_facts_fold_packed_metadata_arithmetic() {
+    fn reg_const_facts_fold_integer_arithmetic() {
         let constants = vec![Constant::Int(17), Constant::Int(4111)];
         let code = vec![
             Instruction::new(Opcode::LoadConst, 5, 0, 0),
@@ -965,7 +950,7 @@ mod tests {
         assert_eq!(
             facts[5].get(&5),
             Some(&((17i64 << 32) | 4111)),
-            "packed metadata built from pure integer ops should stay available"
+            "integer facts built from pure ops should stay available"
         );
     }
 

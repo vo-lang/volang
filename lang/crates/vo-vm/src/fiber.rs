@@ -1057,6 +1057,22 @@ impl Fiber {
         }
     }
 
+    /// Take a recoverable panic while preserving typed runtime trap metadata.
+    pub fn take_recoverable_panic_with_kind(
+        &mut self,
+    ) -> Option<(Option<RuntimeTrapKind>, InterfaceSlot)> {
+        match self.panic_state.take() {
+            Some(PanicState::Recoverable(val)) => {
+                let kind = self.panic_trap_kind.take();
+                Some((kind, val))
+            }
+            other => {
+                self.panic_state = other;
+                None
+            }
+        }
+    }
+
     #[inline]
     pub fn clear_parent_borrowed_slots(
         &mut self,

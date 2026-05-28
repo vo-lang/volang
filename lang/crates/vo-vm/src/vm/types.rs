@@ -176,6 +176,8 @@ pub enum ExecResult {
     Block(crate::fiber::BlockReason),
     /// Panic, unwind or kill.
     Panic,
+    /// Fatal JIT infrastructure error. This is not recoverable by user code.
+    JitError(String),
     /// Fiber finished.
     Done,
     /// Extern function requests closure execution. Internal to run_fiber.
@@ -251,6 +253,7 @@ pub enum VmError {
         loc: Option<ErrorLocation>,
     },
     Deadlock(String),
+    Jit(String),
 }
 
 /// Active island thread info.

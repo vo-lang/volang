@@ -5,6 +5,7 @@ use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
     types, InstBuilder, MemFlags, StackSlot, StackSlotData, StackSlotKind, Value,
 };
+use vo_runtime::jit_api::{JitContext, JitRuntimeTrapKind};
 
 use vo_runtime::bytecode::Constant;
 use vo_runtime::instruction::{Instruction, Opcode, QUEUE_KIND_PORT_FLAG};
@@ -514,9 +515,18 @@ pub fn translate_inst<'a>(
     }
 }
 
-/// Emit runtime panic (nil pointer, bounds check, division by zero, etc).
-/// Sets panic_flag=true but NOT is_user_panic - VM will create default error message.
-fn emit_panic_if<'a>(e: &mut impl IrEmitter<'a>, condition: Value) {
+/// Emit a typed runtime trap (nil pointer, bounds check, division by zero, etc).
+///
+/// The helper records `JitRuntimeTrapKind`, dynamic trap arguments, and bytecode
+/// pc in `JitContext`; VM panic setup converts that back to RuntimeTrapKind,
+/// source location, and user-visible panic text.
+pub(super) fn emit_runtime_trap_if<'a>(
+    e: &mut impl IrEmitter<'a>,
+    condition: Value,
+    kind: JitRuntimeTrapKind,
+    arg0: Option<Value>,
+    arg1: Option<Value>,
+) {
     let panic_block = e.builder().create_block();
     let ok_block = e.builder().create_block();
     e.builder()
@@ -526,33 +536,48 @@ fn emit_panic_if<'a>(e: &mut impl IrEmitter<'a>, condition: Value) {
     e.builder().switch_to_block(panic_block);
     e.builder().seal_block(panic_block);
 
-    // Runtime errors: just set panic_flag, don't call vo_panic
-    // (vo_panic sets is_user_panic=true which would prevent default message creation)
     let ctx = e.ctx_param();
-    let panic_flag_offset =
-        std::mem::offset_of!(vo_runtime::jit_api::JitContext, panic_flag) as i32;
-    let panic_flag_ptr =
-        e.builder()
-            .ins()
-            .load(types::I64, MemFlags::trusted(), ctx, panic_flag_offset);
-    let true_val = e.builder().ins().iconst(types::I8, 1);
-    e.builder()
-        .ins()
-        .store(MemFlags::trusted(), true_val, panic_flag_ptr, 0);
-
-    let panic_ret_val = e.panic_return_value();
-    let panic_ret = e.builder().ins().iconst(types::I32, panic_ret_val as i64);
+    let zero = e.builder().ins().iconst(types::I64, 0);
+    let arg0 = arg0.unwrap_or(zero);
+    let arg1 = arg1.unwrap_or(zero);
+    let kind_val = e.builder().ins().iconst(types::I32, kind as i64);
+    let current_pc = e.current_pc();
+    let pc_val = e.builder().ins().iconst(types::I32, current_pc as i64);
+    let trap_func = e
+        .helpers()
+        .runtime_trap
+        .expect("runtime_trap helper must be registered");
+    let call = emit_funcref_call(e, trap_func, &[ctx, kind_val, arg0, arg1, pc_val]);
+    let panic_ret = e.builder().inst_results(call)[0];
     e.builder().ins().return_(&[panic_ret]);
 
     e.builder().switch_to_block(ok_block);
     e.builder().seal_block(ok_block);
 }
 
+pub(super) fn mark_runtime_trap_pc<'a>(e: &mut impl IrEmitter<'a>) {
+    let ctx = e.ctx_param();
+    let current_pc = e.current_pc();
+    let pc_val = e.builder().ins().iconst(types::I32, current_pc as i64);
+    e.builder().ins().store(
+        MemFlags::trusted(),
+        pc_val,
+        ctx,
+        JitContext::OFFSET_RUNTIME_TRAP_PC,
+    );
+}
+
 /// Emit nil check for pointer. Panics if ptr is nil.
 fn emit_nil_ptr_check<'a>(e: &mut impl IrEmitter<'a>, ptr: Value) {
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_nil = e.builder().ins().icmp(IntCC::Equal, ptr, zero);
-    emit_panic_if(e, is_nil);
+    emit_runtime_trap_if(
+        e,
+        is_nil,
+        JitRuntimeTrapKind::NilPointerDereference,
+        None,
+        None,
+    );
 }
 
 /// Emit nil check for pointer with slot tracking.

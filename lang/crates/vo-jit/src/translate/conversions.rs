@@ -6,13 +6,14 @@ use cranelift_codegen::ir::{
 };
 use vo_runtime::bytecode::Constant;
 use vo_runtime::instruction::{Instruction, Opcode, QUEUE_KIND_PORT_FLAG};
+use vo_runtime::jit_api::JitRuntimeTrapKind;
 
 use crate::translator::{
     emit_funcref_call, emit_funcref_call_with_effect, HelperCallEffect, IrEmitter,
 };
 use crate::JitError;
 
-use super::emit_panic_if;
+use super::emit_runtime_trap_if;
 
 pub(super) fn conv_i2f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Input is I64 (int), output is F64 (float)
@@ -78,5 +79,11 @@ pub(super) fn index_check<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         .builder()
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_panic_if(e, out_of_bounds);
+    emit_runtime_trap_if(
+        e,
+        out_of_bounds,
+        JitRuntimeTrapKind::IndexOutOfBounds,
+        Some(idx),
+        Some(len),
+    );
 }

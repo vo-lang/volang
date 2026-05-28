@@ -6,13 +6,14 @@ use cranelift_codegen::ir::{
 };
 use vo_runtime::bytecode::Constant;
 use vo_runtime::instruction::{Instruction, Opcode, QUEUE_KIND_PORT_FLAG};
+use vo_runtime::jit_api::JitRuntimeTrapKind;
 
 use crate::translator::{
     emit_funcref_call, emit_funcref_call_with_effect, HelperCallEffect, IrEmitter,
 };
 use crate::JitError;
 
-use super::emit_panic_if;
+use super::{emit_runtime_trap_if, mark_runtime_trap_pc};
 
 // =============================================================================
 // Closure operations
@@ -96,7 +97,13 @@ pub(super) fn queue_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Panic if error_code != 0
     let zero = e.builder().ins().iconst(types::I32, 0);
     let has_error = e.builder().ins().icmp(IntCC::NotEqual, error_code, zero);
-    emit_panic_if(e, has_error);
+    let kind = if inst.queue_new_is_port() {
+        JitRuntimeTrapKind::MakePort
+    } else {
+        JitRuntimeTrapKind::MakeChan
+    };
+    let error_arg = e.builder().ins().sextend(types::I64, error_code);
+    emit_runtime_trap_if(e, has_error, kind, Some(error_arg), None);
 
     // Load result from output slot
     let result = e.builder().ins().stack_load(types::I64, out_slot, 0);
@@ -278,7 +285,13 @@ pub(super) fn iface_assert<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     if !has_ok {
         let zero = e.builder().ins().iconst(types::I64, 0);
         let is_panic = e.builder().ins().icmp(IntCC::Equal, result, zero);
-        emit_panic_if(e, is_panic);
+        emit_runtime_trap_if(
+            e,
+            is_panic,
+            JitRuntimeTrapKind::TypeAssertionFailed,
+            None,
+            None,
+        );
     }
     let dst_slots = if assert_kind == 1 {
         2
@@ -325,7 +338,13 @@ pub(super) fn iface_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check if result == 2 (panic for uncomparable type)
     let two = e.builder().ins().iconst(types::I64, 2);
     let is_panic = e.builder().ins().icmp(IntCC::Equal, result, two);
-    emit_panic_if(e, is_panic);
+    emit_runtime_trap_if(
+        e,
+        is_panic,
+        JitRuntimeTrapKind::UncomparableType,
+        None,
+        None,
+    );
 
     // Mask result to 0 or 1 (already know it's not 2)
     let one = e.builder().ins().iconst(types::I64, 1);
@@ -396,6 +415,7 @@ pub(super) fn emit_close_with_panic_check<'a>(
     let ctx = e.ctx_param();
     let obj = e.read_var(obj_slot);
 
+    mark_runtime_trap_pc(e);
     let call = emit_funcref_call(e, close_func, &[ctx, obj]);
     let result = e.builder().inst_results(call)[0];
 
@@ -446,6 +466,7 @@ pub(super) fn emit_queue_send<'a>(
         ctx,
         JitContext::OFFSET_CALL_RESUME_PC,
     );
+    mark_runtime_trap_pc(e);
 
     let queue = e.read_var(inst.a);
     let val_slots = inst.flags as u32;
@@ -497,6 +518,7 @@ pub(super) fn emit_queue_recv<'a>(
         ctx,
         JitContext::OFFSET_CALL_RESUME_PC,
     );
+    mark_runtime_trap_pc(e);
 
     let queue = e.read_var(inst.b);
     let dst_ptr = e.var_addr(inst.a);
@@ -730,6 +752,7 @@ pub(super) fn select_exec<'a>(
         ctx,
         JitContext::OFFSET_CALL_RESUME_PC,
     );
+    mark_runtime_trap_pc(e);
 
     let result_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
     e.spill_all_vars();

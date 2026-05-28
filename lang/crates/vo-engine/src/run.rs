@@ -84,6 +84,7 @@ impl RuntimeError {
                 RuntimeErrorKind::Panic,
             ),
             VmError::Deadlock(msg) => (msg.clone(), None, RuntimeErrorKind::Deadlock),
+            VmError::Jit(msg) => (msg.clone(), None, RuntimeErrorKind::Other),
             _ => (format!("{:?}", e), None, RuntimeErrorKind::Other),
         };
         RuntimeError {
@@ -197,16 +198,25 @@ pub fn run_with_output_interruptible_observed(
                 loop_threshold,
                 debug_ir,
             };
-            let mut vm = Vm::with_jit_config(config);
-            vm.init_jit();
-            vm
+            Vm::try_with_jit_config(config).map_err(|err| {
+                RunError::Runtime(RuntimeError {
+                    message: format!("JIT initialization failed: {err}"),
+                    location: None,
+                    kind: RuntimeErrorKind::Other,
+                })
+            })?
         }
     };
 
     #[cfg(not(feature = "jit"))]
     let mut vm = {
         if mode == RunMode::Jit {
-            eprintln!("Warning: JIT mode requested but not available, falling back to VM");
+            return Err(RunError::Runtime(RuntimeError {
+                message: "JIT mode requested but vo-engine was built without the jit feature"
+                    .to_string(),
+                location: None,
+                kind: RuntimeErrorKind::Other,
+            }));
         }
         Vm::new()
     };
@@ -285,4 +295,542 @@ fn load_extensions(specs: &[NativeExtensionSpec]) -> Result<Option<ExtensionLoad
         })
     })?;
     Ok(Some(loader))
+}
+
+#[cfg(all(test, feature = "jit"))]
+mod tests {
+    use super::*;
+
+    use vo_common_core::instruction::HINT_LOOP;
+    use vo_runtime::bytecode::JitInstructionMetadata;
+    use vo_runtime::instruction::Opcode;
+    use vo_runtime::output::CaptureSink;
+
+    fn vm_error_for(source: &str, mode: RunMode) -> VmError {
+        let compiled = crate::compile_string(source).expect("source should compile");
+        let mut vm = match mode {
+            RunMode::Vm => Vm::new(),
+            RunMode::Jit => Vm::try_with_jit_config(vo_vm::JitConfig {
+                call_threshold: 1,
+                loop_threshold: 1_000_000,
+                debug_ir: false,
+            })
+            .expect("JIT should initialize"),
+        };
+        vm.state.output = CaptureSink::new();
+        vm.load(compiled.module);
+        match vm.run() {
+            Err(err) => err,
+            Ok(outcome) => panic!("expected runtime error, VM returned {outcome:?}"),
+        }
+    }
+
+    fn vm_error_for_compiled(compiled: CompileOutput, config: vo_vm::JitConfig) -> VmError {
+        let mut vm = Vm::try_with_jit_config(config).expect("JIT should initialize");
+        vm.state.output = CaptureSink::new();
+        vm.load(compiled.module);
+        match vm.run() {
+            Err(err) => err,
+            Ok(outcome) => panic!("expected runtime error, VM returned {outcome:?}"),
+        }
+    }
+
+    fn assert_jit_runtime_trap_matches_vm(
+        source: &str,
+        expected_message: &str,
+        expected_kind: RuntimeTrapKind,
+    ) {
+        let vm = vm_error_for(source, RunMode::Vm);
+        let jit = vm_error_for(source, RunMode::Jit);
+
+        let VmError::RuntimeTrap {
+            kind: vm_kind,
+            msg: vm_msg,
+            loc: vm_loc,
+        } = vm
+        else {
+            panic!("expected VM runtime trap, got {vm:?}");
+        };
+        let VmError::RuntimeTrap {
+            kind: jit_kind,
+            msg: jit_msg,
+            loc: jit_loc,
+        } = jit
+        else {
+            panic!("expected JIT runtime trap, got {jit:?}");
+        };
+
+        assert_eq!(vm_msg, expected_message);
+        assert_eq!(jit_msg, vm_msg);
+        assert_eq!(vm_kind, expected_kind);
+        assert_eq!(jit_kind, expected_kind);
+        assert_eq!(
+            jit_loc.map(|loc| (loc.func_id, loc.pc)),
+            vm_loc.map(|loc| (loc.func_id, loc.pc))
+        );
+        assert!(
+            jit_loc.is_some(),
+            "JIT trap should preserve VM error location"
+        );
+    }
+
+    #[test]
+    fn jit_division_by_zero_preserves_runtime_trap_kind_message_and_location() {
+        assert_jit_runtime_trap_matches_vm(
+            r#"
+package main
+
+func div(x int) int {
+	return 10 / x
+}
+
+func main() {
+	_ = div(0)
+}
+"#,
+            "runtime error: integer divide by zero",
+            RuntimeTrapKind::DivisionByZero,
+        );
+    }
+
+    #[test]
+    fn jit_negative_shift_preserves_runtime_trap_kind_message_and_location() {
+        assert_jit_runtime_trap_matches_vm(
+            r#"
+package main
+
+func shift(x int) int {
+	return 1 << x
+}
+
+func main() {
+	_ = shift(-1)
+}
+"#,
+            "runtime error: negative shift amount",
+            RuntimeTrapKind::NegativeShift,
+        );
+    }
+
+    #[test]
+    fn jit_bounds_check_preserves_runtime_trap_kind_message_and_location() {
+        assert_jit_runtime_trap_matches_vm(
+            r#"
+package main
+
+func get(s []int) int {
+	return s[3]
+}
+
+func main() {
+	s := []int{1, 2}
+	_ = get(s)
+}
+"#,
+            "runtime error: index out of range [3] with length 2",
+            RuntimeTrapKind::IndexOutOfBounds,
+        );
+    }
+
+    #[test]
+    fn jit_nil_map_write_preserves_runtime_trap_kind_message_and_location() {
+        assert_jit_runtime_trap_matches_vm(
+            r#"
+package main
+
+func put(m map[string]int) {
+	m["x"] = 1
+}
+
+func main() {
+	var m map[string]int
+	put(m)
+}
+"#,
+            "runtime error: assignment to entry in nil map",
+            RuntimeTrapKind::NilMapWrite,
+        );
+    }
+
+    #[test]
+    fn jit_type_assertion_preserves_runtime_trap_kind_message_and_location() {
+        assert_jit_runtime_trap_matches_vm(
+            r#"
+package main
+
+func asInt(v any) int {
+	return v.(int)
+}
+
+func main() {
+	_ = asInt("not an int")
+}
+"#,
+            "runtime error: interface conversion: interface is nil, not",
+            RuntimeTrapKind::TypeAssertionFailed,
+        );
+    }
+
+    #[test]
+    fn jit_interface_eq_preserves_runtime_trap_kind_message_and_location() {
+        assert_jit_runtime_trap_matches_vm(
+            r#"
+package main
+
+func eq(a any, b any) bool {
+	return a == b
+}
+
+func main() {
+	s := []int{1}
+	_ = eq(s, s)
+}
+"#,
+            "runtime error: comparing uncomparable type in interface value",
+            RuntimeTrapKind::UncomparableType,
+        );
+    }
+
+    #[test]
+    fn jit_map_hash_preserves_runtime_trap_kind_message_and_location() {
+        assert_jit_runtime_trap_matches_vm(
+            r#"
+package main
+
+func put(m map[any]int, k any) {
+	m[k] = 1
+}
+
+func main() {
+	m := make(map[any]int)
+	k := []int{1}
+	put(m, k)
+}
+"#,
+            "runtime error: hash of unhashable type",
+            RuntimeTrapKind::UnhashableType,
+        );
+    }
+
+    #[test]
+    fn jit_queue_callback_preserves_runtime_trap_kind_message_and_location() {
+        assert_jit_runtime_trap_matches_vm(
+            r#"
+package main
+
+func sendClosed(ch chan int) {
+	close(ch)
+	ch <- 1
+}
+
+func main() {
+	ch := make(chan int, 1)
+	sendClosed(ch)
+}
+"#,
+            "runtime error: send on closed channel",
+            RuntimeTrapKind::SendOnClosedChannel,
+        );
+    }
+
+    #[test]
+    fn jit_make_slice_negative_len_preserves_runtime_trap_kind_message_and_location() {
+        assert_jit_runtime_trap_matches_vm(
+            r#"
+package main
+
+func mk(n int) []int {
+	return make([]int, n)
+}
+
+func main() {
+	_ = mk(-1)
+}
+"#,
+            "runtime error: makeslice: len out of range",
+            RuntimeTrapKind::MakeSlice,
+        );
+    }
+
+    #[test]
+    fn jit_make_slice_len_larger_than_cap_preserves_runtime_trap_kind_message_and_location() {
+        assert_jit_runtime_trap_matches_vm(
+            r#"
+package main
+
+func mk(n int, c int) []int {
+	return make([]int, n, c)
+}
+
+func main() {
+	_ = mk(2, 1)
+}
+"#,
+            "runtime error: makeslice: len larger than cap",
+            RuntimeTrapKind::MakeSlice,
+        );
+    }
+
+    #[test]
+    fn jit_make_chan_negative_size_preserves_runtime_trap_kind_message_and_location() {
+        assert_jit_runtime_trap_matches_vm(
+            r#"
+package main
+
+func mk(n int) chan int {
+	return make(chan int, n)
+}
+
+func main() {
+	_ = mk(-1)
+}
+"#,
+            "runtime error: makechan: size out of range",
+            RuntimeTrapKind::MakeChan,
+        );
+    }
+
+    #[test]
+    fn jit_make_port_negative_size_preserves_runtime_trap_kind_message_and_location() {
+        assert_jit_runtime_trap_matches_vm(
+            r#"
+package main
+
+func mk(n int) port int {
+	return make(port int, n)
+}
+
+func main() {
+	_ = mk(-1)
+}
+"#,
+            "runtime error: makeport: size out of range",
+            RuntimeTrapKind::MakePort,
+        );
+    }
+
+    #[test]
+    fn strict_jit_extern_not_registered_fails_fast() {
+        let compiled = crate::compile_string(
+            r#"
+package main
+
+import "fmt"
+
+func callPrint() {
+	fmt.Println("hello")
+}
+
+func main() {
+	callPrint()
+}
+"#,
+        )
+        .expect("source should compile");
+        let mut vm = Vm::try_with_jit_config(vo_vm::JitConfig {
+            call_threshold: 1,
+            loop_threshold: 1_000_000,
+            debug_ir: false,
+        })
+        .expect("JIT should initialize");
+        vm.state.output = CaptureSink::new();
+        vm.load(compiled.module);
+        vm.state.extern_registry = vo_runtime::ExternRegistry::new();
+
+        let err = match vm.run() {
+            Err(err) => err,
+            Ok(outcome) => panic!("expected JIT extern error, VM returned {outcome:?}"),
+        };
+
+        let VmError::Jit(msg) = err else {
+            panic!("expected strict JIT extern registration error, got {err:?}");
+        };
+        assert!(msg.contains("extern function"), "{msg}");
+        assert!(msg.contains("not registered"), "{msg}");
+        assert!(!msg.contains("JIT panic"), "{msg}");
+    }
+
+    #[test]
+    fn strict_jit_full_compile_invalid_metadata_fails_fast() {
+        let mut compiled = crate::compile_string(
+            r#"
+package main
+
+func hot(x int) int {
+	return x + 1
+}
+
+func main() {
+	_ = hot(41)
+}
+"#,
+        )
+        .expect("source should compile");
+        let func = compiled
+            .module
+            .functions
+            .iter_mut()
+            .find(|func| func.name.ends_with("hot"))
+            .expect("hot function");
+        let return_pc = func
+            .code
+            .iter()
+            .position(|inst| inst.opcode() == Opcode::Return)
+            .expect("return pc");
+        func.jit_metadata[return_pc] = JitInstructionMetadata::MapDelete { key_slots: 1 };
+
+        let err = vm_error_for_compiled(
+            compiled,
+            vo_vm::JitConfig {
+                call_threshold: 1,
+                loop_threshold: 1_000_000,
+                debug_ir: false,
+            },
+        );
+
+        let VmError::Jit(msg) = err else {
+            panic!("expected strict JIT error, got {err:?}");
+        };
+        assert!(msg.contains("invalid JIT metadata"), "{msg}");
+        assert!(msg.contains("hot"), "{msg}");
+    }
+
+    #[test]
+    fn strict_jit_osr_loop_analysis_error_fails_fast() {
+        let mut compiled = crate::compile_string(
+            r#"
+package main
+
+func loopHot(n int) int {
+	sum := 0
+	for i := 0; i < n; i++ {
+		sum += i
+	}
+	return sum
+}
+
+func main() {
+	_ = loopHot(20)
+}
+"#,
+        )
+        .expect("source should compile");
+        let func = compiled
+            .module
+            .functions
+            .iter_mut()
+            .find(|func| func.name.ends_with("loopHot"))
+            .expect("loopHot function");
+        let hint_pc = func
+            .code
+            .iter()
+            .position(|inst| inst.opcode() == Opcode::Hint && inst.flags == HINT_LOOP)
+            .expect("loop hint pc");
+        func.jit_metadata[hint_pc] = JitInstructionMetadata::LoopEnd {
+            end_pc: hint_pc as u32,
+        };
+
+        let err = vm_error_for_compiled(
+            compiled,
+            vo_vm::JitConfig {
+                call_threshold: 1_000_000,
+                loop_threshold: 1,
+                debug_ir: false,
+            },
+        );
+
+        let VmError::Jit(msg) = err else {
+            panic!("expected strict OSR JIT error, got {err:?}");
+        };
+        assert!(msg.contains("JIT OSR compilation failed"), "{msg}");
+        assert!(msg.contains("loop analysis failed"), "{msg}");
+    }
+
+    #[test]
+    fn strict_jit_dynamic_callee_precompile_error_fails_fast() {
+        let mut compiled = crate::compile_string(
+            r#"
+package main
+
+func target(x int) int {
+	return x + 1
+}
+
+func call(fn func(int) int) int {
+	return fn(41)
+}
+
+func main() {
+	_ = call(target)
+}
+"#,
+        )
+        .expect("source should compile");
+        let func = compiled
+            .module
+            .functions
+            .iter_mut()
+            .find(|func| func.name.ends_with("target"))
+            .expect("target function");
+        let return_pc = func
+            .code
+            .iter()
+            .position(|inst| inst.opcode() == Opcode::Return)
+            .expect("return pc");
+        func.jit_metadata[return_pc] = JitInstructionMetadata::MapDelete { key_slots: 1 };
+
+        let err = vm_error_for_compiled(
+            compiled,
+            vo_vm::JitConfig {
+                call_threshold: 1,
+                loop_threshold: 1_000_000,
+                debug_ir: false,
+            },
+        );
+
+        let VmError::Jit(msg) = err else {
+            panic!("expected strict dynamic callee JIT error, got {err:?}");
+        };
+        assert!(
+            msg.contains("prepared dynamic callee compilation")
+                || msg.contains("callee compilation"),
+            "{msg}"
+        );
+        assert!(msg.contains("invalid JIT metadata"), "{msg}");
+    }
+}
+
+#[cfg(all(test, not(feature = "jit")))]
+mod no_jit_tests {
+    use super::*;
+
+    use vo_runtime::output::CaptureSink;
+
+    #[test]
+    fn jit_mode_without_jit_feature_fails_fast() {
+        let compiled = crate::compile_string(
+            r#"
+package main
+
+func main() {
+	println("should not run")
+}
+"#,
+        )
+        .expect("source should compile");
+
+        let err = run_with_output_observed(compiled, RunMode::Jit, Vec::new(), CaptureSink::new())
+            .expect_err("RunMode::Jit must fail when jit feature is disabled");
+        let RunError::Runtime(runtime) = err else {
+            panic!("expected runtime error, got {err:?}");
+        };
+        assert_eq!(runtime.kind, RuntimeErrorKind::Other);
+        assert!(
+            runtime
+                .message
+                .contains("JIT mode requested but vo-engine was built without the jit feature"),
+            "{}",
+            runtime.message
+        );
+    }
 }
