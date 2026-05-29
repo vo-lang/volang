@@ -312,12 +312,7 @@ impl<'a> LoopCompiler<'a> {
                 crate::call_helpers::emit_call_iface(self, inst);
                 Ok(false)
             }
-            _ => {
-                // Unsupported - exit to VM (variables already in memory)
-                self.store_vars_to_memory();
-                self.emit_loop_exit(self.current_pc as u32);
-                Ok(true)
-            }
+            other => Err(JitError::UnsupportedOpcode(other)),
         }
     }
 

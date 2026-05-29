@@ -1,0 +1,35 @@
+package main
+
+func assert(ok bool, msg string) {
+	if !ok {
+		panic(msg)
+	}
+}
+
+func bounce(f func(int), n int) {
+	var pad [4096]int
+	pad[0] = n
+	pad[4095] = n
+	if n > 0 {
+		f(n - 1)
+	}
+}
+
+func main() {
+	var f func(int)
+	f = func(n int) {
+		bounce(f, n)
+	}
+
+	recovered := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				recovered = true
+			}
+		}()
+		f(400)
+	}()
+
+	assert(recovered, "prepared closure call stack overflow must recover")
+}

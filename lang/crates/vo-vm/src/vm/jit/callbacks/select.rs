@@ -3,7 +3,9 @@
 //! These callbacks are called from JIT-compiled code for select statements.
 //! They delegate to exec/select.rs to avoid code duplication.
 
-use vo_runtime::jit_api::{JitContext, JitResult};
+use vo_runtime::jit_api::{
+    set_jit_infra_error, JitContext, JitResult, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+};
 use vo_runtime::slot::Slot;
 
 use crate::exec::{self, SelectResult};
@@ -47,6 +49,13 @@ pub extern "C" fn jit_select_send(
 ) -> JitResult {
     let (_, fiber) = unsafe { extract_context(ctx) };
 
+    if fiber.select_state.is_none() {
+        return set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            queue_reg as u64,
+        );
+    }
     exec::exec_select_send(
         &mut fiber.select_state,
         queue_reg as u16,
@@ -74,6 +83,13 @@ pub extern "C" fn jit_select_recv(
 ) -> JitResult {
     let (_, fiber) = unsafe { extract_context(ctx) };
 
+    if fiber.select_state.is_none() {
+        return set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            queue_reg as u64,
+        );
+    }
     exec::exec_select_recv(
         &mut fiber.select_state,
         dst_reg as u16,
@@ -96,6 +112,13 @@ pub extern "C" fn jit_select_recv(
 pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitResult {
     let (vm, fiber) = unsafe { extract_context(ctx) };
 
+    if fiber.select_state.is_none() {
+        return set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            result_reg as u64,
+        );
+    }
     let stack = fiber.stack.as_mut_ptr() as *mut Slot;
     let bp = unsafe { (*ctx).jit_bp as usize };
 

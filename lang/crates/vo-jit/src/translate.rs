@@ -497,7 +497,7 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         IfaceAssign => {
-            iface_assign(e, inst);
+            iface_assign(e, inst)?;
             Ok(Completed)
         }
         IfaceEq => {
@@ -510,8 +510,7 @@ pub fn translate_inst<'a>(
         Jump | JumpIf | JumpIfNot | Return | Panic => Ok(Unhandled),
         // Function calls - compiler specific
         Call | CallExtern | CallClosure | CallIface => Ok(Unhandled),
-        // Unsupported
-        _ => Ok(Unhandled),
+        Invalid => Err(JitError::UnsupportedOpcode(Invalid)),
     }
 }
 

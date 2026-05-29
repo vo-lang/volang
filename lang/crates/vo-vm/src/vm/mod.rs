@@ -273,6 +273,7 @@ impl Vm {
     }
 
     #[cfg(feature = "jit")]
+    #[allow(clippy::result_large_err)]
     pub fn try_with_jit_config(config: JitConfig) -> Result<Self, vo_jit::JitError> {
         let mut vm = Self::new();
         vm.jit_mgr = Some(JitManager::with_config(config)?);
@@ -283,6 +284,7 @@ impl Vm {
     ///
     /// Does nothing if a JIT manager already exists.
     #[cfg(feature = "jit")]
+    #[allow(clippy::result_large_err)]
     pub fn try_init_jit(&mut self) -> Result<(), vo_jit::JitError> {
         if self.jit_mgr.is_some() {
             return Ok(());

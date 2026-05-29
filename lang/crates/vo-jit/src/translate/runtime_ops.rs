@@ -174,7 +174,10 @@ pub(super) fn str_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     }
 }
 
-pub(super) fn iface_assign<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn iface_assign<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
     use vo_runtime::bytecode::Constant;
     let vk = inst.flags;
     let src = e.read_var(inst.b);
@@ -183,16 +186,8 @@ pub(super) fn iface_assign<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let (slot0, slot1) = if vk == 16 {
         // Interface source: preserve rttid/vk from source, update itab_id
         // For interface->any (iface_meta_id=0), itab_id must be 0
-        let const_idx = inst.c as usize;
-        let Constant::Int(packed) = e
-            .vo_module()
-            .constants
-            .get(const_idx)
-            .expect("iface_assign metadata constant missing")
-        else {
-            panic!("iface_assign metadata constant must be an integer");
-        };
-        let iface_meta_id = (*packed & 0xFFFFFFFF) as u32;
+        let packed = iface_assign_metadata_constant(e, inst)?;
+        let iface_meta_id = (packed & 0xFFFFFFFF) as u32;
 
         let src_slot0 = src;
         let src_slot1 = e.read_var(inst.b + 1);
@@ -222,17 +217,9 @@ pub(super) fn iface_assign<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         }
     } else {
         // Concrete type source: use compile-time constants
-        let const_idx = inst.c as usize;
-        let Constant::Int(packed) = e
-            .vo_module()
-            .constants
-            .get(const_idx)
-            .expect("iface_assign metadata constant missing")
-        else {
-            panic!("iface_assign metadata constant must be an integer");
-        };
-        let rttid = (*packed >> 32) as u32;
-        let itab_id = (*packed & 0xFFFFFFFF) as u32;
+        let packed = iface_assign_metadata_constant(e, inst)?;
+        let rttid = (packed >> 32) as u32;
+        let itab_id = (packed & 0xFFFFFFFF) as u32;
         let itab_shifted = (itab_id as u64) << 32;
         let rttid_shifted = (rttid as u64) << 8;
         let slot0_val = itab_shifted | rttid_shifted | (vk as u64);
@@ -255,6 +242,25 @@ pub(super) fn iface_assign<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
     e.write_var(inst.a, slot0);
     e.write_var(inst.a + 1, slot1);
+    Ok(())
+}
+
+fn iface_assign_metadata_constant<'a>(
+    e: &impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<i64, JitError> {
+    let const_idx = inst.c as usize;
+    match e.vo_module().constants.get(const_idx) {
+        Some(Constant::Int(packed)) => Ok(*packed),
+        Some(other) => Err(JitError::Internal(format!(
+            "IfaceAssign metadata constant at pc {} must be Int, got {other:?}",
+            e.current_pc()
+        ))),
+        None => Err(JitError::Internal(format!(
+            "IfaceAssign metadata constant index {const_idx} missing at pc {}",
+            e.current_pc()
+        ))),
+    }
 }
 
 pub(super) fn iface_assert<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
@@ -283,23 +289,14 @@ pub(super) fn iface_assert<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
                 8,
             ));
     let dst_ptr = e.builder().ins().stack_addr(types::I64, result_slot, 0);
+    mark_runtime_trap_pc(e);
     let call = emit_funcref_call(
         e,
         func,
         &[ctx, slot0, slot1, target_id_i32, flags_i16, dst_ptr],
     );
     let result = e.builder().inst_results(call)[0];
-    if !has_ok {
-        let zero = e.builder().ins().iconst(types::I64, 0);
-        let is_panic = e.builder().ins().icmp(IntCC::Equal, result, zero);
-        emit_runtime_trap_if(
-            e,
-            is_panic,
-            JitRuntimeTrapKind::TypeAssertionFailed,
-            None,
-            None,
-        );
-    }
+    crate::call_helpers::check_call_result(e, result, true);
     let dst_slots = if assert_kind == 1 {
         2
     } else {
@@ -370,11 +367,12 @@ pub(super) fn island_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         .island_new
         .expect("island_new helper not registered");
     let ctx = e.ctx_param();
+    let out_ptr = e.var_addr(inst.a);
 
-    let call = emit_funcref_call(e, island_new_func, &[ctx]);
-    let handle = e.builder().inst_results(call)[0];
-
-    e.write_var(inst.a, handle);
+    let call = emit_funcref_call(e, island_new_func, &[ctx, out_ptr]);
+    let result = e.builder().inst_results(call)[0];
+    crate::call_helpers::check_call_result(e, result, true);
+    e.sync_written_slots(inst.a, 1);
 }
 
 /// ChanClose: close(chan[a])
@@ -587,7 +585,8 @@ pub(super) fn go_start<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     };
     let args_ptr = e.var_addr(inst.b);
     let arg_slots = e.builder().ins().iconst(types::I32, inst.c as i64);
-    emit_funcref_call(
+    mark_runtime_trap_pc(e);
+    let call = emit_funcref_call(
         e,
         go_start_func,
         &[
@@ -599,6 +598,8 @@ pub(super) fn go_start<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             arg_slots,
         ],
     );
+    let result = e.builder().inst_results(call)[0];
+    crate::call_helpers::check_call_result(e, result, true);
 }
 
 pub(super) fn go_island<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
@@ -612,11 +613,14 @@ pub(super) fn go_island<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     crate::contract::emit_nil_func_trap_if(e, closure_ref);
     let args_ptr = e.var_addr(inst.c);
     let arg_slots = e.builder().ins().iconst(types::I32, inst.flags as i64);
-    emit_funcref_call(
+    mark_runtime_trap_pc(e);
+    let call = emit_funcref_call(
         e,
         go_island_func,
         &[ctx, island, closure_ref, args_ptr, arg_slots],
     );
+    let result = e.builder().inst_results(call)[0];
+    crate::call_helpers::check_call_result(e, result, true);
 }
 
 pub(super) fn defer_push<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, is_errdefer: bool) {
@@ -648,7 +652,7 @@ pub(super) fn defer_push<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, is_
         .builder()
         .ins()
         .iconst(types::I32, if is_errdefer { 1 } else { 0 });
-    emit_funcref_call(
+    let call = emit_funcref_call(
         e,
         defer_push_func,
         &[
@@ -662,6 +666,8 @@ pub(super) fn defer_push<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, is_
             is_errdefer_val,
         ],
     );
+    let result = e.builder().inst_results(call)[0];
+    crate::call_helpers::check_call_result(e, result, true);
 }
 
 pub(super) fn recover<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
@@ -669,7 +675,8 @@ pub(super) fn recover<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let ctx = e.ctx_param();
     let result_ptr = e.var_addr(inst.a);
     let call = emit_funcref_call(e, recover_func, &[ctx, result_ptr]);
-    let _ = e.builder().inst_results(call)[0];
+    let result = e.builder().inst_results(call)[0];
+    crate::call_helpers::check_call_result(e, result, true);
     e.sync_written_slots(inst.a, 2);
 }
 

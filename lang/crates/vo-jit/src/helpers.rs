@@ -411,7 +411,7 @@ pub fn declare_helpers(
         sig.params.push(AbiParam::new(types::I32));
         sig.params.push(AbiParam::new(types::I16));
         sig.params.push(AbiParam::new(ptr));
-        sig.returns.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I32));
         sig
     })?;
 
@@ -449,8 +449,9 @@ pub fn declare_helpers(
 
     let island_new = module.declare_function("vo_island_new", Import, &{
         let mut sig = Signature::new(module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(ptr));
-        sig.returns.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(ptr)); // ctx
+        sig.params.push(AbiParam::new(ptr)); // out island handle
+        sig.returns.push(AbiParam::new(types::I32)); // JitResult
         sig
     })?;
 
@@ -491,6 +492,7 @@ pub fn declare_helpers(
         sig.params.push(AbiParam::new(types::I64)); // closure_ref
         sig.params.push(AbiParam::new(ptr)); // args_ptr
         sig.params.push(AbiParam::new(types::I32)); // arg_slots
+        sig.returns.push(AbiParam::new(types::I32)); // JitResult
         sig
     })?;
 
@@ -501,6 +503,7 @@ pub fn declare_helpers(
         sig.params.push(AbiParam::new(types::I64)); // closure_ref
         sig.params.push(AbiParam::new(ptr)); // args_ptr
         sig.params.push(AbiParam::new(types::I32)); // arg_slots
+        sig.returns.push(AbiParam::new(types::I32)); // JitResult
         sig
     })?;
 
@@ -514,6 +517,7 @@ pub fn declare_helpers(
         sig.params.push(AbiParam::new(ptr)); // args_ptr
         sig.params.push(AbiParam::new(types::I32)); // arg_count
         sig.params.push(AbiParam::new(types::I32)); // is_errdefer
+        sig.returns.push(AbiParam::new(types::I32)); // JitResult
         sig
     })?;
 
@@ -521,7 +525,7 @@ pub fn declare_helpers(
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr)); // ctx
         sig.params.push(AbiParam::new(ptr)); // result_ptr
-        sig.returns.push(AbiParam::new(types::I32));
+        sig.returns.push(AbiParam::new(types::I32)); // JitResult
         sig
     })?;
 

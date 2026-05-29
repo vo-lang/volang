@@ -1,6 +1,6 @@
 //! JIT callback helper functions.
 
-use vo_runtime::jit_api::{JitContext, JitResult};
+use vo_runtime::jit_api::{JitContext, JitResult, JitRuntimeTrapKind};
 use vo_runtime::objects::interface::InterfaceSlot;
 
 use crate::fiber::Fiber;
@@ -33,6 +33,17 @@ pub fn set_jit_trap(
     let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
     fiber.set_recoverable_trap(kind, InterfaceSlot::new(slot0, panic_str as u64));
     JitResult::Panic
+}
+
+pub fn record_runtime_trap(ctx: &mut JitContext, kind: JitRuntimeTrapKind, pc: u32) {
+    unsafe {
+        *ctx.panic_flag = true;
+        *ctx.is_user_panic = false;
+    }
+    ctx.runtime_trap_kind = kind as u8;
+    ctx.runtime_trap_arg0 = 0;
+    ctx.runtime_trap_arg1 = 0;
+    ctx.runtime_trap_pc = pc;
 }
 
 pub extern "C" fn jit_stack_overflow(ctx: *mut JitContext) -> JitResult {

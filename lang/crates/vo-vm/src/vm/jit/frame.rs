@@ -1,8 +1,10 @@
 //! JIT frame management callbacks.
 
-use vo_runtime::jit_api::JitContext;
+use vo_runtime::jit_api::{JitContext, JitResult, JitRuntimeTrapKind};
 
 use crate::fiber::Fiber;
+
+use super::callbacks::helpers::record_runtime_trap;
 
 /// Reserve a callee stack window for a prepared JIT-to-JIT call.
 ///
@@ -45,7 +47,17 @@ pub extern "C" fn jit_push_frame(
     // In JIT non-OK propagation blocks, ctx.fiber_sp is correctly restored
     // to the caller's sp, but fiber.sp may still reflect a deeper call's sp.
     let new_bp = ctx_ref.fiber_sp as usize;
-    let new_sp = fiber.reserve_slots_at(new_bp, local_slots as usize);
+    let new_sp = match fiber.try_reserve_slots_at(new_bp, local_slots as usize) {
+        Ok(sp) => sp,
+        Err(_) => {
+            record_runtime_trap(
+                ctx_ref,
+                JitRuntimeTrapKind::StackOverflow,
+                caller_resume_pc.saturating_sub(1),
+            );
+            return core::ptr::null_mut();
+        }
+    };
 
     // NOTE: No zeroing here! With mixed stack, callee initializes its own
     // locals_slot in prologue. fiber.stack is only used for parameter passing
@@ -112,18 +124,30 @@ pub extern "C" fn jit_push_resume_point(
     caller_bp: u32,
     ret_reg: u32,
     ret_slots: u32,
-) {
+) -> JitResult {
     let ctx_ref = unsafe { &mut *ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
 
     // Push to resume_stack (builds chain in reverse: innermost callee first, outermost caller last)
     #[cfg(feature = "jit")]
-    fiber.resume_stack.push(crate::fiber::ResumePoint {
-        func_id,
-        resume_pc,
-        bp: bp as usize,
-        caller_bp: caller_bp as usize,
-        ret_reg: ret_reg as u16,
-        ret_slots: ret_slots as u16,
-    });
+    {
+        let pending = fiber.resume_stack.len().saturating_add(1);
+        if fiber.try_reserve_call_frames(pending).is_err() {
+            record_runtime_trap(
+                ctx_ref,
+                JitRuntimeTrapKind::StackOverflow,
+                resume_pc.saturating_sub(1),
+            );
+            return JitResult::Panic;
+        }
+        fiber.resume_stack.push(crate::fiber::ResumePoint {
+            func_id,
+            resume_pc,
+            bp: bp as usize,
+            caller_bp: caller_bp as usize,
+            ret_reg: ret_reg as u16,
+            ret_slots: ret_slots as u16,
+        });
+    }
+    JitResult::Ok
 }

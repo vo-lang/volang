@@ -227,7 +227,8 @@ pub fn emit_call_depth_leave<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value, 
     );
 }
 
-/// Create signature for push_resume_point_fn callback: (ctx, func_id, resume_pc, bp, caller_bp, ret_reg, ret_slots) -> ()
+/// Create signature for push_resume_point_fn callback:
+/// (ctx, func_id, resume_pc, bp, caller_bp, ret_reg, ret_slots) -> JitResult
 pub fn import_push_resume_point_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     let call_conv = current_call_conv(emitter);
     emitter.builder().func.import_signature({
@@ -246,6 +247,8 @@ pub fn import_push_resume_point_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> Si
             .push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_reg
         sig.params
             .push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_slots
+        sig.returns
+            .push(cranelift_codegen::ir::AbiParam::new(types::I32)); // JitResult
         sig
     })
 }
@@ -268,7 +271,7 @@ pub fn import_jit_func_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
 }
 
 /// Create signature for prepare_closure_call callback.
-/// (ctx, closure_ref, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr, out) -> void
+/// (ctx, closure_ref, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr, out) -> JitResult
 /// Uses output pointer to avoid ABI mismatch (PreparedCall is 48 bytes, too large for register return).
 fn import_prepare_closure_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     let call_conv = current_call_conv(emitter);
@@ -292,12 +295,14 @@ fn import_prepare_closure_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
             .push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr
         sig.params
             .push(cranelift_codegen::ir::AbiParam::new(types::I64)); // out: *mut PreparedCall
+        sig.returns
+            .push(cranelift_codegen::ir::AbiParam::new(types::I32)); // JitResult
         sig
     })
 }
 
 /// Create signature for prepare_iface_call callback.
-/// (ctx, slot0, slot1, method_idx, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr, out) -> void
+/// (ctx, slot0, slot1, method_idx, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr, out) -> JitResult
 fn import_prepare_iface_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     let call_conv = current_call_conv(emitter);
     emitter.builder().func.import_signature({
@@ -324,6 +329,8 @@ fn import_prepare_iface_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
             .push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr
         sig.params
             .push(cranelift_codegen::ir::AbiParam::new(types::I64)); // out: *mut PreparedCall
+        sig.returns
+            .push(cranelift_codegen::ir::AbiParam::new(types::I32)); // JitResult
         sig
     })
 }
@@ -966,7 +973,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instructi
     let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
     let arg_count_val = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
 
-    emitter.builder().ins().call_indirect(
+    let prepare_call = emitter.builder().ins().call_indirect(
         prepare_sig,
         prepare_fn_ptr,
         &[
@@ -981,7 +988,8 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instructi
             out_ptr,
         ],
     );
-    crate::contract::emit_return_if_runtime_trap_recorded(emitter);
+    let prepare_result = emitter.builder().inst_results(prepare_call)[0];
+    check_call_result(emitter, prepare_result, true);
 
     // IC key for closure = tagged func_id.
     let out_func_id =
@@ -1289,7 +1297,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction
     let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
     let arg_count_val = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
 
-    emitter.builder().ins().call_indirect(
+    let prepare_call = emitter.builder().ins().call_indirect(
         prepare_sig,
         prepare_fn_ptr,
         &[
@@ -1306,7 +1314,8 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction
             out_ptr,
         ],
     );
-    crate::contract::emit_return_if_runtime_trap_recorded(emitter);
+    let prepare_result = emitter.builder().inst_results(prepare_call)[0];
+    check_call_result(emitter, prepare_result, true);
 
     emit_ic_miss_update_and_dispatch(
         emitter,
@@ -1559,7 +1568,7 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(emitter: &mut E, p: PreparedCallPara
         JitContext::OFFSET_PUSH_RESUME_POINT_FN,
     );
     let push_resume_point_sig = import_push_resume_point_sig(emitter);
-    emitter.builder().ins().call_indirect(
+    let push_resume_call = emitter.builder().ins().call_indirect(
         push_resume_point_sig,
         push_resume_point_fn_ptr,
         &[
@@ -1572,6 +1581,8 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(emitter: &mut E, p: PreparedCallPara
             p.ret_slots_val,
         ],
     );
+    let push_resume_result = emitter.builder().inst_results(push_resume_call)[0];
+    check_call_result(emitter, push_resume_result, true);
     emitter.builder().ins().return_(&[jit_result]);
 
     // OK: pop_frame, jump to merge
@@ -2389,6 +2400,7 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(emitter: &mut E, p: NonOkSlow
             p.caller_resume_pc_val,
         ],
     );
+    crate::contract::emit_return_if_runtime_trap_recorded(emitter);
 
     // 4. Optional: copy args from native stack to fiber.stack.
     // Self-recursive calls pass args via native stack slot, so we must copy them.
@@ -2424,7 +2436,7 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(emitter: &mut E, p: NonOkSlow
         ctx,
         JitContext::OFFSET_JIT_BP,
     );
-    emitter.builder().ins().call_indirect(
+    let push_resume_call = emitter.builder().ins().call_indirect(
         push_resume_point_sig,
         push_resume_point_fn_ptr,
         &[
@@ -2437,6 +2449,8 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(emitter: &mut E, p: NonOkSlow
             p.ret_slots_val,
         ],
     );
+    let push_resume_result = emitter.builder().inst_results(push_resume_call)[0];
+    check_call_result(emitter, push_resume_result, true);
 
     // 6. Return the JIT result.
     emitter.builder().ins().return_(&[p.jit_result]);
@@ -2449,7 +2463,7 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(emitter: &mut E, p: NonOkSlow
 /// For non-Ok results:
 /// - If spill_vars is true: spill all variables to memory before returning
 /// - Return the JitResult directly for VM to handle
-fn check_call_result<'a, E: IrEmitter<'a>>(emitter: &mut E, result: Value, spill_vars: bool) {
+pub fn check_call_result<'a, E: IrEmitter<'a>>(emitter: &mut E, result: Value, spill_vars: bool) {
     let ok_block = emitter.builder().create_block();
     let non_ok_block = emitter.builder().create_block();
 

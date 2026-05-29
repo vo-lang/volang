@@ -116,7 +116,7 @@ pub type JitPushResumePointFn = extern "C" fn(
     caller_bp: u32,
     ret_reg: u32,
     ret_slots: u32,
-);
+) -> JitResult;
 
 /// Monomorphic inline cache entry for dynamic calls (closure/iface).
 ///
@@ -271,7 +271,7 @@ pub type PrepareClosureCallFn = extern "C" fn(
     user_arg_count: u32,
     ret_ptr: *mut u64,
     out: *mut PreparedCall,
-);
+) -> JitResult;
 
 /// Function pointer type for preparing an interface method call.
 /// Writes result to `out` pointer instead of returning struct.
@@ -287,7 +287,7 @@ pub type PrepareIfaceCallFn = extern "C" fn(
     user_arg_count: u32,
     ret_ptr: *mut u64,
     out: *mut PreparedCall,
-);
+) -> JitResult;
 
 #[repr(C)]
 pub struct JitContext {
@@ -507,7 +507,7 @@ pub struct JitContext {
             closure_ref: u64,
             args_ptr: *const u64,
             arg_slots: u32,
-        ),
+        ) -> JitResult,
     >,
 
     /// Callback to spawn a goroutine on a specific island.
@@ -519,7 +519,7 @@ pub struct JitContext {
             closure_ref: u64,
             args_ptr: *const u64,
             arg_slots: u32,
-        ),
+        ) -> JitResult,
     >,
 
     // =========================================================================
@@ -539,11 +539,11 @@ pub struct JitContext {
             args_ptr: *const u64,
             arg_count: u32,
             is_errdefer: u32,
-        ),
+        ) -> JitResult,
     >,
 
-    /// Callback for recover() - writes result to output (2 slots), returns 1 if recovered.
-    pub recover_fn: Option<extern "C" fn(ctx: *mut JitContext, result_ptr: *mut u64) -> u32>,
+    /// Callback for recover() - writes result to output (2 slots).
+    pub recover_fn: Option<extern "C" fn(ctx: *mut JitContext, result_ptr: *mut u64) -> JitResult>,
 
     // =========================================================================
     // Select Statement Support
@@ -813,6 +813,43 @@ pub enum JitResult {
     JitError = 6,
 }
 
+pub const JIT_INFRA_ERROR_SENTINEL: u64 = u64::MAX;
+pub const JIT_INFRA_ERROR_MISSING_CALLBACK: u64 = 1;
+pub const JIT_INFRA_ERROR_INVALID_CALLBACK_STATE: u64 = 2;
+pub const JIT_INFRA_ERROR_INVALID_METADATA: u64 = 3;
+pub const JIT_CALLBACK_DEFER_PUSH: u64 = 1;
+pub const JIT_CALLBACK_RECOVER: u64 = 2;
+pub const JIT_CALLBACK_GO_START: u64 = 3;
+pub const JIT_CALLBACK_GO_ISLAND: u64 = 4;
+pub const JIT_CALLBACK_QUEUE_CLOSE: u64 = 5;
+pub const JIT_CALLBACK_QUEUE_SEND: u64 = 6;
+pub const JIT_CALLBACK_QUEUE_RECV: u64 = 7;
+pub const JIT_CALLBACK_SELECT_BEGIN: u64 = 8;
+pub const JIT_CALLBACK_SELECT_SEND: u64 = 9;
+pub const JIT_CALLBACK_SELECT_RECV: u64 = 10;
+pub const JIT_CALLBACK_SELECT_EXEC: u64 = 11;
+pub const JIT_CALLBACK_CREATE_ISLAND: u64 = 12;
+pub const JIT_CALLBACK_IFACE_ASSERT: u64 = 13;
+
+#[inline]
+pub fn set_jit_infra_error(ctx: *mut JitContext, code: u64, detail: u64) -> JitResult {
+    unsafe {
+        let ctx = &mut *ctx;
+        *ctx.panic_flag = false;
+        *ctx.is_user_panic = false;
+        ctx.runtime_trap_kind = JitRuntimeTrapKind::None as u8;
+        ctx.runtime_trap_arg0 = JIT_INFRA_ERROR_SENTINEL;
+        ctx.runtime_trap_arg1 = code;
+        ctx.runtime_trap_pc = detail as u32;
+    }
+    JitResult::JitError
+}
+
+#[inline]
+fn missing_callback(ctx: *mut JitContext, callback_id: u64) -> JitResult {
+    set_jit_infra_error(ctx, JIT_INFRA_ERROR_MISSING_CALLBACK, callback_id)
+}
+
 // =============================================================================
 // Runtime Helper Functions
 // =============================================================================
@@ -939,11 +976,11 @@ pub extern "C" fn vo_defer_push(
     args_ptr: *const u64,
     arg_count: u32,
     is_errdefer: u32,
-) {
+) -> JitResult {
     let ctx_ref = unsafe { &*ctx };
-    let f = ctx_ref
-        .defer_push_fn
-        .expect("JIT ABI violation: defer_push_fn not set");
+    let Some(f) = ctx_ref.defer_push_fn else {
+        return missing_callback(ctx, JIT_CALLBACK_DEFER_PUSH);
+    };
     f(
         ctx,
         func_id,
@@ -953,11 +990,10 @@ pub extern "C" fn vo_defer_push(
         args_ptr,
         arg_count,
         is_errdefer,
-    );
+    )
 }
 
 /// Execute recover() from JIT code.
-/// Returns 1 if panic was recovered, 0 otherwise.
 /// Result is written to result_ptr (2 slots for interface{}).
 ///
 /// # Safety
@@ -965,11 +1001,15 @@ pub extern "C" fn vo_defer_push(
 /// - `ctx.recover_fn` must be set
 /// - `result_ptr` must point to at least 2 u64 slots
 #[no_mangle]
-pub extern "C" fn vo_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> u32 {
+pub extern "C" fn vo_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> JitResult {
     let ctx_ref = unsafe { &*ctx };
-    let f = ctx_ref
-        .recover_fn
-        .expect("JIT ABI violation: recover_fn not set");
+    let Some(f) = ctx_ref.recover_fn else {
+        unsafe {
+            *result_ptr = 0;
+            *result_ptr.add(1) = 0;
+        }
+        return missing_callback(ctx, JIT_CALLBACK_RECOVER);
+    };
     f(ctx, result_ptr)
 }
 
@@ -1769,7 +1809,8 @@ pub extern "C" fn vo_iface_eq(
 }
 
 /// Interface assertion.
-/// Returns: 1 if matches, 0 if not (when has_ok), or panics (when !has_ok && !matches)
+/// Returns JitResult::Ok on success, JitResult::Panic for a language type assertion panic,
+/// or JitResult::JitError for malformed runtime metadata.
 /// dst layout: [result_slots...][ok_flag if has_ok]
 #[no_mangle]
 pub extern "C" fn vo_iface_assert(
@@ -1779,7 +1820,7 @@ pub extern "C" fn vo_iface_assert(
     target_id: u32,
     flags: u16,
     dst: *mut u64,
-) -> u64 {
+) -> JitResult {
     use crate::objects::interface;
     use crate::ValueKind;
 
@@ -1817,7 +1858,7 @@ pub extern "C" fn vo_iface_assert(
             *dst.add(ok_slot) = matches as u64;
 
             if matches {
-                write_iface_assert_success(
+                let result = write_iface_assert_success(
                     ctx,
                     slot0,
                     slot1,
@@ -1826,6 +1867,9 @@ pub extern "C" fn vo_iface_assert(
                     target_id,
                     dst,
                 );
+                if result != JitResult::Ok {
+                    return result;
+                }
             } else {
                 // Zero out on failure
                 let dst_slots = if assert_kind == 1 {
@@ -1837,9 +1881,9 @@ pub extern "C" fn vo_iface_assert(
                     *dst.add(i) = 0;
                 }
             }
-            1 // Continue
+            JitResult::Ok
         } else if matches {
-            write_iface_assert_success(
+            let result = write_iface_assert_success(
                 ctx,
                 slot0,
                 slot1,
@@ -1848,9 +1892,18 @@ pub extern "C" fn vo_iface_assert(
                 target_id,
                 dst,
             );
-            1 // Continue
+            if result != JitResult::Ok {
+                return result;
+            }
+            JitResult::Ok
         } else {
-            0 // Panic
+            let ctx_ref = &mut *ctx;
+            *ctx_ref.panic_flag = false;
+            *ctx_ref.is_user_panic = false;
+            ctx_ref.runtime_trap_kind = JitRuntimeTrapKind::TypeAssertionFailed as u8;
+            ctx_ref.runtime_trap_arg0 = 0;
+            ctx_ref.runtime_trap_arg1 = 0;
+            JitResult::Panic
         }
     }
 }
@@ -1863,7 +1916,7 @@ unsafe fn write_iface_assert_success(
     target_slots: usize,
     target_id: u32,
     dst: *mut u64,
-) {
+) -> JitResult {
     use crate::gc::GcRef;
     use crate::objects::interface;
     use crate::ValueKind;
@@ -1880,16 +1933,17 @@ unsafe fn write_iface_assert_success(
         let new_itab_id = if target_id == 0 {
             0
         } else {
-            let named_type_id = module
+            let Some(named_type_id) = module
                 .runtime_types
                 .get(src_rttid as usize)
                 .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "vo_iface_assert metadata missing: target_id={} src_rttid={} src_vk={:?}",
-                        target_id, src_rttid, src_vk
-                    )
-                });
+            else {
+                return set_jit_infra_error(
+                    ctx,
+                    JIT_INFRA_ERROR_INVALID_METADATA,
+                    JIT_CALLBACK_IFACE_ASSERT,
+                );
+            };
             // Value types (non-pointer) cannot use pointer receiver methods
             let src_is_pointer = src_vk == ValueKind::Pointer;
             itab_cache.get_or_create(
@@ -1935,6 +1989,7 @@ unsafe fn write_iface_assert_success(
         // Other types: slot1 is the value
         *dst = slot1;
     }
+    JitResult::Ok
 }
 
 // =============================================================================
@@ -2113,12 +2168,16 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
 
 /// Create a new island.
 /// Calls into VM via callback to properly register with scheduler.
-/// Returns the island handle.
 #[no_mangle]
-pub extern "C" fn vo_island_new(ctx: *mut JitContext) -> u64 {
+pub extern "C" fn vo_island_new(ctx: *mut JitContext, out: *mut u64) -> JitResult {
     let ctx = unsafe { &mut *ctx };
-    let create_fn = ctx.create_island_fn.expect("create_island_fn not set");
-    create_fn(ctx)
+    let Some(create_fn) = ctx.create_island_fn else {
+        return missing_callback(ctx, JIT_CALLBACK_CREATE_ISLAND);
+    };
+    unsafe {
+        *out = create_fn(ctx);
+    }
+    JitResult::Ok
 }
 
 /// Close a channel.
@@ -2126,7 +2185,9 @@ pub extern "C" fn vo_island_new(ctx: *mut JitContext) -> u64 {
 #[no_mangle]
 pub extern "C" fn vo_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
     let ctx = unsafe { &mut *ctx };
-    let close_fn = ctx.queue_close_fn.expect("queue_close_fn not set");
+    let Some(close_fn) = ctx.queue_close_fn else {
+        return missing_callback(ctx, JIT_CALLBACK_QUEUE_CLOSE);
+    };
     close_fn(ctx, chan)
 }
 
@@ -2145,7 +2206,9 @@ pub extern "C" fn vo_chan_send(
     val_slots: u32,
 ) -> JitResult {
     let ctx = unsafe { &mut *ctx };
-    let send_fn = ctx.queue_send_fn.expect("queue_send_fn not set");
+    let Some(send_fn) = ctx.queue_send_fn else {
+        return missing_callback(ctx, JIT_CALLBACK_QUEUE_SEND);
+    };
     send_fn(ctx, chan, val_ptr, val_slots)
 }
 
@@ -2161,7 +2224,9 @@ pub extern "C" fn vo_chan_recv(
     has_ok: u32,
 ) -> JitResult {
     let ctx = unsafe { &mut *ctx };
-    let recv_fn = ctx.queue_recv_fn.expect("queue_recv_fn not set");
+    let Some(recv_fn) = ctx.queue_recv_fn else {
+        return missing_callback(ctx, JIT_CALLBACK_QUEUE_RECV);
+    };
     recv_fn(ctx, chan, dst_ptr, elem_slots, has_ok)
 }
 
@@ -2179,9 +2244,11 @@ pub extern "C" fn vo_go_start(
     closure_ref: u64,
     args_ptr: *const u64,
     arg_slots: u32,
-) {
+) -> JitResult {
     let ctx = unsafe { &mut *ctx };
-    let go_fn = ctx.go_start_fn.expect("go_start_fn not set");
+    let Some(go_fn) = ctx.go_start_fn else {
+        return missing_callback(ctx, JIT_CALLBACK_GO_START);
+    };
     go_fn(ctx, func_id, is_closure, closure_ref, args_ptr, arg_slots)
 }
 
@@ -2194,9 +2261,11 @@ pub extern "C" fn vo_go_island(
     closure_ref: u64,
     args_ptr: *const u64,
     arg_slots: u32,
-) {
+) -> JitResult {
     let ctx = unsafe { &mut *ctx };
-    let go_fn = ctx.go_island_fn.expect("go_island_fn not set");
+    let Some(go_fn) = ctx.go_island_fn else {
+        return missing_callback(ctx, JIT_CALLBACK_GO_ISLAND);
+    };
     go_fn(ctx, island, closure_ref, args_ptr, arg_slots)
 }
 
@@ -2212,7 +2281,9 @@ pub extern "C" fn vo_select_begin(
     has_default: u32,
 ) -> JitResult {
     let ctx = unsafe { &mut *ctx };
-    let begin_fn = ctx.select_begin_fn.expect("select_begin_fn not set");
+    let Some(begin_fn) = ctx.select_begin_fn else {
+        return missing_callback(ctx, JIT_CALLBACK_SELECT_BEGIN);
+    };
     begin_fn(ctx, case_count, has_default)
 }
 
@@ -2226,7 +2297,9 @@ pub extern "C" fn vo_select_send(
     case_idx: u32,
 ) -> JitResult {
     let ctx = unsafe { &mut *ctx };
-    let send_fn = ctx.select_send_fn.expect("select_send_fn not set");
+    let Some(send_fn) = ctx.select_send_fn else {
+        return missing_callback(ctx, JIT_CALLBACK_SELECT_SEND);
+    };
     send_fn(ctx, queue_reg, val_reg, elem_slots, case_idx)
 }
 
@@ -2241,7 +2314,9 @@ pub extern "C" fn vo_select_recv(
     case_idx: u32,
 ) -> JitResult {
     let ctx = unsafe { &mut *ctx };
-    let recv_fn = ctx.select_recv_fn.expect("select_recv_fn not set");
+    let Some(recv_fn) = ctx.select_recv_fn else {
+        return missing_callback(ctx, JIT_CALLBACK_SELECT_RECV);
+    };
     recv_fn(ctx, dst_reg, queue_reg, elem_slots, has_ok, case_idx)
 }
 
@@ -2250,7 +2325,9 @@ pub extern "C" fn vo_select_recv(
 #[no_mangle]
 pub extern "C" fn vo_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitResult {
     let ctx = unsafe { &mut *ctx };
-    let exec_fn = ctx.select_exec_fn.expect("select_exec_fn not set");
+    let Some(exec_fn) = ctx.select_exec_fn else {
+        return missing_callback(ctx, JIT_CALLBACK_SELECT_EXEC);
+    };
     exec_fn(ctx, result_reg)
 }
 
@@ -2266,6 +2343,24 @@ mod tests {
             .any(|(name, _)| *name == "vo_set_call_request"));
         assert!(symbols.iter().any(|(name, _)| *name == "vo_defer_push"));
         assert!(symbols.iter().any(|(name, _)| *name == "vo_recover"));
+    }
+
+    #[test]
+    fn jit_abi_wrappers_do_not_unwrap_missing_callbacks() {
+        let src = include_str!("jit_api.rs");
+        let start = src
+            .find("// Island/Channel JIT Helpers")
+            .expect("JIT helper section");
+        let end = src.find("#[cfg(test)]").expect("test section");
+        let wrappers = &src[start..end];
+        assert!(
+            !wrappers.contains(".expect("),
+            "JIT ABI wrappers must return JitResult::JitError instead of panicking"
+        );
+        assert!(
+            !wrappers.contains("JIT ABI violation"),
+            "JIT ABI wrappers must use the machine-readable infra-error path"
+        );
     }
 
     #[test]

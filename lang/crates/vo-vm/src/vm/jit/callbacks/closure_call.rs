@@ -5,7 +5,10 @@
 
 use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::gc::GcRef;
-use vo_runtime::jit_api::{DynCallIC, JitContext, JitRuntimeTrapKind, PreparedCall};
+use vo_runtime::jit_api::{
+    set_jit_infra_error, DynCallIC, JitContext, JitResult, JitRuntimeTrapKind, PreparedCall,
+    JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, JIT_INFRA_ERROR_MISSING_CALLBACK,
+};
 use vo_runtime::objects::closure;
 
 #[inline]
@@ -57,7 +60,7 @@ pub extern "C" fn jit_prepare_closure_call(
     user_arg_count: u32,
     ret_ptr: *mut u64,
     out: *mut PreparedCall,
-) {
+) -> JitResult {
     let ctx = unsafe { &mut *ctx };
     let module = unsafe { &*(ctx.module) };
     if closure_ref == 0 {
@@ -67,13 +70,16 @@ pub extern "C" fn jit_prepare_closure_call(
             caller_resume_pc.saturating_sub(1),
         );
         unsafe { write_trapped_prepared_call(out) };
-        return;
+        return JitResult::Panic;
     }
 
     // 1. Resolve func_id from closure
     let closure_gcref = closure_ref as GcRef;
     let func_id = closure::func_id(closure_gcref);
-    let func_def = &module.functions[func_id as usize];
+    let Some(func_def) = module.functions.get(func_id as usize) else {
+        unsafe { write_trapped_prepared_call(out) };
+        return set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, func_id as u64);
+    };
     let local_slots = func_def.local_slots as usize;
 
     // 2. Determine if callee can use JIT fast path
@@ -81,7 +87,10 @@ pub extern "C" fn jit_prepare_closure_call(
 
     // 3. push_frame: always allocate callee frame on fiber.stack.
     //    Both fast path (JIT direct call) and slow path (call_vm trampoline) need valid callee_args_ptr.
-    let push_frame_fn = ctx.push_frame_fn.expect("push_frame_fn not set");
+    let Some(push_frame_fn) = ctx.push_frame_fn else {
+        unsafe { write_trapped_prepared_call(out) };
+        return set_jit_infra_error(ctx, JIT_INFRA_ERROR_MISSING_CALLBACK, 0);
+    };
     let callee_args_ptr = push_frame_fn(
         ctx,
         func_id,
@@ -90,6 +99,10 @@ pub extern "C" fn jit_prepare_closure_call(
         ret_slots,
         caller_resume_pc,
     );
+    if callee_args_ptr.is_null() {
+        unsafe { write_trapped_prepared_call(out) };
+        return JitResult::Panic;
+    }
 
     // 4. Copy args with correct closure layout
     let layout = closure::call_layout(
@@ -132,6 +145,7 @@ pub extern "C" fn jit_prepare_closure_call(
             is_leaf: (!func_def.has_calls && !func_def.has_call_extern) as u32,
         };
     }
+    JitResult::Ok
 }
 
 /// Prepare an interface method call for JIT dispatch.
@@ -149,7 +163,7 @@ pub extern "C" fn jit_prepare_iface_call(
     user_arg_count: u32,
     ret_ptr: *mut u64,
     out: *mut PreparedCall,
-) {
+) -> JitResult {
     use vo_runtime::objects::interface;
 
     let ctx_ref = unsafe { &mut *ctx };
@@ -162,13 +176,35 @@ pub extern "C" fn jit_prepare_iface_call(
             caller_resume_pc.saturating_sub(1),
         );
         unsafe { write_trapped_prepared_call(out) };
-        return;
+        return JitResult::Panic;
     }
 
     // 1. Resolve func_id from itab
     let itab_id = interface::unpack_itab_id(iface_slot0);
-    let func_id = itab_cache.lookup_method(itab_id, method_idx as usize);
-    let func_def = &module.functions[func_id as usize];
+    let Some(itab) = itab_cache.get_itab(itab_id) else {
+        unsafe { write_trapped_prepared_call(out) };
+        return set_jit_infra_error(
+            ctx_ref,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            itab_id as u64,
+        );
+    };
+    let Some(&func_id) = itab.methods.get(method_idx as usize) else {
+        unsafe { write_trapped_prepared_call(out) };
+        return set_jit_infra_error(
+            ctx_ref,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            method_idx as u64,
+        );
+    };
+    let Some(func_def) = module.functions.get(func_id as usize) else {
+        unsafe { write_trapped_prepared_call(out) };
+        return set_jit_infra_error(
+            ctx_ref,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            func_id as u64,
+        );
+    };
     let local_slots = func_def.local_slots as usize;
     let recv_slots = func_def.recv_slots as usize;
 
@@ -176,7 +212,10 @@ pub extern "C" fn jit_prepare_iface_call(
     let jit_func_ptr = lookup_direct_call_ptr(ctx_ref, func_id, func_def);
 
     // 3. push_frame: always allocate callee frame on fiber.stack
-    let push_frame_fn = ctx_ref.push_frame_fn.expect("push_frame_fn not set");
+    let Some(push_frame_fn) = ctx_ref.push_frame_fn else {
+        unsafe { write_trapped_prepared_call(out) };
+        return set_jit_infra_error(ctx_ref, JIT_INFRA_ERROR_MISSING_CALLBACK, 0);
+    };
     let callee_args_ptr = push_frame_fn(
         ctx,
         func_id,
@@ -185,6 +224,10 @@ pub extern "C" fn jit_prepare_iface_call(
         ret_slots,
         caller_resume_pc,
     );
+    if callee_args_ptr.is_null() {
+        unsafe { write_trapped_prepared_call(out) };
+        return JitResult::Panic;
+    }
 
     // 4. Copy args: receiver at slot 0, user args at recv_slots
     unsafe {
@@ -207,6 +250,7 @@ pub extern "C" fn jit_prepare_iface_call(
             is_leaf: (!func_def.has_calls && !func_def.has_call_extern) as u32,
         };
     }
+    JitResult::Ok
 }
 
 #[cfg(test)]

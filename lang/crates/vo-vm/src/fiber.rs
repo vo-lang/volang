@@ -1061,14 +1061,26 @@ impl Fiber {
         ret_reg: u16,
         ret_count: u16,
     ) -> usize {
-        assert!(
-            scan_slots <= local_slots,
-            "push_frame: scan_slots={} local_slots={}",
-            scan_slots,
-            local_slots,
-        );
+        self.try_push_frame(func_id, local_slots, scan_slots, ret_reg, ret_count)
+            .unwrap_or_else(|err| panic!("{}", err.message()))
+    }
+
+    pub fn try_push_frame(
+        &mut self,
+        func_id: u32,
+        local_slots: u16,
+        scan_slots: u16,
+        ret_reg: u16,
+        ret_count: u16,
+    ) -> Result<usize, FiberCapacityError> {
+        if scan_slots > local_slots {
+            return Err(FiberCapacityError::StackSlots {
+                required: scan_slots as usize,
+                limit: local_slots as usize,
+            });
+        }
         let bp = self.sp;
-        self.reserve_slots_at(bp, local_slots as usize);
+        self.try_reserve_slots_at(bp, local_slots as usize)?;
         // Zero the new frame's slots. ensure_capacity zeros newly-allocated memory, but
         // previously-used slots (from prior calls that shared this stack region) contain
         // stale values. GC root scanning uses slot_types to determine which slots hold
@@ -1076,8 +1088,8 @@ impl Fiber {
         // This zero-fill is the canonical fix (same approach as JVM/CLR).
         // Safety: ensure_capacity guarantees stack[bp..new_sp] is valid.
         self.zero_slots_at(bp, scan_slots as usize);
-        self.push_call_frame(func_id, bp, ret_reg, ret_count, scan_slots);
-        bp
+        self.try_push_call_frame(func_id, bp, ret_reg, ret_count, scan_slots)?;
+        Ok(bp)
     }
 
     pub fn pop_frame(&mut self) -> Option<CallFrame> {

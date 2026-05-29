@@ -242,10 +242,14 @@ pub unsafe fn try_build_closure_fiber_from_args_ptr(
     }
     let closure_gcref = closure_ref as GcRef;
     let func_id = closure::func_id(closure_gcref);
-    let func_def = &functions[func_id as usize];
+    let Some(func_def) = functions.get(func_id as usize) else {
+        return Err(RuntimeTrapKind::NilFuncCall);
+    };
 
     let mut fiber = Fiber::new(next_fiber_id);
-    fiber.push_frame(func_id, func_def.local_slots, func_def.gc_scan_slots, 0, 0);
+    fiber
+        .try_push_frame(func_id, func_def.local_slots, func_def.gc_scan_slots, 0, 0)
+        .map_err(|_| RuntimeTrapKind::StackOverflow)?;
 
     let layout = closure_call_layout(
         closure_ref,

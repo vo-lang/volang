@@ -1,7 +1,9 @@
 //! JIT callbacks for defer/recover operations.
 
 use vo_runtime::gc::{Gc, GcRef};
-use vo_runtime::jit_api::JitContext;
+use vo_runtime::jit_api::{
+    set_jit_infra_error, JitContext, JitResult, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+};
 use vo_runtime::InterfaceSlot;
 use vo_runtime::{ValueKind, ValueMeta};
 
@@ -20,7 +22,7 @@ pub extern "C" fn jit_defer_push(
     args_ptr: *const u64,
     arg_count: u32,
     is_errdefer: u32,
-) {
+) -> JitResult {
     let ctx_ref = unsafe { &*ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     let gc = unsafe { &mut *ctx_ref.gc };
@@ -30,23 +32,29 @@ pub extern "C" fn jit_defer_push(
     let arg_slots = arg_count as u16;
     let frame_depth = fiber.frames.len();
     let generation = fiber.effective_defer_generation();
-    let caller_frame = fiber
-        .frames
-        .last()
-        .copied()
-        .expect("jit_defer_push: missing caller frame");
-    let caller_func = module
-        .functions
-        .get(caller_frame.func_id as usize)
-        .expect("jit_defer_push: missing caller function metadata");
-    let arg_layout = DeferArgLayout::try_from_caller_slot_types(
+    let Some(caller_frame) = fiber.frames.last().copied() else {
+        return set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, 0);
+    };
+    let Some(caller_func) = module.functions.get(caller_frame.func_id as usize) else {
+        return set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            caller_frame.func_id as u64,
+        );
+    };
+    let Ok(arg_layout) = DeferArgLayout::try_from_caller_slot_types(
         &caller_func.slot_types,
         caller_frame.func_id,
         caller_frame.pc.saturating_sub(1) as u32,
         arg_start as u16,
         arg_slots,
-    )
-    .unwrap_or_else(|err| panic!("{err}"));
+    ) else {
+        return set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            arg_start as u64,
+        );
+    };
 
     // Match VM push_defer_entry semantics (exec/defer.rs)
     let (fid, closure): (u32, GcRef) = if is_closure {
@@ -76,14 +84,14 @@ pub extern "C" fn jit_defer_push(
         is_errdefer: is_errdefer != 0,
         registered_at_generation: generation,
     });
+    JitResult::Ok
 }
 
 /// Execute recover() from JIT code.
 ///
 /// Called by JIT-compiled code when executing Recover instruction.
-/// Returns 1 if panic was recovered, 0 otherwise.
 /// Result (interface{}) is written to result_ptr (2 slots).
-pub extern "C" fn jit_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> u32 {
+pub extern "C" fn jit_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> JitResult {
     let ctx_ref = unsafe { &*ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
 
@@ -94,7 +102,7 @@ pub extern "C" fn jit_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> u32
             *result_ptr = 0;
             *result_ptr.add(1) = 0;
         }
-        return 0;
+        return JitResult::Ok;
     }
 
     // Try to take the panic value
@@ -110,8 +118,8 @@ pub extern "C" fn jit_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> u32
     // If recover succeeded, switch from Panic to Return mode
     if recovered.is_some() {
         fiber.switch_panic_to_return_mode();
-        1
+        JitResult::Ok
     } else {
-        0
+        JitResult::Ok
     }
 }

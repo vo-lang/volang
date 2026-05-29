@@ -18,6 +18,7 @@ use crate::vm::helpers::{stack_get, stack_set};
 /// - c: arg_slots
 /// - flags bit 0: is_closure
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub fn exec_defer_push(
     stack: *const Slot,
     bp: usize,
@@ -42,6 +43,7 @@ pub fn exec_defer_push(
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub fn exec_err_defer_push(
     stack: *const Slot,
     bp: usize,

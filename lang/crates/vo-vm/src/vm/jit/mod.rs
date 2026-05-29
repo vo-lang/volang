@@ -49,8 +49,21 @@ struct JitPanicInfo {
     msg: InterfaceSlot,
 }
 
+#[derive(Debug)]
+enum JitFrameMaterializeError {
+    Capacity(FiberCapacityError),
+    Invariant(&'static str),
+}
+
+impl From<FiberCapacityError> for JitFrameMaterializeError {
+    fn from(err: FiberCapacityError) -> Self {
+        Self::Capacity(err)
+    }
+}
+
 enum SetupJitPanicError {
     Capacity(FiberCapacityError),
+    MaterializationInvariant(&'static str),
     MissingPayload,
     MissingLocation(&'static str),
 }
@@ -62,6 +75,23 @@ fn jit_error_message(action: &str, func_name: &str, err: &vo_jit::JitError) -> S
 fn jit_context_error_message(ctx: &JitContextWrapper, module: &Module) -> String {
     let extern_id = ctx.ctx.runtime_trap_arg0 as u32;
     let not_registered_id = ctx.ctx.runtime_trap_arg1 as u32;
+    if ctx.ctx.runtime_trap_arg0 == vo_runtime::jit_api::JIT_INFRA_ERROR_SENTINEL {
+        return match ctx.ctx.runtime_trap_arg1 {
+            vo_runtime::jit_api::JIT_INFRA_ERROR_MISSING_CALLBACK => format!(
+                "JIT ABI callback missing (callback id {})",
+                ctx.ctx.runtime_trap_pc
+            ),
+            vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE => format!(
+                "JIT callback contract violation (detail {})",
+                ctx.ctx.runtime_trap_pc
+            ),
+            vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_METADATA => format!(
+                "JIT metadata contract violation (detail {})",
+                ctx.ctx.runtime_trap_pc
+            ),
+            code => format!("JIT infrastructure error {code}"),
+        };
+    }
     if let Some(extern_def) = module.externs.get(extern_id as usize) {
         format!(
             "JIT extern call failed: extern function '{}' (id={}) not registered",
@@ -145,6 +175,22 @@ fn stack_overflow_exec_result(
     )
 }
 
+fn frame_materialize_exec_result(
+    vm: &mut Vm,
+    fiber: &mut Fiber,
+    module: &Module,
+    err: JitFrameMaterializeError,
+) -> ExecResult {
+    match err {
+        JitFrameMaterializeError::Capacity(err) => {
+            stack_overflow_exec_result(vm, fiber, module, err)
+        }
+        JitFrameMaterializeError::Invariant(err) => {
+            ExecResult::JitError(format!("JIT frame materialization invariant failed: {err}"))
+        }
+    }
+}
+
 fn set_stack_overflow_panic(vm: &mut Vm, fiber: &mut Fiber, err: FiberCapacityError) {
     let msg = err.message();
     fiber.capture_panic_source_loc();
@@ -193,7 +239,12 @@ fn setup_jit_panic(
     let trap_pc = (ctx.ctx.runtime_trap_pc != u32::MAX).then_some(ctx.ctx.runtime_trap_pc);
     let user_panic_pc = (ctx.ctx.user_panic_pc != u32::MAX).then_some(ctx.ctx.user_panic_pc);
 
-    materialize_jit_frames(fiber, module, 0).map_err(SetupJitPanicError::Capacity)?;
+    materialize_jit_frames(fiber, module, 0).map_err(|err| match err {
+        JitFrameMaterializeError::Capacity(err) => SetupJitPanicError::Capacity(err),
+        JitFrameMaterializeError::Invariant(err) => {
+            SetupJitPanicError::MaterializationInvariant(err)
+        }
+    })?;
 
     if fiber.panic_source_loc.is_none() {
         let (pc, missing) = if trap_kind.is_some() {
@@ -229,11 +280,9 @@ pub fn dispatch_jit_call(
     func_id: u32,
 ) -> ExecResult {
     let arg_start = inst.b as usize;
-    let caller_frame = fiber
-        .frames
-        .last()
-        .copied()
-        .expect("dispatch_jit_call: missing caller frame");
+    let Some(caller_frame) = fiber.frames.last().copied() else {
+        return ExecResult::JitError("JIT call requested without an active caller frame".into());
+    };
     let caller_func = &module.functions[caller_frame.func_id as usize];
     let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(arg_start as u16);
 
@@ -271,11 +320,9 @@ pub fn dispatch_jit_frame(
     module: &Module,
     jit_func: vo_jit::JitFunc,
 ) -> ExecResult {
-    let frame = fiber
-        .frames
-        .last()
-        .copied()
-        .expect("dispatch_jit_frame: missing current frame");
+    let Some(frame) = fiber.frames.last().copied() else {
+        return ExecResult::JitError("JIT frame entry requested without an active frame".into());
+    };
     let func_def = &module.functions[frame.func_id as usize];
     invoke_jit_and_handle(
         vm,
@@ -334,7 +381,9 @@ fn handle_jit_result(
         JitResult::Ok => {
             fiber.resume_stack.clear();
 
-            let frame = fiber.frames.last().unwrap();
+            let Some(frame) = fiber.frames.last() else {
+                return ExecResult::JitError("JIT returned Ok without an active frame".into());
+            };
             let func = &module.functions[frame.func_id as usize];
 
             // Guard ctx metadata with function's own attributes.
@@ -394,6 +443,11 @@ fn handle_jit_result(
                 Ok(info) => info,
                 Err(SetupJitPanicError::Capacity(err)) => {
                     return stack_overflow_exec_result(vm, fiber, module, err);
+                }
+                Err(SetupJitPanicError::MaterializationInvariant(err)) => {
+                    return ExecResult::JitError(format!(
+                        "JIT frame materialization invariant failed: {err}"
+                    ));
                 }
                 Err(SetupJitPanicError::MissingPayload) => {
                     return ExecResult::JitError(
@@ -463,7 +517,7 @@ fn handle_jit_result(
                     callee_bp,
                     caller_resume_pc,
                 ) {
-                    return stack_overflow_exec_result(vm, fiber, module, err);
+                    return frame_materialize_exec_result(vm, fiber, module, err);
                 }
                 return ExecResult::FrameChanged;
             }
@@ -483,7 +537,7 @@ fn handle_jit_result(
                 call_arg_start,
                 resume_pc,
             ) {
-                return stack_overflow_exec_result(vm, fiber, module, err);
+                return frame_materialize_exec_result(vm, fiber, module, err);
             }
 
             // Return to the VM scheduler after materializing the callee frame.
@@ -513,7 +567,7 @@ fn handle_jit_result(
             }
             let resume_pc = ctx.call_resume_pc();
             if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                return stack_overflow_exec_result(vm, fiber, module, err);
+                return frame_materialize_exec_result(vm, fiber, module, err);
             }
 
             #[cfg(feature = "std")]
@@ -524,7 +578,7 @@ fn handle_jit_result(
             }
             #[cfg(not(feature = "std"))]
             {
-                panic!("JIT returned WaitIo but std feature not enabled")
+                ExecResult::JitError("JIT returned WaitIo but std feature is not enabled".into())
             }
         }
         JitResult::WaitQueue => {
@@ -533,7 +587,7 @@ fn handle_jit_result(
             }
             let resume_pc = ctx.call_resume_pc();
             if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                return stack_overflow_exec_result(vm, fiber, module, err);
+                return frame_materialize_exec_result(vm, fiber, module, err);
             }
             ExecResult::Block(crate::fiber::BlockReason::Queue)
         }
@@ -546,7 +600,7 @@ fn handle_jit_result(
             // re-execute it and go through the suspend/replay path.
             let resume_pc = ctx.call_resume_pc();
             if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                return stack_overflow_exec_result(vm, fiber, module, err);
+                return frame_materialize_exec_result(vm, fiber, module, err);
             }
             ExecResult::FrameChanged
         }
@@ -570,8 +624,10 @@ fn setup_prepared_call(
     call_ret_reg: u16,
     callee_bp: usize,
     caller_resume_pc: u32,
-) -> Result<(), FiberCapacityError> {
-    let callee_func_def = &module.functions[callee_func_id as usize];
+) -> Result<(), JitFrameMaterializeError> {
+    let callee_func_def = module.functions.get(callee_func_id as usize).ok_or(
+        JitFrameMaterializeError::Invariant("prepared call callee func_id is out of module range"),
+    )?;
     let param_slots = callee_func_def.param_slots as usize;
     let local_slots = callee_func_def.local_slots as usize;
     let gc_scan_slots = callee_func_def.gc_scan_slots as usize;
@@ -612,18 +668,27 @@ fn setup_regular_call(
     call_ret_reg: u16,
     call_arg_start: usize,
     resume_pc: u32,
-) -> Result<usize, FiberCapacityError> {
+) -> Result<usize, JitFrameMaterializeError> {
     materialize_jit_frames(fiber, module, resume_pc)?;
 
     // After materialize_jit_frames, the last frame is the immediate caller.
-    let caller_frame = fiber.frames.last().unwrap();
+    let caller_frame = fiber
+        .frames
+        .last()
+        .ok_or(JitFrameMaterializeError::Invariant(
+            "regular call has no materialized caller frame",
+        ))?;
     let actual_caller_bp = caller_frame.bp;
-    let caller_func = &module.functions[caller_frame.func_id as usize];
+    let caller_func = module.functions.get(caller_frame.func_id as usize).ok_or(
+        JitFrameMaterializeError::Invariant("regular call caller func_id is out of module range"),
+    )?;
 
     // Recompute fiber.sp from the materialized caller frame
     fiber.sp = actual_caller_bp + caller_func.local_slots as usize;
 
-    let callee_func_def = &module.functions[callee_func_id as usize];
+    let callee_func_def = module.functions.get(callee_func_id as usize).ok_or(
+        JitFrameMaterializeError::Invariant("regular call callee func_id is out of module range"),
+    )?;
     let callee_local_slots = callee_func_def.local_slots as usize;
     let callee_gc_scan_slots = callee_func_def.gc_scan_slots as usize;
     let arg_slots = callee_func_def.param_slots as usize;
@@ -679,7 +744,7 @@ fn materialize_jit_frames(
     fiber: &mut Fiber,
     module: &Module,
     resume_pc: u32,
-) -> Result<(), FiberCapacityError> {
+) -> Result<(), JitFrameMaterializeError> {
     let len = fiber.resume_stack.len();
 
     if len == 0 {
@@ -692,7 +757,13 @@ fn materialize_jit_frames(
 
     fiber.try_reserve_call_frames(len)?;
     let innermost = &fiber.resume_stack[0];
-    let innermost_local_slots = module.functions[innermost.func_id as usize].local_slots as usize;
+    let innermost_local_slots = module
+        .functions
+        .get(innermost.func_id as usize)
+        .ok_or(JitFrameMaterializeError::Invariant(
+            "innermost resume func_id is out of module range",
+        ))?
+        .local_slots as usize;
     let innermost_sp =
         innermost
             .bp
@@ -715,7 +786,13 @@ fn materialize_jit_frames(
         let rp = fiber.resume_stack[i];
         let func_id = rp.func_id;
         let bp = rp.bp;
-        let func_def = &module.functions[func_id as usize];
+        let func_def =
+            module
+                .functions
+                .get(func_id as usize)
+                .ok_or(JitFrameMaterializeError::Invariant(
+                    "resume func_id is out of module range",
+                ))?;
 
         // Calculate pc for this frame:
         // - innermost (i=0): use resume_pc parameter (where VM should continue)
@@ -768,7 +845,7 @@ fn materialize_jit_frames(
     fiber.resume_stack.clear();
     #[cfg(debug_assertions)]
     if let Err(err) = materialized_jit_frame_invariants(fiber, module) {
-        panic!("JIT frame materialization invariant failed: {err}");
+        return Err(JitFrameMaterializeError::Invariant(err));
     }
     Ok(())
 }
@@ -994,6 +1071,22 @@ pub enum OsrResult {
     JitError(String),
 }
 
+fn osr_result_from_frame_materialize_error(
+    vm: &mut Vm,
+    fiber: &mut Fiber,
+    err: JitFrameMaterializeError,
+) -> OsrResult {
+    match err {
+        JitFrameMaterializeError::Capacity(err) => {
+            set_stack_overflow_panic(vm, fiber, err);
+            OsrResult::Panic
+        }
+        JitFrameMaterializeError::Invariant(err) => {
+            OsrResult::JitError(format!("JIT frame materialization invariant failed: {err}"))
+        }
+    }
+}
+
 /// Execute a compiled loop via OSR.
 pub fn dispatch_loop_osr(
     vm: &mut Vm,
@@ -1003,7 +1096,10 @@ pub fn dispatch_loop_osr(
     local_slots: usize,
 ) -> OsrResult {
     // Use raw pointers to avoid borrow conflicts
-    let module_ptr = vm.module.as_ref().unwrap() as *const Module;
+    let Some(module) = vm.module.as_ref() else {
+        return OsrResult::JitError("Loop OSR requested without a loaded module".into());
+    };
+    let module_ptr = module as *const Module;
     let fiber_ptr = vm.scheduler.get_fiber_mut(fiber_id) as *mut Fiber;
 
     let (result, ctx) = unsafe {
@@ -1049,6 +1145,11 @@ pub fn dispatch_loop_osr(
                     set_stack_overflow_panic(vm, fiber, err);
                     return OsrResult::Panic;
                 }
+                Err(SetupJitPanicError::MaterializationInvariant(err)) => {
+                    return OsrResult::JitError(format!(
+                        "JIT frame materialization invariant failed: {err}"
+                    ));
+                }
                 Err(SetupJitPanicError::MissingPayload) => {
                     return OsrResult::JitError(
                         "JIT returned Panic without user panic or typed runtime trap payload"
@@ -1084,8 +1185,7 @@ pub fn dispatch_loop_osr(
                     }
                     let resume_pc = ctx.call_resume_pc();
                     if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                        set_stack_overflow_panic(vm, fiber, err);
-                        return OsrResult::Panic;
+                        return osr_result_from_frame_materialize_error(vm, fiber, err);
                     }
                     return OsrResult::FrameChanged;
                 }
@@ -1120,8 +1220,7 @@ pub fn dispatch_loop_osr(
                     callee_bp,
                     caller_resume_pc,
                 ) {
-                    set_stack_overflow_panic(vm, fiber, err);
-                    return OsrResult::Panic;
+                    return osr_result_from_frame_materialize_error(vm, fiber, err);
                 }
                 OsrResult::FrameChanged
             } else {
@@ -1138,8 +1237,7 @@ pub fn dispatch_loop_osr(
                     call_arg_start,
                     resume_pc,
                 ) {
-                    set_stack_overflow_panic(vm, fiber, err);
-                    return OsrResult::Panic;
+                    return osr_result_from_frame_materialize_error(vm, fiber, err);
                 }
                 OsrResult::FrameChanged
             }
@@ -1156,8 +1254,7 @@ pub fn dispatch_loop_osr(
             // Without this, resume_stack entries are lost and the fiber
             // resumes at the wrong PC (callee's PC in the loop function's frame).
             if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                set_stack_overflow_panic(vm, fiber, err);
-                return OsrResult::Panic;
+                return osr_result_from_frame_materialize_error(vm, fiber, err);
             }
 
             // Store token for scheduler
@@ -1167,7 +1264,7 @@ pub fn dispatch_loop_osr(
         }
         #[cfg(not(feature = "std"))]
         JitResult::WaitIo => {
-            panic!("Loop OSR returned WaitIo but std feature not enabled")
+            OsrResult::JitError("Loop OSR returned WaitIo but std feature is not enabled".into())
         }
         JitResult::WaitQueue => {
             if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
@@ -1175,8 +1272,7 @@ pub fn dispatch_loop_osr(
             }
             let resume_pc = ctx.call_resume_pc();
             if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                set_stack_overflow_panic(vm, fiber, err);
-                return OsrResult::Panic;
+                return osr_result_from_frame_materialize_error(vm, fiber, err);
             }
             OsrResult::WaitQueue
         }
@@ -1186,8 +1282,7 @@ pub fn dispatch_loop_osr(
             }
             let resume_pc = ctx.call_resume_pc();
             if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                set_stack_overflow_panic(vm, fiber, err);
-                return OsrResult::Panic;
+                return osr_result_from_frame_materialize_error(vm, fiber, err);
             }
             OsrResult::FrameChanged
         }
@@ -1222,12 +1317,22 @@ pub(crate) fn try_loop_osr(
             )));
         }
     };
-    let module = vm.module.as_ref().unwrap();
-    let local_slots = module.functions[func_id as usize].local_slots as usize;
+    let Some(module) = vm.module.as_ref() else {
+        return Some(OsrResult::JitError(
+            "Loop OSR requested without a loaded module".into(),
+        ));
+    };
+    let Some(func) = module.functions.get(func_id as usize) else {
+        return Some(OsrResult::JitError(format!(
+            "Loop OSR requested missing function id {func_id}"
+        )));
+    };
+    let local_slots = func.local_slots as usize;
     Some(dispatch_loop_osr(vm, fiber_id, loop_func, bp, local_slots))
 }
 
 /// Get compiled loop or compile if hot. Returns None if not ready.
+#[allow(clippy::result_large_err)]
 fn get_or_compile_loop(
     vm: &mut Vm,
     func_id: u32,
@@ -1310,7 +1415,7 @@ fn get_or_compile_loop(
 #[cfg(all(test, feature = "jit"))]
 mod tests {
     use super::*;
-    use crate::fiber::ResumePoint;
+    use crate::fiber::{ResumePoint, MAX_STACK_CAPACITY};
     use crate::scheduler::FiberId;
     use crate::vm::JitConfig;
     use vo_runtime::bytecode::{FunctionDef, Module};
@@ -1393,6 +1498,30 @@ mod tests {
             OsrResult::JitError(msg) => assert!(msg.contains("runtime_trap_pc")),
             _ => panic!("missing runtime_trap_pc must be a JitError"),
         }
+    }
+
+    #[test]
+    fn jit_push_frame_capacity_failure_records_recoverable_trap() {
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut module = Module::new("jit-push-frame-contract-test".to_string());
+        module.functions.push(function(1, 0));
+        vm.load(module);
+
+        let module_ptr = vm.module.as_ref().unwrap() as *const Module;
+        let mut fiber = Fiber::new(7);
+        fiber.push_frame(0, 1, 0, 0, 0);
+        let mut ctx = unsafe { build_jit_context(&mut vm, &mut fiber, &*module_ptr) };
+        ctx.ctx.fiber_sp = MAX_STACK_CAPACITY as u32;
+
+        let args = super::frame::jit_push_frame(ctx.as_ptr(), 0, 1, 0, 0, 12);
+
+        assert!(args.is_null());
+        assert!(fiber.jit_panic_flag);
+        assert_eq!(
+            ctx.ctx.runtime_trap_kind,
+            JitRuntimeTrapKind::StackOverflow as u8
+        );
+        assert_eq!(ctx.ctx.runtime_trap_pc, 11);
     }
 
     #[test]

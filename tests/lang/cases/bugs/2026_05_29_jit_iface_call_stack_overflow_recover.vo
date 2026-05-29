@@ -1,0 +1,40 @@
+package main
+
+func assert(ok bool, msg string) {
+	if !ok {
+		panic(msg)
+	}
+}
+
+type Runner interface {
+	Run(int)
+}
+
+type Task struct {
+	seed int
+}
+
+func (t Task) Run(n int) {
+	var pad [4096]int
+	pad[0] = t.seed + n
+	pad[4095] = pad[0]
+	if n > 0 {
+		var next Runner = t
+		next.Run(n - 1)
+	}
+}
+
+func main() {
+	var r Runner = Task{seed: 7}
+	recovered := false
+	func() {
+		defer func() {
+			if v := recover(); v != nil {
+				recovered = true
+			}
+		}()
+		r.Run(400)
+	}()
+
+	assert(recovered, "prepared interface call stack overflow must recover")
+}

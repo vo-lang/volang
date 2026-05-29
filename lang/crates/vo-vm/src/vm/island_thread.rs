@@ -11,6 +11,7 @@ use super::{island_shared, Vm};
 use crate::bytecode::Module;
 
 #[cfg(feature = "jit")]
+#[allow(clippy::result_large_err)]
 fn create_island_vm_with_initializer<F>(
     jit_config: Option<super::JitConfig>,
     init_jit_vm: F,
@@ -25,6 +26,7 @@ where
 }
 
 #[cfg(feature = "jit")]
+#[allow(clippy::result_large_err)]
 fn create_island_vm(jit_config: Option<super::JitConfig>) -> Result<Vm, vo_jit::JitError> {
     create_island_vm_with_initializer(jit_config, Vm::try_with_jit_config)
 }
@@ -158,6 +160,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::result_large_err)]
     fn island_jit_config_init_error_is_propagated() {
         let result =
             create_island_vm_with_initializer(Some(super::super::JitConfig::default()), |_| {

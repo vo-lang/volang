@@ -588,6 +588,19 @@ mod tests {
     }
 
     #[test]
+    fn loop_compiler_has_no_implicit_unknown_opcode_side_exit() {
+        let src = include_str!("loop_compiler.rs");
+        assert!(
+            !src.contains("Unsupported - exit to VM"),
+            "OSR unknown-opcode handling must be a strict JitError, not an implicit VM side exit"
+        );
+        assert!(
+            src.contains("other => Err(JitError::UnsupportedOpcode(other))"),
+            "loop compiler must keep an explicit strict fallback arm for unsupported opcodes"
+        );
+    }
+
+    #[test]
     fn effect_contract_protects_key_runtime_boundaries() {
         let alloc = crate::contract::opcode_contract(Opcode::PtrNew);
         assert!(alloc.may_alloc && alloc.may_gc);
