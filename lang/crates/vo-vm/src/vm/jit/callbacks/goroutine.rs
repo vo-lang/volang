@@ -17,13 +17,14 @@ unsafe fn spawn_closure_fiber(
     args_ptr: *const u64,
     arg_slots: u32,
 ) {
-    let new_fiber = helpers::build_closure_fiber_from_args_ptr(
+    let new_fiber = helpers::try_build_closure_fiber_from_args_ptr(
         &module.functions,
         vm.scheduler.fibers.len() as u32,
         closure_ref,
         args_ptr,
         arg_slots,
-    );
+    )
+    .expect("jit_go_start: nil closure was not trapped by JIT");
     vm.scheduler.spawn(new_fiber);
 }
 

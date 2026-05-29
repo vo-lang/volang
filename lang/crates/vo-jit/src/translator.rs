@@ -603,10 +603,10 @@ fn reg_const_effect(
             }
         }
         Opcode::Call => {
-            let (arg_slots, ret_slots) = functions
+            let callee = functions
                 .get(inst.static_call_func_id() as usize)
-                .map(|callee| (callee.param_slots, callee.ret_slots))
-                .unwrap_or((inst.packed_arg_slots(), inst.packed_ret_slots()));
+                .expect("static call callee metadata missing");
+            let (arg_slots, ret_slots) = (callee.param_slots, callee.ret_slots);
             let Some(ret_start) = inst.b.checked_add(arg_slots) else {
                 return RegConstEffect::Clear;
             };

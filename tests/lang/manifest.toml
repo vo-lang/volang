@@ -1157,6 +1157,13 @@ targets = ["vm", "jit", "osr", "nostd", "wasm"]
 expect = "pass"
 
 [[case]]
+id = "defer-nil-func-recover"
+kind = "file"
+path = "cases/defer_nil_func_recover.vo"
+targets = ["vm", "jit", "osr", "nostd", "wasm"]
+expect = "pass"
+
+[[case]]
 id = "defer-named-return"
 kind = "file"
 path = "cases/defer_named_return.vo"
@@ -2425,6 +2432,15 @@ reason = "GC debug not available in wasm"
 expect = "pass"
 
 [[case]]
+id = "gc-defer-closure-hidden-slot-args"
+kind = "file"
+path = "cases/gc_defer_closure_hidden_slot_args.vo"
+targets = ["vm", "jit", "osr", "gc-vm", "gc-jit", "nostd", "wasm"]
+skip = ["wasm"]
+reason = "GC debug not available in wasm"
+expect = "pass"
+
+[[case]]
 id = "gc-incremental-sweep-barrier"
 kind = "file"
 path = "cases/gc_incremental_sweep_barrier.vo"
@@ -3051,6 +3067,27 @@ id = "jit-maketree-crash"
 kind = "file"
 path = "cases/jit_maketree_crash.vo"
 targets = ["vm", "jit", "osr", "nostd", "wasm"]
+expect = "pass"
+
+[[case]]
+id = "jit-nil-callclosure-recover"
+kind = "file"
+path = "cases/jit_nil_callclosure_recover.vo"
+targets = ["vm", "jit", "osr", "nostd", "wasm"]
+expect = "pass"
+
+[[case]]
+id = "jit-nil-calliface-recover"
+kind = "file"
+path = "cases/jit_nil_calliface_recover.vo"
+targets = ["vm", "jit", "osr", "gc-jit", "nostd", "wasm"]
+expect = "pass"
+
+[[case]]
+id = "jit-direct-call-frame-contract"
+kind = "file"
+path = "cases/jit_direct_call_frame_contract.vo"
+targets = ["vm", "jit", "osr", "gc-jit", "nostd", "wasm"]
 expect = "pass"
 
 [[case]]

@@ -233,3 +233,19 @@ pub fn data_is_gc_ref(slot0: u64) -> bool {
     let vk = unpack_value_kind(slot0);
     vk.may_contain_gc_refs()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nil_interface_semantics_use_value_kind_void() {
+        assert!(is_nil(InterfaceSlot::nil().slot0));
+
+        let malformed_void = pack_slot0(7, 42, ValueKind::Void);
+        assert!(is_nil(malformed_void));
+
+        let typed_nil_pointer = pack_slot0(0, 42, ValueKind::Pointer);
+        assert!(!is_nil(typed_nil_pointer));
+    }
+}

@@ -661,7 +661,6 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instructi
     let ret_slots = plan.ret_slots;
 
     let ctx = emitter.ctx_param();
-    let panic_ret_val = emitter.panic_return_value();
     let caller_func_id = emitter.func_id();
     let resume_pc = plan.resume_pc;
 
@@ -684,12 +683,12 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instructi
     // Nil closure -> panic
     emitter.builder().switch_to_block(nil_block);
     emitter.builder().seal_block(nil_block);
-    let panic_result = emitter
-        .builder()
-        .ins()
-        .iconst(types::I32, panic_ret_val as i64);
-    emitter.spill_all_vars();
-    emitter.builder().ins().return_(&[panic_result]);
+    crate::contract::emit_runtime_trap_return(
+        emitter,
+        vo_runtime::jit_api::JitRuntimeTrapKind::NilFuncCall,
+        None,
+        None,
+    );
 
     emitter.builder().switch_to_block(continue_block);
     emitter.builder().seal_block(continue_block);
@@ -753,9 +752,18 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instructi
         .ins()
         .iadd_imm(ic_table, ic_byte_offset as i64);
 
-    // Load IC key and compare
+    // Load tagged IC key and compare.
+    let closure_func_id_u64 = emitter.builder().ins().uextend(types::I64, closure_func_id);
+    let closure_key_tag = emitter.builder().ins().iconst(
+        types::I64,
+        (DynCallIC::KEY_KIND_CLOSURE << DynCallIC::KEY_KIND_SHIFT) as i64,
+    );
+    let closure_key = emitter
+        .builder()
+        .ins()
+        .bor(closure_key_tag, closure_func_id_u64);
     let ic_key = emitter.builder().ins().load(
-        types::I32,
+        types::I64,
         MemFlags::trusted(),
         ic_entry,
         DynCallIC::OFFSET_KEY,
@@ -763,7 +771,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instructi
     let key_match = emitter
         .builder()
         .ins()
-        .icmp(IntCC::Equal, closure_func_id, ic_key);
+        .icmp(IntCC::Equal, closure_key, ic_key);
 
     // Load IC jit_func_ptr and check non-null
     let ic_jit_ptr = emitter.builder().ins().load(
@@ -973,13 +981,23 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instructi
             out_ptr,
         ],
     );
+    crate::contract::emit_return_if_runtime_trap_recorded(emitter);
 
-    // IC key for closure = func_id
-    let ic_key_val =
+    // IC key for closure = tagged func_id.
+    let out_func_id =
         emitter
             .builder()
             .ins()
             .stack_load(types::I32, out_slot, PreparedCall::OFFSET_FUNC_ID);
+    let out_func_id_u64 = emitter.builder().ins().uextend(types::I64, out_func_id);
+    let closure_key_tag = emitter.builder().ins().iconst(
+        types::I64,
+        (DynCallIC::KEY_KIND_CLOSURE << DynCallIC::KEY_KIND_SHIFT) as i64,
+    );
+    let ic_key_val = emitter
+        .builder()
+        .ins()
+        .bor(closure_key_tag, out_func_id_u64);
 
     emit_ic_miss_update_and_dispatch(
         emitter,
@@ -1022,7 +1040,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instructi
 /// CallIface: inst.a = iface_slot (2 slots), inst.b = arg_start, inst.c = (arg_slots << 8) | ret_slots
 ///            inst.flags = method_idx
 ///
-/// IC key for iface: packed (itab_id << 16) | method_idx — unique per (concrete type, method).
+/// IC key for iface: tagged full-width (itab_id, method_idx), unique per (concrete type, method).
 /// IC fast path: extract itab_id from slot0, check IC, native stack with receiver + user args.
 /// IC slow path: call prepare_iface_call, update IC, dispatch via emit_prepared_call.
 pub fn emit_call_iface<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction) {
@@ -1041,6 +1059,19 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction
     // Read interface slots
     let slot0 = emitter.read_var(iface_slot as u16);
     let slot1 = emitter.read_var((iface_slot + 1) as u16);
+    let zero = emitter.builder().ins().iconst(types::I64, 0);
+    let value_kind = emitter.builder().ins().band_imm(slot0, 0xFF);
+    let is_nil_iface = emitter
+        .builder()
+        .ins()
+        .icmp_imm(IntCC::Equal, value_kind, 0);
+    crate::contract::emit_runtime_trap_if(
+        emitter,
+        is_nil_iface,
+        vo_runtime::jit_api::JitRuntimeTrapKind::NilPointerDereference,
+        None,
+        None,
+    );
 
     // Read user args into SSA values (before any branching)
     let mut user_arg_vals = Vec::with_capacity(arg_slots);
@@ -1081,15 +1112,24 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction
 
     // Extract itab_id = slot0 >> 32 (high 32 bits of slot0)
     let itab_id = emitter.builder().ins().ushr_imm(slot0, 32);
-    let itab_id_i32 = emitter.builder().ins().ireduce(types::I32, itab_id);
 
-    // IC key = (itab_id << 16) | method_idx
-    let key_shifted = emitter.builder().ins().ishl_imm(itab_id_i32, 16);
+    // IC key = tagged full (itab_id, method_idx). The old u32
+    // (itab_id << 16) key collided whenever itab_id differed above bit 15.
     let method_idx_val_i32 = emitter
         .builder()
         .ins()
         .iconst(types::I32, method_idx as i64);
-    let ic_key_val = emitter.builder().ins().bor(key_shifted, method_idx_val_i32);
+    let method_idx_val_u64 = emitter
+        .builder()
+        .ins()
+        .uextend(types::I64, method_idx_val_i32);
+    let method_key = emitter.builder().ins().ishl_imm(method_idx_val_u64, 32);
+    let iface_key_tag = emitter.builder().ins().iconst(
+        types::I64,
+        (DynCallIC::KEY_KIND_IFACE << DynCallIC::KEY_KIND_SHIFT) as i64,
+    );
+    let tagged_method_key = emitter.builder().ins().bor(iface_key_tag, method_key);
+    let ic_key_val = emitter.builder().ins().bor(tagged_method_key, itab_id);
 
     // Compute IC entry address
     let ic_table = emitter.builder().ins().load(
@@ -1106,9 +1146,9 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction
         .ins()
         .iadd_imm(ic_table, ic_byte_offset as i64);
 
-    // Load IC key and compare
+    // Load tagged IC key and compare.
     let ic_stored_key = emitter.builder().ins().load(
-        types::I32,
+        types::I64,
         MemFlags::trusted(),
         ic_entry,
         DynCallIC::OFFSET_KEY,
@@ -1119,7 +1159,6 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction
         .icmp(IntCC::Equal, ic_key_val, ic_stored_key);
 
     // Load IC jit_func_ptr and check non-null
-    let zero = emitter.builder().ins().iconst(types::I64, 0);
     let ic_jit_ptr = emitter.builder().ins().load(
         types::I64,
         MemFlags::trusted(),
@@ -1267,6 +1306,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction
             out_ptr,
         ],
     );
+    crate::contract::emit_return_if_runtime_trap_recorded(emitter);
 
     emit_ic_miss_update_and_dispatch(
         emitter,
@@ -1766,8 +1806,6 @@ pub struct CallViaVmConfig {
 /// Lowering route selected for a bytecode call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallRoute {
-    /// Same function, direct native-stack recursive call.
-    SelfRecursiveNative,
     /// Callee has a known Cranelift FuncRef at compile time.
     KnownDirectJit,
     /// Callee may be compiled at runtime; generated code checks jit_func_table.
@@ -1788,7 +1826,7 @@ pub struct CallPlan {
     pub call_ret_slots: usize,
     pub func_ret_slots: usize,
     pub callee_local_slots: usize,
-    pub callee_has_defer: bool,
+    pub can_elide_frame: bool,
     pub callee_func_ref: Option<FuncRef>,
 }
 
@@ -1809,7 +1847,7 @@ impl CallPlan {
             call_ret_slots,
             func_ret_slots: target_func.ret_slots as usize,
             callee_local_slots: target_func.local_slots as usize,
-            callee_has_defer: target_func.has_defer,
+            can_elide_frame: crate::can_elide_frame_for_direct_jit(target_func),
             callee_func_ref,
         }
     }
@@ -1823,15 +1861,12 @@ impl CallPlan {
     }
 
     pub fn can_use_direct_jit(self) -> bool {
-        !self.callee_has_defer && self.fits_direct_native_frame()
+        self.can_elide_frame && self.fits_direct_native_frame()
     }
 
     pub fn route_for_full_function(self, current_func_id: u32) -> CallRoute {
-        if self.is_self_recursive(current_func_id)
-            && !self.callee_has_defer
-            && self.fits_direct_native_frame()
-        {
-            return CallRoute::SelfRecursiveNative;
+        if self.is_self_recursive(current_func_id) {
+            return CallRoute::VmFallback;
         }
         self.route_non_recursive()
     }
@@ -2479,7 +2514,8 @@ mod tests {
         let self_plan = CallPlan::new(7, 2, &func(8, false), None);
         assert_eq!(
             self_plan.route_for_full_function(7),
-            CallRoute::SelfRecursiveNative
+            CallRoute::VmFallback,
+            "self recursion must use VM frames so stack overflow remains recoverable"
         );
 
         let defer_self = CallPlan::new(7, 2, &func(8, true), None);
@@ -2504,6 +2540,20 @@ mod tests {
             CallRoute::DynamicJitTable
         );
         assert_eq!(dynamic.route_for_loop(), CallRoute::DynamicJitTable);
+
+        let mut allocating = func(8, false);
+        allocating.code = vec![Instruction::new(
+            vo_runtime::instruction::Opcode::PtrNew,
+            0,
+            1,
+            1,
+        )];
+        let allocating_plan = CallPlan::new(8, 2, &allocating, Some(FuncRef::from_u32(4)));
+        assert_eq!(
+            allocating_plan.route_for_full_function(7),
+            CallRoute::VmFallback,
+            "allocating callees may still JIT, but must use a materialized VM frame"
+        );
     }
 
     #[test]

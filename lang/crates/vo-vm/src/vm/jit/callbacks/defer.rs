@@ -5,7 +5,7 @@ use vo_runtime::jit_api::JitContext;
 use vo_runtime::InterfaceSlot;
 use vo_runtime::{ValueKind, ValueMeta};
 
-use crate::fiber::{DeferEntry, Fiber};
+use crate::fiber::{DeferArgLayout, DeferEntry, Fiber};
 
 /// Push a defer entry from JIT code.
 ///
@@ -16,6 +16,7 @@ pub extern "C" fn jit_defer_push(
     func_id: u32,
     is_closure: u32,
     closure_ref: u64,
+    arg_start: u32,
     args_ptr: *const u64,
     arg_count: u32,
     is_errdefer: u32,
@@ -23,11 +24,29 @@ pub extern "C" fn jit_defer_push(
     let ctx_ref = unsafe { &*ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     let gc = unsafe { &mut *ctx_ref.gc };
+    let module = unsafe { &*ctx_ref.module };
 
     let is_closure = is_closure != 0;
     let arg_slots = arg_count as u16;
     let frame_depth = fiber.frames.len();
     let generation = fiber.effective_defer_generation();
+    let caller_frame = fiber
+        .frames
+        .last()
+        .copied()
+        .expect("jit_defer_push: missing caller frame");
+    let caller_func = module
+        .functions
+        .get(caller_frame.func_id as usize)
+        .expect("jit_defer_push: missing caller function metadata");
+    let arg_layout = DeferArgLayout::try_from_caller_slot_types(
+        &caller_func.slot_types,
+        caller_frame.func_id,
+        caller_frame.pc.saturating_sub(1) as u32,
+        arg_start as u16,
+        arg_slots,
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
 
     // Match VM push_defer_entry semantics (exec/defer.rs)
     let (fid, closure): (u32, GcRef) = if is_closure {
@@ -52,7 +71,7 @@ pub extern "C" fn jit_defer_push(
         func_id: fid,
         closure,
         args,
-        arg_slots,
+        arg_layout,
         is_closure,
         is_errdefer: is_errdefer != 0,
         registered_at_generation: generation,

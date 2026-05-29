@@ -1,0 +1,62 @@
+package main
+
+type Namer interface {
+	Name() string
+}
+
+type Box struct {
+	label string
+}
+
+func (b *Box) Name() string {
+	return b.label
+}
+
+func allocStringMapSlice(n int) int {
+	values := []int{n, n + 1}
+	m := make(map[string]int)
+	m["first"] = values[0]
+	m["second"] = values[1]
+	return m["first"] + m["second"] + len("vo"+"lang")
+}
+
+func closureArg(f func(int) int) int {
+	return f(41)
+}
+
+func ifaceArg(n Namer) int {
+	return len(n.Name())
+}
+
+func recoveredPanic() int {
+	recovered := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				recovered = true
+			}
+		}()
+		panic("boom")
+	}()
+	if recovered {
+		return 1
+	}
+	return 0
+}
+
+func contractCaller(n int) int {
+	box := &Box{label: "box"}
+	return allocStringMapSlice(n) +
+		closureArg(func(x int) int { return x + 1 }) +
+		ifaceArg(box) +
+		recoveredPanic()
+}
+
+func main() {
+	total := 0
+	for i := 0; i < 16; i++ {
+		total += contractCaller(i)
+	}
+	assert(total == 1088, "direct call frame contract result")
+	println("jit_direct_call_frame_contract: ok")
+}

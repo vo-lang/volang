@@ -28,31 +28,23 @@ fn scan_gcrefs(gc: &mut Gc, gcrefs: &[u64]) {
 /// Scan DeferEntry for GC refs.
 ///
 /// Closure and args GcRefs are marked directly. Args content is scanned
-/// precisely using the deferred function's slot_types (args are stored as
-/// ValueKind::Void objects which scan_object skips).
+/// precisely using the argument layout captured at defer registration time.
+/// Saved defer args are ValueKind::Void objects, so scan_object skips them.
 #[inline]
-fn scan_defer_entry(gc: &mut Gc, entry: &DeferEntry, functions: &[FunctionDef]) {
+fn scan_defer_entry(gc: &mut Gc, entry: &DeferEntry) {
     if !entry.closure.is_null() {
         gc.mark_gray(entry.closure);
     }
     if !entry.args.is_null() {
         gc.mark_gray(entry.args);
-        // Scan args content using deferred function's slot_types.
-        // Args are raw copies of the function's parameters, so slot_types[0..arg_slots]
-        // describes their types precisely.
-        let func_id = if entry.is_closure {
-            vo_runtime::objects::closure::func_id(entry.closure)
-        } else {
-            entry.func_id
-        };
-        let arg_slots = entry.arg_slots as usize;
+        // Scan args content using the layout captured when the defer was registered.
+        // Closure callees may have hidden slot0/receiver prefixes, so callee slot_types
+        // are not a safe description of the saved user-argument buffer.
+        let arg_slots = entry.arg_layout.arg_slots() as usize;
         if arg_slots > 0 {
-            if let Some(func) = functions.get(func_id as usize) {
-                let args_data =
-                    unsafe { core::slice::from_raw_parts(entry.args as *const u64, arg_slots) };
-                let slot_types = &func.slot_types[..arg_slots.min(func.slot_types.len())];
-                scan_slots_by_types(gc, args_data, slot_types);
-            }
+            let args_data =
+                unsafe { core::slice::from_raw_parts(entry.args as *const u64, arg_slots) };
+            scan_slots_by_types(gc, args_data, &entry.arg_layout.slot_types);
         }
     }
 }
@@ -99,31 +91,19 @@ fn collect_slots_by_types(
 }
 
 #[inline]
-fn collect_defer_entry_roots(
-    roots: &mut Vec<GcRef>,
-    entry: &DeferEntry,
-    functions: &[FunctionDef],
-) {
+fn collect_defer_entry_roots(roots: &mut Vec<GcRef>, entry: &DeferEntry) {
     collect_gcref(roots, entry.closure);
     if entry.args.is_null() {
         return;
     }
 
     collect_gcref(roots, entry.args);
-    let func_id = if entry.is_closure {
-        vo_runtime::objects::closure::func_id(entry.closure)
-    } else {
-        entry.func_id
-    };
-    let arg_slots = entry.arg_slots as usize;
+    let arg_slots = entry.arg_layout.arg_slots() as usize;
     if arg_slots == 0 {
         return;
     }
-    if let Some(func) = functions.get(func_id as usize) {
-        let args_data = unsafe { core::slice::from_raw_parts(entry.args as *const u64, arg_slots) };
-        let slot_types = &func.slot_types[..arg_slots.min(func.slot_types.len())];
-        collect_slots_by_types(roots, args_data, slot_types);
-    }
+    let args_data = unsafe { core::slice::from_raw_parts(entry.args as *const u64, arg_slots) };
+    collect_slots_by_types(roots, args_data, &entry.arg_layout.slot_types);
 }
 
 fn collect_sentinel_error_roots(roots: &mut Vec<GcRef>, cache: &SentinelErrorCache) {
@@ -205,12 +185,12 @@ fn collect_fiber_roots(gc: &Gc, roots: &mut Vec<GcRef>, fiber: &Fiber, functions
     }
 
     for entry in &fiber.defer_stack {
-        collect_defer_entry_roots(roots, entry, functions);
+        collect_defer_entry_roots(roots, entry);
     }
 
     if let Some(state) = &fiber.unwinding {
         for entry in &state.pending {
-            collect_defer_entry_roots(roots, entry, functions);
+            collect_defer_entry_roots(roots, entry);
         }
         if let Some(ref rv) = state.return_values {
             match rv {
@@ -509,22 +489,34 @@ impl Vm {
         let mut completed_root_scan: Option<VmRootScanCompletion> = None;
         let func_closure_scan_layout =
             |func_id: u32| -> vo_runtime::gc_types::ClosureScanLayout<'_> {
-                module_ref
+                let func = module_ref
                     .functions
                     .get(func_id as usize)
-                    .map(|f| {
-                        let runtime_capture_slot_types =
-                            if f.capture_slot_types.is_empty() && f.recv_slots == 1 {
-                                f.slot_types.get(..1).unwrap_or(&[])
-                            } else {
-                                &[]
-                            };
-                        vo_runtime::gc_types::ClosureScanLayout::new(
-                            f.capture_slot_types.as_slice(),
-                            runtime_capture_slot_types,
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "closure GC metadata missing: func_id={} functions_len={}",
+                            func_id,
+                            module_ref.functions.len()
                         )
-                    })
-                    .unwrap_or_default()
+                    });
+                let runtime_capture_slot_types = if func.capture_slot_types.is_empty()
+                    && func.recv_slots == 1
+                {
+                    func.slot_types.get(..1).unwrap_or_else(|| {
+                            panic!(
+                                "closure receiver slot metadata missing: func_id={} name={} slot range 0..1 actual slot_types={}",
+                                func_id,
+                                func.name,
+                                func.slot_types.len()
+                            )
+                        })
+                } else {
+                    &[]
+                };
+                vo_runtime::gc_types::ClosureScanLayout::new(
+                    func.capture_slot_types.as_slice(),
+                    runtime_capture_slot_types,
+                )
             };
 
         unsafe { &mut *gc_ptr }.step_with_root_scanner(
@@ -695,13 +687,13 @@ fn scan_fiber(gc: &mut Gc, fiber: &Fiber, functions: &[FunctionDef]) {
 
     // Scan defer_stack
     for entry in &fiber.defer_stack {
-        scan_defer_entry(gc, entry, functions);
+        scan_defer_entry(gc, entry);
     }
 
     // Scan unwinding state (return/panic unwinding with pending defers)
     if let Some(state) = &fiber.unwinding {
         for entry in &state.pending {
-            scan_defer_entry(gc, entry, functions);
+            scan_defer_entry(gc, entry);
         }
         // Scan return values
         if let Some(ref rv) = state.return_values {

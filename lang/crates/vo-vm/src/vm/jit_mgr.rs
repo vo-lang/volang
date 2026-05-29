@@ -179,9 +179,9 @@ pub struct JitManager {
     /// Used by JIT code for direct JIT-to-JIT calls.
     func_table: Vec<*const u8>,
 
-    /// Direct call table: only populated for functions that pass can_direct_jit_call
-    /// (no defer and no nested calls). Used by prepare_closure_call / prepare_iface_call
-    /// to decide if JIT-to-JIT direct call is safe from the fast path.
+    /// Direct call table: only populated for functions that can elide a VM frame.
+    /// Used by prepare_closure_call / prepare_iface_call to decide if the IC hit
+    /// native-stack fast path is safe.
     direct_call_table: Vec<*const u8>,
 
     /// Cranelift compiler.
@@ -483,11 +483,10 @@ impl JitManager {
         }
         self.func_table[idx] = ptr as *const u8;
 
-        // Only populate direct_call_table if function is safe for JIT-to-JIT direct calls
-        // from prepare callbacks. Defer functions need real frames for unwinding, and
-        // functions with nested calls can return JitResult::Call through paths the
-        // prepared-call fast path cannot safely replay.
-        if vo_jit::can_direct_jit_call(func_def) {
+        // Only populate direct_call_table if the callee can run on the IC hit
+        // native-stack path without hiding roots, panic/unwind state, or frame
+        // observation from the VM.
+        if vo_jit::can_elide_frame_for_direct_jit(func_def) {
             self.direct_call_table[idx] = ptr as *const u8;
         }
 

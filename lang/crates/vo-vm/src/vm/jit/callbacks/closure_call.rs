@@ -5,17 +5,17 @@
 
 use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::gc::GcRef;
-use vo_runtime::jit_api::{DynCallIC, JitContext, PreparedCall};
+use vo_runtime::jit_api::{DynCallIC, JitContext, JitRuntimeTrapKind, PreparedCall};
 use vo_runtime::objects::closure;
 
 #[inline]
 fn can_use_direct_call_table_entry(func_def: &FunctionDef) -> bool {
-    !func_def.has_defer && !func_def.has_calls && !func_def.has_call_extern
+    vo_jit::can_elide_frame_for_direct_jit(func_def)
 }
 
 /// Look up a function in the direct_call_table for JIT-to-JIT fast path.
 /// Returns non-null only when callee is a no-defer leaf accepted by
-/// vo_jit::can_direct_jit_call. The local predicate keeps the callback safe
+/// vo_jit::can_elide_frame_for_direct_jit. The local predicate keeps the callback safe
 /// even if an older or test-built table is over-populated.
 #[inline]
 fn lookup_direct_call_ptr(ctx: &JitContext, func_id: u32, func_def: &FunctionDef) -> *const u8 {
@@ -24,6 +24,23 @@ fn lookup_direct_call_ptr(ctx: &JitContext, func_id: u32, func_def: &FunctionDef
     } else {
         core::ptr::null()
     }
+}
+
+#[inline]
+fn record_runtime_trap(ctx: &mut JitContext, kind: JitRuntimeTrapKind, pc: u32) {
+    unsafe {
+        *ctx.panic_flag = true;
+        *ctx.is_user_panic = false;
+    }
+    ctx.runtime_trap_kind = kind as u8;
+    ctx.runtime_trap_arg0 = 0;
+    ctx.runtime_trap_arg1 = 0;
+    ctx.runtime_trap_pc = pc;
+}
+
+#[inline]
+unsafe fn write_trapped_prepared_call(out: *mut PreparedCall) {
+    *out = PreparedCall::fallback(0, 0);
 }
 
 /// Prepare a closure call for JIT dispatch.
@@ -43,6 +60,15 @@ pub extern "C" fn jit_prepare_closure_call(
 ) {
     let ctx = unsafe { &mut *ctx };
     let module = unsafe { &*(ctx.module) };
+    if closure_ref == 0 {
+        record_runtime_trap(
+            ctx,
+            JitRuntimeTrapKind::NilFuncCall,
+            caller_resume_pc.saturating_sub(1),
+        );
+        unsafe { write_trapped_prepared_call(out) };
+        return;
+    }
 
     // 1. Resolve func_id from closure
     let closure_gcref = closure_ref as GcRef;
@@ -129,6 +155,15 @@ pub extern "C" fn jit_prepare_iface_call(
     let ctx_ref = unsafe { &mut *ctx };
     let module = unsafe { &*(ctx_ref.module) };
     let itab_cache = unsafe { &*ctx_ref.itab_cache };
+    if interface::is_nil(iface_slot0) {
+        record_runtime_trap(
+            ctx_ref,
+            JitRuntimeTrapKind::NilPointerDereference,
+            caller_resume_pc.saturating_sub(1),
+        );
+        unsafe { write_trapped_prepared_call(out) };
+        return;
+    }
 
     // 1. Resolve func_id from itab
     let itab_id = interface::unpack_itab_id(iface_slot0);
@@ -206,10 +241,19 @@ mod tests {
     }
 
     #[test]
-    fn direct_call_lookup_predicate_rejects_defer_and_nested_calls() {
+    fn direct_call_lookup_predicate_uses_frame_elision_contract() {
         assert!(can_use_direct_call_table_entry(&func(false, false, false)));
         assert!(!can_use_direct_call_table_entry(&func(true, false, false)));
         assert!(!can_use_direct_call_table_entry(&func(false, true, false)));
         assert!(!can_use_direct_call_table_entry(&func(false, false, true)));
+
+        let mut alloc = func(false, false, false);
+        alloc.code = vec![vo_runtime::instruction::Instruction::new(
+            vo_runtime::instruction::Opcode::PtrNew,
+            0,
+            1,
+            1,
+        )];
+        assert!(!can_use_direct_call_table_entry(&alloc));
     }
 }

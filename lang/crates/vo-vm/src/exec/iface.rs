@@ -53,6 +53,11 @@ pub fn exec_iface_assign(
     let (actual_rttid, actual_vk, itab_id) = if vk == ValueKind::Interface {
         // Interface -> Interface: runtime itab lookup/creation
         let src_slot0 = src;
+        if src_slot0 == 0 {
+            stack_set(stack, bp + inst.a as usize, 0);
+            stack_set(stack, bp + inst.a as usize + 1, 0);
+            return;
+        }
         let src_rttid = interface::unpack_rttid(src_slot0);
         let src_vk = interface::unpack_value_kind(src_slot0);
         let iface_meta_id = low; // low = target iface_meta_id
@@ -167,20 +172,29 @@ pub fn exec_iface_assert(
         if assert_kind == 1 {
             // Interface assertion: return new interface with itab for target interface
             // Use extract_named_type_id to handle Pointer(Named(id)) case
-            let named_type_id = module
-                .runtime_types
-                .get(src_rttid as usize)
-                .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
-                .unwrap_or(0);
-            // Value types (non-pointer) cannot use pointer receiver methods
-            let src_is_pointer = src_vk == ValueKind::Pointer;
-            let new_itab_id = itab_cache.get_or_create(
-                named_type_id,
-                target_id,
-                src_is_pointer,
-                &module.named_type_metas,
-                &module.interface_metas,
-            );
+            let new_itab_id = if target_id == 0 {
+                0
+            } else {
+                let named_type_id = module
+                    .runtime_types
+                    .get(src_rttid as usize)
+                    .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "IfaceAssert metadata missing: target_id={} src_rttid={} src_vk={:?}",
+                            target_id, src_rttid, src_vk
+                        )
+                    });
+                // Value types (non-pointer) cannot use pointer receiver methods
+                let src_is_pointer = src_vk == ValueKind::Pointer;
+                itab_cache.get_or_create(
+                    named_type_id,
+                    target_id,
+                    src_is_pointer,
+                    &module.named_type_metas,
+                    &module.interface_metas,
+                )
+            };
             let new_slot0 = interface::pack_slot0(new_itab_id, src_rttid, src_vk);
             stack_set(stack, bp + inst.a as usize, new_slot0);
             stack_set(stack, bp + inst.a as usize + 1, slot1);

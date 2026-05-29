@@ -184,11 +184,15 @@ pub(super) fn iface_assign<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         // Interface source: preserve rttid/vk from source, update itab_id
         // For interface->any (iface_meta_id=0), itab_id must be 0
         let const_idx = inst.c as usize;
-        let iface_meta_id = if let Constant::Int(packed) = &e.vo_module().constants[const_idx] {
-            (*packed & 0xFFFFFFFF) as u32
-        } else {
-            0
+        let Constant::Int(packed) = e
+            .vo_module()
+            .constants
+            .get(const_idx)
+            .expect("iface_assign metadata constant missing")
+        else {
+            panic!("iface_assign metadata constant must be an integer");
         };
+        let iface_meta_id = (*packed & 0xFFFFFFFF) as u32;
 
         let src_slot0 = src;
         let src_slot1 = e.read_var(inst.b + 1);
@@ -205,27 +209,30 @@ pub(super) fn iface_assign<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             (new_slot0, src_slot1)
         } else {
             // Target is non-empty interface: runtime itab lookup
-            if let Some(iface_to_iface_func) = e.helpers().iface_to_iface {
-                let ctx = e.ctx_param();
-                let iface_meta_id_val = e.builder().ins().iconst(types::I32, iface_meta_id as i64);
-                let call =
-                    emit_funcref_call(e, iface_to_iface_func, &[ctx, src_slot0, iface_meta_id_val]);
-                let new_slot0 = e.builder().inst_results(call)[0];
-                (new_slot0, src_slot1)
-            } else {
-                (src_slot0, src_slot1)
-            }
+            let iface_to_iface_func = e
+                .helpers()
+                .iface_to_iface
+                .expect("iface_to_iface helper not registered");
+            let ctx = e.ctx_param();
+            let iface_meta_id_val = e.builder().ins().iconst(types::I32, iface_meta_id as i64);
+            let call =
+                emit_funcref_call(e, iface_to_iface_func, &[ctx, src_slot0, iface_meta_id_val]);
+            let new_slot0 = e.builder().inst_results(call)[0];
+            (new_slot0, src_slot1)
         }
     } else {
         // Concrete type source: use compile-time constants
         let const_idx = inst.c as usize;
-        let (rttid, itab_id) = if let Constant::Int(packed) = &e.vo_module().constants[const_idx] {
-            let rttid = (*packed >> 32) as u32;
-            let itab_id = (*packed & 0xFFFFFFFF) as u32;
-            (rttid, itab_id)
-        } else {
-            (0, 0)
+        let Constant::Int(packed) = e
+            .vo_module()
+            .constants
+            .get(const_idx)
+            .expect("iface_assign metadata constant missing")
+        else {
+            panic!("iface_assign metadata constant must be an integer");
         };
+        let rttid = (*packed >> 32) as u32;
+        let itab_id = (*packed & 0xFFFFFFFF) as u32;
         let itab_shifted = (itab_id as u64) << 32;
         let rttid_shifted = (rttid as u64) << 8;
         let slot0_val = itab_shifted | rttid_shifted | (vk as u64);
@@ -233,13 +240,13 @@ pub(super) fn iface_assign<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
         let slot1 = if vk == 14 || vk == 15 {
             // Struct or Array: ptr_clone the GcRef
-            if let Some(ptr_clone_func) = e.helpers().ptr_clone {
-                let gc_ptr = e.gc_ptr();
-                let call = emit_funcref_call(e, ptr_clone_func, &[gc_ptr, src]);
-                e.builder().inst_results(call)[0]
-            } else {
-                src
-            }
+            let ptr_clone_func = e
+                .helpers()
+                .ptr_clone
+                .expect("ptr_clone helper not registered");
+            let gc_ptr = e.gc_ptr();
+            let call = emit_funcref_call(e, ptr_clone_func, &[gc_ptr, src]);
+            e.builder().inst_results(call)[0]
         } else {
             src
         };
@@ -572,7 +579,9 @@ pub(super) fn go_start<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         .ins()
         .iconst(types::I32, if is_closure_call { 1 } else { 0 });
     let closure_ref = if is_closure_call {
-        e.read_var(inst.a)
+        let closure_ref = e.read_var(inst.a);
+        crate::contract::emit_nil_func_trap_if(e, closure_ref);
+        closure_ref
     } else {
         e.builder().ins().iconst(types::I64, 0)
     };
@@ -600,6 +609,7 @@ pub(super) fn go_island<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let ctx = e.ctx_param();
     let island = e.read_var(inst.a);
     let closure_ref = e.read_var(inst.b);
+    crate::contract::emit_nil_func_trap_if(e, closure_ref);
     let args_ptr = e.var_addr(inst.c);
     let arg_slots = e.builder().ins().iconst(types::I32, inst.flags as i64);
     emit_funcref_call(
@@ -631,6 +641,7 @@ pub(super) fn defer_push<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, is_
     } else {
         e.builder().ins().iconst(types::I64, 0)
     };
+    let arg_start_val = e.builder().ins().iconst(types::I32, inst.b as i64);
     let args_ptr = e.var_addr(inst.b);
     let arg_count = e.builder().ins().iconst(types::I32, inst.c as i64);
     let is_errdefer_val = e
@@ -645,6 +656,7 @@ pub(super) fn defer_push<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, is_
             func_id_val,
             is_closure_val,
             closure_ref,
+            arg_start_val,
             args_ptr,
             arg_count,
             is_errdefer_val,

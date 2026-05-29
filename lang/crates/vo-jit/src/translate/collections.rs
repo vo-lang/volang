@@ -606,11 +606,13 @@ pub(super) fn emit_array_write_barrier<'a>(e: &mut impl IrEmitter<'a>, arr: Valu
 
     e.builder().switch_to_block(barrier_block);
     e.builder().seal_block(barrier_block);
-    if let Some(wb_ref) = e.helpers().write_barrier {
-        let gc = e.gc_ptr();
-        let zero_offset = e.builder().ins().iconst(types::I32, 0);
-        emit_funcref_call(e, wb_ref, &[gc, arr, zero_offset, val]);
-    }
+    let wb_ref = e
+        .helpers()
+        .write_barrier
+        .expect("write_barrier helper not registered");
+    let gc = e.gc_ptr();
+    let zero_offset = e.builder().ins().iconst(types::I32, 0);
+    emit_funcref_call(e, wb_ref, &[gc, arr, zero_offset, val]);
     e.builder().ins().jump(continue_block, &[]);
 
     e.builder().switch_to_block(continue_block);
@@ -647,15 +649,17 @@ pub(super) fn emit_array_write_barrier_multi<'a>(
 
     e.builder().switch_to_block(barrier_block);
     e.builder().seal_block(barrier_block);
-    if let Some(wb_ref) = e.helpers().write_barrier {
-        let gc = e.gc_ptr();
-        let zero_offset = e.builder().ins().iconst(types::I32, 0);
-        // Barrier each slot - write_barrier checks colors so non-GcRef slots are harmless
-        // when the parent-child color check fails (which it will for non-pointer values).
-        for i in 0..elem_slots {
-            let v = e.read_var(src_start + i as u16);
-            emit_funcref_call(e, wb_ref, &[gc, arr, zero_offset, v]);
-        }
+    let wb_ref = e
+        .helpers()
+        .write_barrier
+        .expect("write_barrier helper not registered");
+    let gc = e.gc_ptr();
+    let zero_offset = e.builder().ins().iconst(types::I32, 0);
+    // Barrier each slot - write_barrier checks colors so non-GcRef slots are harmless
+    // when the parent-child color check fails (which it will for non-pointer values).
+    for i in 0..elem_slots {
+        let v = e.read_var(src_start + i as u16);
+        emit_funcref_call(e, wb_ref, &[gc, arr, zero_offset, v]);
     }
     e.builder().ins().jump(continue_block, &[]);
 

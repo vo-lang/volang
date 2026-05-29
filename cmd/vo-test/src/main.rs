@@ -212,7 +212,8 @@ fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::E
         );
     }
 
-    let results = run_jobs_parallel(plan.jobs, opts.jobs, opts.format == "text")?;
+    let mut results = run_jobs_parallel(plan.jobs, opts.jobs, opts.format == "text")?;
+    validate_differential_results(&mut results);
     let passed = results.iter().filter(|result| result.passed).count();
     let failed = results.len() - passed;
 
@@ -283,6 +284,105 @@ fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::E
         println!("\n{} passed, {} failed", passed, failed);
     }
     Ok(if failed == 0 { 0 } else { 1 })
+}
+
+fn validate_differential_results(results: &mut [PlanResult]) {
+    let mut by_case: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    for (index, result) in results.iter().enumerate() {
+        by_case
+            .entry(result.case_id.clone())
+            .or_default()
+            .insert(result.target.clone(), index);
+    }
+
+    let mut failures = Vec::new();
+    for targets in by_case.values() {
+        for (target, baseline_candidates) in [
+            ("jit", &["vm"][..]),
+            ("osr", &["vm"][..]),
+            ("gc-jit", &["gc-vm", "vm"][..]),
+        ] {
+            let Some(&target_index) = targets.get(target) else {
+                continue;
+            };
+            let Some((&baseline_name, &baseline_index)) = baseline_candidates
+                .iter()
+                .find_map(|name| targets.get(*name).map(|index| (name, index)))
+            else {
+                continue;
+            };
+
+            if let Some(detail) =
+                differential_mismatch(&results[baseline_index], &results[target_index])
+            {
+                failures.push((
+                    target_index,
+                    format!("differential mismatch against {baseline_name}: {detail}"),
+                ));
+            }
+        }
+    }
+
+    for (index, detail) in failures {
+        let result = &mut results[index];
+        result.passed = false;
+        if result.error.trim().is_empty() {
+            result.error = detail;
+        } else {
+            result.error = format!("{}; {}", result.error.trim(), detail);
+        }
+    }
+}
+
+fn differential_mismatch(baseline: &PlanResult, candidate: &PlanResult) -> Option<String> {
+    let mut parts = Vec::new();
+    if baseline.passed != candidate.passed {
+        parts.push(format!(
+            "exit status expected {}, got {}",
+            pass_status(baseline.passed),
+            pass_status(candidate.passed)
+        ));
+    }
+    if baseline.stdout != candidate.stdout {
+        parts.push(format!(
+            "stdout expected {:?}, got {:?}",
+            summarize_text(&baseline.stdout),
+            summarize_text(&candidate.stdout)
+        ));
+    }
+    let baseline_error = baseline.error.trim();
+    let candidate_error = candidate.error.trim();
+    if baseline_error != candidate_error {
+        parts.push(format!(
+            "panic/error expected {:?}, got {:?}",
+            summarize_text(baseline_error),
+            summarize_text(candidate_error)
+        ));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
+fn pass_status(passed: bool) -> &'static str {
+    if passed {
+        "pass"
+    } else {
+        "fail"
+    }
+}
+
+fn summarize_text(text: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    let normalized = text.replace('\n', "\\n");
+    if normalized.chars().count() <= MAX_CHARS {
+        normalized
+    } else {
+        let prefix: String = normalized.chars().take(MAX_CHARS).collect();
+        format!("{prefix}...")
+    }
 }
 
 fn run_jobs_parallel(
@@ -584,4 +684,70 @@ fn patterns_match(message: &str, expect: &Expect) -> bool {
         return false;
     };
     pattern_matches(message, Some(pattern))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(case_id: &str, target: &str, passed: bool, stdout: &str, error: &str) -> PlanResult {
+        PlanResult {
+            id: format!("{case_id}::{target}"),
+            case_id: case_id.to_string(),
+            kind: "file".to_string(),
+            path: format!("tests/lang/cases/{case_id}.vo"),
+            target: target.to_string(),
+            backend: if target == "vm" || target == "gc-vm" {
+                "vm".to_string()
+            } else {
+                "jit".to_string()
+            },
+            passed,
+            elapsed_ms: 1,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+            error: error.to_string(),
+        }
+    }
+
+    #[test]
+    fn differential_runner_rejects_jit_stdout_divergence() {
+        let mut results = vec![
+            result("case", "vm", true, "ok\n", ""),
+            result("case", "jit", true, "wrong\n", ""),
+        ];
+
+        validate_differential_results(&mut results);
+
+        assert!(results[0].passed);
+        assert!(!results[1].passed);
+        assert!(results[1].error.contains("stdout expected"));
+    }
+
+    #[test]
+    fn differential_runner_uses_gc_vm_baseline_for_gc_jit() {
+        let mut results = vec![
+            result("case", "vm", true, "normal\n", ""),
+            result("case", "gc-vm", true, "gc\n", ""),
+            result("case", "gc-jit", true, "normal\n", ""),
+        ];
+
+        validate_differential_results(&mut results);
+
+        assert!(!results[2].passed);
+        assert!(results[2].error.contains("against gc-vm"));
+    }
+
+    #[test]
+    fn differential_runner_rejects_panic_error_divergence() {
+        let mut results = vec![
+            result("case", "vm", false, "", "runtime error: nil pointer"),
+            result("case", "osr", false, "", "runtime error: JIT panic"),
+        ];
+
+        validate_differential_results(&mut results);
+
+        assert!(!results[1].passed);
+        assert!(results[1].error.contains("panic/error expected"));
+    }
 }

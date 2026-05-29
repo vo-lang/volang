@@ -6,6 +6,40 @@
 
 本次复核覆盖 `vo-jit` 的 full-function JIT、loop OSR、shared translator、direct JIT-to-JIT call、dynamic call inline cache、JIT/VM frame materialization、CopyN 编码与 loop liveness。结论基于源码阅读和现有 JIT/OSR 测试验证。
 
+## 2026-05-29 JIT correctness architecture pass
+
+本轮目标是把 JIT/VM correctness 从“局部补洞”收敛到几个统一边界：interface/closure 调用语义、effect contract、direct-call frame elision、metadata fail-fast、JIT callback ABI、防 GC root 猜测、以及 test runner 的跨 target 差分比较。复核范围覆盖 `vo-jit/src/**`、`vo-vm/src/vm/jit/**`、`vo-vm/src/exec/**`、`gc_roots.rs`、`fiber.rs` 和 `vo-runtime/src/jit_api.rs`。
+
+已确认并修复的问题：
+
+1. true nil interface method call 在 VM/JIT 路径都会越过 nil check，可能解出 `itab_id=0` 后错误分发或崩溃。新增 `tests/lang/cases/jit_nil_calliface_recover.vo`，修复前 `vm` 与 `jit` 都失败；修复后 `vm`、`jit`、`osr`、`gc-jit` 都 recover 到 nil pointer panic。VM `CallIface`、JIT lowering、JIT prepare callback 现在都在 itab/IC/direct route 前检查 nil interface。
+2. interface-to-interface assignment 会把 true nil interface 重新 pack 成非 nil `slot0`。VM `IfaceAssign` 与 JIT helper `vo_iface_to_iface` 现在保留 nil `(0, 0)`，并统一使用 runtime `interface::is_nil` 语义；typed nil pointer 仍不是 nil interface。
+3. direct JIT call 的“可 direct 调用”和“可省略 VM frame”原本混在一起。现在 `vo_jit::can_elide_frame_for_direct_jit` 基于 `EffectContract::permits_frame_elision()`；会 alloc/GC/panic/unwind/call/schedule/observe frame/touch interface/materialize closure/write barrier 的函数仍可 JIT，但必须走 materialized VM frame 或 prepared call path。static route、dynamic direct table、closure/interface callback 查表都使用同一判断。
+4. full JIT 的普通 `JitResult::Call` 路径会在 VM frame 已 materialize 后立即递归 re-enter 编译 callee。深递归时 host stack 会先于 fiber stack 上限溢出，绕过可 recover 的 Vo stack panic。现在该路径只 push callee frame 并返回 `FrameChanged` 给 VM scheduler；strict mode 仍会在 side-exit 时 resolve/compile callee 以保持 metadata fail-fast。materialized-frame 再入口由 `can_enter_materialized_frame_for_jit` 和 `fiber.unwinding.is_none()` 共同判断，允许普通 call/alloc callee 在已有 VM frame 上继续 JIT，但 defer/errdefer unwind 期间的 deferred calls 保留 materialized frame 并解释执行，避免 deferred-call 顺序和 recover 资格分叉。self-recursive direct-native route 也统一走 VM fallback，避免隐藏 frame depth 和 root 边界。
+5. metadata 缺失存在 fail-open：defer arg layout、unwind stack return slot types、heap return gcref slot count、closure GC scan layout 和 interface assert named type metadata 都可能用空 metadata 或默认值继续执行。现在这些路径在缺失或越界时 fail fast，错误信息带 func id/name、pc、slot range、expected/actual。
+6. 语言 test runner 过去只分别验证各 target pass，没有比较 VM/JIT/OSR/GC-JIT 的 stdout、panic/error 和 exit status。`vo-test run-plan` 现在按 case 做差分：`jit`/`osr` 对齐 `vm`，`gc-jit` 优先对齐 `gc-vm`，没有 `gc-vm` 时对齐 `vm`。
+
+架构变化：
+
+- 新增 `vo-jit/src/contract.rs`，集中声明 opcode、runtime helper、JIT callback 的 `may_gc`、`may_alloc`、`may_panic`、`may_unwind`、`may_call`、`may_schedule`、`may_observe_frame`、`needs_frame`、`needs_slot_metadata`、`needs_type_metadata`、`needs_write_barrier`、`touches_interface`、`materializes_closure`。
+- JIT lowering 的 call route、direct table 填充、callback direct lookup 和 frame elision 都查询 effect contract，不再靠局部 `has_calls` / `has_defer` 近似判断。
+- direct JIT-to-JIT 能力保留在 effect contract 允许的 leaf/native-stack 路径；一旦需要 materialized VM frame，JIT 会回到 scheduler 边界而不是在 host stack 上递归执行。scheduler frame-entry 再入口使用独立的 materialized-frame contract 和 runtime unwind gate，保留普通 nested-call/alloc JIT 能力，同时防止 defer/recover 语义被隐藏。
+- nil interface、interface assignment、callback trap、panic/trap return ABI 使用共享 runtime 语义或 typed JIT trap helper。JIT generated code 对 interface nil 判断生成等价的 value-kind `Void` 检查，避免 raw unpack nil interface。
+- `DeferArgLayout::try_from_caller_slot_types`、`require_slot_types`、`require_heap_ret_slots` 把 defer/unwind/heap-return 元数据边界变成 typed failure，正常 defer/recover/GC 路径继续通过既有 layout。
+- `vo-test` 差分 runner 把 target output parity 变成测试框架能力；关键 JIT correctness case 登记 `vm`、`jit`、`osr`、`gc-jit`，GC root case 还覆盖 `gc-vm`。
+
+新增和扩展的保护：
+
+- 语言回归：`jit_nil_calliface_recover.vo`、`jit_direct_call_frame_contract.vo`，并纳入 `vm`、`jit`、`osr`、`gc-jit`；既有/本轮 JIT 语义回归还覆盖 nil closure defer/recover、defer hidden args under GC、direct call alloc/panic/interface/closure args。
+- Rust 单测：`vo-runtime::objects::interface::nil_interface_semantics_use_value_kind_void`、`vo-jit::direct_call_table_uses_frame_elision_contract`、`vo-jit::effect_contract_protects_key_runtime_boundaries`、`vo-jit::call_plan_routes_full_function_call_shapes`、`vo-vm` metadata fail-fast tests、`vo-test` differential runner tests。
+- 差分实跑：`cargo run -q -p vo-dev -- test run --suite lang --targets vm,jit,osr,gc-vm,gc-jit --path tests/lang/cases/jit_nil_calliface_recover.vo --path tests/lang/cases/jit_direct_call_frame_contract.vo --path tests/lang/cases/gc_defer_closure_hidden_slot_args.vo`，13/13 通过。
+
+本轮审计结论：
+
+- 合法 fallback 仍限于 cold/not-hot、regular/prepared VM call materialization、WaitIo/WaitQueue/Yield/Replay、OSR normal exit、stack-capacity trampoline 和显式 best-effort embedding API。strict JIT 的 compile/metadata/internal ABI failure 仍必须 fail fast。
+- 未发现新的 JIT silent fallback、metadata 猜测、panic payload 缺失或 GC root materialization fail-open。`JitInstructionMetadata::None` 的剩余出现集中在 verifier/test 构造和无需 metadata 的 opcode；JIT callback 的 raw pointer 解码前增加 nil/contract gate 或沿用 typed trap ABI。
+- 剩余风险是新增 opcode/helper/callback 时必须继续维护 `EffectContract` 和差分覆盖；helper effect 当前偏保守，可能多 spill 或走 prepared path，但不牺牲 correctness。后续建议增加 malformed metadata fuzzing，并把 stderr parity 作为可选差分模式用于调试基础设施输出。
+
 ## 2026-05-29 JIT/OSR/GC 架构级修复
 
 本轮修复两个当前 P1，并把对应不变量前移到 verifier/ABI 边界：

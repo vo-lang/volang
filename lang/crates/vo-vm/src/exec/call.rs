@@ -3,12 +3,12 @@
 //! Note: Return and panic unwinding logic has been moved to unwind.rs
 
 use vo_runtime::gc::GcRef;
-use vo_runtime::objects::closure;
+use vo_runtime::objects::{closure, interface};
 
 use crate::bytecode::Module;
 use crate::fiber::{Fiber, FiberCapacityError};
 use crate::instruction::Instruction;
-use crate::vm::helpers::{runtime_panic, stack_get, stack_set};
+use crate::vm::helpers::{runtime_panic, runtime_trap, stack_get, stack_set};
 use crate::vm::{ExecResult, RuntimeTrapKind};
 use vo_runtime::gc::Gc;
 use vo_runtime::itab::ItabCache;
@@ -272,6 +272,15 @@ pub fn exec_call_iface(
     let stack = fiber.stack_ptr();
     let slot0 = stack_get(stack, caller_bp + inst.a as usize);
     let slot1 = stack_get(stack, caller_bp + inst.a as usize + 1);
+    if interface::is_nil(slot0) {
+        return runtime_trap(
+            gc,
+            fiber,
+            stack,
+            module,
+            RuntimeTrapKind::NilPointerDereference,
+        );
+    }
 
     let itab_id = (slot0 >> 32) as u32;
     let target =

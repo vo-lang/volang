@@ -527,44 +527,11 @@ pub(super) fn emit_runtime_trap_if<'a>(
     arg0: Option<Value>,
     arg1: Option<Value>,
 ) {
-    let panic_block = e.builder().create_block();
-    let ok_block = e.builder().create_block();
-    e.builder()
-        .ins()
-        .brif(condition, panic_block, &[], ok_block, &[]);
-
-    e.builder().switch_to_block(panic_block);
-    e.builder().seal_block(panic_block);
-
-    let ctx = e.ctx_param();
-    let zero = e.builder().ins().iconst(types::I64, 0);
-    let arg0 = arg0.unwrap_or(zero);
-    let arg1 = arg1.unwrap_or(zero);
-    let kind_val = e.builder().ins().iconst(types::I32, kind as i64);
-    let current_pc = e.current_pc();
-    let pc_val = e.builder().ins().iconst(types::I32, current_pc as i64);
-    let trap_func = e
-        .helpers()
-        .runtime_trap
-        .expect("runtime_trap helper must be registered");
-    let call = emit_funcref_call(e, trap_func, &[ctx, kind_val, arg0, arg1, pc_val]);
-    let panic_ret = e.builder().inst_results(call)[0];
-    e.builder().ins().return_(&[panic_ret]);
-
-    e.builder().switch_to_block(ok_block);
-    e.builder().seal_block(ok_block);
+    crate::contract::emit_runtime_trap_if(e, condition, kind, arg0, arg1);
 }
 
 pub(super) fn mark_runtime_trap_pc<'a>(e: &mut impl IrEmitter<'a>) {
-    let ctx = e.ctx_param();
-    let current_pc = e.current_pc();
-    let pc_val = e.builder().ins().iconst(types::I32, current_pc as i64);
-    e.builder().ins().store(
-        MemFlags::trusted(),
-        pc_val,
-        ctx,
-        JitContext::OFFSET_RUNTIME_TRAP_PC,
-    );
+    crate::contract::mark_runtime_trap_pc(e);
 }
 
 /// Emit nil check for pointer. Panics if ptr is nil.

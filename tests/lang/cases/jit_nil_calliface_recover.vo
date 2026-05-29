@@ -1,0 +1,39 @@
+package main
+
+type Namer interface {
+	Name() string
+}
+
+type NoDeref struct{}
+
+func (n NoDeref) Name() string {
+	return "wrong dispatch"
+}
+
+func callNilIface(n Namer) string {
+	return n.Name()
+}
+
+func nilIfaceRecovered() bool {
+	var n Namer
+	recovered := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				recovered = true
+			}
+		}()
+		_ = callNilIface(n)
+	}()
+	return recovered
+}
+
+func main() {
+	var warm Namer = NoDeref{}
+	assert(warm.Name() == "wrong dispatch", "warm interface dispatch")
+
+	for i := 0; i < 8; i++ {
+		assert(nilIfaceRecovered(), "nil interface method call should panic before itab dispatch")
+	}
+	println("jit_nil_calliface_recover: ok")
+}

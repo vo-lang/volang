@@ -124,17 +124,17 @@ pub type JitPushResumePointFn = extern "C" fn(
 /// skips the prepare callback entirely and does a direct JIT-to-JIT call
 /// with native stack args.
 ///
-/// Layout: 32 bytes, 8-aligned.
+/// Layout: 40 bytes, 8-aligned.
 #[derive(Debug)]
 #[repr(C)]
 pub struct DynCallIC {
-    /// Cache key: func_id (closure) or packed itab_id|method_idx (iface).
+    /// Tagged cache key: closure func_id or full iface (itab_id, method_idx).
     /// 0 = empty/invalid entry.
-    pub key: u32,
-    /// Callee's local_slots count.
-    pub local_slots: u32,
+    pub key: u64,
     /// Cached JIT function pointer (0 = callee not compiled or not in direct_call_table).
     pub jit_func_ptr: u64,
+    /// Callee's local_slots count.
+    pub local_slots: u32,
     /// Offset where user args start in callee frame (0, 1, or recv_slots).
     pub arg_offset: u32,
     /// What to place in slot0:
@@ -160,24 +160,40 @@ impl Default for DynCallIC {
 impl DynCallIC {
     pub const SIZE: usize = core::mem::size_of::<DynCallIC>();
     pub const OFFSET_KEY: i32 = 0;
-    pub const OFFSET_LOCAL_SLOTS: i32 = 4;
     pub const OFFSET_JIT_FUNC_PTR: i32 = 8;
-    pub const OFFSET_ARG_OFFSET: i32 = 16;
-    pub const OFFSET_SLOT0_KIND: i32 = 20;
-    pub const OFFSET_FUNC_ID: i32 = 24;
-    pub const OFFSET_IS_LEAF: i32 = 28;
+    pub const OFFSET_LOCAL_SLOTS: i32 = 16;
+    pub const OFFSET_ARG_OFFSET: i32 = 20;
+    pub const OFFSET_SLOT0_KIND: i32 = 24;
+    pub const OFFSET_FUNC_ID: i32 = 28;
+    pub const OFFSET_IS_LEAF: i32 = 32;
 
     pub const SLOT0_NONE: u32 = 0;
     pub const SLOT0_CLOSURE_REF: u32 = 1;
     pub const SLOT0_CAPTURE0: u32 = 2;
     pub const SLOT0_IFACE_RECEIVER: u32 = 3;
 
+    pub const KEY_KIND_SHIFT: u64 = 56;
+    pub const KEY_KIND_CLOSURE: u64 = 1;
+    pub const KEY_KIND_IFACE: u64 = 2;
+
     /// IC table size (must be power of 2).
     pub const TABLE_SIZE: usize = 512;
     pub const TABLE_MASK: u32 = (Self::TABLE_SIZE - 1) as u32;
+
+    #[inline]
+    pub const fn closure_key(func_id: u32) -> u64 {
+        (Self::KEY_KIND_CLOSURE << Self::KEY_KIND_SHIFT) | func_id as u64
+    }
+
+    #[inline]
+    pub const fn iface_key(itab_id: u32, method_idx: u32) -> u64 {
+        (Self::KEY_KIND_IFACE << Self::KEY_KIND_SHIFT)
+            | ((method_idx as u64) << 32)
+            | itab_id as u64
+    }
 }
 
-const _: () = assert!(DynCallIC::SIZE == 32);
+const _: () = assert!(DynCallIC::SIZE == 40);
 const _: () = assert!(DynCallIC::TABLE_SIZE.is_power_of_two());
 
 /// Allocate a zeroed IC table with TABLE_SIZE entries.
@@ -353,9 +369,9 @@ pub struct JitContext {
     /// Number of functions (length of jit_func_table).
     pub jit_func_count: u32,
 
-    /// Direct call table: only contains entries for functions that pass can_direct_jit_call
-    /// (no defer and no nested calls). Used by prepare_closure_call / prepare_iface_call
-    /// to decide if JIT-to-JIT direct call is safe.
+    /// Direct call table: only contains entries for functions that pass the
+    /// JIT effect-contract frame-elision predicate. Other compiled functions
+    /// may still run through the prepared VM-frame path.
     pub direct_call_table: *const *const u8,
 
     /// Number of entries in direct_call_table.
@@ -519,6 +535,7 @@ pub struct JitContext {
             func_id: u32,
             is_closure: u32,
             closure_ref: u64,
+            arg_start: u32,
             args_ptr: *const u64,
             arg_count: u32,
             is_errdefer: u32,
@@ -918,22 +935,25 @@ pub extern "C" fn vo_defer_push(
     func_id: u32,
     is_closure: u32,
     closure_ref: u64,
+    arg_start: u32,
     args_ptr: *const u64,
     arg_count: u32,
     is_errdefer: u32,
 ) {
     let ctx_ref = unsafe { &*ctx };
-    if let Some(f) = ctx_ref.defer_push_fn {
-        f(
-            ctx,
-            func_id,
-            is_closure,
-            closure_ref,
-            args_ptr,
-            arg_count,
-            is_errdefer,
-        );
-    }
+    let f = ctx_ref
+        .defer_push_fn
+        .expect("JIT ABI violation: defer_push_fn not set");
+    f(
+        ctx,
+        func_id,
+        is_closure,
+        closure_ref,
+        arg_start,
+        args_ptr,
+        arg_count,
+        is_errdefer,
+    );
 }
 
 /// Execute recover() from JIT code.
@@ -947,16 +967,10 @@ pub extern "C" fn vo_defer_push(
 #[no_mangle]
 pub extern "C" fn vo_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> u32 {
     let ctx_ref = unsafe { &*ctx };
-    match ctx_ref.recover_fn {
-        Some(f) => f(ctx, result_ptr),
-        None => {
-            unsafe {
-                *result_ptr = 0;
-                *result_ptr.add(1) = 0;
-            }
-            0
-        }
-    }
+    let f = ctx_ref
+        .recover_fn
+        .expect("JIT ABI violation: recover_fn not set");
+    f(ctx, result_ptr)
 }
 
 /// Trigger a user panic from JIT code (explicit `panic()` call or `?` operator).
@@ -1703,6 +1717,10 @@ pub extern "C" fn vo_iface_to_iface(
 ) -> u64 {
     use crate::objects::interface;
 
+    if interface::is_nil(src_slot0) {
+        return 0;
+    }
+
     let src_rttid = interface::unpack_rttid(src_slot0);
     let src_vk = interface::unpack_value_kind(src_slot0);
 
@@ -1859,20 +1877,29 @@ unsafe fn write_iface_assert_success(
         let module = &*ctx_ref.module;
         let itab_cache = &mut *ctx_ref.itab_cache;
 
-        let named_type_id = module
-            .runtime_types
-            .get(src_rttid as usize)
-            .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
-            .unwrap_or(0);
-        // Value types (non-pointer) cannot use pointer receiver methods
-        let src_is_pointer = src_vk == ValueKind::Pointer;
-        let new_itab_id = itab_cache.get_or_create(
-            named_type_id,
-            target_id,
-            src_is_pointer,
-            &module.named_type_metas,
-            &module.interface_metas,
-        );
+        let new_itab_id = if target_id == 0 {
+            0
+        } else {
+            let named_type_id = module
+                .runtime_types
+                .get(src_rttid as usize)
+                .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "vo_iface_assert metadata missing: target_id={} src_rttid={} src_vk={:?}",
+                        target_id, src_rttid, src_vk
+                    )
+                });
+            // Value types (non-pointer) cannot use pointer receiver methods
+            let src_is_pointer = src_vk == ValueKind::Pointer;
+            itab_cache.get_or_create(
+                named_type_id,
+                target_id,
+                src_is_pointer,
+                &module.named_type_metas,
+                &module.interface_metas,
+            )
+        };
         let new_slot0 = interface::pack_slot0(new_itab_id, src_rttid, src_vk);
         *dst = new_slot0;
         *dst.add(1) = slot1;
@@ -2249,6 +2276,19 @@ mod tests {
         for ((registered, _), manifest) in symbols.iter().zip(names.iter()) {
             assert_eq!(registered, manifest);
         }
+    }
+
+    #[test]
+    fn dyn_call_iface_key_keeps_full_itab_id() {
+        let method_idx = 7;
+        let low = DynCallIC::iface_key(0x0000_0002, method_idx);
+        let high = DynCallIC::iface_key(0x0001_0002, method_idx);
+        let legacy_low = (0x0000_0002_u32 << 16) | method_idx;
+        let legacy_high = (0x0001_0002_u32 << 16) | method_idx;
+
+        assert_eq!(legacy_low, legacy_high, "legacy u32 key collided");
+        assert_ne!(low, high, "tagged key must retain high itab_id bits");
+        assert_ne!(low, DynCallIC::closure_key(0x0000_0002));
     }
 
     #[test]

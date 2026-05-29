@@ -446,28 +446,7 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn panic(&mut self, inst: &Instruction) {
-        let panic_func = self.helpers.panic.expect("panic helper must be registered");
-        let ctx = self.ctx_ptr;
-        let pc_val = self
-            .builder
-            .ins()
-            .iconst(types::I32, self.current_pc as i64);
-        self.builder.ins().store(
-            MemFlags::trusted(),
-            pc_val,
-            ctx,
-            JitContext::OFFSET_USER_PANIC_PC,
-        );
-        // Panic message is an interface (2 slots): slot0=metadata, slot1=data.
-        // Note: Panic instruction uses inst.a for the register (not inst.b).
-        let msg_slot0 = self.read_var(inst.a);
-        let msg_slot1 = self.read_var(inst.a + 1);
-        crate::translator::emit_funcref_call(self, panic_func, &[ctx, msg_slot0, msg_slot1]);
-        let panic_val = self
-            .builder
-            .ins()
-            .iconst(types::I32, JitResult::Panic as i64);
-        self.builder.ins().return_(&[panic_val]);
+        crate::contract::emit_user_panic_return(self, inst.a);
     }
 
     /// Returns true if block is terminated.
@@ -498,8 +477,7 @@ impl<'a> LoopCompiler<'a> {
                 );
                 true
             }
-            crate::call_helpers::CallRoute::SelfRecursiveNative
-            | crate::call_helpers::CallRoute::DynamicInlineCache => unreachable!(),
+            crate::call_helpers::CallRoute::DynamicInlineCache => unreachable!(),
         }
     }
 

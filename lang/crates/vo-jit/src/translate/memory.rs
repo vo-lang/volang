@@ -76,11 +76,13 @@ pub(super) fn ptr_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
     // Write barrier if val may be GcRef (flags & 1)
     if (inst.flags & 1) != 0 {
-        if let Some(wb_ref) = e.helpers().write_barrier {
-            let gc = e.gc_ptr();
-            let offset_val = e.builder().ins().iconst(types::I32, inst.b as i64);
-            emit_funcref_call(e, wb_ref, &[gc, ptr, offset_val, v]);
-        }
+        let wb_ref = e
+            .helpers()
+            .write_barrier
+            .expect("write_barrier helper not registered");
+        let gc = e.gc_ptr();
+        let offset_val = e.builder().ins().iconst(types::I32, inst.b as i64);
+        emit_funcref_call(e, wb_ref, &[gc, ptr, offset_val, v]);
     }
 }
 

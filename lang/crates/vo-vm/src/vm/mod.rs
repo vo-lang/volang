@@ -1046,7 +1046,12 @@ impl Vm {
                         jit::OsrResult::Panic => {
                             let fiber = self.scheduler.get_fiber_mut(fiber_id);
                             stack = fiber.stack_ptr();
-                            handle_panic_result!(helpers::panic_unwind(fiber, stack, module));
+                            handle_panic_result!(helpers::panic_unwind(
+                                &mut self.state.gc,
+                                fiber,
+                                stack,
+                                module
+                            ));
                         }
                         jit::OsrResult::JitError(msg) => {
                             return ExecResult::JitError(msg);
@@ -1151,6 +1156,37 @@ impl Vm {
             if self.interrupt_requested() {
                 return ExecResult::Interrupted;
             }
+
+            #[cfg(feature = "jit")]
+            {
+                let frame = unsafe { &mut *frame_ptr };
+                // JIT side exits may materialize a callee frame and return to
+                // this interpreter loop. This is not frame elision: the VM
+                // frame already exists, but deferred calls executing under the
+                // unwind machine still need interpreter-owned ordering and
+                // recover eligibility checks.
+                if frame.pc == 0
+                    && fiber.unwinding.is_none()
+                    && vo_jit::can_enter_materialized_frame_for_jit(func)
+                {
+                    if let Some(jit_func) = self
+                        .jit_mgr
+                        .as_ref()
+                        .and_then(|jit_mgr| jit_mgr.get_entry(func_id))
+                    {
+                        let result = jit::dispatch_jit_frame(self, fiber, module, jit_func);
+                        stack = fiber.stack_ptr();
+                        match result {
+                            ExecResult::FrameChanged => {
+                                refetch!();
+                                continue;
+                            }
+                            other => return other,
+                        }
+                    }
+                }
+            }
+
             let frame = unsafe { &mut *frame_ptr };
             let pc = frame.pc;
             let inst = unsafe { *code.get_unchecked(pc) };
@@ -1837,11 +1873,18 @@ impl Vm {
                 }
                 Opcode::Return => {
                     let result = if fiber.is_direct_defer_context() {
-                        exec::handle_panic_unwind(fiber, module)
+                        exec::handle_panic_unwind(&mut self.state.gc, fiber, module)
                     } else {
                         let func = &module.functions[func_id as usize];
                         let is_error_return = (inst.flags & 1) != 0;
-                        exec::handle_return(fiber, &inst, func, module, is_error_return)
+                        exec::handle_return(
+                            &mut self.state.gc,
+                            fiber,
+                            &inst,
+                            func,
+                            module,
+                            is_error_return,
+                        )
                     };
                     stack = fiber.stack_ptr();
                     if !matches!(result, ExecResult::FrameChanged) {
@@ -2489,6 +2532,19 @@ impl Vm {
 
                 // Goroutine - spawn new fiber
                 Opcode::GoStart => {
+                    if inst.call_shape_is_closure() {
+                        let closure_ref =
+                            stack_get(stack, bp + inst.a as usize) as vo_runtime::gc::GcRef;
+                        if closure_ref.is_null() {
+                            handle_panic_result!(runtime_trap(
+                                &mut self.state.gc,
+                                fiber,
+                                stack,
+                                module,
+                                RuntimeTrapKind::NilFuncCall
+                            ));
+                        }
+                    }
                     let next_id = self.scheduler.fibers.len() as u32;
                     let go_result =
                         exec::exec_go_start(stack, bp, &inst, &module.functions, next_id);
@@ -2502,6 +2558,7 @@ impl Vm {
                         stack,
                         bp,
                         &fiber.frames,
+                        &module.functions[func_id as usize],
                         &mut fiber.defer_stack,
                         &inst,
                         &mut self.state.gc,
@@ -2514,6 +2571,7 @@ impl Vm {
                         stack,
                         bp,
                         &fiber.frames,
+                        &module.functions[func_id as usize],
                         &mut fiber.defer_stack,
                         &inst,
                         &mut self.state.gc,
@@ -2521,7 +2579,7 @@ impl Vm {
                     );
                 }
                 Opcode::Panic => {
-                    let result = user_panic(fiber, stack, bp, inst.a, module);
+                    let result = user_panic(&mut self.state.gc, fiber, stack, bp, inst.a, module);
                     if matches!(result, ExecResult::FrameChanged) {
                         refetch!();
                     } else {
@@ -2639,12 +2697,21 @@ impl Vm {
                     let _ = exec::exec_island_new(stack, bp, &inst, &mut self.state.gc, island_id);
                 }
                 Opcode::GoIsland => {
+                    let closure_ref =
+                        stack_get(stack, bp + inst.b as usize) as vo_runtime::gc::GcRef;
+                    if closure_ref.is_null() {
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::NilFuncCall
+                        ));
+                    }
                     let result = exec::exec_go_island(stack, bp, &inst);
                     let island_id = vo_runtime::island::id(result.island);
 
                     if island_id == self.state.current_island_id {
-                        let closure_ref =
-                            stack_get(stack, bp + inst.b as usize) as vo_runtime::gc::GcRef;
                         let new_fiber = unsafe {
                             helpers::build_closure_fiber_from_args_ptr(
                                 &module.functions,

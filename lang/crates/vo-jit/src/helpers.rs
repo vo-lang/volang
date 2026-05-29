@@ -510,6 +510,7 @@ pub fn declare_helpers(
         sig.params.push(AbiParam::new(types::I32)); // func_id
         sig.params.push(AbiParam::new(types::I32)); // is_closure
         sig.params.push(AbiParam::new(types::I64)); // closure_ref
+        sig.params.push(AbiParam::new(types::I32)); // arg_start
         sig.params.push(AbiParam::new(ptr)); // args_ptr
         sig.params.push(AbiParam::new(types::I32)); // arg_count
         sig.params.push(AbiParam::new(types::I32)); // is_errdefer

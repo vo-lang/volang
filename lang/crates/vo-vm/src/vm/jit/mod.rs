@@ -260,19 +260,31 @@ pub fn dispatch_jit_call(
     invoke_jit_and_handle(vm, fiber, module, jit_func, jit_bp, ret_slots)
 }
 
-/// Execute a JIT callee when frame is already set up (from Call request).
+/// Execute an already-materialized frame through its compiled JIT entry.
 ///
-/// Called recursively from handle_jit_result when the callee can be JIT-executed.
-/// The callee's frame has already been pushed to fiber.frames.
-fn execute_jit_callee(
+/// This is used after a JIT side exit materializes a callee frame and returns
+/// to the VM scheduler. Re-entering here from the interpreter loop preserves
+/// JIT execution without recursively growing the host stack.
+pub fn dispatch_jit_frame(
     vm: &mut Vm,
     fiber: &mut Fiber,
     module: &Module,
     jit_func: vo_jit::JitFunc,
-    callee_bp: usize,
-    callee_ret_slots: usize,
 ) -> ExecResult {
-    invoke_jit_and_handle(vm, fiber, module, jit_func, callee_bp, callee_ret_slots)
+    let frame = fiber
+        .frames
+        .last()
+        .copied()
+        .expect("dispatch_jit_frame: missing current frame");
+    let func_def = &module.functions[frame.func_id as usize];
+    invoke_jit_and_handle(
+        vm,
+        fiber,
+        module,
+        jit_func,
+        frame.bp,
+        func_def.ret_slots as usize,
+    )
 }
 
 /// Shared JIT invocation: build context, call function, handle result.
@@ -366,6 +378,7 @@ fn handle_jit_result(
 
             let ret_start = ctx.ret_start() as usize;
             crate::exec::handle_jit_ok_return(
+                &mut vm.state.gc,
                 fiber,
                 func,
                 module,
@@ -400,7 +413,7 @@ fn handle_jit_result(
                 fiber.set_recoverable_panic(panic_info.msg);
             }
             let stack_ptr = fiber.stack_ptr();
-            helpers::panic_unwind(fiber, stack_ptr, module)
+            helpers::panic_unwind(&mut vm.state.gc, fiber, stack_ptr, module)
         }
         JitResult::Call => {
             // Check for special call_kind values that don't need frame setup
@@ -461,7 +474,7 @@ fn handle_jit_result(
             }
             let resume_pc = ctx.call_resume_pc();
             let call_ret_reg = ctx.call_ret_reg();
-            let callee_bp = match setup_regular_call(
+            if let Err(err) = setup_regular_call(
                 fiber,
                 module,
                 callee_func_id,
@@ -470,25 +483,19 @@ fn handle_jit_result(
                 call_arg_start,
                 resume_pc,
             ) {
-                Ok(bp) => bp,
-                Err(err) => return stack_overflow_exec_result(vm, fiber, module, err),
-            };
+                return stack_overflow_exec_result(vm, fiber, module, err);
+            }
 
-            // Check if callee can be JIT-executed instead of interpreter fallback
+            // Return to the VM scheduler after materializing the callee frame.
+            // Re-entering a compiled callee recursively here can overflow the
+            // host stack before the fiber frame limit turns recursion into a
+            // recoverable Vo stack panic. Resolve now so strict JIT compile or
+            // metadata failures remain fail-fast; the compiled callee runs from
+            // the next VM frame-entry dispatch.
             if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
                 let callee_func_def = &module.functions[callee_func_id as usize];
                 match jit_mgr.resolve_call(callee_func_id, callee_func_def, module) {
-                    Ok(Some(jit_func)) => {
-                        return execute_jit_callee(
-                            vm,
-                            fiber,
-                            module,
-                            jit_func,
-                            callee_bp,
-                            callee_ret_slots,
-                        );
-                    }
-                    Ok(None) => {}
+                    Ok(Some(_)) | Ok(None) => {}
                     Err(err) => {
                         return ExecResult::JitError(jit_error_message(
                             "callee compilation",
@@ -498,7 +505,6 @@ fn handle_jit_result(
                     }
                 }
             }
-
             ExecResult::FrameChanged
         }
         JitResult::WaitIo => {

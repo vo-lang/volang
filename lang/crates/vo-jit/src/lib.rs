@@ -4,6 +4,7 @@
 mod analysis;
 mod call_helpers;
 mod capability;
+mod contract;
 mod effects;
 mod func_compiler;
 mod helpers;
@@ -340,7 +341,6 @@ impl JitCompiler {
                 func,
                 vo_module,
                 helpers,
-                Some(self_func_ref),
                 &callee_func_refs,
             );
             compiler.compile()
@@ -459,21 +459,30 @@ impl Default for JitCompiler {
     }
 }
 
-/// Check if a function can be safely called via JIT-to-JIT direct call from
-/// prepare_closure_call / prepare_iface_call fast path.
+/// Check if a function may use the native-stack direct JIT path that elides a
+/// materialized VM frame.
 ///
-/// Returns false if the function has defer state or contains any call
-/// instructions (Call/CallClosure/CallIface/CallExtern). Deferred functions
-/// need real VM frames for unwinding, and nested calls can return
-/// JitResult::Call through paths that the prepared-call fast path cannot
-/// safely replay.
+/// This is stricter than "can be JIT-compiled". Functions that may allocate,
+/// GC, panic/unwind, call, schedule, observe frames, touch interfaces, need
+/// write barriers, or materialize closures can still be JIT-compiled, but their
+/// callers must use a VM-frame/prepared call path.
+pub fn can_elide_frame_for_direct_jit(func: &vo_runtime::bytecode::FunctionDef) -> bool {
+    crate::contract::function_contract(func).permits_frame_elision()
+}
+
+/// Check if a materialized VM frame may re-enter its compiled JIT body.
 ///
-/// Only no-defer leaf functions are safe for JIT-to-JIT direct dispatch from
-/// prepare callbacks. They always return Ok or Panic, never Call.
-/// This is used to populate the direct_call_table, which prepare callbacks consult
-/// to decide if a JIT-to-JIT direct call is safe.
+/// This is intentionally broader than frame elision: the frame already exists,
+/// so callees that allocate or make nested calls can still execute as JIT.
+/// Functions with defer/recover state stay in the interpreter because their
+/// correctness depends on VM-visible defer ordering and recover eligibility.
+pub fn can_enter_materialized_frame_for_jit(func: &vo_runtime::bytecode::FunctionDef) -> bool {
+    !func.has_defer
+}
+
+/// Backward-compatible spelling for direct-call-table eligibility.
 pub fn can_direct_jit_call(func: &vo_runtime::bytecode::FunctionDef) -> bool {
-    !func.has_defer && !func.has_calls && !func.has_call_extern
+    can_elide_frame_for_direct_jit(func)
 }
 
 #[cfg(test)]
@@ -541,19 +550,70 @@ mod tests {
     }
 
     #[test]
-    fn direct_call_table_excludes_defer_and_nested_call_functions() {
+    fn direct_call_table_uses_frame_elision_contract() {
         let leaf = make_func(vec![Instruction::new(Opcode::Return, 0, 0, 0)], 1);
-        assert!(can_direct_jit_call(&leaf));
+        assert!(can_elide_frame_for_direct_jit(&leaf));
 
         let mut defer_leaf = make_func(vec![Instruction::new(Opcode::Return, 0, 0, 0)], 1);
         defer_leaf.has_defer = true;
         assert!(
-            !can_direct_jit_call(&defer_leaf),
+            !can_elide_frame_for_direct_jit(&defer_leaf),
             "defer functions need VM frames and must not enter direct_call_table"
         );
 
         let nested_call = make_func(vec![Instruction::new(Opcode::Call, 0, 0, 0)], 1);
-        assert!(!can_direct_jit_call(&nested_call));
+        assert!(!can_elide_frame_for_direct_jit(&nested_call));
+        assert!(
+            can_enter_materialized_frame_for_jit(&nested_call),
+            "materialized VM frames can safely re-enter ordinary nested-call JIT"
+        );
+
+        let alloc = make_func(vec![Instruction::new(Opcode::PtrNew, 0, 1, 1)], 2);
+        assert!(
+            !can_elide_frame_for_direct_jit(&alloc),
+            "allocating JIT callees need materialized VM frames for GC roots"
+        );
+        assert!(
+            can_enter_materialized_frame_for_jit(&alloc),
+            "allocation is safe with a materialized VM frame and precise roots"
+        );
+
+        let iface = make_func(vec![Instruction::new(Opcode::CallIface, 0, 2, 0)], 4);
+        assert!(
+            !can_elide_frame_for_direct_jit(&iface),
+            "interface dispatch can panic/unwind and must not elide frames"
+        );
+        assert!(can_enter_materialized_frame_for_jit(&iface));
+        assert!(!can_enter_materialized_frame_for_jit(&defer_leaf));
+    }
+
+    #[test]
+    fn effect_contract_protects_key_runtime_boundaries() {
+        let alloc = crate::contract::opcode_contract(Opcode::PtrNew);
+        assert!(alloc.may_alloc && alloc.may_gc);
+
+        let iface_call = crate::contract::opcode_contract(Opcode::CallIface);
+        assert!(iface_call.may_call);
+        assert!(iface_call.may_panic);
+        assert!(iface_call.needs_frame);
+        assert!(iface_call.touches_interface);
+
+        let ptr_set = crate::contract::opcode_contract(Opcode::PtrSet);
+        assert!(ptr_set.needs_write_barrier);
+
+        let defer_push = crate::contract::opcode_contract(Opcode::DeferPush);
+        assert!(defer_push.may_unwind);
+        assert!(defer_push.may_observe_frame);
+        assert!(defer_push.needs_frame);
+
+        let helper =
+            crate::contract::runtime_helper_contract(crate::contract::RuntimeHelper::GcAlloc);
+        assert!(helper.may_gc && helper.may_alloc);
+
+        let callback =
+            crate::contract::jit_callback_contract(crate::contract::JitCallback::PrepareIfaceCall);
+        assert!(callback.needs_frame);
+        assert!(callback.touches_interface);
     }
 
     struct JitContextParts {

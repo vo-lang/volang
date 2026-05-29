@@ -65,12 +65,50 @@ impl CallFrame {
 }
 
 #[derive(Debug, Clone)]
+pub struct DeferArgLayout {
+    pub slot_types: Vec<vo_runtime::SlotType>,
+}
+
+impl DeferArgLayout {
+    pub fn try_from_caller_slot_types(
+        caller_slot_types: &[vo_runtime::SlotType],
+        caller_func_id: u32,
+        caller_pc: u32,
+        arg_start: u16,
+        arg_slots: u16,
+    ) -> Result<Self, String> {
+        let start = arg_start as usize;
+        let count = arg_slots as usize;
+        let end = start.saturating_add(count);
+        if end > caller_slot_types.len() {
+            return Err(format!(
+                "DeferArgLayout metadata missing: func_id={} pc={} slot range {}..{} expected {} slots actual slot_types={}",
+                caller_func_id,
+                caller_pc,
+                start,
+                end,
+                count,
+                caller_slot_types.len()
+            ));
+        }
+        Ok(Self {
+            slot_types: caller_slot_types[start..end].to_vec(),
+        })
+    }
+
+    #[inline]
+    pub fn arg_slots(&self) -> u16 {
+        self.slot_types.len() as u16
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct DeferEntry {
     pub frame_depth: usize,
     pub func_id: u32,
     pub closure: GcRef,
     pub args: GcRef,
-    pub arg_slots: u16,
+    pub arg_layout: DeferArgLayout,
     pub is_closure: bool,
     pub is_errdefer: bool,
     /// The panic generation when this defer was registered.
@@ -1154,8 +1192,10 @@ impl Fiber {
 #[cfg(test)]
 mod tests {
     use super::{
-        Fiber, FiberCapacityError, INITIAL_STACK_CAPACITY, MAX_CALL_FRAMES, MAX_STACK_CAPACITY,
+        DeferArgLayout, Fiber, FiberCapacityError, INITIAL_STACK_CAPACITY, MAX_CALL_FRAMES,
+        MAX_STACK_CAPACITY,
     };
+    use vo_runtime::SlotType;
 
     #[test]
     fn ensure_capacity_grows_stack_within_limit() {
@@ -1197,5 +1237,16 @@ mod tests {
                 limit: MAX_CALL_FRAMES,
             })
         );
+    }
+
+    #[test]
+    fn defer_arg_layout_rejects_missing_slot_metadata() {
+        let err = DeferArgLayout::try_from_caller_slot_types(&[SlotType::Value], 7, 11, 1, 2)
+            .expect_err("missing metadata must fail fast");
+
+        assert!(err.contains("func_id=7"));
+        assert!(err.contains("pc=11"));
+        assert!(err.contains("slot range 1..3"));
+        assert!(err.contains("actual slot_types=1"));
     }
 }

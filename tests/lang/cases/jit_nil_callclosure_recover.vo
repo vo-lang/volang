@@ -1,0 +1,28 @@
+package main
+
+import "fmt"
+
+func callNilClosure(f func()) {
+	f()
+}
+
+func tryNilClosureCall() bool {
+	var f func()
+	recovered := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				recovered = true
+			}
+		}()
+		callNilClosure(f)
+	}()
+	return recovered
+}
+
+func main() {
+	for i := 0; i < 8; i++ {
+		assert(tryNilClosureCall(), "nil CallClosure should panic and recover")
+	}
+	fmt.Println("jit_nil_callclosure_recover: ok")
+}

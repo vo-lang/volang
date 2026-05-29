@@ -152,7 +152,7 @@ pub fn runtime_panic(
     let panic_str = string::new_from_string(gc, msg);
     let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
     fiber.set_recoverable_trap(kind, InterfaceSlot::new(slot0, panic_str as u64));
-    panic_unwind(fiber, stack, module)
+    panic_unwind(gc, fiber, stack, module)
 }
 
 #[inline]
@@ -185,20 +185,26 @@ pub fn runtime_panic_msg(
     let panic_str = string::new_from_string(gc, msg);
     let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
     fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));
-    panic_unwind(fiber, stack, module)
+    panic_unwind(gc, fiber, stack, module)
 }
 
 /// Continue panic unwinding (simplified interface).
 /// Use when panic has already been set up.
 #[inline]
-pub fn panic_unwind(fiber: &mut Fiber, _stack: *mut Slot, module: &Module) -> ExecResult {
-    exec::handle_panic_unwind(fiber, module)
+pub fn panic_unwind(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    _stack: *mut Slot,
+    module: &Module,
+) -> ExecResult {
+    exec::handle_panic_unwind(gc, fiber, module)
 }
 
 /// User code panic() - set value and start unwinding in one call.
 /// val_reg points to interface{} (2 slots).
 #[inline]
 pub fn user_panic(
+    gc: &mut Gc,
     fiber: &mut Fiber,
     stack: *mut Slot,
     bp: usize,
@@ -209,7 +215,7 @@ pub fn user_panic(
     let slot0 = stack_get(stack, bp + val_reg as usize);
     let slot1 = stack_get(stack, bp + val_reg as usize + 1);
     fiber.set_recoverable_panic(InterfaceSlot::new(slot0, slot1));
-    panic_unwind(fiber, stack, module)
+    panic_unwind(gc, fiber, stack, module)
 }
 
 // =============================================================================
@@ -224,13 +230,16 @@ pub use vo_runtime::objects::closure::{call_layout as closure_call_layout, Closu
 
 /// # Safety
 /// `args` must point to at least `arg_count` valid u64 values.
-pub unsafe fn build_closure_fiber_from_args_ptr(
+pub unsafe fn try_build_closure_fiber_from_args_ptr(
     functions: &[FunctionDef],
     next_fiber_id: u32,
     closure_ref: u64,
     args: *const u64,
     arg_count: u32,
-) -> Fiber {
+) -> Result<Fiber, RuntimeTrapKind> {
+    if closure_ref == 0 {
+        return Err(RuntimeTrapKind::NilFuncCall);
+    }
     let closure_gcref = closure_ref as GcRef;
     let func_id = closure::func_id(closure_gcref);
     let func_def = &functions[func_id as usize];
@@ -252,7 +261,20 @@ pub unsafe fn build_closure_fiber_from_args_ptr(
         *stack.add(layout.arg_offset + i) = *args.add(i);
     }
 
-    fiber
+    Ok(fiber)
+}
+
+/// # Safety
+/// `args` must point to at least `arg_count` valid u64 values.
+pub unsafe fn build_closure_fiber_from_args_ptr(
+    functions: &[FunctionDef],
+    next_fiber_id: u32,
+    closure_ref: u64,
+    args: *const u64,
+    arg_count: u32,
+) -> Fiber {
+    try_build_closure_fiber_from_args_ptr(functions, next_fiber_id, closure_ref, args, arg_count)
+        .expect("build_closure_fiber_from_args_ptr: nil closure")
 }
 
 /// Build full args for closure call (prepends slot0 if needed).
